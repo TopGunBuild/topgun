@@ -1,0 +1,12 @@
+node_modules
+build
+dist
+tests
+src/**.js
+.idea/*
+
+coverage
+.nyc_output
+*.log
+
+package-lock.json

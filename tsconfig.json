@@ -1,0 +1,23 @@
+{
+    "extends": "./tsconfig.base",
+    "compilerOptions": {
+        "emitDeclarationOnly": true,
+        "declaration": true,
+        "target": "esnext",
+        "lib": [
+            "esnext",
+            "dom"
+        ],
+        "strict": false,
+        "noImplicitAny": false,
+        "esModuleInterop": true,
+        "moduleResolution": "node",
+        "outDir": "dist",
+        "module": "esnext",
+        "skipLibCheck": true,
+        "types": [
+            "node",
+            "jest"
+        ]
+    }
+}
