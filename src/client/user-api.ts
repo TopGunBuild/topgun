@@ -2,11 +2,10 @@ import { authenticate, createUser, graphSigner } from '../sea';
 import { Client } from './client';
 import { Event } from './control-flow/event';
 import { SocketConnector } from '../socket-connector';
-import { SupportedStorage } from './interfaces';
 import { getItemAsync, removeItemAsync, setItemAsync } from '../utils/storage-helpers';
 import { Pair } from '../sea/pair';
 import { AuthOptions } from '../sea/authenticate';
-import { AuthCallback, OptionsPut, UserCredentials, UserReference } from '../types';
+import { AuthCallback, SupportedStorage, OptionsPut, UserCredentials, UserReference } from '../types';
 import { isObject } from '../utils/is-object';
 import { isString } from '../utils/is-string';
 import { isFunction } from '../utils/is-function';
@@ -67,7 +66,7 @@ export class UserApi
             }
             return ref
         }
-        catch (err: any)
+        catch (err)
         {
             if (cb)
             {
@@ -134,7 +133,7 @@ export class UserApi
             }
             return ref
         }
-        catch (err: any)
+        catch (err)
         {
             if (cb)
             {

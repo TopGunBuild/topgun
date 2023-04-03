@@ -1,7 +1,6 @@
-import { MessageCb, OptionsGet, OptionsPut, Value } from '../types'
-import { Client } from './client'
-import { Event } from './control-flow/event'
-import { ChainOptions, OnCb } from './interfaces'
+import { ChainOptions, OnCb, MessageCb, OptionsGet, OptionsPut, Value } from '../types';
+import { Client } from './client';
+import { Event } from './control-flow/event';
 import { generateMessageId } from './graph/graph-utils';
 import { Graph } from './graph/graph';
 import { isObject } from '../utils/is-object';

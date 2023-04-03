@@ -5,7 +5,7 @@
 // between binary and 'hex' | 'utf8' | 'base64'
 // See documentation and validation for safe implementation in:
 // https://github.com/feross/safe-buffer#update
-import SeaArray from './SeaArray'
+import SeaArray from './sea-array'
 import { base64 } from './base64'
 import { isString } from '../utils/is-string';
 

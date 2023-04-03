@@ -1,6 +1,6 @@
 import { encrypt } from './encrypt';
 import { pair as createPair } from './pair';
-import { pseudoRandomText } from './pseudoRandomText';
+import { pseudoRandomText } from './pseudo-random-text';
 import { signGraph } from './sign';
 import { work } from './work';
 import { Client } from '../client/client';

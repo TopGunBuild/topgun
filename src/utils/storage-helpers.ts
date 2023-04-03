@@ -1,4 +1,4 @@
-import { SupportedStorage } from '../client/interfaces';
+import { SupportedStorage } from '../types';
 
 export const setItemAsync = async (
     storage: SupportedStorage,

@@ -1,4 +1,4 @@
-import { importAesKey } from './importAesKey';
+import { importAesKey } from './import-aes-key';
 import { Buffer, crypto, random, TextEncoder } from './shims';
 import { Pair } from './pair';
 import { isObject } from '../utils/is-object';

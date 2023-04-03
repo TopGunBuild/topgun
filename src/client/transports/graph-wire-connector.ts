@@ -1,6 +1,6 @@
-import { Get, Put, Message, MessageCb } from '../../types'
-import { generateMessageId } from '../graph/graph-utils'
-import { GraphConnector } from './graph-connector'
+import { Get, Put, Message, MessageCb } from '../../types';
+import { generateMessageId } from '../graph/graph-utils';
+import { GraphConnector } from './graph-connector';
 
 export class GraphWireConnector extends GraphConnector
 {

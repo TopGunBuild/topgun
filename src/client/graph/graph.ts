@@ -5,10 +5,13 @@ import {
     GraphData,
     MessageCb,
     Value,
-    OptionsPut
+    OptionsPut,
+    Middleware,
+    MiddlewareType,
+    NodeListenCb,
+    OnCb
 } from '../../types';
 import { Event } from '../control-flow/event';
-import { Middleware, MiddlewareType, NodeListenCb, OnCb } from '../interfaces';
 import { GraphConnector } from '../transports/graph-connector';
 import { GraphNode } from './graph-node';
 import { diffSets, flattenGraphData, generateMessageId, getPathData } from './graph-utils';

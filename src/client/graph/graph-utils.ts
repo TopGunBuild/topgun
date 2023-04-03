@@ -1,7 +1,6 @@
-import { addMissingState, diffCRDT, mergeGraph } from '../../crdt'
-import { GraphData, Node } from '../../types'
-import { Link } from '../link'
-import { PathData } from '../interfaces'
+import { addMissingState, diffCRDT, mergeGraph } from '../../crdt';
+import { GraphData, Node, PathData } from '../../types';
+import { Link } from '../link';
 import { isDefined } from '../../utils/is-defined';
 import { isObject } from '../../utils/is-object';
 import { cloneValue } from '../../utils/clone-value';

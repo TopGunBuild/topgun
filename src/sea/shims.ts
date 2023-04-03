@@ -1,6 +1,6 @@
 import root from 'window-or-global';
 import './base64';
-import SafeBuffer from './SafeBuffer';
+import SafeBuffer from './safe-buffer';
 import isocrypto from 'isomorphic-webcrypto';
 
 export const crypto = isocrypto['default'] || isocrypto;

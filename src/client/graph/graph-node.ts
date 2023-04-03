@@ -1,6 +1,5 @@
-import { GraphData, Message, Node } from '../../types';
+import { GraphData, Message, Node, NodeListenCb } from '../../types';
 import { Event } from '../control-flow/event';
-import { NodeListenCb } from '../interfaces';
 import { Graph } from './graph';
 
 /**

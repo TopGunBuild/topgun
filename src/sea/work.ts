@@ -1,7 +1,7 @@
 import { pbkdf2 } from './settings'
 import { Buffer, crypto, TextEncoder } from './shims'
 import { Pair } from './pair';
-import { pseudoRandomText } from './pseudoRandomText';
+import { pseudoRandomText } from './pseudo-random-text';
 import { isObject } from '../utils/is-object';
 import { isString } from '../utils/is-string';
 

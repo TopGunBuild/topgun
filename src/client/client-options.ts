@@ -1,6 +1,6 @@
 import { Graph } from './graph/graph';
 import { GraphConnector } from './transports/graph-connector';
-import { SupportedStorage } from './interfaces';
+import { SupportedStorage } from '../types';
 
 export interface ClientOptions
 {

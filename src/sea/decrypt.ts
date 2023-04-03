@@ -1,4 +1,4 @@
-import { importAesKey } from './importAesKey';
+import { importAesKey } from './import-aes-key';
 import { parse } from './settings';
 import { Buffer, crypto, TextDecoder } from './shims';
 import { Pair } from './pair';
