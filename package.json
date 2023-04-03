@@ -3,7 +3,13 @@
     "version": "0.0.1",
     "description": "Realtime, offline-first, secure, graph data synchronization engine. Reimplementation of gunDB in TypeScript",
     "scripts": {
-        "test": "echo \"Error: no test specified\" && exit 1"
+        "buildall": "npm run clean && npm run ts-types && concurrently \"npm:build:*\"",
+        "build:client": "node build-scripts/client.esbuild.js",
+        "build:server": "node build-scripts/server.esbuild.js",
+        "test": "echo \"Error: no test specified\" && exit 1",
+        "test:unit": "jest --coverage",
+        "clean": "rimraf dist",
+        "ts-types": "tsc -p tsconfig.json"
     },
     "repository": {
         "type": "git",
@@ -35,6 +41,7 @@
         "window-or-global": "^1.0.1"
     },
     "devDependencies": {
+        "@types/jest": "^29.4.0",
         "@types/route-parser": "^0.1.4",
         "@types/window-or-global": "^1.0.4",
         "concurrently": "^7.5.0",
