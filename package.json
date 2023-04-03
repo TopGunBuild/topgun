@@ -1,7 +1,7 @@
 {
     "name": "topgun",
     "version": "0.0.1",
-    "description": "A realtime, offline-first, graph data synchronization engine. Reimplementation of gunDB in TypeScript.",
+    "description": "Realtime, offline-first, secure, graph data synchronization engine. Reimplementation of gunDB in TypeScript",
     "scripts": {
         "test": "echo \"Error: no test specified\" && exit 1"
     },
@@ -15,7 +15,11 @@
         "database",
         "typescript",
         "javascript",
-        "gun"
+        "gun",
+        "key-value store",
+        "storage",
+        "adapter",
+        "performance"
     ],
     "author": "Ivan Kalashnik",
     "license": "MIT",
