@@ -1,6 +1,6 @@
 import { addMissingState, diffCRDT, mergeGraph } from '../../crdt';
-import { GraphData, Node, PathData } from '../../types';
-import { Link } from '../link';
+import { TGGraphData, TGNode, TGPathData } from '../../types';
+import { TGLink } from '../link';
 import { isDefined } from '../../utils/is-defined';
 import { isObject } from '../../utils/is-object';
 import { cloneValue } from '../../utils/clone-value';
@@ -23,11 +23,11 @@ export function diffSets(
     ]
 }
 
-export function nodeToGraph(node: Node): GraphData
+export function nodeToGraph(node: TGNode): TGGraphData
 {
-    const modified       = cloneValue(node);
-    let nodes: GraphData = {};
-    const nodeSoul       = node && node._ && node._['#'];
+    const modified         = cloneValue(node);
+    let nodes: TGGraphData = {};
+    const nodeSoul         = node && node._ && node._['#'];
 
     for (const key in node)
     {
@@ -51,7 +51,7 @@ export function nodeToGraph(node: Node): GraphData
 
         let soul = val && (val._ && val._['#']);
 
-        if (val instanceof Link && val.soul)
+        if (val instanceof TGLink && val.soul)
         {
             soul = val.soul
         }
@@ -74,10 +74,10 @@ export function nodeToGraph(node: Node): GraphData
     return nodes
 }
 
-export function flattenGraphData(data: GraphData): GraphData
+export function flattenGraphData(data: TGGraphData): TGGraphData
 {
-    const graphs: GraphData[] = [];
-    let flatGraph: GraphData  = {};
+    const graphs: TGGraphData[] = [];
+    let flatGraph: TGGraphData  = {};
 
     for (const soul in data)
     {
@@ -104,8 +104,8 @@ export function flattenGraphData(data: GraphData): GraphData
 
 export function getPathData(
     keys: readonly string[],
-    graph: GraphData
-): PathData
+    graph: TGGraphData
+): TGPathData
 {
     const lastKey = keys[keys.length - 1];
 
@@ -132,7 +132,7 @@ export function getPathData(
         }
     }
 
-    const value = (parentValue as Node)[lastKey];
+    const value = (parentValue as TGNode)[lastKey];
 
     if (!value)
     {

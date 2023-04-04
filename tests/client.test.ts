@@ -1,10 +1,10 @@
-import { Client } from '../src/client';
+import { TGClient } from '../src/client';
 import { dataWalking } from '../src/utils/data-walking';
 
 
 describe('Client', () =>
 {
-    const client = new Client();
+    const client = new TGClient();
 
     it('callback', async () =>
     {

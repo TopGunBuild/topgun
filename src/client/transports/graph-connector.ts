@@ -1,23 +1,23 @@
-import { Get, Put, GraphData, Message } from '../../types'
-import { Event } from '../control-flow/event'
-import { ProcessQueue } from '../control-flow/process-queue'
-import { Graph } from '../graph/graph'
+import { TGGet, TGPut, TGGraphData, TGMessage } from '../../types'
+import { TGEvent } from '../control-flow/event'
+import { TGProcessQueue } from '../control-flow/process-queue'
+import { TGGraph } from '../graph/graph'
 
-export abstract class GraphConnector
+export abstract class TGGraphConnector
 {
     public readonly name: string;
     public isConnected: boolean;
 
     public readonly events: {
-        readonly graphData: Event<GraphData,
+        readonly graphData: TGEvent<TGGraphData,
             string|undefined,
             string|undefined>
-        readonly receiveMessage: Event<Message>
-        readonly connection: Event<boolean>
+        readonly receiveMessage: TGEvent<TGMessage>
+        readonly connection: TGEvent<boolean>
     };
 
-    protected readonly inputQueue: ProcessQueue<Message>;
-    protected readonly outputQueue: ProcessQueue<Message>;
+    protected readonly inputQueue: TGProcessQueue<TGMessage>;
+    protected readonly outputQueue: TGProcessQueue<TGMessage>;
 
     constructor(name = 'GraphConnector')
     {
@@ -27,37 +27,37 @@ export abstract class GraphConnector
         this.put = this.put.bind(this);
         this.off = this.off.bind(this);
 
-        this.inputQueue  = new ProcessQueue<Message>(`${name}.inputQueue`);
-        this.outputQueue = new ProcessQueue<Message>(`${name}.outputQueue`);
+        this.inputQueue  = new TGProcessQueue<TGMessage>(`${name}.inputQueue`);
+        this.outputQueue = new TGProcessQueue<TGMessage>(`${name}.outputQueue`);
 
         this.events = {
-            connection    : new Event(`${name}.events.connection`),
-            graphData     : new Event<GraphData>(`${name}.events.graphData`),
-            receiveMessage: new Event<Message>(`${name}.events.receiveMessage`)
+            connection    : new TGEvent(`${name}.events.connection`),
+            graphData     : new TGEvent<TGGraphData>(`${name}.events.graphData`),
+            receiveMessage: new TGEvent<TGMessage>(`${name}.events.receiveMessage`)
         };
 
         this.__onConnectedChange = this.__onConnectedChange.bind(this);
         this.events.connection.on(this.__onConnectedChange)
     }
 
-    public connectToGraph(graph: Graph): GraphConnector
+    public connectToGraph(graph: TGGraph): TGGraphConnector
     {
         graph.events.off.on(this.off);
         return this
     }
 
-    public off(_msgId: string): GraphConnector
+    public off(_msgId: string): TGGraphConnector
     {
         return this
     }
 
-    public sendPutsFromGraph(graph: Graph): GraphConnector
+    public sendPutsFromGraph(graph: TGGraph): TGGraphConnector
     {
         graph.events.put.on(this.put);
         return this
     }
 
-    public sendRequestsFromGraph(graph: Graph): GraphConnector
+    public sendRequestsFromGraph(graph: TGGraph): TGGraphConnector
     {
         graph.events.get.on(req =>
         {
@@ -92,7 +92,7 @@ export abstract class GraphConnector
      *
      * @returns A function to be called to clean up callback listeners
      */
-    public put(_params: Put): () => void
+    public put(_params: TGPut): () => void
     {
         return () =>
         {
@@ -104,7 +104,7 @@ export abstract class GraphConnector
      *
      * @returns A function to be called to clean up callback listeners
      */
-    public get(_params: Get): () => void
+    public get(_params: TGGet): () => void
     {
         return () =>
         {
@@ -116,7 +116,7 @@ export abstract class GraphConnector
      *
      * @param msgs The wire protocol messages to enqueue
      */
-    public send(msgs: readonly Message[]): GraphConnector
+    public send(msgs: readonly TGMessage[]): TGGraphConnector
     {
         this.outputQueue.enqueueMany(msgs);
         if (this.isConnected)
@@ -132,7 +132,7 @@ export abstract class GraphConnector
      *
      * @param msgs
      */
-    public ingest(msgs: readonly Message[]): GraphConnector
+    public ingest(msgs: readonly TGMessage[]): TGGraphConnector
     {
         this.inputQueue.enqueueMany(msgs).process();
 

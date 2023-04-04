@@ -1,30 +1,30 @@
-import { GraphData, Message, Node, NodeListenCb } from '../../types';
-import { Event } from '../control-flow/event';
-import { Graph } from './graph';
+import { TGGraphData, TGMessage, TGNode, TGNodeListenCb } from '../../types';
+import { TGEvent } from '../control-flow/event';
+import { TGGraph } from './graph';
 
 /**
  * Query state around a single node in the graph
  */
-export class GraphNode
+export class TGGraphNode
 {
     public readonly soul: string;
 
     private _endCurQuery?: () => void;
-    private readonly _data: Event<Node|undefined>;
-    private readonly _graph: Graph;
+    private readonly _data: TGEvent<TGNode|undefined>;
+    private readonly _graph: TGGraph;
     private readonly _updateGraph: (
-        data: GraphData,
+        data: TGGraphData,
         replyToId?: string
     ) => void;
 
     constructor(
-        graph: Graph,
+        graph: TGGraph,
         soul: string,
-        updateGraph: (data: GraphData, replyToId?: string) => void
+        updateGraph: (data: TGGraphData, replyToId?: string) => void
     )
     {
         this._onDirectQueryReply = this._onDirectQueryReply.bind(this);
-        this._data               = new Event<Node|undefined>(`<GraphNode ${soul}>`);
+        this._data               = new TGEvent<TGNode|undefined>(`<GraphNode ${soul}>`);
         this._graph              = graph;
         this._updateGraph        = updateGraph;
         this.soul                = soul;
@@ -35,7 +35,7 @@ export class GraphNode
         return this._data.listenerCount()
     }
 
-    public get(cb?: NodeListenCb): GraphNode
+    public get(cb?: TGNodeListenCb): TGGraphNode
     {
         if (cb)
         {
@@ -45,23 +45,23 @@ export class GraphNode
         return this
     }
 
-    public receive(data: Node|undefined): GraphNode
+    public receive(data: TGNode|undefined): TGGraphNode
     {
         this._data.trigger(data, this.soul);
         return this
     }
 
     public on(
-        cb: (data: Node|undefined, soul: string) => void
-    ): GraphNode
+        cb: (data: TGNode|undefined, soul: string) => void
+    ): TGGraphNode
     {
         this._data.on(cb);
         return this
     }
 
     public off(
-        cb?: (data: Node|undefined, soul: string) => void
-    ): GraphNode
+        cb?: (data: TGNode|undefined, soul: string) => void
+    ): TGGraphNode
     {
         if (cb)
         {
@@ -81,7 +81,7 @@ export class GraphNode
         return this
     }
 
-    private _ask(): GraphNode
+    private _ask(): TGGraphNode
     {
         if (this._endCurQuery)
         {
@@ -92,7 +92,7 @@ export class GraphNode
         return this;
     }
 
-    private _onDirectQueryReply(msg: Message): void
+    private _onDirectQueryReply(msg: TGMessage): void
     {
         if (!msg.put)
         {

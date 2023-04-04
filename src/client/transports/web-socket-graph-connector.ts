@@ -1,3 +1,4 @@
+import { TGGraphWireConnector } from './graph-wire-connector';
 import { TGChannel } from 'topgun-socket';
 import {
     ClientOptions,
@@ -5,12 +6,11 @@ import {
     create as createSocketClient,
     SubscribeOptions
 } from 'topgun-socket/client';
-import { sign } from '../sea';
-import { Get, Put, Message, MessageCb } from '../types';
-import { GraphWireConnector } from '../client/transports/graph-wire-connector';
-import { generateMessageId } from '../client/graph/graph-utils';
+import { TGGet, TGMessage, TGMessageCb, TGPut } from '../../types';
+import { generateMessageId } from '../graph/graph-utils';
+import { sign } from '../../sea';
 
-export class SocketConnector extends GraphWireConnector
+export class TGWebSocketGraphConnector extends TGGraphWireConnector
 {
     public readonly socket: TGClientSocket;
     public readonly opts: ClientOptions|undefined;
@@ -27,7 +27,7 @@ export class SocketConnector extends GraphWireConnector
      */
     constructor(
         opts: ClientOptions|undefined,
-        name = 'SocketConnector'
+        name = 'TGWebSocketGraphConnector'
     )
     {
         super(name);
@@ -43,7 +43,7 @@ export class SocketConnector extends GraphWireConnector
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    off(msgId: string): SocketConnector
+    off(msgId: string): TGWebSocketGraphConnector
     {
         super.off(msgId);
         const channel = this._requestChannels[msgId];
@@ -62,7 +62,7 @@ export class SocketConnector extends GraphWireConnector
             msgId,
             cb,
             opts
-        }: Get
+        }: TGGet
     ): () => void
     {
         const cbWrap = (msg: any) =>
@@ -85,7 +85,7 @@ export class SocketConnector extends GraphWireConnector
             msgId = '',
             replyTo = '',
             cb
-        }: Put
+        }: TGPut
     ): () => void
     {
         if (!graph)
@@ -127,13 +127,13 @@ export class SocketConnector extends GraphWireConnector
         }
     }
 
-    publishToChannel(channelName: string, msg: Message): SocketConnector
+    publishToChannel(channelName: string, msg: TGMessage): TGWebSocketGraphConnector
     {
         this.socket.transmitPublish(channelName, msg);
         return this;
     }
 
-    subscribeToChannel(channelName: string, cb?: MessageCb, opts?: SubscribeOptions): TGChannel<any>
+    subscribeToChannel(channelName: string, cb?: TGMessageCb, opts?: SubscribeOptions): TGChannel<any>
     {
         const channel = this.socket.subscribe(channelName, opts);
         this.onChannelMessage(channel, cb);
@@ -154,7 +154,7 @@ export class SocketConnector extends GraphWireConnector
         return this.socket.invoke('login', { proof, pub });
     }
 
-    private async onChannelMessage(channel: TGChannel<any>, cb?: MessageCb): Promise<void>
+    private async onChannelMessage(channel: TGChannel<any>, cb?: TGMessageCb): Promise<void>
     {
         for await (let msg of channel)
         {
@@ -216,8 +216,8 @@ export class SocketConnector extends GraphWireConnector
     }
 }
 
-export function createConnector(opts: ClientOptions|undefined): SocketConnector
+export function createConnector(opts: ClientOptions|undefined): TGWebSocketGraphConnector
 {
-    return new SocketConnector(opts);
+    return new TGWebSocketGraphConnector(opts);
 }
 

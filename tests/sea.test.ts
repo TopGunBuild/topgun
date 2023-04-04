@@ -1,9 +1,9 @@
 import * as SEA from '../src/sea';
-import { Client } from '../src/client';
+import { TGClient } from '../src/client';
 
 describe('SEA', () =>
 {
-    const client = new Client();
+    const client = new TGClient();
 
     it('encrypt/decrypt', async () =>
     {

@@ -1,11 +1,11 @@
-export { Client } from './client';
-export { Graph } from './graph/graph';
-export { Link } from './link';
-export { Event } from './control-flow/event';
-export { Queue } from './control-flow/queue';
-export { ProcessQueue } from './control-flow/process-queue';
-export { GraphConnector } from './transports/graph-connector';
-export { GraphWireConnector } from './transports/graph-wire-connector';
-export { GraphConnectorFromAdapter } from './transports/graph-connector-from-adapter';
-export { UserApi } from './user-api';
+export { TGClient } from './client';
+export { TGGraph } from './graph/graph';
+export { TGLink } from './link';
+export { TGEvent } from './control-flow/event';
+export { TGQueue } from './control-flow/queue';
+export { TGProcessQueue } from './control-flow/process-queue';
+export { TGGraphConnector } from './transports/graph-connector';
+export { TGGraphWireConnector } from './transports/graph-wire-connector';
+export { TGGraphConnectorFromAdapter } from './transports/graph-connector-from-adapter';
+export { TGUserApi } from './user-api';
 

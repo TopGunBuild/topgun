@@ -3,8 +3,8 @@ import { sha256 } from './sha256';
 import { Buffer, crypto } from './shims';
 import { pubFromSoul } from './soul';
 import { verify, VerifyData } from './verify';
-import { GraphData, Node, OptionsPut, Value } from '../types';
-import { Client, Link } from '../client';
+import { TGGraphData, TGNode, TGOptionsPut, TGValue } from '../types';
+import { TGClient, TGLink } from '../client';
 import { isString } from '../utils/is-string';
 import { isObject } from '../utils/is-object';
 import { isDefined } from '../utils/is-defined';
@@ -23,7 +23,7 @@ const DEFAULT_OPTS: {
 };
 
 export async function verifyCertificate(
-    client: Client,
+    client: TGClient,
     cert: {readonly m: string; readonly s: string},
     userPub: string,
     soulPub: string,
@@ -83,7 +83,7 @@ export async function verifyCertificate(
 
                     if (isString(writeBlockPath))
                     {
-                        let root: Link|Client = client;
+                        let root: TGLink|TGClient = client;
 
                         // Fix if path doesn't start with certificate
                         if (!data.wb.startsWith('~'))
@@ -118,12 +118,12 @@ export async function verifyCertificate(
 export function prep(
     val: any,
     key: string,
-    node: Node,
+    node: TGNode,
     soul: string
 ): {
     readonly '#': string
     readonly '.': string
-    readonly ':': Value
+    readonly ':': TGValue
     readonly '>': number
 }
 {
@@ -144,7 +144,7 @@ export async function hashForSignature(prepped: any): Promise<string>
     return hash.toString('hex')
 }
 
-export function hashNodeKey(node: Node, key: string): Promise<string>
+export function hashNodeKey(node: TGNode, key: string): Promise<string>
 {
     const val     = node && node[key];
     const parsed  = parse(val);
@@ -248,12 +248,12 @@ export async function sign(
 }
 
 export async function signNodeValue(
-    node: Node,
+    node: TGNode,
     key: string,
     pair: PairBase,
     _encoding = DEFAULT_OPTS.encode
 ): Promise<{
-    readonly ':': Value
+    readonly ':': TGValue
     readonly '~': string
 }>
 {
@@ -278,15 +278,15 @@ export async function signNodeValue(
 }
 
 export async function signNode(
-    node: Node,
+    node: TGNode,
     pair: PairBase,
     encoding = DEFAULT_OPTS.encode
-): Promise<Node>
+): Promise<TGNode>
 {
-    const signedNode: Node = {
+    const signedNode: TGNode = {
         _: node._
     };
-    const soul             = node._ && node._['#'];
+    const soul               = node._ && node._['#'];
 
     for (const key in node)
     {
@@ -308,13 +308,13 @@ export async function signNode(
 }
 
 export async function signGraph(
-    client: Client,
-    graph: GraphData,
+    client: TGClient,
+    graph: TGGraphData,
     pair: PairBase,
     encoding = DEFAULT_OPTS.encode,
-    putOpt?: OptionsPut,
+    putOpt?: TGOptionsPut,
     fullPath?: string[]
-): Promise<GraphData>
+): Promise<TGGraphData>
 {
     const modifiedGraph = { ...graph };
 
@@ -366,15 +366,15 @@ export async function signGraph(
 }
 
 export function graphSigner(
-    client: Client,
+    client: TGClient,
     pair: PairBase,
     encoding = DEFAULT_OPTS.encode
-): (graph: GraphData, existingGraph: any, putOpt?: OptionsPut, fullPath?: string[]) => Promise<GraphData>
+): (graph: TGGraphData, existingGraph: any, putOpt?: TGOptionsPut, fullPath?: string[]) => Promise<TGGraphData>
 {
     return (
-        graph: GraphData,
+        graph: TGGraphData,
         existingGraph: any,
-        putOpt?: OptionsPut,
+        putOpt?: TGOptionsPut,
         fullPath?: string[]
     ) => signGraph(client, graph, pair, encoding, putOpt, fullPath)
 }

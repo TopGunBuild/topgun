@@ -1,4 +1,4 @@
-export class MiddlewareSystem<T, U = undefined, V = undefined>
+export class TGMiddlewareSystem<T, U = undefined, V = undefined>
 {
     public readonly name: string;
     private readonly _middlewareFunctions: Array<(a: T, b?: U, c?: V) => Promise<T>|T|undefined>;
@@ -16,7 +16,7 @@ export class MiddlewareSystem<T, U = undefined, V = undefined>
      */
     public use(
         middleware: (a: T, b?: U, c?: V) => Promise<T>|T|undefined
-    ): MiddlewareSystem<T, U, V>
+    ): TGMiddlewareSystem<T, U, V>
     {
         if (this._middlewareFunctions.indexOf(middleware) !== -1)
         {
@@ -34,7 +34,7 @@ export class MiddlewareSystem<T, U = undefined, V = undefined>
      */
     public unuse(
         middleware: (a: T, b?: U, c?: V) => T|undefined
-    ): MiddlewareSystem<T, U, V>
+    ): TGMiddlewareSystem<T, U, V>
     {
         const idx = this._middlewareFunctions.indexOf(middleware);
         if (idx !== -1)

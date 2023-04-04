@@ -1,6 +1,6 @@
-import { Message } from '../../types'
+import { TGMessage } from '../../types'
 
-export class Queue<T = Message>
+export class TGQueue<T = TGMessage>
 {
     public readonly name: string;
     private _queue: T[];
@@ -21,7 +21,7 @@ export class Queue<T = Message>
         return this._queue.indexOf(item) !== -1
     }
 
-    public enqueue(item: T): Queue<T>
+    public enqueue(item: T): TGQueue<T>
     {
         if (this.has(item))
         {
@@ -37,7 +37,7 @@ export class Queue<T = Message>
         return this._queue.pop()
     }
 
-    public enqueueMany(items: readonly T[]): Queue<T>
+    public enqueueMany(items: readonly T[]): TGQueue<T>
     {
         const filtered = items.filter(item => !this.has(item));
 

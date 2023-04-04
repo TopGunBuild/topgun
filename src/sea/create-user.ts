@@ -3,11 +3,11 @@ import { pair as createPair } from './pair';
 import { pseudoRandomText } from './pseudo-random-text';
 import { signGraph } from './sign';
 import { work } from './work';
-import { Client } from '../client/client';
+import { TGClient } from '../client/client';
 import { isNumber } from '../utils/is-number';
 
 export async function createUser(
-    client: Client,
+    client: TGClient,
     alias: string,
     password: string
 ): Promise<{

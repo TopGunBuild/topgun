@@ -1,11 +1,11 @@
 import { LEX } from './lex';
 
-export type ChangeSetEntry = readonly [string, GraphData];
+export type ChangeSetEntry = readonly [string, TGGraphData];
 
 /**
  * Timestamp of last change for each attribute
  */
-export interface NodeState
+export interface TGNodeState
 {
     [key: string]: number
 }
@@ -13,40 +13,40 @@ export interface NodeState
 /**
  * Soul and State of a Node
  */
-export interface NodeMeta
+export interface TGNodeMeta
 {
     '#'?: string;
-    '>'?: NodeState;
+    '>'?: TGNodeState;
 }
 
 /**
  * A node (or partial node data) in a Graph
  */
-export interface Node
+export interface TGNode
 {
-    _?: NodeMeta
+    _?: TGNodeMeta
     [key: string]: any
 }
 
 /**
  * Valid values in TopGunDB
  */
-export type Value = object|string|number|boolean|null;
+export type TGValue = object|string|number|boolean|null;
 
 /**
  * Graph Data consists of one or more full or partial nodes
  */
-export interface GraphData
+export interface TGGraphData
 {
-    [key: string]: Node|undefined
+    [key: string]: TGNode|undefined
 }
 
-export interface PartialGraphData
+export interface TGPartialGraphData
 {
-    [key: string]: Partial<Node>|undefined
+    [key: string]: Partial<TGNode>|undefined
 }
 
-export interface OptionsGet
+export interface TGOptionsGet
 {
     /** soul */
     '#'?: string;
@@ -58,7 +58,7 @@ export interface OptionsGet
     '-'?: boolean;
 }
 
-export type OptionsPut = Partial<{
+export type TGOptionsPut = Partial<{
     opt: {
         /** certificate that gives other people write permission */ cert: string;
     };
@@ -68,18 +68,18 @@ export interface CRDTOpts
 {
     readonly machineState?: number
     readonly futureGrace?: number
-    readonly Lexical?: (x: Value) => any
+    readonly Lexical?: (x: TGValue) => any
 }
 
-export interface GraphAdapter
+export interface TGGraphAdapter
 {
     readonly close?: () => void
-    readonly get: (soul: string, opts?: OptionsGet) => Promise<Node|null>
-    readonly getJsonString?: (soul: string, opts?: OptionsGet) => Promise<string>
-    readonly getJsonStringSync?: (soul: string, opts?: OptionsGet) => string
-    readonly getSync?: (soul: string, opts?: OptionsGet) => Node|null
-    readonly put: (graphData: GraphData) => Promise<GraphData|null>
-    readonly putSync?: (graphData: GraphData) => GraphData|null
+    readonly get: (soul: string, opts?: TGOptionsGet) => Promise<TGNode|null>
+    readonly getJsonString?: (soul: string, opts?: TGOptionsGet) => Promise<string>
+    readonly getJsonStringSync?: (soul: string, opts?: TGOptionsGet) => string
+    readonly getSync?: (soul: string, opts?: TGOptionsGet) => TGNode|null
+    readonly put: (graphData: TGGraphData) => Promise<TGGraphData|null>
+    readonly putSync?: (graphData: TGGraphData) => TGGraphData|null
 
     readonly pruneChangelog?: (before: number) => Promise<void>
 

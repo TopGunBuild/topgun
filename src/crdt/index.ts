@@ -1,15 +1,15 @@
 import {
     CRDTOpts,
-    GraphData,
-    Node,
-    NodeState,
-    PartialGraphData
+    TGGraphData,
+    TGNode,
+    TGNodeState,
+    TGPartialGraphData
 } from '../types'
 import { cloneValue } from '../utils/clone-value';
 
 const EMPTY: any = {};
 
-export function addMissingState(graphData: PartialGraphData): GraphData
+export function addMissingState(graphData: TGPartialGraphData): TGGraphData
 {
     const updatedGraphData = cloneValue(graphData);
     const now              = new Date().getTime();
@@ -42,7 +42,7 @@ export function addMissingState(graphData: PartialGraphData): GraphData
         updatedGraphData[soul] = node
     }
 
-    return updatedGraphData as GraphData;
+    return updatedGraphData as TGGraphData;
 }
 
 const DEFAULT_OPTS = {
@@ -51,10 +51,10 @@ const DEFAULT_OPTS = {
 };
 
 export function diffCRDT(
-    updatedGraph: GraphData,
-    existingGraph: GraphData,
+    updatedGraph: TGGraphData,
+    existingGraph: TGGraphData,
     opts: CRDTOpts = DEFAULT_OPTS
-): GraphData|undefined
+): TGGraphData|undefined
 {
     const {
               machineState = new Date().getTime(),
@@ -63,7 +63,7 @@ export function diffCRDT(
           }        = opts || EMPTY;
     const maxState = machineState + futureGrace;
 
-    const allUpdates: GraphData = {};
+    const allUpdates: TGGraphData = {};
 
     /*console.log({
         updatedGraph: JSON.stringify(updatedGraph),
@@ -76,10 +76,10 @@ export function diffCRDT(
         {
             continue
         }
-        const existing                 = existingGraph[soul];
-        const updated                  = updatedGraph[soul];
-        const existingState: NodeState = (existing && existing._ && existing._['>']) || EMPTY;
-        const updatedState: NodeState  = (updated && updated._ && updated._['>']) || EMPTY;
+        const existing                   = existingGraph[soul];
+        const updated                    = updatedGraph[soul];
+        const existingState: TGNodeState = (existing && existing._ && existing._['>']) || EMPTY;
+        const updatedState: TGNodeState  = (updated && updated._ && updated._['>']) || EMPTY;
 
         if (!updated)
         {
@@ -92,7 +92,7 @@ export function diffCRDT(
 
         let hasUpdates = false;
 
-        const updates: Node = {
+        const updates: TGNode = {
             _: {
                 '#': soul,
                 '>': {}
@@ -142,10 +142,10 @@ export function diffCRDT(
 }
 
 export function mergeNodes(
-    existing: Node|undefined,
-    updates: Node|undefined,
+    existing: TGNode|undefined,
+    updates: TGNode|undefined,
     mut: 'immutable'|'mutable' = 'immutable'
-): Node|undefined
+): TGNode|undefined
 {
     if (!existing)
     {
@@ -192,12 +192,12 @@ export function mergeNodes(
 }
 
 export function mergeGraph(
-    existing: GraphData,
-    diff: GraphData,
+    existing: TGGraphData,
+    diff: TGGraphData,
     mut: 'immutable'|'mutable' = 'immutable'
-): GraphData
+): TGGraphData
 {
-    const result: GraphData = mut ? existing : { ...existing };
+    const result: TGGraphData = mut ? existing : { ...existing };
 
     for (const soul in diff)
     {

@@ -1,16 +1,16 @@
-import { Graph } from './graph/graph';
-import { GraphConnector } from './transports/graph-connector';
-import { SupportedStorage } from '../types';
+import { TGGraph } from './graph/graph';
+import { TGGraphConnector } from './transports/graph-connector';
+import { TGSupportedStorage } from '../types';
 
-export interface ClientOptions
+export interface TGClientOptions
 {
     readonly peers?: string[];
-    readonly graph?: Graph;
-    readonly connectors?: GraphConnector[];
+    readonly graph?: TGGraph;
+    readonly connectors?: TGGraphConnector[];
     readonly persistStorage?: boolean;
     readonly storageKey?: string;
     readonly persistSession?: boolean;
-    readonly sessionStorage?: SupportedStorage;
+    readonly sessionStorage?: TGSupportedStorage;
     readonly sessionStorageKey?: string;
     readonly passwordMinLength?: number;
 }

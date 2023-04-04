@@ -11,6 +11,24 @@
         "clean": "rimraf dist",
         "ts-types": "tsc -p tsconfig.json"
     },
+    "exports": {
+        "./client": {
+            "types": "./dist/client/index.d.ts",
+            "module": "./dist/client.module.js",
+            "import": "./dist/client.module.js",
+            "require": "./dist/client.module.js",
+            "default": "./dist/client.js"
+        },
+        "./server": {
+            "types": "./dist/server/index.d.ts",
+            "module": "./dist/server.js",
+            "node": "./dist/server.js",
+            "import": "./dist/server.js",
+            "require": "./dist/server.js",
+            "default": "./dist/server.js"
+        },
+        "./package.json": "./package.json"
+    },
     "repository": {
         "type": "git",
         "url": "git+https://github.com/TopGunBuild/topgun.git"
@@ -37,7 +55,7 @@
         "ajv": "^8.12.0",
         "isomorphic-webcrypto": "^2.3.8",
         "route-parser": "^0.0.5",
-        "topgun-socket": "0.0.5",
+        "topgun-socket": "0.0.9",
         "window-or-global": "^1.0.1"
     },
     "devDependencies": {

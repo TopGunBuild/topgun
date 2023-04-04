@@ -1,7 +1,7 @@
 import { isBrowser } from './is-browser';
-import { SupportedStorage } from '../types';
+import { TGSupportedStorage } from '../types';
 
-export const localStorageAdapter: SupportedStorage = {
+export const localStorageAdapter: TGSupportedStorage = {
     getItem   : (key) =>
     {
         if (!isBrowser())

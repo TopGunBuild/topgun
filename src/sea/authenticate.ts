@@ -1,6 +1,6 @@
 import { decrypt } from './decrypt';
 import { work } from './work';
-import { Client } from '../client/client';
+import { TGClient } from '../client/client';
 import { Pair } from './pair';
 import { isObject } from '../utils/is-object';
 import { isString } from '../utils/is-string';
@@ -71,7 +71,7 @@ export async function authenticateAccount(
 }
 
 export async function authenticateIdentity(
-    client: Client,
+    client: TGClient,
     soul: string,
     password: string,
     encoding: 'base64' | 'utf8' | 'hex' = 'base64'
@@ -89,18 +89,18 @@ export async function authenticateIdentity(
 }
 
 export function authenticate(
-    client: Client,
+    client: TGClient,
     pair: Pair,
     opt?: AuthOptions
 ): Promise<AuthResult>
 export function authenticate(
-    client: Client,
+    client: TGClient,
     alias: string,
     password: string,
     opt?: AuthOptions
 ): Promise<AuthResult>
 export async function authenticate(
-    client: Client,
+    client: TGClient,
     aliasOrPair: string|Pair,
     passwordOrOpt: string|AuthOptions,
     maybeOptions?: AuthOptions

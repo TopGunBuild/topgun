@@ -1,38 +1,38 @@
 import { authenticate, createUser, graphSigner } from '../sea';
-import { Client } from './client';
-import { Event } from './control-flow/event';
-import { SocketConnector } from '../socket-connector';
+import { TGClient } from './client';
+import { TGEvent } from './control-flow/event';
+import { TGWebSocketGraphConnector } from './transports/web-socket-graph-connector';
 import { getItemAsync, removeItemAsync, setItemAsync } from '../utils/storage-helpers';
 import { Pair } from '../sea/pair';
 import { AuthOptions } from '../sea/authenticate';
-import { AuthCallback, SupportedStorage, OptionsPut, UserCredentials, UserReference } from '../types';
+import { TGAuthCallback, TGSupportedStorage, TGOptionsPut, TGUserCredentials, TGUserReference } from '../types';
 import { isObject } from '../utils/is-object';
 import { isString } from '../utils/is-string';
 import { isFunction } from '../utils/is-function';
-import { LexLink } from './lex-link';
+import { TGLexLink } from './lex-link';
 
 const DEFAULT_CREATE_OPTS = {};
 
-export class UserApi
+export class TGUserApi
 {
-    private readonly _client: Client;
+    private readonly _client: TGClient;
     private readonly _persistSession: boolean;
-    private readonly _sessionStorage: SupportedStorage;
+    private readonly _sessionStorage: TGSupportedStorage;
     private readonly _sessionStorageKey: string;
-    private readonly _authEvent: Event<UserReference>;
-    private _signMiddleware?: (graph: any, existingGraph: any, putOpt?: OptionsPut) => Promise<any>;
-    private _credentials: UserCredentials;
-    public is?: UserReference;
+    private readonly _authEvent: TGEvent<TGUserReference>;
+    private _signMiddleware?: (graph: any, existingGraph: any, putOpt?: TGOptionsPut) => Promise<any>;
+    private _credentials: TGUserCredentials;
+    public is?: TGUserReference;
 
     /**
      * Constructor
      */
     constructor(
-        client: Client,
+        client: TGClient,
         persistSession: boolean,
-        sessionStorage: SupportedStorage,
+        sessionStorage: TGSupportedStorage,
         sessionStorageKey: string,
-        authEvent: Event<UserReference>
+        authEvent: TGEvent<TGUserReference>
     )
     {
         this._authEvent         = authEvent;
@@ -52,9 +52,9 @@ export class UserApi
     public async create(
         alias: string,
         password: string,
-        cb?: AuthCallback,
+        cb?: TGAuthCallback,
         _opt = DEFAULT_CREATE_OPTS
-    ): Promise<UserReference>
+    ): Promise<TGUserReference>
     {
         try
         {
@@ -81,21 +81,21 @@ export class UserApi
      */
     public async auth(
         pair: Pair,
-        cb?: AuthCallback,
+        cb?: TGAuthCallback,
         _opt?: AuthOptions
-    ): Promise<UserReference>
+    ): Promise<TGUserReference>
     public async auth(
         alias: string,
         password: string,
-        cb?: AuthCallback,
+        cb?: TGAuthCallback,
         _opt?: AuthOptions
-    ): Promise<UserReference>
+    ): Promise<TGUserReference>
     public async auth(
         aliasOrPair: string|Pair,
-        passwordOrCallback: string|AuthCallback,
-        optionsOrCallback?: AuthCallback|AuthOptions,
+        passwordOrCallback: string|TGAuthCallback,
+        optionsOrCallback?: TGAuthCallback|AuthOptions,
         maybeOptions?: AuthOptions
-    ): Promise<UserReference>
+    ): Promise<TGUserReference>
     {
         const cb = isFunction(optionsOrCallback)
             ? optionsOrCallback
@@ -107,7 +107,7 @@ export class UserApi
         {
             await this.recoverCredentials();
 
-            let user: UserCredentials;
+            let user: TGUserCredentials;
 
             if (isObject(aliasOrPair) && (aliasOrPair.pub || aliasOrPair.epub))
             {
@@ -146,7 +146,7 @@ export class UserApi
     /**
      * Log out currently authenticated user
      */
-    public leave(): UserApi
+    public leave(): TGUserApi
     {
         if (this._signMiddleware)
         {
@@ -162,7 +162,7 @@ export class UserApi
     /**
      * Traverse a location in the graph
      */
-    public get(soul: string): LexLink|undefined
+    public get(soul: string): TGLexLink|undefined
     {
         return this.is && this._client.get(`~${this.is.pub}/${soul}`);
     }
@@ -194,7 +194,7 @@ export class UserApi
      * Authenticates a user by credentials
      */
     public useCredentials(
-        credentials: UserCredentials
+        credentials: TGUserCredentials
     ): {
         readonly alias: string
         readonly pub: string
@@ -219,7 +219,7 @@ export class UserApi
         return this.is;
     }
 
-    public pair(): UserCredentials
+    public pair(): TGUserCredentials
     {
         return this._credentials;
     }
@@ -228,7 +228,7 @@ export class UserApi
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private _authSuccess(credentials: UserCredentials): void
+    private _authSuccess(credentials: TGUserCredentials): void
     {
         this._credentials = credentials;
         this._authEvent.trigger(this.is);
@@ -236,18 +236,18 @@ export class UserApi
         this._persistCredentials(credentials);
     }
 
-    private _authConnectors(credentials: UserCredentials): void
+    private _authConnectors(credentials: TGUserCredentials): void
     {
         this._client.graph.eachConnector(connector =>
         {
-            if (connector.name === 'SocketConnector')
+            if (connector.name === 'TGWebSocketGraphConnector')
             {
-                (connector as SocketConnector).authenticate(credentials.pub, credentials.priv);
+                (connector as TGWebSocketGraphConnector).authenticate(credentials.pub, credentials.priv);
             }
         });
     }
 
-    private async _persistCredentials(credentials: UserCredentials): Promise<void>
+    private async _persistCredentials(credentials: TGUserCredentials): Promise<void>
     {
         if (this._persistSession)
         {
@@ -267,7 +267,7 @@ export class UserApi
         }
     }
 
-    private _isValidCredentials(maybeSession: unknown): maybeSession is UserCredentials
+    private _isValidCredentials(maybeSession: unknown): maybeSession is TGUserCredentials
     {
         return isObject(maybeSession) &&
             'priv' in maybeSession &&

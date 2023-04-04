@@ -1,17 +1,17 @@
-import { Get, Put, GraphAdapter } from '../../types'
+import { TGGet, TGPut, TGGraphAdapter } from '../../types'
 import { generateMessageId } from '../graph/graph-utils'
-import { GraphWireConnector } from './graph-wire-connector'
+import { TGGraphWireConnector } from './graph-wire-connector'
 
 const NOOP = () => undefined;
 
-export class GraphConnectorFromAdapter extends GraphWireConnector
+export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
 {
-    protected readonly adapter: GraphAdapter;
+    protected readonly adapter: TGGraphAdapter;
 
     /**
      * Constructor
      */
-    constructor(adapter: GraphAdapter, name = 'GraphConnectorFromAdapter')
+    constructor(adapter: TGGraphAdapter, name = 'GraphConnectorFromAdapter')
     {
         super(name);
         this.adapter = adapter;
@@ -21,7 +21,7 @@ export class GraphConnectorFromAdapter extends GraphWireConnector
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    public get({ soul, cb, opts, msgId = '' }: Get): () => void
+    public get({ soul, cb, opts, msgId = '' }: TGGet): () => void
     {
         this.adapter
             .get(soul, opts)
@@ -56,7 +56,7 @@ export class GraphConnectorFromAdapter extends GraphWireConnector
         return NOOP
     }
 
-    public put({ graph, msgId = '', cb }: Put): () => void
+    public put({ graph, msgId = '', cb }: TGPut): () => void
     {
         this.adapter
             .put(graph)

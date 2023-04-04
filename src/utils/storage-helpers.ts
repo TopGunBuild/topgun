@@ -1,7 +1,7 @@
-import { SupportedStorage } from '../types';
+import { TGSupportedStorage } from '../types';
 
 export const setItemAsync = async (
-    storage: SupportedStorage,
+    storage: TGSupportedStorage,
     key: string,
     data: any
 ): Promise<void> =>
@@ -9,7 +9,7 @@ export const setItemAsync = async (
     await storage.setItem(key, JSON.stringify(data))
 };
 
-export const getItemAsync = async (storage: SupportedStorage, key: string): Promise<unknown> =>
+export const getItemAsync = async (storage: TGSupportedStorage, key: string): Promise<unknown> =>
 {
     const value = await storage.getItem(key);
 
@@ -28,7 +28,7 @@ export const getItemAsync = async (storage: SupportedStorage, key: string): Prom
     }
 };
 
-export const removeItemAsync = async (storage: SupportedStorage, key: string): Promise<void> =>
+export const removeItemAsync = async (storage: TGSupportedStorage, key: string): Promise<void> =>
 {
     await storage.removeItem(key)
 };

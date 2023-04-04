@@ -1,5 +1,5 @@
 import { diffCRDT, mergeGraph } from '../crdt'
-import { GraphAdapter, GraphData, Node } from '../types'
+import { TGGraphAdapter, TGGraphData, TGNode } from '../types'
 import { cloneValue } from '../utils/clone-value';
 
 const DEFAULT_OPTS = {
@@ -16,23 +16,23 @@ interface MemoryAdapterOpts
 
 const getSync = (
     opts: MemoryAdapterOpts,
-    graph: GraphData,
+    graph: TGGraphData,
     soul: string
-): Node|null => (opts.direct ? graph[soul] : cloneValue(graph[soul])) || null;
+): TGNode|null => (opts.direct ? graph[soul] : cloneValue(graph[soul])) || null;
 
 const get = (
     opts: MemoryAdapterOpts,
-    graph: GraphData,
+    graph: TGGraphData,
     soul: string
-): Promise<Node|null> => Promise.resolve(getSync(opts, graph, soul));
+): Promise<TGNode|null> => Promise.resolve(getSync(opts, graph, soul));
 
 const putSync = (
     {
         diffFn = DEFAULT_OPTS.diffFn,
         mergeFn = DEFAULT_OPTS.mergeFn
     }: MemoryAdapterOpts,
-    graph: GraphData,
-    graphData: GraphData
+    graph: TGGraphData,
+    graphData: TGGraphData
 ) =>
 {
     const diff = diffFn(graphData, graph);
@@ -47,20 +47,20 @@ const putSync = (
 
 const put = (
     opts: MemoryAdapterOpts,
-    graph: GraphData,
-    graphData: GraphData
-): Promise<GraphData|null> => Promise.resolve(putSync(opts, graph, graphData));
+    graph: TGGraphData,
+    graphData: TGGraphData
+): Promise<TGGraphData|null> => Promise.resolve(putSync(opts, graph, graphData));
 
 export function createMemoryAdapter(
     opts: MemoryAdapterOpts = DEFAULT_OPTS
-): GraphAdapter
+): TGGraphAdapter
 {
-    const graph: GraphData = {};
+    const graph: TGGraphData = {};
 
     return {
         get    : (soul: string) => get(opts, graph, soul),
         getSync: (soul: string) => getSync(opts, graph, soul),
-        put    : (graphData: GraphData) => put(opts, graph, graphData),
-        putSync: (graphData: GraphData) => putSync(opts, graph, graphData)
+        put    : (graphData: TGGraphData) => put(opts, graph, graphData),
+        putSync: (graphData: TGGraphData) => putSync(opts, graph, graphData)
     }
 }

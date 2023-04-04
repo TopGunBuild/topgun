@@ -5,11 +5,11 @@ import {
     TGActionSubscribe,
     TGServerSocket
 } from 'topgun-socket/server';
-import { GraphAdapter, Message, Node } from '../../types';
+import { TGGraphAdapter, TGMessage, TGNode } from '../../types';
 import { MiddlewareInboundStrategy } from './strategy/middleware-inbound-strategy';
 import { pseudoRandomText } from '../../sea';
 import { generateMessageId } from '../../client/graph/graph-utils';
-import { SocketServerOptions } from '../socket-server-options';
+import { TGServerOptions } from '../server-options';
 
 export class InboundMiddleware extends MiddlewareInboundStrategy
 {
@@ -17,8 +17,8 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
      * Constructor
      */
     constructor(
-        protected readonly adapter: GraphAdapter,
-        private readonly options: SocketServerOptions
+        protected readonly adapter: TGGraphAdapter,
+        private readonly options: TGServerOptions
     )
     {
         super();
@@ -114,7 +114,7 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
             //     console.log({soul, res});
             //     return res;
             // })
-            .then((msg: {channel: string, data: Message}) => this.publish(action, msg))
+            .then((msg: {channel: string, data: TGMessage}) => this.publish(action, msg))
     }
 
     default(
@@ -133,7 +133,7 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
         action.allow();
     }
 
-    readNode(soul: string): Promise<Node|null>
+    readNode(soul: string): Promise<TGNode|null>
     {
         return this.adapter.get(soul);
     }
@@ -148,7 +148,7 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
     /**
      * Persist put data and publish any resulting diff
      */
-    async processPut(msg: Message): Promise<Message>
+    async processPut(msg: TGMessage): Promise<TGMessage>
     {
         const msgId = pseudoRandomText();
 
@@ -183,7 +183,7 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
             |TGActionInvoke
             |TGActionSubscribe
             |TGActionAuthenticate,
-        message: {channel: string, data: Message}
+        message: {channel: string, data: TGMessage}
     ): void
     {
         action.socket.transmit('#publish', message, {});

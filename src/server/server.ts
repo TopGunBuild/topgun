@@ -1,8 +1,8 @@
 import { InboundMiddleware } from './middlewares/inbound-middleware';
 import { pseudoRandomText, verify } from '../sea';
-import { GraphAdapter, GraphData, Message } from '../types';
+import { TGGraphAdapter, TGGraphData, TGMessage } from '../types';
 import { MiddlewareInboundStrategy } from './middlewares/strategy/middleware-inbound-strategy';
-import { SocketServerOptions } from './socket-server-options';
+import { TGServerOptions } from './server-options';
 import { createValidator } from '../validator-sea';
 import { ValidateFunction } from 'ajv';
 import {
@@ -12,17 +12,17 @@ import {
     TGActionPublishIn,
     TGActionSubscribe,
     TGActionTransmit,
-    TGServer,
+    TGServerSocketGateway,
     TGServerSocket,
 } from 'topgun-socket/server';
 import { WritableConsumableStream } from 'topgun-socket';
 import { createMemoryAdapter } from '../memory-adapter';
 
-export class SocketServer
+export class TGServer
 {
-    public readonly adapter: GraphAdapter;
-    public readonly internalAdapter: GraphAdapter;
-    public readonly server: TGServer;
+    public readonly adapter: TGGraphAdapter;
+    public readonly internalAdapter: TGGraphAdapter;
+    public readonly server: TGServerSocketGateway;
 
     protected readonly validaror: {schema: any, validate: ValidateFunction<any>};
 
@@ -30,13 +30,13 @@ export class SocketServer
      * Constructor
      */
     constructor(
-        public readonly options: SocketServerOptions,
+        public readonly options: TGServerOptions,
     )
     {
         this.validaror       = createValidator();
         this.internalAdapter = this.options.adapter || createMemoryAdapter();
         this.adapter         = this.wrapAdapter(this.internalAdapter);
-        this.server          = new TGServer(this.options);
+        this.server          = new TGServerSocketGateway(this.options);
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -59,7 +59,7 @@ export class SocketServer
     /**
      * Send put data to all node subscribers
      */
-    protected publishDiff(soul: string, msgId: string, nodeDiff: GraphData): void
+    protected publishDiff(soul: string, msgId: string, nodeDiff: TGGraphData): void
     {
         this.server.exchange.invokePublish(`topgun/nodes/${soul}`, {
             '#': `${msgId}/${soul}`,
@@ -72,11 +72,11 @@ export class SocketServer
     /**
      * Wrap adapter
      */
-    protected wrapAdapter(adapter: GraphAdapter): GraphAdapter
+    protected wrapAdapter(adapter: TGGraphAdapter): TGGraphAdapter
     {
-        const withPublish: GraphAdapter = {
+        const withPublish: TGGraphAdapter = {
             ...adapter,
-            put    : async (graph: GraphData) =>
+            put    : async (graph: TGGraphData) =>
             {
                 const diff = await adapter.put(graph);
 
@@ -95,7 +95,7 @@ export class SocketServer
 
         return {
             ...withPublish,
-            put: (graph: GraphData) =>
+            put: (graph: TGGraphData) =>
             {
                 return this.validatePut(graph).then(isValid =>
                 {
@@ -113,7 +113,7 @@ export class SocketServer
     /**
      * Send put data to node subscribers as a diff
      */
-    protected publishIsDiff(msg: Message): void
+    protected publishIsDiff(msg: TGMessage): void
     {
         const msgId = msg['#'];
         const diff  = msg.put;
@@ -144,7 +144,7 @@ export class SocketServer
     /**
      * Validate put operation
      */
-    protected async validatePut(graph: GraphData): Promise<boolean>
+    protected async validatePut(graph: TGGraphData): Promise<boolean>
     {
         if (this.options.disableValidation)
         {
@@ -309,7 +309,7 @@ export class SocketServer
 }
 
 
-export function createServer(serverConfig: SocketServerOptions): SocketServer
+export function createServer(serverConfig: TGServerOptions): TGServer
 {
-    return new SocketServer(serverConfig);
+    return new TGServer(serverConfig);
 }

@@ -1,27 +1,27 @@
 import { diffCRDT } from '../crdt'
-import { Link } from './link'
-import { Graph } from './graph/graph'
-import { GraphConnector } from './transports/graph-connector';
-import { ClientOptions } from './client-options';
-import { createConnector } from '../socket-connector';
+import { TGLink } from './link'
+import { TGGraph } from './graph/graph'
+import { TGGraphConnector } from './transports/graph-connector';
+import { TGClientOptions } from './client-options';
+import { createConnector } from './transports/web-socket-graph-connector';
 import { ClientOptions as SocketClientOptions } from 'topgun-socket';
-import { UserApi } from './user-api';
+import { TGUserApi } from './user-api';
 import { pubFromSoul, unpackGraph } from '../sea';
 import { polyfillGlobalThis } from '../utils/global-this';
 import { isObject } from '../utils/is-object';
-import { IndexedDbConnector } from '../indexeddb/indexeddb-connector';
+import { TGIndexedDbConnector } from '../indexeddb/indexeddb-connector';
 import { localStorageAdapter } from '../utils/local-storage';
-import { OnCb, Node, UserReference } from '../types';
-import { Event } from './control-flow/event';
+import { TGOnCb, TGNode, TGUserReference } from '../types';
+import { TGEvent } from './control-flow/event';
 import { isString } from '../utils/is-string';
-import { LexLink } from './lex-link';
+import { TGLexLink } from './lex-link';
 import { match } from '../utils/match';
 
 polyfillGlobalThis(); // Make "globalThis" available
 
-const DEFAULT_OPTIONS: Required<ClientOptions> = {
+const DEFAULT_OPTIONS: Required<TGClientOptions> = {
     peers            : [],
-    graph            : new Graph(),
+    graph            : new TGGraph(),
     connectors       : [],
     persistStorage   : false,
     storageKey       : 'top-gun-nodes',
@@ -39,24 +39,24 @@ const DEFAULT_OPTIONS: Required<ClientOptions> = {
  *   const topGun = new TopGun.Client({ peers: ["https://top-gun.io/topgun"]})
  *   topGun.get("topgun/things/f8c3de3d-1fea-4d7c-a8b0-29f63c4c3454").on(thing => console.log(thing))
  */
-export class Client
+export class TGClient
 {
     static match = match;
 
-    options: ClientOptions;
+    options: TGClientOptions;
     pub: string|undefined;
-    readonly graph: Graph;
-    protected readonly _authEvent: Event<UserReference>;
-    protected _user?: UserApi;
+    readonly graph: TGGraph;
+    protected readonly _authEvent: TGEvent<TGUserReference>;
+    protected _user?: TGUserApi;
 
     /**
      * Constructor
      */
-    constructor(options?: ClientOptions)
+    constructor(options?: TGClientOptions)
     {
         options         = isObject(options) ? options : {};
         this.options    = { ...DEFAULT_OPTIONS, ...options };
-        this._authEvent = new Event<UserReference>('auth data');
+        this._authEvent = new TGEvent<TGUserReference>('auth data');
 
         if (this.options && this.options.graph)
         {
@@ -64,7 +64,7 @@ export class Client
         }
         else
         {
-            this.graph = new Graph();
+            this.graph = new TGGraph();
             this.graph.use(diffCRDT);
             this.graph.use(diffCRDT, 'write');
         }
@@ -81,9 +81,9 @@ export class Client
     /**
      * Get User API
      */
-    user(): UserApi
-    user(pubOrNode: string|Node): Link
-    user(pubOrNode?: string|Node): UserApi|Link
+    user(): TGUserApi
+    user(pubOrNode: string|TGNode): TGLink
+    user(pubOrNode?: string|TGNode): TGUserApi|TGLink
     {
         if (pubOrNode)
         {
@@ -100,7 +100,7 @@ export class Client
         }
 
         return (
-            this._user = this._user || new UserApi(
+            this._user = this._user || new TGUserApi(
                 this,
                 this.options.persistSession,
                 this.options.sessionStorage,
@@ -113,7 +113,7 @@ export class Client
     /**
      * Set TopGun configuration options
      */
-    opt(options: ClientOptions): Client
+    opt(options: TGClientOptions): TGClient
     {
         this.options = { ...this.options, ...options };
 
@@ -124,7 +124,7 @@ export class Client
         if (options.persistStorage)
         {
             this.useConnector(
-                new IndexedDbConnector(options.storageKey)
+                new TGIndexedDbConnector(options.storageKey)
             );
         }
         if (Array.isArray(options.connectors))
@@ -138,15 +138,15 @@ export class Client
     /**
      * Traverse a location in the graph
      */
-    get(soul: string): LexLink
+    get(soul: string): TGLexLink
     {
-        return new LexLink(this, soul);
+        return new TGLexLink(this, soul);
     }
 
     /**
      * System events Callback
      */
-    on(event: string, cb: OnCb): Client
+    on(event: string, cb: TGOnCb): TGClient
     {
         switch (event)
         {
@@ -181,7 +181,7 @@ export class Client
     /**
      * Setup GraphConnector for graph
      */
-    private useConnector(connector: GraphConnector): void
+    private useConnector(connector: TGGraphConnector): void
     {
         connector.sendPutsFromGraph(this.graph);
         connector.sendRequestsFromGraph(this.graph);

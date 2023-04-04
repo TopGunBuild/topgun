@@ -1,9 +1,9 @@
-import { CRDTOpts, GraphData, OptionsGet, OptionsPut, Value } from './graph-adapter';
+import { CRDTOpts, TGGraphData, TGNode, TGOptionsGet, TGOptionsPut, TGValue } from './graph-adapter';
 
 /**
  * A standard Protocol Message
  */
-export interface Message
+export interface TGMessage
 {
     '#'?: string
     '@'?: string
@@ -12,50 +12,50 @@ export interface Message
         readonly '#': string
     }
 
-    readonly put?: GraphData
+    readonly put?: TGGraphData
 
     readonly ack?: number|boolean
     readonly err?: any
     readonly ok?: boolean|number
 }
 
-export type MessageCb = (msg: Message) => void
+export type TGMessageCb = (msg: TGMessage) => void
 
 /**
  * How puts are communicated to connectors
  */
-export interface Put
+export interface TGPut
 {
-    readonly graph: GraphData
+    readonly graph: TGGraphData
     readonly msgId?: string
     readonly replyTo?: string
-    readonly cb?: MessageCb
+    readonly cb?: TGMessageCb
 }
 
 /**
  * How gets are communicated to connectors
  */
-export interface Get
+export interface TGGet
 {
     readonly soul: string;
-    readonly opts?: OptionsGet,
+    readonly opts?: TGOptionsGet,
     readonly msgId?: string;
     readonly key?: string;
-    readonly cb?: MessageCb;
+    readonly cb?: TGMessageCb;
 }
 
-export interface UserReference
+export interface TGUserReference
 {
     readonly alias: string
     readonly pub: string
 }
 
-export interface AckErr
+export interface TGAckErr
 {
     readonly err: Error
 }
 
-export interface UserCredentials
+export interface TGUserCredentials
 {
     readonly priv: string
     readonly epriv: any
@@ -64,30 +64,30 @@ export interface UserCredentials
     readonly epub: string
 }
 
-export type AuthCallback = (userRef?: UserReference|AckErr) => void;
+export type TGAuthCallback = (userRef?: TGUserReference|TGAckErr) => void;
 
-export interface ChainOptions
+export interface TGChainOptions
 {
     readonly uuid?: (path: readonly string[]) => Promise<string>|string
 }
 
-export type OnCb = (node: Value|undefined, key?: string) => void;
-export type NodeListenCb = (node: Node|undefined) => void
+export type TGOnCb = (node: TGValue|undefined, key?: string) => void;
+export type TGNodeListenCb = (node: TGNode|undefined) => void
 
-export interface PathData
+export interface TGPathData
 {
     readonly souls: readonly string[]
-    readonly value: Value|undefined
+    readonly value: TGValue|undefined
     readonly complete: boolean
 }
 
-export type Middleware = (
-    updates: GraphData,
-    existingGraph: GraphData,
-    opts?: CRDTOpts|OptionsGet|OptionsPut,
+export type TGMiddleware = (
+    updates: TGGraphData,
+    existingGraph: TGGraphData,
+    opts?: CRDTOpts|TGOptionsGet|TGOptionsPut,
     fullPath?: string[]
-) => GraphData|undefined|Promise<GraphData|undefined>;
-export type MiddlewareType = 'read'|'write';
+) => TGGraphData|undefined|Promise<TGGraphData|undefined>;
+export type TGMiddlewareType = 'read'|'write';
 
 type AnyFunction = (...args: any[]) => any
 type MaybePromisify<T> = T|Promise<T>
@@ -98,6 +98,6 @@ type PromisifyMethods<T> = {
         : T[K]
 }
 
-export type SupportedStorage = PromisifyMethods<Pick<Storage, 'getItem'|'setItem'|'removeItem'>>
+export type TGSupportedStorage = PromisifyMethods<Pick<Storage, 'getItem'|'setItem'|'removeItem'>>
 
 

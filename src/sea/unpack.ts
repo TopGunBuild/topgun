@@ -1,10 +1,10 @@
 import { check, parse, shuffleAttackCutoff } from './settings'
 import { pubFromSoul } from './soul'
-import { GraphData, Node } from '../types';
+import { TGGraphData, TGNode } from '../types';
 import { isObject } from '../utils/is-object';
 import { isDefined } from '../utils/is-defined';
 
-export function unpack(passedValue: any, key: string, node: Node): any
+export function unpack(passedValue: any, key: string, node: TGNode): any
 {
     let value = passedValue;
 
@@ -63,16 +63,16 @@ export function unpack(passedValue: any, key: string, node: Node): any
 }
 
 export function unpackNode(
-    node: Node,
+    node: TGNode,
     mut: 'immutable'|'mutable' = 'immutable'
-): Node
+): TGNode
 {
     if (!node)
     {
         return node
     }
 
-    const result: Node =
+    const result: TGNode =
               mut === 'mutable'
                   ? node
                   : {
@@ -93,11 +93,11 @@ export function unpackNode(
 }
 
 export function unpackGraph(
-    graph: GraphData,
+    graph: TGGraphData,
     mut: 'immutable'|'mutable' = 'immutable'
-): GraphData
+): TGGraphData
 {
-    const unpackedGraph: GraphData = mut === 'mutable' ? graph : {};
+    const unpackedGraph: TGGraphData = mut === 'mutable' ? graph : {};
 
     for (const soul in graph)
     {

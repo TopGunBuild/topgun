@@ -1,12 +1,12 @@
-type EventCb<T = any, U = any, V = any> = (a: T, b?: U, c?: V) => void
+type TGEventCb<T = any, U = any, V = any> = (a: T, b?: U, c?: V) => void
 
 /**
  * Generic event/listener system
  */
-export class Event<T = any, U = any, V = any>
+export class TGEvent<T = any, U = any, V = any>
 {
     public readonly name: string;
-    private _listeners: Array<EventCb<T, U, V>>;
+    private _listeners: Array<TGEventCb<T, U, V>>;
 
     constructor(name = 'Event')
     {
@@ -31,7 +31,7 @@ export class Event<T = any, U = any, V = any>
      *
      * @param cb the callback to subscribe
      */
-    public on(cb: EventCb<T, U, V>): Event<T, U, V>
+    public on(cb: TGEventCb<T, U, V>): TGEvent<T, U, V>
     {
         if (this._listeners.indexOf(cb) !== -1)
         {
@@ -45,7 +45,7 @@ export class Event<T = any, U = any, V = any>
      * Unregister a listener on this event
      * @param cb the callback to unsubscribe
      */
-    public off(cb: EventCb<T, U, V>): Event<T, U, V>
+    public off(cb: TGEventCb<T, U, V>): TGEvent<T, U, V>
     {
         const idx = this._listeners.indexOf(cb);
         if (idx !== -1)
@@ -58,7 +58,7 @@ export class Event<T = any, U = any, V = any>
     /**
      * Unregister all listeners on this event
      */
-    public reset(): Event<T, U, V>
+    public reset(): TGEvent<T, U, V>
     {
         this._listeners = [];
         return this
@@ -67,7 +67,7 @@ export class Event<T = any, U = any, V = any>
     /**
      * Trigger this event
      */
-    public trigger(a: T, b?: U, c?: V): Event<T, U, V>
+    public trigger(a: T, b?: U, c?: V): TGEvent<T, U, V>
     {
         this._listeners.forEach(cb => cb(a, b, c));
         return this

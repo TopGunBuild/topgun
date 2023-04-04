@@ -1,8 +1,8 @@
-import { ChainOptions, OnCb, MessageCb, OptionsGet, OptionsPut, Value } from '../types';
-import { Client } from './client';
-import { Event } from './control-flow/event';
+import { TGChainOptions, TGOnCb, TGMessageCb, TGOptionsGet, TGOptionsPut, TGValue } from '../types';
+import { TGClient } from './client';
+import { TGEvent } from './control-flow/event';
 import { generateMessageId } from './graph/graph-utils';
-import { Graph } from './graph/graph';
+import { TGGraph } from './graph/graph';
 import { isObject } from '../utils/is-object';
 import { isNotEmptyObject } from '../utils/is-empty-object';
 import { isDefined } from '../utils/is-defined';
@@ -10,34 +10,34 @@ import { pubFromSoul } from '../sea';
 import { match } from '../utils/match';
 
 
-export class Link
+export class TGLink
 {
     readonly key: string;
     readonly soul: string|undefined;
-    optionsGet: OptionsGet|undefined;
+    optionsGet: TGOptionsGet|undefined;
 
-    protected readonly _updateEvent: Event<Value|undefined, string>;
-    protected readonly _chain: Client;
-    protected readonly _parent?: Link;
-    protected _opt: ChainOptions;
+    protected readonly _updateEvent: TGEvent<TGValue|undefined, string>;
+    protected readonly _chain: TGClient;
+    protected readonly _parent?: TGLink;
+    protected _opt: TGChainOptions;
     protected _hasReceived: boolean;
-    protected _lastValue: Value|undefined;
+    protected _lastValue: TGValue|undefined;
     protected _endQuery?: () => void;
 
     /* map utils */
-    protected _mapLinks: {[key: string]: Link}|undefined;
+    protected _mapLinks: {[key: string]: TGLink}|undefined;
 
     /**
      * Constructor
      */
-    constructor(chain: Client, key: string, parent?: Link)
+    constructor(chain: TGClient, key: string, parent?: TGLink)
     {
         this.key          = key;
         this._opt         = {};
         this._chain       = chain;
         this._parent      = parent;
         this._hasReceived = false;
-        this._updateEvent = new Event(this.getPath().join('|'));
+        this._updateEvent = new TGEvent(this.getPath().join('|'));
         if (!parent)
         {
             this.soul = key;
@@ -52,9 +52,9 @@ export class Link
     /**
      * Graph from the current chain link
      *
-     * @returns {Graph}
+     * @returns {TGGraph}
      */
-    getGraph(): Graph
+    getGraph(): TGGraph
     {
         return this._chain.graph;
     }
@@ -78,7 +78,7 @@ export class Link
      * @param key Key to read data from
      * @returns New chain context corresponding to given key
      */
-    get(key: string): Link
+    get(key: string): TGLink
     {
         return new (this.constructor as any)(this._chain, key, this);
     }
@@ -91,7 +91,7 @@ export class Link
      * @param amount The number of times you want to go back up the chain. {-1} or {Infinity} will take you to the root.
      * @returns a parent chain context
      */
-    back(amount = 1): Link|Client
+    back(amount = 1): TGLink|TGClient
     {
         if (amount < 0 || amount === Infinity)
         {
@@ -116,12 +116,12 @@ export class Link
       *!/*/
     /**
      *
-     * @param {Value} value
-     * @param {MessageCb} cb
-     * @param {OptionsPut} opt
+     * @param {TGValue} value
+     * @param {TGMessageCb} cb
+     * @param {TGOptionsPut} opt
      * @returns {Link}
      */
-    put(value: Value, cb?: MessageCb, opt?: OptionsPut): Link
+    put(value: TGValue, cb?: TGMessageCb, opt?: TGOptionsPut): TGLink
     {
         if (!this._parent && !isObject(value))
         {
@@ -141,14 +141,14 @@ export class Link
      *
      * @param data should be a topGun reference or an object
      * @param cb The callback is invoked exactly the same as .put
-     * @param {OptionsPut} opt
+     * @param {TGOptionsPut} opt
      * @returns chain context for added object
      */
-    set(data: any, cb?: MessageCb, opt?: OptionsPut): Link
+    set(data: any, cb?: TGMessageCb, opt?: TGOptionsPut): TGLink
     {
         let soul;
 
-        if (data instanceof Link && data.soul)
+        if (data instanceof TGLink && data.soul)
         {
             soul = data.soul;
 
@@ -203,7 +203,7 @@ export class Link
      * @param cb If there's reason to believe the data doesn't exist, the callback will be invoked. This can be used as a check to prevent implicitly writing data
      * @returns same chain context
      */
-    not(cb: (key: string) => void): Link
+    not(cb: (key: string) => void): TGLink
     {
         this.promise().then(val => !isDefined(val) && cb(this.key));
         return this
@@ -215,7 +215,7 @@ export class Link
      * @param options
      * @returns current options
      */
-    opt(options?: ChainOptions): ChainOptions
+    opt(options?: TGChainOptions): TGChainOptions
     {
         if (options)
         {
@@ -234,7 +234,7 @@ export class Link
      * @param cb The data is the value for that chain at that given point in time. And the key is the last property name or ID of the node.
      * @returns same chain context
      */
-    once(cb: OnCb): Link
+    once(cb: TGOnCb): TGLink
     {
         this.promise().then(val => cb(val, this.key));
         return this
@@ -251,7 +251,7 @@ export class Link
      * @param cb The callback is immediately fired with the data as it is at that point in time.
      * @returns same chain context
      */
-    on(cb: OnCb): Link
+    on(cb: TGOnCb): TGLink
     {
         const callback = (val, key) =>
         {
@@ -268,7 +268,7 @@ export class Link
      *
      * @returns same chain context
      */
-    off(cb?: OnCb): Link
+    off(cb?: TGOnCb): TGLink
     {
         if (cb)
         {
@@ -293,7 +293,7 @@ export class Link
             {
                 const link = this._mapLinks[key];
 
-                if (link instanceof Link)
+                if (link instanceof TGLink)
                 {
                     link.off(cb);
                 }
@@ -303,11 +303,11 @@ export class Link
         return this
     }
 
-    promise(opts = { timeout: 0 }): Promise<Value>
+    promise(opts = { timeout: 0 }): Promise<TGValue>
     {
-        return new Promise<Value>((ok: (...args: any) => void) =>
+        return new Promise<TGValue>((ok: (...args: any) => void) =>
         {
-            const cb: OnCb = (val: Value|undefined) =>
+            const cb: TGOnCb = (val: TGValue|undefined) =>
             {
                 ok(val);
                 this.off(cb);
@@ -321,7 +321,7 @@ export class Link
         })
     }
 
-    then(fn?: (val: Value) => any): Promise<any>
+    then(fn?: (val: TGValue) => any): Promise<any>
     {
         return this.promise().then(fn)
     }
@@ -334,20 +334,20 @@ export class Link
      *
      * @returns a new chain context holding many chains simultaneously.
      */
-    map(): Link
+    map(): TGLink
     {
         this._mapLinks = {};
         return this;
     }
 
-    protected _onQueryResponse(value?: Value): void
+    protected _onQueryResponse(value?: TGValue): void
     {
         this._updateEvent.trigger(value, this.key);
         this._lastValue   = value;
         this._hasReceived = true
     }
 
-    protected _on(cb: OnCb): Link
+    protected _on(cb: TGOnCb): TGLink
     {
         this._updateEvent.on(cb);
         if (this._hasReceived)
@@ -366,7 +366,7 @@ export class Link
         return this
     }
 
-    protected _onMap(cb: OnCb): Link
+    protected _onMap(cb: TGOnCb): TGLink
     {
         this._mapLinks = {};
 

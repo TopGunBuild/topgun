@@ -1,24 +1,24 @@
 import { addMissingState, mergeNodes } from '../../crdt';
 import {
-    Get,
-    Put,
-    GraphData,
-    MessageCb,
-    Value,
-    OptionsPut,
-    Middleware,
-    MiddlewareType,
-    NodeListenCb,
-    OnCb
+    TGGet,
+    TGPut,
+    TGGraphData,
+    TGMessageCb,
+    TGValue,
+    TGOptionsPut,
+    TGMiddleware,
+    TGMiddlewareType,
+    TGNodeListenCb,
+    TGOnCb
 } from '../../types';
-import { Event } from '../control-flow/event';
-import { GraphConnector } from '../transports/graph-connector';
-import { GraphNode } from './graph-node';
+import { TGEvent } from '../control-flow/event';
+import { TGGraphConnector } from '../transports/graph-connector';
+import { TGGraphNode } from './graph-node';
 import { diffSets, flattenGraphData, generateMessageId, getPathData } from './graph-utils';
 import { dataWalking, set } from '../../utils/data-walking';
 import { isDefined } from '../../utils/is-defined';
 
-interface GraphOptions
+interface TGGraphOptions
 {
     readonly mutable?: boolean;
 }
@@ -28,26 +28,26 @@ interface GraphOptions
  *
  * Provides facilities for querying and writing to graph data from one or more sources
  */
-export class Graph
+export class TGGraph
 {
     readonly id: string;
 
     readonly events: {
-        readonly graphData: Event<GraphData, string|undefined, string|undefined>
-        readonly put: Event<Put>
-        readonly get: Event<Get>
-        readonly off: Event<string>
+        readonly graphData: TGEvent<TGGraphData, string|undefined, string|undefined>
+        readonly put: TGEvent<TGPut>
+        readonly get: TGEvent<TGGet>
+        readonly off: TGEvent<string>
     };
 
     activeConnectors: number;
 
-    private _opt: GraphOptions;
-    private readonly _connectors: GraphConnector[];
-    private readonly _readMiddleware: Middleware[];
-    private readonly _writeMiddleware: Middleware[];
-    private readonly _graph: GraphData;
+    private _opt: TGGraphOptions;
+    private readonly _connectors: TGGraphConnector[];
+    private readonly _readMiddleware: TGMiddleware[];
+    private readonly _writeMiddleware: TGMiddleware[];
+    private readonly _graph: TGGraphData;
     private readonly _nodes: {
-        [soul: string]: GraphNode
+        [soul: string]: TGGraphNode
     };
 
     /**
@@ -60,10 +60,10 @@ export class Graph
         this.__onConnectorStatus = this.__onConnectorStatus.bind(this);
         this.activeConnectors    = 0;
         this.events              = {
-            get      : new Event('request soul'),
-            graphData: new Event('graph data'),
-            off      : new Event('off event'),
-            put      : new Event('put data')
+            get      : new TGEvent('request soul'),
+            graphData: new TGEvent('graph data'),
+            off      : new TGEvent('off event'),
+            put      : new TGEvent('put data')
         };
         this._opt                = {};
         this._graph              = {};
@@ -84,7 +84,7 @@ export class Graph
      *
      * @param options
      */
-    opt(options: GraphOptions): Graph
+    opt(options: TGGraphOptions): TGGraph
     {
         this._opt = { ...this._opt, ...options };
         return this
@@ -95,7 +95,7 @@ export class Graph
      *
      * @param connector the source or destination for graph data
      */
-    connect(connector: GraphConnector): Graph
+    connect(connector: TGGraphConnector): TGGraph
     {
         if (this._connectors.indexOf(connector) !== -1)
         {
@@ -118,7 +118,7 @@ export class Graph
      *
      * @param connector the source or destination for graph data
      */
-    disconnect(connector: GraphConnector): Graph
+    disconnect(connector: TGGraphConnector): TGGraph
     {
         const idx = this._connectors.indexOf(connector);
         connector.events.graphData.off(this.receiveGraphData);
@@ -141,9 +141,9 @@ export class Graph
      * @param kind Optionaly register write middleware instead of read by passing "write"
      */
     use(
-        middleware: Middleware,
-        kind = 'read' as MiddlewareType
-    ): Graph
+        middleware: TGMiddleware,
+        kind = 'read' as TGMiddlewareType
+    ): TGGraph
     {
         if (kind === 'read')
         {
@@ -163,9 +163,9 @@ export class Graph
      * @param kind Optionaly unregister write middleware instead of read by passing "write"
      */
     unuse(
-        middleware: Middleware,
-        kind = 'read' as MiddlewareType
-    ): Graph
+        middleware: TGMiddleware,
+        kind = 'read' as TGMiddlewareType
+    ): TGGraph
     {
         if (kind === 'read')
         {
@@ -194,10 +194,10 @@ export class Graph
      * @param cb The callback to invoke with results
      * @returns a cleanup function to after done with query
      */
-    query(path: readonly string[], cb: OnCb): () => void
+    query(path: readonly string[], cb: TGOnCb): () => void
     {
         let lastSouls = [] as readonly string[];
-        let currentValue: Value|undefined;
+        let currentValue: TGValue|undefined;
 
         const updateQuery = () =>
         {
@@ -249,11 +249,11 @@ export class Graph
      */
     async putPath(
         fullPath: string[],
-        data: Value,
-        cb?: MessageCb,
+        data: TGValue,
+        cb?: TGMessageCb,
         uuidFn?: (path: readonly string[]) => Promise<string>|string,
         getPub?: string,
-        putOpt?: OptionsPut
+        putOpt?: TGOptionsPut
     ): Promise<void>
     {
         if (!fullPath.length)
@@ -286,7 +286,7 @@ export class Graph
      * @param msgId optional unique message identifier
      * @returns a function to cleanup listeners when done
      */
-    get(soul: string, cb?: MessageCb, msgId?: string): () => void
+    get(soul: string, cb?: TGMessageCb, msgId?: string): () => void
     {
         const id = msgId || generateMessageId();
 
@@ -311,15 +311,15 @@ export class Graph
      * @returns a function to clean up listeners when done
      */
     put(
-        data: GraphData,
+        data: TGGraphData,
         fullPath: string[],
-        cb?: MessageCb,
+        cb?: TGMessageCb,
         msgId?: string,
         soul?: string,
-        putOpt?: OptionsPut
+        putOpt?: TGOptionsPut
     ): () => void
     {
-        let diff: GraphData|undefined = flattenGraphData(addMissingState(data));
+        let diff: TGGraphData|undefined = flattenGraphData(addMissingState(data));
 
         const id = msgId || generateMessageId();
         (async () =>
@@ -370,7 +370,7 @@ export class Graph
      *
      * @param cb The callback to invoke
      */
-    eachConnector(cb: (connector: GraphConnector) => void): Graph
+    eachConnector(cb: (connector: TGGraphConnector) => void): TGGraph
     {
         for (const connector of this._connectors)
         {
@@ -384,7 +384,7 @@ export class Graph
      * Update graph data in this chain from some local or external source
      */
     async receiveGraphData(
-        data?: GraphData,
+        data?: TGGraphData,
         id?: string,
         replyToId?: string
     ): Promise<void>
@@ -428,18 +428,18 @@ export class Graph
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private _node(soul: string): GraphNode
+    private _node(soul: string): TGGraphNode
     {
-        return (this._nodes[soul] = this._nodes[soul] || new GraphNode(this, soul, this.receiveGraphData));
+        return (this._nodes[soul] = this._nodes[soul] || new TGGraphNode(this, soul, this.receiveGraphData));
     }
 
-    private _requestSoul(soul: string, cb: NodeListenCb): Graph
+    private _requestSoul(soul: string, cb: TGNodeListenCb): TGGraph
     {
         this._node(soul).get(cb);
         return this
     }
 
-    private _unlistenSoul(soul: string, cb: NodeListenCb): Graph
+    private _unlistenSoul(soul: string, cb: TGNodeListenCb): TGGraph
     {
         const node = this._nodes[soul];
         if (!node)
@@ -455,7 +455,7 @@ export class Graph
         return this
     }
 
-    private _forgetSoul(soul: string): Graph
+    private _forgetSoul(soul: string): TGGraph
     {
         const node = this._nodes[soul];
         if (node)

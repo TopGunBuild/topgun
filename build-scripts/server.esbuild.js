@@ -1,20 +1,20 @@
 (async () => {
     const esbuild = require('esbuild');
     const fs = require('fs');
-    const metafile = false;
+    const metafile = true;
 
     // Automatically exclude all node_modules from the bundled version
     const {nodeExternalsPlugin} = require('esbuild-node-externals');
 
     let result = await esbuild.build({
-        entryPoints: ['src/socket-server/build-api.ts'],
+        entryPoints: ['src/server/build-api.ts'],
         outfile: 'dist/node/server.js',
         bundle: true,
         sourcemap: true,
         minify: false,
         platform: 'node',
         target: ['node14'],
-        plugins: [nodeExternalsPlugin()],
+        // plugins: [nodeExternalsPlugin()],
         metafile
     });
 

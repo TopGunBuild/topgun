@@ -1,8 +1,9 @@
 (async () => {
     const esbuild = require('esbuild');
     const fs = require('fs');
-    const metafile = false;
+    const metafile = true;
 
+    // iife
     let result = await esbuild.build({
         globalName: 'TopGun',
         entryPoints: ['src/client/build-api.ts'],
@@ -14,6 +15,19 @@
         target: ['esnext'],
         define: {global: 'window'},
         metafile
+    });
+
+    // esm
+    await esbuild.build({
+        globalName: 'TopGun',
+        entryPoints: ['src/client/build-api.ts'],
+        outfile: 'dist/client.module.js',
+        bundle: true,
+        sourcemap: true,
+        minify: true,
+        format: 'esm',
+        target: ['esnext'],
+        define: {global: 'window'},
     });
 
     if (metafile) {

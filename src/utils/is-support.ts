@@ -1,10 +1,10 @@
 import { isObject } from './is-object';
-import { Value } from '../types';
+import { TGValue } from '../types';
 import { isString } from './is-string';
 import { isNumber } from './is-number';
 import { isBoolean } from './is-boolean';
 
-export function isSupport(value: any): value is Value
+export function isSupport(value: any): value is TGValue
 {
     return isObject(value)
         || isString(value)

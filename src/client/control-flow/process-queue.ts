@@ -1,32 +1,32 @@
-import { Message } from '../../types'
-import { Event } from './event'
-import { Queue } from './queue'
-import { MiddlewareSystem } from './middleware-system'
+import { TGMessage } from '../../types'
+import { TGEvent } from './event'
+import { TGQueue } from './queue'
+import { TGMiddlewareSystem } from './middleware-system'
 
-type ProcessDupesOption = 'process_dupes'|'dont_process_dupes'
+type TGProcessDupesOption = 'process_dupes'|'dont_process_dupes'
 
-export class ProcessQueue<T = Message, U = any, V = any> extends Queue<T>
+export class TGProcessQueue<T = TGMessage, U = any, V = any> extends TGQueue<T>
 {
     public isProcessing: boolean;
-    public readonly middleware: MiddlewareSystem<T, U, V>;
-    public readonly completed: Event<T>;
-    public readonly emptied: Event<boolean>;
-    public readonly processDupes: ProcessDupesOption;
+    public readonly middleware: TGMiddlewareSystem<T, U, V>;
+    public readonly completed: TGEvent<T>;
+    public readonly emptied: TGEvent<boolean>;
+    public readonly processDupes: TGProcessDupesOption;
 
     protected alreadyProcessed: T[];
 
     constructor(
-        name                             = 'ProcessQueue',
-        processDupes: ProcessDupesOption = 'process_dupes'
+        name                               = 'ProcessQueue',
+        processDupes: TGProcessDupesOption = 'process_dupes'
     )
     {
         super(name);
         this.alreadyProcessed = [];
         this.isProcessing     = false;
         this.processDupes     = processDupes;
-        this.completed        = new Event<T>(`${name}.processed`);
-        this.emptied          = new Event<boolean>(`${name}.emptied`);
-        this.middleware       = new MiddlewareSystem<T, U, V>(`${name}.middleware`);
+        this.completed        = new TGEvent<T>(`${name}.processed`);
+        this.emptied          = new TGEvent<boolean>(`${name}.emptied`);
+        this.middleware       = new TGMiddlewareSystem<T, U, V>(`${name}.middleware`);
     }
 
     public has(item: T): boolean
@@ -57,7 +57,7 @@ export class ProcessQueue<T = Message, U = any, V = any> extends Queue<T>
         }
     }
 
-    public enqueueMany(items: readonly T[]): ProcessQueue<T, U, V>
+    public enqueueMany(items: readonly T[]): TGProcessQueue<T, U, V>
     {
         super.enqueueMany(items);
         return this

@@ -1,11 +1,11 @@
-import { Get, Put, Message, MessageCb } from '../../types';
+import { TGGet, TGPut, TGMessage, TGMessageCb } from '../../types';
 import { generateMessageId } from '../graph/graph-utils';
-import { GraphConnector } from './graph-connector';
+import { TGGraphConnector } from './graph-connector';
 
-export class GraphWireConnector extends GraphConnector
+export class TGGraphWireConnector extends TGGraphConnector
 {
     private readonly _callbacks: {
-         [msgId: string]: MessageCb
+         [msgId: string]: TGMessageCb
     };
 
     constructor(name = 'GraphWireConnector')
@@ -17,7 +17,7 @@ export class GraphWireConnector extends GraphConnector
         this.inputQueue.completed.on(this._onProcessedInput)
     }
 
-    public off(msgId: string): GraphWireConnector
+    public off(msgId: string): TGGraphWireConnector
     {
         super.off(msgId);
         delete this._callbacks[msgId];
@@ -29,7 +29,7 @@ export class GraphWireConnector extends GraphConnector
      *
      * @returns A function to be called to clean up callback listeners
      */
-    public put({ graph, msgId = '', replyTo = '', cb }: Put): () => void
+    public put({ graph, msgId = '', replyTo = '', cb }: TGPut): () => void
     {
         if (!graph)
         {
@@ -37,7 +37,7 @@ export class GraphWireConnector extends GraphConnector
             {
             }
         }
-        const msg: Message = {
+        const msg: TGMessage = {
             put: graph
         };
         if (msgId)
@@ -57,10 +57,10 @@ export class GraphWireConnector extends GraphConnector
      *
      * @returns A function to be called to clean up callback listeners
      */
-    public get({ soul, cb, msgId = '' }: Get): () => void
+    public get({ soul, cb, msgId = '' }: TGGet): () => void
     {
-        const get          = { '#': soul };
-        const msg: Message = { get };
+        const get            = { '#': soul };
+        const msg: TGMessage = { get };
         if (msgId)
         {
             msg['#'] = msgId
@@ -75,7 +75,7 @@ export class GraphWireConnector extends GraphConnector
      * @param msg
      * @param cb
      */
-    public req(msg: Message, cb?: MessageCb): () => void
+    public req(msg: TGMessage, cb?: TGMessageCb): () => void
     {
         const reqId = (msg['#'] = msg['#'] || generateMessageId());
         if (cb)
@@ -89,7 +89,7 @@ export class GraphWireConnector extends GraphConnector
         }
     }
 
-    private _onProcessedInput(msg?: Message): void
+    private _onProcessedInput(msg?: TGMessage): void
     {
         if (!msg)
         {

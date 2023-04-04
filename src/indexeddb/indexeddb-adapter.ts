@@ -1,5 +1,5 @@
 import { diffCRDT, mergeGraph } from '../crdt';
-import { OptionsGet, GraphAdapter, GraphData, Node } from '../types';
+import { TGOptionsGet, TGGraphAdapter, TGGraphData, TGNode } from '../types';
 import { IndexedDb } from './indexeddb';
 
 const DEFAULT_DB_NAME = 'topgun-nodes';
@@ -18,7 +18,7 @@ export const DEFAULT_CRDT_OPTS = {
  */
 export function createGraphAdapter(
     name = DEFAULT_DB_NAME
-): GraphAdapter
+): TGGraphAdapter
 {
     const db = new IndexedDb(name);
     return adapterFromIndexedDB(db);
@@ -29,28 +29,28 @@ export function createGraphAdapter(
  */
 export function adapterFromIndexedDB(
     db: IndexedDb
-): GraphAdapter
+): TGGraphAdapter
 {
     return {
-        get: (soul: string, opts?: OptionsGet) => getNode(db, soul, opts),
-        put: (graphData: GraphData) => patchGraph(db, graphData)
+        get: (soul: string, opts?: TGOptionsGet) => getNode(db, soul, opts),
+        put: (graphData: TGGraphData) => patchGraph(db, graphData)
     };
 }
 
 export async function getNode(
     db: IndexedDb,
     soul: string,
-    opts?: OptionsGet
-): Promise<Node|null>
+    opts?: TGOptionsGet
+): Promise<TGNode|null>
 {
-    return db.get<Node>(soul);
+    return db.get<TGNode>(soul);
 }
 
 export async function patchGraph(
     db: IndexedDb,
-    data: GraphData,
+    data: TGGraphData,
     opts = DEFAULT_CRDT_OPTS
-): Promise<GraphData|null>
+): Promise<TGGraphData|null>
 {
     const diff: any = {};
 
@@ -80,9 +80,9 @@ export async function patchGraph(
 
 export async function patchGraphFull(
     db: IndexedDb,
-    data: GraphData,
+    data: TGGraphData,
     opts = DEFAULT_CRDT_OPTS
-): Promise<GraphData|null>
+): Promise<TGGraphData|null>
 {
     while (true)
     {
@@ -105,10 +105,10 @@ export async function patchGraphFull(
 
 export async function getPatchDiff(
     db: IndexedDb,
-    data: GraphData,
+    data: TGGraphData,
     opts = DEFAULT_CRDT_OPTS
 ): Promise<null|{
-    readonly diff: GraphData
+    readonly diff: TGGraphData
     readonly existing: RawGraphData
     readonly toWrite: RawGraphData
 }>
@@ -145,10 +145,10 @@ export async function getPatchDiff(
 
 export async function getExisting(
     db: IndexedDb,
-    data: GraphData
-): Promise<GraphData>
+    data: TGGraphData
+): Promise<TGGraphData>
 {
-    const existingData: GraphData = {};
+    const existingData: TGGraphData = {};
 
     for (const soul in data)
     {
@@ -157,7 +157,7 @@ export async function getExisting(
             continue;
         }
 
-        existingData[soul] = await db.get<Node>(soul);
+        existingData[soul] = await db.get<TGNode>(soul);
     }
 
     return existingData;
