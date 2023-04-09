@@ -25,7 +25,7 @@ export async function work(
     data: string,
     saltOrPair: string|Pair|null|Function,
     opt: WorkOptions = DEFAULT_OPTS
-): Promise<string|undefined>
+): Promise<string>
 {
     // epub not recommended, salt should be random!
     const salt = isObject<Pair>(saltOrPair) && isString(saltOrPair.epub)

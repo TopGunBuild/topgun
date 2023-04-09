@@ -33,7 +33,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         super(name);
         this._requestChannels = {};
         this.opts             = opts;
-        this.socket           = createSocketClient(this.opts);
+        this.socket           = createSocketClient(this.opts || {});
         this.onConnect();
         this.onError();
         this.outputQueue.completed.on(this.onOutputProcessed.bind(this));

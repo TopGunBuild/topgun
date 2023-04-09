@@ -8,6 +8,7 @@ import { isNotEmptyObject } from '../utils/is-empty-object';
 import { isDefined } from '../utils/is-defined';
 import { pubFromSoul } from '../sea';
 import { match } from '../utils/match';
+import { LEX } from '../types/lex';
 
 
 export class TGLink
@@ -370,7 +371,7 @@ export class TGLink
     {
         this._mapLinks = {};
 
-        return this._on((node: Node|undefined) =>
+        return this._on((node: TGValue|undefined) =>
         {
             if (isObject(node))
             {
@@ -379,7 +380,7 @@ export class TGLink
                     if (node.hasOwnProperty(soul) && soul !== '_')
                     {
                         // Already subscribed
-                        if (this._mapLinks.hasOwnProperty(soul))
+                        if ((this._mapLinks as object).hasOwnProperty(soul))
                         {
                             continue;
                         }
@@ -388,16 +389,16 @@ export class TGLink
                         if (
                             isObject(this.optionsGet) &&
                             isNotEmptyObject(this.optionsGet['.']) &&
-                            !match(soul, this.optionsGet['.'])
+                            !match(soul, this.optionsGet['.'] as LEX)
                         )
                         {
                             continue;
                         }
 
                         // Register child listener
-                        if (!this._mapLinks.hasOwnProperty(soul))
+                        if (!(this._mapLinks as object).hasOwnProperty(soul))
                         {
-                            this._mapLinks[soul] = this.get(soul).on(cb);
+                            (this._mapLinks as object)[soul] = this.get(soul).on(cb);
                         }
                     }
                 }

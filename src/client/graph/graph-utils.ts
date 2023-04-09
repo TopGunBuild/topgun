@@ -66,7 +66,7 @@ export function nodeToGraph(node: TGNode): TGGraphData
         }
     }
 
-    const raw              = { [nodeSoul]: modified };
+    const raw              = { [nodeSoul as string]: modified };
     const withMissingState = addMissingState(raw);
     const graphDiff        = diffCRDT(withMissingState, nodes);
     nodes                  = graphDiff ? mergeGraph(nodes, graphDiff) : nodes;

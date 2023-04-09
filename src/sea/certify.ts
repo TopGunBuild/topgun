@@ -10,6 +10,7 @@ const DEFAULT_OPTS: {
     readonly raw?: boolean;
     readonly expiry?: string|number;
 }                             = {};
+type WhoCertify = '*' | string | string[] | { pub: string } | { pub: string }[];
 
 /**
  * This is to certify that a group of "who" can "put" anything at a group of matched "paths" to the certificate authority's graph
@@ -58,7 +59,7 @@ export async function certify(
     policy: IPolicy = DEFAULT_POLICY,
     authority: { priv: string; pub: string },
     opt             = DEFAULT_OPTS
-): Promise<string|{readonly m: any; readonly s: string}>
+): Promise<string|{readonly m: any; readonly s: string}|undefined>
 {
     try
     {
@@ -69,7 +70,7 @@ export async function certify(
 
         who = (() =>
         {
-            const data = [];
+            const data: string[] = [];
             if (who)
             {
                 if (isString(who) && who.includes('*'))
@@ -118,7 +119,7 @@ export async function certify(
         if (!who)
         {
             console.log('No certificant found.');
-            return undefined;
+            return;
         }
 
         const expiry      = isString(opt?.expiry)
@@ -154,7 +155,7 @@ export async function certify(
         if (!readPolicy && !writePolicy)
         {
             console.log('No policy found.');
-            return undefined;
+            return;
         }
 
         // reserved keys: c, e, r, w, rb, wb
@@ -179,6 +180,5 @@ export async function certify(
     catch (e)
     {
         console.log(e);
-        return undefined;
     }
 }

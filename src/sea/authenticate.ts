@@ -106,39 +106,15 @@ export async function authenticate(
     maybeOptions?: AuthOptions
 ): Promise<AuthResult>
 {
-    let pair: Pair, alias: string, password: string, options: AuthOptions;
+    let options: AuthOptions = isObject(passwordOrOpt)
+        ? passwordOrOpt
+        : isObject(maybeOptions)
+            ? maybeOptions
+            : DEFAULT_OPTS; // Auth by alias and password
 
-    if (isObject(aliasOrPair) && (aliasOrPair.pub || aliasOrPair.epub))
+    if (isString(aliasOrPair))
     {
-        pair = aliasOrPair as Pair;
-    }
-    else if (isString(aliasOrPair))
-    {
-        alias = aliasOrPair;
-    }
-
-    if (isString(passwordOrOpt))
-    {
-        password = passwordOrOpt;
-    }
-
-    if (isObject(passwordOrOpt))
-    {
-        options = passwordOrOpt;
-    }
-    else if (isObject(maybeOptions))
-    {
-        options = maybeOptions;
-    }
-    else
-    {
-        options = DEFAULT_OPTS;
-    }
-
-    // Auth by alias and password
-    if (alias)
-    {
-        const aliasSoul = `~@${alias}`;
+        const aliasSoul = `~@${aliasOrPair}`;
 
         if (!isObject(options))
         {
@@ -169,7 +145,7 @@ export async function authenticate(
 
             try
             {
-                pair = await authenticateIdentity(client, soul, password);
+                pair = await authenticateIdentity(client, soul, passwordOrOpt as string);
             }
             catch (e: any)
             {
@@ -186,11 +162,11 @@ export async function authenticate(
     }
 
     // Auth by pair
-    if (pair)
+    if (isObject(aliasOrPair) && (aliasOrPair.pub || aliasOrPair.epub))
     {
         return {
-            ...pair,
-            alias: '~' + pair.pub
+            ...aliasOrPair,
+            alias: '~' + aliasOrPair.pub
         }
     }
 

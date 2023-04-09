@@ -139,7 +139,7 @@ export async function getPatchDiff(
     return {
         diff    : graphDiff,
         existing: existingFromDiff,
-        toWrite : updatedGraph
+        toWrite : updatedGraph as RawGraphData
     };
 }
 
