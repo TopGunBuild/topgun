@@ -82,13 +82,13 @@ export class TGLexLink extends TGLink
 
     limit(value: number): TGLexLink
     {
-        this.optionsGet['%'] = value;
+        (this.optionsGet as object)['%'] = value;
         return this;
     }
 
     reverse(value = true): TGLexLink
     {
-        this.optionsGet['-'] = value;
+        (this.optionsGet as object)['-'] = value;
         return this;
     }
 
@@ -104,7 +104,7 @@ export class TGLexLink extends TGLink
 
     getQuery(): TGOptionsGet
     {
-        return this.optionsGet;
+        return this.optionsGet as TGOptionsGet;
     }
 
     on(cb: (node: (TGValue|undefined), key?: string) => void): TGLink
@@ -123,6 +123,6 @@ export class TGLexLink extends TGLink
 
     private _setLex(key: KeyOfLex, value: ValueOfLex): void
     {
-        this.optionsGet['.'][key] = value;
+        (this.optionsGet as object)['.'][key] = value;
     }
 }
