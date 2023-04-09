@@ -1,3 +1,6 @@
-describe('SEA', () =>
+import { test } from 'vitest';
+
+test('SEA', () =>
 {
+
 });
