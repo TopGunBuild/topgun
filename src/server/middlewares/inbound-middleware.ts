@@ -87,7 +87,7 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
 
         this.readNode(soul)
             .then(node => ({
-                channel: action.channel,
+                channel: action.channel as string,
                 data   : {
                     '#': msgId,
                     put: node
@@ -95,18 +95,18 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
                             [soul]: node
                         }
                         : null
-                }
+                } as TGMessage
             }))
             .catch(e =>
             {
                 console.warn(e.stack || e);
                 return {
-                    channel: action.channel,
+                    channel: action.channel as string,
                     data   : {
                         '#': msgId,
                         '@': action.data['#'],
                         err: 'Error fetching node'
-                    }
+                    } as TGMessage
                 }
             })
             // .then(res =>
@@ -114,7 +114,10 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
             //     console.log({soul, res});
             //     return res;
             // })
-            .then((msg: {channel: string, data: TGMessage}) => this.publish(action, msg))
+            .then((msg: {channel: string, data: TGMessage}) =>
+            {
+                this.publish(action, msg)
+            })
     }
 
     default(

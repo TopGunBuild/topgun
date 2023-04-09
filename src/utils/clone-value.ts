@@ -6,7 +6,7 @@ export const cloneValue = (value: any, deep = false): any =>
     {
         if (deep)
         {
-            const arr = [];
+            const arr: any[] = [];
             if (!value)
             {
                 return arr;

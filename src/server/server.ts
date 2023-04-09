@@ -17,6 +17,7 @@ import {
 } from 'topgun-socket/server';
 import { WritableConsumableStream } from 'topgun-socket/writable-consumable-stream';
 import { createMemoryAdapter } from '../memory-adapter';
+import { generateMessageId } from '../client/graph/graph-utils';
 
 export class TGServer
 {
@@ -115,7 +116,7 @@ export class TGServer
      */
     protected publishIsDiff(msg: TGMessage): void
     {
-        const msgId = msg['#'];
+        const msgId = msg['#'] || generateMessageId();
         const diff  = msg.put;
 
         if (!diff)
