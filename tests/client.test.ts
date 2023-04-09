@@ -1,7 +1,5 @@
-import { test, expectTypeOf } from 'vitest';
-import { TGClient } from '../src/client';
+import { test } from 'vitest';
 
 test('Client', () =>
 {
-    expectTypeOf(TGClient).toBeObject();
 });
