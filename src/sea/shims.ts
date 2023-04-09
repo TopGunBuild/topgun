@@ -18,15 +18,6 @@ api.random     = (len: number) =>
         crypto.getRandomValues(new Uint8Array(api.Buffer.alloc(len)))
     );
 
-// if (!api.TextEncoder)
-// {
-//     import('text-encoding').then(({ TextEncoder, TextDecoder }) =>
-//     {
-//         api.TextEncoder                    = TextEncoder;
-//         api.TextDecoder                    = TextDecoder;
-//     });
-// }
-
 export const random      = api.random;
 export const TextEncoder = api.TextEncoder;
 export const TextDecoder = api.TextDecoder;

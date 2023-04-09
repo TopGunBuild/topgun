@@ -80,7 +80,7 @@ export class TGUserApi
      */
     public async auth(
         pair: Pair,
-        cb?: TGAuthCallback,
+        cb: TGAuthCallback,
         _opt?: AuthOptions
     ): Promise<TGUserReference|undefined>
     public async auth(

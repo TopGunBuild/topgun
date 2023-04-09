@@ -19,5 +19,5 @@ export function pubFromSoul(soul: string): string
         .slice(0, 2)
         .join('.')
         .split('/')
-        .shift();
+        .shift() as string;
 }

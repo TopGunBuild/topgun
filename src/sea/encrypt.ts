@@ -47,7 +47,7 @@ export async function encrypt(
         ? keyOrPair.epriv
         : isString(keyOrPair)
             ? keyOrPair
-            : null;
+            : '';
     const ct       = await crypto.subtle.encrypt(
         {
             iv  : new Uint8Array(rand.iv),

@@ -18,7 +18,7 @@ export interface PolicyOptions extends PolicyLexOptions
     path?: PolicyLexOptions;
 }
 
-function mapPolicyLex(options: PolicyLexOptions): IPolicyLex
+function mapPolicyLex(options: PolicyLexOptions|undefined): IPolicyLex|null
 {
     if (!isObject(options))
     {
@@ -60,12 +60,12 @@ function mapPolicyLex(options: PolicyLexOptions): IPolicyLex
 
 export function createPolicy(options: PolicyOptions): IPolicyLex|IPolicy
 {
-    let keyPolicy: IPolicyLex  = mapPolicyLex(options.key);
-    let pathPolicy: IPolicyLex = mapPolicyLex(options.path);
+    const keyPolicy  = mapPolicyLex(options.key);
+    const pathPolicy = mapPolicyLex(options.path);
 
     if (!keyPolicy && !pathPolicy)
     {
-        return mapPolicyLex(options);
+        return mapPolicyLex(options) || {};
     }
 
     const policy: IPolicy = {};
@@ -168,7 +168,7 @@ export class Policy
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private needCertInPath(options: IPolicyLex|string): boolean
+    private needCertInPath(options: IPolicyLex|string|undefined): boolean
     {
         return isObject(options) && options['+'] === '*';
     }
@@ -191,7 +191,7 @@ export class Policy
         return this.hasPolicy(this.keyPolicy);
     }
 
-    private hasPolicy(options: IPolicyLex|string): boolean
+    private hasPolicy(options: IPolicyLex|string|undefined): boolean
     {
         return isString(options) || isObject(options);
     }

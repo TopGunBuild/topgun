@@ -43,8 +43,8 @@ export function unpack(passedValue: any, key: string, node: TGNode): any
     {
         return value;
     }
-    const soul = node && node._ && node._['#'];
-    const state = node && node._ && node._['>'] && node._['>'][key];
+    const soul  = node && node._ && node._['#'];
+    const state = (node && node._ && node._['>'] && node._['>'][key]) || 0;
     if (
         value &&
         4 === value.length &&

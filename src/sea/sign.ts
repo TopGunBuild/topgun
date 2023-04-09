@@ -35,7 +35,7 @@ export async function verifyCertificate(
         // check if "pub" (of the graph owner) really issued this cert
         const data     = await verify(cert, soulPub);
         const putDate  = new Date().getTime();
-        const certDate = data && data.e;
+        const certDate = (data && data.e) || 0;
 
         if (putDate > certDate)
         {
@@ -51,7 +51,7 @@ export async function verifyCertificate(
         if (certified && writePermission && (certified === '*' || certified.includes(userPub)))
         {
             // ok, now "certifying" is in the "certifyings" list, but is "path" allowed? Check path
-            const key  = fullPath.pop();
+            const key  = fullPath.pop() as string;
             const path = fullPath.join('/');
 
             const writePermissions = Array.isArray(writePermission)
@@ -86,13 +86,13 @@ export async function verifyCertificate(
                         let root: TGLink|TGClient = client;
 
                         // Fix if path doesn't start with certificate
-                        if (!data.wb.startsWith('~'))
+                        if (!writeBlockPath.startsWith('~'))
                         {
                             root = client.get('~' + soulPub);
                         }
 
                         // TODO: Might be worth changing
-                        const value = await root.get(data.wb).get(userPub).promise({ timeout: 1000 });
+                        const value = await root.get(writeBlockPath).get(userPub).promise({ timeout: 1000 });
 
                         if (value === 1 || value === true)
                         {
@@ -149,7 +149,7 @@ export function hashNodeKey(node: TGNode, key: string): Promise<string>
     const val     = node && node[key];
     const parsed  = parse(val);
     const soul    = node && node._ && node._['#'];
-    const prepped = prep(parsed, key, node, soul);
+    const prepped = prep(parsed, key, node, soul as string);
 
     return hashForSignature(prepped);
 }
@@ -317,6 +317,7 @@ export async function signGraph(
 ): Promise<TGGraphData>
 {
     const modifiedGraph = { ...graph };
+    fullPath            = Array.isArray(fullPath) ? [...fullPath].reverse() : [];
 
     for (const soul in graph)
     {
@@ -341,7 +342,7 @@ export async function signGraph(
         // if writing to other's graph, check if cert exists then try to inject cert into put, also inject self pub so that everyone can verify the put
         else if (soulPub && check(putOpt?.opt?.cert))
         {
-            const cert = parse(putOpt.opt.cert);
+            const cert = parse(putOpt?.opt?.cert);
 
             // even if cert exists, we must verify it
             if (
@@ -353,7 +354,7 @@ export async function signGraph(
                     cert,
                     pair.pub,
                     soulPub,
-                    [...fullPath].reverse()
+                    fullPath
                 ))
             )
             {

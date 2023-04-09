@@ -26,7 +26,7 @@ export async function decrypt<T>(
         ? keyOrPair.epriv
         : isString(keyOrPair)
             ? keyOrPair
-            : null;
+            : '';
 
     try
     {
@@ -50,8 +50,8 @@ export async function decrypt<T>(
 
         if (!opt.fallback || encoding === opt.fallback)
         {
-            return undefined;
-            // throw new Error('Could not decrypt');
+            // return;
+            throw new Error('Could not decrypt');
         }
         return decrypt(data, key, { ...opt, encode: opt.fallback });
     }

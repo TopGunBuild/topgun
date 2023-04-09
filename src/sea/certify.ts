@@ -30,12 +30,12 @@ type WhoCertify = '*' | string | string[] | { pub: string } | { pub: string }[];
  *  @returns {Promise<void>}
  */
 export async function certify(
-    who: '*' | string | string[] | { pub: string } | { pub: string }[],
+    who: WhoCertify,
     policy: IPolicy,
     authority: { priv: string; pub: string },
 ): Promise<string>
 export async function certify(
-    who: '*' | string | string[] | { pub: string } | { pub: string }[],
+    who: WhoCertify,
     policy: IPolicy,
     authority: { priv: string; pub: string },
     opt: {
@@ -45,7 +45,7 @@ export async function certify(
     }
 ): Promise<string>
 export async function certify(
-    who: '*' | string | string[] | { pub: string } | { pub: string }[],
+    who: WhoCertify,
     policy: IPolicy,
     authority: { priv: string; pub: string },
     opt: {
@@ -55,7 +55,7 @@ export async function certify(
     }
 ): Promise<{readonly m: any; readonly s: string}>
 export async function certify(
-    who: '*' | string | string[] | { pub: string } | { pub: string }[],
+    who: WhoCertify,
     policy: IPolicy = DEFAULT_POLICY,
     authority: { priv: string; pub: string },
     opt             = DEFAULT_OPTS
@@ -114,7 +114,7 @@ export async function certify(
                 return data.length > 0 ? data : null
             }
             return null;
-        })();
+        })() as WhoCertify;
 
         if (!who)
         {

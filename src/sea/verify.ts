@@ -89,7 +89,7 @@ export async function verify(
             ? pubOrPair.pub
             : isString(pubOrPair)
                 ? pubOrPair
-                : null;
+                : '';
 
         const json = parse(data);
         if (await verifySignature(json.m, json.s, pub, opt))

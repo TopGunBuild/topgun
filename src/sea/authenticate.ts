@@ -91,7 +91,7 @@ export async function authenticateIdentity(
 export function authenticate(
     client: TGClient,
     pair: Pair,
-    opt?: AuthOptions
+    opt: AuthOptions
 ): Promise<AuthResult>
 export function authenticate(
     client: TGClient,

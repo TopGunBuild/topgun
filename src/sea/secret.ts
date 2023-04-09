@@ -1,5 +1,4 @@
 import { Pair } from './pair';
-import { jwk } from './settings';
 import { crypto } from './shims';
 
 const DEFAULT_OPTS: {} = {};
@@ -7,7 +6,7 @@ const DEFAULT_OPTS: {} = {};
 const keysToEcdhJwk = (
     pub: string,
     d?: string
-) =>
+): ['jwk', JsonWebKey, EcKeyImportParams] =>
 {
     const [x, y] = pub.split('.'); // new
     const jwk    = d ? { d } : {};
@@ -35,31 +34,31 @@ export async function secret(
     pair: Pair,
     cb?: (value?: string) => void,
     opt = DEFAULT_OPTS
-): Promise<string>
+): Promise<string|undefined>
 {
     try
     {
         if (!pair || !pair.epriv || !pair.epub)
         {
             console.log('No secret mix.');
-            return null;
+            return;
         }
 
-        const pub         = key;
-        const epub        = pair.epub;
-        const epriv       = pair.epriv;
-        const pubKeyData  = keysToEcdhJwk(pub);
-        const props       = Object.assign(
+        const pub                          = key;
+        const epub                         = pair.epub;
+        const epriv                        = pair.epriv;
+        const [format, keyData, algorithm] = keysToEcdhJwk(pub);
+        const props                        = Object.assign(
             {
-                public: await crypto.subtle.importKey(...pubKeyData, true, [])
+                public: await crypto.subtle.importKey(format, keyData, algorithm, true, [])
             },
             {
                 name      : 'ECDH',
                 namedCurve: 'P-256'
             }
         );
-        const privKeyData = keysToEcdhJwk(epub, epriv);
-        const derived     = await crypto.subtle
+        const privKeyData                  = keysToEcdhJwk(epub, epriv);
+        const derived                      = await crypto.subtle
             .importKey(...privKeyData, false, ['deriveBits'])
             .then(async (privKey) =>
             {
@@ -92,11 +91,10 @@ export async function secret(
     }
     catch (e)
     {
-        console.log(e);
+        console.error(e);
         if (cb)
         {
             cb()
         }
-        return null;
     }
 }
