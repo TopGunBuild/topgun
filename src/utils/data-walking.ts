@@ -14,7 +14,7 @@ export function set(list: Array<string>, value: any): {[key: string]: any}
 }
 
 
-export function dataWalking(obj: any, pathArr = [], target = {}): {[key: string]: any}
+export function dataWalking(obj: any, pathArr: string[] = [], target = {}): {[key: string]: any}
 {
     if (!isSupport(obj))
     {

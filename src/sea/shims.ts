@@ -1,9 +1,9 @@
-import root from 'window-or-global';
+import root from '../utils/window-or-global';
 import './base64';
 import SafeBuffer from './safe-buffer';
-import isocrypto from 'isomorphic-webcrypto';
+import { Crypto } from '@peculiar/webcrypto';
 
-export const crypto = isocrypto['default'] || isocrypto;
+export const crypto = new Crypto();
 export const Buffer = SafeBuffer;
 
 const api: any = {

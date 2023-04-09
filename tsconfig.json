@@ -1,23 +1,18 @@
 {
-    "extends": "./tsconfig.base",
     "compilerOptions": {
-        "emitDeclarationOnly": true,
-        "declaration": true,
-        "target": "esnext",
-        "lib": [
-            "esnext",
-            "dom"
-        ],
-        "strict": false,
-        "noImplicitAny": false,
+        "target": "es2020",
+        "module": "esnext",
+        "strict": true,
         "esModuleInterop": true,
         "moduleResolution": "node",
-        "outDir": "dist",
-        "module": "esnext",
         "skipLibCheck": true,
-        "types": [
-            "node",
-            "jest"
-        ]
+        "noUnusedLocals": true,
+        "noImplicitAny": false,
+        "allowJs": true,
+        "noEmit": true,
+        "outDir": "dist",
+        "resolveJsonModule": true,
+
+        "types": ["vitest/globals"]
     }
 }

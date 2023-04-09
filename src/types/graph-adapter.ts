@@ -62,6 +62,8 @@ export type TGOptionsPut = Partial<{
     opt: {
         /** certificate that gives other people write permission */ cert: string;
     };
+
+    [key: string]: any;
 }>;
 
 export interface CRDTOpts
@@ -69,6 +71,8 @@ export interface CRDTOpts
     readonly machineState?: number
     readonly futureGrace?: number
     readonly Lexical?: (x: TGValue) => any
+
+    [k: string]: any;
 }
 
 export interface TGGraphAdapter

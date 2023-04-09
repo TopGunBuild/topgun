@@ -58,7 +58,7 @@ const compileValidateSoul = (ajv: any) => (schema: any) =>
     {
         const soul = data && data['_'] && data['_']['#'];
 
-        if (!soul || !pattern || soul !== dataCxt.parentDataProperty)
+        if (!soul || !pattern || soul !== dataCxt?.parentDataProperty)
         {
             return false;
         }
@@ -140,11 +140,11 @@ export function createValidator({
             const route     = new Route(pattern);
             const pathOrRef = (p: string[]) =>
             {
-                const val             = p.reduce((accum, path) => accum && accum[path], defs);
-                const ref: string     = val && val['$refs'];
-                const refRouteParams  = refRoute.match(ref || '');
-                const refName: string = refRouteParams && refRouteParams['refName'];
-                const result          = !!refName ? defs[refName] : val;
+                const val                   = p.reduce((accum, path) => accum && accum[path], defs);
+                const ref: string           = val && val['$refs'];
+                const refRouteParams        = refRoute.match(ref || '');
+                const refName: string|false = refRouteParams && refRouteParams['refName'];
+                const result                = !!refName ? defs[refName] : val;
 
                 return isObject(result) ? result : {};
             };
@@ -331,7 +331,7 @@ export function createValidator({
                     }
                 }
             },
-            TopGunNodeMeta: {
+            TopGunNodeMeta    : {
                 title               : 'TopGun Node Metadata',
                 description         : 'Change State and soul of a node',
                 type                : 'object',
@@ -342,7 +342,7 @@ export function createValidator({
                 },
                 required            : ['#', '>']
             },
-            TopGunEdge    : {
+            TopGunEdge        : {
                 type                : 'object',
                 additionalProperties: false,
                 properties          : {

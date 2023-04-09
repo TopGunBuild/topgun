@@ -127,9 +127,14 @@ export function diffCRDT(
                     continue
                 }
             }
-            updates[key]        = updated[key];
-            updates._['>'][key] = updatedKeyState;
-            hasUpdates          = true
+            updates[key] = updated[key];
+
+            if (updates._ && updates._['>'])
+            {
+                updates._['>'][key] = updatedKeyState;
+            }
+
+            hasUpdates = true;
         }
 
         if (hasUpdates)
@@ -185,7 +190,7 @@ export function mergeNodes(
             '#': existingMeta['#'],
             '>': {
                 ...existingMeta['>'],
-                ...updates._['>']
+                ...(updates._ && updates._['>'] || {})
             }
         }
     }

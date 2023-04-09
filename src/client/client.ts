@@ -4,7 +4,7 @@ import { TGGraph } from './graph/graph'
 import { TGGraphConnector } from './transports/graph-connector';
 import { TGClientOptions } from './client-options';
 import { createConnector } from './transports/web-socket-graph-connector';
-import { ClientOptions as SocketClientOptions } from 'topgun-socket';
+import { ClientOptions as SocketClientOptions } from 'topgun-socket/client';
 import { TGUserApi } from './user-api';
 import { pubFromSoul, unpackGraph } from '../sea';
 import { polyfillGlobalThis } from '../utils/global-this';
@@ -19,7 +19,7 @@ import { match } from '../utils/match';
 
 polyfillGlobalThis(); // Make "globalThis" available
 
-const DEFAULT_OPTIONS: Required<TGClientOptions> = {
+export const DEFAULT_OPTIONS: Required<TGClientOptions> = {
     peers            : [],
     graph            : new TGGraph(),
     connectors       : [],

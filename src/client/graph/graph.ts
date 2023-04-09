@@ -271,11 +271,11 @@ export class TGGraph
             throw err;
         }
 
-        const soul      = fullPath.shift();
+        const soul      = fullPath.shift() as string;
         const rawData   = set(fullPath, data);
         const graphData = dataWalking(rawData, [soul]);
 
-        this.put(graphData, fullPath, cb, null, soul, putOpt);
+        this.put(graphData, fullPath, cb, undefined, soul, putOpt);
     }
 
     /**

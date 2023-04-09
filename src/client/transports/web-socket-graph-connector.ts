@@ -1,5 +1,5 @@
 import { TGGraphWireConnector } from './graph-wire-connector';
-import { TGChannel } from 'topgun-socket';
+import { TGChannel } from 'topgun-socket/channel';
 import {
     ClientOptions,
     TGClientSocket,

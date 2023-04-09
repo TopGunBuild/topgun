@@ -1,33 +1,41 @@
 {
     "name": "topgun",
-    "version": "0.0.1",
+    "version": "0.0.0",
     "description": "Realtime, offline-first, secure, graph data synchronization engine. Reimplementation of gunDB in TypeScript",
-    "scripts": {
-        "buildall": "npm run clean && npm run ts-types && concurrently \"npm:build:*\"",
-        "build:client": "node build-scripts/client.esbuild.js",
-        "build:server": "node build-scripts/server.esbuild.js",
-        "test": "echo \"Error: no test specified\" && exit 1",
-        "test:unit": "jest --coverage",
-        "clean": "rimraf dist",
-        "ts-types": "tsc -p tsconfig.json"
+    "publishConfig": {
+        "access": "public"
     },
+    "scripts": {
+        "build": "tsup",
+        "prepublishOnly": "pnpm run build",
+        "test": "vitest run",
+        "semantic-release": "semantic-release"
+    },
+    "browser": "dist/client.global.js",
     "exports": {
         "./client": {
-            "types": "./dist/client/index.d.ts",
-            "module": "./dist/client.module.js",
-            "import": "./dist/client.module.js",
-            "require": "./dist/client.module.js",
+            "types": "./dist/client.d.ts",
+            "require": "./dist/client.js",
+            "import": "./dist/client.mjs",
             "default": "./dist/client.js"
         },
         "./server": {
-            "types": "./dist/server/index.d.ts",
-            "module": "./dist/server.js",
-            "node": "./dist/server.js",
-            "import": "./dist/server.js",
+            "types": "./dist/server.d.ts",
             "require": "./dist/server.js",
+            "import": "./dist/server.mjs",
             "default": "./dist/server.js"
         },
         "./package.json": "./package.json"
+    },
+    "typesVersions": {
+        "*": {
+            "client": [
+                "./dist/client.d.ts"
+            ],
+            "server": [
+                "./dist/server.d.ts"
+            ]
+        }
     },
     "repository": {
         "type": "git",
@@ -52,50 +60,22 @@
     },
     "homepage": "https://github.com/TopGunBuild/topgun#readme",
     "dependencies": {
+        "@peculiar/webcrypto": "^1.4.3",
         "ajv": "^8.12.0",
-        "isomorphic-webcrypto": "^2.3.8",
         "route-parser": "^0.0.5",
-        "topgun-socket": "0.0.9",
-        "window-or-global": "^1.0.1"
+        "topgun-socket": "1.0.5"
     },
     "devDependencies": {
-        "@types/jest": "^29.4.0",
+        "@semantic-release/changelog": "^6.0.3",
+        "@semantic-release/commit-analyzer": "^9.0.2",
+        "@semantic-release/git": "^10.0.1",
+        "@semantic-release/github": "^8.0.7",
+        "@semantic-release/npm": "^10.0.3",
+        "@semantic-release/release-notes-generator": "^10.0.3",
         "@types/route-parser": "^0.1.4",
-        "@types/window-or-global": "^1.0.4",
-        "concurrently": "^7.5.0",
-        "esbuild": "^0.15.14",
-        "esbuild-node-externals": "^1.5.0",
-        "jest": "^29.4.1",
-        "rimraf": "^3.0.2",
-        "ts-jest": "^29.0.5",
-        "tslint": "^6.1.3",
-        "typescript": "^4.8.4"
-    },
-    "jest": {
-        "transform": {
-            ".(ts|tsx)": "ts-jest"
-        },
-        "testEnvironment": "node",
-        "testRegex": "(/__tests__/.*|\\.(test|spec))\\.(ts|tsx|js)$",
-        "moduleFileExtensions": [
-            "ts",
-            "tsx",
-            "js"
-        ],
-        "coveragePathIgnorePatterns": [
-            "/node_modules/",
-            "/test/"
-        ],
-        "coverageThreshold": {
-            "global": {
-                "branches": 90,
-                "functions": 95,
-                "lines": 95,
-                "statements": 95
-            }
-        },
-        "collectCoverageFrom": [
-            "src/*.{js,ts}"
-        ]
+        "semantic-release": "^21.0.1",
+        "tsup": "^6.7.0",
+        "typescript": "4.9.4",
+        "vitest": "^0.29.8"
     }
 }

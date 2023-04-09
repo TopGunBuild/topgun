@@ -15,7 +15,7 @@ import {
     TGServerSocketGateway,
     TGServerSocket,
 } from 'topgun-socket/server';
-import { WritableConsumableStream } from 'topgun-socket';
+import { WritableConsumableStream } from 'topgun-socket/writable-consumable-stream';
 import { createMemoryAdapter } from '../memory-adapter';
 
 export class TGServer
