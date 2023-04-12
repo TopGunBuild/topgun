@@ -2,23 +2,24 @@ import { TGGet, TGPut, TGMessage, TGMessageCb } from '../../types';
 import { generateMessageId } from '../graph/graph-utils';
 import { TGGraphConnector } from './graph-connector';
 
-export class TGGraphWireConnector extends TGGraphConnector
+/* eslint-disable @typescript-eslint/no-empty-function */
+export class TGGraphWireConnector extends TGGraphConnector 
 {
     private readonly _callbacks: {
-         [msgId: string]: TGMessageCb
+        [msgId: string]: TGMessageCb;
     };
 
-    constructor(name = 'GraphWireConnector')
-    {
+    constructor(name = 'GraphWireConnector') 
+{
         super(name);
         this._callbacks = {};
 
         this._onProcessedInput = this._onProcessedInput.bind(this);
-        this.inputQueue.completed.on(this._onProcessedInput)
+        this.inputQueue.completed.on(this._onProcessedInput);
     }
 
-    public off(msgId: string): TGGraphWireConnector
-    {
+    public off(msgId: string): TGGraphWireConnector 
+{
         super.off(msgId);
         delete this._callbacks[msgId];
         return this;
@@ -29,24 +30,23 @@ export class TGGraphWireConnector extends TGGraphConnector
      *
      * @returns A function to be called to clean up callback listeners
      */
-    public put({ graph, msgId = '', replyTo = '', cb }: TGPut): () => void
-    {
-        if (!graph)
-        {
-            return () =>
-            {
-            }
+    public put({ graph, msgId = '', replyTo = '', cb }: TGPut): () => void 
+{
+        if (!graph) 
+{
+            return () => 
+{};
         }
         const msg: TGMessage = {
-            put: graph
+            put: graph,
         };
-        if (msgId)
-        {
-            msg['#'] = msgId
+        if (msgId) 
+{
+            msg['#'] = msgId;
         }
-        if (replyTo)
-        {
-            msg['@'] = replyTo
+        if (replyTo) 
+{
+            msg['@'] = replyTo;
         }
 
         return this.req(msg, cb);
@@ -57,16 +57,16 @@ export class TGGraphWireConnector extends TGGraphConnector
      *
      * @returns A function to be called to clean up callback listeners
      */
-    public get({ soul, cb, msgId = '' }: TGGet): () => void
-    {
-        const get            = { '#': soul };
+    public get({ soul, cb, msgId = '' }: TGGet): () => void 
+{
+        const get = { '#': soul };
         const msg: TGMessage = { get };
-        if (msgId)
-        {
-            msg['#'] = msgId
+        if (msgId) 
+{
+            msg['#'] = msgId;
         }
 
-        return this.req(msg, cb)
+        return this.req(msg, cb);
     }
 
     /**
@@ -75,43 +75,43 @@ export class TGGraphWireConnector extends TGGraphConnector
      * @param msg
      * @param cb
      */
-    public req(msg: TGMessage, cb?: TGMessageCb): () => void
-    {
+    public req(msg: TGMessage, cb?: TGMessageCb): () => void 
+{
         const reqId = (msg['#'] = msg['#'] || generateMessageId());
-        if (cb)
-        {
-            this._callbacks[reqId] = cb
+        if (cb) 
+{
+            this._callbacks[reqId] = cb;
         }
         this.send([msg]);
-        return () =>
-        {
+        return () => 
+{
             this.off(reqId);
-        }
+        };
     }
 
-    private _onProcessedInput(msg?: TGMessage): void
-    {
-        if (!msg)
-        {
-            return
+    private _onProcessedInput(msg?: TGMessage): void 
+{
+        if (!msg) 
+{
+            return;
         }
-        const id      = msg['#'];
+        const id = msg['#'];
         const replyTo = msg['@'];
 
-        if (msg.put)
-        {
-            this.events.graphData.trigger(msg.put, id, replyTo)
+        if (msg.put) 
+{
+            this.events.graphData.trigger(msg.put, id, replyTo);
         }
 
-        if (replyTo)
-        {
+        if (replyTo) 
+{
             const cb = this._callbacks[replyTo];
-            if (cb)
-            {
-                cb(msg)
+            if (cb) 
+{
+                cb(msg);
             }
         }
 
-        this.events.receiveMessage.trigger(msg)
+        this.events.receiveMessage.trigger(msg);
     }
 }

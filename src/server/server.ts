@@ -19,25 +19,26 @@ import { WritableConsumableStream } from 'topgun-socket/writable-consumable-stre
 import { createMemoryAdapter } from '../memory-adapter';
 import { generateMessageId } from '../client/graph/graph-utils';
 
-export class TGServer
+export class TGServer 
 {
     public readonly adapter: TGGraphAdapter;
     public readonly internalAdapter: TGGraphAdapter;
     public readonly server: TGServerSocketGateway;
 
-    protected readonly validaror: {schema: any, validate: ValidateFunction<any>};
+    protected readonly validaror: {
+        schema: any;
+        validate: ValidateFunction<any>;
+    };
 
     /**
      * Constructor
      */
-    constructor(
-        public readonly options: TGServerOptions,
-    )
-    {
-        this.validaror       = createValidator();
+    constructor(public readonly options: TGServerOptions) 
+{
+        this.validaror = createValidator();
         this.internalAdapter = this.options.adapter || createMemoryAdapter();
-        this.adapter         = this.wrapAdapter(this.internalAdapter);
-        this.server          = new TGServerSocketGateway(this.options);
+        this.adapter = this.wrapAdapter(this.internalAdapter);
+        this.server = new TGServerSocketGateway(this.options);
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -47,9 +48,11 @@ export class TGServer
     /**
      * Run server
      */
-    run(): void
-    {
-        this.setInboundMiddleware(new InboundMiddleware(this.adapter, this.options));
+    run(): void 
+{
+        this.setInboundMiddleware(
+            new InboundMiddleware(this.adapter, this.options),
+        );
         this.handleWebsocketConnection();
     }
 
@@ -60,82 +63,86 @@ export class TGServer
     /**
      * Send put data to all node subscribers
      */
-    protected publishDiff(soul: string, msgId: string, nodeDiff: TGGraphData): void
-    {
+    protected publishDiff(
+        soul: string,
+        msgId: string,
+        nodeDiff: TGGraphData,
+    ): void 
+{
         this.server.exchange.invokePublish(`topgun/nodes/${soul}`, {
             '#': `${msgId}/${soul}`,
-            put: {
-                [soul]: nodeDiff
-            }
+            'put': {
+                [soul]: nodeDiff,
+            },
         });
     }
 
     /**
      * Wrap adapter
      */
-    protected wrapAdapter(adapter: TGGraphAdapter): TGGraphAdapter
-    {
+    protected wrapAdapter(adapter: TGGraphAdapter): TGGraphAdapter 
+{
         const withPublish: TGGraphAdapter = {
             ...adapter,
-            put    : async (graph: TGGraphData) =>
-            {
+            put: async (graph: TGGraphData) => 
+{
                 const diff = await adapter.put(graph);
 
-                if (diff)
-                {
+                if (diff) 
+{
                     this.publishIsDiff({
                         '#': pseudoRandomText(),
-                        put: diff
-                    })
+                        'put': diff,
+                    });
                 }
 
-                return diff
+                return diff;
             },
-            putSync: undefined
+            putSync: undefined,
         };
 
         return {
             ...withPublish,
-            put: (graph: TGGraphData) =>
-            {
-                return this.validatePut(graph).then(isValid =>
-                {
-                    if (isValid)
-                    {
-                        return withPublish.put(graph)
+            put: (graph: TGGraphData) => 
+{
+                return this.validatePut(graph).then((isValid) => 
+{
+                    if (isValid) 
+{
+                        return withPublish.put(graph);
                     }
 
-                    throw new Error('Invalid graph data')
-                })
-            }
-        }
+                    throw new Error('Invalid graph data');
+                });
+            },
+        };
     }
 
     /**
      * Send put data to node subscribers as a diff
      */
-    protected publishIsDiff(msg: TGMessage): void
-    {
+    protected publishIsDiff(msg: TGMessage): void 
+{
         const msgId = msg['#'] || generateMessageId();
-        const diff  = msg.put;
+        const diff = msg.put;
 
-        if (!diff)
-        {
-            return
+        if (!diff) 
+{
+            return;
         }
 
-        for (const soul in diff)
-        {
-            if (!soul)
-            {
-                continue
+        for (const soul in diff) 
+{
+            if (!soul) 
+{
+                continue;
             }
 
             const nodeDiff = diff[soul];
 
-            if (!nodeDiff)
-            {
-                continue
+            if (!nodeDiff) 
+{
+                continue;
             }
 
             this.publishDiff(soul, msgId, nodeDiff);
@@ -145,15 +152,15 @@ export class TGServer
     /**
      * Validate put operation
      */
-    protected async validatePut(graph: TGGraphData): Promise<boolean>
-    {
-        if (this.options.disableValidation)
-        {
-            return true
+    protected async validatePut(graph: TGGraphData): Promise<boolean> 
+{
+        if (this.options.disableValidation) 
+{
+            return true;
         }
         return this.validaror.validate({
             '#': 'dummymsgid',
-            put: graph
+            'put': graph,
         });
     }
 
@@ -164,15 +171,15 @@ export class TGServer
     /**
      * Set up a loop to handle websocket connections.
      */
-    private async handleWebsocketConnection(): Promise<void>
-    {
-        for await (let { socket } of this.server.listener('connection'))
-        {
-            (async () =>
-            {
+    private async handleWebsocketConnection(): Promise<void> 
+{
+        for await (const { socket } of this.server.listener('connection')) 
+{
+            (async () => 
+{
                 // Set up a loop to handle and respond to RPCs.
-                for await (let request of socket.procedure('login'))
-                {
+                for await (const request of socket.procedure('login')) 
+{
                     this.authenticateLogin(socket, request);
                 }
             })();
@@ -184,84 +191,85 @@ export class TGServer
      */
     private async authenticateLogin(
         socket: TGServerSocket,
-        request: any
-    ): Promise<void>
-    {
+        request: any,
+    ): Promise<void> 
+{
         const data = request.data as {
-            pub: string,
+            pub: string;
             proof: {
-                m: string
-                s: string
-            }
+                m: string;
+                s: string;
+            };
         };
 
-        if (!data.pub || !data.proof)
-        {
+        if (!data.pub || !data.proof) 
+{
             request.end('Missing login info');
-            return
+            return;
         }
 
-        try
-        {
+        try 
+{
             const [socketId, timestampStr] = data.proof.m.split('/');
-            const timestamp                = parseInt(timestampStr, 10);
-            const now                      = new Date().getTime();
-            const drift                    = Math.abs(now - timestamp);
-            const maxDrift                 = (
-                this.options.authMaxDrift && parseInt(`${this.options.authMaxDrift}`, 10)
-            ) || 1000 * 60 * 5;
+            const timestamp = parseInt(timestampStr, 10);
+            const now = new Date().getTime();
+            const drift = Math.abs(now - timestamp);
+            const maxDrift =
+                (this.options.authMaxDrift &&
+                    parseInt(`${this.options.authMaxDrift}`, 10)) ||
+                1000 * 60 * 5;
 
-            if (drift > maxDrift)
-            {
+            if (drift > maxDrift) 
+{
                 request.error(new Error('Exceeded max clock drift'));
-                return
+                return;
             }
 
-            if (!socketId || socketId !== socket.id)
-            {
+            if (!socketId || socketId !== socket.id) 
+{
                 request.error(new Error('Socket ID doesn\'t match'));
-                return
+                return;
             }
 
             const isVerified = await verify(data.proof, data.pub);
 
-            if (isVerified)
-            {
+            if (isVerified) 
+{
                 socket.setAuthToken({
                     pub: data.pub,
-                    timestamp
+                    timestamp,
                 });
                 request.end();
             }
-            else
-            {
-                request.end('Invalid login')
+ else 
+{
+                request.end('Invalid login');
             }
         }
-        catch (err)
-        {
-            request.end('Invalid login')
+ catch (err) 
+{
+            request.end('Invalid login');
         }
     }
 
     /**
      * Setup a MIDDLEWARE_INBOUND
      */
-    private setInboundMiddleware(inbound: MiddlewareInboundStrategy)
-    {
-        if (inbound)
-        {
+    private setInboundMiddleware(inbound: MiddlewareInboundStrategy) 
+{
+        if (inbound) 
+{
             // debug.log('Middleware inbound -> ' + inbound.constructor.name);
 
             this.server.setMiddleware(
                 MIDDLEWARE_INBOUND,
-                async (middlewareStream: WritableConsumableStream<any>) =>
-                {
-                    for await (const action of middlewareStream)
-                    {
+                async (middlewareStream: WritableConsumableStream<any>) => 
+{
+                    for await (const action of middlewareStream) 
+{
                         this.handleInboundAction(action, inbound);
                     }
-                }
+                },
             );
         }
     }
@@ -271,16 +279,16 @@ export class TGServer
      */
     private handleInboundAction(
         action:
-            |TGActionTransmit
-            |TGActionInvoke
-            |TGActionSubscribe
-            |TGActionPublishIn
-            |TGActionAuthenticate,
-        inbound: MiddlewareInboundStrategy
-    )
-    {
-        switch (action.type)
-        {
+            | TGActionTransmit
+            | TGActionInvoke
+            | TGActionSubscribe
+            | TGActionPublishIn
+            | TGActionAuthenticate,
+        inbound: MiddlewareInboundStrategy,
+    ) 
+{
+        switch (action.type) 
+{
             case action.AUTHENTICATE:
                 inbound.onAuthenticate
                     ? inbound.onAuthenticate(action)
@@ -292,10 +300,14 @@ export class TGServer
                     : inbound.default(action);
                 break;
             case action.TRANSMIT:
-                inbound.onTransmit ? inbound.onTransmit(action) : inbound.default;
+                inbound.onTransmit
+                    ? inbound.onTransmit(action)
+                    : inbound.default;
                 break;
             case action.INVOKE:
-                inbound.onInvoke ? inbound.onInvoke(action) : inbound.default(action);
+                inbound.onInvoke
+                    ? inbound.onInvoke(action)
+                    : inbound.default(action);
                 break;
             case action.PUBLISH_IN:
                 inbound.onPublishIn
@@ -309,8 +321,7 @@ export class TGServer
     }
 }
 
-
-export function createServer(serverConfig: TGServerOptions): TGServer
+export function createServer(serverConfig: TGServerOptions): TGServer 
 {
     return new TGServer(serverConfig);
 }

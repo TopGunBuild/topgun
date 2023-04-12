@@ -1,18 +1,18 @@
-import { TGGet, TGPut, TGGraphAdapter } from '../../types'
-import { generateMessageId } from '../graph/graph-utils'
-import { TGGraphWireConnector } from './graph-wire-connector'
+import { TGGet, TGPut, TGGraphAdapter } from '../../types';
+import { generateMessageId } from '../graph/graph-utils';
+import { TGGraphWireConnector } from './graph-wire-connector';
 
 const NOOP = () => undefined;
 
-export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
+export class TGGraphConnectorFromAdapter extends TGGraphWireConnector 
 {
     protected readonly adapter: TGGraphAdapter;
 
     /**
      * Constructor
      */
-    constructor(adapter: TGGraphAdapter, name = 'GraphConnectorFromAdapter')
-    {
+    constructor(adapter: TGGraphAdapter, name = 'GraphConnectorFromAdapter') 
+{
         super(name);
         this.adapter = adapter;
     }
@@ -21,74 +21,74 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    public get({ soul, cb, opts, msgId = '' }: TGGet): () => void
-    {
+    public get({ soul, cb, opts, msgId = '' }: TGGet): () => void 
+{
         this.adapter
             .get(soul, opts)
             .then(node => ({
                 '#': generateMessageId(),
                 '@': msgId,
-                put: node
+                'put': node
                     ? {
-                        [soul]: node
-                    }
-                    : undefined
+                          [soul]: node,
+                      }
+                    : undefined,
             }))
-            .catch(error =>
-            {
+            .catch((error) => 
+{
                 console.warn(error.stack || error);
 
                 return {
                     '#': generateMessageId(),
                     '@': msgId,
-                    err: 'Error fetching node'
-                }
+                    'err': 'Error fetching node',
+                };
             })
-            .then(msg =>
-            {
+            .then((msg) => 
+{
                 this.ingest([msg]);
-                if (cb)
-                {
-                    cb(msg)
+                if (cb) 
+{
+                    cb(msg);
                 }
             });
 
-        return NOOP
+        return NOOP;
     }
 
-    public put({ graph, msgId = '', cb }: TGPut): () => void
-    {
+    public put({ graph, msgId = '', cb }: TGPut): () => void 
+{
         this.adapter
             .put(graph)
-            .then(() =>
-            {
+            .then(() => 
+{
                 return {
                     '#': generateMessageId(),
                     '@': msgId,
-                    err: null,
-                    ok : true
-                }
+                    'err': null,
+                    'ok': true,
+                };
             })
-            .catch(error =>
-            {
+            .catch((error) => 
+{
                 console.warn(error.stack || error);
 
                 return {
                     '#': generateMessageId(),
                     '@': msgId,
-                    err: 'Error saving put',
-                    ok : false
-                }
+                    'err': 'Error saving put',
+                    'ok': false,
+                };
             })
-            .then(msg =>
-            {
+            .then((msg) => 
+{
                 this.ingest([msg]);
-                if (cb)
-                {
-                    cb(msg)
+                if (cb) 
+{
+                    cb(msg);
                 }
             });
 
-        return NOOP
+        return NOOP;
     }
 }
