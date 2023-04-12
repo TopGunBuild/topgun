@@ -2,8 +2,7 @@ import { TGGraph } from './graph/graph';
 import { TGGraphConnector } from './transports/graph-connector';
 import { TGSupportedStorage } from '../types';
 
-export interface TGClientOptions
-{
+export interface TGClientOptions {
     readonly peers?: string[];
     readonly graph?: TGGraph;
     readonly connectors?: TGGraphConnector[];

@@ -1,6 +1,6 @@
-import { diffCRDT } from '../crdt'
-import { TGLink } from './link'
-import { TGGraph } from './graph/graph'
+import { diffCRDT } from '../crdt';
+import { TGLink } from './link';
+import { TGGraph } from './graph/graph';
 import { TGGraphConnector } from './transports/graph-connector';
 import { TGClientOptions } from './client-options';
 import { createConnector } from './transports/web-socket-graph-connector';
@@ -20,13 +20,13 @@ import { match } from '../utils/match';
 polyfillGlobalThis(); // Make "globalThis" available
 
 export const DEFAULT_OPTIONS: Required<TGClientOptions> = {
-    peers            : [],
-    graph            : new TGGraph(),
-    connectors       : [],
-    persistStorage   : false,
-    storageKey       : 'top-gun-nodes',
-    persistSession   : true,
-    sessionStorage   : localStorageAdapter,
+    peers: [],
+    graph: new TGGraph(),
+    connectors: [],
+    persistStorage: false,
+    storageKey: 'top-gun-nodes',
+    persistSession: true,
+    sessionStorage: localStorageAdapter,
     sessionStorageKey: 'top-gun-session',
     passwordMinLength: 8,
 };
@@ -39,12 +39,12 @@ export const DEFAULT_OPTIONS: Required<TGClientOptions> = {
  *   const topGun = new TopGun.Client({ peers: ["https://top-gun.io/topgun"]})
  *   topGun.get("topgun/things/f8c3de3d-1fea-4d7c-a8b0-29f63c4c3454").on(thing => console.log(thing))
  */
-export class TGClient
+export class TGClient 
 {
     static match = match;
 
     options: TGClientOptions;
-    pub: string|undefined;
+    pub: string | undefined;
     readonly graph: TGGraph;
     protected readonly _authEvent: TGEvent<TGUserReference>;
     protected _user?: TGUserApi;
@@ -52,18 +52,18 @@ export class TGClient
     /**
      * Constructor
      */
-    constructor(options?: TGClientOptions)
-    {
-        options         = isObject(options) ? options : {};
-        this.options    = { ...DEFAULT_OPTIONS, ...options };
+    constructor(options?: TGClientOptions) 
+{
+        options = isObject(options) ? options : {};
+        this.options = { ...DEFAULT_OPTIONS, ...options };
         this._authEvent = new TGEvent<TGUserReference>('auth data');
 
-        if (this.options && this.options.graph)
-        {
+        if (this.options && this.options.graph) 
+{
             this.graph = this.options.graph;
         }
-        else
-        {
+ else 
+{
             this.graph = new TGGraph();
             this.graph.use(diffCRDT);
             this.graph.use(diffCRDT, 'write');
@@ -81,55 +81,57 @@ export class TGClient
     /**
      * Get User API
      */
-    user(): TGUserApi
-    user(pubOrNode: string|TGNode): TGLink
-    user(pubOrNode?: string|TGNode): TGUserApi|TGLink
-    {
-        if (pubOrNode)
-        {
-            if (isObject(pubOrNode) && pubOrNode._ && pubOrNode._['#'])
-            {
+    user(): TGUserApi;
+    user(pubOrNode: string | TGNode): TGLink;
+    user(pubOrNode?: string | TGNode): TGUserApi | TGLink 
+{
+        if (pubOrNode) 
+{
+            if (isObject(pubOrNode) && pubOrNode._ && pubOrNode._['#']) 
+{
                 this.pub = pubFromSoul(pubOrNode._['#']);
             }
-            else if (isString(pubOrNode))
-            {
-                this.pub = pubOrNode.startsWith('~') ? pubFromSoul(pubOrNode) : pubOrNode;
+ else if (isString(pubOrNode)) 
+{
+                this.pub = pubOrNode.startsWith('~')
+                    ? pubFromSoul(pubOrNode)
+                    : pubOrNode;
             }
 
             return this.get('~' + this.pub);
         }
 
-        return (
-            this._user = this._user || new TGUserApi(
+        return (this._user =
+            this._user ||
+            new TGUserApi(
                 this,
                 this.options.persistSession,
                 this.options.sessionStorage,
                 this.options.sessionStorageKey,
-                this._authEvent
-            )
-        );
+                this._authEvent,
+            ));
     }
 
     /**
      * Set TopGun configuration options
      */
-    opt(options: TGClientOptions): TGClient
-    {
+    opt(options: TGClientOptions): TGClient 
+{
         this.options = { ...this.options, ...options };
 
-        if (Array.isArray(options.peers))
-        {
-            this.handlePeers(options.peers)
+        if (Array.isArray(options.peers)) 
+{
+            this.handlePeers(options.peers);
         }
-        if (options.persistStorage)
-        {
-            this.useConnector(
-                new TGIndexedDbConnector(options.storageKey)
+        if (options.persistStorage) 
+{
+            this.useConnector(new TGIndexedDbConnector(options.storageKey));
+        }
+        if (Array.isArray(options.connectors)) 
+{
+            options.connectors.forEach(connector =>
+                this.useConnector(connector),
             );
-        }
-        if (Array.isArray(options.connectors))
-        {
-            options.connectors.forEach(connector => this.useConnector(connector));
         }
 
         return this;
@@ -138,22 +140,22 @@ export class TGClient
     /**
      * Traverse a location in the graph
      */
-    get(soul: string): TGLexLink
-    {
+    get(soul: string): TGLexLink 
+{
         return new TGLexLink(this, soul);
     }
 
     /**
      * System events Callback
      */
-    on(event: string, cb: TGOnCb): TGClient
-    {
-        switch (event)
-        {
+    on(event: string, cb: TGOnCb): TGClient 
+{
+        switch (event) 
+{
             case 'auth':
                 this._authEvent.on(cb);
-                if (this._user?.is)
-                {
+                if (this._user?.is) 
+{
                     this._authEvent.trigger(this._user.is);
                 }
                 break;
@@ -168,21 +170,21 @@ export class TGClient
     /**
      * Register middleware with Security, Encryption, & Authorization - SEA
      */
-    private registerSeaMiddleware(): void
-    {
+    private registerSeaMiddleware(): void 
+{
         this.graph.use(graph =>
             unpackGraph(
                 graph,
-                this.graph['_opt'].mutable ? 'mutable' : 'immutable'
-            )
-        )
+                this.graph['_opt'].mutable ? 'mutable' : 'immutable',
+            ),
+        );
     }
 
     /**
      * Setup GraphConnector for graph
      */
-    private useConnector(connector: TGGraphConnector): void
-    {
+    private useConnector(connector: TGGraphConnector): void 
+{
         connector.sendPutsFromGraph(this.graph);
         connector.sendRequestsFromGraph(this.graph);
         this.graph.connect(connector);
@@ -191,29 +193,27 @@ export class TGClient
     /**
      * Connect to peers via connector SocketClusterConnector
      */
-    private async handlePeers(peers: string[]): Promise<void>
-    {
-        peers.forEach((peer: string) =>
-        {
-            try
-            {
-                const url                                   = new URL(peer);
+    private async handlePeers(peers: string[]): Promise<void> 
+{
+        peers.forEach((peer: string) => 
+{
+            try 
+{
+                const url = new URL(peer);
                 const options: SocketClientOptions = {
                     hostname: url.hostname,
-                    secure  : url.protocol.includes('https')
+                    secure: url.protocol.includes('https'),
                 };
 
-                if (url.port.length > 0)
-                {
+                if (url.port.length > 0) 
+{
                     options.port = Number(url.port);
                 }
 
-                this.useConnector(
-                    createConnector(options)
-                );
+                this.useConnector(createConnector(options));
             }
-            catch (e)
-            {
+ catch (e) 
+{
                 console.error(e);
             }
         });

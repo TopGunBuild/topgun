@@ -1,0 +1,60 @@
+{
+    "root": true,
+    "env": {
+        "node": true,
+        "es6": true
+    },
+    "parserOptions": {
+        "sourceType": "module",
+        "project": [
+            "tsconfig.json"
+        ]
+    },
+    "ignorePatterns": [],
+    "plugins": [
+        "@typescript-eslint/eslint-plugin"
+    ],
+    "extends": [
+        "plugin:@typescript-eslint/eslint-recommended",
+        "plugin:@typescript-eslint/recommended",
+        "prettier"
+    ],
+    "rules": {
+        "@typescript-eslint/interface-name-prefix": "off",
+        "@typescript-eslint/explicit-function-return-type": "off",
+        "@typescript-eslint/no-explicit-any": "off",
+        "@typescript-eslint/no-empty-interface": "off",
+        "@typescript-eslint/max-len": "off",
+        "@typescript-eslint/dot-notation": "off",
+        "@typescript-eslint/explicit-member-accessibility": [
+            "off",
+            {
+                "accessibility": "explicit"
+            }
+        ],
+        "@typescript-eslint/no-inferrable-types": "off",
+        "arrow-parens": [
+            "error",
+            "as-needed",
+            {
+                "requireForBlockBody": true
+            }
+        ],
+        "import/order": "off",
+        "max-len": "off",
+        "no-underscore-dangle": "off",
+        "object-shorthand": "off",
+        "quote-props": [
+            "error",
+            "consistent"
+        ],
+        "quotes": [
+            "error",
+            "single"
+        ],
+        "brace-style": [
+            2,
+            "allman"
+        ]
+    }
+}

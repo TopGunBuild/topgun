@@ -1,31 +1,30 @@
 import { isObject } from './is-object';
 
+declare const __magic__: any;
+
 /**
  * https://mathiasbynens.be/notes/globalthis
  */
-export function polyfillGlobalThis(): void
+export function polyfillGlobalThis(): void 
 {
     if (isObject(globalThis)) return;
-    try
-    {
+    try 
+{
         Object.defineProperty(Object.prototype, '__magic__', {
-            get         : function ()
-            {
-                return this
+            get: function () 
+{
+                return this;
             },
             configurable: true,
         });
-        // @ts-ignore
         __magic__.globalThis = __magic__;
-        // @ts-ignore
-        delete Object.prototype.__magic__
+        delete Object.prototype['__magic__'];
     }
-    catch (e)
-    {
-        if (typeof self !== 'undefined')
-        {
-            // @ts-ignore
-            self.globalThis = self
+ catch (e) 
+{
+        if (typeof self !== 'undefined') 
+{
+            (self as any).globalThis = self;
         }
     }
 }

@@ -10,13 +10,13 @@ import { cloneValue } from '../utils/clone-value';
 type KeyOfLex = keyof LEX;
 type ValueOfLex = LEX[KeyOfLex];
 
-export class TGLexLink extends TGLink
+export class TGLexLink extends TGLink 
 {
     /**
      * Constructor
      */
-    constructor(chain: TGClient, key: string)
-    {
+    constructor(chain: TGClient, key: string) 
+{
         super(chain, key);
     }
 
@@ -30,90 +30,90 @@ export class TGLexLink extends TGLink
      * @param query Key to read data from or LEX query
      * @returns New chain context corresponding to given key
      */
-    get(query: TGOptionsGet): TGLexLink
-    get(key: string): TGLink
-    get(keyOrOptions: string|TGOptionsGet): TGLink|TGLexLink
-    {
+    get(query: TGOptionsGet): TGLexLink;
+    get(key: string): TGLink;
+    get(keyOrOptions: string | TGOptionsGet): TGLink | TGLexLink 
+{
         // The argument is a LEX query
-        if (isObject(keyOrOptions) && !isString(keyOrOptions))
-        {
-            const soul      = this.getPath().shift();
+        if (isObject(keyOrOptions) && !isString(keyOrOptions)) 
+{
+            const soul = this.getPath().shift();
             this.optionsGet = { ['#']: soul, ['.']: {} };
 
-            if (isObject(keyOrOptions['.']))
-            {
+            if (isObject(keyOrOptions['.'])) 
+{
                 this.optionsGet['.'] = cloneValue(keyOrOptions['.']);
             }
-            if (isNumber(keyOrOptions['%']))
-            {
+            if (isNumber(keyOrOptions['%'])) 
+{
                 this.optionsGet['%'] = keyOrOptions['%'];
             }
             return this;
         }
-        else
-        {
+ else 
+{
             return new TGLink(this._chain, keyOrOptions as string, this);
         }
     }
 
-    start(value: string): TGLexLink
-    {
+    start(value: string): TGLexLink 
+{
         this._setLex('>', value);
         return this;
     }
 
-    end(value: string): TGLexLink
-    {
+    end(value: string): TGLexLink 
+{
         this._setLex('<', value);
         return this;
     }
 
-    prefix(value: string): TGLexLink
-    {
+    prefix(value: string): TGLexLink 
+{
         this._setLex('*', value);
         return this;
     }
 
-    equals(value: string): TGLexLink
-    {
+    equals(value: string): TGLexLink 
+{
         this._setLex('=', value);
         return this;
     }
 
-    limit(value: number): TGLexLink
-    {
+    limit(value: number): TGLexLink 
+{
         (this.optionsGet as object)['%'] = value;
         return this;
     }
 
-    reverse(value = true): TGLexLink
-    {
+    reverse(value = true): TGLexLink 
+{
         (this.optionsGet as object)['-'] = value;
         return this;
     }
 
-    map(): TGLink
-    {
+    map(): TGLink 
+{
         return super.map();
     }
 
-    toString(): string
-    {
+    toString(): string 
+{
         return JSON.stringify(this.optionsGet);
     }
 
-    getQuery(): TGOptionsGet
-    {
+    getQuery(): TGOptionsGet 
+{
         return this.optionsGet as TGOptionsGet;
     }
 
-    on(cb: (node: (TGValue|undefined), key?: string) => void): TGLink
-    {
+    on(cb: (node: TGValue | undefined, key?: string) => void): TGLink 
+{
         return super.on(cb);
     }
 
-    once(cb: (node: (TGValue|undefined), key?: string) => void): TGLink
-    {
+    once(cb: (node: TGValue | undefined, key?: string) => void): TGLink 
+{
         return super.once(cb);
     }
 
@@ -121,8 +121,8 @@ export class TGLexLink extends TGLink
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private _setLex(key: KeyOfLex, value: ValueOfLex): void
-    {
+    private _setLex(key: KeyOfLex, value: ValueOfLex): void 
+{
         (this.optionsGet as object)['.'][key] = value;
     }
 }
