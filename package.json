@@ -8,7 +8,10 @@
     "scripts": {
         "build": "tsup",
         "prepublishOnly": "pnpm run build",
-        "test": "vitest run",
+        "test": "jest",
+        "format": "prettier --write \"src/**/*.ts\"",
+        "lint": "eslint \"src/**/*.ts\" --fix",
+        "prepare": "simple-git-hooks",
         "semantic-release": "semantic-release"
     },
     "browser": "dist/client.global.js",
