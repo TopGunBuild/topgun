@@ -1,24 +1,24 @@
 import { isObject } from './is-object';
 
-export function mergeDeep(target, ...sources)
+export function mergeDeep(target, ...sources) 
 {
-    if (!sources.length)
-    {
+    if (!sources.length) 
+{
         return target;
     }
     const source = sources.shift();
 
-    if (isObject(target) && isObject(source))
-    {
-        for (const key in source)
-        {
-            if (isObject(source[key]))
-            {
+    if (isObject(target) && isObject(source)) 
+{
+        for (const key in source) 
+{
+            if (isObject(source[key])) 
+{
                 if (!target[key]) Object.assign(target, { [key]: {} });
                 mergeDeep(target[key], source[key]);
             }
-            else
-            {
+ else 
+{
                 Object.assign(target, { [key]: source[key] });
             }
         }
@@ -26,4 +26,3 @@ export function mergeDeep(target, ...sources)
 
     return mergeDeep(target, ...sources);
 }
-

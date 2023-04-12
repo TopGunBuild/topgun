@@ -8,4 +8,3 @@ export type LEX = {
     /** lte match */
     '<'?: string;
 };
-

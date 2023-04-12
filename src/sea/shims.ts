@@ -13,13 +13,11 @@ const api: any = {
     TextDecoder: root && root.TextDecoder,
 };
 
-api.random     = (len: number) =>
+api.random = (len: number) =>
     api.Buffer.from(
-        crypto.getRandomValues(new Uint8Array(api.Buffer.alloc(len)))
+        crypto.getRandomValues(new Uint8Array(api.Buffer.alloc(len))),
     );
 
-export const random      = api.random;
+export const random = api.random;
 export const TextEncoder = api.TextEncoder;
 export const TextDecoder = api.TextDecoder;
-
-

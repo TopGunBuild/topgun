@@ -1,7 +1,6 @@
 import { LEX } from './lex';
 
-export interface IPolicyLex extends LEX
-{
+export interface IPolicyLex extends LEX {
     /** Path */
     '#'?: IPolicyLex;
     /** Key */

@@ -1,4 +1,4 @@
-import * as _shims from './shims'
+import * as _shims from './shims';
 
 export * from './settings';
 export * from './unpack';
