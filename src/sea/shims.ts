@@ -12,9 +12,11 @@ const api: any = {
 
 api.random = (len: number) =>
     api.Buffer.from(
-        api.crypto.getRandomValues(new Uint8Array(api.Buffer.alloc(len))),
+        crypto.getRandomValues(new Uint8Array(api.Buffer.alloc(len))),
     );
 
 export const random = api.random;
 export const TextEncoder = api.TextEncoder;
 export const TextDecoder = api.TextDecoder;
+export const crypto = api.crypto;
+export const Buffer = api.Buffer;
