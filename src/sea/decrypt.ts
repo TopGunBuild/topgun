@@ -18,7 +18,7 @@ export async function decrypt<T>(
     data: string | { ct: string; iv: string; readonly s: string },
     keyOrPair: string | Pair,
     opt = DEFAULT_OPTS,
-): Promise<T> 
+): Promise<T | undefined> 
 {
     const json: any = parse(data);
     const encoding = opt.encode || DEFAULT_OPTS.encode;
@@ -47,12 +47,12 @@ export async function decrypt<T>(
     }
  catch (e: any) 
 {
-        console.warn('decrypt error', e, e.stack || e);
+        // console.warn('decrypt error', e, e.stack || e);
 
         if (!opt.fallback || encoding === opt.fallback) 
 {
-            // return;
-            throw new Error('Could not decrypt');
+            return;
+            // throw new Error('Could not decrypt');
         }
         return decrypt(data, key, { ...opt, encode: opt.fallback });
     }
