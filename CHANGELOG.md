@@ -1,3 +1,10 @@
+## [1.0.1](https://github.com/TopGunBuild/topgun/compare/v1.0.0...v1.0.1) (2023-04-13)
+
+
+### Bug Fixes
+
+* using topgun-webcrypto instead of @peculiar/webcrypto for isomorphic support ([b2444e3](https://github.com/TopGunBuild/topgun/commit/b2444e38e4df8f6e7e1c1de8aa89962991976bce))
+
 # 1.0.0 (2023-04-13)
 
 
