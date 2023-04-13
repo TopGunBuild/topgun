@@ -32,6 +32,11 @@ export class TGGraphWireConnector extends TGGraphConnector
         return this;
     }
 
+    /**
+     * Send graph data for one or more nodes
+     *
+     * @returns A function to be called to clean up callback listeners
+     */
     put({ graph, msgId = '', replyTo = '', cb }: TGPut): () => void 
     {
         if (!graph) 
@@ -54,6 +59,11 @@ export class TGGraphWireConnector extends TGGraphConnector
         return this.req(msg, cb);
     }
 
+    /**
+     * Request data for a given soul
+     *
+     * @returns A function to be called to clean up callback listeners
+     */
     get({ soul, cb, msgId = '' }: TGGet): () => void 
     {
         const get = { '#': soul };
@@ -66,6 +76,12 @@ export class TGGraphWireConnector extends TGGraphConnector
         return this.req(msg, cb);
     }
 
+    /**
+     * Send a message that expects responses via @
+     *
+     * @param msg
+     * @param cb
+     */
     req(msg: TGMessage, cb?: TGMessageCb): () => void 
     {
         const reqId = (msg['#'] = msg['#'] || generateMessageId());

@@ -18,6 +18,9 @@ import { match } from '../utils/match';
 
 polyfillGlobalThis(); // Make "globalThis" available
 
+/**
+ * Main entry point for TopGun in browser
+ */
 export class TGClient 
 {
     static match = match;
@@ -57,6 +60,9 @@ export class TGClient
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
+    /**
+     * Get User API
+     */
     user(): TGUserApi;
     user(pubOrNode: string | TGNode): TGLink;
     user(pubOrNode?: string | TGNode): TGUserApi | TGLink 
@@ -88,6 +94,9 @@ export class TGClient
             ));
     }
 
+    /**
+     * Set TopGun configuration options
+     */
     opt(options: TGClientOptions): TGClient 
     {
         this.options = { ...this.options, ...options };
@@ -110,11 +119,17 @@ export class TGClient
         return this;
     }
 
+    /**
+     * Traverse a location in the graph
+     */
     get(soul: string): TGLexLink 
     {
         return new TGLexLink(this, soul);
     }
 
+    /**
+     * System events Callback
+     */
     on(event: string, cb: TGOnCb): TGClient 
     {
         switch (event) 
@@ -134,6 +149,9 @@ export class TGClient
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
+    /**
+     * Register middleware with Security, Encryption, & Authorization - SEA
+     */
     private registerSeaMiddleware(): void 
     {
         this.graph.use(graph =>
@@ -144,6 +162,9 @@ export class TGClient
         );
     }
 
+    /**
+     * Setup GraphConnector for graph
+     */
     private useConnector(connector: TGGraphConnector): void 
     {
         connector.sendPutsFromGraph(this.graph);
@@ -151,6 +172,9 @@ export class TGClient
         this.graph.connect(connector);
     }
 
+    /**
+     * Connect to peers via connector TopGunSocket
+     */
     private async handlePeers(peers: string[]): Promise<void> 
     {
         peers.forEach((peer: string) => 

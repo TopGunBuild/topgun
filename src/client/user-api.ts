@@ -59,6 +59,9 @@ export class TGUserApi
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
+    /**
+     * Creates a new user and calls callback upon completion.
+     */
     async create(
         alias: string,
         password: string,
@@ -85,6 +88,9 @@ export class TGUserApi
         }
     }
 
+    /**
+     * Authenticates a user, previously created via User.create.
+     */
     async auth(
         pair: Pair,
         cb: TGAuthCallback,
@@ -166,6 +172,9 @@ export class TGUserApi
         }
     }
 
+    /**
+     * Log out currently authenticated user
+     */
     leave(): TGUserApi 
     {
         if (this._signMiddleware) 
@@ -179,11 +188,17 @@ export class TGUserApi
         return this;
     }
 
+    /**
+     * Traverse a location in the graph
+     */
     get(soul: string): TGLexLink | undefined 
     {
         return this.is && this._client.get(`~${this.is.pub}/${soul}`);
     }
 
+    /**
+     * Recovers the credentials from LocalStorage
+     */
     async recoverCredentials(): Promise<void> 
     {
         if (this._persistSession) 
@@ -207,6 +222,9 @@ export class TGUserApi
         }
     }
 
+    /**
+     * Authenticates a user by credentials
+     */
     useCredentials(credentials: TGUserCredentials): {
         readonly alias: string;
         readonly pub: string;

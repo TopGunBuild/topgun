@@ -18,6 +18,11 @@ export class TGMiddlewareSystem<T, U = undefined, V = undefined>
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
+    /**
+     * Register middleware function
+     *
+     * @param middleware The middleware function to add
+     */
     use(
         middleware: (a: T, b?: U, c?: V) => Promise<T> | T | undefined,
     ): TGMiddlewareSystem<T, U, V> 
@@ -31,6 +36,11 @@ export class TGMiddlewareSystem<T, U = undefined, V = undefined>
         return this;
     }
 
+    /**
+     * Unregister middleware function
+     *
+     * @param middleware The middleware function to remove
+     */
     unuse(
         middleware: (a: T, b?: U, c?: V) => T | undefined,
     ): TGMiddlewareSystem<T, U, V> 
@@ -44,6 +54,12 @@ export class TGMiddlewareSystem<T, U = undefined, V = undefined>
         return this;
     }
 
+    /**
+     * Process values through this middleware
+     * @param a Required, this is the value modified/passed through each middleware fn
+     * @param b Optional extra argument passed to each middleware function
+     * @param c Optional extra argument passed to each middleware function
+     */
     async process(a: T, b?: U, c?: V): Promise<T | undefined | void> 
     {
         let val: T | undefined = a;

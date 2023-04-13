@@ -56,11 +56,17 @@ export class TGLink
         }
     }
 
+    /**
+     * Graph from the current chain link
+     */
     getGraph(): TGGraph 
     {
         return this._chain.graph;
     }
 
+    /**
+     * @returns path of this node
+     */
     getPath(): string[] 
     {
         if (this._parent) 
@@ -71,11 +77,25 @@ export class TGLink
         return [this.key];
     }
 
+    /**
+     * Traverse a location in the graph
+     *
+     * @param key Key to read data from
+     * @returns New chain context corresponding to given key
+     */
     get(key: string): TGLink 
     {
         return new (this.constructor as any)(this._chain, key, this);
     }
 
+    /**
+     * Move up to the parent context on the chain.
+     *
+     * Every time a new chain is created, a reference to the old context is kept to go back to.
+     *
+     * @param amount The number of times you want to go back up the chain. {-1} or {Infinity} will take you to the root.
+     * @returns a parent chain context
+     */
     back(amount = 1): TGLink | TGClient 
     {
         if (amount < 0 || amount === Infinity) 
@@ -89,6 +109,17 @@ export class TGLink
         return this.back(amount - 1);
     }
 
+    /**
+     * Save data into topGun, syncing it with your connected peers.
+     *
+     * You do not need to re-save the entire object every time, topGun will automatically
+     * merge your data into what already exists as a "partial" update.
+     *
+     * @param value the data to save
+     * @param cb an optional callback, invoked on each acknowledgment
+     * @param opt options put
+     * @returns same chain context
+     **/
     put(value: TGValue, cb?: TGMessageCb, opt?: TGOptionsPut): TGLink 
     {
         if (!this._parent && !isObject(value)) 

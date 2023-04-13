@@ -18,7 +18,7 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
     }
 
     // -----------------------------------------------------------------------------------------------------
-    // @ methods
+    // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
     get({ soul, cb, opts, msgId = '' }: TGGet): () => void 

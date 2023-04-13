@@ -100,18 +100,33 @@ export abstract class TGGraphConnector
         });
     }
 
+    /**
+     * Send graph data for one or more nodes
+     *
+     * @returns A function to be called to clean up callback listeners
+     */
     put(_params: TGPut): () => void 
     {
         return () => 
         {};
     }
 
+    /**
+     * Request data for a given soul
+     *
+     * @returns A function to be called to clean up callback listeners
+     */
     get(_params: TGGet): () => void 
     {
         return () => 
         {};
     }
 
+    /**
+     * Queues outgoing messages for sending
+     *
+     * @param msgs The wire protocol messages to enqueue
+     */
     send(msgs: readonly TGMessage[]): TGGraphConnector 
     {
         this.outputQueue.enqueueMany(msgs);
@@ -123,6 +138,11 @@ export abstract class TGGraphConnector
         return this;
     }
 
+    /**
+     * Queue incoming messages for processing
+     *
+     * @param msgs
+     */
     ingest(msgs: readonly TGMessage[]): TGGraphConnector 
     {
         this.inputQueue.enqueueMany(msgs).process();
