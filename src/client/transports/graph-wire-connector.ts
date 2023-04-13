@@ -9,6 +9,9 @@ export class TGGraphWireConnector extends TGGraphConnector
         [msgId: string]: TGMessageCb;
     };
 
+    /**
+     * Constructor
+     */
     constructor(name = 'GraphWireConnector') 
     {
         super(name);
@@ -18,19 +21,18 @@ export class TGGraphWireConnector extends TGGraphConnector
         this.inputQueue.completed.on(this._onProcessedInput);
     }
 
-    public off(msgId: string): TGGraphWireConnector 
+    // -----------------------------------------------------------------------------------------------------
+    // @ Public methods
+    // -----------------------------------------------------------------------------------------------------
+
+    off(msgId: string): TGGraphWireConnector 
     {
         super.off(msgId);
         delete this._callbacks[msgId];
         return this;
     }
 
-    /**
-     * Send graph data for one or more nodes
-     *
-     * @returns A function to be called to clean up callback listeners
-     */
-    public put({ graph, msgId = '', replyTo = '', cb }: TGPut): () => void 
+    put({ graph, msgId = '', replyTo = '', cb }: TGPut): () => void 
     {
         if (!graph) 
         {
@@ -52,12 +54,7 @@ export class TGGraphWireConnector extends TGGraphConnector
         return this.req(msg, cb);
     }
 
-    /**
-     * Request data for a given soul
-     *
-     * @returns A function to be called to clean up callback listeners
-     */
-    public get({ soul, cb, msgId = '' }: TGGet): () => void 
+    get({ soul, cb, msgId = '' }: TGGet): () => void 
     {
         const get = { '#': soul };
         const msg: TGMessage = { get };
@@ -69,13 +66,7 @@ export class TGGraphWireConnector extends TGGraphConnector
         return this.req(msg, cb);
     }
 
-    /**
-     * Send a message that expects responses via @
-     *
-     * @param msg
-     * @param cb
-     */
-    public req(msg: TGMessage, cb?: TGMessageCb): () => void 
+    req(msg: TGMessage, cb?: TGMessageCb): () => void 
     {
         const reqId = (msg['#'] = msg['#'] || generateMessageId());
         if (cb) 
@@ -88,6 +79,10 @@ export class TGGraphWireConnector extends TGGraphConnector
             this.off(reqId);
         };
     }
+
+    // -----------------------------------------------------------------------------------------------------
+    // @ Private methods
+    // -----------------------------------------------------------------------------------------------------
 
     private _onProcessedInput(msg?: TGMessage): void 
     {

@@ -11,14 +11,17 @@ export class TGProcessQueue<
     V = any,
 > extends TGQueue<T> 
 {
-    public isProcessing: boolean;
-    public readonly middleware: TGMiddlewareSystem<T, U, V>;
-    public readonly completed: TGEvent<T>;
-    public readonly emptied: TGEvent<boolean>;
-    public readonly processDupes: TGProcessDupesOption;
+    isProcessing: boolean;
+    readonly middleware: TGMiddlewareSystem<T, U, V>;
+    readonly completed: TGEvent<T>;
+    readonly emptied: TGEvent<boolean>;
+    readonly processDupes: TGProcessDupesOption;
 
     protected alreadyProcessed: T[];
 
+    /**
+     * Constructor
+     */
     constructor(
         name = 'ProcessQueue',
         processDupes: TGProcessDupesOption = 'process_dupes',
@@ -33,12 +36,16 @@ export class TGProcessQueue<
         this.middleware = new TGMiddlewareSystem<T, U, V>(`${name}.middleware`);
     }
 
-    public has(item: T): boolean 
+    // -----------------------------------------------------------------------------------------------------
+    // @ Public methods
+    // -----------------------------------------------------------------------------------------------------
+
+    has(item: T): boolean 
     {
         return super.has(item) || this.alreadyProcessed.indexOf(item) !== -1;
     }
 
-    public async processNext(b?: U, c?: V): Promise<void> 
+    async processNext(b?: U, c?: V): Promise<void> 
     {
         let item = this.dequeue();
         const processedItem = item;
@@ -61,13 +68,13 @@ export class TGProcessQueue<
         }
     }
 
-    public enqueueMany(items: readonly T[]): TGProcessQueue<T, U, V> 
+    enqueueMany(items: readonly T[]): TGProcessQueue<T, U, V> 
     {
         super.enqueueMany(items);
         return this;
     }
 
-    public async process(): Promise<void> 
+    async process(): Promise<void> 
     {
         if (this.isProcessing) 
         {

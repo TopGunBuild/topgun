@@ -2,7 +2,7 @@ import { diffCRDT } from '../crdt';
 import { TGLink } from './link';
 import { TGGraph } from './graph/graph';
 import { TGGraphConnector } from './transports/graph-connector';
-import { TGClientOptions } from './client-options';
+import { DEFAULT_OPTIONS, TGClientOptions } from './client-options';
 import { createConnector } from './transports/web-socket-graph-connector';
 import { ClientOptions as SocketClientOptions } from 'topgun-socket/client';
 import { TGUserApi } from './user-api';
@@ -10,7 +10,6 @@ import { pubFromSoul, unpackGraph } from '../sea';
 import { polyfillGlobalThis } from '../utils/global-this';
 import { isObject } from '../utils/is-object';
 import { TGIndexedDbConnector } from '../indexeddb/indexeddb-connector';
-import { localStorageAdapter } from '../utils/local-storage';
 import { TGOnCb, TGNode, TGUserReference } from '../types';
 import { TGEvent } from './control-flow/event';
 import { isString } from '../utils/is-string';
@@ -19,26 +18,6 @@ import { match } from '../utils/match';
 
 polyfillGlobalThis(); // Make "globalThis" available
 
-export const DEFAULT_OPTIONS: Required<TGClientOptions> = {
-    peers: [],
-    graph: new TGGraph(),
-    connectors: [],
-    persistStorage: false,
-    storageKey: 'top-gun-nodes',
-    persistSession: true,
-    sessionStorage: localStorageAdapter,
-    sessionStorageKey: 'top-gun-session',
-    passwordMinLength: 8,
-};
-
-/**
- * Main entry point for TopGun
- *
- * Usage:
- *
- *   const topGun = new TopGun.Client({ peers: ["https://top-gun.io/topgun"]})
- *   topGun.get("topgun/things/f8c3de3d-1fea-4d7c-a8b0-29f63c4c3454").on(thing => console.log(thing))
- */
 export class TGClient 
 {
     static match = match;
@@ -78,9 +57,6 @@ export class TGClient
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    /**
-     * Get User API
-     */
     user(): TGUserApi;
     user(pubOrNode: string | TGNode): TGLink;
     user(pubOrNode?: string | TGNode): TGUserApi | TGLink 
@@ -112,9 +88,6 @@ export class TGClient
             ));
     }
 
-    /**
-     * Set TopGun configuration options
-     */
     opt(options: TGClientOptions): TGClient 
     {
         this.options = { ...this.options, ...options };
@@ -137,17 +110,11 @@ export class TGClient
         return this;
     }
 
-    /**
-     * Traverse a location in the graph
-     */
     get(soul: string): TGLexLink 
     {
         return new TGLexLink(this, soul);
     }
 
-    /**
-     * System events Callback
-     */
     on(event: string, cb: TGOnCb): TGClient 
     {
         switch (event) 
@@ -167,9 +134,6 @@ export class TGClient
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    /**
-     * Register middleware with Security, Encryption, & Authorization - SEA
-     */
     private registerSeaMiddleware(): void 
     {
         this.graph.use(graph =>
@@ -180,9 +144,6 @@ export class TGClient
         );
     }
 
-    /**
-     * Setup GraphConnector for graph
-     */
     private useConnector(connector: TGGraphConnector): void 
     {
         connector.sendPutsFromGraph(this.graph);
@@ -190,9 +151,6 @@ export class TGClient
         this.graph.connect(connector);
     }
 
-    /**
-     * Connect to peers via connector SocketClusterConnector
-     */
     private async handlePeers(peers: string[]): Promise<void> 
     {
         peers.forEach((peer: string) => 

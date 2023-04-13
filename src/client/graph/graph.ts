@@ -27,11 +27,6 @@ interface TGGraphOptions {
     readonly mutable?: boolean;
 }
 
-/**
- * High level management of a subset of the graph
- *
- * Provides facilities for querying and writing to graph data from one or more sources
- */
 export class TGGraph 
 {
     readonly id: string;
@@ -85,24 +80,12 @@ export class TGGraph
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    /**
-     * Configure graph options
-     *
-     * Currently unused
-     *
-     * @param options
-     */
     opt(options: TGGraphOptions): TGGraph 
     {
         this._opt = { ...this._opt, ...options };
         return this;
     }
 
-    /**
-     * Connect to a source/destination for graph data
-     *
-     * @param connector the source or destination for graph data
-     */
     connect(connector: TGGraphConnector): TGGraph 
     {
         if (this._connectors.indexOf(connector) !== -1) 
@@ -121,11 +104,6 @@ export class TGGraph
         return this;
     }
 
-    /**
-     * Disconnect from a source/destination for graph data
-     *
-     * @param connector the source or destination for graph data
-     */
     disconnect(connector: TGGraphConnector): TGGraph 
     {
         const idx = this._connectors.indexOf(connector);
@@ -142,12 +120,6 @@ export class TGGraph
         return this;
     }
 
-    /**
-     * Register graph middleware
-     *
-     * @param middleware The middleware function to add
-     * @param kind Optionaly register write middleware instead of read by passing "write"
-     */
     use(middleware: TGMiddleware, kind = 'read' as TGMiddlewareType): TGGraph 
     {
         if (kind === 'read') 
@@ -161,12 +133,6 @@ export class TGGraph
         return this;
     }
 
-    /**
-     * Unregister graph middleware
-     *
-     * @param middleware The middleware function to remove
-     * @param kind Optionaly unregister write middleware instead of read by passing "write"
-     */
     unuse(
         middleware: TGMiddleware,
         kind = 'read' as TGMiddlewareType,
@@ -192,13 +158,6 @@ export class TGGraph
         return this;
     }
 
-    /**
-     * Read a potentially multi-level deep path from the graph
-     *
-     * @param path The path to read
-     * @param cb The callback to invoke with results
-     * @returns a cleanup function to after done with query
-     */
     query(path: readonly string[], cb: TGOnCb): () => void 
     {
         let lastSouls = [] as readonly string[];
@@ -242,17 +201,6 @@ export class TGGraph
         };
     }
 
-    /**
-     * Write graph data to a potentially multi-level deep path in the graph
-     *
-     * @param fullPath The path to read
-     * @param data The value to write
-     * @param cb Callback function to be invoked for write acks
-     * @param uuidFn
-     * @param getPub
-     * @param putOpt
-     * @returns a promise
-     */
     async putPath(
         fullPath: string[],
         data: TGValue,
@@ -284,14 +232,6 @@ export class TGGraph
         this.put(graphData, fullPath, cb, undefined, soul, putOpt);
     }
 
-    /**
-     * Request node data
-     *
-     * @param soul identifier of node to request
-     * @param cb callback for response messages
-     * @param msgId optional unique message identifier
-     * @returns a function to cleanup listeners when done
-     */
     get(soul: string, cb?: TGMessageCb, msgId?: string): () => void 
     {
         const id = msgId || generateMessageId();
@@ -305,17 +245,6 @@ export class TGGraph
         return () => this.events.off.trigger(id);
     }
 
-    /**
-     * Write node data
-     *
-     * @param data one or more nodes keyed by soul
-     * @param fullPath The path to read
-     * @param cb optional callback for response messages
-     * @param msgId optional unique message identifier
-     * @param soul string
-     * @param putOpt put options
-     * @returns a function to clean up listeners when done
-     */
     put(
         data: TGGraphData,
         fullPath: string[],
@@ -376,11 +305,6 @@ export class TGGraph
         return this._connectors.length;
     }
 
-    /**
-     * Synchronously invoke callback function for each connector to this graph
-     *
-     * @param cb The callback to invoke
-     */
     eachConnector(cb: (connector: TGGraphConnector) => void): TGGraph 
     {
         for (const connector of this._connectors) 
@@ -391,9 +315,6 @@ export class TGGraph
         return this;
     }
 
-    /**
-     * Update graph data in this chain from some local or external source
-     */
     async receiveGraphData(
         data?: TGGraphData,
         id?: string,

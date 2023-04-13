@@ -7,7 +7,7 @@ import { TGGraph } from './graph';
  */
 export class TGGraphNode 
 {
-    public readonly soul: string;
+    readonly soul: string;
 
     private _endCurQuery?: () => void;
     private readonly _data: TGEvent<TGNode | undefined>;
@@ -17,6 +17,9 @@ export class TGGraphNode
         replyToId?: string,
     ) => void;
 
+    /**
+     * Constructor
+     */
     constructor(
         graph: TGGraph,
         soul: string,
@@ -30,12 +33,16 @@ export class TGGraphNode
         this.soul = soul;
     }
 
-    public listenerCount(): number 
+    // -----------------------------------------------------------------------------------------------------
+    // @ Public methods
+    // -----------------------------------------------------------------------------------------------------
+
+    listenerCount(): number 
     {
         return this._data.listenerCount();
     }
 
-    public get(cb?: TGNodeListenCb): TGGraphNode 
+    get(cb?: TGNodeListenCb): TGGraphNode 
     {
         if (cb) 
         {
@@ -45,23 +52,19 @@ export class TGGraphNode
         return this;
     }
 
-    public receive(data: TGNode | undefined): TGGraphNode 
+    receive(data: TGNode | undefined): TGGraphNode 
     {
         this._data.trigger(data, this.soul);
         return this;
     }
 
-    public on(
-        cb: (data: TGNode | undefined, soul: string) => void,
-    ): TGGraphNode 
+    on(cb: (data: TGNode | undefined, soul: string) => void): TGGraphNode 
     {
         this._data.on(cb);
         return this;
     }
 
-    public off(
-        cb?: (data: TGNode | undefined, soul: string) => void,
-    ): TGGraphNode 
+    off(cb?: (data: TGNode | undefined, soul: string) => void): TGGraphNode 
     {
         if (cb) 
         {
@@ -80,6 +83,10 @@ export class TGGraphNode
 
         return this;
     }
+
+    // -----------------------------------------------------------------------------------------------------
+    // @ Private methods
+    // -----------------------------------------------------------------------------------------------------
 
     private _ask(): TGGraphNode 
     {

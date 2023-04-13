@@ -1,22 +1,24 @@
 export class TGMiddlewareSystem<T, U = undefined, V = undefined> 
 {
-    public readonly name: string;
+    readonly name: string;
     private readonly _middlewareFunctions: Array<
         (a: T, b?: U, c?: V) => Promise<T> | T | undefined
     >;
 
+    /**
+     * Constructor
+     */
     constructor(name = 'MiddlewareSystem') 
     {
         this.name = name;
         this._middlewareFunctions = [];
     }
 
-    /**
-     * Register middleware function
-     *
-     * @param middleware The middleware function to add
-     */
-    public use(
+    // -----------------------------------------------------------------------------------------------------
+    // @ Public methods
+    // -----------------------------------------------------------------------------------------------------
+
+    use(
         middleware: (a: T, b?: U, c?: V) => Promise<T> | T | undefined,
     ): TGMiddlewareSystem<T, U, V> 
     {
@@ -29,12 +31,7 @@ export class TGMiddlewareSystem<T, U = undefined, V = undefined>
         return this;
     }
 
-    /**
-     * Unregister middleware function
-     *
-     * @param middleware The middleware function to remove
-     */
-    public unuse(
+    unuse(
         middleware: (a: T, b?: U, c?: V) => T | undefined,
     ): TGMiddlewareSystem<T, U, V> 
     {
@@ -47,13 +44,7 @@ export class TGMiddlewareSystem<T, U = undefined, V = undefined>
         return this;
     }
 
-    /**
-     * Process values through this middleware
-     * @param a Required, this is the value modified/passed through each middleware fn
-     * @param b Optional extra argument passed to each middleware function
-     * @param c Optional extra argument passed to each middleware function
-     */
-    public async process(a: T, b?: U, c?: V): Promise<T | undefined | void> 
+    async process(a: T, b?: U, c?: V): Promise<T | undefined | void> 
     {
         let val: T | undefined = a;
 

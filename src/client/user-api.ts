@@ -1,5 +1,5 @@
 import { authenticate, createUser, graphSigner } from '../sea';
-import { DEFAULT_OPTIONS, TGClient } from './client';
+import { TGClient } from './client';
 import { TGEvent } from './control-flow/event';
 import { TGWebSocketGraphConnector } from './transports/web-socket-graph-connector';
 import {
@@ -20,6 +20,7 @@ import { isObject } from '../utils/is-object';
 import { isString } from '../utils/is-string';
 import { isFunction } from '../utils/is-function';
 import { TGLexLink } from './lex-link';
+import { DEFAULT_OPTIONS } from './client-options';
 
 export class TGUserApi 
 {
@@ -33,7 +34,7 @@ export class TGUserApi
         existingGraph: any,
         putOpt?: TGOptionsPut,
     ) => Promise<any>;
-    public is?: TGUserReference;
+    is?: TGUserReference;
 
     /**
      * Constructor
@@ -58,10 +59,7 @@ export class TGUserApi
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    /**
-     * Creates a new user and calls callback upon completion.
-     */
-    public async create(
+    async create(
         alias: string,
         password: string,
         cb?: TGAuthCallback,
@@ -87,21 +85,18 @@ export class TGUserApi
         }
     }
 
-    /**
-     * Authenticates a user, previously created via User.create.
-     */
-    public async auth(
+    async auth(
         pair: Pair,
         cb: TGAuthCallback,
         _opt?: AuthOptions,
     ): Promise<TGUserReference | undefined>;
-    public async auth(
+    async auth(
         alias: string,
         password: string,
         cb?: TGAuthCallback,
         _opt?: AuthOptions,
     ): Promise<TGUserReference | undefined>;
-    public async auth(
+    async auth(
         aliasOrPair: string | Pair,
         passwordOrCallback: string | TGAuthCallback,
         optionsOrCallback?: TGAuthCallback | AuthOptions,
@@ -171,10 +166,7 @@ export class TGUserApi
         }
     }
 
-    /**
-     * Log out currently authenticated user
-     */
-    public leave(): TGUserApi 
+    leave(): TGUserApi 
     {
         if (this._signMiddleware) 
         {
@@ -187,18 +179,12 @@ export class TGUserApi
         return this;
     }
 
-    /**
-     * Traverse a location in the graph
-     */
-    public get(soul: string): TGLexLink | undefined 
+    get(soul: string): TGLexLink | undefined 
     {
         return this.is && this._client.get(`~${this.is.pub}/${soul}`);
     }
 
-    /**
-     * Recovers the credentials from LocalStorage
-     */
-    public async recoverCredentials(): Promise<void> 
+    async recoverCredentials(): Promise<void> 
     {
         if (this._persistSession) 
         {
@@ -221,10 +207,7 @@ export class TGUserApi
         }
     }
 
-    /**
-     * Authenticates a user by credentials
-     */
-    public useCredentials(credentials: TGUserCredentials): {
+    useCredentials(credentials: TGUserCredentials): {
         readonly alias: string;
         readonly pub: string;
     } 

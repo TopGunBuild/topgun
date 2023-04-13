@@ -24,12 +24,6 @@ export class TGLexLink extends TGLink
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    /**
-     * Where to read data from
-     *
-     * @param query Key to read data from or LEX query
-     * @returns New chain context corresponding to given key
-     */
     get(query: TGOptionsGet): TGLexLink;
     get(key: string): TGLink;
     get(keyOrOptions: string | TGOptionsGet): TGLink | TGLexLink 

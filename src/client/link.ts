@@ -56,19 +56,11 @@ export class TGLink
         }
     }
 
-    /**
-     * Graph from the current chain link
-     *
-     * @returns {TGGraph}
-     */
     getGraph(): TGGraph 
     {
         return this._chain.graph;
     }
 
-    /**
-     * @returns path of this node
-     */
     getPath(): string[] 
     {
         if (this._parent) 
@@ -79,25 +71,11 @@ export class TGLink
         return [this.key];
     }
 
-    /**
-     * Traverse a location in the graph
-     *
-     * @param key Key to read data from
-     * @returns New chain context corresponding to given key
-     */
     get(key: string): TGLink 
     {
         return new (this.constructor as any)(this._chain, key, this);
     }
 
-    /**
-     * Move up to the parent context on the chain.
-     *
-     * Every time a new chain is created, a reference to the old context is kept to go back to.
-     *
-     * @param amount The number of times you want to go back up the chain. {-1} or {Infinity} will take you to the root.
-     * @returns a parent chain context
-     */
     back(amount = 1): TGLink | TGClient 
     {
         if (amount < 0 || amount === Infinity) 
@@ -111,23 +89,6 @@ export class TGLink
         return this.back(amount - 1);
     }
 
-    /* /!**
-     * Save data into topGun, syncing it with your connected peers.
-     *
-     * You do not need to re-save the entire object every time, topGun will automatically
-     * merge your data into what already exists as a "partial" update.
-     *
-     * @param value the data to save
-     * @param cb an optional callback, invoked on each acknowledgment
-     * @returns same chain context
-     *!/*/
-    /**
-     *
-     * @param {TGValue} value
-     * @param {TGMessageCb} cb
-     * @param {TGOptionsPut} opt
-     * @returns {Link}
-     */
     put(value: TGValue, cb?: TGMessageCb, opt?: TGOptionsPut): TGLink 
     {
         if (!this._parent && !isObject(value)) 
@@ -148,18 +109,6 @@ export class TGLink
         return this;
     }
 
-    /**
-     * Add a unique item to an unordered list.
-     *
-     * Works like a mathematical set, where each item in the list is unique.
-     * If the item is added twice, it will be merged.
-     * This means only objects, for now, are supported.
-     *
-     * @param data should be a topGun reference or an object
-     * @param cb The callback is invoked exactly the same as .put
-     * @param {TGOptionsPut} opt
-     * @returns chain context for added object
-     */
     set(data: any, cb?: TGMessageCb, opt?: TGOptionsPut): TGLink 
     {
         let soul;
@@ -210,27 +159,12 @@ export class TGLink
         return this;
     }
 
-    /**
-     * Register a callback for when it appears a record does not exist
-     *
-     * If you need to know whether a property or key exists, you can check with .not.
-     * It will consult the connected peers and invoke the callback if there's reasonable certainty that none of them have the data available.
-     *
-     * @param cb If there's reason to believe the data doesn't exist, the callback will be invoked. This can be used as a check to prevent implicitly writing data
-     * @returns same chain context
-     */
     not(cb: (key: string) => void): TGLink 
     {
         this.promise().then(val => !isDefined(val) && cb(this.key));
         return this;
     }
 
-    /**
-     * Change the configuration of this chain link
-     *
-     * @param options
-     * @returns current options
-     */
     opt(options?: TGChainOptions): TGChainOptions 
     {
         if (options) 
@@ -244,29 +178,12 @@ export class TGLink
         return this._opt;
     }
 
-    /**
-     * Get the current data without subscribing to updates. Or undefined if it cannot be found.
-     *
-     * @param cb The data is the value for that chain at that given point in time. And the key is the last property name or ID of the node.
-     * @returns same chain context
-     */
     once(cb: TGOnCb): TGLink 
     {
         this.promise().then(val => cb(val, this.key));
         return this;
     }
 
-    /**
-     * Subscribe to updates and changes on a node or property in realtime.
-     *
-     * Triggered once initially and whenever the property or node you're focused on changes,
-     * Since topGun streams data, the callback will probably be called multiple times as new chunk comes in.
-     *
-     * To remove a listener call .off() on the same property or node.
-     *
-     * @param cb The callback is immediately fired with the data as it is at that point in time.
-     * @returns same chain context
-     */
     on(cb: TGOnCb): TGLink 
     {
         const callback = (val, key) => 
@@ -281,11 +198,6 @@ export class TGLink
             : this._on(callback);
     }
 
-    /**
-     * Unsubscribe one or all listeners subscribed with on
-     *
-     * @returns same chain context
-     */
     off(cb?: TGOnCb): TGLink 
     {
         if (cb) 
@@ -344,19 +256,15 @@ export class TGLink
         return this.promise().then(fn);
     }
 
-    /**
-     * Iterates over each property and item on a node, passing it down the chain
-     *
-     * Behaves like a forEach on your data.
-     * It also subscribes to every item as well and listens for newly inserted items.
-     *
-     * @returns a new chain context holding many chains simultaneously.
-     */
     map(): TGLink 
     {
         this._mapLinks = {};
         return this;
     }
+
+    // -----------------------------------------------------------------------------------------------------
+    // @ Protected methods
+    // -----------------------------------------------------------------------------------------------------
 
     protected _onQueryResponse(value?: TGValue): void 
     {

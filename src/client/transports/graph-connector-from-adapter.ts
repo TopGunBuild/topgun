@@ -18,10 +18,10 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
     }
 
     // -----------------------------------------------------------------------------------------------------
-    // @ Public methods
+    // @ methods
     // -----------------------------------------------------------------------------------------------------
 
-    public get({ soul, cb, opts, msgId = '' }: TGGet): () => void 
+    get({ soul, cb, opts, msgId = '' }: TGGet): () => void 
     {
         this.adapter
             .get(soul, opts)
@@ -56,7 +56,7 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
         return NOOP;
     }
 
-    public put({ graph, msgId = '', cb }: TGPut): () => void 
+    put({ graph, msgId = '', cb }: TGPut): () => void 
     {
         this.adapter
             .put(graph)

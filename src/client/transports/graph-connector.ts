@@ -4,14 +4,13 @@ import { TGProcessQueue } from '../control-flow/process-queue';
 import { TGGraph } from '../graph/graph';
 
 /* eslint-disable @typescript-eslint/no-unused-vars */
-
 /* eslint-disable @typescript-eslint/no-empty-function */
 export abstract class TGGraphConnector 
 {
-    public readonly name: string;
-    public isConnected: boolean;
+    readonly name: string;
+    isConnected: boolean;
 
-    public readonly events: {
+    readonly events: {
         readonly graphData: TGEvent<
             TGGraphData,
             string | undefined,
@@ -24,7 +23,10 @@ export abstract class TGGraphConnector
     protected readonly inputQueue: TGProcessQueue<TGMessage>;
     protected readonly outputQueue: TGProcessQueue<TGMessage>;
 
-    constructor(name = 'GraphConnector') 
+    /**
+     * Constructor
+     */
+    protected constructor(name = 'GraphConnector') 
     {
         this.isConnected = false;
         this.name = name;
@@ -43,28 +45,32 @@ export abstract class TGGraphConnector
             ),
         };
 
-        this.__onConnectedChange = this.__onConnectedChange.bind(this);
-        this.events.connection.on(this.__onConnectedChange);
+        this._onConnectedChange = this._onConnectedChange.bind(this);
+        this.events.connection.on(this._onConnectedChange);
     }
 
-    public connectToGraph(graph: TGGraph): TGGraphConnector 
+    // -----------------------------------------------------------------------------------------------------
+    // @ Public methods
+    // -----------------------------------------------------------------------------------------------------
+
+    connectToGraph(graph: TGGraph): TGGraphConnector 
     {
         graph.events.off.on(this.off);
         return this;
     }
 
-    public off(_msgId: string): TGGraphConnector 
+    off(_msgId: string): TGGraphConnector 
     {
         return this;
     }
 
-    public sendPutsFromGraph(graph: TGGraph): TGGraphConnector 
+    sendPutsFromGraph(graph: TGGraph): TGGraphConnector 
     {
         graph.events.put.on(this.put);
         return this;
     }
 
-    public sendRequestsFromGraph(graph: TGGraph): TGGraphConnector 
+    sendRequestsFromGraph(graph: TGGraph): TGGraphConnector 
     {
         graph.events.get.on((req) => 
         {
@@ -73,7 +79,7 @@ export abstract class TGGraphConnector
         return this;
     }
 
-    public waitForConnection(): Promise<void> 
+    waitForConnection(): Promise<void> 
     {
         if (this.isConnected) 
         {
@@ -94,34 +100,19 @@ export abstract class TGGraphConnector
         });
     }
 
-    /**
-     * Send graph data for one or more nodes
-     *
-     * @returns A function to be called to clean up callback listeners
-     */
-    public put(_params: TGPut): () => void 
+    put(_params: TGPut): () => void 
     {
         return () => 
         {};
     }
 
-    /**
-     * Request data for a given soul
-     *
-     * @returns A function to be called to clean up callback listeners
-     */
-    public get(_params: TGGet): () => void 
+    get(_params: TGGet): () => void 
     {
         return () => 
         {};
     }
 
-    /**
-     * Queues outgoing messages for sending
-     *
-     * @param msgs The wire protocol messages to enqueue
-     */
-    public send(msgs: readonly TGMessage[]): TGGraphConnector 
+    send(msgs: readonly TGMessage[]): TGGraphConnector 
     {
         this.outputQueue.enqueueMany(msgs);
         if (this.isConnected) 
@@ -132,19 +123,18 @@ export abstract class TGGraphConnector
         return this;
     }
 
-    /**
-     * Queue incoming messages for processing
-     *
-     * @param msgs
-     */
-    public ingest(msgs: readonly TGMessage[]): TGGraphConnector 
+    ingest(msgs: readonly TGMessage[]): TGGraphConnector 
     {
         this.inputQueue.enqueueMany(msgs).process();
 
         return this;
     }
 
-    private __onConnectedChange(connected?: boolean): void 
+    // -----------------------------------------------------------------------------------------------------
+    // @ Private methods
+    // -----------------------------------------------------------------------------------------------------
+
+    private _onConnectedChange(connected?: boolean): void 
     {
         if (connected) 
         {

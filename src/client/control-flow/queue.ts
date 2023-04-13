@@ -2,26 +2,33 @@ import { TGMessage } from '../../types';
 
 export class TGQueue<T = TGMessage> 
 {
-    public readonly name: string;
+    readonly name: string;
     private _queue: T[];
 
+    /**
+     * Constructor
+     */
     constructor(name = 'Queue') 
     {
         this.name = name;
         this._queue = [];
     }
 
-    public count(): number 
+    // -----------------------------------------------------------------------------------------------------
+    // @ Public methods
+    // -----------------------------------------------------------------------------------------------------
+
+    count(): number 
     {
         return this._queue.length;
     }
 
-    public has(item: T): boolean 
+    has(item: T): boolean 
     {
         return this._queue.indexOf(item) !== -1;
     }
 
-    public enqueue(item: T): TGQueue<T> 
+    enqueue(item: T): TGQueue<T> 
     {
         if (this.has(item)) 
         {
@@ -32,12 +39,12 @@ export class TGQueue<T = TGMessage>
         return this;
     }
 
-    public dequeue(): T | undefined 
+    dequeue(): T | undefined 
     {
         return this._queue.pop();
     }
 
-    public enqueueMany(items: readonly T[]): TGQueue<T> 
+    enqueueMany(items: readonly T[]): TGQueue<T> 
     {
         const filtered = items.filter(item => !this.has(item));
 

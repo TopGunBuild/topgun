@@ -13,11 +13,11 @@ import { sign } from '../../sea';
 /* eslint-disable @typescript-eslint/no-empty-function */
 export class TGWebSocketGraphConnector extends TGGraphWireConnector 
 {
-    public readonly socket: TGClientSocket;
-    public readonly opts: ClientOptions | undefined;
-    public readonly msgChannel?: TGChannel<any>;
-    public readonly getsChannel?: TGChannel<any>;
-    public readonly putsChannel?: TGChannel<any>;
+    readonly socket: TGClientSocket;
+    readonly opts: ClientOptions | undefined;
+    readonly msgChannel?: TGChannel<any>;
+    readonly getsChannel?: TGChannel<any>;
+    readonly putsChannel?: TGChannel<any>;
 
     private readonly _requestChannels: {
         [msgId: string]: TGChannel<any>;
