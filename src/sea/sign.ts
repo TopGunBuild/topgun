@@ -31,14 +31,14 @@ export async function verifyCertificate(
 ): Promise<false | VerifyData> 
 {
     if (cert && cert.m && cert.s && userPub && soulPub) 
-{
+    {
         // check if "pub" (of the graph owner) really issued this cert
         const data = await verify(cert, soulPub);
         const putDate = new Date().getTime();
         const certDate = (data && data.e) || 0;
 
         if (putDate > certDate) 
-{
+        {
             console.warn('Certificate expired.');
             return false;
         }
@@ -53,7 +53,7 @@ export async function verifyCertificate(
             writePermission &&
             (certified === '*' || certified.includes(userPub))
         ) 
-{
+        {
             // ok, now "certifying" is in the "certifyings" list, but is "path" allowed? Check path
             const key = fullPath.pop() as string;
             const path = fullPath.join('/');
@@ -61,18 +61,18 @@ export async function verifyCertificate(
             const writePermissions = Array.isArray(writePermission)
                 ? writePermission
                 : isObject(writePermission) || isString(writePermission)
-                ? [writePermission]
-                : [];
+                    ? [writePermission]
+                    : [];
 
             for (const lex of writePermissions) 
-{
+            {
                 const policy = new Policy(lex, path, key, userPub);
 
                 if (policy.match()) 
-{
+                {
                     // Is Certificant forced to present in Path
                     if (policy.hasCertificatePathError()) 
-{
+                    {
                         console.warn(
                             `Path "${path}" or key "${key}" must contain string "${userPub}".`,
                         );
@@ -85,16 +85,16 @@ export async function verifyCertificate(
                         isObject(data.wb) && isString(data.wb['#'])
                             ? data.wb['#']
                             : isString(data.wb)
-                            ? data.wb
-                            : null;
+                                ? data.wb
+                                : null;
 
                     if (isString(writeBlockPath)) 
-{
+                    {
                         let root: TGLink | TGClient = client;
 
                         // Fix if path doesn't start with certificate
                         if (!writeBlockPath.startsWith('~')) 
-{
+                        {
                             root = client.get('~' + soulPub);
                         }
 
@@ -105,7 +105,7 @@ export async function verifyCertificate(
                             .promise({ timeout: 1000 });
 
                         if (value === 1 || value === true) 
-{
+                        {
                             console.warn(`Certificant ${userPub} blocked.`);
                             return false;
                         }
@@ -219,7 +219,7 @@ export async function sign(
 ): Promise<string | { readonly m: any; readonly s: string }> 
 {
     if (!isDefined(data)) 
-{
+    {
         throw new Error('`undefined` not allowed.');
     }
     const json = parse(data);
@@ -231,11 +231,11 @@ export async function sign(
         ((json.s && json.m) || (json[':'] && json['~'])) &&
         (await verify(data, pair.pub))
     ) 
-{
+    {
         // already signed
         const parsed = parse(checkData);
         if (opt.raw) 
-{
+        {
             return parsed;
         }
         return 'SEA' + JSON.stringify(parsed);
@@ -248,7 +248,7 @@ export async function sign(
         s: sig,
     };
     if (opt.raw) 
-{
+    {
         return r;
     }
     return 'SEA' + JSON.stringify(r);
@@ -267,7 +267,7 @@ export async function signNodeValue(
     const json = parse(data);
 
     if (data && json && ((json.s && json.m) || (json[':'] && json['~']))) 
-{
+    {
         // already signed
         return json;
     }
@@ -291,13 +291,13 @@ export async function signNode(node: TGNode, pair: PairBase): Promise<TGNode>
     const soul = node._ && node._['#'];
 
     for (const key in node) 
-{
+    {
         if (key === '_') 
-{
+        {
             continue;
         }
         if (key === 'pub' /*|| key === "alias"*/ && soul === `~${pair.pub}`) 
-{
+        {
             // Special case
             signedNode[key] = node[key];
             continue;
@@ -319,15 +319,15 @@ export async function signGraph(
     fullPath = Array.isArray(fullPath) ? [...fullPath].reverse() : [];
 
     for (const soul in graph) 
-{
+    {
         if (!soul) 
-{
+        {
             continue;
         }
 
         const node = graph[soul];
         if (!node) 
-{
+        {
             continue;
         }
 
@@ -335,12 +335,12 @@ export async function signGraph(
 
         // if writing to own graph, just allow it
         if (soulPub === pair.pub) 
-{
+        {
             modifiedGraph[soul] = await signNode(node, pair);
         }
         // if writing to other's graph, check if cert exists then try to inject cert into put, also inject self pub so that everyone can verify the put
         else if (soulPub && check(putOpt?.opt?.cert)) 
-{
+        {
             const cert = parse(putOpt?.opt?.cert);
 
             // even if cert exists, we must verify it
@@ -356,7 +356,7 @@ export async function signGraph(
                     fullPath,
                 ))
             ) 
-{
+            {
                 modifiedGraph[soul] = await signNode(node, pair);
             }
         }

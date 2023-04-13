@@ -5,11 +5,14 @@ type TGEventCb<T = any, U = any, V = any> = (a: T, b?: U, c?: V) => void;
  */
 export class TGEvent<T = any, U = any, V = any> 
 {
-    public readonly name: string;
+    readonly name: string;
     private _listeners: Array<TGEventCb<T, U, V>>;
 
+    /**
+     * Constructor
+     */
     constructor(name = 'Event') 
-{
+    {
         this.name = name;
         this._listeners = [];
         this.listenerCount = this.listenerCount.bind(this);
@@ -18,11 +21,15 @@ export class TGEvent<T = any, U = any, V = any>
         this.trigger = this.trigger.bind(this);
     }
 
+    // -----------------------------------------------------------------------------------------------------
+    // @ Public methods
+    // -----------------------------------------------------------------------------------------------------
+
     /**
      * @returns number of currently subscribed listeners
      */
-    public listenerCount(): number 
-{
+    listenerCount(): number 
+    {
         return this._listeners.length;
     }
 
@@ -31,10 +38,10 @@ export class TGEvent<T = any, U = any, V = any>
      *
      * @param cb the callback to subscribe
      */
-    public on(cb: TGEventCb<T, U, V>): TGEvent<T, U, V> 
-{
+    on(cb: TGEventCb<T, U, V>): TGEvent<T, U, V> 
+    {
         if (this._listeners.indexOf(cb) !== -1) 
-{
+        {
             return this;
         }
         this._listeners.push(cb);
@@ -45,11 +52,11 @@ export class TGEvent<T = any, U = any, V = any>
      * Unregister a listener on this event
      * @param cb the callback to unsubscribe
      */
-    public off(cb: TGEventCb<T, U, V>): TGEvent<T, U, V> 
-{
+    off(cb: TGEventCb<T, U, V>): TGEvent<T, U, V> 
+    {
         const idx = this._listeners.indexOf(cb);
         if (idx !== -1) 
-{
+        {
             this._listeners.splice(idx, 1);
         }
         return this;
@@ -58,8 +65,8 @@ export class TGEvent<T = any, U = any, V = any>
     /**
      * Unregister all listeners on this event
      */
-    public reset(): TGEvent<T, U, V> 
-{
+    reset(): TGEvent<T, U, V> 
+    {
         this._listeners = [];
         return this;
     }
@@ -67,8 +74,8 @@ export class TGEvent<T = any, U = any, V = any>
     /**
      * Trigger this event
      */
-    public trigger(a: T, b?: U, c?: V): TGEvent<T, U, V> 
-{
+    trigger(a: T, b?: U, c?: V): TGEvent<T, U, V> 
+    {
         this._listeners.forEach(cb => cb(a, b, c));
         return this;
     }

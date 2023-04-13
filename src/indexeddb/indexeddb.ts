@@ -4,8 +4,11 @@ export class IndexedDb
     readonly _dbName: string;
     readonly _storeName: string;
 
+    /**
+     * Constructor
+     */
     constructor(storeName: string) 
-{
+    {
         this._dbName = storeName;
         this._storeName = storeName;
         this._init();
@@ -16,47 +19,47 @@ export class IndexedDb
     // -----------------------------------------------------------------------------------------------------
 
     get<Type>(key: IDBValidKey): Promise<Type> 
-{
+    {
         let req: IDBRequest;
         return this._withIDBStore('readwrite', (store) => 
-{
+        {
             req = store.get(key);
         }).then(() => req.result);
     }
 
     getALlKeys(): Promise<string[]> 
-{
+    {
         let req: IDBRequest;
         return this._withIDBStore('readwrite', (store) => 
-{
+        {
             req = store.getAll();
         }).then(() => req.result);
     }
 
     set(key: IDBValidKey, value: any): Promise<void> 
-{
+    {
         return this._withIDBStore('readwrite', (store) => 
-{
+        {
             store.put(value, key);
         });
     }
 
     update(key: IDBValidKey, updater: (val: any) => any): Promise<void> 
-{
+    {
         return this._withIDBStore('readwrite', (store) => 
-{
+        {
             const req = store.get(key);
             req.onsuccess = () => 
-{
+            {
                 store.put(updater(req.result), key);
             };
         });
     }
 
     del(key: IDBValidKey): Promise<void> 
-{
+    {
         return this._withIDBStore('readwrite', (store) => 
-{
+        {
             store.delete(key);
         });
     }
@@ -66,13 +69,13 @@ export class IndexedDb
     // -----------------------------------------------------------------------------------------------------
 
     private _init(): void 
-{
+    {
         if (this._dbp) 
-{
+        {
             return;
         }
         this._dbp = new Promise((resolve, reject) => 
-{
+        {
             const indexedDB =
                 window.indexedDB ||
                 window['mozIndexedDB'] ||
@@ -81,7 +84,7 @@ export class IndexedDb
                 window['shimIndexedDB'];
 
             if (!indexedDB) 
-{
+            {
                 return reject(Error('IndexedDB could not be found!'));
             }
 
@@ -91,7 +94,7 @@ export class IndexedDb
 
             // First time setup: create an empty object store
             openreq.onupgradeneeded = () => 
-{
+            {
                 openreq.result.createObjectStore(this._storeName);
             };
         });
@@ -101,12 +104,12 @@ export class IndexedDb
         type: IDBTransactionMode,
         callback: (store: IDBObjectStore) => void,
     ): Promise<void> 
-{
+    {
         this._init();
         return (this._dbp as Promise<IDBDatabase>).then(
             db =>
                 new Promise<void>((resolve, reject) => 
-{
+                {
                     const transaction = db.transaction(this._storeName, type);
                     transaction.oncomplete = () => resolve();
                     transaction.onabort = transaction.onerror = () =>

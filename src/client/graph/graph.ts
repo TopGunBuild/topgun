@@ -62,7 +62,7 @@ export class TGGraph
      * Constructor
      */
     constructor() 
-{
+    {
         this.id = generateMessageId();
         this.receiveGraphData = this.receiveGraphData.bind(this);
         this.__onConnectorStatus = this.__onConnectorStatus.bind(this);
@@ -87,13 +87,9 @@ export class TGGraph
 
     /**
      * Configure graph options
-     *
-     * Currently unused
-     *
-     * @param options
      */
     opt(options: TGGraphOptions): TGGraph 
-{
+    {
         this._opt = { ...this._opt, ...options };
         return this;
     }
@@ -104,9 +100,9 @@ export class TGGraph
      * @param connector the source or destination for graph data
      */
     connect(connector: TGGraphConnector): TGGraph 
-{
+    {
         if (this._connectors.indexOf(connector) !== -1) 
-{
+        {
             return this;
         }
         this._connectors.push(connector.connectToGraph(this));
@@ -115,7 +111,7 @@ export class TGGraph
         connector.events.graphData.on(this.receiveGraphData);
 
         if (connector.isConnected) 
-{
+        {
             this.activeConnectors++;
         }
         return this;
@@ -127,16 +123,16 @@ export class TGGraph
      * @param connector the source or destination for graph data
      */
     disconnect(connector: TGGraphConnector): TGGraph 
-{
+    {
         const idx = this._connectors.indexOf(connector);
         connector.events.graphData.off(this.receiveGraphData);
         connector.events.connection.off(this.__onConnectorStatus);
         if (idx !== -1) 
-{
+        {
             this._connectors.splice(idx, 1);
         }
         if (connector.isConnected) 
-{
+        {
             this.activeConnectors--;
         }
         return this;
@@ -146,16 +142,16 @@ export class TGGraph
      * Register graph middleware
      *
      * @param middleware The middleware function to add
-     * @param kind Optionaly register write middleware instead of read by passing "write"
+     * @param kind optionally register write middleware instead of read by passing "write"
      */
     use(middleware: TGMiddleware, kind = 'read' as TGMiddlewareType): TGGraph 
-{
+    {
         if (kind === 'read') 
-{
+        {
             this._readMiddleware.push(middleware);
         }
- else if (kind === 'write') 
-{
+        else if (kind === 'write') 
+        {
             this._writeMiddleware.push(middleware);
         }
         return this;
@@ -165,26 +161,26 @@ export class TGGraph
      * Unregister graph middleware
      *
      * @param middleware The middleware function to remove
-     * @param kind Optionaly unregister write middleware instead of read by passing "write"
+     * @param kind optionally unregister write middleware instead of read by passing "write"
      */
     unuse(
         middleware: TGMiddleware,
         kind = 'read' as TGMiddlewareType,
     ): TGGraph 
-{
+    {
         if (kind === 'read') 
-{
+        {
             const idx = this._readMiddleware.indexOf(middleware);
             if (idx !== -1) 
-{
+            {
                 this._readMiddleware.splice(idx, 1);
             }
         }
- else if (kind === 'write') 
-{
+        else if (kind === 'write') 
+        {
             const idx = this._writeMiddleware.indexOf(middleware);
             if (idx !== -1) 
-{
+            {
                 this._writeMiddleware.splice(idx, 1);
             }
         }
@@ -200,12 +196,12 @@ export class TGGraph
      * @returns a cleanup function to after done with query
      */
     query(path: readonly string[], cb: TGOnCb): () => void 
-{
+    {
         let lastSouls = [] as readonly string[];
         let currentValue: TGValue | undefined;
 
         const updateQuery = () => 
-{
+        {
             const { souls, value, complete } = getPathData(path, this._graph);
             const [added, removed] = diffSets(lastSouls, souls);
 
@@ -213,18 +209,18 @@ export class TGGraph
                 (complete && !isDefined(currentValue)) ||
                 (isDefined(value) && value !== currentValue)
             ) 
-{
+            {
                 currentValue = value;
                 cb(value, path[path.length - 1]);
             }
 
             for (const soul of added) 
-{
+            {
                 this._requestSoul(soul, updateQuery);
             }
 
             for (const soul of removed) 
-{
+            {
                 this._unlistenSoul(soul, updateQuery);
             }
 
@@ -234,9 +230,9 @@ export class TGGraph
         updateQuery();
 
         return () => 
-{
+        {
             for (const soul of lastSouls) 
-{
+            {
                 this._unlistenSoul(soul, updateQuery);
             }
         };
@@ -251,7 +247,6 @@ export class TGGraph
      * @param uuidFn
      * @param getPub
      * @param putOpt
-     * @returns a promise
      */
     async putPath(
         fullPath: string[],
@@ -261,12 +256,12 @@ export class TGGraph
         getPub?: string,
         putOpt?: TGOptionsPut,
     ): Promise<void> 
-{
+    {
         if (!fullPath.length) 
-{
+        {
             const err = new Error('No path specified');
             if (cb) 
-{
+            {
                 cb({
                     '#': undefined,
                     '@': '',
@@ -293,7 +288,7 @@ export class TGGraph
      * @returns a function to cleanup listeners when done
      */
     get(soul: string, cb?: TGMessageCb, msgId?: string): () => void 
-{
+    {
         const id = msgId || generateMessageId();
 
         this.events.get.trigger({
@@ -324,25 +319,25 @@ export class TGGraph
         soul?: string,
         putOpt?: TGOptionsPut,
     ): () => void 
-{
+    {
         let diff: TGGraphData | undefined = flattenGraphData(
             addMissingState(data),
         );
 
         const id = msgId || generateMessageId();
         (async () => 
-{
+        {
             for (const fn of this._writeMiddleware) 
-{
+            {
                 if (!diff) 
-{
+                {
                     return;
                 }
                 diff = await fn(diff, this._graph, putOpt, fullPath);
             }
 
             if (!diff) 
-{
+            {
                 return;
             }
 
@@ -355,10 +350,12 @@ export class TGGraph
             });
 
             if (cb) 
-{
-                // && this.events.put.listenerCount() === 0
+            {
                 cb({
-                    '#': undefined,
+                    '#':
+                        fullPath.length > 0
+                            ? fullPath[fullPath.length - 1]
+                            : soul,
                     '@': msgId,
                     'err': null,
                     'ok': true,
@@ -370,7 +367,7 @@ export class TGGraph
     }
 
     connectorCount(): number 
-{
+    {
         return this._connectors.length;
     }
 
@@ -380,9 +377,9 @@ export class TGGraph
      * @param cb The callback to invoke
      */
     eachConnector(cb: (connector: TGGraphConnector) => void): TGGraph 
-{
+    {
         for (const connector of this._connectors) 
-{
+        {
             cb(connector);
         }
 
@@ -397,27 +394,27 @@ export class TGGraph
         id?: string,
         replyToId?: string,
     ): Promise<void> 
-{
+    {
         let diff = data;
 
         for (const fn of this._readMiddleware) 
-{
+        {
             if (!diff) 
-{
+            {
                 return;
             }
             diff = await fn(diff, this._graph);
         }
 
         if (!diff) 
-{
+        {
             return;
         }
 
         for (const soul in diff) 
-{
+        {
             if (!soul) 
-{
+            {
                 continue;
             }
 
@@ -438,28 +435,28 @@ export class TGGraph
     // -----------------------------------------------------------------------------------------------------
 
     private _node(soul: string): TGGraphNode 
-{
+    {
         return (this._nodes[soul] =
             this._nodes[soul] ||
             new TGGraphNode(this, soul, this.receiveGraphData));
     }
 
     private _requestSoul(soul: string, cb: TGNodeListenCb): TGGraph 
-{
+    {
         this._node(soul).get(cb);
         return this;
     }
 
     private _unlistenSoul(soul: string, cb: TGNodeListenCb): TGGraph 
-{
+    {
         const node = this._nodes[soul];
         if (!node) 
-{
+        {
             return this;
         }
         node.off(cb);
         if (node.listenerCount() <= 0) 
-{
+        {
             node.off();
             this._forgetSoul(soul);
         }
@@ -467,10 +464,10 @@ export class TGGraph
     }
 
     private _forgetSoul(soul: string): TGGraph 
-{
+    {
         const node = this._nodes[soul];
         if (node) 
-{
+        {
             node.off();
             delete this._nodes[soul];
         }
@@ -479,13 +476,13 @@ export class TGGraph
     }
 
     private __onConnectorStatus(connected?: boolean): void 
-{
+    {
         if (connected) 
-{
+        {
             this.activeConnectors++;
         }
- else 
-{
+        else 
+        {
             this.activeConnectors--;
         }
     }

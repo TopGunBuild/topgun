@@ -47,8 +47,8 @@ export async function encrypt(
         isObject(keyOrPair) && isString(keyOrPair.epriv)
             ? keyOrPair.epriv
             : isString(keyOrPair)
-            ? keyOrPair
-            : '';
+                ? keyOrPair
+                : '';
     const ct = await crypto.subtle.encrypt(
         {
             iv: new Uint8Array(rand.iv),
@@ -64,7 +64,7 @@ export async function encrypt(
         s: rand.s.toString(encoding),
     };
     if (opt.raw) 
-{
+    {
         return r;
     }
     return 'SEA' + JSON.stringify(r);

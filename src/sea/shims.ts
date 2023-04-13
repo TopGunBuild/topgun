@@ -1,14 +1,11 @@
 import root from '../utils/window-or-global';
 import './base64';
 import SafeBuffer from './safe-buffer';
-import { Crypto } from '@peculiar/webcrypto';
-
-export const crypto = new Crypto();
-export const Buffer = SafeBuffer;
+import WebCrypto from 'topgun-webcrypto';
 
 const api: any = {
-    Buffer,
-    crypto,
+    Buffer: SafeBuffer,
+    crypto: WebCrypto,
     TextEncoder: root && root.TextEncoder,
     TextDecoder: root && root.TextDecoder,
 };
@@ -21,3 +18,5 @@ api.random = (len: number) =>
 export const random = api.random;
 export const TextEncoder = api.TextEncoder;
 export const TextDecoder = api.TextDecoder;
+export const crypto = api.crypto;
+export const Buffer = api.Buffer;

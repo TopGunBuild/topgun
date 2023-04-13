@@ -4,7 +4,7 @@ import { TGGraphConnectorFromAdapter } from '../client/transports/graph-connecto
 export class TGIndexedDbConnector extends TGGraphConnectorFromAdapter 
 {
     constructor(storageKey?: string) 
-{
+    {
         super(createGraphAdapter(storageKey), 'TGIndexedDbConnector');
     }
 }

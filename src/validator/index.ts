@@ -55,11 +55,11 @@ const compileValidateSoul = (ajv: any) => (schema: any) =>
     const route = new Route(pattern);
 
     return (data: any, dataCxt?: DataValidationCxt): boolean => 
-{
+    {
         const soul = data && data['_'] && data['_']['#'];
 
         if (!soul || !pattern || soul !== dataCxt?.parentDataProperty) 
-{
+        {
             return false;
         }
         const match = route.match(soul);
@@ -78,14 +78,14 @@ const compilePropsFromSoul = (propMap: any, parentSchema: any) =>
     const route = new Route(pattern);
 
     return (data: any) => 
-{
+    {
         const soul: string = (data && data['_'] && data['_']['#']) || '';
         const soulProps = route.match(soul) || {};
 
         return !Object.keys(propMap).find((propName) => 
-{
+        {
             if (!(propName in data)) 
-{
+            {
                 return false;
             }
             return soulProps[propName] !== data[propMap[propName]];
@@ -95,8 +95,8 @@ const compilePropsFromSoul = (propMap: any, parentSchema: any) =>
 
 const compileEdgeMatchesKey =
     (schema: any) =>
-    (data: any, _cPath: any, _parentData?: any, keyInParent?: any) =>
-        schema ? data['#'] === keyInParent : true;
+        (data: any, _cPath: any, _parentData?: any, keyInParent?: any) =>
+            schema ? data['#'] === keyInParent : true;
 
 export function initAjv({
     coerceTypes = true,
@@ -132,16 +132,16 @@ export function createValidator({
 {
     const nodeTypes: string[] = [];
     const definitions = Object.keys(supplied).reduce((defs: any, typeName) => 
-{
+    {
         const pattern = defs[typeName]?.soul?.pattern || '';
 
         if (!pattern) 
-{
+        {
             return defs;
         }
         const route = new Route(pattern);
         const pathOrRef = (p: string[]) => 
-{
+        {
             const val = p.reduce((accum, path) => accum && accum[path], defs);
             const ref: string = val && val['$refs'];
             const refRouteParams = refRoute.match(ref || '');
@@ -293,14 +293,12 @@ export function createValidator({
                     },
                     'leech': {
                         title: 'Leech Command',
-                        description:
-                            'TopGun protocol extension added by pistol',
+                        description: 'TopGun protocol extension',
                         type: 'boolean',
                     },
                     'ping': {
                         title: 'Ping Command',
-                        description:
-                            'TopGun protocol extension added by pistol',
+                        description: 'TopGun protocol extension',
                         type: 'boolean',
                     },
                     'get': {

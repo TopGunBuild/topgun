@@ -5,7 +5,7 @@ export function pseudoRandomText(
 {
     let s = '';
     while (l > 0) 
-{
+    {
         s += c.charAt(Math.floor(Math.random() * c.length));
         l--;
     }

@@ -1,9 +1,6 @@
 lockfileVersion: '6.0'
 
 dependencies:
-  '@peculiar/webcrypto':
-    specifier: ^1.4.3
-    version: 1.4.3
   ajv:
     specifier: ^8.12.0
     version: 8.12.0
@@ -13,6 +10,9 @@ dependencies:
   topgun-socket:
     specifier: 1.0.5
     version: 1.0.5
+  topgun-webcrypto:
+    specifier: ^1.0.3
+    version: 1.0.3
 
 devDependencies:
   '@semantic-release/changelog':
@@ -5514,6 +5514,12 @@ packages:
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
+    dev: false
+
+  /topgun-webcrypto@1.0.3:
+    resolution: {integrity: sha512-GlzMWlIcz7Nc9XBciVhdeeLb9s7QniUuay+oaqPe7vDcqIOVS6Pot5sAwGPcKHjnyBhrDBprSh8FtF5wanIBpg==}
+    dependencies:
+      '@peculiar/webcrypto': 1.4.3
     dev: false
 
   /tr46@0.0.3:

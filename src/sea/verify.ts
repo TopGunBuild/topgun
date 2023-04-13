@@ -55,7 +55,7 @@ export async function verifyHashSignature(
             new Uint8Array(Buffer.from(hash, 'hex')),
         )
     ) 
-{
+    {
         return true;
     }
 
@@ -80,17 +80,17 @@ export async function verify(
 ): Promise<false | VerifyData> 
 {
     try 
-{
+    {
         const pub =
             isObject(pubOrPair) && isString(pubOrPair.pub)
                 ? pubOrPair.pub
                 : isString(pubOrPair)
-                ? pubOrPair
-                : '';
+                    ? pubOrPair
+                    : '';
 
         const json = parse(data);
         if (await verifySignature(json.m, json.s, pub, opt)) 
-{
+        {
             return {
                 ct: json.ct,
                 iv: json.iv,
@@ -102,8 +102,8 @@ export async function verify(
         }
         return false;
     }
- catch (e) 
-{
+    catch (e) 
+    {
         return false;
     }
 }

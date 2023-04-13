@@ -1,6 +1,7 @@
 import { TGGraph } from './graph/graph';
 import { TGGraphConnector } from './transports/graph-connector';
 import { TGSupportedStorage } from '../types';
+import { localStorageAdapter } from '../utils/local-storage';
 
 export interface TGClientOptions {
     readonly peers?: string[];
@@ -13,3 +14,15 @@ export interface TGClientOptions {
     readonly sessionStorageKey?: string;
     readonly passwordMinLength?: number;
 }
+
+export const DEFAULT_OPTIONS: Required<TGClientOptions> = {
+    peers: [],
+    graph: new TGGraph(),
+    connectors: [],
+    persistStorage: false,
+    storageKey: 'top-gun-nodes',
+    persistSession: true,
+    sessionStorage: localStorageAdapter,
+    sessionStorageKey: 'top-gun-session',
+    passwordMinLength: 8,
+};

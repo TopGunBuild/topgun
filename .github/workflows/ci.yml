@@ -46,6 +46,8 @@ jobs:
 
             # Runs a set of commands using the runners shell
             - name: Build and Test
+              env:
+                  NODE_OPTIONS: "--max_old_space_size=4096"
               run: pnpm test
 
     release:

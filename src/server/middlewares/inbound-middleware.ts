@@ -20,22 +20,26 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
         protected readonly adapter: TGGraphAdapter,
         private readonly options: TGServerOptions,
     ) 
-{
+    {
         super();
     }
 
+    // -----------------------------------------------------------------------------------------------------
+    // @ Public methods
+    // -----------------------------------------------------------------------------------------------------
+
     onPublishIn(action: TGActionPublishIn): void 
-{
+    {
         const msg = action.data;
 
         if (action.channel !== 'topgun/put') 
-{
+        {
             if (this.isAdmin(action.socket)) 
-{
+            {
                 action.allow();
             }
- else 
-{
+            else 
+            {
                 action.block(
                     new Error('You aren\'t allowed to write to this channel'),
                 );
@@ -46,12 +50,12 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
         action.allow();
 
         if (action.channel !== 'topgun/put' || !msg || !msg.put) 
-{
+        {
             return;
         }
 
         this.processPut(msg).then((data) => 
-{
+        {
             this.publish(action, {
                 channel: `topgun/@${msg['#']}`,
                 data,
@@ -60,11 +64,11 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
     }
 
     async onSubscribe(action: TGActionSubscribe): Promise<void> 
-{
+    {
         if (action.channel === 'topgun/put') 
-{
+        {
             if (!this.isAdmin(action.socket)) 
-{
+            {
                 action.block(
                     new Error(
                         `You aren't allowed to subscribe to ${action.channel}`,
@@ -77,7 +81,7 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
         const soul = String(action.channel).replace(/^topgun\/nodes\//, '');
 
         if (!soul || soul === action.channel) 
-{
+        {
             action.allow();
             return;
         }
@@ -85,7 +89,7 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
         action.allow();
 
         if (soul === 'changelog') 
-{
+        {
             return;
         }
 
@@ -98,13 +102,13 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
                     '#': msgId,
                     'put': node
                         ? {
-                              [soul]: node,
-                          }
+                            [soul]: node,
+                        }
                         : null,
                 } as TGMessage,
             }))
             .catch((e) => 
-{
+            {
                 console.warn(e.stack || e);
                 return {
                     channel: action.channel as string,
@@ -121,7 +125,7 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
             //     return res;
             // })
             .then((msg: { channel: string; data: TGMessage }) => 
-{
+            {
                 this.publish(action, msg);
             });
     }
@@ -133,38 +137,35 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
             | TGActionSubscribe
             | TGActionAuthenticate,
     ): void | Promise<void> 
-{
+    {
         action.allow();
     }
 
     async onAuthenticate?(action: TGActionAuthenticate): Promise<void> 
-{
+    {
         action.allow();
     }
 
     readNode(soul: string): Promise<TGNode | null> 
-{
+    {
         return this.adapter.get(soul);
     }
 
     isAdmin(socket: TGServerSocket): boolean | undefined 
-{
+    {
         return (
             socket.authToken && socket.authToken.pub === this.options.ownerPub
         );
     }
 
-    /**
-     * Persist put data and publish any resulting diff
-     */
     async processPut(msg: TGMessage): Promise<TGMessage> 
-{
+    {
         const msgId = pseudoRandomText();
 
         try 
-{
+        {
             if (msg.put) 
-{
+            {
                 await this.adapter.put(msg.put);
             }
 
@@ -175,8 +176,8 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
                 'ok': true,
             };
         }
- catch (e) 
-{
+        catch (e) 
+        {
             return {
                 '#': msgId,
                 '@': msg['#'],
@@ -194,7 +195,7 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
             | TGActionAuthenticate,
         message: { channel: string; data: TGMessage },
     ): void 
-{
+    {
         action.socket.transmit('#publish', message, {});
     }
 }

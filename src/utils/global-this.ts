@@ -9,10 +9,10 @@ export function polyfillGlobalThis(): void
 {
     if (isObject(globalThis)) return;
     try 
-{
+    {
         Object.defineProperty(Object.prototype, '__magic__', {
             get: function () 
-{
+            {
                 return this;
             },
             configurable: true,
@@ -20,10 +20,10 @@ export function polyfillGlobalThis(): void
         __magic__.globalThis = __magic__;
         delete Object.prototype['__magic__'];
     }
- catch (e) 
-{
+    catch (e) 
+    {
         if (typeof self !== 'undefined') 
-{
+        {
             (self as any).globalThis = self;
         }
     }

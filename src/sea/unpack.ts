@@ -9,38 +9,38 @@ export function unpack(passedValue: any, key: string, node: TGNode): any
     let value = passedValue;
 
     if (!value) 
-{
+    {
         return;
     }
 
     if (isObject(value) && ':' in value) 
-{
+    {
         const val = value[':'];
         if (isDefined(val)) 
-{
+        {
             return val;
         }
     }
 
     if (isObject(value) && 'm' in value) 
-{
+    {
         const val = value.m;
         if (isDefined(val)) 
-{
+        {
             value = parse(val);
         }
     }
 
     if (!key || !node) 
-{
+    {
         return;
     }
     if (value === node[key]) 
-{
+    {
         return value;
     }
     if (!check(node[key])) 
-{
+    {
         return value;
     }
     const soul = node && node._ && node._['#'];
@@ -52,12 +52,12 @@ export function unpack(passedValue: any, key: string, node: TGNode): any
         key === value[1] &&
         Math.floor(state) === Math.floor(value[3])
     ) 
-{
+    {
         console.log('value', value);
         return value[2];
     }
     if (state < shuffleAttackCutoff) 
-{
+    {
         return value;
     }
 }
@@ -68,7 +68,7 @@ export function unpackNode(
 ): TGNode 
 {
     if (!node) 
-{
+    {
         return node;
     }
 
@@ -76,13 +76,13 @@ export function unpackNode(
         mut === 'mutable'
             ? node
             : {
-                  _: node._,
-              };
+                _: node._,
+            };
 
     for (const key in node) 
-{
+    {
         if (key === '_') 
-{
+        {
             continue;
         }
 
@@ -100,9 +100,9 @@ export function unpackGraph(
     const unpackedGraph: TGGraphData = mut === 'mutable' ? graph : {};
 
     for (const soul in graph) 
-{
+    {
         if (!soul) 
-{
+        {
             continue;
         }
 

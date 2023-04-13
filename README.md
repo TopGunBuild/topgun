@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://github.com/TopGunBuild" target="blank"><img src="https://avatars.githubusercontent.com/u/121893825?s=200&v=4" width="120" alt="TopGun Logo" /></a>
+  <a href="https://github.com/TopGunBuild/topgun" target="blank"><img src="https://avatars.githubusercontent.com/u/121893825?s=200&v=4" width="120" alt="TopGun Logo" /></a>
 </p>
 <h1 align="center" style="border-bottom: none;">🚀 TopGun</h1>
 <p align="center">A graph data synchronisation engine for building realtime, offline-first, secure and scalable applications.</p>
@@ -19,3 +19,13 @@
       <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg">
   </a>
 </p>
+
+## Installation
+
+```bash
+$ npm install topgun --save
+```
+
+## License
+
+TopGun is [MIT licensed](LICENSE).

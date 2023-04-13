@@ -1,27 +1,34 @@
 export class TGMiddlewareSystem<T, U = undefined, V = undefined> 
 {
-    public readonly name: string;
+    readonly name: string;
     private readonly _middlewareFunctions: Array<
         (a: T, b?: U, c?: V) => Promise<T> | T | undefined
     >;
 
+    /**
+     * Constructor
+     */
     constructor(name = 'MiddlewareSystem') 
-{
+    {
         this.name = name;
         this._middlewareFunctions = [];
     }
+
+    // -----------------------------------------------------------------------------------------------------
+    // @ Public methods
+    // -----------------------------------------------------------------------------------------------------
 
     /**
      * Register middleware function
      *
      * @param middleware The middleware function to add
      */
-    public use(
+    use(
         middleware: (a: T, b?: U, c?: V) => Promise<T> | T | undefined,
     ): TGMiddlewareSystem<T, U, V> 
-{
+    {
         if (this._middlewareFunctions.indexOf(middleware) !== -1) 
-{
+        {
             return this;
         }
 
@@ -34,13 +41,13 @@ export class TGMiddlewareSystem<T, U = undefined, V = undefined>
      *
      * @param middleware The middleware function to remove
      */
-    public unuse(
+    unuse(
         middleware: (a: T, b?: U, c?: V) => T | undefined,
     ): TGMiddlewareSystem<T, U, V> 
-{
+    {
         const idx = this._middlewareFunctions.indexOf(middleware);
         if (idx !== -1) 
-{
+        {
             this._middlewareFunctions.splice(idx, 1);
         }
 
@@ -53,14 +60,14 @@ export class TGMiddlewareSystem<T, U = undefined, V = undefined>
      * @param b Optional extra argument passed to each middleware function
      * @param c Optional extra argument passed to each middleware function
      */
-    public async process(a: T, b?: U, c?: V): Promise<T | undefined | void> 
-{
+    async process(a: T, b?: U, c?: V): Promise<T | undefined | void> 
+    {
         let val: T | undefined = a;
 
         for (const fn of this._middlewareFunctions) 
-{
+        {
             if (!val) 
-{
+            {
                 return;
             }
 

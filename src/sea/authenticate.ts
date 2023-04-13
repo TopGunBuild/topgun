@@ -37,21 +37,21 @@ export async function authenticateAccount(
 > 
 {
     if (!ident || !ident.auth) 
-{
+    {
         return undefined;
     }
 
     let decrypted: any;
     try 
-{
+    {
         const proof = await work(password, ident.auth.s, { encode: encoding });
 
         decrypted = await decrypt(ident.auth.ek, proof, {
             encode: encoding,
         });
     }
- catch (err) 
-{
+    catch (err) 
+    {
         const proof = await work(password, ident.auth.s, { encode: 'utf8' });
         decrypted = await decrypt(ident.auth.ek, proof, {
             encode: encoding,
@@ -59,7 +59,7 @@ export async function authenticateAccount(
     }
 
     if (!decrypted) 
-{
+    {
         return undefined;
     }
 
@@ -113,59 +113,59 @@ export async function authenticate(
     let options: AuthOptions = isObject(passwordOrOpt)
         ? passwordOrOpt
         : isObject(maybeOptions)
-        ? maybeOptions
-        : DEFAULT_OPTS; // Auth by alias and password
+            ? maybeOptions
+            : DEFAULT_OPTS; // Auth by alias and password
 
     if (isString(aliasOrPair)) 
-{
+    {
         const aliasSoul = `~@${aliasOrPair}`;
 
         if (!isObject(options)) 
-{
+        {
             options = {};
         }
         if (!isNumber(options.timeout)) 
-{
+        {
             options.timeout = DEFAULT_OPTS.timeout;
         }
 
         let idents =
             client.graph.connectorCount() === 0
                 ? await client
-                      .get(aliasSoul)
-                      .promise({ timeout: options.timeout })
-                      .then()
+                    .get(aliasSoul)
+                    .promise({ timeout: options.timeout })
+                    .then()
                 : await client.get(aliasSoul).then();
 
         if (!isObject(idents)) 
-{
+        {
             idents = {};
         }
 
         for (const soul in idents) 
-{
+        {
             if (soul === '_') 
-{
+            {
                 continue;
             }
 
             let pair;
 
             try 
-{
+            {
                 pair = await authenticateIdentity(
                     client,
                     soul,
                     passwordOrOpt as string,
                 );
             }
- catch (e: any) 
-{
+            catch (e: any) 
+            {
                 console.warn(e.stack || e);
             }
 
             if (pair) 
-{
+            {
                 return pair;
             }
         }
@@ -175,7 +175,7 @@ export async function authenticate(
 
     // Auth by pair
     if (isObject(aliasOrPair) && (aliasOrPair.pub || aliasOrPair.epub)) 
-{
+    {
         return {
             ...aliasOrPair,
             alias: '~' + aliasOrPair.pub,

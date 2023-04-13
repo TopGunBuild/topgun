@@ -13,11 +13,11 @@ import { sign } from '../../sea';
 /* eslint-disable @typescript-eslint/no-empty-function */
 export class TGWebSocketGraphConnector extends TGGraphWireConnector 
 {
-    public readonly socket: TGClientSocket;
-    public readonly opts: ClientOptions | undefined;
-    public readonly msgChannel?: TGChannel<any>;
-    public readonly getsChannel?: TGChannel<any>;
-    public readonly putsChannel?: TGChannel<any>;
+    readonly socket: TGClientSocket;
+    readonly opts: ClientOptions | undefined;
+    readonly msgChannel?: TGChannel<any>;
+    readonly getsChannel?: TGChannel<any>;
+    readonly putsChannel?: TGChannel<any>;
 
     private readonly _requestChannels: {
         [msgId: string]: TGChannel<any>;
@@ -30,7 +30,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         opts: ClientOptions | undefined,
         name = 'TGWebSocketGraphConnector',
     ) 
-{
+    {
         super(name);
         this._requestChannels = {};
         this.opts = opts;
@@ -45,12 +45,12 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
     // -----------------------------------------------------------------------------------------------------
 
     off(msgId: string): TGWebSocketGraphConnector 
-{
+    {
         super.off(msgId);
         const channel = this._requestChannels[msgId];
 
         if (channel) 
-{
+        {
             channel.unsubscribe();
             delete this._requestChannels[msgId];
         }
@@ -59,12 +59,12 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
     }
 
     get({ soul, msgId, cb, opts }: TGGet): () => void 
-{
+    {
         const cbWrap = (msg: any) => 
-{
+        {
             this.ingest([msg]);
             if (cb) 
-{
+            {
                 cb(msg);
             }
         };
@@ -79,19 +79,19 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
     }
 
     put({ graph, msgId = '', replyTo = '', cb }: TGPut): () => void 
-{
+    {
         if (!graph) 
-{
+        {
             return () => 
-{};
+            {};
         }
 
         msgId = msgId || generateMessageId();
 
         if (cb) 
-{
+        {
             const cbWrap = (response: any) => 
-{
+            {
                 this.ingest([response]);
                 cb(response);
                 this.off(msgId);
@@ -104,20 +104,20 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
 
             return super.put({ graph, msgId, replyTo, cb: cbWrap });
         }
- else 
-{
+        else 
+        {
             return super.put({ graph, msgId, replyTo, cb });
         }
     }
 
     async authenticate(pub: string, priv: string): Promise<void> 
-{
+    {
         await this.waitForConnection();
         this.doAuth(pub, priv);
 
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
         for await (const _event of this.socket.listener('connect')) 
-{
+        {
             this.doAuth(pub, priv);
         }
     }
@@ -126,7 +126,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         channelName: string,
         msg: TGMessage,
     ): TGWebSocketGraphConnector 
-{
+    {
         this.socket.transmitPublish(channelName, msg);
         return this;
     }
@@ -136,7 +136,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         cb?: TGMessageCb,
         opts?: SubscribeOptions,
     ): TGChannel<any> 
-{
+    {
         const channel = this.socket.subscribe(channelName, opts);
         this.onChannelMessage(channel, cb);
         return channel;
@@ -150,7 +150,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         pub: string,
         priv: string,
     ): Promise<{ channel: string; data: any }> 
-{
+    {
         const id = this.socket.id;
         const timestamp = new Date().getTime();
         const challenge = `${id}/${timestamp}`;
@@ -163,35 +163,35 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         channel: TGChannel<any>,
         cb?: TGMessageCb,
     ): Promise<void> 
-{
+    {
         for await (const msg of channel) 
-{
+        {
             this.ingest([msg]);
             if (cb) 
-{
+            {
                 cb(msg);
             }
         }
     }
 
     private onOutputProcessed(msg: any): void 
-{
+    {
         if (msg && this.socket) 
-{
+        {
             const replyTo = msg['@'];
 
             if (replyTo) 
-{
+            {
                 this.publishToChannel(`topgun/@${replyTo}`, msg);
             }
- else 
-{
+            else 
+            {
                 if ('get' in msg) 
-{
+                {
                     this.publishToChannel('topgun/get', msg);
                 }
- else if ('put' in msg) 
-{
+                else if ('put' in msg) 
+                {
                     this.publishToChannel('topgun/put', msg);
                 }
             }
@@ -199,25 +199,25 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
     }
 
     private async onConnect(): Promise<void> 
-{
+    {
         for await (const _event of this.socket.listener('connect')) 
-{
+        {
             console.log(`SC client ${_event.id} is connected.`);
             try 
-{
+            {
                 this.events.connection.trigger(true);
             }
- catch (error) 
-{
+            catch (error) 
+            {
                 console.error(error);
             }
         }
     }
 
     private async onError(): Promise<void> 
-{
+    {
         for await (const _event of this.socket.listener('error')) 
-{
+        {
             console.error(
                 'Socket Connection Error',
                 _event.error.stack,
