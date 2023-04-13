@@ -1,10 +1,3 @@
-// tslint:disable
-
-// This is Buffer implementation used in SEA. Functionality is mostly
-// compatible with NodeJS 'safe-buffer' and is used for encoding conversions
-// between binary and 'hex' | 'utf8' | 'base64'
-// See documentation and validation for safe implementation in:
-// https://github.com/feross/safe-buffer#update
 import SeaArray from './sea-array';
 import { base64 } from './base64';
 import { isString } from '../utils/is-string';

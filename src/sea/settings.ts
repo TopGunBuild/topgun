@@ -1,7 +1,6 @@
 import { isString } from '../utils/is-string';
 
 export const shuffleAttackCutoff = 1546329600000; // Jan 1, 2019
-
 export const pbkdf2 = { hash: { name: 'SHA-256' }, iter: 100000, ks: 64 };
 export const ecdsa = {
     pair: { name: 'ECDSA', namedCurve: 'P-256' },
@@ -9,7 +8,6 @@ export const ecdsa = {
 };
 export const ecdh = { name: 'ECDH', namedCurve: 'P-256' };
 
-// This creates Web Cryptography API compliant JWK for sign/verify purposes
 export function jwk(
     pub: string,
     d?: string,

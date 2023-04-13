@@ -12,23 +12,6 @@ const DEFAULT_OPTS: {
 } = {};
 type WhoCertify = '*' | string | string[] | { pub: string } | { pub: string }[];
 
-/**
- * This is to certify that a group of "who" can "put" anything at a group of matched "paths" to the certificate authority's graph
- * A Certificate is like a Signature. No one knows who (authority) created/signed a cert until you put it into their graph.
- *
- * @param who '*' or a String (Bob.pub) || an Object that contains "pub" as a key || an array of [object || string].
- * These people will have the rights.
- *
- * @param {{}} policy A string ('inbox'), or a LEX object {'*': 'inbox'}, or an Array of RAD/LEX objects or strings.
- * RAD/LEX object can contain key "?" with indexOf("*") > -1 to force key equals certificant pub.
- * This rule is used to check against soul+'/'+key using Gun.text.match or String.match.
- *
- * @param authority Key pair or priv of the certificate authority.
- *
- * @param {{}} opt If opt.expiry (a timestamp) is set, SEA won't sync data after opt.expiry. If opt.block is set, SEA will look for block before syncing.
- *
- *  @returns {Promise<void>}
- */
 export async function certify(
     who: WhoCertify,
     policy: IPolicy,

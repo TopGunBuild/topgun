@@ -16,14 +16,6 @@ const keysToEcdhJwk = (
     ];
 };
 
-/**
- * Derive shared secret from other's pub and my epub/epriv
- *
- * @param {string} key
- * @param {Pair} pair
- * @param {(value?: string) => void} cb
- * @returns {Promise<string>}
- */
 export async function secret(
     key: string,
     pair: Pair,
