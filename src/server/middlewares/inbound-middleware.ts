@@ -24,6 +24,10 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
         super();
     }
 
+    // -----------------------------------------------------------------------------------------------------
+    // @ Public methods
+    // -----------------------------------------------------------------------------------------------------
+
     onPublishIn(action: TGActionPublishIn): void 
     {
         const msg = action.data;
@@ -154,9 +158,6 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
         );
     }
 
-    /**
-     * Persist put data and publish any resulting diff
-     */
     async processPut(msg: TGMessage): Promise<TGMessage> 
     {
         const msgId = pseudoRandomText();

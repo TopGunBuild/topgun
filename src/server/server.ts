@@ -21,9 +21,9 @@ import { generateMessageId } from '../client/graph/graph-utils';
 
 export class TGServer 
 {
-    public readonly adapter: TGGraphAdapter;
-    public readonly internalAdapter: TGGraphAdapter;
-    public readonly server: TGServerSocketGateway;
+    readonly adapter: TGGraphAdapter;
+    readonly internalAdapter: TGGraphAdapter;
+    readonly server: TGServerSocketGateway;
 
     protected readonly validaror: {
         schema: any;
@@ -33,7 +33,7 @@ export class TGServer
     /**
      * Constructor
      */
-    constructor(public readonly options: TGServerOptions) 
+    constructor(readonly options: TGServerOptions) 
     {
         this.validaror = createValidator();
         this.internalAdapter = this.options.adapter || createMemoryAdapter();
