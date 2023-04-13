@@ -56,15 +56,15 @@ export function check(t: any): boolean
 export function parse(t: any): any 
 {
     try 
-{
+    {
         const yes = isString(t);
         if (yes && 'SEA{' === t.slice(0, 4)) 
-{
+        {
             t = t.slice(3);
         }
         return yes ? JSON.parse(t) : t;
     }
- catch (_e) 
-{}
+    catch (_e) 
+    {}
     return t;
 }

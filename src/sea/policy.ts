@@ -21,35 +21,35 @@ function mapPolicyLex(
 ): IPolicyLex | null 
 {
     if (!isObject(options)) 
-{
+    {
         return null;
     }
 
     const lex = Object.keys(options).reduce((accum, key) => 
-{
+    {
         const value = options[key];
 
         switch (key) 
-{
-            case 'greaterThan':
-                accum['>'] = value;
-                break;
+        {
+        case 'greaterThan':
+            accum['>'] = value;
+            break;
 
-            case 'lessThan':
-                accum['<'] = value;
-                break;
+        case 'lessThan':
+            accum['<'] = value;
+            break;
 
-            case 'equals':
-                accum['='] = value;
-                break;
+        case 'equals':
+            accum['='] = value;
+            break;
 
-            case 'startsWith':
-                accum['*'] = value;
-                break;
+        case 'startsWith':
+            accum['*'] = value;
+            break;
 
-            case 'pubInPatch':
-                accum['+'] = '*';
-                break;
+        case 'pubInPatch':
+            accum['+'] = '*';
+            break;
         }
 
         return accum;
@@ -64,18 +64,18 @@ export function createPolicy(options: PolicyOptions): IPolicyLex | IPolicy
     const pathPolicy = mapPolicyLex(options.path);
 
     if (!keyPolicy && !pathPolicy) 
-{
+    {
         return mapPolicyLex(options) || {};
     }
 
     const policy: IPolicy = {};
 
     if (keyPolicy) 
-{
+    {
         policy['.'] = keyPolicy;
     }
     if (pathPolicy) 
-{
+    {
         policy['#'] = pathPolicy;
     }
 
@@ -99,7 +99,7 @@ export class Policy
         key: string,
         certificant: string,
     ) 
-{
+    {
         this.policy = policy;
         this.path = path || '';
         this.key = key || '';
@@ -112,12 +112,12 @@ export class Policy
     // -----------------------------------------------------------------------------------------------------
 
     get pathPolicy(): IPolicyLex | undefined 
-{
+    {
         return this.policy['#'];
     }
 
     get keyPolicy(): IPolicyLex | undefined 
-{
+    {
         return this.policy['.'];
     }
 
@@ -126,18 +126,18 @@ export class Policy
     // -----------------------------------------------------------------------------------------------------
 
     match(): boolean 
-{
+    {
         let valid = true;
         if (this.hasPathPolicy() && !match(this.path, this.policy['#'])) 
-{
+        {
             valid = false;
         }
         if (this.hasKeyPolicy() && match(this.key, this.policy['.'])) 
-{
+        {
             valid = false;
         }
         if (this.hasPlainPolicy()) 
-{
+        {
             valid = match(this.fullPath, this.policy as IPolicyLex);
         }
 
@@ -145,28 +145,28 @@ export class Policy
     }
 
     hasCertificatePathError(): boolean 
-{
+    {
         let valid = true;
 
         if (
             this.needCertInPath(this.keyPolicy) &&
             !this.key.includes(this.certificant)
         ) 
-{
+        {
             valid = false;
         }
         if (
             this.needCertInPath(this.pathPolicy) &&
             !this.path.includes(this.certificant)
         ) 
-{
+        {
             valid = false;
         }
         if (
             this.needCertInPath(this.policy as IPolicyLex) &&
             !this.fullPath.includes(this.certificant)
         ) 
-{
+        {
             valid = false;
         }
 
@@ -178,12 +178,12 @@ export class Policy
     // -----------------------------------------------------------------------------------------------------
 
     private needCertInPath(options: IPolicyLex | string | undefined): boolean 
-{
+    {
         return isObject(options) && options['+'] === '*';
     }
 
     private hasPlainPolicy(): boolean 
-{
+    {
         return (
             isString(this.policy['=']) ||
             isString(this.policy['*']) ||
@@ -193,17 +193,17 @@ export class Policy
     }
 
     private hasPathPolicy(): boolean 
-{
+    {
         return this.hasPolicy(this.pathPolicy);
     }
 
     private hasKeyPolicy(): boolean 
-{
+    {
         return this.hasPolicy(this.keyPolicy);
     }
 
     private hasPolicy(options: IPolicyLex | string | undefined): boolean 
-{
+    {
         return isString(options) || isObject(options);
     }
 }

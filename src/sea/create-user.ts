@@ -25,7 +25,7 @@ export async function createUser(
         : 8;
 
     if ((password || '').length < passwordMinLength) 
-{
+    {
         throw Error('Password too short!');
     }
 
@@ -57,7 +57,7 @@ export async function createUser(
                     '#': pubSoul,
                     '>': Object.keys(data).reduce(
                         (state: { [key: string]: number }, key) => 
-{
+                        {
                             state[key] = now;
                             return state;
                         },

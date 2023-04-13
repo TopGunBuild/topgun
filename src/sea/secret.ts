@@ -31,9 +31,9 @@ export async function secret(
 ): Promise<string | undefined> 
 {
     try 
-{
+    {
         if (!pair || !pair.epriv || !pair.epub) 
-{
+        {
             console.log('No secret mix.');
             return;
         }
@@ -61,7 +61,7 @@ export async function secret(
         const derived = await crypto.subtle
             .importKey(...privKeyData, false, ['deriveBits'])
             .then(async (privKey) => 
-{
+            {
                 // privateKey scope doesn't leak out from here!
                 const derivedBits = await crypto.subtle.deriveBits(
                     props,
@@ -87,23 +87,23 @@ export async function secret(
 
         const r = derived;
         if (cb) 
-{
+        {
             try 
-{
+            {
                 cb(r);
             }
- catch (e) 
-{
+            catch (e) 
+            {
                 console.log(e);
             }
         }
         return r;
     }
- catch (e) 
-{
+    catch (e) 
+    {
         console.error(e);
         if (cb) 
-{
+        {
             cb();
         }
     }

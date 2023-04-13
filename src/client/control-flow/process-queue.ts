@@ -23,7 +23,7 @@ export class TGProcessQueue<
         name = 'ProcessQueue',
         processDupes: TGProcessDupesOption = 'process_dupes',
     ) 
-{
+    {
         super(name);
         this.alreadyProcessed = [];
         this.isProcessing = false;
@@ -34,60 +34,60 @@ export class TGProcessQueue<
     }
 
     public has(item: T): boolean 
-{
+    {
         return super.has(item) || this.alreadyProcessed.indexOf(item) !== -1;
     }
 
     public async processNext(b?: U, c?: V): Promise<void> 
-{
+    {
         let item = this.dequeue();
         const processedItem = item;
 
         if (!item) 
-{
+        {
             return;
         }
 
         item = (await this.middleware.process(item, b, c)) as T | undefined;
 
         if (processedItem && this.processDupes === 'dont_process_dupes') 
-{
+        {
             this.alreadyProcessed.push(processedItem);
         }
 
         if (item) 
-{
+        {
             this.completed.trigger(item);
         }
     }
 
     public enqueueMany(items: readonly T[]): TGProcessQueue<T, U, V> 
-{
+    {
         super.enqueueMany(items);
         return this;
     }
 
     public async process(): Promise<void> 
-{
+    {
         if (this.isProcessing) 
-{
+        {
             return;
         }
 
         if (!this.count()) 
-{
+        {
             return;
         }
 
         this.isProcessing = true;
         while (this.count()) 
-{
+        {
             try 
-{
+            {
                 await this.processNext();
             }
- catch (e) 
-{
+            catch (e) 
+            {
                 console.error('Process Queue error', e);
             }
         }

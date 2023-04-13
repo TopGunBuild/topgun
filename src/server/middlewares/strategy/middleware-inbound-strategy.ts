@@ -50,7 +50,7 @@ export abstract class MiddlewareInboundStrategy
             | TGActionPublishIn
             | TGActionAuthenticate,
     ): void | Promise<void> 
-{
+    {
         action.allow();
     }
 }

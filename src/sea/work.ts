@@ -31,8 +31,8 @@ export async function work(
         isObject<Pair>(saltOrPair) && isString(saltOrPair.epub)
             ? saltOrPair.epub
             : isString(saltOrPair)
-            ? saltOrPair
-            : pseudoRandomText();
+                ? saltOrPair
+                : pseudoRandomText();
 
     const key = await crypto.subtle.importKey(
         'raw',

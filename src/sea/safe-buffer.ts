@@ -21,10 +21,10 @@ SafeBuffer.prototype = Object.create(Array.prototype);
 Object.assign(SafeBuffer, {
     // (data, enc) where typeof data === 'string' then enc === 'utf8'|'hex'|'base64'
     from() 
-{
+    {
         // eslint-disable-next-line prefer-rest-params
         if (!Object.keys(arguments).length) 
-{
+        {
             throw new TypeError(
                 'First argument must be a string, Buffer, ArrayBuffer, Array, or array-like object.',
             );
@@ -33,49 +33,49 @@ Object.assign(SafeBuffer, {
         const input = arguments[0];
         let buf;
         if (isString(input)) 
-{
+        {
             // eslint-disable-next-line prefer-rest-params
             const enc = arguments[1] || 'utf8';
             if (enc === 'hex') 
-{
+            {
                 const bytes = (<any>input)
                     .match(/([\da-fA-F]{2})/g)
                     .map((byte: string) => parseInt(byte, 16));
                 if (!bytes || !bytes.length) 
-{
+                {
                     throw new TypeError(
                         'Invalid first argument for type \'hex\'.',
                     );
                 }
                 buf = SeaArray.from(bytes);
             }
- else if (enc === 'utf8') 
-{
+            else if (enc === 'utf8') 
+            {
                 const length = input.length;
                 const words = new Uint16Array(length);
                 for (let i = 0; i < length; i++) 
-{
+                {
                     words[i] = input.charCodeAt(i);
                 }
                 buf = SeaArray.from(words);
             }
- else if (enc === 'base64') 
-{
+            else if (enc === 'base64') 
+            {
                 const dec = base64.atob(input);
                 const length = dec.length;
                 const bytes = new Uint8Array(length);
                 for (let i = 0; i < length; i++) 
-{
+                {
                     bytes[i] = dec.charCodeAt(i);
                 }
                 buf = SeaArray.from(bytes);
             }
- else if (enc === 'binary') 
-{
+            else if (enc === 'binary') 
+            {
                 buf = SeaArray.from(input);
             }
- else 
-{
+            else 
+            {
                 console.info('SafeBuffer.from unknown encoding: ' + enc);
             }
             return buf;
@@ -83,14 +83,14 @@ Object.assign(SafeBuffer, {
         const length = input?.byteLength
             ? input.byteLength
             : input?.length
-            ? input?.length
-            : null;
+                ? input?.length
+                : null;
 
         if (length) 
-{
+        {
             let buf;
             if (input instanceof ArrayBuffer) 
-{
+            {
                 buf = new Uint8Array(input);
             }
             return SeaArray.from(buf || input);
@@ -98,22 +98,22 @@ Object.assign(SafeBuffer, {
     },
     // This is 'safe-buffer.alloc' sans encoding support
     alloc(length: number, fill = 0 /*, enc */) 
-{
+    {
         return SeaArray.from(
             new Uint8Array(Array.from({ length: length }, () => fill)),
         );
     },
     // This is normal UNSAFE 'buffer.alloc' or 'new Buffer(length)' - don't use!
     allocUnsafe(length: number) 
-{
+    {
         return SeaArray.from(new Uint8Array(Array.from({ length: length })));
     },
     // This puts together array of array like members
     concat(arr: any[]) 
-{
+    {
         // octet array
         if (!Array.isArray(arr)) 
-{
+        {
             throw new TypeError(
                 'First argument must be Array containing ArrayBuffer or Uint8Array instances.',
             );

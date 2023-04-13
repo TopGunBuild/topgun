@@ -53,8 +53,9 @@
             "single"
         ],
         "brace-style": [
-            2,
+            "error",
             "allman"
-        ]
+        ],
+        "indent": [2, 4, {"VariableDeclarator": 0}]
     }
 }

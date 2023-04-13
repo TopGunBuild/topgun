@@ -10,7 +10,7 @@ export class TGGraphWireConnector extends TGGraphConnector
     };
 
     constructor(name = 'GraphWireConnector') 
-{
+    {
         super(name);
         this._callbacks = {};
 
@@ -19,7 +19,7 @@ export class TGGraphWireConnector extends TGGraphConnector
     }
 
     public off(msgId: string): TGGraphWireConnector 
-{
+    {
         super.off(msgId);
         delete this._callbacks[msgId];
         return this;
@@ -31,21 +31,21 @@ export class TGGraphWireConnector extends TGGraphConnector
      * @returns A function to be called to clean up callback listeners
      */
     public put({ graph, msgId = '', replyTo = '', cb }: TGPut): () => void 
-{
+    {
         if (!graph) 
-{
+        {
             return () => 
-{};
+            {};
         }
         const msg: TGMessage = {
             put: graph,
         };
         if (msgId) 
-{
+        {
             msg['#'] = msgId;
         }
         if (replyTo) 
-{
+        {
             msg['@'] = replyTo;
         }
 
@@ -58,11 +58,11 @@ export class TGGraphWireConnector extends TGGraphConnector
      * @returns A function to be called to clean up callback listeners
      */
     public get({ soul, cb, msgId = '' }: TGGet): () => void 
-{
+    {
         const get = { '#': soul };
         const msg: TGMessage = { get };
         if (msgId) 
-{
+        {
             msg['#'] = msgId;
         }
 
@@ -76,38 +76,38 @@ export class TGGraphWireConnector extends TGGraphConnector
      * @param cb
      */
     public req(msg: TGMessage, cb?: TGMessageCb): () => void 
-{
+    {
         const reqId = (msg['#'] = msg['#'] || generateMessageId());
         if (cb) 
-{
+        {
             this._callbacks[reqId] = cb;
         }
         this.send([msg]);
         return () => 
-{
+        {
             this.off(reqId);
         };
     }
 
     private _onProcessedInput(msg?: TGMessage): void 
-{
+    {
         if (!msg) 
-{
+        {
             return;
         }
         const id = msg['#'];
         const replyTo = msg['@'];
 
         if (msg.put) 
-{
+        {
             this.events.graphData.trigger(msg.put, id, replyTo);
         }
 
         if (replyTo) 
-{
+        {
             const cb = this._callbacks[replyTo];
             if (cb) 
-{
+            {
                 cb(msg);
             }
         }

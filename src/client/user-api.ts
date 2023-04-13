@@ -45,7 +45,7 @@ export class TGUserApi
         sessionStorageKey: string | undefined,
         authEvent: TGEvent<TGUserReference>,
     ) 
-{
+    {
         this._authEvent = authEvent;
         this._client = client;
         this._persistSession = persistSession || DEFAULT_OPTIONS.persistSession;
@@ -66,21 +66,21 @@ export class TGUserApi
         password: string,
         cb?: TGAuthCallback,
     ): Promise<TGUserReference> 
-{
+    {
         try 
-{
+        {
             const user = await createUser(this._client, alias, password);
             const ref = this.useCredentials(user);
             if (cb) 
-{
+            {
                 cb(ref);
             }
             return ref;
         }
- catch (err) 
-{
+        catch (err) 
+        {
             if (cb) 
-{
+            {
                 cb({ err: err as Error });
             }
             throw err;
@@ -107,15 +107,15 @@ export class TGUserApi
         optionsOrCallback?: TGAuthCallback | AuthOptions,
         maybeOptions?: AuthOptions,
     ): Promise<TGUserReference | undefined> 
-{
+    {
         const cb = isFunction(optionsOrCallback)
             ? optionsOrCallback
             : isFunction(passwordOrCallback)
-            ? passwordOrCallback
-            : null;
+                ? passwordOrCallback
+                : null;
 
         try 
-{
+        {
             await this.recoverCredentials();
 
             let user: TGUserCredentials;
@@ -125,7 +125,7 @@ export class TGUserApi
                 isObject(aliasOrPair) &&
                 (aliasOrPair.pub || aliasOrPair.epub)
             ) 
-{
+            {
                 const pair = aliasOrPair;
                 const options = optionsOrCallback as AuthOptions;
 
@@ -133,14 +133,14 @@ export class TGUserApi
                 ref = this.useCredentials(user);
 
                 if (cb) 
-{
+                {
                     cb(ref);
                 }
 
                 return ref;
             }
- else if (isString(aliasOrPair) && isString(passwordOrCallback)) 
-{
+            else if (isString(aliasOrPair) && isString(passwordOrCallback)) 
+            {
                 const alias = aliasOrPair;
                 const password = passwordOrCallback;
                 const options = maybeOptions;
@@ -154,17 +154,17 @@ export class TGUserApi
                 ref = this.useCredentials(user);
 
                 if (cb) 
-{
+                {
                     cb(ref);
                 }
 
                 return ref;
             }
         }
- catch (err) 
-{
+        catch (err) 
+        {
             if (cb) 
-{
+            {
                 cb({ err: err as Error });
             }
             throw err;
@@ -175,9 +175,9 @@ export class TGUserApi
      * Log out currently authenticated user
      */
     public leave(): TGUserApi 
-{
+    {
         if (this._signMiddleware) 
-{
+        {
             // this._removeCredentials();
             this._client.graph.unuse(this._signMiddleware, 'write');
             this._signMiddleware = undefined;
@@ -191,7 +191,7 @@ export class TGUserApi
      * Traverse a location in the graph
      */
     public get(soul: string): TGLexLink | undefined 
-{
+    {
         return this.is && this._client.get(`~${this.is.pub}/${soul}`);
     }
 
@@ -199,22 +199,22 @@ export class TGUserApi
      * Recovers the credentials from LocalStorage
      */
     public async recoverCredentials(): Promise<void> 
-{
+    {
         if (this._persistSession) 
-{
+        {
             const maybeSession = await getItemAsync(
                 this._sessionStorage,
                 this._sessionStorageKey,
             );
 
             if (maybeSession !== null) 
-{
+            {
                 if (this._isValidCredentials(maybeSession)) 
-{
+                {
                     this.useCredentials(maybeSession);
                 }
- else 
-{
+                else 
+                {
                     await this._removeCredentials();
                 }
             }
@@ -228,7 +228,7 @@ export class TGUserApi
         readonly alias: string;
         readonly pub: string;
     } 
-{
+    {
         this.leave();
         this._signMiddleware = graphSigner(this._client, {
             priv: credentials.priv,
@@ -241,7 +241,7 @@ export class TGUserApi
         };
 
         if (this.is && this.is.pub) 
-{
+        {
             this._authSuccess(credentials);
         }
 
@@ -253,7 +253,7 @@ export class TGUserApi
     // -----------------------------------------------------------------------------------------------------
 
     private _authSuccess(credentials: TGUserCredentials): void 
-{
+    {
         this._authEvent.trigger({
             alias: credentials.alias,
             pub: credentials.pub,
@@ -263,11 +263,11 @@ export class TGUserApi
     }
 
     private _authConnectors(credentials: TGUserCredentials): void 
-{
+    {
         this._client.graph.eachConnector((connector) => 
-{
+        {
             if (connector.name === 'TGWebSocketGraphConnector') 
-{
+            {
                 (connector as TGWebSocketGraphConnector).authenticate(
                     credentials.pub,
                     credentials.priv,
@@ -279,9 +279,9 @@ export class TGUserApi
     private async _persistCredentials(
         credentials: TGUserCredentials,
     ): Promise<void> 
-{
+    {
         if (this._persistSession) 
-{
+        {
             await setItemAsync(
                 this._sessionStorage,
                 this._sessionStorageKey,
@@ -291,9 +291,9 @@ export class TGUserApi
     }
 
     private async _removeCredentials(): Promise<void> 
-{
+    {
         if (this._persistSession) 
-{
+        {
             await removeItemAsync(
                 this._sessionStorage,
                 this._sessionStorageKey,
@@ -304,7 +304,7 @@ export class TGUserApi
     private _isValidCredentials(
         maybeSession: unknown,
     ): maybeSession is TGUserCredentials 
-{
+    {
         return (
             isObject(maybeSession) &&
             'priv' in maybeSession &&

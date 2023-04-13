@@ -18,26 +18,26 @@ export function dataWalking(
 ): { [key: string]: any } 
 {
     if (!isSupport(obj)) 
-{
+    {
         throw Error(
             'Invalid data: ' + checkType(obj) + ' at ' + pathArr.join('.'),
         );
     }
- else if (!isObject(obj)) 
-{
+    else if (!isObject(obj)) 
+    {
         obj = set(pathArr, obj);
     }
 
     const path = pathArr.join('/');
     if (pathArr.length > 0 && !isObject(target[path])) 
-{
+    {
         target[path] = {};
     }
 
     for (const k in obj) 
-{
+    {
         if (!obj.hasOwnProperty(k)) 
-{
+        {
             continue;
         }
 
@@ -46,7 +46,7 @@ export function dataWalking(
         const pathFull = pathArrFull.join('/');
 
         if (!isSupport(value)) 
-{
+        {
             console.log(
                 'Invalid data: ' +
                     checkType(value) +
@@ -57,12 +57,12 @@ export function dataWalking(
         }
 
         if (isObject(value)) 
-{
+        {
             target[path][k] = { '#': pathFull };
             dataWalking(value, pathArrFull, target);
         }
- else 
-{
+        else 
+        {
             target[path][k] = value;
         }
     }

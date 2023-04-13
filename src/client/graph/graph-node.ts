@@ -22,7 +22,7 @@ export class TGGraphNode
         soul: string,
         updateGraph: (data: TGGraphData, replyToId?: string) => void,
     ) 
-{
+    {
         this._onDirectQueryReply = this._onDirectQueryReply.bind(this);
         this._data = new TGEvent<TGNode | undefined>(`<GraphNode ${soul}>`);
         this._graph = graph;
@@ -31,14 +31,14 @@ export class TGGraphNode
     }
 
     public listenerCount(): number 
-{
+    {
         return this._data.listenerCount();
     }
 
     public get(cb?: TGNodeListenCb): TGGraphNode 
-{
+    {
         if (cb) 
-{
+        {
             this.on(cb);
         }
         this._ask();
@@ -46,7 +46,7 @@ export class TGGraphNode
     }
 
     public receive(data: TGNode | undefined): TGGraphNode 
-{
+    {
         this._data.trigger(data, this.soul);
         return this;
     }
@@ -54,7 +54,7 @@ export class TGGraphNode
     public on(
         cb: (data: TGNode | undefined, soul: string) => void,
     ): TGGraphNode 
-{
+    {
         this._data.on(cb);
         return this;
     }
@@ -62,18 +62,18 @@ export class TGGraphNode
     public off(
         cb?: (data: TGNode | undefined, soul: string) => void,
     ): TGGraphNode 
-{
+    {
         if (cb) 
-{
+        {
             this._data.off(cb);
         }
- else 
-{
+        else 
+        {
             this._data.reset();
         }
 
         if (this._endCurQuery && !this._data.listenerCount()) 
-{
+        {
             this._endCurQuery();
             this._endCurQuery = undefined;
         }
@@ -82,9 +82,9 @@ export class TGGraphNode
     }
 
     private _ask(): TGGraphNode 
-{
+    {
         if (this._endCurQuery) 
-{
+        {
             return this;
         }
 
@@ -96,9 +96,9 @@ export class TGGraphNode
     }
 
     private _onDirectQueryReply(msg: TGMessage): void 
-{
+    {
         if (!msg.put) 
-{
+        {
             this._updateGraph(
                 {
                     [this.soul]: undefined,

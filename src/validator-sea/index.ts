@@ -144,94 +144,94 @@ export const read = (
 
 const validateSeaProperty =
     (ajv: any) =>
-    (
-        schema: any,
-        data: any,
-        pSchema: any,
-        _cPath: any,
-        parentData: any,
-        keyInParent: string,
-    ) => 
-{
-        const soul: string =
+        (
+            schema: any,
+            data: any,
+            pSchema: any,
+            _cPath: any,
+            parentData: any,
+            keyInParent: string,
+        ) => 
+        {
+            const soul: string =
             (parentData && parentData['_'] && parentData['_']['#']) || '';
 
-        if (keyInParent === '_') 
-{
-            return true;
-        }
-        const obj =
+            if (keyInParent === '_') 
+            {
+                return true;
+            }
+            const obj =
             seaSoulRoute.match(soul) || seaAuthorRoute.match(soul) || {};
-        const authorId: string = obj['authorId'] || '';
+            const authorId: string = obj['authorId'] || '';
 
-        if (!authorId) 
-{
-            return false;
-        }
-        if (soul === `~${authorId}` && keyInParent === 'pub') 
-{
-            return data === authorId;
-        }
-
-        // Validate as an object to give property validators more context
-        const validate = ajv.compile({
-            additionalProperties: true,
-            properties: {
-                [keyInParent]: schema,
-            },
-        });
-        let result: any;
-
-        return read(parentData, keyInParent, authorId)
-            .then((res: any) => (result = res))
-            .then((res: any) => ({ ...parentData, [keyInParent]: res }))
-            .catch((err: any) => 
-{
-                console.error(
-                    'key err',
-                    soul,
-                    keyInParent,
-                    authorId,
-                    parentData[keyInParent],
-                    err.stack || err,
-                );
+            if (!authorId) 
+            {
                 return false;
-            })
-            .then((res: any) => 
-{
-                if (!res || typeof res[keyInParent] === 'undefined') 
-{
-                    delete parentData[keyInParent];
-                    if (parentData && parentData['_'] && parentData['_']['>']) 
-{
-                        delete parentData['_']['>'];
-                    }
+            }
+            if (soul === `~${authorId}` && keyInParent === 'pub') 
+            {
+                return data === authorId;
+            }
+
+            // Validate as an object to give property validators more context
+            const validate = ajv.compile({
+                additionalProperties: true,
+                properties: {
+                    [keyInParent]: schema,
+                },
+            });
+            let result: any;
+
+            return read(parentData, keyInParent, authorId)
+                .then((res: any) => (result = res))
+                .then((res: any) => ({ ...parentData, [keyInParent]: res }))
+                .catch((err: any) => 
+                {
                     console.error(
-                        'sea prop err',
+                        'key err',
                         soul,
                         keyInParent,
-                        result,
-                        pSchema,
+                        authorId,
+                        parentData[keyInParent],
+                        err.stack || err,
                     );
-                    return res;
-                }
-                return Promise.resolve(validate(res)).then((isValid) => 
-{
-                    if (!isValid) 
-{
+                    return false;
+                })
+                .then((res: any) => 
+                {
+                    if (!res || typeof res[keyInParent] === 'undefined') 
+                    {
+                        delete parentData[keyInParent];
+                        if (parentData && parentData['_'] && parentData['_']['>']) 
+                        {
+                            delete parentData['_']['>'];
+                        }
                         console.error(
-                            'sea validation err',
+                            'sea prop err',
                             soul,
                             keyInParent,
                             result,
-                            validate.errors,
                             pSchema,
                         );
+                        return res;
                     }
-                    return isValid;
+                    return Promise.resolve(validate(res)).then((isValid) => 
+                    {
+                        if (!isValid) 
+                        {
+                            console.error(
+                                'sea validation err',
+                                soul,
+                                keyInParent,
+                                result,
+                                validate.errors,
+                                pSchema,
+                            );
+                        }
+                        return isValid;
+                    });
                 });
-            });
-    };
+        };
 
 export const initAjv = (conf?: any) => 
 {

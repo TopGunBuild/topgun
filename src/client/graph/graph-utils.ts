@@ -28,19 +28,19 @@ export function nodeToGraph(node: TGNode): TGGraphData
     const nodeSoul = node && node._ && node._['#'];
 
     for (const key in node) 
-{
+    {
         if (key === '_') 
-{
+        {
             continue;
         }
         const val = node[key];
         if (typeof val !== 'object' || val === null) 
-{
+        {
             continue;
         }
 
         if (val.soul) 
-{
+        {
             const edge = { '#': val.soul };
             modified[key] = edge;
 
@@ -50,12 +50,12 @@ export function nodeToGraph(node: TGNode): TGGraphData
         let soul = val && val._ && val._['#'];
 
         if (val instanceof TGLink && val.soul) 
-{
+        {
             soul = val.soul;
         }
 
         if (soul) 
-{
+        {
             const edge = { '#': soul };
             modified[key] = edge;
             const graph = addMissingState(nodeToGraph(val));
@@ -78,21 +78,21 @@ export function flattenGraphData(data: TGGraphData): TGGraphData
     let flatGraph: TGGraphData = {};
 
     for (const soul in data) 
-{
+    {
         if (!soul) 
-{
+        {
             continue;
         }
 
         const node = data[soul];
         if (node) 
-{
+        {
             graphs.push(nodeToGraph(node));
         }
     }
 
     for (const graph of graphs) 
-{
+    {
         const diff = diffCRDT(graph, flatGraph);
         flatGraph = diff ? mergeGraph(flatGraph, diff) : flatGraph;
     }
@@ -108,7 +108,7 @@ export function getPathData(
     const lastKey = keys[keys.length - 1];
 
     if (keys.length === 1) 
-{
+    {
         return {
             complete: lastKey in graph,
             souls: keys,
@@ -123,7 +123,7 @@ export function getPathData(
     } = getPathData(keys.slice(0, keys.length - 1), graph);
 
     if (!isObject(parentValue)) 
-{
+    {
         return {
             complete: complete || isDefined(parentValue),
             souls,
@@ -134,7 +134,7 @@ export function getPathData(
     const value = (parentValue as TGNode)[lastKey];
 
     if (!value) 
-{
+    {
         return {
             complete: true,
             souls,
@@ -145,7 +145,7 @@ export function getPathData(
     const edgeSoul = value['#'];
 
     if (edgeSoul) 
-{
+    {
         return {
             complete: edgeSoul in graph,
             souls: [...souls, edgeSoul],

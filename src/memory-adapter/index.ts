@@ -38,7 +38,7 @@ const putSync = (
     const diff = diffFn(graphData, graph);
 
     if (diff) 
-{
+    {
         mergeFn(graph, diff, 'mutable');
     }
 

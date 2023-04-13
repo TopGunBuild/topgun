@@ -17,16 +17,16 @@ export const getItemAsync = async (
     const value = await storage.getItem(key);
 
     if (!value) 
-{
+    {
         return null;
     }
 
     try 
-{
+    {
         return JSON.parse(value);
     }
- catch 
-{
+    catch 
+    {
         return value;
     }
 };

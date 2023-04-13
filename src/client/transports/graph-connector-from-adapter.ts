@@ -12,7 +12,7 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
      * Constructor
      */
     constructor(adapter: TGGraphAdapter, name = 'GraphConnectorFromAdapter') 
-{
+    {
         super(name);
         this.adapter = adapter;
     }
@@ -22,7 +22,7 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
     // -----------------------------------------------------------------------------------------------------
 
     public get({ soul, cb, opts, msgId = '' }: TGGet): () => void 
-{
+    {
         this.adapter
             .get(soul, opts)
             .then(node => ({
@@ -30,12 +30,12 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
                 '@': msgId,
                 'put': node
                     ? {
-                          [soul]: node,
-                      }
+                        [soul]: node,
+                    }
                     : undefined,
             }))
             .catch((error) => 
-{
+            {
                 console.warn(error.stack || error);
 
                 return {
@@ -45,10 +45,10 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
                 };
             })
             .then((msg) => 
-{
+            {
                 this.ingest([msg]);
                 if (cb) 
-{
+                {
                     cb(msg);
                 }
             });
@@ -57,11 +57,11 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
     }
 
     public put({ graph, msgId = '', cb }: TGPut): () => void 
-{
+    {
         this.adapter
             .put(graph)
             .then(() => 
-{
+            {
                 return {
                     '#': generateMessageId(),
                     '@': msgId,
@@ -70,7 +70,7 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
                 };
             })
             .catch((error) => 
-{
+            {
                 console.warn(error.stack || error);
 
                 return {
@@ -81,10 +81,10 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
                 };
             })
             .then((msg) => 
-{
+            {
                 this.ingest([msg]);
                 if (cb) 
-{
+                {
                     cb(msg);
                 }
             });

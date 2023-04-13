@@ -26,11 +26,11 @@ export async function decrypt<T>(
         isObject(keyOrPair) && isString(keyOrPair.epriv)
             ? keyOrPair.epriv
             : isString(keyOrPair)
-            ? keyOrPair
-            : '';
+                ? keyOrPair
+                : '';
 
     try 
-{
+    {
         const aeskey = await importAesKey(key, Buffer.from(json.s, encoding));
         const encrypted = new Uint8Array(Buffer.from(json.ct, encoding));
         const iv = new Uint8Array(Buffer.from(json.iv, encoding));
@@ -45,12 +45,12 @@ export async function decrypt<T>(
         );
         return parse(new TextDecoder('utf8').decode(ct));
     }
- catch (e: any) 
-{
+    catch (e: any) 
+    {
         // console.warn('decrypt error', e, e.stack || e);
 
         if (!opt.fallback || encoding === opt.fallback) 
-{
+        {
             return;
             // throw new Error('Could not decrypt');
         }
