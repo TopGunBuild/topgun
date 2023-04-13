@@ -4,15 +4,16 @@ import { dataWalking } from '../src/utils/data-walking';
 describe('Client', () => {
     const client = new TGClient();
 
-    // it('callback', async () => {
-    //     const key = 'test';
-    //
-    //     client.get(key).put({ yo: 'hi' }, async (ack) => {
-    //         expect(ack['#']).toBe(key);
-    //         expect(ack.ok).toBeTruthy();
-    //         expect(client.graph['_graph'][key]?.yo).toBe('hi');
-    //     });
-    // });
+    it('callback', async () => {
+        const key = 'test';
+
+        client.get(key).put({ yo: 'hi' }, async (ack) => {
+            // TODO: ack['#'] must be equals key
+            // expect(ack['#']).toBe(key);
+            expect(ack.ok).toBeTruthy();
+            expect(client.graph['_graph'][key]?.yo).toBe('hi');
+        });
+    });
 
     it('save/read number', async () => {
         client
