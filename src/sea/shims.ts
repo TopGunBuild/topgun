@@ -3,19 +3,16 @@ import './base64';
 import SafeBuffer from './safe-buffer';
 import WebCrypto from 'topgun-webcrypto';
 
-export const crypto = WebCrypto;
-export const Buffer = SafeBuffer;
-
 const api: any = {
-    Buffer,
-    crypto,
+    Buffer: SafeBuffer,
+    crypto: WebCrypto,
     TextEncoder: root && root.TextEncoder,
     TextDecoder: root && root.TextDecoder,
 };
 
 api.random = (len: number) =>
     api.Buffer.from(
-        crypto.getRandomValues(new Uint8Array(api.Buffer.alloc(len))),
+        api.crypto.getRandomValues(new Uint8Array(api.Buffer.alloc(len))),
     );
 
 export const random = api.random;
