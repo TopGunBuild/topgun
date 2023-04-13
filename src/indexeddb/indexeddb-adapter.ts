@@ -13,18 +13,12 @@ export const DEFAULT_CRDT_OPTS = {
     mergeFn: mergeGraph,
 };
 
-/**
- * Open a IndexedDB database as a Graph Adapter
- */
 export function createGraphAdapter(name = DEFAULT_DB_NAME): TGGraphAdapter 
 {
     const db = new IndexedDb(name);
     return adapterFromIndexedDB(db);
 }
 
-/**
- * Create Graph Adapter from IndexedDB database
- */
 export function adapterFromIndexedDB(db: IndexedDb): TGGraphAdapter 
 {
     return {

@@ -4,6 +4,9 @@ export class IndexedDb
     readonly _dbName: string;
     readonly _storeName: string;
 
+    /**
+     * Constructor
+     */
     constructor(storeName: string) 
     {
         this._dbName = storeName;
