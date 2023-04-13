@@ -356,9 +356,11 @@ export class TGGraph
 
             if (cb) 
             {
-                // && this.events.put.listenerCount() === 0
                 cb({
-                    '#': undefined,
+                    '#':
+                        fullPath.length > 0
+                            ? fullPath[fullPath.length - 1]
+                            : soul,
                     '@': msgId,
                     'err': null,
                     'ok': true,
