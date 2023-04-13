@@ -293,14 +293,12 @@ export function createValidator({
                     },
                     'leech': {
                         title: 'Leech Command',
-                        description:
-                            'TopGun protocol extension added by pistol',
+                        description: 'TopGun protocol extension',
                         type: 'boolean',
                     },
                     'ping': {
                         title: 'Ping Command',
-                        description:
-                            'TopGun protocol extension added by pistol',
+                        description: 'TopGun protocol extension',
                         type: 'boolean',
                     },
                     'get': {
