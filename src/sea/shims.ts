@@ -1,9 +1,9 @@
 import root from '../utils/window-or-global';
 import './base64';
 import SafeBuffer from './safe-buffer';
-import { Crypto } from '@peculiar/webcrypto';
+import WebCrypto from 'topgun-webcrypto';
 
-export const crypto = new Crypto();
+export const crypto = WebCrypto;
 export const Buffer = SafeBuffer;
 
 const api: any = {

@@ -63,10 +63,10 @@
     },
     "homepage": "https://github.com/TopGunBuild/topgun#readme",
     "dependencies": {
-        "@peculiar/webcrypto": "^1.4.3",
         "ajv": "^8.12.0",
         "route-parser": "^0.0.5",
-        "topgun-socket": "1.0.5"
+        "topgun-socket": "1.0.5",
+        "topgun-webcrypto": "^1.0.3"
     },
     "devDependencies": {
         "@semantic-release/changelog": "^6.0.3",
