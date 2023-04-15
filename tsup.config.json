@@ -16,5 +16,6 @@
         "client": "src/client/index.ts",
         "server": "src/server/index.ts"
     },
+    "target": ["esnext"],
     "watch": false
 }
