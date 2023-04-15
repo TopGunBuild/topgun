@@ -8,8 +8,8 @@ dependencies:
     specifier: ^0.0.5
     version: 0.0.5
   topgun-socket:
-    specifier: 1.0.5
-    version: 1.0.5
+    specifier: 1.1.10
+    version: 1.1.10
   topgun-webcrypto:
     specifier: ^1.0.3
     version: 1.0.3
@@ -5505,11 +5505,11 @@ packages:
       is-number: 7.0.0
     dev: true
 
-  /topgun-socket@1.0.5:
-    resolution: {integrity: sha512-y+tJrCEqIkg5a0V1NA7imBRpz97NIv3rITbu08zvhGFJ5Rsxs885l2qJa67Te/76zE1WtxfNITZZXhSlwRx0Gw==}
+  /topgun-socket@1.1.10:
+    resolution: {integrity: sha512-Ll2crlSllabbDyEht9rm79fhMjn44IsSCg2+NZY0j9iFh3qSRImW1A4Tw7zvkkON7AT2C8JOs+8lN0Tw1WQ7GA==}
     dependencies:
-      '@peculiar/webcrypto': 1.4.3
       buffer: 5.7.1
+      topgun-webcrypto: 1.0.3
       ws: 8.13.0
     transitivePeerDependencies:
       - bufferutil
