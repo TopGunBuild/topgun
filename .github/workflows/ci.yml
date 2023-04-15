@@ -46,8 +46,6 @@ jobs:
 
             # Runs a set of commands using the runners shell
             - name: Build and Test
-              env:
-                  NODE_OPTIONS: "--max_old_space_size=4096"
               run: pnpm test
 
     release:
@@ -72,7 +70,10 @@ jobs:
                       ${{ runner.os }}-
             - run: npm i -g pnpm
             - run: pnpm i
-            - run: pnpm semantic-release
+            - name: Build packages
+              run: pnpm build:package
+            - name: Run semantic release and publish package
+              run: pnpm semantic-release
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
                   NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
