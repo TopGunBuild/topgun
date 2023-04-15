@@ -180,7 +180,7 @@ export class TGUserApi
         if (this._signMiddleware) 
         {
             // this._removeCredentials();
-            this._client.graph.unuse(this._signMiddleware, 'write');
+            // this._client.graph.unuse(this._signMiddleware, 'write');
             this._signMiddleware = undefined;
             this.is = undefined;
         }

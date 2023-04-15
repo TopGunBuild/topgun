@@ -88,6 +88,7 @@ export async function authenticateIdentity(
       }
 > 
 {
+    console.log({ soul, graph: client.graph });
     const ident = await client.get(soul).then();
     return authenticateAccount(ident, password, encoding);
 }
