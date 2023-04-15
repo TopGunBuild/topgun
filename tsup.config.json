@@ -16,6 +16,11 @@
         "client": "src/client/index.ts",
         "server": "src/server/index.ts"
     },
-    "target": ["esnext"],
+    "target": [
+        "esnext"
+    ],
+    "define": {
+        "global": "window"
+    },
     "watch": false
 }
