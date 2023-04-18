@@ -11,8 +11,8 @@ dependencies:
     specifier: 1.0.3
     version: 1.0.3
   topgun-socket:
-    specifier: 1.2.2
-    version: 1.2.2
+    specifier: 1.2.3
+    version: 1.2.3
   topgun-webcrypto:
     specifier: 1.0.5
     version: 1.0.5
@@ -5497,8 +5497,8 @@ packages:
     resolution: {integrity: sha512-Upuzkv7kj23Q3JtZKLSAWGEFkrsmKn+7ZZnOqBjdblb0lkZBW4S3+nttdL37hJnTh7NTJ4Giz6A+qw3SDRW1Ag==}
     dev: false
 
-  /topgun-socket@1.2.2:
-    resolution: {integrity: sha512-out2XZVJoBUyE6yjmOlp6ocEEScyOB7M7iHFMNwta8zAZUeI04q5WkMwxqVaispqyNbqo/t2gpg9lopLGNn23g==}
+  /topgun-socket@1.2.3:
+    resolution: {integrity: sha512-Xwl3M7mYZOmqOETInkpZRin94yxKaUUXAxsIt86298r/oTP0uUKr7PPj3ZrMJ32xPgTOMx5XSWyKzp2jSiGqcA==}
     dependencies:
       topgun-buffer: 1.0.3
       topgun-webcrypto: 1.0.5
