@@ -1,3 +1,13 @@
+## [1.0.3](https://github.com/TopGunBuild/topgun/compare/v1.0.2...v1.0.3) (2023-04-18)
+
+
+### Bug Fixes
+
+* add topgun-buffer, upgrade deps, add examples folder ([2f00aa4](https://github.com/TopGunBuild/topgun/commit/2f00aa4bf7af5a9bdc21ad421501b495778e55ac))
+* bump topgun-socket 1.1.10 -> 1.1.11 ([c6eec0f](https://github.com/TopGunBuild/topgun/commit/c6eec0fa4f20ab1acdbf731c2ab5a8e6eeb523d7))
+* update "exports" in package.json ([80eaff7](https://github.com/TopGunBuild/topgun/commit/80eaff74886bd56f4545e75acf223301e0efa5db))
+* upgrade deps ([09daf8d](https://github.com/TopGunBuild/topgun/commit/09daf8d20e649c55768910e39e6508353a47f8ac))
+
 ## [1.0.2](https://github.com/TopGunBuild/topgun/compare/v1.0.1...v1.0.2) (2023-04-13)
 
 
