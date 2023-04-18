@@ -19,17 +19,13 @@
     "exports": {
         "./client": {
             "types": "./dist/client.d.ts",
-            "node": "./dist/client.js",
             "require": "./dist/client.js",
-            "import": "./dist/client.mjs",
-            "default": "./dist/client.mjs"
+            "import": "./dist/client.mjs"
         },
         "./server": {
             "types": "./dist/server.d.ts",
-            "node": "./dist/server.js",
             "require": "./dist/server.js",
-            "import": "./dist/server.mjs",
-            "default": "./dist/server.mjs"
+            "import": "./dist/server.mjs"
         },
         "./package.json": "./package.json"
     },
