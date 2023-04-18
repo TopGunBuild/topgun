@@ -1,3 +1,12 @@
+## [1.0.4](https://github.com/TopGunBuild/topgun/compare/v1.0.3...v1.0.4) (2023-04-18)
+
+
+### Bug Fixes
+
+* bump topgun-socket 1.2.2 -> 1.2.3 ([95c50f6](https://github.com/TopGunBuild/topgun/commit/95c50f60a0723f389bf3e4c69c69833d005f56de))
+* export `SEA` methods from client ([4c4d3fb](https://github.com/TopGunBuild/topgun/commit/4c4d3fbe37f9f50b270ff779620694446da97202))
+* set `splitting` to false ([76e9d46](https://github.com/TopGunBuild/topgun/commit/76e9d46ae7e4fd5255b19d9f3449acd4e81587aa))
+
 ## [1.0.3](https://github.com/TopGunBuild/topgun/compare/v1.0.2...v1.0.3) (2023-04-18)
 
 
