@@ -1,3 +1,10 @@
+## [1.0.2](https://github.com/TopGunBuild/topgun/compare/v1.0.1...v1.0.2) (2023-04-13)
+
+
+### Bug Fixes
+
+* **client:** return graph key in put callback ([f68a810](https://github.com/TopGunBuild/topgun/commit/f68a8109c4f97443d686031581ea8f71d12eea9e))
+
 ## [1.0.1](https://github.com/TopGunBuild/topgun/compare/v1.0.0...v1.0.1) (2023-04-13)
 
 
