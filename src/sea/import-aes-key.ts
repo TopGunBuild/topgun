@@ -1,3 +1,4 @@
+import Buffer from 'topgun-buffer';
 import { keyToJwk } from './settings';
 import { sha256 } from './sha256';
 import { crypto, random } from './shims';

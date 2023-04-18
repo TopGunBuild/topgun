@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Todo</title>
+
+    <style>
+        body {
+            color: #fff;
+            background: #03a9f4;
+            padding: 0.5rem;
+        }
+
+        * {
+            border: 0;
+            outline: none;
+        }
+
+        button, input[type=button], input[type=submit] {
+            cursor: pointer;
+        }
+
+        button:hover, input[type=button]:hover, input[type=submit]:hover {
+            opacity: 0.9;
+        }
+
+        input, button {
+            border-left: 8px solid #afafaf87;
+            margin: 4px;
+            line-height: 24px;
+            padding-left: .5rem;
+        }
+    </style>
+</head>
+<body>
+<h1>Todo</h1>
+
+<!-- Auth form -->
+<form id="sign">
+    <input id="alias" placeholder="username">
+    <input id="pass" type="password" placeholder="passphrase">
+    <input id="in" onclick="signInHandler()" type="button" value="sign in">
+    <input id="up" onclick="signUpHandler()" type="button" value="sign up">
+</form>
+
+<!-- Said form -->
+<form id="said">
+    <input id="say">
+    <input id="speak" type="submit" value="speak">
+</form>
+
+<!-- List -->
+<ul></ul>
+
+<!--<script src="https://cdn.jsdelivr.net/npm/gun/gun.js"></script>-->
+<!--<script src="https://cdn.jsdelivr.net/npm/gun/sea.js"></script>-->
+<!--<script src="https://cdn.jsdelivr.net/npm/gun/lib/book.js"></script>-->
+
+<script src="../dist/client.global.js"></script>
+<!--<script type="module" src="../dist/client.mjs"></script>-->
+
+<script>
+    // Instances
+    // const client = new TopGun.Client({
+    //     // peers: ['http://localhost:8765'],
+    //     persistSession: false
+    // });
+
+    // Helper function
+    const getInputValue = _id => document.getElementById(_id).value;
+    const isValid = () => !!(getInputValue('alias') && getInputValue('pass'));
+
+    function signUpHandler() {
+        if (isValid()) {
+            const alias = getInputValue('alias');
+            const pass = getInputValue('pass');
+            client.user().create(alias, pass, ({err, alias, pub}) => console.log('[Minigun] Sign up', {
+                err,
+                alias,
+                pub
+            }));
+        }
+    }
+
+    function signInHandler() {
+        if (isValid()) {
+            const alias = getInputValue('alias');
+            const pass = getInputValue('pass');
+            client.user()
+                .auth(alias, pass, ({err, alias, pub}) => console.log('[Minigun] Sign in', {err, alias, pub}))
+                .catch(err => console.log(err));
+        }
+    }
+
+    // client.get('first').get('second').get('third').on(console.log)
+
+    // console.log(
+    //     client.user('xxx')
+    //         .start('xx-lte')
+    //         .end('xx-gte')
+    //         .equals('xx')
+    //         .limit(100)
+    //         .reverse()
+    //         .getQuery()
+    // );
+
+    document.getElementById('said').addEventListener('submit', async e => {
+        e.preventDefault();
+
+        const data = getInputValue('say');
+        const Alice = await Minigun.SEA.pair();
+        const userPub = client.user().is.pub; // gun.user().is.pub;
+
+        // Alice wants to allow current user to use write to her "inbox" and "stories" UNTIL TOMORROW
+        // On Alice's side:
+        const certificate = await Minigun.SEA.certify(
+            [userPub],
+            [
+                Minigun.SEA.createPolicy({
+                    startsWith: 'inbox',
+                    pubInPatch: true
+                }),
+                Minigun.SEA.createPolicy({
+                    startsWith: 'stories',
+                }),
+            ],
+            Alice,
+            {
+                expiry: Date.now() + (60 * 60 * 24 * 1000) // Let's set a one day expiration period
+            }
+        );
+
+        client.get('~' + Alice.pub)
+            .get('inbox')
+            .get('deeper')
+            .get(userPub)
+            .on((data, id) => {
+                console.log(id, data);
+            });
+
+        client.get('~' + Alice.pub)
+            .get('inbox')
+            .get('deeper')
+            .get(userPub)
+            .put(data, null, {opt: {cert: certificate}});
+
+        document.getElementById('say').value = '';
+    });
+
+    // client.on('auth', () => {
+    //     document.getElementById('sign').hidden = true;
+    //     document.getElementById('speak').hidden = false;
+    //
+    //     console.log('[Minigun] Auth success');
+    //
+    //     client.user().get('said').map().on((data, id) => {
+    //         if (!document.getElementById(id)) {
+    //             document.querySelector('ul').insertAdjacentHTML('beforeend', `<li id="${id}"></li>`);
+    //         }
+    //         document.getElementById(id).textContent = data.say;
+    //         console.log('[Minigun]', id, data);
+    //     });
+    // });
+
+    function setDefaultValues() {
+        document.getElementById('alias').value = 'ivan-kalashnik';
+        document.getElementById('pass').value = '1qazxsw2';
+    }
+
+    setDefaultValues();
+</script>
+</body>
+</html>

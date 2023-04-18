@@ -1,4 +1,5 @@
-import { Buffer, crypto, TextEncoder } from './shims';
+import Buffer from 'topgun-buffer';
+import { crypto, TextEncoder } from './shims';
 import { isString } from '../utils/is-string';
 
 export async function sha256(

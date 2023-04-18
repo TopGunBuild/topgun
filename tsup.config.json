@@ -1,9 +1,5 @@
 {
     "globalName": "TopGun",
-    "splitting": true,
-    "sourcemap": false,
-    "clean": true,
-    "dts": true,
     "format": [
         "cjs",
         "esm",
@@ -11,16 +7,11 @@
     ],
     "minify": true,
     "bundle": true,
-    "skipNodeModulesBundle": true,
     "entry": {
         "client": "src/client/index.ts",
         "server": "src/server/index.ts"
     },
-    "target": [
-        "esnext"
-    ],
     "define": {
         "global": "window"
-    },
-    "watch": false
+    }
 }

@@ -1,6 +1,7 @@
+import Buffer from 'topgun-buffer';
 import { ecdsa, jwk, parse } from './settings';
 import { sha256 } from './sha256';
-import { Buffer, crypto } from './shims';
+import { crypto } from './shims';
 import { Pair } from './pair';
 import { isObject } from '../utils/is-object';
 import { isString } from '../utils/is-string';

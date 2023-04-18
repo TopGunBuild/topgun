@@ -1,3 +1,4 @@
+import Buffer from 'topgun-buffer';
 import { isString } from '../utils/is-string';
 
 export const shuffleAttackCutoff = 1546329600000; // Jan 1, 2019

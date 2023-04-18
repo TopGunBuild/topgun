@@ -1,5 +1,6 @@
+import Buffer from 'topgun-buffer';
 import { importAesKey } from './import-aes-key';
-import { Buffer, crypto, random, TextEncoder } from './shims';
+import { crypto, random, TextEncoder } from './shims';
 import { Pair } from './pair';
 import { isObject } from '../utils/is-object';
 import { isString } from '../utils/is-string';

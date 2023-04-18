@@ -1,6 +1,7 @@
+import Buffer from 'topgun-buffer';
 import { check, ecdsa, jwk, parse } from './settings';
 import { sha256 } from './sha256';
-import { Buffer, crypto } from './shims';
+import { crypto } from './shims';
 import { pubFromSoul } from './soul';
 import { verify, VerifyData } from './verify';
 import { TGGraphData, TGNode, TGOptionsPut, TGValue } from '../types';

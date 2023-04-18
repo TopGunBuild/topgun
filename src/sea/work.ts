@@ -1,5 +1,6 @@
+import Buffer from 'topgun-buffer';
 import { pbkdf2 } from './settings';
-import { Buffer, crypto, TextEncoder } from './shims';
+import { crypto, TextEncoder } from './shims';
 import { Pair } from './pair';
 import { pseudoRandomText } from './pseudo-random-text';
 import { isObject } from '../utils/is-object';
