@@ -52,19 +52,14 @@
 <!-- List -->
 <ul></ul>
 
-<!--<script src="https://cdn.jsdelivr.net/npm/gun/gun.js"></script>-->
-<!--<script src="https://cdn.jsdelivr.net/npm/gun/sea.js"></script>-->
-<!--<script src="https://cdn.jsdelivr.net/npm/gun/lib/book.js"></script>-->
-
 <script src="../dist/client.global.js"></script>
-<!--<script type="module" src="../dist/client.mjs"></script>-->
 
 <script>
     // Instances
-    // const client = new TopGun.Client({
-    //     // peers: ['http://localhost:8765'],
-    //     persistSession: false
-    // });
+    const client = new TopGun.TGClient({
+        peers: ['http://localhost:8000'],
+        persistSession: false
+    });
 
     // Helper function
     const getInputValue = _id => document.getElementById(_id).value;
@@ -74,7 +69,7 @@
         if (isValid()) {
             const alias = getInputValue('alias');
             const pass = getInputValue('pass');
-            client.user().create(alias, pass, ({err, alias, pub}) => console.log('[Minigun] Sign up', {
+            client.user().create(alias, pass, ({err, alias, pub}) => console.log('[TopGun] Sign up', {
                 err,
                 alias,
                 pub
@@ -87,7 +82,7 @@
             const alias = getInputValue('alias');
             const pass = getInputValue('pass');
             client.user()
-                .auth(alias, pass, ({err, alias, pub}) => console.log('[Minigun] Sign in', {err, alias, pub}))
+                .auth(alias, pass, ({err, alias, pub}) => console.log('[TopGun] Sign in', {err, alias, pub}))
                 .catch(err => console.log(err));
         }
     }
@@ -108,19 +103,19 @@
         e.preventDefault();
 
         const data = getInputValue('say');
-        const Alice = await Minigun.SEA.pair();
+        const Alice = await TopGun.SEA.pair();
         const userPub = client.user().is.pub; // gun.user().is.pub;
 
         // Alice wants to allow current user to use write to her "inbox" and "stories" UNTIL TOMORROW
         // On Alice's side:
-        const certificate = await Minigun.SEA.certify(
+        const certificate = await TopGun.SEA.certify(
             [userPub],
             [
-                Minigun.SEA.createPolicy({
+                TopGun.SEA.createPolicy({
                     startsWith: 'inbox',
                     pubInPatch: true
                 }),
-                Minigun.SEA.createPolicy({
+                TopGun.SEA.createPolicy({
                     startsWith: 'stories',
                 }),
             ],
@@ -147,20 +142,20 @@
         document.getElementById('say').value = '';
     });
 
-    // client.on('auth', () => {
-    //     document.getElementById('sign').hidden = true;
-    //     document.getElementById('speak').hidden = false;
-    //
-    //     console.log('[Minigun] Auth success');
-    //
-    //     client.user().get('said').map().on((data, id) => {
-    //         if (!document.getElementById(id)) {
-    //             document.querySelector('ul').insertAdjacentHTML('beforeend', `<li id="${id}"></li>`);
-    //         }
-    //         document.getElementById(id).textContent = data.say;
-    //         console.log('[Minigun]', id, data);
-    //     });
-    // });
+    client.on('auth', () => {
+        document.getElementById('sign').hidden = true;
+        document.getElementById('speak').hidden = false;
+
+        console.log('[TopGun] Auth success');
+
+        client.user().get('said').map().on((data, id) => {
+            if (!document.getElementById(id)) {
+                document.querySelector('ul').insertAdjacentHTML('beforeend', `<li id="${id}"></li>`);
+            }
+            document.getElementById(id).textContent = data.say;
+            console.log('[TopGun]', id, data);
+        });
+    });
 
     function setDefaultValues() {
         document.getElementById('alias').value = 'ivan-kalashnik';
