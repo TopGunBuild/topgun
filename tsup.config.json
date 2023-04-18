@@ -1,6 +1,6 @@
 {
     "globalName": "TopGun",
-    "splitting": true,
+    "splitting": false,
     "sourcemap": false,
     "clean": true,
     "dts": true,
