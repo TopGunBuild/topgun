@@ -11,8 +11,8 @@ dependencies:
     specifier: 1.0.3
     version: 1.0.3
   topgun-socket:
-    specifier: 1.2.3
-    version: 1.2.3
+    specifier: 1.2.4
+    version: 1.2.4
   topgun-webcrypto:
     specifier: 1.0.5
     version: 1.0.5
@@ -4237,7 +4237,6 @@ packages:
 
   /ms@2.1.2:
     resolution: {integrity: sha512-sGkPx+VjMtmA6MX27oA4FBFELFCZZ4S4XqeGOXCv68tT+jb3vk/RyaKWP0PTKyWtmLSM0b+adUTEvbs1PEaH2w==}
-    dev: true
 
   /mz@2.7.0:
     resolution: {integrity: sha512-z81GNO7nnYMEhrGh9LeymoE4+Yr0Wn5McHIZMK5cfQCl+NDX08sCZgUc9/6MHni9IWuFLm1Z3HTCXu2z9fN62Q==}
@@ -5497,11 +5496,23 @@ packages:
     resolution: {integrity: sha512-Upuzkv7kj23Q3JtZKLSAWGEFkrsmKn+7ZZnOqBjdblb0lkZBW4S3+nttdL37hJnTh7NTJ4Giz6A+qw3SDRW1Ag==}
     dev: false
 
-  /topgun-socket@1.2.3:
-    resolution: {integrity: sha512-Xwl3M7mYZOmqOETInkpZRin94yxKaUUXAxsIt86298r/oTP0uUKr7PPj3ZrMJ32xPgTOMx5XSWyKzp2jSiGqcA==}
+  /topgun-jsonwebtoken@1.0.2:
+    resolution: {integrity: sha512-J/5H7kz+tcR8fiZuxn6BpuytevvPqo1/f3jv15/UOfYJFFzo/0QrQEO44MYoCDUwzIsvT7pF9pRHK/7GzqhsNQ==}
+    dependencies:
+      ms: 2.1.2
+      topgun-webcrypto: 1.0.5
+    dev: false
+
+  /topgun-socket@1.2.4:
+    resolution: {integrity: sha512-feuVrWjq327zKWsVjS7dgYhbyZePy780EsnJhsNX/hDyOj/neuwZkqUSy2T5p/SkjvDMwvZ44gYOu4xlMndObA==}
     dependencies:
       topgun-buffer: 1.0.3
+      topgun-jsonwebtoken: 1.0.2
       topgun-webcrypto: 1.0.5
+      ws: 8.13.0
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
     dev: false
 
   /topgun-webcrypto@1.0.5:
@@ -5881,6 +5892,19 @@ packages:
       imurmurhash: 0.1.4
       signal-exit: 3.0.7
     dev: true
+
+  /ws@8.13.0:
+    resolution: {integrity: sha512-x9vcZYTrFPC7aSIbj7sRCYo7L/Xb8Iy+pW0ng0wt2vCJv7M9HOMy0UoN3rr+IFC7hb7vXoqS+P9ktyLLLhO+LA==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
+    dev: false
 
   /xtend@4.0.2:
     resolution: {integrity: sha512-LKYU1iAXJXUgAXn9URjiu+MWhyUXHsvfp7mcuYm9dSUKK0/CjtrUwFAxD82/mCWbtLsGjFIad0wIsod4zrTAEQ==}
