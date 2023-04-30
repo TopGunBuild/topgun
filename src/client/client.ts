@@ -8,14 +8,11 @@ import { createConnector } from './transports/web-socket-graph-connector';
 import { ClientOptions as SocketClientOptions } from 'topgun-socket/client';
 import { TGUserApi } from './user-api';
 import { pubFromSoul, unpackGraph } from '../sea';
-import { polyfillGlobalThis } from '../utils/global-this';
 import { TGIndexedDbConnector } from '../indexeddb/indexeddb-connector';
 import { TGOnCb, TGNode, TGUserReference } from '../types';
 import { TGEvent } from './control-flow/event';
 import { TGLexLink } from './lex-link';
 import { match } from '../utils/match';
-
-polyfillGlobalThis(); // Make "globalThis" available
 
 /**
  * Main entry point for TopGun in browser
