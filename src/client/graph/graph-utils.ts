@@ -1,9 +1,7 @@
+import { isDefined, isObject, cloneValue } from 'topgun-typed';
 import { addMissingState, diffCRDT, mergeGraph } from '../../crdt';
 import { TGGraphData, TGNode, TGPathData } from '../../types';
 import { TGLink } from '../link';
-import { isDefined } from '../../utils/is-defined';
-import { isObject } from '../../utils/is-object';
-import { cloneValue } from '../../utils/clone-value';
 
 export function generateMessageId(): string 
 {

@@ -1,3 +1,4 @@
+import { isUndefined, isDefined } from 'topgun-typed';
 import { addMissingState, mergeNodes } from '../../crdt';
 import {
     TGGet,
@@ -21,7 +22,6 @@ import {
     getPathData,
 } from './graph-utils';
 import { dataWalking, set } from '../../utils/data-walking';
-import { isDefined } from '../../utils/is-defined';
 
 interface TGGraphOptions {
     readonly mutable?: boolean;
@@ -206,7 +206,7 @@ export class TGGraph
             const [added, removed] = diffSets(lastSouls, souls);
 
             if (
-                (complete && !isDefined(currentValue)) ||
+                (complete && isUndefined(currentValue)) ||
                 (isDefined(value) && value !== currentValue)
             ) 
             {

@@ -1,6 +1,4 @@
-import { isString } from './is-string';
-import { isDefined } from './is-defined';
-import { isObject } from './is-object';
+import { isString, isObject, isDefined } from 'topgun-typed';
 import { LEX } from '../types/lex';
 
 export function match(template: string, options: LEX | string): boolean 

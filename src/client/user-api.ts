@@ -1,3 +1,4 @@
+import { isObject, isString, isFunction } from 'topgun-typed';
 import { authenticate, createUser, graphSigner } from '../sea';
 import { TGClient } from './client';
 import { TGEvent } from './control-flow/event';
@@ -16,9 +17,6 @@ import {
     TGUserCredentials,
     TGUserReference,
 } from '../types';
-import { isObject } from '../utils/is-object';
-import { isString } from '../utils/is-string';
-import { isFunction } from '../utils/is-function';
 import { TGLexLink } from './lex-link';
 import { DEFAULT_OPTIONS } from './client-options';
 

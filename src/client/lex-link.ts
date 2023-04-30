@@ -1,11 +1,8 @@
+import { cloneValue, isNumber, isString, isObject } from 'topgun-typed';
 import { TGLink } from './link';
 import { LEX } from '../types/lex';
-import { isObject } from '../utils/is-object';
-import { isString } from '../utils/is-string';
 import { TGClient } from './client';
-import { isNumber } from '../utils/is-number';
 import { TGOptionsGet, TGValue } from '../types';
-import { cloneValue } from '../utils/clone-value';
 
 type KeyOfLex = keyof LEX;
 type ValueOfLex = LEX[KeyOfLex];

@@ -5,7 +5,7 @@ import {
     TGNodeState,
     TGPartialGraphData,
 } from '../types';
-import { cloneValue } from '../utils/clone-value';
+import { cloneValue } from 'topgun-typed';
 
 const EMPTY: any = {};
 

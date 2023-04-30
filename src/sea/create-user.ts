@@ -1,10 +1,10 @@
+import { isNumber } from 'topgun-typed';
 import { encrypt } from './encrypt';
 import { pair as createPair } from './pair';
 import { pseudoRandomText } from './pseudo-random-text';
 import { signGraph } from './sign';
 import { work } from './work';
 import { TGClient } from '../client/client';
-import { isNumber } from '../utils/is-number';
 
 export async function createUser(
     client: TGClient,

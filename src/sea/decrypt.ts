@@ -1,10 +1,9 @@
 import Buffer from 'topgun-buffer';
+import { isString, isObject } from 'topgun-typed';
 import { importAesKey } from './import-aes-key';
 import { parse } from './settings';
 import { crypto, TextDecoder } from './shims';
 import { Pair } from './pair';
-import { isObject } from '../utils/is-object';
-import { isString } from '../utils/is-string';
 
 const DEFAULT_OPTS: {
     readonly name?: string;

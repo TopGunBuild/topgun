@@ -1,8 +1,7 @@
+import { isObject, isDefined } from 'topgun-typed';
 import { check, parse, shuffleAttackCutoff } from './settings';
 import { pubFromSoul } from './soul';
 import { TGGraphData, TGNode } from '../types';
-import { isObject } from '../utils/is-object';
-import { isDefined } from '../utils/is-defined';
 
 export function unpack(passedValue: any, key: string, node: TGNode): any 
 {

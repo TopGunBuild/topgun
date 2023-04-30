@@ -1,3 +1,4 @@
+import { isDefined, isNotEmptyObject, isObject } from 'topgun-typed';
 import {
     TGChainOptions,
     TGOnCb,
@@ -10,9 +11,6 @@ import { TGClient } from './client';
 import { TGEvent } from './control-flow/event';
 import { generateMessageId } from './graph/graph-utils';
 import { TGGraph } from './graph/graph';
-import { isObject } from '../utils/is-object';
-import { isNotEmptyObject } from '../utils/is-empty-object';
-import { isDefined } from '../utils/is-defined';
 import { pubFromSoul } from '../sea';
 import { match } from '../utils/match';
 import { LEX } from '../types/lex';

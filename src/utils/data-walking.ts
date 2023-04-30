@@ -1,4 +1,4 @@
-import { isObject } from './is-object';
+import { isObject } from 'topgun-typed';
 import { isSupport } from './is-support';
 
 export function checkType(d: any, tmp?: any): string 

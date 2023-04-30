@@ -1,10 +1,9 @@
 import Buffer from 'topgun-buffer';
+import { isObject, isString } from 'topgun-typed';
 import { pbkdf2 } from './settings';
 import { crypto, TextEncoder } from './shims';
 import { Pair } from './pair';
 import { pseudoRandomText } from './pseudo-random-text';
-import { isObject } from '../utils/is-object';
-import { isString } from '../utils/is-string';
 
 const DEFAULT_OPTS: WorkOptions = {
     encode: 'base64',

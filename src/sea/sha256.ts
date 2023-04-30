@@ -1,6 +1,6 @@
 import Buffer from 'topgun-buffer';
 import { crypto, TextEncoder } from './shims';
-import { isString } from '../utils/is-string';
+import { isString } from 'topgun-typed';
 
 export async function sha256(
     input: string | object,

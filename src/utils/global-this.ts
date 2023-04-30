@@ -1,4 +1,4 @@
-import { isObject } from './is-object';
+import { isObject } from 'topgun-typed';
 
 declare const __magic__: any;
 

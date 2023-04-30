@@ -1,7 +1,5 @@
+import { isObject, isString, isNumber } from 'topgun-typed';
 import { sign } from './sign';
-import { isObject } from '../utils/is-object';
-import { isString } from '../utils/is-string';
-import { isNumber } from '../utils/is-number';
 import { IPolicy } from '../types/policy';
 
 const DEFAULT_POLICY: IPolicy = {};

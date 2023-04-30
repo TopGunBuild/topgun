@@ -1,10 +1,8 @@
+import { isNumber, isString, isObject } from 'topgun-typed';
 import { decrypt } from './decrypt';
 import { work } from './work';
 import { TGClient } from '../client/client';
 import { Pair } from './pair';
-import { isObject } from '../utils/is-object';
-import { isString } from '../utils/is-string';
-import { isNumber } from '../utils/is-number';
 
 export type AuthOptions = {
     timeout?: number;

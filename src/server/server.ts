@@ -3,8 +3,6 @@ import { pseudoRandomText, verify } from '../sea';
 import { TGGraphAdapter, TGGraphData, TGMessage } from '../types';
 import { MiddlewareInboundStrategy } from './middlewares/strategy/middleware-inbound-strategy';
 import { TGServerOptions } from './server-options';
-import { createValidator } from '../validator-sea';
-import { ValidateFunction } from 'ajv';
 import {
     MIDDLEWARE_INBOUND,
     TGActionAuthenticate,

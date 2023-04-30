@@ -6,9 +6,7 @@ import { pubFromSoul } from './soul';
 import { verify, VerifyData } from './verify';
 import { TGGraphData, TGNode, TGOptionsPut, TGValue } from '../types';
 import { TGClient, TGLink } from '../client';
-import { isString } from '../utils/is-string';
-import { isObject } from '../utils/is-object';
-import { isDefined } from '../utils/is-defined';
+import { isString, isObject, isUndefined } from 'topgun-typed';
 import { Policy } from './policy';
 import { PairBase } from './pair';
 
@@ -219,7 +217,7 @@ export async function sign(
     opt = DEFAULT_OPTS,
 ): Promise<string | { readonly m: any; readonly s: string }> 
 {
-    if (!isDefined(data)) 
+    if (isUndefined(data)) 
     {
         throw new Error('`undefined` not allowed.');
     }

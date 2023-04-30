@@ -1,6 +1,6 @@
 import { diffCRDT, mergeGraph } from '../crdt';
 import { TGGraphAdapter, TGGraphData, TGNode } from '../types';
-import { cloneValue } from '../utils/clone-value';
+import { cloneValue } from 'topgun-typed';
 
 const DEFAULT_OPTS = {
     diffFn: diffCRDT,

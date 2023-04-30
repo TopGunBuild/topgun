@@ -1,3 +1,4 @@
+import { isObject, isString } from 'topgun-typed';
 import { diffCRDT } from '../crdt';
 import { TGLink } from './link';
 import { TGGraph } from './graph/graph';
@@ -8,11 +9,9 @@ import { ClientOptions as SocketClientOptions } from 'topgun-socket/client';
 import { TGUserApi } from './user-api';
 import { pubFromSoul, unpackGraph } from '../sea';
 import { polyfillGlobalThis } from '../utils/global-this';
-import { isObject } from '../utils/is-object';
 import { TGIndexedDbConnector } from '../indexeddb/indexeddb-connector';
 import { TGOnCb, TGNode, TGUserReference } from '../types';
 import { TGEvent } from './control-flow/event';
-import { isString } from '../utils/is-string';
 import { TGLexLink } from './lex-link';
 import { match } from '../utils/match';
 
