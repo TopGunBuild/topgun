@@ -1,6 +1,7 @@
 import { expectErr, expectOk } from './test-util';
-import { validator } from '../src/validator';
+import { createValidator } from '../src/validator';
 
+const validator = createValidator();
 const getTopGunData = () => ({
     user: {
         _: {

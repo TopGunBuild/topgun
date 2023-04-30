@@ -2,14 +2,14 @@ import {
     CRDTOpts,
     TGGraphData,
     TGNode,
+    TGNodeMeta,
     TGNodeState,
-    TGPartialGraphData,
 } from '../types';
 import { cloneValue } from 'topgun-typed';
 
 const EMPTY: any = {};
 
-export function addMissingState(graphData: TGPartialGraphData): TGGraphData 
+export function addMissingState(graphData: Partial<TGGraphData>): TGGraphData 
 {
     const updatedGraphData = cloneValue(graphData);
     const now = new Date().getTime();
@@ -26,7 +26,7 @@ export function addMissingState(graphData: TGPartialGraphData): TGGraphData
         {
             continue;
         }
-        const meta = (node._ = node._ || {});
+        const meta = (node._ = node._ || { '#': null, '>': {} });
         meta['#'] = soul;
         const state = (meta['>'] = meta['>'] || {});
 
@@ -169,9 +169,6 @@ export function mergeNodes(
 
     if (mut === 'mutable') 
     {
-        existingMeta['>'] = existingState;
-        existing._ = existingMeta;
-
         for (const key in updatedState) 
         {
             if (!key) 
@@ -181,6 +178,9 @@ export function mergeNodes(
             existing[key] = updates[key];
             existingState[key] = updatedState[key];
         }
+
+        existingMeta['>'] = existingState;
+        existing._ = existingMeta as TGNodeMeta;
 
         return existing;
     }

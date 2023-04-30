@@ -28,7 +28,7 @@ export async function work(
 {
     // epub not recommended, salt should be random!
     const salt =
-        isObject<Pair>(saltOrPair) && isString(saltOrPair.epub)
+        isObject(saltOrPair) && isString(saltOrPair.epub)
             ? saltOrPair.epub
             : isString(saltOrPair)
                 ? saltOrPair

@@ -15,8 +15,9 @@ import {
     StructError,
     isString,
 } from 'topgun-typed';
+import { TGGraphData, TGNode } from '../types';
 
-const attributeTimestampStruct: Struct<any> = (node) => 
+const attributeTimestampStruct: Struct<TGNode> = (node) => 
 {
     const shape: Shape = Object.keys(node)
         .filter(key => key !== '_')
@@ -28,7 +29,7 @@ const attributeTimestampStruct: Struct<any> = (node) =>
     return isOk(result) ? ok(node) : result;
 };
 
-const nodeTypesStruct: Struct<any> = (node) => 
+const nodeTypesStruct: Struct<TGNode> = (node) => 
 {
     const nodeWithoutState = { ...node };
     delete nodeWithoutState['_'];
@@ -45,8 +46,8 @@ const nodeTypesStruct: Struct<any> = (node) =>
 };
 
 const nodeStruct =
-    (graph): Struct<any> =>
-        (input) => 
+    (graph: TGGraphData): Struct<TGNode> =>
+        (input: unknown) => 
         {
             if (!isObject(input)) 
             {
@@ -97,20 +98,22 @@ const nodeStruct =
             return nodeTypesStruct(input);
         };
 
-export const validator: Struct<any> = (graph) => 
-{
-    if (!isObject(graph)) 
-    {
-        return err(
-            new StructError('Root graph must be object', {
-                input: graph,
-                path: [],
-            }),
-        );
-    }
+export const createValidator =
+    (msg = 'Root graph must be object'): Struct<TGGraphData> =>
+        (graph: unknown) => 
+        {
+            if (!isObject(graph)) 
+            {
+                return err(
+                    new StructError(msg, {
+                        input: graph,
+                        path: [],
+                    }),
+                );
+            }
 
-    const struct = record(string(), nodeStruct(graph));
-    const result = struct(graph);
+            const struct = record(string(), nodeStruct(graph));
+            const result = struct(graph);
 
-    return isOk(result) ? ok(graph) : result;
-};
+            return isOk(result) ? ok(graph) : result;
+        };

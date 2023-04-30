@@ -1,4 +1,5 @@
 import Buffer from 'topgun-buffer';
+import { isString, isObject, isUndefined } from 'topgun-typed';
 import { check, ecdsa, jwk, parse } from './settings';
 import { sha256 } from './sha256';
 import { crypto } from './shims';
@@ -6,7 +7,6 @@ import { pubFromSoul } from './soul';
 import { verify, VerifyData } from './verify';
 import { TGGraphData, TGNode, TGOptionsPut, TGValue } from '../types';
 import { TGClient, TGLink } from '../client';
-import { isString, isObject, isUndefined } from 'topgun-typed';
 import { Policy } from './policy';
 import { PairBase } from './pair';
 

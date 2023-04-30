@@ -119,11 +119,6 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
                     } as TGMessage,
                 };
             })
-            // .then(res =>
-            // {
-            //     console.log({soul, res});
-            //     return res;
-            // })
             .then((msg: { channel: string; data: TGMessage }) => 
             {
                 this.publish(action, msg);

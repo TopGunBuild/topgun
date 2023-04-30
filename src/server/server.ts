@@ -1,3 +1,4 @@
+import { Struct, Result, ok, isErr } from 'topgun-typed';
 import { InboundMiddleware } from './middlewares/inbound-middleware';
 import { pseudoRandomText, verify } from '../sea';
 import { TGGraphAdapter, TGGraphData, TGMessage } from '../types';
@@ -16,6 +17,7 @@ import {
 import { WritableConsumableStream } from 'topgun-socket/writable-consumable-stream';
 import { createMemoryAdapter } from '../memory-adapter';
 import { generateMessageId } from '../client/graph/graph-utils';
+import { createValidator } from '../validator';
 
 export class TGServer 
 {
@@ -23,17 +25,14 @@ export class TGServer
     readonly internalAdapter: TGGraphAdapter;
     readonly server: TGServerSocketGateway;
 
-    protected readonly validaror: {
-        schema: any;
-        validate: ValidateFunction<any>;
-    };
+    protected readonly validator: Struct<TGGraphData>;
 
     /**
      * Constructor
      */
     constructor(readonly options: TGServerOptions) 
     {
-        this.validaror = createValidator();
+        this.validator = createValidator();
         this.internalAdapter = this.options.adapter || createMemoryAdapter();
         this.adapter = this.wrapAdapter(this.internalAdapter);
         this.server = new TGServerSocketGateway(this.options);
@@ -101,17 +100,16 @@ export class TGServer
 
         return {
             ...withPublish,
-            put: (graph: TGGraphData) => 
+            put: async (graph: TGGraphData) => 
             {
-                return this.validatePut(graph).then((isValid) => 
-                {
-                    if (isValid) 
-                    {
-                        return withPublish.put(graph);
-                    }
+                const result = this.validatePut(graph);
 
-                    throw new Error('Invalid graph data');
-                });
+                if (isErr(result)) 
+                {
+                    throw result.error;
+                }
+
+                return withPublish.put(graph);
             },
         };
     }
@@ -150,16 +148,13 @@ export class TGServer
     /**
      * Validate put operation
      */
-    protected async validatePut(graph: TGGraphData): Promise<boolean> 
+    protected validatePut(graph: TGGraphData): Result<TGGraphData> 
     {
         if (this.options.disableValidation) 
         {
-            return true;
+            return ok(graph);
         }
-        return this.validaror.validate({
-            '#': 'dummymsgid',
-            'put': graph,
-        });
+        return this.validator(graph);
     }
 
     // -----------------------------------------------------------------------------------------------------
