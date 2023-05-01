@@ -6,4 +6,5 @@ export interface TGServerOptions extends TGServerSocketGatewayOptions {
     authMaxDrift?: number;
     ownerPub?: string;
     adapter?: TGGraphAdapter;
+    port?: number;
 }

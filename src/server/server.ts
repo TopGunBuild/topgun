@@ -1,4 +1,4 @@
-import { Struct, Result, ok, isErr } from 'topgun-typed';
+import { Struct, Result, ok, isErr, isObject } from 'topgun-typed';
 import { InboundMiddleware } from './middlewares/inbound-middleware';
 import { pseudoRandomText, verify } from '../sea';
 import { TGGraphAdapter, TGGraphData, TGMessage } from '../types';
@@ -13,6 +13,7 @@ import {
     TGActionTransmit,
     TGServerSocketGateway,
     TGServerSocket,
+    listen,
 } from 'topgun-socket/server';
 import { WritableConsumableStream } from 'topgun-socket/writable-consumable-stream';
 import { createMemoryAdapter } from '../memory-adapter';
@@ -24,18 +25,20 @@ export class TGServer
     readonly adapter: TGGraphAdapter;
     readonly internalAdapter: TGGraphAdapter;
     readonly server: TGServerSocketGateway;
+    readonly options: TGServerOptions;
 
     protected readonly validator: Struct<TGGraphData>;
 
     /**
      * Constructor
      */
-    constructor(readonly options: TGServerOptions) 
+    constructor(options: TGServerOptions) 
     {
+        this.options = isObject(options) ? options : {};
         this.validator = createValidator();
         this.internalAdapter = this.options.adapter || createMemoryAdapter();
         this.adapter = this.wrapAdapter(this.internalAdapter);
-        this.server = new TGServerSocketGateway(this.options);
+        this.server = listen(this.options.port, this.options);
     }
 
     // -----------------------------------------------------------------------------------------------------
