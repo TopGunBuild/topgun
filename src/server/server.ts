@@ -39,26 +39,23 @@ export class TGServer
         this.internalAdapter = this.options.adapter || createMemoryAdapter();
         this.adapter = this.wrapAdapter(this.internalAdapter);
         this.server = listen(this.options.port, this.options);
+        this.run();
     }
 
     // -----------------------------------------------------------------------------------------------------
-    // @ Public methods
+    // @ Protected methods
     // -----------------------------------------------------------------------------------------------------
 
     /**
      * Run server
      */
-    run(): void 
+    protected run(): void 
     {
         this.setInboundMiddleware(
             new InboundMiddleware(this.adapter, this.options),
         );
         this.handleWebsocketConnection();
     }
-
-    // -----------------------------------------------------------------------------------------------------
-    // @ Protected methods
-    // -----------------------------------------------------------------------------------------------------
 
     /**
      * Send put data to all node subscribers
