@@ -1,3 +1,16 @@
+# [1.1.0](https://github.com/TopGunBuild/topgun/compare/v1.0.4...v1.1.0) (2023-05-01)
+
+
+### Bug Fixes
+
+* bump topgun-socket version, update server, add example server ([0e944d2](https://github.com/TopGunBuild/topgun/commit/0e944d2d2025ca6fea293f55f7fd3256bc38d606))
+* use topgun-typed instead of ajv ([1bd3aa0](https://github.com/TopGunBuild/topgun/commit/1bd3aa0fb78c68b84710df86219a3d8980c5a046))
+
+
+### Features
+
+* add port to TGServerOptions ([cf5c3ce](https://github.com/TopGunBuild/topgun/commit/cf5c3ce0a473b424d27dbda01ec3e8b3891248e6))
+
 ## [1.0.4](https://github.com/TopGunBuild/topgun/compare/v1.0.3...v1.0.4) (2023-04-18)
 
 
