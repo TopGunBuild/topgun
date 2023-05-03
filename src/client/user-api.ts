@@ -1,4 +1,4 @@
-import { isObject, isString, isFunction } from 'topgun-typed';
+import { isObject, isString, isFunction, isBoolean } from 'topgun-typed';
 import { authenticate, createUser, graphSigner } from '../sea';
 import { TGClient } from './client';
 import { TGEvent } from './control-flow/event';
@@ -47,7 +47,9 @@ export class TGUserApi
     {
         this._authEvent = authEvent;
         this._client = client;
-        this._persistSession = persistSession || DEFAULT_OPTIONS.persistSession;
+        this._persistSession = isBoolean(persistSession)
+            ? persistSession
+            : DEFAULT_OPTIONS.persistSession;
         this._sessionStorage = sessionStorage || DEFAULT_OPTIONS.sessionStorage;
         this._sessionStorageKey =
             sessionStorageKey || DEFAULT_OPTIONS.sessionStorageKey;
