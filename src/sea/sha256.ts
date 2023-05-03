@@ -5,7 +5,7 @@ import { isString } from 'topgun-typed';
 export async function sha256(
     input: string | object,
     name = 'SHA-256',
-): Promise<Buffer> 
+): Promise<any> 
 {
     const inp = isString(input) ? input : JSON.stringify(input);
     const encoded = new TextEncoder().encode(inp);
