@@ -17,12 +17,12 @@ import { match } from '../utils/match';
 /**
  * Main entry point for TopGun in browser
  */
-export class TGClient 
+export class TGClient
 {
     static match = match;
 
     options: TGClientOptions;
-    pub: string | undefined;
+    pub: string|undefined;
     readonly graph: TGGraph;
     protected readonly _authEvent: TGEvent<TGUserReference>;
     protected _user?: TGUserApi;
@@ -30,17 +30,17 @@ export class TGClient
     /**
      * Constructor
      */
-    constructor(options?: TGClientOptions) 
+    constructor(options?: TGClientOptions)
     {
-        options = isObject(options) ? options : {};
-        this.options = { ...DEFAULT_OPTIONS, ...options };
+        options         = isObject(options) ? options : {};
+        this.options    = { ...DEFAULT_OPTIONS, ...options };
         this._authEvent = new TGEvent<TGUserReference>('auth data');
 
-        if (this.options && this.options.graph) 
+        if (this.options && this.options.graph)
         {
             this.graph = this.options.graph;
         }
-        else 
+        else
         {
             this.graph = new TGGraph();
             this.graph.use(diffCRDT);
@@ -60,16 +60,16 @@ export class TGClient
      * Get User API
      */
     user(): TGUserApi;
-    user(pubOrNode: string | TGNode): TGLink;
-    user(pubOrNode?: string | TGNode): TGUserApi | TGLink 
+    user(pubOrNode: string|TGNode): TGLink;
+    user(pubOrNode?: string|TGNode): TGUserApi|TGLink
     {
-        if (pubOrNode) 
+        if (pubOrNode)
         {
-            if (isObject(pubOrNode) && pubOrNode._ && pubOrNode._['#']) 
+            if (isObject(pubOrNode) && pubOrNode._ && pubOrNode._['#'])
             {
                 this.pub = pubFromSoul(pubOrNode._['#']);
             }
-            else if (isString(pubOrNode)) 
+            else if (isString(pubOrNode))
             {
                 this.pub = pubOrNode.startsWith('~')
                     ? pubFromSoul(pubOrNode)
@@ -93,19 +93,19 @@ export class TGClient
     /**
      * Set TopGun configuration options
      */
-    opt(options: TGClientOptions): TGClient 
+    opt(options: TGClientOptions): TGClient
     {
         this.options = { ...this.options, ...options };
 
-        if (Array.isArray(options.peers)) 
+        if (Array.isArray(options.peers))
         {
             this.handlePeers(options.peers);
         }
-        if (options.persistStorage) 
+        if (options.persistStorage)
         {
             this.useConnector(new TGIndexedDbConnector(options.storageKey));
         }
-        if (Array.isArray(options.connectors)) 
+        if (Array.isArray(options.connectors))
         {
             options.connectors.forEach(connector =>
                 this.useConnector(connector),
@@ -118,7 +118,7 @@ export class TGClient
     /**
      * Traverse a location in the graph
      */
-    get(soul: string): TGLexLink 
+    get(soul: string): TGLexLink
     {
         return new TGLexLink(this, soul);
     }
@@ -126,12 +126,12 @@ export class TGClient
     /**
      * System events Callback
      */
-    on(event: string, cb: TGOnCb): TGClient 
+    on(event: string, cb: TGOnCb): TGClient
     {
-        if (event === 'auth') 
+        if (event === 'auth')
         {
             this._authEvent.on(cb);
-            if (this._user?.is) 
+            if (this._user?.is)
             {
                 this._authEvent.trigger(this._user.is);
             }
@@ -146,7 +146,7 @@ export class TGClient
     /**
      * Register middleware with Security, Encryption, & Authorization - SEA
      */
-    private registerSeaMiddleware(): void 
+    private registerSeaMiddleware(): void
     {
         this.graph.use(graph =>
             unpackGraph(
@@ -159,7 +159,7 @@ export class TGClient
     /**
      * Setup GraphConnector for graph
      */
-    private useConnector(connector: TGGraphConnector): void 
+    private useConnector(connector: TGGraphConnector): void
     {
         connector.sendPutsFromGraph(this.graph);
         connector.sendRequestsFromGraph(this.graph);
@@ -169,26 +169,26 @@ export class TGClient
     /**
      * Connect to peers via connector TopGunSocket
      */
-    private async handlePeers(peers: string[]): Promise<void> 
+    private async handlePeers(peers: string[]): Promise<void>
     {
-        peers.forEach((peer: string) => 
+        peers.forEach((peer: string) =>
         {
-            try 
+            try
             {
-                const url = new URL(peer);
+                const url                          = new URL(peer);
                 const options: SocketClientOptions = {
                     hostname: url.hostname,
                     secure  : url.protocol.includes('https'),
                 };
 
-                if (url.port.length > 0) 
+                if (url.port.length > 0)
                 {
                     options.port = Number(url.port);
                 }
 
                 this.useConnector(createConnector(options));
             }
-            catch (e) 
+            catch (e)
             {
                 console.error(e);
             }
