@@ -178,7 +178,7 @@ export class TGClient
                 const url = new URL(peer);
                 const options: SocketClientOptions = {
                     hostname: url.hostname,
-                    secure: url.protocol.includes('https'),
+                    secure  : url.protocol.includes('https'),
                 };
 
                 if (url.port.length > 0) 

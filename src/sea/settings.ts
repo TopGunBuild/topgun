@@ -13,25 +13,25 @@ export function jwk(
     pub: string,
     d?: string,
 ): {
-    readonly crv: string;
-    readonly d?: string;
-    readonly ext: boolean;
-    readonly key_opts: readonly string[];
-    readonly kty: string;
-    readonly x: string;
-    readonly y: string;
-} 
+        readonly crv: string;
+        readonly d?: string;
+        readonly ext: boolean;
+        readonly key_opts: readonly string[];
+        readonly kty: string;
+        readonly x: string;
+        readonly y: string;
+    } 
 {
     // d === priv
     const coords = pub.split('.');
     return {
-        crv: 'P-256',
+        crv     : 'P-256',
         d,
-        ext: true,
+        ext     : true,
         key_opts: d ? ['sign'] : ['verify'],
-        kty: 'EC',
-        x: coords[0],
-        y: coords[1],
+        kty     : 'EC',
+        x       : coords[0],
+        y       : coords[1],
     };
 }
 

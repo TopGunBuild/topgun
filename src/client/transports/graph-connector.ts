@@ -12,9 +12,9 @@ export abstract class TGGraphConnector
 
     readonly events: {
         readonly graphData: TGEvent<
-            TGGraphData,
-            string | undefined,
-            string | undefined
+        TGGraphData,
+        string | undefined,
+        string | undefined
         >;
         readonly receiveMessage: TGEvent<TGMessage>;
         readonly connection: TGEvent<boolean>;
@@ -38,8 +38,8 @@ export abstract class TGGraphConnector
         this.outputQueue = new TGProcessQueue<TGMessage>(`${name}.outputQueue`);
 
         this.events = {
-            connection: new TGEvent(`${name}.events.connection`),
-            graphData: new TGEvent<TGGraphData>(`${name}.events.graphData`),
+            connection    : new TGEvent(`${name}.events.connection`),
+            graphData     : new TGEvent<TGGraphData>(`${name}.events.graphData`),
             receiveMessage: new TGEvent<TGMessage>(
                 `${name}.events.receiveMessage`,
             ),

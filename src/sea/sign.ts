@@ -130,11 +130,11 @@ export function prep(
     node: TGNode,
     soul: string,
 ): {
-    readonly '#': string;
-    readonly '.': string;
-    readonly ':': TGValue;
-    readonly '>': number;
-} 
+        readonly '#': string;
+        readonly '.': string;
+        readonly ':': TGValue;
+        readonly '>': number;
+    } 
 {
     // prep for signing
     return {
@@ -258,9 +258,9 @@ export async function signNodeValue(
     key: string,
     pair: PairBase,
 ): Promise<{
-    readonly ':': TGValue;
-    readonly '~': string;
-}> 
+        readonly ':': TGValue;
+        readonly '~': string;
+    }> 
 {
     const data = node[key];
     const json = parse(data);
@@ -368,11 +368,11 @@ export function graphSigner(
     client: TGClient,
     pair: PairBase,
 ): (
-    graph: TGGraphData,
-    existingGraph: any,
-    putOpt?: TGOptionsPut,
-    fullPath?: string[],
-) => Promise<TGGraphData> 
+        graph: TGGraphData,
+        existingGraph: any,
+        putOpt?: TGOptionsPut,
+        fullPath?: string[],
+    ) => Promise<TGGraphData> 
 {
     return (
         graph: TGGraphData,

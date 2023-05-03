@@ -10,7 +10,6 @@
         "prepublishOnly": "pnpm run build",
         "build:package": "node ./tools/prepare-package.js",
         "test": "jest",
-        "format": "prettier --write \"src/**/*.ts\"",
         "lint": "eslint \"src/**/*.ts\" --fix",
         "prepare": "simple-git-hooks",
         "semantic-release": "semantic-release"
@@ -93,7 +92,6 @@
     },
     "lint-staged": {
         "**/*.{ts}": [
-            "prettier --write \"src/**/*.ts\"",
             "eslint \"src/**/*.ts\" --fix"
         ]
     },

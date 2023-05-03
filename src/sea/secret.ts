@@ -45,7 +45,7 @@ export async function secret(
                 ),
             },
             {
-                name: 'ECDH',
+                name      : 'ECDH',
                 namedCurve: 'P-256',
             },
         );
@@ -65,7 +65,7 @@ export async function secret(
                     'raw',
                     rawBits,
                     {
-                        name: 'AES-GCM',
+                        name  : 'AES-GCM',
                         length: 256,
                     },
                     true,

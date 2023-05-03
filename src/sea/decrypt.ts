@@ -11,7 +11,7 @@ const DEFAULT_OPTS: {
     readonly fallback?: string;
 } = {
     encode: 'base64',
-    name: 'AES-GCM',
+    name  : 'AES-GCM',
 };
 
 export async function decrypt<T>(
@@ -37,7 +37,7 @@ export async function decrypt<T>(
         const ct = await crypto.subtle.decrypt(
             {
                 iv,
-                name: opt.name || DEFAULT_OPTS.name || 'AES-GCM',
+                name     : opt.name || DEFAULT_OPTS.name || 'AES-GCM',
                 tagLength: 128,
             },
             aeskey,

@@ -56,6 +56,17 @@
             "error",
             "allman"
         ],
-        "indent": [2, 4, {"VariableDeclarator": 0}]
+        "key-spacing": [2, {
+            "singleLine": {
+                "beforeColon": false,
+                "afterColon": true
+            },
+            "multiLine": {
+                "beforeColon": false,
+                "afterColon": true,
+                "align": "colon"
+            }
+        }],
+        "indent": [2, 4, {"VariableDeclarator": "first"}]
     }
 }

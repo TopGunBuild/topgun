@@ -16,13 +16,13 @@ export interface TGClientOptions {
 }
 
 export const DEFAULT_OPTIONS: Required<TGClientOptions> = {
-    peers: [],
-    graph: new TGGraph(),
-    connectors: [],
-    persistStorage: false,
-    storageKey: 'top-gun-nodes',
-    persistSession: true,
-    sessionStorage: localStorageAdapter,
+    peers            : [],
+    graph            : new TGGraph(),
+    connectors       : [],
+    persistStorage   : false,
+    storageKey       : 'top-gun-nodes',
+    persistSession   : true,
+    sessionStorage   : localStorageAdapter,
     sessionStorageKey: 'top-gun-session',
     passwordMinLength: 8,
 };

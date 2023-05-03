@@ -94,10 +94,10 @@ export async function verify(
             return {
                 ct: json.ct,
                 iv: json.iv,
-                s: json.s,
-                e: json.m?.e,
-                w: json.m?.w,
-                c: json.m?.c,
+                s : json.s,
+                e : json.m?.e,
+                w : json.m?.w,
+                c : json.m?.c,
             };
         }
         return false;

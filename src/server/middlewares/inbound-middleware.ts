@@ -98,8 +98,8 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
         this.readNode(soul)
             .then(node => ({
                 channel: action.channel as string,
-                data: {
-                    '#': msgId,
+                data   : {
+                    '#'  : msgId,
                     'put': node
                         ? {
                             [soul]: node,
@@ -112,9 +112,9 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
                 console.warn(e.stack || e);
                 return {
                     channel: action.channel as string,
-                    data: {
-                        '#': msgId,
-                        '@': action.data['#'],
+                    data   : {
+                        '#'  : msgId,
+                        '@'  : action.data['#'],
                         'err': 'Error fetching node',
                     } as TGMessage,
                 };
@@ -127,10 +127,10 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
 
     default(
         action:
-            | TGActionPublishIn
-            | TGActionInvoke
-            | TGActionSubscribe
-            | TGActionAuthenticate,
+        | TGActionPublishIn
+        | TGActionInvoke
+        | TGActionSubscribe
+        | TGActionAuthenticate,
     ): void | Promise<void> 
     {
         action.allow();
@@ -165,29 +165,29 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
             }
 
             return {
-                '#': msgId,
-                '@': msg['#'],
+                '#'  : msgId,
+                '@'  : msg['#'],
                 'err': null,
-                'ok': true,
+                'ok' : true,
             };
         }
         catch (e) 
         {
             return {
-                '#': msgId,
-                '@': msg['#'],
+                '#'  : msgId,
+                '@'  : msg['#'],
                 'err': 'Error saving',
-                'ok': false,
+                'ok' : false,
             };
         }
     }
 
     publish(
         action:
-            | TGActionPublishIn
-            | TGActionInvoke
-            | TGActionSubscribe
-            | TGActionAuthenticate,
+        | TGActionPublishIn
+        | TGActionInvoke
+        | TGActionSubscribe
+        | TGActionAuthenticate,
         message: { channel: string; data: TGMessage },
     ): void 
     {

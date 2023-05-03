@@ -26,8 +26,8 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
         this.adapter
             .get(soul, opts)
             .then(node => ({
-                '#': generateMessageId(),
-                '@': msgId,
+                '#'  : generateMessageId(),
+                '@'  : msgId,
                 'put': node
                     ? {
                         [soul]: node,
@@ -39,8 +39,8 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
                 console.warn(error.stack || error);
 
                 return {
-                    '#': generateMessageId(),
-                    '@': msgId,
+                    '#'  : generateMessageId(),
+                    '@'  : msgId,
                     'err': 'Error fetching node',
                 };
             })
@@ -63,10 +63,10 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
             .then(() => 
             {
                 return {
-                    '#': generateMessageId(),
-                    '@': msgId,
+                    '#'  : generateMessageId(),
+                    '@'  : msgId,
                     'err': null,
-                    'ok': true,
+                    'ok' : true,
                 };
             })
             .catch((error) => 
@@ -74,10 +74,10 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
                 console.warn(error.stack || error);
 
                 return {
-                    '#': generateMessageId(),
-                    '@': msgId,
+                    '#'  : generateMessageId(),
+                    '@'  : msgId,
                     'err': 'Error saving put',
-                    'ok': false,
+                    'ok' : false,
                 };
             })
             .then((msg) => 

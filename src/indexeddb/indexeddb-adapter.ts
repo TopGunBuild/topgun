@@ -9,7 +9,7 @@ type RawNodeData = null | RawWideNodeData;
 type RawGraphData = Record<string, RawNodeData>;
 
 export const DEFAULT_CRDT_OPTS = {
-    diffFn: diffCRDT,
+    diffFn : diffCRDT,
     mergeFn: mergeGraph,
 };
 
@@ -97,10 +97,10 @@ export async function getPatchDiff(
     data: TGGraphData,
     opts = DEFAULT_CRDT_OPTS,
 ): Promise<null | {
-    readonly diff: TGGraphData;
-    readonly existing: RawGraphData;
-    readonly toWrite: RawGraphData;
-}> 
+        readonly diff: TGGraphData;
+        readonly existing: RawGraphData;
+        readonly toWrite: RawGraphData;
+    }> 
 {
     const { diffFn = diffCRDT, mergeFn = mergeGraph } = opts;
     const existing = await getExisting(db, data);
@@ -126,9 +126,9 @@ export async function getPatchDiff(
     const updatedGraph = mergeFn(existing, graphDiff, 'mutable');
 
     return {
-        diff: graphDiff,
+        diff    : graphDiff,
         existing: existingFromDiff,
-        toWrite: updatedGraph as RawGraphData,
+        toWrite : updatedGraph as RawGraphData,
     };
 }
 

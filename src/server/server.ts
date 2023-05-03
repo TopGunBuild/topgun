@@ -67,7 +67,7 @@ export class TGServer
     ): void 
     {
         this.server.exchange.invokePublish(`topgun/nodes/${soul}`, {
-            '#': `${msgId}/${soul}`,
+            '#'  : `${msgId}/${soul}`,
             'put': {
                 [soul]: nodeDiff,
             },
@@ -88,7 +88,7 @@ export class TGServer
                 if (diff) 
                 {
                     this.publishIsDiff({
-                        '#': pseudoRandomText(),
+                        '#'  : pseudoRandomText(),
                         'put': diff,
                     });
                 }
@@ -272,11 +272,11 @@ export class TGServer
      */
     private handleInboundAction(
         action:
-            | TGActionTransmit
-            | TGActionInvoke
-            | TGActionSubscribe
-            | TGActionPublishIn
-            | TGActionAuthenticate,
+        | TGActionTransmit
+        | TGActionInvoke
+        | TGActionSubscribe
+        | TGActionPublishIn
+        | TGActionAuthenticate,
         inbound: MiddlewareInboundStrategy,
     ) 
     {

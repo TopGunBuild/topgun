@@ -7,8 +7,8 @@ import { pseudoRandomText } from './pseudo-random-text';
 
 const DEFAULT_OPTS: WorkOptions = {
     encode: 'base64',
-    hash: pbkdf2.hash.name,
-    name: 'PBKDF2',
+    hash  : pbkdf2.hash.name,
+    name  : 'PBKDF2',
 };
 
 export interface WorkOptions {
@@ -43,10 +43,10 @@ export async function work(
     );
     const res = await crypto.subtle.deriveBits(
         {
-            hash: opt.hash || DEFAULT_OPTS.hash,
+            hash      : opt.hash || DEFAULT_OPTS.hash,
             iterations: opt.iterations || pbkdf2.iter,
-            name: opt.name || 'PBKDF2',
-            salt: new TextEncoder().encode(salt),
+            name      : opt.name || 'PBKDF2',
+            salt      : new TextEncoder().encode(salt),
         },
         key,
         opt.length || pbkdf2.ks * 8,

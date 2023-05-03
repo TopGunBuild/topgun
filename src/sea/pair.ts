@@ -24,7 +24,7 @@ export async function pair(): Promise<Pair>
     const signPub = await crypto.subtle.exportKey('jwk', signKeys.publicKey);
     const sa = {
         priv: (await crypto.subtle.exportKey('jwk', signKeys.privateKey)).d,
-        pub: `${signPub.x}.${signPub.y}`,
+        pub : `${signPub.x}.${signPub.y}`,
     };
 
     const cryptKeys = await crypto.subtle.generateKey(ecdh, true, [
@@ -33,13 +33,13 @@ export async function pair(): Promise<Pair>
     const cryptPub = await crypto.subtle.exportKey('jwk', cryptKeys.publicKey);
     const dh = {
         epriv: (await crypto.subtle.exportKey('jwk', cryptKeys.privateKey)).d,
-        epub: `${cryptPub.x}.${cryptPub.y}`,
+        epub : `${cryptPub.x}.${cryptPub.y}`,
     };
 
     return {
         epriv: dh.epriv || '',
-        epub: dh.epub,
-        priv: sa.priv || '',
-        pub: sa.pub,
+        epub : dh.epub,
+        priv : sa.priv || '',
+        pub  : sa.pub,
     };
 }

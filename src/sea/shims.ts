@@ -3,7 +3,7 @@ import Buffer from 'topgun-buffer';
 import root from '../utils/window-or-global';
 
 const api: any = {
-    crypto: WebCrypto,
+    crypto     : WebCrypto,
     TextEncoder: root && root.TextEncoder,
     TextDecoder: root && root.TextDecoder,
 };

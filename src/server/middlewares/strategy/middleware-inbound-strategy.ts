@@ -38,11 +38,11 @@ export abstract class MiddlewareInboundStrategy
      */
     default(
         action:
-            | TGActionTransmit
-            | TGActionInvoke
-            | TGActionSubscribe
-            | TGActionPublishIn
-            | TGActionAuthenticate,
+        | TGActionTransmit
+        | TGActionInvoke
+        | TGActionSubscribe
+        | TGActionPublishIn
+        | TGActionAuthenticate,
     ): void | Promise<void> 
     {
         action.allow();

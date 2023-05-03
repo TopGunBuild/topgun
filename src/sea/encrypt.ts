@@ -10,7 +10,7 @@ const DEFAULT_OPTS: {
     readonly raw?: boolean;
 } = {
     encode: 'base64',
-    name: 'AES-GCM',
+    name  : 'AES-GCM',
 };
 
 export async function encrypt(
@@ -51,7 +51,7 @@ export async function encrypt(
                 : '';
     const ct = await crypto.subtle.encrypt(
         {
-            iv: new Uint8Array(rand.iv),
+            iv  : new Uint8Array(rand.iv),
             name: opt.name || DEFAULT_OPTS.name || 'AES-GCM',
         },
         await importAesKey(key, rand.s),
@@ -61,7 +61,7 @@ export async function encrypt(
     const r = {
         ct: Buffer.from(ct, 'binary').toString(encoding),
         iv: rand.iv.toString(encoding),
-        s: rand.s.toString(encoding),
+        s : rand.s.toString(encoding),
     };
     if (opt.raw) 
     {

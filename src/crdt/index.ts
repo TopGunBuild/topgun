@@ -46,7 +46,7 @@ export function addMissingState(graphData: Partial<TGGraphData>): TGGraphData
 }
 
 const DEFAULT_OPTS = {
-    Lexical: JSON.stringify,
+    Lexical    : JSON.stringify,
     futureGrace: 10 * 60 * 1000,
 };
 

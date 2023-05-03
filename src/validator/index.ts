@@ -107,7 +107,7 @@ export const createValidator =
                 return err(
                     new StructError(msg, {
                         input: graph,
-                        path: [],
+                        path : [],
                     }),
                 );
             }

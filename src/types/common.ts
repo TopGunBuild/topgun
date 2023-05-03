@@ -156,5 +156,5 @@ type PromisifyMethods<T> = {
 };
 
 export type TGSupportedStorage = PromisifyMethods<
-    Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
+Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
 >;

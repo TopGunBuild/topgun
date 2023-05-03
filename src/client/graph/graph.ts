@@ -38,9 +38,9 @@ export class TGGraph
 
     readonly events: {
         readonly graphData: TGEvent<
-            TGGraphData,
-            string | undefined,
-            string | undefined
+        TGGraphData,
+        string | undefined,
+        string | undefined
         >;
         readonly put: TGEvent<TGPut>;
         readonly get: TGEvent<TGGet>;
@@ -68,10 +68,10 @@ export class TGGraph
         this.__onConnectorStatus = this.__onConnectorStatus.bind(this);
         this.activeConnectors = 0;
         this.events = {
-            get: new TGEvent('request soul'),
+            get      : new TGEvent('request soul'),
             graphData: new TGEvent('graph data'),
-            off: new TGEvent('off event'),
-            put: new TGEvent('put data'),
+            off      : new TGEvent('off event'),
+            put      : new TGEvent('put data'),
         };
         this._opt = {};
         this._graph = {};
@@ -263,10 +263,10 @@ export class TGGraph
             if (cb) 
             {
                 cb({
-                    '#': undefined,
-                    '@': '',
+                    '#'  : undefined,
+                    '@'  : '',
                     'err': err,
-                    'ok': false,
+                    'ok' : false,
                 });
             }
             throw err;
@@ -356,9 +356,9 @@ export class TGGraph
                         fullPath.length > 0
                             ? fullPath[fullPath.length - 1]
                             : soul,
-                    '@': msgId,
+                    '@'  : msgId,
                     'err': null,
-                    'ok': true,
+                    'ok' : true,
                 });
             }
         })();

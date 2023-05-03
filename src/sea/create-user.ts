@@ -11,13 +11,13 @@ export async function createUser(
     alias: string,
     password: string,
 ): Promise<{
-    readonly alias: string;
-    readonly auth: string;
-    readonly epub: string;
-    readonly pub: string;
-    readonly epriv: string;
-    readonly priv: string;
-}> 
+        readonly alias: string;
+        readonly auth: string;
+        readonly epub: string;
+        readonly pub: string;
+        readonly epriv: string;
+        readonly priv: string;
+    }> 
 {
     const aliasSoul = `~@${alias}`;
     const passwordMinLength = isNumber(client.options.passwordMinLength)

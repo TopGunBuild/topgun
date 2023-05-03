@@ -2,7 +2,7 @@ export class TGMiddlewareSystem<T, U = undefined, V = undefined>
 {
     readonly name: string;
     private readonly _middlewareFunctions: Array<
-        (a: T, b?: U, c?: V) => Promise<T> | T | undefined
+    (a: T, b?: U, c?: V) => Promise<T> | T | undefined
     >;
 
     /**

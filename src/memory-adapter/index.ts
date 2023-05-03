@@ -3,7 +3,7 @@ import { TGGraphAdapter, TGGraphData, TGNode } from '../types';
 import { cloneValue } from 'topgun-typed';
 
 const DEFAULT_OPTS = {
-    diffFn: diffCRDT,
+    diffFn : diffCRDT,
     mergeFn: mergeGraph,
 };
 
@@ -59,9 +59,9 @@ export function createMemoryAdapter(
     const graph: TGGraphData = {};
 
     return {
-        get: (soul: string) => get(opts, graph, soul),
+        get    : (soul: string) => get(opts, graph, soul),
         getSync: (soul: string) => getSync(opts, graph, soul),
-        put: (graphData: TGGraphData) => put(opts, graph, graphData),
+        put    : (graphData: TGGraphData) => put(opts, graph, graphData),
         putSync: (graphData: TGGraphData) => putSync(opts, graph, graphData),
     };
 }

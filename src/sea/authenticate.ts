@@ -26,13 +26,13 @@ export async function authenticateAccount(
 ): Promise<
     | undefined
     | {
-          readonly alias: string;
-          readonly epriv: string;
-          readonly epub: string;
-          readonly priv: string;
-          readonly pub: string;
-      }
-> 
+        readonly alias: string;
+        readonly epriv: string;
+        readonly epub: string;
+        readonly priv: string;
+        readonly pub: string;
+    }
+    > 
 {
     if (!ident || !ident.auth) 
     {
@@ -64,9 +64,9 @@ export async function authenticateAccount(
     return {
         alias: ident.alias as string,
         epriv: decrypted.epriv as string,
-        epub: ident.epub as string,
-        priv: decrypted.priv as string,
-        pub: ident.pub as string,
+        epub : ident.epub as string,
+        priv : decrypted.priv as string,
+        pub  : ident.pub as string,
     };
 }
 
@@ -78,13 +78,13 @@ export async function authenticateIdentity(
 ): Promise<
     | undefined
     | {
-          readonly alias: string;
-          readonly epriv: string;
-          readonly epub: string;
-          readonly priv: string;
-          readonly pub: string;
-      }
-> 
+        readonly alias: string;
+        readonly epriv: string;
+        readonly epub: string;
+        readonly priv: string;
+        readonly pub: string;
+    }
+    > 
 {
     const ident = await client.get(soul).then();
     return authenticateAccount(ident, password, encoding);
