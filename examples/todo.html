@@ -99,12 +99,16 @@
         document.getElementById('sign').hidden = true;
         document.getElementById('speak').hidden = false;
 
+        console.log('[TopGun] Auth success');
+
+        client.user().get('said').on(console.log);
+
         client.user().get('said').map().on((data, id) => {
             if (!document.getElementById(id)) {
                 document.querySelector('ul').insertAdjacentHTML('beforeend', `<li id="${id}"></li>`);
             }
             document.getElementById(id).textContent = data.say;
-            console.log('[TopGun]', id, data);
+            // console.log('[TopGun]', id, data);
         });
     });
 
