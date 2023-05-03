@@ -1,3 +1,13 @@
+## [1.1.1](https://github.com/TopGunBuild/topgun/compare/v1.1.0...v1.1.1) (2023-05-03)
+
+
+### Bug Fixes
+
+* add missing Buffer import ([5e308e9](https://github.com/TopGunBuild/topgun/commit/5e308e93c42d02f291120117664630c8f6cfcb45))
+* **sea:** fix Buffer typings ([eab2f6a](https://github.com/TopGunBuild/topgun/commit/eab2f6aa6f38d31e1a3d9ab329e1095bd5de439c))
+* upgrade topgun-buffer 1.0.3 -> 1.0.5 ([2602c7e](https://github.com/TopGunBuild/topgun/commit/2602c7e09c0a0776677d47b1cc6fc86e23fa5567))
+* upgrade topgun-socket 1.3.1 -> 1.3.2 ([e70a35a](https://github.com/TopGunBuild/topgun/commit/e70a35a96377708b661c3a49fad5405f427d9754))
+
 # [1.1.0](https://github.com/TopGunBuild/topgun/compare/v1.0.4...v1.1.0) (2023-05-01)
 
 
