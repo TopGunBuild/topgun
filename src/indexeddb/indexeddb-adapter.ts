@@ -5,7 +5,7 @@ import { IndexedDb } from './indexeddb';
 const DEFAULT_DB_NAME = 'topgun-nodes';
 
 type RawWideNodeData = Record<string, any>;
-type RawNodeData = null | RawWideNodeData;
+type RawNodeData = null|RawWideNodeData;
 type RawGraphData = Record<string, RawNodeData>;
 
 export const DEFAULT_CRDT_OPTS = {
@@ -13,13 +13,13 @@ export const DEFAULT_CRDT_OPTS = {
     mergeFn: mergeGraph,
 };
 
-export function createGraphAdapter(name = DEFAULT_DB_NAME): TGGraphAdapter 
+export function createGraphAdapter(name = DEFAULT_DB_NAME): TGGraphAdapter
 {
     const db = new IndexedDb(name);
     return adapterFromIndexedDB(db);
 }
 
-export function adapterFromIndexedDB(db: IndexedDb): TGGraphAdapter 
+export function adapterFromIndexedDB(db: IndexedDb): TGGraphAdapter
 {
     return {
         get: (soul: string) => getNode(db, soul),
@@ -30,7 +30,7 @@ export function adapterFromIndexedDB(db: IndexedDb): TGGraphAdapter
 export async function getNode(
     db: IndexedDb,
     soul: string,
-): Promise<TGNode | null> 
+): Promise<TGNode|null>
 {
     return db.get<TGNode>(soul);
 }
@@ -39,13 +39,13 @@ export async function patchGraph(
     db: IndexedDb,
     data: TGGraphData,
     opts = DEFAULT_CRDT_OPTS,
-): Promise<TGGraphData | null> 
+): Promise<TGGraphData|null>
 {
     const diff: any = {};
 
-    for (const soul in data) 
+    for (const soul in data)
     {
-        if (!soul) 
+        if (!soul)
         {
             continue;
         }
@@ -58,7 +58,7 @@ export async function patchGraph(
             opts,
         );
 
-        if (nodeDiff) 
+        if (nodeDiff)
         {
             diff[soul] = nodeDiff[soul];
         }
@@ -71,19 +71,19 @@ export async function patchGraphFull(
     db: IndexedDb,
     data: TGGraphData,
     opts = DEFAULT_CRDT_OPTS,
-): Promise<TGGraphData | null> 
+): Promise<TGGraphData|null>
 {
-    while (true) 
+    while (true)
     {
         const patchDiffData = await getPatchDiff(db, data, opts);
 
-        if (!patchDiffData) 
+        if (!patchDiffData)
         {
             return null;
         }
         const { diff, toWrite } = patchDiffData;
 
-        if (await writeRawGraph(db, toWrite)) 
+        if (await writeRawGraph(db, toWrite))
         {
             return diff;
         }
@@ -96,26 +96,26 @@ export async function getPatchDiff(
     db: IndexedDb,
     data: TGGraphData,
     opts = DEFAULT_CRDT_OPTS,
-): Promise<null | {
+): Promise<null|{
         readonly diff: TGGraphData;
         readonly existing: RawGraphData;
         readonly toWrite: RawGraphData;
-    }> 
+    }>
 {
     const { diffFn = diffCRDT, mergeFn = mergeGraph } = opts;
-    const existing = await getExisting(db, data);
-    const graphDiff = diffFn(data, existing);
+    const existing                                    = await getExisting(db, data);
+    const graphDiff                                   = diffFn(data, existing);
 
-    if (!graphDiff || !Object.keys(graphDiff).length) 
+    if (!graphDiff || !Object.keys(graphDiff).length)
     {
         return null;
     }
 
     const existingFromDiff: any = {};
 
-    for (const soul in graphDiff) 
+    for (const soul in graphDiff)
     {
-        if (!soul) 
+        if (!soul)
         {
             continue;
         }
@@ -135,13 +135,13 @@ export async function getPatchDiff(
 export async function getExisting(
     db: IndexedDb,
     data: TGGraphData,
-): Promise<TGGraphData> 
+): Promise<TGGraphData>
 {
     const existingData: TGGraphData = {};
 
-    for (const soul in data) 
+    for (const soul in data)
     {
-        if (!soul) 
+        if (!soul)
         {
             continue;
         }
@@ -155,20 +155,20 @@ export async function getExisting(
 export async function writeRawGraph(
     db: IndexedDb,
     data: RawGraphData,
-): Promise<boolean> 
+): Promise<boolean>
 {
-    try 
+    try
     {
-        for (const soul in data) 
+        for (const soul in data)
         {
-            if (!soul) 
+            if (!soul)
             {
                 continue;
             }
 
             const nodeToWrite = data[soul];
 
-            if (!nodeToWrite) 
+            if (!nodeToWrite)
             {
                 // TODO db.removeItem(soul)?
                 continue;
@@ -179,7 +179,7 @@ export async function writeRawGraph(
 
         return true;
     }
-    catch (e) 
+    catch (e)
     {
         throw e;
     }

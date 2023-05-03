@@ -5,12 +5,12 @@ import { TGGraph } from './graph';
 /**
  * Query state around a single node in the graph
  */
-export class TGGraphNode 
+export class TGGraphNode
 {
     readonly soul: string;
 
     private _endCurQuery?: () => void;
-    private readonly _data: TGEvent<TGNode | undefined>;
+    private readonly _data: TGEvent<TGNode|undefined>;
     private readonly _graph: TGGraph;
     private readonly _updateGraph: (
         data: TGGraphData,
@@ -24,27 +24,27 @@ export class TGGraphNode
         graph: TGGraph,
         soul: string,
         updateGraph: (data: TGGraphData, replyToId?: string) => void,
-    ) 
+    )
     {
         this._onDirectQueryReply = this._onDirectQueryReply.bind(this);
-        this._data = new TGEvent<TGNode | undefined>(`<GraphNode ${soul}>`);
-        this._graph = graph;
-        this._updateGraph = updateGraph;
-        this.soul = soul;
+        this._data               = new TGEvent<TGNode|undefined>(`<GraphNode ${soul}>`);
+        this._graph              = graph;
+        this._updateGraph        = updateGraph;
+        this.soul                = soul;
     }
 
     // -----------------------------------------------------------------------------------------------------
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    listenerCount(): number 
+    listenerCount(): number
     {
         return this._data.listenerCount();
     }
 
-    get(cb?: TGNodeListenCb): TGGraphNode 
+    get(cb?: TGNodeListenCb): TGGraphNode
     {
-        if (cb) 
+        if (cb)
         {
             this.on(cb);
         }
@@ -52,30 +52,30 @@ export class TGGraphNode
         return this;
     }
 
-    receive(data: TGNode | undefined): TGGraphNode 
+    receive(data: TGNode|undefined): TGGraphNode
     {
         this._data.trigger(data, this.soul);
         return this;
     }
 
-    on(cb: (data: TGNode | undefined, soul: string) => void): TGGraphNode 
+    on(cb: (data: TGNode|undefined, soul: string) => void): TGGraphNode
     {
         this._data.on(cb);
         return this;
     }
 
-    off(cb?: (data: TGNode | undefined, soul: string) => void): TGGraphNode 
+    off(cb?: (data: TGNode|undefined, soul: string) => void): TGGraphNode
     {
-        if (cb) 
+        if (cb)
         {
             this._data.off(cb);
         }
-        else 
+        else
         {
             this._data.reset();
         }
 
-        if (this._endCurQuery && !this._data.listenerCount()) 
+        if (this._endCurQuery && !this._data.listenerCount())
         {
             this._endCurQuery();
             this._endCurQuery = undefined;
@@ -88,9 +88,9 @@ export class TGGraphNode
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private _ask(): TGGraphNode 
+    private _ask(): TGGraphNode
     {
-        if (this._endCurQuery) 
+        if (this._endCurQuery)
         {
             return this;
         }
@@ -102,9 +102,9 @@ export class TGGraphNode
         return this;
     }
 
-    private _onDirectQueryReply(msg: TGMessage): void 
+    private _onDirectQueryReply(msg: TGMessage): void
     {
-        if (!msg.put) 
+        if (!msg.put)
         {
             this._updateGraph(
                 {

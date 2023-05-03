@@ -17,7 +17,7 @@ import {
 } from 'topgun-typed';
 import { TGGraphData, TGNode } from '../types';
 
-const attributeTimestampStruct: Struct<TGNode> = (node) => 
+const attributeTimestampStruct: Struct<TGNode> = (node) =>
 {
     const shape: Shape = Object.keys(node)
         .filter(key => key !== '_')
@@ -29,7 +29,7 @@ const attributeTimestampStruct: Struct<TGNode> = (node) =>
     return isOk(result) ? ok(node) : result;
 };
 
-const nodeTypesStruct: Struct<TGNode> = (node) => 
+const nodeTypesStruct: Struct<TGNode> = (node) =>
 {
     const nodeWithoutState = { ...node };
     delete nodeWithoutState['_'];
@@ -39,81 +39,81 @@ const nodeTypesStruct: Struct<TGNode> = (node) =>
         [number(), string(), boolean(), object({ '#': string() })],
         'Node value must be null string, number, boolean or object.',
     );
-    const struct = record(string(), nullable(valueStruct));
-    const result = struct(nodeWithoutState);
+    const struct      = record(string(), nullable(valueStruct));
+    const result      = struct(nodeWithoutState);
 
     return isOk(result) ? attributeTimestampStruct(node) : result;
 };
 
 const nodeStruct =
-    (graph: TGGraphData): Struct<TGNode> =>
-        (input: unknown) => 
-        {
-            if (!isObject(input)) 
-            {
-                return err(
-                    new StructError('Node must be object', { input, path: [] }),
-                );
-            }
-            if (!isObject(input._)) 
-            {
-                return err(
-                    new StructError('Node state must be object in path _', {
-                        input,
-                        path: ['_'],
-                    }),
-                );
-            }
-            if (!isObject(input._['>'])) 
-            {
-                return err(
-                    new StructError('Node state must be object in path _.[\'>\']', {
-                        input,
-                        path: ['_', '>'],
-                    }),
-                );
-            }
-            if (!isString(input._['#'])) 
-            {
-                return err(
-                    new StructError('Soul must be string in _.[\'#\']', {
-                        input,
-                        path: ['_', '#'],
-                    }),
-                );
-            }
+          (graph: TGGraphData): Struct<TGNode> =>
+              (input: unknown) =>
+              {
+                  if (!isObject(input))
+                  {
+                      return err(
+                          new StructError('Node must be object', { input, path: [] }),
+                      );
+                  }
+                  if (!isObject(input._))
+                  {
+                      return err(
+                          new StructError('Node state must be object in path _', {
+                              input,
+                              path: ['_'],
+                          }),
+                      );
+                  }
+                  if (!isObject(input._['>']))
+                  {
+                      return err(
+                          new StructError('Node state must be object in path _.[\'>\']', {
+                              input,
+                              path: ['_', '>'],
+                          }),
+                      );
+                  }
+                  if (!isString(input._['#']))
+                  {
+                      return err(
+                          new StructError('Soul must be string in _.[\'#\']', {
+                              input,
+                              path: ['_', '#'],
+                          }),
+                      );
+                  }
 
-            const soul = input._['#'];
+                  const soul = input._['#'];
 
-            if (!isObject(graph[soul])) 
-            {
-                return err(
-                    new StructError('Soul must be present in root graph', {
-                        input,
-                        path: [],
-                    }),
-                );
-            }
+                  if (!isObject(graph[soul]))
+                  {
+                      return err(
+                          new StructError('Soul must be present in root graph', {
+                              input,
+                              path: [],
+                          }),
+                      );
+                  }
 
-            return nodeTypesStruct(input);
-        };
+                  return nodeTypesStruct(input);
+              };
 
 export const createValidator =
-    (msg = 'Root graph must be object'): Struct<TGGraphData> =>
-        (graph: unknown) => 
-        {
-            if (!isObject(graph)) 
-            {
-                return err(
-                    new StructError(msg, {
-                        input: graph,
-                        path : [],
-                    }),
-                );
-            }
+                 (msg = 'Root graph must be object'): Struct<TGGraphData> =>
+                     (graph: unknown) =>
+                     {
+                         if (!isObject(graph))
+                         {
+                             return err(
+                                 new StructError(msg, {
+                                     input: graph,
+                                     path : [],
+                                 }),
+                             );
+                         }
 
-            const struct = record(string(), nodeStruct(graph));
-            const result = struct(graph);
+                         const struct = record(string(), nodeStruct(graph));
+                         const result = struct(graph);
 
-            return isOk(result) ? ok(graph) : result;
-        };
+                         return isOk(result) ? ok(graph) : result;
+                     };

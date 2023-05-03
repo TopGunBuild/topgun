@@ -9,30 +9,30 @@ import { cloneValue } from 'topgun-typed';
 
 const EMPTY: any = {};
 
-export function addMissingState(graphData: Partial<TGGraphData>): TGGraphData 
+export function addMissingState(graphData: Partial<TGGraphData>): TGGraphData
 {
     const updatedGraphData = cloneValue(graphData);
-    const now = new Date().getTime();
+    const now              = new Date().getTime();
 
-    for (const soul in graphData) 
+    for (const soul in graphData)
     {
-        if (!soul) 
+        if (!soul)
         {
             continue;
         }
 
         const node = graphData[soul];
-        if (!node) 
+        if (!node)
         {
             continue;
         }
-        const meta = (node._ = node._ || { '#': null, '>': {} });
-        meta['#'] = soul;
+        const meta  = (node._ = node._ || { '#': null, '>': {} });
+        meta['#']   = soul;
         const state = (meta['>'] = meta['>'] || {});
 
-        for (const key in node) 
+        for (const key in node)
         {
-            if (key === '_') 
+            if (key === '_')
             {
                 continue;
             }
@@ -54,13 +54,13 @@ export function diffCRDT(
     updatedGraph: TGGraphData,
     existingGraph: TGGraphData,
     opts: CRDTOpts = DEFAULT_OPTS,
-): TGGraphData | undefined 
+): TGGraphData|undefined
 {
     const {
         machineState = new Date().getTime(),
-        futureGrace = DEFAULT_OPTS.futureGrace,
-        Lexical = DEFAULT_OPTS.Lexical,
-    } = opts || EMPTY;
+        futureGrace  = DEFAULT_OPTS.futureGrace,
+        Lexical      = DEFAULT_OPTS.Lexical,
+    }        = opts || EMPTY;
     const maxState = machineState + futureGrace;
 
     const allUpdates: TGGraphData = {};
@@ -70,22 +70,22 @@ export function diffCRDT(
         existingGraph: JSON.stringify(existingGraph)
     });*/
 
-    for (const soul in updatedGraph) 
+    for (const soul in updatedGraph)
     {
-        if (!soul) 
+        if (!soul)
         {
             continue;
         }
-        const existing = existingGraph[soul];
-        const updated = updatedGraph[soul];
+        const existing                   = existingGraph[soul];
+        const updated                    = updatedGraph[soul];
         const existingState: TGNodeState =
-            (existing && existing._ && existing._['>']) || EMPTY;
-        const updatedState: TGNodeState =
-            (updated && updated._ && updated._['>']) || EMPTY;
+                  (existing && existing._ && existing._['>']) || EMPTY;
+        const updatedState: TGNodeState  =
+                  (updated && updated._ && updated._['>']) || EMPTY;
 
-        if (!updated) 
+        if (!updated)
         {
-            if (!(soul in existingGraph)) 
+            if (!(soul in existingGraph))
             {
                 allUpdates[soul] = updated;
             }
@@ -101,37 +101,37 @@ export function diffCRDT(
             },
         };
 
-        for (const key in updatedState) 
+        for (const key in updatedState)
         {
-            if (!key) 
+            if (!key)
             {
                 continue;
             }
 
             const existingKeyState = existingState[key];
-            const updatedKeyState = updatedState[key];
+            const updatedKeyState  = updatedState[key];
 
-            if (updatedKeyState > maxState || !updatedKeyState) 
+            if (updatedKeyState > maxState || !updatedKeyState)
             {
                 continue;
             }
-            if (existingKeyState && existingKeyState >= updatedKeyState) 
+            if (existingKeyState && existingKeyState >= updatedKeyState)
             {
                 continue;
             }
-            if (existingKeyState === updatedKeyState) 
+            if (existingKeyState === updatedKeyState)
             {
                 const existingVal = (existing && existing[key]) || undefined;
-                const updatedVal = updated[key];
+                const updatedVal  = updated[key];
                 // This is based on TopGun logic
-                if (Lexical(updatedVal) <= Lexical(existingVal)) 
+                if (Lexical(updatedVal) <= Lexical(existingVal))
                 {
                     continue;
                 }
             }
             updates[key] = updated[key];
 
-            if (updates._ && updates._['>']) 
+            if (updates._ && updates._['>'])
             {
                 updates._['>'][key] = updatedKeyState;
             }
@@ -139,7 +139,7 @@ export function diffCRDT(
             hasUpdates = true;
         }
 
-        if (hasUpdates) 
+        if (hasUpdates)
         {
             allUpdates[soul] = updates;
         }
@@ -149,38 +149,38 @@ export function diffCRDT(
 }
 
 export function mergeNodes(
-    existing: TGNode | undefined,
-    updates: TGNode | undefined,
-    mut: 'immutable' | 'mutable' = 'immutable',
-): TGNode | undefined 
+    existing: TGNode|undefined,
+    updates: TGNode|undefined,
+    mut: 'immutable'|'mutable' = 'immutable',
+): TGNode|undefined
 {
-    if (!existing) 
+    if (!existing)
     {
         return updates;
     }
-    if (!updates) 
+    if (!updates)
     {
         return existing;
     }
-    const existingMeta = existing._ || {};
+    const existingMeta  = existing._ || {};
     const existingState = existingMeta['>'] || {};
-    const updatedMeta = updates._ || {};
-    const updatedState = updatedMeta['>'] || {};
+    const updatedMeta   = updates._ || {};
+    const updatedState  = updatedMeta['>'] || {};
 
-    if (mut === 'mutable') 
+    if (mut === 'mutable')
     {
-        for (const key in updatedState) 
+        for (const key in updatedState)
         {
-            if (!key) 
+            if (!key)
             {
                 continue;
             }
-            existing[key] = updates[key];
+            existing[key]      = updates[key];
             existingState[key] = updatedState[key];
         }
 
         existingMeta['>'] = existingState;
-        existing._ = existingMeta as TGNodeMeta;
+        existing._        = existingMeta as TGNodeMeta;
 
         return existing;
     }
@@ -201,14 +201,14 @@ export function mergeNodes(
 export function mergeGraph(
     existing: TGGraphData,
     diff: TGGraphData,
-    mut: 'immutable' | 'mutable' = 'immutable',
-): TGGraphData 
+    mut: 'immutable'|'mutable' = 'immutable',
+): TGGraphData
 {
     const result: TGGraphData = mut ? existing : { ...existing };
 
-    for (const soul in diff) 
+    for (const soul in diff)
     {
-        if (!soul) 
+        if (!soul)
         {
             continue;
         }

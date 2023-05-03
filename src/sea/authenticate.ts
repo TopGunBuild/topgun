@@ -22,25 +22,23 @@ const DEFAULT_OPTS = {
 export async function authenticateAccount(
     ident: any,
     password: string,
-    encoding: 'base64' | 'utf8' | 'hex' = 'base64',
-): Promise<
-    | undefined
-    | {
+    encoding: 'base64'|'utf8'|'hex' = 'base64',
+): Promise<|undefined
+    |{
         readonly alias: string;
         readonly epriv: string;
         readonly epub: string;
         readonly priv: string;
         readonly pub: string;
-    }
-    > 
+    }>
 {
-    if (!ident || !ident.auth) 
+    if (!ident || !ident.auth)
     {
         return undefined;
     }
 
     let decrypted: any;
-    try 
+    try
     {
         const proof = await work(password, ident.auth.s, { encode: encoding });
 
@@ -48,15 +46,15 @@ export async function authenticateAccount(
             encode: encoding,
         });
     }
-    catch (err) 
+    catch (err)
     {
         const proof = await work(password, ident.auth.s, { encode: 'utf8' });
-        decrypted = await decrypt(ident.auth.ek, proof, {
+        decrypted   = await decrypt(ident.auth.ek, proof, {
             encode: encoding,
         });
     }
 
-    if (!decrypted) 
+    if (!decrypted)
     {
         return undefined;
     }
@@ -74,17 +72,15 @@ export async function authenticateIdentity(
     client: TGClient,
     soul: string,
     password: string,
-    encoding: 'base64' | 'utf8' | 'hex' = 'base64',
-): Promise<
-    | undefined
-    | {
+    encoding: 'base64'|'utf8'|'hex' = 'base64',
+): Promise<|undefined
+    |{
         readonly alias: string;
         readonly epriv: string;
         readonly epub: string;
         readonly priv: string;
         readonly pub: string;
-    }
-    > 
+    }>
 {
     const ident = await client.get(soul).then();
     return authenticateAccount(ident, password, encoding);
@@ -103,10 +99,10 @@ export function authenticate(
 ): Promise<AuthResult>;
 export async function authenticate(
     client: TGClient,
-    aliasOrPair: string | Pair,
-    passwordOrOpt: string | AuthOptions,
+    aliasOrPair: string|Pair,
+    passwordOrOpt: string|AuthOptions,
     maybeOptions?: AuthOptions,
-): Promise<AuthResult> 
+): Promise<AuthResult>
 {
     let options: AuthOptions = isObject(passwordOrOpt)
         ? passwordOrOpt
@@ -114,42 +110,42 @@ export async function authenticate(
             ? maybeOptions
             : DEFAULT_OPTS; // Auth by alias and password
 
-    if (isString(aliasOrPair)) 
+    if (isString(aliasOrPair))
     {
         const aliasSoul = `~@${aliasOrPair}`;
 
-        if (!isObject(options)) 
+        if (!isObject(options))
         {
             options = {};
         }
-        if (!isNumber(options.timeout)) 
+        if (!isNumber(options.timeout))
         {
             options.timeout = DEFAULT_OPTS.timeout;
         }
 
         let idents =
-            client.graph.connectorCount() === 0
-                ? await client
-                    .get(aliasSoul)
-                    .promise({ timeout: options.timeout })
-                    .then()
-                : await client.get(aliasSoul).then();
+                client.graph.connectorCount() === 0
+                    ? await client
+                        .get(aliasSoul)
+                        .promise({ timeout: options.timeout })
+                        .then()
+                    : await client.get(aliasSoul).then();
 
-        if (!isObject(idents)) 
+        if (!isObject(idents))
         {
             idents = {};
         }
 
-        for (const soul in idents) 
+        for (const soul in idents)
         {
-            if (soul === '_') 
+            if (soul === '_')
             {
                 continue;
             }
 
             let pair;
 
-            try 
+            try
             {
                 pair = await authenticateIdentity(
                     client,
@@ -157,12 +153,12 @@ export async function authenticate(
                     passwordOrOpt as string,
                 );
             }
-            catch (e: any) 
+            catch (e: any)
             {
                 console.warn(e.stack || e);
             }
 
-            if (pair) 
+            if (pair)
             {
                 return pair;
             }
@@ -172,7 +168,7 @@ export async function authenticate(
     }
 
     // Auth by pair
-    if (isObject(aliasOrPair) && (aliasOrPair.pub || aliasOrPair.epub)) 
+    if (isObject(aliasOrPair) && (aliasOrPair.pub || aliasOrPair.epub))
     {
         return {
             ...aliasOrPair,

@@ -4,7 +4,7 @@ export const setItemAsync = async (
     storage: TGSupportedStorage,
     key: string,
     data: any,
-): Promise<void> => 
+): Promise<void> =>
 {
     await storage.setItem(key, JSON.stringify(data));
 };
@@ -12,20 +12,20 @@ export const setItemAsync = async (
 export const getItemAsync = async (
     storage: TGSupportedStorage,
     key: string,
-): Promise<unknown> => 
+): Promise<unknown> =>
 {
     const value = await storage.getItem(key);
 
-    if (!value) 
+    if (!value)
     {
         return null;
     }
 
-    try 
+    try
     {
         return JSON.parse(value);
     }
-    catch 
+    catch
     {
         return value;
     }
@@ -34,7 +34,7 @@ export const getItemAsync = async (
 export const removeItemAsync = async (
     storage: TGSupportedStorage,
     key: string,
-): Promise<void> => 
+): Promise<void> =>
 {
     await storage.removeItem(key);
 };

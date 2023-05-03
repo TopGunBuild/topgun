@@ -6,67 +6,67 @@ const DEFAULT_POLICY: IPolicy = {};
 const DEFAULT_OPTS: {
     readonly block?: any;
     readonly raw?: boolean;
-    readonly expiry?: string | number;
-} = {};
-type WhoCertify = '*' | string | string[] | { pub: string } | { pub: string }[];
+    readonly expiry?: string|number;
+}                             = {};
+type WhoCertify = '*'|string|string[]|{pub: string}|{pub: string}[];
 
 export async function certify(
     who: WhoCertify,
     policy: IPolicy,
-    authority: { priv: string; pub: string },
+    authority: {priv: string; pub: string},
 ): Promise<string>;
 export async function certify(
     who: WhoCertify,
     policy: IPolicy,
-    authority: { priv: string; pub: string },
+    authority: {priv: string; pub: string},
     opt: {
         readonly block?: any;
-        readonly expiry?: string | number;
+        readonly expiry?: string|number;
         readonly raw?: false;
     },
 ): Promise<string>;
 export async function certify(
     who: WhoCertify,
     policy: IPolicy,
-    authority: { priv: string; pub: string },
+    authority: {priv: string; pub: string},
     opt: {
         readonly block?: any;
-        readonly expiry?: string | number;
+        readonly expiry?: string|number;
         readonly raw: true;
     },
-): Promise<{ readonly m: any; readonly s: string }>;
+): Promise<{readonly m: any; readonly s: string}>;
 export async function certify(
     who: WhoCertify,
     policy: IPolicy = DEFAULT_POLICY,
-    authority: { priv: string; pub: string },
-    opt = DEFAULT_OPTS,
-): Promise<string | { readonly m: any; readonly s: string } | undefined> 
+    authority: {priv: string; pub: string},
+    opt             = DEFAULT_OPTS,
+): Promise<string|{readonly m: any; readonly s: string}|undefined>
 {
-    if (!isObject(opt)) 
+    if (!isObject(opt))
     {
         opt = DEFAULT_OPTS;
     }
 
-    who = (() => 
+    who = (() =>
     {
         const data: string[] = [];
-        if (who) 
+        if (who)
         {
-            if (isString(who) && who.includes('*')) 
+            if (isString(who) && who.includes('*'))
             {
                 return '*';
             }
-            if (Array.isArray(who) && who.some(e => e === '*')) 
+            if (Array.isArray(who) && who.some(e => e === '*'))
             {
                 return '*';
             }
-            if (isString(who)) 
+            if (isString(who))
             {
                 return who;
             }
-            if (Array.isArray(who)) 
+            if (Array.isArray(who))
             {
-                if (who.length === 1 && who[0]) 
+                if (who.length === 1 && who[0])
                 {
                     return isObject(who[0]) && who[0].pub
                         ? who[0].pub
@@ -74,19 +74,19 @@ export async function certify(
                             ? who[0]
                             : null;
                 }
-                who.map((certificant) => 
+                who.map((certificant) =>
                 {
-                    if (isString(certificant)) 
+                    if (isString(certificant))
                     {
                         data.push(certificant);
                     }
-                    else if (isObject(certificant) && certificant.pub) 
+                    else if (isObject(certificant) && certificant.pub)
                     {
                         data.push(certificant.pub);
                     }
                 });
             }
-            else if (isObject(who) && who.pub) 
+            else if (isObject(who) && who.pub)
             {
                 return who.pub;
             }
@@ -95,50 +95,50 @@ export async function certify(
         return null;
     })() as WhoCertify;
 
-    if (!who) 
+    if (!who)
     {
         console.log('No certificant found.');
         return;
     }
 
-    const expiry = isString(opt?.expiry)
+    const expiry      = isString(opt?.expiry)
         ? parseFloat(opt.expiry)
         : isNumber(opt?.expiry)
             ? opt.expiry
             : null;
-    const readPolicy =
-        !Array.isArray(policy) && isObject(policy) && policy['read']
-            ? policy['read']
-            : null;
+    const readPolicy  =
+              !Array.isArray(policy) && isObject(policy) && policy['read']
+                  ? policy['read']
+                  : null;
     const writePolicy =
-        !Array.isArray(policy) && isObject(policy) && policy['write']
-            ? policy['write']
-            : isString(policy) ||
-              Array.isArray(policy) ||
-              (policy && policy['+']) ||
-              policy['#'] ||
-              policy['.'] ||
-              policy['='] ||
-              policy['*'] ||
-              policy['>'] ||
-              policy['<']
-                ? policy
-                : null;
+              !Array.isArray(policy) && isObject(policy) && policy['write']
+                  ? policy['write']
+                  : isString(policy) ||
+                  Array.isArray(policy) ||
+                  (policy && policy['+']) ||
+                  policy['#'] ||
+                  policy['.'] ||
+                  policy['='] ||
+                  policy['*'] ||
+                  policy['>'] ||
+                  policy['<']
+                      ? policy
+                      : null;
 
     // We can now use 1 key: block
 
-    const block = isObject(opt) ? opt.block || {} : {};
-    const readBlock =
-        block.read && (isString(block.read) || (block.read || {})['#'])
-            ? block.read
-            : null;
+    const block      = isObject(opt) ? opt.block || {} : {};
+    const readBlock  =
+              block.read && (isString(block.read) || (block.read || {})['#'])
+                  ? block.read
+                  : null;
     const writeBlock = isString(block)
         ? block
         : block.write && (isString(block.write) || block.write['#'])
             ? block.write
             : null;
 
-    if (!readPolicy && !writePolicy) 
+    if (!readPolicy && !writePolicy)
     {
         console.log('No policy found.');
         return;
@@ -156,7 +156,7 @@ export async function certify(
 
     const certificate = await sign(data, authority, { raw: true });
 
-    if (opt.raw) 
+    if (opt.raw)
     {
         return certificate;
     }

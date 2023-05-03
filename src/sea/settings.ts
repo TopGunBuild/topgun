@@ -2,12 +2,12 @@ import Buffer from 'topgun-buffer';
 import { isString } from 'topgun-typed';
 
 export const shuffleAttackCutoff = 1546329600000; // Jan 1, 2019
-export const pbkdf2 = { hash: { name: 'SHA-256' }, iter: 100000, ks: 64 };
-export const ecdsa = {
+export const pbkdf2              = { hash: { name: 'SHA-256' }, iter: 100000, ks: 64 };
+export const ecdsa               = {
     pair: { name: 'ECDSA', namedCurve: 'P-256' },
     sign: { name: 'ECDSA', hash: { name: 'SHA-256' } },
 };
-export const ecdh = { name: 'ECDH', namedCurve: 'P-256' };
+export const ecdh                = { name: 'ECDH', namedCurve: 'P-256' };
 
 export function jwk(
     pub: string,
@@ -20,7 +20,7 @@ export function jwk(
         readonly kty: string;
         readonly x: string;
         readonly y: string;
-    } 
+    }
 {
     // d === priv
     const coords = pub.split('.');
@@ -40,30 +40,31 @@ export function keyToJwk(keyBytes: Buffer): {
     readonly kty: string;
     readonly ext: boolean;
     readonly alg: string;
-} 
+}
 {
     const keyB64 = keyBytes.toString('base64');
-    const k = keyB64.replace(/\+/g, '-').replace(/\//g, '_').replace(/\=/g, '');
+    const k      = keyB64.replace(/\+/g, '-').replace(/\//g, '_').replace(/\=/g, '');
     return { kty: 'oct', k, ext: false, alg: 'A256GCM' };
 }
 
-export function check(t: any): boolean 
+export function check(t: any): boolean
 {
     return isString(t) && 'SEA{' === t.slice(0, 4);
 }
 
-export function parse(t: any): any 
+export function parse(t: any): any
 {
-    try 
+    try
     {
         const yes = isString(t);
-        if (yes && 'SEA{' === t.slice(0, 4)) 
+        if (yes && 'SEA{' === t.slice(0, 4))
         {
             t = t.slice(3);
         }
         return yes ? JSON.parse(t) : t;
     }
-    catch (_e) 
-    {}
+    catch (_e)
+    {
+    }
     return t;
 }

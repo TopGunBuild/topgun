@@ -7,7 +7,8 @@ const DEFAULT_OPTS = {
     mergeFn: mergeGraph,
 };
 
-interface MemoryAdapterOpts {
+interface MemoryAdapterOpts
+{
     readonly diffFn?: typeof diffCRDT;
     readonly mergeFn?: typeof mergeGraph;
     readonly direct?: boolean;
@@ -17,14 +18,14 @@ const getSync = (
     opts: MemoryAdapterOpts,
     graph: TGGraphData,
     soul: string,
-): TGNode | null =>
+): TGNode|null =>
     (opts.direct ? graph[soul] : cloneValue(graph[soul])) || null;
 
 const get = (
     opts: MemoryAdapterOpts,
     graph: TGGraphData,
     soul: string,
-): Promise<TGNode | null> => Promise.resolve(getSync(opts, graph, soul));
+): Promise<TGNode|null> => Promise.resolve(getSync(opts, graph, soul));
 
 const putSync = (
     {
@@ -33,11 +34,11 @@ const putSync = (
     }: MemoryAdapterOpts,
     graph: TGGraphData,
     graphData: TGGraphData,
-) => 
+) =>
 {
     const diff = diffFn(graphData, graph);
 
-    if (diff) 
+    if (diff)
     {
         mergeFn(graph, diff, 'mutable');
     }
@@ -49,12 +50,12 @@ const put = (
     opts: MemoryAdapterOpts,
     graph: TGGraphData,
     graphData: TGGraphData,
-): Promise<TGGraphData | null> =>
+): Promise<TGGraphData|null> =>
     Promise.resolve(putSync(opts, graph, graphData));
 
 export function createMemoryAdapter(
     opts: MemoryAdapterOpts = DEFAULT_OPTS,
-): TGGraphAdapter 
+): TGGraphAdapter
 {
     const graph: TGGraphData = {};
 

@@ -23,27 +23,27 @@ const DEFAULT_OPTS: {
 
 export async function verifyCertificate(
     client: TGClient,
-    cert: { readonly m: string; readonly s: string },
+    cert: {readonly m: string; readonly s: string},
     userPub: string,
     soulPub: string,
     fullPath: string[],
-): Promise<false | VerifyData> 
+): Promise<false|VerifyData>
 {
-    if (cert && cert.m && cert.s && userPub && soulPub) 
+    if (cert && cert.m && cert.s && userPub && soulPub)
     {
         // check if "pub" (of the graph owner) really issued this cert
-        const data = await verify(cert, soulPub);
-        const putDate = new Date().getTime();
+        const data     = await verify(cert, soulPub);
+        const putDate  = new Date().getTime();
         const certDate = (data && data.e) || 0;
 
-        if (putDate > certDate) 
+        if (putDate > certDate)
         {
             console.warn('Certificate expired.');
             return false;
         }
 
         // "data.c" = a list of certified users
-        const certified = data && data.c;
+        const certified       = data && data.c;
         // "data.w" = lex WRITE permission, in the future, there will be "data.r" which means lex READ permission
         const writePermission = data && data.w;
 
@@ -51,10 +51,10 @@ export async function verifyCertificate(
             certified &&
             writePermission &&
             (certified === '*' || certified.includes(userPub))
-        ) 
+        )
         {
             // ok, now "certifying" is in the "certifyings" list, but is "path" allowed? Check path
-            const key = fullPath.pop() as string;
+            const key  = fullPath.pop() as string;
             const path = fullPath.join('/');
 
             const writePermissions = Array.isArray(writePermission)
@@ -63,14 +63,14 @@ export async function verifyCertificate(
                     ? [writePermission]
                     : [];
 
-            for (const lex of writePermissions) 
+            for (const lex of writePermissions)
             {
                 const policy = new Policy(lex, path, key, userPub);
 
-                if (policy.match()) 
+                if (policy.match())
                 {
                     // Is Certificant forced to present in Path
-                    if (policy.hasCertificatePathError()) 
+                    if (policy.hasCertificatePathError())
                     {
                         console.warn(
                             `Path "${path}" or key "${key}" must contain string "${userPub}".`,
@@ -81,18 +81,18 @@ export async function verifyCertificate(
                     // path is allowed, but is there any WRITE block? Check it out
                     // "data.wb" = path to the WRITE block
                     const writeBlockPath =
-                        isObject(data.wb) && isString(data.wb['#'])
-                            ? data.wb['#']
-                            : isString(data.wb)
-                                ? data.wb
-                                : null;
+                              isObject(data.wb) && isString(data.wb['#'])
+                                  ? data.wb['#']
+                                  : isString(data.wb)
+                                      ? data.wb
+                                      : null;
 
-                    if (isString(writeBlockPath)) 
+                    if (isString(writeBlockPath))
                     {
-                        let root: TGLink | TGClient = client;
+                        let root: TGLink|TGClient = client;
 
                         // Fix if path doesn't start with certificate
-                        if (!writeBlockPath.startsWith('~')) 
+                        if (!writeBlockPath.startsWith('~'))
                         {
                             root = client.get('~' + soulPub);
                         }
@@ -103,7 +103,7 @@ export async function verifyCertificate(
                             .get(userPub)
                             .promise({ timeout: 1000 });
 
-                        if (value === 1 || value === true) 
+                        if (value === 1 || value === true)
                         {
                             console.warn(`Certificant ${userPub} blocked.`);
                             return false;
@@ -134,7 +134,7 @@ export function prep(
         readonly '.': string;
         readonly ':': TGValue;
         readonly '>': number;
-    } 
+    }
 {
     // prep for signing
     return {
@@ -145,7 +145,7 @@ export function prep(
     };
 }
 
-export async function hashForSignature(prepped: any): Promise<string> 
+export async function hashForSignature(prepped: any): Promise<string>
 {
     const hash = await sha256(
         isString(prepped) ? prepped : JSON.stringify(prepped),
@@ -153,11 +153,11 @@ export async function hashForSignature(prepped: any): Promise<string>
     return hash.toString('hex');
 }
 
-export function hashNodeKey(node: TGNode, key: string): Promise<string> 
+export function hashNodeKey(node: TGNode, key: string): Promise<string>
 {
-    const val = node && node[key];
-    const parsed = parse(val);
-    const soul = node && node._ && node._['#'];
+    const val     = node && node[key];
+    const parsed  = parse(val);
+    const soul    = node && node._ && node._['#'];
     const prepped = prep(parsed, key, node, soul as string);
 
     return hashForSignature(prepped);
@@ -167,18 +167,18 @@ export async function signHash(
     hash: string,
     pair: PairBase,
     encoding = DEFAULT_OPTS.encode,
-): Promise<string> 
+): Promise<string>
 {
     const { pub, priv } = pair;
-    const token = jwk(pub, priv);
-    const signKey = await crypto.subtle.importKey(
+    const token         = jwk(pub, priv);
+    const signKey       = await crypto.subtle.importKey(
         'jwk',
         token,
         ecdsa.pair,
         false,
         ['sign'],
     );
-    const sig = await crypto.subtle.sign(
+    const sig           = await crypto.subtle.sign(
         ecdsa.sign,
         signKey,
         new Uint8Array(Buffer.from(hash, 'hex')),
@@ -210,30 +210,30 @@ export async function sign(
             readonly s: string;
         };
     },
-): Promise<{ readonly m: any; readonly s: string }>;
+): Promise<{readonly m: any; readonly s: string}>;
 export async function sign(
     data: string,
     pair: PairBase,
     opt = DEFAULT_OPTS,
-): Promise<string | { readonly m: any; readonly s: string }> 
+): Promise<string|{readonly m: any; readonly s: string}>
 {
-    if (isUndefined(data)) 
+    if (isUndefined(data))
     {
         throw new Error('`undefined` not allowed.');
     }
-    const json = parse(data);
-    const encoding = opt.encode || DEFAULT_OPTS.encode;
+    const json      = parse(data);
+    const encoding  = opt.encode || DEFAULT_OPTS.encode;
     const checkData = opt.check || json;
 
     if (
         json &&
         ((json.s && json.m) || (json[':'] && json['~'])) &&
         (await verify(data, pair.pub))
-    ) 
+    )
     {
         // already signed
         const parsed = parse(checkData);
-        if (opt.raw) 
+        if (opt.raw)
         {
             return parsed;
         }
@@ -241,12 +241,12 @@ export async function sign(
     }
 
     const hash = await hashForSignature(data);
-    const sig = await signHash(hash, pair, encoding);
-    const r = {
+    const sig  = await signHash(hash, pair, encoding);
+    const r    = {
         m: json,
         s: sig,
     };
-    if (opt.raw) 
+    if (opt.raw)
     {
         return r;
     }
@@ -260,19 +260,19 @@ export async function signNodeValue(
 ): Promise<{
         readonly ':': TGValue;
         readonly '~': string;
-    }> 
+    }>
 {
     const data = node[key];
     const json = parse(data);
 
-    if (data && json && ((json.s && json.m) || (json[':'] && json['~']))) 
+    if (data && json && ((json.s && json.m) || (json[':'] && json['~'])))
     {
         // already signed
         return json;
     }
 
     const hash = await hashNodeKey(node, key);
-    const sig = await signHash(hash, pair);
+    const sig  = await signHash(hash, pair);
 
     // console.log({':': parse(node[key]), node, key});
 
@@ -282,20 +282,20 @@ export async function signNodeValue(
     };
 }
 
-export async function signNode(node: TGNode, pair: PairBase): Promise<TGNode> 
+export async function signNode(node: TGNode, pair: PairBase): Promise<TGNode>
 {
     const signedNode: TGNode = {
         _: node._,
     };
-    const soul = node._ && node._['#'];
+    const soul               = node._ && node._['#'];
 
-    for (const key in node) 
+    for (const key in node)
     {
-        if (key === '_') 
+        if (key === '_')
         {
             continue;
         }
-        if (key === 'pub' /*|| key === "alias"*/ && soul === `~${pair.pub}`) 
+        if (key === 'pub' /*|| key === "alias"*/ && soul === `~${pair.pub}`)
         {
             // Special case
             signedNode[key] = node[key];
@@ -312,20 +312,20 @@ export async function signGraph(
     pair: PairBase,
     putOpt?: TGOptionsPut,
     fullPath?: string[],
-): Promise<TGGraphData> 
+): Promise<TGGraphData>
 {
     const modifiedGraph = { ...graph };
-    fullPath = Array.isArray(fullPath) ? [...fullPath].reverse() : [];
+    fullPath            = Array.isArray(fullPath) ? [...fullPath].reverse() : [];
 
-    for (const soul in graph) 
+    for (const soul in graph)
     {
-        if (!soul) 
+        if (!soul)
         {
             continue;
         }
 
         const node = graph[soul];
-        if (!node) 
+        if (!node)
         {
             continue;
         }
@@ -333,12 +333,12 @@ export async function signGraph(
         const soulPub = pubFromSoul(soul);
 
         // if writing to own graph, just allow it
-        if (soulPub === pair.pub) 
+        if (soulPub === pair.pub)
         {
             modifiedGraph[soul] = await signNode(node, pair);
         }
         // if writing to other's graph, check if cert exists then try to inject cert into put, also inject self pub so that everyone can verify the put
-        else if (soulPub && check(putOpt?.opt?.cert)) 
+        else if (soulPub && check(putOpt?.opt?.cert))
         {
             const cert = parse(putOpt?.opt?.cert);
 
@@ -354,7 +354,7 @@ export async function signGraph(
                     soulPub,
                     fullPath,
                 ))
-            ) 
+            )
             {
                 modifiedGraph[soul] = await signNode(node, pair);
             }
@@ -372,7 +372,7 @@ export function graphSigner(
         existingGraph: any,
         putOpt?: TGOptionsPut,
         fullPath?: string[],
-    ) => Promise<TGGraphData> 
+    ) => Promise<TGGraphData>
 {
     return (
         graph: TGGraphData,

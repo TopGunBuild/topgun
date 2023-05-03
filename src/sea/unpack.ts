@@ -3,46 +3,46 @@ import { check, parse, shuffleAttackCutoff } from './settings';
 import { pubFromSoul } from './soul';
 import { TGGraphData, TGNode } from '../types';
 
-export function unpack(passedValue: any, key: string, node: TGNode): any 
+export function unpack(passedValue: any, key: string, node: TGNode): any
 {
     let value = passedValue;
 
-    if (!value) 
+    if (!value)
     {
         return;
     }
 
-    if (isObject(value) && ':' in value) 
+    if (isObject(value) && ':' in value)
     {
         const val = value[':'];
-        if (isDefined(val)) 
+        if (isDefined(val))
         {
             return val;
         }
     }
 
-    if (isObject(value) && 'm' in value) 
+    if (isObject(value) && 'm' in value)
     {
         const val = value.m;
-        if (isDefined(val)) 
+        if (isDefined(val))
         {
             value = parse(val);
         }
     }
 
-    if (!key || !node) 
+    if (!key || !node)
     {
         return;
     }
-    if (value === node[key]) 
+    if (value === node[key])
     {
         return value;
     }
-    if (!check(node[key])) 
+    if (!check(node[key]))
     {
         return value;
     }
-    const soul = node && node._ && node._['#'];
+    const soul  = node && node._ && node._['#'];
     const state = (node && node._ && node._['>'] && node._['>'][key]) || 0;
     if (
         value &&
@@ -50,12 +50,12 @@ export function unpack(passedValue: any, key: string, node: TGNode): any
         soul === value[0] &&
         key === value[1] &&
         Math.floor(state) === Math.floor(value[3])
-    ) 
+    )
     {
         console.log('value', value);
         return value[2];
     }
-    if (state < shuffleAttackCutoff) 
+    if (state < shuffleAttackCutoff)
     {
         return value;
     }
@@ -63,24 +63,24 @@ export function unpack(passedValue: any, key: string, node: TGNode): any
 
 export function unpackNode(
     node: TGNode,
-    mut: 'immutable' | 'mutable' = 'immutable',
-): TGNode 
+    mut: 'immutable'|'mutable' = 'immutable',
+): TGNode
 {
-    if (!node) 
+    if (!node)
     {
         return node;
     }
 
     const result: TGNode =
-        mut === 'mutable'
-            ? node
-            : {
-                _: node._,
-            };
+              mut === 'mutable'
+                  ? node
+                  : {
+                      _: node._,
+                  };
 
-    for (const key in node) 
+    for (const key in node)
     {
-        if (key === '_') 
+        if (key === '_')
         {
             continue;
         }
@@ -93,20 +93,20 @@ export function unpackNode(
 
 export function unpackGraph(
     graph: TGGraphData,
-    mut: 'immutable' | 'mutable' = 'immutable',
-): TGGraphData 
+    mut: 'immutable'|'mutable' = 'immutable',
+): TGGraphData
 {
     const unpackedGraph: TGGraphData = mut === 'mutable' ? graph : {};
 
-    for (const soul in graph) 
+    for (const soul in graph)
     {
-        if (!soul) 
+        if (!soul)
         {
             continue;
         }
 
         const node = graph[soul];
-        const pub = pubFromSoul(soul);
+        const pub  = pubFromSoul(soul);
 
         unpackedGraph[soul] = node && pub ? unpackNode(node, mut) : node;
     }

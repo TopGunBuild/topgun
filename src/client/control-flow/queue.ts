@@ -1,6 +1,6 @@
 import { TGMessage } from '../../types';
 
-export class TGQueue<T = TGMessage> 
+export class TGQueue<T = TGMessage>
 {
     readonly name: string;
     private _queue: T[];
@@ -8,9 +8,9 @@ export class TGQueue<T = TGMessage>
     /**
      * Constructor
      */
-    constructor(name = 'Queue') 
+    constructor(name = 'Queue')
     {
-        this.name = name;
+        this.name   = name;
         this._queue = [];
     }
 
@@ -18,19 +18,19 @@ export class TGQueue<T = TGMessage>
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    count(): number 
+    count(): number
     {
         return this._queue.length;
     }
 
-    has(item: T): boolean 
+    has(item: T): boolean
     {
         return this._queue.indexOf(item) !== -1;
     }
 
-    enqueue(item: T): TGQueue<T> 
+    enqueue(item: T): TGQueue<T>
     {
-        if (this.has(item)) 
+        if (this.has(item))
         {
             return this;
         }
@@ -39,16 +39,16 @@ export class TGQueue<T = TGMessage>
         return this;
     }
 
-    dequeue(): T | undefined 
+    dequeue(): T|undefined
     {
         return this._queue.pop();
     }
 
-    enqueueMany(items: readonly T[]): TGQueue<T> 
+    enqueueMany(items: readonly T[]): TGQueue<T>
     {
         const filtered = items.filter(item => !this.has(item));
 
-        if (filtered.length) 
+        if (filtered.length)
         {
             this._queue.splice(0, 0, ...filtered.slice().reverse());
         }

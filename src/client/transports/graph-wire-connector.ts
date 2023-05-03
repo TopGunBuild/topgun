@@ -3,7 +3,7 @@ import { generateMessageId } from '../graph/graph-utils';
 import { TGGraphConnector } from './graph-connector';
 
 /* eslint-disable @typescript-eslint/no-empty-function */
-export class TGGraphWireConnector extends TGGraphConnector 
+export class TGGraphWireConnector extends TGGraphConnector
 {
     private readonly _callbacks: {
         [msgId: string]: TGMessageCb;
@@ -12,11 +12,10 @@ export class TGGraphWireConnector extends TGGraphConnector
     /**
      * Constructor
      */
-    constructor(name = 'GraphWireConnector') 
+    constructor(name = 'GraphWireConnector')
     {
         super(name);
-        this._callbacks = {};
-
+        this._callbacks        = {};
         this._onProcessedInput = this._onProcessedInput.bind(this);
         this.inputQueue.completed.on(this._onProcessedInput);
     }
@@ -25,7 +24,7 @@ export class TGGraphWireConnector extends TGGraphConnector
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    off(msgId: string): TGGraphWireConnector 
+    off(msgId: string): TGGraphWireConnector
     {
         super.off(msgId);
         delete this._callbacks[msgId];
@@ -37,21 +36,22 @@ export class TGGraphWireConnector extends TGGraphConnector
      *
      * @returns A function to be called to clean up callback listeners
      */
-    put({ graph, msgId = '', replyTo = '', cb }: TGPut): () => void 
+    put({ graph, msgId = '', replyTo = '', cb }: TGPut): () => void
     {
-        if (!graph) 
+        if (!graph)
         {
-            return () => 
-            {};
+            return () =>
+            {
+            };
         }
         const msg: TGMessage = {
             put: graph,
         };
-        if (msgId) 
+        if (msgId)
         {
             msg['#'] = msgId;
         }
-        if (replyTo) 
+        if (replyTo)
         {
             msg['@'] = replyTo;
         }
@@ -64,11 +64,11 @@ export class TGGraphWireConnector extends TGGraphConnector
      *
      * @returns A function to be called to clean up callback listeners
      */
-    get({ soul, cb, msgId = '' }: TGGet): () => void 
+    get({ soul, cb, msgId = '' }: TGGet): () => void
     {
-        const get = { '#': soul };
+        const get            = { '#': soul };
         const msg: TGMessage = { get };
-        if (msgId) 
+        if (msgId)
         {
             msg['#'] = msgId;
         }
@@ -82,15 +82,15 @@ export class TGGraphWireConnector extends TGGraphConnector
      * @param msg
      * @param cb
      */
-    req(msg: TGMessage, cb?: TGMessageCb): () => void 
+    req(msg: TGMessage, cb?: TGMessageCb): () => void
     {
         const reqId = (msg['#'] = msg['#'] || generateMessageId());
-        if (cb) 
+        if (cb)
         {
             this._callbacks[reqId] = cb;
         }
         this.send([msg]);
-        return () => 
+        return () =>
         {
             this.off(reqId);
         };
@@ -100,24 +100,24 @@ export class TGGraphWireConnector extends TGGraphConnector
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private _onProcessedInput(msg?: TGMessage): void 
+    private _onProcessedInput(msg?: TGMessage): void
     {
-        if (!msg) 
+        if (!msg)
         {
             return;
         }
-        const id = msg['#'];
+        const id      = msg['#'];
         const replyTo = msg['@'];
 
-        if (msg.put) 
+        if (msg.put)
         {
             this.events.graphData.trigger(msg.put, id, replyTo);
         }
 
-        if (replyTo) 
+        if (replyTo)
         {
             const cb = this._callbacks[replyTo];
-            if (cb) 
+            if (cb)
             {
                 cb(msg);
             }

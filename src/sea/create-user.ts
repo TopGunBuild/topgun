@@ -17,27 +17,27 @@ export async function createUser(
         readonly pub: string;
         readonly epriv: string;
         readonly priv: string;
-    }> 
+    }>
 {
-    const aliasSoul = `~@${alias}`;
+    const aliasSoul         = `~@${alias}`;
     const passwordMinLength = isNumber(client.options.passwordMinLength)
         ? client.options.passwordMinLength
         : 8;
 
-    if ((password || '').length < passwordMinLength) 
+    if ((password || '').length < passwordMinLength)
     {
         throw Error('Password too short!');
     }
 
     // "pseudo-randomly create a salt, then use PBKDF2 function to extend the password with it."
-    const salt = pseudoRandomText(64);
-    const proof = await work(password, salt);
-    const pair = await createPair();
+    const salt                       = pseudoRandomText(64);
+    const proof                      = await work(password, salt);
+    const pair                       = await createPair();
     const { pub, priv, epub, epriv } = pair;
-    const pubSoul = `~${pub}`;
+    const pubSoul                    = `~${pub}`;
 
     // "to keep the private key safe, we AES encrypt it with the proof of work!"
-    const ek = await encrypt(JSON.stringify({ priv, epriv }), proof, {
+    const ek   = await encrypt(JSON.stringify({ priv, epriv }), proof, {
         raw: true,
     });
     const auth = JSON.stringify({ ek, s: salt });
@@ -48,7 +48,7 @@ export async function createUser(
         pub,
     };
 
-    const now = new Date().getTime();
+    const now   = new Date().getTime();
     const graph = await signGraph(
         client,
         {
@@ -56,7 +56,7 @@ export async function createUser(
                 _: {
                     '#': pubSoul,
                     '>': Object.keys(data).reduce(
-                        (state: { [key: string]: number }, key) => 
+                        (state: {[key: string]: number}, key) =>
                         {
                             state[key] = now;
                             return state;

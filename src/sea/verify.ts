@@ -5,7 +5,8 @@ import { sha256 } from './sha256';
 import { crypto } from './shims';
 import { Pair } from './pair';
 
-export interface VerifyData {
+export interface VerifyData
+{
     readonly ct: string;
     readonly iv: string;
     readonly s: string;
@@ -26,9 +27,9 @@ const DEFAULT_OPTS: {
     encode: 'base64',
 };
 
-function importKey(pub: string): Promise<any> 
+function importKey(pub: string): Promise<any>
 {
-    const token = jwk(pub);
+    const token   = jwk(pub);
     const promise = crypto.subtle.importKey('jwk', token, ecdsa.pair, false, [
         'verify',
     ]);
@@ -40,12 +41,12 @@ export async function verifyHashSignature(
     signature: string,
     pub: string,
     opt = DEFAULT_OPTS,
-): Promise<boolean> 
+): Promise<boolean>
 {
     const encoding = opt.encode || DEFAULT_OPTS.encode;
-    const key = await importKey(pub);
-    const buf = Buffer.from(signature, encoding);
-    const sig = new Uint8Array(buf);
+    const key      = await importKey(pub);
+    const buf      = Buffer.from(signature, encoding);
+    const sig      = new Uint8Array(buf);
 
     if (
         await crypto.subtle.verify(
@@ -54,7 +55,7 @@ export async function verifyHashSignature(
             sig,
             new Uint8Array(Buffer.from(hash, 'hex')),
         )
-    ) 
+    )
     {
         return true;
     }
@@ -67,29 +68,29 @@ export async function verifySignature(
     signature: string,
     pub: string,
     opt = DEFAULT_OPTS,
-): Promise<boolean> 
+): Promise<boolean>
 {
     const hash = await sha256(isString(text) ? text : JSON.stringify(text));
     return verifyHashSignature(hash.toString('hex'), signature, pub, opt);
 }
 
 export async function verify(
-    data: string | { readonly m: string; readonly s: string },
-    pubOrPair: string | Pair,
+    data: string|{readonly m: string; readonly s: string},
+    pubOrPair: string|Pair,
     opt = DEFAULT_OPTS,
-): Promise<false | VerifyData> 
+): Promise<false|VerifyData>
 {
-    try 
+    try
     {
         const pub =
-            isObject(pubOrPair) && isString(pubOrPair.pub)
-                ? pubOrPair.pub
-                : isString(pubOrPair)
-                    ? pubOrPair
-                    : '';
+                  isObject(pubOrPair) && isString(pubOrPair.pub)
+                      ? pubOrPair.pub
+                      : isString(pubOrPair)
+                          ? pubOrPair
+                          : '';
 
         const json = parse(data);
-        if (await verifySignature(json.m, json.s, pub, opt)) 
+        if (await verifySignature(json.m, json.s, pub, opt))
         {
             return {
                 ct: json.ct,
@@ -102,7 +103,7 @@ export async function verify(
         }
         return false;
     }
-    catch (e) 
+    catch (e)
     {
         return false;
     }

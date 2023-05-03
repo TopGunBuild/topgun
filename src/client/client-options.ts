@@ -3,7 +3,8 @@ import { TGGraphConnector } from './transports/graph-connector';
 import { TGSupportedStorage } from '../types';
 import { localStorageAdapter } from '../utils/local-storage';
 
-export interface TGClientOptions {
+export interface TGClientOptions
+{
     readonly peers?: string[];
     readonly graph?: TGGraph;
     readonly connectors?: TGGraphConnector[];

@@ -67,6 +67,7 @@
                 "align": "colon"
             }
         }],
-        "indent": [2, 4, {"VariableDeclarator": "first"}]
+        "indent": "off",
+        "@typescript-eslint/indent": [2, 4, {"VariableDeclarator": "first"}]
     }
 }

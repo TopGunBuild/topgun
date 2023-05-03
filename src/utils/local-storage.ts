@@ -3,27 +3,27 @@ import { TGSupportedStorage } from '../types';
 import globalThis from '../utils/window-or-global';
 
 export const localStorageAdapter: TGSupportedStorage = {
-    getItem: (key) => 
+    getItem: (key) =>
     {
-        if (!isBrowser()) 
+        if (!isBrowser())
         {
             return null;
         }
 
         return globalThis.localStorage.getItem(key);
     },
-    setItem: (key, value) => 
+    setItem: (key, value) =>
     {
-        if (!isBrowser()) 
+        if (!isBrowser())
         {
             return;
         }
 
         globalThis.localStorage.setItem(key, value);
     },
-    removeItem: (key) => 
+    removeItem: (key) =>
     {
-        if (!isBrowser()) 
+        if (!isBrowser())
         {
             return;
         }

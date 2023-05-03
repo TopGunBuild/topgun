@@ -4,10 +4,10 @@ import { crypto } from './shims';
 const keysToEcdhJwk = (
     pub: string,
     d?: string,
-): ['jwk', JsonWebKey, EcKeyImportParams] => 
+): ['jwk', JsonWebKey, EcKeyImportParams] =>
 {
     const [x, y] = pub.split('.'); // new
-    const jwk = d ? { d } : {};
+    const jwk    = d ? { d } : {};
     return [
         // Use with spread returned value...
         'jwk',
@@ -20,21 +20,21 @@ export async function secret(
     key: string,
     pair: Pair,
     cb?: (value?: string) => void,
-): Promise<string | undefined> 
+): Promise<string|undefined>
 {
-    try 
+    try
     {
-        if (!pair || !pair.epriv || !pair.epub) 
+        if (!pair || !pair.epriv || !pair.epub)
         {
             console.log('No secret mix.');
             return;
         }
 
-        const pub = key;
-        const epub = pair.epub;
-        const epriv = pair.epriv;
+        const pub                          = key;
+        const epub                         = pair.epub;
+        const epriv                        = pair.epriv;
         const [format, keyData, algorithm] = keysToEcdhJwk(pub);
-        const props = Object.assign(
+        const props                        = Object.assign(
             {
                 public: await crypto.subtle.importKey(
                     format,
@@ -49,10 +49,10 @@ export async function secret(
                 namedCurve: 'P-256',
             },
         );
-        const privKeyData = keysToEcdhJwk(epub, epriv);
-        const derived = await crypto.subtle
+        const privKeyData                  = keysToEcdhJwk(epub, epriv);
+        const derived                      = await crypto.subtle
             .importKey(...privKeyData, false, ['deriveBits'])
-            .then(async (privKey) => 
+            .then(async (privKey) =>
             {
                 // privateKey scope doesn't leak out from here!
                 const derivedBits = await crypto.subtle.deriveBits(
@@ -60,8 +60,8 @@ export async function secret(
                     privKey,
                     256,
                 );
-                const rawBits = new Uint8Array(derivedBits);
-                const derivedKey = await crypto.subtle.importKey(
+                const rawBits     = new Uint8Array(derivedBits);
+                const derivedKey  = await crypto.subtle.importKey(
                     'raw',
                     rawBits,
                     {
@@ -78,23 +78,23 @@ export async function secret(
             });
 
         const r = derived;
-        if (cb) 
+        if (cb)
         {
-            try 
+            try
             {
                 cb(r);
             }
-            catch (e) 
+            catch (e)
             {
                 console.log(e);
             }
         }
         return r;
     }
-    catch (e) 
+    catch (e)
     {
         console.error(e);
-        if (cb) 
+        if (cb)
         {
             cb();
         }

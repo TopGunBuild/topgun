@@ -15,11 +15,11 @@ const DEFAULT_OPTS: {
 
 export async function encrypt(
     msg: string,
-    keyOrPair: string | Pair,
+    keyOrPair: string|Pair,
 ): Promise<string>;
 export async function encrypt(
     msg: string,
-    keyOrPair: string | Pair,
+    keyOrPair: string|Pair,
     opt: {
         readonly name?: string;
         readonly encode?: string;
@@ -28,28 +28,28 @@ export async function encrypt(
 ): Promise<string>;
 export async function encrypt(
     msg: string,
-    keyOrPair: string | Pair,
+    keyOrPair: string|Pair,
     opt: {
         readonly name?: string;
         readonly encode?: string;
         readonly raw: true;
     },
-): Promise<{ ct: string; iv: string; readonly s: string }>;
+): Promise<{ct: string; iv: string; readonly s: string}>;
 export async function encrypt(
     msg: string,
-    keyOrPair: string | Pair,
+    keyOrPair: string|Pair,
     opt = DEFAULT_OPTS,
-): Promise<string | { ct: string; iv: string; readonly s: string }> 
+): Promise<string|{ct: string; iv: string; readonly s: string}>
 {
     const rand = { s: random(9), iv: random(15) }; // consider making this 9 and 15 or 18 or 12 to reduce == padding.
 
-    const key =
-        isObject(keyOrPair) && isString(keyOrPair.epriv)
-            ? keyOrPair.epriv
-            : isString(keyOrPair)
-                ? keyOrPair
-                : '';
-    const ct = await crypto.subtle.encrypt(
+    const key      =
+              isObject(keyOrPair) && isString(keyOrPair.epriv)
+                  ? keyOrPair.epriv
+                  : isString(keyOrPair)
+                      ? keyOrPair
+                      : '';
+    const ct       = await crypto.subtle.encrypt(
         {
             iv  : new Uint8Array(rand.iv),
             name: opt.name || DEFAULT_OPTS.name || 'AES-GCM',
@@ -58,12 +58,12 @@ export async function encrypt(
         new TextEncoder().encode(msg),
     );
     const encoding = opt.encode || DEFAULT_OPTS.encode;
-    const r = {
+    const r        = {
         ct: Buffer.from(ct, 'binary').toString(encoding),
         iv: rand.iv.toString(encoding),
         s : rand.s.toString(encoding),
     };
-    if (opt.raw) 
+    if (opt.raw)
     {
         return r;
     }

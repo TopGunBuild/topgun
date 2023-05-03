@@ -11,7 +11,7 @@ import { pseudoRandomText } from '../../sea';
 import { generateMessageId } from '../../client/graph/graph-utils';
 import { TGServerOptions } from '../server-options';
 
-export class InboundMiddleware extends MiddlewareInboundStrategy 
+export class InboundMiddleware extends MiddlewareInboundStrategy
 {
     /**
      * Constructor
@@ -19,7 +19,7 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
     constructor(
         protected readonly adapter: TGGraphAdapter,
         private readonly options: TGServerOptions,
-    ) 
+    )
     {
         super();
     }
@@ -28,17 +28,17 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    onPublishIn(action: TGActionPublishIn): void 
+    onPublishIn(action: TGActionPublishIn): void
     {
         const msg = action.data;
 
-        if (action.channel !== 'topgun/put') 
+        if (action.channel !== 'topgun/put')
         {
-            if (this.isAdmin(action.socket)) 
+            if (this.isAdmin(action.socket))
             {
                 action.allow();
             }
-            else 
+            else
             {
                 action.block(
                     new Error('You aren\'t allowed to write to this channel'),
@@ -49,12 +49,12 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
 
         action.allow();
 
-        if (action.channel !== 'topgun/put' || !msg || !msg.put) 
+        if (action.channel !== 'topgun/put' || !msg || !msg.put)
         {
             return;
         }
 
-        this.processPut(msg).then((data) => 
+        this.processPut(msg).then((data) =>
         {
             this.publish(action, {
                 channel: `topgun/@${msg['#']}`,
@@ -63,11 +63,11 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
         });
     }
 
-    async onSubscribe(action: TGActionSubscribe): Promise<void> 
+    async onSubscribe(action: TGActionSubscribe): Promise<void>
     {
-        if (action.channel === 'topgun/put') 
+        if (action.channel === 'topgun/put')
         {
-            if (!this.isAdmin(action.socket)) 
+            if (!this.isAdmin(action.socket))
             {
                 action.block(
                     new Error(
@@ -80,7 +80,7 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
 
         const soul = String(action.channel).replace(/^topgun\/nodes\//, '');
 
-        if (!soul || soul === action.channel) 
+        if (!soul || soul === action.channel)
         {
             action.allow();
             return;
@@ -88,7 +88,7 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
 
         action.allow();
 
-        if (soul === 'changelog') 
+        if (soul === 'changelog')
         {
             return;
         }
@@ -107,7 +107,7 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
                         : null,
                 } as TGMessage,
             }))
-            .catch((e) => 
+            .catch((e) =>
             {
                 console.warn(e.stack || e);
                 return {
@@ -119,7 +119,7 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
                     } as TGMessage,
                 };
             })
-            .then((msg: { channel: string; data: TGMessage }) => 
+            .then((msg: {channel: string; data: TGMessage}) =>
             {
                 this.publish(action, msg);
             });
@@ -127,39 +127,39 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
 
     default(
         action:
-        | TGActionPublishIn
-        | TGActionInvoke
-        | TGActionSubscribe
-        | TGActionAuthenticate,
-    ): void | Promise<void> 
+        |TGActionPublishIn
+        |TGActionInvoke
+        |TGActionSubscribe
+        |TGActionAuthenticate,
+    ): void|Promise<void>
     {
         action.allow();
     }
 
-    async onAuthenticate?(action: TGActionAuthenticate): Promise<void> 
+    async onAuthenticate?(action: TGActionAuthenticate): Promise<void>
     {
         action.allow();
     }
 
-    readNode(soul: string): Promise<TGNode | null> 
+    readNode(soul: string): Promise<TGNode|null>
     {
         return this.adapter.get(soul);
     }
 
-    isAdmin(socket: TGServerSocket): boolean | undefined 
+    isAdmin(socket: TGServerSocket): boolean|undefined
     {
         return (
             socket.authToken && socket.authToken.pub === this.options.ownerPub
         );
     }
 
-    async processPut(msg: TGMessage): Promise<TGMessage> 
+    async processPut(msg: TGMessage): Promise<TGMessage>
     {
         const msgId = pseudoRandomText();
 
-        try 
+        try
         {
-            if (msg.put) 
+            if (msg.put)
             {
                 await this.adapter.put(msg.put);
             }
@@ -171,7 +171,7 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
                 'ok' : true,
             };
         }
-        catch (e) 
+        catch (e)
         {
             return {
                 '#'  : msgId,
@@ -184,12 +184,12 @@ export class InboundMiddleware extends MiddlewareInboundStrategy
 
     publish(
         action:
-        | TGActionPublishIn
-        | TGActionInvoke
-        | TGActionSubscribe
-        | TGActionAuthenticate,
-        message: { channel: string; data: TGMessage },
-    ): void 
+        |TGActionPublishIn
+        |TGActionInvoke
+        |TGActionSubscribe
+        |TGActionAuthenticate,
+        message: {channel: string; data: TGMessage},
+    ): void
     {
         action.socket.transmit('#publish', message, {});
     }

@@ -4,14 +4,14 @@ import { TGGraphWireConnector } from './graph-wire-connector';
 
 const NOOP = () => undefined;
 
-export class TGGraphConnectorFromAdapter extends TGGraphWireConnector 
+export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
 {
     protected readonly adapter: TGGraphAdapter;
 
     /**
      * Constructor
      */
-    constructor(adapter: TGGraphAdapter, name = 'GraphConnectorFromAdapter') 
+    constructor(adapter: TGGraphAdapter, name = 'GraphConnectorFromAdapter')
     {
         super(name);
         this.adapter = adapter;
@@ -21,7 +21,7 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    get({ soul, cb, opts, msgId = '' }: TGGet): () => void 
+    get({ soul, cb, opts, msgId = '' }: TGGet): () => void
     {
         this.adapter
             .get(soul, opts)
@@ -34,7 +34,7 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
                     }
                     : undefined,
             }))
-            .catch((error) => 
+            .catch((error) =>
             {
                 console.warn(error.stack || error);
 
@@ -44,10 +44,10 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
                     'err': 'Error fetching node',
                 };
             })
-            .then((msg) => 
+            .then((msg) =>
             {
                 this.ingest([msg]);
-                if (cb) 
+                if (cb)
                 {
                     cb(msg);
                 }
@@ -56,11 +56,11 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
         return NOOP;
     }
 
-    put({ graph, msgId = '', cb }: TGPut): () => void 
+    put({ graph, msgId = '', cb }: TGPut): () => void
     {
         this.adapter
             .put(graph)
-            .then(() => 
+            .then(() =>
             {
                 return {
                     '#'  : generateMessageId(),
@@ -69,7 +69,7 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
                     'ok' : true,
                 };
             })
-            .catch((error) => 
+            .catch((error) =>
             {
                 console.warn(error.stack || error);
 
@@ -80,10 +80,10 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
                     'ok' : false,
                 };
             })
-            .then((msg) => 
+            .then((msg) =>
             {
                 this.ingest([msg]);
-                if (cb) 
+                if (cb)
                 {
                     cb(msg);
                 }

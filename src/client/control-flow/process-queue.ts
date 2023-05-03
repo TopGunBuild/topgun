@@ -3,13 +3,12 @@ import { TGEvent } from './event';
 import { TGQueue } from './queue';
 import { TGMiddlewareSystem } from './middleware-system';
 
-type TGProcessDupesOption = 'process_dupes' | 'dont_process_dupes';
+type TGProcessDupesOption = 'process_dupes'|'dont_process_dupes';
 
-export class TGProcessQueue<
-    T = TGMessage,
+export class TGProcessQueue<T = TGMessage,
     U = any,
     V = any,
-> extends TGQueue<T> 
+> extends TGQueue<T>
 {
     isProcessing: boolean;
     readonly middleware: TGMiddlewareSystem<T, U, V>;
@@ -23,77 +22,77 @@ export class TGProcessQueue<
      * Constructor
      */
     constructor(
-        name = 'ProcessQueue',
+        name                               = 'ProcessQueue',
         processDupes: TGProcessDupesOption = 'process_dupes',
-    ) 
+    )
     {
         super(name);
         this.alreadyProcessed = [];
-        this.isProcessing = false;
-        this.processDupes = processDupes;
-        this.completed = new TGEvent<T>(`${name}.processed`);
-        this.emptied = new TGEvent<boolean>(`${name}.emptied`);
-        this.middleware = new TGMiddlewareSystem<T, U, V>(`${name}.middleware`);
+        this.isProcessing     = false;
+        this.processDupes     = processDupes;
+        this.completed        = new TGEvent<T>(`${name}.processed`);
+        this.emptied          = new TGEvent<boolean>(`${name}.emptied`);
+        this.middleware       = new TGMiddlewareSystem<T, U, V>(`${name}.middleware`);
     }
 
     // -----------------------------------------------------------------------------------------------------
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    has(item: T): boolean 
+    has(item: T): boolean
     {
         return super.has(item) || this.alreadyProcessed.indexOf(item) !== -1;
     }
 
-    async processNext(b?: U, c?: V): Promise<void> 
+    async processNext(b?: U, c?: V): Promise<void>
     {
-        let item = this.dequeue();
+        let item            = this.dequeue();
         const processedItem = item;
 
-        if (!item) 
+        if (!item)
         {
             return;
         }
 
-        item = (await this.middleware.process(item, b, c)) as T | undefined;
+        item = (await this.middleware.process(item, b, c)) as T|undefined;
 
-        if (processedItem && this.processDupes === 'dont_process_dupes') 
+        if (processedItem && this.processDupes === 'dont_process_dupes')
         {
             this.alreadyProcessed.push(processedItem);
         }
 
-        if (item) 
+        if (item)
         {
             this.completed.trigger(item);
         }
     }
 
-    enqueueMany(items: readonly T[]): TGProcessQueue<T, U, V> 
+    enqueueMany(items: readonly T[]): TGProcessQueue<T, U, V>
     {
         super.enqueueMany(items);
         return this;
     }
 
-    async process(): Promise<void> 
+    async process(): Promise<void>
     {
-        if (this.isProcessing) 
+        if (this.isProcessing)
         {
             return;
         }
 
-        if (!this.count()) 
+        if (!this.count())
         {
             return;
         }
 
         this.isProcessing = true;
-        while (this.count()) 
+        while (this.count())
         {
-            try 
+            try
             {
                 await this.processNext();
             }
-            catch (e) 
+            catch (e)
             {
                 console.error('Process Queue error', e);
             }

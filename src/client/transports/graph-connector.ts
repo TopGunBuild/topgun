@@ -5,17 +5,15 @@ import { TGGraph } from '../graph/graph';
 
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-empty-function */
-export abstract class TGGraphConnector 
+export abstract class TGGraphConnector
 {
     readonly name: string;
     isConnected: boolean;
 
     readonly events: {
-        readonly graphData: TGEvent<
-        TGGraphData,
-        string | undefined,
-        string | undefined
-        >;
+        readonly graphData: TGEvent<TGGraphData,
+        string|undefined,
+        string|undefined>;
         readonly receiveMessage: TGEvent<TGMessage>;
         readonly connection: TGEvent<boolean>;
     };
@@ -26,15 +24,15 @@ export abstract class TGGraphConnector
     /**
      * Constructor
      */
-    protected constructor(name = 'GraphConnector') 
+    protected constructor(name = 'GraphConnector')
     {
         this.isConnected = false;
-        this.name = name;
+        this.name        = name;
 
         this.put = this.put.bind(this);
         this.off = this.off.bind(this);
 
-        this.inputQueue = new TGProcessQueue<TGMessage>(`${name}.inputQueue`);
+        this.inputQueue  = new TGProcessQueue<TGMessage>(`${name}.inputQueue`);
         this.outputQueue = new TGProcessQueue<TGMessage>(`${name}.outputQueue`);
 
         this.events = {
@@ -53,43 +51,43 @@ export abstract class TGGraphConnector
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    connectToGraph(graph: TGGraph): TGGraphConnector 
+    connectToGraph(graph: TGGraph): TGGraphConnector
     {
         graph.events.off.on(this.off);
         return this;
     }
 
-    off(_msgId: string): TGGraphConnector 
+    off(_msgId: string): TGGraphConnector
     {
         return this;
     }
 
-    sendPutsFromGraph(graph: TGGraph): TGGraphConnector 
+    sendPutsFromGraph(graph: TGGraph): TGGraphConnector
     {
         graph.events.put.on(this.put);
         return this;
     }
 
-    sendRequestsFromGraph(graph: TGGraph): TGGraphConnector 
+    sendRequestsFromGraph(graph: TGGraph): TGGraphConnector
     {
-        graph.events.get.on((req) => 
+        graph.events.get.on((req) =>
         {
             this.get(req);
         });
         return this;
     }
 
-    waitForConnection(): Promise<void> 
+    waitForConnection(): Promise<void>
     {
-        if (this.isConnected) 
+        if (this.isConnected)
         {
             return Promise.resolve();
         }
-        return new Promise((ok) => 
+        return new Promise((ok) =>
         {
-            const onConnected = (connected?: boolean) => 
+            const onConnected = (connected?: boolean) =>
             {
-                if (!connected) 
+                if (!connected)
                 {
                     return;
                 }
@@ -105,10 +103,11 @@ export abstract class TGGraphConnector
      *
      * @returns A function to be called to clean up callback listeners
      */
-    put(_params: TGPut): () => void 
+    put(_params: TGPut): () => void
     {
-        return () => 
-        {};
+        return () =>
+        {
+        };
     }
 
     /**
@@ -116,10 +115,11 @@ export abstract class TGGraphConnector
      *
      * @returns A function to be called to clean up callback listeners
      */
-    get(_params: TGGet): () => void 
+    get(_params: TGGet): () => void
     {
-        return () => 
-        {};
+        return () =>
+        {
+        };
     }
 
     /**
@@ -127,10 +127,10 @@ export abstract class TGGraphConnector
      *
      * @param msgs The wire protocol messages to enqueue
      */
-    send(msgs: readonly TGMessage[]): TGGraphConnector 
+    send(msgs: readonly TGMessage[]): TGGraphConnector
     {
         this.outputQueue.enqueueMany(msgs);
-        if (this.isConnected) 
+        if (this.isConnected)
         {
             this.outputQueue.process();
         }
@@ -143,7 +143,7 @@ export abstract class TGGraphConnector
      *
      * @param msgs
      */
-    ingest(msgs: readonly TGMessage[]): TGGraphConnector 
+    ingest(msgs: readonly TGMessage[]): TGGraphConnector
     {
         this.inputQueue.enqueueMany(msgs).process();
 
@@ -154,14 +154,14 @@ export abstract class TGGraphConnector
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private _onConnectedChange(connected?: boolean): void 
+    private _onConnectedChange(connected?: boolean): void
     {
-        if (connected) 
+        if (connected)
         {
             this.isConnected = true;
             this.outputQueue.process();
         }
-        else 
+        else
         {
             this.isConnected = false;
         }

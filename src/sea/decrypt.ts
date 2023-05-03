@@ -15,26 +15,26 @@ const DEFAULT_OPTS: {
 };
 
 export async function decrypt<T>(
-    data: string | { ct: string; iv: string; readonly s: string },
-    keyOrPair: string | Pair,
+    data: string|{ct: string; iv: string; readonly s: string},
+    keyOrPair: string|Pair,
     opt = DEFAULT_OPTS,
-): Promise<T | undefined> 
+): Promise<T|undefined>
 {
     const json: any = parse(data);
-    const encoding = opt.encode || DEFAULT_OPTS.encode;
-    const key =
-        isObject(keyOrPair) && isString(keyOrPair.epriv)
-            ? keyOrPair.epriv
-            : isString(keyOrPair)
-                ? keyOrPair
-                : '';
+    const encoding  = opt.encode || DEFAULT_OPTS.encode;
+    const key       =
+              isObject(keyOrPair) && isString(keyOrPair.epriv)
+                  ? keyOrPair.epriv
+                  : isString(keyOrPair)
+                      ? keyOrPair
+                      : '';
 
-    try 
+    try
     {
-        const aeskey = await importAesKey(key, Buffer.from(json.s, encoding));
+        const aeskey    = await importAesKey(key, Buffer.from(json.s, encoding));
         const encrypted = new Uint8Array(Buffer.from(json.ct, encoding));
-        const iv = new Uint8Array(Buffer.from(json.iv, encoding));
-        const ct = await crypto.subtle.decrypt(
+        const iv        = new Uint8Array(Buffer.from(json.iv, encoding));
+        const ct        = await crypto.subtle.decrypt(
             {
                 iv,
                 name     : opt.name || DEFAULT_OPTS.name || 'AES-GCM',
@@ -45,11 +45,11 @@ export async function decrypt<T>(
         );
         return parse(new TextDecoder('utf8').decode(ct));
     }
-    catch (e: any) 
+    catch (e: any)
     {
         // console.warn('decrypt error', e, e.stack || e);
 
-        if (!opt.fallback || encoding === opt.fallback) 
+        if (!opt.fallback || encoding === opt.fallback)
         {
             return;
             // throw new Error('Could not decrypt');

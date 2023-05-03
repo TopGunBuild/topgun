@@ -11,9 +11,10 @@ const DEFAULT_OPTS: WorkOptions = {
     name  : 'PBKDF2',
 };
 
-export interface WorkOptions {
-    name?: 'SHA-256' | 'PBKDF2';
-    encode?: 'base64' | 'utf8' | 'hex';
+export interface WorkOptions
+{
+    name?: 'SHA-256'|'PBKDF2';
+    encode?: 'base64'|'utf8'|'hex';
     salt?: any;
     hash?: string;
     length?: number;
@@ -22,17 +23,17 @@ export interface WorkOptions {
 
 export async function work(
     data: string,
-    saltOrPair: string | Pair | null,
+    saltOrPair: string|Pair|null,
     opt: WorkOptions = DEFAULT_OPTS,
-): Promise<string> 
+): Promise<string>
 {
     // epub not recommended, salt should be random!
     const salt =
-        isObject(saltOrPair) && isString(saltOrPair.epub)
-            ? saltOrPair.epub
-            : isString(saltOrPair)
-                ? saltOrPair
-                : pseudoRandomText();
+              isObject(saltOrPair) && isString(saltOrPair.epub)
+                  ? saltOrPair.epub
+                  : isString(saltOrPair)
+                      ? saltOrPair
+                      : pseudoRandomText();
 
     const key = await crypto.subtle.importKey(
         'raw',
