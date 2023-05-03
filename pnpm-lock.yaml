@@ -2,11 +2,11 @@ lockfileVersion: '6.0'
 
 dependencies:
   topgun-buffer:
-    specifier: 1.0.3
-    version: 1.0.3
+    specifier: 1.0.5
+    version: 1.0.5
   topgun-socket:
-    specifier: 1.3.1
-    version: 1.3.1
+    specifier: 1.3.2
+    version: 1.3.2
   topgun-typed:
     specifier: 1.1.0
     version: 1.1.0
@@ -5468,8 +5468,8 @@ packages:
       is-number: 7.0.0
     dev: true
 
-  /topgun-buffer@1.0.3:
-    resolution: {integrity: sha512-Upuzkv7kj23Q3JtZKLSAWGEFkrsmKn+7ZZnOqBjdblb0lkZBW4S3+nttdL37hJnTh7NTJ4Giz6A+qw3SDRW1Ag==}
+  /topgun-buffer@1.0.5:
+    resolution: {integrity: sha512-Aa0bfil2SzrjruJoK9SF3WolW0QqPLpHNgIGmeFsgKKTDOK3bDrt4ZSmCTCKJRPfzyJoKmoyMTJtWo5h3uVM+Q==}
     dev: false
 
   /topgun-jsonwebtoken@1.0.2:
@@ -5479,10 +5479,10 @@ packages:
       topgun-webcrypto: 1.0.5
     dev: false
 
-  /topgun-socket@1.3.1:
-    resolution: {integrity: sha512-cHBDeOOH95RO83rUO5hrQaCofLX+wBeHBYso9EPkpgTEp0AkakVSyiUKSvRQpmI5qELrVCqPSP84dzsNPLuqwA==}
+  /topgun-socket@1.3.2:
+    resolution: {integrity: sha512-31Xjo28DXM3UogZvmhAKVtV9BHluQOGQuEgtOp/Gflm0T8ABRSRTrNxWCz2tpOSg0G7Kq2KYGgOV1X8WR9+xFQ==}
     dependencies:
-      topgun-buffer: 1.0.3
+      topgun-buffer: 1.0.5
       topgun-jsonwebtoken: 1.0.2
       topgun-webcrypto: 1.0.5
       ws: 8.13.0

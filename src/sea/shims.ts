@@ -1,5 +1,6 @@
-import root from '../utils/window-or-global';
 import WebCrypto from 'topgun-webcrypto';
+import Buffer from 'topgun-buffer';
+import root from '../utils/window-or-global';
 
 const api: any = {
     crypto: WebCrypto,

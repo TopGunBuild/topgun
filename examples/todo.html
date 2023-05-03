@@ -55,9 +55,9 @@
 <script src="../dist/client.global.js"></script>
 
 <script>
-    // Instances
+    // Run server.js
     const client = new TopGun.TGClient({
-        peers: ['http://localhost:8000'],
+        peers: ['http://localhost:8765'],
         persistSession: false
     });
 
@@ -87,66 +87,17 @@
         }
     }
 
-    // client.get('first').get('second').get('third').on(console.log)
-
-    // console.log(
-    //     client.user('xxx')
-    //         .start('xx-lte')
-    //         .end('xx-gte')
-    //         .equals('xx')
-    //         .limit(100)
-    //         .reverse()
-    //         .getQuery()
-    // );
-
     document.getElementById('said').addEventListener('submit', async e => {
         e.preventDefault();
 
         const data = getInputValue('say');
-        const Alice = await TopGun.SEA.pair();
-        const userPub = client.user().is.pub; // gun.user().is.pub;
-
-        // Alice wants to allow current user to use write to her "inbox" and "stories" UNTIL TOMORROW
-        // On Alice's side:
-        const certificate = await TopGun.SEA.certify(
-            [userPub],
-            [
-                TopGun.SEA.createPolicy({
-                    startsWith: 'inbox',
-                    pubInPatch: true
-                }),
-                TopGun.SEA.createPolicy({
-                    startsWith: 'stories',
-                }),
-            ],
-            Alice,
-            {
-                expiry: Date.now() + (60 * 60 * 24 * 1000) // Let's set a one day expiration period
-            }
-        );
-
-        client.get('~' + Alice.pub)
-            .get('inbox')
-            .get('deeper')
-            .get(userPub)
-            .on((data, id) => {
-                console.log(id, data);
-            });
-
-        client.get('~' + Alice.pub)
-            .get('inbox')
-            .get('deeper')
-            .get(userPub)
-            .put(data, null, {opt: {cert: certificate}});
-
+        client.user().get(`said`).set({say: data});
         document.getElementById('say').value = '';
     });
 
     client.on('auth', () => {
         document.getElementById('sign').hidden = true;
         document.getElementById('speak').hidden = false;
-
-        console.log('[TopGun] Auth success');
 
         client.user().get('said').map().on((data, id) => {
             if (!document.getElementById(id)) {
