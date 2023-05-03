@@ -128,15 +128,13 @@ export class TGClient
      */
     on(event: string, cb: TGOnCb): TGClient 
     {
-        switch (event) 
+        if (event === 'auth') 
         {
-        case 'auth':
             this._authEvent.on(cb);
             if (this._user?.is) 
             {
                 this._authEvent.trigger(this._user.is);
             }
-            break;
         }
         return this;
     }
