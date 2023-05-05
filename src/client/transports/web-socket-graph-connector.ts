@@ -60,6 +60,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
 
     get({ soul, msgId, cb, opts }: TGGet): () => void
     {
+        msgId        = msgId || generateMessageId();
         const cbWrap = (msg: any) =>
         {
             this.ingest([msg]);
@@ -69,7 +70,6 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
             }
         };
 
-        msgId                        = msgId || generateMessageId();
         this._requestChannels[msgId] = this.subscribeToChannel(
             `topgun/nodes/${soul}`,
             cbWrap,

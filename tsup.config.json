@@ -9,7 +9,7 @@
         "esm",
         "iife"
     ],
-    "minify": true,
+    "minify": false,
     "bundle": true,
     "entry": {
         "client": "src/client/index.ts",
@@ -17,5 +17,6 @@
     },
     "define": {
         "global": "window"
-    }
+    },
+    "watch": true
 }

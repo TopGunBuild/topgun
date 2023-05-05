@@ -1,7 +1,17 @@
-import { TGClient } from '../src/client';
+import { diffCRDT, TGClient } from '../src/client';
 
 describe('Client', () => {
     const client = new TGClient();
+
+    it('diffCRDT ', function ()
+    {
+        const updatedGraph = {"user/said":{"_":{"#":"user/said",">":{"say":1683308843720}},"say":"Hello"}};
+        const existingGraph = {"user/said":{"_":{"#":"user/said",">":{"say":1683308843720}},"say":"Hello"}};
+
+        const diff =  diffCRDT(updatedGraph, existingGraph);
+
+        expect(diff).toBeUndefined();
+    });
 
     it('callback', async () => {
         const key = 'test';

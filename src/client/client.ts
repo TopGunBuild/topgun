@@ -35,17 +35,10 @@ export class TGClient
         options         = isObject(options) ? options : {};
         this.options    = { ...DEFAULT_OPTIONS, ...options };
         this._authEvent = new TGEvent<TGUserReference>('auth data');
+        this.graph      = this.options && this.options.graph ? this.options.graph : new TGGraph();
 
-        if (this.options && this.options.graph)
-        {
-            this.graph = this.options.graph;
-        }
-        else
-        {
-            this.graph = new TGGraph();
-            this.graph.use(diffCRDT);
-            this.graph.use(diffCRDT, 'write');
-        }
+        this.graph.use(diffCRDT);
+        this.graph.use(diffCRDT, 'write');
 
         this.opt(this.options);
         this.registerSeaMiddleware();

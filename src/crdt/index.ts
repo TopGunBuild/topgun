@@ -65,11 +65,6 @@ export function diffCRDT(
 
     const allUpdates: TGGraphData = {};
 
-    /*console.log({
-        updatedGraph: JSON.stringify(updatedGraph),
-        existingGraph: JSON.stringify(existingGraph)
-    });*/
-
     for (const soul in updatedGraph)
     {
         if (!soul)
@@ -145,7 +140,7 @@ export function diffCRDT(
         }
     }
 
-    return Object.keys(allUpdates) ? allUpdates : undefined;
+    return Object.keys(allUpdates).length > 0 ? allUpdates : undefined;
 }
 
 export function mergeNodes(
