@@ -5,7 +5,7 @@ import {
     TGMessageCb,
     TGOptionsGet,
     TGOptionsPut,
-    TGValue,
+    TGValue, TGUserReference,
 } from '../types';
 import { TGClient } from './client';
 import { TGEvent } from './control-flow/event';
@@ -17,8 +17,8 @@ import { LEX } from '../types/lex';
 
 export class TGLink
 {
-    readonly key: string;
-    readonly soul: string|undefined;
+    key: string;
+    soul: string|undefined;
     optionsGet: TGOptionsGet|undefined;
 
     protected readonly _updateEvent: TGEvent<TGValue|undefined, string>;
@@ -52,6 +52,15 @@ export class TGLink
                 this._chain.pub = pubFromSoul(key);
             }
         }
+    }
+
+    // -----------------------------------------------------------------------------------------------------
+    // @ Public methods
+    // -----------------------------------------------------------------------------------------------------
+
+    userPubExpected(): boolean
+    {
+        return this.getPath().some(path => path.includes(this._chain.WAIT_FOR_USER_PUB));
     }
 
     /**
@@ -120,6 +129,12 @@ export class TGLink
      **/
     put(value: TGValue, cb?: TGMessageCb, opt?: TGOptionsPut): TGLink
     {
+        if (this.userPubExpected())
+        {
+            throw new Error(
+                'You cannot save data to user space if the user is not authorized.',
+            );
+        }
         if (!this._parent && !isObject(value))
         {
             throw new Error(
@@ -292,36 +307,67 @@ export class TGLink
     }
 
     // -----------------------------------------------------------------------------------------------------
-    // @ Protected methods
+    // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    protected _onQueryResponse(value?: TGValue): void
+    private _setUserPub(pub: string): void
+    {
+        if (this._parent)
+        {
+            this._parent._setUserPub(pub);
+        }
+        else
+        {
+            this._chain.pub = pub;
+            this.soul       = this.soul.replace(this._chain.WAIT_FOR_USER_PUB, pub);
+            this.key        = this.key.replace(this._chain.WAIT_FOR_USER_PUB, pub);
+        }
+    }
+
+    private _onQueryResponse(value?: TGValue): void
     {
         this._updateEvent.trigger(value, this.key);
         this._lastValue   = value;
         this._hasReceived = true;
     }
 
-    protected _on(cb: TGOnCb): TGLink
+    private _on(cb: TGOnCb): TGLink
     {
-        this._updateEvent.on(cb);
-        if (this._hasReceived)
+        const handler = () =>
         {
-            // TODO: Callback key or soul?
-            // const soul = this._lastValue && this._lastValue._ && this._lastValue._['#'];
-            cb(this._lastValue, this.key);
-        }
-        if (!this._endQuery)
+            this._updateEvent.on(cb);
+            if (this._hasReceived)
+            {
+                // TODO: Callback key or soul?
+                // const soul = this._lastValue && this._lastValue._ && this._lastValue._['#'];
+                cb(this._lastValue, this.key);
+            }
+            if (!this._endQuery)
+            {
+                this._endQuery = this._chain.graph.query(
+                    this.getPath(),
+                    this._onQueryResponse.bind(this),
+                );
+            }
+        };
+
+        if (this.userPubExpected())
         {
-            this._endQuery = this._chain.graph.query(
-                this.getPath(),
-                this._onQueryResponse.bind(this),
-            );
+            this._chain.promise<TGUserReference>('auth').then((value) =>
+            {
+                this._setUserPub(value.pub);
+                handler();
+            })
         }
+        else
+        {
+            handler();
+        }
+
         return this;
     }
 
-    protected _onMap(cb: TGOnCb): TGLink
+    private _onMap(cb: TGOnCb): TGLink
     {
         this._mapLinks = {};
 

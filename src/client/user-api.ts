@@ -178,6 +178,7 @@ export class TGUserApi
     {
         if (this._signMiddleware)
         {
+            // TODO: Should all data be cleared?
             // this._removeCredentials();
             // this._client.graph.unuse(this._signMiddleware, 'write');
             this._signMiddleware = undefined;
@@ -190,9 +191,11 @@ export class TGUserApi
     /**
      * Traverse a location in the graph
      */
-    get(soul: string): TGLexLink|undefined
+    get(soul: string): TGLexLink
     {
-        return this.is && this._client.get(`~${this.is.pub}/${soul}`);
+        return !!this.is
+            ? this._client.get(`~${this.is.pub}/${soul}`)
+            : this._client.get(`~${this._client.WAIT_FOR_USER_PUB}/${soul}`);
     }
 
     /**

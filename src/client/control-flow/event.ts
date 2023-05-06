@@ -40,7 +40,7 @@ export class TGEvent<T = any, U = any, V = any>
      */
     on(cb: TGEventCb<T, U, V>): TGEvent<T, U, V>
     {
-        if (this._listeners.indexOf(cb) !== -1)
+        if (this._listeners.some(_cb => _cb === cb))
         {
             return this;
         }
@@ -54,11 +54,7 @@ export class TGEvent<T = any, U = any, V = any>
      */
     off(cb: TGEventCb<T, U, V>): TGEvent<T, U, V>
     {
-        const idx = this._listeners.indexOf(cb);
-        if (idx !== -1)
-        {
-            this._listeners.splice(idx, 1);
-        }
+        this._listeners = this._listeners.filter(_cb => _cb !== cb);
         return this;
     }
 

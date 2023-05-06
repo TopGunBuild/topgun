@@ -9,7 +9,7 @@ import { ClientOptions as SocketClientOptions } from 'topgun-socket/client';
 import { TGUserApi } from './user-api';
 import { pubFromSoul, unpackGraph } from '../sea';
 import { TGIndexedDbConnector } from '../indexeddb/indexeddb-connector';
-import { TGOnCb, TGNode, TGUserReference } from '../types';
+import { TGNode, TGUserReference, SystemEvent } from '../types';
 import { TGEvent } from './control-flow/event';
 import { TGLexLink } from './lex-link';
 import { match } from '../utils/match';
@@ -26,16 +26,18 @@ export class TGClient
     readonly graph: TGGraph;
     protected readonly _authEvent: TGEvent<TGUserReference>;
     protected _user?: TGUserApi;
+    readonly WAIT_FOR_USER_PUB: string;
 
     /**
      * Constructor
      */
     constructor(options?: TGClientOptions)
     {
-        options         = isObject(options) ? options : {};
-        this.options    = { ...DEFAULT_OPTIONS, ...options };
-        this._authEvent = new TGEvent<TGUserReference>('auth data');
-        this.graph      = this.options && this.options.graph ? this.options.graph : new TGGraph();
+        options                = isObject(options) ? options : {};
+        this.options           = { ...DEFAULT_OPTIONS, ...options };
+        this._authEvent        = new TGEvent<TGUserReference>('auth data');
+        this.graph             = this.options && this.options.graph ? this.options.graph : new TGGraph();
+        this.WAIT_FOR_USER_PUB = '__WAIT_FOR_USER_PUB__';
 
         this.graph.use(diffCRDT);
         this.graph.use(diffCRDT, 'write');
@@ -117,19 +119,39 @@ export class TGClient
     }
 
     /**
-     * System events Callback
+     * System events callback
      */
-    on(event: string, cb: TGOnCb): TGClient
+    on(event: SystemEvent, cb: (value) => void, once = false): TGClient
     {
-        if (event === 'auth')
+        switch (event)
         {
-            this._authEvent.on(cb);
+        case 'auth':
+            const _cb = (value) =>
+            {
+                cb(value);
+                if (once)
+                {
+                    this._authEvent.off(_cb);
+                }
+            };
+            this._authEvent.on(_cb);
+
             if (this._user?.is)
             {
+                // Execute immediately if the user is authorized
                 this._authEvent.trigger(this._user.is);
             }
+            break;
         }
         return this;
+    }
+
+    /**
+     * Return system event as promise
+     */
+    promise<T>(event: SystemEvent): Promise<T>
+    {
+        return new Promise<T>(resolve => this.on(event, resolve, true));
     }
 
     // -----------------------------------------------------------------------------------------------------
