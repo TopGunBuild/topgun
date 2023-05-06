@@ -7,8 +7,9 @@
     },
     "scripts": {
         "build": "tsup",
-        "prepublishOnly": "pnpm run build",
+        "build:dev": "tsup --watch",
         "build:package": "node ./tools/prepare-package.js",
+        "prepublishOnly": "pnpm run build",
         "test": "jest",
         "lint": "eslint \"src/**/*.ts\" --fix",
         "prepare": "simple-git-hooks",
