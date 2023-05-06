@@ -4,4 +4,4 @@ const server = createServer({
     port: 8765
 });
 
-console.log('Minigun Server started on port ' + server.options.port);
+console.log('TopGun Server started on port ' + server.options.port);

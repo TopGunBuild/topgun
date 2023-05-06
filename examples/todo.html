@@ -62,27 +62,29 @@
     });
 
     // Helper function
-    const getInputValue = _id => document.getElementById(_id).value;
-    const isValid = () => !!(getInputValue('alias') && getInputValue('pass'));
+    const getValue = _id => document.getElementById(_id).value;
+    const isValid = () => !!(getValue('alias') && getValue('pass'));
 
     function signUpHandler() {
         if (isValid()) {
-            const alias = getInputValue('alias');
-            const pass = getInputValue('pass');
-            client.user().create(alias, pass, ({err, alias, pub}) => console.log('[TopGun] Sign up', {
-                err,
-                alias,
-                pub
-            }));
+            const alias = getValue('alias');
+            const pass = getValue('pass');
+            client.user().create(alias, pass, ({err, alias, pub}) =>
+            {
+                console.log('[TopGun] Sign up', {err, alias, pub});
+            });
         }
     }
 
     function signInHandler() {
         if (isValid()) {
-            const alias = getInputValue('alias');
-            const pass = getInputValue('pass');
+            const alias = getValue('alias');
+            const pass = getValue('pass');
             client.user()
-                .auth(alias, pass, ({err, alias, pub}) => console.log('[TopGun] Sign in', {err, alias, pub}))
+                .auth(alias, pass, ({err, alias, pub}) =>
+                {
+                    console.log('[TopGun] Sign in', {err, alias, pub});
+                })
                 .catch(err => console.log(err));
         }
     }
@@ -90,7 +92,7 @@
     document.getElementById('said').addEventListener('submit', async e => {
         e.preventDefault();
 
-        const data = getInputValue('say');
+        const data = getValue('say');
         client.user().get(`said`).set({say: data});
         document.getElementById('say').value = '';
     });
