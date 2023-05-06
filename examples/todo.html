@@ -57,7 +57,7 @@
 <script>
     // Run server.js
     const client = new TopGun.TGClient({
-        peers: ['http://localhost:8765'],
+        peers         : ['http://localhost:8765'],
         persistSession: false
     });
 
@@ -65,19 +65,25 @@
     const getValue = _id => document.getElementById(_id).value;
     const isValid = () => !!(getValue('alias') && getValue('pass'));
 
-    function signUpHandler() {
-        if (isValid()) {
+    function signUpHandler()
+    {
+        if (isValid())
+        {
             const alias = getValue('alias');
             const pass = getValue('pass');
-            client.user().create(alias, pass, ({err, alias, pub}) =>
-            {
-                console.log('[TopGun] Sign up', {err, alias, pub});
-            });
+            client.user()
+                .create(alias, pass, ({err, alias, pub}) =>
+                {
+                    console.log('[TopGun] Sign up', {err, alias, pub});
+                })
+                .catch(err => console.log(err));
         }
     }
 
-    function signInHandler() {
-        if (isValid()) {
+    function signInHandler()
+    {
+        if (isValid())
+        {
             const alias = getValue('alias');
             const pass = getValue('pass');
             client.user()
@@ -89,15 +95,23 @@
         }
     }
 
-    document.getElementById('said').addEventListener('submit', async e => {
+    document.getElementById('said').addEventListener('submit', async e =>
+    {
         e.preventDefault();
 
-        const data = getValue('say');
-        client.user().get(`said`).set({say: data});
+        client.user()
+            .get(`said`)
+            .set({
+                say: getValue('say')
+            });
+
         document.getElementById('say').value = '';
     });
 
-    client.on('auth', () => {
+    client.user().get('said').on(console.log);
+
+    client.on('auth', () =>
+    {
         document.getElementById('sign').hidden = true;
         document.getElementById('speak').hidden = false;
 
@@ -105,8 +119,10 @@
 
         client.user().get('said').on(console.log);
 
-        client.user().get('said').map().on((data, id) => {
-            if (!document.getElementById(id)) {
+        client.user().get('said').map().on((data, id) =>
+        {
+            if (!document.getElementById(id))
+            {
                 document.querySelector('ul').insertAdjacentHTML('beforeend', `<li id="${id}"></li>`);
             }
             document.getElementById(id).textContent = data.say;
@@ -114,7 +130,8 @@
         });
     });
 
-    function setDefaultValues() {
+    function setDefaultValues()
+    {
         document.getElementById('alias').value = 'ivan-kalashnik';
         document.getElementById('pass').value = '1qazxsw2';
     }
