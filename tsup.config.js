@@ -4,10 +4,10 @@ export default defineConfig((options) =>
 {
     return {
         minify     : !options.watch,
-        bundle     : !options.watch,
         sourcemap  : options.watch,
         globalName : 'TopGun',
-        splitting  : false,
+        splitting  : true,
+        bundle     : true,
         clean      : true,
         dts        : true,
         format     : ['cjs', 'esm', 'iife'],
