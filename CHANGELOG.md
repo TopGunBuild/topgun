@@ -1,3 +1,16 @@
+# [1.2.0](https://github.com/TopGunBuild/topgun/compare/v1.1.2...v1.2.0) (2023-05-06)
+
+
+### Bug Fixes
+
+* **client:** fix value assignment to persistSession ([ad534b6](https://github.com/TopGunBuild/topgun/commit/ad534b60255912f6a85cbffc8ef08de1a6aa3f70))
+* fix CRDT diff check ([042a49a](https://github.com/TopGunBuild/topgun/commit/042a49a74bbf4ca26987fff4502f3b5ba9516409))
+
+
+### Features
+
+* **client:** listen data in user space before authorization ([a353d6d](https://github.com/TopGunBuild/topgun/commit/a353d6d8f10a1be8082dd40d29ab31ab05f4a8df))
+
 ## [1.1.2](https://github.com/TopGunBuild/topgun/compare/v1.1.1...v1.1.2) (2023-05-03)
 
 
