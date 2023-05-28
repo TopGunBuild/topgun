@@ -1,7 +1,7 @@
 import { TGGraphWireConnector } from './graph-wire-connector';
 import { TGChannel } from 'topgun-socket/channel';
 import {
-    ClientOptions,
+    TGSocketClientOptions,
     TGClientSocket,
     create as createSocketClient,
     SubscribeOptions,
@@ -14,7 +14,7 @@ import { sign } from '../../sea';
 export class TGWebSocketGraphConnector extends TGGraphWireConnector
 {
     readonly socket: TGClientSocket;
-    readonly opts: ClientOptions|undefined;
+    readonly opts: TGSocketClientOptions|undefined;
     readonly msgChannel?: TGChannel<any>;
     readonly getsChannel?: TGChannel<any>;
     readonly putsChannel?: TGChannel<any>;
@@ -27,7 +27,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
      * Constructor
      */
     constructor(
-        opts: ClientOptions|undefined,
+        opts: TGSocketClientOptions|undefined,
         name = 'TGWebSocketGraphConnector',
     )
     {
@@ -128,7 +128,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         msg: TGMessage,
     ): TGWebSocketGraphConnector
     {
-        this.socket.transmitPublish(channelName, msg);
+        this.socket.publish(channelName, msg);
         return this;
     }
 
@@ -230,7 +230,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
 }
 
 export function createConnector(
-    opts: ClientOptions|undefined,
+    opts: TGSocketClientOptions|undefined,
 ): TGWebSocketGraphConnector
 {
     return new TGWebSocketGraphConnector(opts);

@@ -5,7 +5,7 @@ import { TGGraph } from './graph/graph';
 import { TGGraphConnector } from './transports/graph-connector';
 import { DEFAULT_OPTIONS, TGClientOptions } from './client-options';
 import { createConnector } from './transports/web-socket-graph-connector';
-import { ClientOptions as SocketClientOptions } from 'topgun-socket/client';
+import { TGSocketClientOptions } from 'topgun-socket/client';
 import { TGUserApi } from './user-api';
 import { pubFromSoul, unpackGraph } from '../sea';
 import { TGIndexedDbConnector } from '../indexeddb/indexeddb-connector';
@@ -191,7 +191,7 @@ export class TGClient
             try
             {
                 const url                          = new URL(peer);
-                const options: SocketClientOptions = {
+                const options: TGSocketClientOptions = {
                     hostname: url.hostname,
                     secure  : url.protocol.includes('https'),
                 };

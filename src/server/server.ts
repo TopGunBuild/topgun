@@ -1,31 +1,20 @@
 import { Struct, Result, ok, isErr, isObject } from 'topgun-typed';
-import { InboundMiddleware } from './middlewares/inbound-middleware';
 import { pseudoRandomText, verify } from '../sea';
 import { TGGraphAdapter, TGGraphData, TGMessage } from '../types';
-import { MiddlewareInboundStrategy } from './middlewares/strategy/middleware-inbound-strategy';
 import { TGServerOptions } from './server-options';
-import {
-    MIDDLEWARE_INBOUND,
-    TGActionAuthenticate,
-    TGActionInvoke,
-    TGActionPublishIn,
-    TGActionSubscribe,
-    TGActionTransmit,
-    TGServerSocketGateway,
-    TGServerSocket,
-    listen,
-} from 'topgun-socket/server';
-import { WritableConsumableStream } from 'topgun-socket/writable-consumable-stream';
+import { listen, TGSocketServer, TGSocket } from 'topgun-socket/server';
 import { createMemoryAdapter } from '../memory-adapter';
 import { generateMessageId } from '../client/graph/graph-utils';
 import { createValidator } from '../validator';
+import { Middleware } from './middleware';
 
 export class TGServer
 {
     readonly adapter: TGGraphAdapter;
     readonly internalAdapter: TGGraphAdapter;
-    readonly server: TGServerSocketGateway;
+    readonly server: TGSocketServer;
     readonly options: TGServerOptions;
+    readonly middleware: Middleware;
 
     protected readonly validator: Struct<TGGraphData>;
 
@@ -39,6 +28,7 @@ export class TGServer
         this.internalAdapter = this.options.adapter || createMemoryAdapter();
         this.adapter         = this.wrapAdapter(this.internalAdapter);
         this.server          = listen(this.options.port, this.options);
+        this.middleware      = new Middleware(this.server, this.options, this.adapter);
         this.run();
     }
 
@@ -51,9 +41,7 @@ export class TGServer
      */
     protected run(): void
     {
-        this.setInboundMiddleware(
-            new InboundMiddleware(this.adapter, this.options),
-        );
+        this.middleware.setupMiddleware();
         this.handleWebsocketConnection();
     }
 
@@ -66,7 +54,7 @@ export class TGServer
         nodeDiff: TGGraphData,
     ): void
     {
-        this.server.exchange.invokePublish(`topgun/nodes/${soul}`, {
+        this.server.exchange.publish(`topgun/nodes/${soul}`, {
             '#'  : `${msgId}/${soul}`,
             'put': {
                 [soul]: nodeDiff,
@@ -171,7 +159,7 @@ export class TGServer
             (async () =>
             {
                 // Set up a loop to handle and respond to RPCs.
-                for await (const request of socket.procedure('login'))
+                for await (const request of (socket as TGSocket).procedure('login'))
                 {
                     this.authenticateLogin(socket, request);
                 }
@@ -183,7 +171,7 @@ export class TGServer
      * Authenticate a connection for extra privileges
      */
     private async authenticateLogin(
-        socket: TGServerSocket,
+        socket: TGSocket,
         request: any,
     ): Promise<void>
     {
@@ -242,74 +230,6 @@ export class TGServer
         catch (err)
         {
             request.end('Invalid login');
-        }
-    }
-
-    /**
-     * Setup a MIDDLEWARE_INBOUND
-     */
-    private setInboundMiddleware(inbound: MiddlewareInboundStrategy)
-    {
-        if (inbound)
-        {
-            // debug.log('Middleware inbound -> ' + inbound.constructor.name);
-
-            this.server.setMiddleware(
-                MIDDLEWARE_INBOUND,
-                async (middlewareStream: WritableConsumableStream<any>) =>
-                {
-                    for await (const action of middlewareStream)
-                    {
-                        this.handleInboundAction(action, inbound);
-                    }
-                },
-            );
-        }
-    }
-
-    /**
-     * Handling MIDDLEWARE_INBOUND actions
-     */
-    private handleInboundAction(
-        action:
-        |TGActionTransmit
-        |TGActionInvoke
-        |TGActionSubscribe
-        |TGActionPublishIn
-        |TGActionAuthenticate,
-        inbound: MiddlewareInboundStrategy,
-    )
-    {
-        switch (action.type)
-        {
-        case action.AUTHENTICATE:
-            inbound.onAuthenticate
-                ? inbound.onAuthenticate(action)
-                : inbound.default(action);
-            break;
-        case action.SUBSCRIBE:
-            inbound.onSubscribe
-                ? inbound.onSubscribe(action)
-                : inbound.default(action);
-            break;
-        case action.TRANSMIT:
-            inbound.onTransmit
-                ? inbound.onTransmit(action)
-                : inbound.default;
-            break;
-        case action.INVOKE:
-            inbound.onInvoke
-                ? inbound.onInvoke(action)
-                : inbound.default(action);
-            break;
-        case action.PUBLISH_IN:
-            inbound.onPublishIn
-                ? inbound.onPublishIn(action)
-                : inbound.default(action);
-            break;
-        default:
-            console.warn(`Not implemented type "${action}"!`);
-            inbound.default(action);
         }
     }
 }
