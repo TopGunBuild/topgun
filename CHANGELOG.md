@@ -1,3 +1,10 @@
+## [1.2.2](https://github.com/TopGunBuild/topgun/compare/v1.2.1...v1.2.2) (2023-05-28)
+
+
+### Bug Fixes
+
+* fix subscribe data ([b13a324](https://github.com/TopGunBuild/topgun/commit/b13a324478dfe0195229920723fde2fb67b38330))
+
 ## [1.2.1](https://github.com/TopGunBuild/topgun/compare/v1.2.0...v1.2.1) (2023-05-28)
 
 
