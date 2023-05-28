@@ -52,7 +52,6 @@ export function unpack(passedValue: any, key: string, node: TGNode): any
         Math.floor(state) === Math.floor(value[3])
     )
     {
-        console.log('value', value);
         return value[2];
     }
     if (state < shuffleAttackCutoff)

@@ -41,45 +41,30 @@ export class Middleware
     {
         const msg = req.data;
 
-        if (req.channel !== 'gun/put')
+        if (req.channel !== 'topgun/put')
         {
-            if (!this.isAdmin(req.socket))
-            {
-                throw new Error('You aren\'t allowed to write to this channel');
-            }
-            if (!msg || !msg?.put)
-            {
-                return
-            }
+            return;
         }
 
         this.processPut(msg).then((data) =>
         {
-            req.socket.emit('#publish', {
-                channel: `gun/@${msg['#']}`,
+            req.socket.transmit('#publish', {
+                channel: `topgun/@${msg['#']}`,
                 data
-            })
+            });
         })
     }
 
     private async subscribeMiddleware(req: RequestObject): Promise<void>
     {
-        if (req.channel === 'gun/put')
+        if (req.channel === 'topgun/put')
         {
-            if (!this.isAdmin(req.socket))
-            {
-                throw new Error(`You aren't allowed to subscribe to ${req.channel}`);
-            }
+            return;
         }
 
-        const soul = req.channel.replace(/^gun\/nodes\//, '');
+        const soul = req.channel.replace(/^topgun\/nodes\//, '');
 
-        if (!soul || soul === req.channel)
-        {
-            return
-        }
-
-        if (soul === 'changelog')
+        if (!soul || soul === req.channel || soul === 'changelog')
         {
             return
         }
@@ -115,12 +100,7 @@ export class Middleware
             })
             .then((msg) =>
             {
-                // setTimeout(() => {
-                //     // Not sure why this delay is necessary and it really shouldn't be
-                //     // Only thing I can figure is if we don't wait we emit before subscribed
-                //     req.socket.emit('#publish', msg)
-                // }, 25)
-                req.socket.emit('#publish', msg);
+                req.socket.transmit('#publish', msg);
             })
     }
 

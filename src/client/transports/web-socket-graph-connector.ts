@@ -13,7 +13,7 @@ import { sign } from '../../sea';
 /* eslint-disable @typescript-eslint/no-empty-function */
 export class TGWebSocketGraphConnector extends TGGraphWireConnector
 {
-    readonly socket: TGClientSocket;
+    readonly client: TGClientSocket;
     readonly opts: TGSocketClientOptions|undefined;
     readonly msgChannel?: TGChannel<any>;
     readonly getsChannel?: TGChannel<any>;
@@ -34,7 +34,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         super(name);
         this._requestChannels = {};
         this.opts             = opts;
-        this.socket           = createSocketClient(this.opts || {});
+        this.client           = createSocketClient(this.opts || {});
         this.onConnect();
         this.onError();
         this.outputQueue.completed.on(this.onOutputProcessed.bind(this));
@@ -117,7 +117,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         this.doAuth(pub, priv);
 
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        for await (const _event of this.socket.listener('connect'))
+        for await (const _event of this.client.listener('connect'))
         {
             this.doAuth(pub, priv);
         }
@@ -128,7 +128,24 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         msg: TGMessage,
     ): TGWebSocketGraphConnector
     {
-        this.socket.publish(channelName, msg);
+        const messageId = msg['#'];
+        const channel   = this._requestChannels[messageId];
+
+        if (channel)
+        {
+            channel
+                .listener('subscribe')
+                .once()
+                .then(() =>
+                {
+                    this.client.publish(channelName, msg);
+                });
+        }
+        else
+        {
+            this.client.publish(channelName, msg);
+        }
+
         return this;
     }
 
@@ -138,8 +155,9 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         opts?: SubscribeOptions,
     ): TGChannel<any>
     {
-        const channel = this.socket.subscribe(channelName, opts);
+        const channel = this.client.subscribe(channelName, opts);
         this.onChannelMessage(channel, cb);
+
         return channel;
     }
 
@@ -152,12 +170,12 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         priv: string,
     ): Promise<{channel: string; data: any}>
     {
-        const id        = this.socket.id;
+        const id        = this.client.id;
         const timestamp = new Date().getTime();
         const challenge = `${id}/${timestamp}`;
         const proof     = await sign(challenge, { pub, priv }, { raw: true });
 
-        return this.socket.invoke('login', { proof, pub });
+        return this.client.invoke('login', { proof, pub });
     }
 
     private async onChannelMessage(
@@ -175,11 +193,11 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         }
     }
 
-    private onOutputProcessed(msg: any): void
+    private onOutputProcessed(msg: TGMessage): void
     {
-        if (msg && this.socket)
+        if (msg && this.client)
         {
-            const replyTo = msg['@'];
+            const replyTo   = msg['@'];
 
             if (replyTo)
             {
@@ -201,7 +219,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
 
     private async onConnect(): Promise<void>
     {
-        for await (const _event of this.socket.listener('connect'))
+        for await (const _event of this.client.listener('connect'))
         {
             console.log(`SC client ${_event.id} is connected.`);
             try
@@ -217,7 +235,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
 
     private async onError(): Promise<void>
     {
-        for await (const _event of this.socket.listener('error'))
+        for await (const _event of this.client.listener('error'))
         {
             console.error(
                 'Socket Connection Error',
