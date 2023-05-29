@@ -21,7 +21,7 @@ export class TGServer
     /**
      * Constructor
      */
-    constructor(options: TGServerOptions)
+    constructor(options?: TGServerOptions)
     {
         this.options         = isObject(options) ? options : {};
         this.validator       = createValidator();

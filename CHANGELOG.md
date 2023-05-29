@@ -1,3 +1,17 @@
+## [1.2.4](https://github.com/TopGunBuild/topgun/compare/v1.2.3...v1.2.4) (2023-05-29)
+
+
+### Bug Fixes
+
+* upgrade topgun-socket 1.4.3 -> 1.4.4 ([2f1dd51](https://github.com/TopGunBuild/topgun/commit/2f1dd5104dbe4dd013e09c35d9c83e14c78446c2))
+
+## [1.2.3](https://github.com/TopGunBuild/topgun/compare/v1.2.2...v1.2.3) (2023-05-29)
+
+
+### Bug Fixes
+
+* upgrade topgun-socket 1.4.2 -> 1.4.3 ([4d0c1dd](https://github.com/TopGunBuild/topgun/commit/4d0c1dd9b8c482e07616b0cd641c2a29fd1531d6))
+
 ## [1.2.2](https://github.com/TopGunBuild/topgun/compare/v1.2.1...v1.2.2) (2023-05-28)
 
 
