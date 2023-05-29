@@ -63,7 +63,7 @@
     "homepage": "https://github.com/TopGunBuild/topgun#readme",
     "dependencies": {
         "topgun-buffer": "1.0.6",
-        "topgun-socket": "1.4.3",
+        "topgun-socket": "1.4.4",
         "topgun-typed": "1.1.0",
         "topgun-webcrypto": "1.0.5"
     },
