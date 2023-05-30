@@ -1,7 +1,6 @@
 import { LEX } from './lex';
 
 export type SystemEvent = 'auth';
-export type ChangeSetEntry = readonly [string, TGGraphData];
 
 /**
  * Timestamp of last change for each attribute
