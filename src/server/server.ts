@@ -83,7 +83,6 @@ export class TGServer
 
                 return diff;
             },
-            putSync: undefined,
         };
 
         return {

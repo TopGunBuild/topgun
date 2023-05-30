@@ -60,9 +60,7 @@ export function createMemoryAdapter(
     const graph: TGGraphData = {};
 
     return {
-        get    : (soul: string) => get(opts, graph, soul),
-        getSync: (soul: string) => getSync(opts, graph, soul),
-        put    : (graphData: TGGraphData) => put(opts, graph, graphData),
-        putSync: (graphData: TGGraphData) => putSync(opts, graph, graphData),
+        get: (soul: string) => get(opts, graph, soul),
+        put: (graphData: TGGraphData) => put(opts, graph, graphData),
     };
 }
