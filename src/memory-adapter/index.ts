@@ -18,14 +18,18 @@ const getSync = (
     opts: MemoryAdapterOpts,
     graph: TGGraphData,
     soul: string,
-): TGNode|null =>
-    (opts.direct ? graph[soul] : cloneValue(graph[soul])) || null;
+): TGGraphData =>
+{
+    return {
+        [soul]: (opts.direct ? graph[soul] : cloneValue(graph[soul])) || null
+    };
+};
 
 const get = (
     opts: MemoryAdapterOpts,
     graph: TGGraphData,
     soul: string,
-): Promise<TGNode|null> => Promise.resolve(getSync(opts, graph, soul));
+): Promise<TGGraphData> => Promise.resolve(getSync(opts, graph, soul));
 
 const putSync = (
     {
