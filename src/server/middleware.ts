@@ -1,6 +1,6 @@
 import { TGSocketServer, TGSocket, RequestObject } from 'topgun-socket/server';
 import { TGServerOptions } from './server-options';
-import { TGGraphAdapter, TGMessage, TGNode } from '../types';
+import { TGGraphAdapter, TGGraphData, TGMessage, TGOptionsGet } from '../types';
 import { pseudoRandomText } from '../sea';
 
 export class Middleware
@@ -69,20 +69,17 @@ export class Middleware
             return
         }
 
+        const opts  = req.data && req.data['optionsGet'] as TGOptionsGet|undefined;
         const msgId = Math.random()
             .toString(36)
             .slice(2);
 
-        this.readNode(soul)
-            .then(node => ({
+        this.readNodes(soul, opts)
+            .then(graphData => ({
                 channel: req.channel,
                 data   : {
                     '#'  : msgId,
-                    'put': node
-                        ? {
-                            [soul]: node
-                        }
-                        : null
+                    'put': graphData
                 }
             }))
             .catch((e) =>
@@ -104,9 +101,9 @@ export class Middleware
             })
     }
 
-    private readNode(soul: string): Promise<TGNode|null>
+    private readNodes(soul: string, opts?: TGOptionsGet): Promise<TGGraphData>
     {
-        return this.adapter.get(soul);
+        return this.adapter.get(soul, opts);
     }
 
     private async processPut(msg: TGMessage): Promise<TGMessage>
