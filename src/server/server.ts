@@ -184,13 +184,7 @@ export class TGServer
         },
     ): Promise<void>
     {
-        const data = request['data'] as {
-            pub: string;
-            proof: {
-                m: string;
-                s: string;
-            };
-        };
+        const data = request.data;
 
         if (!data.pub || !data.proof)
         {
