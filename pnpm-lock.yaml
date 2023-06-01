@@ -5,8 +5,8 @@ dependencies:
     specifier: 1.0.6
     version: 1.0.6
   topgun-socket:
-    specifier: 1.4.4
-    version: 1.4.4
+    specifier: 1.4.7
+    version: 1.4.7
   topgun-typed:
     specifier: 1.1.0
     version: 1.1.0
@@ -5479,8 +5479,8 @@ packages:
       topgun-webcrypto: 1.0.5
     dev: false
 
-  /topgun-socket@1.4.4:
-    resolution: {integrity: sha512-U6TFqKaD1V0SXlLuj3SzZhYVD5Z6TU4GAbuKs9YcTj0grcv8Oq7MTdntYfMpqWxFxcfOcJ/AJhUxzY9FCeUAHA==}
+  /topgun-socket@1.4.7:
+    resolution: {integrity: sha512-muU0pHGTXh3WbFcIcU5Ycc3t7u5YXc+HOeo4UnIPnVwqNJYmwOxNItqfkVra0FAyLnTrY+t2B2Vqka3VJ5pscg==}
     dependencies:
       topgun-buffer: 1.0.6
       topgun-jsonwebtoken: 1.0.2

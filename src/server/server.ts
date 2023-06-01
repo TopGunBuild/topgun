@@ -2,6 +2,7 @@ import { Struct, Result, ok, isErr, isObject } from 'topgun-typed';
 import { pseudoRandomText, verify } from '../sea';
 import { TGGraphAdapter, TGGraphData, TGMessage } from '../types';
 import { TGServerOptions } from './server-options';
+import { TGResponse } from 'topgun-socket/response';
 import { listen, TGSocketServer, TGSocket } from 'topgun-socket/server';
 import { createMemoryAdapter } from '../memory-adapter';
 import { generateMessageId } from '../client/graph/graph-utils';
@@ -171,10 +172,10 @@ export class TGServer
      */
     private async authenticateLogin(
         socket: TGSocket,
-        request: any,
+        request: TGResponse,
     ): Promise<void>
     {
-        const data = request.data as {
+        const data = request['data'] as {
             pub: string;
             proof: {
                 m: string;
