@@ -371,15 +371,13 @@ export class TGGraph
     }
 
     /**
-     * Synchronously invoke callback function for each connector to this graph
-     *
-     * @param cb The callback to invoke
+     * Invoke callback function for each connector to this graph
      */
-    eachConnector(cb: (connector: TGGraphConnector) => void): TGGraph
+    async eachConnector(cb: (connector: TGGraphConnector) => void): Promise<TGGraph>
     {
-        for (const connector of this._connectors)
+        for (let index = 0; index < this._connectors.length; index++)
         {
-            cb(connector);
+            await cb(this._connectors[index]);
         }
 
         return this;
