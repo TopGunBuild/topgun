@@ -15,6 +15,8 @@ export class TGLexLink extends TGLink
     constructor(chain: TGClient, key: string)
     {
         super(chain, key);
+        const soul      = this.getPath().shift();
+        this.optionsGet = { ['#']: soul, ['.']: {} };
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -34,9 +36,6 @@ export class TGLexLink extends TGLink
         // The argument is a LEX query
         if (isObject(keyOrOptions) && !isString(keyOrOptions))
         {
-            const soul      = this.getPath().shift();
-            this.optionsGet = { ['#']: soul, ['.']: {} };
-
             if (isObject(keyOrOptions['.']))
             {
                 this.optionsGet['.'] = cloneValue(keyOrOptions['.']);
