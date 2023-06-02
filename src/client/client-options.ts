@@ -24,9 +24,9 @@ export const DEFAULT_OPTIONS: Required<TGClientOptions> = {
     graph            : new TGGraph(),
     connectors       : [],
     persistStorage   : false,
-    storageKey       : 'top-gun-nodes',
+    storageKey       : 'topgun-nodes',
     persistSession   : true,
     sessionStorage   : localStorageAdapter,
-    sessionStorageKey: 'top-gun-session',
+    sessionStorageKey: 'topgun-session',
     passwordMinLength: 8,
 };
