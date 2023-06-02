@@ -1,9 +1,9 @@
-import { isObject, isString, isFunction } from 'topgun-typed';
+import { isObject, isString } from 'topgun-typed';
 import { diffCRDT } from '../crdt';
 import { TGLink } from './link';
 import { TGGraph } from './graph/graph';
 import { TGGraphConnector } from './transports/graph-connector';
-import { DEFAULT_OPTIONS, TGClientOptions } from './client-options';
+import { DEFAULT_OPTIONS, TGClientOptions, TGClientPeerOptions } from './client-options';
 import { createConnector } from './transports/web-socket-graph-connector';
 import { TGSocketClientOptions } from 'topgun-socket/client';
 import { TGUserApi } from './user-api';
@@ -192,24 +192,31 @@ export class TGClient
     /**
      * Connect to peers via connector TopGunSocket
      */
-    private async handlePeers(peers: string[]): Promise<void>
+    private async handlePeers(peers: TGClientPeerOptions[]): Promise<void>
     {
-        peers.forEach((peer: string) =>
+        peers.forEach((peer: TGClientPeerOptions) =>
         {
             try
             {
-                const url                          = new URL(peer);
-                const options: TGSocketClientOptions = {
-                    hostname: url.hostname,
-                    secure  : url.protocol.includes('https'),
-                };
-
-                if (url.port.length > 0)
+                if (isString(peer))
                 {
-                    options.port = Number(url.port);
-                }
+                    const url                          = new URL(peer);
+                    const options: TGSocketClientOptions = {
+                        hostname: url.hostname,
+                        secure  : url.protocol.includes('https'),
+                    };
 
-                this.useConnector(createConnector(options));
+                    if (url.port.length > 0)
+                    {
+                        options.port = Number(url.port);
+                    }
+
+                    this.useConnector(createConnector(options));
+                }
+                else if (isObject(peer))
+                {
+                    this.useConnector(createConnector(peer));
+                }
             }
             catch (e)
             {

@@ -1,11 +1,14 @@
+import { TGSocketClientOptions } from 'topgun-socket/client';
 import { TGGraph } from './graph/graph';
 import { TGGraphConnector } from './transports/graph-connector';
 import { TGSupportedStorage } from '../types';
 import { localStorageAdapter } from '../utils/local-storage';
 
+export type TGClientPeerOptions = string|TGSocketClientOptions;
+
 export interface TGClientOptions
 {
-    readonly peers?: string[];
+    readonly peers?: TGClientPeerOptions[];
     readonly graph?: TGGraph;
     readonly connectors?: TGGraphConnector[];
     readonly persistStorage?: boolean;
