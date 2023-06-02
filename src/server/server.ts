@@ -1,4 +1,4 @@
-import { Struct, Result, ok, isErr, isObject } from 'topgun-typed';
+import { Struct, Result, ok, isErr, isObject, isFunction } from 'topgun-typed';
 import { pseudoRandomText, verify } from '../sea';
 import { TGGraphAdapter, TGGraphData, TGMessage } from '../types';
 import { TGServerOptions } from './server-options';
@@ -30,6 +30,24 @@ export class TGServer
         this.server          = listen(this.options.port, this.options);
         this.middleware      = new Middleware(this.server, this.options, this.adapter);
         this.run();
+    }
+
+    // -----------------------------------------------------------------------------------------------------
+    // @ Public methods
+    // -----------------------------------------------------------------------------------------------------
+
+    onReady(): Promise<void>
+    {
+        return this.server.listener('ready').once();
+    }
+
+    async close(): Promise<void>
+    {
+        if (isFunction(this.server.httpServer?.close))
+        {
+            this.server.httpServer.close();
+        }
+        await this.server.close();
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -237,7 +255,7 @@ export class TGServer
     }
 }
 
-export function createServer(serverConfig?: TGServerOptions): TGServer
+export function createServer(options?: TGServerOptions): TGServer
 {
-    return new TGServer(serverConfig);
+    return new TGServer(options);
 }
