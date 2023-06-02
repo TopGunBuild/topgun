@@ -44,6 +44,11 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
+    disconnect(): void
+    {
+        this.client.disconnect();
+    }
+
     off(msgId: string): TGWebSocketGraphConnector
     {
         super.off(msgId);

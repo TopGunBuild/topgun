@@ -1,4 +1,4 @@
-import { isObject, isString } from 'topgun-typed';
+import { isObject, isString, isFunction } from 'topgun-typed';
 import { diffCRDT } from '../crdt';
 import { TGLink } from './link';
 import { TGGraph } from './graph/graph';
@@ -152,6 +152,14 @@ export class TGClient
     promise<T>(event: SystemEvent): Promise<T>
     {
         return new Promise<T>(resolve => this.on(event, resolve, true));
+    }
+
+    /**
+     * Close all connections
+     */
+    disconnect(): void
+    {
+        this.graph.eachConnector(connector => connector.disconnect());
     }
 
     // -----------------------------------------------------------------------------------------------------
