@@ -17,6 +17,7 @@ export interface TGClientOptions
     readonly sessionStorage?: TGSupportedStorage;
     readonly sessionStorageKey?: string;
     readonly passwordMinLength?: number;
+    readonly passwordMaxLength?: number;
 }
 
 export const DEFAULT_OPTIONS: Required<TGClientOptions> = {
@@ -29,4 +30,5 @@ export const DEFAULT_OPTIONS: Required<TGClientOptions> = {
     sessionStorage   : localStorageAdapter,
     sessionStorageKey: 'topgun-session',
     passwordMinLength: 8,
+    passwordMaxLength: 48,
 };
