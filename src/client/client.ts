@@ -210,3 +210,8 @@ export class TGClient
         });
     }
 }
+
+export function createClient(options?: TGClientOptions): TGClient
+{
+    return new TGClient(options);
+}
