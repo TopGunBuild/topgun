@@ -36,9 +36,9 @@ export class TGServer
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    waitForReady(): Promise<void>
+    async waitForReady(): Promise<void>
     {
-        return this.server.listener('ready').once();
+        await this.server.listener('ready').once();
     }
 
     async close(): Promise<void>
