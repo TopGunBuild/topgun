@@ -74,35 +74,22 @@ beforeEach(async () =>
 afterEach(async () =>
 {
     await server.close();
-    client.disconnect();
+    // client.disconnect();
 });
 
 describe('LEX', () =>
 {
     it('test lex query', async () =>
     {
-        // client.get('xxx').put({
-        //     value: 'yyy'
-        // });
-
-        client
+        const value = await client
             .get('xxx')
-            .once((data, id) =>
-            {
-                console.log(data);
-                expect(client).not.toBeUndefined();
-            });
+            .start('a')
+            .end('b')
+            .limit(2)
+            .map()
+            .promise();
 
-        /* client
-             .get('xxx')
-             .start('a')
-             .end('b')
-             .limit(2)
-             .map()
-             .once((data, id) =>
-             {
-                 console.log(data);
-                 expect(client).not.toBeUndefined();
-             });*/
+        // console.log(value);
+        expect(value['name']).toBe('a');
     });
 });
