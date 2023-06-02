@@ -55,7 +55,6 @@ beforeEach(async () =>
         port,
         adapter: adapter()
     });
-
     await server.waitForReady();
 
     client = createClient({
@@ -63,6 +62,11 @@ beforeEach(async () =>
             hostname: '127.0.0.1',
             port
         }]
+    });
+
+    await client.graph.eachConnector(async connector =>
+    {
+        await connector.waitForConnection();
     });
 });
 
