@@ -1,5 +1,5 @@
-import { TGClient, TGGraphAdapter, TGGraphData, TGOptionsGet } from '../src/client';
-import { createServer } from '../src/server';
+import { createClient, TGClient, TGGraphAdapter, TGGraphData, TGOptionsGet } from '../src/client';
+import { createServer, TGServer } from '../src/server';
 
 let state = {
     'xxx': {
@@ -46,25 +46,35 @@ function adapter(): TGGraphAdapter
 }
 
 const port = 3457;
+let server: TGServer, client: TGClient;
 
+// Run the server and client before start
 beforeEach(async () =>
 {
+    server = createServer({
+        port,
+        adapter: adapter()
+    });
 
+    await server.waitForReady();
+
+    client = createClient({
+        peers         : [`http://127.0.0.1:${port}`],
+        persistSession: false
+    });
+});
+
+// Close server and client after each test
+afterEach(async () =>
+{
+    await server.close();
+    client.disconnect();
 });
 
 describe('LEX', () =>
 {
     it('test lex query', async () =>
     {
-        const client = new TGClient({
-            peers         : [`http://127.0.0.1:${port}`],
-            persistSession: false
-        });
-        const server = createServer({
-            port,
-            adapter: adapter()
-        });
-
         client.get('xxx').put({
             value: 'yyy'
         });
