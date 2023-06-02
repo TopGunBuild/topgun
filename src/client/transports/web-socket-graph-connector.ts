@@ -226,7 +226,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
     {
         for await (const _event of this.client.listener('connect'))
         {
-            console.log(`SC client ${_event.id} is connected.`);
+            // console.log(`SC client ${_event.id} is connected.`);
             try
             {
                 this.events.connection.trigger(true);
