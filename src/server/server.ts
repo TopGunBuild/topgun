@@ -237,7 +237,7 @@ export class TGServer
     }
 }
 
-export function createServer(serverConfig: TGServerOptions): TGServer
+export function createServer(serverConfig?: TGServerOptions): TGServer
 {
     return new TGServer(serverConfig);
 }
