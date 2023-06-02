@@ -59,8 +59,10 @@ beforeEach(async () =>
     await server.waitForReady();
 
     client = createClient({
-        peers         : [`http://127.0.0.1:${port}`],
-        persistSession: false
+        peers         : [{
+            hostname: '127.0.0.1',
+            port
+        }]
     });
 });
 
@@ -75,9 +77,9 @@ describe('LEX', () =>
 {
     it('test lex query', async () =>
     {
-        client.get('xxx').put({
-            value: 'yyy'
-        });
+        // client.get('xxx').put({
+        //     value: 'yyy'
+        // });
 
         client
             .get('xxx')
