@@ -4,7 +4,7 @@ import { TGLink } from './link';
 import { TGGraph } from './graph/graph';
 import { TGGraphConnector } from './transports/graph-connector';
 import { DEFAULT_OPTIONS, TGClientOptions, TGClientPeerOptions } from './client-options';
-import { createConnector } from './transports/web-socket-graph-connector';
+import { createConnector, TGWebSocketGraphConnector } from './transports/web-socket-graph-connector';
 import { TGSocketClientOptions } from 'topgun-socket/client';
 import { TGUserApi } from './user-api';
 import { pubFromSoul, unpackGraph } from '../sea';
@@ -157,9 +157,40 @@ export class TGClient
     /**
      * Close all connections
      */
-    disconnect(): void
+    async disconnect(): Promise<void>
     {
-        this.graph.eachConnector(connector => connector.disconnect());
+        await this.graph.eachConnector(async (connector) =>
+        {
+            if (connector instanceof TGWebSocketGraphConnector)
+            {
+                const cleanupTasks = [];
+                const client       = connector.client;
+
+                if (client)
+                {
+                    if (client.state !== client.CLOSED)
+                    {
+                        cleanupTasks.push(
+                            Promise.race([
+                                client.listener('disconnect').once(),
+                                client.listener('connectAbort').once()
+                            ])
+                        );
+                        client.disconnect();
+                    }
+                    else
+                    {
+                        client.disconnect();
+                    }
+                }
+
+                await Promise.all(cleanupTasks);
+            }
+            else
+            {
+                connector.disconnect();
+            }
+        });
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -200,7 +231,7 @@ export class TGClient
             {
                 if (isString(peer))
                 {
-                    const url                          = new URL(peer);
+                    const url                            = new URL(peer);
                     const options: TGSocketClientOptions = {
                         hostname: url.hostname,
                         secure  : url.protocol.includes('https'),
