@@ -1,4 +1,4 @@
-import { Struct, Result, ok, isErr, isObject } from 'topgun-typed';
+import { Struct, Result, ok, isErr, isObject, isFunction } from 'topgun-typed';
 import { pseudoRandomText, verify } from '../sea';
 import { TGGraphAdapter, TGGraphData, TGMessage } from '../types';
 import { TGServerOptions } from './server-options';
@@ -30,6 +30,24 @@ export class TGServer
         this.server          = listen(this.options.port, this.options);
         this.middleware      = new Middleware(this.server, this.options, this.adapter);
         this.run();
+    }
+
+    // -----------------------------------------------------------------------------------------------------
+    // @ Public methods
+    // -----------------------------------------------------------------------------------------------------
+
+    async waitForReady(): Promise<void>
+    {
+        await this.server.listener('ready').once();
+    }
+
+    async close(): Promise<void>
+    {
+        if (isFunction(this.server.httpServer?.close))
+        {
+            this.server.httpServer.close();
+        }
+        await this.server.close();
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -171,16 +189,20 @@ export class TGServer
      */
     private async authenticateLogin(
         socket: TGSocket,
-        request: any,
+        request: {
+            data: {
+                pub: string;
+                proof: {
+                    m: string;
+                    s: string;
+                };
+            },
+            end: (reason?: string) => void,
+            error: (error?: Error) => void
+        },
     ): Promise<void>
     {
-        const data = request.data as {
-            pub: string;
-            proof: {
-                m: string;
-                s: string;
-            };
-        };
+        const data = request.data;
 
         if (!data.pub || !data.proof)
         {
@@ -233,7 +255,7 @@ export class TGServer
     }
 }
 
-export function createServer(serverConfig: TGServerOptions): TGServer
+export function createServer(options?: TGServerOptions): TGServer
 {
-    return new TGServer(serverConfig);
+    return new TGServer(options);
 }

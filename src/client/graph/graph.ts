@@ -10,7 +10,7 @@ import {
     TGMiddleware,
     TGMiddlewareType,
     TGNodeListenCb,
-    TGOnCb,
+    TGOnCb, TGOptionsGet,
 } from '../../types';
 import { TGEvent } from '../control-flow/event';
 import { TGGraphConnector } from '../transports/graph-connector';
@@ -189,14 +189,10 @@ export class TGGraph
 
     /**
      * Read a potentially multi-level deep path from the graph
-     *
-     * @param path The path to read
-     * @param cb The callback to invoke with results
-     * @returns a cleanup function to after done with query
      */
-    query(path: readonly string[], cb: TGOnCb): () => void
+    query(path: string[], cb: TGOnCb, opts?: TGOptionsGet): () => void
     {
-        let lastSouls = [] as readonly string[];
+        let lastSouls = [] as string[];
         let currentValue: TGValue|undefined;
 
         const updateQuery = () =>
@@ -215,7 +211,7 @@ export class TGGraph
 
             for (const soul of added)
             {
-                this._requestSoul(soul, updateQuery);
+                this._requestSoul(soul, updateQuery, opts);
             }
 
             for (const soul of removed)
@@ -280,23 +276,14 @@ export class TGGraph
 
     /**
      * Request node data
-     *
-     * @param soul identifier of node to request
-     * @param cb callback for response messages
-     * @param msgId optional unique message identifier
-     * @returns a function to cleanup listeners when done
      */
-    get(soul: string, cb?: TGMessageCb, msgId?: string): () => void
+    get(data: TGGet): () => void
     {
-        const id = msgId || generateMessageId();
+        const msgId = data.msgId || generateMessageId();
 
-        this.events.get.trigger({
-            cb,
-            msgId: id,
-            soul,
-        });
+        this.events.get.trigger({ ...data, msgId });
 
-        return () => this.events.off.trigger(id);
+        return () => this.events.off.trigger(msgId);
     }
 
     /**
@@ -371,15 +358,13 @@ export class TGGraph
     }
 
     /**
-     * Synchronously invoke callback function for each connector to this graph
-     *
-     * @param cb The callback to invoke
+     * Invoke callback function for each connector to this graph
      */
-    eachConnector(cb: (connector: TGGraphConnector) => void): TGGraph
+    async eachConnector(cb: (connector: TGGraphConnector) => void): Promise<TGGraph>
     {
-        for (const connector of this._connectors)
+        for (let index = 0; index < this._connectors.length; index++)
         {
-            cb(connector);
+            await cb(this._connectors[index]);
         }
 
         return this;
@@ -440,9 +425,9 @@ export class TGGraph
             new TGGraphNode(this, soul, this.receiveGraphData));
     }
 
-    private _requestSoul(soul: string, cb: TGNodeListenCb): TGGraph
+    private _requestSoul(soul: string, cb: TGNodeListenCb, opts?: TGOptionsGet): TGGraph
     {
-        this._node(soul).get(cb);
+        this._node(soul).get(cb, opts);
         return this;
     }
 

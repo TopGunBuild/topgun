@@ -1,11 +1,14 @@
+import { TGSocketClientOptions } from 'topgun-socket/client';
 import { TGGraph } from './graph/graph';
 import { TGGraphConnector } from './transports/graph-connector';
 import { TGSupportedStorage } from '../types';
 import { localStorageAdapter } from '../utils/local-storage';
 
+export type TGClientPeerOptions = string|TGSocketClientOptions;
+
 export interface TGClientOptions
 {
-    readonly peers?: string[];
+    readonly peers?: TGClientPeerOptions[];
     readonly graph?: TGGraph;
     readonly connectors?: TGGraphConnector[];
     readonly persistStorage?: boolean;
@@ -14,6 +17,7 @@ export interface TGClientOptions
     readonly sessionStorage?: TGSupportedStorage;
     readonly sessionStorageKey?: string;
     readonly passwordMinLength?: number;
+    readonly passwordMaxLength?: number;
 }
 
 export const DEFAULT_OPTIONS: Required<TGClientOptions> = {
@@ -21,9 +25,10 @@ export const DEFAULT_OPTIONS: Required<TGClientOptions> = {
     graph            : new TGGraph(),
     connectors       : [],
     persistStorage   : false,
-    storageKey       : 'top-gun-nodes',
+    storageKey       : 'topgun-nodes',
     persistSession   : true,
     sessionStorage   : localStorageAdapter,
-    sessionStorageKey: 'top-gun-session',
+    sessionStorageKey: 'topgun-session',
     passwordMinLength: 8,
+    passwordMaxLength: 48,
 };

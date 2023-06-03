@@ -157,9 +157,9 @@ export class TGLink
     {
         let soul;
 
-        if (data instanceof TGLink && data.soul)
+        if (data instanceof TGLink && data.optionsGet['#'])
         {
-            soul = data.soul;
+            soul = data.optionsGet['#'];
 
             this.put(
                 {
@@ -318,9 +318,9 @@ export class TGLink
         }
         else
         {
-            this._chain.pub = pub;
-            this.soul       = this.soul.replace(this._chain.WAIT_FOR_USER_PUB, pub);
-            this.key        = this.key.replace(this._chain.WAIT_FOR_USER_PUB, pub);
+            this._chain.pub      = pub;
+            this.optionsGet['#'] = this.optionsGet['#'].replace(this._chain.WAIT_FOR_USER_PUB, pub);
+            this.key             = this.key.replace(this._chain.WAIT_FOR_USER_PUB, pub);
         }
     }
 
@@ -347,6 +347,7 @@ export class TGLink
                 this._endQuery = this._chain.graph.query(
                     this.getPath(),
                     this._onQueryResponse.bind(this),
+                    this.optionsGet,
                 );
             }
         };

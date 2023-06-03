@@ -23,10 +23,17 @@ export async function createUser(
     const passwordMinLength = isNumber(client.options.passwordMinLength)
         ? client.options.passwordMinLength
         : 8;
+    const passwordMaxLength = isNumber(client.options.passwordMaxLength)
+        ? client.options.passwordMaxLength
+        : 48;
 
     if ((password || '').length < passwordMinLength)
     {
         throw Error('Password too short!');
+    }
+    if ((password || '').length > passwordMaxLength)
+    {
+        throw Error('Password too long!');
     }
 
     // "pseudo-randomly create a salt, then use PBKDF2 function to extend the password with it."

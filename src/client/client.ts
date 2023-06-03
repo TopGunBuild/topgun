@@ -3,8 +3,8 @@ import { diffCRDT } from '../crdt';
 import { TGLink } from './link';
 import { TGGraph } from './graph/graph';
 import { TGGraphConnector } from './transports/graph-connector';
-import { DEFAULT_OPTIONS, TGClientOptions } from './client-options';
-import { createConnector } from './transports/web-socket-graph-connector';
+import { DEFAULT_OPTIONS, TGClientOptions, TGClientPeerOptions } from './client-options';
+import { createConnector, TGWebSocketGraphConnector } from './transports/web-socket-graph-connector';
 import { TGSocketClientOptions } from 'topgun-socket/client';
 import { TGUserApi } from './user-api';
 import { pubFromSoul, unpackGraph } from '../sea';
@@ -13,6 +13,7 @@ import { TGNode, TGUserReference, SystemEvent } from '../types';
 import { TGEvent } from './control-flow/event';
 import { TGLexLink } from './lex-link';
 import { match } from '../utils/match';
+import { wait } from '../utils/wait';
 
 /**
  * Main entry point for TopGun in browser
@@ -154,6 +155,47 @@ export class TGClient
         return new Promise<T>(resolve => this.on(event, resolve, true));
     }
 
+    /**
+     * Close all connections
+     */
+    async disconnect(): Promise<void>
+    {
+        // Wait for topgun-socket closed all transport gateways
+        await wait(5);
+        await this.graph.eachConnector(async (connector) =>
+        {
+            if (connector instanceof TGWebSocketGraphConnector)
+            {
+                const cleanupTasks = [];
+                const client       = connector.client;
+
+                if (client)
+                {
+                    if (client.state !== client.CLOSED)
+                    {
+                        cleanupTasks.push(
+                            Promise.race([
+                                client.listener('disconnect').once(),
+                                client.listener('connectAbort').once()
+                            ])
+                        );
+                        client.disconnect();
+                    }
+                    else
+                    {
+                        client.disconnect();
+                    }
+                }
+
+                await Promise.all(cleanupTasks);
+            }
+            else
+            {
+                connector.disconnect();
+            }
+        });
+    }
+
     // -----------------------------------------------------------------------------------------------------
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
@@ -184,24 +226,31 @@ export class TGClient
     /**
      * Connect to peers via connector TopGunSocket
      */
-    private async handlePeers(peers: string[]): Promise<void>
+    private async handlePeers(peers: TGClientPeerOptions[]): Promise<void>
     {
-        peers.forEach((peer: string) =>
+        peers.forEach((peer: TGClientPeerOptions) =>
         {
             try
             {
-                const url                          = new URL(peer);
-                const options: TGSocketClientOptions = {
-                    hostname: url.hostname,
-                    secure  : url.protocol.includes('https'),
-                };
-
-                if (url.port.length > 0)
+                if (isString(peer))
                 {
-                    options.port = Number(url.port);
-                }
+                    const url                            = new URL(peer);
+                    const options: TGSocketClientOptions = {
+                        hostname: url.hostname,
+                        secure  : url.protocol.includes('https'),
+                    };
 
-                this.useConnector(createConnector(options));
+                    if (url.port.length > 0)
+                    {
+                        options.port = Number(url.port);
+                    }
+
+                    this.useConnector(createConnector(options));
+                }
+                else if (isObject(peer))
+                {
+                    this.useConnector(createConnector(peer));
+                }
             }
             catch (e)
             {
@@ -209,4 +258,9 @@ export class TGClient
             }
         });
     }
+}
+
+export function createClient(options?: TGClientOptions): TGClient
+{
+    return new TGClient(options);
 }

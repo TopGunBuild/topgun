@@ -25,14 +25,10 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
     {
         this.adapter
             .get(soul, opts)
-            .then(node => ({
+            .then(graphData => ({
                 '#'  : generateMessageId(),
                 '@'  : msgId,
-                'put': node
-                    ? {
-                        [soul]: node,
-                    }
-                    : undefined,
+                'put': graphData
             }))
             .catch((error) =>
             {

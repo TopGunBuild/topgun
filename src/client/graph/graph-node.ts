@@ -1,4 +1,4 @@
-import { TGGraphData, TGMessage, TGNode, TGNodeListenCb } from '../../types';
+import { TGGet, TGGraphData, TGMessage, TGNode, TGNodeListenCb, TGOptionsGet } from '../../types';
 import { TGEvent } from '../control-flow/event';
 import { TGGraph } from './graph';
 
@@ -42,13 +42,13 @@ export class TGGraphNode
         return this._data.listenerCount();
     }
 
-    get(cb?: TGNodeListenCb): TGGraphNode
+    get(cb?: TGNodeListenCb, opts?: TGOptionsGet): TGGraphNode
     {
         if (cb)
         {
             this.on(cb);
         }
-        this._ask();
+        this._ask(opts);
         return this;
     }
 
@@ -88,17 +88,24 @@ export class TGGraphNode
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private _ask(): TGGraphNode
+    private _ask(opts?: TGOptionsGet): TGGraphNode
     {
         if (this._endCurQuery)
         {
             return this;
         }
 
-        this._endCurQuery = this._graph.get(
-            this.soul,
-            this._onDirectQueryReply,
-        );
+        const data: TGGet = {
+            soul: this.soul,
+            cb  : this._onDirectQueryReply.bind(this)
+        };
+
+        if (opts)
+        {
+            data.opts = opts;
+        }
+
+        this._endCurQuery = this._graph.get(data);
         return this;
     }
 

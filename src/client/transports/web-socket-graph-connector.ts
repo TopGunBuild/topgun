@@ -44,6 +44,11 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
+    disconnect(): void
+    {
+        this.client.disconnect();
+    }
+
     off(msgId: string): TGWebSocketGraphConnector
     {
         super.off(msgId);
@@ -73,6 +78,9 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         this._requestChannels[msgId] = this.subscribeToChannel(
             `topgun/nodes/${soul}`,
             cbWrap,
+            {
+                data: opts
+            }
         );
 
         return super.get({ soul, msgId, cb, opts });
@@ -221,7 +229,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
     {
         for await (const _event of this.client.listener('connect'))
         {
-            console.log(`SC client ${_event.id} is connected.`);
+            // console.log(`SC client ${_event.id} is connected.`);
             try
             {
                 this.events.connection.trigger(true);

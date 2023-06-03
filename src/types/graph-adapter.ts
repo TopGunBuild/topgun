@@ -1,8 +1,8 @@
-import { TGGraphData, TGNode, TGOptionsGet } from './common';
+import { TGGraphData, TGOptionsGet } from './common';
 
 export interface TGGraphAdapter
 {
     readonly close?: () => void;
-    readonly get: (soul: string, opts?: TGOptionsGet) => Promise<TGNode|null>;
+    readonly get: (soul: string, opts?: TGOptionsGet) => Promise<TGGraphData>;
     readonly put: (graphData: TGGraphData) => Promise<TGGraphData|null>;
 }

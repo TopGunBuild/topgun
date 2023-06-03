@@ -3,8 +3,8 @@ export type LEX = {
     '='?: string;
     /** prefix match */
     '*'?: string;
-    /** gte match */
+    /** greater than match */
     '>'?: string;
-    /** lte match */
+    /** less than match */
     '<'?: string;
 };

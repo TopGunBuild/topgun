@@ -34,8 +34,7 @@ export class TGLexLink extends TGLink
         // The argument is a LEX query
         if (isObject(keyOrOptions) && !isString(keyOrOptions))
         {
-            const soul      = this.getPath().shift();
-            this.optionsGet = { ['#']: soul, ['.']: {} };
+            this._persistOptions();
 
             if (isObject(keyOrOptions['.']))
             {
@@ -120,6 +119,13 @@ export class TGLexLink extends TGLink
 
     private _setLex(key: KeyOfLex, value: ValueOfLex): void
     {
+        this._persistOptions();
         (this.optionsGet as object)['.'][key] = value;
+    }
+
+    private _persistOptions(): void
+    {
+        const soul      = this.getPath().shift();
+        this.optionsGet = { ['#']: soul, ['.']: {} };
     }
 }
