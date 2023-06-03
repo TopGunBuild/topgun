@@ -13,6 +13,7 @@ import { TGNode, TGUserReference, SystemEvent } from '../types';
 import { TGEvent } from './control-flow/event';
 import { TGLexLink } from './lex-link';
 import { match } from '../utils/match';
+import { wait } from '../utils/wait';
 
 /**
  * Main entry point for TopGun in browser
@@ -159,6 +160,8 @@ export class TGClient
      */
     async disconnect(): Promise<void>
     {
+        // Wait for topgun-socket closed all transport gateways
+        await wait(5);
         await this.graph.eachConnector(async (connector) =>
         {
             if (connector instanceof TGWebSocketGraphConnector)

@@ -73,8 +73,8 @@ beforeEach(async () =>
 // Close server and client after each test
 afterEach(async () =>
 {
+    await client.disconnect();
     await server.close();
-    // client.disconnect();
 });
 
 describe('LEX', () =>
