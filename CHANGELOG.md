@@ -1,3 +1,27 @@
+# [1.3.0](https://github.com/TopGunBuild/topgun/compare/v1.2.4...v1.3.0) (2023-06-03)
+
+
+### Bug Fixes
+
+* **client:** add createClient function ([047cc9a](https://github.com/TopGunBuild/topgun/commit/047cc9ae156efdf1d451dbb24380613d6ded2403))
+* **client:** add option for max limit for LEX query ([882e438](https://github.com/TopGunBuild/topgun/commit/882e438cb33b168b4c3dfd3685a0b51dda9f93c3))
+* **client:** add wait for client disconnect ([23a7b51](https://github.com/TopGunBuild/topgun/commit/23a7b51e9826a74a4697cb1341f7848a1163adb6))
+* **client:** create LEX object in constructor ([b26dd36](https://github.com/TopGunBuild/topgun/commit/b26dd36ba877d88e489ab1bb8605d9e62029d301))
+* **client:** get soul from optionsGet ([a722755](https://github.com/TopGunBuild/topgun/commit/a722755eb3d979c3ec03725ac72fdb578fa8149a))
+* **client:** handle optionsGet property in link class ([a8c1436](https://github.com/TopGunBuild/topgun/commit/a8c1436cf5c78b576894306c9c1e2b20262afde0))
+* **client:** make disconnect async ([0c3df5d](https://github.com/TopGunBuild/topgun/commit/0c3df5d49f15668c0202563176e564b8cab18c92))
+* **client:** pass optionsGet to subscribe request ([ab2e002](https://github.com/TopGunBuild/topgun/commit/ab2e0027b4cbb3aa3aa63d0e54fec50417a2085e))
+* upgrade topgun-socket 1.4.2 -> 1.4.3 ([a9c8034](https://github.com/TopGunBuild/topgun/commit/a9c8034dc6f1716c682b8ea8e2ebef6711391b1c))
+* upgrade topgun-socket 1.4.4 -> 1.4.7 ([329bc58](https://github.com/TopGunBuild/topgun/commit/329bc584e6c1adaa79b1cf99e7b36ac1a1b846c1))
+
+
+### Features
+
+* **client:** add client method to disconnect ([25dbe99](https://github.com/TopGunBuild/topgun/commit/25dbe99e13aa9f2d22139d6c82e7c1ef8a5eb292))
+* **client:** add passwordMaxLength option ([d78561b](https://github.com/TopGunBuild/topgun/commit/d78561b48d8219a59aaa7bc3813ae9d430467585))
+* **client:** the ability to set peer options by an object ([0c53350](https://github.com/TopGunBuild/topgun/commit/0c53350dc9496f1b1e269eafddea685c5c46329c))
+* **server:** add server methods to stop and check readiness ([0f7201f](https://github.com/TopGunBuild/topgun/commit/0f7201fbf2f865842fcc6706c6a75e99049b1dad))
+
 ## [1.2.4](https://github.com/TopGunBuild/topgun/compare/v1.2.3...v1.2.4) (2023-05-29)
 
 
