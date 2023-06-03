@@ -9,12 +9,15 @@ type ValueOfLex = LEX[KeyOfLex];
 
 export class TGLexLink extends TGLink
 {
+    maxLimit: number;
+
     /**
      * Constructor
      */
     constructor(chain: TGClient, key: string)
     {
         super(chain, key);
+        this.maxLimit = this._chain.options.transportMaxKeyValuePairs;
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -78,6 +81,12 @@ export class TGLexLink extends TGLink
 
     limit(value: number): TGLexLink
     {
+        if (value > this.maxLimit)
+        {
+            throw Error(
+                `Limit exceeds the maximum allowed. The maximum length is ${this.maxLimit}`
+            );
+        }
         (this.optionsGet as object)['%'] = value;
         return this;
     }
@@ -125,7 +134,14 @@ export class TGLexLink extends TGLink
 
     private _persistOptions(): void
     {
-        const soul      = this.getPath().shift();
-        this.optionsGet = { ['#']: soul, ['.']: {} };
+        if (!isObject(this.optionsGet))
+        {
+            const soul      = this.getPath().shift();
+            this.optionsGet = {
+                ['#']: soul,
+                ['.']: {},
+                ['%']: this.maxLimit
+            };
+        }
     }
 }
