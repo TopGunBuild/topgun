@@ -47,9 +47,9 @@ export function nodeToGraph(node: TGNode): TGGraphData
 
         let soul = val && val._ && val._['#'];
 
-        if (val instanceof TGLink && val.soul)
+        if (val instanceof TGLink && val.optionsGet['#'])
         {
-            soul = val.soul;
+            soul = val.optionsGet['#'];
         }
 
         if (soul)

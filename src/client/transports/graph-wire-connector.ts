@@ -66,6 +66,7 @@ export class TGGraphWireConnector extends TGGraphConnector
      */
     get({ soul, cb, msgId = '', opts }: TGGet): () => void
     {
+        console.trace(opts);
         const get            = { '#': soul };
         const msg: TGMessage = { get };
         if (msgId)
