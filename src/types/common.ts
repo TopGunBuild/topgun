@@ -79,10 +79,7 @@ export interface TGMessage
     '#'?: string;
     '@'?: string;
 
-    readonly get?: {
-        readonly '#': string;
-    };
-
+    readonly get?: TGOptionsGet;
     readonly put?: TGGraphData;
 
     readonly ack?: number|boolean;

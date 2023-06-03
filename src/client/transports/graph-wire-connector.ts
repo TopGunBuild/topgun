@@ -64,7 +64,7 @@ export class TGGraphWireConnector extends TGGraphConnector
      *
      * @returns A function to be called to clean up callback listeners
      */
-    get({ soul, cb, msgId = '' }: TGGet): () => void
+    get({ soul, cb, msgId = '', opts }: TGGet): () => void
     {
         const get            = { '#': soul };
         const msg: TGMessage = { get };

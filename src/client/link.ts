@@ -18,7 +18,6 @@ import { LEX } from '../types/lex';
 export class TGLink
 {
     key: string;
-    soul: string|undefined;
     optionsGet: TGOptionsGet|undefined;
 
     protected readonly _updateEvent: TGEvent<TGValue|undefined, string>;
@@ -45,7 +44,8 @@ export class TGLink
         this._updateEvent = new TGEvent(this.getPath().join('|'));
         if (!parent)
         {
-            this.soul = key;
+            // this.soul = key;
+            this.optionsGet = { ['#']: key, ['.']: {} };
 
             if (key.startsWith('~') && pubFromSoul(key))
             {
@@ -157,9 +157,9 @@ export class TGLink
     {
         let soul;
 
-        if (data instanceof TGLink && data.soul)
+        if (data instanceof TGLink && data.optionsGet['#'])
         {
-            soul = data.soul;
+            soul = data.optionsGet['#'];
 
             this.put(
                 {
@@ -318,9 +318,9 @@ export class TGLink
         }
         else
         {
-            this._chain.pub = pub;
-            this.soul       = this.soul.replace(this._chain.WAIT_FOR_USER_PUB, pub);
-            this.key        = this.key.replace(this._chain.WAIT_FOR_USER_PUB, pub);
+            this._chain.pub      = pub;
+            this.optionsGet['#'] = this.optionsGet['#'].replace(this._chain.WAIT_FOR_USER_PUB, pub);
+            this.key             = this.key.replace(this._chain.WAIT_FOR_USER_PUB, pub);
         }
     }
 

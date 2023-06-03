@@ -15,8 +15,6 @@ export class TGLexLink extends TGLink
     constructor(chain: TGClient, key: string)
     {
         super(chain, key);
-        const soul      = this.getPath().shift();
-        this.optionsGet = { ['#']: soul, ['.']: {} };
     }
 
     // -----------------------------------------------------------------------------------------------------
