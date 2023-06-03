@@ -99,7 +99,7 @@ export function flattenGraphData(data: TGGraphData): TGGraphData
 }
 
 export function getPathData(
-    keys: readonly string[],
+    keys: string[],
     graph: TGGraphData,
 ): TGPathData
 {

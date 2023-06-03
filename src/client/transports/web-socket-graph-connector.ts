@@ -78,6 +78,9 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         this._requestChannels[msgId] = this.subscribeToChannel(
             `topgun/nodes/${soul}`,
             cbWrap,
+            {
+                data: opts
+            }
         );
 
         return super.get({ soul, msgId, cb, opts });

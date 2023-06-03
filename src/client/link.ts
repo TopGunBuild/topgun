@@ -18,6 +18,7 @@ import { LEX } from '../types/lex';
 export class TGLink
 {
     key: string;
+    soul: string|undefined;
     optionsGet: TGOptionsGet|undefined;
 
     protected readonly _updateEvent: TGEvent<TGValue|undefined, string>;
@@ -44,8 +45,7 @@ export class TGLink
         this._updateEvent = new TGEvent(this.getPath().join('|'));
         if (!parent)
         {
-            // this.soul = key;
-            this.optionsGet = { ['#']: key, ['.']: {} };
+            this.soul = key;
 
             if (key.startsWith('~') && pubFromSoul(key))
             {
@@ -347,6 +347,7 @@ export class TGLink
                 this._endQuery = this._chain.graph.query(
                     this.getPath(),
                     this._onQueryResponse.bind(this),
+                    this.optionsGet,
                 );
             }
         };

@@ -69,7 +69,7 @@ export class Middleware
             return
         }
 
-        const opts  = req.data && req.data['optionsGet'] as TGOptionsGet|undefined;
+        const opts  = req.data as TGOptionsGet|undefined;
         const msgId = Math.random()
             .toString(36)
             .slice(2);

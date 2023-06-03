@@ -64,9 +64,9 @@ export type TGOptionsPut = Partial<{
 
 export interface CRDTOpts
 {
-    readonly machineState?: number;
-    readonly futureGrace?: number;
-    readonly Lexical?: (x: TGValue) => any;
+    machineState?: number;
+    futureGrace?: number;
+    Lexical?: (x: TGValue) => any;
 
     [k: string]: any;
 }
@@ -79,12 +79,12 @@ export interface TGMessage
     '#'?: string;
     '@'?: string;
 
-    readonly get?: TGOptionsGet;
-    readonly put?: TGGraphData;
+    get?: TGOptionsGet;
+    put?: TGGraphData;
 
-    readonly ack?: number|boolean;
-    readonly err?: any;
-    readonly ok?: boolean|number;
+    ack?: number|boolean;
+    err?: any;
+    ok?: boolean|number;
 }
 
 export type TGMessageCb = (msg: TGMessage) => void;
@@ -94,10 +94,10 @@ export type TGMessageCb = (msg: TGMessage) => void;
  */
 export interface TGPut
 {
-    readonly graph: TGGraphData;
-    readonly msgId?: string;
-    readonly replyTo?: string;
-    readonly cb?: TGMessageCb;
+    graph: TGGraphData;
+    msgId?: string;
+    replyTo?: string;
+    cb?: TGMessageCb;
 }
 
 /**
@@ -105,38 +105,38 @@ export interface TGPut
  */
 export interface TGGet
 {
-    readonly soul: string;
-    readonly opts?: TGOptionsGet;
-    readonly msgId?: string;
-    readonly key?: string;
-    readonly cb?: TGMessageCb;
+    soul: string;
+    opts?: TGOptionsGet;
+    msgId?: string;
+    key?: string;
+    cb?: TGMessageCb;
 }
 
 export interface TGUserReference
 {
-    readonly alias: string;
-    readonly pub: string;
+    alias: string;
+    pub: string;
 }
 
 export interface TGAckErr
 {
-    readonly err: Error;
+    err: Error;
 }
 
 export interface TGUserCredentials
 {
-    readonly priv: string;
-    readonly epriv: any;
-    readonly alias: string;
-    readonly pub: string;
-    readonly epub: string;
+    priv: string;
+    epriv: any;
+    alias: string;
+    pub: string;
+    epub: string;
 }
 
 export type TGAuthCallback = (userRef?: TGUserReference|TGAckErr) => void;
 
 export interface TGChainOptions
 {
-    readonly uuid?: (path: readonly string[]) => Promise<string>|string;
+    uuid?: (path: string[]) => Promise<string>|string;
 }
 
 export type TGOnCb = (node: TGValue|undefined, key?: string) => void;
@@ -144,9 +144,9 @@ export type TGNodeListenCb = (node: TGNode|undefined) => void;
 
 export interface TGPathData
 {
-    readonly souls: readonly string[];
-    readonly value: TGValue|undefined;
-    readonly complete: boolean;
+    souls: string[];
+    value: TGValue|undefined;
+    complete: boolean;
 }
 
 export type TGMiddleware = (

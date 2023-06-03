@@ -3,13 +3,18 @@ import { createServer, TGServer } from '../src/server';
 
 let state = {
     'xxx': {
-        _   : {
+        _     : {
             '#': 'xxx',
             '>': {
                 name: 1682701808609
             }
         },
-        name: 'a'
+        name  : 'a',
+        nested: {
+            '#': 'xxx/nested',
+            '>': { 'say': 1683308843720 },
+            say: 'value'
+        },
     },
     'yyy': {
         _   : {
@@ -58,7 +63,7 @@ beforeEach(async () =>
     await server.waitForReady();
 
     client = createClient({
-        peers         : [{
+        peers: [{
             hostname: '127.0.0.1',
             port
         }]
