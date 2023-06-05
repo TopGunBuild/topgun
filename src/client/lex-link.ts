@@ -87,13 +87,13 @@ export class TGLexLink extends TGLink
                 `Limit exceeds the maximum allowed. The maximum length is ${this.maxLimit}`
             );
         }
-        (this.optionsGet as object)['%'] = value;
+        this.optionsGet['%'] = value;
         return this;
     }
 
     reverse(value = true): TGLexLink
     {
-        (this.optionsGet as object)['-'] = value;
+        this.optionsGet['-'] = value;
         return this;
     }
 
@@ -104,7 +104,7 @@ export class TGLexLink extends TGLink
 
     toString(): string
     {
-        return JSON.stringify(this.optionsGet);
+        return JSON.stringify(this.optionsGet || {});
     }
 
     getQuery(): TGOptionsGet
@@ -129,7 +129,7 @@ export class TGLexLink extends TGLink
     private _setLex(key: KeyOfLex, value: ValueOfLex): void
     {
         this._persistOptions();
-        (this.optionsGet as object)['.'][key] = value;
+        this.optionsGet['.'][key] = value;
     }
 
     private _persistOptions(): void
