@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>TopGun LEX</title>
+
+    <style>
+        body {
+            color: #fff;
+            background: #03a9f4;
+            padding: 0.5rem;
+        }
+
+        * {
+            border: 0;
+            outline: none;
+        }
+
+        button, input[type=button], input[type=submit] {
+            cursor: pointer;
+        }
+
+        button:hover, input[type=button]:hover, input[type=submit]:hover {
+            opacity: 0.9;
+        }
+
+        input, button {
+            border-left: 8px solid #afafaf87;
+            margin: 4px;
+            line-height: 24px;
+            padding-left: .5rem;
+        }
+
+        #code {
+            background-color: #292929;
+            color: rgba(255, 255, 255, .7);
+            padding: 20px;
+            width: 600px;
+            border-radius: 8px;
+            margin-bottom: 18px;
+        }
+
+        ul {
+            padding: 0;
+        }
+
+        li {
+            display: flex;
+        }
+
+        li span {
+            width: 150px;
+            word-break: break-all;
+        }
+
+        img {
+            height: 20px;
+            margin-left: 8px;
+            cursor: pointer;
+        }
+
+        input {
+            width: 150px;
+            margin-right: 8px;
+        }
+
+        input[type='checkbox'] {
+            width: auto;
+        }
+    </style>
+</head>
+<body>
+
+<h1>Realtime Updates:</h1>
+
+<div><input id="input">
+    <button onclick="set()">Add</button>
+</div>
+
+<h4>Filtered</h4>
+<ul id="filtered"></ul>
+
+<h4>All</h4>
+<ul id="all"></ul>
+
+<script src="../dist/client.global.js"></script>
+<script>
+    // Instances
+    const client = new TopGun.TGClient({
+        peers: ['http://localhost:8765'],
+    });
+    const chat = client.get('chat');
+
+    // Set to graph
+    function set()
+    {
+        const input = document.getElementById('input');
+
+        client
+            .get('chat')
+            // .get(new Date().toISOString())
+            .get(`data-${input.value}`)
+            .put({
+                message: input.value
+            });
+
+        input.value = '';
+    }
+
+    // Listen to a list of data on 'said' path in user private space
+    client
+        .get('chat')
+        .start(`data-1`)
+        .end('data-3')
+        .map()
+        .on((data, id) =>
+        {
+            const elId = 'filtered-' + id;
+            if (!document.getElementById(elId))
+            {
+                document.querySelector('ul#filtered').insertAdjacentHTML('beforeend', `<li id="${elId}"></li>`);
+            }
+            document.getElementById(elId).textContent = data.message;
+            console.log('[TopGun] filtered', id, data);
+        });
+
+    client
+        .get('chat')
+        .map()
+        .on((data, id) =>
+        {
+            const elId = 'all-' + id;
+            if (!document.getElementById(elId))
+            {
+                document.querySelector('ul#all').insertAdjacentHTML('beforeend', `<li id="${elId}"></li>`);
+            }
+            document.getElementById(elId).textContent = data.message;
+            console.log('[TopGun] all', id, data);
+        });
+</script>
+</body>
+</html>
