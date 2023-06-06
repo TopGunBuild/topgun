@@ -1,6 +1,6 @@
-import { TGNode } from '../types';
+import { TGNode, TGStorage } from '../types';
 
-export class MemoryStorage
+export class MemoryStorage implements TGStorage
 {
     constructor(
         protected map = new Map<string, TGNode>(),
