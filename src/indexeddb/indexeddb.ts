@@ -1,4 +1,6 @@
-export class IndexedDb
+import { TGStorage } from '../types';
+
+export class IndexedDb implements TGStorage
 {
     private _dbp: Promise<IDBDatabase>|undefined;
     readonly _dbName: string;
@@ -36,7 +38,7 @@ export class IndexedDb
         }).then(() => req.result);
     }
 
-    set(key: IDBValidKey, value: any): Promise<void>
+    put(key: IDBValidKey, value: any): Promise<void>
     {
         return this._withIDBStore('readwrite', (store) =>
         {

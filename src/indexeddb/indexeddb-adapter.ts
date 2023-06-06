@@ -174,7 +174,7 @@ export async function writeRawGraph(
                 continue;
             }
 
-            await db.set(soul, nodeToWrite);
+            await db.put(soul, nodeToWrite);
         }
 
         return true;
