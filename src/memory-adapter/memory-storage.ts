@@ -1,4 +1,5 @@
-import { TGNode, TGStorage } from '../types';
+import { TGNode } from '../types';
+import { TGStorage } from '../storage';
 
 export class MemoryStorage implements TGStorage
 {

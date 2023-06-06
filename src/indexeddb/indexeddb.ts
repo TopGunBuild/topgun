@@ -1,4 +1,4 @@
-import { TGStorage } from '../types';
+import { TGStorage } from '../storage';
 
 export class IndexedDb implements TGStorage
 {
