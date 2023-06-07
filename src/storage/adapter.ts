@@ -1,5 +1,6 @@
-import { TGStorage } from './types';
-import { TGGraphData, TGNode, TGOptionsGet } from '../types';
+import { cloneValue, isNumber, isString, isObject } from 'topgun-typed';
+import { StorageListOptions, TGStorage } from './types';
+import { LEX, TGGraphData, TGNode, TGOptionsGet } from '../types';
 import { diffCRDT, mergeGraph } from '../crdt';
 import { DEFAULT_CRDT_OPTS } from '../indexeddb/indexeddb-adapter';
 
@@ -7,12 +8,64 @@ export async function getNodes(
     db: TGStorage,
     soul: string,
     opts?: TGOptionsGet
-): Promise<TGNode|null>
+): Promise<TGGraphData>
 {
-    return db.get<TGNode>(soul);
+    const lexQuery: LEX|undefined  = opts && opts['.'];
+    const limit: number|undefined  = opts && opts['%'];
+    const prefix: string|undefined = lexQuery && lexQuery['*'];
+    const start: string|undefined  = lexQuery && lexQuery['>'];
+    const end: string|undefined    = lexQuery && lexQuery['<'];
+
+    soul = soul || (opts && opts['#']);
+
+    if (isString(prefix) || isString(start) || isString(end))
+    {
+        const options: StorageListOptions = {};
+        const getPath                     = (path: string) => [soul, path].join('/');
+
+        if (start)
+        {
+            options.start = getPath(start);
+        }
+        if (end)
+        {
+            options.end = getPath(end);
+        }
+        if (prefix)
+        {
+            options.prefix = getPath(prefix);
+        }
+        if (limit)
+        {
+            options.limit = limit;
+        }
+
+        return await getList(db, options);
+    }
+
+    return {
+        [soul]: (await db.get(soul) || null)
+    };
 }
 
-export async function patchGraph(
+async function getList(db: TGStorage, options: StorageListOptions): Promise<TGGraphData>
+{
+    if (options.limit !== undefined && options.limit <= 0)
+    {
+        throw new TypeError('List limit must be positive.');
+    }
+    if (options.start !== undefined)
+    {
+        if (options.limit !== undefined)
+        {
+            options.limit++;
+        }
+    }
+
+
+}
+
+async function patchGraph(
     db: TGStorage,
     data: TGGraphData,
     opts = DEFAULT_CRDT_OPTS,
@@ -44,7 +97,7 @@ export async function patchGraph(
     return Object.keys(diff).length ? diff : null;
 }
 
-export async function patchGraphFull(
+async function patchGraphFull(
     db: TGStorage,
     data: TGGraphData,
     opts = DEFAULT_CRDT_OPTS,
@@ -69,7 +122,7 @@ export async function patchGraphFull(
     }
 }
 
-export async function getPatchDiff(
+async function getPatchDiff(
     db: TGStorage,
     data: TGGraphData,
     opts = DEFAULT_CRDT_OPTS,
@@ -109,7 +162,7 @@ export async function getPatchDiff(
     };
 }
 
-export async function getExisting(
+async function getExisting(
     db: TGStorage,
     data: TGGraphData,
 ): Promise<TGGraphData>
@@ -129,7 +182,7 @@ export async function getExisting(
     return existingData;
 }
 
-export async function writeRawGraph(
+async function writeRawGraph(
     db: TGStorage,
     data: TGGraphData,
 ): Promise<boolean>

@@ -1,5 +1,7 @@
-import { TGNode } from '../types';
-import { TGStorage } from '../storage';
+import { isNumber } from 'topgun-typed';
+import { TGGraphData, TGNode } from '../types';
+import { StorageListOptions, TGStorage } from '../storage';
+import { lexicographicCompare, listFilterMatch } from '../storage/utils';
 
 export class MemoryStorage implements TGStorage
 {
@@ -9,14 +11,24 @@ export class MemoryStorage implements TGStorage
     {
     }
 
-    putSync(key: string, value: TGNode): void
+    list(options: StorageListOptions): Promise<TGGraphData>
     {
-        this.map.set(key, value);
-    }
+        const direction = options?.reverse ? -1 : 1;
+        let keys        = Array.from(this.map.keys())
+            .filter(key => listFilterMatch(options, key))
+            .sort((a, b) => direction * lexicographicCompare(a, b));
 
-    getSync(key: string): TGNode|null
-    {
-        return this.map.get(key) || null;
+        if (isNumber(options?.limit) && keys.length > options?.limit)
+        {
+            keys = keys.slice(0, options.limit);
+        }
+
+        const result = keys.reduce((accum: TGGraphData, key: string) =>
+        {
+            return { ...accum, [key]: this.map.get(key) }
+        }, {});
+
+        return Promise.resolve(result);
     }
 
     put(key: string, value: TGNode): Promise<void>
@@ -27,5 +39,15 @@ export class MemoryStorage implements TGStorage
     get(key: string): Promise<TGNode>
     {
         return Promise.resolve(this.getSync(key));
+    }
+
+    putSync(key: string, value: TGNode): void
+    {
+        this.map.set(key, value);
+    }
+
+    getSync(key: string): TGNode|null
+    {
+        return this.map.get(key) || null;
     }
 }
