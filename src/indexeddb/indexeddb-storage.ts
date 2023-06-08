@@ -1,6 +1,9 @@
-import { TGStorage } from '../storage';
+import { isNumber } from 'topgun-typed';
+import { StorageListOptions, TGStorage } from '../storage';
+import { lexicographicCompare, listFilterMatch } from '../storage/utils';
+import { TGGraphData } from '../types';
 
-export class IndexedDb implements TGStorage
+export class IndexedDBStorage implements TGStorage
 {
     private _dbp: Promise<IDBDatabase>|undefined;
     readonly _dbName: string;
@@ -29,13 +32,19 @@ export class IndexedDb implements TGStorage
         }).then(() => req.result);
     }
 
-    getALlKeys(): Promise<string[]>
+    async list<Type>(options: StorageListOptions): Promise<Type>
     {
-        let req: IDBRequest;
-        return this._withIDBStore('readwrite', (store) =>
+        const direction = options?.reverse ? -1 : 1;
+        let keys        = (await this.getAllKeys())
+            .filter(key => listFilterMatch(options, key))
+            .sort((a, b) => direction * lexicographicCompare(a, b));
+
+        if (isNumber(options?.limit) && keys.length > options?.limit)
         {
-            req = store.getAll();
-        }).then(() => req.result);
+            keys = keys.slice(0, options.limit);
+        }
+
+        return keys.reduce((accum: Type, key: string) => ({ ...accum, [key]: this.get(key) }), {} as Type);
     }
 
     put(key: IDBValidKey, value: any): Promise<void>
@@ -44,6 +53,15 @@ export class IndexedDb implements TGStorage
         {
             store.put(value, key);
         });
+    }
+
+    getAllKeys(): Promise<string[]>
+    {
+        let req: IDBRequest;
+        return this._withIDBStore('readwrite', (store) =>
+        {
+            req = store.getAll();
+        }).then(() => req.result);
     }
 
     update(key: IDBValidKey, updater: (val: any) => any): Promise<void>

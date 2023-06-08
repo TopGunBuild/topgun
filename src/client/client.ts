@@ -8,7 +8,7 @@ import { createConnector, TGWebSocketGraphConnector } from './transports/web-soc
 import { TGSocketClientOptions } from 'topgun-socket/client';
 import { TGUserApi } from './user-api';
 import { pubFromSoul, unpackGraph } from '../sea';
-import { TGIndexedDbConnector } from '../indexeddb/indexeddb-connector';
+import { TGIndexedDBConnector } from '../indexeddb/indexeddb-connector';
 import { TGNode, TGUserReference, SystemEvent } from '../types';
 import { TGEvent } from './control-flow/event';
 import { TGLexLink } from './lex-link';
@@ -99,7 +99,7 @@ export class TGClient
         }
         if (options.persistStorage)
         {
-            this.useConnector(new TGIndexedDbConnector(options.storageKey));
+            this.useConnector(new TGIndexedDBConnector(options.storageKey));
         }
         if (Array.isArray(options.connectors))
         {
