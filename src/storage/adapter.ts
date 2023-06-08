@@ -1,15 +1,19 @@
 import { isNumber, isString } from 'topgun-typed';
 import { StorageListOptions, TGStorage } from './types';
-import { LEX, TGGraphAdapter, TGGraphData, TGOptionsGet } from '../types';
+import { LEX, TGGraphAdapter, TGGraphAdapterOptions, TGGraphData, TGOptionsGet } from '../types';
 import { diffCRDT, mergeGraph } from '../crdt';
-import { DEFAULT_CRDT_OPTS } from '../indexeddb/indexeddb-adapter';
 import { assertPutEntry } from './utils';
 
-export function createGraphAdapter(storage: TGStorage): TGGraphAdapter
+const DEFAULT_CRDT_OPTS = {
+    diffFn : diffCRDT,
+    mergeFn: mergeGraph,
+};
+
+export function createGraphAdapter(storage: TGStorage, adapterOptions?: TGGraphAdapterOptions): TGGraphAdapter
 {
     return {
         get: (soul: string, opts?: TGOptionsGet) => get(storage, soul, opts),
-        put: (graphData: TGGraphData) => put(storage, graphData),
+        put: (graphData: TGGraphData) => put(storage, graphData, adapterOptions),
     };
 }
 
@@ -82,7 +86,8 @@ async function getList(db: TGStorage, options: StorageListOptions): Promise<TGGr
 async function put(
     db: TGStorage,
     data: TGGraphData,
-    opts = DEFAULT_CRDT_OPTS,
+    adapterOptions?: TGGraphAdapterOptions,
+    crdtOptions = DEFAULT_CRDT_OPTS,
 ): Promise<TGGraphData|null>
 {
     const diff: TGGraphData = {};
@@ -99,7 +104,8 @@ async function put(
             {
                 [soul]: data[soul],
             },
-            opts,
+            adapterOptions,
+            crdtOptions,
         );
 
         if (nodeDiff)
@@ -114,12 +120,13 @@ async function put(
 async function patchGraphFull(
     db: TGStorage,
     data: TGGraphData,
-    opts = DEFAULT_CRDT_OPTS,
+    adapterOptions?: TGGraphAdapterOptions,
+    crdtOptions = DEFAULT_CRDT_OPTS,
 ): Promise<TGGraphData|null>
 {
     while (true)
     {
-        const patchDiffData = await getPatchDiff(db, data, opts);
+        const patchDiffData = await getPatchDiff(db, data, crdtOptions);
 
         if (!patchDiffData)
         {
@@ -127,7 +134,7 @@ async function patchGraphFull(
         }
         const { diff, toWrite } = patchDiffData;
 
-        if (await writeRawGraph(db, toWrite))
+        if (await writeRawGraph(db, toWrite, adapterOptions))
         {
             return diff;
         }
@@ -139,14 +146,14 @@ async function patchGraphFull(
 async function getPatchDiff(
     db: TGStorage,
     data: TGGraphData,
-    opts = DEFAULT_CRDT_OPTS,
+    crdtOptions = DEFAULT_CRDT_OPTS,
 ): Promise<null|{
         readonly diff: TGGraphData;
         readonly existing: TGGraphData;
         readonly toWrite: TGGraphData;
     }>
 {
-    const { diffFn = diffCRDT, mergeFn = mergeGraph } = opts;
+    const { diffFn = diffCRDT, mergeFn = mergeGraph } = crdtOptions;
     const existing                                    = await getExisting(db, data);
     const graphDiff                                   = diffFn(data, existing);
 
@@ -199,6 +206,7 @@ async function getExisting(
 async function writeRawGraph(
     db: TGStorage,
     data: TGGraphData,
+    adapterOptions?: TGGraphAdapterOptions
 ): Promise<boolean>
 {
     try
@@ -218,7 +226,7 @@ async function writeRawGraph(
                 continue;
             }
 
-            assertPutEntry(soul, nodeToWrite);
+            assertPutEntry(soul, nodeToWrite, adapterOptions);
             await db.put(soul, nodeToWrite);
         }
 

@@ -49,9 +49,13 @@ export class TGLexLink extends TGLink
             }
             return this;
         }
-        else
+        else if (isString(keyOrOptions))
         {
             return new TGLink(this._chain, keyOrOptions as string, this);
+        }
+        else
+        {
+            throw Error('Get path must be string or query object.');
         }
     }
 
@@ -70,12 +74,6 @@ export class TGLexLink extends TGLink
     prefix(value: string): TGLexLink
     {
         this._setLex('*', value);
-        return this;
-    }
-
-    equals(value: string): TGLexLink
-    {
-        this._setLex('=', value);
         return this;
     }
 

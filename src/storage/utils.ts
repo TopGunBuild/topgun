@@ -1,38 +1,41 @@
+import { isNumber } from 'topgun-typed';
 import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from './constants';
-import { TGNode } from '../types';
+import { TGGraphAdapterOptions, TGNode } from '../types';
 import { TextEncoder } from '../sea/shims';
 import { StorageListOptions } from './types';
 
 const encoder = new TextEncoder();
 
-export function assertPutEntry(soul: string, node: TGNode): void
+export function assertPutEntry(soul: string, node: TGNode, options: TGGraphAdapterOptions): void
 {
-    assertKeySize(soul);
-    assertValueSize(node, soul)
+    const maxKeySize = isNumber(options?.maxKeySize) ? options.maxKeySize : MAX_KEY_SIZE;
+    const maxValueSize = isNumber(options?.maxValueSize) ? options.maxValueSize : MAX_VALUE_SIZE;
+    assertKeySize(soul, maxKeySize);
+    assertValueSize(node, maxValueSize, soul)
 }
 
-export function assertKeySize(key: string): void
+export function assertKeySize(key: string, maxKeySize: number): void
 {
-    if (new Blob([key]).size <= MAX_KEY_SIZE)
+    if (new Blob([key]).size <= maxKeySize)
     {
         return;
     }
-    throw new RangeError( `Key "${key}" is larger than the limit of ${MAX_KEY_SIZE} bytes.`);
+    throw new RangeError( `Key "${key}" is larger than the limit of ${maxKeySize} bytes.`);
 }
 
-export function assertValueSize(value: TGNode, key?: string): void
+export function assertValueSize(value: TGNode, maxValueSize: number, key?: string): void
 {
-    if (roughSizeOfObject(value) <= MAX_VALUE_SIZE)
+    if (roughSizeOfObject(value) <= maxValueSize)
     {
         return;
     }
     if (key !== undefined)
     {
         throw new RangeError(
-            `Value for key "${key}" is above the limit of ${MAX_VALUE_SIZE} bytes.`
+            `Value for key "${key}" is above the limit of ${maxValueSize} bytes.`
         );
     }
-    throw new RangeError(`Values cannot be larger than ${MAX_VALUE_SIZE} bytes.`);
+    throw new RangeError(`Values cannot be larger than ${maxValueSize} bytes.`);
 }
 
 function roughSizeOfObject(object: object): number

@@ -1,7 +1,7 @@
 import { TGSocketServerOptions } from 'topgun-socket/server';
-import { TGGraphAdapter } from '../types';
+import { TGGraphAdapter, TGGraphAdapterOptions } from '../types';
 
-export interface TGServerOptions extends TGSocketServerOptions
+export interface TGServerOptions extends TGSocketServerOptions, TGGraphAdapterOptions
 {
     disableValidation?: boolean;
     authMaxDrift?: number;

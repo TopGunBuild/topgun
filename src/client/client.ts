@@ -1,4 +1,4 @@
-import { isObject, isString } from 'topgun-typed';
+import { isObject, isString, unwrap } from 'topgun-typed';
 import { diffCRDT } from '../crdt';
 import { TGLink } from './link';
 import { TGGraph } from './graph/graph';
@@ -99,7 +99,7 @@ export class TGClient
         }
         if (options.persistStorage)
         {
-            this.useConnector(new TGIndexedDBConnector(options.storageKey));
+            this.useConnector(new TGIndexedDBConnector(options.storageKey, options));
         }
         if (Array.isArray(options.connectors))
         {
@@ -116,6 +116,10 @@ export class TGClient
      */
     get(soul: string): TGLexLink
     {
+        if (!isString(soul))
+        {
+            throw Error('Get path must be string.');
+        }
         return new TGLexLink(this, soul);
     }
 

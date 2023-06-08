@@ -25,7 +25,7 @@ export class TGServer
     {
         this.options         = isObject(options) ? options : {};
         this.validator       = createValidator();
-        this.internalAdapter = this.options.adapter || createMemoryAdapter();
+        this.internalAdapter = this.options.adapter || createMemoryAdapter(options);
         this.adapter         = this.wrapAdapter(this.internalAdapter);
         this.server          = listen(this.options.port, this.options);
         this.middleware      = new Middleware(this.server, this.options, this.adapter);
