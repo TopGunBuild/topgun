@@ -1,7 +1,6 @@
 import { isNumber } from 'topgun-typed';
 import { StorageListOptions, TGStorage } from '../storage';
 import { lexicographicCompare, listFilterMatch } from '../storage/utils';
-import { TGGraphData } from '../types';
 
 export class IndexedDBStorage implements TGStorage
 {
