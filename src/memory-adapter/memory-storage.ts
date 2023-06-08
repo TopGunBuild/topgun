@@ -23,10 +23,7 @@ export class MemoryStorage implements TGStorage
             keys = keys.slice(0, options.limit);
         }
 
-        const result = keys.reduce((accum: TGGraphData, key: string) =>
-        {
-            return { ...accum, [key]: this.map.get(key) }
-        }, {});
+        const result = keys.reduce((accum: TGGraphData, key: string) => ({ ...accum, [key]: this.map.get(key) }), {});
 
         return Promise.resolve(result);
     }

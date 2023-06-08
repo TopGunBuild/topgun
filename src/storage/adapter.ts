@@ -1,10 +1,19 @@
-import { cloneValue, isNumber, isString, isObject } from 'topgun-typed';
+import { isNumber, isString } from 'topgun-typed';
 import { StorageListOptions, TGStorage } from './types';
-import { LEX, TGGraphData, TGNode, TGOptionsGet } from '../types';
+import { LEX, TGGraphAdapter, TGGraphData, TGOptionsGet } from '../types';
 import { diffCRDT, mergeGraph } from '../crdt';
 import { DEFAULT_CRDT_OPTS } from '../indexeddb/indexeddb-adapter';
+import { assertPutEntry } from './utils';
 
-export async function getNodes(
+export function createGraphAdapter(storage: TGStorage): TGGraphAdapter
+{
+    return {
+        get: (soul: string, opts?: TGOptionsGet) => get(storage, soul, opts),
+        put: (graphData: TGGraphData) => put(storage, graphData),
+    };
+}
+
+async function get(
     db: TGStorage,
     soul: string,
     opts?: TGOptionsGet
@@ -43,29 +52,34 @@ export async function getNodes(
         return await getList(db, options);
     }
 
-    return {
-        [soul]: (await db.get(soul) || null)
-    };
+    if (isString(soul))
+    {
+        return {
+            [soul]: (await db.get(soul) || null)
+        };
+    }
+
+    return {};
 }
 
 async function getList(db: TGStorage, options: StorageListOptions): Promise<TGGraphData>
 {
-    if (options.limit !== undefined && options.limit <= 0)
+    if (isNumber(options.limit) && options.limit <= 0)
     {
         throw new TypeError('List limit must be positive.');
     }
-    if (options.start !== undefined)
+    if (isNumber(options.start))
     {
-        if (options.limit !== undefined)
+        if (isNumber(options.limit))
         {
             options.limit++;
         }
     }
 
-
+    return await db.list(options);
 }
 
-async function patchGraph(
+async function put(
     db: TGStorage,
     data: TGGraphData,
     opts = DEFAULT_CRDT_OPTS,
@@ -141,7 +155,7 @@ async function getPatchDiff(
         return null;
     }
 
-    const existingFromDiff: any = {};
+    const existingFromDiff: TGGraphData = {};
 
     for (const soul in graphDiff)
     {
@@ -204,6 +218,7 @@ async function writeRawGraph(
                 continue;
             }
 
+            assertPutEntry(soul, nodeToWrite);
             await db.put(soul, nodeToWrite);
         }
 

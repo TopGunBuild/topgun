@@ -5,21 +5,27 @@ import { StorageListOptions } from './types';
 
 const encoder = new TextEncoder();
 
-export function assertKeySize(key: string, many = false): void
+export function assertPutEntry(soul: string, node: TGNode): void
 {
-    if (new Blob([key]).size <= MAX_KEY_SIZE) return;
-    if (many)
+    assertKeySize(soul);
+    assertValueSize(node, soul)
+}
+
+export function assertKeySize(key: string): void
+{
+    if (new Blob([key]).size <= MAX_KEY_SIZE)
     {
-        throw new RangeError(
-            `Key "${key}" is larger than the limit of ${MAX_KEY_SIZE} bytes.`
-        );
+        return;
     }
-    throw new RangeError(`Keys cannot be larger than ${MAX_KEY_SIZE} bytes.`);
+    throw new RangeError( `Key "${key}" is larger than the limit of ${MAX_KEY_SIZE} bytes.`);
 }
 
 export function assertValueSize(value: TGNode, key?: string): void
 {
-    if (roughSizeOfObject(value) <= MAX_VALUE_SIZE) return;
+    if (roughSizeOfObject(value) <= MAX_VALUE_SIZE)
+    {
+        return;
+    }
     if (key !== undefined)
     {
         throw new RangeError(
