@@ -1,11 +1,13 @@
-import { isDefined, isNotEmptyObject, isObject } from 'topgun-typed';
+import { isDefined, isFunction, isNotEmptyObject, isNumber, isObject } from 'topgun-typed';
 import {
+    SystemEvent,
     TGChainOptions,
-    TGOnCb,
     TGMessageCb,
+    TGOnCb,
     TGOptionsGet,
     TGOptionsPut,
-    TGValue, TGUserReference,
+    TGUserReference,
+    TGValue,
 } from '../types';
 import { TGClient } from './client';
 import { TGEvent } from './control-flow/event';
@@ -14,6 +16,7 @@ import { TGGraph } from './graph/graph';
 import { pubFromSoul } from '../sea';
 import { match } from '../utils/match';
 import { LEX } from '../types/lex';
+import { assertFn, assertNotEmptyString } from '../utils/assert';
 
 export class TGLink
 {
@@ -92,7 +95,7 @@ export class TGLink
      */
     get(key: string): TGLink
     {
-        return new (this.constructor as any)(this._chain, key, this);
+        return new (this.constructor as any)(this._chain, assertNotEmptyString(key), this);
     }
 
     /**
@@ -211,7 +214,7 @@ export class TGLink
 
     opt(options?: TGChainOptions): TGChainOptions
     {
-        if (options)
+        if (isObject(options))
         {
             this._opt = { ...this._opt, ...options };
         }
@@ -224,6 +227,7 @@ export class TGLink
 
     once(cb: TGOnCb): TGLink
     {
+        cb = assertFn<TGOnCb>(cb);
         this.promise().then(val => cb(val, this.key));
         return this;
     }
@@ -232,7 +236,7 @@ export class TGLink
     {
         const callback = (val, key) =>
         {
-            if (isDefined(val))
+            if (isDefined(val) && isFunction(cb))
             {
                 cb(val, key);
             }
@@ -288,7 +292,7 @@ export class TGLink
             };
             this._on(cb);
 
-            if (opts.timeout)
+            if (isNumber(opts.timeout))
             {
                 setTimeout(() => cb(undefined), opts.timeout);
             }
@@ -354,7 +358,7 @@ export class TGLink
 
         if (this.userPubExpected())
         {
-            this._chain.promise<TGUserReference>('auth').then((value) =>
+            this._chain.promise<TGUserReference>(SystemEvent.auth).then((value) =>
             {
                 this._setUserPub(value.pub);
                 handler();

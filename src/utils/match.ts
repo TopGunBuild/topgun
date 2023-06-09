@@ -7,10 +7,6 @@ export function match(template: string, options: LEX|string): boolean
     {
         return false;
     }
-    else if (isString(options))
-    {
-        options = { '=': options };
-    }
     else if (!isObject(options))
     {
         options = {};

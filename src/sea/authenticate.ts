@@ -41,8 +41,7 @@ export async function authenticateAccount(
     try
     {
         const proof = await work(password, ident.auth.s, { encode: encoding });
-
-        decrypted = await decrypt(ident.auth.ek, proof, {
+        decrypted   = await decrypt(ident.auth.ek, proof, {
             encode: encoding,
         });
     }

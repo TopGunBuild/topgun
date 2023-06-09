@@ -19,6 +19,7 @@ import {
 } from '../types';
 import { TGLexLink } from './lex-link';
 import { DEFAULT_OPTIONS } from './client-options';
+import { assertCredentials, assertNotEmptyString } from '../utils/assert';
 
 export class TGUserApi
 {
@@ -193,6 +194,7 @@ export class TGUserApi
      */
     get(soul: string): TGLexLink
     {
+        soul = assertNotEmptyString(soul);
         return !!this.is
             ? this._client.get(`~${this.is.pub}/${soul}`)
             : this._client.get(`~${this._client.WAIT_FOR_USER_PUB}/${soul}`);
@@ -232,6 +234,8 @@ export class TGUserApi
         readonly pub: string;
     }
     {
+        credentials  = assertCredentials(credentials);
+
         this.leave();
         this._signMiddleware = graphSigner(this._client, {
             priv: credentials.priv,

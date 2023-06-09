@@ -3,6 +3,7 @@ import { TGLink } from './link';
 import { LEX } from '../types/lex';
 import { TGClient } from './client';
 import { TGOptionsGet, TGValue } from '../types';
+import { assertBoolean, assertNotEmptyString, assertNumber } from '../utils/assert';
 
 type KeyOfLex = keyof LEX;
 type ValueOfLex = LEX[KeyOfLex];
@@ -61,19 +62,19 @@ export class TGLexLink extends TGLink
 
     start(value: string): TGLexLink
     {
-        this._setLex('>', value);
+        this._setLex('>', assertNotEmptyString(value));
         return this;
     }
 
     end(value: string): TGLexLink
     {
-        this._setLex('<', value);
+        this._setLex('<', assertNotEmptyString(value));
         return this;
     }
 
     prefix(value: string): TGLexLink
     {
-        this._setLex('*', value);
+        this._setLex('*', assertNotEmptyString(value));
         return this;
     }
 
@@ -85,13 +86,13 @@ export class TGLexLink extends TGLink
                 `Limit exceeds the maximum allowed. The maximum length is ${this.maxLimit}`
             );
         }
-        this.optionsGet['%'] = value;
+        this.optionsGet['%'] = assertNumber(value);
         return this;
     }
 
     reverse(value = true): TGLexLink
     {
-        this.optionsGet['-'] = value;
+        this.optionsGet['-'] = assertBoolean(value);
         return this;
     }
 

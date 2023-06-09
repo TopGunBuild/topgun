@@ -1,6 +1,8 @@
 import { LEX } from './lex';
 
-export type SystemEvent = 'auth';
+export enum SystemEvent {
+    auth = 'auth'
+}
 
 /**
  * Timestamp of last change for each attribute

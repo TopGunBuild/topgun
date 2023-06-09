@@ -1,4 +1,4 @@
-import { isObject, isString, unwrap } from 'topgun-typed';
+import { isObject, isString, isFunction, enums, unwrap } from 'topgun-typed';
 import { diffCRDT } from '../crdt';
 import { TGLink } from './link';
 import { TGGraph } from './graph/graph';
@@ -14,6 +14,7 @@ import { TGEvent } from './control-flow/event';
 import { TGLexLink } from './lex-link';
 import { match } from '../utils/match';
 import { wait } from '../utils/wait';
+import { assertNotEmptyString, assertObject } from '../utils/assert';
 
 /**
  * Main entry point for TopGun in browser
@@ -71,6 +72,10 @@ export class TGClient
                     ? pubFromSoul(pubOrNode)
                     : pubOrNode;
             }
+            else
+            {
+                throw Error('Argument must be public key or node!');
+            }
 
             return this.get('~' + this.pub);
         }
@@ -91,6 +96,7 @@ export class TGClient
      */
     opt(options: TGClientOptions): TGClient
     {
+        options      = assertObject(options);
         this.options = { ...this.options, ...options };
 
         if (Array.isArray(options.peers))
@@ -116,11 +122,7 @@ export class TGClient
      */
     get(soul: string): TGLexLink
     {
-        if (!isString(soul))
-        {
-            throw Error('Get path must be string.');
-        }
-        return new TGLexLink(this, soul);
+        return new TGLexLink(this, assertNotEmptyString(soul));
     }
 
     /**
@@ -128,12 +130,18 @@ export class TGClient
      */
     on(event: SystemEvent, cb: (value) => void, once = false): TGClient
     {
-        switch (event)
+        const struct = enums(SystemEvent);
+        const actual = struct(event);
+
+        switch (unwrap(actual))
         {
         case 'auth':
             const _cb = (value) =>
             {
-                cb(value);
+                if (isFunction(cb))
+                {
+                    cb(value);
+                }
                 if (once)
                 {
                     this._authEvent.off(_cb);
