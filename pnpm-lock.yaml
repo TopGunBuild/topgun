@@ -1,4 +1,8 @@
-lockfileVersion: '6.0'
+lockfileVersion: '6.1'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
 
 dependencies:
   topgun-buffer:
@@ -8,8 +12,8 @@ dependencies:
     specifier: 1.4.7
     version: 1.4.7
   topgun-typed:
-    specifier: 1.1.0
-    version: 1.1.0
+    specifier: 1.2.0
+    version: 1.2.0
   topgun-webcrypto:
     specifier: 1.0.5
     version: 1.0.5
@@ -5490,8 +5494,8 @@ packages:
       - utf-8-validate
     dev: false
 
-  /topgun-typed@1.1.0:
-    resolution: {integrity: sha512-kzwdvaFRI/X14VflD4NE1JYINJYXGt/uwb/KYmOLSens/+E85C6Lx91tL54ZvsnNhM0dvliIIQGV4xYSf+zwHA==}
+  /topgun-typed@1.2.0:
+    resolution: {integrity: sha512-gqxt+mb14uRrNOroK8dG/iJf3XkxpgwTzBf6FXXE0/g+HeZ05Z4gwkc1tChlFxwqc7nuv/yiKPqOgdRsvVtfuQ==}
     dev: false
 
   /topgun-webcrypto@1.0.5:

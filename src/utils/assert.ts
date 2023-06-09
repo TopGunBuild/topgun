@@ -1,4 +1,4 @@
-import { boolean, string, unwrap, number } from 'topgun-typed';
+import { boolean, string, unwrap, number, fn } from 'topgun-typed';
 
 export function assertBoolean(value: unknown, msg?: string): boolean
 {
@@ -21,9 +21,9 @@ export function assertNumber(value: unknown, msg?: string): number
     return unwrap(actual);
 }
 
-// export function assertObject(value: unknown, msg?: string): string
-// {
-//     const struct      = record(string(), any(null));
-//     const actual = struct(value);
-//     return unwrap(actual);
-// }
+export function assertFn<Type>(value: unknown, msg?: string): Type
+{
+    const struct = fn(msg);
+    const actual = struct(value);
+    return unwrap(actual) as Type;
+}
