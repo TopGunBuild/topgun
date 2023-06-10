@@ -38,9 +38,7 @@ export class TGGraph
     readonly id: string;
 
     readonly events: {
-        readonly graphData: TGEvent<TGGraphData,
-        string|undefined,
-        string|undefined>;
+        readonly graphData: TGEvent<TGGraphData, string|undefined, string|undefined>;
         readonly put: TGEvent<TGPut>;
         readonly get: TGEvent<TGGet>;
         readonly off: TGEvent<string>;
@@ -54,7 +52,7 @@ export class TGGraph
     private readonly _writeMiddleware: TGMiddleware[];
     private readonly _graph: TGGraphData;
     private readonly _nodes: {
-        [soul: string]: TGGraphNode;
+        [query: string]: TGGraphNode;
     };
 
     /**

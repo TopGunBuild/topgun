@@ -4,6 +4,7 @@ import { LEX } from '../types/lex';
 import { TGClient } from './client';
 import { TGOptionsGet, TGValue } from '../types';
 import { assertBoolean, assertNotEmptyString, assertNumber } from '../utils/assert';
+import { sortKeys } from '../utils/stringify-sort-keys';
 
 type KeyOfLex = keyof LEX;
 type ValueOfLex = LEX[KeyOfLex];
@@ -103,7 +104,7 @@ export class TGLexLink extends TGLink
 
     toString(): string
     {
-        return JSON.stringify(this.optionsGet || {});
+        return JSON.stringify(this.optionsGet || {}, sortKeys);
     }
 
     getQuery(): TGOptionsGet

@@ -8,6 +8,7 @@ import { TGGraph } from './graph';
 export class TGGraphNode
 {
     readonly soul: string;
+    readonly optionsGet: TGOptionsGet;
 
     private _endCurQuery?: () => void;
     private readonly _data: TGEvent<TGNode|undefined>;
@@ -22,15 +23,16 @@ export class TGGraphNode
      */
     constructor(
         graph: TGGraph,
-        soul: string,
+        optionsGet: TGOptionsGet,
         updateGraph: (data: TGGraphData, replyToId?: string) => void,
     )
     {
         this._onDirectQueryReply = this._onDirectQueryReply.bind(this);
-        this._data               = new TGEvent<TGNode|undefined>(`<GraphNode ${soul}>`);
+        this.soul                = optionsGet['#'];
+        this.optionsGet          = optionsGet;
         this._graph              = graph;
         this._updateGraph        = updateGraph;
-        this.soul                = soul;
+        this._data               = new TGEvent<TGNode|undefined>(`<GraphNode ${soul}>`);
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -42,13 +44,13 @@ export class TGGraphNode
         return this._data.listenerCount();
     }
 
-    get(cb?: TGNodeListenCb, opts?: TGOptionsGet): TGGraphNode
+    get(cb?: TGNodeListenCb): TGGraphNode
     {
         if (cb)
         {
             this.on(cb);
         }
-        this._ask(opts);
+        this._ask();
         return this;
     }
 
@@ -88,7 +90,7 @@ export class TGGraphNode
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private _ask(opts?: TGOptionsGet): TGGraphNode
+    private _ask(): TGGraphNode
     {
         if (this._endCurQuery)
         {
