@@ -1,6 +1,7 @@
-import { isNumber } from 'topgun-typed';
+import { isNumber, isString } from 'topgun-typed';
 import { StorageListOptions, TGStorage } from '../storage';
 import { lexicographicCompare, listFilterMatch } from '../storage/utils';
+import { TGNode } from '../types';
 
 export class IndexedDBStorage implements TGStorage
 {
@@ -34,16 +35,16 @@ export class IndexedDBStorage implements TGStorage
     async list<Type>(options: StorageListOptions): Promise<Type>
     {
         const direction = options?.reverse ? -1 : 1;
-        let keys        = (await this.getAllKeys())
-            .filter(key => listFilterMatch(options, key))
-            .sort((a, b) => direction * lexicographicCompare(a, b));
+        let nodes        = (await this.getAll())
+            .filter(node => node && node._ && isString(node._['#']) && listFilterMatch(options, node._['#']))
+            .sort((a, b) => direction * lexicographicCompare(a._['#'], b._['#']));
 
-        if (isNumber(options?.limit) && keys.length > options?.limit)
+        if (isNumber(options?.limit) && nodes.length > options?.limit)
         {
-            keys = keys.slice(0, options.limit);
+            nodes = nodes.slice(0, options.limit);
         }
 
-        return keys.reduce((accum: Type, key: string) => ({ ...accum, [key]: this.get(key) }), {} as Type);
+        return nodes.reduce((accum: Type, node: TGNode) => ({ ...accum, [node._['#']]: node }), {} as Type);
     }
 
     put(key: IDBValidKey, value: any): Promise<void>
@@ -54,12 +55,12 @@ export class IndexedDBStorage implements TGStorage
         });
     }
 
-    getAllKeys(): Promise<string[]>
+    getAll(): Promise<TGNode[]>
     {
         let req: IDBRequest;
         return this._withIDBStore('readwrite', (store) =>
         {
-            req = store.getAllKeys();
+            req = store.getAll();
         }).then(() => req.result);
     }
 
@@ -72,14 +73,6 @@ export class IndexedDBStorage implements TGStorage
             {
                 store.put(updater(req.result), key);
             };
-        });
-    }
-
-    del(key: IDBValidKey): Promise<void>
-    {
-        return this._withIDBStore('readwrite', (store) =>
-        {
-            store.delete(key);
         });
     }
 
