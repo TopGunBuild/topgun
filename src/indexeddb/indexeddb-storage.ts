@@ -59,7 +59,7 @@ export class IndexedDBStorage implements TGStorage
         let req: IDBRequest;
         return this._withIDBStore('readwrite', (store) =>
         {
-            req = store.getAll();
+            req = store.getAllKeys();
         }).then(() => req.result);
     }
 
