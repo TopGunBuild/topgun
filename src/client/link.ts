@@ -281,7 +281,7 @@ export class TGLink
         return this;
     }
 
-    promise(opts = { timeout: 0 }): Promise<TGValue>
+    promise(opts?: { timeout: number }): Promise<TGValue>
     {
         return new Promise<TGValue>((ok: (...args: any) => void) =>
         {
@@ -292,7 +292,7 @@ export class TGLink
             };
             this._on(cb);
 
-            if (isNumber(opts.timeout))
+            if (isNumber(opts?.timeout))
             {
                 setTimeout(() => cb(undefined), opts.timeout);
             }

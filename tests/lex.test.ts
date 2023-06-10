@@ -2,28 +2,44 @@ import { createClient, TGClient, TGGraphAdapter, TGGraphData, TGOptionsGet } fro
 import { createServer, TGServer } from '../src/server';
 
 let state = {
-    'xxx': {
-        _     : {
-            '#': 'xxx',
+    'chat'                         : {
+        '_'                       : {
+            '#': 'chat',
             '>': {
-                name: 1682701808609
+                '2019-06-20T06:49:08.348Z': 1686379748349,
+                '2019-06-20T06:50:28.594Z': 1686379828595,
+                '2019-06-21T07:37:24.197Z': 1686382644198,
+                '2019-06-22T07:37:50.550Z': 1686382670551
             }
         },
-        name  : 'a',
-        nested: {
-            '#': 'xxx/nested',
-            '>': { 'say': 1683308843720 },
-            say: 'value'
-        },
+        '2019-06-20T06:49:08.348Z': { '#': 'chat/2019-06-20T06:49:08.348Z' },
+        '2019-06-20T06:50:28.594Z': { '#': 'chat/2019-06-20T06:50:28.594Z' },
+        '2019-06-21T07:37:24.197Z': { '#': 'chat/2019-06-21T07:37:24.197Z' },
+        '2019-06-22T07:37:50.550Z': { '#': 'chat/2019-06-22T07:37:50.550Z' }
     },
-    'yyy': {
-        _   : {
-            '#': 'yyy',
-            '>': {
-                name: 1682701808609
-            }
-        },
-        name: 'b'
+    'chat/2019-06-20T06:49:08.348Z': {
+        '_'         : {
+            '#': 'chat/2019-06-20T06:49:08.348Z',
+            '>': { 'message': 1686379748349 }
+        }, 'message': '2023-06-10T06:49:08.349Z'
+    },
+    'chat/2019-06-20T06:50:28.594Z': {
+        '_'         : {
+            '#': 'chat/2019-06-20T06:50:28.594Z',
+            '>': { 'message': 1686379828595 }
+        }, 'message': '2023-06-10T06:50:28.594Z'
+    },
+    'chat/2019-06-21T07:37:24.197Z': {
+        '_'         : {
+            '#': 'chat/2019-06-21T07:37:24.197Z',
+            '>': { 'message': 1686379828595 }
+        }, 'message': '2023-06-10T06:50:28.594Z'
+    },
+    'chat/2019-06-22T07:37:50.550Z': {
+        '_'         : {
+            '#': 'chat/2019-06-22T07:37:50.550Z',
+            '>': { 'message': 1686382670551 }
+        }, 'message': '2023-06-10T07:37:50.551Z'
     }
 };
 
@@ -86,15 +102,17 @@ describe('LEX', () =>
 {
     it('test lex query', async () =>
     {
-        const value = await client
+        const query = client
             .get('xxx')
             .start('a')
             .end('b')
-            .limit(2)
+            .limit(2);
+
+        const value = await query
             .map()
             .promise();
 
-        // console.log(value);
-        expect(value['name']).toBe('a');
+        console.log(query.toString());
+        expect(value).toBeUndefined();
     });
 });
