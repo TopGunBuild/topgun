@@ -1,5 +1,3 @@
-import * as _shims from './shims';
-
 export * from './settings';
 export * from './unpack';
 export { authenticate, authenticateAccount } from './authenticate';
@@ -18,4 +16,3 @@ export { secret } from './secret';
 export { createPolicy, Policy } from './policy';
 export { verify, verifySignature, verifyHashSignature } from './verify';
 
-export const shims = _shims;

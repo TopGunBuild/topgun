@@ -1,10 +1,8 @@
 import { isNumber } from 'topgun-typed';
+import textEncoder from 'topgun-textencoder';
 import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from './constants';
 import { TGGraphAdapterOptions, TGNode } from '../types';
-import { TextEncoder } from '../sea/shims';
 import { StorageListOptions } from './types';
-
-const encoder = new TextEncoder();
 
 export function assertPutEntry(soul: string, node: TGNode, options: TGGraphAdapterOptions): void
 {
@@ -96,8 +94,8 @@ export function arrayCompare<T extends any[]|NodeJS.TypedArray>(
 // Compares x and y lexicographically using a UTF-8 collation
 export function lexicographicCompare(x: string, y: string): number
 {
-    const xEncoded = encoder.encode(x);
-    const yEncoded = encoder.encode(y);
+    const xEncoded = textEncoder.encode(x);
+    const yEncoded = textEncoder.encode(y);
     return arrayCompare(xEncoded, yEncoded);
 }
 

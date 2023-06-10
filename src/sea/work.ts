@@ -1,7 +1,8 @@
 import Buffer from 'topgun-buffer';
+import WebCrypto from 'topgun-webcrypto';
+import TextEncoder from 'topgun-textencoder';
 import { isObject, isString } from 'topgun-typed';
 import { pbkdf2 } from './settings';
-import { crypto, TextEncoder } from './shims';
 import { Pair } from './pair';
 import { pseudoRandomText } from './pseudo-random-text';
 
@@ -35,24 +36,24 @@ export async function work(
                       ? saltOrPair
                       : pseudoRandomText();
 
-    const key = await crypto.subtle.importKey(
+    const key = await WebCrypto.subtle.importKey(
         'raw',
-        new TextEncoder().encode(data),
+        TextEncoder.encode(data),
         { name: opt.name || DEFAULT_OPTS.name || '' },
         false,
         ['deriveBits'],
     );
-    const res = await crypto.subtle.deriveBits(
+    const res = await WebCrypto.subtle.deriveBits(
         {
             hash      : opt.hash || DEFAULT_OPTS.hash,
             iterations: opt.iterations || pbkdf2.iter,
             name      : opt.name || 'PBKDF2',
-            salt      : new TextEncoder().encode(salt),
+            salt      : TextEncoder.encode(salt),
         },
         key,
         opt.length || pbkdf2.ks * 8,
     );
-    return Buffer.from(res, 'binary').toString(
+    return Buffer.from(res).toString(
         opt.encode || DEFAULT_OPTS.encode,
     );
 }

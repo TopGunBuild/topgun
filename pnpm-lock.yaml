@@ -11,6 +11,9 @@ dependencies:
   topgun-socket:
     specifier: 1.4.7
     version: 1.4.7
+  topgun-textencoder:
+    specifier: ^1.0.1
+    version: 1.0.1
   topgun-typed:
     specifier: 1.2.0
     version: 1.2.0
@@ -5492,6 +5495,10 @@ packages:
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
+    dev: false
+
+  /topgun-textencoder@1.0.1:
+    resolution: {integrity: sha512-upc2+ZkRug9StMuQUlVHDhw4LuG0BCe96WoPShYYHb3/MfCzXRVkBV/3Sq8p0/st2MBWWDWK9eLDKz5QiLPkLg==}
     dev: false
 
   /topgun-typed@1.2.0:

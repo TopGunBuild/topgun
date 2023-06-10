@@ -1,8 +1,8 @@
 import Buffer from 'topgun-buffer';
+import WebCrypto from 'topgun-webcrypto';
 import { isString, isObject, isUndefined } from 'topgun-typed';
 import { check, ecdsa, jwk, parse } from './settings';
 import { sha256 } from './sha256';
-import { crypto } from './shims';
 import { pubFromSoul } from './soul';
 import { verify, VerifyData } from './verify';
 import { TGGraphData, TGNode, TGOptionsPut, TGValue } from '../types';
@@ -171,19 +171,19 @@ export async function signHash(
 {
     const { pub, priv } = pair;
     const token         = jwk(pub, priv);
-    const signKey       = await crypto.subtle.importKey(
+    const signKey       = await WebCrypto.subtle.importKey(
         'jwk',
         token,
         ecdsa.pair,
         false,
         ['sign'],
     );
-    const sig           = await crypto.subtle.sign(
+    const sig           = await WebCrypto.subtle.sign(
         ecdsa.sign,
         signKey,
         new Uint8Array(Buffer.from(hash, 'hex')),
     );
-    return Buffer.from(sig, 'binary').toString(encoding);
+    return Buffer.from(sig).toString(encoding);
 }
 
 export async function sign(data: string, pair: PairBase): Promise<string>;

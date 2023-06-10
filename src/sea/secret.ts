@@ -1,5 +1,5 @@
+import WebCrypto from 'topgun-webcrypto';
 import { Pair } from './pair';
-import { crypto } from './shims';
 
 const keysToEcdhJwk = (
     pub: string,
@@ -36,7 +36,7 @@ export async function secret(
         const [format, keyData, algorithm] = keysToEcdhJwk(pub);
         const props                        = Object.assign(
             {
-                public: await crypto.subtle.importKey(
+                public: await WebCrypto.subtle.importKey(
                     format,
                     keyData,
                     algorithm,
@@ -50,18 +50,18 @@ export async function secret(
             },
         );
         const privKeyData                  = keysToEcdhJwk(epub, epriv);
-        const derived                      = await crypto.subtle
+        const derived                      = await WebCrypto.subtle
             .importKey(...privKeyData, false, ['deriveBits'])
             .then(async (privKey) =>
             {
                 // privateKey scope doesn't leak out from here!
-                const derivedBits = await crypto.subtle.deriveBits(
+                const derivedBits = await WebCrypto.subtle.deriveBits(
                     props,
                     privKey,
                     256,
                 );
                 const rawBits     = new Uint8Array(derivedBits);
-                const derivedKey  = await crypto.subtle.importKey(
+                const derivedKey  = await WebCrypto.subtle.importKey(
                     'raw',
                     rawBits,
                     {
@@ -72,7 +72,7 @@ export async function secret(
                     ['encrypt', 'decrypt'],
                 );
 
-                return crypto.subtle
+                return WebCrypto.subtle
                     .exportKey('jwk', derivedKey)
                     .then(({ k }) => k);
             });
