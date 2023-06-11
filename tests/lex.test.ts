@@ -1,5 +1,6 @@
 import { createClient, TGClient, TGGraphAdapter, TGGraphData, TGOptionsGet } from '../src/client';
 import { createServer, TGServer } from '../src/server';
+import { flatten } from '../src/utils/data-walking';
 
 let state = {
     'chat'                         : {
@@ -114,5 +115,85 @@ describe('LEX', () =>
 
         console.log(query.toString());
         expect(value).toBeUndefined();
+    });
+
+    it('should walk', function ()
+    {
+        const pathArr   = ['widget'];
+        const data      = {
+            'debug' : 'on',
+            'window': {
+                'title' : 'Sample Konfabulator Widget',
+                'name'  : 'main_window',
+                'width' : 500,
+                'height': 500
+            }
+        };
+        const graphData = flatten(data, pathArr);
+
+        // console.log(
+        //     graphData
+        // );
+
+        const pathArr2   = ['widget', 'window'];
+        const data2      = {
+            'title': 'Sample Konfabulator Widget',
+        };
+        const graphData2 = flatten(data, pathArr);
+
+        // expect(graphData).not.toBeUndefined();
+        expect(graphData[pathArr2.join('/')])
+    });
+
+    it('should walk nested', function ()
+    {
+        const pathArr   = ['widget', 'window'];
+        const data      = {
+            'title': 'Sample Konfabulator Widget',
+        };
+        const graphData = flatten(data, pathArr);
+
+        console.log(
+            graphData
+        );
+
+        expect(graphData).not.toBeUndefined();
+    });
+
+    it('should walk nested 2', function ()
+    {
+        const pathArr   = ['widget', 'window', 'title'];
+        const data      = 'Sample Konfabulator Widget';
+        const graphData = flatten(data, pathArr);
+
+        console.log(
+            graphData
+        );
+
+        expect(graphData).not.toBeUndefined();
+    });
+
+    it('should walk nested 3', function ()
+    {
+        const pathArr   = ['widget'];
+        const data      = {
+            'window': {
+                'title': 'Sample Konfabulator Widget'
+            }
+        };
+        const graphData = flatten(data, pathArr);
+
+        console.log(
+            graphData
+        );
+
+        expect(graphData).not.toBeUndefined();
+    });
+
+    it('should walk 4', function ()
+    {
+        client.get(`said`).set({
+            say: 'Hello'
+        });
     });
 });

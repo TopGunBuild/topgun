@@ -1,5 +1,21 @@
 import { isObject } from 'topgun-typed';
 import { isSupport } from './is-support';
+import { TGGraphData, TGValue } from '../types';
+
+export function flatten(data: TGValue, fullPath: string[]): TGGraphData
+{
+    if (isObject(data))
+    {
+        const soul = fullPath.join('/');
+        return dataWalking(data, [soul]);
+    }
+    else
+    {
+        const propertyName = fullPath.pop();
+        const soul         = fullPath.join('/');
+        return dataWalking({ [propertyName]: data }, [soul]);
+    }
+}
 
 export function checkType(d: any, tmp?: any): string
 {
@@ -15,7 +31,7 @@ export function dataWalking(
     obj: any,
     pathArr: string[] = [],
     target            = {},
-): {[key: string]: any}
+): TGGraphData
 {
     if (!isSupport(obj))
     {

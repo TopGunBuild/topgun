@@ -1,4 +1,4 @@
-import { isUndefined, isDefined } from 'topgun-typed';
+import { isUndefined, isDefined, isObject } from 'topgun-typed';
 import { addMissingState, mergeNodes } from '../../crdt';
 import {
     TGGet,
@@ -267,9 +267,25 @@ export class TGGraph
             throw err;
         }
 
-        const soul      = fullPath.shift() as string;
-        const rawData   = set(fullPath, data);
-        const graphData = dataWalking(rawData, [soul]);
+        let soul: string, graphData: TGGraphData;
+
+        if (isObject(data))
+        {
+            soul      = fullPath.join('/');
+            graphData = dataWalking(data, [soul]);
+        }
+        else
+        {
+            soul      = fullPath.shift() as string;
+            graphData = dataWalking(set(fullPath, data), [soul]);
+        }
+
+        console.log({
+            fullPath,
+            data,
+            soul,
+            graphData
+        });
 
         this.put(graphData, fullPath, cb, undefined, soul, putOpt);
     }
