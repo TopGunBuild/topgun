@@ -1,4 +1,4 @@
-import { isUndefined, isDefined, isObject } from 'topgun-typed';
+import { isUndefined, isDefined } from 'topgun-typed';
 import { addMissingState, mergeNodes } from '../../crdt';
 import {
     TGGet,
@@ -20,8 +20,8 @@ import {
     flattenGraphData,
     generateMessageId,
     getPathData,
+    graphFromRawValue
 } from './graph-utils';
-import { dataWalking, set } from '../../utils/data-walking';
 
 interface TGGraphOptions
 {
@@ -234,21 +234,29 @@ export class TGGraph
     }
 
     /**
+     * Request node data
+     */
+    get(data: TGGet): () => void
+    {
+        const msgId = data.msgId || generateMessageId();
+
+        this.events.get.trigger({ ...data, msgId });
+
+        return () => this.events.off.trigger(msgId);
+    }
+
+    /**
      * Write graph data to a potentially multi-level deep path in the graph
      *
      * @param fullPath The path to read
      * @param data The value to write
      * @param cb Callback function to be invoked for write acks
-     * @param uuidFn
-     * @param getPub
      * @param putOpt
      */
     async putPath(
         fullPath: string[],
         data: TGValue,
         cb?: TGMessageCb,
-        uuidFn?: (path: readonly string[]) => Promise<string>|string,
-        getPub?: string,
         putOpt?: TGOptionsPut,
     ): Promise<void>
     {
@@ -267,46 +275,15 @@ export class TGGraph
             throw err;
         }
 
-        let soul: string, graphData: TGGraphData;
+        const { graphData, soul } = graphFromRawValue(data, fullPath);
 
-        if (isObject(data))
-        {
-            soul      = fullPath.join('/');
-            graphData = dataWalking(data, [soul]);
-        }
-        else
-        {
-            soul      = fullPath.shift() as string;
-            graphData = dataWalking(set(fullPath, data), [soul]);
-        }
-
-        console.log({
-            fullPath,
-            data,
-            soul,
-            graphData
-        });
-
-        this.put(graphData, fullPath, cb, undefined, soul, putOpt);
-    }
-
-    /**
-     * Request node data
-     */
-    get(data: TGGet): () => void
-    {
-        const msgId = data.msgId || generateMessageId();
-
-        this.events.get.trigger({ ...data, msgId });
-
-        return () => this.events.off.trigger(msgId);
+        this.put(graphData, cb, soul, putOpt);
     }
 
     /**
      * Write node data
      *
      * @param data one or more nodes keyed by soul
-     * @param fullPath The path to read
      * @param cb optional callback for response messages
      * @param msgId optional unique message identifier
      * @param soul string
@@ -315,14 +292,13 @@ export class TGGraph
      */
     put(
         data: TGGraphData,
-        fullPath: string[],
         cb?: TGMessageCb,
-        msgId?: string,
         soul?: string,
         putOpt?: TGOptionsPut,
+        msgId?: string
     ): () => void
     {
-        let diff: TGGraphData|undefined = flattenGraphData(
+        let diff: TGGraphData = flattenGraphData(
             addMissingState(data),
         );
 
@@ -335,7 +311,7 @@ export class TGGraph
                 {
                     return;
                 }
-                diff = await fn(diff, this._graph, putOpt, fullPath);
+                diff = await fn(diff, this._graph, putOpt);
             }
 
             if (!diff)
@@ -354,10 +330,7 @@ export class TGGraph
             if (cb)
             {
                 cb({
-                    '#':
-                        fullPath.length > 0
-                            ? fullPath[fullPath.length - 1]
-                            : soul,
+                    '#'  : soul,
                     '@'  : msgId,
                     'err': null,
                     'ok' : true,

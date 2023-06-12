@@ -1,7 +1,8 @@
 import { isDefined, isObject, cloneValue } from 'topgun-typed';
 import { addMissingState, diffCRDT, mergeGraph } from '../../crdt';
-import { TGGraphData, TGNode, TGPathData } from '../../types';
+import { TGGraphData, TGNode, TGPathData, TGValue } from '../../types';
 import { TGLink } from '../link';
+import { isSupport } from '../../utils/is-support';
 
 export function generateMessageId(): string
 {
@@ -156,4 +157,96 @@ export function getPathData(
         souls,
         value,
     };
+}
+
+export function graphFromRawValue(data: TGValue, fullPath: string[]): {
+    graphData: TGGraphData,
+    soul: string
+}
+{
+    if (isObject(data))
+    {
+        const soul = fullPath.join('/');
+        return {
+            graphData: flattenGraphByPath(data, [soul]),
+            soul
+        };
+    }
+    else
+    {
+        const propertyName = fullPath.pop();
+        const soul         = fullPath.join('/');
+        return {
+            graphData: flattenGraphByPath({ [propertyName]: data }, [soul]),
+            soul
+        };
+    }
+}
+
+export function checkType(d: any, tmp?: any): string
+{
+    return (d && (tmp = d.constructor) && tmp.name) || typeof d;
+}
+
+export function set(list: Array<string>, value: any): {[key: string]: any}
+{
+    return list.reverse().reduce((a, c) => ({ [c]: a }), value);
+}
+
+export function flattenGraphByPath(
+    obj: object,
+    pathArr: string[] = [],
+    target            = {},
+): TGGraphData
+{
+    if (!isSupport(obj))
+    {
+        throw Error(
+            'Invalid data: ' + checkType(obj) + ' at ' + pathArr.join('.'),
+        );
+    }
+    else if (!isObject(obj))
+    {
+        obj = set(pathArr, obj);
+    }
+
+    const path = pathArr.join('/');
+    if (pathArr.length > 0 && !isObject(target[path]))
+    {
+        target[path] = {};
+    }
+
+    for (const k in obj)
+    {
+        if (!obj.hasOwnProperty(k))
+        {
+            continue;
+        }
+
+        const value       = obj[k];
+        const pathArrFull = [...pathArr, k];
+        const pathFull    = pathArrFull.join('/');
+
+        if (!isSupport(value))
+        {
+            console.log(
+                'Invalid data: ' +
+                checkType(value) +
+                ' at ' +
+                pathArrFull.join('.'),
+            );
+            continue;
+        }
+
+        if (isObject(value))
+        {
+            target[path][k] = { '#': pathFull };
+            flattenGraphByPath(value, pathArrFull, target);
+        }
+        else
+        {
+            target[path][k] = value;
+        }
+    }
+    return target;
 }

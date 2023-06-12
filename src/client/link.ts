@@ -11,7 +11,6 @@ import {
 } from '../types';
 import { TGClient } from './client';
 import { TGEvent } from './control-flow/event';
-import { generateMessageId } from './graph/graph-utils';
 import { TGGraph } from './graph/graph';
 import { pubFromSoul } from '../sea';
 import { match } from '../utils/match';
@@ -148,60 +147,8 @@ export class TGLink
             this.getPath(),
             value,
             cb,
-            this.opt().uuid,
-            this._chain.pub,
             opt,
         );
-
-        return this;
-    }
-
-    set(data: any, cb?: TGMessageCb, opt?: TGOptionsPut): TGLink
-    {
-        let soul;
-
-        if (data instanceof TGLink && data.optionsGet['#'])
-        {
-            soul = data.optionsGet['#'];
-
-            this.put(
-                {
-                    [soul]: {
-                        '#': soul,
-                    },
-                },
-                cb,
-                opt,
-            );
-        }
-        else if (data && data._ && data._['#'])
-        {
-            soul = data && data._ && data._['#'];
-
-            this.put(
-                {
-                    [soul]: data,
-                },
-                cb,
-                opt,
-            );
-        }
-        else if (isObject(data) && isNotEmptyObject(data))
-        {
-            soul = generateMessageId();
-
-            this.put(
-                {
-                    [soul]: data,
-                },
-                cb,
-                opt,
-            );
-        }
-        else
-        {
-            throw new Error('This data type is not supported in set()');
-        }
 
         return this;
     }

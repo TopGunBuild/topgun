@@ -1,9 +1,10 @@
-import { cloneValue, isNumber, isString, isObject } from 'topgun-typed';
+import { cloneValue, isNumber, isString, isObject, isNotEmptyObject } from 'topgun-typed';
 import { TGLink } from './link';
 import { LEX } from '../types/lex';
 import { TGClient } from './client';
-import { TGOptionsGet, TGValue } from '../types';
+import { TGMessageCb, TGOptionsGet, TGOptionsPut, TGValue } from '../types';
 import { assertBoolean, assertNotEmptyString, assertNumber } from '../utils/assert';
+import { generateMessageId } from './graph/graph-utils';
 
 type KeyOfLex = keyof LEX;
 type ValueOfLex = LEX[KeyOfLex];
@@ -119,6 +120,52 @@ export class TGLexLink extends TGLink
     once(cb: (node: TGValue|undefined, key?: string) => void): TGLink
     {
         return super.once(cb);
+    }
+
+    set(data: any, cb?: TGMessageCb, opt?: TGOptionsPut): TGLink
+    {
+        let soul;
+        const put = (soul: string, value: TGValue) =>
+        {
+            if (this.userPubExpected())
+            {
+                throw new Error(
+                    'You cannot save data to user space if the user is not authorized.',
+                );
+            }
+
+            this._chain.graph.putPath(
+                [...this.getPath(), soul],
+                value,
+                cb,
+                opt,
+            );
+        };
+
+        if (data instanceof TGLink && data.optionsGet['#'])
+        {
+            soul = data.optionsGet['#'];
+            put(soul, {
+                '#': soul,
+            }
+            );
+        }
+        else if (data && data._ && data._['#'])
+        {
+            soul = data && data._ && data._['#'];
+            put(soul, data);
+        }
+        else if (isObject(data) && isNotEmptyObject(data))
+        {
+            soul = generateMessageId();
+            put(soul, data);
+        }
+        else
+        {
+            throw new Error('This data type is not supported in set()');
+        }
+
+        return this;
     }
 
     // -----------------------------------------------------------------------------------------------------

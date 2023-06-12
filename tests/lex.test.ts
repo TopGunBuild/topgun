@@ -1,6 +1,6 @@
 import { createClient, TGClient, TGGraphAdapter, TGGraphData, TGOptionsGet } from '../src/client';
 import { createServer, TGServer } from '../src/server';
-import { flatten } from '../src/utils/data-walking';
+import { graphFromRawValue } from '../src/client/graph/graph-utils';
 
 let state = {
     'chat'                         : {
@@ -73,30 +73,32 @@ let server: TGServer, client: TGClient;
 // Run the server and client before start
 beforeEach(async () =>
 {
-    server = createServer({
-        port,
-        adapter: adapter()
-    });
-    await server.waitForReady();
+    // server = createServer({
+    //     port,
+    //     adapter: adapter()
+    // });
+    // await server.waitForReady();
+    //
+    // client = createClient({
+    //     peers: [{
+    //         hostname: '127.0.0.1',
+    //         port
+    //     }]
+    // });
+    //
+    // await client.graph.eachConnector(async connector =>
+    // {
+    //     await connector.waitForConnection();
+    // });
 
-    client = createClient({
-        peers: [{
-            hostname: '127.0.0.1',
-            port
-        }]
-    });
-
-    await client.graph.eachConnector(async connector =>
-    {
-        await connector.waitForConnection();
-    });
+    client = createClient();
 });
 
 // Close server and client after each test
 afterEach(async () =>
 {
-    await client.disconnect();
-    await server.close();
+    // await client.disconnect();
+    // await server.close();
 });
 
 describe('LEX', () =>
@@ -129,7 +131,7 @@ describe('LEX', () =>
                 'height': 500
             }
         };
-        const graphData = flatten(data, pathArr);
+        const graphData = graphFromRawValue(data, pathArr);
 
         // console.log(
         //     graphData
@@ -139,7 +141,7 @@ describe('LEX', () =>
         const data2      = {
             'title': 'Sample Konfabulator Widget',
         };
-        const graphData2 = flatten(data, pathArr);
+        const graphData2 = graphFromRawValue(data, pathArr);
 
         // expect(graphData).not.toBeUndefined();
         expect(graphData[pathArr2.join('/')])
@@ -151,7 +153,7 @@ describe('LEX', () =>
         const data      = {
             'title': 'Sample Konfabulator Widget',
         };
-        const graphData = flatten(data, pathArr);
+        const graphData = graphFromRawValue(data, pathArr);
 
         console.log(
             graphData
@@ -164,7 +166,7 @@ describe('LEX', () =>
     {
         const pathArr   = ['widget', 'window', 'title'];
         const data      = 'Sample Konfabulator Widget';
-        const graphData = flatten(data, pathArr);
+        const graphData = graphFromRawValue(data, pathArr);
 
         console.log(
             graphData
@@ -181,19 +183,28 @@ describe('LEX', () =>
                 'title': 'Sample Konfabulator Widget'
             }
         };
-        const graphData = flatten(data, pathArr);
+        const graphData = graphFromRawValue(data, pathArr);
 
         console.log(
-            graphData
+            JSON.stringify(graphData, null, 2)
         );
 
         expect(graphData).not.toBeUndefined();
     });
 
-    it('should walk 4', function ()
+    it('should walk 4', async () =>
     {
-        client.get(`said`).set({
-            say: 'Hello'
-        });
+        await client
+            .get(`said`)
+            .set({
+                say: 'Hello'
+            })
+            .promise();
+
+        console.log(
+            JSON.stringify(client.graph['_graph'], null, 2)
+        );
+
+        expect(client.graph['_graph']).not.toBeUndefined();
     });
 });
