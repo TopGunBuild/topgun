@@ -29,6 +29,9 @@
 $ npm install topgun --save
 ```
 
+## Description
+Coming Soon.
+
 ## License
 
 TopGun is [MIT licensed](LICENSE).
