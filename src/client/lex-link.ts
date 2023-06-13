@@ -1,10 +1,11 @@
-import { cloneValue, isNumber, isString, isObject, isNotEmptyObject } from 'topgun-typed';
+import { cloneValue, isEmptyObject, isNumber, isObject, isString } from 'topgun-typed';
 import { TGLink } from './link';
 import { LEX } from '../types/lex';
 import { TGClient } from './client';
 import { TGMessageCb, TGOptionsGet, TGOptionsPut, TGValue } from '../types';
 import { assertBoolean, assertNotEmptyString, assertNumber } from '../utils/assert';
 import { generateMessageId } from './graph/graph-utils';
+import { isNode } from '../utils/is-node';
 
 type KeyOfLex = keyof LEX;
 type ValueOfLex = LEX[KeyOfLex];
@@ -37,7 +38,7 @@ export class TGLexLink extends TGLink
     get(keyOrOptions: string|TGOptionsGet): TGLink|TGLexLink
     {
         // The argument is a LEX query
-        if (isObject(keyOrOptions) && !isString(keyOrOptions))
+        if (isObject(keyOrOptions))
         {
             this._persistOptions();
 
@@ -124,53 +125,46 @@ export class TGLexLink extends TGLink
 
     set(data: any, cb?: TGMessageCb, opt?: TGOptionsPut): TGLink
     {
-        let soul;
-        const put = (soul: string, value: TGValue) =>
+        let soulSuffix, value = cloneValue(data);
+
+        if (!isObject(value) || isEmptyObject(value))
         {
-            if (this.userPubExpected())
+            throw new Error('This data type is not supported in set().');
+        }
+
+        if (data instanceof TGLink)
+        {
+            if (data.getPath().length === 0)
             {
-                throw new Error(
-                    'You cannot save data to user space if the user is not authorized.',
-                );
+                throw new Error('Link is empty.');
             }
 
-            this._chain.graph.putPath(
-                [...this.getPath(), soul],
-                value,
-                cb,
-                opt,
-            );
-        };
-
-        if (data instanceof TGLink && data.optionsGet['#'])
-        {
-            soul = data.optionsGet['#'];
-            put(soul, {
-                '#': soul,
-            }
-            );
+            soulSuffix = data.getPath()[0];
+            value      = { '#': soulSuffix };
         }
-        else if (data && data._ && data._['#'])
+        else if (isNode(data))
         {
-            soul = data && data._ && data._['#'];
-            put(soul, data);
-        }
-        else if (isObject(data) && isNotEmptyObject(data))
-        {
-            soul = generateMessageId();
-            put(soul, data);
+            soulSuffix = data._['#'];
         }
         else
         {
-            throw new Error('This data type is not supported in set()');
+            soulSuffix = generateMessageId();
         }
 
-        return this;
+        this._addSoulSuffix(soulSuffix);
+        return this.put(value, cb, opt);
     }
 
     // -----------------------------------------------------------------------------------------------------
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
+
+    private _addSoulSuffix(path: string): void
+    {
+        path     = assertNotEmptyString(path);
+        this.key = this.key.endsWith('/') ? `${this.key}${path}` : `${this.key}/${path}`;
+        this._persistOptions();
+    }
 
     private _setLex(key: KeyOfLex, value: ValueOfLex): void
     {
@@ -182,12 +176,14 @@ export class TGLexLink extends TGLink
     {
         if (!isObject(this.optionsGet))
         {
-            const soul      = this.getPath().shift();
-            this.optionsGet = {
-                ['#']: soul,
-                ['.']: {},
-                ['%']: this.maxLimit
-            };
+            this.optionsGet = {};
         }
+        if (!isObject(this.optionsGet['.']))
+        {
+            this.optionsGet['.'] = {};
+        }
+
+        this.optionsGet['#'] = this.getPath().shift();
+        this.optionsGet['%'] = this.maxLimit;
     }
 }
