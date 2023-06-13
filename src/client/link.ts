@@ -290,8 +290,8 @@ export class TGLink
             if (this._hasReceived)
             {
                 // TODO: Callback key or soul?
-                // const soul = this._lastValue && this._lastValue._ && this._lastValue._['#'];
-                cb(this._lastValue, this.key);
+                const soul = isObject(this._lastValue) && this._lastValue._ && this._lastValue._['#'];
+                cb(this._lastValue, soul);
             }
             if (!this._endQuery)
             {
