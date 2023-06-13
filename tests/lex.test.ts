@@ -1,5 +1,5 @@
 import { createClient, TGClient, TGGraphAdapter, TGGraphData, TGOptionsGet } from '../src/client';
-import { createServer, TGServer } from '../src/server';
+import { TGServer } from '../src/server';
 import { graphFromRawValue } from '../src/client/graph/graph-utils';
 
 let state = {
