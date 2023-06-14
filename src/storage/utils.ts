@@ -1,12 +1,66 @@
-import { isNumber } from 'topgun-typed';
+import { isNumber, isString } from 'topgun-typed';
 import textEncoder from 'topgun-textencoder';
 import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from './constants';
-import { TGGraphAdapterOptions, TGNode } from '../types';
+import { LEX, TGGraphAdapterOptions, TGNode, TGOptionsGet } from '../types';
 import { StorageListOptions } from './types';
+
+export function filterNodesByListOptions(nodes: TGNode[], options: StorageListOptions): TGNode[]
+{
+    const direction   = options?.reverse ? -1 : 1;
+    let filteredNodes = nodes
+        .filter(node => node && node._ && isString(node._['#']) && listFilterMatch(options, node._['#']))
+        .sort((a, b) => direction * lexicographicCompare(a._['#'], b._['#']));
+
+    if (isNumber(options?.limit) && filteredNodes.length > options?.limit)
+    {
+        filteredNodes = filteredNodes.slice(0, options.limit);
+    }
+
+    return filteredNodes;
+}
+
+export function storageListOptionsFromGetOptions(soul: string, opts?: TGOptionsGet): StorageListOptions|null
+{
+    const lexQuery: LEX|undefined    = opts && opts['.'];
+    const limit: number|undefined    = opts && opts['%'];
+    const reverse: boolean|undefined = opts && opts['-'];
+    const prefix: string|undefined   = lexQuery && lexQuery['*'];
+    const start: string|undefined    = lexQuery && lexQuery['>'];
+    const end: string|undefined      = lexQuery && lexQuery['<'];
+
+    soul = soul || (opts && opts['#']);
+
+    if (isString(start) || isString(end) || isString(prefix) || isNumber(limit) || isNumber(reverse))
+    {
+        const options: StorageListOptions = {};
+        const getPath                     = (path: string) => [soul, path].join('/');
+
+        if (start)
+        {
+            options.start = getPath(start);
+        }
+        if (end)
+        {
+            options.end = getPath(end);
+        }
+        if (prefix)
+        {
+            options.prefix = getPath(prefix);
+        }
+        if (limit)
+        {
+            options.limit = limit;
+        }
+
+        return options;
+    }
+
+    return null;
+}
 
 export function assertPutEntry(soul: string, node: TGNode, options: TGGraphAdapterOptions): void
 {
-    const maxKeySize = isNumber(options?.maxKeySize) ? options.maxKeySize : MAX_KEY_SIZE;
+    const maxKeySize   = isNumber(options?.maxKeySize) ? options.maxKeySize : MAX_KEY_SIZE;
     const maxValueSize = isNumber(options?.maxValueSize) ? options.maxValueSize : MAX_VALUE_SIZE;
     assertKeySize(soul, maxKeySize);
     assertValueSize(node, maxValueSize, soul)
@@ -18,7 +72,7 @@ export function assertKeySize(key: string, maxKeySize: number): void
     {
         return;
     }
-    throw new RangeError( `Key "${key}" is larger than the limit of ${maxKeySize} bytes.`);
+    throw new RangeError(`Key "${key}" is larger than the limit of ${maxKeySize} bytes.`);
 }
 
 export function assertValueSize(value: TGNode, maxValueSize: number, key?: string): void

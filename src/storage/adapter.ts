@@ -1,8 +1,8 @@
 import { isNumber, isString } from 'topgun-typed';
 import { StorageListOptions, TGStorage } from './types';
-import { LEX, TGGraphAdapter, TGGraphAdapterOptions, TGGraphData, TGOptionsGet } from '../types';
+import { TGGraphAdapter, TGGraphAdapterOptions, TGGraphData, TGOptionsGet } from '../types';
 import { diffCRDT, mergeGraph } from '../crdt';
-import { assertPutEntry } from './utils';
+import { assertPutEntry, storageListOptionsFromGetOptions } from './utils';
 
 const DEFAULT_CRDT_OPTS = {
     diffFn : diffCRDT,
@@ -23,37 +23,11 @@ async function get(
     opts?: TGOptionsGet
 ): Promise<TGGraphData>
 {
-    const lexQuery: LEX|undefined  = opts && opts['.'];
-    const limit: number|undefined  = opts && opts['%'];
-    const prefix: string|undefined = lexQuery && lexQuery['*'];
-    const start: string|undefined  = lexQuery && lexQuery['>'];
-    const end: string|undefined    = lexQuery && lexQuery['<'];
+    const listOptions = storageListOptionsFromGetOptions(soul, opts);
 
-    soul = soul || (opts && opts['#']);
-
-    if (isString(prefix) || isString(start) || isString(end))
+    if (listOptions)
     {
-        const options: StorageListOptions = {};
-        const getPath                     = (path: string) => [soul, path].join('/');
-
-        if (start)
-        {
-            options.start = getPath(start);
-        }
-        if (end)
-        {
-            options.end = getPath(end);
-        }
-        if (prefix)
-        {
-            options.prefix = getPath(prefix);
-        }
-        if (limit)
-        {
-            options.limit = limit;
-        }
-
-        return await getList(db, options);
+        return await getList(db, listOptions);
     }
 
     if (isString(soul))

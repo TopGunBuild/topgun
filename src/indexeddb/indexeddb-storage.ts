@@ -1,6 +1,6 @@
 import { isNumber, isString } from 'topgun-typed';
 import { StorageListOptions, TGStorage } from '../storage';
-import { lexicographicCompare, listFilterMatch } from '../storage/utils';
+import { filterNodesByListOptions, lexicographicCompare, listFilterMatch } from '../storage/utils';
 import { TGNode } from '../types';
 
 export class IndexedDBStorage implements TGStorage
@@ -34,15 +34,8 @@ export class IndexedDBStorage implements TGStorage
 
     async list<Type>(options: StorageListOptions): Promise<Type>
     {
-        const direction = options?.reverse ? -1 : 1;
-        let nodes        = (await this.getAll())
-            .filter(node => node && node._ && isString(node._['#']) && listFilterMatch(options, node._['#']))
-            .sort((a, b) => direction * lexicographicCompare(a._['#'], b._['#']));
-
-        if (isNumber(options?.limit) && nodes.length > options?.limit)
-        {
-            nodes = nodes.slice(0, options.limit);
-        }
+        const allNodes = await this.getAll();
+        const nodes    = filterNodesByListOptions(allNodes, options);
 
         return nodes.reduce((accum: Type, node: TGNode) => ({ ...accum, [node._['#']]: node }), {} as Type);
     }
