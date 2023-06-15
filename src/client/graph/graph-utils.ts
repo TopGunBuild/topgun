@@ -1,8 +1,9 @@
-import { isDefined, isObject, cloneValue } from 'topgun-typed';
+import { isDefined, isObject, isNumber, cloneValue } from 'topgun-typed';
 import { addMissingState, diffCRDT, mergeGraph } from '../../crdt';
-import { TGGraphData, TGNode, TGPathData, TGValue } from '../../types';
+import { TGGraphData, TGNode, TGOptionsGet, TGPathData, TGValue } from '../../types';
 import { TGLink } from '../link';
 import { isSupport } from '../../utils/is-support';
+import { filterNodesByListOptions, storageListOptionsFromGetOptions } from '../../storage/utils';
 
 export function generateMessageId(): string
 {
@@ -97,6 +98,23 @@ export function flattenGraphData(data: TGGraphData): TGGraphData
     }
 
     return flatGraph;
+}
+
+export function getNodeListFromGraph(
+    options: TGOptionsGet,
+    graph: TGGraphData
+): TGNode[]
+{
+    const allNodes    = Object.values(graph);
+    const listOptions = storageListOptionsFromGetOptions(options);
+    let filteredNodes = filterNodesByListOptions(allNodes, listOptions);
+
+    if (isNumber(listOptions?.limit) && filteredNodes.length > listOptions?.limit)
+    {
+        filteredNodes = filteredNodes.slice(0, listOptions.limit);
+    }
+
+    return filteredNodes;
 }
 
 export function getPathData(

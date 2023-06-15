@@ -18,10 +18,13 @@ import { TGGraphNode } from './graph-node';
 import {
     diffSets,
     flattenGraphData,
-    generateMessageId,
+    generateMessageId, getNodeListFromGraph,
     getPathData,
     graphFromRawValue
 } from './graph-utils';
+import { getNodeSoul } from '../../utils/node';
+import { TGGraphQuery } from './graph-query';
+import { stringifyOptionsGet } from '../../utils/stringify-options-get';
 
 interface TGGraphOptions
 {
@@ -56,6 +59,9 @@ export class TGGraph
     private readonly _nodes: {
         [soul: string]: TGGraphNode;
     };
+    private readonly _queries: {
+        [queryString: string]: TGGraphQuery;
+    };
 
     /**
      * Constructor
@@ -75,6 +81,7 @@ export class TGGraph
         this._opt                = {};
         this._graph              = {};
         this._nodes              = {};
+        this._queries            = {};
         this._connectors         = [];
         this._readMiddleware     = [];
         this._writeMiddleware    = [];
@@ -185,6 +192,26 @@ export class TGGraph
         }
 
         return this;
+    }
+
+    /**
+     * Read a matching nodes from the graph
+     */
+    queryList(opts: TGOptionsGet, cb: TGOnCb): () => void
+    {
+        getNodeListFromGraph(opts, this._graph).forEach((node) =>
+        {
+            cb(node, getNodeSoul(node));
+        });
+
+        const queryString = stringifyOptionsGet(opts);
+
+        this._listen(queryString, cb);
+
+        return () =>
+        {
+            this._unlisten(queryString, cb);
+        };
     }
 
     /**
@@ -391,13 +418,13 @@ export class TGGraph
                 continue;
             }
 
-            this._node(soul).receive(
-                (this._graph[soul] = mergeNodes(
-                    this._graph[soul],
-                    diff[soul],
-                    this._opt.mutable ? 'mutable' : 'immutable',
-                )),
+            this._graph[soul] = mergeNodes(
+                this._graph[soul],
+                diff[soul],
+                this._opt.mutable ? 'mutable' : 'immutable',
             );
+
+            this._node(soul).receive(this._graph[soul]);
         }
 
         this.events.graphData.trigger(diff, id, replyToId);
@@ -420,6 +447,35 @@ export class TGGraph
         return this;
     }
 
+    private _query(queryString: string): TGGraphQuery
+    {
+        return (this._queries[queryString] =
+            this._queries[queryString] ||
+            new TGGraphQuery(this, queryString, this.receiveGraphData));
+    }
+
+    private _listen(queryString: string, cb: TGNodeListenCb): TGGraph
+    {
+        this._query(queryString).get(cb);
+        return this;
+    }
+
+    private _unlisten(queryString: string, cb: TGNodeListenCb): TGGraph
+    {
+        const node = this._queries[queryString];
+        if (!node)
+        {
+            return this;
+        }
+        node.off(cb);
+        if (node.listenerCount() <= 0)
+        {
+            node.off();
+            this._forgetQuery(queryString);
+        }
+        return this;
+    }
+
     private _unlistenSoul(soul: string, cb: TGNodeListenCb): TGGraph
     {
         const node = this._nodes[soul];
@@ -437,6 +493,18 @@ export class TGGraph
     }
 
     private _forgetSoul(soul: string): TGGraph
+    {
+        const node = this._nodes[soul];
+        if (node)
+        {
+            node.off();
+            delete this._nodes[soul];
+        }
+        // delete this._graph[soul];
+        return this;
+    }
+
+    private _forgetQuery(soul: string): TGGraph
     {
         const node = this._nodes[soul];
         if (node)

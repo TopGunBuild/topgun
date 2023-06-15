@@ -12,23 +12,24 @@ const DEFAULT_CRDT_OPTS = {
 export function createGraphAdapter(storage: TGStorage, adapterOptions?: TGGraphAdapterOptions): TGGraphAdapter
 {
     return {
-        get: (soul: string, opts?: TGOptionsGet) => get(storage, soul, opts),
+        get: (opts: TGOptionsGet) => get(storage, opts),
         put: (graphData: TGGraphData) => put(storage, graphData, adapterOptions),
     };
 }
 
 async function get(
     db: TGStorage,
-    soul: string,
-    opts?: TGOptionsGet
+    opts: TGOptionsGet
 ): Promise<TGGraphData>
 {
-    const listOptions = storageListOptionsFromGetOptions(soul, opts);
+    const listOptions = storageListOptionsFromGetOptions(opts);
 
     if (listOptions)
     {
         return await getList(db, listOptions);
     }
+
+    const soul = opts['#'];
 
     if (isString(soul))
     {

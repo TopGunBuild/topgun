@@ -107,8 +107,7 @@ export interface TGPut
  */
 export interface TGGet
 {
-    soul: string;
-    opts?: TGOptionsGet;
+    options: TGOptionsGet;
     msgId?: string;
     key?: string;
     cb?: TGMessageCb;

@@ -5,7 +5,8 @@ import { TGClient } from './client';
 import { TGMessageCb, TGOptionsGet, TGOptionsPut, TGValue } from '../types';
 import { assertBoolean, assertNotEmptyString, assertNumber } from '../utils/assert';
 import { generateMessageId } from './graph/graph-utils';
-import { isNode } from '../utils/is-node';
+import { isNode } from '../utils/node';
+import { replacerSortKeys } from '../utils/replacer-sort-keys';
 
 type KeyOfLex = keyof LEX;
 type ValueOfLex = LEX[KeyOfLex];
@@ -105,7 +106,7 @@ export class TGLexLink extends TGLink
 
     toString(): string
     {
-        return JSON.stringify(this.optionsGet || {});
+        return JSON.stringify(this.optionsGet || {}, replacerSortKeys);
     }
 
     getQuery(): TGOptionsGet

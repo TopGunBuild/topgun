@@ -63,7 +63,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         return this;
     }
 
-    get({ soul, msgId, cb, opts }: TGGet): () => void
+    get({ soul, msgId, cb, options }: TGGet): () => void
     {
         msgId        = msgId || generateMessageId();
         const cbWrap = (msg: any) =>
@@ -79,11 +79,11 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
             `topgun/nodes/${soul}`,
             cbWrap,
             {
-                data: opts
+                data: options
             }
         );
 
-        return super.get({ soul, msgId, cb, opts });
+        return super.get({ soul, msgId, cb, options: opts });
     }
 
     put({ graph, msgId = '', replyTo = '', cb }: TGPut): () => void

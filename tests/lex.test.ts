@@ -1,6 +1,8 @@
 import { createClient, TGClient, TGGraphAdapter, TGGraphData, TGOptionsGet } from '../src/client';
 import { TGServer } from '../src/server';
 import { graphFromRawValue } from '../src/client/graph/graph-utils';
+import { StorageListOptions } from '../src/storage';
+import { lexicographicCompare, listFilterMatch } from '../src/storage/utils';
 
 let state = {
     'chat'                         : {
@@ -206,5 +208,39 @@ describe('LEX', () =>
         );
 
         expect(client.graph['_graph']).not.toBeUndefined();
+    });
+
+    it('should compare', function ()
+    {
+        const key                      = 'abc';
+        const opts: StorageListOptions = {
+            end: 'abc'
+        };
+        const result                   = listFilterMatch(opts, key);
+
+        console.log(result);
+
+        expect(result).not.toBeUndefined();
+    });
+
+    it('should sort keys', function ()
+    {
+        const replacer = (key, value) =>
+            value instanceof Object && !(value instanceof Array) ?
+                Object.keys(value)
+                    .sort()
+                    .reduce((sorted, key) =>
+                    {
+                        sorted[key] = value[key];
+                        return sorted
+                    }, {}) :
+                value;
+
+        // Usage
+        const result = JSON.stringify({ c: 1, a: { d: 0, c: 1, e: { d:'0', a: 0, 1: 4 } } }, replacer);
+
+        console.log(result);
+
+        expect(result).not.toBeUndefined();
     });
 });

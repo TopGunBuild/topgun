@@ -3,6 +3,7 @@ import textEncoder from 'topgun-textencoder';
 import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from './constants';
 import { LEX, TGGraphAdapterOptions, TGGraphData, TGNode, TGOptionsGet } from '../types';
 import { StorageListOptions } from './types';
+import { getNodeSoul } from '../utils/node';
 
 export function arrayNodesToObject(nodes: TGNode[]): TGGraphData
 {
@@ -13,8 +14,8 @@ export function filterNodesByListOptions(nodes: TGNode[], options: StorageListOp
 {
     const direction   = options?.reverse ? -1 : 1;
     let filteredNodes = nodes
-        .filter(node => node && node._ && isString(node._['#']) && listFilterMatch(options, node._['#']))
-        .sort((a, b) => direction * lexicographicCompare(a._['#'], b._['#']));
+        .filter(node => listFilterMatch(options, getNodeSoul(node)))
+        .sort((a, b) => direction * lexicographicCompare(getNodeSoul(a), getNodeSoul(b)));
 
     if (isNumber(options?.limit) && filteredNodes.length > options?.limit)
     {
@@ -24,7 +25,7 @@ export function filterNodesByListOptions(nodes: TGNode[], options: StorageListOp
     return filteredNodes;
 }
 
-export function storageListOptionsFromGetOptions(soul: string, opts?: TGOptionsGet): StorageListOptions|null
+export function storageListOptionsFromGetOptions(opts: TGOptionsGet): StorageListOptions|null
 {
     const lexQuery: LEX|undefined    = opts && opts['.'];
     const limit: number|undefined    = opts && opts['%'];
@@ -33,7 +34,7 @@ export function storageListOptionsFromGetOptions(soul: string, opts?: TGOptionsG
     const start: string|undefined    = lexQuery && lexQuery['>'];
     const end: string|undefined      = lexQuery && lexQuery['<'];
 
-    soul = soul || (opts && opts['#']);
+    const soul = opts && opts['#'];
 
     if (isString(start) || isString(end) || isString(prefix) || isNumber(limit) || isNumber(reverse))
     {
@@ -163,6 +164,11 @@ export function listFilterMatch(
     name: string
 ): boolean
 {
+    if (!isString(name))
+    {
+        return false;
+    }
+
     return !(
         (options?.prefix !== undefined && !name.startsWith(options.prefix)) ||
         (options?.start !== undefined && lexicographicCompare(name, options.start) < 0) ||

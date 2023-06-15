@@ -21,10 +21,10 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    get({ soul, cb, opts, msgId = '' }: TGGet): () => void
+    get({ soul, cb, options, msgId = '' }: TGGet): () => void
     {
         this.adapter
-            .get(soul, opts)
+            .get(soul, options)
             .then(graphData => ({
                 '#'  : generateMessageId(),
                 '@'  : msgId,
