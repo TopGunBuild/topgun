@@ -1,7 +1,6 @@
-import { isNumber, isString } from 'topgun-typed';
 import { StorageListOptions, TGStorage } from '../storage';
-import { filterNodesByListOptions, lexicographicCompare, listFilterMatch } from '../storage/utils';
-import { TGNode } from '../types';
+import { arrayNodesToObject, filterNodesByListOptions } from '../storage/utils';
+import { TGGraphData, TGNode } from '../types';
 
 export class IndexedDBStorage implements TGStorage
 {
@@ -23,7 +22,7 @@ export class IndexedDBStorage implements TGStorage
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    get<Type>(key: IDBValidKey): Promise<Type>
+    get(key: IDBValidKey): Promise<TGNode>
     {
         let req: IDBRequest;
         return this._withIDBStore('readwrite', (store) =>
@@ -32,12 +31,12 @@ export class IndexedDBStorage implements TGStorage
         }).then(() => req.result);
     }
 
-    async list<Type>(options: StorageListOptions): Promise<Type>
+    async list(options: StorageListOptions): Promise<TGGraphData>
     {
         const allNodes = await this.getAll();
         const nodes    = filterNodesByListOptions(allNodes, options);
 
-        return nodes.reduce((accum: Type, node: TGNode) => ({ ...accum, [node._['#']]: node }), {} as Type);
+        return arrayNodesToObject(nodes);
     }
 
     put(key: IDBValidKey, value: any): Promise<void>

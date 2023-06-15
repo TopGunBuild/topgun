@@ -1,8 +1,13 @@
 import { isNumber, isString } from 'topgun-typed';
 import textEncoder from 'topgun-textencoder';
 import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from './constants';
-import { LEX, TGGraphAdapterOptions, TGNode, TGOptionsGet } from '../types';
+import { LEX, TGGraphAdapterOptions, TGGraphData, TGNode, TGOptionsGet } from '../types';
 import { StorageListOptions } from './types';
+
+export function arrayNodesToObject(nodes: TGNode[]): TGGraphData
+{
+    return nodes.reduce((accum: TGGraphData, node: TGNode) => ({ ...accum, [node._['#']]: node }), {});
+}
 
 export function filterNodesByListOptions(nodes: TGNode[], options: StorageListOptions): TGNode[]
 {
