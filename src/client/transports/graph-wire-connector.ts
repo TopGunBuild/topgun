@@ -1,4 +1,3 @@
-import { isObject } from 'topgun-typed';
 import { TGGet, TGPut, TGMessage, TGMessageCb } from '../../types';
 import { generateMessageId } from '../graph/graph-utils';
 import { TGGraphConnector } from './graph-connector';
@@ -65,10 +64,9 @@ export class TGGraphWireConnector extends TGGraphConnector
      *
      * @returns A function to be called to clean up callback listeners
      */
-    get({ soul, cb, msgId = '', options }: TGGet): () => void
+    get({ cb, msgId = '', options }: TGGet): () => void
     {
-        const get            = isObject(options) ? options : { '#': soul };
-        const msg: TGMessage = { get };
+        const msg: TGMessage = { get: options };
         if (msgId)
         {
             msg['#'] = msgId;
