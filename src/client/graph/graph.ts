@@ -14,11 +14,10 @@ import {
 } from '../../types';
 import { TGEvent } from '../control-flow/event';
 import { TGGraphConnector } from '../transports/graph-connector';
-import { TGGraphNode } from './graph-node';
 import {
     diffSets,
     flattenGraphData,
-    generateMessageId, getNodeListFromGraph,
+    generateMessageId, getNodesFromGraph,
     getPathData,
     graphFromRawValue
 } from './graph-utils';
@@ -56,9 +55,6 @@ export class TGGraph
     private readonly _readMiddleware: TGMiddleware[];
     private readonly _writeMiddleware: TGMiddleware[];
     private readonly _graph: TGGraphData;
-    private readonly _nodes: {
-        [soul: string]: TGGraphNode;
-    };
     private readonly _queries: {
         [queryString: string]: TGGraphQuery;
     };
@@ -80,7 +76,6 @@ export class TGGraph
         };
         this._opt                = {};
         this._graph              = {};
-        this._nodes              = {};
         this._queries            = {};
         this._connectors         = [];
         this._readMiddleware     = [];
@@ -197,9 +192,9 @@ export class TGGraph
     /**
      * Read a matching nodes from the graph
      */
-    queryList(opts: TGOptionsGet, cb: TGOnCb): () => void
+    queryMany(opts: TGOptionsGet, cb: TGOnCb): () => void
     {
-        getNodeListFromGraph(opts, this._graph).forEach((node) =>
+        getNodesFromGraph(opts, this._graph).forEach((node) =>
         {
             cb(node, getNodeSoul(node));
         });
@@ -217,7 +212,7 @@ export class TGGraph
     /**
      * Read a potentially multi-level deep path from the graph
      */
-    query(path: string[], cb: TGOnCb, opts?: TGOptionsGet): () => void
+    query(path: string[], cb: TGOnCb): () => void
     {
         let lastSouls = [] as string[];
         let currentValue: TGValue|undefined;
@@ -238,12 +233,12 @@ export class TGGraph
 
             for (const soul of added)
             {
-                this._requestSoul(soul, updateQuery, opts);
+                this._listen(this._queryStringBySoul(soul), updateQuery);
             }
 
             for (const soul of removed)
             {
-                this._unlistenSoul(soul, updateQuery);
+                this._unlisten(this._queryStringBySoul(soul), updateQuery);
             }
 
             lastSouls = souls;
@@ -255,7 +250,7 @@ export class TGGraph
         {
             for (const soul of lastSouls)
             {
-                this._unlistenSoul(soul, updateQuery);
+                this._unlisten(this._queryStringBySoul(soul), updateQuery);
             }
         };
     }
@@ -418,13 +413,19 @@ export class TGGraph
                 continue;
             }
 
-            this._graph[soul] = mergeNodes(
+            const node = this._graph[soul] = mergeNodes(
                 this._graph[soul],
                 diff[soul],
                 this._opt.mutable ? 'mutable' : 'immutable',
             );
 
-            this._node(soul).receive(this._graph[soul]);
+            this._eachQuery((query) =>
+            {
+                if (query.match(node))
+                {
+                    query.receive(node);
+                }
+            });
         }
 
         this.events.graphData.trigger(diff, id, replyToId);
@@ -433,19 +434,6 @@ export class TGGraph
     // -----------------------------------------------------------------------------------------------------
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
-
-    private _node(soul: string): TGGraphNode
-    {
-        return (this._nodes[soul] =
-            this._nodes[soul] ||
-            new TGGraphNode(this, soul, this.receiveGraphData));
-    }
-
-    private _requestSoul(soul: string, cb: TGNodeListenCb, opts?: TGOptionsGet): TGGraph
-    {
-        this._node(soul).get(cb, opts);
-        return this;
-    }
 
     private _query(queryString: string): TGGraphQuery
     {
@@ -476,44 +464,31 @@ export class TGGraph
         return this;
     }
 
-    private _unlistenSoul(soul: string, cb: TGNodeListenCb): TGGraph
+    private _forgetQuery(queryString: string): TGGraph
     {
-        const node = this._nodes[soul];
-        if (!node)
+        const query = this._queries[queryString];
+        if (query)
         {
-            return this;
-        }
-        node.off(cb);
-        if (node.listenerCount() <= 0)
-        {
-            node.off();
-            this._forgetSoul(soul);
-        }
-        return this;
-    }
-
-    private _forgetSoul(soul: string): TGGraph
-    {
-        const node = this._nodes[soul];
-        if (node)
-        {
-            node.off();
-            delete this._nodes[soul];
+            query.off();
+            delete this._queries[queryString];
         }
         // delete this._graph[soul];
         return this;
     }
 
-    private _forgetQuery(soul: string): TGGraph
+    private async _eachQuery(cb: (query: TGGraphQuery) => void): Promise<TGGraph>
     {
-        const node = this._nodes[soul];
-        if (node)
+        for (const queryString in this._queries)
         {
-            node.off();
-            delete this._nodes[soul];
+            await cb(this._queries[queryString]);
         }
-        // delete this._graph[soul];
+
         return this;
+    }
+
+    private _queryStringBySoul(soul: string): string
+    {
+        return stringifyOptionsGet({ ['#']: soul });
     }
 
     private __onConnectorStatus(connected?: boolean): void

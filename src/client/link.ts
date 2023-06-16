@@ -1,4 +1,4 @@
-import { isDefined, isFunction, isNotEmptyObject, isNumber, isObject } from 'topgun-typed';
+import { isDefined, isFunction, isString, isNumber, isObject } from 'topgun-typed';
 import {
     SystemEvent,
     TGChainOptions,
@@ -13,9 +13,8 @@ import { TGClient } from './client';
 import { TGEvent } from './control-flow/event';
 import { TGGraph } from './graph/graph';
 import { pubFromSoul } from '../sea';
-import { match } from '../utils/match';
-import { LEX } from '../types/lex';
 import { assertFn, assertNotEmptyString } from '../utils/assert';
+import { getNodeSoul } from '../utils/node';
 
 export class TGLink
 {
@@ -30,9 +29,7 @@ export class TGLink
     protected _hasReceived: boolean;
     protected _lastValue: TGValue|undefined;
     protected _endQuery?: () => void;
-
-    /* map utils */
-    protected _mapLinks: {[key: string]: TGLink}|undefined;
+    protected _multiple?: boolean;
 
     /**
      * Constructor
@@ -188,7 +185,7 @@ export class TGLink
                 cb(val, key);
             }
         };
-        return isObject(this._mapLinks)
+        return this._multiple
             ? this._onMap(callback)
             : this._on(callback);
     }
@@ -212,23 +209,10 @@ export class TGLink
             this._updateEvent.reset();
         }
 
-        if (isNotEmptyObject(this._mapLinks))
-        {
-            for (const key in this._mapLinks)
-            {
-                const link = this._mapLinks[key];
-
-                if (link instanceof TGLink)
-                {
-                    link.off(cb);
-                }
-            }
-        }
-
         return this;
     }
 
-    promise(opts?: { timeout: number }): Promise<TGValue>
+    promise(opts?: {timeout: number}): Promise<TGValue>
     {
         return new Promise<TGValue>((ok: (...args: any) => void) =>
         {
@@ -253,7 +237,7 @@ export class TGLink
 
     map(): TGLink
     {
-        this._mapLinks = {};
+        this._multiple = true;
         return this;
     }
 
@@ -269,47 +253,67 @@ export class TGLink
         }
         else
         {
-            this._chain.pub      = pub;
-            this.optionsGet['#'] = this.optionsGet['#'].replace(this._chain.WAIT_FOR_USER_PUB, pub);
-            this.key             = this.key.replace(this._chain.WAIT_FOR_USER_PUB, pub);
+            this._chain.pub = pub;
+            this.key        = this.key.replace(this._chain.WAIT_FOR_USER_PUB, pub);
+
+            if (isObject(this.optionsGet) && isString(this.optionsGet['#']))
+            {
+                this.optionsGet['#'] = this.optionsGet['#'].replace(this._chain.WAIT_FOR_USER_PUB, pub);
+            }
         }
     }
 
     private _onQueryResponse(value?: TGValue): void
     {
-        this._updateEvent.trigger(value, this.key);
+        const soul = getNodeSoul(value) || this.key;
+        this._updateEvent.trigger(value, soul);
         this._lastValue   = value;
         this._hasReceived = true;
     }
 
     private _on(cb: TGOnCb): TGLink
     {
-        const handler = () =>
+        return this._maybeWaitAuth(() =>
         {
             this._updateEvent.on(cb);
             if (this._hasReceived)
             {
-                // TODO: Callback key or soul?
-                const soul = isObject(this._lastValue) && this._lastValue._ && this._lastValue._['#'];
-                cb(this._lastValue, soul);
+                cb(this._lastValue, this.key);
             }
             if (!this._endQuery)
             {
                 this._endQuery = this._chain.graph.query(
                     this.getPath(),
                     this._onQueryResponse.bind(this),
-                    this.optionsGet,
                 );
             }
-        };
+        });
+    }
 
+    private _onMap(cb: TGOnCb): TGLink
+    {
+        return this._maybeWaitAuth(() =>
+        {
+            this._updateEvent.on(cb);
+            if (!this._endQuery)
+            {
+                this._endQuery = this._chain.graph.queryMany(
+                    this.optionsGet,
+                    this._onQueryResponse.bind(this),
+                );
+            }
+        });
+    }
+
+    private _maybeWaitAuth(handler: () => void): TGLink
+    {
         if (this.userPubExpected())
         {
             this._chain.promise<TGUserReference>(SystemEvent.auth).then((value) =>
             {
                 this._setUserPub(value.pub);
                 handler();
-            })
+            });
         }
         else
         {
@@ -317,45 +321,5 @@ export class TGLink
         }
 
         return this;
-    }
-
-    private _onMap(cb: TGOnCb): TGLink
-    {
-        this._mapLinks = {};
-
-        return this._on((node: TGValue|undefined) =>
-        {
-            if (isObject(node))
-            {
-                for (const soul in node)
-                {
-                    if (node.hasOwnProperty(soul) && soul !== '_')
-                    {
-                        // Already subscribed
-                        if ((this._mapLinks as object).hasOwnProperty(soul))
-                        {
-                            continue;
-                        }
-
-                        // LEX condition does not pass
-                        if (
-                            isObject(this.optionsGet) &&
-                            isNotEmptyObject(this.optionsGet['.']) &&
-                            !match(soul, this.optionsGet['.'] as LEX)
-                        )
-                        {
-                            continue;
-                        }
-
-                        // Register child listener
-                        if (!(this._mapLinks as object).hasOwnProperty(soul))
-                        {
-                            (this._mapLinks as object)[soul] =
-                                this.get(soul).on(cb);
-                        }
-                    }
-                }
-            }
-        });
     }
 }

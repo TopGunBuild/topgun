@@ -8,7 +8,7 @@ export function isNode(data: unknown): boolean
         isObject(data && data._ && data._['>']);
 }
 
-export function getNodeSoul(data: TGNode): string
+export function getNodeSoul(data: unknown): string
 {
-    return isNode(data) ? data._['#'] : null;
+    return isNode(data) ? (data as TGNode)._['#'] : null;
 }

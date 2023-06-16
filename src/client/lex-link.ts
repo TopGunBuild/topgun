@@ -2,7 +2,7 @@ import { cloneValue, isEmptyObject, isNumber, isObject, isString } from 'topgun-
 import { TGLink } from './link';
 import { LEX } from '../types/lex';
 import { TGClient } from './client';
-import { TGMessageCb, TGOptionsGet, TGOptionsPut, TGValue } from '../types';
+import { TGMessageCb, TGOptionsGet, TGOptionsPut } from '../types';
 import { assertBoolean, assertNotEmptyString, assertNumber } from '../utils/assert';
 import { generateMessageId } from './graph/graph-utils';
 import { isNode } from '../utils/node';
@@ -99,11 +99,6 @@ export class TGLexLink extends TGLink
         return this;
     }
 
-    map(): TGLink
-    {
-        return super.map();
-    }
-
     toString(): string
     {
         return JSON.stringify(this.optionsGet || {}, replacerSortKeys);
@@ -112,16 +107,6 @@ export class TGLexLink extends TGLink
     getQuery(): TGOptionsGet
     {
         return this.optionsGet as TGOptionsGet;
-    }
-
-    on(cb: (node: TGValue|undefined, key?: string) => void): TGLink
-    {
-        return super.on(cb);
-    }
-
-    once(cb: (node: TGValue|undefined, key?: string) => void): TGLink
-    {
-        return super.once(cb);
     }
 
     set(data: any, cb?: TGMessageCb, opt?: TGOptionsPut): TGLink
@@ -186,5 +171,6 @@ export class TGLexLink extends TGLink
 
         this.optionsGet['#'] = this.getPath().shift();
         this.optionsGet['%'] = this.maxLimit;
+        this._multiple       = true;
     }
 }

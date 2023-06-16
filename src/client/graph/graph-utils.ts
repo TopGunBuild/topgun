@@ -100,7 +100,7 @@ export function flattenGraphData(data: TGGraphData): TGGraphData
     return flatGraph;
 }
 
-export function getNodeListFromGraph(
+export function getNodesFromGraph(
     options: TGOptionsGet,
     graph: TGGraphData
 ): TGNode[]
