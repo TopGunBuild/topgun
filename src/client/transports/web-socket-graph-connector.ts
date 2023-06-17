@@ -11,6 +11,7 @@ import { generateMessageId } from '../graph/graph-utils';
 import { sign } from '../../sea';
 
 /* eslint-disable @typescript-eslint/no-empty-function */
+/* eslint-disable-next-line @typescript-eslint/no-unused-vars */
 export class TGWebSocketGraphConnector extends TGGraphWireConnector
 {
     readonly client: TGClientSocket;
@@ -63,8 +64,9 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         return this;
     }
 
-    get({ soul, msgId, cb, options }: TGGet): () => void
+    get({ msgId, cb, options }: TGGet): () => void
     {
+        const soul   = options['#'];
         msgId        = msgId || generateMessageId();
         const cbWrap = (msg: any) =>
         {
@@ -83,7 +85,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
             }
         );
 
-        return super.get({ soul, msgId, cb, options: opts });
+        return super.get({ msgId, cb, options });
     }
 
     put({ graph, msgId = '', replyTo = '', cb }: TGPut): () => void
@@ -124,7 +126,6 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         await this.waitForConnection();
         this.doAuth(pub, priv);
 
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
         for await (const _event of this.client.listener('connect'))
         {
             this.doAuth(pub, priv);
@@ -205,7 +206,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
     {
         if (msg && this.client)
         {
-            const replyTo   = msg['@'];
+            const replyTo = msg['@'];
 
             if (replyTo)
             {

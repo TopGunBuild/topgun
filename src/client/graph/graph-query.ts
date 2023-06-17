@@ -3,6 +3,7 @@ import { TGEvent, TGGraph } from '..';
 import { getNodeSoul } from '../../utils/node';
 import { StorageListOptions } from '../../storage';
 import { listFilterMatch, storageListOptionsFromGetOptions } from '../../storage/utils';
+import { generateMessageId } from './graph-utils';
 
 export class TGGraphQuery
 {
@@ -45,13 +46,13 @@ export class TGGraphQuery
         return this._data.listenerCount();
     }
 
-    get(cb?: TGNodeListenCb): TGGraphQuery
+    get(cb?: TGNodeListenCb, msgId?: string): TGGraphQuery
     {
         if (cb)
         {
             this.on(cb);
         }
-        this._ask();
+        this._ask(msgId);
         return this;
     }
 
@@ -103,7 +104,7 @@ export class TGGraphQuery
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private _ask(): TGGraphQuery
+    private _ask(msgId?: string): TGGraphQuery
     {
         if (this._endCurQuery)
         {
@@ -111,6 +112,7 @@ export class TGGraphQuery
         }
 
         const data: TGGet = {
+            msgId  : msgId || generateMessageId(),
             options: this.options,
             cb     : this._onDirectQueryReply.bind(this)
         };

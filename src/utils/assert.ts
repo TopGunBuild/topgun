@@ -1,4 +1,4 @@
-import { boolean, unwrap, number, fn, Struct, isString, isObject, err, StructError, string, ok, object, record, unknown } from 'topgun-typed';
+import { boolean, unwrap, number, fn, Struct, isString, isObject, err, StructError, string, ok, object } from 'topgun-typed';
 import { TGUserCredentials } from '../types';
 
 const structObject = (msg = 'Expected object'): Struct<any> =>

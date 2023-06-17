@@ -1,7 +1,7 @@
 import { isDefined, isFunction, isString, isNumber, isObject } from 'topgun-typed';
 import {
     SystemEvent,
-    TGChainOptions,
+    TGChainOptions, TGGraphData,
     TGMessageCb,
     TGOnCb,
     TGOptionsGet,
@@ -15,7 +15,9 @@ import { TGGraph } from './graph/graph';
 import { pubFromSoul } from '../sea';
 import { assertFn, assertNotEmptyString } from '../utils/assert';
 import { getNodeSoul } from '../utils/node';
+import { generateMessageId } from './graph/graph-utils';
 
+/* eslint-disable @typescript-eslint/no-empty-function */
 export class TGLink
 {
     key: string;
@@ -169,25 +171,17 @@ export class TGLink
         return this._opt;
     }
 
-    once(cb: TGOnCb): TGLink
+    once(cb: TGOnCb, timeout = 500): TGLink
     {
         cb = assertFn<TGOnCb>(cb);
-        this.promise().then(val => cb(val, this.key));
+        this.promise({ timeout, cb });
         return this;
     }
 
     on(cb: TGOnCb): TGLink
     {
-        const callback = (val, key) =>
-        {
-            if (isDefined(val) && isFunction(cb))
-            {
-                cb(val, key);
-            }
-        };
-        return this._multiple
-            ? this._onMap(callback)
-            : this._on(callback);
+        cb = assertFn<TGOnCb>(cb);
+        return this._multiple ? this._onMap(cb) : this._on(cb);
     }
 
     off(cb?: TGOnCb): TGLink
@@ -212,27 +206,49 @@ export class TGLink
         return this;
     }
 
-    promise(opts?: {timeout: number}): Promise<TGValue>
+    promise(opts?: {timeout: number, cb?: TGOnCb}): Promise<TGValue|undefined>
     {
         return new Promise<TGValue>((ok: (...args: any) => void) =>
         {
-            const cb: TGOnCb = (val: TGValue|undefined) =>
+            const connectorMsgId    = generateMessageId();
+            const connectorCallback = (data?: TGGraphData, msgId?: string) => connectorMsgId === msgId && resolve();
+            const resolve           = (val?: TGValue) =>
             {
                 ok(val);
-                this.off(cb);
+                this.off(callback);
+                this._chain.graph.events.graphData.off(connectorCallback);
             };
-            this._on(cb);
+            const originalCallback  = isFunction(opts && opts.cb) ? opts.cb : () =>
+            {
+            };
+            const callback          = (val: TGValue|undefined, soul?: string) =>
+            {
+                originalCallback(val, soul);
 
+                // Terminate if only one node is requested
+                if (!this._multiple)
+                {
+                    resolve(val);
+                }
+            };
+
+            if (this._multiple)
+            {
+                this._onMap(callback, connectorMsgId);
+                // Wait until at least one of the connectors returns a graph data
+                this._chain.graph.events.graphData.on(connectorCallback);
+            }
+            else
+            {
+                this._on(callback);
+            }
+
+            // Resolve by timeout
             if (isNumber(opts?.timeout))
             {
-                setTimeout(() => cb(undefined), opts.timeout);
+                setTimeout(() => resolve(), opts.timeout);
             }
         });
-    }
-
-    then(fn?: (val: TGValue) => any): Promise<any>
-    {
-        return this.promise().then(fn);
     }
 
     map(): TGLink
@@ -290,7 +306,7 @@ export class TGLink
         });
     }
 
-    private _onMap(cb: TGOnCb): TGLink
+    private _onMap(cb: TGOnCb, msgId?: string): TGLink
     {
         return this._maybeWaitAuth(() =>
         {
@@ -300,6 +316,7 @@ export class TGLink
                 this._endQuery = this._chain.graph.queryMany(
                     this.optionsGet,
                     this._onQueryResponse.bind(this),
+                    msgId
                 );
             }
         });

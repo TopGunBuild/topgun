@@ -81,7 +81,7 @@ export async function authenticateIdentity(
         readonly pub: string;
     }>
 {
-    const ident = await client.get(soul).then();
+    const ident = await client.get(soul).promise();
     return authenticateAccount(ident, password, encoding);
 }
 
@@ -128,7 +128,7 @@ export async function authenticate(
                         .get(aliasSoul)
                         .promise({ timeout: options.timeout })
                         .then()
-                    : await client.get(aliasSoul).then();
+                    : await client.get(aliasSoul).promise();
 
         if (!isObject(idents))
         {

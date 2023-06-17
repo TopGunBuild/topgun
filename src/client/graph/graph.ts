@@ -192,7 +192,7 @@ export class TGGraph
     /**
      * Read a matching nodes from the graph
      */
-    queryMany(opts: TGOptionsGet, cb: TGOnCb): () => void
+    queryMany(opts: TGOptionsGet, cb: TGOnCb, msgId?: string): () => void
     {
         getNodesFromGraph(opts, this._graph).forEach((node) =>
         {
@@ -201,7 +201,7 @@ export class TGGraph
 
         const queryString = stringifyOptionsGet(opts);
 
-        this._listen(queryString, cb);
+        this._listen(queryString, cb, msgId);
 
         return () =>
         {
@@ -442,9 +442,9 @@ export class TGGraph
             new TGGraphQuery(this, queryString, this.receiveGraphData));
     }
 
-    private _listen(queryString: string, cb: TGNodeListenCb): TGGraph
+    private _listen(queryString: string, cb: TGNodeListenCb, msgId?: string): TGGraph
     {
-        this._query(queryString).get(cb);
+        this._query(queryString).get(cb, msgId);
         return this;
     }
 
