@@ -102,9 +102,9 @@ export class TGClient
         {
             this.handlePeers(options.peers);
         }
-        if (options.persistStorage)
+        if (options.localStorage)
         {
-            this.useConnector(new TGIndexedDBConnector(options.storageKey, options));
+            this.useConnector(new TGIndexedDBConnector(options.localStorageKey, options));
         }
         if (Array.isArray(options.connectors))
         {

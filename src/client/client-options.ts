@@ -12,8 +12,8 @@ export interface TGClientOptions extends TGGraphAdapterOptions
     peers?: TGClientPeerOptions[];
     graph?: TGGraph;
     connectors?: TGGraphConnector[];
-    persistStorage?: boolean;
-    storageKey?: string;
+    localStorage?: boolean;
+    localStorageKey?: string;
     sessionStorage?: TGSupportedStorage|boolean;
     sessionStorageKey?: string;
     passwordMinLength?: number;
@@ -25,8 +25,8 @@ export const DEFAULT_OPTIONS: Required<TGClientOptions> = {
     peers                    : [],
     graph                    : new TGGraph(),
     connectors               : [],
-    persistStorage           : false,
-    storageKey               : 'topgun-nodes',
+    localStorage             : false,
+    localStorageKey          : 'topgun-nodes',
     sessionStorage           : localStorageAdapter,
     sessionStorageKey        : 'topgun-session',
     passwordMinLength        : 8,
