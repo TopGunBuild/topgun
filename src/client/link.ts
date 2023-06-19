@@ -235,8 +235,16 @@ export class TGLink
             if (this._multiple)
             {
                 this._onMap(callback, connectorMsgId);
-                // Wait until at least one of the connectors returns a graph data
-                this._chain.graph.events.graphData.on(connectorCallback);
+
+                if (this._chain.graph.activeConnectors > 0)
+                {
+                    // Wait until at least one of the connectors returns a graph data
+                    this._chain.graph.events.graphData.on(connectorCallback);
+                }
+                else
+                {
+                    resolve();
+                }
             }
             else
             {
