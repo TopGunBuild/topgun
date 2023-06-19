@@ -14,8 +14,7 @@ export interface TGClientOptions extends TGGraphAdapterOptions
     connectors?: TGGraphConnector[];
     persistStorage?: boolean;
     storageKey?: string;
-    persistSession?: boolean;
-    sessionStorage?: TGSupportedStorage;
+    sessionStorage?: TGSupportedStorage|boolean;
     sessionStorageKey?: string;
     passwordMinLength?: number;
     passwordMaxLength?: number;
@@ -28,7 +27,6 @@ export const DEFAULT_OPTIONS: Required<TGClientOptions> = {
     connectors               : [],
     persistStorage           : false,
     storageKey               : 'topgun-nodes',
-    persistSession           : true,
     sessionStorage           : localStorageAdapter,
     sessionStorageKey        : 'topgun-session',
     passwordMinLength        : 8,

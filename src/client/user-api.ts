@@ -1,4 +1,4 @@
-import { isObject, isString, isFunction, isBoolean } from 'topgun-typed';
+import { isObject, isString, isFunction, object, fn } from 'topgun-typed';
 import { authenticate, createUser, graphSigner } from '../sea';
 import { TGClient } from './client';
 import { TGEvent } from './control-flow/event';
@@ -21,10 +21,15 @@ import { TGLexLink } from './lex-link';
 import { DEFAULT_OPTIONS } from './client-options';
 import { assertCredentials, assertNotEmptyString } from '../utils/assert';
 
+const storageStruct = object({
+    getItem   : fn(),
+    setItem   : fn(),
+    removeItem: fn()
+});
+
 export class TGUserApi
 {
     private readonly _client: TGClient;
-    private readonly _persistSession: boolean;
     private readonly _sessionStorage: TGSupportedStorage;
     private readonly _sessionStorageKey: string;
     private readonly _authEvent: TGEvent<TGUserReference>;
@@ -40,18 +45,14 @@ export class TGUserApi
      */
     constructor(
         client: TGClient,
-        persistSession: boolean|undefined,
-        sessionStorage: TGSupportedStorage|undefined,
+        sessionStorage: TGSupportedStorage|undefined|boolean,
         sessionStorageKey: string|undefined,
         authEvent: TGEvent<TGUserReference>,
     )
     {
         this._authEvent         = authEvent;
         this._client            = client;
-        this._persistSession    = isBoolean(persistSession)
-            ? persistSession
-            : DEFAULT_OPTIONS.persistSession;
-        this._sessionStorage    = sessionStorage || DEFAULT_OPTIONS.sessionStorage;
+        this._sessionStorage    = storageStruct(sessionStorage).ok ? (sessionStorage as TGSupportedStorage) : null;
         this._sessionStorageKey = sessionStorageKey || DEFAULT_OPTIONS.sessionStorageKey;
     }
 
@@ -205,7 +206,7 @@ export class TGUserApi
      */
     async recoverCredentials(): Promise<void>
     {
-        if (this._persistSession)
+        if (this._sessionStorage)
         {
             const maybeSession = await getItemAsync(
                 this._sessionStorage,
@@ -234,7 +235,7 @@ export class TGUserApi
         readonly pub: string;
     }
     {
-        credentials  = assertCredentials(credentials);
+        credentials = assertCredentials(credentials);
 
         this.leave();
         this._signMiddleware = graphSigner(this._client, {
@@ -287,7 +288,7 @@ export class TGUserApi
         credentials: TGUserCredentials,
     ): Promise<void>
     {
-        if (this._persistSession)
+        if (this._sessionStorage)
         {
             await setItemAsync(
                 this._sessionStorage,
@@ -299,7 +300,7 @@ export class TGUserApi
 
     private async _removeCredentials(): Promise<void>
     {
-        if (this._persistSession)
+        if (this._sessionStorage)
         {
             await removeItemAsync(
                 this._sessionStorage,

@@ -84,7 +84,6 @@ export class TGClient
             this._user ||
             new TGUserApi(
                 this,
-                this.options.persistSession,
                 this.options.sessionStorage,
                 this.options.sessionStorageKey,
                 this._authEvent,
