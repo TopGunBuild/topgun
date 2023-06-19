@@ -21,7 +21,12 @@ export class TGLexLink extends TGLink
     constructor(chain: TGClient, key: string)
     {
         super(chain, key);
-        this.maxLimit = this._chain.options.transportMaxKeyValuePairs;
+        this.maxLimit   = this._chain.options.transportMaxKeyValuePairs;
+        this.optionsGet = {
+            '.': {},
+            '%': this.maxLimit
+        };
+        this._mergeSoul();
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -41,8 +46,6 @@ export class TGLexLink extends TGLink
         // The argument is a LEX query
         if (isObject(keyOrOptions))
         {
-            this._persistOptions();
-
             if (isObject(keyOrOptions['.']))
             {
                 this.optionsGet['.'] = cloneValue(keyOrOptions['.']);
@@ -149,28 +152,16 @@ export class TGLexLink extends TGLink
     {
         path     = assertNotEmptyString(path);
         this.key = this.key.endsWith('/') ? `${this.key}${path}` : `${this.key}/${path}`;
-        this._persistOptions();
+        this._mergeSoul();
     }
 
     private _setLex(key: KeyOfLex, value: ValueOfLex): void
     {
-        this._persistOptions();
         this.optionsGet['.'][key] = value;
     }
 
-    private _persistOptions(): void
+    private _mergeSoul(): void
     {
-        if (!isObject(this.optionsGet))
-        {
-            this.optionsGet = {};
-        }
-        if (!isObject(this.optionsGet['.']))
-        {
-            this.optionsGet['.'] = {};
-        }
-
         this.optionsGet['#'] = this.getPath().shift();
-        this.optionsGet['%'] = this.maxLimit;
-        this._multiple       = true;
     }
 }
