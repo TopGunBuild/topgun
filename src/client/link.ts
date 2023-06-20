@@ -1,4 +1,4 @@
-import { isDefined, isFunction, isString, isNumber, isObject } from 'topgun-typed';
+import { cloneValue, isEmptyObject, isFunction, isString, isNumber, isObject } from 'topgun-typed';
 import {
     SystemEvent,
     TGChainOptions, TGGraphData,
@@ -14,15 +14,15 @@ import { TGEvent } from './control-flow/event';
 import { TGGraph } from './graph/graph';
 import { pubFromSoul } from '../sea';
 import { assertFn, assertNotEmptyString } from '../utils/assert';
-import { getNodeSoul } from '../utils/node';
+import { getNodeSoul, isNode } from '../utils/node';
 import { generateMessageId } from './graph/graph-utils';
+import { TGLexLink } from './lex-link';
 
 /* eslint-disable @typescript-eslint/no-empty-function */
 export class TGLink
 {
     key: string;
     soul: string|undefined;
-    optionsGet: TGOptionsGet|undefined;
 
     protected readonly _updateEvent: TGEvent<TGValue|undefined, string>;
     protected readonly _chain: TGClient;
@@ -31,7 +31,7 @@ export class TGLink
     protected _hasReceived: boolean;
     protected _lastValue: TGValue|undefined;
     protected _endQuery?: () => void;
-    protected _multiple?: boolean;
+    protected _lex?: TGLexLink;
 
     /**
      * Constructor
@@ -88,12 +88,26 @@ export class TGLink
     /**
      * Traverse a location in the graph
      *
-     * @param key Key to read data from
+     * @param query Key to read data from or LEX query
      * @returns New chain context corresponding to given key
      */
-    get(key: string): TGLink
+    get(query: TGOptionsGet): TGLexLink;
+    get(key: string): TGLink;
+    get(keyOrOptions: string|TGOptionsGet): TGLink|TGLexLink
     {
-        return new (this.constructor as any)(this._chain, assertNotEmptyString(key), this);
+        // The argument is a LEX query
+        if (isObject(keyOrOptions))
+        {
+            return new TGLexLink(this._chain, keyOrOptions, this);
+        }
+        else if (isString(keyOrOptions))
+        {
+            return new TGLink(this._chain, assertNotEmptyString(keyOrOptions), this);
+        }
+        else
+        {
+            throw Error('Get path must be string or query object.');
+        }
     }
 
     /**
@@ -152,10 +166,36 @@ export class TGLink
         return this;
     }
 
-    not(cb: (key: string) => void): TGLink
+    set(data: any, cb?: TGMessageCb, opt?: TGOptionsPut): TGLink
     {
-        this.promise().then(val => !isDefined(val) && cb(this.key));
-        return this;
+        let soulSuffix, value = cloneValue(data);
+
+        if (!isObject(value) || isEmptyObject(value))
+        {
+            throw new Error('This data type is not supported in set().');
+        }
+
+        if (data instanceof TGLink)
+        {
+            if (data.getPath().length === 0)
+            {
+                throw new Error('Link is empty.');
+            }
+
+            soulSuffix = assertNotEmptyString(data.getPath()[0]);
+            value      = { '#': soulSuffix };
+        }
+        else if (isNode(data))
+        {
+            soulSuffix = assertNotEmptyString(data._['#']);
+        }
+        else
+        {
+            soulSuffix = generateMessageId();
+        }
+
+        this.key = this.key.endsWith('/') ? `${this.key}${soulSuffix}` : `${this.key}/${soulSuffix}`;
+        return this.put(value, cb, opt);
     }
 
     opt(options?: TGChainOptions): TGChainOptions
@@ -171,20 +211,26 @@ export class TGLink
         return this._opt;
     }
 
-    once(cb: TGOnCb, timeout = 500): TGLink
+    once(cb: TGOnCb, timeout = 500): Promise<TGValue|undefined>
     {
         cb = assertFn<TGOnCb>(cb);
-        this.promise({ timeout, cb });
-        return this;
+        return this.promise({ timeout, cb });
     }
 
-    on(cb: TGOnCb): TGLink
+    on(cb: TGOnCb): void
     {
         cb = assertFn<TGOnCb>(cb);
-        return this._multiple ? this._onMap(cb) : this._on(cb);
+        if (this._lex)
+        {
+            this._onMap(cb);
+        }
+        else
+        {
+            this._on(cb);
+        }
     }
 
-    off(cb?: TGOnCb): TGLink
+    off(cb?: TGOnCb): void
     {
         if (cb)
         {
@@ -202,8 +248,6 @@ export class TGLink
             }
             this._updateEvent.reset();
         }
-
-        return this;
     }
 
     promise(opts?: {timeout: number, cb?: TGOnCb}): Promise<TGValue|undefined>
@@ -226,13 +270,13 @@ export class TGLink
                 originalCallback(val, soul);
 
                 // Terminate if only one node is requested
-                if (!this._multiple)
+                if (!this._lex)
                 {
                     resolve(val);
                 }
             };
 
-            if (this._multiple)
+            if (this._lex)
             {
                 this._onMap(callback, connectorMsgId);
 
@@ -259,10 +303,39 @@ export class TGLink
         });
     }
 
-    map(): TGLink
+    // -----------------------------------------------------------------------------------------------------
+    // @ Public methods for collections
+    // -----------------------------------------------------------------------------------------------------
+
+    map(): TGLexLink
     {
-        this._multiple = true;
-        return this;
+        this._lex = new TGLexLink(this._chain, {}, this);
+        return this._lex;
+    }
+
+    start(value: string): TGLexLink
+    {
+        return this.map().start(value);
+    }
+
+    end(value: string): TGLexLink
+    {
+        return this.map().end(value);
+    }
+
+    prefix(value: string): TGLexLink
+    {
+        return this.map().prefix(value);
+    }
+
+    limit(value: number): TGLexLink
+    {
+        return this.map().limit(value);
+    }
+
+    reverse(value = true): TGLexLink
+    {
+        return this.map().reverse(value);
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -280,9 +353,9 @@ export class TGLink
             this._chain.pub = pub;
             this.key        = this.key.replace(this._chain.WAIT_FOR_USER_PUB, pub);
 
-            if (isObject(this.optionsGet) && isString(this.optionsGet['#']))
+            if (isObject(this._lex.optionsGet) && isString(this._lex.optionsGet['#']))
             {
-                this.optionsGet['#'] = this.optionsGet['#'].replace(this._chain.WAIT_FOR_USER_PUB, pub);
+                this._lex.optionsGet['#'] = this._lex.optionsGet['#'].replace(this._chain.WAIT_FOR_USER_PUB, pub);
             }
         }
     }
@@ -322,7 +395,7 @@ export class TGLink
             if (!this._endQuery)
             {
                 this._endQuery = this._chain.graph.queryMany(
-                    this.optionsGet,
+                    this._lex.optionsGet,
                     this._onQueryResponse.bind(this),
                     msgId
                 );

@@ -17,9 +17,9 @@ import {
     TGUserCredentials,
     TGUserReference,
 } from '../types';
-import { TGLexLink } from './lex-link';
 import { DEFAULT_OPTIONS } from './client-options';
 import { assertCredentials, assertNotEmptyString } from '../utils/assert';
+import { TGLink } from './link';
 
 const storageStruct = object({
     getItem   : fn(),
@@ -193,7 +193,7 @@ export class TGUserApi
     /**
      * Traverse a location in the graph
      */
-    get(soul: string): TGLexLink
+    get(soul: string): TGLink
     {
         soul = assertNotEmptyString(soul);
         return !!this.is

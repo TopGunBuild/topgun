@@ -11,7 +11,6 @@ import { pubFromSoul, unpackGraph } from '../sea';
 import { TGIndexedDBConnector } from '../indexeddb/indexeddb-connector';
 import { TGNode, TGUserReference, SystemEvent } from '../types';
 import { TGEvent } from './control-flow/event';
-import { TGLexLink } from './lex-link';
 import { match } from '../utils/match';
 import { wait } from '../utils/wait';
 import { assertNotEmptyString, assertObject } from '../utils/assert';
@@ -119,9 +118,9 @@ export class TGClient
     /**
      * Traverse a location in the graph
      */
-    get(soul: string): TGLexLink
+    get(soul: string): TGLink
     {
-        return new TGLexLink(this, assertNotEmptyString(soul));
+        return new TGLink(this, assertNotEmptyString(soul));
     }
 
     /**

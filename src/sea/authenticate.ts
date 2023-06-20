@@ -123,11 +123,10 @@ export async function authenticate(
         }
 
         let idents =
-                client.graph.connectorCount() === 0
+                client.graph.activeConnectors === 0
                     ? await client
                         .get(aliasSoul)
                         .promise({ timeout: options.timeout })
-                        .then()
                     : await client.get(aliasSoul).promise();
 
         if (!isObject(idents))
