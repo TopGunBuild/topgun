@@ -23,6 +23,7 @@ export class TGLink
 {
     key: string;
     soul: string|undefined;
+    _lex?: TGLexLink;
 
     protected readonly _updateEvent: TGEvent<TGValue|undefined, string>;
     protected readonly _chain: TGClient;
@@ -31,7 +32,6 @@ export class TGLink
     protected _hasReceived: boolean;
     protected _lastValue: TGValue|undefined;
     protected _endQuery?: () => void;
-    protected _lex?: TGLexLink;
 
     /**
      * Constructor
@@ -309,8 +309,7 @@ export class TGLink
 
     map(): TGLexLink
     {
-        this._lex = new TGLexLink(this._chain, {}, this);
-        return this._lex;
+        return new TGLexLink(this._chain, {}, this);
     }
 
     start(value: string): TGLexLink
