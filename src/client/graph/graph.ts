@@ -299,6 +299,13 @@ export class TGGraph
 
         const { graphData, soul } = graphFromRawValue(data, fullPath);
 
+        console.log({
+            data,
+            graphData,
+            fullPath,
+            soul
+        });
+
         this.put(graphData, cb, soul, putOpt);
     }
 
