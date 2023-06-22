@@ -47,16 +47,7 @@ export function nodeToGraph(node: TGNode): TGGraphData
             continue;
         }
 
-        let soul = val && val._ && val._['#'];
-
-        if (val instanceof TGLink && val.optionsGet['#'])
-        {
-            soul = val.optionsGet['#'];
-        }
-        else if (val instanceof TGLink && val.optionsGet['#'])
-        {
-            soul = val.optionsGet['#'];
-        }
+        const soul = val && val._ && val._['#'];
 
         if (soul)
         {
