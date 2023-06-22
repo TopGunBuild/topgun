@@ -1,5 +1,4 @@
-import { isDefined, isObject, isNumber, cloneValue } from 'topgun-typed';
-import { addMissingState, diffCRDT, mergeGraph } from '../../crdt';
+import { isDefined, isObject, isNumber } from 'topgun-typed';
 import { TGGraphData, TGNode, TGOptionsGet, TGPathData, TGValue } from '../../types';
 import { isSupportValue } from '../../utils/is-support';
 import { filterNodesByListOptions, storageListOptionsFromGetOptions } from '../../storage/utils';
@@ -18,80 +17,6 @@ export function diffSets(
         updated.filter(key => initial.indexOf(key) === -1),
         initial.filter(key => updated.indexOf(key) === -1),
     ];
-}
-
-export function nodeToGraph(node: TGNode): TGGraphData
-{
-    const modified         = cloneValue(node);
-    let nodes: TGGraphData = {};
-    const nodeSoul         = node && node._ && node._['#'];
-
-    for (const key in node)
-    {
-        if (key === '_')
-        {
-            continue;
-        }
-        const val = node[key];
-        if (typeof val !== 'object' || val === null)
-        {
-            continue;
-        }
-
-        if (val.soul)
-        {
-            const edge    = { '#': val.soul };
-            modified[key] = edge;
-
-            continue;
-        }
-
-        const soul = val && val._ && val._['#'];
-
-        if (soul)
-        {
-            const edge    = { '#': soul };
-            modified[key] = edge;
-            const graph   = addMissingState(nodeToGraph(val));
-            const diff    = diffCRDT(graph, nodes);
-            nodes         = diff ? mergeGraph(nodes, diff) : nodes;
-        }
-    }
-
-    const raw              = { [nodeSoul as string]: modified };
-    const withMissingState = addMissingState(raw);
-    const graphDiff        = diffCRDT(withMissingState, nodes);
-    nodes                  = graphDiff ? mergeGraph(nodes, graphDiff) : nodes;
-
-    return nodes;
-}
-
-export function flattenGraphData(data: TGGraphData): TGGraphData
-{
-    const graphs: TGGraphData[] = [];
-    let flatGraph: TGGraphData  = {};
-
-    for (const soul in data)
-    {
-        if (!soul)
-        {
-            continue;
-        }
-
-        const node = data[soul];
-        if (node)
-        {
-            graphs.push(nodeToGraph(node));
-        }
-    }
-
-    for (const graph of graphs)
-    {
-        const diff = diffCRDT(graph, flatGraph);
-        flatGraph  = diff ? mergeGraph(flatGraph, diff) : flatGraph;
-    }
-
-    return flatGraph;
 }
 
 export function getNodesFromGraph(
@@ -171,7 +96,7 @@ export function getPathData(
     };
 }
 
-export function graphFromRawValue(data: TGValue, fullPath: string[]): {
+export function flattenGraphData(data: TGValue, fullPath: string[]): {
     graphData: TGGraphData,
     soul: string
 }
@@ -230,7 +155,7 @@ export function flattenGraphByPath(
 
     for (const k in obj)
     {
-        if (!obj.hasOwnProperty(k))
+        if (!obj.hasOwnProperty(k) || k === '_')
         {
             continue;
         }

@@ -16,10 +16,9 @@ import { TGEvent } from '../control-flow/event';
 import { TGGraphConnector } from '../transports/graph-connector';
 import {
     diffSets,
-    flattenGraphData,
     generateMessageId, getNodesFromGraph,
     getPathData,
-    graphFromRawValue
+    flattenGraphData
 } from './graph-utils';
 import { getNodeSoul } from '../../utils/node';
 import { TGGraphQuery } from './graph-query';
@@ -297,14 +296,7 @@ export class TGGraph
             throw err;
         }
 
-        const { graphData, soul } = graphFromRawValue(data, fullPath);
-
-        console.log({
-            data,
-            graphData,
-            fullPath,
-            soul
-        });
+        const { graphData, soul } = flattenGraphData(data, fullPath);
 
         this.put(graphData, cb, soul, putOpt);
     }
@@ -327,9 +319,7 @@ export class TGGraph
         msgId?: string
     ): () => void
     {
-        let diff: TGGraphData = flattenGraphData(
-            addMissingState(data),
-        );
+        let diff: TGGraphData = addMissingState(data);
 
         const id = msgId || generateMessageId();
         (async () =>
