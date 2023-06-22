@@ -53,6 +53,10 @@ export function nodeToGraph(node: TGNode): TGGraphData
         {
             soul = val.optionsGet['#'];
         }
+        else if (val instanceof TGLink && val.optionsGet['#'])
+        {
+            soul = val.optionsGet['#'];
+        }
 
         if (soul)
         {
