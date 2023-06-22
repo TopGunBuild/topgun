@@ -114,6 +114,11 @@ export class TGLexLink
         return this;
     }
 
+    promise(opts?: {timeout: number, cb?: TGOnCb}): Promise<TGValue|undefined>
+    {
+        return this._link.promise(opts);
+    }
+
     // -----------------------------------------------------------------------------------------------------
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
