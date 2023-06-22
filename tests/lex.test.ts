@@ -237,10 +237,31 @@ describe('LEX', () =>
                 value;
 
         // Usage
-        const result = JSON.stringify({ c: 1, a: { d: 0, c: 1, e: { d:'0', a: 0, 1: 4 } } }, replacer);
+        const result = JSON.stringify({ c: 1, a: { d: 0, c: 1, e: { d: '0', a: 0, 1: 4 } } }, replacer);
 
         console.log(result);
 
         expect(result).not.toBeUndefined();
+    });
+
+    it('should sign graph', function ()
+    {
+        const raw = {
+            '~XFQj766zXgsSdWe-M3yJ7--BjFmOLq4xOizYjfo40CE.sSGGCKBkmkkv92N1zAxzffyJET0jT-3sh0tIE84SGbg': {
+                '_'    : {
+                    '#': '~XFQj766zXgsSdWe-M3yJ7--BjFmOLq4xOizYjfo40CE.sSGGCKBkmkkv92N1zAxzffyJET0jT-3sh0tIE84SGbg',
+                    '>': {
+                        'alias': 1687406907672,
+                        'auth' : 1687406907672,
+                        'epub' : 1687406907672,
+                        'pub'  : 1687406907672
+                    }
+                },
+                'alias': '{":":"billy","~":"CoWEkP9DNPe6CnQwR9GB8Er2b1bqucgK22AeTpjjPIhGA5z9mj+hwPGlDTEyPRPrA4NmpbrD9XuRvAsJYuY0sw=="}',
+                'auth' : '{":":{"ek":{"ct":"gyyELRpqkMJ3yNdB/4mIRmUrJp/vyh1Zieq+zDQCjMzccKmfVLcqC09v9ldbcl4ZpSRDgusp0OoM4wsrsf9JYCnTfHuh5YqVOoNQCNSdXLfLGnucrluufTBnfEHVpOOxGC56iVakHIlGlyHjSddJYsHvtFujj5TyuquTdQ==","iv":"A4zRO08JQHSYmSIjDZq2","s":"BkpdiNdFp7qh"},"s":"XNVq5WfjTHVoHxDjSERuf1qe9CQ3OHmA6RfxZrO92K4b4qhCCMPp01zvvlmntllU"},"~":"TxDRmXBS5GcaSCWGUCoKg04uBqfh5vY0eLXccOQ21LuQKtOdBJfjlCcIj0iA4WESK6h9aVCBhCs20iy643qLCw=="}',
+                'epub' : '{":":"3r08-6U8ju37B_ZZJeObScylod0xEC1tgtn3LSyfBOk.4rmg7RxqkUuzDWKqARSUptpFnY35W1kjMl80A0ugCPw","~":"pM+1fnxgARon47cMlU/t3XeDNW4OE5CkmEuThWfHQ7loFE+lv5ObJiAjQR9WKRazvWlxKHbRcpWfevtvrnARmw=="}',
+                'pub'  : 'XFQj766zXgsSdWe-M3yJ7--BjFmOLq4xOizYjfo40CE.sSGGCKBkmkkv92N1zAxzffyJET0jT-3sh0tIE84SGbg'
+            }
+        };
     });
 });
