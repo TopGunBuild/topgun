@@ -1,7 +1,7 @@
 import { isObject, isString, isNumber, isBoolean } from 'topgun-typed';
 import { TGValue } from '../types';
 
-export function isSupport(value: any): value is TGValue 
+export function isSupportValue(value: unknown): value is TGValue
 {
     return (
         isObject(value) ||

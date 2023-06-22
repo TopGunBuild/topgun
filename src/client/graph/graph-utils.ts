@@ -1,8 +1,7 @@
 import { isDefined, isObject, isNumber, cloneValue } from 'topgun-typed';
 import { addMissingState, diffCRDT, mergeGraph } from '../../crdt';
 import { TGGraphData, TGNode, TGOptionsGet, TGPathData, TGValue } from '../../types';
-import { TGLink } from '../link';
-import { isSupport } from '../../utils/is-support';
+import { isSupportValue } from '../../utils/is-support';
 import { filterNodesByListOptions, storageListOptionsFromGetOptions } from '../../storage/utils';
 
 export function generateMessageId(): string
@@ -212,7 +211,7 @@ export function flattenGraphByPath(
     target            = {},
 ): TGGraphData
 {
-    if (!isSupport(obj))
+    if (!isSupportValue(obj))
     {
         throw Error(
             'Invalid data: ' + checkType(obj) + ' at ' + pathArr.join('.'),
@@ -240,7 +239,7 @@ export function flattenGraphByPath(
         const pathArrFull = [...pathArr, k];
         const pathFull    = pathArrFull.join('/');
 
-        if (!isSupport(value))
+        if (!isSupportValue(value))
         {
             console.log(
                 'Invalid data: ' +
