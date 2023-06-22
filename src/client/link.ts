@@ -13,7 +13,7 @@ import { TGClient } from './client';
 import { TGEvent } from './control-flow/event';
 import { TGGraph } from './graph/graph';
 import { pubFromSoul } from '../sea';
-import { assertFn, assertNotEmptyString } from '../utils/assert';
+import { assertFn, assertNotEmptyString, assertPath } from '../utils/assert';
 import { getNodeSoul, isNode } from '../utils/node';
 import { generateMessageId } from './graph/graph-utils';
 import { TGLexLink } from './lex-link';
@@ -102,7 +102,7 @@ export class TGLink
         }
         else if (isString(keyOrOptions))
         {
-            return new TGLink(this._chain, assertNotEmptyString(keyOrOptions), this);
+            return new TGLink(this._chain, assertPath(keyOrOptions), this);
         }
         else
         {

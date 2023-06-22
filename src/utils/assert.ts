@@ -1,4 +1,18 @@
-import { boolean, unwrap, number, fn, Struct, isString, isObject, err, StructError, string, ok, object } from 'topgun-typed';
+import {
+    boolean,
+    unwrap,
+    union,
+    number,
+    fn,
+    Struct,
+    isString,
+    isObject,
+    err,
+    StructError,
+    string,
+    ok,
+    object
+} from 'topgun-typed';
 import { TGUserCredentials } from '../types';
 
 const structObject = (msg = 'Expected object'): Struct<any> =>
@@ -42,6 +56,20 @@ const structNotEmptyString = (msg = 'Expected non-empty string value'): Struct<s
             : input.length > 0
                 ? ok(input)
                 : err(new StructError(msg, { input, path: [] }));
+
+const structNotAllowUnderscore = (msg = 'Not an underscore expected'): Struct<string> =>
+    input =>
+        input !== '_'
+            ? ok(input)
+            : err(new StructError(msg, { input, path: [] }));
+
+export function assertPath(value: unknown): string
+{
+    const message = 'A non-empty string value and not an underscore is expected.';
+    const struct  = union([structNotEmptyString(), structNotAllowUnderscore()], message);
+    const actual  = struct(value);
+    return unwrap(actual);
+}
 
 export function assertNotEmptyString(value: unknown, msg?: string): string
 {
