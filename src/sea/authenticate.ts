@@ -134,9 +134,9 @@ export async function authenticate(
             idents = {};
         }
 
-        for (const soul in idents)
+        for (const key in idents)
         {
-            if (soul === '_')
+            if (key === '_') //  || !isObject(idents[key])
             {
                 continue;
             }
@@ -145,7 +145,8 @@ export async function authenticate(
 
             try
             {
-                pair = await authenticateIdentity(
+                const soul = idents[key]['#'];
+                pair       = await authenticateIdentity(
                     client,
                     soul,
                     passwordOrOpt as string,

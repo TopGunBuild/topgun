@@ -66,7 +66,7 @@ export class Middleware
 
         if (!soul || soul === req.channel || soul === 'changelog')
         {
-            return
+            return;
         }
 
         const opts  = req.data as TGOptionsGet|undefined;
