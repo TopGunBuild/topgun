@@ -1,9 +1,10 @@
-import { isNumber, isString } from 'topgun-typed';
+import { isNumber, isString, isDefined } from 'topgun-typed';
 import textEncoder from 'topgun-textencoder';
 import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from './constants';
 import { LEX, TGGraphAdapterOptions, TGGraphData, TGNode, TGOptionsGet } from '../types';
 import { StorageListOptions } from './types';
 import { getNodeSoul } from '../utils/node';
+import { assertNotEmptyString } from '../utils/assert';
 
 export function arrayNodesToObject(nodes: TGNode[]): TGGraphData
 {
@@ -27,6 +28,7 @@ export function filterNodesByListOptions(nodes: TGNode[], options: StorageListOp
 
 export function storageListOptionsFromGetOptions(opts: TGOptionsGet): StorageListOptions|null
 {
+    const soul: string               = assertNotEmptyString(opts['#'], 'The soul must be defined');
     const lexQuery: LEX|undefined    = opts && opts['.'];
     const limit: number|undefined    = opts && opts['%'];
     const reverse: boolean|undefined = opts && opts['-'];
@@ -34,34 +36,31 @@ export function storageListOptionsFromGetOptions(opts: TGOptionsGet): StorageLis
     const start: string|undefined    = lexQuery && lexQuery['>'];
     const end: string|undefined      = lexQuery && lexQuery['<'];
 
-    const soul = opts && opts['#'];
+    const getPath                     = (path: string) => [soul, path]
+        .filter(value => value && value.length > 0)
+        .join('/');
+    const options: StorageListOptions = {
+        prefix: getPath(prefix)
+    };
 
-    if (isString(start) || isString(end) || isString(prefix) || isNumber(limit) || isNumber(reverse))
+    if (start)
     {
-        const options: StorageListOptions = {};
-        const getPath                     = (path: string) => [soul, path].join('/');
-
-        if (start)
-        {
-            options.start = getPath(start);
-        }
-        if (end)
-        {
-            options.end = getPath(end);
-        }
-        if (prefix)
-        {
-            options.prefix = getPath(prefix);
-        }
-        if (limit)
-        {
-            options.limit = limit;
-        }
-
-        return options;
+        options.start = getPath(start);
+    }
+    if (end)
+    {
+        options.end = getPath(end);
+    }
+    if (limit)
+    {
+        options.limit = limit;
+    }
+    if (isDefined(reverse))
+    {
+        options.reverse = reverse;
     }
 
-    return null;
+    return options;
 }
 
 export function assertPutEntry(soul: string, node: TGNode, options: TGGraphAdapterOptions): void

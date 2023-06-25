@@ -13,7 +13,7 @@ import { TGNode, TGUserReference, SystemEvent } from '../types';
 import { TGEvent } from './control-flow/event';
 import { match } from '../utils/match';
 import { wait } from '../utils/wait';
-import { assertObject, assertPath } from '../utils/assert';
+import { assertObject, assertGetPath } from '../utils/assert';
 
 /**
  * Main entry point for TopGun in browser
@@ -120,7 +120,7 @@ export class TGClient
      */
     get(soul: string): TGLink
     {
-        return new TGLink(this, assertPath(soul));
+        return new TGLink(this, assertGetPath(soul));
     }
 
     /**

@@ -63,7 +63,7 @@ const structNotAllowUnderscore = (msg = 'Not an underscore expected'): Struct<st
             ? ok(input)
             : err(new StructError(msg, { input, path: [] }));
 
-export function assertPath(value: unknown): string
+export function assertGetPath(value: unknown): string
 {
     const message = 'A non-empty string value and not an underscore is expected.';
     const struct  = union([structNotEmptyString(), structNotAllowUnderscore()], message);

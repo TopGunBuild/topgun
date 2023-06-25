@@ -1,6 +1,6 @@
-import { createClient, TGClient, TGGraphAdapter, TGGraphData, TGOptionsGet } from '../src/client';
+import { addMissingState, createClient, TGClient, TGGraphAdapter, TGGraphData, TGOptionsGet } from '../src/client';
 import { TGServer } from '../src/server';
-import { graphFromRawValue } from '../src/client/graph/graph-utils';
+import { flattenGraphData } from '../src/client/graph/graph-utils';
 import { StorageListOptions } from '../src/storage';
 import { lexicographicCompare, listFilterMatch } from '../src/storage/utils';
 
@@ -150,7 +150,7 @@ describe('LEX', () =>
                 'height': 500
             }
         };
-        const graphData = graphFromRawValue(data, pathArr);
+        const graphData = flattenGraphData(data, pathArr);
 
         // console.log(
         //     graphData
@@ -160,7 +160,7 @@ describe('LEX', () =>
         const data2      = {
             'title': 'Sample Konfabulator Widget',
         };
-        const graphData2 = graphFromRawValue(data, pathArr);
+        const graphData2 = flattenGraphData(data, pathArr);
 
         // expect(graphData).not.toBeUndefined();
         expect(graphData[pathArr2.join('/')])
@@ -172,7 +172,7 @@ describe('LEX', () =>
         const data      = {
             'title': 'Sample Konfabulator Widget',
         };
-        const graphData = graphFromRawValue(data, pathArr);
+        const graphData = flattenGraphData(data, pathArr);
 
         console.log(
             graphData
@@ -185,7 +185,7 @@ describe('LEX', () =>
     {
         const pathArr   = ['widget', 'window', 'title'];
         const data      = 'Sample Konfabulator Widget';
-        const graphData = graphFromRawValue(data, pathArr);
+        const graphData = flattenGraphData(data, pathArr);
 
         console.log(
             graphData
@@ -202,7 +202,7 @@ describe('LEX', () =>
                 'title': 'Sample Konfabulator Widget'
             }
         };
-        const graphData = graphFromRawValue(data, pathArr);
+        const graphData = flattenGraphData(data, pathArr);
 
         console.log(
             JSON.stringify(graphData, null, 2)
@@ -264,10 +264,12 @@ describe('LEX', () =>
     it('should sign graph', () =>
     {
         const fullPath = ['~@billy'];
-        const result = graphFromRawValue(authData, fullPath);
+        const {graphData} = flattenGraphData(authData, fullPath);
 
-        console.log(result);
+        console.log(
+            addMissingState(graphData)
+        );
 
-        expect(result).not.toBeUndefined();
+        expect(graphData).not.toBeUndefined();
     });
 });
