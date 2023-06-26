@@ -20,6 +20,7 @@ import {
 import { DEFAULT_OPTIONS } from './client-options';
 import { assertCredentials, assertNotEmptyString } from '../utils/assert';
 import { TGLink } from './link';
+import { localStorageAdapter } from '../utils/local-storage';
 
 const storageStruct = object({
     getItem   : fn(),
@@ -52,7 +53,11 @@ export class TGUserApi
     {
         this._authEvent         = authEvent;
         this._client            = client;
-        this._sessionStorage    = storageStruct(sessionStorage).ok ? (sessionStorage as TGSupportedStorage) : null;
+        this._sessionStorage    = !sessionStorage
+            ? null
+            : storageStruct(sessionStorage).ok
+                ? (sessionStorage as TGSupportedStorage)
+                : localStorageAdapter;
         this._sessionStorageKey = sessionStorageKey || DEFAULT_OPTIONS.sessionStorageKey;
     }
 
@@ -288,6 +293,7 @@ export class TGUserApi
         credentials: TGUserCredentials,
     ): Promise<void>
     {
+        console.log('_sessionStorage', this._sessionStorage);
         if (this._sessionStorage)
         {
             await setItemAsync(
