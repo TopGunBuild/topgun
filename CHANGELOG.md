@@ -1,3 +1,38 @@
+# [1.4.0](https://github.com/TopGunBuild/topgun/compare/v1.3.0...v1.4.0) (2023-06-26)
+
+
+### Bug Fixes
+
+* add `promise` method to lex link ([329720e](https://github.com/TopGunBuild/topgun/commit/329720e61b199f912bb04d682cfdaae025509853))
+* add path validation ([e47718e](https://github.com/TopGunBuild/topgun/commit/e47718ec59dfc374afad34a7e829e3b37a74f2fc))
+* add topgun-textencoder, remove shims ([c0f5375](https://github.com/TopGunBuild/topgun/commit/c0f537515826ef3b497a81eec47a311af02a19d0))
+* authenticate identity with a reference soul ([e26bcb3](https://github.com/TopGunBuild/topgun/commit/e26bcb307e5208f19a59b6dc7f44387dda8ac600))
+* **client:** collections query fixed ([f7afb07](https://github.com/TopGunBuild/topgun/commit/f7afb07b67482e372dbb36c1bda5cc2663634697))
+* **client:** generate soul in method `set` ([ad5be79](https://github.com/TopGunBuild/topgun/commit/ad5be79f9c310a609ffda2585e813bffcecf9b67))
+* **client:** init get options in constructor ([ef2ddb0](https://github.com/TopGunBuild/topgun/commit/ef2ddb028accc28d24d531a0f629e4fef791bb53))
+* **client:** move `set` method to lex-link ([4e29ca4](https://github.com/TopGunBuild/topgun/commit/4e29ca455f491780ef32d555535679ac177454b1))
+* **client:** query multiple nodes ([c62fc72](https://github.com/TopGunBuild/topgun/commit/c62fc72a98ef49eb0b1b55ddfe29b3b57d1e0505))
+* **client:** remove `persistSession` from options ([6f40894](https://github.com/TopGunBuild/topgun/commit/6f40894959d6f9bad20a97a45a99e76a102110eb))
+* **client:** remove credentials when user leave ([07525ff](https://github.com/TopGunBuild/topgun/commit/07525ffba2a8da2e0d0315a689d9937f3aed5acc))
+* **client:** remove default timeout in promise method ([039221a](https://github.com/TopGunBuild/topgun/commit/039221a3d1e7452e7479ccaea5a42547ec67e059))
+* **client:** remove unused code ([279ef61](https://github.com/TopGunBuild/topgun/commit/279ef6168efbfb366f0af7044bc35f217dd5d37d))
+* **client:** renamed local storage options ([c9aaaf0](https://github.com/TopGunBuild/topgun/commit/c9aaaf01ca52dd998ea8c99d97cd0c9fb0c4682d))
+* **client:** resilve promise immediately if there are no active connectors ([7c07586](https://github.com/TopGunBuild/topgun/commit/7c075862ccafe4f7d98d1f1d9a23ad987bb86986))
+* **client:** return soul from last value ([11a3017](https://github.com/TopGunBuild/topgun/commit/11a3017ddc5561445be9700b6530f65c15b61693))
+* **client:** set default session storage ([df26d74](https://github.com/TopGunBuild/topgun/commit/df26d74ddc3229a54c88fcd129bad143e4c45e99))
+* create memory adapter based on the memory storage ([e33e3b5](https://github.com/TopGunBuild/topgun/commit/e33e3b516d5ee8f84dfb4f314b65b23cf30a9143))
+* fixed method `once` when requesting collections ([5278d4f](https://github.com/TopGunBuild/topgun/commit/5278d4f07ee0d3a8d6b159c6255f258e7f5ad7b5))
+* flatten graph data ([8f497e9](https://github.com/TopGunBuild/topgun/commit/8f497e9e9413afdfd7b88e4f51b50784f6b9a252))
+* include soul to prefix query ([16a41dc](https://github.com/TopGunBuild/topgun/commit/16a41dc234f113844428d06952c8ec06a2fb5dd7))
+* **indexeddb:** get keys instead of values ([9a3e942](https://github.com/TopGunBuild/topgun/commit/9a3e942560f5c3393bea0f979721b4b711fa4321))
+* request nodes from an adapter using get options ([3c5ad9d](https://github.com/TopGunBuild/topgun/commit/3c5ad9dc465fbb5d152539dd6ea8d34a97c36d84))
+* update link soul ([547d948](https://github.com/TopGunBuild/topgun/commit/547d948fdcb373adca54886b489de9e074393705))
+
+
+### Features
+
+* add options for max key/value size ([b200d25](https://github.com/TopGunBuild/topgun/commit/b200d2582a65f46422984753ebf5e72a8d2b5311))
+
 # [1.3.0](https://github.com/TopGunBuild/topgun/compare/v1.2.4...v1.3.0) (2023-06-03)
 
 
