@@ -9,6 +9,7 @@ import { TGGraphData, TGNode, TGOptionsPut, TGValue } from '../types';
 import { TGClient, TGLink } from '../client';
 import { Policy } from './policy';
 import { PairBase } from './pair';
+import { getNodeSoul } from '../utils/node';
 
 const DEFAULT_OPTS: {
     readonly encode?: string;
@@ -157,7 +158,7 @@ export function hashNodeKey(node: TGNode, key: string): Promise<string>
 {
     const val     = node && node[key];
     const parsed  = parse(val);
-    const soul    = node && node._ && node._['#'];
+    const soul    = getNodeSoul(node);
     const prepped = prep(parsed, key, node, soul as string);
 
     return hashForSignature(prepped);
@@ -287,7 +288,7 @@ export async function signNode(node: TGNode, pair: PairBase): Promise<TGNode>
     const signedNode: TGNode = {
         _: node._,
     };
-    const soul               = node._ && node._['#'];
+    const soul               = getNodeSoul(node);
 
     for (const key in node)
     {

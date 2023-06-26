@@ -2,6 +2,7 @@ import { isObject, isDefined } from 'topgun-typed';
 import { check, parse, shuffleAttackCutoff } from './settings';
 import { pubFromSoul } from './soul';
 import { TGGraphData, TGNode } from '../types';
+import { getNodeSoul } from '../utils/node';
 
 export function unpack(passedValue: any, key: string, node: TGNode): any
 {
@@ -42,7 +43,7 @@ export function unpack(passedValue: any, key: string, node: TGNode): any
     {
         return value;
     }
-    const soul  = node && node._ && node._['#'];
+    const soul  = getNodeSoul(node);
     const state = (node && node._ && node._['>'] && node._['>'][key]) || 0;
     if (
         value &&
