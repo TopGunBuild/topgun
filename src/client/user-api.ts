@@ -293,7 +293,6 @@ export class TGUserApi
         credentials: TGUserCredentials,
     ): Promise<void>
     {
-        console.log('_sessionStorage', this._sessionStorage);
         if (this._sessionStorage)
         {
             await setItemAsync(
