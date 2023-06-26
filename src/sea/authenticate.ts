@@ -41,8 +41,7 @@ export async function authenticateAccount(
     try
     {
         const proof = await work(password, ident.auth.s, { encode: encoding });
-
-        decrypted = await decrypt(ident.auth.ek, proof, {
+        decrypted   = await decrypt(ident.auth.ek, proof, {
             encode: encoding,
         });
     }
@@ -82,7 +81,7 @@ export async function authenticateIdentity(
         readonly pub: string;
     }>
 {
-    const ident = await client.get(soul).then();
+    const ident = await client.get(soul).promise();
     return authenticateAccount(ident, password, encoding);
 }
 
@@ -124,21 +123,20 @@ export async function authenticate(
         }
 
         let idents =
-                client.graph.connectorCount() === 0
+                client.graph.activeConnectors === 0
                     ? await client
                         .get(aliasSoul)
                         .promise({ timeout: options.timeout })
-                        .then()
-                    : await client.get(aliasSoul).then();
+                    : await client.get(aliasSoul).promise();
 
         if (!isObject(idents))
         {
             idents = {};
         }
 
-        for (const soul in idents)
+        for (const key in idents)
         {
-            if (soul === '_')
+            if (key === '_') //  || !isObject(idents[key])
             {
                 continue;
             }
@@ -147,7 +145,8 @@ export async function authenticate(
 
             try
             {
-                pair = await authenticateIdentity(
+                const soul = idents[key]['#'];
+                pair       = await authenticateIdentity(
                     client,
                     soul,
                     passwordOrOpt as string,

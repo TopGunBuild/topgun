@@ -1,15 +1,17 @@
 import { TGGet, TGGraphData, TGMessage, TGNode, TGNodeListenCb, TGOptionsGet } from '../../types';
-import { TGEvent } from '../control-flow/event';
-import { TGGraph } from './graph';
+import { TGEvent, TGGraph } from '..';
+import { getNodeSoul } from '../../utils/node';
+import { StorageListOptions } from '../../storage';
+import { listFilterMatch, storageListOptionsFromGetOptions } from '../../storage/utils';
+import { generateMessageId } from './graph-utils';
 
-/**
- * Query state around a single node in the graph
- */
-export class TGGraphNode
+export class TGGraphQuery
 {
-    readonly soul: string;
+    readonly queryString: string;
+    readonly options: TGOptionsGet;
 
     private _endCurQuery?: () => void;
+    private readonly _listOptions: StorageListOptions|null;
     private readonly _data: TGEvent<TGNode|undefined>;
     private readonly _graph: TGGraph;
     private readonly _updateGraph: (
@@ -22,15 +24,17 @@ export class TGGraphNode
      */
     constructor(
         graph: TGGraph,
-        soul: string,
+        queryString: string,
         updateGraph: (data: TGGraphData, replyToId?: string) => void,
     )
     {
         this._onDirectQueryReply = this._onDirectQueryReply.bind(this);
-        this._data               = new TGEvent<TGNode|undefined>(`<GraphNode ${soul}>`);
+        this.options             = JSON.parse(queryString);
+        this.queryString         = queryString;
+        this._data               = new TGEvent<TGNode|undefined>(`<GraphNode ${this.queryString}>`);
         this._graph              = graph;
         this._updateGraph        = updateGraph;
-        this.soul                = soul;
+        this._listOptions        = storageListOptionsFromGetOptions(this.options)
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -42,29 +46,41 @@ export class TGGraphNode
         return this._data.listenerCount();
     }
 
-    get(cb?: TGNodeListenCb, opts?: TGOptionsGet): TGGraphNode
+    get(cb?: TGNodeListenCb, msgId?: string): TGGraphQuery
     {
         if (cb)
         {
             this.on(cb);
         }
-        this._ask(opts);
+        this._ask(msgId);
         return this;
     }
 
-    receive(data: TGNode|undefined): TGGraphNode
+    receive(data: TGNode|undefined): TGGraphQuery
     {
-        this._data.trigger(data, this.soul);
+        this._data.trigger(data, getNodeSoul(data));
         return this;
     }
 
-    on(cb: (data: TGNode|undefined, soul: string) => void): TGGraphNode
+    match(node: TGNode|undefined): boolean
+    {
+        const soul = getNodeSoul(node);
+
+        if (this._listOptions)
+        {
+            return listFilterMatch(this._listOptions, soul)
+        }
+
+        return soul === this.options['#'];
+    }
+
+    on(cb: (data: TGNode|undefined, soul: string) => void): TGGraphQuery
     {
         this._data.on(cb);
         return this;
     }
 
-    off(cb?: (data: TGNode|undefined, soul: string) => void): TGGraphNode
+    off(cb?: (data: TGNode|undefined, soul: string) => void): TGGraphQuery
     {
         if (cb)
         {
@@ -88,7 +104,7 @@ export class TGGraphNode
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private _ask(opts?: TGOptionsGet): TGGraphNode
+    private _ask(msgId?: string): TGGraphQuery
     {
         if (this._endCurQuery)
         {
@@ -96,14 +112,10 @@ export class TGGraphNode
         }
 
         const data: TGGet = {
-            soul: this.soul,
-            cb  : this._onDirectQueryReply.bind(this)
+            msgId  : msgId || generateMessageId(),
+            options: this.options,
+            cb     : this._onDirectQueryReply.bind(this)
         };
-
-        if (opts)
-        {
-            data.opts = opts;
-        }
 
         this._endCurQuery = this._graph.get(data);
         return this;
@@ -113,9 +125,11 @@ export class TGGraphNode
     {
         if (!msg.put)
         {
+            const soul = msg['#'] || this.options['#'];
+
             this._updateGraph(
                 {
-                    [this.soul]: undefined,
+                    [soul]: undefined,
                 },
                 msg['@'],
             );

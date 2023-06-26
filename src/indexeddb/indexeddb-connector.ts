@@ -1,10 +1,11 @@
-import { createGraphAdapter } from './indexeddb-adapter';
+import { createIndexedDBAdapter } from './indexeddb-adapter';
 import { TGGraphConnectorFromAdapter } from '../client/transports/graph-connector-from-adapter';
+import { TGGraphAdapterOptions } from '../types';
 
-export class TGIndexedDbConnector extends TGGraphConnectorFromAdapter
+export class TGIndexedDBConnector extends TGGraphConnectorFromAdapter
 {
-    constructor(storageKey?: string)
+    constructor(storageKey?: string, adapterOptions?: TGGraphAdapterOptions)
     {
-        super(createGraphAdapter(storageKey), 'TGIndexedDbConnector');
+        super(createIndexedDBAdapter(storageKey, adapterOptions), 'TGIndexedDBConnector');
     }
 }

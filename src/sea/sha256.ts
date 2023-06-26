@@ -1,5 +1,6 @@
 import Buffer from 'topgun-buffer';
-import { crypto, TextEncoder } from './shims';
+import WebCrypto from 'topgun-webcrypto';
+import TextEncoder from 'topgun-textencoder';
 import { isString } from 'topgun-typed';
 
 export async function sha256(
@@ -8,7 +9,7 @@ export async function sha256(
 ): Promise<any>
 {
     const inp     = isString(input) ? input : JSON.stringify(input);
-    const encoded = new TextEncoder().encode(inp);
-    const hash    = await crypto.subtle.digest({ name }, encoded);
+    const encoded = TextEncoder.encode(inp);
+    const hash    = await WebCrypto.subtle.digest({ name }, encoded);
     return Buffer.from(hash);
 }

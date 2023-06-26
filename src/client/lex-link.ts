@@ -1,125 +1,122 @@
-import { cloneValue, isNumber, isString, isObject } from 'topgun-typed';
+import { cloneValue, isNumber, isObject } from 'topgun-typed';
 import { TGLink } from './link';
 import { LEX } from '../types/lex';
 import { TGClient } from './client';
-import { TGOptionsGet, TGValue } from '../types';
+import { TGOnCb, TGOptionsGet, TGValue } from '../types';
+import { assertBoolean, assertNotEmptyString, assertNumber } from '../utils/assert';
+import { replacerSortKeys } from '../utils/replacer-sort-keys';
 
 type KeyOfLex = keyof LEX;
 type ValueOfLex = LEX[KeyOfLex];
 
-export class TGLexLink extends TGLink
+export class TGLexLink
 {
-    maxLimit: number;
+    readonly optionsGet: TGOptionsGet;
+
+    private readonly _maxLimit: number;
+    private readonly _link: TGLink;
+    private readonly _chain: TGClient;
 
     /**
      * Constructor
      */
-    constructor(chain: TGClient, key: string)
+    constructor(chain: TGClient, optionsGet: TGOptionsGet, link: TGLink)
     {
-        super(chain, key);
-        this.maxLimit = this._chain.options.transportMaxKeyValuePairs;
+        this._chain     = chain;
+        this._link      = link;
+        this._link._lex = this;
+        this._maxLimit  = this._chain.options.transportMaxKeyValuePairs;
+        this.optionsGet = {
+            '.': {},
+            '%': this._maxLimit
+        };
+        if (isObject(optionsGet))
+        {
+            if (isObject(optionsGet['.']))
+            {
+                this.optionsGet['.'] = cloneValue(optionsGet['.']);
+            }
+            if (isNumber(optionsGet['%']))
+            {
+                this.optionsGet['%'] = optionsGet['%'];
+            }
+        }
+        this._mergeSoul();
     }
 
     // -----------------------------------------------------------------------------------------------------
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    /**
-     * Where to read data from
-     *
-     * @param query Key to read data from or LEX query
-     * @returns New chain context corresponding to given key
-     */
-    get(query: TGOptionsGet): TGLexLink;
-    get(key: string): TGLink;
-    get(keyOrOptions: string|TGOptionsGet): TGLink|TGLexLink
-    {
-        // The argument is a LEX query
-        if (isObject(keyOrOptions) && !isString(keyOrOptions))
-        {
-            this._persistOptions();
-
-            if (isObject(keyOrOptions['.']))
-            {
-                this.optionsGet['.'] = cloneValue(keyOrOptions['.']);
-            }
-            if (isNumber(keyOrOptions['%']))
-            {
-                this.optionsGet['%'] = keyOrOptions['%'];
-            }
-            return this;
-        }
-        else
-        {
-            return new TGLink(this._chain, keyOrOptions as string, this);
-        }
-    }
-
     start(value: string): TGLexLink
     {
-        this._setLex('>', value);
+        this._setLex('>', assertNotEmptyString(value));
         return this;
     }
 
     end(value: string): TGLexLink
     {
-        this._setLex('<', value);
+        this._setLex('<', assertNotEmptyString(value));
         return this;
     }
 
     prefix(value: string): TGLexLink
     {
-        this._setLex('*', value);
-        return this;
-    }
-
-    equals(value: string): TGLexLink
-    {
-        this._setLex('=', value);
+        this._setLex('*', assertNotEmptyString(value));
         return this;
     }
 
     limit(value: number): TGLexLink
     {
-        if (value > this.maxLimit)
+        if (value > this._maxLimit)
         {
             throw Error(
-                `Limit exceeds the maximum allowed. The maximum length is ${this.maxLimit}`
+                `Limit exceeds the maximum allowed. The maximum length is ${this._maxLimit}`
             );
         }
-        (this.optionsGet as object)['%'] = value;
+        this.optionsGet['%'] = assertNumber(value);
         return this;
     }
 
     reverse(value = true): TGLexLink
     {
-        (this.optionsGet as object)['-'] = value;
+        this.optionsGet['-'] = assertBoolean(value);
         return this;
-    }
-
-    map(): TGLink
-    {
-        return super.map();
     }
 
     toString(): string
     {
-        return JSON.stringify(this.optionsGet);
+        return JSON.stringify(this.optionsGet, replacerSortKeys);
     }
 
     getQuery(): TGOptionsGet
     {
-        return this.optionsGet as TGOptionsGet;
+        return this.optionsGet;
     }
 
-    on(cb: (node: TGValue|undefined, key?: string) => void): TGLink
+    once(cb: TGOnCb, timeout = 500): Promise<TGValue|undefined>
     {
-        return super.on(cb);
+        return this._link.once(cb, timeout);
     }
 
-    once(cb: (node: TGValue|undefined, key?: string) => void): TGLink
+    on(cb: TGOnCb): void
     {
-        return super.once(cb);
+        return this._link.on(cb);
+    }
+
+    off(cb?: TGOnCb): void
+    {
+        return this._link.off(cb);
+    }
+
+    map(): TGLexLink
+    {
+        return this;
+    }
+
+    promise(opts?: {timeout: number, cb?: TGOnCb}): Promise<TGValue|undefined>
+    {
+        return this._link.promise(opts);
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -128,20 +125,11 @@ export class TGLexLink extends TGLink
 
     private _setLex(key: KeyOfLex, value: ValueOfLex): void
     {
-        this._persistOptions();
-        (this.optionsGet as object)['.'][key] = value;
+        this.optionsGet['.'][key] = value;
     }
 
-    private _persistOptions(): void
+    private _mergeSoul(): void
     {
-        if (!isObject(this.optionsGet))
-        {
-            const soul      = this.getPath().shift();
-            this.optionsGet = {
-                ['#']: soul,
-                ['.']: {},
-                ['%']: this.maxLimit
-            };
-        }
+        this.optionsGet['#'] = this._link.soul = this._link.getPath().join();
     }
 }

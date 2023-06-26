@@ -5,6 +5,7 @@ import { pseudoRandomText } from './pseudo-random-text';
 import { signGraph } from './sign';
 import { work } from './work';
 import { TGClient } from '../client/client';
+import { assertNotEmptyString } from '../utils/assert';
 
 export async function createUser(
     client: TGClient,
@@ -19,7 +20,7 @@ export async function createUser(
         readonly priv: string;
     }>
 {
-    const aliasSoul         = `~@${alias}`;
+    const aliasSoul         = `~@${assertNotEmptyString(alias)}`;
     const passwordMinLength = isNumber(client.options.passwordMinLength)
         ? client.options.passwordMinLength
         : 8;

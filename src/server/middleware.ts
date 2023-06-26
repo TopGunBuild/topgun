@@ -66,7 +66,7 @@ export class Middleware
 
         if (!soul || soul === req.channel || soul === 'changelog')
         {
-            return
+            return;
         }
 
         const opts  = req.data as TGOptionsGet|undefined;
@@ -74,7 +74,7 @@ export class Middleware
             .toString(36)
             .slice(2);
 
-        this.readNodes(soul, opts)
+        this.readNodes(opts)
             .then(graphData => ({
                 channel: req.channel,
                 data   : {
@@ -101,9 +101,9 @@ export class Middleware
             })
     }
 
-    private readNodes(soul: string, opts?: TGOptionsGet): Promise<TGGraphData>
+    private readNodes(opts: TGOptionsGet): Promise<TGGraphData>
     {
-        return this.adapter.get(soul, opts);
+        return this.adapter.get(opts);
     }
 
     private async processPut(msg: TGMessage): Promise<TGMessage>

@@ -1,4 +1,4 @@
-import { isObject, isString } from 'topgun-typed';
+import { isObject, isString, isFunction, enums, unwrap } from 'topgun-typed';
 import { diffCRDT } from '../crdt';
 import { TGLink } from './link';
 import { TGGraph } from './graph/graph';
@@ -8,12 +8,12 @@ import { createConnector, TGWebSocketGraphConnector } from './transports/web-soc
 import { TGSocketClientOptions } from 'topgun-socket/client';
 import { TGUserApi } from './user-api';
 import { pubFromSoul, unpackGraph } from '../sea';
-import { TGIndexedDbConnector } from '../indexeddb/indexeddb-connector';
+import { TGIndexedDBConnector } from '../indexeddb/indexeddb-connector';
 import { TGNode, TGUserReference, SystemEvent } from '../types';
 import { TGEvent } from './control-flow/event';
-import { TGLexLink } from './lex-link';
 import { match } from '../utils/match';
 import { wait } from '../utils/wait';
+import { assertObject, assertGetPath } from '../utils/assert';
 
 /**
  * Main entry point for TopGun in browser
@@ -71,6 +71,10 @@ export class TGClient
                     ? pubFromSoul(pubOrNode)
                     : pubOrNode;
             }
+            else
+            {
+                throw Error('Argument must be public key or node!');
+            }
 
             return this.get('~' + this.pub);
         }
@@ -79,7 +83,6 @@ export class TGClient
             this._user ||
             new TGUserApi(
                 this,
-                this.options.persistSession,
                 this.options.sessionStorage,
                 this.options.sessionStorageKey,
                 this._authEvent,
@@ -91,15 +94,16 @@ export class TGClient
      */
     opt(options: TGClientOptions): TGClient
     {
+        options      = assertObject(options);
         this.options = { ...this.options, ...options };
 
         if (Array.isArray(options.peers))
         {
             this.handlePeers(options.peers);
         }
-        if (options.persistStorage)
+        if (options.localStorage)
         {
-            this.useConnector(new TGIndexedDbConnector(options.storageKey));
+            this.useConnector(new TGIndexedDBConnector(options.localStorageKey, options));
         }
         if (Array.isArray(options.connectors))
         {
@@ -114,9 +118,9 @@ export class TGClient
     /**
      * Traverse a location in the graph
      */
-    get(soul: string): TGLexLink
+    get(soul: string): TGLink
     {
-        return new TGLexLink(this, soul);
+        return new TGLink(this, assertGetPath(soul));
     }
 
     /**
@@ -124,12 +128,18 @@ export class TGClient
      */
     on(event: SystemEvent, cb: (value) => void, once = false): TGClient
     {
-        switch (event)
+        const struct = enums(SystemEvent);
+        const actual = struct(event);
+
+        switch (unwrap(actual))
         {
         case 'auth':
             const _cb = (value) =>
             {
-                cb(value);
+                if (isFunction(cb))
+                {
+                    cb(value);
+                }
                 if (once)
                 {
                     this._authEvent.off(_cb);

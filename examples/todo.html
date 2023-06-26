@@ -56,8 +56,8 @@
 <script>
     // Run server.js
     const client = new TopGun.TGClient({
-        peers         : ['http://localhost:8765'],
-        persistSession: false
+        peers       : ['http://localhost:8765'],
+        localStorage: true
     });
 
     // Helper function
@@ -129,8 +129,15 @@
             document.querySelector('ul').insertAdjacentHTML('beforeend', `<li id="${id}"></li>`);
         }
         document.getElementById(id).textContent = data.say;
-        console.log('[TopGun]', id, data);
+        // console.log('[TopGun]', id, data);
     });
+
+    window.getQuery = () =>
+    {
+        console.log(
+            client.user().get('said').map()
+        )
+    };
 </script>
 </body>
 </html>

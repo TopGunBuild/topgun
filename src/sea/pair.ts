@@ -1,5 +1,5 @@
+import WebCrypto from 'topgun-webcrypto';
 import { ecdh, ecdsa } from './settings';
-import { crypto } from './shims';
 
 export interface PairBase
 {
@@ -19,22 +19,22 @@ export interface Pair extends PairBase
 
 export async function pair(): Promise<Pair>
 {
-    const signKeys = await crypto.subtle.generateKey(ecdsa.pair, true, [
+    const signKeys = await WebCrypto.subtle.generateKey(ecdsa.pair, true, [
         'sign',
         'verify',
     ]);
-    const signPub  = await crypto.subtle.exportKey('jwk', signKeys.publicKey);
+    const signPub  = await WebCrypto.subtle.exportKey('jwk', signKeys.publicKey);
     const sa       = {
-        priv: (await crypto.subtle.exportKey('jwk', signKeys.privateKey)).d,
+        priv: (await WebCrypto.subtle.exportKey('jwk', signKeys.privateKey)).d,
         pub : `${signPub.x}.${signPub.y}`,
     };
 
-    const cryptKeys = await crypto.subtle.generateKey(ecdh, true, [
+    const cryptKeys = await WebCrypto.subtle.generateKey(ecdh, true, [
         'deriveKey',
     ]);
-    const cryptPub  = await crypto.subtle.exportKey('jwk', cryptKeys.publicKey);
+    const cryptPub  = await WebCrypto.subtle.exportKey('jwk', cryptKeys.publicKey);
     const dh        = {
-        epriv: (await crypto.subtle.exportKey('jwk', cryptKeys.privateKey)).d,
+        epriv: (await WebCrypto.subtle.exportKey('jwk', cryptKeys.privateKey)).d,
         epub : `${cryptPub.x}.${cryptPub.y}`,
     };
 

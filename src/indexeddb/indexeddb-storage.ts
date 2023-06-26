@@ -1,4 +1,8 @@
-export class IndexedDb
+import { StorageListOptions, TGStorage } from '../storage';
+import { arrayNodesToObject, filterNodesByListOptions } from '../storage/utils';
+import { TGGraphData, TGNode } from '../types';
+
+export class IndexedDBStorage implements TGStorage
 {
     private _dbp: Promise<IDBDatabase>|undefined;
     readonly _dbName: string;
@@ -18,7 +22,7 @@ export class IndexedDb
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    get<Type>(key: IDBValidKey): Promise<Type>
+    get(key: IDBValidKey): Promise<TGNode>
     {
         let req: IDBRequest;
         return this._withIDBStore('readwrite', (store) =>
@@ -27,21 +31,29 @@ export class IndexedDb
         }).then(() => req.result);
     }
 
-    getALlKeys(): Promise<string[]>
+    async list(options: StorageListOptions): Promise<TGGraphData>
+    {
+        const allNodes = await this.getAll();
+        const nodes    = filterNodesByListOptions(allNodes, options);
+
+        return arrayNodesToObject(nodes);
+    }
+
+    put(key: IDBValidKey, value: any): Promise<void>
+    {
+        return this._withIDBStore('readwrite', (store) =>
+        {
+            store.put(value, key);
+        });
+    }
+
+    getAll(): Promise<TGNode[]>
     {
         let req: IDBRequest;
         return this._withIDBStore('readwrite', (store) =>
         {
             req = store.getAll();
         }).then(() => req.result);
-    }
-
-    set(key: IDBValidKey, value: any): Promise<void>
-    {
-        return this._withIDBStore('readwrite', (store) =>
-        {
-            store.put(value, key);
-        });
     }
 
     update(key: IDBValidKey, updater: (val: any) => any): Promise<void>
@@ -53,14 +65,6 @@ export class IndexedDb
             {
                 store.put(updater(req.result), key);
             };
-        });
-    }
-
-    del(key: IDBValidKey): Promise<void>
-    {
-        return this._withIDBStore('readwrite', (store) =>
-        {
-            store.delete(key);
         });
     }
 

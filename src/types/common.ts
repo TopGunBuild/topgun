@@ -1,6 +1,8 @@
 import { LEX } from './lex';
 
-export type SystemEvent = 'auth';
+export enum SystemEvent {
+    auth = 'auth'
+}
 
 /**
  * Timestamp of last change for each attribute
@@ -105,8 +107,7 @@ export interface TGPut
  */
 export interface TGGet
 {
-    soul: string;
-    opts?: TGOptionsGet;
+    options: TGOptionsGet;
     msgId?: string;
     key?: string;
     cb?: TGMessageCb;
@@ -139,7 +140,7 @@ export interface TGChainOptions
     uuid?: (path: string[]) => Promise<string>|string;
 }
 
-export type TGOnCb = (node: TGValue|undefined, key?: string) => void;
+export type TGOnCb = (node: TGValue|undefined, soul?: string) => void;
 export type TGNodeListenCb = (node: TGNode|undefined) => void;
 
 export interface TGPathData
