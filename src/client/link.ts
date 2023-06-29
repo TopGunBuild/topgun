@@ -1,7 +1,7 @@
 import { cloneValue, isEmptyObject, isFunction, isString, isNumber, isObject } from 'topgun-typed';
 import {
     SystemEvent,
-    TGChainOptions, TGGraphData,
+    TGChainOptions, TGGraphData, TGMessage,
     TGMessageCb,
     TGOnCb,
     TGOptionsGet,
@@ -26,7 +26,7 @@ export class TGLink
     _lex?: TGLexLink;
 
     protected readonly _updateEvent: TGEvent<TGValue|undefined, string>;
-    protected readonly _chain: TGClient;
+    protected readonly _client: TGClient;
     protected readonly _parent?: TGLink;
     protected _opt: TGChainOptions;
     protected _hasReceived: boolean;
@@ -36,11 +36,11 @@ export class TGLink
     /**
      * Constructor
      */
-    constructor(chain: TGClient, key: string, parent?: TGLink)
+    constructor(client: TGClient, key: string, parent?: TGLink)
     {
         this.key          = key;
         this._opt         = {};
-        this._chain       = chain;
+        this._client      = client;
         this._parent      = parent;
         this._hasReceived = false;
         this._updateEvent = new TGEvent(this.getPath().join('|'));
@@ -50,7 +50,7 @@ export class TGLink
 
             if (key.startsWith('~') && pubFromSoul(key))
             {
-                this._chain.pub = pubFromSoul(key);
+                this._client.pub = pubFromSoul(key);
             }
         }
     }
@@ -61,7 +61,7 @@ export class TGLink
 
     userPubExpected(): boolean
     {
-        return this.getPath().some(path => path.includes(this._chain.WAIT_FOR_USER_PUB));
+        return this.getPath().some(path => path.includes(this._client.WAIT_FOR_USER_PUB));
     }
 
     /**
@@ -69,7 +69,7 @@ export class TGLink
      */
     getGraph(): TGGraph
     {
-        return this._chain.graph;
+        return this._client.graph;
     }
 
     /**
@@ -98,11 +98,11 @@ export class TGLink
         // The argument is a LEX query
         if (isObject(keyOrOptions))
         {
-            return new TGLexLink(this._chain, keyOrOptions, this);
+            return new TGLexLink(this._client, keyOrOptions, this);
         }
         else if (isString(keyOrOptions))
         {
-            return new TGLink(this._chain, assertGetPath(keyOrOptions), this);
+            return new TGLink(this._client, assertGetPath(keyOrOptions), this);
         }
         else
         {
@@ -122,11 +122,11 @@ export class TGLink
     {
         if (amount < 0 || amount === Infinity)
         {
-            return this._chain;
+            return this._client;
         }
         if (amount === 1)
         {
-            return this._parent || this._chain;
+            return this._parent || this._client;
         }
         return this.back(amount - 1);
     }
@@ -142,60 +142,75 @@ export class TGLink
      * @param opt options put
      * @returns same chain context
      **/
-    put(value: TGValue, cb?: TGMessageCb, opt?: TGOptionsPut): TGLink
+    put(value: TGValue, cb?: TGMessageCb, opt?: TGOptionsPut): Promise<TGMessage>
     {
-        if (this.userPubExpected())
+        return new Promise<TGMessage>((resolve) =>
         {
-            throw new Error(
-                'You cannot save data to user space if the user is not authorized.',
-            );
-        }
-        if (!this._parent && !isObject(value))
-        {
-            throw new Error(
-                'Data at root of graph must be a node (an object).',
-            );
-        }
-        this._chain.graph.putPath(
-            this.getPath(),
-            value,
-            cb,
-            opt,
-        );
-
-        return this;
-    }
-
-    set(data: any, cb?: TGMessageCb, opt?: TGOptionsPut): TGLink
-    {
-        let soulSuffix, value = cloneValue(data);
-
-        if (!isObject(value) || isEmptyObject(value))
-        {
-            throw new Error('This data type is not supported in set().');
-        }
-
-        if (data instanceof TGLink)
-        {
-            if (data.getPath().length === 0)
+            if (this.userPubExpected())
             {
-                throw new Error('Link is empty.');
+                throw new Error(
+                    'You cannot save data to user space if the user is not authorized.',
+                );
+            }
+            if (!this._parent && !isObject(value))
+            {
+                throw new Error(
+                    'Data at root of graph must be a node (an object).',
+                );
             }
 
-            soulSuffix = assertNotEmptyString(data.getPath()[0]);
-            value      = { '#': soulSuffix };
-        }
-        else if (isNode(data))
-        {
-            soulSuffix = assertNotEmptyString(data._['#']);
-        }
-        else
-        {
-            soulSuffix = generateMessageId();
-        }
+            const callback = (msg: TGMessage) =>
+            {
+                if (cb)
+                {
+                    cb(msg);
+                }
+                resolve(msg);
+            };
 
-        this.key = this.key.endsWith('/') ? `${this.key}${soulSuffix}` : `${this.key}/${soulSuffix}`;
-        return this.put(value, cb, opt);
+            this._client.graph.putPath(
+                this.getPath(),
+                value,
+                callback,
+                opt,
+            );
+        })
+    }
+
+    set(data: any, cb?: TGMessageCb, opt?: TGOptionsPut): Promise<TGMessage>
+    {
+        return new Promise<TGMessage>((resolve, reject) =>
+        {
+            let soulSuffix, value = cloneValue(data);
+
+            if (!isObject(value) || isEmptyObject(value))
+            {
+                throw new Error('This data type is not supported in set().');
+            }
+
+            if (data instanceof TGLink)
+            {
+                if (data.getPath().length === 0)
+                {
+                    throw new Error('Link is empty.');
+                }
+
+                soulSuffix = assertNotEmptyString(data.getPath()[0]);
+                value      = { '#': soulSuffix };
+            }
+            else if (isNode(data))
+            {
+                soulSuffix = assertNotEmptyString(data._['#']);
+            }
+            else
+            {
+                soulSuffix = generateMessageId();
+            }
+
+            this.key = this.key.endsWith('/') ? `${this.key}${soulSuffix}` : `${this.key}/${soulSuffix}`;
+
+            return this.put(value, cb, opt).then(resolve).catch(reject);
+        });
     }
 
     opt(options?: TGChainOptions): TGChainOptions
@@ -260,7 +275,7 @@ export class TGLink
             {
                 ok(val);
                 this.off(callback);
-                this._chain.graph.events.graphData.off(connectorCallback);
+                this._client.graph.events.graphData.off(connectorCallback);
             };
             const originalCallback  = isFunction(opts && opts.cb) ? opts.cb : () =>
             {
@@ -280,10 +295,10 @@ export class TGLink
             {
                 this._onMap(callback, connectorMsgId);
 
-                if (this._chain.graph.activeConnectors > 0)
+                if (this._client.graph.activeConnectors > 0)
                 {
                     // Wait until at least one of the connectors returns a graph data
-                    this._chain.graph.events.graphData.on(connectorCallback);
+                    this._client.graph.events.graphData.on(connectorCallback);
                 }
                 else
                 {
@@ -309,7 +324,7 @@ export class TGLink
 
     map(): TGLexLink
     {
-        return new TGLexLink(this._chain, {}, this);
+        return new TGLexLink(this._client, {}, this);
     }
 
     start(value: string): TGLexLink
@@ -349,12 +364,12 @@ export class TGLink
         }
         else
         {
-            this._chain.pub = pub;
-            this.key        = this.key.replace(this._chain.WAIT_FOR_USER_PUB, pub);
+            this._client.pub = pub;
+            this.key         = this.key.replace(this._client.WAIT_FOR_USER_PUB, pub);
 
             if (isObject(this._lex.optionsGet) && isString(this._lex.optionsGet['#']))
             {
-                this._lex.optionsGet['#'] = this._lex.optionsGet['#'].replace(this._chain.WAIT_FOR_USER_PUB, pub);
+                this._lex.optionsGet['#'] = this._lex.optionsGet['#'].replace(this._client.WAIT_FOR_USER_PUB, pub);
             }
         }
     }
@@ -378,7 +393,7 @@ export class TGLink
             }
             if (!this._endQuery)
             {
-                this._endQuery = this._chain.graph.query(
+                this._endQuery = this._client.graph.query(
                     this.getPath(),
                     this._onQueryResponse.bind(this),
                 );
@@ -393,7 +408,7 @@ export class TGLink
             this._updateEvent.on(cb);
             if (!this._endQuery)
             {
-                this._endQuery = this._chain.graph.queryMany(
+                this._endQuery = this._client.graph.queryMany(
                     this._lex.optionsGet,
                     this._onQueryResponse.bind(this),
                     msgId
@@ -406,7 +421,7 @@ export class TGLink
     {
         if (this.userPubExpected())
         {
-            this._chain.promise<TGUserReference>(SystemEvent.auth).then((value) =>
+            this._client.listener(SystemEvent.Auth).once().then((value) =>
             {
                 this._setUserPub(value.pub);
                 handler();

@@ -12,8 +12,8 @@ dependencies:
     specifier: 1.0.6
     version: 1.0.6
   topgun-socket:
-    specifier: 1.4.8
-    version: 1.4.8
+    specifier: 1.4.9
+    version: 1.4.9
   topgun-textencoder:
     specifier: ^1.0.1
     version: 1.0.1
@@ -5493,8 +5493,8 @@ packages:
       topgun-webcrypto: 1.0.5
     dev: false
 
-  /topgun-socket@1.4.8:
-    resolution: {integrity: sha512-dnL9UU3oZjhkYEJmFkOwYLhrsitaP/YeeJrsaDvE/cHo0ub/RnxYVREcAhmg6GVUjS0WcwC8iazgS4JzTgo55Q==}
+  /topgun-socket@1.4.9:
+    resolution: {integrity: sha512-q1cNEMa4as2ZyLbhMjOqLd2EjB6a90vuSX247fIfk4R3jw2wiONDOtktwcm1htPCa27iDaQEVFuDhck+lQHSOQ==}
     dependencies:
       topgun-async-stream-emitter: 1.1.0
       topgun-buffer: 1.0.6

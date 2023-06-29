@@ -1,4 +1,5 @@
-import { isObject, isString, isFunction, enums, unwrap } from 'topgun-typed';
+import { isObject, isString } from 'topgun-typed';
+import { AsyncStreamEmitter } from 'topgun-async-stream-emitter';
 import { diffCRDT } from '../crdt';
 import { TGLink } from './link';
 import { TGGraph } from './graph/graph';
@@ -9,8 +10,7 @@ import { TGSocketClientOptions } from 'topgun-socket/client';
 import { TGUserApi } from './user-api';
 import { pubFromSoul, unpackGraph } from '../sea';
 import { TGIndexedDBConnector } from '../indexeddb/indexeddb-connector';
-import { TGNode, TGUserReference, SystemEvent } from '../types';
-import { TGEvent } from './control-flow/event';
+import { TGNode } from '../types';
 import { match } from '../utils/match';
 import { wait } from '../utils/wait';
 import { assertObject, assertGetPath } from '../utils/assert';
@@ -18,14 +18,13 @@ import { assertObject, assertGetPath } from '../utils/assert';
 /**
  * Main entry point for TopGun in browser
  */
-export class TGClient
+export class TGClient extends AsyncStreamEmitter<any>
 {
     static match = match;
 
     options: TGClientOptions;
     pub: string|undefined;
     readonly graph: TGGraph;
-    protected readonly _authEvent: TGEvent<TGUserReference>;
     protected _user?: TGUserApi;
     readonly WAIT_FOR_USER_PUB: string;
 
@@ -34,9 +33,9 @@ export class TGClient
      */
     constructor(options?: TGClientOptions)
     {
+        super();
         options                = isObject(options) ? options : {};
         this.options           = { ...DEFAULT_OPTIONS, ...options };
-        this._authEvent        = new TGEvent<TGUserReference>('auth data');
         this.graph             = this.options && this.options.graph ? this.options.graph : new TGGraph();
         this.WAIT_FOR_USER_PUB = '__WAIT_FOR_USER_PUB__';
 
@@ -85,7 +84,6 @@ export class TGClient
                 this,
                 this.options.sessionStorage,
                 this.options.sessionStorageKey,
-                this._authEvent,
             ));
     }
 
@@ -121,48 +119,6 @@ export class TGClient
     get(soul: string): TGLink
     {
         return new TGLink(this, assertGetPath(soul));
-    }
-
-    /**
-     * System events callback
-     */
-    on(event: SystemEvent, cb: (value) => void, once = false): TGClient
-    {
-        const struct = enums(SystemEvent);
-        const actual = struct(event);
-
-        switch (unwrap(actual))
-        {
-        case 'auth':
-            const _cb = (value) =>
-            {
-                if (isFunction(cb))
-                {
-                    cb(value);
-                }
-                if (once)
-                {
-                    this._authEvent.off(_cb);
-                }
-            };
-            this._authEvent.on(_cb);
-
-            if (this._user?.is)
-            {
-                // Execute immediately if the user is authorized
-                this._authEvent.trigger(this._user.is);
-            }
-            break;
-        }
-        return this;
-    }
-
-    /**
-     * Return system event as promise
-     */
-    promise<T>(event: SystemEvent): Promise<T>
-    {
-        return new Promise<T>(resolve => this.on(event, resolve, true));
     }
 
     /**
@@ -204,6 +160,7 @@ export class TGClient
                 connector.disconnect();
             }
         });
+        this.closeAllListeners();
     }
 
     // -----------------------------------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 import { LEX } from './lex';
 
 export enum SystemEvent {
-    auth = 'auth'
+    Auth = 'auth'
 }
 
 /**

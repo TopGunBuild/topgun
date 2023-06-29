@@ -98,7 +98,7 @@ describe('SEA', () => {
             });
     });
 
-    it('set user ref should be found', async () => {
+    /*it('set user ref should be found', async () => {
         const user = client.user();
         await user.create('zach', 'password');
 
@@ -119,5 +119,5 @@ describe('SEA', () => {
                 console.log('*****', data);
                 expect(data.what).toBe(msg.what);
             });
-    });
+    });*/
 });

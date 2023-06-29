@@ -274,12 +274,12 @@ export class TGGraph
      * @param cb Callback function to be invoked for write acks
      * @param putOpt
      */
-    async putPath(
+    putPath(
         fullPath: string[],
         data: TGValue,
         cb?: TGMessageCb,
         putOpt?: TGOptionsPut,
-    ): Promise<void>
+    ): void
     {
         if (!fullPath.length)
         {

@@ -15,7 +15,7 @@ import {
     TGSupportedStorage,
     TGOptionsPut,
     TGUserCredentials,
-    TGUserReference,
+    TGUserReference, SystemEvent,
 } from '../types';
 import { DEFAULT_OPTIONS } from './client-options';
 import { assertCredentials, assertNotEmptyString } from '../utils/assert';
@@ -33,7 +33,6 @@ export class TGUserApi
     private readonly _client: TGClient;
     private readonly _sessionStorage: TGSupportedStorage;
     private readonly _sessionStorageKey: string;
-    private readonly _authEvent: TGEvent<TGUserReference>;
     private _signMiddleware?: (
         graph: any,
         existingGraph: any,
@@ -47,11 +46,9 @@ export class TGUserApi
     constructor(
         client: TGClient,
         sessionStorage: TGSupportedStorage|undefined|boolean,
-        sessionStorageKey: string|undefined,
-        authEvent: TGEvent<TGUserReference>,
+        sessionStorageKey: string|undefined
     )
     {
-        this._authEvent         = authEvent;
         this._client            = client;
         this._sessionStorage    = !sessionStorage
             ? null
@@ -266,7 +263,7 @@ export class TGUserApi
 
     private _authSuccess(credentials: TGUserCredentials): void
     {
-        this._authEvent.trigger({
+        this._client.emit(SystemEvent.Auth, {
             alias: credentials.alias,
             pub  : credentials.pub,
         });
