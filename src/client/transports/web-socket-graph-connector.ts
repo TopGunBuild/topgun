@@ -45,9 +45,29 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    disconnect(): void
+    async disconnect(): Promise<void>
     {
-        this.client.disconnect();
+        const cleanupTasks = [];
+
+        if (this.client)
+        {
+            if (this.client.state !== this.client.CLOSED)
+            {
+                cleanupTasks.push(
+                    Promise.race([
+                        this.client.listener('disconnect').once(),
+                        this.client.listener('connectAbort').once()
+                    ])
+                );
+                this.client.disconnect();
+            }
+            else
+            {
+                this.client.disconnect();
+            }
+        }
+
+        await Promise.all(cleanupTasks);
     }
 
     off(msgId: string): TGWebSocketGraphConnector

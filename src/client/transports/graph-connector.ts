@@ -150,7 +150,7 @@ export abstract class TGGraphConnector
         return this;
     }
 
-    disconnect(): void
+    async disconnect(): Promise<void>
     {
     }
 
