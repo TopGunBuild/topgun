@@ -131,13 +131,8 @@ export class TGLink
     /**
      * Save data into topGun, syncing it with your connected peers.
      *
-     * You do not need to re-save the entire object every time, topGun will automatically
+     * You do not need to re-save the entire object every time, TopGun will automatically
      * merge your data into what already exists as a "partial" update.
-     *
-     * @param value the data to save
-     * @param cb an optional callback, invoked on each acknowledgment
-     * @param opt options put
-     * @returns same chain context
      **/
     put(value: TGValue, cb?: TGMessageCb, opt?: TGOptionsPut): Promise<TGMessage>
     {
