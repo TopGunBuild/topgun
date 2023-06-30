@@ -1,8 +1,9 @@
 import { cloneValue, isNumber, isObject } from 'topgun-typed';
+import { DemuxedConsumableStream } from 'topgun-async-stream-emitter';
 import { TGLink } from './link';
 import { LEX } from '../types/lex';
 import { TGClient } from './client';
-import { TGOnCb, TGOptionsGet, TGValue } from '../types';
+import { TGData, TGOnCb, TGOptionsGet } from '../types';
 import { assertBoolean, assertNotEmptyString, assertNumber } from '../utils/assert';
 import { replacerSortKeys } from '../utils/replacer-sort-keys';
 
@@ -94,14 +95,19 @@ export class TGLexLink
         return this.optionsGet;
     }
 
-    once(cb: TGOnCb, timeout = 500): Promise<TGValue|undefined>
+    once(cb: TGOnCb): TGLink
     {
-        return this._link.once(cb, timeout);
+        return this._link.once(cb);
     }
 
-    on(cb: TGOnCb): void
+    on(cb: TGOnCb): TGLink
     {
         return this._link.on(cb);
+    }
+
+    stream(): DemuxedConsumableStream<TGData>
+    {
+        return this._link.stream();
     }
 
     off(cb?: TGOnCb): void
@@ -112,11 +118,6 @@ export class TGLexLink
     map(): TGLexLink
     {
         return this;
-    }
-
-    promise(opts?: {timeout: number, cb?: TGOnCb}): Promise<TGValue|undefined>
-    {
-        return this._link.promise(opts);
     }
 
     // -----------------------------------------------------------------------------------------------------

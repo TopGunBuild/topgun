@@ -1,6 +1,7 @@
-import { cloneValue, isEmptyObject, isFunction, isString, isNumber, isObject } from 'topgun-typed';
+import { cloneValue, isEmptyObject, isString, isNumber, isObject } from 'topgun-typed';
+import { DemuxedConsumableStream } from 'topgun-async-stream-emitter';
 import {
-    SystemEvent,
+    SystemEvent, TGData,
     TGGraphData, TGMessage,
     TGMessageCb,
     TGOnCb,
@@ -20,6 +21,7 @@ import { TGLexLink } from './lex-link';
 /* eslint-disable @typescript-eslint/no-empty-function */
 export class TGLink
 {
+    readonly id: string;
     key: string;
     soul: string|undefined;
     _lex?: TGLexLink;
@@ -30,12 +32,14 @@ export class TGLink
     protected _hasReceived: boolean;
     protected _lastValue: TGValue|undefined;
     protected _endQuery?: () => void;
+    protected _streamCb?: TGOnCb;
 
     /**
      * Constructor
      */
     constructor(client: TGClient, key: string, parent?: TGLink)
     {
+        this.id           = generateMessageId();
         this.key          = key;
         this._client      = client;
         this._parent      = parent;
@@ -205,13 +209,14 @@ export class TGLink
         });
     }
 
-    once(cb: TGOnCb, timeout = 500): Promise<TGValue|undefined>
+    once(cb: TGOnCb): TGLink
     {
         cb = assertFn<TGOnCb>(cb);
-        return this.promise({ timeout, cb });
+        this.promise().then(val => cb(val, this.key));
+        return this;
     }
 
-    on(cb: TGOnCb): void
+    on(cb: TGOnCb): TGLink
     {
         cb = assertFn<TGOnCb>(cb);
         if (this._lex)
@@ -222,6 +227,19 @@ export class TGLink
         {
             this._on(cb);
         }
+        return this;
+    }
+
+    stream(): DemuxedConsumableStream<TGData>
+    {
+        if (!this._streamCb)
+        {
+            this._streamCb = () =>
+            {
+            };
+            this.on(this._streamCb);
+        }
+        return this._client.listener(this.id);
     }
 
     off(cb?: TGOnCb): void
@@ -231,20 +249,20 @@ export class TGLink
             this._updateEvent.off(cb);
             if (this._endQuery && this._updateEvent.listenerCount() === 0)
             {
-                this._endQuery();
+                this._killAll();
             }
         }
         else
         {
             if (this._endQuery)
             {
-                this._endQuery();
+                this._killAll();
             }
             this._updateEvent.reset();
         }
     }
 
-    promise(opts?: {timeout: number, cb?: TGOnCb}): Promise<TGValue|undefined>
+    promise(opts?: {timeout?: number}): Promise<TGValue|undefined>
     {
         return new Promise<TGValue>((ok: (...args: any) => void) =>
         {
@@ -256,13 +274,8 @@ export class TGLink
                 this.off(callback);
                 this._client.graph.events.graphData.off(connectorCallback);
             };
-            const originalCallback  = isFunction(opts && opts.cb) ? opts.cb : () =>
-            {
-            };
             const callback          = (val: TGValue|undefined, soul?: string) =>
             {
-                originalCallback(val, soul);
-
                 // Terminate if only one node is requested
                 if (!this._lex)
                 {
@@ -335,6 +348,12 @@ export class TGLink
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
+    private _killAll(): void
+    {
+        this._endQuery();
+        this._client.closeListener(this.id);
+    }
+
     private _setUserPub(pub: string): void
     {
         if (this._parent)
@@ -359,11 +378,12 @@ export class TGLink
         this._updateEvent.trigger(value, soul);
         this._lastValue   = value;
         this._hasReceived = true;
+        this._client.emit(this.id, { value, soul });
     }
 
-    private _on(cb: TGOnCb): TGLink
+    private _on(cb: TGOnCb): void
     {
-        return this._maybeWaitAuth(() =>
+        this._maybeWaitAuth(() =>
         {
             this._updateEvent.on(cb);
             if (this._hasReceived)
@@ -380,9 +400,9 @@ export class TGLink
         });
     }
 
-    private _onMap(cb: TGOnCb, msgId?: string): TGLink
+    private _onMap(cb: TGOnCb, msgId?: string): void
     {
-        return this._maybeWaitAuth(() =>
+        this._maybeWaitAuth(() =>
         {
             this._updateEvent.on(cb);
             if (!this._endQuery)

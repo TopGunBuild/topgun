@@ -6,8 +6,8 @@ settings:
 
 dependencies:
   topgun-async-stream-emitter:
-    specifier: 1.1.0
-    version: 1.1.0
+    specifier: 1.1.1
+    version: 1.1.1
   topgun-buffer:
     specifier: 1.0.6
     version: 1.0.6
@@ -5480,6 +5480,10 @@ packages:
 
   /topgun-async-stream-emitter@1.1.0:
     resolution: {integrity: sha512-vcBSzgNudjyengH8QFDvIDiEi41P0lsjNZkq4ljRsU4qCwF1Z4NkXWRpKCuBMJxPIBGA52wQmci130a3vxlvrA==}
+    dev: false
+
+  /topgun-async-stream-emitter@1.1.1:
+    resolution: {integrity: sha512-n8C0wDRFAf3Cj9HDe2oQawBv7GuPxnAPvxGOB7K4krIhUNkgiqlX0vNcWbqlzwoVaDqVfdabl/0h6gCHATlVMg==}
     dev: false
 
   /topgun-buffer@1.0.6:

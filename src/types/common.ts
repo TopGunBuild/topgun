@@ -138,6 +138,12 @@ export type TGAuthCallback = (userRef?: TGUserReference|TGAckErr) => void;
 export type TGOnCb = (node: TGValue|undefined, soul?: string) => void;
 export type TGNodeListenCb = (node: TGNode|undefined) => void;
 
+export interface TGData
+{
+    value: TGValue|undefined;
+    soul: string;
+}
+
 export interface TGPathData
 {
     souls: string[];
