@@ -56,7 +56,7 @@ export class TGLink
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    userPubExpected(): boolean
+    waitForAuth(): boolean
     {
         return this.getPath().some(path => path.includes(this._client.WAIT_FOR_USER_PUB));
     }
@@ -138,7 +138,7 @@ export class TGLink
     {
         return new Promise<TGMessage>((resolve) =>
         {
-            if (this.userPubExpected())
+            if (this.waitForAuth())
             {
                 throw new Error(
                     'You cannot save data to user space if the user is not authorized.',
@@ -398,7 +398,7 @@ export class TGLink
 
     private _maybeWaitAuth(handler: () => void): TGLink
     {
-        if (this.userPubExpected())
+        if (this.waitForAuth())
         {
             this._client.listener(SystemEvent.Auth).once().then((value) =>
             {
