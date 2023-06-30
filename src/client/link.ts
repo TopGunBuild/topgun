@@ -15,8 +15,8 @@ import { TGGraph } from './graph/graph';
 import { pubFromSoul } from '../sea';
 import { assertFn, assertNotEmptyString, assertGetPath } from '../utils/assert';
 import { getNodeSoul, isNode } from '../utils/node';
-import { generateMessageId } from './graph/graph-utils';
 import { TGLexLink } from './lex-link';
+import { uuidv4 } from '../utils/uuidv4';
 
 /* eslint-disable @typescript-eslint/no-empty-function */
 export class TGLink
@@ -39,7 +39,7 @@ export class TGLink
      */
     constructor(client: TGClient, key: string, parent?: TGLink)
     {
-        this.id           = generateMessageId();
+        this.id           = uuidv4();
         this.key          = key;
         this._client      = client;
         this._parent      = parent;
@@ -200,7 +200,7 @@ export class TGLink
             }
             else
             {
-                soulSuffix = generateMessageId();
+                soulSuffix = uuidv4();
             }
 
             this.key = this.key.endsWith('/') ? `${this.key}${soulSuffix}` : `${this.key}/${soulSuffix}`;
@@ -266,7 +266,7 @@ export class TGLink
     {
         return new Promise<TGValue>((ok: (...args: any) => void) =>
         {
-            const connectorMsgId    = generateMessageId();
+            const connectorMsgId    = uuidv4();
             const connectorCallback = (data?: TGGraphData, msgId?: string) => connectorMsgId === msgId && resolve();
             const resolve           = (val?: TGValue) =>
             {

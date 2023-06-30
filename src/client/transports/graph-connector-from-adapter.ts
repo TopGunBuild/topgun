@@ -1,6 +1,6 @@
 import { TGGet, TGPut, TGGraphAdapter } from '../../types';
-import { generateMessageId } from '../graph/graph-utils';
 import { TGGraphWireConnector } from './graph-wire-connector';
+import { uuidv4 } from '../../utils/uuidv4';
 
 const NOOP = () => undefined;
 
@@ -26,7 +26,7 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
         this.adapter
             .get(options)
             .then(graphData => ({
-                '#'  : generateMessageId(),
+                '#'  : uuidv4(),
                 '@'  : msgId,
                 'put': graphData
             }))
@@ -35,7 +35,7 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
                 console.warn(error.stack || error);
 
                 return {
-                    '#'  : generateMessageId(),
+                    '#'  : uuidv4(),
                     '@'  : msgId,
                     'err': 'Error fetching node',
                 };
@@ -59,7 +59,7 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
             .then(() =>
             {
                 return {
-                    '#'  : generateMessageId(),
+                    '#'  : uuidv4(),
                     '@'  : msgId,
                     'err': null,
                     'ok' : true,
@@ -70,7 +70,7 @@ export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
                 console.warn(error.stack || error);
 
                 return {
-                    '#'  : generateMessageId(),
+                    '#'  : uuidv4(),
                     '@'  : msgId,
                     'err': 'Error saving put',
                     'ok' : false,

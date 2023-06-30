@@ -7,8 +7,8 @@ import {
     SubscribeOptions,
 } from 'topgun-socket/client';
 import { TGGet, TGMessage, TGMessageCb, TGPut } from '../../types';
-import { generateMessageId } from '../graph/graph-utils';
 import { sign } from '../../sea';
+import { uuidv4 } from '../../utils/uuidv4';
 
 /* eslint-disable @typescript-eslint/no-empty-function */
 /* eslint-disable-next-line @typescript-eslint/no-unused-vars */
@@ -87,7 +87,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
     get({ msgId, cb, options }: TGGet): () => void
     {
         const soul   = options['#'];
-        msgId        = msgId || generateMessageId();
+        msgId        = msgId || uuidv4();
         const cbWrap = (msg: any) =>
         {
             this.ingest([msg]);
@@ -117,7 +117,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
             };
         }
 
-        msgId = msgId || generateMessageId();
+        msgId = msgId || uuidv4();
 
         if (cb)
         {

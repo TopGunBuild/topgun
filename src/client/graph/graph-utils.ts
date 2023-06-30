@@ -3,11 +3,6 @@ import { TGGraphData, TGNode, TGOptionsGet, TGPathData, TGValue } from '../../ty
 import { isSupportValue } from '../../utils/is-support';
 import { filterNodesByListOptions, storageListOptionsFromGetOptions } from '../../storage/utils';
 
-export function generateMessageId(): string
-{
-    return Math.random().toString(36).slice(2);
-}
-
 export function diffSets(
     initial: readonly string[],
     updated: readonly string[],

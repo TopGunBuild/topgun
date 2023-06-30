@@ -1,6 +1,6 @@
 import { TGGet, TGPut, TGMessage, TGMessageCb } from '../../types';
-import { generateMessageId } from '../graph/graph-utils';
 import { TGGraphConnector } from './graph-connector';
+import { uuidv4 } from '../../utils/uuidv4';
 
 /* eslint-disable @typescript-eslint/no-empty-function */
 export class TGGraphWireConnector extends TGGraphConnector
@@ -83,7 +83,7 @@ export class TGGraphWireConnector extends TGGraphConnector
      */
     req(msg: TGMessage, cb?: TGMessageCb): () => void
     {
-        const reqId = (msg['#'] = msg['#'] || generateMessageId());
+        const reqId = (msg['#'] = msg['#'] || uuidv4());
         if (cb)
         {
             this._callbacks[reqId] = cb;

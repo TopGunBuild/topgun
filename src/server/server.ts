@@ -4,9 +4,9 @@ import { TGGraphAdapter, TGGraphData, TGMessage } from '../types';
 import { TGServerOptions } from './server-options';
 import { listen, TGSocketServer, TGSocket } from 'topgun-socket/server';
 import { createMemoryAdapter } from '../memory-adapter';
-import { generateMessageId } from '../client/graph/graph-utils';
 import { createValidator } from '../validator';
 import { Middleware } from './middleware';
+import { uuidv4 } from '../utils/uuidv4';
 
 export class TGServer
 {
@@ -124,7 +124,7 @@ export class TGServer
      */
     protected publishIsDiff(msg: TGMessage): void
     {
-        const msgId = msg['#'] || generateMessageId();
+        const msgId = msg['#'] || uuidv4();
         const diff  = msg.put;
 
         if (!diff)

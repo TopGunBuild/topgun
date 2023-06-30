@@ -3,7 +3,7 @@ import { TGEvent, TGGraph } from '..';
 import { getNodeSoul } from '../../utils/node';
 import { StorageListOptions } from '../../storage';
 import { listFilterMatch, storageListOptionsFromGetOptions } from '../../storage/utils';
-import { generateMessageId } from './graph-utils';
+import { uuidv4 } from '../../utils/uuidv4';
 
 export class TGGraphQuery
 {
@@ -112,7 +112,7 @@ export class TGGraphQuery
         }
 
         const data: TGGet = {
-            msgId  : msgId || generateMessageId(),
+            msgId  : msgId || uuidv4(),
             options: this.options,
             cb     : this._onDirectQueryReply.bind(this)
         };

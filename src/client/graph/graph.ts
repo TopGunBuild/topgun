@@ -16,13 +16,14 @@ import { TGEvent } from '../control-flow/event';
 import { TGGraphConnector } from '../transports/graph-connector';
 import {
     diffSets,
-    generateMessageId, getNodesFromGraph,
+    getNodesFromGraph,
     getPathData,
     flattenGraphData
 } from './graph-utils';
 import { getNodeSoul } from '../../utils/node';
 import { TGGraphQuery } from './graph-query';
 import { stringifyOptionsGet } from '../../utils/stringify-options-get';
+import { uuidv4 } from '../../utils/uuidv4';
 
 interface TGGraphOptions
 {
@@ -63,7 +64,7 @@ export class TGGraph
      */
     constructor()
     {
-        this.id                  = generateMessageId();
+        this.id                  = uuidv4();
         this.receiveGraphData    = this.receiveGraphData.bind(this);
         this.__onConnectorStatus = this.__onConnectorStatus.bind(this);
         this.activeConnectors    = 0;
@@ -259,7 +260,7 @@ export class TGGraph
      */
     get(data: TGGet): () => void
     {
-        const msgId = data.msgId || generateMessageId();
+        const msgId = data.msgId || uuidv4();
 
         this.events.get.trigger({ ...data, msgId });
 
@@ -321,7 +322,7 @@ export class TGGraph
     {
         let diff: TGGraphData = addMissingState(data);
 
-        const id = msgId || generateMessageId();
+        const id = msgId || uuidv4();
         (async () =>
         {
             for (const fn of this._writeMiddleware)
