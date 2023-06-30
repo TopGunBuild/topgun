@@ -135,11 +135,6 @@ export interface TGUserCredentials
 
 export type TGAuthCallback = (userRef?: TGUserReference|TGAckErr) => void;
 
-export interface TGChainOptions
-{
-    uuid?: (path: string[]) => Promise<string>|string;
-}
-
 export type TGOnCb = (node: TGValue|undefined, soul?: string) => void;
 export type TGNodeListenCb = (node: TGNode|undefined) => void;
 

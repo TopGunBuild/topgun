@@ -1,12 +1,11 @@
 import { cloneValue, isEmptyObject, isFunction, isString, isNumber, isObject } from 'topgun-typed';
 import {
     SystemEvent,
-    TGChainOptions, TGGraphData, TGMessage,
+    TGGraphData, TGMessage,
     TGMessageCb,
     TGOnCb,
     TGOptionsGet,
     TGOptionsPut,
-    TGUserReference,
     TGValue,
 } from '../types';
 import { TGClient } from './client';
@@ -28,7 +27,6 @@ export class TGLink
     protected readonly _updateEvent: TGEvent<TGValue|undefined, string>;
     protected readonly _client: TGClient;
     protected readonly _parent?: TGLink;
-    protected _opt: TGChainOptions;
     protected _hasReceived: boolean;
     protected _lastValue: TGValue|undefined;
     protected _endQuery?: () => void;
@@ -39,7 +37,6 @@ export class TGLink
     constructor(client: TGClient, key: string, parent?: TGLink)
     {
         this.key          = key;
-        this._opt         = {};
         this._client      = client;
         this._parent      = parent;
         this._hasReceived = false;
@@ -211,19 +208,6 @@ export class TGLink
 
             return this.put(value, cb, opt).then(resolve).catch(reject);
         });
-    }
-
-    opt(options?: TGChainOptions): TGChainOptions
-    {
-        if (isObject(options))
-        {
-            this._opt = { ...this._opt, ...options };
-        }
-        if (this._parent)
-        {
-            return { ...this._parent.opt(), ...this._opt };
-        }
-        return this._opt;
     }
 
     once(cb: TGOnCb, timeout = 500): Promise<TGValue|undefined>
