@@ -30,11 +30,11 @@ export async function createUser(
 
     if ((password || '').length < passwordMinLength)
     {
-        throw Error('Password too short!');
+        throw Error(`Minimum password length is ${passwordMinLength}`);
     }
     if ((password || '').length > passwordMaxLength)
     {
-        throw Error('Password too long!');
+        throw Error(`Maximum password length is ${passwordMaxLength}`);
     }
 
     // "pseudo-randomly create a salt, then use PBKDF2 function to extend the password with it."
