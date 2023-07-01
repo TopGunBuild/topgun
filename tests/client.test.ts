@@ -1,6 +1,7 @@
 import { diffCRDT, TGSystemEvent, TGClient, TGUserReference, TGLink } from '../src/client';
 import { genString } from './test-util';
 import { TGLexLink } from '../src/client/lex-link';
+import { wait } from '../src/utils/wait';
 
 describe('Client', () =>
 {
@@ -249,5 +250,33 @@ describe('Client', () =>
         expect(message['#']).toBe('say');
         expect(message.err).toBeNull();
         expect(message.ok).toBeTruthy();
+        expect(client.graph['_graph']['say'].yo).toBe('hi');
+    });
+
+    it('should map', async () =>
+    {
+        const link = client.get('chat');
+
+        link.set({say: 'Hi!'});
+        link.set({say: 'Yeah, man...'});
+        link.set({say: 'Awesome! Call me in 5 minutes..'});
+        link.set({say: '👍'});
+
+        await wait(10);
+
+        // link.map().on(value =>
+        // {
+        //     return console.log(value);
+        // });
+
+        (async () =>
+        {
+            for await (const value of link.map().stream<{say: string}>())
+            {
+                console.log(value);
+            }
+        })();
+
+        expect(link).not.toBeUndefined();
     });
 });

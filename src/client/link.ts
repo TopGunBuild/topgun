@@ -1,19 +1,21 @@
-import { cloneValue, isEmptyObject, isString, isNumber, isObject } from 'topgun-typed';
+import { cloneValue, isEmptyObject, isNumber, isObject, isString } from 'topgun-typed';
 import { DemuxedConsumableStream } from 'topgun-async-stream-emitter';
 import {
-    TGSystemEvent, TGData,
-    TGGraphData, TGMessage,
+    TGData,
+    TGGraphData,
+    TGMessage,
     TGMessageCb,
     TGOnCb,
     TGOptionsGet,
     TGOptionsPut,
+    TGSystemEvent,
     TGValue,
 } from '../types';
 import { TGClient } from './client';
 import { TGEvent } from './control-flow/event';
 import { TGGraph } from './graph/graph';
 import { pubFromSoul } from '../sea';
-import { assertFn, assertNotEmptyString, assertGetPath, assertOptionsGet } from '../utils/assert';
+import { assertFn, assertGetPath, assertNotEmptyString, assertOptionsGet } from '../utils/assert';
 import { getNodeSoul, isNode } from '../utils/node';
 import { TGLexLink } from './lex-link';
 import { uuidv4 } from '../utils/uuidv4';
@@ -188,13 +190,19 @@ export class TGLink
 
     set(data: any, cb?: TGMessageCb, opt?: TGOptionsPut): Promise<TGMessage>
     {
-        return new Promise<TGMessage>((resolve, reject) =>
+        return new Promise<TGMessage>((resolve) =>
         {
             let soulSuffix, value = cloneValue(data);
 
             if (!isObject(value) || isEmptyObject(value))
             {
                 throw new Error('This data type is not supported in set().');
+            }
+            else if (this.waitForAuth())
+            {
+                throw new Error(
+                    'You cannot save data to user space if the user is not authorized.',
+                );
             }
 
             if (data instanceof TGLink)
@@ -216,9 +224,24 @@ export class TGLink
                 soulSuffix = uuidv4();
             }
 
-            this.key = this.key.endsWith('/') ? `${this.key}${soulSuffix}` : `${this.key}/${soulSuffix}`;
+            const callback = (msg: TGMessage) =>
+            {
+                if (cb)
+                {
+                    cb(msg);
+                }
+                resolve(msg);
+            };
 
-            return this.put(value, cb, opt).then(resolve).catch(reject);
+            const pathArr               = this.getPath();
+            pathArr[pathArr.length - 1] = [this.key, soulSuffix].join('/');
+
+            this._client.graph.putPath(
+                pathArr,
+                value,
+                callback,
+                opt,
+            );
         });
     }
 
@@ -247,8 +270,9 @@ export class TGLink
     {
         if (!this._streamCb)
         {
-            this._streamCb = () =>
+            this._streamCb = (value, soul) =>
             {
+                this._client.emit(this.id, { value, soul });
             };
             this.on(this._streamCb);
         }
@@ -395,7 +419,6 @@ export class TGLink
         this._updateEvent.trigger(value, soul);
         this._lastValue   = value;
         this._hasReceived = true;
-        this._client.emit(this.id, { value, soul });
     }
 
     private _on<T extends TGValue>(cb: TGOnCb<T>): void
