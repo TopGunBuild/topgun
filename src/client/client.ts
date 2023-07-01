@@ -10,7 +10,7 @@ import { TGSocketClientOptions } from 'topgun-socket/client';
 import { TGUserApi } from './user-api';
 import { pubFromSoul, unpackGraph } from '../sea';
 import { TGIndexedDBConnector } from '../indexeddb/indexeddb-connector';
-import { SystemEvent, TGNode } from '../types';
+import { TGSystemEvent, TGNode } from '../types';
 import { match } from '../utils/match';
 import { wait } from '../utils/wait';
 import { assertObject, assertGetPath } from '../utils/assert';
@@ -138,7 +138,7 @@ export class TGClient extends AsyncStreamEmitter<any>
     /**
      * System events callback
      */
-    on(event: SystemEvent, cb: (value) => void): void
+    on(event: TGSystemEvent, cb: (value) => void): void
     {
         (async () =>
         {

@@ -1,7 +1,7 @@
 import { cloneValue, isEmptyObject, isString, isNumber, isObject } from 'topgun-typed';
 import { DemuxedConsumableStream } from 'topgun-async-stream-emitter';
 import {
-    SystemEvent, TGData,
+    TGSystemEvent, TGData,
     TGGraphData, TGMessage,
     TGMessageCb,
     TGOnCb,
@@ -61,6 +61,19 @@ export class TGLink
     // -----------------------------------------------------------------------------------------------------
 
     waitForAuth(): boolean
+    {
+        if (this._client.user().is?.pub)
+        {
+            if (this.userPubExpected())
+            {
+                this._setUserPub(this._client.user().is?.pub);
+            }
+            return false;
+        }
+        return this.userPubExpected();
+    }
+
+    userPubExpected(): boolean
     {
         return this.getPath().some(path => path.includes(this._client.WAIT_FOR_USER_PUB));
     }
@@ -420,7 +433,7 @@ export class TGLink
     {
         if (this.waitForAuth())
         {
-            this._client.listener(SystemEvent.Auth).once().then((value) =>
+            this._client.listener(TGSystemEvent.Auth).once().then((value) =>
             {
                 this._setUserPub(value.pub);
                 handler();

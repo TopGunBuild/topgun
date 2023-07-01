@@ -1,4 +1,4 @@
-import { diffCRDT, SystemEvent, TGClient } from '../src/client';
+import { diffCRDT, TGSystemEvent, TGClient } from '../src/client';
 
 describe('Client', () =>
 {
@@ -114,8 +114,8 @@ describe('Client', () =>
         expect(link.waitForAuth()).toBeTruthy();
 
         client.user().create('john', '12345678');
-        await client.listener(SystemEvent.Auth).once().then(console.log);
+        await client.listener(TGSystemEvent.Auth).once(); //.then(console.log);
 
-        expect(client.user().get('some').waitForAuth()).toBeFalsy();
+        expect(link.waitForAuth()).toBeFalsy();
     });
 });

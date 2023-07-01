@@ -1,6 +1,6 @@
 import { LEX } from './lex';
 
-export enum SystemEvent {
+export enum TGSystemEvent {
     Auth = 'auth'
 }
 
