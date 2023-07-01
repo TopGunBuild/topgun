@@ -1,4 +1,6 @@
-import { diffCRDT, TGSystemEvent, TGClient, TGUserReference } from '../src/client';
+import { diffCRDT, TGSystemEvent, TGClient, TGUserReference, TGLink } from '../src/client';
+import { genString } from './test-util';
+import { TGLexLink } from '../src/client/lex-link';
 
 describe('Client', () =>
 {
@@ -113,10 +115,97 @@ describe('Client', () =>
 
         expect(link.waitForAuth()).toBeTruthy();
 
+        // minimum password length 8
         client.user().create('john', '12345678');
         const auth = await client.listener(TGSystemEvent.Auth).once() as TGUserReference;
 
         expect(auth.alias).toBe('john');
         expect(link.waitForAuth()).toBeFalsy();
+    });
+
+    it('minimum password length', async () =>
+    {
+        try
+        {
+            await client.user().create('john', genString(7));
+        }
+        catch (e)
+        {
+            expect(e.message).toBe(`Minimum password length is 8`);
+        }
+        const user = await client.user().create('john', genString(8));
+        expect(user.alias).toBe('john');
+
+        const client2 = new TGClient({
+            passwordMinLength: 3
+        });
+
+        try
+        {
+            await client2.user().create('john', genString(2));
+        }
+        catch (e)
+        {
+            expect(e.message).toBe(`Minimum password length is 3`);
+        }
+        const user2 = await client2.user().create('john', genString(4));
+        expect(user2.alias).toBe('john');
+    });
+
+    it('maximum password length', async () =>
+    {
+        try
+        {
+            await client.user().create('john', genString(49));
+        }
+        catch (e)
+        {
+            expect(e.message).toBe(`Maximum password length is 48`);
+        }
+
+        const client2 = new TGClient({
+            passwordMaxLength: 40
+        });
+
+        try
+        {
+            await client2.user().create('john', genString(41));
+        }
+        catch (e)
+        {
+            expect(e.message).toBe(`Maximum password length is 40`);
+        }
+        const user2 = await client2.user().create('john', genString(38));
+        expect(user2.alias).toBe('john');
+    });
+
+    it('should array of path', function ()
+    {
+        const path = client.get('one').get('two').getPath();
+
+        expect(path[0]).toBe('one');
+        expect(path[1]).toBe('two');
+    });
+
+    it('check link instance', function ()
+    {
+        const link1 = client.get('chat').get('122');
+        const link2 = client.get('chat').get({'.': {'*': '2019-06-20T'}});
+
+        expect(link1 instanceof TGLink).toBeTruthy();
+        expect(link2 instanceof TGLexLink).toBeTruthy();
+    });
+
+    it('should valid path', function ()
+    {
+        try
+        {
+            client.get(null)
+        }
+        catch (e)
+        {
+            console.log(e);
+            expect(e.message).toBe('A non-empty string value and not an underscore is expected.');
+        }
     });
 });

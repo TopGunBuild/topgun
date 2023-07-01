@@ -1,31 +1,45 @@
 import * as SEA from '../src/sea';
 import { TGClient } from '../src/client';
 
-describe('SEA', () => {
-    const client = new TGClient();
+describe('SEA', () =>
+{
+    let client: TGClient;
 
-    it('encrypt/decrypt', async () => {
-        const pair = await SEA.pair();
-        const data = 'foo';
+    beforeEach(() =>
+    {
+        client = new TGClient();
+    });
+    afterEach(async () =>
+    {
+        await client.disconnect();
+    });
+
+    it('encrypt/decrypt', async () =>
+    {
+        const pair       = await SEA.pair();
+        const data       = 'foo';
         const ciphertext = (await SEA.encrypt(data, pair.epriv)) as string;
         expect(await SEA.decrypt(ciphertext, pair.epriv)).toBe(data);
     });
 
-    it('sign', async () => {
-        const pair = await SEA.pair();
+    it('sign', async () =>
+    {
+        const pair      = await SEA.pair();
         const otherPair = await SEA.pair();
-        const data = 'foo';
-        const signed = await SEA.sign(data, pair);
+        const data      = 'foo';
+        const signed    = await SEA.sign(data, pair);
         expect(await SEA.verify(signed, pair.pub)).toBeInstanceOf(Object);
         expect(await SEA.verify(signed, otherPair.pub)).toBe(false);
     });
 
-    it('quickstart', async () => {
+    it('quickstart', async () =>
+    {
         const pair = await SEA.pair();
-        const enc = await SEA.encrypt('hello self', pair);
+        const enc  = await SEA.encrypt('hello self', pair);
         const data = await SEA.sign(enc, pair);
-        const msg = await SEA.verify(data, pair.pub);
-        if (msg) {
+        const msg  = await SEA.verify(data, pair.pub);
+        if (msg)
+        {
             const dec = (await SEA.decrypt(msg, pair)) as string;
             expect(dec).toBe('hello self');
 
@@ -34,20 +48,21 @@ describe('SEA', () => {
             expect(proof).toBe(check);
 
             const alice = await SEA.pair();
-            const bob = await SEA.pair();
-            const aes = await SEA.secret(bob.epub, alice);
-            const enc1 = await SEA.encrypt('shared data', aes as string);
-            const aes1 = await SEA.secret(alice.epub, bob);
-            const dec1 = await SEA.decrypt(enc1, aes1 as string);
+            const bob   = await SEA.pair();
+            const aes   = await SEA.secret(bob.epub, alice);
+            const enc1  = await SEA.encrypt('shared data', aes as string);
+            const aes1  = await SEA.secret(alice.epub, bob);
+            const dec1  = await SEA.decrypt(enc1, aes1 as string);
             expect(dec1).toBe('shared data');
         }
     });
 
-    it('quickwrong', async () => {
+    it('quickwrong', async () =>
+    {
         const alice = await SEA.pair();
-        const bob = await SEA.pair();
+        const bob   = await SEA.pair();
 
-        const data = await SEA.sign('asdf', alice);
+        const data      = await SEA.sign('asdf', alice);
         const isVerify1 = await SEA.verify(data, bob.pub);
         expect(isVerify1).toBe(false);
 
@@ -62,36 +77,42 @@ describe('SEA', () => {
         expect(dec2).toBe(undefined);
     });
 
-    it('double sign', async () => {
+    it('double sign', async () =>
+    {
         const pair = await SEA.pair();
         const sig1 = await SEA.sign('hello world', pair);
         const dup1 = await SEA.sign(sig1, pair);
         expect(dup1).toBe(sig1);
     });
 
-    it('register/auth', async () => {
-        const user = client.user();
+    it('register/auth', async () =>
+    {
+        const user    = client.user();
         const newUser = await user.create('carl', 'testing123');
         user.leave();
         const authUser = await user.auth('carl', 'testing123');
         expect(newUser.pub).toBe(authUser?.pub);
     });
 
-    it('save & read encrypt', async () => {
+    it('save & read encrypt', async () =>
+    {
         const pair = await SEA.pair();
         const data = await SEA.encrypt('hi', pair.epriv);
-        const is = data.slice();
+        const is   = data.slice();
 
         client
             .get('a')
             .get('d')
-            .put(data, (ack) => {
+            .put(data, (ack) =>
+            {
                 expect(ack.err).toBeFalsy();
-                setTimeout(() => {
+                setTimeout(() =>
+                {
                     client
                         .get('a')
                         .get('d')
-                        .once((data) => {
+                        .once((data) =>
+                        {
                             expect(data).toBe(is);
                         });
                 });

@@ -20,3 +20,7 @@ export function expectErr(
     }
 }
 
+export function genString(length: number): string
+{
+    return '#'.repeat(length);
+}
