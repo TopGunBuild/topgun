@@ -237,4 +237,17 @@ describe('Client', () =>
         expect(path instanceof TGLink && path.getPath().join()).toBe('path');
         expect(root instanceof TGClient).toBeTruthy();
     });
+
+    it('should put', async () =>
+    {
+        const message = await client.get('say').put({ yo: 'hi' });
+        const yo      = await client.get('say').get('yo').promise();
+        const say     = await client.get('say').promise() as any;
+
+        expect(say.yo).toBe('hi');
+        expect(yo).toBe('hi');
+        expect(message['#']).toBe('say');
+        expect(message.err).toBeNull();
+        expect(message.ok).toBeTruthy();
+    });
 });
