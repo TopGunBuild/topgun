@@ -1,7 +1,7 @@
 import {
     boolean,
     unwrap,
-    union,
+    unionAll,
     number,
     fn,
     Struct,
@@ -66,7 +66,7 @@ const structNotAllowUnderscore = (msg = 'Not an underscore expected'): Struct<st
 export function assertGetPath(value: unknown): string
 {
     const message = 'A non-empty string value and not an underscore is expected.';
-    const struct  = union([structNotEmptyString(), structNotAllowUnderscore()], message);
+    const struct  = unionAll([structNotEmptyString(), structNotAllowUnderscore()], message);
     const actual  = struct(value);
     return unwrap(actual);
 }

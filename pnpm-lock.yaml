@@ -18,8 +18,8 @@ dependencies:
     specifier: ^1.0.1
     version: 1.0.1
   topgun-typed:
-    specifier: 1.2.0
-    version: 1.2.0
+    specifier: 1.3.0
+    version: 1.3.0
   topgun-webcrypto:
     specifier: 1.0.5
     version: 1.0.5
@@ -5513,8 +5513,8 @@ packages:
     resolution: {integrity: sha512-upc2+ZkRug9StMuQUlVHDhw4LuG0BCe96WoPShYYHb3/MfCzXRVkBV/3Sq8p0/st2MBWWDWK9eLDKz5QiLPkLg==}
     dev: false
 
-  /topgun-typed@1.2.0:
-    resolution: {integrity: sha512-gqxt+mb14uRrNOroK8dG/iJf3XkxpgwTzBf6FXXE0/g+HeZ05Z4gwkc1tChlFxwqc7nuv/yiKPqOgdRsvVtfuQ==}
+  /topgun-typed@1.3.0:
+    resolution: {integrity: sha512-/t/M3tIJXluFg8WxO/7S1yBqd29/lV+SDOX3+6du1eZbVOhZE9VTwFP0Qx9N7jrSMYlwuuBQkDonucQqFyUDlQ==}
     dev: false
 
   /topgun-webcrypto@1.0.5:
