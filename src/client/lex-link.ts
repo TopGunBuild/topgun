@@ -3,7 +3,7 @@ import { DemuxedConsumableStream } from 'topgun-async-stream-emitter';
 import { TGLink } from './link';
 import { LEX } from '../types/lex';
 import { TGClient } from './client';
-import { TGData, TGOnCb, TGOptionsGet } from '../types';
+import { TGData, TGOnCb, TGOptionsGet, TGValue } from '../types';
 import { assertBoolean, assertNotEmptyString, assertNumber } from '../utils/assert';
 import { replacerSortKeys } from '../utils/replacer-sort-keys';
 
@@ -95,22 +95,22 @@ export class TGLexLink
         return this.optionsGet;
     }
 
-    once(cb: TGOnCb): TGLink
+    once<T extends TGValue>(cb: TGOnCb<T>): TGLink
     {
         return this._link.once(cb);
     }
 
-    on(cb: TGOnCb): TGLink
+    on<T extends TGValue>(cb: TGOnCb<T>): TGLink
     {
         return this._link.on(cb);
     }
 
-    stream(): DemuxedConsumableStream<TGData>
+    stream<T extends TGValue>(): DemuxedConsumableStream<TGData<T>>
     {
         return this._link.stream();
     }
 
-    off(cb?: TGOnCb): void
+    off(cb?: TGOnCb<any>): void
     {
         return this._link.off(cb);
     }

@@ -9,7 +9,6 @@ import {
     TGOptionsPut,
     TGMiddleware,
     TGMiddlewareType,
-    TGNodeListenCb,
     TGOnCb, TGOptionsGet,
 } from '../../types';
 import { TGEvent } from '../control-flow/event';
@@ -192,11 +191,11 @@ export class TGGraph
     /**
      * Read a matching nodes from the graph
      */
-    queryMany(opts: TGOptionsGet, cb: TGOnCb, msgId?: string): () => void
+    queryMany<T extends TGValue>(opts: TGOptionsGet, cb: TGOnCb<T>, msgId?: string): () => void
     {
         getNodesFromGraph(opts, this._graph).forEach((node) =>
         {
-            cb(node, getNodeSoul(node));
+            cb(node as T, getNodeSoul(node));
         });
 
         const queryString = stringifyOptionsGet(opts);
@@ -212,7 +211,7 @@ export class TGGraph
     /**
      * Read a potentially multi-level deep path from the graph
      */
-    query(path: string[], cb: TGOnCb): () => void
+    query<T extends TGValue>(path: string[], cb: TGOnCb<T>): () => void
     {
         let lastSouls = [] as string[];
         let currentValue: TGValue|undefined;
@@ -228,7 +227,7 @@ export class TGGraph
             )
             {
                 currentValue = value;
-                cb(value, path[path.length - 1]);
+                cb(value as T, path[path.length - 1]);
             }
 
             for (const soul of added)
@@ -440,13 +439,13 @@ export class TGGraph
             new TGGraphQuery(this, queryString, this.receiveGraphData));
     }
 
-    private _listen(queryString: string, cb: TGNodeListenCb, msgId?: string): TGGraph
+    private _listen<T extends TGValue>(queryString: string, cb: TGOnCb<T>, msgId?: string): TGGraph
     {
         this._query(queryString).get(cb, msgId);
         return this;
     }
 
-    private _unlisten(queryString: string, cb: TGNodeListenCb): TGGraph
+    private _unlisten(queryString: string, cb: TGOnCb<any>): TGGraph
     {
         const node = this._queries[queryString];
         if (!node)

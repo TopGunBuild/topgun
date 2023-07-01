@@ -135,12 +135,11 @@ export interface TGUserCredentials
 
 export type TGAuthCallback = (userRef?: TGUserReference|TGAckErr) => void;
 
-export type TGOnCb = (node: TGValue|undefined, soul?: string) => void;
-export type TGNodeListenCb = (node: TGNode|undefined) => void;
+export type TGOnCb<T extends TGValue> = (node: T, soul?: string) => void;
 
-export interface TGData
+export interface TGData<T extends TGValue>
 {
-    value: TGValue|undefined;
+    value: T;
     soul: string;
 }
 

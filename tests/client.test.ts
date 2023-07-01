@@ -238,11 +238,11 @@ describe('Client', () =>
         expect(root instanceof TGClient).toBeTruthy();
     });
 
-    it('should put', async () =>
+    it('simple check put/promise/get', async () =>
     {
         const message = await client.get('say').put({ yo: 'hi' });
-        const yo      = await client.get('say').get('yo').promise();
-        const say     = await client.get('say').promise() as any;
+        const yo      = await client.get('say').get('yo').promise<string>();
+        const say     = await client.get('say').promise<{ yo: string }>();
 
         expect(say.yo).toBe('hi');
         expect(yo).toBe('hi');

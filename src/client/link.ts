@@ -32,7 +32,7 @@ export class TGLink
     protected _hasReceived: boolean;
     protected _lastValue: TGValue|undefined;
     protected _endQuery?: () => void;
-    protected _streamCb?: TGOnCb;
+    protected _streamCb?: TGOnCb<any>;
 
     /**
      * Constructor
@@ -222,16 +222,16 @@ export class TGLink
         });
     }
 
-    once(cb: TGOnCb): TGLink
+    once<T extends TGValue>(cb: TGOnCb<T>): TGLink
     {
-        cb = assertFn<TGOnCb>(cb);
-        this.promise().then(val => cb(val, this.key));
+        cb = assertFn<TGOnCb<T>>(cb);
+        this.promise<T>().then(val => cb(val, this.key));
         return this;
     }
 
-    on(cb: TGOnCb): TGLink
+    on<T extends TGValue>(cb: TGOnCb<T>): TGLink
     {
-        cb = assertFn<TGOnCb>(cb);
+        cb = assertFn<TGOnCb<T>>(cb);
         if (this._lex)
         {
             this._onMap(cb);
@@ -243,7 +243,7 @@ export class TGLink
         return this;
     }
 
-    stream(): DemuxedConsumableStream<TGData>
+    stream<T extends TGValue>(): DemuxedConsumableStream<TGData<T>>
     {
         if (!this._streamCb)
         {
@@ -255,7 +255,7 @@ export class TGLink
         return this._client.listener(this.id);
     }
 
-    off(cb?: TGOnCb): void
+    off(cb?: TGOnCb<any>): void
     {
         if (cb)
         {
@@ -275,9 +275,9 @@ export class TGLink
         }
     }
 
-    promise(opts?: {timeout?: number}): Promise<TGValue|undefined>
+    promise<T extends TGValue>(opts?: {timeout?: number}): Promise<T>
     {
-        return new Promise<TGValue>((ok: (...args: any) => void) =>
+        return new Promise<T>((ok: (...args: any) => void) =>
         {
             const connectorMsgId    = uuidv4();
             const connectorCallback = (data?: TGGraphData, msgId?: string) => connectorMsgId === msgId && resolve();
@@ -398,14 +398,14 @@ export class TGLink
         this._client.emit(this.id, { value, soul });
     }
 
-    private _on(cb: TGOnCb): void
+    private _on<T extends TGValue>(cb: TGOnCb<T>): void
     {
         this._maybeWaitAuth(() =>
         {
             this._updateEvent.on(cb);
             if (this._hasReceived)
             {
-                cb(this._lastValue, this.key);
+                cb(this._lastValue as T, this.key);
             }
             if (!this._endQuery)
             {
@@ -417,7 +417,7 @@ export class TGLink
         });
     }
 
-    private _onMap(cb: TGOnCb, msgId?: string): void
+    private _onMap<T extends TGValue>(cb: TGOnCb<T>, msgId?: string): void
     {
         this._maybeWaitAuth(() =>
         {

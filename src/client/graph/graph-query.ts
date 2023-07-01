@@ -1,4 +1,4 @@
-import { TGGet, TGGraphData, TGMessage, TGNode, TGNodeListenCb, TGOptionsGet } from '../../types';
+import { TGGet, TGGraphData, TGMessage, TGNode, TGOnCb, TGOptionsGet } from '../../types';
 import { TGEvent, TGGraph } from '..';
 import { getNodeSoul } from '../../utils/node';
 import { StorageListOptions } from '../../storage';
@@ -46,7 +46,7 @@ export class TGGraphQuery
         return this._data.listenerCount();
     }
 
-    get(cb?: TGNodeListenCb, msgId?: string): TGGraphQuery
+    get(cb?: TGOnCb<any>, msgId?: string): TGGraphQuery
     {
         if (cb)
         {
