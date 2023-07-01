@@ -142,7 +142,7 @@ export class TGLink
         {
             return this._parent || this._client;
         }
-        return this.back(amount - 1);
+        return this._parent.back(amount - 1);
     }
 
     /**
