@@ -1,4 +1,4 @@
-import { diffCRDT, TGSystemEvent, TGClient } from '../src/client';
+import { diffCRDT, TGSystemEvent, TGClient, TGUserReference } from '../src/client';
 
 describe('Client', () =>
 {
@@ -17,7 +17,7 @@ describe('Client', () =>
     {
         const updatedGraph  = {
             'user/said': {
-                '_': { '#': 'user/said', '>': { 'say': 1683308843720 } },
+                '_'  : { '#': 'user/said', '>': { 'say': 1683308843720 } },
                 'say': 'Hello'
             }
         };
@@ -107,15 +107,16 @@ describe('Client', () =>
         });
     });
 
-    it('waitForAuth', async () =>
+    it('auth wait', async () =>
     {
         const link = client.user().get('some');
 
         expect(link.waitForAuth()).toBeTruthy();
 
         client.user().create('john', '12345678');
-        await client.listener(TGSystemEvent.Auth).once(); //.then(console.log);
+        const auth = await client.listener(TGSystemEvent.Auth).once() as TGUserReference;
 
+        expect(auth.alias).toBe('john');
         expect(link.waitForAuth()).toBeFalsy();
     });
 });
