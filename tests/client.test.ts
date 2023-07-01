@@ -225,4 +225,16 @@ describe('Client', () =>
             expect(e.message).toBe('A non-empty string value and not an underscore is expected.');
         }
     });
+
+    it('go to parent context on the chain', function ()
+    {
+        const link = client.get('path').get('deep').get('deeper');
+        const deep = link.back();
+        const path = link.back(2);
+        const root = link.back(3);
+
+        expect(deep instanceof TGLink && deep.getPath().join()).toBe('path,deep');
+        expect(path instanceof TGLink && path.getPath().join()).toBe('path');
+        expect(root instanceof TGClient).toBeTruthy();
+    });
 });
