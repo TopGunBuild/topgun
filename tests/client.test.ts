@@ -190,13 +190,13 @@ describe('Client', () =>
     it('check link instance', function ()
     {
         const link1 = client.get('chat').get('122');
-        const link2 = client.get('chat').get({'.': {'*': '2019-06-20T'}});
+        const link2 = client.get('chat').get({ '.': { '*': '2019-06-20T' } });
 
         expect(link1 instanceof TGLink).toBeTruthy();
         expect(link2 instanceof TGLexLink).toBeTruthy();
     });
 
-    it('should valid path', function ()
+    it('should get argument', function ()
     {
         try
         {
@@ -204,7 +204,24 @@ describe('Client', () =>
         }
         catch (e)
         {
-            console.log(e);
+            expect(e.message).toBe('A non-empty string value and not an underscore is expected.');
+        }
+
+        try
+        {
+            client.get('_')
+        }
+        catch (e)
+        {
+            expect(e.message).toBe('A non-empty string value and not an underscore is expected.');
+        }
+
+        try
+        {
+            client.get('')
+        }
+        catch (e)
+        {
             expect(e.message).toBe('A non-empty string value and not an underscore is expected.');
         }
     });
