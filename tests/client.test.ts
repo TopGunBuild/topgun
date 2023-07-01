@@ -1,8 +1,17 @@
-import { diffCRDT, TGClient } from '../src/client';
+import { diffCRDT, SystemEvent, TGClient } from '../src/client';
 
 describe('Client', () =>
 {
-    const client = new TGClient();
+    let client: TGClient;
+
+    beforeEach(() =>
+    {
+        client = new TGClient();
+    });
+    afterEach(async () =>
+    {
+        await client.disconnect();
+    });
 
     it('diffCRDT ', function ()
     {
@@ -96,5 +105,17 @@ describe('Client', () =>
             expect(results.length).toBe(3);
             expect(results).toContain(JSON.stringify(ack));
         });
+    });
+
+    it('waitForAuth', async () =>
+    {
+        const link = client.user().get('some');
+
+        expect(link.waitForAuth()).toBeTruthy();
+
+        client.user().create('john', '12345678');
+        await client.listener(SystemEvent.Auth).once().then(console.log);
+
+        expect(client.user().get('some').waitForAuth()).toBeFalsy();
     });
 });
