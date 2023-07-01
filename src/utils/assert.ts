@@ -11,7 +11,8 @@ import {
     StructError,
     string,
     ok,
-    object
+    object,
+    optional,
 } from 'topgun-typed';
 import { TGUserCredentials } from '../types';
 
@@ -20,6 +21,27 @@ const structObject = (msg = 'Expected object'): Struct<any> =>
         isObject(input)
             ? ok(input)
             : err(new StructError(msg, { input, path: [] }));
+
+export function assertOptionsGet(value: unknown, msg = 'Expected query object')
+{
+    const struct = object(
+        {
+            '.': optional(
+                object({
+                    '*': optional(string('Expected string in \'*\'')),
+                    '>': optional(string('Expected string in \'>\'')),
+                    '<': optional(string('Expected string in \'<\'')),
+                }, 'Expected LEX query')
+            ),
+            '#': optional(string('Expected number in \'#\'')),
+            '%': optional(number('Expected number in \'%\'')),
+            '-': optional(boolean('Expected boolean in \'-\'')),
+        },
+        msg,
+    );
+    const actual = struct(value);
+    return unwrap(actual);
+}
 
 export function assertObject<T>(value: unknown, msg?: string): T
 {

@@ -13,7 +13,7 @@ import { TGClient } from './client';
 import { TGEvent } from './control-flow/event';
 import { TGGraph } from './graph/graph';
 import { pubFromSoul } from '../sea';
-import { assertFn, assertNotEmptyString, assertGetPath } from '../utils/assert';
+import { assertFn, assertNotEmptyString, assertGetPath, assertOptionsGet } from '../utils/assert';
 import { getNodeSoul, isNode } from '../utils/node';
 import { TGLexLink } from './lex-link';
 import { uuidv4 } from '../utils/uuidv4';
@@ -112,7 +112,7 @@ export class TGLink
         // The argument is a LEX query
         if (isObject(keyOrOptions))
         {
-            return new TGLexLink(this._client, keyOrOptions, this);
+            return new TGLexLink(this._client, assertOptionsGet(keyOrOptions), this);
         }
         else if (isString(keyOrOptions))
         {
