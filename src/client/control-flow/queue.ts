@@ -1,6 +1,7 @@
+import { AsyncStreamEmitter } from 'topgun-async-stream-emitter';
 import { TGMessage } from '../../types';
 
-export class TGQueue<T = TGMessage>
+export class TGQueue<T = TGMessage> extends AsyncStreamEmitter<any>
 {
     readonly name: string;
     private _queue: T[];
@@ -10,6 +11,7 @@ export class TGQueue<T = TGMessage>
      */
     constructor(name = 'Queue')
     {
+        super();
         this.name   = name;
         this._queue = [];
     }

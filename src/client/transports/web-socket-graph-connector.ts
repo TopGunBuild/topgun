@@ -16,9 +16,6 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
 {
     readonly client: TGClientSocket;
     readonly opts: TGSocketClientOptions|undefined;
-    readonly msgChannel?: TGChannel<any>;
-    readonly getsChannel?: TGChannel<any>;
-    readonly putsChannel?: TGChannel<any>;
 
     private readonly _requestChannels: {
         [msgId: string]: TGChannel<any>;
@@ -38,7 +35,14 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         this.client           = createSocketClient(this.opts || {});
         this.onConnect();
         this.onError();
-        this.outputQueue.completed.on(this.onOutputProcessed.bind(this));
+
+        (async () =>
+        {
+            for await (const value of this.outputQueue.listener('completed'))
+            {
+                this.onOutputProcessed(value);
+            }
+        })();
     }
 
     // -----------------------------------------------------------------------------------------------------

@@ -15,9 +15,15 @@ export class TGGraphWireConnector extends TGGraphConnector
     constructor(name = 'GraphWireConnector')
     {
         super(name);
-        this._callbacks        = {};
-        this._onProcessedInput = this._onProcessedInput.bind(this);
-        this.inputQueue.completed.on(this._onProcessedInput);
+        this._callbacks = {};
+
+        (async () =>
+        {
+            for await (const value of this.inputQueue.listener('completed'))
+            {
+                this._onProcessedInput(value);
+            }
+        })();
     }
 
     // -----------------------------------------------------------------------------------------------------

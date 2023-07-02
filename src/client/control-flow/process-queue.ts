@@ -1,5 +1,4 @@
 import { TGMessage } from '../../types';
-import { TGEvent } from './event';
 import { TGQueue } from './queue';
 import { TGMiddlewareSystem } from './middleware-system';
 
@@ -12,8 +11,6 @@ export class TGProcessQueue<T = TGMessage,
 {
     isProcessing: boolean;
     readonly middleware: TGMiddlewareSystem<T, U, V>;
-    readonly completed: TGEvent<T>;
-    readonly emptied: TGEvent<boolean>;
     readonly processDupes: TGProcessDupesOption;
 
     protected alreadyProcessed: T[];
@@ -30,8 +27,6 @@ export class TGProcessQueue<T = TGMessage,
         this.alreadyProcessed = [];
         this.isProcessing     = false;
         this.processDupes     = processDupes;
-        this.completed        = new TGEvent<T>(`${name}.processed`);
-        this.emptied          = new TGEvent<boolean>(`${name}.emptied`);
         this.middleware       = new TGMiddlewareSystem<T, U, V>(`${name}.middleware`);
     }
 
@@ -63,7 +58,7 @@ export class TGProcessQueue<T = TGMessage,
 
         if (item)
         {
-            this.completed.trigger(item);
+            this.emit('completed', item);
         }
     }
 
@@ -98,7 +93,7 @@ export class TGProcessQueue<T = TGMessage,
             }
         }
 
-        this.emptied.trigger(true);
+        this.emit('emptied', true);
         this.isProcessing = false;
     }
 }
