@@ -1,8 +1,6 @@
-import { cloneValue, isEmptyObject, isNumber, isObject, isString } from 'topgun-typed';
-import { DemuxedConsumableStream } from 'topgun-async-stream-emitter';
+import { cloneValue, isEmptyObject, isNumber, isObject, isString, isFunction } from 'topgun-typed';
 import {
     TGData,
-    TGGraphData,
     TGMessage,
     TGMessageCb,
     TGOnCb,
@@ -12,13 +10,14 @@ import {
     TGValue,
 } from '../types';
 import { TGClient } from './client';
-import { TGEvent } from './control-flow/event';
 import { TGGraph } from './graph/graph';
 import { pubFromSoul } from '../sea';
-import { assertFn, assertGetPath, assertNotEmptyString, assertOptionsGet } from '../utils/assert';
+import { assertGetPath, assertNotEmptyString, assertOptionsGet } from '../utils/assert';
 import { getNodeSoul, isNode } from '../utils/node';
 import { TGLexLink } from './lex-link';
 import { uuidv4 } from '../utils/uuidv4';
+import { TGStream } from '../stream/stream';
+import { TGExchange } from '../stream/exchange';
 
 /* eslint-disable @typescript-eslint/no-empty-function */
 export class TGLink
@@ -28,25 +27,30 @@ export class TGLink
     soul: string|undefined;
     _lex?: TGLexLink;
 
-    protected readonly _updateEvent: TGEvent<TGValue|undefined, string>;
     protected readonly _client: TGClient;
     protected readonly _parent?: TGLink;
-    protected _hasReceived: boolean;
-    protected _lastValue: TGValue|undefined;
-    protected _endQuery?: () => void;
-    protected _streamCb?: TGOnCb<any>;
+    protected readonly _exchange: TGExchange;
+    protected _receivedData: {
+        [streamName: string]: {
+            [soul: string]: TGValue
+        }
+    };
+    protected _endQueries?: {
+        [streamName: string]: () => void
+    };
 
     /**
      * Constructor
      */
     constructor(client: TGClient, key: string, parent?: TGLink)
     {
-        this.id           = uuidv4();
-        this.key          = key;
-        this._client      = client;
-        this._parent      = parent;
-        this._hasReceived = false;
-        this._updateEvent = new TGEvent(this.getPath().join('|'));
+        this.id            = uuidv4();
+        this.key           = key;
+        this._client       = client;
+        this._parent       = parent;
+        this._exchange     = new TGExchange();
+        this._receivedData = {};
+        this._endQueries   = {};
         if (!parent)
         {
             this.soul = key;
@@ -56,11 +60,27 @@ export class TGLink
                 this._client.pub = pubFromSoul(key);
             }
         }
+
+        (async () =>
+        {
+            for await (const { streamName } of this._exchange.listener('destroy'))
+            {
+                if (isFunction(this._endQueries[streamName]))
+                {
+                    this._endQueries[streamName]();
+                }
+            }
+        })();
     }
 
     // -----------------------------------------------------------------------------------------------------
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
+
+    multiQuery(): boolean
+    {
+        return this._lex instanceof TGLexLink;
+    }
 
     waitForAuth(): boolean
     {
@@ -245,104 +265,81 @@ export class TGLink
         });
     }
 
-    once<T extends TGValue>(cb: TGOnCb<T>): TGLink
+    once<T extends TGValue>(cb?: TGOnCb<T>): TGStream<TGData<T>>
     {
-        cb = assertFn<TGOnCb<T>>(cb);
-        this.promise<T>().then(val => cb(val, this.key));
-        return this;
+        const stream = this._exchange.subscribe(uuidv4(), { once: true });
+
+        if (isFunction(cb))
+        {
+            (async () =>
+            {
+                for await (const { value, soul } of stream)
+                {
+                    cb(value, soul);
+
+                    if (!this.multiQuery())
+                    {
+                        stream.destroy();
+                    }
+                }
+            })();
+        }
+
+        return this.multiQuery() ? this._onMap(stream) : this._on(stream);
     }
 
-    on<T extends TGValue>(cb: TGOnCb<T>): TGLink
+    on<T extends TGValue>(cb?: TGOnCb<T>): TGStream<TGData<T>>
     {
-        cb = assertFn<TGOnCb<T>>(cb);
-        if (this._lex)
+        const stream = this._exchange.subscribe();
+
+        if (isFunction(cb))
         {
-            this._onMap(cb);
+            (async () =>
+            {
+                for await (const { value, soul } of stream)
+                {
+                    cb(value, soul);
+                }
+            })();
         }
-        else
-        {
-            this._on(cb);
-        }
-        return this;
+
+        return this.multiQuery() ? this._onMap(stream) : this._on(stream);
     }
 
-    stream<T extends TGValue>(): DemuxedConsumableStream<TGData<T>>
+    off(): void
     {
-        if (!this._streamCb)
-        {
-            this._streamCb = (value, soul) =>
-            {
-                this._client.emit(this.id, { value, soul });
-            };
-            this.on(this._streamCb);
-        }
-        return this._client.listener(this.id);
-    }
-
-    off(cb?: TGOnCb<any>): void
-    {
-        if (cb)
-        {
-            this._updateEvent.off(cb);
-            if (this._endQuery && this._updateEvent.listenerCount() === 0)
-            {
-                this._killAll();
-            }
-        }
-        else
-        {
-            if (this._endQuery)
-            {
-                this._killAll();
-            }
-            this._updateEvent.reset();
-        }
+        this._exchange.destroy();
+        this._receivedData = {};
+        this._endQueries   = {};
     }
 
     promise<T extends TGValue>(opts?: {timeout?: number}): Promise<T>
     {
-        return new Promise<T>((ok: (...args: any) => void) =>
+        return new Promise<T>((resolve, reject) =>
         {
-            const connectorMsgId    = uuidv4();
-            const connectorCallback = (data?: TGGraphData, msgId?: string) => connectorMsgId === msgId && resolve();
-            const resolve           = (val?: TGValue) =>
+            if (this.multiQuery())
             {
-                ok(val);
-                this.off(callback);
-                this._client.graph.events.graphData.off(connectorCallback);
-            };
-            const callback          = (val: TGValue|undefined, soul?: string) =>
-            {
-                // Terminate if only one node is requested
-                if (!this._lex)
-                {
-                    resolve(val);
-                }
-            };
-
-            if (this._lex)
-            {
-                this._onMap(callback, connectorMsgId);
-
-                if (this._client.graph.activeConnectors > 0)
-                {
-                    // Wait until at least one of the connectors returns a graph data
-                    this._client.graph.events.graphData.on(connectorCallback);
-                }
-                else
-                {
-                    resolve();
-                }
-            }
-            else
-            {
-                this._on(callback);
+                return reject(Error('For multiple use once() or on() method'));
             }
 
-            // Resolve by timeout
+            const stream = this._exchange.subscribe();
+
+            (async () =>
+            {
+                for await (const { value } of this._on(stream))
+                {
+                    resolve(value);
+                    stream.destroy();
+                }
+            })();
+
             if (isNumber(opts?.timeout))
             {
-                setTimeout(() => resolve(), opts.timeout);
+                setTimeout(() =>
+                {
+                    stream.destroy();
+                    resolve(null);
+                }, opts.timeout);
             }
         });
     }
@@ -385,12 +382,6 @@ export class TGLink
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private _killAll(): void
-    {
-        this._endQuery();
-        this._client.closeListener(this.id);
-    }
-
     private _setUserPub(pub: string): void
     {
         if (this._parent)
@@ -413,47 +404,48 @@ export class TGLink
         }
     }
 
-    private _onQueryResponse(value?: TGValue): void
+    private _onQueryResponse<T extends TGValue>(value: TGValue, stream: TGStream<T>): void
     {
         const soul = getNodeSoul(value) || this.key;
-        this._updateEvent.trigger(value, soul);
-        this._lastValue   = value;
-        this._hasReceived = true;
+
+        if (!isObject(this._receivedData[stream.name]))
+        {
+            this._receivedData[stream.name] = {};
+        }
+        if (stream.attributes['once'] && this._receivedData[stream.name][soul])
+        {
+            return;
+        }
+        this._receivedData[stream.name][soul] = value;
+        stream.publish({ value, soul });
     }
 
-    private _on<T extends TGValue>(cb: TGOnCb<T>): void
+    private _on<T extends TGValue>(stream: TGStream<T>, msgId?: string): TGStream<T>
     {
         this._maybeWaitAuth(() =>
         {
-            this._updateEvent.on(cb);
-            if (this._hasReceived)
-            {
-                cb(this._lastValue as T, this.key);
-            }
-            if (!this._endQuery)
-            {
-                this._endQuery = this._client.graph.query(
-                    this.getPath(),
-                    this._onQueryResponse.bind(this),
-                );
-            }
+            this._endQueries[stream.name] = this._client.graph.query(
+                this.getPath(),
+                (value: TGValue) => this._onQueryResponse(value, stream),
+                msgId
+            );
         });
+
+        return stream;
     }
 
-    private _onMap<T extends TGValue>(cb: TGOnCb<T>, msgId?: string): void
+    private _onMap<T extends TGValue>(stream: TGStream<T>, msgId?: string): TGStream<T>
     {
         this._maybeWaitAuth(() =>
         {
-            this._updateEvent.on(cb);
-            if (!this._endQuery)
-            {
-                this._endQuery = this._client.graph.queryMany(
-                    this._lex.optionsGet,
-                    this._onQueryResponse.bind(this),
-                    msgId
-                );
-            }
+            this._endQueries[stream.name] = this._client.graph.queryMany(
+                this._lex.optionsGet,
+                (value: TGValue) => this._onQueryResponse(value, stream),
+                msgId
+            );
         });
+
+        return stream;
     }
 
     private _maybeWaitAuth(handler: () => void): TGLink

@@ -1,11 +1,11 @@
 import { cloneValue, isNumber, isObject } from 'topgun-typed';
-import { DemuxedConsumableStream } from 'topgun-async-stream-emitter';
 import { TGLink } from './link';
 import { LEX } from '../types/lex';
 import { TGClient } from './client';
 import { TGData, TGOnCb, TGOptionsGet, TGValue } from '../types';
 import { assertBoolean, assertNotEmptyString, assertNumber } from '../utils/assert';
 import { replacerSortKeys } from '../utils/replacer-sort-keys';
+import { TGStream } from '../stream/stream';
 
 type KeyOfLex = keyof LEX;
 type ValueOfLex = LEX[KeyOfLex];
@@ -95,24 +95,19 @@ export class TGLexLink
         return this.optionsGet;
     }
 
-    once<T extends TGValue>(cb: TGOnCb<T>): TGLink
+    once<T extends TGValue>(cb?: TGOnCb<T>): TGStream<TGData<T>>
     {
         return this._link.once(cb);
     }
 
-    on<T extends TGValue>(cb: TGOnCb<T>): TGLink
+    on<T extends TGValue>(cb?: TGOnCb<T>): TGStream<TGData<T>>
     {
         return this._link.on(cb);
     }
 
-    stream<T extends TGValue>(): DemuxedConsumableStream<TGData<T>>
+    off(): void
     {
-        return this._link.stream();
-    }
-
-    off(cb?: TGOnCb<any>): void
-    {
-        return this._link.off(cb);
+        return this._link.off();
     }
 
     map(): TGLexLink

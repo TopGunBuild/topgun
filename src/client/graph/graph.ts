@@ -211,7 +211,7 @@ export class TGGraph
     /**
      * Read a potentially multi-level deep path from the graph
      */
-    query<T extends TGValue>(path: string[], cb: TGOnCb<T>): () => void
+    query<T extends TGValue>(path: string[], cb: TGOnCb<T>, msgId?: string): () => void
     {
         let lastSouls = [] as string[];
         let currentValue: TGValue|undefined;
@@ -232,7 +232,7 @@ export class TGGraph
 
             for (const soul of added)
             {
-                this._listen(this._queryStringBySoul(soul), updateQuery);
+                this._listen(this._queryStringBySoul(soul), updateQuery, msgId);
             }
 
             for (const soul of removed)

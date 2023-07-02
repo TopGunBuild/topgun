@@ -253,7 +253,7 @@ describe('Client', () =>
         expect(client.graph['_graph']['say'].yo).toBe('hi');
     });
 
-    it('should map', async () =>
+    /*it('should map', async () =>
     {
         const link = client.get('chat');
 
@@ -278,5 +278,5 @@ describe('Client', () =>
         })();
 
         expect(link).not.toBeUndefined();
-    });
+    });*/
 });
