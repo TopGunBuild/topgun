@@ -243,7 +243,7 @@ describe('Client', () =>
     {
         const message = await client.get('say').put({ yo: 'hi' });
         const yo      = await client.get('say').get('yo').promise<string>();
-        const say     = await client.get('say').promise<{ yo: string }>();
+        const say     = await client.get('say').promise<{yo: string}>();
 
         expect(say.yo).toBe('hi');
         expect(yo).toBe('hi');
@@ -253,30 +253,27 @@ describe('Client', () =>
         expect(client.graph['_graph']['say'].yo).toBe('hi');
     });
 
-    /*it('should map', async () =>
+    it('test simple async stream', async () =>
     {
         const link = client.get('chat');
 
-        link.set({say: 'Hi!'});
-        link.set({say: 'Yeah, man...'});
-        link.set({say: 'Awesome! Call me in 5 minutes..'});
-        link.set({say: '👍'});
+        link.set({ say: 'Hi!' });
+        link.set({ say: 'Yeah, man...' });
+        link.set({ say: 'Awesome! Call me in 5 minutes..' });
+        link.set({ say: '👍' });
 
-        await wait(10);
+        const linkStream      = link.map().on<{say: string}>();
+        const receivedPackets = [];
 
-        // link.map().on(value =>
-        // {
-        //     return console.log(value);
-        // });
-
-        (async () =>
+        for await (const { value, soul } of linkStream)
         {
-            for await (const value of link.map().stream<{say: string}>())
+            receivedPackets.push({ value, soul });
+            if (value.say === '👍')
             {
-                console.log(value);
+                linkStream.destroy();
             }
-        })();
+        }
 
-        expect(link).not.toBeUndefined();
-    });*/
+        expect(receivedPackets.length).toBe(4);
+    });
 });
