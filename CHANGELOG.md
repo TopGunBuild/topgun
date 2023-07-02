@@ -1,3 +1,22 @@
+# [1.5.0](https://github.com/TopGunBuild/topgun/compare/v1.4.0...v1.5.0) (2023-07-02)
+
+
+### Bug Fixes
+
+* **client:** add `on` method to listen for system events ([b664cea](https://github.com/TopGunBuild/topgun/commit/b664cea42f2dd1928bd2cbf73c0965e6dd84c0ea))
+* **client:** fix link back ([1114d9e](https://github.com/TopGunBuild/topgun/commit/1114d9ecfe545411867b9b0679fb4e6a5a8cb468))
+* **client:** immutable link after `set()` ([c7c8796](https://github.com/TopGunBuild/topgun/commit/c7c8796e02cb6f8ec8809ea6cf660cda3a900b3e))
+* **client:** rename method userPubExpected -> waitForAuth ([5a35600](https://github.com/TopGunBuild/topgun/commit/5a35600cb48c9a29baa82cfcf654c8e81598eb83))
+* **client:** update link after authorization ([e103a76](https://github.com/TopGunBuild/topgun/commit/e103a76b4f1dce11f977ec4c2a0ab60458b435f4))
+* **client:** upgrade topgun-async-stream-emitter 1.1.0 -> 1.1.1, add `stream` method ([6e21f18](https://github.com/TopGunBuild/topgun/commit/6e21f18f6fceee2e0486b5a5c544664a4910b17c))
+* **types:** rename SystemEvent -> TGSystemEvent ([b02bd22](https://github.com/TopGunBuild/topgun/commit/b02bd22bab8b615302af5d3099b7d0d67018b47a))
+* upgrade topgun-typed 1.2.0 -> 1.3.0, throw error when path not valid ([cb4c050](https://github.com/TopGunBuild/topgun/commit/cb4c050bd828ef751adc9e48bc01952ccf04a2fb))
+
+
+### Features
+
+* **client:** implement async iterable streams ([f44e28d](https://github.com/TopGunBuild/topgun/commit/f44e28dab2155fdf28d6b352b7de770a2f03cd8f))
+
 # [1.4.0](https://github.com/TopGunBuild/topgun/compare/v1.3.0...v1.4.0) (2023-06-26)
 
 
