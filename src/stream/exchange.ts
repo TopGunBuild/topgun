@@ -43,17 +43,18 @@ export class TGExchange extends AsyncStreamEmitter<any>
         return Promise.resolve();
     }
 
-    // stream(streamName: string): TGStream<any>
-    // {
-    //     const channelDataStream = this._streamDataDemux.stream(streamName);
-    //
-    //     return new TGStream(
-    //         streamName,
-    //         this,
-    //         this._streamEventDemux,
-    //         channelDataStream
-    //     );
-    // }
+    stream(streamName: string, attributes: {[key: string]: any} = {}): TGStream<any>
+    {
+        const channelDataStream = this._streamDataDemux.stream(streamName);
+
+        return new TGStream(
+            streamName,
+            this,
+            this._streamEventDemux,
+            channelDataStream,
+            attributes
+        );
+    }
 
     destroy(streamName?: string): void
     {
