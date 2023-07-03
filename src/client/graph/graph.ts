@@ -1,4 +1,5 @@
 import { isUndefined, isDefined } from 'topgun-typed';
+import { AsyncStreamEmitter } from 'topgun-async-stream-emitter';
 import { addMissingState, mergeNodes } from '../../crdt';
 import {
     TGGet,
@@ -23,6 +24,7 @@ import { getNodeSoul } from '../../utils/node';
 import { TGGraphQuery } from './graph-query';
 import { stringifyOptionsGet } from '../../utils/stringify-options-get';
 import { uuidv4 } from '../../utils/uuidv4';
+import { TGStream } from '../../stream/stream';
 
 interface TGGraphOptions
 {
@@ -34,7 +36,7 @@ interface TGGraphOptions
  *
  * Provides facilities for querying and writing to graph data from one or more sources
  */
-export class TGGraph
+export class TGGraph extends AsyncStreamEmitter<any>
 {
     readonly id: string;
 
@@ -63,6 +65,7 @@ export class TGGraph
      */
     constructor()
     {
+        super();
         this.id                  = uuidv4();
         this.receiveGraphData    = this.receiveGraphData.bind(this);
         this.__onConnectorStatus = this.__onConnectorStatus.bind(this);
@@ -191,7 +194,7 @@ export class TGGraph
     /**
      * Read a matching nodes from the graph
      */
-    queryMany<T extends TGValue>(opts: TGOptionsGet, cb: TGOnCb<T>, msgId?: string): () => void
+    queryMany<T extends TGValue>(opts: TGOptionsGet, cb: TGOnCb<T>, msgId: string): () => void
     {
         getNodesFromGraph(opts, this._graph).forEach((node) =>
         {
@@ -199,22 +202,22 @@ export class TGGraph
         });
 
         const queryString = stringifyOptionsGet(opts);
-
-        this._listen(queryString, cb, msgId);
+        const stream      = this._listen(queryString, cb, msgId);
 
         return () =>
         {
-            this._unlisten(queryString, cb);
+            this._unlisten(queryString, stream);
         };
     }
 
     /**
      * Read a potentially multi-level deep path from the graph
      */
-    query<T extends TGValue>(path: string[], cb: TGOnCb<T>, msgId?: string): () => void
+    query<T extends TGValue>(path: string[], cb: TGOnCb<T>, msgId: string): () => void
     {
-        let lastSouls = [] as string[];
+        let lastSouls   = [] as string[];
         let currentValue: TGValue|undefined;
+        const streamMap = new Map<string, TGStream<any>>();
 
         const updateQuery = () =>
         {
@@ -232,12 +235,13 @@ export class TGGraph
 
             for (const soul of added)
             {
-                this._listen(this._queryStringBySoul(soul), updateQuery, msgId);
+                const stream = this._listen(this._queryStringBySoul(soul), updateQuery, msgId);
+                streamMap.set(soul, stream);
             }
 
             for (const soul of removed)
             {
-                this._unlisten(this._queryStringBySoul(soul), updateQuery);
+                this._unlisten(this._queryStringBySoul(soul), streamMap.get(soul));
             }
 
             lastSouls = souls;
@@ -249,7 +253,7 @@ export class TGGraph
         {
             for (const soul of lastSouls)
             {
-                this._unlisten(this._queryStringBySoul(soul), updateQuery);
+                this._unlisten(this._queryStringBySoul(soul), streamMap.get(soul));
             }
         };
     }
@@ -360,11 +364,6 @@ export class TGGraph
         return () => this.events.off.trigger(id);
     }
 
-    connectorCount(): number
-    {
-        return this._connectors.length;
-    }
-
     /**
      * Invoke callback function for each connector to this graph
      */
@@ -439,37 +438,23 @@ export class TGGraph
             new TGGraphQuery(this, queryString, this.receiveGraphData));
     }
 
-    private _listen<T extends TGValue>(queryString: string, cb: TGOnCb<T>, msgId?: string): TGGraph
+    private _listen<T extends TGValue>(queryString: string, cb: TGOnCb<T>, msgId?: string): TGStream<any>
     {
-        this._query(queryString).get(cb, msgId);
-        return this;
+        return this._query(queryString).getStream(cb, msgId);
     }
 
-    private _unlisten(queryString: string, cb: TGOnCb<any>): TGGraph
+    private _unlisten(queryString: string, stream: TGStream<any>): TGGraph
     {
-        const node = this._queries[queryString];
-        if (!node)
+        if (stream instanceof TGStream)
         {
-            return this;
+            stream.destroy();
         }
-        node.off(cb);
-        if (node.listenerCount() <= 0)
-        {
-            node.off();
-            this._forgetQuery(queryString);
-        }
-        return this;
-    }
-
-    private _forgetQuery(queryString: string): TGGraph
-    {
         const query = this._queries[queryString];
-        if (query)
+        if (query instanceof TGGraphQuery && query.listenerCount() <= 0)
         {
             query.off();
             delete this._queries[queryString];
         }
-        // delete this._graph[soul];
         return this;
     }
 

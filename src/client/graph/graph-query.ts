@@ -1,18 +1,20 @@
+import { isFunction } from 'topgun-typed';
 import { TGGet, TGGraphData, TGMessage, TGNode, TGOnCb, TGOptionsGet } from '../../types';
-import { TGEvent, TGGraph } from '..';
+import { TGGraph } from './graph';
 import { getNodeSoul } from '../../utils/node';
 import { StorageListOptions } from '../../storage';
 import { listFilterMatch, storageListOptionsFromGetOptions } from '../../storage/utils';
 import { uuidv4 } from '../../utils/uuidv4';
+import { TGExchange } from '../../stream/exchange';
+import { TGStream } from '../../stream/stream';
 
-export class TGGraphQuery
+export class TGGraphQuery extends TGExchange
 {
     readonly queryString: string;
     readonly options: TGOptionsGet;
 
     private _endCurQuery?: () => void;
     private readonly _listOptions: StorageListOptions|null;
-    private readonly _data: TGEvent<TGNode|undefined>;
     private readonly _graph: TGGraph;
     private readonly _updateGraph: (
         data: TGGraphData,
@@ -28,10 +30,10 @@ export class TGGraphQuery
         updateGraph: (data: TGGraphData, replyToId?: string) => void,
     )
     {
+        super();
         this._onDirectQueryReply = this._onDirectQueryReply.bind(this);
         this.options             = JSON.parse(queryString);
         this.queryString         = queryString;
-        this._data               = new TGEvent<TGNode|undefined>(`<GraphNode ${this.queryString}>`);
         this._graph              = graph;
         this._updateGraph        = updateGraph;
         this._listOptions        = storageListOptionsFromGetOptions(this.options)
@@ -43,22 +45,41 @@ export class TGGraphQuery
 
     listenerCount(): number
     {
-        return this._data.listenerCount();
+        return this.subscriptions(true).length;
     }
 
-    get(cb?: TGOnCb<any>, msgId?: string): TGGraphQuery
+    // get(cb?: TGOnCb<any>, msgId?: string): TGGraphQuery
+    // {
+    //     if (cb)
+    //     {
+    //         this.on(cb);
+    //     }
+    //     this._ask(msgId);
+    //     return this;
+    // }
+
+    getStream(cb: TGOnCb<any>, msgId?: string): TGStream<any>
     {
-        if (cb)
+        const stream = this.subscribe();
+
+        (async () =>
         {
-            this.on(cb);
-        }
+            for await (const packet of stream)
+            {
+                cb(packet);
+            }
+        })();
+
         this._ask(msgId);
-        return this;
+        return stream;
     }
 
-    receive(data: TGNode|undefined): TGGraphQuery
+    receive(value: TGNode|undefined): TGGraphQuery
     {
-        this._data.trigger(data, getNodeSoul(data));
+        this.subscriptions(true).forEach((streamName) =>
+        {
+            this.publish(streamName, value);
+        });
         return this;
     }
 
@@ -74,28 +95,19 @@ export class TGGraphQuery
         return soul === this.options['#'];
     }
 
-    on(cb: (data: TGNode|undefined, soul: string) => void): TGGraphQuery
-    {
-        this._data.on(cb);
-        return this;
-    }
+    // on(cb: (data: TGNode|undefined, soul: string) => void): TGGraphQuery
+    // {
+    //     this._data.on(cb);
+    //     return this;
+    // }
 
-    off(cb?: (data: TGNode|undefined, soul: string) => void): TGGraphQuery
+    off(): TGGraphQuery
     {
-        if (cb)
-        {
-            this._data.off(cb);
-        }
-        else
-        {
-            this._data.reset();
-        }
-
-        if (this._endCurQuery && !this._data.listenerCount())
+        if (isFunction(this._endCurQuery))
         {
             this._endCurQuery();
-            this._endCurQuery = undefined;
         }
+        this.destroy();
 
         return this;
     }

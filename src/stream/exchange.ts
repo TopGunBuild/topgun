@@ -60,11 +60,11 @@ export class TGExchange extends AsyncStreamEmitter<any>
     {
         if (streamName)
         {
-            const channel = this._streamMap[streamName];
+            const stream = this._streamMap[streamName];
 
-            if (channel)
+            if (stream)
             {
-                this._triggerStreamDestroy(channel);
+                this._triggerStreamDestroy(stream);
             }
 
             this._streamDataDemux.close(streamName);
@@ -74,8 +74,8 @@ export class TGExchange extends AsyncStreamEmitter<any>
         {
             Object.keys(this._streamMap).forEach((streamName) =>
             {
-                const channel = this._streamMap[streamName];
-                this._triggerStreamDestroy(channel);
+                const stream = this._streamMap[streamName];
+                this._triggerStreamDestroy(stream);
             });
             this.closeAllListeners();
             this._streamDataDemux.closeAll();
@@ -152,6 +152,7 @@ export class TGExchange extends AsyncStreamEmitter<any>
 
         stream.state = TGStream.DESTROYED;
 
+        delete this._streamMap[streamName];
         this._streamEventDemux.write(`${streamName}/destroy`, {});
         this.emit('destroy', { streamName });
     }

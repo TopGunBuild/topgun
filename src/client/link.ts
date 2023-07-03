@@ -420,28 +420,28 @@ export class TGLink
         stream.publish({ value, soul });
     }
 
-    private _on<T extends TGValue>(stream: TGStream<T>, msgId?: string): TGStream<T>
+    private _on<T extends TGValue>(stream: TGStream<T>): TGStream<T>
     {
         this._maybeWaitAuth(() =>
         {
             this._endQueries[stream.name] = this._client.graph.query(
                 this.getPath(),
                 (value: TGValue) => this._onQueryResponse(value, stream),
-                msgId
+                stream.name
             );
         });
 
         return stream;
     }
 
-    private _onMap<T extends TGValue>(stream: TGStream<T>, msgId?: string): TGStream<T>
+    private _onMap<T extends TGValue>(stream: TGStream<T>): TGStream<T>
     {
         this._maybeWaitAuth(() =>
         {
             this._endQueries[stream.name] = this._client.graph.queryMany(
                 this._lex.optionsGet,
                 (value: TGValue) => this._onQueryResponse(value, stream),
-                msgId
+                stream.name
             );
         });
 
