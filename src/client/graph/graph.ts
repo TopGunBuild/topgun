@@ -3,7 +3,6 @@ import { AsyncStreamEmitter } from 'topgun-async-stream-emitter';
 import { addMissingState, mergeNodes } from '../../crdt';
 import {
     TGGet,
-    TGPut,
     TGGraphData,
     TGMessageCb,
     TGValue,
@@ -12,7 +11,6 @@ import {
     TGMiddlewareType,
     TGOnCb, TGOptionsGet,
 } from '../../types';
-import { TGEvent } from '../control-flow/event';
 import { TGGraphConnector } from '../transports/graph-connector';
 import {
     diffSets,
@@ -40,15 +38,6 @@ export class TGGraph extends AsyncStreamEmitter<any>
 {
     readonly id: string;
 
-    readonly events: {
-        readonly graphData: TGEvent<TGGraphData,
-        string|undefined,
-        string|undefined>;
-        readonly put: TGEvent<TGPut>;
-        readonly get: TGEvent<TGGet>;
-        readonly off: TGEvent<string>;
-    };
-
     activeConnectors: number;
 
     private _opt: TGGraphOptions;
@@ -70,18 +59,12 @@ export class TGGraph extends AsyncStreamEmitter<any>
         this.receiveGraphData    = this.receiveGraphData.bind(this);
         this.__onConnectorStatus = this.__onConnectorStatus.bind(this);
         this.activeConnectors    = 0;
-        this.events              = {
-            get      : new TGEvent('request soul'),
-            graphData: new TGEvent('graph data'),
-            off      : new TGEvent('off event'),
-            put      : new TGEvent('put data'),
-        };
-        this._opt                = {};
-        this._graph              = {};
-        this._queries            = {};
-        this._connectors         = [];
-        this._readMiddleware     = [];
-        this._writeMiddleware    = [];
+        this._opt             = {};
+        this._graph           = {};
+        this._queries         = {};
+        this._connectors      = [];
+        this._readMiddleware  = [];
+        this._writeMiddleware = [];
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -265,9 +248,9 @@ export class TGGraph extends AsyncStreamEmitter<any>
     {
         const msgId = data.msgId || uuidv4();
 
-        this.events.get.trigger({ ...data, msgId });
+        this.emit('get', { ...data, msgId });
 
-        return () => this.events.off.trigger(msgId);
+        return () => this.emit('off', msgId);
     }
 
     /**
@@ -344,7 +327,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
 
             await this.receiveGraphData(diff);
 
-            this.events.put.trigger({
+            this.emit('put', {
                 cb,
                 graph: diff,
                 msgId: id,
@@ -361,7 +344,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
             }
         })();
 
-        return () => this.events.off.trigger(id);
+        return () => this.emit('off', id);
     }
 
     /**
@@ -424,7 +407,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
             });
         }
 
-        this.events.graphData.trigger(diff, id, replyToId);
+        this.emit('graphData', { diff, id, replyToId });
     }
 
     // -----------------------------------------------------------------------------------------------------

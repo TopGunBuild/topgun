@@ -53,7 +53,13 @@ export abstract class TGGraphConnector
 
     connectToGraph(graph: TGGraph): TGGraphConnector
     {
-        graph.events.off.on(this.off);
+        (async () =>
+        {
+            for await (const value of graph.listener('off'))
+            {
+                this.off(value);
+            }
+        })();
         return this;
     }
 
@@ -64,16 +70,25 @@ export abstract class TGGraphConnector
 
     sendPutsFromGraph(graph: TGGraph): TGGraphConnector
     {
-        graph.events.put.on(this.put);
+        (async () =>
+        {
+            for await (const value of graph.listener('put'))
+            {
+                this.put(value);
+            }
+        })();
         return this;
     }
 
     sendRequestsFromGraph(graph: TGGraph): TGGraphConnector
     {
-        graph.events.get.on((req) =>
+        (async () =>
         {
-            this.get(req);
-        });
+            for await (const value of graph.listener('get'))
+            {
+                this.get(value);
+            }
+        })();
         return this;
     }
 
