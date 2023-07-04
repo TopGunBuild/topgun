@@ -1,7 +1,7 @@
+import { isEmptyObject } from 'topgun-typed';
 import { diffCRDT, TGSystemEvent, TGClient, TGUserReference, TGLink } from '../src/client';
 import { genString } from './test-util';
 import { TGLexLink } from '../src/client/lex-link';
-import { wait } from '../src/utils/wait';
 
 describe('Client', () =>
 {
@@ -253,27 +253,107 @@ describe('Client', () =>
         expect(client.graph['_graph']['say'].yo).toBe('hi');
     });
 
-    it('test simple async stream', async () =>
+    it('link stream listen and destroy', async () =>
     {
         const link = client.get('chat');
 
-        link.set({ say: 'Hi!' });
-        link.set({ say: 'Yeah, man...' });
-        link.set({ say: 'Awesome! Call me in 5 minutes..' });
-        link.set({ say: '👍' });
+        await link.set({ say: 'Hi!' });
+        await link.set({ say: 'Yeah, man...' });
+        await link.set({ say: 'Awesome! Call me in 5 minutes..' });
+        await link.set({ say: '👍' });
 
-        const linkStream      = link.map().on<{say: string}>();
         const receivedPackets = [];
-
-        for await (const { value, soul } of linkStream)
+        const callback        = (data, id) =>
         {
-            receivedPackets.push({ value, soul });
-            if (value.say === '👍')
-            {
-                linkStream.destroy();
-            }
-        }
+            receivedPackets.push({ data, id })
+        };
 
+        const stream           = link.map().on<{say: string}>(callback);
+        const receivedPackets2 = [];
+
+        await Promise.all([
+            (async () =>
+            {
+                for await (const { value, soul } of stream)
+                {
+                    receivedPackets2.push({ value, soul });
+                    if (value.say === '👍')
+                    {
+                        stream.destroy();
+                    }
+                }
+            })(),
+            stream.listener('destroy').once()
+        ]);
+
+        expect(isEmptyObject(client.graph['_queries'])).toBeTruthy();
+        expect(receivedPackets2.length).toBe(4);
         expect(receivedPackets.length).toBe(4);
+    });
+
+    it('lex query', async () =>
+    {
+        const link = client.get('chat');
+
+        await link.get('2019-06-20T00:00').put({ say: 'one' });
+        await link.get('2019-06-20T11:59').put({ say: 'two' });
+        await link.get('2019-06-21T00:00').put({ say: 'three' });
+        await link.get('2019-06-22T00:00').put({ say: 'four' });
+
+        const stream1 = link
+            .prefix('2019-06-20')
+            .on<{say: string}>();
+
+        const stream2 = link
+            .start('2019-06-20')
+            .end('2019-06-22')
+            .on<{say: string}>();
+
+        const stream3 = link
+            .prefix('2019-06-20')
+            .limit(1)
+            .reverse()
+            .on<{say: string}>();
+
+        const receivedPackets1 = [];
+        const receivedPackets2 = [];
+        const receivedPackets3 = [];
+
+        await Promise.all([
+            (async () =>
+            {
+                for await (const { value, soul } of stream1)
+                {
+                    receivedPackets1.push(soul);
+                    if (value.say === 'two')
+                    {
+                        stream1.destroy();
+                    }
+                }
+            })(),
+            (async () =>
+            {
+                for await (const { value, soul } of stream2)
+                {
+                    receivedPackets2.push(soul);
+                    if (value.say === 'three')
+                    {
+                        stream2.destroy();
+                    }
+                }
+            })(),
+            (async () =>
+            {
+                for await (const { soul } of stream3)
+                {
+                    receivedPackets3.push(soul);
+                    stream3.destroy();
+                }
+            })()
+        ]);
+
+        expect(receivedPackets1.length).toBe(2);
+        expect(receivedPackets2.length).toBe(3);
+        expect(receivedPackets3[0] === 'chat/2019-06-20T11:59').toBeTruthy();
     });
 });
