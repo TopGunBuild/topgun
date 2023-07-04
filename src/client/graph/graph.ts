@@ -93,8 +93,29 @@ export class TGGraph extends AsyncStreamEmitter<any>
         }
         this._connectors.push(connector.connectToGraph(this));
 
-        connector.events.connection.on(this.__onConnectorStatus);
-        connector.events.graphData.on(this.receiveGraphData);
+        (async () =>
+        {
+            for await (const value of connector.listener('connect'))
+            {
+                this.__onConnectorStatus(true);
+            }
+        })();
+
+        (async () =>
+        {
+            for await (const value of connector.listener('disconnect'))
+            {
+                this.__onConnectorStatus(false);
+            }
+        })();
+
+        (async () =>
+        {
+            for await (const { data, id, replyToId } of connector.listener('graphData'))
+            {
+                this.receiveGraphData(data, id, replyToId);
+            }
+        })();
 
         if (connector.isConnected)
         {
@@ -111,8 +132,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
     disconnect(connector: TGGraphConnector): TGGraph
     {
         const idx = this._connectors.indexOf(connector);
-        connector.events.graphData.off(this.receiveGraphData);
-        connector.events.connection.off(this.__onConnectorStatus);
+        connector.closeAllListeners();
         if (idx !== -1)
         {
             this._connectors.splice(idx, 1);

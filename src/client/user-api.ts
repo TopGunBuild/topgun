@@ -1,7 +1,6 @@
 import { isObject, isString, isFunction, object, fn } from 'topgun-typed';
 import { authenticate, createUser, graphSigner } from '../sea';
 import { TGClient } from './client';
-import { TGEvent } from './control-flow/event';
 import { TGWebSocketGraphConnector } from './transports/web-socket-graph-connector';
 import {
     getItemAsync,

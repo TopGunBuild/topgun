@@ -256,7 +256,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         {
             try
             {
-                this.events.connection.trigger(true);
+                this.emit('connect', {});
             }
             catch (error)
             {
@@ -274,7 +274,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
                 _event.error.stack,
                 _event.error.message,
             );
-            this.events.connection.trigger(false);
+            this.emit('disconnect', {});
         }
     }
 }

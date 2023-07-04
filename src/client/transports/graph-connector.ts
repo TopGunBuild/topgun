@@ -1,22 +1,14 @@
-import { TGGet, TGPut, TGGraphData, TGMessage } from '../../types';
-import { TGEvent } from '../control-flow/event';
+import { AsyncStreamEmitter } from 'topgun-async-stream-emitter';
+import { TGGet, TGPut, TGMessage } from '../../types';
 import { TGProcessQueue } from '../control-flow/process-queue';
 import { TGGraph } from '../graph/graph';
 
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /* eslint-disable @typescript-eslint/no-empty-function */
-export abstract class TGGraphConnector
+export abstract class TGGraphConnector extends AsyncStreamEmitter<any>
 {
     readonly name: string;
     isConnected: boolean;
-
-    readonly events: {
-        readonly graphData: TGEvent<TGGraphData,
-        string|undefined,
-        string|undefined>;
-        readonly receiveMessage: TGEvent<TGMessage>;
-        readonly connection: TGEvent<boolean>;
-    };
 
     protected readonly inputQueue: TGProcessQueue<TGMessage>;
     protected readonly outputQueue: TGProcessQueue<TGMessage>;
@@ -26,6 +18,7 @@ export abstract class TGGraphConnector
      */
     protected constructor(name = 'GraphConnector')
     {
+        super();
         this.isConnected = false;
         this.name        = name;
 
@@ -35,16 +28,21 @@ export abstract class TGGraphConnector
         this.inputQueue  = new TGProcessQueue<TGMessage>(`${name}.inputQueue`);
         this.outputQueue = new TGProcessQueue<TGMessage>(`${name}.outputQueue`);
 
-        this.events = {
-            connection    : new TGEvent(`${name}.events.connection`),
-            graphData     : new TGEvent<TGGraphData>(`${name}.events.graphData`),
-            receiveMessage: new TGEvent<TGMessage>(
-                `${name}.events.receiveMessage`,
-            ),
-        };
+        (async () =>
+        {
+            for await (const value of this.listener('connect'))
+            {
+                this._onConnectedChange(true);
+            }
+        })();
 
-        this._onConnectedChange = this._onConnectedChange.bind(this);
-        this.events.connection.on(this._onConnectedChange);
+        (async () =>
+        {
+            for await (const value of this.listener('disconnect'))
+            {
+                this._onConnectedChange(false);
+            }
+        })();
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -98,19 +96,8 @@ export abstract class TGGraphConnector
         {
             return Promise.resolve();
         }
-        return new Promise((ok) =>
-        {
-            const onConnected = (connected?: boolean) =>
-            {
-                if (!connected)
-                {
-                    return;
-                }
-                ok();
-                this.events.connection.off(onConnected);
-            };
-            this.events.connection.on(onConnected);
-        });
+
+        return this.listener('connect').once();
     }
 
     /**

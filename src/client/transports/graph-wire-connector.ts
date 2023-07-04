@@ -112,22 +112,26 @@ export class TGGraphWireConnector extends TGGraphConnector
             return;
         }
         const id      = msg['#'];
-        const replyTo = msg['@'];
+        const replyToId = msg['@'];
 
         if (msg.put)
         {
-            this.events.graphData.trigger(msg.put, id, replyTo);
+            this.emit('graphData', {
+                data: msg.put,
+                id,
+                replyToId
+            });
         }
 
-        if (replyTo)
+        if (replyToId)
         {
-            const cb = this._callbacks[replyTo];
+            const cb = this._callbacks[replyToId];
             if (cb)
             {
                 cb(msg);
             }
         }
 
-        this.events.receiveMessage.trigger(msg);
+        this.emit('receiveMessage', msg);
     }
 }
