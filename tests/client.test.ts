@@ -1,5 +1,5 @@
 import { isEmptyObject } from 'topgun-typed';
-import { diffCRDT, TGSystemEvent, TGClient, TGUserReference, TGLink } from '../src/client';
+import { diffCRDT, TGSystemEvent, TGClient, TGUserReference, TGLink, TGAuthCallback } from '../src/client';
 import { genString } from './test-util';
 import { TGLexLink } from '../src/client/lex-link';
 
@@ -355,5 +355,37 @@ describe('Client', () =>
         expect(receivedPackets1.length).toBe(2);
         expect(receivedPackets2.length).toBe(3);
         expect(receivedPackets3[0] === 'chat/2019-06-20T11:59').toBeTruthy();
+    });
+
+    it('auth callback', async () =>
+    {
+        let user: TGUserReference;
+        let userFromCallback: TGUserReference;
+        let userFromListener1: TGUserReference;
+        let userFromListener2: TGUserReference;
+
+        await Promise.all([
+            (async () =>
+            {
+                const callback: TGAuthCallback = (value: TGUserReference) =>
+                {
+                    userFromCallback = value;
+                };
+                user = await client.user().create('john', genString(20), callback);
+            })(),
+            (async () =>
+            {
+                userFromListener1 = await client.listener(TGSystemEvent.Auth).once();
+            })(),
+            (async () =>
+            {
+                userFromListener2 = await client.listener(TGSystemEvent.Auth).once();
+            })()
+        ]);
+
+        expect(typeof user.alias === 'string').toBeTruthy();
+        expect(
+            [userFromCallback.alias, userFromListener1.alias, userFromListener2.alias].every(alias => user.alias)
+        ).toBeTruthy();
     });
 });
