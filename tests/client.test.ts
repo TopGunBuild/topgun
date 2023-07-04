@@ -371,7 +371,7 @@ describe('Client', () =>
                 {
                     userFromCallback = value;
                 };
-                user = await client.user().create('john', genString(20), callback);
+                user                           = await client.user().create('john', genString(20), callback);
             })(),
             (async () =>
             {
@@ -383,9 +383,24 @@ describe('Client', () =>
             })()
         ]);
 
-        expect(typeof user.alias === 'string').toBeTruthy();
+        expect(typeof user.pub === 'string').toBeTruthy();
         expect(
-            [userFromCallback.alias, userFromListener1.alias, userFromListener2.alias].every(alias => user.alias)
+            [userFromCallback.pub, userFromListener1.pub, userFromListener2.pub].every(pub => user.pub === pub)
+        ).toBeTruthy();
+    });
+
+    it('auth', async () =>
+    {
+        const password = genString(20);
+        const signUp   = await client.user().create('john', password);
+
+        client.user().leave();
+        expect(client.user().is).toBeUndefined();
+
+        const signIn = await client.user().auth('john', password);
+
+        expect(
+            [signUp.pub, signIn.pub].every(pub => pub === client.user().is.pub)
         ).toBeTruthy();
     });
 });
