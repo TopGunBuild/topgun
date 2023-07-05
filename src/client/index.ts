@@ -1,6 +1,6 @@
 import * as _sea from '../sea';
 
-export { TGClient, createClient } from './client';
+export { TGClient } from './client';
 export { TGGraph } from './graph/graph';
 export { TGLink } from './link';
 export { TGQueue } from './control-flow/queue';
