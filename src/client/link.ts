@@ -408,15 +408,18 @@ export class TGLink
     {
         const soul = getNodeSoul(value) || this.key;
 
-        if (!isObject(this._receivedData[stream.name]))
+        if (stream.attributes['once'])
         {
-            this._receivedData[stream.name] = {};
+            if (!isObject(this._receivedData[stream.name]))
+            {
+                this._receivedData[stream.name] = {};
+            }
+            if (this._receivedData[stream.name][soul])
+            {
+                return;
+            }
         }
-        if (stream.attributes['once'] && this._receivedData[stream.name][soul])
-        {
-            return;
-        }
-        this._receivedData[stream.name][soul] = value;
+
         stream.publish({ value, soul });
     }
 
