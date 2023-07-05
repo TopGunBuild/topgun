@@ -1,6 +1,6 @@
-const {createServer} = require('../dist/server.js');
+const {TGServer} = require('../dist/server.js');
 
-const server = createServer({
+const server = new TGServer({
     port: 8765
 });
 

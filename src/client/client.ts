@@ -212,8 +212,3 @@ export class TGClient extends AsyncStreamEmitter<any>
         });
     }
 }
-
-export function createClient(options?: TGClientOptions): TGClient
-{
-    return new TGClient(options);
-}
