@@ -1,5 +1,5 @@
 import { isEmptyObject } from 'topgun-typed';
-import { diffCRDT, TGSystemEvent, TGClient, TGUserReference, TGLink, TGAuthCallback } from '../src/client';
+import { diffCRDT, TGSystemEvent, TGClient, TGUserReference, TGLink } from '../src/client';
 import { genString } from './test-util';
 import { TGLexLink } from '../src/client/lex-link';
 
