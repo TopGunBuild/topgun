@@ -367,11 +367,11 @@ describe('Client', () =>
         await Promise.all([
             (async () =>
             {
-                const callback: TGAuthCallback = (value: TGUserReference) =>
+                const callback = (value: TGUserReference) =>
                 {
                     userFromCallback = value;
                 };
-                user                           = await client.user().create('john', genString(20), callback);
+                user           = await client.user().create('john', genString(20), callback);
             })(),
             (async () =>
             {
@@ -389,7 +389,7 @@ describe('Client', () =>
         ).toBeTruthy();
     });
 
-    it('auth', async () =>
+    it('signUp, leave, auth', async () =>
     {
         const password = genString(20);
         const signUp   = await client.user().create('john', password);
@@ -402,5 +402,62 @@ describe('Client', () =>
         expect(
             [signUp.pub, signIn.pub].every(pub => pub === client.user().is.pub)
         ).toBeTruthy();
+    });
+
+    it('simple write to user space', async () =>
+    {
+        await client.user().create('john', genString(20));
+
+        const link   = client.user().get('chat');
+        const stream = link.map().on<{say: string}>();
+
+        link.set({ say: 'Hi!' });
+        link.set({ say: 'Yeah, man...' });
+        link.set({ say: 'Awesome! Call me in 5 minutes..' });
+        link.set({ say: '👍' });
+
+        const receivedPackets = [];
+
+        for await (const { soul, value } of stream)
+        {
+            receivedPackets.push({ soul, value });
+            if (value.say === '👍')
+            {
+                stream.destroy();
+            }
+        }
+
+        expect(receivedPackets.length).toBe(4);
+    });
+
+    it('read list item once', async () =>
+    {
+        const link = client.get('chat');
+
+        await link.get('2019-06-20T00:00').put({ say: 'one' });
+        await link.get('2019-06-20T11:59').put({ say: 'two' });
+        await link.get('2019-06-21T00:00').put({ say: 'three' });
+        await link.get('2019-06-22T00:00').put({ say: 'four' });
+
+        const receivedPackets = [];
+
+        const stream = link.map().once<{say: string}>();
+
+        for await (const { soul, value } of stream)
+        {
+            receivedPackets.push({ soul, value });
+
+            if (value.say === 'two')
+            {
+                await link.get('2019-06-20T00:00').put({ say: 'new one' });
+                await link.get('2019-06-20T11:59').put({ say: 'new two' });
+            }
+            if (value.say === 'four')
+            {
+                stream.destroy();
+            }
+        }
+
+        expect(receivedPackets.length).toBe(4);
     });
 });
