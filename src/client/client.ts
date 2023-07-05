@@ -36,7 +36,7 @@ export class TGClient extends AsyncStreamEmitter<any>
         super();
         options                = isObject(options) ? options : {};
         this.options           = { ...DEFAULT_OPTIONS, ...options };
-        this.graph             = this.options && this.options.graph ? this.options.graph : new TGGraph();
+        this.graph             = new TGGraph(this);
         this.WAIT_FOR_USER_PUB = '__WAIT_FOR_USER_PUB__';
 
         this.graph.use(diffCRDT);
@@ -133,6 +133,11 @@ export class TGClient extends AsyncStreamEmitter<any>
             await connector.disconnect();
         });
         this.closeAllListeners();
+    }
+
+    async waitForConnect(): Promise<void>
+    {
+        await this.listener('connectorConnected').once();
     }
 
     /**

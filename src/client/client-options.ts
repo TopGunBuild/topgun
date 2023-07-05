@@ -1,5 +1,4 @@
 import { TGSocketClientOptions } from 'topgun-socket/client';
-import { TGGraph } from './graph/graph';
 import { TGGraphConnector } from './transports/graph-connector';
 import { TGGraphAdapterOptions, TGSupportedStorage } from '../types';
 import { localStorageAdapter } from '../utils/local-storage';
@@ -10,7 +9,6 @@ export type TGClientPeerOptions = string|TGSocketClientOptions;
 export interface TGClientOptions extends TGGraphAdapterOptions
 {
     peers?: TGClientPeerOptions[];
-    graph?: TGGraph;
     connectors?: TGGraphConnector[];
     localStorage?: boolean;
     localStorageKey?: string;
@@ -23,7 +21,6 @@ export interface TGClientOptions extends TGGraphAdapterOptions
 
 export const DEFAULT_OPTIONS: Required<TGClientOptions> = {
     peers                    : [],
-    graph                    : new TGGraph(),
     connectors               : [],
     localStorage             : false,
     localStorageKey          : 'topgun-nodes',

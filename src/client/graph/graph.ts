@@ -48,23 +48,27 @@ export class TGGraph extends AsyncStreamEmitter<any>
     private readonly _queries: {
         [queryString: string]: TGGraphQuery;
     };
+    private readonly rootEventEmitter: AsyncStreamEmitter<any>;
 
     /**
      * Constructor
      */
-    constructor()
+    constructor(
+        rootEventEmitter: AsyncStreamEmitter<any>
+    )
     {
         super();
         this.id                  = uuidv4();
         this.receiveGraphData    = this.receiveGraphData.bind(this);
         this.__onConnectorStatus = this.__onConnectorStatus.bind(this);
         this.activeConnectors    = 0;
-        this._opt             = {};
-        this._graph           = {};
-        this._queries         = {};
-        this._connectors      = [];
-        this._readMiddleware  = [];
-        this._writeMiddleware = [];
+        this._opt                = {};
+        this._graph              = {};
+        this._queries            = {};
+        this._connectors         = [];
+        this._readMiddleware     = [];
+        this._writeMiddleware    = [];
+        this.rootEventEmitter    = rootEventEmitter;
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -98,6 +102,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
             for await (const value of connector.listener('connect'))
             {
                 this.__onConnectorStatus(true);
+                this.rootEventEmitter.emit('connectorConnected', connector);
             }
         })();
 
@@ -106,6 +111,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
             for await (const value of connector.listener('disconnect'))
             {
                 this.__onConnectorStatus(false);
+                this.rootEventEmitter.emit('connectorDisconnected', connector);
             }
         })();
 
