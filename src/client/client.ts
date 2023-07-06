@@ -126,8 +126,6 @@ export class TGClient extends AsyncStreamEmitter<any>
      */
     async disconnect(): Promise<void>
     {
-        // Wait for topgun-socket closed all transport gateways
-        await wait(5);
         await this.graph.eachConnector(async (connector) =>
         {
             await connector.disconnect();
