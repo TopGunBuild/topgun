@@ -1,9 +1,5 @@
 import { LEX } from './lex';
 
-export enum TGSystemEvent {
-    Auth = 'auth'
-}
-
 /**
  * Timestamp of last change for each attribute
  */

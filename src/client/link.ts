@@ -6,7 +6,6 @@ import {
     TGOnCb,
     TGOptionsGet,
     TGOptionsPut,
-    TGSystemEvent,
     TGValue,
 } from '../types';
 import { TGClient } from './client';
@@ -455,7 +454,7 @@ export class TGLink
     {
         if (this.waitForAuth())
         {
-            this._client.listener(TGSystemEvent.Auth).once().then((value) =>
+            this._client.listener('auth').once().then((value) =>
             {
                 this._setUserPub(value.pub);
                 handler();

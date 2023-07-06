@@ -39,9 +39,9 @@ export class TGGraph extends AsyncStreamEmitter<any>
     readonly id: string;
 
     activeConnectors: number;
+    readonly connectors: TGGraphConnector[];
 
     private _opt: TGGraphOptions;
-    private readonly _connectors: TGGraphConnector[];
     private readonly _readMiddleware: TGMiddleware[];
     private readonly _writeMiddleware: TGMiddleware[];
     private readonly _graph: TGGraphData;
@@ -65,7 +65,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
         this._opt                = {};
         this._graph              = {};
         this._queries            = {};
-        this._connectors         = [];
+        this.connectors          = [];
         this._readMiddleware     = [];
         this._writeMiddleware    = [];
         this.rootEventEmitter    = rootEventEmitter;
@@ -91,11 +91,11 @@ export class TGGraph extends AsyncStreamEmitter<any>
      */
     connect(connector: TGGraphConnector): TGGraph
     {
-        if (this._connectors.indexOf(connector) !== -1)
+        if (this.connectors.indexOf(connector) !== -1)
         {
             return this;
         }
-        this._connectors.push(connector.connectToGraph(this));
+        this.connectors.push(connector.connectToGraph(this));
 
         (async () =>
         {
@@ -137,11 +137,11 @@ export class TGGraph extends AsyncStreamEmitter<any>
      */
     disconnect(connector: TGGraphConnector): TGGraph
     {
-        const idx = this._connectors.indexOf(connector);
+        const idx = this.connectors.indexOf(connector);
         connector.closeAllListeners();
         if (idx !== -1)
         {
-            this._connectors.splice(idx, 1);
+            this.connectors.splice(idx, 1);
         }
         if (connector.isConnected)
         {
@@ -378,9 +378,9 @@ export class TGGraph extends AsyncStreamEmitter<any>
      */
     async eachConnector(cb: (connector: TGGraphConnector) => void): Promise<TGGraph>
     {
-        for (let index = 0; index < this._connectors.length; index++)
+        for (let index = 0; index < this.connectors.length; index++)
         {
-            await cb(this._connectors[index]);
+            await cb(this.connectors[index]);
         }
 
         return this;

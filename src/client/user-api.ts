@@ -13,7 +13,7 @@ import {
     TGSupportedStorage,
     TGOptionsPut,
     TGUserCredentials,
-    TGUserReference, TGSystemEvent,
+    TGUserReference,
 } from '../types';
 import { DEFAULT_OPTIONS } from './client-options';
 import { assertCredentials, assertNotEmptyString } from '../utils/assert';
@@ -264,7 +264,7 @@ export class TGUserApi
             this._persistCredentials(credentials)
         ]);
 
-        this._client.emit(TGSystemEvent.Auth, {
+        this._client.emit('auth', {
             alias: credentials.alias,
             pub  : credentials.pub,
         });

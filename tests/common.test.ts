@@ -18,24 +18,44 @@ describe('Common', () =>
         server = new TGServer({
             port: PORT_NUMBER
         });
-
-        await Promise.all([
-            server.waitForReady(),
-            client.waitForConnect()
-        ]);
     });
     afterEach(async () =>
     {
         await Promise.all([
-            // client.disconnect(),
+            client.disconnect(),
             server.close()
         ]);
     });
 
     it('should ', async () =>
     {
-        const user = await client.user().create('john', genString(20));
+        let serverToken;
 
-        expect(!!user).toBeTruthy();
+        (async () =>
+        {
+            for await (const { socket } of server.server.listener('connection'))
+            {
+                (async () =>
+                {
+                    for await (let { authToken } of socket.listener('authenticate'))
+                    {
+                        serverToken = authToken;
+                    }
+                })();
+            }
+
+            // for await
+        })();
+
+        await Promise.all([
+            server.waitForReady(),
+            client.waitForConnect()
+        ]);
+
+        await client.user().create('john', genString(20));
+
+        // console.log(client.connectors()[0]);
+
+        expect(!!serverToken).toBeTruthy();
     });
 });

@@ -10,9 +10,8 @@ import { TGSocketClientOptions } from 'topgun-socket/client';
 import { TGUserApi } from './user-api';
 import { pubFromSoul, unpackGraph } from '../sea';
 import { TGIndexedDBConnector } from '../indexeddb/indexeddb-connector';
-import { TGSystemEvent, TGNode } from '../types';
+import { TGNode } from '../types';
 import { match } from '../utils/match';
-import { wait } from '../utils/wait';
 import { assertObject, assertGetPath } from '../utils/assert';
 
 /**
@@ -141,7 +140,7 @@ export class TGClient extends AsyncStreamEmitter<any>
     /**
      * System events callback
      */
-    on(event: TGSystemEvent, cb: (value) => void): void
+    on(event: string, cb: (value) => void): void
     {
         (async () =>
         {
@@ -150,6 +149,11 @@ export class TGClient extends AsyncStreamEmitter<any>
                 cb(value);
             }
         })();
+    }
+
+    connectors(): TGGraphConnector[]
+    {
+        return this.graph.connectors;
     }
 
     // -----------------------------------------------------------------------------------------------------
