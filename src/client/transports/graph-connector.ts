@@ -156,6 +156,10 @@ export abstract class TGGraphConnector extends AsyncStreamEmitter<any>
     {
     }
 
+    async authenticate(pub: string, priv: string): Promise<void>
+    {
+    }
+
     // -----------------------------------------------------------------------------------------------------
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------

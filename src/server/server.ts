@@ -237,7 +237,7 @@ export class TGServer
 
             if (isVerified)
             {
-                socket.setAuthToken({
+                await socket.setAuthToken({
                     pub: data.pub,
                     timestamp,
                 });

@@ -57,7 +57,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         }
         catch (e)
         {
-            
+
         }
     }
 
@@ -135,12 +135,15 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
     async authenticate(pub: string, priv: string): Promise<void>
     {
         await this.waitForConnection();
-        this.doAuth(pub, priv);
+        await this.doAuth(pub, priv);
 
-        for await (const _event of this.client.listener('connect'))
+        (async () =>
         {
-            this.doAuth(pub, priv);
-        }
+            for await (const _event of this.client.listener('connect'))
+            {
+                this.doAuth(pub, priv);
+            }
+        })();
     }
 
     publishToChannel(

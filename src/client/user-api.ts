@@ -1,7 +1,6 @@
 import { isObject, isString, isFunction, object, fn } from 'topgun-typed';
 import { authenticate, createUser, graphSigner } from '../sea';
 import { TGClient } from './client';
-import { TGWebSocketGraphConnector } from './transports/web-socket-graph-connector';
 import {
     getItemAsync,
     removeItemAsync,
@@ -73,7 +72,7 @@ export class TGUserApi
         try
         {
             const user = await createUser(this._client, alias, password);
-            const ref  = this.useCredentials(user);
+            const ref  = await this.useCredentials(user);
             if (cb)
             {
                 cb(ref);
@@ -133,7 +132,7 @@ export class TGUserApi
                 const options = optionsOrCallback as AuthOptions;
 
                 user = await authenticate(this._client, pair as Pair, options);
-                ref  = this.useCredentials(user);
+                ref  = await this.useCredentials(user);
 
                 if (cb)
                 {
@@ -154,7 +153,7 @@ export class TGUserApi
                     password,
                     options,
                 );
-                ref  = this.useCredentials(user);
+                ref  = await this.useCredentials(user);
 
                 if (cb)
                 {
@@ -215,7 +214,7 @@ export class TGUserApi
             {
                 if (this._isValidCredentials(maybeSession))
                 {
-                    this.useCredentials(maybeSession);
+                    await this.useCredentials(maybeSession);
                 }
                 else
                 {
@@ -228,10 +227,10 @@ export class TGUserApi
     /**
      * Authenticates a user by credentials
      */
-    useCredentials(credentials: TGUserCredentials): {
+    async useCredentials(credentials: TGUserCredentials): Promise<{
         readonly alias: string;
         readonly pub: string;
-    }
+    }>
     {
         credentials = assertCredentials(credentials);
 
@@ -248,7 +247,7 @@ export class TGUserApi
 
         if (this.is && this.is.pub)
         {
-            this._authSuccess(credentials);
+            await this._authSuccess(credentials);
         }
 
         return this.is;
@@ -258,23 +257,26 @@ export class TGUserApi
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private _authSuccess(credentials: TGUserCredentials): void
+    private async _authSuccess(credentials: TGUserCredentials): Promise<void>
     {
+        await Promise.all([
+            this._authConnectors(credentials),
+            this._persistCredentials(credentials)
+        ]);
+
         this._client.emit(TGSystemEvent.Auth, {
             alias: credentials.alias,
             pub  : credentials.pub,
         });
-        this._authConnectors(credentials);
-        this._persistCredentials(credentials);
     }
 
-    private _authConnectors(credentials: TGUserCredentials): void
+    private async _authConnectors(credentials: TGUserCredentials): Promise<any>
     {
-        this._client.graph.eachConnector((connector) =>
+        await this._client.graph.eachConnector(async (connector) =>
         {
-            if (connector.name === 'TGWebSocketGraphConnector')
+            if (isFunction(connector?.authenticate))
             {
-                (connector as TGWebSocketGraphConnector).authenticate(
+                await connector.authenticate(
                     credentials.pub,
                     credentials.priv,
                 );
