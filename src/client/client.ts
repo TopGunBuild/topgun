@@ -132,9 +132,9 @@ export class TGClient extends AsyncStreamEmitter<any>
         this.closeAllListeners();
     }
 
-    async waitForConnect(): Promise<void>
+    async waitForConnect<T extends TGGraphConnector>(): Promise<T>
     {
-        await this.listener('connectorConnected').once();
+        return await this.listener('connectorConnected').once();
     }
 
     /**
