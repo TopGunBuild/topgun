@@ -1,3 +1,4 @@
+import { AuthToken } from 'topgun-socket/types';
 import { TGClient } from '../src/client';
 import { TGServer } from '../src/server';
 import { genString } from './test-util';
@@ -27,9 +28,10 @@ describe('Common', () =>
         ]);
     });
 
-    it('should ', async () =>
+    it('should client/server authenticate', async () =>
     {
-        let serverToken;
+        let serverToken: AuthToken;
+        let clientToken: AuthToken;
 
         (async () =>
         {
@@ -43,8 +45,20 @@ describe('Common', () =>
                     }
                 })();
             }
+        })();
 
-            // for await
+        (async () =>
+        {
+            for await (const connector of client.listener('connectorConnected'))
+            {
+                (async () =>
+                {
+                    for await (const {authToken} of connector.client.listener('authenticate'))
+                    {
+                        clientToken = authToken;
+                    }
+                })();
+            }
         })();
 
         await Promise.all([
@@ -54,8 +68,8 @@ describe('Common', () =>
 
         await client.user().create('john', genString(20));
 
-        // console.log(client.connectors()[0]);
-
-        expect(!!serverToken).toBeTruthy();
+        expect(clientToken).not.toBeUndefined();
+        expect(serverToken).not.toBeUndefined();
+        expect(clientToken.pub).toBe(serverToken.pub);
     });
 });
