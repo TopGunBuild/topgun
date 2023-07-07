@@ -1,7 +1,8 @@
 import { AuthToken } from 'topgun-socket/types';
 import { TGClient } from '../src/client';
 import { TGServer } from '../src/server';
-import { genString, loginBob, passwordBob } from './test-util';
+import { authenticate } from '../src/sea/authenticate';
+import { genString } from './test-util';
 
 const PORT_NUMBER = 3457;
 let server: TGServer, client: TGClient;
@@ -66,9 +67,7 @@ describe('Common', () =>
             client.waitForConnect()
         ]);
 
-        const user = await client.user().create(loginBob, passwordBob);
-
-        console.log({user,clientToken});
+        const user = await client.user().create('john', genString(20));
 
         expect(clientToken).not.toBeUndefined();
         expect(serverToken).not.toBeUndefined();

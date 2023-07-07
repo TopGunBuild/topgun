@@ -24,6 +24,3 @@ export function genString(length: number): string
 {
     return '#'.repeat(length);
 }
-
-export const loginBob     = 'bob';
-export const passwordBob  = '1qazxsw2';
