@@ -12,7 +12,7 @@ export class TGServer
 {
     readonly adapter: TGGraphAdapter;
     readonly internalAdapter: TGGraphAdapter;
-    readonly server: TGSocketServer;
+    readonly gateway: TGSocketServer;
     readonly options: TGServerOptions;
     readonly middleware: Middleware;
 
@@ -27,8 +27,8 @@ export class TGServer
         this.validator       = createValidator();
         this.internalAdapter = this.options.adapter || createMemoryAdapter(options);
         this.adapter         = this.wrapAdapter(this.internalAdapter);
-        this.server          = listen(this.options.port, this.options);
-        this.middleware      = new Middleware(this.server, this.options, this.adapter);
+        this.gateway         = listen(this.options.port, this.options);
+        this.middleware      = new Middleware(this.gateway, this.options, this.adapter);
         this.run();
     }
 
@@ -38,16 +38,16 @@ export class TGServer
 
     async waitForReady(): Promise<void>
     {
-        await this.server.listener('ready').once();
+        await this.gateway.listener('ready').once();
     }
 
     async close(): Promise<void>
     {
-        if (isFunction(this.server.httpServer?.close))
+        if (isFunction(this.gateway.httpServer?.close))
         {
-            this.server.httpServer.close();
+            this.gateway.httpServer.close();
         }
-        await this.server.close();
+        await this.gateway.close();
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -72,7 +72,7 @@ export class TGServer
         nodeDiff: TGGraphData,
     ): void
     {
-        this.server.exchange.publish(`topgun/nodes/${soul}`, {
+        this.gateway.exchange.publish(`topgun/nodes/${soul}`, {
             '#'  : `${msgId}/${soul}`,
             'put': {
                 [soul]: nodeDiff,
@@ -171,7 +171,7 @@ export class TGServer
      */
     private async handleWebsocketConnection(): Promise<void>
     {
-        for await (const { socket } of this.server.listener('connection'))
+        for await (const { socket } of this.gateway.listener('connection'))
         {
             (async () =>
             {

@@ -33,7 +33,7 @@ describe('Common', () =>
 
         (async () =>
         {
-            for await (const { socket } of server.server.listener('connection'))
+            for await (const { socket } of server.gateway.listener('connection'))
             {
                 (async () =>
                 {
