@@ -1,7 +1,7 @@
 import { AuthToken } from 'topgun-socket/types';
 import { TGClient } from '../src/client';
 import { TGServer } from '../src/server';
-import { genString } from './test-util';
+import { genString, loginBob, passwordBob } from './test-util';
 
 const PORT_NUMBER = 3457;
 let server: TGServer, client: TGClient;
@@ -53,7 +53,7 @@ describe('Common', () =>
             {
                 (async () =>
                 {
-                    for await (const {authToken} of connector.client.listener('authenticate'))
+                    for await (const { authToken } of connector.client.listener('authenticate'))
                     {
                         clientToken = authToken;
                     }
@@ -66,10 +66,13 @@ describe('Common', () =>
             client.waitForConnect()
         ]);
 
-        await client.user().create('john', genString(20));
+        const user = await client.user().create(loginBob, passwordBob);
+
+        console.log({user,clientToken});
 
         expect(clientToken).not.toBeUndefined();
         expect(serverToken).not.toBeUndefined();
         expect(clientToken.pub).toBe(serverToken.pub);
+        expect([clientToken.pub, serverToken.pub].every(pub => pub === user.pub)).toBeTruthy();
     });
 });
