@@ -272,20 +272,21 @@ describe('Client', () =>
         const stream           = link.map().on<{say: string}>(callback);
         const receivedPackets2 = [];
 
-        await Promise.all([
-            (async () =>
+        (async () =>
+        {
+            for await (const { value, soul } of stream)
             {
-                for await (const { value, soul } of stream)
+                receivedPackets2.push({ value, soul });
+                if (value.say === '👍')
                 {
-                    receivedPackets2.push({ value, soul });
-                    if (value.say === '👍')
-                    {
-                        stream.destroy();
-                    }
+                    stream.destroy();
                 }
-            })(),
-            stream.listener('destroy').once()
-        ]);
+            }
+        })();
+
+        await wait(500);
+
+        stream.destroy();
 
         expect(isEmptyObject(client.graph['_queries'])).toBeTruthy();
         expect(receivedPackets2.length).toBe(4);
@@ -320,38 +321,42 @@ describe('Client', () =>
         const receivedPackets2 = [];
         const receivedPackets3 = [];
 
-        await Promise.all([
-            (async () =>
+        (async () =>
+        {
+            for await (const { value, soul } of stream1)
             {
-                for await (const { value, soul } of stream1)
+                receivedPackets1.push(soul);
+                if (value.say === 'two')
                 {
-                    receivedPackets1.push(soul);
-                    if (value.say === 'two')
-                    {
-                        stream1.destroy();
-                    }
+                    stream1.destroy();
                 }
-            })(),
-            (async () =>
+            }
+        })();
+        (async () =>
+        {
+            for await (const { value, soul } of stream2)
             {
-                for await (const { value, soul } of stream2)
+                receivedPackets2.push(soul);
+                if (value.say === 'three')
                 {
-                    receivedPackets2.push(soul);
-                    if (value.say === 'three')
-                    {
-                        stream2.destroy();
-                    }
+                    stream2.destroy();
                 }
-            })(),
-            (async () =>
+            }
+        })();
+        (async () =>
+        {
+            for await (const { soul } of stream3)
             {
-                for await (const { soul } of stream3)
-                {
-                    receivedPackets3.push(soul);
-                    stream3.destroy();
-                }
-            })()
-        ]);
+                receivedPackets3.push(soul);
+                stream3.destroy();
+            }
+        })();
+
+        await wait(500);
+
+        stream1.destroy();
+        stream2.destroy();
+        stream3.destroy();
 
         expect(receivedPackets1.length).toBe(2);
         expect(receivedPackets2.length).toBe(3);
@@ -419,15 +424,17 @@ describe('Client', () =>
 
         const receivedPackets = [];
 
-        for await (const { soul, value } of stream)
+        (async () =>
         {
-            receivedPackets.push({ soul, value });
-            if (value.say === '👍')
+            for await (const { soul, value } of stream)
             {
-                stream.destroy();
+                receivedPackets.push({ soul, value });
             }
-        }
+        })();
 
+        await wait(500);
+
+        stream.destroy();
         expect(receivedPackets.length).toBe(4);
     });
 
