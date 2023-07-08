@@ -417,6 +417,7 @@ export class TGLink
             {
                 return;
             }
+            this._receivedData[stream.name][soul] = value;
         }
 
         stream.publish({ value, soul });

@@ -1,7 +1,8 @@
 import { isEmptyObject } from 'topgun-typed';
-import { diffCRDT, TGSystemEvent, TGClient, TGUserReference, TGLink } from '../src/client';
+import { diffCRDT, TGClient, TGUserReference, TGLink } from '../src/client';
 import { genString } from './test-util';
 import { TGLexLink } from '../src/client/lex-link';
+import { wait } from '../src/utils/wait';
 
 describe('Client', () =>
 {
@@ -118,7 +119,7 @@ describe('Client', () =>
 
         // minimum password length 8
         client.user().create('john', '12345678');
-        const auth = await client.listener(TGSystemEvent.Auth).once() as TGUserReference;
+        const auth = await client.listener('auth').once() as TGUserReference;
 
         expect(auth.alias).toBe('john');
         expect(link.waitForAuth()).toBeFalsy();
@@ -257,10 +258,10 @@ describe('Client', () =>
     {
         const link = client.get('chat');
 
-        await link.set({ say: 'Hi!' });
-        await link.set({ say: 'Yeah, man...' });
-        await link.set({ say: 'Awesome! Call me in 5 minutes..' });
-        await link.set({ say: '👍' });
+        link.set({ say: 'Hi!' });
+        link.set({ say: 'Yeah, man...' });
+        link.set({ say: 'Awesome! Call me in 5 minutes..' });
+        link.set({ say: '👍' });
 
         const receivedPackets = [];
         const callback        = (data, id) =>
@@ -375,11 +376,11 @@ describe('Client', () =>
             })(),
             (async () =>
             {
-                userFromListener1 = await client.listener(TGSystemEvent.Auth).once();
+                userFromListener1 = await client.listener('auth').once();
             })(),
             (async () =>
             {
-                userFromListener2 = await client.listener(TGSystemEvent.Auth).once();
+                userFromListener2 = await client.listener('auth').once();
             })()
         ]);
 
@@ -443,21 +444,23 @@ describe('Client', () =>
 
         const stream = link.map().once<{say: string}>();
 
-        for await (const { soul, value } of stream)
+        (async () =>
         {
-            receivedPackets.push({ soul, value });
-
-            if (value.say === 'two')
+            for await (const { value } of stream)
             {
-                await link.get('2019-06-20T00:00').put({ say: 'new one' });
-                await link.get('2019-06-20T11:59').put({ say: 'new two' });
-            }
-            if (value.say === 'four')
-            {
-                stream.destroy();
-            }
-        }
+                receivedPackets.push(value.say);
 
+                if (value.say === 'two')
+                {
+                    await link.get('2019-06-20T00:00').put({ say: 'new one' });
+                    await link.get('2019-06-20T11:59').put({ say: 'new two' });
+                }
+            }
+        })();
+
+        await wait(500);
+
+        stream.destroy();
         expect(receivedPackets.length).toBe(4);
     });
 });
