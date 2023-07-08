@@ -1,3 +1,14 @@
+## [1.5.1](https://github.com/TopGunBuild/topgun/compare/v1.5.0...v1.5.1) (2023-07-08)
+
+
+### Bug Fixes
+
+* **client:** improve `leave()` method ([58b43a9](https://github.com/TopGunBuild/topgun/commit/58b43a93951a2743c82e8a9cdb9b069a05bf18ac))
+* **client:** update options, add `waitForConnect()` method ([a5c42c0](https://github.com/TopGunBuild/topgun/commit/a5c42c04fe13fe7fc1154f4f023152ce77f84739))
+* fix listen once ([4acc73c](https://github.com/TopGunBuild/topgun/commit/4acc73c5eeb804df68806f0c4d153adadc2f30ed))
+* remove unused export ([198ebfb](https://github.com/TopGunBuild/topgun/commit/198ebfb5ecc2e72552b8eb8cb792d406e945394d))
+* wait for socket connector auth ([6eacb9c](https://github.com/TopGunBuild/topgun/commit/6eacb9cf132b5001d4b1ca9edcd9c17b69138cfc))
+
 # [1.5.0](https://github.com/TopGunBuild/topgun/compare/v1.4.0...v1.5.0) (2023-07-02)
 
 
