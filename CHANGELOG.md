@@ -1,3 +1,12 @@
+## [1.5.2](https://github.com/TopGunBuild/topgun/compare/v1.5.1...v1.5.2) (2023-07-10)
+
+
+### Bug Fixes
+
+* add stream and sea packages for export ([e70a0bb](https://github.com/TopGunBuild/topgun/commit/e70a0bbc157186a1d2e0dc6109b28951d8ffb2bb))
+* **client:** check username in use before create user ([2a2239e](https://github.com/TopGunBuild/topgun/commit/2a2239e967ea201f5658b5b10352f04ed7d35a57))
+* upgrade exports ([3d3af8d](https://github.com/TopGunBuild/topgun/commit/3d3af8dff60c60b8abd1bfa36ae82202ec5bbdad))
+
 ## [1.5.1](https://github.com/TopGunBuild/topgun/compare/v1.5.0...v1.5.1) (2023-07-08)
 
 
