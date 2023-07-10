@@ -7,6 +7,12 @@ import { work } from './work';
 import { TGClient } from '../client/client';
 import { assertNotEmptyString } from '../utils/assert';
 
+async function checkUsernameInUse(client: TGClient, aliasSoul: string): Promise<boolean>
+{
+    const user = await client.get(aliasSoul).promise({ timeout: 1000 });
+    return !!user;
+}
+
 export async function createUser(
     client: TGClient,
     alias: string,
@@ -35,6 +41,12 @@ export async function createUser(
     if ((password || '').length > passwordMaxLength)
     {
         throw Error(`Maximum password length is ${passwordMaxLength}`);
+    }
+
+    const exists = await checkUsernameInUse(client, aliasSoul);
+    if (exists)
+    {
+        throw Error(`Username ${alias} is already in use`);
     }
 
     // "pseudo-randomly create a salt, then use PBKDF2 function to extend the password with it."
