@@ -1,5 +1,3 @@
-import * as _sea from '../sea';
-
 export { TGClient } from './client';
 export { TGGraph } from './graph/graph';
 export { TGLink } from './link';
@@ -11,5 +9,7 @@ export { TGGraphConnectorFromAdapter } from './transports/graph-connector-from-a
 export { TGUserApi } from './user-api';
 export * from '../crdt';
 export * from '../types';
+export * from '../sea';
+export * from '../stream';
 
-export const SEA = _sea;
+
