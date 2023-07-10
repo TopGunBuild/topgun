@@ -470,4 +470,17 @@ describe('Client', () =>
         stream.destroy();
         expect(receivedPackets.length).toBe(4);
     });
+
+    it('should throw error when name is already in use', async () =>
+    {
+        try
+        {
+            await client.user().create('john', '12345678');
+            await client.user().create('john', '123456789');
+        }
+        catch (e)
+        {
+            expect(e.message).toBe(`Username john is already in use`);
+        }
+    });
 });
