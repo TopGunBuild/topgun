@@ -13,9 +13,11 @@ export default defineConfig((options) =>
         format     : ['cjs', 'esm', 'iife'],
         entryPoints: {
             client: 'src/client/index.ts',
-            server: 'src/server/index.ts'
+            server: 'src/server/index.ts',
+            stream: 'src/stream/index.ts',
+            sea   : 'src/sea/index.ts'
         },
-        define: {
+        define     : {
             global: 'window'
         }
     }

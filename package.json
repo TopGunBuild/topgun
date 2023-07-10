@@ -27,6 +27,16 @@
             "require": "./dist/server.js",
             "import": "./dist/server.mjs"
         },
+        "./stream": {
+            "types": "./dist/stream.d.ts",
+            "require": "./dist/stream.js",
+            "import": "./dist/stream.mjs"
+        },
+        "./sea": {
+            "types": "./dist/sea.d.ts",
+            "require": "./dist/sea.js",
+            "import": "./dist/sea.mjs"
+        },
         "./package.json": "./package.json"
     },
     "typesVersions": {
