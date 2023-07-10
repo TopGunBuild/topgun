@@ -442,10 +442,10 @@ describe('Client', () =>
     {
         const link = client.get('chat');
 
-        await link.get('2019-06-20T00:00').put({ say: 'one' });
-        await link.get('2019-06-20T11:59').put({ say: 'two' });
-        await link.get('2019-06-21T00:00').put({ say: 'three' });
-        await link.get('2019-06-22T00:00').put({ say: 'four' });
+        link.get('2019-06-20T00:00').put({ say: 'one' });
+        link.get('2019-06-20T11:59').put({ say: 'two' });
+        link.get('2019-06-21T00:00').put({ say: 'three' });
+        link.get('2019-06-22T00:00').put({ say: 'four' });
 
         const receivedPackets = [];
 
@@ -465,7 +465,7 @@ describe('Client', () =>
             }
         })();
 
-        await wait(500);
+        await wait(100);
 
         stream.destroy();
         expect(receivedPackets.length).toBe(4);
