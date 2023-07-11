@@ -3,16 +3,10 @@ import { decrypt } from './decrypt';
 import { work } from './work';
 import { TGClient } from '../client/client';
 import { Pair } from './pair';
+import { TGUserCredentials } from '../types';
 
 export type AuthOptions = {
     timeout?: number;
-};
-export type AuthResult = {
-    readonly alias: string;
-    readonly epriv: string;
-    readonly epub: string;
-    readonly priv: string;
-    readonly pub: string;
 };
 
 const DEFAULT_OPTS = {
@@ -23,14 +17,7 @@ export async function authenticateAccount(
     ident: any,
     password: string,
     encoding: 'base64'|'utf8'|'hex' = 'base64',
-): Promise<|undefined
-    |{
-        readonly alias: string;
-        readonly epriv: string;
-        readonly epub: string;
-        readonly priv: string;
-        readonly pub: string;
-    }>
+): Promise<undefined|TGUserCredentials>
 {
     if (!ident || !ident.auth)
     {
@@ -89,19 +76,19 @@ export function authenticate(
     client: TGClient,
     pair: Pair,
     opt: AuthOptions,
-): Promise<AuthResult>;
+): Promise<TGUserCredentials>;
 export function authenticate(
     client: TGClient,
     alias: string,
     password: string,
     opt?: AuthOptions,
-): Promise<AuthResult>;
+): Promise<TGUserCredentials>;
 export async function authenticate(
     client: TGClient,
     aliasOrPair: string|Pair,
     passwordOrOpt: string|AuthOptions,
     maybeOptions?: AuthOptions,
-): Promise<AuthResult>
+): Promise<TGUserCredentials>
 {
     let options: AuthOptions = isObject(passwordOrOpt)
         ? passwordOrOpt

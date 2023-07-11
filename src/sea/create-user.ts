@@ -6,6 +6,7 @@ import { signGraph } from './sign';
 import { work } from './work';
 import { TGClient } from '../client/client';
 import { assertNotEmptyString } from '../utils/assert';
+import { TGUserCredentials } from '../types';
 
 async function checkUsernameInUse(client: TGClient, aliasSoul: string): Promise<boolean>
 {
@@ -17,14 +18,7 @@ export async function createUser(
     client: TGClient,
     alias: string,
     password: string,
-): Promise<{
-        readonly alias: string;
-        readonly auth: string;
-        readonly epub: string;
-        readonly pub: string;
-        readonly epriv: string;
-        readonly priv: string;
-    }>
+): Promise<TGUserCredentials>
 {
     const aliasSoul         = `~@${assertNotEmptyString(alias)}`;
     const passwordMinLength = isNumber(client.options.passwordMinLength)

@@ -67,17 +67,17 @@ export class TGUserApi
         alias: string,
         password: string,
         cb?: TGAuthCallback,
-    ): Promise<TGUserReference>
+    ): Promise<TGUserCredentials>
     {
         try
         {
-            const user = await createUser(this._client, alias, password);
-            const ref  = await this.useCredentials(user);
-            if (cb)
+            const credentials = await createUser(this._client, alias, password);
+            await this.useCredentials(credentials);
+            if (isFunction(cb))
             {
-                cb(ref);
+                cb(credentials);
             }
-            return ref;
+            return credentials;
         }
         catch (err)
         {
@@ -96,19 +96,19 @@ export class TGUserApi
         pair: Pair,
         cb: TGAuthCallback,
         _opt?: AuthOptions,
-    ): Promise<TGUserReference|undefined>;
+    ): Promise<TGUserCredentials|undefined>;
     async auth(
         alias: string,
         password: string,
         cb?: TGAuthCallback,
         _opt?: AuthOptions,
-    ): Promise<TGUserReference|undefined>;
+    ): Promise<TGUserCredentials|undefined>;
     async auth(
         aliasOrPair: string|Pair,
         passwordOrCallback: string|TGAuthCallback,
         optionsOrCallback?: TGAuthCallback|AuthOptions,
         maybeOptions?: AuthOptions,
-    ): Promise<TGUserReference|undefined>
+    ): Promise<TGUserCredentials|undefined>
     {
         const cb = isFunction(optionsOrCallback)
             ? optionsOrCallback
@@ -120,8 +120,7 @@ export class TGUserApi
         {
             await this.recoverCredentials();
 
-            let user: TGUserCredentials;
-            let ref: TGUserReference;
+            let credentials: TGUserCredentials;
 
             if (
                 isObject(aliasOrPair) &&
@@ -131,15 +130,16 @@ export class TGUserApi
                 const pair    = aliasOrPair;
                 const options = optionsOrCallback as AuthOptions;
 
-                user = await authenticate(this._client, pair as Pair, options);
-                ref  = await this.useCredentials(user);
+                credentials = await authenticate(this._client, pair as Pair, options);
 
-                if (cb)
+                await this.useCredentials(credentials);
+
+                if (isFunction(cb))
                 {
-                    cb(ref);
+                    cb(credentials);
                 }
 
-                return ref;
+                return credentials;
             }
             else if (isString(aliasOrPair) && isString(passwordOrCallback))
             {
@@ -147,20 +147,20 @@ export class TGUserApi
                 const password = passwordOrCallback;
                 const options  = maybeOptions;
 
-                user = await authenticate(
+                credentials = await authenticate(
                     this._client,
                     alias,
                     password,
                     options,
                 );
-                ref  = await this.useCredentials(user);
+                await this.useCredentials(credentials);
 
-                if (cb)
+                if (isFunction(cb))
                 {
-                    cb(ref);
+                    cb(credentials);
                 }
 
-                return ref;
+                return credentials;
             }
         }
         catch (err)

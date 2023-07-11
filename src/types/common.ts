@@ -129,7 +129,7 @@ export interface TGUserCredentials
     epub: string;
 }
 
-export type TGAuthCallback = (userRef?: TGUserReference|TGAckErr) => void;
+export type TGAuthCallback = (userRef?: TGUserCredentials|TGAckErr) => void;
 
 export type TGOnCb<T extends TGValue> = (node: T, soul?: string) => void;
 
