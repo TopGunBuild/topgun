@@ -1,3 +1,4 @@
+import global from '../utils/window-or-global';
 import { StorageListOptions, TGStorage } from '../storage';
 import { arrayNodesToObject, filterNodesByListOptions } from '../storage/utils';
 import { TGGraphData, TGNode } from '../types';
@@ -81,11 +82,11 @@ export class IndexedDBStorage implements TGStorage
         this._dbp = new Promise((resolve, reject) =>
         {
             const indexedDB =
-                      window.indexedDB ||
-                      window['mozIndexedDB'] ||
-                      window['webkitIndexedDB'] ||
-                      window['msIndexedDB'] ||
-                      window['shimIndexedDB'];
+                      global.indexedDB ||
+                      global['mozIndexedDB'] ||
+                      global['webkitIndexedDB'] ||
+                      global['msIndexedDB'] ||
+                      global['shimIndexedDB'];
 
             if (!indexedDB)
             {

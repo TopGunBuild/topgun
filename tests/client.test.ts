@@ -1,5 +1,5 @@
 import { isEmptyObject } from 'topgun-typed';
-import { diffCRDT, TGClient, TGUserReference, TGLink } from '../src/client';
+import { diffCRDT, TGClient, TGUserReference, TGLink, TGUserCredentials } from '../src/client';
 import { genString } from './test-util';
 import { TGLexLink } from '../src/client/lex-link';
 import { wait } from '../src/utils/wait';
@@ -366,14 +366,14 @@ describe('Client', () =>
     it('auth callback', async () =>
     {
         let user: TGUserReference;
-        let userFromCallback: TGUserReference;
+        let userFromCallback: TGUserCredentials;
         let userFromListener1: TGUserReference;
         let userFromListener2: TGUserReference;
 
         await Promise.all([
             (async () =>
             {
-                const callback = (value: TGUserReference) =>
+                const callback = (value: TGUserCredentials) =>
                 {
                     userFromCallback = value;
                 };

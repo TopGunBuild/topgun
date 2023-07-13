@@ -1,7 +1,6 @@
-import { isFunction } from 'topgun-typed';
+import { isFunction, isEmptyObject } from 'topgun-typed';
 import { TGGet, TGGraphData, TGMessage, TGNode, TGOnCb, TGOptionsGet } from '../../types';
 import { TGGraph } from './graph';
-import { getNodeSoul } from '../../utils/node';
 import { StorageListOptions } from '../../storage';
 import { listFilterMatch, storageListOptionsFromGetOptions } from '../../storage/utils';
 import { uuidv4 } from '../../utils/uuidv4';
@@ -48,16 +47,6 @@ export class TGGraphQuery extends TGExchange
         return this.subscriptions(true).length;
     }
 
-    // get(cb?: TGOnCb<any>, msgId?: string): TGGraphQuery
-    // {
-    //     if (cb)
-    //     {
-    //         this.on(cb);
-    //     }
-    //     this._ask(msgId);
-    //     return this;
-    // }
-
     getStream(cb: TGOnCb<any>, msgId?: string): TGStream<any>
     {
         const stream = this.subscribe();
@@ -83,10 +72,8 @@ export class TGGraphQuery extends TGExchange
         return this;
     }
 
-    match(node: TGNode|undefined): boolean
+    match(soul: string): boolean
     {
-        const soul = getNodeSoul(node);
-
         if (this._listOptions)
         {
             return listFilterMatch(this._listOptions, soul)
@@ -94,12 +81,6 @@ export class TGGraphQuery extends TGExchange
 
         return soul === this.options['#'];
     }
-
-    // on(cb: (data: TGNode|undefined, soul: string) => void): TGGraphQuery
-    // {
-    //     this._data.on(cb);
-    //     return this;
-    // }
 
     off(): TGGraphQuery
     {
@@ -135,9 +116,9 @@ export class TGGraphQuery extends TGExchange
 
     private _onDirectQueryReply(msg: TGMessage): void
     {
-        if (!msg.put)
+        if (!msg.put || isEmptyObject(msg.put))
         {
-            const soul = msg['#'] || this.options['#'];
+            const soul = this.options['#'];
 
             this._updateGraph(
                 {

@@ -332,12 +332,25 @@ export class TGLink
                 }
             })();
 
+            // Set termination timeout if there are no connectors
+            if (this._client.connectors().length === 0 && !isNumber(opts?.timeout))
+            {
+                if (!isObject(opts))
+                {
+                    opts = {};
+                }
+                opts.timeout = 50;
+            }
+
             if (isNumber(opts?.timeout))
             {
                 setTimeout(() =>
                 {
-                    stream.destroy();
-                    resolve(null);
+                    if (stream.state !== 'destroyed')
+                    {
+                        stream.destroy();
+                        resolve(undefined);
+                    }
                 }, opts.timeout);
             }
         });

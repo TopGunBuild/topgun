@@ -224,8 +224,8 @@ export class TGGraph extends AsyncStreamEmitter<any>
      */
     query<T extends TGValue>(path: string[], cb: TGOnCb<T>, msgId: string): () => void
     {
-        let lastSouls   = [] as string[];
         let currentValue: TGValue|undefined;
+        let lastSouls   = [] as string[];
         const streamMap = new Map<string, TGStream<any>>();
 
         const updateQuery = () =>
@@ -244,13 +244,13 @@ export class TGGraph extends AsyncStreamEmitter<any>
 
             for (const soul of added)
             {
-                const stream = this._listen(this._queryStringBySoul(soul), updateQuery, msgId);
+                const stream = this._listen(this._queryStringForSoul(soul), updateQuery, msgId);
                 streamMap.set(soul, stream);
             }
 
             for (const soul of removed)
             {
-                this._unlisten(this._queryStringBySoul(soul), streamMap.get(soul));
+                this._unlisten(this._queryStringForSoul(soul), streamMap.get(soul));
             }
 
             lastSouls = souls;
@@ -262,8 +262,9 @@ export class TGGraph extends AsyncStreamEmitter<any>
         {
             for (const soul of lastSouls)
             {
-                this._unlisten(this._queryStringBySoul(soul), streamMap.get(soul));
+                this._unlisten(this._queryStringForSoul(soul), streamMap.get(soul));
             }
+            streamMap.clear();
         };
     }
 
@@ -426,7 +427,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
 
             this._eachQuery((query) =>
             {
-                if (query.match(node))
+                if (query.match(soul))
                 {
                     query.receive(node);
                 }
@@ -477,7 +478,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
         return this;
     }
 
-    private _queryStringBySoul(soul: string): string
+    private _queryStringForSoul(soul: string): string
     {
         return stringifyOptionsGet({ ['#']: soul });
     }
