@@ -116,7 +116,7 @@ export class TGGraphQuery extends TGExchange
 
     private _onDirectQueryReply(msg: TGMessage): void
     {
-        if (!msg.put || isEmptyObject(msg.put))
+        if (isEmptyObject(msg.put))
         {
             const soul = this.options['#'];
 
