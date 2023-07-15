@@ -1,5 +1,5 @@
 import { AuthToken } from 'topgun-socket/types';
-import { TGClient } from '../src/client';
+import { TGClient, TGUserGraph } from '../src/client';
 import { TGServer } from '../src/server';
 import { authenticate } from '../src/sea/authenticate';
 import { genString } from './test-util';
@@ -76,24 +76,16 @@ describe('Common', () =>
         expect([clientToken.pub, serverToken.pub].every(pub => pub === user.pub)).toBeTruthy();
     });
 
-    it('should xxx', async () =>
+    it('public keys should equals', async () =>
     {
         const john  = await client.user().create('john', '12345678');
-        // client.user().leave();
+        client.user().leave();
         const billy = await client.user().create('billy', '12345678');
-        // const john2 = client.user(john.pub); // .promise();
-
-        // console.log(john2.key, john.pub);
-
-        // client.get('~' + billy.pub).promise().then(value => console.log(value));
-
-        console.log(
-            client.graph['_graph']
-        );
+        const john2 = await client.user(john.pub).promise<TGUserGraph>();
 
         await wait(100);
 
-        expect(john).not.toBeUndefined();
+        expect(john.pub === john2.pub).not.toBeUndefined();
         expect(billy.pub === client.user().is.pub);
     });
 });

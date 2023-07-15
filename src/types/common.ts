@@ -129,6 +129,21 @@ export interface TGUserCredentials
     epub: string;
 }
 
+export interface TGUserGraph
+{
+    alias: string;
+    auth: {
+        ek: {
+            ct: string;
+            iv: string;
+            s: string;
+        },
+        s: string;
+    },
+    epub: string;
+    pub: string;
+}
+
 export type TGAuthCallback = (userRef?: TGUserCredentials|TGAckErr) => void;
 
 export type TGOnCb<T> = (node: T, soul?: string) => void;
