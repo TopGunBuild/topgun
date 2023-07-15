@@ -7,7 +7,7 @@ describe('Stream', () =>
     it('should destroy stream after emitting all events', async () =>
     {
         const exchange = new TGExchange();
-        const stream   = exchange.subscribe();
+        const stream   = exchange.subscribe<string>();
         let destroyed  = false;
 
         stream.listener('destroy').once().then(() =>
@@ -25,7 +25,7 @@ describe('Stream', () =>
             stream.destroy();
         })();
 
-        const receivedPackets = [];
+        const receivedPackets: string[] = [];
 
         await Promise.all([
             (async () =>

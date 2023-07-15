@@ -131,12 +131,12 @@ export interface TGUserCredentials
 
 export type TGAuthCallback = (userRef?: TGUserCredentials|TGAckErr) => void;
 
-export type TGOnCb<T extends TGValue> = (node: T, soul?: string) => void;
+export type TGOnCb<T> = (node: T, soul?: string) => void;
 
-export interface TGData<T extends TGValue>
+export interface TGData<T>
 {
     value: T;
-    soul: string;
+    key: string;
 }
 
 export interface TGPathData

@@ -274,9 +274,9 @@ describe('Client', () =>
 
         (async () =>
         {
-            for await (const { value, soul } of stream)
+            for await (const { value, key } of stream)
             {
-                receivedPackets2.push({ value, soul });
+                receivedPackets2.push({ value, key });
                 if (value.say === '👍')
                 {
                     stream.destroy();
@@ -323,9 +323,9 @@ describe('Client', () =>
 
         (async () =>
         {
-            for await (const { value, soul } of stream1)
+            for await (const { value, key } of stream1)
             {
-                receivedPackets1.push(soul);
+                receivedPackets1.push(key);
                 if (value.say === 'two')
                 {
                     stream1.destroy();
@@ -334,9 +334,9 @@ describe('Client', () =>
         })();
         (async () =>
         {
-            for await (const { value, soul } of stream2)
+            for await (const { value, key } of stream2)
             {
-                receivedPackets2.push(soul);
+                receivedPackets2.push(key);
                 if (value.say === 'three')
                 {
                     stream2.destroy();
@@ -345,9 +345,9 @@ describe('Client', () =>
         })();
         (async () =>
         {
-            for await (const { soul } of stream3)
+            for await (const { key } of stream3)
             {
-                receivedPackets3.push(soul);
+                receivedPackets3.push(key);
                 stream3.destroy();
             }
         })();
@@ -426,9 +426,9 @@ describe('Client', () =>
 
         (async () =>
         {
-            for await (const { soul, value } of stream)
+            for await (const { key, value } of stream)
             {
-                receivedPackets.push({ soul, value });
+                receivedPackets.push({ key, value });
             }
         })();
 

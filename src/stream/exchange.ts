@@ -43,7 +43,7 @@ export class TGExchange extends AsyncStreamEmitter<any>
         return Promise.resolve();
     }
 
-    stream(streamName: string, attributes: {[key: string]: any} = {}): TGStream<any>
+    stream<T>(streamName: string, attributes: {[key: string]: any} = {}): TGStream<T>
     {
         const channelDataStream = this._streamDataDemux.stream(streamName);
 
@@ -93,7 +93,7 @@ export class TGExchange extends AsyncStreamEmitter<any>
         return TGStream.UNSUBSCRIBED;
     }
 
-    subscribe(streamName: string = uuidv4(), attributes: {[key: string]: any} = {}): TGStream<any>
+    subscribe<T>(streamName: string = uuidv4(), attributes: {[key: string]: any} = {}): TGStream<T>
     {
         let channel = this._streamMap[streamName];
 

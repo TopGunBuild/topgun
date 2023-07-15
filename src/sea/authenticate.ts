@@ -109,7 +109,7 @@ export async function authenticate(
             options.timeout = DEFAULT_OPTS.timeout;
         }
 
-        let idents =
+        let idents: object =
                 client.graph.activeConnectors === 0
                     ? await client
                         .get(aliasSoul)
