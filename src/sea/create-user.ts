@@ -66,6 +66,17 @@ export async function createUser(
     const graph = await signGraph(
         client,
         {
+            [aliasSoul]: {
+                _: {
+                    '#': aliasSoul,
+                    '>': {
+                        [pubSoul]: now
+                    },
+                },
+                [pubSoul]: {
+                    '#': pubSoul
+                }
+            },
             [pubSoul]: {
                 _: {
                     '#': pubSoul,
@@ -84,7 +95,7 @@ export async function createUser(
         { pub, priv },
     );
 
-    await new Promise(ok => client.get(aliasSoul).put(graph, ok));
+    await new Promise(ok => client.graph.put(graph, ok));
 
     return {
         ...data,
