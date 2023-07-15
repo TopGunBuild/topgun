@@ -37,6 +37,11 @@
             "require": "./dist/sea.js",
             "import": "./dist/sea.mjs"
         },
+        "./utils": {
+            "types": "./dist/utils.d.ts",
+            "require": "./dist/utils.js",
+            "import": "./dist/utils.mjs"
+        },
         "./package.json": "./package.json"
     },
     "typesVersions": {
@@ -46,6 +51,15 @@
             ],
             "server": [
                 "./dist/server.d.ts"
+            ],
+            "stream": [
+                "./dist/stream.d.ts"
+            ],
+            "sea": [
+                "./dist/sea.d.ts"
+            ],
+            "utils": [
+                "./dist/utils.d.ts"
             ]
         }
     },
