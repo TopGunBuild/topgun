@@ -1,3 +1,18 @@
+## [1.5.3](https://github.com/TopGunBuild/topgun/compare/v1.5.2...v1.5.3) (2023-07-15)
+
+
+### Bug Fixes
+
+* add type for user graph ([bd1740d](https://github.com/TopGunBuild/topgun/commit/bd1740d346aa234e5b61a47eacbe67e4a22dd904))
+* **client:** add `state` property to graph ([3f10f71](https://github.com/TopGunBuild/topgun/commit/3f10f7100c692efe4c5401f7b1454541e05c492a))
+* **client:** update user sign graph ([ca48f07](https://github.com/TopGunBuild/topgun/commit/ca48f078bb57c44e9adef90642d16a55bfbf836b))
+* improve connectors ([07cdd3b](https://github.com/TopGunBuild/topgun/commit/07cdd3b9173cfe1342acc309d1e72cb717850554))
+* improve direct query reply ([170a93d](https://github.com/TopGunBuild/topgun/commit/170a93d9be145a673eb09c6ee7eb0e15f5685961))
+* return user pairs after authorization ([1ed920a](https://github.com/TopGunBuild/topgun/commit/1ed920a61684ca59b6006d09217ead408a2048aa))
+* **sea:** export Pair interfaces ([bb640dc](https://github.com/TopGunBuild/topgun/commit/bb640dc8d1a175f215ecb16716296c8b768fc6db))
+* update export packages ([7ed8c36](https://github.com/TopGunBuild/topgun/commit/7ed8c3648ae84b1fef262ee8fda11798a5fc7fd0))
+* update typings ([83060a1](https://github.com/TopGunBuild/topgun/commit/83060a177e8f40d8c9b2571e91003b9637680ad0))
+
 ## [1.5.2](https://github.com/TopGunBuild/topgun/compare/v1.5.1...v1.5.2) (2023-07-10)
 
 
