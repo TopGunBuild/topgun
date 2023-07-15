@@ -3,6 +3,7 @@ import { TGClient } from '../src/client';
 import { TGServer } from '../src/server';
 import { authenticate } from '../src/sea/authenticate';
 import { genString } from './test-util';
+import { wait } from '../src/utils/wait';
 
 const PORT_NUMBER = 3457;
 let server: TGServer, client: TGClient;
@@ -73,5 +74,26 @@ describe('Common', () =>
         expect(serverToken).not.toBeUndefined();
         expect(clientToken.pub).toBe(serverToken.pub);
         expect([clientToken.pub, serverToken.pub].every(pub => pub === user.pub)).toBeTruthy();
+    });
+
+    it('should xxx', async () =>
+    {
+        const john  = await client.user().create('john', '12345678');
+        // client.user().leave();
+        const billy = await client.user().create('billy', '12345678');
+        // const john2 = client.user(john.pub); // .promise();
+
+        // console.log(john2.key, john.pub);
+
+        // client.get('~' + billy.pub).promise().then(value => console.log(value));
+
+        console.log(
+            client.graph['_graph']
+        );
+
+        await wait(100);
+
+        expect(john).not.toBeUndefined();
+        expect(billy.pub === client.user().is.pub);
     });
 });
