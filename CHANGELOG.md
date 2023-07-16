@@ -1,3 +1,10 @@
+## [1.5.6](https://github.com/TopGunBuild/topgun/compare/v1.5.5...v1.5.6) (2023-07-16)
+
+
+### Bug Fixes
+
+* **client:** fix link path ([69c768d](https://github.com/TopGunBuild/topgun/commit/69c768dbb8705423193e0ab75923963ea317ed54))
+
 ## [1.5.5](https://github.com/TopGunBuild/topgun/compare/v1.5.4...v1.5.5) (2023-07-16)
 
 
