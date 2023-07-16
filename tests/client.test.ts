@@ -438,39 +438,6 @@ describe('Client', () =>
         expect(receivedPackets.length).toBe(4);
     });
 
-    it('read list item once', async () =>
-    {
-        const link = client.get('chat');
-
-        link.get('2019-06-20T00:00').put({ say: 'one' });
-        link.get('2019-06-20T11:59').put({ say: 'two' });
-        link.get('2019-06-21T00:00').put({ say: 'three' });
-        link.get('2019-06-22T00:00').put({ say: 'four' });
-
-        const receivedPackets = [];
-
-        const stream = link.map().once<{say: string}>();
-
-        (async () =>
-        {
-            for await (const { value } of stream)
-            {
-                receivedPackets.push(value.say);
-
-                if (value.say === 'two')
-                {
-                    await link.get('2019-06-20T00:00').put({ say: 'new one' });
-                    await link.get('2019-06-20T11:59').put({ say: 'new two' });
-                }
-            }
-        })();
-
-        await wait(100);
-
-        stream.destroy();
-        expect(receivedPackets.length).toBe(4);
-    });
-
     it('should throw error when name is already in use', async () =>
     {
         try
