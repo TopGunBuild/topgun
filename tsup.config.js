@@ -15,7 +15,8 @@ export default defineConfig((options) =>
             client: 'src/client/index.ts',
             server: 'src/server/index.ts',
             stream: 'src/stream/index.ts',
-            sea   : 'src/sea/index.ts'
+            sea   : 'src/sea/index.ts',
+            utils : 'src/utils/index.ts'
         },
         define     : {
             global: 'window'
