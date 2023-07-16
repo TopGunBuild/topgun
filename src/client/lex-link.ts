@@ -126,6 +126,6 @@ export class TGLexLink
 
     private _mergeSoul(): void
     {
-        this.optionsGet['#'] = this._link.soul = this._link.getPath().join();
+        this.optionsGet['#'] = this._link.soul = this._link.getPath().join('/');
     }
 }
