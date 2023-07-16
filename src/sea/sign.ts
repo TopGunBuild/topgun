@@ -275,8 +275,6 @@ export async function signNodeValue(
     const hash = await hashNodeKey(node, key);
     const sig  = await signHash(hash, pair);
 
-    // console.log({':': parse(node[key]), node, key});
-
     return {
         ':': parse(node[key]),
         '~': sig,

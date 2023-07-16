@@ -1,3 +1,24 @@
+## [1.5.6](https://github.com/TopGunBuild/topgun/compare/v1.5.5...v1.5.6) (2023-07-16)
+
+
+### Bug Fixes
+
+* **client:** fix link path ([69c768d](https://github.com/TopGunBuild/topgun/commit/69c768dbb8705423193e0ab75923963ea317ed54))
+
+## [1.5.5](https://github.com/TopGunBuild/topgun/compare/v1.5.4...v1.5.5) (2023-07-16)
+
+
+### Bug Fixes
+
+* add export for utils package ([54d588f](https://github.com/TopGunBuild/topgun/commit/54d588f1d7efe39b25223dca00b4bf6367f0537b))
+
+## [1.5.4](https://github.com/TopGunBuild/topgun/compare/v1.5.3...v1.5.4) (2023-07-16)
+
+
+### Bug Fixes
+
+* add missing utils package ([3a45844](https://github.com/TopGunBuild/topgun/commit/3a4584468a346440a3f6f9903b1cf7dc8d31857c))
+
 ## [1.5.3](https://github.com/TopGunBuild/topgun/compare/v1.5.2...v1.5.3) (2023-07-15)
 
 

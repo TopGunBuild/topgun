@@ -193,9 +193,10 @@ export class TGUserApi
     get(soul: string): TGLink
     {
         soul = assertNotEmptyString(soul);
+
         return !!this.is
-            ? this._client.get(`~${this.is.pub}/${soul}`)
-            : this._client.get(`~${this._client.WAIT_FOR_USER_PUB}/${soul}`);
+            ? this._client.get(`~${this.is.pub}`).get(soul)
+            : this._client.get(`~${this._client.WAIT_FOR_USER_PUB}`).get(soul);
     }
 
     /**
