@@ -24,3 +24,11 @@ export function genString(length: number): string
 {
     return '#'.repeat(length);
 }
+
+export function wait(duration = 0): Promise<void>
+{
+    return new Promise((resolve) =>
+    {
+        setTimeout(() => resolve(), duration);
+    });
+}

@@ -9,5 +9,4 @@ export * from './replacer-sort-keys';
 export * from './storage-helpers';
 export * from './stringify-options-get';
 export * from './uuidv4';
-export * from './wait';
 export * from './window-or-global';

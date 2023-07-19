@@ -1,6 +1,5 @@
 import { TGExchange } from '../src/stream/exchange';
-import { wait } from '../src/utils/wait';
-import { TGStream } from '../src/stream/stream';
+import { wait } from './test-util';
 
 describe('Stream', () =>
 {

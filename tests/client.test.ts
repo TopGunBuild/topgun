@@ -1,8 +1,7 @@
 import { isEmptyObject } from 'topgun-typed';
 import { diffCRDT, TGClient, TGUserReference, TGLink, TGUserCredentials } from '../src/client';
-import { genString } from './test-util';
+import { genString, wait } from './test-util';
 import { TGLexLink } from '../src/client/lex-link';
-import { wait } from '../src/utils/wait';
 
 describe('Client', () =>
 {

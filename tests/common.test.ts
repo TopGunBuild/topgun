@@ -2,8 +2,7 @@ import { AuthToken } from 'topgun-socket/types';
 import { TGClient, TGUserGraph } from '../src/client';
 import { TGServer } from '../src/server';
 import { authenticate } from '../src/sea/authenticate';
-import { genString } from './test-util';
-import { wait } from '../src/utils/wait';
+import { genString, wait } from './test-util';
 
 const PORT_NUMBER = 3457;
 let server: TGServer, client: TGClient;
