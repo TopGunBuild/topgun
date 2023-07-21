@@ -78,7 +78,7 @@ export class TGStream<T> extends ConsumableStream<T>
         this.exchange.subscribe(this.name);
     }
 
-    publish(data: any): Promise<void>
+    publish(data: T): Promise<void>
     {
         return this.exchange.publish(this.name, data);
     }

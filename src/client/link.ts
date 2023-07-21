@@ -264,7 +264,7 @@ export class TGLink
         });
     }
 
-    once<T>(cb?: TGOnCb<T>): TGStream<TGData<T>>
+    once<T extends TGValue>(cb?: TGOnCb<T>): TGStream<TGData<T>>
     {
         const stream = this._exchange.subscribe<TGData<T>>(uuidv4(), { once: true });
 
@@ -287,7 +287,7 @@ export class TGLink
         return this.multiQuery() ? this._onMap(stream) : this._on(stream);
     }
 
-    on<T>(cb?: TGOnCb<T>): TGStream<TGData<T>>
+    on<T extends TGValue>(cb?: TGOnCb<T>): TGStream<TGData<T>>
     {
         const stream = this._exchange.subscribe<TGData<T>>();
 
@@ -312,7 +312,7 @@ export class TGLink
         this._endQueries   = {};
     }
 
-    promise<T>(opts?: {timeout?: number}): Promise<T>
+    promise<T extends TGValue>(opts?: {timeout?: number}): Promise<T>
     {
         return new Promise<T>((resolve, reject) =>
         {
@@ -416,7 +416,7 @@ export class TGLink
         }
     }
 
-    private _onQueryResponse<T>(value: TGValue, stream: TGStream<T>): void
+    private _onQueryResponse<T extends TGValue>(value: T, stream: TGStream<TGData<T>>): void
     {
         const key = getNodeSoul(value) || this.key;
 
@@ -436,7 +436,7 @@ export class TGLink
         stream.publish({ value, key });
     }
 
-    private _on<T>(stream: TGStream<T>): TGStream<T>
+    private _on<T extends TGValue>(stream: TGStream<TGData<T>>): TGStream<TGData<T>>
     {
         this._maybeWaitAuth(() =>
         {
@@ -450,7 +450,7 @@ export class TGLink
         return stream;
     }
 
-    private _onMap<T extends TGValue>(stream: TGStream<T>): TGStream<T>
+    private _onMap<T extends TGValue>(stream: TGStream<TGData<T>>): TGStream<TGData<T>>
     {
         this._maybeWaitAuth(() =>
         {
