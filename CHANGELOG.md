@@ -1,3 +1,10 @@
+## [1.5.8](https://github.com/TopGunBuild/topgun/compare/v1.5.7...v1.5.8) (2023-07-21)
+
+
+### Bug Fixes
+
+* add missing export for TGLexLink ([1c723a3](https://github.com/TopGunBuild/topgun/commit/1c723a3b7be8e54e64318bbbb52f34226b89a699))
+
 ## [1.5.7](https://github.com/TopGunBuild/topgun/compare/v1.5.6...v1.5.7) (2023-07-21)
 
 
