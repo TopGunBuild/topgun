@@ -33,14 +33,14 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         this._requestChannels = {};
         this.opts             = opts;
         this.client           = createSocketClient(this.opts || {});
-        this.onConnect();
-        this.onError();
+        this.#onConnect();
+        this.#onError();
 
         (async () =>
         {
             for await (const value of this.outputQueue.listener('completed'))
             {
-                this.onOutputProcessed(value);
+                this.#onOutputProcessed(value);
             }
         })();
     }
@@ -135,13 +135,13 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
     async authenticate(pub: string, priv: string): Promise<void>
     {
         await this.waitForConnection();
-        await this.doAuth(pub, priv);
+        await this.#doAuth(pub, priv);
 
         (async () =>
         {
             for await (const _event of this.client.listener('connect'))
             {
-                this.doAuth(pub, priv);
+                this.#doAuth(pub, priv);
             }
         })();
     }
@@ -179,7 +179,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
     ): TGChannel<any>
     {
         const channel = this.client.subscribe(channelName, opts);
-        this.onChannelMessage(channel, cb);
+        this.#onChannelMessage(channel, cb);
 
         return channel;
     }
@@ -188,7 +188,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private async doAuth(
+    async #doAuth(
         pub: string,
         priv: string,
     ): Promise<{channel: string; data: any}>
@@ -201,7 +201,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         return this.client.invoke('login', { proof, pub });
     }
 
-    private async onChannelMessage(
+    async #onChannelMessage(
         channel: TGChannel<any>,
         cb?: TGMessageCb,
     ): Promise<void>
@@ -216,7 +216,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         }
     }
 
-    private onOutputProcessed(msg: TGMessage): void
+    #onOutputProcessed(msg: TGMessage): void
     {
         if (msg && this.client)
         {
@@ -240,7 +240,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         }
     }
 
-    private async onConnect(): Promise<void>
+    async #onConnect(): Promise<void>
     {
         for await (const _event of this.client.listener('connect'))
         {
@@ -255,7 +255,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         }
     }
 
-    private async onError(): Promise<void>
+    async #onError(): Promise<void>
     {
         for await (const _event of this.client.listener('error'))
         {

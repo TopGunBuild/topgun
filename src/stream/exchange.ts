@@ -64,7 +64,7 @@ export class TGExchange extends AsyncStreamEmitter<any>
 
             if (stream)
             {
-                this._triggerStreamDestroy(stream);
+                this.#triggerStreamDestroy(stream);
             }
 
             this._streamDataDemux.close(streamName);
@@ -75,7 +75,7 @@ export class TGExchange extends AsyncStreamEmitter<any>
             Object.keys(this._streamMap).forEach((streamName) =>
             {
                 const stream = this._streamMap[streamName];
-                this._triggerStreamDestroy(stream);
+                this.#triggerStreamDestroy(stream);
             });
             this.closeAllListeners();
             this._streamDataDemux.closeAll();
@@ -105,7 +105,7 @@ export class TGExchange extends AsyncStreamEmitter<any>
                 attributes
             };
             this._streamMap[streamName] = channel;
-            this._triggerStreamSubscribe(channel);
+            this.#triggerStreamSubscribe(channel);
         }
 
         const channelDataStream = this._streamDataDemux.stream(streamName);
@@ -125,7 +125,7 @@ export class TGExchange extends AsyncStreamEmitter<any>
 
         if (channel)
         {
-            this._triggerStreamUnsubscribe(channel);
+            this.#triggerStreamUnsubscribe(channel);
         }
     }
 
@@ -146,7 +146,7 @@ export class TGExchange extends AsyncStreamEmitter<any>
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private _triggerStreamDestroy(stream: TGSimpleStream): void
+    #triggerStreamDestroy(stream: TGSimpleStream): void
     {
         const streamName = stream.name;
 
@@ -157,7 +157,7 @@ export class TGExchange extends AsyncStreamEmitter<any>
         this.emit('destroy', { streamName });
     }
 
-    private _triggerStreamSubscribe(stream: TGSimpleStream): void
+    #triggerStreamSubscribe(stream: TGSimpleStream): void
     {
         const streamName = stream.name;
 
@@ -167,7 +167,7 @@ export class TGExchange extends AsyncStreamEmitter<any>
         this.emit('subscribe', { streamName });
     }
 
-    private _triggerStreamUnsubscribe(stream: TGSimpleStream): void
+    #triggerStreamUnsubscribe(stream: TGSimpleStream): void
     {
         const streamName = stream.name;
 

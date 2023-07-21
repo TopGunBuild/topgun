@@ -180,7 +180,7 @@ export class TGUserApi
     {
         if (this._signMiddleware)
         {
-            this._removeCredentials();
+            this.#removeCredentials();
             this.is = undefined;
         }
 
@@ -213,13 +213,13 @@ export class TGUserApi
 
             if (maybeSession !== null)
             {
-                if (this._isValidCredentials(maybeSession))
+                if (this.#isValidCredentials(maybeSession))
                 {
                     await this.useCredentials(maybeSession);
                 }
                 else
                 {
-                    await this._removeCredentials();
+                    await this.#removeCredentials();
                 }
             }
         }
@@ -248,7 +248,7 @@ export class TGUserApi
 
         if (this.is && this.is.pub)
         {
-            await this._authSuccess(credentials);
+            await this.#authSuccess(credentials);
         }
 
         return this.is;
@@ -258,11 +258,11 @@ export class TGUserApi
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private async _authSuccess(credentials: TGUserCredentials): Promise<void>
+    async #authSuccess(credentials: TGUserCredentials): Promise<void>
     {
         await Promise.all([
-            this._authConnectors(credentials),
-            this._persistCredentials(credentials)
+            this.#authConnectors(credentials),
+            this.#persistCredentials(credentials)
         ]);
 
         this._client.emit('auth', {
@@ -271,7 +271,7 @@ export class TGUserApi
         });
     }
 
-    private async _authConnectors(credentials: TGUserCredentials): Promise<any>
+    async #authConnectors(credentials: TGUserCredentials): Promise<any>
     {
         await this._client.graph.eachConnector(async (connector) =>
         {
@@ -285,7 +285,7 @@ export class TGUserApi
         });
     }
 
-    private async _persistCredentials(
+    async #persistCredentials(
         credentials: TGUserCredentials,
     ): Promise<void>
     {
@@ -299,7 +299,7 @@ export class TGUserApi
         }
     }
 
-    private async _removeCredentials(): Promise<void>
+    async #removeCredentials(): Promise<void>
     {
         if (this._sessionStorage)
         {
@@ -310,7 +310,7 @@ export class TGUserApi
         }
     }
 
-    private _isValidCredentials(
+    #isValidCredentials(
         maybeSession: unknown,
     ): maybeSession is TGUserCredentials
     {

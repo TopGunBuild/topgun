@@ -42,7 +42,7 @@ export class TGClient extends AsyncStreamEmitter<any>
         this.graph.use(diffCRDT, 'write');
 
         this.opt(this.options);
-        this.registerSeaMiddleware();
+        this.#registerSeaMiddleware();
         this.user().recoverCredentials();
     }
 
@@ -96,16 +96,16 @@ export class TGClient extends AsyncStreamEmitter<any>
 
         if (Array.isArray(options.peers))
         {
-            this.handlePeers(options.peers);
+            this.#handlePeers(options.peers);
         }
         if (options.localStorage)
         {
-            this.useConnector(new TGIndexedDBConnector(options.localStorageKey, options));
+            this.#useConnector(new TGIndexedDBConnector(options.localStorageKey, options));
         }
         if (Array.isArray(options.connectors))
         {
             options.connectors.forEach(connector =>
-                this.useConnector(connector),
+                this.#useConnector(connector),
             );
         }
 
@@ -163,7 +163,7 @@ export class TGClient extends AsyncStreamEmitter<any>
     /**
      * Register middleware with Security, Encryption, & Authorization - SEA
      */
-    private registerSeaMiddleware(): void
+    #registerSeaMiddleware(): void
     {
         this.graph.use(graph =>
             unpackGraph(
@@ -176,7 +176,7 @@ export class TGClient extends AsyncStreamEmitter<any>
     /**
      * Setup GraphConnector for graph
      */
-    private useConnector(connector: TGGraphConnector): void
+    #useConnector(connector: TGGraphConnector): void
     {
         connector.sendPutsFromGraph(this.graph);
         connector.sendRequestsFromGraph(this.graph);
@@ -186,7 +186,7 @@ export class TGClient extends AsyncStreamEmitter<any>
     /**
      * Connect to peers via connector TopGunSocket
      */
-    private async handlePeers(peers: TGClientPeerOptions[]): Promise<void>
+    async #handlePeers(peers: TGClientPeerOptions[]): Promise<void>
     {
         peers.forEach((peer: TGClientPeerOptions) =>
         {
@@ -205,11 +205,11 @@ export class TGClient extends AsyncStreamEmitter<any>
                         options.port = Number(url.port);
                     }
 
-                    this.useConnector(createConnector(options));
+                    this.#useConnector(createConnector(options));
                 }
                 else if (isObject(peer))
                 {
-                    this.useConnector(createConnector(peer));
+                    this.#useConnector(createConnector(peer));
                 }
             }
             catch (e)

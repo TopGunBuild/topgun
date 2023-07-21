@@ -42,7 +42,7 @@ export class TGLexLink
                 this.optionsGet['%'] = optionsGet['%'];
             }
         }
-        this._mergeSoul();
+        this.#mergeSoul();
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -51,19 +51,19 @@ export class TGLexLink
 
     start(value: string): TGLexLink
     {
-        this._setLex('>', assertNotEmptyString(value));
+        this.#setLex('>', assertNotEmptyString(value));
         return this;
     }
 
     end(value: string): TGLexLink
     {
-        this._setLex('<', assertNotEmptyString(value));
+        this.#setLex('<', assertNotEmptyString(value));
         return this;
     }
 
     prefix(value: string): TGLexLink
     {
-        this._setLex('*', assertNotEmptyString(value));
+        this.#setLex('*', assertNotEmptyString(value));
         return this;
     }
 
@@ -119,12 +119,12 @@ export class TGLexLink
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private _setLex(key: KeyOfLex, value: ValueOfLex): void
+    #setLex(key: KeyOfLex, value: ValueOfLex): void
     {
         this.optionsGet['.'][key] = value;
     }
 
-    private _mergeSoul(): void
+    #mergeSoul(): void
     {
         this.optionsGet['#'] = this._link.soul = this._link.getPath().join('/');
     }

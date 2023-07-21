@@ -21,7 +21,7 @@ export class TGGraphWireConnector extends TGGraphConnector
         {
             for await (const value of this.inputQueue.listener('completed'))
             {
-                this._onProcessedInput(value);
+                this.#onProcessedInput(value);
             }
         })();
     }
@@ -105,7 +105,7 @@ export class TGGraphWireConnector extends TGGraphConnector
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private _onProcessedInput(msg?: TGMessage): void
+    #onProcessedInput(msg?: TGMessage): void
     {
         if (!msg)
         {

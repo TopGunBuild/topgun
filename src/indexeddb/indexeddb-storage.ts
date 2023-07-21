@@ -16,7 +16,7 @@ export class IndexedDBStorage implements TGStorage
     {
         this._dbName    = storeName;
         this._storeName = storeName;
-        this._init();
+        this.#init();
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -26,7 +26,7 @@ export class IndexedDBStorage implements TGStorage
     get(key: IDBValidKey): Promise<TGNode>
     {
         let req: IDBRequest;
-        return this._withIDBStore('readwrite', (store) =>
+        return this.#withIDBStore('readwrite', (store) =>
         {
             req = store.get(key);
         }).then(() => req.result);
@@ -42,7 +42,7 @@ export class IndexedDBStorage implements TGStorage
 
     put(key: IDBValidKey, value: any): Promise<void>
     {
-        return this._withIDBStore('readwrite', (store) =>
+        return this.#withIDBStore('readwrite', (store) =>
         {
             store.put(value, key);
         });
@@ -51,7 +51,7 @@ export class IndexedDBStorage implements TGStorage
     getAll(): Promise<TGNode[]>
     {
         let req: IDBRequest;
-        return this._withIDBStore('readwrite', (store) =>
+        return this.#withIDBStore('readwrite', (store) =>
         {
             req = store.getAll();
         }).then(() => req.result);
@@ -59,7 +59,7 @@ export class IndexedDBStorage implements TGStorage
 
     update(key: IDBValidKey, updater: (val: any) => any): Promise<void>
     {
-        return this._withIDBStore('readwrite', (store) =>
+        return this.#withIDBStore('readwrite', (store) =>
         {
             const req     = store.get(key);
             req.onsuccess = () =>
@@ -73,7 +73,7 @@ export class IndexedDBStorage implements TGStorage
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private _init(): void
+    #init(): void
     {
         if (this._dbp)
         {
@@ -105,12 +105,12 @@ export class IndexedDBStorage implements TGStorage
         });
     }
 
-    private _withIDBStore(
+    #withIDBStore(
         type: IDBTransactionMode,
         callback: (store: IDBObjectStore) => void,
     ): Promise<void>
     {
-        this._init();
+        this.#init();
         return (this._dbp as Promise<IDBDatabase>).then(
             db =>
                 new Promise<void>((resolve, reject) =>

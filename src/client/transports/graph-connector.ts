@@ -32,7 +32,7 @@ export abstract class TGGraphConnector extends AsyncStreamEmitter<any>
         {
             for await (const value of this.listener('connect'))
             {
-                this._onConnectedChange(true);
+                this.#onConnectedChange(true);
             }
         })();
 
@@ -40,7 +40,7 @@ export abstract class TGGraphConnector extends AsyncStreamEmitter<any>
         {
             for await (const value of this.listener('disconnect'))
             {
-                this._onConnectedChange(false);
+                this.#onConnectedChange(false);
             }
         })();
     }
@@ -164,7 +164,7 @@ export abstract class TGGraphConnector extends AsyncStreamEmitter<any>
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private _onConnectedChange(connected?: boolean): void
+    #onConnectedChange(connected?: boolean): void
     {
         if (connected)
         {

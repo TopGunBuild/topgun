@@ -87,7 +87,7 @@ export class TGLink
         {
             if (this.userPubExpected())
             {
-                this._setUserPub(this._client.user().is?.pub);
+                this.__setUserPub(this._client.user().is?.pub);
             }
             return false;
         }
@@ -284,7 +284,7 @@ export class TGLink
             })();
         }
 
-        return this.multiQuery() ? this._onMap(stream) : this._on(stream);
+        return this.multiQuery() ? this.#onMap(stream) : this.#on(stream);
     }
 
     on<T extends TGValue>(cb?: TGOnCb<T>): TGStream<TGData<T>>
@@ -302,7 +302,7 @@ export class TGLink
             })();
         }
 
-        return this.multiQuery() ? this._onMap(stream) : this._on(stream);
+        return this.multiQuery() ? this.#onMap(stream) : this.#on(stream);
     }
 
     off(): void
@@ -325,7 +325,7 @@ export class TGLink
 
             (async () =>
             {
-                for await (const { value } of this._on(stream))
+                for await (const { value } of this.#on(stream))
                 {
                     resolve(value);
                     stream.destroy();
@@ -394,11 +394,11 @@ export class TGLink
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private _setUserPub(pub: string): void
+    __setUserPub(pub: string): void
     {
         if (this._parent)
         {
-            this._parent._setUserPub(pub);
+            this._parent.__setUserPub(pub);
         }
         else
         {
@@ -416,7 +416,7 @@ export class TGLink
         }
     }
 
-    private _onQueryResponse<T extends TGValue>(value: T, stream: TGStream<TGData<T>>): void
+    #onQueryResponse<T extends TGValue>(value: T, stream: TGStream<TGData<T>>): void
     {
         const key = getNodeSoul(value) || this.key;
 
@@ -436,13 +436,13 @@ export class TGLink
         stream.publish({ value, key });
     }
 
-    private _on<T extends TGValue>(stream: TGStream<TGData<T>>): TGStream<TGData<T>>
+    #on<T extends TGValue>(stream: TGStream<TGData<T>>): TGStream<TGData<T>>
     {
-        this._maybeWaitAuth(() =>
+        this.#maybeWaitAuth(() =>
         {
             this._endQueries[stream.name] = this._client.graph.query(
                 this.getPath(),
-                (value: TGValue) => this._onQueryResponse(value, stream),
+                (value: TGValue) => this.#onQueryResponse(value, stream),
                 stream.name
             );
         });
@@ -450,13 +450,13 @@ export class TGLink
         return stream;
     }
 
-    private _onMap<T extends TGValue>(stream: TGStream<TGData<T>>): TGStream<TGData<T>>
+    #onMap<T extends TGValue>(stream: TGStream<TGData<T>>): TGStream<TGData<T>>
     {
-        this._maybeWaitAuth(() =>
+        this.#maybeWaitAuth(() =>
         {
             this._endQueries[stream.name] = this._client.graph.queryMany(
                 this._lex.optionsGet,
-                (value: TGValue) => this._onQueryResponse(value, stream),
+                (value: TGValue) => this.#onQueryResponse(value, stream),
                 stream.name
             );
         });
@@ -464,13 +464,13 @@ export class TGLink
         return stream;
     }
 
-    private _maybeWaitAuth(handler: () => void): TGLink
+    #maybeWaitAuth(handler: () => void): TGLink
     {
         if (this.waitForAuth())
         {
             this._client.listener('auth').once().then((value) =>
             {
-                this._setUserPub(value.pub);
+                this.__setUserPub(value.pub);
                 handler();
             });
         }

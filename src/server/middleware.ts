@@ -46,7 +46,7 @@ export class Middleware
             return;
         }
 
-        this.processPut(msg).then((data) =>
+        this.#processPut(msg).then((data) =>
         {
             req.socket.transmit('#publish', {
                 channel: `topgun/@${msg['#']}`,
@@ -74,7 +74,7 @@ export class Middleware
             .toString(36)
             .slice(2);
 
-        this.readNodes(opts)
+        this.#readNodes(opts)
             .then(graphData => ({
                 channel: req.channel,
                 data   : {
@@ -101,12 +101,12 @@ export class Middleware
             })
     }
 
-    private readNodes(opts: TGOptionsGet): Promise<TGGraphData>
+    #readNodes(opts: TGOptionsGet): Promise<TGGraphData>
     {
         return this.adapter.get(opts);
     }
 
-    private async processPut(msg: TGMessage): Promise<TGMessage>
+    async #processPut(msg: TGMessage): Promise<TGMessage>
     {
         const msgId = pseudoRandomText();
 
@@ -135,7 +135,7 @@ export class Middleware
         }
     }
 
-    private isAdmin(socket: TGSocket): boolean|undefined
+    #isAdmin(socket: TGSocket): boolean|undefined
     {
         return (
             socket.authToken && socket.authToken.pub === this.options.ownerPub

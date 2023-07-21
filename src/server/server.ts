@@ -26,10 +26,10 @@ export class TGServer
         this.options         = isObject(options) ? options : {};
         this.validator       = createValidator();
         this.internalAdapter = this.options.adapter || createMemoryAdapter(options);
-        this.adapter         = this.wrapAdapter(this.internalAdapter);
+        this.adapter         = this.#wrapAdapter(this.internalAdapter);
         this.gateway         = listen(this.options.port, this.options);
         this.middleware      = new Middleware(this.gateway, this.options, this.adapter);
-        this.run();
+        this.#run();
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -51,22 +51,22 @@ export class TGServer
     }
 
     // -----------------------------------------------------------------------------------------------------
-    // @ Protected methods
+    // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
     /**
      * Run server
      */
-    protected run(): void
+    #run(): void
     {
         this.middleware.setupMiddleware();
-        this.handleWebsocketConnection();
+        this.#handleWebsocketConnection();
     }
 
     /**
      * Send put data to all node subscribers
      */
-    protected publishDiff(
+    #publishDiff(
         soul: string,
         msgId: string,
         nodeDiff: TGGraphData,
@@ -83,7 +83,7 @@ export class TGServer
     /**
      * Wrap adapter
      */
-    protected wrapAdapter(adapter: TGGraphAdapter): TGGraphAdapter
+    #wrapAdapter(adapter: TGGraphAdapter): TGGraphAdapter
     {
         const withPublish: TGGraphAdapter = {
             ...adapter,
@@ -93,7 +93,7 @@ export class TGServer
 
                 if (diff)
                 {
-                    this.publishIsDiff({
+                    this.#publishIsDiff({
                         '#'  : pseudoRandomText(),
                         'put': diff,
                     });
@@ -107,7 +107,7 @@ export class TGServer
             ...withPublish,
             put: async (graph: TGGraphData) =>
             {
-                const result = this.validatePut(graph);
+                const result = this.#validatePut(graph);
 
                 if (isErr(result))
                 {
@@ -122,7 +122,7 @@ export class TGServer
     /**
      * Send put data to node subscribers as a diff
      */
-    protected publishIsDiff(msg: TGMessage): void
+    #publishIsDiff(msg: TGMessage): void
     {
         const msgId = msg['#'] || uuidv4();
         const diff  = msg.put;
@@ -146,14 +146,14 @@ export class TGServer
                 continue;
             }
 
-            this.publishDiff(soul, msgId, nodeDiff);
+            this.#publishDiff(soul, msgId, nodeDiff);
         }
     }
 
     /**
      * Validate put operation
      */
-    protected validatePut(graph: TGGraphData): Result<TGGraphData>
+    #validatePut(graph: TGGraphData): Result<TGGraphData>
     {
         if (this.options.disableValidation)
         {
@@ -162,14 +162,10 @@ export class TGServer
         return this.validator(graph);
     }
 
-    // -----------------------------------------------------------------------------------------------------
-    // @ Private methods
-    // -----------------------------------------------------------------------------------------------------
-
     /**
      * Set up a loop to handle websocket connections.
      */
-    private async handleWebsocketConnection(): Promise<void>
+    async #handleWebsocketConnection(): Promise<void>
     {
         for await (const { socket } of this.gateway.listener('connection'))
         {
@@ -178,7 +174,7 @@ export class TGServer
                 // Set up a loop to handle and respond to RPCs.
                 for await (const request of (socket as TGSocket).procedure('login'))
                 {
-                    this.authenticateLogin(socket, request);
+                    this.#authenticateLogin(socket, request);
                 }
             })();
         }
@@ -187,7 +183,7 @@ export class TGServer
     /**
      * Authenticate a connection for extra privileges
      */
-    private async authenticateLogin(
+    async #authenticateLogin(
         socket: TGSocket,
         request: {
             data: {

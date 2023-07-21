@@ -30,7 +30,6 @@ export class TGGraphQuery extends TGExchange
     )
     {
         super();
-        this._onDirectQueryReply = this._onDirectQueryReply.bind(this);
         this.options             = JSON.parse(queryString);
         this.queryString         = queryString;
         this._graph              = graph;
@@ -59,7 +58,7 @@ export class TGGraphQuery extends TGExchange
             }
         })();
 
-        this._ask(msgId);
+        this.#ask(msgId);
         return stream;
     }
 
@@ -97,7 +96,7 @@ export class TGGraphQuery extends TGExchange
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private _ask(msgId?: string): TGGraphQuery
+    #ask(msgId?: string): TGGraphQuery
     {
         if (this._endCurQuery)
         {
@@ -107,14 +106,14 @@ export class TGGraphQuery extends TGExchange
         const data: TGGet = {
             msgId  : msgId || uuidv4(),
             options: this.options,
-            cb     : this._onDirectQueryReply.bind(this)
+            cb     : (msg: TGMessage) => this.#onDirectQueryReply(msg)
         };
 
         this._endCurQuery = this._graph.get(data);
         return this;
     }
 
-    private _onDirectQueryReply(msg: TGMessage): void
+    #onDirectQueryReply(msg: TGMessage): void
     {
         if (isEmptyObject(msg.put))
         {

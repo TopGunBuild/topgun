@@ -60,7 +60,6 @@ export class TGGraph extends AsyncStreamEmitter<any>
         super();
         this.id                  = uuidv4();
         this.receiveGraphData    = this.receiveGraphData.bind(this);
-        this.__onConnectorStatus = this.__onConnectorStatus.bind(this);
         this.activeConnectors    = 0;
         this._opt                = {};
         this._graph              = {};
@@ -115,7 +114,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
         {
             for await (const value of connector.listener('connect'))
             {
-                this.__onConnectorStatus(true);
+                this.#onConnectorStatus(true);
                 this.rootEventEmitter.emit('connectorConnected', connector);
             }
         })();
@@ -124,7 +123,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
         {
             for await (const value of connector.listener('disconnect'))
             {
-                this.__onConnectorStatus(false);
+                this.#onConnectorStatus(false);
                 this.rootEventEmitter.emit('connectorDisconnected', connector);
             }
         })();
@@ -225,11 +224,11 @@ export class TGGraph extends AsyncStreamEmitter<any>
         });
 
         const queryString = stringifyOptionsGet(opts);
-        const stream      = this._listen(queryString, cb, msgId);
+        const stream      = this.#listen(queryString, cb, msgId);
 
         return () =>
         {
-            this._unlisten(queryString, stream);
+            this.#unlisten(queryString, stream);
         };
     }
 
@@ -258,13 +257,13 @@ export class TGGraph extends AsyncStreamEmitter<any>
 
             for (const soul of added)
             {
-                const stream = this._listen(this._queryStringForSoul(soul), updateQuery, msgId);
+                const stream = this.#listen(this.#queryStringForSoul(soul), updateQuery, msgId);
                 streamMap.set(soul, stream);
             }
 
             for (const soul of removed)
             {
-                this._unlisten(this._queryStringForSoul(soul), streamMap.get(soul));
+                this.#unlisten(this.#queryStringForSoul(soul), streamMap.get(soul));
             }
 
             lastSouls = souls;
@@ -276,7 +275,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
         {
             for (const soul of lastSouls)
             {
-                this._unlisten(this._queryStringForSoul(soul), streamMap.get(soul));
+                this.#unlisten(this.#queryStringForSoul(soul), streamMap.get(soul));
             }
             streamMap.clear();
         };
@@ -439,7 +438,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
                 this._opt.mutable ? 'mutable' : 'immutable',
             );
 
-            this._eachQuery((query) =>
+            this.#eachQuery((query) =>
             {
                 if (query.match(soul))
                 {
@@ -455,19 +454,19 @@ export class TGGraph extends AsyncStreamEmitter<any>
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private _query(queryString: string): TGGraphQuery
+    #query(queryString: string): TGGraphQuery
     {
         return (this._queries[queryString] =
             this._queries[queryString] ||
             new TGGraphQuery(this, queryString, this.receiveGraphData));
     }
 
-    private _listen<T extends TGValue>(queryString: string, cb: TGOnCb<T>, msgId?: string): TGStream<any>
+    #listen<T extends TGValue>(queryString: string, cb: TGOnCb<T>, msgId?: string): TGStream<any>
     {
-        return this._query(queryString).getStream(cb, msgId);
+        return this.#query(queryString).getStream(cb, msgId);
     }
 
-    private _unlisten(queryString: string, stream: TGStream<any>): TGGraph
+    #unlisten(queryString: string, stream: TGStream<any>): TGGraph
     {
         if (stream instanceof TGStream)
         {
@@ -482,7 +481,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
         return this;
     }
 
-    private async _eachQuery(cb: (query: TGGraphQuery) => void): Promise<TGGraph>
+    async #eachQuery(cb: (query: TGGraphQuery) => void): Promise<TGGraph>
     {
         for (const queryString in this._queries)
         {
@@ -492,12 +491,12 @@ export class TGGraph extends AsyncStreamEmitter<any>
         return this;
     }
 
-    private _queryStringForSoul(soul: string): string
+    #queryStringForSoul(soul: string): string
     {
         return stringifyOptionsGet({ ['#']: soul });
     }
 
-    private __onConnectorStatus(connected?: boolean): void
+    #onConnectorStatus(connected?: boolean): void
     {
         if (connected)
         {
