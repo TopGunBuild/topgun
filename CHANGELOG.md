@@ -1,3 +1,11 @@
+## [1.5.7](https://github.com/TopGunBuild/topgun/compare/v1.5.6...v1.5.7) (2023-07-21)
+
+
+### Bug Fixes
+
+* add missing utils package ([e86ac58](https://github.com/TopGunBuild/topgun/commit/e86ac58cdfbcdc6edeca2968ef95f749203083cf))
+* update streams typings ([b7d3f44](https://github.com/TopGunBuild/topgun/commit/b7d3f447310201788e6b2853750661787f7c4192))
+
 ## [1.5.6](https://github.com/TopGunBuild/topgun/compare/v1.5.5...v1.5.6) (2023-07-16)
 
 
