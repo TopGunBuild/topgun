@@ -1,6 +1,7 @@
 export { TGClient } from './client';
 export { TGGraph } from './graph/graph';
 export { TGLink } from './link';
+export { TGLexLink } from './lex-link';
 export { TGQueue } from './control-flow/queue';
 export { TGProcessQueue } from './control-flow/process-queue';
 export { TGGraphConnector } from './transports/graph-connector';

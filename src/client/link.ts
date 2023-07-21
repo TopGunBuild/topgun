@@ -76,11 +76,6 @@ export class TGLink
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    multiQuery(): boolean
-    {
-        return this._lex instanceof TGLexLink;
-    }
-
     waitForAuth(): boolean
     {
         if (this._client.user().is?.pub)
@@ -276,7 +271,7 @@ export class TGLink
                 {
                     cb(value, key);
 
-                    if (!this.multiQuery())
+                    if (!this.#multiQuery())
                     {
                         stream.destroy();
                     }
@@ -284,7 +279,7 @@ export class TGLink
             })();
         }
 
-        return this.multiQuery() ? this.#onMap(stream) : this.#on(stream);
+        return this.#multiQuery() ? this.#onMap(stream) : this.#on(stream);
     }
 
     on<T extends TGValue>(cb?: TGOnCb<T>): TGStream<TGData<T>>
@@ -302,7 +297,7 @@ export class TGLink
             })();
         }
 
-        return this.multiQuery() ? this.#onMap(stream) : this.#on(stream);
+        return this.#multiQuery() ? this.#onMap(stream) : this.#on(stream);
     }
 
     off(): void
@@ -316,7 +311,7 @@ export class TGLink
     {
         return new Promise<T>((resolve, reject) =>
         {
-            if (this.multiQuery())
+            if (this.#multiQuery())
             {
                 return reject(Error('For multiple use once() or on() method'));
             }
@@ -414,6 +409,11 @@ export class TGLink
                 this._lex.optionsGet['#'] = this._lex.optionsGet['#'].replace(this._client.WAIT_FOR_USER_PUB, pub);
             }
         }
+    }
+
+    #multiQuery(): boolean
+    {
+        return this._lex instanceof TGLexLink;
     }
 
     #onQueryResponse<T extends TGValue>(value: T, stream: TGStream<TGData<T>>): void
