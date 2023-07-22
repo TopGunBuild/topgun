@@ -2,7 +2,6 @@ import { cloneValue, isEmptyObject, isNumber, isObject, isString, isFunction } f
 import {
     TGData,
     TGMessage,
-    TGMessageCb,
     TGOnCb,
     TGOptionsGet,
     TGOptionsPut,
@@ -167,7 +166,7 @@ export class TGLink
      * You do not need to re-save the entire object every time, TopGun will automatically
      * merge your data into what already exists as a "partial" update.
      **/
-    put(value: TGValue, cb?: TGMessageCb, opt?: TGOptionsPut): Promise<TGMessage>
+    put(value: TGValue, opt?: TGOptionsPut): Promise<TGMessage>
     {
         return new Promise<TGMessage>((resolve) =>
         {
@@ -184,25 +183,16 @@ export class TGLink
                 );
             }
 
-            const callback = (msg: TGMessage) =>
-            {
-                if (cb)
-                {
-                    cb(msg);
-                }
-                resolve(msg);
-            };
-
             this._client.graph.putPath(
                 this.getPath(),
                 value,
-                callback,
+                resolve,
                 opt,
             );
         })
     }
 
-    set(data: any, cb?: TGMessageCb, opt?: TGOptionsPut): Promise<TGMessage>
+    set(data: any, opt?: TGOptionsPut): Promise<TGMessage>
     {
         return new Promise<TGMessage>((resolve) =>
         {
@@ -238,22 +228,13 @@ export class TGLink
                 soulSuffix = uuidv4();
             }
 
-            const callback = (msg: TGMessage) =>
-            {
-                if (cb)
-                {
-                    cb(msg);
-                }
-                resolve(msg);
-            };
-
             const pathArr               = this.getPath();
             pathArr[pathArr.length - 1] = [this.key, soulSuffix].join('/');
 
             this._client.graph.putPath(
                 pathArr,
                 value,
-                callback,
+                resolve,
                 opt,
             );
         });
