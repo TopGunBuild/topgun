@@ -142,6 +142,8 @@ export interface TGUserGraph
     },
     epub: string;
     pub: string;
+
+    [key: string]: TGValue;
 }
 
 export type TGAuthCallback = (userRef?: TGUserCredentials|TGAckErr) => void;

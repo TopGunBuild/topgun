@@ -458,6 +458,9 @@ describe('Client', () =>
         const value  = await client.user().get('some').promise<string>();
         const value2 = await client.user(user.pub).get('some').promise<string>();
 
+        const user2 = await client.user(user.pub).promise();
+        console.log(user2);
+
         expect(value === value2).toBeTruthy();
     });
 });
