@@ -1,3 +1,11 @@
+## [1.5.9](https://github.com/TopGunBuild/topgun/compare/v1.5.8...v1.5.9) (2023-07-22)
+
+
+### Bug Fixes
+
+* remove callback from `put` and 'set' ([05e483d](https://github.com/TopGunBuild/topgun/commit/05e483d403ce9b7c8ae86647c2a15172a5f5dfda))
+* upgrade TGUserGraph interface ([6b2f6cb](https://github.com/TopGunBuild/topgun/commit/6b2f6cb4d40816d1f7266bc61c62962fd1d97e6b))
+
 ## [1.5.8](https://github.com/TopGunBuild/topgun/compare/v1.5.7...v1.5.8) (2023-07-21)
 
 
