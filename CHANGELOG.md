@@ -1,3 +1,10 @@
+## [1.5.10](https://github.com/TopGunBuild/topgun/compare/v1.5.9...v1.5.10) (2023-07-24)
+
+
+### Bug Fixes
+
+* add missing options export ([4630913](https://github.com/TopGunBuild/topgun/commit/4630913f877ca2ffd071837fffb0b5af1c8189e1))
+
 ## [1.5.9](https://github.com/TopGunBuild/topgun/compare/v1.5.8...v1.5.9) (2023-07-22)
 
 
