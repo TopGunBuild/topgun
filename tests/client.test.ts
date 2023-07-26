@@ -1,5 +1,5 @@
 import { isEmptyObject } from 'topgun-typed';
-import { diffCRDT, TGClient, TGUserReference, TGLink, TGUserCredentials } from '../src/client';
+import { diffCRDT, TGClient, TGUserReference, TGLink, TGUserCredentials, TGUserGraph } from '../src/client';
 import { genString, wait } from './test-util';
 import { TGLexLink } from '../src/client/lex-link';
 
@@ -458,9 +458,9 @@ describe('Client', () =>
         const value  = await client.user().get('some').promise<string>();
         const value2 = await client.user(user.pub).get('some').promise<string>();
 
-        const user2 = await client.user(user.pub).promise();
-        console.log(user2);
+        const user2 = await client.user(user.pub).promise<TGUserGraph>();
 
+        expect(user.pub === user2.pub).toBeTruthy();
         expect(value === value2).toBeTruthy();
     });
 });
