@@ -1,4 +1,4 @@
-import { isDefined, isObject, isNumber } from 'topgun-typed';
+import { isObject, isNumber } from 'topgun-typed';
 import { TGGraphData, TGNode, TGOptionsGet, TGPathData, TGValue } from '../../types';
 import { isSupportValue } from '../../utils/is-support';
 import { filterNodesByListOptions, storageListOptionsFromGetOptions } from '../../storage/utils';
@@ -31,49 +31,9 @@ export function getNodesFromGraph(
     return filteredNodes;
 }
 
-export function getPathData(
-    keys: string[],
-    graph: TGGraphData,
-): TGPathData
+function graphData(souls: string[], value: TGValue, complete: boolean, graph: TGGraphData): TGPathData
 {
-    const lastKey = keys[keys.length - 1];
-
-    if (keys.length === 1)
-    {
-        return {
-            complete: lastKey in graph,
-            souls   : keys,
-            value   : graph[lastKey],
-        };
-    }
-
-    const {
-        value: parentValue,
-        souls,
-        complete,
-    } = getPathData(keys.slice(0, keys.length - 1), graph);
-
-    if (!isObject(parentValue))
-    {
-        return {
-            complete: complete || isDefined(parentValue),
-            souls,
-            value   : undefined,
-        };
-    }
-
-    const value = (parentValue as TGNode)[lastKey];
-
-    if (!value)
-    {
-        return {
-            complete: true,
-            souls,
-            value,
-        };
-    }
-
-    const edgeSoul = value['#'];
+    const edgeSoul = value && value['#'];
 
     if (edgeSoul)
     {
@@ -85,9 +45,56 @@ export function getPathData(
     }
 
     return {
-        complete: true,
-        souls,
         value,
+        souls,
+        complete
+    }
+}
+
+function getSoulsFromKeys(keys: string[]): string[]
+{
+    return keys.reduce((accum, key) =>
+    {
+        const lastPath = accum[accum.length - 1];
+
+        if (lastPath)
+        {
+            return [...accum, [lastPath, key].join('/')];
+        }
+
+        return [key];
+    }, []);
+}
+
+export function getPathData(
+    keys: string[],
+    graph: TGGraphData,
+): TGPathData
+{
+    const souls    = getSoulsFromKeys(keys);
+    const lastSoul = souls[souls.length - 1];
+    const lastKey  = keys[keys.length - 1];
+    let complete   = lastSoul in graph;
+    let value      = graph[lastSoul];
+
+    if (souls.length === 1 || complete)
+    {
+        return graphData([lastSoul], value, complete, graph);
+    }
+
+    const preLastSoul = souls[souls.length - 2];
+    complete          = preLastSoul in graph;
+    value             = graph[preLastSoul] && graph[preLastSoul][lastKey];
+
+    if (complete)
+    {
+        return graphData([preLastSoul], value, complete, graph);
+    }
+
+    return {
+        souls,
+        complete: false,
+        value   : undefined
     };
 }
 
@@ -161,7 +168,7 @@ export function flattenGraphByPath(
 
         if (!isSupportValue(value))
         {
-            console.log(
+            console.trace(
                 'Invalid data: ' +
                 checkType(value) +
                 ' at ' +

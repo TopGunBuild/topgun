@@ -1,12 +1,13 @@
 import { isEmptyObject } from 'topgun-typed';
-import { diffCRDT, TGClient, TGUserReference, TGLink, TGUserCredentials, TGUserGraph } from '../src/client';
+import { diffCRDT, TGClient, TGUserReference, TGLink, TGUserCredentials, TGUserGraph, TGMessage } from '../src/client';
 import { genString, wait } from './test-util';
 import { TGLexLink } from '../src/client/lex-link';
+import { getPathData } from '../src/client/graph/graph-utils';
+
+let client: TGClient;
 
 describe('Client', () =>
 {
-    let client: TGClient;
-
     beforeEach(() =>
     {
         client = new TGClient();
@@ -14,6 +15,13 @@ describe('Client', () =>
     afterEach(async () =>
     {
         await client.disconnect();
+    });
+
+    it('get path ', function ()
+    {
+        const result = getPathData(['one', 'two', 'three', 'five'], {});
+
+        expect(result).not.toBeUndefined();
     });
 
     it('diffCRDT ', function ()
