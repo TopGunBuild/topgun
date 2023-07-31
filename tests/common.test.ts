@@ -3,6 +3,7 @@ import { TGClient, TGUserGraph } from '../src/client';
 import { TGServer } from '../src/server';
 import { authenticate } from '../src/sea/authenticate';
 import { genString, wait } from './test-util';
+import { flattenGraphData } from '../src/client/graph/graph-utils';
 
 const PORT_NUMBER = 3457;
 let server: TGServer, client: TGClient;
@@ -86,5 +87,14 @@ describe('Common', () =>
 
         expect(john.pub === john2.pub).not.toBeUndefined();
         expect(billy.pub === client.user().is.pub);
+    });
+
+    it('flat graph data', async () =>
+    {
+        // const result = flattenGraphData(null, ['zzz']);
+        const result = flattenGraphData({value: {yyy: 123}}, ['zzz']);
+
+        console.log(JSON.stringify(result));
+        expect(result).not.toBeUndefined();
     });
 });

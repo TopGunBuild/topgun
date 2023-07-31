@@ -176,10 +176,10 @@ export class TGLink
                     'You cannot save data to user space if the user is not authorized.',
                 );
             }
-            if (!this._parent && !isObject(value))
+            if (!this._parent && (!isObject(value) && value !== null))
             {
                 throw new Error(
-                    'Data at root of graph must be a node (an object).',
+                    'Data at root of graph must be a node (an object) or null.',
                 );
             }
 

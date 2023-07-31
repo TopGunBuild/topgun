@@ -29,7 +29,7 @@ describe('Client', () =>
         // Send request to john
         const addParticipantCert = await addRequest(participant.pub, user);
 
-        /*client.user().leave();
+        client.user().leave();
         await wait(10);
 
         // Auth as john
@@ -49,15 +49,15 @@ describe('Client', () =>
             request    = value;
             requestKey = key;
 
-            console.log(value);
+            console.log(request);
 
             if (request.cert)
             {
                 // Accept request from billy
-                const message = await acceptRequest(requestKey, request.pub);
+                const message = await acceptRequest(requestKey, request.cert);
                 requestsStream.destroy();
             }
-        }*/
+        }
 
         // console.log(
         //     JSON.stringify(
@@ -75,9 +75,9 @@ async function generateAddParticipantCertificate(participantPub: string, userCre
         .get('certificates')
         .get(participantPub)
         .get('addParticipant')
-        .promise<{cert: string}>();
+        .promise<string>();
 
-    if (certificateExists?.cert) return;
+    if (certificateExists) return;
 
     const certificate = await certify(
         [participantPub],
@@ -90,9 +90,7 @@ async function generateAddParticipantCertificate(participantPub: string, userCre
         .get('certificates')
         .get(participantPub)
         .get('addParticipant')
-        .put({
-            cert: certificate
-        });
+        .put(certificate);
 
     return certificate;
 }
@@ -102,9 +100,9 @@ async function generateParticipantRequestsCertificate(): Promise<string>
     const certificateExists = await client.user()
         .get('certificates')
         .get('participantRequests')
-        .promise<{cert: string}>();
+        .promise<string>();
 
-    if (certificateExists?.cert) return certificateExists.cert;
+    if (certificateExists) return certificateExists;
 
     const certificate = await certify(
         ['*'],
@@ -116,9 +114,7 @@ async function generateParticipantRequestsCertificate(): Promise<string>
     await client.user()
         .get('certificates')
         .get('participantRequests')
-        .put({
-            cert: certificate
-        });
+        .put(certificate);
 
     return certificate;
 }
@@ -130,22 +126,18 @@ async function addRequest(participantPub: string, userCredentials: TGUserCredent
         .user(participantPub)
         .get('certificates')
         .get('participantRequests')
-        .promise<{cert: string}>();
+        .promise<string>();
 
     // console.log('c-', addRequestCertificate);
 
-    if (!addRequestCertificate?.cert)
+    if (!addRequestCertificate)
     {
-        // console.log(
-        //     client
-        //         .user(participantPub)
-        //         .get('certificates')
-        //         .get('participantRequests')
-        //         .getPath()
-        // );
-        // console.log(client.graph.state);
         throw Error(`Could not find participant certificate to add request`);
     }
+
+    // console.log(
+    //     addRequestCertificate
+    // );
 
     // Save your request to him
     const setRequest = await client
@@ -166,11 +158,19 @@ async function addRequest(participantPub: string, userCredentials: TGUserCredent
 
 async function acceptRequest(requestKey: string, participantPub: string): Promise<TGMessage>
 {
+    // console.log(requestKey);
     // Clear request
-    await client.user()
-        .get('participantRequests')
-        .get(requestKey)
-        .put(null);
+    await client.get(requestKey).put(null);
+    // console.log('after');
+    // await client.user()
+    //     .get('participantRequests')
+    //     .get(requestKey)
+    //     .put(null);
+
+    // await client.user()
+    //     .get('participantRequests')
+    //     .get(requestKey)
+    //     .put(null);
 
     // Get your certificate
     const addParticipantCertificate = await client
@@ -178,7 +178,7 @@ async function acceptRequest(requestKey: string, participantPub: string): Promis
         .get('certificates')
         .get(client.user().is.pub)
         .get('addParticipant')
-        .promise<{cert: string}>();
+        .promise<string>();
 
     // Add yourself to his participant list
     const setPub = await client

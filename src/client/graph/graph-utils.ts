@@ -111,10 +111,20 @@ export function flattenGraphData(data: TGValue, fullPath: string[]): {
             soul
         };
     }
+    else if (fullPath.length === 1 && data === null)
+    {
+        const soul = fullPath[0];
+
+        return {
+            graphData: { [soul]: null },
+            soul
+        };
+    }
     else
     {
         const propertyName = fullPath.pop();
-        const soul         = fullPath.join('/');
+        const soul         = fullPath.join('/').trim();
+
         return {
             graphData: flattenGraphByPath({ [propertyName]: data }, [soul]),
             soul

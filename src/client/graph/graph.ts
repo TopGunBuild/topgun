@@ -323,7 +323,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
             throw err;
         }
 
-        const { graphData, soul } = flattenGraphData(data, fullPath);
+        const { graphData, soul } = flattenGraphData(data, [...fullPath]);
 
         this.put(graphData, cb, soul, putOpt);
     }
@@ -357,6 +357,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
                 {
                     return;
                 }
+
                 diff = await fn(diff, this._graph, putOpt);
             }
 

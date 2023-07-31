@@ -80,10 +80,7 @@ export function diffCRDT(
 
         if (!updated)
         {
-            if (!(soul in existingGraph))
-            {
-                allUpdates[soul] = updated;
-            }
+            allUpdates[soul] = updated;
             continue;
         }
 
