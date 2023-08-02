@@ -78,7 +78,7 @@ describe('Common', () =>
 
     it('public keys should equals', async () =>
     {
-        const john  = await client.user().create('john', '12345678');
+        const john = await client.user().create('john', '12345678');
         client.user().leave();
         const billy = await client.user().create('billy', '12345678');
         const john2 = await client.user(john.pub).promise<TGUserGraph>();
@@ -91,10 +91,10 @@ describe('Common', () =>
 
     it('flat graph data', async () =>
     {
-        // const result = flattenGraphData(null, ['zzz']);
-        const result = flattenGraphData({value: {yyy: 123}}, ['zzz']);
+        const result1 = flattenGraphData(null, ['zzz']);
+        const result2 = flattenGraphData({ value: { yyy: 123 } }, ['zzz']);
 
-        console.log(JSON.stringify(result));
-        expect(result).not.toBeUndefined();
+        expect(JSON.stringify(result1.graphData)).toBe('{"zzz":null}');
+        expect(JSON.stringify(result2.graphData)).toBe('{"zzz":{"value":{"#":"zzz/value"}},"zzz/value":{"yyy":123}}');
     });
 });

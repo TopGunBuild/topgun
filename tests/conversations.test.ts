@@ -5,7 +5,7 @@ import { wait } from './test-util';
 
 let client: TGClient;
 
-describe('Client', () =>
+describe('Conversation', () =>
 {
     beforeEach(() =>
     {
@@ -40,6 +40,7 @@ describe('Client', () =>
             .map()
             .once<any>();
 
+        let result: TGMessage;
         let request: any;
         let requestKey: string;
 
@@ -49,23 +50,12 @@ describe('Client', () =>
             request    = value;
             requestKey = key;
 
-            console.log(request);
-
-            if (request.cert)
-            {
-                // Accept request from billy
-                const message = await acceptRequest(requestKey, request.cert);
-                requestsStream.destroy();
-            }
+            // Accept request from billy
+            result = await acceptRequest(requestKey, request.cert);
+            requestsStream.destroy();
         }
 
-        // console.log(
-        //     JSON.stringify(
-        //         client.graph.state
-        //     )
-        // );
-
-        expect(typeof addParticipantCert === 'string').toBeTruthy();
+        expect(result.ok).toBeTruthy();
     });
 });
 
