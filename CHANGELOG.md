@@ -1,3 +1,11 @@
+## [1.5.11](https://github.com/TopGunBuild/topgun/compare/v1.5.10...v1.5.11) (2023-08-02)
+
+
+### Bug Fixes
+
+* fix write graph ([4351c39](https://github.com/TopGunBuild/topgun/commit/4351c39a73a9190894944f5955dc2f12b96e0eb9))
+* upgrade get graph data ([6b4f00f](https://github.com/TopGunBuild/topgun/commit/6b4f00f51968d0b812c7a5576c780038722d6469))
+
 ## [1.5.10](https://github.com/TopGunBuild/topgun/compare/v1.5.9...v1.5.10) (2023-07-24)
 
 
