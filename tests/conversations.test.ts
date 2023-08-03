@@ -118,16 +118,10 @@ async function addRequest(participantPub: string, userCredentials: TGUserCredent
         .get('participantRequests')
         .promise<string>();
 
-    // console.log('c-', addRequestCertificate);
-
     if (!addRequestCertificate)
     {
         throw Error(`Could not find participant certificate to add request`);
     }
-
-    // console.log(
-    //     addRequestCertificate
-    // );
 
     // Save your request to him
     const setRequest = await client
@@ -148,19 +142,8 @@ async function addRequest(participantPub: string, userCredentials: TGUserCredent
 
 async function acceptRequest(requestKey: string, participantPub: string): Promise<TGMessage>
 {
-    // console.log(requestKey);
     // Clear request
     await client.get(requestKey).put(null);
-    // console.log('after');
-    // await client.user()
-    //     .get('participantRequests')
-    //     .get(requestKey)
-    //     .put(null);
-
-    // await client.user()
-    //     .get('participantRequests')
-    //     .get(requestKey)
-    //     .put(null);
 
     // Get your certificate
     const addParticipantCertificate = await client
