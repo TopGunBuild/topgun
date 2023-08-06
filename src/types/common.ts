@@ -129,15 +129,21 @@ export interface TGUserCredentials
     epub: string;
 }
 
+export interface TGEncryptData
+{
+    ct: string;
+    iv: string;
+    s: string;
+    e?: string;
+    w?: string;
+    c?: string;
+}
+
 export interface TGUserGraph
 {
     alias: string;
     auth: {
-        ek: {
-            ct: string;
-            iv: string;
-            s: string;
-        },
+        ek: TGEncryptData,
         s: string;
     },
     epub: string;

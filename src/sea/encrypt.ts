@@ -5,6 +5,7 @@ import { isObject, isString } from 'topgun-typed';
 import { importAesKey } from './import-aes-key';
 import { Pair } from './pair';
 import { random } from '../utils/random';
+import { TGEncryptData } from '../types';
 
 const DEFAULT_OPTS: {
     readonly name?: string;
@@ -36,12 +37,12 @@ export async function encrypt(
         readonly encode?: string;
         readonly raw: true;
     },
-): Promise<{ct: string; iv: string; readonly s: string}>;
+): Promise<TGEncryptData>;
 export async function encrypt(
     msg: string,
     keyOrPair: string|Pair,
     opt = DEFAULT_OPTS,
-): Promise<string|{ct: string; iv: string; readonly s: string}>
+): Promise<string|TGEncryptData>
 {
     const rand = { s: random(9), iv: random(15) }; // consider making this 9 and 15 or 18 or 12 to reduce == padding.
 

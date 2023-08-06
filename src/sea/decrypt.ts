@@ -5,6 +5,7 @@ import { isString, isObject } from 'topgun-typed';
 import { importAesKey } from './import-aes-key';
 import { parse } from './settings';
 import { Pair } from './pair';
+import { TGEncryptData } from '../types';
 
 const DEFAULT_OPTS: {
     readonly name?: string;
@@ -16,7 +17,7 @@ const DEFAULT_OPTS: {
 };
 
 export async function decrypt<T>(
-    data: string|{ct: string; iv: string; readonly s: string},
+    data: string|TGEncryptData,
     keyOrPair: string|Pair,
     opt = DEFAULT_OPTS,
 ): Promise<T|undefined>
