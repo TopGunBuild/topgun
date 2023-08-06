@@ -49,7 +49,7 @@ export async function decrypt<T>(
     }
     catch (e: any)
     {
-        // console.warn('decrypt error', e, e.stack || e);
+        console.warn('decrypt error', e, e.stack || e);
 
         if (!opt.fallback || encoding === opt.fallback)
         {
