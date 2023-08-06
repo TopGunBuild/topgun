@@ -4,8 +4,8 @@ import { isString, isObject, isUndefined } from 'topgun-typed';
 import { check, ecdsa, jwk, parse } from './settings';
 import { sha256 } from './sha256';
 import { pubFromSoul } from './soul';
-import { verify, VerifyData } from './verify';
-import { TGGraphData, TGNode, TGOptionsPut, TGValue } from '../types';
+import { verify } from './verify';
+import { TGEncryptData, TGGraphData, TGNode, TGOptionsPut, TGValue } from '../types';
 import { TGClient, TGLink } from '../client';
 import { Policy } from './policy';
 import { PairBase } from './pair';
@@ -28,7 +28,7 @@ export async function verifyCertificate(
     userPub: string,
     soulPub: string,
     fullPath: string[],
-): Promise<false|VerifyData>
+): Promise<false|TGEncryptData>
 {
     if (cert && cert.m && cert.s && userPub && soulPub)
     {

@@ -4,17 +4,7 @@ import { isObject, isString } from 'topgun-typed';
 import { ecdsa, jwk, parse } from './settings';
 import { sha256 } from './sha256';
 import { Pair } from './pair';
-
-export interface VerifyData
-{
-    readonly ct: string;
-    readonly iv: string;
-    readonly s: string;
-    readonly e?: number;
-    readonly w?: Record<string, string>[];
-    readonly c?: string;
-    readonly wb?: string;
-}
+import { TGEncryptData } from '../types';
 
 const DEFAULT_OPTS: {
     readonly encode?: string;
@@ -78,7 +68,7 @@ export async function verify(
     data: string|{readonly m: string; readonly s: string},
     pubOrPair: string|Pair,
     opt = DEFAULT_OPTS,
-): Promise<false|VerifyData>
+): Promise<false|TGEncryptData>
 {
     try
     {

@@ -134,9 +134,10 @@ export interface TGEncryptData
     ct: string;
     iv: string;
     s: string;
-    e?: string;
-    w?: string;
-    c?: string;
+    readonly e?: number;
+    readonly w?: Record<string, string>[];
+    readonly c?: string;
+    readonly wb?: string;
 }
 
 export interface TGUserGraph
