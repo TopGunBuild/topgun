@@ -1,3 +1,11 @@
+## [1.5.12](https://github.com/TopGunBuild/topgun/compare/v1.5.11...v1.5.12) (2023-08-06)
+
+
+### Bug Fixes
+
+* add `TGEncryptData` type ([af86a9e](https://github.com/TopGunBuild/topgun/commit/af86a9ee877017cca52d1b491d808fc2f20def9e))
+* fix types ([f13c076](https://github.com/TopGunBuild/topgun/commit/f13c076d695a7b73321c0fa7efaeaf8818204173))
+
 ## [1.5.11](https://github.com/TopGunBuild/topgun/compare/v1.5.10...v1.5.11) (2023-08-02)
 
 
