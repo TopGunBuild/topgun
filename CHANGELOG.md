@@ -1,3 +1,10 @@
+## [1.5.14](https://github.com/TopGunBuild/topgun/compare/v1.5.13...v1.5.14) (2023-08-09)
+
+
+### Bug Fixes
+
+* destruct client options ([40a5393](https://github.com/TopGunBuild/topgun/commit/40a53933783d6ee30ab4276340159b9158744f7f))
+
 ## [1.5.13](https://github.com/TopGunBuild/topgun/compare/v1.5.12...v1.5.13) (2023-08-09)
 
 
