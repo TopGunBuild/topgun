@@ -13,6 +13,7 @@ import { TGIndexedDBConnector } from '../indexeddb/indexeddb-connector';
 import { TGNode } from '../types';
 import { match } from '../utils/match';
 import { assertObject, assertGetPath } from '../utils/assert';
+import { getSessionStorage, getSessionStorageKey } from '../utils';
 
 let clientOptions: TGClientOptions;
 
@@ -86,8 +87,8 @@ export class TGClient extends AsyncStreamEmitter<any>
             this._user ||
             new TGUserApi(
                 this,
-                clientOptions.sessionStorage,
-                clientOptions.sessionStorageKey || TG_CLIENT_DEFAULT_OPTIONS.sessionStorageKey,
+                getSessionStorage(clientOptions?.sessionStorage),
+                getSessionStorageKey(clientOptions?.sessionStorageKey),
             ));
     }
 

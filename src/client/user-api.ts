@@ -18,7 +18,6 @@ import {
 import { assertCredentials, assertNotEmptyString } from '../utils/assert';
 import { TGLink } from './link';
 import { isValidCredentials } from '../utils/is-valid-credentials';
-import { getSessionStorage } from '../utils/session-storage';
 
 let sessionStorage: TGSupportedStorage;
 let sessionStorageKey: string;
@@ -38,12 +37,12 @@ export class TGUserApi
      */
     constructor(
         client: TGClient,
-        _sessionStorage: TGSupportedStorage|undefined|boolean,
+        _sessionStorage: TGSupportedStorage,
         _sessionStorageKey: string|undefined
     )
     {
         this.#client      = client;
-        sessionStorage    = getSessionStorage(_sessionStorage);
+        sessionStorage    = _sessionStorage;
         sessionStorageKey = _sessionStorageKey;
     }
 
