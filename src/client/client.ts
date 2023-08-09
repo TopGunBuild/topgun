@@ -4,7 +4,7 @@ import { diffCRDT } from '../crdt';
 import { TGLink } from './link';
 import { TGGraph } from './graph/graph';
 import { TGGraphConnector } from './transports/graph-connector';
-import { DEFAULT_OPTIONS, TGClientOptions, TGClientPeerOptions } from './client-options';
+import { TG_CLIENT_DEFAULT_OPTIONS, TGClientOptions, TGClientPeerOptions } from './client-options';
 import { createConnector } from './transports/web-socket-graph-connector';
 import { TGSocketClientOptions } from 'topgun-socket/client';
 import { TGUserApi } from './user-api';
@@ -14,6 +14,8 @@ import { TGNode } from '../types';
 import { match } from '../utils/match';
 import { assertObject, assertGetPath } from '../utils/assert';
 
+let clientOptions: TGClientOptions;
+
 /**
  * Main entry point for TopGun in browser
  */
@@ -21,8 +23,11 @@ export class TGClient extends AsyncStreamEmitter<any>
 {
     static match = match;
 
-    options: TGClientOptions;
     pub: string|undefined;
+    passwordMinLength: number;
+    passwordMaxLength: number;
+    transportMaxKeyValuePairs: number;
+
     readonly graph: TGGraph;
     protected _user?: TGUserApi;
     readonly WAIT_FOR_USER_PUB: string;
@@ -34,14 +39,14 @@ export class TGClient extends AsyncStreamEmitter<any>
     {
         super();
         options                = isObject(options) ? options : {};
-        this.options           = { ...DEFAULT_OPTIONS, ...options };
+        clientOptions          = { ...TG_CLIENT_DEFAULT_OPTIONS, ...options };
         this.graph             = new TGGraph(this);
         this.WAIT_FOR_USER_PUB = '__WAIT_FOR_USER_PUB__';
 
         this.graph.use(diffCRDT);
         this.graph.use(diffCRDT, 'write');
 
-        this.opt(this.options);
+        this.opt(clientOptions);
         this.#registerSeaMiddleware();
         this.user().recoverCredentials();
     }
@@ -81,8 +86,8 @@ export class TGClient extends AsyncStreamEmitter<any>
             this._user ||
             new TGUserApi(
                 this,
-                this.options.sessionStorage,
-                this.options.sessionStorageKey,
+                clientOptions.sessionStorage,
+                clientOptions.sessionStorageKey || TG_CLIENT_DEFAULT_OPTIONS.sessionStorageKey,
             ));
     }
 
@@ -91,20 +96,22 @@ export class TGClient extends AsyncStreamEmitter<any>
      */
     opt(options: TGClientOptions): TGClient
     {
-        options      = assertObject(options);
-        this.options = { ...this.options, ...options };
+        clientOptions                  = assertObject(options);
+        this.passwordMaxLength         = clientOptions.passwordMaxLength || TG_CLIENT_DEFAULT_OPTIONS.passwordMaxLength;
+        this.passwordMinLength         = clientOptions.passwordMinLength || TG_CLIENT_DEFAULT_OPTIONS.passwordMinLength;
+        this.transportMaxKeyValuePairs = clientOptions.transportMaxKeyValuePairs || TG_CLIENT_DEFAULT_OPTIONS.transportMaxKeyValuePairs;
 
-        if (Array.isArray(options.peers))
+        if (Array.isArray(clientOptions.peers))
         {
-            this.#handlePeers(options.peers);
+            this.#handlePeers(clientOptions.peers);
         }
-        if (options.localStorage)
+        if (clientOptions.localStorage)
         {
-            this.#useConnector(new TGIndexedDBConnector(options.localStorageKey, options));
+            this.#useConnector(new TGIndexedDBConnector(clientOptions.localStorageKey, clientOptions));
         }
-        if (Array.isArray(options.connectors))
+        if (Array.isArray(clientOptions.connectors))
         {
-            options.connectors.forEach(connector =>
+            clientOptions.connectors.forEach(connector =>
                 this.#useConnector(connector),
             );
         }

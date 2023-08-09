@@ -1,4 +1,4 @@
-import { isObject, isString, isFunction, object, fn } from 'topgun-typed';
+import { isObject, isString, isFunction } from 'topgun-typed';
 import { authenticate, createUser, graphSigner } from '../sea';
 import { TGClient } from './client';
 import {
@@ -15,24 +15,18 @@ import {
     TGUserCredentials,
     TGUserReference,
 } from '../types';
-import { DEFAULT_OPTIONS } from './client-options';
 import { assertCredentials, assertNotEmptyString } from '../utils/assert';
 import { TGLink } from './link';
-import { localStorageAdapter } from '../utils/local-storage';
 import { isValidCredentials } from '../utils/is-valid-credentials';
+import { getSessionStorage } from '../utils/session-storage';
 
-const storageStruct = object({
-    getItem   : fn(),
-    setItem   : fn(),
-    removeItem: fn()
-});
+let sessionStorage: TGSupportedStorage;
+let sessionStorageKey: string;
 
 export class TGUserApi
 {
-    private readonly _client: TGClient;
-    private readonly _sessionStorage: TGSupportedStorage;
-    private readonly _sessionStorageKey: string;
-    private _signMiddleware?: (
+    readonly #client: TGClient;
+    #signMiddleware?: (
         graph: any,
         existingGraph: any,
         putOpt?: TGOptionsPut,
@@ -44,17 +38,13 @@ export class TGUserApi
      */
     constructor(
         client: TGClient,
-        sessionStorage: TGSupportedStorage|undefined|boolean,
-        sessionStorageKey: string|undefined
+        _sessionStorage: TGSupportedStorage|undefined|boolean,
+        _sessionStorageKey: string|undefined
     )
     {
-        this._client            = client;
-        this._sessionStorage    = !sessionStorage
-            ? null
-            : storageStruct(sessionStorage).ok
-                ? (sessionStorage as TGSupportedStorage)
-                : localStorageAdapter;
-        this._sessionStorageKey = sessionStorageKey || DEFAULT_OPTIONS.sessionStorageKey;
+        this.#client      = client;
+        sessionStorage    = getSessionStorage(_sessionStorage);
+        sessionStorageKey = _sessionStorageKey;
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -72,7 +62,7 @@ export class TGUserApi
     {
         try
         {
-            const credentials = await createUser(this._client, alias, password);
+            const credentials = await createUser(this.#client, alias, password);
             await this.useCredentials(credentials);
             if (isFunction(cb))
             {
@@ -131,7 +121,7 @@ export class TGUserApi
                 const pair    = aliasOrPair;
                 const options = optionsOrCallback as AuthOptions;
 
-                credentials = await authenticate(this._client, pair as Pair, options);
+                credentials = await authenticate(this.#client, pair as Pair, options);
 
                 await this.useCredentials(credentials);
 
@@ -149,7 +139,7 @@ export class TGUserApi
                 const options  = maybeOptions;
 
                 credentials = await authenticate(
-                    this._client,
+                    this.#client,
                     alias,
                     password,
                     options,
@@ -179,7 +169,7 @@ export class TGUserApi
      */
     leave(): TGUserApi
     {
-        if (this._signMiddleware)
+        if (this.#signMiddleware)
         {
             this.#removeCredentials();
             this.is = undefined;
@@ -196,8 +186,8 @@ export class TGUserApi
         soul = assertNotEmptyString(soul);
 
         return !!this.is
-            ? this._client.get(`~${this.is.pub}`).get(soul)
-            : this._client.get(`~${this._client.WAIT_FOR_USER_PUB}`).get(soul);
+            ? this.#client.get(`~${this.is.pub}`).get(soul)
+            : this.#client.get(`~${this.#client.WAIT_FOR_USER_PUB}`).get(soul);
     }
 
     /**
@@ -205,11 +195,11 @@ export class TGUserApi
      */
     async recoverCredentials(): Promise<void>
     {
-        if (this._sessionStorage)
+        if (sessionStorage)
         {
             const maybeSession = await getItemAsync(
-                this._sessionStorage,
-                this._sessionStorageKey,
+                sessionStorage,
+                sessionStorageKey,
             );
 
             if (maybeSession !== null)
@@ -237,11 +227,11 @@ export class TGUserApi
         credentials = assertCredentials(credentials);
 
         this.leave();
-        this._signMiddleware = graphSigner(this._client, {
+        this.#signMiddleware = graphSigner(this.#client, {
             priv: credentials.priv,
             pub : credentials.pub,
         });
-        this._client.graph.use(this._signMiddleware, 'write');
+        this.#client.graph.use(this.#signMiddleware, 'write');
         this.is = {
             alias: credentials.alias,
             pub  : credentials.pub,
@@ -266,7 +256,7 @@ export class TGUserApi
             this.#persistCredentials(credentials)
         ]);
 
-        this._client.emit('auth', {
+        this.#client.emit('auth', {
             alias: credentials.alias,
             pub  : credentials.pub,
         });
@@ -274,7 +264,7 @@ export class TGUserApi
 
     async #authConnectors(credentials: TGUserCredentials): Promise<any>
     {
-        await this._client.graph.eachConnector(async (connector) =>
+        await this.#client.graph.eachConnector(async (connector) =>
         {
             if (isFunction(connector?.authenticate))
             {
@@ -290,11 +280,11 @@ export class TGUserApi
         credentials: TGUserCredentials,
     ): Promise<void>
     {
-        if (this._sessionStorage)
+        if (sessionStorage)
         {
             await setItemAsync(
-                this._sessionStorage,
-                this._sessionStorageKey,
+                sessionStorage,
+                sessionStorageKey,
                 credentials,
             );
         }
@@ -302,11 +292,11 @@ export class TGUserApi
 
     async #removeCredentials(): Promise<void>
     {
-        if (this._sessionStorage)
+        if (sessionStorage)
         {
             await removeItemAsync(
-                this._sessionStorage,
-                this._sessionStorageKey,
+                sessionStorage,
+                sessionStorageKey,
             );
         }
     }

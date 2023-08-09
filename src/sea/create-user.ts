@@ -21,11 +21,11 @@ export async function createUser(
 ): Promise<TGUserCredentials>
 {
     const aliasSoul         = `~@${assertNotEmptyString(alias)}`;
-    const passwordMinLength = isNumber(client.options.passwordMinLength)
-        ? client.options.passwordMinLength
+    const passwordMinLength = isNumber(client.passwordMinLength)
+        ? client.passwordMinLength
         : 8;
-    const passwordMaxLength = isNumber(client.options.passwordMaxLength)
-        ? client.options.passwordMaxLength
+    const passwordMaxLength = isNumber(client.passwordMaxLength)
+        ? client.passwordMaxLength
         : 48;
 
     if ((password || '').length < passwordMinLength)

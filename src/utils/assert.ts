@@ -117,3 +117,9 @@ export function assertCredentials(value: unknown): TGUserCredentials
     const actual = userCredentialsStruct(value);
     return unwrap(actual);
 }
+
+export const storageStruct = object({
+    getItem   : fn(),
+    setItem   : fn(),
+    removeItem: fn()
+});

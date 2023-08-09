@@ -26,7 +26,7 @@ export class TGLexLink
         this._chain     = chain;
         this._link      = link;
         this._link._lex = this;
-        this._maxLimit  = this._chain.options.transportMaxKeyValuePairs;
+        this._maxLimit  = this._chain.transportMaxKeyValuePairs;
         this.optionsGet = {
             '.': {},
             '%': this._maxLimit

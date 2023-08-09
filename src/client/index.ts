@@ -1,5 +1,5 @@
 export { TGClient } from './client';
-export { TGClientOptions, TGClientPeerOptions } from './client-options';
+export * from './client-options';
 export { TGGraph } from './graph/graph';
 export { TGLink } from './link';
 export { TGLexLink } from './lex-link';

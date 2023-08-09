@@ -19,7 +19,7 @@ export interface TGClientOptions extends TGGraphAdapterOptions
     transportMaxKeyValuePairs?: number;
 }
 
-export const DEFAULT_OPTIONS: Required<TGClientOptions> = {
+export const TG_CLIENT_DEFAULT_OPTIONS: Required<TGClientOptions> = {
     peers                    : [],
     connectors               : [],
     localStorage             : false,
