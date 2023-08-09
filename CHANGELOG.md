@@ -1,3 +1,11 @@
+## [1.5.13](https://github.com/TopGunBuild/topgun/compare/v1.5.12...v1.5.13) (2023-08-09)
+
+
+### Bug Fixes
+
+* export method for validate credentials ([998272b](https://github.com/TopGunBuild/topgun/commit/998272b3b188617e53916965f943506523da8270))
+* log decrypt error ([63efe5f](https://github.com/TopGunBuild/topgun/commit/63efe5f1d1cbbd808e295e41c8179ed761f4f1b3))
+
 ## [1.5.12](https://github.com/TopGunBuild/topgun/compare/v1.5.11...v1.5.12) (2023-08-06)
 
 
