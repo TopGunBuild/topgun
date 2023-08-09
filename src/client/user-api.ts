@@ -19,6 +19,7 @@ import { DEFAULT_OPTIONS } from './client-options';
 import { assertCredentials, assertNotEmptyString } from '../utils/assert';
 import { TGLink } from './link';
 import { localStorageAdapter } from '../utils/local-storage';
+import { isValidCredentials } from '../utils/is-valid-credentials';
 
 const storageStruct = object({
     getItem   : fn(),
@@ -213,7 +214,7 @@ export class TGUserApi
 
             if (maybeSession !== null)
             {
-                if (this.#isValidCredentials(maybeSession))
+                if (isValidCredentials(maybeSession))
                 {
                     await this.useCredentials(maybeSession);
                 }
@@ -308,19 +309,5 @@ export class TGUserApi
                 this._sessionStorageKey,
             );
         }
-    }
-
-    #isValidCredentials(
-        maybeSession: unknown,
-    ): maybeSession is TGUserCredentials
-    {
-        return (
-            isObject(maybeSession) &&
-            'priv' in maybeSession &&
-            'epriv' in maybeSession &&
-            'alias' in maybeSession &&
-            'pub' in maybeSession &&
-            'epub' in maybeSession
-        );
     }
 }

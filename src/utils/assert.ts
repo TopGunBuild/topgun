@@ -100,19 +100,20 @@ export function assertNotEmptyString(value: unknown, msg?: string): string
     return unwrap(actual);
 }
 
+const userCredentialsErrMes        = arg => `Credentials must contain '${arg}' string property.`;
+export const userCredentialsStruct = object(
+    {
+        alias: string(userCredentialsErrMes('alias')),
+        pub  : string(userCredentialsErrMes('pub')),
+        priv : string(userCredentialsErrMes('priv')),
+        epriv: string(userCredentialsErrMes('epriv')),
+        epub : string(userCredentialsErrMes('priv')),
+    },
+    'Credentials invalid',
+);
+
 export function assertCredentials(value: unknown): TGUserCredentials
 {
-    const errMes = arg => `Credentials must contain '${arg}' string property.`;
-    const struct = object(
-        {
-            alias: string(errMes('alias')),
-            pub  : string(errMes('pub')),
-            priv : string(errMes('priv')),
-            epriv: string(errMes('epriv')),
-            epub : string(errMes('priv')),
-        },
-        'Credentials invalid',
-    );
-    const actual = struct(value);
+    const actual = userCredentialsStruct(value);
     return unwrap(actual);
 }
