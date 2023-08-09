@@ -11,3 +11,4 @@ export * from './stringify-options-get';
 export * from './uuidv4';
 export * from './window-or-global';
 export * from './is-valid-credentials';
+export * from './session-storage';
