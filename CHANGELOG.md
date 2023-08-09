@@ -1,3 +1,10 @@
+## [1.5.15](https://github.com/TopGunBuild/topgun/compare/v1.5.14...v1.5.15) (2023-08-09)
+
+
+### Bug Fixes
+
+* add missing export `getSessionStorage` ([9990319](https://github.com/TopGunBuild/topgun/commit/999031900d054f7b6031ede59d8e191d136ba988))
+
 ## [1.5.14](https://github.com/TopGunBuild/topgun/compare/v1.5.13...v1.5.14) (2023-08-09)
 
 
