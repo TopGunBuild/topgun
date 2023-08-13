@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const PACKAGE_DIRS = ['client', 'server', 'stream', 'sea', 'utils'];
+const PACKAGE_DIRS = ['client', 'server', 'stream', 'storage', 'sea', 'utils'];
 
 const getContent = function (name)
 {

@@ -12,11 +12,12 @@ export default defineConfig((options) =>
         dts        : true,
         format     : ['cjs', 'esm', 'iife'],
         entryPoints: {
-            client: 'src/client/index.ts',
-            server: 'src/server/index.ts',
-            stream: 'src/stream/index.ts',
-            sea   : 'src/sea/index.ts',
-            utils : 'src/utils/index.ts'
+            client : 'src/client/index.ts',
+            server : 'src/server/index.ts',
+            stream : 'src/stream/index.ts',
+            storage: 'src/storage/index.ts',
+            sea    : 'src/sea/index.ts',
+            utils  : 'src/utils/index.ts'
         },
         define     : {
             global: 'window'

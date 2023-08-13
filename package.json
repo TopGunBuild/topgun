@@ -27,6 +27,11 @@
             "require": "./dist/server.js",
             "import": "./dist/server.mjs"
         },
+        "./storage": {
+            "types": "./dist/storage.d.ts",
+            "require": "./dist/storage.js",
+            "import": "./dist/storage.mjs"
+        },
         "./stream": {
             "types": "./dist/stream.d.ts",
             "require": "./dist/stream.js",
@@ -51,6 +56,9 @@
             ],
             "server": [
                 "./dist/server.d.ts"
+            ],
+            "storage": [
+                "./dist/storage.d.ts"
             ],
             "stream": [
                 "./dist/stream.d.ts"
