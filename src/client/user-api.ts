@@ -170,10 +170,13 @@ export class TGUserApi
     {
         if (this.#signMiddleware)
         {
-            this.#client.emit('leave', {
-                alias: this.is.alias,
-                pub  : this.is.pub,
-            });
+            if (this.is?.alias)
+            {
+                this.#client.emit('leave', {
+                    alias: this.is.alias,
+                    pub  : this.is.pub,
+                });
+            }
             this.#removeCredentials();
             this.is = undefined;
         }
