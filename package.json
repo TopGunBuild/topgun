@@ -22,6 +22,11 @@
             "require": "./dist/client.js",
             "import": "./dist/client.mjs"
         },
+        "./crdt": {
+            "types": "./dist/crdt.d.ts",
+            "require": "./dist/crdt.js",
+            "import": "./dist/crdt.mjs"
+        },
         "./server": {
             "types": "./dist/server.d.ts",
             "require": "./dist/server.js",
@@ -47,12 +52,20 @@
             "require": "./dist/utils.js",
             "import": "./dist/utils.mjs"
         },
+        "./types": {
+            "types": "./dist/types.d.ts",
+            "require": "./dist/types.js",
+            "import": "./dist/types.mjs"
+        },
         "./package.json": "./package.json"
     },
     "typesVersions": {
         "*": {
             "client": [
                 "./dist/client.d.ts"
+            ],
+            "crdt": [
+                "./dist/crdt.d.ts"
             ],
             "server": [
                 "./dist/server.d.ts"
@@ -67,6 +80,9 @@
                 "./dist/sea.d.ts"
             ],
             "utils": [
+                "./dist/utils.d.ts"
+            ],
+            "types": [
                 "./dist/utils.d.ts"
             ]
         }
