@@ -1,3 +1,14 @@
+## [1.5.17](https://github.com/TopGunBuild/topgun/compare/v1.5.16...v1.5.17) (2023-08-13)
+
+
+### Bug Fixes
+
+* add missing export packages ([7bc8051](https://github.com/TopGunBuild/topgun/commit/7bc80518d2f646c1ca46583f21a49932885975e6))
+* **client:** emit 'leave' event if user is logged in ([8fd6196](https://github.com/TopGunBuild/topgun/commit/8fd6196af4b3c50ad07358ae7bdef08610ef5e17))
+* emit event when user logout ([340c938](https://github.com/TopGunBuild/topgun/commit/340c93827926b3fc0a4e5d96e7bc0fb7dfd47ef8))
+* export 'storage' package ([d477ff8](https://github.com/TopGunBuild/topgun/commit/d477ff8f77f0d226e3480e0137b5739841ef48d5))
+* **sea:** disable decrypt error log ([f15415b](https://github.com/TopGunBuild/topgun/commit/f15415b63937aa97820f255046fa020e4436351d))
+
 ## [1.5.16](https://github.com/TopGunBuild/topgun/compare/v1.5.15...v1.5.16) (2023-08-09)
 
 
