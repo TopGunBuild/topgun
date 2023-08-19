@@ -6,6 +6,18 @@
 * bump version ([0d5d45f](https://github.com/TopGunBuild/topgun/commit/0d5d45f2ce57a8b6b2f38f1b37d9a9c7dffa83a7))
 * bump version ([7d8e5bc](https://github.com/TopGunBuild/topgun/commit/7d8e5bc9b33e3a8609e4ef211fd52224e3b08ed9))
 * **client:** pass TGLink to `.put()` ([272849c](https://github.com/TopGunBuild/topgun/commit/272849cee1f953586a02711f8e10e3ed514083ed))
+* **client:** remove packages export ([ec3537b](https://github.com/TopGunBuild/topgun/commit/ec3537b81101cf3d107f1106af137c9bb5cb205e))
+* packages export ([4024cd3](https://github.com/TopGunBuild/topgun/commit/4024cd3ca4a990cdc9f210e76cdb3113f8b33199))
+* **storage:** export utils from storage ([7a5a9bb](https://github.com/TopGunBuild/topgun/commit/7a5a9bb699042af7e97b885ebca070d87448681e))
+
+## [1.5.18](https://github.com/TopGunBuild/topgun/compare/v1.5.17...v1.5.18) (2023-08-19)
+
+
+### Bug Fixes
+
+* bump version ([0d5d45f](https://github.com/TopGunBuild/topgun/commit/0d5d45f2ce57a8b6b2f38f1b37d9a9c7dffa83a7))
+* bump version ([7d8e5bc](https://github.com/TopGunBuild/topgun/commit/7d8e5bc9b33e3a8609e4ef211fd52224e3b08ed9))
+* **client:** pass TGLink to `.put()` ([272849c](https://github.com/TopGunBuild/topgun/commit/272849cee1f953586a02711f8e10e3ed514083ed))
 * **storage:** export utils from storage ([7a5a9bb](https://github.com/TopGunBuild/topgun/commit/7a5a9bb699042af7e97b885ebca070d87448681e))
 
 ## [1.5.18](https://github.com/TopGunBuild/topgun/compare/v1.5.17...v1.5.18) (2023-08-19)
