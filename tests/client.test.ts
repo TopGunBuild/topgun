@@ -1,8 +1,10 @@
 import { isEmptyObject } from 'topgun-typed';
-import { diffCRDT, TGClient, TGUserReference, TGLink, TGUserCredentials, TGUserGraph, TGMessage } from '../src/client';
+import { TGClient, TGLink } from '../src/client';
 import { genString, wait } from './test-util';
 import { TGLexLink } from '../src/client/lex-link';
 import { getPathData } from '../src/client/graph/graph-utils';
+import { diffCRDT } from '../src/crdt';
+import { TGUserCredentials, TGUserGraph, TGUserReference } from '../src/types';
 
 let client: TGClient;
 

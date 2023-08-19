@@ -1,9 +1,10 @@
 import { AuthToken } from 'topgun-socket/types';
-import { TGClient, TGUserGraph } from '../src/client';
+import { TGClient } from '../src/client';
 import { TGServer } from '../src/server';
 import { authenticate } from '../src/sea/authenticate';
 import { genString, wait } from './test-util';
 import { flattenGraphData } from '../src/client/graph/graph-utils';
+import { TGUserGraph } from '../src/types';
 
 const PORT_NUMBER = 3457;
 let server: TGServer, client: TGClient;
