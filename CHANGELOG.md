@@ -3,6 +3,15 @@
 
 ### Bug Fixes
 
+* bump version ([7d8e5bc](https://github.com/TopGunBuild/topgun/commit/7d8e5bc9b33e3a8609e4ef211fd52224e3b08ed9))
+* **client:** pass TGLink to `.put()` ([272849c](https://github.com/TopGunBuild/topgun/commit/272849cee1f953586a02711f8e10e3ed514083ed))
+* **storage:** export utils from storage ([7a5a9bb](https://github.com/TopGunBuild/topgun/commit/7a5a9bb699042af7e97b885ebca070d87448681e))
+
+## [1.5.18](https://github.com/TopGunBuild/topgun/compare/v1.5.17...v1.5.18) (2023-08-19)
+
+
+### Bug Fixes
+
 * **client:** pass TGLink to `.put()` ([272849c](https://github.com/TopGunBuild/topgun/commit/272849cee1f953586a02711f8e10e3ed514083ed))
 * **storage:** export utils from storage ([7a5a9bb](https://github.com/TopGunBuild/topgun/commit/7a5a9bb699042af7e97b885ebca070d87448681e))
 
