@@ -101,7 +101,8 @@
         "key-value store",
         "storage",
         "adapter",
-        "performance"
+        "performance",
+        "engine"
     ],
     "author": "Ivan Kalashnik",
     "license": "MIT",
