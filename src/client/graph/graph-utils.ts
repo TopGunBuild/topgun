@@ -98,6 +98,8 @@ export function getPathData(
     };
 }
 
+const isReferenceLink = (data: TGValue) => Object.keys(data).length === 1 && typeof data['#'] === 'string';
+
 export function flattenGraphData(data: TGValue, fullPath: string[]): {
     graphData: TGGraphData,
     soul: string
@@ -105,11 +107,36 @@ export function flattenGraphData(data: TGValue, fullPath: string[]): {
 {
     if (isObject(data))
     {
+        if (isReferenceLink(data))
+        {
+            const propertyName = fullPath.pop();
+            const soul         = fullPath.join('/').trim();
+
+            return {
+                graphData: {
+                    [soul]: {
+                        [propertyName]: data
+                    }
+                } as TGGraphData,
+                soul
+            }
+        }
+        else
+        {
+            const soul = fullPath.join('/');
+            return {
+                graphData: flattenGraphByPath(data, [soul]),
+                soul
+            };
+        }
+        /*console.log({
+            data, fullPath
+        });
         const soul = fullPath.join('/');
         return {
             graphData: flattenGraphByPath(data, [soul]),
             soul
-        };
+        };*/
     }
     else if (fullPath.length === 1 && data === null)
     {

@@ -166,7 +166,7 @@ export class TGLink
      * You do not need to re-save the entire object every time, TopGun will automatically
      * merge your data into what already exists as a "partial" update.
      **/
-    put(value: TGValue, opt?: TGOptionsPut): Promise<TGMessage>
+    put(value: TGValue|TGLink, opt?: TGOptionsPut): Promise<TGMessage>
     {
         return new Promise<TGMessage>((resolve) =>
         {
@@ -176,11 +176,19 @@ export class TGLink
                     'You cannot save data to user space if the user is not authorized.',
                 );
             }
-            if (!this._parent && (!isObject(value) && value !== null))
+            else if (!this._parent && (!isObject(value) && value !== null))
             {
                 throw new Error(
                     'Data at root of graph must be a node (an object) or null.',
                 );
+            }
+            else if (value instanceof TGLink)
+            {
+                if (value.getPath().length > 2)
+                {
+                    throw new Error('Data at root of graph must be a node (an object) or null.');
+                }
+                value = { '#': value.getPath().join('/') };
             }
 
             this._client.graph.putPath(
