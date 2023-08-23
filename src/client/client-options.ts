@@ -1,4 +1,4 @@
-import { TGSocketClientOptions } from 'topgun-socket/client';
+import { TGSocketClientOptions } from '@topgunbuild/socket/client';
 import { TGGraphConnector } from './transports/graph-connector';
 import { TGGraphAdapterOptions, TGSupportedStorage } from '../types';
 import { localStorageAdapter } from '../utils/local-storage';

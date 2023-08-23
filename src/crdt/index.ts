@@ -5,7 +5,7 @@ import {
     TGNodeMeta,
     TGNodeState,
 } from '../types';
-import { cloneValue } from 'topgun-typed';
+import { cloneValue } from '@topgunbuild/typed';
 
 const EMPTY: any = {};
 

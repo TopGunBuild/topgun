@@ -1,4 +1,4 @@
-import { isNumber, isString } from 'topgun-typed';
+import { isNumber, isString } from '@topgunbuild/typed';
 import { StorageListOptions, TGStorage } from './types';
 import { TGGraphAdapter, TGGraphAdapterOptions, TGGraphData, TGOptionsGet } from '../types';
 import { diffCRDT, mergeGraph } from '../crdt';

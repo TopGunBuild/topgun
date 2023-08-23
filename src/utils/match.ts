@@ -1,4 +1,4 @@
-import { isString, isObject, isDefined } from 'topgun-typed';
+import { isString, isObject, isDefined } from '@topgunbuild/typed';
 import { LEX } from '../types/lex';
 
 export function match(template: string, options: LEX|string): boolean

@@ -13,7 +13,7 @@ import {
     ok,
     object,
     optional,
-} from 'topgun-typed';
+} from '@topgunbuild/typed';
 import { TGUserCredentials } from '../types';
 
 const structObject = (msg = 'Expected object'): Struct<any> =>

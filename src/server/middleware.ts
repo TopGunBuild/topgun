@@ -1,4 +1,4 @@
-import { TGSocketServer, TGSocket, RequestObject } from 'topgun-socket/server';
+import { TGSocketServer, TGSocket, RequestObject } from '@topgunbuild/socket/server';
 import { TGServerOptions } from './server-options';
 import { TGGraphAdapter, TGGraphData, TGMessage, TGOptionsGet } from '../types';
 import { pseudoRandomText } from '../sea';

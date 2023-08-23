@@ -1,5 +1,5 @@
-import { isUndefined, isDefined } from 'topgun-typed';
-import { AsyncStreamEmitter } from 'topgun-async-stream-emitter';
+import { isUndefined, isDefined } from '@topgunbuild/typed';
+import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { addMissingState, mergeNodes } from '../../crdt';
 import {
     TGGet,

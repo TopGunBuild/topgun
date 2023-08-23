@@ -1,4 +1,4 @@
-import { AsyncStreamEmitter, StreamDemux } from 'topgun-async-stream-emitter';
+import { AsyncStreamEmitter, StreamDemux } from '@topgunbuild/async-stream-emitter';
 import { TGStream } from './stream';
 import { TGSimpleStream, TGStreamState } from './types';
 import { uuidv4 } from '../utils/uuidv4';

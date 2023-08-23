@@ -1,4 +1,4 @@
-import { isObject, isString, isNumber } from 'topgun-typed';
+import { isObject, isString, isNumber } from '@topgunbuild/typed';
 import { sign } from './sign';
 import { IPolicy } from '../types/policy';
 

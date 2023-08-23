@@ -1,4 +1,4 @@
-import { isNumber } from 'topgun-typed';
+import { isNumber } from '@topgunbuild/typed';
 import { TGGraphData, TGNode } from '../types';
 import { StorageListOptions, TGStorage } from '../storage';
 import { lexicographicCompare, listFilterMatch } from '../storage/utils';

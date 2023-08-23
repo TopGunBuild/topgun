@@ -1,4 +1,4 @@
-import WebCrypto from 'topgun-webcrypto';
+import WebCrypto from '@topgunbuild/webcrypto';
 import { ecdh, ecdsa } from './settings';
 
 export interface PairBase

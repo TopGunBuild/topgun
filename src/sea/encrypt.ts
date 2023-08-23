@@ -1,7 +1,7 @@
-import Buffer from 'topgun-buffer';
-import WebCrypto from 'topgun-webcrypto';
-import textEncoder from 'topgun-textencoder';
-import { isObject, isString } from 'topgun-typed';
+import Buffer from '@topgunbuild/buffer';
+import WebCrypto from '@topgunbuild/webcrypto';
+import textEncoder from '@topgunbuild/textencoder';
+import { isObject, isString } from '@topgunbuild/typed';
 import { importAesKey } from './import-aes-key';
 import { Pair } from './pair';
 import { random } from '../utils/random';

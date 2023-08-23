@@ -1,4 +1,4 @@
-import { isNumber, isString, isObject } from 'topgun-typed';
+import { isNumber, isString, isObject } from '@topgunbuild/typed';
 import { decrypt } from './decrypt';
 import { work } from './work';
 import { TGClient } from '../client/client';

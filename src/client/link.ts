@@ -1,4 +1,4 @@
-import { cloneValue, isEmptyObject, isNumber, isObject, isString, isFunction } from 'topgun-typed';
+import { cloneValue, isEmptyObject, isNumber, isObject, isString, isFunction } from '@topgunbuild/typed';
 import {
     TGData,
     TGMessage,
