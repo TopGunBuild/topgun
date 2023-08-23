@@ -6,9 +6,6 @@
 <p align="center">Alternate implementation of <a href="https://github.com/amark/gun" target="blank">GunDB</a> in TypeScript</p>
 
 <p align="center">
-  <a href="https://github.com/semantic-release/semantic-release">
-      <img alt="semantic-release" src="https://img.shields.io/badge/%20%20%F0%9F%93%A6%F0%9F%9A%80-semantic--release-e10079.svg">
-  </a>
   <a href="https://npm.im/topgun">
     <img alt="npm" src="https://badgen.net/npm/v/topgun">
   </a>
