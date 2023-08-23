@@ -1,4 +1,4 @@
-import { isEmptyObject } from 'topgun-typed';
+import { isEmptyObject } from '@topgunbuild/typed';
 import { diffCRDT, TGClient, TGUserReference, TGLink, TGUserCredentials, TGUserGraph, TGMessage } from '../src/client';
 import { genString, wait } from './test-util';
 import { TGLexLink } from '../src/client/lex-link';

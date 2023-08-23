@@ -1,4 +1,4 @@
-import { AuthToken } from 'topgun-socket/types';
+import { AuthToken } from '@topgunbuild/socket/types';
 import { TGClient, TGUserGraph } from '../src/client';
 import { TGServer } from '../src/server';
 import { authenticate } from '../src/sea/authenticate';

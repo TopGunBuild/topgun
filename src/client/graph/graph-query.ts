@@ -1,4 +1,4 @@
-import { isFunction, isEmptyObject } from 'topgun-typed';
+import { isFunction, isEmptyObject } from '@topgunbuild/typed';
 import { TGGet, TGGraphData, TGMessage, TGNode, TGOnCb, TGOptionsGet } from '../../types';
 import { TGGraph } from './graph';
 import { StorageListOptions } from '../../storage';

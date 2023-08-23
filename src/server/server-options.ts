@@ -1,4 +1,4 @@
-import { TGSocketServerOptions } from 'topgun-socket/server';
+import { TGSocketServerOptions } from '@topgunbuild/socket/server';
 import { TGGraphAdapter, TGGraphAdapterOptions } from '../types';
 
 export interface TGServerOptions extends TGSocketServerOptions, TGGraphAdapterOptions

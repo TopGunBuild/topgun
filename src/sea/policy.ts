@@ -1,4 +1,4 @@
-import { isObject, isString } from 'topgun-typed';
+import { isObject, isString } from '@topgunbuild/typed';
 import { IPolicy, IPolicyLex } from '../types/policy';
 import { match } from '../utils/match';
 

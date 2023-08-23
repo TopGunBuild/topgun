@@ -1,4 +1,4 @@
-import { AsyncStreamEmitter } from 'topgun-async-stream-emitter';
+import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { TGMessage } from '../../types';
 
 export class TGQueue<T = TGMessage> extends AsyncStreamEmitter<any>

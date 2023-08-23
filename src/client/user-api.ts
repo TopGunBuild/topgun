@@ -1,4 +1,4 @@
-import { isObject, isString, isFunction } from 'topgun-typed';
+import { isObject, isString, isFunction } from '@topgunbuild/typed';
 import { authenticate, createUser, graphSigner } from '../sea';
 import { TGClient } from './client';
 import {

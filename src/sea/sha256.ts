@@ -1,7 +1,7 @@
-import Buffer from 'topgun-buffer';
-import WebCrypto from 'topgun-webcrypto';
-import TextEncoder from 'topgun-textencoder';
-import { isString } from 'topgun-typed';
+import Buffer from '@topgunbuild/buffer';
+import WebCrypto from '@topgunbuild/webcrypto';
+import TextEncoder from '@topgunbuild/textencoder';
+import { isString } from '@topgunbuild/typed';
 
 export async function sha256(
     input: string|object,

@@ -1,4 +1,4 @@
-import { isObject, isString } from 'topgun-typed';
+import { isObject, isString } from '@topgunbuild/typed';
 import { TGNode } from '../types';
 
 export function isNode(data: unknown): boolean

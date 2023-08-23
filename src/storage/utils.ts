@@ -1,5 +1,5 @@
-import { isNumber, isString, isDefined } from 'topgun-typed';
-import textEncoder from 'topgun-textencoder';
+import { isNumber, isString, isDefined } from '@topgunbuild/typed';
+import textEncoder from '@topgunbuild/textencoder';
 import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from './constants';
 import { LEX, TGGraphAdapterOptions, TGGraphData, TGNode, TGOptionsGet } from '../types';
 import { StorageListOptions } from './types';

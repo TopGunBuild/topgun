@@ -1,5 +1,5 @@
-import Buffer from 'topgun-buffer';
-import { isString } from 'topgun-typed';
+import Buffer from '@topgunbuild/buffer';
+import { isString } from '@topgunbuild/typed';
 
 export const shuffleAttackCutoff = 1546329600000; // Jan 1, 2019
 export const pbkdf2              = { hash: { name: 'SHA-256' }, iter: 100000, ks: 64 };

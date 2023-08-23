@@ -1,4 +1,4 @@
-import { StructError, StructErrorInfo } from 'topgun-typed';
+import { StructError, StructErrorInfo } from '@topgunbuild/typed';
 
 export function expectOk(actual: any, expected: any)
 {

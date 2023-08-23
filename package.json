@@ -111,12 +111,12 @@
     },
     "homepage": "https://github.com/TopGunBuild/topgun#readme",
     "dependencies": {
-        "topgun-async-stream-emitter": "1.1.1",
-        "topgun-buffer": "1.0.6",
-        "topgun-socket": "1.4.9",
-        "topgun-textencoder": "^1.0.1",
-        "topgun-typed": "1.3.0",
-        "topgun-webcrypto": "1.0.5"
+        "@topgunbuild/async-stream-emitter": "^0.0.1",
+        "@topgunbuild/buffer": "^0.0.1",
+        "@topgunbuild/socket": "^0.0.1",
+        "@topgunbuild/textencoder": "^0.0.1",
+        "@topgunbuild/typed": "^0.1.0",
+        "@topgunbuild/webcrypto": "^0.0.1"
     },
     "devDependencies": {
         "@types/jest": "^29.5.0",

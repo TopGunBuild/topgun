@@ -1,4 +1,4 @@
-import WebCrypto from 'topgun-webcrypto';
+import WebCrypto from '@topgunbuild/webcrypto';
 import { keyToJwk } from './settings';
 import { sha256 } from './sha256';
 import { random } from '../utils/random';

@@ -1,6 +1,6 @@
-import Buffer from 'topgun-buffer';
-import WebCrypto from 'topgun-webcrypto';
-import { isString, isObject, isUndefined } from 'topgun-typed';
+import Buffer from '@topgunbuild/buffer';
+import WebCrypto from '@topgunbuild/webcrypto';
+import { isString, isObject, isUndefined } from '@topgunbuild/typed';
 import { check, ecdsa, jwk, parse } from './settings';
 import { sha256 } from './sha256';
 import { pubFromSoul } from './soul';

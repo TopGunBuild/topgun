@@ -1,12 +1,12 @@
-import { isObject, isString } from 'topgun-typed';
-import { AsyncStreamEmitter } from 'topgun-async-stream-emitter';
+import { isObject, isString } from '@topgunbuild/typed';
+import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { diffCRDT } from '../crdt';
 import { TGLink } from './link';
 import { TGGraph } from './graph/graph';
 import { TGGraphConnector } from './transports/graph-connector';
 import { TG_CLIENT_DEFAULT_OPTIONS, TGClientOptions, TGClientPeerOptions } from './client-options';
 import { createConnector } from './transports/web-socket-graph-connector';
-import { TGSocketClientOptions } from 'topgun-socket/client';
+import { TGSocketClientOptions } from '@topgunbuild/socket/client';
 import { TGUserApi } from './user-api';
 import { pubFromSoul, unpackGraph } from '../sea';
 import { TGIndexedDBConnector } from '../indexeddb/indexeddb-connector';

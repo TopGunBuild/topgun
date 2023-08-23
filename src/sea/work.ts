@@ -1,7 +1,7 @@
-import Buffer from 'topgun-buffer';
-import WebCrypto from 'topgun-webcrypto';
-import TextEncoder from 'topgun-textencoder';
-import { isObject, isString } from 'topgun-typed';
+import Buffer from '@topgunbuild/buffer';
+import WebCrypto from '@topgunbuild/webcrypto';
+import TextEncoder from '@topgunbuild/textencoder';
+import { isObject, isString } from '@topgunbuild/typed';
 import { pbkdf2 } from './settings';
 import { Pair } from './pair';
 import { pseudoRandomText } from './pseudo-random-text';

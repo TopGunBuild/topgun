@@ -1,4 +1,4 @@
-import { isNumber } from 'topgun-typed';
+import { isNumber } from '@topgunbuild/typed';
 import { encrypt } from './encrypt';
 import { pair as createPair } from './pair';
 import { pseudoRandomText } from './pseudo-random-text';

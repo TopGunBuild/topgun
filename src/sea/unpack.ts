@@ -1,4 +1,4 @@
-import { isObject, isDefined } from 'topgun-typed';
+import { isObject, isDefined } from '@topgunbuild/typed';
 import { check, parse, shuffleAttackCutoff } from './settings';
 import { pubFromSoul } from './soul';
 import { TGGraphData, TGNode } from '../types';

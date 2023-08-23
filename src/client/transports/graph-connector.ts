@@ -1,4 +1,4 @@
-import { AsyncStreamEmitter } from 'topgun-async-stream-emitter';
+import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { TGGet, TGPut, TGMessage } from '../../types';
 import { TGProcessQueue } from '../control-flow/process-queue';
 import { TGGraph } from '../graph/graph';

@@ -14,7 +14,7 @@ import {
     err,
     StructError,
     isString,
-} from 'topgun-typed';
+} from '@topgunbuild/typed';
 import { TGGraphData, TGNode } from '../types';
 
 const attributeTimestampStruct: Struct<TGNode> = (node) =>

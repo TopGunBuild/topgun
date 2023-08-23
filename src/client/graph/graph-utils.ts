@@ -1,4 +1,4 @@
-import { isObject, isNumber } from 'topgun-typed';
+import { isObject, isNumber } from '@topgunbuild/typed';
 import { TGGraphData, TGNode, TGOptionsGet, TGPathData, TGValue } from '../../types';
 import { isSupportValue } from '../../utils/is-support';
 import { filterNodesByListOptions, storageListOptionsFromGetOptions } from '../../storage/utils';

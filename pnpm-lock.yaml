@@ -5,24 +5,24 @@ settings:
   excludeLinksFromLockfile: false
 
 dependencies:
-  topgun-async-stream-emitter:
-    specifier: 1.1.1
-    version: 1.1.1
-  topgun-buffer:
-    specifier: 1.0.6
-    version: 1.0.6
-  topgun-socket:
-    specifier: 1.4.9
-    version: 1.4.9
-  topgun-textencoder:
-    specifier: ^1.0.1
-    version: 1.0.1
-  topgun-typed:
-    specifier: 1.3.0
-    version: 1.3.0
-  topgun-webcrypto:
-    specifier: 1.0.5
-    version: 1.0.5
+  '@topgunbuild/async-stream-emitter':
+    specifier: ^0.0.1
+    version: 0.0.1
+  '@topgunbuild/buffer':
+    specifier: ^0.0.1
+    version: 0.0.1
+  '@topgunbuild/socket':
+    specifier: ^0.0.1
+    version: 0.0.1
+  '@topgunbuild/textencoder':
+    specifier: ^0.0.1
+    version: 0.0.1
+  '@topgunbuild/typed':
+    specifier: ^0.1.0
+    version: 0.1.0
+  '@topgunbuild/webcrypto':
+    specifier: ^0.0.1
+    version: 0.0.1
 
 devDependencies:
   '@types/jest':
@@ -1009,6 +1009,47 @@ packages:
   /@tootallnate/quickjs-emscripten@0.23.0:
     resolution: {integrity: sha512-C5Mc6rdnsaJDjO3UpGW/CQTHtCKaYlScZTly4JIu97Jxo/odCiH0ITnDXSJPTOrEKk/ycSZ0AOgTmkDtkOsvIA==}
     dev: true
+
+  /@topgunbuild/async-stream-emitter@0.0.1:
+    resolution: {integrity: sha512-pJuvS9TuH5k164UC8qxU2iJfPQjakGOsIJhvsxTGjGJocaIlKoDsY4gwfPMZyOU5bZm60pi0BlM9QVfh94evEw==}
+    dev: false
+
+  /@topgunbuild/buffer@0.0.1:
+    resolution: {integrity: sha512-5t0A8OG3TnYITWsnNivkX793gJ1r+0u3d+UV5gIQFMoXp2hJ7e+CNOLO5Pw1T5vnzE58YZwYCifEhKNjQ1e+Sw==}
+    dev: false
+
+  /@topgunbuild/jsonwebtoken@0.0.3:
+    resolution: {integrity: sha512-S/RRyfDqFGJ/j4zjvZIhkyDWkAmLuDjPKC9o3W1uMKpzUQ98ShRzDSn3lLxEPx9MpcLSbYp8zEXcsBaslgcp9w==}
+    dependencies:
+      '@topgunbuild/webcrypto': 0.0.1
+      ms: 2.1.2
+    dev: false
+
+  /@topgunbuild/socket@0.0.1:
+    resolution: {integrity: sha512-Gp3ju/z44ZizNfQV5V84ylPWLpxEujJnNeT7NBHFpWQxarqyR4bXfpzo8VNIQ/DlbGdFtVVN8UjO/gqHEZeiQA==}
+    dependencies:
+      '@topgunbuild/async-stream-emitter': 0.0.1
+      '@topgunbuild/buffer': 0.0.1
+      '@topgunbuild/jsonwebtoken': 0.0.3
+      ws: 8.13.0
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
+    dev: false
+
+  /@topgunbuild/textencoder@0.0.1:
+    resolution: {integrity: sha512-yy/8IOA+wFImoELxLgleRqDLk00dyfnmAFfRqm9g/pLwXcaeh4xW2trqjFxamXp/VPF031OIMuY3Oz965VJEJw==}
+    dev: false
+
+  /@topgunbuild/typed@0.1.0:
+    resolution: {integrity: sha512-ULkurr4oki9BGy+9x3wmpj5ASvVO30Tv8d/E4JVil9tnbhZsoJ4450MuXsS3JBlJY4MFJoEk/6SlI3NbMI8xRw==}
+    dev: false
+
+  /@topgunbuild/webcrypto@0.0.1:
+    resolution: {integrity: sha512-YsChvYOkXU6FAWsMVqMCXXeEsB7qJO6UkZ9MUSz7DKU19xG2SS27bHh4k2On1DzWdWkTg8vcSpB4I8RmxJ37Kg==}
+    dependencies:
+      '@peculiar/webcrypto': 1.4.3
+    dev: false
 
   /@types/babel__core@7.20.0:
     resolution: {integrity: sha512-+n8dL/9GWblDO0iU6eZAwEIJVr5DWigtle+Q6HLOrh/pdbXOhOtqzq8VPPE2zvNJzSKY4vH/z3iT3tn0A3ypiQ==}
@@ -5541,51 +5582,6 @@ packages:
     dependencies:
       is-number: 7.0.0
     dev: true
-
-  /topgun-async-stream-emitter@1.1.0:
-    resolution: {integrity: sha512-vcBSzgNudjyengH8QFDvIDiEi41P0lsjNZkq4ljRsU4qCwF1Z4NkXWRpKCuBMJxPIBGA52wQmci130a3vxlvrA==}
-    dev: false
-
-  /topgun-async-stream-emitter@1.1.1:
-    resolution: {integrity: sha512-n8C0wDRFAf3Cj9HDe2oQawBv7GuPxnAPvxGOB7K4krIhUNkgiqlX0vNcWbqlzwoVaDqVfdabl/0h6gCHATlVMg==}
-    dev: false
-
-  /topgun-buffer@1.0.6:
-    resolution: {integrity: sha512-7K0v9lOXz7X3Cfzcyq9dC3YPG8BvaqmJC7vpQVXYHqo9L2buSkY2GKJ1Gl1j0e37/Gmh4VR0tEpP6V4qSvKXuw==}
-    dev: false
-
-  /topgun-jsonwebtoken@1.0.2:
-    resolution: {integrity: sha512-J/5H7kz+tcR8fiZuxn6BpuytevvPqo1/f3jv15/UOfYJFFzo/0QrQEO44MYoCDUwzIsvT7pF9pRHK/7GzqhsNQ==}
-    dependencies:
-      ms: 2.1.2
-      topgun-webcrypto: 1.0.5
-    dev: false
-
-  /topgun-socket@1.4.9:
-    resolution: {integrity: sha512-q1cNEMa4as2ZyLbhMjOqLd2EjB6a90vuSX247fIfk4R3jw2wiONDOtktwcm1htPCa27iDaQEVFuDhck+lQHSOQ==}
-    dependencies:
-      topgun-async-stream-emitter: 1.1.0
-      topgun-buffer: 1.0.6
-      topgun-jsonwebtoken: 1.0.2
-      ws: 8.13.0
-    transitivePeerDependencies:
-      - bufferutil
-      - utf-8-validate
-    dev: false
-
-  /topgun-textencoder@1.0.1:
-    resolution: {integrity: sha512-upc2+ZkRug9StMuQUlVHDhw4LuG0BCe96WoPShYYHb3/MfCzXRVkBV/3Sq8p0/st2MBWWDWK9eLDKz5QiLPkLg==}
-    dev: false
-
-  /topgun-typed@1.3.0:
-    resolution: {integrity: sha512-/t/M3tIJXluFg8WxO/7S1yBqd29/lV+SDOX3+6du1eZbVOhZE9VTwFP0Qx9N7jrSMYlwuuBQkDonucQqFyUDlQ==}
-    dev: false
-
-  /topgun-webcrypto@1.0.5:
-    resolution: {integrity: sha512-OyFjBRKvr3Sg0MQNeTc8nzA4NsPNZGSPZKAeJH19hZsYO22YwOeQS2xpNS9jk+rsxymXrPEMMpWo2qPmdyNHJg==}
-    dependencies:
-      '@peculiar/webcrypto': 1.4.3
-    dev: false
 
   /tr46@0.0.3:
     resolution: {integrity: sha512-N3WMsuqV66lT30CrXNbEjx4GEwlow3v6rr4mCcv6prnfwhS01rkgyFdjPNBYd9br7LpXV1+Emh01fHnq2Gdgrw==}

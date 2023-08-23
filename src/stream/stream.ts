@@ -3,7 +3,7 @@ import {
     DemuxedConsumableStream,
     StreamDemux,
     ConsumableStreamConsumer
-} from 'topgun-async-stream-emitter';
+} from '@topgunbuild/async-stream-emitter';
 import { uuidv4 } from '../utils/uuidv4';
 import { TGStreamState } from './types';
 import { TGExchange } from './exchange';

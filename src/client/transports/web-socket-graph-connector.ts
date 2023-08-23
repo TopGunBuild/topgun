@@ -1,11 +1,11 @@
 import { TGGraphWireConnector } from './graph-wire-connector';
-import { TGChannel } from 'topgun-socket/channel';
+import { TGChannel } from '@topgunbuild/socket/channel';
 import {
     TGSocketClientOptions,
     TGClientSocket,
     create as createSocketClient,
     SubscribeOptions,
-} from 'topgun-socket/client';
+} from '@topgunbuild/socket/client';
 import { TGGet, TGMessage, TGMessageCb, TGPut } from '../../types';
 import { sign } from '../../sea';
 import { uuidv4 } from '../../utils/uuidv4';

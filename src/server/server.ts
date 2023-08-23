@@ -1,8 +1,8 @@
-import { Struct, Result, ok, isErr, isObject, isFunction } from 'topgun-typed';
+import { Struct, Result, ok, isErr, isObject, isFunction } from '@topgunbuild/typed';
 import { pseudoRandomText, verify } from '../sea';
 import { TGGraphAdapter, TGGraphData, TGMessage } from '../types';
 import { TGServerOptions } from './server-options';
-import { listen, TGSocketServer, TGSocket } from 'topgun-socket/server';
+import { listen, TGSocketServer, TGSocket } from '@topgunbuild/socket/server';
 import { createMemoryAdapter } from '../memory-adapter';
 import { createValidator } from '../validator';
 import { Middleware } from './middleware';

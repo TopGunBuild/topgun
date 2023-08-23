@@ -1,4 +1,4 @@
-import { cloneValue, isNumber, isObject } from 'topgun-typed';
+import { cloneValue, isNumber, isObject } from '@topgunbuild/typed';
 import { TGLink } from './link';
 import { LEX } from '../types/lex';
 import { TGClient } from './client';
