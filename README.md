@@ -6,24 +6,24 @@
 <p align="center">Alternate implementation of <a href="https://github.com/amark/gun" target="blank">GunDB</a> in TypeScript</p>
 
 <p align="center">
-  <a href="https://npm.im/topgun">
-    <img alt="npm" src="https://badgen.net/npm/v/topgun">
+  <a href="https://npm.im/@topgunbuild/topgun">
+    <img alt="npm" src="https://badgen.net/npm/v/@topgunbuild/topgun">
   </a>
-  <a href="https://bundlephobia.com/result?p=topgun">
-    <img alt="bundlephobia" src="https://img.shields.io/bundlephobia/minzip/topgun.svg">
+  <a href="https://bundlephobia.com/result?p=@topgunbuild/topgun">
+    <img alt="bundlephobia" src="https://img.shields.io/bundlephobia/minzip/@topgunbuild/topgun.svg">
   </a>
   <a href="https://opensource.org/licenses/MIT">
       <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg">
   </a>
-  <a href="https://snyk.io/test/github/TopGunBuild/topgun">
-      <img alt="Snyk" src="https://snyk.io/test/github/TopGunBuild/topgun/badge.svg">
+  <a href="https://snyk.io/test/github/TopGunBuild/@topgunbuild/topgun">
+      <img alt="Snyk" src="https://snyk.io/test/github/TopGunBuild/@topgunbuild/topgun/badge.svg">
   </a>
 </p>
 
 ## Installation
 
 ```bash
-$ npm install topgun --save
+$ npm install @topgunbuild/topgun --save
 ```
 
 ## Description
