@@ -60,7 +60,7 @@ export type TGOptionsPut = Partial<{
     [key: string]: any;
 }>;
 
-export interface CRDTOpts
+export interface CRDTOptions
 {
     machineState?: number;
     futureGrace?: number;
@@ -173,7 +173,7 @@ export interface TGPathData
 export type TGMiddleware = (
     updates: TGGraphData,
     existingGraph: TGGraphData,
-    opts?: CRDTOpts|TGOptionsGet|TGOptionsPut,
+    opts?: CRDTOptions|TGOptionsGet|TGOptionsPut,
     fullPath?: string[],
 ) => TGGraphData|undefined|Promise<TGGraphData|undefined>;
 export type TGMiddlewareType = 'read'|'write';
