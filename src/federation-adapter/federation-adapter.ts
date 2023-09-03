@@ -500,11 +500,10 @@ export function createFederatedAdapter(
     const peers   = { ...external };
 
     return {
-        get: async (soul: string, opts?: TGOptionsGet) =>
+        get: async (opts: TGOptionsGet) =>
         {
-            console.log('get', soul);
             await updateFromPeers(internal, persist, peers, soul, adapterOpts);
-            return internal.get(soul, opts);
+            return internal.get(opts);
         },
 
         put: async (data: TGGraphData) =>

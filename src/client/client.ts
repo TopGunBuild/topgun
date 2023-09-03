@@ -4,16 +4,16 @@ import { diffCRDT } from '../crdt';
 import { TGLink } from './link';
 import { TGGraph } from './graph/graph';
 import { TGGraphConnector } from './transports/graph-connector';
-import { TG_CLIENT_DEFAULT_OPTIONS, TGClientOptions, TGClientPeerOptions } from './client-options';
+import { TG_CLIENT_DEFAULT_OPTIONS, TGClientOptions } from './client-options';
 import { createConnector } from './transports/web-socket-graph-connector';
-import { TGSocketClientOptions } from '@topgunbuild/socket/client';
 import { TGUserApi } from './user-api';
 import { pubFromSoul, unpackGraph } from '../sea';
 import { TGIndexedDBConnector } from '../indexeddb/indexeddb-connector';
-import { TGNode } from '../types';
+import { TGPeerOptions, TGNode } from '../types';
 import { match } from '../utils/match';
 import { assertObject, assertGetPath } from '../utils/assert';
 import { getSessionStorage, getSessionStorageKey } from '../utils';
+import { socketOptionsFromPeer } from '../utils/socket-options-from-peer';
 
 let clientOptions: TGClientOptions;
 
@@ -194,30 +194,17 @@ export class TGClient extends AsyncStreamEmitter<any>
     /**
      * Connect to peers via connector TopGunSocket
      */
-    async #handlePeers(peers: TGClientPeerOptions[]): Promise<void>
+    async #handlePeers(peers: TGPeerOptions[]): Promise<void>
     {
-        peers.forEach((peer: TGClientPeerOptions) =>
+        peers.forEach((peer: TGPeerOptions) =>
         {
             try
             {
-                if (isString(peer))
-                {
-                    const url                            = new URL(peer);
-                    const options: TGSocketClientOptions = {
-                        hostname: url.hostname,
-                        secure  : url.protocol.includes('https'),
-                    };
+                const socketOpts = socketOptionsFromPeer(peer);
 
-                    if (url.port.length > 0)
-                    {
-                        options.port = Number(url.port);
-                    }
-
-                    this.#useConnector(createConnector(options));
-                }
-                else if (isObject(peer))
+                if (socketOpts)
                 {
-                    this.#useConnector(createConnector(peer));
+                    this.#useConnector(createConnector(socketOpts));
                 }
             }
             catch (e)

@@ -1,4 +1,4 @@
-import { LEX } from './lex';
+import { TGSocketClientOptions } from '@topgunbuild/socket/client';
 
 /**
  * Timestamp of last change for each attribute
@@ -188,3 +188,42 @@ type PromisifyMethods<T> = {
 };
 
 export type TGSupportedStorage = PromisifyMethods<Pick<Storage, 'getItem'|'setItem'|'removeItem'>>;
+
+export type TGPeerOptions = string|TGSocketClientOptions;
+
+export type LEX = {
+    /** prefix match */
+    '*'?: string;
+    /** greater than or equals */
+    '>'?: string;
+    /** less than match */
+    '<'?: string;
+};
+
+export interface IPolicyLex extends LEX {
+    /** Path */
+    '#'?: IPolicyLex;
+    /** Key */
+    '.'?: IPolicyLex;
+    /**
+     * Either Path string or Key string must
+     * contain Certificate's Pub string
+     */
+    '+'?: '*';
+}
+
+export type IPolicy = string | IPolicyLex | (string | IPolicyLex)[];
+
+export interface TGGraphAdapter
+{
+    readonly close?: () => void;
+    readonly get: (opts: TGOptionsGet) => Promise<TGGraphData>;
+    readonly put: (graphData: TGGraphData) => Promise<TGGraphData|null>;
+}
+
+export interface TGGraphAdapterOptions
+{
+    maxKeySize?: number;
+    maxValueSize?: number;
+}
+

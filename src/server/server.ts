@@ -1,12 +1,14 @@
 import { Struct, Result, ok, isErr, isObject, isFunction } from '@topgunbuild/typed';
 import { pseudoRandomText, verify } from '../sea';
-import { TGGraphAdapter, TGGraphData, TGMessage } from '../types';
+import { TGGraphAdapter, TGGraphData, TGMessage, TGPeerOptions } from '../types';
 import { TGServerOptions } from './server-options';
 import { listen, TGSocketServer, TGSocket } from '@topgunbuild/socket/server';
 import { createMemoryAdapter } from '../memory-adapter';
 import { createValidator } from '../validator';
 import { Middleware } from './middleware';
 import { uuidv4 } from '../utils/uuidv4';
+import { socketOptionsFromPeer } from '../utils/socket-options-from-peer';
+import { createConnector, TGWebSocketGraphConnector } from '../client/transports/web-socket-graph-connector';
 
 export class TGServer
 {
@@ -15,6 +17,7 @@ export class TGServer
     readonly gateway: TGSocketServer;
     readonly options: TGServerOptions;
     readonly middleware: Middleware;
+    readonly peerConnectors: Map<string, TGWebSocketGraphConnector>;
 
     protected readonly validator: Struct<TGGraphData>;
 
@@ -29,6 +32,7 @@ export class TGServer
         this.adapter         = this.#wrapAdapter(this.internalAdapter);
         this.gateway         = listen(this.options.port, this.options);
         this.middleware      = new Middleware(this.gateway, this.options, this.adapter);
+        this.peerConnectors  = new Map<string, TGWebSocketGraphConnector>();
         this.#run();
     }
 
@@ -50,6 +54,30 @@ export class TGServer
         await this.gateway.close();
     }
 
+    /**
+     * Invoked to create a direct connection to another tg server & publish or subscribe
+     */
+    async connectToServer(peer: TGPeerOptions): Promise<void>
+    {
+        try
+        {
+            const opts      = socketOptionsFromPeer(peer);
+            const connector = createConnector(opts);
+            const uri       = connector.client.transport.uri();
+
+            if (this.peerConnectors.has(uri))
+            {
+                this.peerConnectors.get(uri).disconnect();
+            }
+
+            this.peerConnectors.set(uri, connector);
+        }
+        catch (e)
+        {
+            console.error(e);
+        }
+    }
+
     // -----------------------------------------------------------------------------------------------------
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
@@ -61,6 +89,10 @@ export class TGServer
     {
         this.middleware.setupMiddleware();
         this.#handleWebsocketConnection();
+        if (Array.isArray(this.options?.peers))
+        {
+            this.options.peers.forEach(peer => this.connectToServer(peer));
+        }
     }
 
     /**

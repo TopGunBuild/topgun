@@ -1,5 +1,5 @@
 import { TGSocketServerOptions } from '@topgunbuild/socket/server';
-import { TGGraphAdapter, TGGraphAdapterOptions } from '../types';
+import { TGGraphAdapter, TGGraphAdapterOptions, TGPeerOptions } from '../types';
 
 export interface TGServerOptions extends TGSocketServerOptions, TGGraphAdapterOptions
 {
@@ -8,4 +8,5 @@ export interface TGServerOptions extends TGSocketServerOptions, TGGraphAdapterOp
     ownerPub?: string;
     adapter?: TGGraphAdapter;
     port?: number;
+    peers?: TGPeerOptions[];
 }
