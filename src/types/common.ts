@@ -219,6 +219,7 @@ export interface TGGraphAdapter
     readonly close?: () => void;
     readonly get: (opts: TGOptionsGet) => Promise<TGGraphData>;
     readonly put: (graphData: TGGraphData) => Promise<TGGraphData|null>;
+    readonly pruneChangelog?: (before: number) => Promise<void>;
 }
 
 export interface TGGraphAdapterOptions

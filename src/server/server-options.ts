@@ -9,4 +9,10 @@ export interface TGServerOptions extends TGSocketServerOptions, TGGraphAdapterOp
     adapter?: TGGraphAdapter;
     port?: number;
     peers?: TGPeerOptions[];
+    peerSyncInterval?: number;
+    peerPruneInterval?: number;
+    peerBackSync?: number;
+    peerMaxStaleness?: number;
+    peerBatchInterval?: number;
+    peerChangelogRetention?: number;
 }

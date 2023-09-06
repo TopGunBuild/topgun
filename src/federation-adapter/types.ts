@@ -1,6 +1,7 @@
 import { TGGraphAdapter, TGGraphData } from '../types';
+import { TGWebSocketGraphConnector } from '../client/transports/web-socket-graph-connector';
 
-export type TGPeerSet = Record<string, TGGraphAdapter>;
+export type TGPeerSet = Record<string, TGWebSocketGraphConnector>;
 
 export type TGChangeSetEntry = readonly [string, TGGraphData];
 

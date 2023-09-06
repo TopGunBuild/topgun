@@ -1,4 +1,4 @@
-import { Struct, Result, ok, isErr, isObject, isFunction } from '@topgunbuild/typed';
+import { Struct, Result, ok, isErr, isFunction } from '@topgunbuild/typed';
 import { pseudoRandomText, verify } from '../sea';
 import { TGGraphAdapter, TGGraphData, TGMessage, TGPeerOptions } from '../types';
 import { TGServerOptions } from './server-options';
@@ -8,31 +8,49 @@ import { createValidator } from '../validator';
 import { Middleware } from './middleware';
 import { uuidv4 } from '../utils/uuidv4';
 import { socketOptionsFromPeer } from '../utils/socket-options-from-peer';
-import { createConnector, TGWebSocketGraphConnector } from '../client/transports/web-socket-graph-connector';
+import { createConnector } from '../client/transports/web-socket-graph-connector';
+import { removeProtocolFromUrl } from '../utils/remove-protocol-from-url';
+import { sleep } from '../utils/sleep';
+import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from '../storage';
+import { FederationAdapter } from '../federation-adapter/federation-adapter';
+import { TGFederatedGraphAdapter, TGPeerSet } from '../federation-adapter';
 
 export class TGServer
 {
-    readonly adapter: TGGraphAdapter;
+    readonly adapter: TGFederatedGraphAdapter;
     readonly internalAdapter: TGGraphAdapter;
     readonly gateway: TGSocketServer;
     readonly options: TGServerOptions;
     readonly middleware: Middleware;
-    readonly peerConnectors: Map<string, TGWebSocketGraphConnector>;
+    readonly peerSet: TGPeerSet;
 
     protected readonly validator: Struct<TGGraphData>;
+
+    private pruneInterval: any;
 
     /**
      * Constructor
      */
     constructor(options?: TGServerOptions)
     {
-        this.options         = isObject(options) ? options : {};
+        const opts: TGServerOptions = {
+            maxKeySize            : MAX_KEY_SIZE,
+            maxValueSize          : MAX_VALUE_SIZE,
+            disableValidation     : false,
+            authMaxDrift          : 1000 * 60 * 5,
+            peerSyncInterval      : 1000,
+            peerPruneInterval     : 60 * 60 * 1000,
+            peerBackSync          : 0,
+            peerChangelogRetention: 0
+        };
+
+        this.options         = Object.assign(opts, options || {});
         this.validator       = createValidator();
         this.internalAdapter = this.options.adapter || createMemoryAdapter(options);
         this.adapter         = this.#wrapAdapter(this.internalAdapter);
         this.gateway         = listen(this.options.port, this.options);
         this.middleware      = new Middleware(this.gateway, this.options, this.adapter);
-        this.peerConnectors  = new Map<string, TGWebSocketGraphConnector>();
+        this.peerSet         = {};
         this.#run();
     }
 
@@ -52,25 +70,26 @@ export class TGServer
             this.gateway.httpServer.close();
         }
         await this.gateway.close();
+        clearInterval(this.pruneInterval);
     }
 
     /**
      * Invoked to create a direct connection to another tg server & publish or subscribe
      */
-    async connectToServer(peer: TGPeerOptions): Promise<void>
+    async connectToPeer(peer: TGPeerOptions): Promise<void>
     {
         try
         {
             const opts      = socketOptionsFromPeer(peer);
             const connector = createConnector(opts);
-            const uri       = connector.client.transport.uri();
+            const uri       = removeProtocolFromUrl(connector.client.transport.uri());
 
-            if (this.peerConnectors.has(uri))
+            if (this.peerSet[uri])
             {
-                this.peerConnectors.get(uri).disconnect();
+                this.peerSet[uri].disconnect();
             }
 
-            this.peerConnectors.set(uri, connector);
+            this.peerSet[uri] = connector;
         }
         catch (e)
         {
@@ -87,12 +106,44 @@ export class TGServer
      */
     #run(): void
     {
+        if (Array.isArray(this.options?.peers) && this.options.peers.length > 0)
+        {
+            this.#syncWithPeers();
+            this.#prune();
+            this.pruneInterval = setInterval(this.#prune.bind(this), this.options.peerPruneInterval);
+        }
+
         this.middleware.setupMiddleware();
         this.#handleWebsocketConnection();
-        if (Array.isArray(this.options?.peers))
+    }
+
+    async #syncWithPeers(): Promise<void>
+    {
+        this.options.peers.forEach(peer => this.connectToPeer(peer));
+        this.adapter.connectToPeers();
+
+        while (true)
         {
-            this.options.peers.forEach(peer => this.connectToServer(peer));
+            try
+            {
+                await this.adapter.syncWithPeers()
+            }
+            catch (e: any)
+            {
+                console.warn('Sync error', e.stack || e)
+            }
+
+            await sleep(this.options.peerSyncInterval || 1000);
         }
+    }
+
+    async #prune(): Promise<void>
+    {
+        const before = new Date().getTime() - (this.options.peerChangelogRetention || 0);
+        return (
+            this.internalAdapter.pruneChangelog &&
+            this.internalAdapter.pruneChangelog(before)
+        )
     }
 
     /**
@@ -115,7 +166,7 @@ export class TGServer
     /**
      * Wrap adapter
      */
-    #wrapAdapter(adapter: TGGraphAdapter): TGGraphAdapter
+    #wrapAdapter(adapter: TGGraphAdapter): TGFederatedGraphAdapter
     {
         const withPublish: TGGraphAdapter = {
             ...adapter,
@@ -135,7 +186,7 @@ export class TGServer
             },
         };
 
-        return {
+        const withValidation = {
             ...withPublish,
             put: async (graph: TGGraphData) =>
             {
@@ -149,6 +200,18 @@ export class TGServer
                 return withPublish.put(graph);
             },
         };
+
+        return FederationAdapter.create(
+            withPublish,
+            this.peerSet,
+            withValidation,
+            {
+                backSync     : this.options.peerBackSync,
+                batchInterval: this.options.peerBatchInterval,
+                maxStaleness : this.options.peerMaxStaleness,
+                putToPeers   : true
+            }
+        )
     }
 
     /**
@@ -203,6 +266,15 @@ export class TGServer
         {
             (async () =>
             {
+                // const url = socket.request.headers.host + socket.request.url;
+                //
+                // if (this.peerSet[url])
+                // {
+                //     const err = new Error('Peer already connect');
+                //     err.name = 'FailedPeerConnect';
+                //     socket.disconnect();
+                // }
+
                 // Set up a loop to handle and respond to RPCs.
                 for await (const request of (socket as TGSocket).procedure('login'))
                 {

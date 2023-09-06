@@ -47,7 +47,7 @@ async function updateFromPeer(
     persist: TGGraphAdapter,
     peerName: string,
     allPeers: TGPeerSet,
-    soul: string,
+    getOpts: TGOptionsGet,
     adapterOpts?: TGFederatedAdapterOptions
 ): Promise<void>
 {
@@ -127,7 +127,7 @@ function updateFromPeers(
     internal: TGGraphAdapter,
     persist: TGGraphAdapter,
     allPeers: TGPeerSet,
-    soul: string,
+    getOpts: TGOptionsGet,
     opts?: TGFederatedAdapterOptions
 ): Promise<void>
 {
@@ -500,10 +500,10 @@ export function createFederatedAdapter(
     const peers   = { ...external };
 
     return {
-        get: async (opts: TGOptionsGet) =>
+        get: async (getOpts: TGOptionsGet) =>
         {
-            await updateFromPeers(internal, persist, peers, soul, adapterOpts);
-            return internal.get(opts);
+            await updateFromPeers(internal, persist, peers, getOpts, adapterOpts);
+            return internal.get(getOpts);
         },
 
         put: async (data: TGGraphData) =>
@@ -528,11 +528,9 @@ export function createFederatedAdapter(
             return diff
         },
 
-        syncWithPeers: () =>
-            syncWithPeers(internal, persist, external, adapterOpts),
+        syncWithPeers: () => syncWithPeers(internal, persist, external, adapterOpts),
 
-        connectToPeers: () =>
-            connectToPeers(internal, persist, external, adapterOpts),
+        connectToPeers: () => connectToPeers(internal, persist, external, adapterOpts),
 
         getChangesetFeed: (from: string) => getChangesetFeed(internal, from)
     }
