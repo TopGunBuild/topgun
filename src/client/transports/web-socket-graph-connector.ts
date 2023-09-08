@@ -10,7 +10,6 @@ import { TGGet, TGMessage, TGMessageCb, TGPut } from '../../types';
 import { sign } from '../../sea';
 import { uuidv4 } from '../../utils/uuidv4';
 
-/* eslint-disable @typescript-eslint/no-empty-function */
 /* eslint-disable-next-line @typescript-eslint/no-unused-vars */
 export class TGWebSocketGraphConnector extends TGGraphWireConnector
 {

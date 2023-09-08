@@ -1,7 +1,7 @@
-import { TGGraphAdapter, TGGraphData } from '../types';
-import { TGWebSocketGraphConnector } from '../client/transports/web-socket-graph-connector';
+import { TGGraphData } from '../types';
+import { WebSocketAdapter } from '../web-socket-adapter';
 
-export type TGPeerSet = Record<string, TGWebSocketGraphConnector>;
+export type TGPeerSet = Record<string, WebSocketAdapter>;
 
 export type TGChangeSetEntry = readonly [string, TGGraphData];
 
@@ -14,11 +14,3 @@ export interface TGFederatedAdapterOptions
     readonly batchInterval?: number;
 }
 
-export interface TGFederatedGraphAdapter extends TGGraphAdapter
-{
-    readonly syncWithPeers: () => Promise<void>
-    readonly connectToPeers: () => () => void
-    readonly getChangesetFeed: (
-        from: string
-    ) => () => Promise<TGChangeSetEntry|null>
-}

@@ -8,16 +8,16 @@ import { createValidator } from '../validator';
 import { Middleware } from './middleware';
 import { uuidv4 } from '../utils/uuidv4';
 import { socketOptionsFromPeer } from '../utils/socket-options-from-peer';
-import { createConnector } from '../client/transports/web-socket-graph-connector';
 import { removeProtocolFromUrl } from '../utils/remove-protocol-from-url';
 import { sleep } from '../utils/sleep';
 import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from '../storage';
-import { FederationAdapter } from '../federation-adapter/federation-adapter';
-import { TGFederatedGraphAdapter, TGPeerSet } from '../federation-adapter';
+import { TGFederationAdapter } from '../federation-adapter/federation-adapter';
+import { TGPeerSet } from '../federation-adapter';
+import { WebSocketAdapter } from '../web-socket-adapter';
 
 export class TGServer
 {
-    readonly adapter: TGFederatedGraphAdapter;
+    readonly adapter: TGFederationAdapter;
     readonly internalAdapter: TGGraphAdapter;
     readonly gateway: TGSocketServer;
     readonly options: TGServerOptions;
@@ -80,16 +80,16 @@ export class TGServer
     {
         try
         {
-            const opts      = socketOptionsFromPeer(peer);
-            const connector = createConnector(opts);
-            const uri       = removeProtocolFromUrl(connector.client.transport.uri());
+            const opts    = socketOptionsFromPeer(peer);
+            const adapter = new WebSocketAdapter(opts);
+            const url     = removeProtocolFromUrl(adapter.client.transport.uri());
 
-            if (this.peerSet[uri])
+            if (this.peerSet[url])
             {
-                this.peerSet[uri].disconnect();
+                this.peerSet[url].close();
             }
 
-            this.peerSet[uri] = connector;
+            this.peerSet[url] = adapter;
         }
         catch (e)
         {
@@ -166,7 +166,7 @@ export class TGServer
     /**
      * Wrap adapter
      */
-    #wrapAdapter(adapter: TGGraphAdapter): TGFederatedGraphAdapter
+    #wrapAdapter(adapter: TGGraphAdapter): TGFederationAdapter
     {
         const withPublish: TGGraphAdapter = {
             ...adapter,
@@ -201,7 +201,7 @@ export class TGServer
             },
         };
 
-        return FederationAdapter.create(
+        return new TGFederationAdapter(
             withPublish,
             this.peerSet,
             withValidation,

@@ -17,7 +17,6 @@ import { uuidv4 } from '../utils/uuidv4';
 import { TGStream } from '../stream/stream';
 import { TGExchange } from '../stream/exchange';
 
-/* eslint-disable @typescript-eslint/no-empty-function */
 export class TGLink
 {
     readonly id: string;

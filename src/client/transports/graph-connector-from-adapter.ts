@@ -1,8 +1,7 @@
 import { TGGet, TGPut, TGGraphAdapter } from '../../types';
 import { TGGraphWireConnector } from './graph-wire-connector';
 import { uuidv4 } from '../../utils/uuidv4';
-
-const NOOP = () => undefined;
+import { NOOP } from '../../utils/noop';
 
 export class TGGraphConnectorFromAdapter extends TGGraphWireConnector
 {

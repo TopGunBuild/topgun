@@ -2,7 +2,6 @@ import { TGGet, TGPut, TGMessage, TGMessageCb } from '../../types';
 import { TGGraphConnector } from './graph-connector';
 import { uuidv4 } from '../../utils/uuidv4';
 
-/* eslint-disable @typescript-eslint/no-empty-function */
 export class TGGraphWireConnector extends TGGraphConnector
 {
     private readonly _callbacks: {

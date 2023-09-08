@@ -1,5 +1,5 @@
 import { isString, isObject, isDefined } from '@topgunbuild/typed';
-import { LEX } from '../types/lex';
+import { LEX } from '../types';
 
 export function match(template: string, options: LEX|string): boolean
 {

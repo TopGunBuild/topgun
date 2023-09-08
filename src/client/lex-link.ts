@@ -1,8 +1,7 @@
 import { cloneValue, isNumber, isObject } from '@topgunbuild/typed';
 import { TGLink } from './link';
-import { LEX } from '../types/lex';
 import { TGClient } from './client';
-import { TGData, TGOnCb, TGOptionsGet, TGValue } from '../types';
+import { LEX, TGData, TGOnCb, TGOptionsGet, TGValue } from '../types';
 import { assertBoolean, assertNotEmptyString, assertNumber } from '../utils/assert';
 import { replacerSortKeys } from '../utils/replacer-sort-keys';
 import { TGStream } from '../stream/stream';
