@@ -1,4 +1,5 @@
 import { Struct, Result, ok, isErr, isFunction } from '@topgunbuild/typed';
+import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { pseudoRandomText, verify } from '../sea';
 import { TGGraphAdapter, TGGraphData, TGMessage, TGPeerOptions } from '../types';
 import { TGServerOptions } from './server-options';
@@ -15,7 +16,7 @@ import { TGFederationAdapter } from '../federation-adapter/federation-adapter';
 import { TGPeerSet } from '../federation-adapter';
 import { WebSocketAdapter } from '../web-socket-adapter';
 
-export class TGServer
+export class TGServer extends AsyncStreamEmitter<any>
 {
     readonly adapter: TGFederationAdapter;
     readonly internalAdapter: TGGraphAdapter;
@@ -33,6 +34,7 @@ export class TGServer
      */
     constructor(options?: TGServerOptions)
     {
+        super();
         const opts: TGServerOptions = {
             maxKeySize            : MAX_KEY_SIZE,
             maxValueSize          : MAX_VALUE_SIZE,
@@ -65,6 +67,7 @@ export class TGServer
 
     async close(): Promise<void>
     {
+        Object.keys(this.peerSet).forEach(key => this.peerSet[key].close());
         if (isFunction(this.gateway.httpServer?.close))
         {
             this.gateway.httpServer.close();
@@ -76,7 +79,7 @@ export class TGServer
     /**
      * Invoked to create a direct connection to another tg server & publish or subscribe
      */
-    async connectToPeer(peer: TGPeerOptions): Promise<void>
+    connectToPeer(peer: TGPeerOptions): WebSocketAdapter
     {
         try
         {
@@ -90,6 +93,8 @@ export class TGServer
             }
 
             this.peerSet[url] = adapter;
+
+            return adapter;
         }
         catch (e)
         {
