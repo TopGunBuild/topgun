@@ -126,7 +126,7 @@ export class TGLink
         // The argument is a LEX query
         if (isObject(keyOrOptions))
         {
-            return new TGLexLink(this._client, assertOptionsGet(keyOrOptions), this);
+            return new TGLexLink(this, this._client.transportMaxKeyValuePairs, assertOptionsGet(keyOrOptions));
         }
         else if (isString(keyOrOptions))
         {
@@ -345,7 +345,7 @@ export class TGLink
 
     map(): TGLexLink
     {
-        return new TGLexLink(this._client, {}, this);
+        return new TGLexLink(this, this._client.transportMaxKeyValuePairs);
     }
 
     start(value: string): TGLexLink

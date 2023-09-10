@@ -1,6 +1,5 @@
 import { cloneValue, isNumber, isObject } from '@topgunbuild/typed';
 import { TGLink } from './link';
-import { TGClient } from './client';
 import { LEX, TGData, TGOnCb, TGOptionsGet, TGValue } from '../types';
 import { assertBoolean, assertNotEmptyString, assertNumber } from '../utils/assert';
 import { replacerSortKeys } from '../utils/replacer-sort-keys';
@@ -15,17 +14,15 @@ export class TGLexLink
 
     private readonly _maxLimit: number;
     private readonly _link: TGLink;
-    private readonly _chain: TGClient;
 
     /**
      * Constructor
      */
-    constructor(chain: TGClient, optionsGet: TGOptionsGet, link: TGLink)
+    constructor(link: TGLink, maxLimit = 200, optionsGet: TGOptionsGet = {})
     {
-        this._chain     = chain;
         this._link      = link;
         this._link._lex = this;
-        this._maxLimit  = this._chain.transportMaxKeyValuePairs;
+        this._maxLimit  =  maxLimit;
         this.optionsGet = {
             '.': {},
             '%': this._maxLimit
