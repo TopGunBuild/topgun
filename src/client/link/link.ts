@@ -6,16 +6,16 @@ import {
     TGOptionsGet,
     TGOptionsPut,
     TGValue,
-} from '../types';
-import { TGClient } from './client';
-import { TGGraph } from './graph/graph';
-import { pubFromSoul } from '../sea';
-import { assertGetPath, assertNotEmptyString, assertOptionsGet } from '../utils/assert';
-import { getNodeSoul, isNode } from '../utils/node';
+} from '../../types';
+import { TGClient } from '../client';
+import { TGGraph } from '../graph/graph';
+import { pubFromSoul } from '../../sea';
+import { assertGetPath, assertNotEmptyString, assertOptionsGet } from '../../utils/assert';
+import { getNodeSoul, isNode } from '../../utils/node';
 import { TGLexLink } from './lex-link';
-import { uuidv4 } from '../utils/uuidv4';
-import { TGStream } from '../stream/stream';
-import { TGExchange } from '../stream/exchange';
+import { uuidv4 } from '../../utils/uuidv4';
+import { TGStream } from '../../stream/stream';
+import { TGExchange } from '../../stream/exchange';
 
 export class TGLink
 {

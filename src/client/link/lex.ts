@@ -1,31 +1,24 @@
 import { cloneValue, isNumber, isObject } from '@topgunbuild/typed';
-import { TGLink } from './link';
-import { LEX, TGData, TGOnCb, TGOptionsGet, TGValue } from '../types';
-import { assertBoolean, assertNotEmptyString, assertNumber } from '../utils/assert';
-import { replacerSortKeys } from '../utils/replacer-sort-keys';
-import { TGStream } from '../stream/stream';
+import { LEX, TGOptionsGet } from '../../types';
+import { assertBoolean, assertNotEmptyString, assertNumber, replacerSortKeys } from '../../utils';
 
 type KeyOfLex = keyof LEX;
 type ValueOfLex = LEX[KeyOfLex];
 
-export class TGLexLink
+export class TGLex
 {
     readonly optionsGet: TGOptionsGet;
-
-    private readonly _maxLimit: number;
-    private readonly _link: TGLink;
+    readonly maxLimit: number;
 
     /**
      * Constructor
      */
-    constructor(link: TGLink, maxLimit = 200, optionsGet: TGOptionsGet = {})
+    constructor(maxLimit = 200, optionsGet: TGOptionsGet = {})
     {
-        this._link      = link;
-        this._link._lex = this;
-        this._maxLimit  =  maxLimit;
+        this.maxLimit  =  maxLimit;
         this.optionsGet = {
             '.': {},
-            '%': this._maxLimit
+            '%': this.maxLimit
         };
         if (isObject(optionsGet))
         {
@@ -38,44 +31,43 @@ export class TGLexLink
                 this.optionsGet['%'] = optionsGet['%'];
             }
         }
-        this.#mergeSoul();
     }
 
     // -----------------------------------------------------------------------------------------------------
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    start(value: string): TGLexLink
+    start(value: string): TGLex
     {
         this.#setLex('>', assertNotEmptyString(value));
         return this;
     }
 
-    end(value: string): TGLexLink
+    end(value: string): TGLex
     {
         this.#setLex('<', assertNotEmptyString(value));
         return this;
     }
 
-    prefix(value: string): TGLexLink
+    prefix(value: string): TGLex
     {
         this.#setLex('*', assertNotEmptyString(value));
         return this;
     }
 
-    limit(value: number): TGLexLink
+    limit(value: number): TGLex
     {
-        if (value > this._maxLimit)
+        if (value > this.maxLimit)
         {
             throw Error(
-                `Limit exceeds the maximum allowed. The maximum length is ${this._maxLimit}`
+                `Limit exceeds the maximum allowed. The maximum length is ${this.maxLimit}`
             );
         }
         this.optionsGet['%'] = assertNumber(value);
         return this;
     }
 
-    reverse(value = true): TGLexLink
+    reverse(value = true): TGLex
     {
         this.optionsGet['-'] = assertBoolean(value);
         return this;
@@ -91,26 +83,6 @@ export class TGLexLink
         return this.optionsGet;
     }
 
-    once<T extends TGValue>(cb?: TGOnCb<T>): TGStream<TGData<T>>
-    {
-        return this._link.once(cb);
-    }
-
-    on<T extends TGValue>(cb?: TGOnCb<T>): TGStream<TGData<T>>
-    {
-        return this._link.on(cb);
-    }
-
-    off(): void
-    {
-        return this._link.off();
-    }
-
-    map(): TGLexLink
-    {
-        return this;
-    }
-
     // -----------------------------------------------------------------------------------------------------
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
@@ -118,10 +90,5 @@ export class TGLexLink
     #setLex(key: KeyOfLex, value: ValueOfLex): void
     {
         this.optionsGet['.'][key] = value;
-    }
-
-    #mergeSoul(): void
-    {
-        this.optionsGet['#'] = this._link.soul = this._link.getPath().join('/');
     }
 }

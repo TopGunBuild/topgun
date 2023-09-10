@@ -1,7 +1,7 @@
 import { isObject, isString } from '@topgunbuild/typed';
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { diffCRDT } from '../crdt';
-import { TGLink } from './link';
+import { TGLink } from './link/link';
 import { TGGraph } from './graph/graph';
 import { TGGraphConnector } from './transports/graph-connector';
 import { TG_CLIENT_DEFAULT_OPTIONS, TGClientOptions } from './client-options';
