@@ -1,7 +1,7 @@
 import { Struct, Result, ok, isErr, isFunction } from '@topgunbuild/typed';
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { pseudoRandomText, verify } from '../sea';
-import { TGGraphAdapter, TGGraphData, TGMessage, TGPeerOptions } from '../types';
+import { TGGraphAdapter, TGGraphData, TGMessage } from '../types';
 import { TGServerOptions } from './server-options';
 import { listen, TGSocketServer, TGSocket } from '@topgunbuild/socket/server';
 import { createMemoryAdapter } from '../memory-adapter';
@@ -45,14 +45,13 @@ export class TGServer extends AsyncStreamEmitter<any>
             peerBackSync          : 0,
             peerChangelogRetention: 0
         };
-
+        this.peerSet         = {};
         this.options         = Object.assign(opts, options || {});
         this.validator       = createValidator();
         this.internalAdapter = this.options.adapter || createMemoryAdapter(options);
         this.adapter         = this.#wrapAdapter(this.internalAdapter);
         this.gateway         = listen(this.options.port, this.options);
         this.middleware      = new Middleware(this.gateway, this.options, this.adapter);
-        this.peerSet         = {};
         this.#run();
     }
 
@@ -76,32 +75,6 @@ export class TGServer extends AsyncStreamEmitter<any>
         clearInterval(this.pruneInterval);
     }
 
-    /**
-     * Invoked to create a direct connection to another tg server & publish or subscribe
-     */
-    connectToPeer(peer: TGPeerOptions): WebSocketAdapter
-    {
-        try
-        {
-            const opts    = socketOptionsFromPeer(peer);
-            const adapter = new WebSocketAdapter(opts);
-            const url     = removeProtocolFromUrl(adapter.client.transport.uri());
-
-            if (this.peerSet[url])
-            {
-                this.peerSet[url].close();
-            }
-
-            this.peerSet[url] = adapter;
-
-            return adapter;
-        }
-        catch (e)
-        {
-            console.error(e);
-        }
-    }
-
     // -----------------------------------------------------------------------------------------------------
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
@@ -111,7 +84,7 @@ export class TGServer extends AsyncStreamEmitter<any>
      */
     #run(): void
     {
-        if (Array.isArray(this.options?.peers) && this.options.peers.length > 0)
+        if (Object.keys(this.peerSet).length > 0)
         {
             this.#syncWithPeers();
             this.#prune();
@@ -124,7 +97,6 @@ export class TGServer extends AsyncStreamEmitter<any>
 
     async #syncWithPeers(): Promise<void>
     {
-        this.options.peers.forEach(peer => this.connectToPeer(peer));
         this.adapter.connectToPeers();
 
         while (true)
@@ -206,6 +178,8 @@ export class TGServer extends AsyncStreamEmitter<any>
             },
         };
 
+        this.#initPeers();
+
         return new TGFederationAdapter(
             withPublish,
             this.peerSet,
@@ -217,6 +191,33 @@ export class TGServer extends AsyncStreamEmitter<any>
                 putToPeers   : true
             }
         )
+    }
+
+    #initPeers(): void
+    {
+        try
+        {
+            if (Array.isArray(this.options.peers))
+            {
+                for (const peer of this.options.peers)
+                {
+                    const opts    = socketOptionsFromPeer(peer);
+                    const adapter = new WebSocketAdapter(opts);
+                    const url     = removeProtocolFromUrl(adapter.client.transport.uri());
+
+                    if (this.peerSet[url])
+                    {
+                        this.peerSet[url].close();
+                    }
+
+                    this.peerSet[url] = adapter;
+                }
+            }
+        }
+        catch (e)
+        {
+            console.error(e);
+        }
     }
 
     /**

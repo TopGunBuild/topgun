@@ -1,7 +1,8 @@
 import { TGServer } from '../src/server';
 import { TGClient } from '../src/client';
+import { wait } from './test-util';
 
-let server1: TGServer, server2: TGServer, client: TGClient;
+let server1: TGServer, server2: TGServer, server3: TGServer, client: TGClient;
 
 describe('Common', () =>
 {
@@ -15,13 +16,22 @@ describe('Common', () =>
         });
         server1 = new TGServer({
             port : 3458,
-            peers: [{
-                hostname: '127.0.0.1',
-                port    : 3459,
-            }]
+            peers: [
+                {
+                    hostname: '127.0.0.1',
+                    port    : 3459,
+                },
+                {
+                    hostname: '127.0.0.1',
+                    port    : 3460,
+                }
+            ]
         });
         server2 = new TGServer({
             port: 3459
+        });
+        server3 = new TGServer({
+            port: 3460
         });
     });
     afterEach(async () =>
@@ -29,7 +39,8 @@ describe('Common', () =>
         await Promise.all([
             client.disconnect(),
             server1.close(),
-            server2.close()
+            server2.close(),
+            server3.close()
         ]);
     });
 
@@ -39,7 +50,7 @@ describe('Common', () =>
         {
             for await (const { socket } of server1.gateway.listener('connection'))
             {
-                console.log(`server 1 got connection`);
+                // console.log(`server 1 got connection`);
             }
         })();
 
@@ -47,7 +58,7 @@ describe('Common', () =>
         {
             for await (const { socket } of server2.gateway.listener('connection'))
             {
-                console.log(`server 2 got connection`);
+                // console.log(`server 2 got connection`);
             }
         })();
 
@@ -55,13 +66,14 @@ describe('Common', () =>
         {
             for await (const connector of client.listener('connectorConnected'))
             {
-                console.log(`client connector connected`);
+                // console.log(`client connector connected`);
             }
         })();
 
         await Promise.all([
             server1.waitForReady(),
             server2.waitForReady(),
+            server3.waitForReady(),
             client.waitForConnect()
         ]);
 
@@ -69,5 +81,7 @@ describe('Common', () =>
             .get('a')
             .get('b')
             .put('value');
+
+        await wait(1000);
     })
 });

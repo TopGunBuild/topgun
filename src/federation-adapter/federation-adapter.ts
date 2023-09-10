@@ -182,7 +182,7 @@ export class TGFederationAdapter implements TGGraphAdapter
         const peer       = this.peers[peerName];
         const otherPeers = this.#getOtherPeers(peerName);
 
-        if (!peer || !peer.onChange)
+        if (!peer || !peer?.onChange)
         {
             throw new Error(`Unconnectable peer ${peerName}`);
         }
@@ -190,7 +190,8 @@ export class TGFederationAdapter implements TGGraphAdapter
         const batch = this.#batchWriter(otherPeers);
 
         let disconnector: () => void;
-        let batchTimeout: NodeJS.Timeout;
+        let batchTimeout: any;
+
         (async () =>
         {
             // Catch up in batches before establishing connection
@@ -266,37 +267,39 @@ export class TGFederationAdapter implements TGGraphAdapter
     {
         let lastKey                                     = from;
         const changes: TGChangeSetEntry[]               = [];
-        let nodePromise: Promise<TGGraphData|null>|null = null;
+        let graphPromise: Promise<TGGraphData|null>|null = null;
 
         return async (): Promise<readonly [string, TGGraphData]|null> =>
         {
-            if (!changes.length && !nodePromise)
+            if (!changes.length && !graphPromise)
             {
-                nodePromise = peer.get({
+                graphPromise = peer.get({
                     '#': CHANGELOG_SOUL,
                     '.': {
                         '>': `${lastKey}一`
                     }
                 });
-                const node  = await nodePromise;
-                nodePromise = null;
+                const graph  = await graphPromise;
+                graphPromise = null;
 
-                if (node)
+                // console.log('graph-', JSON.stringify(graph));
+
+                if (graph)
                 {
-                    for (const key in node)
+                    for (const key in graph)
                     {
                         if (key && key !== '_')
                         {
-                            changes.splice(0, 0, [key, node[key]]);
+                            changes.splice(0, 0, [key, graph[key]]);
                             lastKey = key
                         }
                     }
                 }
             }
-            else if (nodePromise)
+            else if (graphPromise)
             {
-                await nodePromise;
-                nodePromise = null
+                await graphPromise;
+                graphPromise = null
             }
 
             const entry = changes.pop();
@@ -452,7 +455,9 @@ export class TGFederationAdapter implements TGGraphAdapter
     async #updateChangelog(diff: TGGraphData): Promise<void>
     {
         const now     = new Date();
-        const itemKey = `${now.toISOString()}-${uuidv4()}`;
+        /*const itemKey = `${now.toISOString()}-${uuidv4()}`;
+
+        console.log('updateChangelog-', JSON.stringify(diff));
 
         await this.internal.put({
             [CHANGELOG_SOUL]: {
@@ -464,7 +469,19 @@ export class TGFederationAdapter implements TGGraphAdapter
                 },
                 [itemKey]: diff
             }
-        })
+        })*/
+        const itemKey = `${CHANGELOG_SOUL}-${now.toISOString()}-${uuidv4()}`;
+        await this.internal.put({
+            [itemKey]: {
+                _: {
+                    '#': itemKey,
+                    '>': {
+                        diff: now.getTime()
+                    }
+                },
+                diff
+            }
+        });
     }
 
     #getOtherPeers(peerName: string): TGPeerSet
