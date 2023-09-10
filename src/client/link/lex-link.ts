@@ -12,10 +12,10 @@ export class TGLexLink extends TGLex
      */
     constructor(link: TGLink, maxLimit = 200, optionsGet: TGOptionsGet = {})
     {
-        super(maxLimit, optionsGet);
+        super(optionsGet, maxLimit);
         this._link      = link;
         this._link._lex = this;
-        this.#mergeSoul();
+        this.#setSoul();
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -76,7 +76,7 @@ export class TGLexLink extends TGLex
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    #mergeSoul(): void
+    #setSoul(): void
     {
         this.optionsGet['#'] = this._link.soul = this._link.getPath().join('/');
     }

@@ -1,4 +1,4 @@
-import { cloneValue, isNumber, isObject } from '@topgunbuild/typed';
+import { cloneValue, isNumber, isObject, isString } from '@topgunbuild/typed';
 import { LEX, TGOptionsGet } from '../../types';
 import { assertBoolean, assertNotEmptyString, assertNumber, replacerSortKeys } from '../../utils';
 
@@ -13,23 +13,27 @@ export class TGLex
     /**
      * Constructor
      */
-    constructor(maxLimit = 200, optionsGet: TGOptionsGet = {})
+    constructor(optionsGetOrSoul: TGOptionsGet|string, maxLimit = 200)
     {
         this.maxLimit  =  maxLimit;
         this.optionsGet = {
             '.': {},
             '%': this.maxLimit
         };
-        if (isObject(optionsGet))
+        if (isObject(optionsGetOrSoul))
         {
-            if (isObject(optionsGet['.']))
+            if (isObject(optionsGetOrSoul['.']))
             {
-                this.optionsGet['.'] = cloneValue(optionsGet['.']);
+                this.optionsGet['.'] = cloneValue(optionsGetOrSoul['.']);
             }
-            if (isNumber(optionsGet['%']))
+            if (isNumber(optionsGetOrSoul['%']))
             {
-                this.optionsGet['%'] = optionsGet['%'];
+                this.optionsGet['%'] = optionsGetOrSoul['%'];
             }
+        }
+        else if (isString(optionsGetOrSoul))
+        {
+            this.optionsGet['#'] = optionsGetOrSoul;
         }
     }
 
@@ -91,4 +95,9 @@ export class TGLex
     {
         this.optionsGet['.'][key] = value;
     }
+}
+
+export function createLex(optionsGetOrSoul: TGOptionsGet|string, maxLimit = 200): TGLex
+{
+    return new TGLex(optionsGetOrSoul, maxLimit);
 }
