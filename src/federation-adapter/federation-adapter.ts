@@ -4,6 +4,7 @@ import { uuidv4 } from '../utils';
 import { CHANGELOG_SOUL, DEFAULT_FEDERATION_OPTIONS, PEER_SYNC_SOUL } from './constants';
 import { diffCRDT, mergeGraph } from '../crdt';
 import { NOOP } from '../utils/noop';
+import { createLex } from '../client/link/lex';
 
 export class TGFederationAdapter implements TGGraphAdapter
 {
@@ -273,16 +274,14 @@ export class TGFederationAdapter implements TGGraphAdapter
         {
             if (!changes.length && !graphPromise)
             {
-                graphPromise = peer.get({
-                    '#': CHANGELOG_SOUL,
-                    '.': {
-                        '>': `${lastKey}一`
-                    }
-                });
+                graphPromise = peer.get(
+                    createLex(CHANGELOG_SOUL).start(lastKey).getQuery()
+                );
                 const graph  = await graphPromise;
                 graphPromise = null;
 
-                // console.log('graph-', JSON.stringify(graph));
+                console.log('lex-', createLex(CHANGELOG_SOUL).start(lastKey).getQuery());
+                console.log('graph-', JSON.stringify(graph));
 
                 if (graph)
                 {
