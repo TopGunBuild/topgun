@@ -1,6 +1,7 @@
+import { isNotEmptyObject } from '@topgunbuild/typed';
 import { TGChangeSetEntry, TGFederatedAdapterOptions, TGPeerSet } from './types';
 import { TGGraphAdapter, TGGraphData, TGOptionsGet } from '../types';
-import { uuidv4 } from '../utils';
+import { createSoul, uuidv4 } from '../utils';
 import { CHANGELOG_SOUL, DEFAULT_FEDERATION_OPTIONS, PEER_SYNC_SOUL } from './constants';
 import { diffCRDT, mergeGraph } from '../crdt';
 import { NOOP } from '../utils/noop';
@@ -101,15 +102,16 @@ export class TGFederationAdapter implements TGGraphAdapter
                 console.error('Error syncing with peer', peerName, e.stack);
             }
 
+            const peerSyncSoul = createSoul(PEER_SYNC_SOUL, peerName);
             await this.internal.put({
-                [PEER_SYNC_SOUL]: {
+                [peerSyncSoul]: {
                     _: {
-                        '#': PEER_SYNC_SOUL,
+                        '#': peerSyncSoul,
                         '>': {
-                            [peerName]: new Date().getTime()
+                            lastSeenKey: new Date().getTime()
                         }
                     },
-                    [peerName]: lastSeenKey
+                    lastSeenKey: lastSeenKey
                 }
             })
         }
@@ -168,14 +170,18 @@ export class TGFederationAdapter implements TGGraphAdapter
 
     async #getPeerSyncDate(peerName: string): Promise<string>
     {
-        const { backSync = DEFAULT_FEDERATION_OPTIONS.backSync } = this.adapterOpts || DEFAULT_FEDERATION_OPTIONS;
-
-        const yesterday = new Date(Date.now() - backSync).toISOString();
-        const graph     = await this.internal.get({
-            '#': PEER_SYNC_SOUL
+        const peerSyncSoul = createSoul(PEER_SYNC_SOUL, peerName);
+        const graph        = await this.internal.get({
+            '#': peerSyncSoul
         });
 
-        return (graph[PEER_SYNC_SOUL] && graph[PEER_SYNC_SOUL][peerName]) || yesterday;
+        if (graph && graph[peerSyncSoul])
+        {
+            console.log(graph);
+        }
+
+        const { backSync = DEFAULT_FEDERATION_OPTIONS.backSync } = this.adapterOpts || DEFAULT_FEDERATION_OPTIONS;
+        return new Date(Date.now() - backSync).getTime().toString(); // yesterday
     }
 
     #connectToPeer(peerName: string, from: string): () => void
@@ -216,15 +222,16 @@ export class TGFederationAdapter implements TGGraphAdapter
                 syncedKey = lastKey;
 
                 await batch.writeBatch();
+                const peerSyncSoul = createSoul(PEER_SYNC_SOUL, peerName);
                 await this.internal.put({
-                    [PEER_SYNC_SOUL]: {
+                    [peerSyncSoul]: {
                         _: {
-                            '#': PEER_SYNC_SOUL,
+                            '#': peerSyncSoul,
                             '>': {
-                                [peerName]: new Date().getTime()
+                                lastKey: new Date().getTime()
                             }
                         },
-                        [peerName]: lastKey
+                        lastKey: lastKey
                     }
                 });
 
@@ -266,8 +273,8 @@ export class TGFederationAdapter implements TGGraphAdapter
 
     #getChangesetFeed(peer: TGGraphAdapter, from: string): () => Promise<TGChangeSetEntry|null>
     {
-        let lastKey                                     = from;
-        const changes: TGChangeSetEntry[]               = [];
+        let lastKey                                      = from;
+        const changes: TGChangeSetEntry[]                = [];
         let graphPromise: Promise<TGGraphData|null>|null = null;
 
         return async (): Promise<readonly [string, TGGraphData]|null> =>
@@ -280,11 +287,9 @@ export class TGFederationAdapter implements TGGraphAdapter
                 const graph  = await graphPromise;
                 graphPromise = null;
 
-                console.log('lex-', createLex(CHANGELOG_SOUL).start(lastKey).getQuery());
-                console.log('graph-', JSON.stringify(graph));
-
-                if (graph)
+                if (isNotEmptyObject(graph))
                 {
+                    console.log(graph);
                     for (const key in graph)
                     {
                         if (key && key !== '_')
@@ -365,7 +370,7 @@ export class TGFederationAdapter implements TGGraphAdapter
             : Promise.resolve();
     }
 
-    async #updateFromPeers(allPeers: TGPeerSet, getOpts: TGOptionsGet): Promise<void>
+    #updateFromPeers(allPeers: TGPeerSet, getOpts: TGOptionsGet): Promise<void>
     {
         const peerNames = Object.keys(allPeers);
         return peerNames.length
@@ -381,24 +386,25 @@ export class TGFederationAdapter implements TGGraphAdapter
     {
         const soul = getOpts['#'];
 
-        if (soul === CHANGELOG_SOUL || soul === PEER_SYNC_SOUL)
+        if (soul.startsWith(CHANGELOG_SOUL) || soul.startsWith(PEER_SYNC_SOUL))
         {
             return
         }
 
         const peer       = this.peers[peerName];
         const otherPeers = this.#getOtherPeers(peerName);
+        const peerSoul   = createSoul('peers', peerName);
+        const status     = await this.internal.get({
+            '#': createSoul(peerSoul, soul)
+        });
+        const now        = new Date().getTime();
+        const staleness  = now - ((status && status._['>'][soul]) || 0);
+
         const {
             maxStaleness      = DEFAULT_FEDERATION_OPTIONS.maxStaleness,
             maintainChangelog = DEFAULT_FEDERATION_OPTIONS.maintainChangelog,
             putToPeers        = DEFAULT_FEDERATION_OPTIONS.putToPeers
-        }          = this.adapterOpts;
-        const peerSoul   = `peers/${peerName}`;
-        const now        = new Date().getTime();
-        const status     = await this.internal.get({
-            '#': `${peerSoul}/${soul}`,
-        });
-        const staleness  = now - ((status && status._['>'][soul]) || 0);
+        } = this.adapterOpts;
 
         if (staleness < maxStaleness)
         {
@@ -453,27 +459,12 @@ export class TGFederationAdapter implements TGGraphAdapter
 
     async #updateChangelog(diff: TGGraphData): Promise<void>
     {
-        const now     = new Date();
-        /*const itemKey = `${now.toISOString()}-${uuidv4()}`;
-
-        console.log('updateChangelog-', JSON.stringify(diff));
-
+        const now  = new Date();
+        const soul = createSoul(CHANGELOG_SOUL, now.getTime(), uuidv4());
         await this.internal.put({
-            [CHANGELOG_SOUL]: {
+            [soul]: {
                 _: {
-                    '#': CHANGELOG_SOUL,
-                    '>': {
-                        [itemKey]: now.getTime()
-                    }
-                },
-                [itemKey]: diff
-            }
-        })*/
-        const itemKey = `${CHANGELOG_SOUL}-${now.toISOString()}-${uuidv4()}`;
-        await this.internal.put({
-            [itemKey]: {
-                _: {
-                    '#': itemKey,
+                    '#': soul,
                     '>': {
                         diff: now.getTime()
                     }
@@ -489,9 +480,9 @@ export class TGFederationAdapter implements TGGraphAdapter
         {
             if (key === peerName)
             {
-                return res
+                return res;
             }
-            return { ...res, [key]: this.peers[key] }
+            return { ...res, [key]: this.peers[key] };
         }, {})
     };
 }

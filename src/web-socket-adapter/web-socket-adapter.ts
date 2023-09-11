@@ -61,10 +61,10 @@ export class WebSocketAdapter extends AsyncStreamEmitter<any> implements TGGraph
         {
             const soul                   = opts['#'];
             const msgId                  = uuidv4();
-            const cb                     = (res: TGGraphData) =>
+            const cb                     = (res: TGMessage) =>
             {
                 this.#off(msgId);
-                resolve(res);
+                resolve(res.put);
             };
             this._requestChannels[msgId] = this.#subscribeToChannel(
                 `topgun/nodes/${soul}`,
