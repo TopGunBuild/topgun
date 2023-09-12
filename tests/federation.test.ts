@@ -8,12 +8,14 @@ describe('Common', () =>
 {
     beforeEach(async () =>
     {
+        // Client
         client  = new TGClient({
             peers: [{
                 hostname: '127.0.0.1',
                 port    : 3458,
             }]
         });
+        // Master
         server1 = new TGServer({
             port : 3458,
             peers: [
@@ -27,6 +29,7 @@ describe('Common', () =>
                 }
             ]
         });
+        // Peers
         server2 = new TGServer({
             port: 3459
         });
@@ -77,6 +80,7 @@ describe('Common', () =>
             client.waitForConnect()
         ]);
 
+        // Put to master
         await client
             .get('a')
             .get('b')

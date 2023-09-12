@@ -9,15 +9,31 @@ import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { TGGraphAdapter, TGGraphData, TGMessage, TGMessageCb, TGOptionsGet } from '../types';
 import { uuidv4 } from '../utils';
 import { TGChangeSetEntry } from '../federation-adapter';
+import { removeProtocolFromUrl } from '../utils/remove-protocol-from-url';
+import { socketOptionsFromPeer } from '../utils/socket-options-from-peer';
 
 export class WebSocketAdapter extends AsyncStreamEmitter<any> implements TGGraphAdapter
 {
+    readonly baseUrl: string;
     readonly client: TGClientSocket;
     readonly opts: TGSocketClientOptions|undefined;
 
     private readonly _requestChannels: {
         [msgId: string]: TGChannel<any>;
     };
+
+    static createByPeerOptions(peer: string|TGSocketClientOptions): WebSocketAdapter
+    {
+        try
+        {
+            const opts = socketOptionsFromPeer(peer);
+            return new WebSocketAdapter(opts);
+        }
+        catch (e)
+        {
+            console.error(e);
+        }
+    }
 
     /**
      * Constructor
@@ -28,6 +44,7 @@ export class WebSocketAdapter extends AsyncStreamEmitter<any> implements TGGraph
         this._requestChannels = {};
         this.opts             = opts;
         this.client           = createSocketClient(this.opts || {});
+        this.baseUrl          = removeProtocolFromUrl(this.client.transport.uri());
         this.#onConnect();
         this.#onError();
     }

@@ -8,12 +8,9 @@ import { createMemoryAdapter } from '../memory-adapter';
 import { createValidator } from '../validator';
 import { Middleware } from './middleware';
 import { uuidv4 } from '../utils/uuidv4';
-import { socketOptionsFromPeer } from '../utils/socket-options-from-peer';
-import { removeProtocolFromUrl } from '../utils/remove-protocol-from-url';
-import { sleep } from '../utils/sleep';
 import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from '../storage';
 import { TGFederationAdapter } from '../federation-adapter/federation-adapter';
-import { TGPeerSet } from '../federation-adapter';
+import { TGPeerMap } from '../federation-adapter';
 import { WebSocketAdapter } from '../web-socket-adapter';
 
 export class TGServer extends AsyncStreamEmitter<any>
@@ -23,11 +20,12 @@ export class TGServer extends AsyncStreamEmitter<any>
     readonly gateway: TGSocketServer;
     readonly options: TGServerOptions;
     readonly middleware: Middleware;
-    readonly peerSet: TGPeerSet;
+    readonly peers: TGPeerMap;
 
     protected readonly validator: Struct<TGGraphData>;
 
     private pruneInterval: any;
+    private peersDisconnector: () => void;
 
     /**
      * Constructor
@@ -35,7 +33,7 @@ export class TGServer extends AsyncStreamEmitter<any>
     constructor(options?: TGServerOptions)
     {
         super();
-        const opts: TGServerOptions = {
+        const defaultOptions: TGServerOptions = {
             maxKeySize            : MAX_KEY_SIZE,
             maxValueSize          : MAX_VALUE_SIZE,
             disableValidation     : false,
@@ -43,13 +41,15 @@ export class TGServer extends AsyncStreamEmitter<any>
             peerSyncInterval      : 1000,
             peerPruneInterval     : 60 * 60 * 1000,
             peerBackSync          : 0,
-            peerChangelogRetention: 0
+            peerChangelogRetention: 0,
+            peers                 : []
         };
-        this.peerSet         = {};
-        this.options         = Object.assign(opts, options || {});
+
+        this.options         = Object.assign(defaultOptions, options || {});
         this.validator       = createValidator();
         this.internalAdapter = this.options.adapter || createMemoryAdapter(options);
-        this.adapter         = this.#wrapAdapter(this.internalAdapter);
+        this.peers           = this.#createPeerMapAdapters();
+        this.adapter         = this.#federateInternalAdapter(this.internalAdapter);
         this.gateway         = listen(this.options.port, this.options);
         this.middleware      = new Middleware(this.gateway, this.options, this.adapter);
         this.#run();
@@ -66,13 +66,14 @@ export class TGServer extends AsyncStreamEmitter<any>
 
     async close(): Promise<void>
     {
-        Object.keys(this.peerSet).forEach(key => this.peerSet[key].close());
         if (isFunction(this.gateway.httpServer?.close))
         {
             this.gateway.httpServer.close();
         }
         await this.gateway.close();
         clearInterval(this.pruneInterval);
+        this.peersDisconnector();
+        this.peers.forEach(value => value.close());
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -84,34 +85,11 @@ export class TGServer extends AsyncStreamEmitter<any>
      */
     #run(): void
     {
-        if (Object.keys(this.peerSet).length > 0)
-        {
-            this.#syncWithPeers();
-            this.#prune();
-            this.pruneInterval = setInterval(this.#prune.bind(this), this.options.peerPruneInterval);
-        }
-
         this.middleware.setupMiddleware();
         this.#handleWebsocketConnection();
-    }
-
-    async #syncWithPeers(): Promise<void>
-    {
-        this.adapter.connectToPeers();
-
-        while (true)
-        {
-            try
-            {
-                await this.adapter.syncWithPeers()
-            }
-            catch (e: any)
-            {
-                console.warn('Sync error', e.stack || e)
-            }
-
-            await sleep(this.options.peerSyncInterval || 1000);
-        }
+        this.#prune();
+        this.pruneInterval     = setInterval(this.#prune.bind(this), this.options.peerPruneInterval);
+        this.peersDisconnector = this.adapter.connectToPeers();
     }
 
     async #prune(): Promise<void>
@@ -141,9 +119,9 @@ export class TGServer extends AsyncStreamEmitter<any>
     }
 
     /**
-     * Wrap adapter
+     * Wrap internal adapter
      */
-    #wrapAdapter(adapter: TGGraphAdapter): TGFederationAdapter
+    #federateInternalAdapter(adapter: TGGraphAdapter): TGFederationAdapter
     {
         const withPublish: TGGraphAdapter = {
             ...adapter,
@@ -178,11 +156,9 @@ export class TGServer extends AsyncStreamEmitter<any>
             },
         };
 
-        this.#initPeers();
-
         return new TGFederationAdapter(
             withPublish,
-            this.peerSet,
+            this.peers,
             withValidation,
             {
                 backSync     : this.options.peerBackSync,
@@ -193,31 +169,20 @@ export class TGServer extends AsyncStreamEmitter<any>
         )
     }
 
-    #initPeers(): void
+    #createPeerMapAdapters(): TGPeerMap
     {
-        try
+        const peers = new Map();
+
+        for (const peer of this.options.peers)
         {
-            if (Array.isArray(this.options.peers))
+            const adapter = WebSocketAdapter.createByPeerOptions(peer);
+            if (adapter?.baseUrl)
             {
-                for (const peer of this.options.peers)
-                {
-                    const opts    = socketOptionsFromPeer(peer);
-                    const adapter = new WebSocketAdapter(opts);
-                    const url     = removeProtocolFromUrl(adapter.client.transport.uri());
-
-                    if (this.peerSet[url])
-                    {
-                        this.peerSet[url].close();
-                    }
-
-                    this.peerSet[url] = adapter;
-                }
+                peers.set(adapter.baseUrl, adapter)
             }
         }
-        catch (e)
-        {
-            console.error(e);
-        }
+
+        return peers;
     }
 
     /**
