@@ -1,7 +1,4 @@
 import { TGGraphData } from '../types';
-import { WebSocketAdapter } from '../web-socket-adapter';
-
-export type TGPeerMap = Map<string, WebSocketAdapter>;
 
 export type TGChangeSetEntry = readonly [string, TGGraphData];
 

@@ -10,8 +10,7 @@ import { Middleware } from './middleware';
 import { uuidv4 } from '../utils/uuidv4';
 import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from '../storage';
 import { TGFederationAdapter } from '../federation-adapter/federation-adapter';
-import { TGPeerMap } from '../federation-adapter';
-import { WebSocketAdapter } from '../web-socket-adapter';
+import { TGPeers } from '../federation-adapter/peers';
 
 export class TGServer extends AsyncStreamEmitter<any>
 {
@@ -20,7 +19,7 @@ export class TGServer extends AsyncStreamEmitter<any>
     readonly gateway: TGSocketServer;
     readonly options: TGServerOptions;
     readonly middleware: Middleware;
-    readonly peers: TGPeerMap;
+    readonly peers: TGPeers;
 
     protected readonly validator: Struct<TGGraphData>;
 
@@ -48,7 +47,7 @@ export class TGServer extends AsyncStreamEmitter<any>
         this.options         = Object.assign(defaultOptions, options || {});
         this.validator       = createValidator();
         this.internalAdapter = this.options.adapter || createMemoryAdapter(options);
-        this.peers           = this.#createPeerMapAdapters();
+        this.peers           = new TGPeers(this.options.peers);
         this.adapter         = this.#federateInternalAdapter(this.internalAdapter);
         this.gateway         = listen(this.options.port, this.options);
         this.middleware      = new Middleware(this.gateway, this.options, this.adapter);
@@ -167,22 +166,6 @@ export class TGServer extends AsyncStreamEmitter<any>
                 putToPeers   : true
             }
         )
-    }
-
-    #createPeerMapAdapters(): TGPeerMap
-    {
-        const peers = new Map();
-
-        for (const peer of this.options.peers)
-        {
-            const adapter = WebSocketAdapter.createByPeerOptions(peer);
-            if (adapter?.baseUrl)
-            {
-                peers.set(adapter.baseUrl, adapter)
-            }
-        }
-
-        return peers;
     }
 
     /**

@@ -1,26 +1,28 @@
 import { isNotEmptyObject } from '@topgunbuild/typed';
-import { TGChangeSetEntry, TGFederatedAdapterOptions, TGPeerMap } from './types';
+import { TGChangeSetEntry, TGFederatedAdapterOptions } from './types';
 import { TGGraphAdapter, TGGraphData, TGOptionsGet } from '../types';
-import { createSoul, uuidv4 } from '../utils';
-import { diffCRDT, mergeGraph } from '../crdt';
+import { createSoul } from '../utils';
 import { createLex } from '../client/link/lex';
-
-const CHANGELOG_SOUL = 'changelog';
-const PEER_SYNC_SOUL = 'peersync';
+import { Writer } from './writer';
+import { CHANGELOG_SOUL, PEER_SYNC_SOUL } from './constants';
+import { BatchWriter } from './batch-writer';
+import { TGPeers } from './peers';
 
 export class TGFederationAdapter implements TGGraphAdapter
 {
     internal: TGGraphAdapter;
-    peers: TGPeerMap;
+    peers: TGPeers;
     persistence: TGGraphAdapter;
     options: TGFederatedAdapterOptions;
+
+    private readonly writer: Writer;
 
     /**
      * Constructor
      */
     constructor(
         internal: TGGraphAdapter,
-        peers: TGPeerMap,
+        peers: TGPeers,
         persistence: TGGraphAdapter,
         adapterOpts: TGFederatedAdapterOptions
     )
@@ -37,6 +39,7 @@ export class TGFederationAdapter implements TGGraphAdapter
         this.peers       = peers;
         this.persistence = persistence;
         this.options     = Object.assign(defaultOptions, adapterOpts || {});
+        this.writer      = new Writer(this.internal, this.persistence, this.peers, this.options);
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -46,7 +49,7 @@ export class TGFederationAdapter implements TGGraphAdapter
     async get(getOpts: TGOptionsGet)
     {
         console.log('get');
-        await this.#updateFromPeers(getOpts);
+        await this.writer.updateFromPeers(getOpts);
         return this.internal.get(getOpts);
     }
 
@@ -62,12 +65,12 @@ export class TGFederationAdapter implements TGGraphAdapter
 
         if (this.options.maintainChangelog)
         {
-            this.#updateChangelog(diff);
+            this.writer.updateChangelog(diff);
         }
 
         if (this.options.putToPeers)
         {
-            this.#updatePeers(diff, this.peers);
+            this.writer.updatePeers(diff, this.peers);
         }
 
         return diff
@@ -75,13 +78,13 @@ export class TGFederationAdapter implements TGGraphAdapter
 
     async syncWithPeer(peerName: string, from: string): Promise<string>
     {
-        console.log('syncWithPeer');
+        console.log('syncWithPeer ', peerName);
         const peer       = this.peers.get(peerName);
-        const otherPeers = this.#getOtherPeers(peerName);
+        const otherPeers = this.peers.getOtherPeers(peerName);
         const getNext    = this.#getChangesetFeed(peer, from);
         let entry: TGChangeSetEntry|null;
 
-        const batch = this.#batchWriter(otherPeers);
+        const batch = new BatchWriter(otherPeers, this.persistence, this.options, this.writer);
 
         let lastSeenKey: string = from;
 
@@ -111,7 +114,7 @@ export class TGFederationAdapter implements TGGraphAdapter
             }
 
             const peerSyncSoul = createSoul(PEER_SYNC_SOUL, peerName);
-            await this.internal.put({
+            await this.writer.internalPut({
                 [peerSyncSoul]: {
                     _: {
                         '#': peerSyncSoul,
@@ -138,7 +141,7 @@ export class TGFederationAdapter implements TGGraphAdapter
 
         const disconnectors: Array<() => void> = [];
 
-        this.peers.forEach(async (_, peerName) =>
+        this.peers.getPeerNames().forEach(async (peerName) =>
         {
             const key = await this.#getPeerSyncDate(peerName);
 
@@ -156,7 +159,7 @@ export class TGFederationAdapter implements TGGraphAdapter
 
     async #getPeerSyncDate(peerName: string): Promise<string>
     {
-        console.log('getPeerSyncDate');
+        console.log('getPeerSyncDate ', peerName);
         const peerSyncSoul = createSoul(PEER_SYNC_SOUL, peerName);
         const graph        = await this.internal.get({
             '#': peerSyncSoul
@@ -172,7 +175,7 @@ export class TGFederationAdapter implements TGGraphAdapter
 
     #connectToPeer(peerName: string, from: string): () => void
     {
-        console.log('connectToPeer');
+        console.log('connectToPeer ', peerName);
         const peer = this.peers.get(peerName);
 
         if (!peer || !peer?.onChange)
@@ -180,8 +183,8 @@ export class TGFederationAdapter implements TGGraphAdapter
             throw new Error(`Unconnectable peer ${peerName}`);
         }
 
-        const otherPeers = this.#getOtherPeers(peerName);
-        const batch      = this.#batchWriter(otherPeers);
+        const otherPeers = this.peers.getOtherPeers(peerName);
+        const batch      = new BatchWriter(otherPeers, this.persistence, this.options, this.writer);
 
         let disconnector: () => void;
         let batchTimeout: any;
@@ -189,8 +192,7 @@ export class TGFederationAdapter implements TGGraphAdapter
         (async () =>
         {
             // Catch up in batches before establishing connection
-            let lastKey = await this.syncWithPeer(peerName, from);
-
+            let lastKey   = await this.syncWithPeer(peerName, from);
             let syncedKey = lastKey;
 
             const writeBatch = async (): Promise<void> =>
@@ -208,7 +210,7 @@ export class TGFederationAdapter implements TGGraphAdapter
 
                 await batch.writeBatch();
                 const peerSyncSoul = createSoul(PEER_SYNC_SOUL, peerName);
-                await this.internal.put({
+                await this.writer.internalPut({
                     [peerSyncSoul]: {
                         _: {
                             '#': peerSyncSoul,
@@ -297,189 +299,4 @@ export class TGFederationAdapter implements TGGraphAdapter
             return entry || null
         }
     }
-
-    #batchWriter(peers: TGPeerMap): {
-        queueDiff: (changes: TGGraphData) => TGGraphData|undefined
-        writeBatch: () => Promise<TGGraphData|null>
-    }
-    {
-        console.log('batchWriter');
-        let batch: TGGraphData = {};
-
-        const queueDiff = (changes: TGGraphData): TGGraphData|undefined =>
-        {
-            const diff = diffCRDT(changes, batch);
-            batch      = diff ? mergeGraph(batch, diff, 'mutable') : batch;
-            return diff
-        };
-
-        const writeBatch = async (): Promise<TGGraphData|null> =>
-        {
-            if (!Object.keys(batch).length)
-            {
-                return null
-            }
-            const toWrite = batch;
-            batch         = {};
-
-            const diff = await this.persistence.put(toWrite);
-
-            if (diff)
-            {
-                if (this.options.maintainChangelog)
-                {
-                    this.#updateChangelog(diff);
-                }
-
-                if (this.options.putToPeers)
-                {
-                    this.#updatePeers(diff, peers);
-                }
-            }
-
-            return diff;
-        };
-
-        return { queueDiff, writeBatch };
-    }
-
-    async #updatePeers(data: TGGraphData, otherPeers: TGPeerMap): Promise<void>
-    {
-        const entries = Array.from(otherPeers);
-        console.log('updatePeers', entries.length, data);
-
-        if (entries.length)
-        {
-            await Promise.all(
-                entries.map(([name, peer]) =>
-                    peer
-                        .put(data)
-                        .catch((err) =>
-                        {
-                            console.warn('Failed to update peer', name, err.stack || err, data)
-                        })
-                )
-            );
-        }
-    }
-
-    async #updateFromPeers(getOpts: TGOptionsGet): Promise<void>
-    {
-        console.log('updateFromPeers');
-        const peerNames = Array.from(this.peers.keys());
-
-        if (peerNames.length)
-        {
-            await Promise.all(
-                peerNames.map(name =>
-                    this.#updateFromPeer(name, getOpts)
-                )
-            );
-        }
-    }
-
-    async #updateFromPeer(peerName: string, getOpts: TGOptionsGet): Promise<void>
-    {
-        console.log('updateFromPeer');
-        const soul = getOpts['#'];
-
-        if (soul.startsWith(CHANGELOG_SOUL) || soul.startsWith(PEER_SYNC_SOUL))
-        {
-            return
-        }
-
-        const peerSoul  = createSoul('peers', peerName);
-        const status    = await this.internal.get({
-            '#': createSoul(peerSoul, soul)
-        });
-        const now       = new Date().getTime();
-        const staleness = now - ((status && status._['>'][soul]) || 0);
-
-        const { maxStaleness, maintainChangelog, putToPeers } = this.options;
-
-        if (staleness < maxStaleness)
-        {
-            return
-        }
-
-        const peer  = this.peers.get(peerName);
-        const graph = await peer.get({
-            '#': soul
-        });
-
-        if (graph)
-        {
-            try
-            {
-                const diff = await this.persistence.put(graph);
-
-                if (diff)
-                {
-                    if (maintainChangelog)
-                    {
-                        this.#updateChangelog(diff);
-                    }
-
-                    if (putToPeers)
-                    {
-                        const otherPeers = this.#getOtherPeers(peerName);
-                        this.#updatePeers(diff, otherPeers);
-                    }
-                }
-            }
-            catch (e: any)
-            {
-                console.warn('Error updating from peer', {
-                    error: e.stack,
-                    peerName,
-                    soul
-                });
-            }
-        }
-
-        await this.internal.put({
-            [peerSoul]: {
-                _: {
-                    '#': peerSoul,
-                    '>': {
-                        [soul]: now
-                    }
-                },
-                [soul]: Object.keys(graph).length > 0
-            }
-        });
-    }
-
-    async #updateChangelog(diff: TGGraphData): Promise<void>
-    {
-        console.log('updateChangelog');
-        const now  = new Date();
-        const soul = createSoul(CHANGELOG_SOUL, now.getTime(), uuidv4());
-        await this.internal.put({
-            [soul]: {
-                _: {
-                    '#': soul,
-                    '>': {
-                        diff: now.getTime()
-                    }
-                },
-                diff
-            }
-        });
-    }
-
-    #getOtherPeers(peerName: string): TGPeerMap
-    {
-        const peers = new Map();
-
-        this.peers.forEach((value, key) =>
-        {
-            if (key !== peerName)
-            {
-                peers.set(key, value);
-            }
-        });
-
-        return peers;
-    };
 }
