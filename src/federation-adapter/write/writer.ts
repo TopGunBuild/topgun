@@ -1,8 +1,8 @@
-import { TGGraphAdapter, TGGraphData, TGOptionsGet } from '../types';
-import { createSoul, uuidv4 } from '../utils';
-import { CHANGELOG_SOUL, PEER_SYNC_SOUL } from './constants';
-import { TGPeers } from './peers';
-import { TGFederatedAdapterOptions } from './types';
+import { TGGraphAdapter, TGGraphData, TGOptionsGet } from '../../types';
+import { createSoul, uuidv4 } from '../../utils';
+import { CHANGELOG_SOUL, PEER_SYNC_SOUL } from '../constants';
+import { TGPeers } from '../peers';
+import { TGFederatedAdapterOptions } from '../types';
 
 export class Writer
 {

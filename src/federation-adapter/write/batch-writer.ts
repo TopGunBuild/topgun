@@ -1,8 +1,8 @@
-import { TGFederatedAdapterOptions } from './types';
-import { TGGraphAdapter, TGGraphData } from '../types';
+import { TGFederatedAdapterOptions } from '../types';
+import { TGGraphAdapter, TGGraphData } from '../../types';
 import { Writer } from './writer';
-import { diffCRDT, mergeGraph } from '../crdt';
-import { TGPeers } from './peers';
+import { diffCRDT, mergeGraph } from '../../crdt';
+import { TGPeers } from '../peers';
 
 export class BatchWriter
 {

@@ -87,5 +87,5 @@ describe('Common', () =>
             .put('value');
 
         await wait(1000);
-    })
+    });
 });
