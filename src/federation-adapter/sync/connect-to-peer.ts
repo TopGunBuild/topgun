@@ -1,13 +1,13 @@
 import { isFunction } from '@topgunbuild/typed';
-import { TGPeers } from './peers';
-import { WebSocketAdapter } from '../web-socket-adapter';
-import { BatchWriter } from './write/batch-writer';
-import { TGGraphAdapter } from '../types';
-import { TGChangeSetEntry, TGFederatedAdapterOptions } from './types';
-import { Writer } from './write/writer';
+import { TGPeers } from '../peers';
+import { WebSocketAdapter } from '../../web-socket-adapter';
+import { BatchWriter } from '../write/batch-writer';
+import { TGGraphAdapter } from '../../types';
+import { TGChangeSetEntry, TGFederatedAdapterOptions } from '../types';
+import { Writer } from '../write/writer';
 import { SyncWithPeer } from './sync-with-peer';
-import { createSoul } from '../utils';
-import { PEER_SYNC_SOUL } from './constants';
+import { createSoul } from '../../utils';
+import { PEER_SYNC_SOUL } from '../constants';
 
 export class ConnectToPeer
 {

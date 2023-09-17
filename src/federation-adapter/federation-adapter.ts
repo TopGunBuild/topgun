@@ -1,12 +1,11 @@
-import { TGChangeSetEntry, TGFederatedAdapterOptions } from './types';
+import { TGFederatedAdapterOptions } from './types';
 import { TGGraphAdapter, TGGraphData, TGOptionsGet } from '../types';
 import { createSoul } from '../utils';
 import { Writer } from './write/writer';
 import { PEER_SYNC_SOUL } from './constants';
 import { TGPeers } from './peers';
-import { ChangesetFeed } from './changeset-feed';
-import { ConnectToPeer } from './connect-to-peer';
-import { SyncWithPeer } from './sync-with-peer';
+import { ConnectToPeer } from './sync/connect-to-peer';
+import { SyncWithPeer } from './sync/sync-with-peer';
 
 export class TGFederationAdapter implements TGGraphAdapter
 {
@@ -80,11 +79,6 @@ export class TGFederationAdapter implements TGGraphAdapter
     {
         console.log('syncWithPeer ', peerName);
         return SyncWithPeer.sync(peerName, from, this.peers, this.persistence, this.options, this.writer);
-    }
-
-    getChangesetFeed(from: string): () => Promise<TGChangeSetEntry|null>
-    {
-        return ChangesetFeed.getChangesetFeed(this.internal, from);
     }
 
     connectToPeers(): () => void

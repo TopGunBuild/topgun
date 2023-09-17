@@ -1,12 +1,12 @@
-import { TGGraphAdapter } from '../types';
-import { TGChangeSetEntry, TGFederatedAdapterOptions } from './types';
-import { Writer } from './write/writer';
-import { WebSocketAdapter } from '../web-socket-adapter';
-import { TGPeers } from './peers';
+import { TGGraphAdapter } from '../../types';
+import { TGChangeSetEntry, TGFederatedAdapterOptions } from '../types';
+import { Writer } from '../write/writer';
+import { WebSocketAdapter } from '../../web-socket-adapter';
+import { TGPeers } from '../peers';
 import { ChangesetFeed } from './changeset-feed';
-import { BatchWriter } from './write/batch-writer';
-import { createSoul } from '../utils';
-import { PEER_SYNC_SOUL } from './constants';
+import { BatchWriter } from '../write/batch-writer';
+import { createSoul } from '../../utils';
+import { PEER_SYNC_SOUL } from '../constants';
 
 export class SyncWithPeer
 {

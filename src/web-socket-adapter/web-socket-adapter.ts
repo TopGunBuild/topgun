@@ -90,15 +90,18 @@ export class WebSocketAdapter extends AsyncStreamEmitter<any> implements TGGraph
                     data: opts
                 }
             );
-            this.#publishToChannel('topgun/get', {
-                '#'  : msgId,
-                'get': opts
-            });
+            // @TODO: Maybe this is unnecessary?
+            // this.#publishToChannel('topgun/get', {
+            //     '#'  : msgId,
+            //     'get': opts
+            // });
         });
     }
 
     onChange(handler: (change: TGChangeSetEntry) => void, from?: string): () => void
     {
+        const msgId                  = uuidv4();
+
         return () =>
         {
 

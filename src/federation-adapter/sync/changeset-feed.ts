@@ -1,8 +1,8 @@
 import { isNotEmptyObject } from '@topgunbuild/typed';
-import { TGGraphAdapter, TGGraphData } from '../types';
-import { TGChangeSetEntry } from './types';
-import { createLex } from '../client/link/lex';
-import { CHANGELOG_SOUL } from './constants';
+import { TGGraphAdapter, TGGraphData } from '../../types';
+import { TGChangeSetEntry } from '../types';
+import { createLex } from '../../client/link/lex';
+import { CHANGELOG_SOUL } from '../constants';
 
 export class ChangesetFeed
 {
@@ -10,12 +10,6 @@ export class ChangesetFeed
     changes: TGChangeSetEntry[];
     graphPromise: Promise<TGGraphData|null>|null;
     peer: TGGraphAdapter;
-
-    static getChangesetFeed(peer: TGGraphAdapter, from: string): () => Promise<TGChangeSetEntry|null>
-    {
-        const feed = new ChangesetFeed(peer, from);
-        return () => feed.getNext();
-    }
 
     /**
      * Constructor
