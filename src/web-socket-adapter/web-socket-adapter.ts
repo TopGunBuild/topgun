@@ -57,12 +57,13 @@ export class WebSocketAdapter extends AsyncStreamEmitter<any> implements TGGraph
     {
         return new Promise<TGGraphData|null>((resolve) =>
         {
-            const msgId                  = uuidv4();
-            const cb                     = (res: TGGraphData|null) =>
+            const msgId = uuidv4();
+            const cb    = (res: TGGraphData|null) =>
             {
                 this.#off(msgId);
                 resolve(res);
             };
+
             this._requestChannels[msgId] = this.#subscribeToChannel(`topgun/@${msgId}`, cb);
 
             this.#publishToChannel('topgun/put', {
@@ -72,24 +73,21 @@ export class WebSocketAdapter extends AsyncStreamEmitter<any> implements TGGraph
         });
     }
 
-    get(opts: TGOptionsGet): Promise<TGGraphData>
+    get(data: TGOptionsGet): Promise<TGGraphData>
     {
         return new Promise<TGGraphData>((resolve) =>
         {
-            const soul                   = opts['#'];
-            const msgId                  = uuidv4();
-            const cb                     = (res: TGMessage) =>
+            const soul  = data['#'];
+            const msgId = uuidv4();
+            const cb    = (res: TGMessage) =>
             {
                 this.#off(msgId);
                 resolve(res.put);
             };
-            this._requestChannels[msgId] = this.#subscribeToChannel(
-                `topgun/nodes/${soul}`,
-                cb,
-                {
-                    data: opts
-                }
-            );
+
+            this._requestChannels[msgId] = this.#subscribeToChannel(`topgun/nodes/${soul}`, cb, {
+                data
+            });
             // @TODO: Maybe this is unnecessary?
             // this.#publishToChannel('topgun/get', {
             //     '#'  : msgId,
@@ -100,11 +98,18 @@ export class WebSocketAdapter extends AsyncStreamEmitter<any> implements TGGraph
 
     onChange(handler: (change: TGChangeSetEntry) => void, from?: string): () => void
     {
-        const msgId                  = uuidv4();
+        const cb    = (res: TGMessage) =>
+        {
+            console.log('changelog', res);
+        };
+
+        const channel = this.#subscribeToChannel('topgun/nodes/changelog', cb, {
+            data: { from }
+        });
 
         return () =>
         {
-
+            channel.unsubscribe();
         };
     }
 
