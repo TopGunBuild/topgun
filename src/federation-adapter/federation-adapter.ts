@@ -23,7 +23,7 @@ export class TGFederationAdapter implements TGGraphAdapter
         internal: TGGraphAdapter,
         peers: TGPeers,
         persistence: TGGraphAdapter,
-        adapterOpts: TGFederatedAdapterOptions
+        options: TGFederatedAdapterOptions
     )
     {
         const defaultOptions: TGFederatedAdapterOptions = {
@@ -37,7 +37,7 @@ export class TGFederationAdapter implements TGGraphAdapter
         this.internal    = internal;
         this.peers       = peers;
         this.persistence = persistence;
-        this.options     = Object.assign(defaultOptions, adapterOpts || {});
+        this.options     = Object.assign(defaultOptions, options || {});
         this.writer      = new Writer(this.internal, this.persistence, this.peers, this.options);
     }
 
@@ -83,7 +83,11 @@ export class TGFederationAdapter implements TGGraphAdapter
 
     connectToPeers(): () => void
     {
-        console.log('connectToPeers');
+        if (this.peers.size)
+        {
+            console.log('connectToPeers');
+        }
+
         const connectors: ConnectToPeer[] = [];
 
         this.peers.getPeerNames().forEach(async (peerName) =>
