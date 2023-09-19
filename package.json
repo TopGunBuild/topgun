@@ -53,6 +53,11 @@
             "require": "./dist/utils.js",
             "import": "./dist/utils.mjs"
         },
+        "./logger": {
+            "types": "./dist/logger.d.ts",
+            "require": "./dist/logger.js",
+            "import": "./dist/logger.mjs"
+        },
         "./types": {
             "types": "./dist/types.d.ts",
             "require": "./dist/types.js",
@@ -82,6 +87,9 @@
             ],
             "utils": [
                 "./dist/utils.d.ts"
+            ],
+            "logger": [
+                "./dist/logger.d.ts"
             ],
             "types": [
                 "./dist/utils.d.ts"
