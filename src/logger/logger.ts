@@ -1,7 +1,7 @@
 import { TGConfigLoggerType, TGExtendedLogType, TGLoggerLevelsType, TGLoggerTransportFunctionType } from './types';
 import { defaultLogger, reservedKey } from './constants';
 
-class TGLogger
+export class TGLogger
 {
     private readonly _levels: TGLoggerLevelsType;
     private readonly _transport: TGLoggerTransportFunctionType|TGLoggerTransportFunctionType[];
