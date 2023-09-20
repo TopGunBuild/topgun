@@ -1,7 +1,13 @@
-import { TGConfigLoggerType, TGExtendedLogType, TGLoggerLevelsType, TGLoggerTransportFunctionType } from './types';
+import {
+    TGLoggerOptions,
+    TGExtendedLogType,
+    TGLoggerLevelsType,
+    TGLoggerTransportFunctionType,
+    TGLoggerType
+} from './types';
 import { defaultLogger, reservedKey } from './constants';
 
-export class TGLogger
+export class TGLogger implements TGLoggerType
 {
     private readonly _levels: TGLoggerLevelsType;
     private readonly _transport: TGLoggerTransportFunctionType|TGLoggerTransportFunctionType[];
@@ -22,7 +28,7 @@ export class TGLogger
     /**
      * Constructor
      */
-    constructor(config: TGConfigLoggerType)
+    constructor(config: TGLoggerOptions)
     {
         this._levels = config.levels;
         this._level  = config.severity || Object.keys(this._levels)[0];
@@ -455,7 +461,7 @@ export class TGLogger
     };
 }
 
-export const createLogger = <Y extends string>(config?: TGConfigLoggerType) =>
+export const createLogger = <Y extends string>(config?: TGLoggerOptions) =>
 {
     type levelMethods<levels extends string> = {
         [key in levels]: (...args: unknown[]) => void;
