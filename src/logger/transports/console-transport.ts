@@ -31,11 +31,11 @@ export const consoleTransport: TGLoggerTransportFunctionType = (props) =>
 
     if (
         props.options?.colors &&
-        props.options.colors[props.level.text] &&
-        availableColors[props.options.colors[props.level.text]]
+        props.options.colors[props.level] &&
+        availableColors[props.options.colors[props.level]]
     )
     {
-        color = `\x1b[${availableColors[props.options.colors[props.level.text]]}m`;
+        color = `\x1b[${availableColors[props.options.colors[props.level]]}m`;
         msg   = `${color}${msg}${resetColors}`;
     }
 

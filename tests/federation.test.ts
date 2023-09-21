@@ -27,7 +27,10 @@ describe('Common', () =>
                     hostname: '127.0.0.1',
                     port    : 3460,
                 }
-            ]
+            ],
+            log  : {
+                enabled: true,
+            }
         });
         // Peers
         server2 = new TGServer({

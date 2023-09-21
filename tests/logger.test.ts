@@ -5,7 +5,7 @@ describe('Logger', () =>
     it('The default log functions should be defined in all transports', () =>
     {
         const log = createLogger();
-        expect(log.debug).toBeDefined();
+        expect(log.log).toBeDefined();
         expect(log.info).toBeDefined();
         expect(log.warn).toBeDefined();
         expect(log.error).toBeDefined();
@@ -24,7 +24,7 @@ describe('Logger', () =>
     {
         const log = createLogger();
         log.setSeverity('info');
-        expect(log.debug('message')).toBe(false);
+        expect(log.log('message')).toBe(false);
     });
 
     it('Custom levels should be defined, even with wrong level config', () =>
@@ -105,15 +105,15 @@ describe('Logger', () =>
         let outputExp  = '';
         const storeLog = (inputs) => (outputData += inputs);
         console['log'] = jest.fn(storeLog);
-        log.debug('message');
+        log.log('message');
         outputExp = `message`;
         expect(outputData).toBe(outputExp);
         outputData = '';
-        log.debug({ message: 'message' });
+        log.log({ message: 'message' });
         outputExp = `{\n  \"message\": \"message\"\n}`;
         expect(outputData).toBe(outputExp);
         outputData = '';
-        log.debug(() =>
+        log.log(() =>
         {
             return true;
         });
@@ -128,7 +128,7 @@ describe('Logger', () =>
         let outputData = '';
         const storeLog = (inputs) => (outputData += inputs);
         console['log'] = jest.fn(storeLog);
-        log.debug('message');
+        log.log('message');
         expect(outputData.length).toBe(0);
     });
 
@@ -141,7 +141,7 @@ describe('Logger', () =>
         let outputData = '';
         const storeLog = (inputs) => (outputData += inputs);
         console['log'] = jest.fn(storeLog);
-        log.debug('message');
+        log.log('message');
         expect(outputData.length).toBe(0);
     });
 
@@ -156,7 +156,7 @@ describe('Logger', () =>
         let outputData = '';
         const storeLog = (inputs) => (outputData += inputs);
         console['log'] = jest.fn(storeLog);
-        log.debug('message');
+        log.log('message');
         const levelTxt  = `DEBUG : `;
         const outputExp = `${levelTxt}message`;
         expect(outputData).toBe(outputExp);
@@ -172,7 +172,7 @@ describe('Logger', () =>
         let outputData = '';
         const storeLog = (inputs) => (outputData += inputs);
         console['log'] = jest.fn(storeLog);
-        log.debug('');
+        log.log('');
         expect(outputData).toBe('');
     });
 
@@ -185,7 +185,7 @@ describe('Logger', () =>
         let outputData = '';
         const storeLog = (inputs) => (outputData += inputs);
         console['log'] = jest.fn(storeLog);
-        log.debug('message');
+        log.log('message');
         const pattern = /\d\d:\d\d:\d\d GMT \| DEBUG \: message$/;
         expect(outputData).toMatch(pattern);
     });
@@ -199,7 +199,7 @@ describe('Logger', () =>
         let outputData = '';
         const storeLog = (inputs) => (outputData += inputs);
         console['log'] = jest.fn(storeLog);
-        log.debug('message');
+        log.log('message');
         const pattern = /T\d\d:\d\d:\d\d\.\d\d\dZ \| DEBUG \: message$/;
         expect(outputData).toMatch(pattern);
     });
@@ -213,7 +213,7 @@ describe('Logger', () =>
         let outputData = '';
         const storeLog = (inputs) => (outputData += inputs);
         console['log'] = jest.fn(storeLog);
-        log.debug('message');
+        log.log('message');
         const levelTxt  = `DEBUG : `;
         const outputExp = `${levelTxt}message`;
         expect(outputData).toBe(outputExp);
@@ -228,7 +228,7 @@ describe('Logger', () =>
         let outputData = '';
         const storeLog = (inputs) => (outputData += inputs);
         console['log'] = jest.fn(storeLog);
-        log.debug('message', 'message2');
+        log.log('message', 'message2');
         const levelTxt  = `DEBUG : `;
         const outputExp = `${levelTxt}message message2`;
         expect(outputData).toBe(outputExp);

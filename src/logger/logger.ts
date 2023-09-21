@@ -1,15 +1,17 @@
+import { isDefined } from '@topgunbuild/typed';
 import {
     TGLoggerOptions,
-    TGExtendedLogType,
-    TGLoggerLevelsType,
+    TGExtendedLoggerType,
     TGLoggerTransportFunctionType,
-    TGLoggerType
+    TGLoggerType, TGLoggerLevel
 } from './types';
-import { defaultLogger, reservedKey } from './constants';
+import { defaultLoggerOptions } from './constants';
 
 export class TGLogger implements TGLoggerType
 {
-    private readonly _levels: TGLoggerLevelsType;
+    private readonly _appName: string;
+    private readonly _appId: string|number;
+    private readonly _levels: TGLoggerLevel[];
     private readonly _transport: TGLoggerTransportFunctionType|TGLoggerTransportFunctionType[];
     private readonly _transportOptions: any;
     private readonly _async: boolean;
@@ -18,11 +20,10 @@ export class TGLogger implements TGLoggerType
     private readonly _dateFormat: string|((date: Date) => string);
     private readonly _printLevel: boolean;
     private readonly _printDate: boolean;
-    private _level: string;
     private _enabled: boolean;
-    private _enabledExtensions: string[]|null                 = null;
-    private _extensions: string[]                             = [];
-    private _extendedLogs: {[key: string]: TGExtendedLogType} = {};
+    private _enabledExtensions: string[]|null                    = null;
+    private _extensions: string[]                                = [];
+    private _extendedLogs: {[key: string]: TGExtendedLoggerType} = {};
     private _originalConsole?: typeof console;
 
     /**
@@ -30,9 +31,9 @@ export class TGLogger implements TGLoggerType
      */
     constructor(config: TGLoggerOptions)
     {
-        this._levels = config.levels;
-        this._level  = config.severity || Object.keys(this._levels)[0];
-
+        this._appName          = config.appName || 'TopGun';
+        this._appId            = config.appId;
+        this._levels           = config.levels;
         this._transport        = config.transport;
         this._transportOptions = config.transportOptions;
 
@@ -60,31 +61,15 @@ export class TGLogger implements TGLoggerType
         /** Bind correct log levels methods */
         /* eslint-disable-next-line @typescript-eslint/no-this-alias */
         const _this: any = this;
-        Object.keys(this._levels).forEach((level: string) =>
+        this._levels.forEach((level: string) =>
         {
-            if (typeof level !== 'string')
+            if (!['debug', 'log', 'warn', 'error'].includes(level))
             {
-                throw Error('[topgun-logs] ERROR: levels must be strings');
-            }
-            if (level[0] === '_')
-            {
-                throw Error(
-                    '[topgun-logs] ERROR: keys with first char "_" is reserved and cannot be used as levels'
-                );
-            }
-            if (reservedKey.indexOf(level) !== -1)
-            {
-                throw Error(
-                    `[topgun-logs] ERROR: [${level}] is a reserved key, you cannot set it as custom level`
-                );
-            }
-            if (typeof this._levels[level] === 'number')
-            {
-                _this[level] = this.#log.bind(this, level, null);
+                throw Error(`[topgun-logs] ERROR: [${level}] wrong level config, levels must be one of 'debug', 'log', 'warn', 'error'`);
             }
             else
             {
-                throw Error(`[topgun-logs] ERROR: [${level}] wrong level config`);
+                _this[level] = this.#log.bind(this, level, null);
             }
         }, this);
     }
@@ -96,7 +81,7 @@ export class TGLogger implements TGLoggerType
     /**
      * Extend logger with a new extension
      */
-    extend(extension: string): TGExtendedLogType
+    extend(extension: string): TGExtendedLoggerType
     {
         if (extension === 'console')
         {
@@ -111,7 +96,7 @@ export class TGLogger implements TGLoggerType
         this._extendedLogs[extension] = {};
         this._extensions.push(extension);
         const extendedLog = this._extendedLogs[extension];
-        Object.keys(this._levels).forEach((level: string) =>
+        Object.keys(this._levels).forEach((level: TGLoggerLevel) =>
         {
             extendedLog[level]                = (...msgs: any) =>
             {
@@ -139,18 +124,6 @@ export class TGLogger implements TGLoggerType
             {
                 throw Error(
                     '[topgun-logs] ERROR: You cannot get extensions from extended logger'
-                );
-            };
-            extendedLog['setSeverity']        = (level: string) =>
-            {
-                throw Error(
-                    '[topgun-logs] ERROR: You cannot set severity from extended logger'
-                );
-            };
-            extendedLog['getSeverity']        = () =>
-            {
-                throw Error(
-                    '[topgun-logs] ERROR: You cannot get severity from extended logger'
                 );
             };
             extendedLog['patchConsole']       = () =>
@@ -252,38 +225,11 @@ export class TGLogger implements TGLoggerType
     }
 
     /**
-     * Set log severity API
-     */
-    setSeverity(level: string): string
-    {
-        if (level in this._levels)
-        {
-            this._level = level;
-        }
-        else
-        {
-            throw Error(
-                `[topgun-logs:setSeverity] ERROR: Level [${level}] not exist`
-            );
-        }
-        return this._level;
-    }
-
-    /**
-     * Get current log severity API
-     */
-    getSeverity(): string
-    {
-        return this._level;
-    }
-
-    /**
      * Monkey Patch global console.log
      */
     patchConsole(): void
     {
         const extension = 'console';
-        const levelKeys = Object.keys(this._levels);
 
         if (!this._originalConsole)
         {
@@ -297,10 +243,10 @@ export class TGLogger implements TGLoggerType
 
         console['log'] = (...msgs: any) =>
         {
-            this.#log(levelKeys[0], extension, ...msgs);
+            this.#log(this._levels[0], extension, ...msgs);
         };
 
-        levelKeys.forEach((level: string) =>
+        this._levels.forEach((level: TGLoggerLevel) =>
         {
             if ((console as any)[level])
             {
@@ -326,7 +272,7 @@ export class TGLogger implements TGLoggerType
     /**
      * Log messages methods and level filter
      */
-    #log(level: string, extension: string|null, ...msgs: any[]): boolean
+    #log(level: TGLoggerLevel, extension: string|null, ...msgs: any[]): boolean
     {
         if (this._async)
         {
@@ -341,7 +287,7 @@ export class TGLogger implements TGLoggerType
         }
     }
 
-    #sendToTransport(level: string, extension: string|null, msgs: any): boolean
+    #sendToTransport(level: TGLoggerLevel, extension: string|null, msgs: any): boolean
     {
         if (!this._enabled) return false;
         if (!this.#isLevelEnabled(level))
@@ -356,7 +302,7 @@ export class TGLogger implements TGLoggerType
         const transportProps = {
             msg      : msg,
             rawMsg   : msgs,
-            level    : { severity: this._levels[level], text: level },
+            level    : level,
             extension: extension,
             options  : this._transportOptions,
         };
@@ -436,15 +382,17 @@ export class TGLogger implements TGLoggerType
             stringMsg += this.#stringifyMsg(msgs);
         }
 
-        return stringMsg;
+        const prefix = isDefined(this._appId) ? `[${this._appName}] ${this._appId} | ` : `[${this._appName}] | `;
+
+        return prefix + stringMsg;
     };
 
     /**
      * Return true if level is enabled
      */
-    #isLevelEnabled(level: string): boolean
+    #isLevelEnabled(level: TGLoggerLevel): boolean
     {
-        return this._levels[level] >= this._levels[this._level];
+        return this._levels.includes(level);
     };
 
     /**
@@ -473,7 +421,7 @@ export const createLogger = <Y extends string>(config?: TGLoggerOptions) =>
         extend: (extension: string) => loggerType;
     };
 
-    const mergedConfig = { ...defaultLogger, ...config };
+    const mergedConfig = { ...defaultLoggerOptions, ...config };
 
     return new TGLogger(mergedConfig) as unknown as Omit<TGLogger, 'extend'>&
     loggerType&

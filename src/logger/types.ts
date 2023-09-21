@@ -1,24 +1,34 @@
-export interface TGLoggerTransportOptions {
+export interface TGLoggerTransportOptions
+{
     msg: any;
     rawMsg: any;
-    level: {severity: number; text: string};
+    level: string;
     extension?: string|null;
     options?: any;
 }
 
 export type TGLoggerTransportFunctionType = (props: TGLoggerTransportOptions) => any;
 
-export type TGLoggerLevelsType = {[key: string]: number};
+export interface TGExtendedLoggerType
+{
+    debug?(...args: any[]): void;
 
-export type TGLevelLogMethodType = (...msgs: any[]) => boolean;
+    log?(...args: any[]): void;
 
-export type TGExtendedLogType = {[key: string]: TGLevelLogMethodType|any};
+    warn?(...args: any[]): void;
 
-export interface TGLoggerOptions {
-    severity?: string;
+    error?(...args: any[]): void;
+}
+
+export type TGLoggerLevel = 'debug' | 'log' | 'warn' | 'error';
+
+export interface TGLoggerOptions
+{
+    appName?: string;
+    appId?: string|number;
     transport?: TGLoggerTransportFunctionType|TGLoggerTransportFunctionType[];
     transportOptions?: any;
-    levels?: TGLoggerLevelsType;
+    levels?: TGLoggerLevel[];
     async?: boolean;
     asyncFunc?: (...args: any[]) => any;
     stringifyFunc?: (msg: any) => string;
@@ -29,19 +39,15 @@ export interface TGLoggerOptions {
     enabledExtensions?: string[]|string|null;
 }
 
-export interface TGLoggerType
+export interface TGLoggerType extends TGExtendedLoggerType
 {
-    extend(extension: string): TGExtendedLogType;
-    enable(extension?: string): boolean;
-    disable(extension?: string): boolean;
-    getExtensions(): string[];
-    setSeverity(level: string): string;
-    getSeverity(): string;
-    patchConsole(): void;
-    debug?(...args: any[]): void;
-    info?(...args: any[]): void;
-    warn?(...args: any[]): void;
-    error?(...args: any[]): void;
+    extend(extension: string): TGExtendedLoggerType;
 
-    [key: string]: any;
+    enable(extension?: string): boolean;
+
+    disable(extension?: string): boolean;
+
+    getExtensions(): string[];
+
+    patchConsole(): void;
 }

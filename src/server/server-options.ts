@@ -1,5 +1,6 @@
 import { TGSocketServerOptions } from '@topgunbuild/socket/server';
 import { TGGraphAdapter, TGGraphAdapterOptions, TGPeerOptions } from '../types';
+import { TGLoggerOptions } from '../logger';
 
 export interface TGServerOptions extends TGSocketServerOptions, TGGraphAdapterOptions
 {
@@ -15,4 +16,5 @@ export interface TGServerOptions extends TGSocketServerOptions, TGGraphAdapterOp
     peerMaxStaleness?: number;
     peerBatchInterval?: number;
     peerChangelogRetention?: number;
+    log?: TGLoggerOptions;
 }

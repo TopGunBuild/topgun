@@ -1,4 +1,4 @@
-import { Struct, Result, ok, isErr, isFunction } from '@topgunbuild/typed';
+import { Struct, Result, ok, isErr, isFunction, isObject, isDefined } from '@topgunbuild/typed';
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { pseudoRandomText, verify } from '../sea';
 import { TGGraphAdapter, TGGraphData, TGMessage } from '../types';
@@ -11,6 +11,7 @@ import { uuidv4 } from '../utils/uuidv4';
 import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from '../storage';
 import { TGFederationAdapter } from '../federation-adapter/federation-adapter';
 import { TGPeers } from '../federation-adapter/peers';
+import { createLogger, TGExtendedLoggerType, TGLoggerType } from '../logger';
 
 export class TGServer extends AsyncStreamEmitter<any>
 {
@@ -20,9 +21,9 @@ export class TGServer extends AsyncStreamEmitter<any>
     readonly options: TGServerOptions;
     readonly middleware: Middleware;
     readonly peers: TGPeers;
+    readonly validator: Struct<TGGraphData>;
 
-    protected readonly validator: Struct<TGGraphData>;
-
+    private logger: TGLoggerType;
     private pruneInterval: any;
     private peersDisconnector: () => void;
 
@@ -41,10 +42,13 @@ export class TGServer extends AsyncStreamEmitter<any>
             peerPruneInterval     : 60 * 60 * 1000,
             peerBackSync          : 0,
             peerChangelogRetention: 0,
-            peers                 : []
+            peers                 : [],
         };
 
-        this.options         = Object.assign(defaultOptions, options || {});
+        this.options = Object.assign(defaultOptions, options || {});
+
+        this.#createLogger();
+
         this.validator       = createValidator();
         this.internalAdapter = this.options.adapter || createMemoryAdapter(options);
         this.peers           = new TGPeers(this.options.peers);
@@ -89,6 +93,8 @@ export class TGServer extends AsyncStreamEmitter<any>
         this.#prune();
         this.pruneInterval     = setInterval(this.#prune.bind(this), this.options.peerPruneInterval);
         this.peersDisconnector = this.adapter.connectToPeers();
+
+        this.logger.log('TopGun application successfully started');
     }
 
     async #prune(): Promise<void>
@@ -306,6 +312,19 @@ export class TGServer extends AsyncStreamEmitter<any>
         {
             request.end('Invalid login');
         }
+    }
+
+    #createLogger(): void
+    {
+        if (!isObject(this.options.log))
+        {
+            this.options.log = {};
+        }
+        if (!isDefined(this.options.log.appId) && this.options.port)
+        {
+            this.options.log.appId = this.options.port;
+        }
+        this.logger = createLogger(this.options.log);
     }
 }
 
