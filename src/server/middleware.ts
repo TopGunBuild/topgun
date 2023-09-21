@@ -64,7 +64,7 @@ export class Middleware
 
         const soul = req.channel.replace(/^topgun\/nodes\//, '');
 
-        if (!soul || soul === req.channel) //  || soul === 'changelog'
+        if (!soul || soul === req.channel)
         {
             return;
         }

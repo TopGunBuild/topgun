@@ -1,6 +1,6 @@
 import { Struct, Result, ok, isErr, isFunction, isObject, isDefined } from '@topgunbuild/typed';
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
-import { pseudoRandomText, verify } from '../sea';
+import { pseudoRandomText } from '../sea';
 import { TGGraphAdapter, TGGraphData, TGMessage } from '../types';
 import { TGServerOptions } from './server-options';
 import { listen, TGSocketServer, TGSocket } from '@topgunbuild/socket/server';
@@ -11,7 +11,8 @@ import { uuidv4 } from '../utils/uuidv4';
 import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from '../storage';
 import { TGFederationAdapter } from '../federation-adapter/federation-adapter';
 import { TGPeers } from '../federation-adapter/peers';
-import { createLogger, TGExtendedLoggerType, TGLoggerType } from '../logger';
+import { createLogger, TGLoggerType } from '../logger';
+import { socketLoginHandler } from './utils/socket-login-handler';
 
 export class TGServer extends AsyncStreamEmitter<any>
 {
@@ -24,7 +25,6 @@ export class TGServer extends AsyncStreamEmitter<any>
     readonly validator: Struct<TGGraphData>;
 
     private logger: TGLoggerType;
-    private pruneInterval: any;
     private peersDisconnector: () => void;
 
     /**
@@ -74,7 +74,6 @@ export class TGServer extends AsyncStreamEmitter<any>
             this.gateway.httpServer.close();
         }
         await this.gateway.close();
-        clearInterval(this.pruneInterval);
         this.peersDisconnector();
         this.peers.forEach(value => value.close());
     }
@@ -90,20 +89,8 @@ export class TGServer extends AsyncStreamEmitter<any>
     {
         this.middleware.setupMiddleware();
         this.#handleWebsocketConnection();
-        this.#prune();
-        this.pruneInterval     = setInterval(this.#prune.bind(this), this.options.peerPruneInterval);
         this.peersDisconnector = this.adapter.connectToPeers();
-
         this.logger.log('TopGun application successfully started');
-    }
-
-    async #prune(): Promise<void>
-    {
-        const before = new Date().getTime() - (this.options.peerChangelogRetention || 0);
-        return (
-            this.internalAdapter.pruneChangelog &&
-            this.internalAdapter.pruneChangelog(before)
-        )
     }
 
     /**
@@ -224,93 +211,18 @@ export class TGServer extends AsyncStreamEmitter<any>
     {
         for await (const { socket } of this.gateway.listener('connection'))
         {
-            (async () =>
-            {
-                // const url = socket.request.headers.host + socket.request.url;
-                //
-                // if (this.peerSet[url])
-                // {
-                //     const err = new Error('Peer already connect');
-                //     err.name = 'FailedPeerConnect';
-                //     socket.disconnect();
-                // }
-
-                // Set up a loop to handle and respond to RPCs.
-                for await (const request of (socket as TGSocket).procedure('login'))
-                {
-                    this.#authenticateLogin(socket, request);
-                }
-            })();
+            this.#loginProcedureListener(socket);
         }
     }
 
     /**
-     * Authenticate a connection for extra privileges
+     * RPC listener for a socket's login
      */
-    async #authenticateLogin(
-        socket: TGSocket,
-        request: {
-            data: {
-                pub: string;
-                proof: {
-                    m: string;
-                    s: string;
-                };
-            },
-            end: (reason?: string) => void,
-            error: (error?: Error) => void
-        },
-    ): Promise<void>
+    async #loginProcedureListener(socket: TGSocket): Promise<void>
     {
-        const data = request.data;
-
-        if (!data.pub || !data.proof)
+        for await (const request of socket.procedure('login'))
         {
-            request.end('Missing login info');
-            return;
-        }
-
-        try
-        {
-            const [socketId, timestampStr] = data.proof.m.split('/');
-            const timestamp                = parseInt(timestampStr, 10);
-            const now                      = new Date().getTime();
-            const drift                    = Math.abs(now - timestamp);
-            const maxDrift                 =
-                      (this.options.authMaxDrift &&
-                          parseInt(`${this.options.authMaxDrift}`, 10)) ||
-                      1000 * 60 * 5;
-
-            if (drift > maxDrift)
-            {
-                request.error(new Error('Exceeded max clock drift'));
-                return;
-            }
-
-            if (!socketId || socketId !== socket.id)
-            {
-                request.error(new Error('Socket ID doesn\'t match'));
-                return;
-            }
-
-            const isVerified = await verify(data.proof, data.pub);
-
-            if (isVerified)
-            {
-                await socket.setAuthToken({
-                    pub: data.pub,
-                    timestamp,
-                });
-                request.end();
-            }
-            else
-            {
-                request.end('Invalid login');
-            }
-        }
-        catch (err)
-        {
-            request.end('Invalid login');
+            socketLoginHandler(socket, request);
         }
     }
 
