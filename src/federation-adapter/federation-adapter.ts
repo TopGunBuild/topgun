@@ -1,11 +1,9 @@
 import { TGFederatedAdapterOptions } from './types';
 import { TGGraphAdapter, TGGraphData, TGOptionsGet } from '../types';
-import { createSoul } from '../utils';
-import { Writer } from './write/writer';
-import { PEER_SYNC_SOUL } from './constants';
+import { Writer } from './writer';
 import { TGPeers } from './peers';
-import { ConnectToPeer } from './sync/connect-to-peer';
-import { SyncWithPeer } from './sync/sync-with-peer';
+import { TGExtendedLoggerType } from '../logger';
+import { ConnectToPeer } from './connect-to-peer';
 
 export class TGFederationAdapter implements TGGraphAdapter
 {
@@ -13,6 +11,7 @@ export class TGFederationAdapter implements TGGraphAdapter
     peers: TGPeers;
     persistence: TGGraphAdapter;
     options: TGFederatedAdapterOptions;
+    logger: TGExtendedLoggerType;
 
     private readonly writer: Writer;
 
@@ -23,38 +22,36 @@ export class TGFederationAdapter implements TGGraphAdapter
         internal: TGGraphAdapter,
         peers: TGPeers,
         persistence: TGGraphAdapter,
-        options: TGFederatedAdapterOptions
+        options: TGFederatedAdapterOptions,
+        logger: TGExtendedLoggerType
     )
     {
         const defaultOptions: TGFederatedAdapterOptions = {
-            backSync         : 1000 * 60 * 60 * 24, // 24 hours
-            batchInterval    : 500,
-            maxStaleness     : 1000 * 60 * 60 * 24,
-            maintainChangelog: true,
-            putToPeers       : false
+            putToPeers: true
         };
 
         this.internal    = internal;
         this.peers       = peers;
         this.persistence = persistence;
         this.options     = Object.assign(defaultOptions, options || {});
-        this.writer      = new Writer(this.internal, this.persistence, this.peers, this.options);
+        this.logger      = logger;
+        this.writer      = new Writer(this.persistence, this.peers, this.options, this.logger);
     }
 
     // -----------------------------------------------------------------------------------------------------
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    async get(getOpts: TGOptionsGet)
+    async get(getOpts: TGOptionsGet): Promise<TGGraphData>
     {
-        console.log('get');
+        this.logger.log('get', getOpts);
         await this.writer.updateFromPeers(getOpts);
         return this.internal.get(getOpts);
     }
 
-    async put(data: TGGraphData)
+    async put(data: TGGraphData): Promise<TGGraphData|null>
     {
-        console.log('put');
+        this.logger.log('put', data);
         const diff = await this.persistence.put(data);
 
         if (!diff)
@@ -62,62 +59,28 @@ export class TGFederationAdapter implements TGGraphAdapter
             return diff
         }
 
-        if (this.options.maintainChangelog)
-        {
-            this.writer.updateChangelog(diff);
-        }
-
         if (this.options.putToPeers)
         {
-            this.writer.updatePeers(diff, this.peers);
+            this.writer.updatePeers(diff, this.peers.getPeers());
         }
 
         return diff
     }
 
-    async syncWithPeer(peerName: string, from: string): Promise<string>
-    {
-        console.log('syncWithPeer ', peerName);
-        return SyncWithPeer.sync(peerName, from, this.peers, this.persistence, this.options, this.writer);
-    }
-
     connectToPeers(): () => void
     {
-        if (this.peers.size)
-        {
-            console.log('connectToPeers');
-        }
-
         const connectors: ConnectToPeer[] = [];
 
-        this.peers.getPeerNames().forEach(async (peerName) =>
+        if (this.peers.size && this.options.reversePeerSync)
         {
-            const key       = await this.#getPeerSyncDate(peerName);
-            const connector = new ConnectToPeer(peerName, key, this.peers, this.persistence, this.options, this.writer);
-            connector.connect();
-            connectors.push(connector);
-        });
-
-        return () => connectors.forEach(c => c.disconnect());
-    }
-
-    // -----------------------------------------------------------------------------------------------------
-    // @ Private methods
-    // -----------------------------------------------------------------------------------------------------
-
-    async #getPeerSyncDate(peerName: string): Promise<string>
-    {
-        console.log('getPeerSyncDate ', peerName);
-        const peerSyncSoul = createSoul(PEER_SYNC_SOUL, peerName);
-        const graph        = await this.internal.get({
-            '#': peerSyncSoul
-        });
-
-        if (graph && graph[peerSyncSoul])
-        {
-            console.log(graph);
+            this.peers.getPeers().forEach(async (peer) =>
+            {
+                const connector = new ConnectToPeer(peer, this.persistence, this.options, this.writer, this.logger);
+                connector.connect();
+                connectors.push(connector);
+            });
         }
 
-        return new Date(Date.now() - this.options.backSync).getTime().toString(); // yesterday
+        return () => connectors.forEach(c => c.disconnect());
     }
 }

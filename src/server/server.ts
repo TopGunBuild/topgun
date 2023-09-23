@@ -75,7 +75,7 @@ export class TGServer extends AsyncStreamEmitter<any>
         }
         await this.gateway.close();
         this.peersDisconnector();
-        this.peers.forEach(value => value.close());
+        this.peers.forEach(peer => peer.disconnect());
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -153,11 +153,10 @@ export class TGServer extends AsyncStreamEmitter<any>
             this.peers,
             withValidation,
             {
-                backSync     : this.options.peerBackSync,
-                batchInterval: this.options.peerBatchInterval,
-                maxStaleness : this.options.peerMaxStaleness,
-                putToPeers   : true
-            }
+                putToPeers     : this.options.putToPeers,
+                reversePeerSync: this.options.reversePeerSync
+            },
+            this.logger.extend('FederationAdapter')
         )
     }
 

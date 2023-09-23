@@ -96,7 +96,7 @@ export class TGLogger implements TGLoggerType
         this._extendedLogs[extension] = {};
         this._extensions.push(extension);
         const extendedLog = this._extendedLogs[extension];
-        Object.keys(this._levels).forEach((level: TGLoggerLevel) =>
+        this._levels.forEach((level: TGLoggerLevel) =>
         {
             extendedLog[level]                = (...msgs: any) =>
             {
@@ -384,7 +384,7 @@ export class TGLogger implements TGLoggerType
 
         const prefix = isDefined(this._appId) ? `[${this._appName}] ${this._appId} | ` : `[${this._appName}] | `;
 
-        return prefix + stringMsg;
+        return (prefix + stringMsg).trim();
     };
 
     /**

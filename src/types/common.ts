@@ -1,5 +1,4 @@
 import { TGSocketClientOptions } from '@topgunbuild/socket/client';
-import { TGChangeSetEntry } from '../federation-adapter';
 
 /**
  * Timestamp of last change for each attribute
@@ -222,8 +221,7 @@ export interface TGGraphAdapter
     readonly put: (graphData: TGGraphData) => Promise<TGGraphData|null>;
     readonly pruneChangelog?: (before: number) => Promise<void>;
     readonly onChange?: (
-        handler: (change: TGChangeSetEntry) => void,
-        from?: string
+        handler: (change: TGGraphData) => void
     ) => () => void
 }
 

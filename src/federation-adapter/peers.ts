@@ -1,7 +1,7 @@
-import { WebSocketAdapter } from '../web-socket-adapter';
 import { TGPeerOptions } from '../types';
+import { TGPeer } from './peer';
 
-export class TGPeers extends Map<string, WebSocketAdapter>
+export class TGPeers extends Map<string, TGPeer>
 {
     /**
      * Constructor
@@ -16,29 +16,14 @@ export class TGPeers extends Map<string, WebSocketAdapter>
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    getEntries(): [string, WebSocketAdapter][]
+    getPeers(): TGPeer[]
     {
-        return Array.from(this);
+        return Array.from(this.values());
     }
 
-    getPeerNames(): string[]
+    getOtherPeers(uri: string): TGPeer[]
     {
-        return Array.from(this.keys());
-    }
-
-    getOtherPeers(peerName: string): TGPeers
-    {
-        const peers = new TGPeers();
-
-        this.forEach((value, key) =>
-        {
-            if (key !== peerName)
-            {
-                peers.set(key, value);
-            }
-        });
-
-        return peers;
+        return this.getPeers().filter(peer => peer.uri !== uri);
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -51,10 +36,10 @@ export class TGPeers extends Map<string, WebSocketAdapter>
         {
             for (const peer of peers)
             {
-                const adapter = WebSocketAdapter.createByPeerOptions(peer);
-                if (adapter?.baseUrl)
+                const adapter = new TGPeer(peer);
+                if (adapter.uri)
                 {
-                    this.set(adapter.baseUrl, adapter)
+                    this.set(adapter.uri, adapter);
                 }
             }
         }

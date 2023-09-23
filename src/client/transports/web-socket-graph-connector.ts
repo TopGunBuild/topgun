@@ -14,7 +14,7 @@ import { uuidv4 } from '../../utils/uuidv4';
 export class TGWebSocketGraphConnector extends TGGraphWireConnector
 {
     readonly client: TGClientSocket;
-    readonly opts: TGSocketClientOptions|undefined;
+    readonly options: TGSocketClientOptions|undefined;
 
     private readonly _requestChannels: {
         [msgId: string]: TGChannel<any>;
@@ -30,8 +30,8 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
     {
         super(name);
         this._requestChannels = {};
-        this.opts             = opts;
-        this.client           = createSocketClient(this.opts || {});
+        this.options          = opts;
+        this.client           = createSocketClient(this.options || {});
         this.#onConnect();
         this.#onError();
 
@@ -52,6 +52,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
     {
         try
         {
+            this.closeAllListeners();
             this.client.disconnect();
         }
         catch (e)
