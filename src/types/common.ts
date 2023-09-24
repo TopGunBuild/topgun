@@ -69,6 +69,8 @@ export interface CRDTOptions
     [k: string]: any;
 }
 
+export type TGOriginators = Record<string, number>;
+
 /**
  * A standard Protocol Message
  */
@@ -83,6 +85,7 @@ export interface TGMessage
     ack?: number|boolean;
     err?: any;
     ok?: boolean|number;
+    originators?: TGOriginators;
 }
 
 export type TGMessageCb = (msg: TGMessage) => void;
@@ -218,8 +221,7 @@ export interface TGGraphAdapter
 {
     readonly close?: () => void;
     readonly get: (opts: TGOptionsGet) => Promise<TGGraphData>;
-    readonly put: (graphData: TGGraphData) => Promise<TGGraphData|null>;
-    readonly pruneChangelog?: (before: number) => Promise<void>;
+    readonly put: (graphData: TGGraphData, originators?: TGOriginators) => Promise<TGGraphData|null>;
     readonly onChange?: (
         handler: (change: TGGraphData) => void
     ) => () => void

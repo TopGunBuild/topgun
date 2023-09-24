@@ -1,7 +1,7 @@
-import { Struct, Result, ok, isErr, isFunction, isObject, isDefined } from '@topgunbuild/typed';
+import { Struct, Result, ok, isErr, isFunction, isObject, isDefined, isString } from '@topgunbuild/typed';
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { pseudoRandomText } from '../sea';
-import { TGGraphAdapter, TGGraphData, TGMessage } from '../types';
+import { TGGraphAdapter, TGGraphData, TGMessage, TGOriginators } from '../types';
 import { TGServerOptions } from './server-options';
 import { listen, TGSocketServer, TGSocket } from '@topgunbuild/socket/server';
 import { createMemoryAdapter } from '../memory-adapter';
@@ -16,6 +16,7 @@ import { socketLoginHandler } from './utils/socket-login-handler';
 
 export class TGServer extends AsyncStreamEmitter<any>
 {
+    appName: string;
     readonly adapter: TGFederationAdapter;
     readonly internalAdapter: TGGraphAdapter;
     readonly gateway: TGSocketServer;
@@ -34,28 +35,28 @@ export class TGServer extends AsyncStreamEmitter<any>
     {
         super();
         const defaultOptions: TGServerOptions = {
-            maxKeySize            : MAX_KEY_SIZE,
-            maxValueSize          : MAX_VALUE_SIZE,
-            disableValidation     : false,
-            authMaxDrift          : 1000 * 60 * 5,
-            peerSyncInterval      : 1000,
-            peerPruneInterval     : 60 * 60 * 1000,
-            peerBackSync          : 0,
-            peerChangelogRetention: 0,
-            peers                 : [],
+            maxKeySize       : MAX_KEY_SIZE,
+            maxValueSize     : MAX_VALUE_SIZE,
+            disableValidation: false,
+            peers            : [],
+            putToPeers       : true,
+            reversePeerSync  : true
         };
 
         this.options = Object.assign(defaultOptions, options || {});
+        this.gateway = listen(this.options.port, this.options);
 
+        this.#persistAppName();
         this.#createLogger();
 
         this.validator       = createValidator();
         this.internalAdapter = this.options.adapter || createMemoryAdapter(options);
         this.peers           = new TGPeers(this.options.peers);
         this.adapter         = this.#federateInternalAdapter(this.internalAdapter);
-        this.gateway         = listen(this.options.port, this.options);
         this.middleware      = new Middleware(this.gateway, this.options, this.adapter);
         this.#run();
+
+        console.log(this.gateway.httpServer.address())
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -94,30 +95,13 @@ export class TGServer extends AsyncStreamEmitter<any>
     }
 
     /**
-     * Send put data to all node subscribers
-     */
-    #publishDiff(
-        soul: string,
-        msgId: string,
-        nodeDiff: TGGraphData,
-    ): void
-    {
-        this.gateway.exchange.publish(`topgun/nodes/${soul}`, {
-            '#'  : `${msgId}/${soul}`,
-            'put': {
-                [soul]: nodeDiff,
-            },
-        });
-    }
-
-    /**
      * Wrap internal adapter
      */
     #federateInternalAdapter(adapter: TGGraphAdapter): TGFederationAdapter
     {
         const withPublish: TGGraphAdapter = {
             ...adapter,
-            put: async (graph: TGGraphData) =>
+            put: async (graph: TGGraphData, originators?: TGOriginators) =>
             {
                 const diff = await adapter.put(graph);
 
@@ -126,6 +110,7 @@ export class TGServer extends AsyncStreamEmitter<any>
                     this.#publishIsDiff({
                         '#'  : pseudoRandomText(),
                         'put': diff,
+                        originators
                     });
                 }
 
@@ -135,7 +120,7 @@ export class TGServer extends AsyncStreamEmitter<any>
 
         const withValidation = {
             ...withPublish,
-            put: async (graph: TGGraphData) =>
+            put: async (graph: TGGraphData, originators?: TGOriginators) =>
             {
                 const result = this.#validatePut(graph);
 
@@ -144,7 +129,7 @@ export class TGServer extends AsyncStreamEmitter<any>
                     throw result.error;
                 }
 
-                return withPublish.put(graph);
+                return withPublish.put(graph, originators);
             },
         };
 
@@ -165,8 +150,9 @@ export class TGServer extends AsyncStreamEmitter<any>
      */
     #publishIsDiff(msg: TGMessage): void
     {
-        const msgId = msg['#'] || uuidv4();
-        const diff  = msg.put;
+        const msgId       = msg['#'] || uuidv4();
+        const diff        = msg.put;
+        const originators = msg.originators;
 
         if (!diff)
         {
@@ -187,8 +173,30 @@ export class TGServer extends AsyncStreamEmitter<any>
                 continue;
             }
 
-            this.#publishDiff(soul, msgId, nodeDiff);
+            this.#publishDiff(soul, msgId, nodeDiff, originators);
         }
+    }
+
+    /**
+     * Send put data to all node subscribers
+     */
+    #publishDiff(
+        soul: string,
+        msgId: string,
+        nodeDiff: TGGraphData,
+        originators?: Record<string, number>
+    ): void
+    {
+        this.gateway.exchange.publish(`topgun/nodes/${soul}`, {
+            '#'  : `${msgId}/${soul}`,
+            'put': {
+                [soul]: nodeDiff,
+            },
+            'originators': {
+                ...(originators || {}),
+                [this.appName]: 1
+            }
+        });
     }
 
     /**
@@ -231,11 +239,29 @@ export class TGServer extends AsyncStreamEmitter<any>
         {
             this.options.log = {};
         }
-        if (!isDefined(this.options.log.appId) && this.options.port)
+        if (!isDefined(this.options.log.appId) && isString(this.appName))
         {
-            this.options.log.appId = this.options.port;
+            this.options.log.appId = this.appName;
         }
         this.logger = createLogger(this.options.log);
+    }
+
+    #persistAppName(): void
+    {
+        this.appName = this.options.appName;
+
+        if (!isString(this.options.appName))
+        {
+            if (isFunction(this.gateway.httpServer?.address))
+            {
+                const address = this.gateway.httpServer?.address();
+                this.appName  = address.address + address.port;
+            }
+            else if (this.options.port)
+            {
+                this.appName = String(this.options.port);
+            }
+        }
     }
 }
 
