@@ -34,10 +34,16 @@ describe('Common', () =>
         });
         // Peers
         server2 = new TGServer({
-            port: 3459
+            port: 3459,
+            log : {
+                enabled: true,
+            }
         });
         server3 = new TGServer({
-            port: 3460
+            port: 3460,
+            log : {
+                enabled: true,
+            }
         });
     });
     afterEach(async () =>
@@ -52,30 +58,6 @@ describe('Common', () =>
 
     it('connect one node to another', async () =>
     {
-        (async () =>
-        {
-            for await (const { socket } of server1.gateway.listener('connection'))
-            {
-                // console.log(`server 1 got connection`);
-            }
-        })();
-
-        (async () =>
-        {
-            for await (const { socket } of server2.gateway.listener('connection'))
-            {
-                // console.log(`server 2 got connection`);
-            }
-        })();
-
-        (async () =>
-        {
-            for await (const connector of client.listener('connectorConnected'))
-            {
-                // console.log(`client connector connected`);
-            }
-        })();
-
         await Promise.all([
             server1.waitForReady(),
             server2.waitForReady(),
