@@ -41,7 +41,7 @@ export class TGGraphWireConnector extends TGGraphConnector
      *
      * @returns A function to be called to clean up callback listeners
      */
-    put({ graph, msgId = '', replyTo = '', cb }: TGPut): () => void
+    put({ graph, msgId = '', replyTo = '', cb, originators }: TGPut): () => void
     {
         if (!graph)
         {
@@ -51,6 +51,7 @@ export class TGGraphWireConnector extends TGGraphConnector
         }
         const msg: TGMessage = {
             put: graph,
+            originators
         };
         if (msgId)
         {

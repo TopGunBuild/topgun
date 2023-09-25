@@ -9,7 +9,8 @@ export class Middleware
      * Constructor
      */
     constructor(
-        private readonly server: TGSocketServer,
+        private readonly appName: string,
+        private readonly socketServer: TGSocketServer,
         private readonly options: TGServerOptions,
         private readonly adapter: TGGraphAdapter,
     )
@@ -22,13 +23,13 @@ export class Middleware
 
     setupMiddleware(): void
     {
-        this.server.addMiddleware(
-            this.server.MIDDLEWARE_SUBSCRIBE,
+        this.socketServer.addMiddleware(
+            this.socketServer.MIDDLEWARE_SUBSCRIBE,
             this.subscribeMiddleware.bind(this)
         );
 
-        this.server.addMiddleware(
-            this.server.MIDDLEWARE_PUBLISH_IN,
+        this.socketServer.addMiddleware(
+            this.socketServer.MIDDLEWARE_PUBLISH_IN,
             this.publishInMiddleware.bind(this)
         );
     }
@@ -39,9 +40,14 @@ export class Middleware
 
     private publishInMiddleware(req: RequestObject): void
     {
-        const msg = req.data;
-
         if (req.channel !== 'topgun/put')
+        {
+            return;
+        }
+
+        const msg = req.data as TGMessage;
+
+        if (msg && msg.originators && msg.originators[this.appName])
         {
             return;
         }
@@ -78,8 +84,9 @@ export class Middleware
             .then(graphData => ({
                 channel: req.channel,
                 data   : {
-                    '#'  : msgId,
-                    'put': graphData
+                    '#'          : msgId,
+                    'put'        : graphData,
+                    'originators': { [this.appName]: 1 }
                 }
             }))
             .catch((e) =>
@@ -95,7 +102,7 @@ export class Middleware
                     }
                 }
             })
-            .then((msg) =>
+            .then((msg: {channel: string, data: TGMessage}) =>
             {
                 req.socket.transmit('#publish', msg);
             })
@@ -114,7 +121,7 @@ export class Middleware
         {
             if (msg.put)
             {
-                await this.adapter.put(msg.put);
+                await this.adapter.put(msg.put, msg.originators);
             }
 
             return {

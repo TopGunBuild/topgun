@@ -1,7 +1,7 @@
 import { TGSocketClientOptions } from '@topgunbuild/socket/client';
 import { TGWebSocketGraphConnector } from '../client/transports/web-socket-graph-connector';
 import { socketOptionsFromPeer } from '../utils/socket-options-from-peer';
-import { TGGraphData, TGOptionsGet } from '../types';
+import { TGGraphData, TGMessage, TGMessageCb, TGOptionsGet, TGOriginators } from '../types';
 
 export class TGPeer extends TGWebSocketGraphConnector
 {
@@ -31,29 +31,30 @@ export class TGPeer extends TGWebSocketGraphConnector
         return this.client.authState === this.client.AUTHENTICATED;
     }
 
-    putData(graph: TGGraphData): Promise<TGGraphData|null>
+    putInPeer(graph: TGGraphData, originators: TGOriginators): Promise<TGMessage>
     {
-        return new Promise<TGGraphData|null>((resolve) =>
+        return new Promise<TGMessage>((resolve) =>
         {
             this.put({
                 graph,
-                cb: (res: TGGraphData|null) => resolve(res)
+                originators,
+                cb: (res: TGMessage) => resolve(res)
             });
         });
     }
 
-    getData(options: TGOptionsGet): Promise<TGGraphData>
+    getFromPeer(options: TGOptionsGet): Promise<TGMessage>
     {
-        return new Promise<TGGraphData>((resolve) =>
+        return new Promise<TGMessage>((resolve) =>
         {
             this.get({
                 options,
-                cb: (res: TGGraphData) => resolve(res)
+                cb: (res: TGMessage) => resolve(res)
             });
         });
     }
 
-    onChange(cb: (res: TGGraphData) => void): () => void
+    onChange(cb: TGMessageCb): () => void
     {
         const channel = this.subscribeToChannel('topgun/changelog', cb);
 

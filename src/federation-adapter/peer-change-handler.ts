@@ -1,10 +1,9 @@
-import { TGGraphAdapter, TGGraphData } from '../types';
-import { TGFederatedAdapterOptions } from './types';
-import { Writer } from './writer';
+import { TGMessage } from '../types';
+import { PeersWriter } from './peers-writer';
 import { TGPeer } from './peer';
 import { TGExtendedLoggerType } from '../logger';
 
-export class ConnectToPeer
+export class PeerChangeHandler
 {
     disconnector: () => void;
 
@@ -12,10 +11,9 @@ export class ConnectToPeer
      * Constructor
      */
     constructor(
+        private readonly appName: string,
         private readonly peer: TGPeer,
-        private readonly persistence: TGGraphAdapter,
-        private readonly options: TGFederatedAdapterOptions,
-        private readonly writer: Writer,
+        private readonly writer: PeersWriter,
         private readonly logger: TGExtendedLoggerType
     )
     {
@@ -27,7 +25,7 @@ export class ConnectToPeer
 
     connect(): void
     {
-        this.disconnector = this.peer.onChange(this.#handlePeerChange.bind(this));
+        this.disconnector = this.peer.onChange((message: TGMessage) => this.#handlePeerChange(message));
     }
 
     disconnect(): void
@@ -39,11 +37,15 @@ export class ConnectToPeer
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    #handlePeerChange(changes: TGGraphData): void
+    #handlePeerChange(changes: TGMessage): void
     {
         try
         {
-            this.writer.put(changes, this.peer.uri);
+            if (changes.originators && changes.originators[this.appName])
+            {
+                return;
+            }
+            this.writer.put(changes.put, this.peer.uri, changes.originators);
         }
         catch (e)
         {

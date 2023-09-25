@@ -53,10 +53,8 @@ export class TGServer extends AsyncStreamEmitter<any>
         this.internalAdapter = this.options.adapter || createMemoryAdapter(options);
         this.peers           = new TGPeers(this.options.peers);
         this.adapter         = this.#federateInternalAdapter(this.internalAdapter);
-        this.middleware      = new Middleware(this.gateway, this.options, this.adapter);
+        this.middleware      = new Middleware(this.appName, this.gateway, this.options, this.adapter);
         this.#run();
-
-        console.log(this.gateway.httpServer.address())
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -134,6 +132,7 @@ export class TGServer extends AsyncStreamEmitter<any>
         };
 
         return new TGFederationAdapter(
+            this.appName,
             withPublish,
             this.peers,
             withValidation,

@@ -79,7 +79,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
     {
         const soul   = options['#'];
         msgId        = msgId || uuidv4();
-        const cbWrap = (msg: any) =>
+        const cbWrap = (msg: TGMessage) =>
         {
             this.ingest([msg]);
             if (cb)
@@ -99,7 +99,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         return super.get({ msgId, cb, options });
     }
 
-    put({ graph, msgId = '', replyTo = '', cb }: TGPut): () => void
+    put({ graph, msgId = '', replyTo = '', cb, originators }: TGPut): () => void
     {
         if (!graph)
         {
@@ -112,7 +112,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
 
         if (cb)
         {
-            const cbWrap = (response: any) =>
+            const cbWrap = (response: TGMessage) =>
             {
                 this.ingest([response]);
                 cb(response);
@@ -124,11 +124,11 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
                 cbWrap,
             );
 
-            return super.put({ graph, msgId, replyTo, cb: cbWrap });
+            return super.put({ graph, msgId, replyTo, cb: cbWrap, originators });
         }
         else
         {
-            return super.put({ graph, msgId, replyTo, cb });
+            return super.put({ graph, msgId, replyTo, cb, originators });
         }
     }
 

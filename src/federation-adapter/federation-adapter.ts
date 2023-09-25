@@ -1,24 +1,26 @@
 import { TGFederatedAdapterOptions } from './types';
-import { TGGraphAdapter, TGGraphData, TGOptionsGet } from '../types';
-import { Writer } from './writer';
+import { TGGraphAdapter, TGGraphData, TGOptionsGet, TGOriginators } from '../types';
+import { PeersWriter } from './peers-writer';
 import { TGPeers } from './peers';
 import { TGExtendedLoggerType } from '../logger';
-import { ConnectToPeer } from './connect-to-peer';
+import { PeerChangeHandler } from './peer-change-handler';
 
 export class TGFederationAdapter implements TGGraphAdapter
 {
+    appName: string;
     internal: TGGraphAdapter;
     peers: TGPeers;
     persistence: TGGraphAdapter;
     options: TGFederatedAdapterOptions;
     logger: TGExtendedLoggerType;
 
-    private readonly writer: Writer;
+    private readonly writer: PeersWriter;
 
     /**
      * Constructor
      */
     constructor(
+        appName: string,
         internal: TGGraphAdapter,
         peers: TGPeers,
         persistence: TGGraphAdapter,
@@ -30,12 +32,13 @@ export class TGFederationAdapter implements TGGraphAdapter
             putToPeers: true
         };
 
+        this.appName     = appName;
         this.internal    = internal;
         this.peers       = peers;
         this.persistence = persistence;
         this.options     = Object.assign(defaultOptions, options || {});
         this.logger      = logger;
-        this.writer      = new Writer(this.persistence, this.peers, this.options, this.logger);
+        this.writer      = new PeersWriter(this.appName, this.persistence, this.peers, this.options, this.logger);
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -49,10 +52,10 @@ export class TGFederationAdapter implements TGGraphAdapter
         return this.internal.get(getOpts);
     }
 
-    async put(data: TGGraphData): Promise<TGGraphData|null>
+    async put(data: TGGraphData, originators?: TGOriginators): Promise<TGGraphData|null>
     {
         this.logger.log('put', data);
-        const diff = await this.persistence.put(data);
+        const diff = await this.persistence.put(data, originators);
 
         if (!diff)
         {
@@ -61,7 +64,7 @@ export class TGFederationAdapter implements TGGraphAdapter
 
         if (this.options.putToPeers)
         {
-            this.writer.updatePeers(diff, this.peers.getPeers());
+            this.writer.updatePeers(diff, this.peers.getPeers(), originators);
         }
 
         return diff
@@ -69,18 +72,18 @@ export class TGFederationAdapter implements TGGraphAdapter
 
     connectToPeers(): () => void
     {
-        const connectors: ConnectToPeer[] = [];
+        const handlers: PeerChangeHandler[] = [];
 
         if (this.peers.size && this.options.reversePeerSync)
         {
             this.peers.getPeers().forEach(async (peer) =>
             {
-                const connector = new ConnectToPeer(peer, this.persistence, this.options, this.writer, this.logger);
+                const connector = new PeerChangeHandler(this.appName, peer, this.writer, this.logger);
                 connector.connect();
-                connectors.push(connector);
+                handlers.push(connector);
             });
         }
 
-        return () => connectors.forEach(c => c.disconnect());
+        return () => handlers.forEach(c => c.disconnect());
     }
 }

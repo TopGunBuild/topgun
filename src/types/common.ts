@@ -99,6 +99,7 @@ export interface TGPut
     msgId?: string;
     replyTo?: string;
     cb?: TGMessageCb;
+    originators?: TGOriginators;
 }
 
 /**
