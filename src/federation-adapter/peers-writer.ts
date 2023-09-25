@@ -11,7 +11,7 @@ export class PeersWriter
      * Constructor
      */
     constructor(
-        private readonly appName: string,
+        private readonly serverName: string,
         private readonly persistence: TGGraphAdapter,
         private readonly peers: TGPeers,
         private readonly options: TGFederatedAdapterOptions,
@@ -28,8 +28,8 @@ export class PeersWriter
     {
         if (peers.length > 0)
         {
-            originators               = originators || {};
-            originators[this.appName] = 1;
+            originators                  = originators || {};
+            originators[this.serverName] = 1;
 
             this.logger.log('updatePeers', data);
             await Promise.all(

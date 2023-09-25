@@ -17,9 +17,9 @@ describe('Common', () =>
         });
         // Master
         server1 = new TGServer({
-            appName: 'Master',
-            port   : 3458,
-            peers  : [
+            serverName: 'Master',
+            port      : 3458,
+            peers     : [
                 {
                     hostname: '127.0.0.1',
                     port    : 3459,
@@ -29,22 +29,22 @@ describe('Common', () =>
                     port    : 3460,
                 }
             ],
-            log    : {
+            log       : {
                 enabled: true,
             }
         });
         // Peers
         server2 = new TGServer({
-            appName: 'Peer1',
-            port   : 3459,
-            log    : {
+            serverName: 'Peer1',
+            port      : 3459,
+            log       : {
                 enabled: true,
             }
         });
         server3 = new TGServer({
-            appName: 'Peer2',
-            port   : 3460,
-            log    : {
+            serverName: 'Peer2',
+            port      : 3460,
+            log       : {
                 enabled: true,
             }
         });

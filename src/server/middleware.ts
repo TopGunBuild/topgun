@@ -9,7 +9,7 @@ export class Middleware
      * Constructor
      */
     constructor(
-        private readonly appName: string,
+        private readonly serverName: string,
         private readonly socketServer: TGSocketServer,
         private readonly options: TGServerOptions,
         private readonly adapter: TGGraphAdapter,
@@ -47,7 +47,7 @@ export class Middleware
 
         const msg = req.data as TGMessage;
 
-        if (msg && msg.originators && msg.originators[this.appName])
+        if (msg && msg.originators && msg.originators[this.serverName])
         {
             return;
         }
@@ -86,7 +86,7 @@ export class Middleware
                 data   : {
                     '#'          : msgId,
                     'put'        : graphData,
-                    'originators': { [this.appName]: 1 }
+                    'originators': { [this.serverName]: 1 }
                 }
             }))
             .catch((e) =>

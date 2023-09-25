@@ -11,7 +11,7 @@ export class PeerChangeHandler
      * Constructor
      */
     constructor(
-        private readonly appName: string,
+        private readonly serverName: string,
         private readonly peer: TGPeer,
         private readonly writer: PeersWriter,
         private readonly logger: TGExtendedLoggerType
@@ -41,7 +41,7 @@ export class PeerChangeHandler
     {
         try
         {
-            if (changes.originators && changes.originators[this.appName])
+            if (changes.originators && changes.originators[this.serverName])
             {
                 return;
             }

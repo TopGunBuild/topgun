@@ -16,7 +16,7 @@ import { socketLoginHandler } from './utils/socket-login-handler';
 
 export class TGServer extends AsyncStreamEmitter<any>
 {
-    appName: string;
+    serverName: string;
     readonly adapter: TGFederationAdapter;
     readonly internalAdapter: TGGraphAdapter;
     readonly gateway: TGSocketServer;
@@ -46,14 +46,14 @@ export class TGServer extends AsyncStreamEmitter<any>
         this.options = Object.assign(defaultOptions, options || {});
         this.gateway = listen(this.options.port, this.options);
 
-        this.#persistAppName();
+        this.#persistServerName();
         this.#createLogger();
 
         this.validator       = createValidator();
         this.internalAdapter = this.options.adapter || createMemoryAdapter(options);
         this.peers           = new TGPeers(this.options.peers);
         this.adapter         = this.#federateInternalAdapter(this.internalAdapter);
-        this.middleware      = new Middleware(this.appName, this.gateway, this.options, this.adapter);
+        this.middleware      = new Middleware(this.serverName, this.gateway, this.options, this.adapter);
         this.#run();
     }
 
@@ -132,7 +132,7 @@ export class TGServer extends AsyncStreamEmitter<any>
         };
 
         return new TGFederationAdapter(
-            this.appName,
+            this.serverName,
             withPublish,
             this.peers,
             withValidation,
@@ -193,7 +193,7 @@ export class TGServer extends AsyncStreamEmitter<any>
             },
             'originators': {
                 ...(originators || {}),
-                [this.appName]: 1
+                [this.serverName]: 1
             }
         });
     }
@@ -238,27 +238,27 @@ export class TGServer extends AsyncStreamEmitter<any>
         {
             this.options.log = {};
         }
-        if (!isDefined(this.options.log.appId) && isString(this.appName))
+        if (!isDefined(this.options.log.appId) && isString(this.serverName))
         {
-            this.options.log.appId = this.appName;
+            this.options.log.appId = this.serverName;
         }
         this.logger = createLogger(this.options.log);
     }
 
-    #persistAppName(): void
+    #persistServerName(): void
     {
-        this.appName = this.options.appName;
+        this.serverName = this.options.serverName;
 
-        if (!isString(this.options.appName))
+        if (!isString(this.options.serverName))
         {
             if (isFunction(this.gateway.httpServer?.address))
             {
-                const address = this.gateway.httpServer?.address();
-                this.appName  = address.address + address.port;
+                const address   = this.gateway.httpServer?.address();
+                this.serverName = address.address + address.port;
             }
             else if (this.options.port)
             {
-                this.appName = String(this.options.port);
+                this.serverName = String(this.options.port);
             }
         }
     }

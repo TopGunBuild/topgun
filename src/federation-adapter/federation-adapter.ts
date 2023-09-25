@@ -7,7 +7,7 @@ import { PeerChangeHandler } from './peer-change-handler';
 
 export class TGFederationAdapter implements TGGraphAdapter
 {
-    appName: string;
+    serverName: string;
     internal: TGGraphAdapter;
     peers: TGPeers;
     persistence: TGGraphAdapter;
@@ -20,7 +20,7 @@ export class TGFederationAdapter implements TGGraphAdapter
      * Constructor
      */
     constructor(
-        appName: string,
+        serverName: string,
         internal: TGGraphAdapter,
         peers: TGPeers,
         persistence: TGGraphAdapter,
@@ -32,13 +32,13 @@ export class TGFederationAdapter implements TGGraphAdapter
             putToPeers: true
         };
 
-        this.appName     = appName;
+        this.serverName  = serverName;
         this.internal    = internal;
         this.peers       = peers;
         this.persistence = persistence;
         this.options     = Object.assign(defaultOptions, options || {});
         this.logger      = logger;
-        this.writer      = new PeersWriter(this.appName, this.persistence, this.peers, this.options, this.logger);
+        this.writer      = new PeersWriter(this.serverName, this.persistence, this.peers, this.options, this.logger);
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -78,7 +78,7 @@ export class TGFederationAdapter implements TGGraphAdapter
         {
             this.peers.getPeers().forEach(async (peer) =>
             {
-                const connector = new PeerChangeHandler(this.appName, peer, this.writer, this.logger);
+                const connector = new PeerChangeHandler(this.serverName, peer, this.writer, this.logger);
                 connector.connect();
                 handlers.push(connector);
             });

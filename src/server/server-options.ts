@@ -12,5 +12,5 @@ export interface TGServerOptions extends TGSocketServerOptions, TGGraphAdapterOp
     putToPeers?: boolean;
     reversePeerSync?: boolean;
     log?: TGLoggerOptions;
-    appName?: string;
+    serverName?: string;
 }
