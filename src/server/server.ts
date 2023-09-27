@@ -12,7 +12,8 @@ import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from '../storage';
 import { TGFederationAdapter } from '../federation-adapter/federation-adapter';
 import { TGPeers } from '../federation-adapter/peers';
 import { createLogger, TGLoggerType } from '../logger';
-import { socketLoginHandler } from './utils/socket-login-handler';
+import { clientLoginHandler } from './utils/client-login-handler';
+import { peerLoginHandler } from './utils/peer-login-handler';
 
 export class TGServer extends AsyncStreamEmitter<any>
 {
@@ -35,12 +36,13 @@ export class TGServer extends AsyncStreamEmitter<any>
     {
         super();
         const defaultOptions: TGServerOptions = {
-            maxKeySize       : MAX_KEY_SIZE,
-            maxValueSize     : MAX_VALUE_SIZE,
-            disableValidation: false,
-            peers            : [],
-            putToPeers       : true,
-            reversePeerSync  : true
+            maxKeySize            : MAX_KEY_SIZE,
+            maxValueSize          : MAX_VALUE_SIZE,
+            disableGraphValidation: false,
+            peers                 : [],
+            putToPeers            : true,
+            reversePeerSync       : true,
+            peerSecretKey         : 'peerSecretKey'
         };
 
         this.options = Object.assign(defaultOptions, options || {});
@@ -203,7 +205,7 @@ export class TGServer extends AsyncStreamEmitter<any>
      */
     #validatePut(graph: TGGraphData): Result<TGGraphData>
     {
-        if (this.options.disableValidation)
+        if (this.options.disableGraphValidation)
         {
             return ok(graph);
         }
@@ -217,18 +219,30 @@ export class TGServer extends AsyncStreamEmitter<any>
     {
         for await (const { socket } of this.gateway.listener('connection'))
         {
-            this.#loginProcedureListener(socket);
+            this.#clientLoginProcedureListener(socket);
+            this.#peerLoginProcedureListener(socket);
         }
     }
 
     /**
      * RPC listener for a socket's login
      */
-    async #loginProcedureListener(socket: TGSocket): Promise<void>
+    async #clientLoginProcedureListener(socket: TGSocket): Promise<void>
     {
         for await (const request of socket.procedure('login'))
         {
-            socketLoginHandler(socket, request);
+            clientLoginHandler(socket, request);
+        }
+    }
+
+    /**
+     * RPC listener for a socket's login
+     */
+    async #peerLoginProcedureListener(socket: TGSocket): Promise<void>
+    {
+        for await (const request of socket.procedure('peerLogin'))
+        {
+            peerLoginHandler(socket, request, this.options.peerSecretKey, this.serverName);
         }
     }
 

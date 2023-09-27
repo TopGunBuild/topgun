@@ -2,9 +2,9 @@ import { TGSocket } from '@topgunbuild/socket/server';
 import { verify } from '../../sea';
 
 /**
- * Authenticate a connection for extra privileges
+ * Authenticate a client connection for extra privileges
  */
-export async function socketLoginHandler(
+export async function clientLoginHandler(
     socket: TGSocket,
     request: {
         data: {

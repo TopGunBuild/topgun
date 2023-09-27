@@ -4,13 +4,13 @@ import { TGLoggerOptions } from '../logger';
 
 export interface TGServerOptions extends TGSocketServerOptions, TGGraphAdapterOptions
 {
-    disableValidation?: boolean;
-    ownerPub?: string;
+    disableGraphValidation?: boolean;
     adapter?: TGGraphAdapter;
     port?: number;
+    log?: TGLoggerOptions;
+    serverName?: string;
     peers?: TGPeerOptions[];
     putToPeers?: boolean;
     reversePeerSync?: boolean;
-    log?: TGLoggerOptions;
-    serverName?: string;
+    peerSecretKey?: string;
 }
