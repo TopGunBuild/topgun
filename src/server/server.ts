@@ -1,9 +1,9 @@
 import { Struct, Result, ok, isErr, isFunction, isObject, isDefined, isString } from '@topgunbuild/typed';
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
+import { listen, TGSocketServer } from '@topgunbuild/socket/server';
 import { pseudoRandomText } from '../sea';
-import { TGGraphAdapter, TGGraphData, TGMessage, TGOriginators } from '../types';
+import { TGGraphAdapter, TGGraphData, TGMessage, TGOriginators, TGPartialNode } from '../types';
 import { TGServerOptions } from './server-options';
-import { listen, TGSocketServer, TGSocket } from '@topgunbuild/socket/server';
 import { createMemoryAdapter } from '../memory-adapter';
 import { createValidator } from '../validator';
 import { Middleware } from './middleware';
@@ -12,8 +12,7 @@ import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from '../storage';
 import { TGFederationAdapter } from '../federation-adapter/federation-adapter';
 import { TGPeers } from '../federation-adapter/peers';
 import { createLogger, TGLoggerType } from '../logger';
-import { clientLoginHandler } from './utils/client-login-handler';
-import { peerLoginHandler } from './utils/peer-login-handler';
+import { Listeners } from './listeners';
 
 export class TGServer extends AsyncStreamEmitter<any>
 {
@@ -25,6 +24,7 @@ export class TGServer extends AsyncStreamEmitter<any>
     readonly middleware: Middleware;
     readonly peers: TGPeers;
     readonly validator: Struct<TGGraphData>;
+    readonly listeners: Listeners;
 
     private logger: TGLoggerType;
     private peersDisconnector: () => void;
@@ -53,9 +53,16 @@ export class TGServer extends AsyncStreamEmitter<any>
 
         this.validator       = createValidator();
         this.internalAdapter = this.options.adapter || createMemoryAdapter(options);
-        this.peers           = new TGPeers(this.options.peers);
+        this.peers           = new TGPeers(this.options.peers, this.options.peerSecretKey);
         this.adapter         = this.#federateInternalAdapter(this.internalAdapter);
-        this.middleware      = new Middleware(this.serverName, this.gateway, this.options, this.adapter);
+        this.middleware      = new Middleware(
+            this.serverName,
+            this.gateway,
+            this.options,
+            this.adapter,
+            this.logger.extend('Middleware')
+        );
+        this.listeners       = new Listeners(this.gateway, this.logger, this.options, this.serverName);
         this.#run();
     }
 
@@ -89,9 +96,11 @@ export class TGServer extends AsyncStreamEmitter<any>
     #run(): void
     {
         this.middleware.setupMiddleware();
-        this.#handleWebsocketConnection();
+        this.listeners.connectionListener();
+        this.listeners.readyListener();
+        this.listeners.errorListener();
+        this.listeners.disconnectionListener();
         this.peersDisconnector = this.adapter.connectToPeers();
-        this.logger.log('TopGun application successfully started');
     }
 
     /**
@@ -184,11 +193,11 @@ export class TGServer extends AsyncStreamEmitter<any>
     #publishDiff(
         soul: string,
         msgId: string,
-        nodeDiff: TGGraphData,
+        nodeDiff: TGPartialNode,
         originators?: Record<string, number>
     ): void
     {
-        this.gateway.exchange.publish(`topgun/nodes/${soul}`, {
+        const message: TGMessage = {
             '#'  : `${msgId}/${soul}`,
             'put': {
                 [soul]: nodeDiff,
@@ -197,7 +206,10 @@ export class TGServer extends AsyncStreamEmitter<any>
                 ...(originators || {}),
                 [this.serverName]: 1
             }
-        });
+        };
+
+        this.gateway.exchange.publish(`topgun/nodes/${soul}`, message);
+        this.listeners.publishChangeLog(message);
     }
 
     /**
@@ -210,40 +222,6 @@ export class TGServer extends AsyncStreamEmitter<any>
             return ok(graph);
         }
         return this.validator(graph);
-    }
-
-    /**
-     * Set up a loop to handle websocket connections.
-     */
-    async #handleWebsocketConnection(): Promise<void>
-    {
-        for await (const { socket } of this.gateway.listener('connection'))
-        {
-            this.#clientLoginProcedureListener(socket);
-            this.#peerLoginProcedureListener(socket);
-        }
-    }
-
-    /**
-     * RPC listener for a socket's login
-     */
-    async #clientLoginProcedureListener(socket: TGSocket): Promise<void>
-    {
-        for await (const request of socket.procedure('login'))
-        {
-            clientLoginHandler(socket, request);
-        }
-    }
-
-    /**
-     * RPC listener for a socket's login
-     */
-    async #peerLoginProcedureListener(socket: TGSocket): Promise<void>
-    {
-        for await (const request of socket.procedure('peerLogin'))
-        {
-            peerLoginHandler(socket, request, this.options.peerSecretKey, this.serverName);
-        }
     }
 
     #createLogger(): void

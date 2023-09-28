@@ -1,7 +1,8 @@
-import { TGSocketServer, TGSocket, RequestObject } from '@topgunbuild/socket/server';
+import { TGSocketServer, RequestObject } from '@topgunbuild/socket/server';
 import { TGServerOptions } from './server-options';
 import { TGGraphAdapter, TGGraphData, TGMessage, TGOptionsGet } from '../types';
 import { pseudoRandomText } from '../sea';
+import { TGExtendedLoggerType } from '../logger';
 
 export class Middleware
 {
@@ -13,6 +14,7 @@ export class Middleware
         private readonly socketServer: TGSocketServer,
         private readonly options: TGServerOptions,
         private readonly adapter: TGGraphAdapter,
+        private readonly logger: TGExtendedLoggerType
     )
     {
     }
@@ -25,12 +27,12 @@ export class Middleware
     {
         this.socketServer.addMiddleware(
             this.socketServer.MIDDLEWARE_SUBSCRIBE,
-            this.subscribeMiddleware.bind(this)
+            this.#outboundMiddlewareHandler.bind(this)
         );
 
         this.socketServer.addMiddleware(
             this.socketServer.MIDDLEWARE_PUBLISH_IN,
-            this.publishInMiddleware.bind(this)
+            this.#inboundMiddlewareHandler.bind(this)
         );
     }
 
@@ -38,30 +40,33 @@ export class Middleware
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private publishInMiddleware(req: RequestObject): void
+    /**
+     * Handles inbound socket requests
+     */
+    #inboundMiddlewareHandler(req: RequestObject): void
     {
-        if (req.channel !== 'topgun/put')
+        if (req.channel === 'topgun/put')
         {
-            return;
+            const msg = req.data as TGMessage;
+
+            // Only allow if the connecting node was not an originator
+            if (this.#originatorCheck(msg))
+            {
+                this.#processPut(msg).then((data) =>
+                {
+                    req.socket.transmit('#publish', {
+                        channel: `topgun/@${msg['#']}`,
+                        data
+                    });
+                })
+            }
         }
-
-        const msg = req.data as TGMessage;
-
-        if (msg && msg.originators && msg.originators[this.serverName])
-        {
-            return;
-        }
-
-        this.#processPut(msg).then((data) =>
-        {
-            req.socket.transmit('#publish', {
-                channel: `topgun/@${msg['#']}`,
-                data
-            });
-        })
     }
 
-    private async subscribeMiddleware(req: RequestObject): Promise<void>
+    /**
+     * Handles all traffic out to connected sockets, this is always publish out
+     */
+    async #outboundMiddlewareHandler(req: RequestObject): Promise<void>
     {
         if (req.channel === 'topgun/put')
         {
@@ -91,8 +96,7 @@ export class Middleware
             }))
             .catch((e) =>
             {
-                // tslint:disable-next-line: no-console
-                console.warn(e.stack || e);
+                this.logger.warn(e.stack || e);
                 return {
                     channel: req.channel,
                     data   : {
@@ -106,6 +110,15 @@ export class Middleware
             {
                 req.socket.transmit('#publish', msg);
             })
+    }
+
+    /**
+     * Check the originator attribute on the data to see if the intended target has already handled this data,
+     * this is to prevent loop backs
+     */
+    #originatorCheck(msg: TGMessage)
+    {
+        return !(msg && msg.originators && msg.originators[this.serverName]);
     }
 
     #readNodes(opts: TGOptionsGet): Promise<TGGraphData>
@@ -140,12 +153,5 @@ export class Middleware
                 'ok' : false,
             };
         }
-    }
-
-    #isAdmin(socket: TGSocket): boolean|undefined
-    {
-        return (
-            socket.authToken && socket.authToken.pub === this.options.ownerPub
-        );
     }
 }

@@ -18,19 +18,19 @@ export interface TGNodeMeta
 }
 
 /**
- * A node (or partial node data) in a Graph
- */
-export interface TGNode
-{
-    _: TGNodeMeta;
-
-    [key: string]: any;
-}
-
-/**
  * Valid values in TopGunDB
  */
 export type TGValue = object|string|number|boolean|null;
+
+export interface TGPartialNode
+{
+    [key: string]: TGValue;
+}
+
+export interface TGNode extends TGPartialNode
+{
+    _: TGNodeMeta;
+}
 
 /**
  * Graph Data consists of one or more full or partial nodes
@@ -38,6 +38,11 @@ export type TGValue = object|string|number|boolean|null;
 export interface TGGraphData
 {
     [key: string]: TGNode|null;
+}
+
+export interface TGPartialGraphData
+{
+    [key: string]: TGPartialNode|null;
 }
 
 export interface TGOptionsGet
@@ -80,7 +85,9 @@ export interface TGMessage
     '@'?: string;
 
     get?: TGOptionsGet;
-    put?: TGGraphData;
+    put?: {
+        [key: string]: TGPartialNode|null
+    };
 
     ack?: number|boolean;
     err?: any;
@@ -222,7 +229,7 @@ export interface TGGraphAdapter
 {
     readonly close?: () => void;
     readonly get: (opts: TGOptionsGet) => Promise<TGGraphData>;
-    readonly put: (graphData: TGGraphData, originators?: TGOriginators) => Promise<TGGraphData|null>;
+    readonly put: (graphData: TGPartialGraphData, originators?: TGOriginators) => Promise<TGGraphData|null>;
     readonly onChange?: (
         handler: (change: TGGraphData) => void
     ) => () => void

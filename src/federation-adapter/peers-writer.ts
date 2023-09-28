@@ -1,5 +1,5 @@
 import { isNotEmptyObject } from '@topgunbuild/typed';
-import { TGGraphAdapter, TGGraphData, TGOptionsGet, TGOriginators } from '../types';
+import { TGGraphAdapter, TGGraphData, TGOptionsGet, TGOriginators, TGPartialGraphData } from '../types';
 import { TGPeers } from './peers';
 import { TGFederatedAdapterOptions } from './types';
 import { TGExtendedLoggerType } from '../logger';
@@ -57,7 +57,7 @@ export class PeersWriter
         }
     }
 
-    async put(graph: TGGraphData, currentPeerUri: string, originators: TGOriginators): Promise<void>
+    async put(graph: TGPartialGraphData, currentPeerUri: string, originators: TGOriginators): Promise<void>
     {
         if (isNotEmptyObject(graph))
         {

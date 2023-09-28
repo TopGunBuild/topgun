@@ -6,10 +6,10 @@ export class TGPeers extends Map<string, TGPeer>
     /**
      * Constructor
      */
-    constructor(peers?: TGPeerOptions[])
+    constructor(peers: TGPeerOptions[], peerSecretKey: string)
     {
         super();
-        this.#init(peers);
+        this.#init(peers, peerSecretKey);
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -30,13 +30,13 @@ export class TGPeers extends Map<string, TGPeer>
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    #init(peers?: TGPeerOptions[]): void
+    #init(peers: TGPeerOptions[], peerSecretKey: string): void
     {
         if (Array.isArray(peers))
         {
             for (const peer of peers)
             {
-                const adapter = new TGPeer(peer);
+                const adapter = new TGPeer(peer, peerSecretKey);
                 if (adapter.uri)
                 {
                     this.set(adapter.uri, adapter);

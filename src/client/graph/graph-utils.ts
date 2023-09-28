@@ -71,11 +71,11 @@ export function getPathData(
     graph: TGGraphData,
 ): TGPathData
 {
-    const souls    = getSoulsFromKeys(keys);
-    const lastSoul = souls[souls.length - 1];
-    const lastKey  = keys[keys.length - 1];
-    let complete   = lastSoul in graph;
-    let value      = graph[lastSoul];
+    const souls               = getSoulsFromKeys(keys);
+    const lastSoul            = souls[souls.length - 1];
+    const lastKey             = keys[keys.length - 1];
+    let complete              = lastSoul in graph;
+    let value: TGNode|TGValue = graph[lastSoul];
 
     if (souls.length === 1 || complete)
     {

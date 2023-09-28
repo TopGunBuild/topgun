@@ -134,8 +134,10 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
 
     async authenticate(pub: string, priv: string): Promise<void>
     {
-        await this.waitForConnection();
-        await this.#doAuth(pub, priv);
+        if (this.isConnected)
+        {
+            this.#doAuth(pub, priv);
+        }
 
         (async () =>
         {
