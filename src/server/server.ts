@@ -53,7 +53,11 @@ export class TGServer extends AsyncStreamEmitter<any>
 
         this.validator       = createValidator();
         this.internalAdapter = this.options.adapter || createMemoryAdapter(options);
-        this.peers           = new TGPeers(this.options.peers, this.options.peerSecretKey);
+        this.peers           = new TGPeers(
+            this.options.peers,
+            this.options.peerSecretKey,
+            this.logger.extend('Peers')
+        );
         this.adapter         = this.#federateInternalAdapter(this.internalAdapter);
         this.middleware      = new Middleware(
             this.serverName,
@@ -70,20 +74,26 @@ export class TGServer extends AsyncStreamEmitter<any>
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    async waitForReady(): Promise<void>
+    waitForReady(): Promise<void>
     {
-        await this.gateway.listener('ready').once();
+        return this.gateway.listener('ready').once();
+    }
+
+    waitForPeersAuth(): Promise<void[]>
+    {
+        return this.peers.waitForAuth();
     }
 
     async close(): Promise<void>
     {
+        this.listeners.close();
         if (isFunction(this.gateway.httpServer?.close))
         {
             this.gateway.httpServer.close();
         }
         await this.gateway.close();
         this.peersDisconnector();
-        this.peers.forEach(peer => peer.disconnect());
+        await this.peers.disconnect();
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -96,10 +106,7 @@ export class TGServer extends AsyncStreamEmitter<any>
     #run(): void
     {
         this.middleware.setupMiddleware();
-        this.listeners.connectionListener();
-        this.listeners.readyListener();
-        this.listeners.errorListener();
-        this.listeners.disconnectionListener();
+        this.listeners.createListeners();
         this.peersDisconnector = this.adapter.connectToPeers();
     }
 

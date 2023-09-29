@@ -3,6 +3,7 @@ import { TGWebSocketGraphConnector } from '../client/transports/web-socket-graph
 import { socketOptionsFromPeer } from '../utils/socket-options-from-peer';
 import { TGGraphData, TGMessage, TGMessageCb, TGOptionsGet, TGOriginators } from '../types';
 import { encrypt, work } from '../sea';
+import { TGExtendedLoggerType } from '../logger';
 
 export class TGPeer extends TGWebSocketGraphConnector
 {
@@ -11,12 +12,16 @@ export class TGPeer extends TGWebSocketGraphConnector
     /**
      * Constructor
      */
-    constructor(peer: string|TGSocketClientOptions, peerSecretKey: string)
+    constructor(
+        private readonly peer: string|TGSocketClientOptions,
+        private readonly peerSecretKey: string,
+        private readonly logger: TGExtendedLoggerType
+    )
     {
         super(socketOptionsFromPeer(peer), 'TGPeer');
 
         this.uri = this.client.transport.uri();
-        this.#authenticate(peerSecretKey);
+        this.#connectListener(peerSecretKey);
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -31,6 +36,16 @@ export class TGPeer extends TGWebSocketGraphConnector
     isAuthenticated(): boolean
     {
         return this.client.authState === this.client.AUTHENTICATED;
+    }
+
+    waitForAuth(): Promise<void>
+    {
+        if (this.isAuthenticated())
+        {
+            return Promise.resolve();
+        }
+
+        return this.client.listener('authenticate').once();
     }
 
     putInPeer(graph: TGGraphData, originators: TGOriginators): Promise<TGMessage>
@@ -70,7 +85,27 @@ export class TGPeer extends TGWebSocketGraphConnector
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    async #authenticate(secret: string): Promise<void>
+    async #connectListener(secret: string): Promise<void>
+    {
+        for await (const event of this.client.listener('connect'))
+        {
+            this.logger.log('Peer is connected');
+            try
+            {
+                await Promise.all([
+                    this.#doAuth(secret),
+                    this.client.listener('authenticate').once(),
+                ]);
+                this.logger.log('Peer is auth!');
+            }
+            catch (e)
+            {
+                console.error(e.message);
+            }
+        }
+    }
+
+    /*async #authenticate(secret: string): Promise<void>
     {
         await this.waitForConnection();
         await this.#doAuth(secret);
@@ -82,7 +117,7 @@ export class TGPeer extends TGWebSocketGraphConnector
                 this.#doAuth(secret);
             }
         })();
-    }
+    }*/
 
     async #doAuth(secret: string): Promise<{channel: string; data: any}>
     {
@@ -91,7 +126,7 @@ export class TGPeer extends TGWebSocketGraphConnector
         const challenge = `${id}/${timestamp}`;
 
         const hash = await work(challenge, secret);
-        const data = await encrypt(JSON.stringify({ peerUri: this.uri }), hash, {raw: true});
+        const data = await encrypt(JSON.stringify({ peerUri: this.uri }), hash, { raw: true });
 
         return this.client.invoke('peerLogin', { challenge, data });
     }

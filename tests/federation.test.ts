@@ -2,31 +2,37 @@ import { TGServer } from '../src/server';
 import { TGClient } from '../src/client';
 import { wait } from './test-util';
 
-let server1: TGServer, server2: TGServer, server3: TGServer, client: TGClient;
+let server1: TGServer, server2: TGServer, server3: TGServer, client1: TGClient, client2: TGClient;
 
 describe('Common', () =>
 {
     beforeEach(async () =>
     {
         // Client
-        client  = new TGClient({
+        client1  = new TGClient({
             peers: [{
                 hostname: '127.0.0.1',
-                port    : 3458,
+                port    : 5000,
+            }]
+        });
+        client2  = new TGClient({
+            peers: [{
+                hostname: '127.0.0.1',
+                port    : 5001,
             }]
         });
         // Master
         server1 = new TGServer({
             serverName: 'Master',
-            port      : 3458,
+            port      : 5000,
             peers     : [
                 {
                     hostname: '127.0.0.1',
-                    port    : 3459,
+                    port    : 5001,
                 },
                 {
                     hostname: '127.0.0.1',
-                    port    : 3460,
+                    port    : 5002,
                 }
             ],
             log       : {
@@ -36,14 +42,14 @@ describe('Common', () =>
         // Peers
         server2 = new TGServer({
             serverName: 'Peer1',
-            port      : 3459,
+            port      : 5001,
             log       : {
                 enabled: true,
             }
         });
         server3 = new TGServer({
             serverName: 'Peer2',
-            port      : 3460,
+            port      : 5002,
             log       : {
                 enabled: true,
             }
@@ -52,7 +58,8 @@ describe('Common', () =>
     afterEach(async () =>
     {
         await Promise.all([
-            client.disconnect(),
+            client1.disconnect(),
+            client2.disconnect(),
             server1.close(),
             server2.close(),
             server3.close()
@@ -62,17 +69,22 @@ describe('Common', () =>
     it('connect one node to another', async () =>
     {
         await Promise.all([
-            server1.waitForReady(),
-            server2.waitForReady(),
-            server3.waitForReady(),
-            client.waitForConnect()
+            server1.waitForPeersAuth(),
+            server2.waitForPeersAuth(),
+            server3.waitForPeersAuth(),
+            client1.waitForConnect(),
+            client2.waitForConnect()
         ]);
 
-        // Put to master
-        await client
+        await client1
             .get('a')
             .get('b')
-            .put('value');
+            .put('Alice');
+
+        await client2
+            .get('a')
+            .get('c')
+            .put('Bob');
 
         await wait(1000);
     });

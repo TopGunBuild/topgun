@@ -74,7 +74,7 @@ export class TGLink
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    waitForAuth(): boolean
+    authRequired(): boolean
     {
         if (this._client.user().is?.pub)
         {
@@ -169,7 +169,7 @@ export class TGLink
     {
         return new Promise<TGMessage>((resolve) =>
         {
-            if (this.waitForAuth())
+            if (this.authRequired())
             {
                 throw new Error(
                     'You cannot save data to user space if the user is not authorized.',
@@ -209,7 +209,7 @@ export class TGLink
             {
                 throw new Error('This data type is not supported in set().');
             }
-            else if (this.waitForAuth())
+            else if (this.authRequired())
             {
                 throw new Error(
                     'You cannot save data to user space if the user is not authorized.',
@@ -454,7 +454,7 @@ export class TGLink
 
     #maybeWaitAuth(handler: () => void): TGLink
     {
-        if (this.waitForAuth())
+        if (this.authRequired())
         {
             this._client.listener('auth').once().then((value) =>
             {

@@ -122,14 +122,14 @@ describe('Client', () =>
     {
         const link = client.user().get('some');
 
-        expect(link.waitForAuth()).toBeTruthy();
+        expect(link.authRequired()).toBeTruthy();
 
         // minimum password length 8
         client.user().create('john', '12345678');
         const auth = await client.listener('auth').once() as TGUserReference;
 
         expect(auth.alias).toBe('john');
-        expect(link.waitForAuth()).toBeFalsy();
+        expect(link.authRequired()).toBeFalsy();
     });
 
     it('minimum password length', async () =>

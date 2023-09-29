@@ -1,12 +1,17 @@
 import { TGPeerOptions } from '../types';
 import { TGPeer } from './peer';
+import { TGExtendedLoggerType } from '../logger';
 
 export class TGPeers extends Map<string, TGPeer>
 {
     /**
      * Constructor
      */
-    constructor(peers: TGPeerOptions[], peerSecretKey: string)
+    constructor(
+        private readonly peers: TGPeerOptions[],
+        private readonly peerSecretKey: string,
+        private readonly logger: TGExtendedLoggerType
+    )
     {
         super();
         this.#init(peers, peerSecretKey);
@@ -26,6 +31,20 @@ export class TGPeers extends Map<string, TGPeer>
         return this.getPeers().filter(peer => peer.uri !== uri);
     }
 
+    waitForAuth(): Promise<void[]>
+    {
+        return Promise.all(
+            this.getPeers().map(peer => peer.waitForAuth())
+        );
+    }
+
+    disconnect(): Promise<void[]>
+    {
+        return Promise.all(
+            this.getPeers().map(peer => peer.disconnect())
+        );
+    }
+
     // -----------------------------------------------------------------------------------------------------
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
@@ -36,7 +55,7 @@ export class TGPeers extends Map<string, TGPeer>
         {
             for (const peer of peers)
             {
-                const adapter = new TGPeer(peer, peerSecretKey);
+                const adapter = new TGPeer(peer, peerSecretKey, this.logger);
                 if (adapter.uri)
                 {
                     this.set(adapter.uri, adapter);

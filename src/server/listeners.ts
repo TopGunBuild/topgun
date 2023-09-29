@@ -8,6 +8,7 @@ import { TGServerOptions } from './server-options';
 export class Listeners
 {
     readonly inboundPeerConnections: Map<string, TGSocket>;
+    closed: boolean;
 
     /**
      * Constructor
@@ -20,11 +21,25 @@ export class Listeners
     )
     {
         this.inboundPeerConnections = new Map<string, TGSocket>();
+        this.closed                 = false;
     }
 
     // -----------------------------------------------------------------------------------------------------
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
+
+    close(): void
+    {
+        this.closed = true;
+    }
+
+    createListeners(): void
+    {
+        this.connectionListener();
+        this.readyListener();
+        this.errorListener();
+        this.disconnectionListener();
+    }
 
     /**
      * Logs disconnection
@@ -33,7 +48,10 @@ export class Listeners
     {
         for await (const { socket, code, reason } of this.gateway.listener('disconnection'))
         {
-            // this.logger.log(`socket ${socket.id} disconnected with code ${code} due to ${reason}`);
+            if (!this.closed)
+            {
+                this.logger.warn(`socket ${socket.id} disconnected with code ${code} due to ${reason}`);
+            }
 
             if (this.inboundPeerConnections.has(socket.id))
             {
