@@ -72,10 +72,8 @@ export class TGPeer extends TGWebSocketGraphConnector
 
     async #authenticate(secret: string): Promise<void>
     {
-        if (this.isConnected)
-        {
-            this.#doAuth(secret);
-        }
+        await this.waitForConnection();
+        await this.#doAuth(secret);
 
         (async () =>
         {
