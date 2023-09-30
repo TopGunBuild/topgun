@@ -78,9 +78,9 @@ export class TGFederationAdapter implements TGGraphAdapter
         {
             this.peers.getPeers().forEach(async (peer) =>
             {
-                const connector = new PeerChangeHandler(this.serverName, peer, this.writer, this.logger);
-                connector.connect();
-                handlers.push(connector);
+                const changeHandler = new PeerChangeHandler(this.serverName, peer, this.writer, this.logger);
+                changeHandler.connect();
+                handlers.push(changeHandler);
             });
         }
 

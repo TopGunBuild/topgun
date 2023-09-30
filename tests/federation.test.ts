@@ -78,12 +78,12 @@ describe('Common', () =>
 
         await client1
             .get('a')
-            .get('b')
+            .get('a')
             .put('Alice');
 
         await client2
             .get('a')
-            .get('c')
+            .get('b')
             .put('Bob');
 
         await wait(1000);
