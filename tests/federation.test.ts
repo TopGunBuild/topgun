@@ -4,7 +4,7 @@ import { wait } from './test-util';
 
 let server1: TGServer, server2: TGServer, server3: TGServer, client1: TGClient, client2: TGClient;
 
-describe('Common', () =>
+describe('Federation', () =>
 {
     beforeEach(async () =>
     {
