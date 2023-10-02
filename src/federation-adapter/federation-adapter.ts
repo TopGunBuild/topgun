@@ -47,14 +47,12 @@ export class TGFederationAdapter implements TGGraphAdapter
 
     async get(getOpts: TGOptionsGet): Promise<TGGraphData>
     {
-        this.logger.log('get', getOpts);
         await this.writer.updateFromPeers(getOpts);
         return this.internal.get(getOpts);
     }
 
     async put(data: TGGraphData, originators?: TGOriginators): Promise<TGGraphData|null>
     {
-        this.logger.log('put', data);
         const diff = await this.persistence.put(data, originators);
 
         if (!diff)

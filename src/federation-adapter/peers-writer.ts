@@ -31,7 +31,6 @@ export class PeersWriter
             originators                  = originators || {};
             originators[this.serverName] = 1;
 
-            this.logger.log('updatePeers', data);
             await Promise.all(
                 peers.map(peer =>
                     peer
@@ -82,8 +81,6 @@ export class PeersWriter
     {
         const peer    = this.peers.get(currentPeerUri);
         const message = await peer.getFromPeer(getOpts);
-
-        this.logger.log('updateFromPeer', message);
 
         try
         {
