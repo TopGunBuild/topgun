@@ -12,8 +12,8 @@ dependencies:
     specifier: ^0.0.1
     version: 0.0.1
   '@topgunbuild/socket':
-    specifier: ^0.0.2
-    version: 0.0.2
+    specifier: ^0.0.5
+    version: 0.0.5
   '@topgunbuild/textencoder':
     specifier: ^0.0.1
     version: 0.0.1
@@ -1025,8 +1025,8 @@ packages:
       ms: 2.1.2
     dev: false
 
-  /@topgunbuild/socket@0.0.2:
-    resolution: {integrity: sha512-79hNFxzZiQxarx/9Fbowe2enugB3DcFeqKeAWUWRuUjCHLa5N5Yt9TXgZzmGwGpEoUpOkFP2PFIq62aKLoQ2ZQ==}
+  /@topgunbuild/socket@0.0.5:
+    resolution: {integrity: sha512-Adm3tKXFhSL/e+eSNQAPz6A9sIkf4/mkKW39deezbs7kVuEUIsnA4E4lW+Ph2Q2mjMmPFXap96vJ/+AJRk/BQw==}
     dependencies:
       '@topgunbuild/async-stream-emitter': 0.0.1
       '@topgunbuild/buffer': 0.0.1

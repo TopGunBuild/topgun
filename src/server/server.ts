@@ -13,6 +13,7 @@ import { TGFederationAdapter } from '../federation-adapter/federation-adapter';
 import { TGPeers } from '../federation-adapter/peers';
 import { createLogger, TGLoggerType } from '../logger';
 import { Listeners } from './listeners';
+import { TGBroker } from './broker-engine/broker';
 
 export class TGServer extends AsyncStreamEmitter<any>
 {
@@ -36,6 +37,7 @@ export class TGServer extends AsyncStreamEmitter<any>
     {
         super();
         const defaultOptions: TGServerOptions = {
+            brokerEngine          : new TGBroker(),
             maxKeySize            : MAX_KEY_SIZE,
             maxValueSize          : MAX_VALUE_SIZE,
             disableGraphValidation: false,
