@@ -13,7 +13,7 @@ import { TGFederationAdapter } from '../federation-adapter/federation-adapter';
 import { TGPeers } from '../federation-adapter/peers';
 import { createLogger, TGLoggerType } from '../logger';
 import { Listeners } from './listeners';
-import { TGBroker } from './broker-engine/broker';
+import { TGBroker } from './broker';
 
 export class TGServer extends AsyncStreamEmitter<any>
 {

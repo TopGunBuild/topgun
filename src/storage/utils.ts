@@ -28,6 +28,7 @@ export function filterNodesByListOptions(nodes: TGNode[], options: StorageListOp
 
 export function storageListOptionsFromGetOptions(opts: TGOptionsGet): StorageListOptions|null
 {
+    opts                             = opts || {};
     const soul: string               = assertNotEmptyString(opts['#'], 'The soul must be defined');
     const lexQuery: LEX|undefined    = opts && opts['.'];
     const limit: number|undefined    = opts && opts['%'];
