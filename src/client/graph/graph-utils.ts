@@ -1,7 +1,7 @@
 import { isObject, isNumber } from '@topgunbuild/typed';
 import { TGGraphData, TGNode, TGOptionsGet, TGPathData, TGValue } from '../../types';
 import { isSupportValue } from '../../utils/is-support';
-import { filterNodesByListOptions, storageListOptionsFromGetOptions } from '../../storage/utils';
+import { filterNodesByQueryOptions, queryOptionsFromGetOptions } from '../../storage/utils';
 
 export function diffSets(
     initial: readonly string[],
@@ -20,8 +20,8 @@ export function getNodesFromGraph(
 ): TGNode[]
 {
     const allNodes    = Object.values(graph);
-    const listOptions = storageListOptionsFromGetOptions(options);
-    let filteredNodes = filterNodesByListOptions(allNodes, listOptions);
+    const listOptions = queryOptionsFromGetOptions(options);
+    let filteredNodes = filterNodesByQueryOptions(allNodes, listOptions);
 
     if (isNumber(listOptions?.limit) && filteredNodes.length > listOptions?.limit)
     {
