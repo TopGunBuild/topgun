@@ -102,8 +102,7 @@ describe('Range query', () =>
 
         await wait(40);
 
-        console.log(receivedPackets);
-        expect(receivedPackets.length > 0).toBeTruthy();
+        expect(receivedPackets.length === 7).toBeTruthy();
         stream.destroy();
     });
 });
