@@ -24,6 +24,20 @@ export const countries = [
     { name: 'Egypt', code: 'EG' },
 ];
 
+const putCountries = async (_client: TGClient, cond: (v: number) => boolean) =>
+{
+    let index = 0;
+
+    for (const c of countries)
+    {
+        if (cond(index))
+        {
+            await _client.get('countries').get(c.name).put(c);
+        }
+        index++;
+    }
+};
+
 describe('Range query', () =>
 {
     beforeEach(async () =>
@@ -40,7 +54,7 @@ describe('Range query', () =>
                 port    : 5000,
             }]
         });
-        server = new TGServer({
+        server  = new TGServer({
             port: 5000,
         });
 
@@ -60,49 +74,34 @@ describe('Range query', () =>
         ]);
     });
 
-    it('range query', async () =>
+    it('prefix/limit', async () =>
     {
-        const putCountries = async (cond: (v: number) => boolean) =>
-        {
-            let index = 0;
-
-            for (const c of countries)
-            {
-                if (cond(index))
-                {
-                    await client2
-                        .get('countries')
-                        .get(c.name)
-                        .put(c);
-                }
-                index++;
-            }
-        };
-
-        await putCountries(isOdd);
-
+        await putCountries(client1, isOdd);
         await wait(40);
 
-        const stream = client1
+        const receivedPackets = [];
+        const stream          = client1
             .get('countries')
             .prefix('A')
+            .limit(2)
             .on<{name: string, code: string}>();
-
-        const receivedPackets = [];
 
         (async () =>
         {
-            for await (const { value, key } of stream)
+            for await (const { key } of stream)
             {
                 receivedPackets.push(key);
             }
         })();
 
-        await putCountries(isEven);
+        await wait(40);
+        expect(receivedPackets.length).toBe(2);
 
+        await putCountries(client2, isEven);
         await wait(40);
 
-        expect(receivedPackets.length === 7).toBeTruthy();
+        // console.log(receivedPackets);
+        expect(receivedPackets.length).toBe(6);
         stream.destroy();
     });
 });
