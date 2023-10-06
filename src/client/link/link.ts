@@ -199,7 +199,7 @@ export class TGLink
         })
     }
 
-    set(data: any, opt?: TGOptionsPut): Promise<TGMessage>
+    set(data: TGValue, opt?: TGOptionsPut): Promise<TGMessage>
     {
         return new Promise<TGMessage>((resolve) =>
         {
