@@ -1,6 +1,6 @@
 import { isObject, isString } from '@topgunbuild/typed';
-import { IPolicy, IPolicyLex } from '../types/policy';
 import { match } from '../utils/match';
+import { IPolicy, IPolicyLex } from '../types';
 
 export interface PolicyLexOptions
 {

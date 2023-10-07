@@ -2,7 +2,7 @@ import { isNumber, isString, isDefined } from '@topgunbuild/typed';
 import textEncoder from '@topgunbuild/textencoder';
 import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from './constants';
 import { LEX, TGGraphAdapterOptions, TGGraphData, TGNode, TGOptionsGet } from '../types';
-import { StorageListOptions } from './types';
+import { TGQueryOptions } from './types';
 import { getNodeSoul } from '../utils/node';
 import { assertNotEmptyString } from '../utils/assert';
 
@@ -11,7 +11,7 @@ export function arrayNodesToObject(nodes: TGNode[]): TGGraphData
     return nodes.reduce((accum: TGGraphData, node: TGNode) => ({ ...accum, [node._['#']]: node }), {});
 }
 
-export function filterNodesByListOptions(nodes: TGNode[], options: StorageListOptions): TGNode[]
+export function filterNodesByQueryOptions(nodes: TGNode[], options: TGQueryOptions): TGNode[]
 {
     const direction   = options?.reverse ? -1 : 1;
     let filteredNodes = nodes
@@ -26,8 +26,9 @@ export function filterNodesByListOptions(nodes: TGNode[], options: StorageListOp
     return filteredNodes;
 }
 
-export function storageListOptionsFromGetOptions(opts: TGOptionsGet): StorageListOptions|null
+export function queryOptionsFromGetOptions(opts: TGOptionsGet): TGQueryOptions|null
 {
+    opts                             = opts || {};
     const soul: string               = assertNotEmptyString(opts['#'], 'The soul must be defined');
     const lexQuery: LEX|undefined    = opts && opts['.'];
     const limit: number|undefined    = opts && opts['%'];
@@ -36,10 +37,10 @@ export function storageListOptionsFromGetOptions(opts: TGOptionsGet): StorageLis
     const start: string|undefined    = lexQuery && lexQuery['>'];
     const end: string|undefined      = lexQuery && lexQuery['<'];
 
-    const getPath                     = (path: string) => [soul, path]
+    const getPath                 = (path: string) => [soul, path]
         .filter(value => value && value.length > 0)
         .join('/');
-    const options: StorageListOptions = {
+    const options: TGQueryOptions = {
         prefix: getPath(prefix)
     };
 
@@ -159,7 +160,7 @@ export function lexicographicCompare(x: string, y: string): number
 }
 
 export function listFilterMatch(
-    options: StorageListOptions|undefined,
+    options: TGQueryOptions|undefined,
     name: string
 ): boolean
 {

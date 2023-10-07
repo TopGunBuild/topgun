@@ -1,6 +1,6 @@
 import { isObject, isString, isNumber } from '@topgunbuild/typed';
 import { sign } from './sign';
-import { IPolicy } from '../types/policy';
+import { IPolicy } from '../types';
 
 const DEFAULT_POLICY: IPolicy = {};
 const DEFAULT_OPTS: {

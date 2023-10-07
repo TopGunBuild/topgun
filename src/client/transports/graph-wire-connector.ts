@@ -2,7 +2,6 @@ import { TGGet, TGPut, TGMessage, TGMessageCb } from '../../types';
 import { TGGraphConnector } from './graph-connector';
 import { uuidv4 } from '../../utils/uuidv4';
 
-/* eslint-disable @typescript-eslint/no-empty-function */
 export class TGGraphWireConnector extends TGGraphConnector
 {
     private readonly _callbacks: {
@@ -42,7 +41,7 @@ export class TGGraphWireConnector extends TGGraphConnector
      *
      * @returns A function to be called to clean up callback listeners
      */
-    put({ graph, msgId = '', replyTo = '', cb }: TGPut): () => void
+    put({ graph, msgId = '', replyTo = '', cb, originators }: TGPut): () => void
     {
         if (!graph)
         {
@@ -52,6 +51,7 @@ export class TGGraphWireConnector extends TGGraphConnector
         }
         const msg: TGMessage = {
             put: graph,
+            originators
         };
         if (msgId)
         {

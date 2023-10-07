@@ -1,34 +1,74 @@
-import { Struct, Result, ok, isErr, isObject, isFunction } from '@topgunbuild/typed';
-import { pseudoRandomText, verify } from '../sea';
-import { TGGraphAdapter, TGGraphData, TGMessage } from '../types';
+import { Struct, Result, ok, isErr, isFunction, isObject, isDefined, isString } from '@topgunbuild/typed';
+import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
+import { listen, TGSocketServer } from '@topgunbuild/socket/server';
+import { pseudoRandomText } from '../sea';
+import { TGGraphAdapter, TGGraphData, TGMessage, TGOriginators, TGPartialNode } from '../types';
 import { TGServerOptions } from './server-options';
-import { listen, TGSocketServer, TGSocket } from '@topgunbuild/socket/server';
 import { createMemoryAdapter } from '../memory-adapter';
 import { createValidator } from '../validator';
 import { Middleware } from './middleware';
 import { uuidv4 } from '../utils/uuidv4';
+import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from '../storage';
+import { TGFederationAdapter } from '../federation-adapter/federation-adapter';
+import { TGPeers } from '../federation-adapter/peers';
+import { createLogger, TGLoggerType } from '../logger';
+import { Listeners } from './listeners';
+import { TGBroker } from './broker';
 
-export class TGServer
+export class TGServer extends AsyncStreamEmitter<any>
 {
-    readonly adapter: TGGraphAdapter;
+    serverName: string;
+    readonly adapter: TGFederationAdapter;
     readonly internalAdapter: TGGraphAdapter;
     readonly gateway: TGSocketServer;
     readonly options: TGServerOptions;
     readonly middleware: Middleware;
+    readonly peers: TGPeers;
+    readonly validator: Struct<TGGraphData>;
+    readonly listeners: Listeners;
 
-    protected readonly validator: Struct<TGGraphData>;
+    private logger: TGLoggerType;
+    private peersDisconnector: () => void;
 
     /**
      * Constructor
      */
     constructor(options?: TGServerOptions)
     {
-        this.options         = isObject(options) ? options : {};
+        super();
+        const defaultOptions: TGServerOptions = {
+            brokerEngine          : new TGBroker(),
+            maxKeySize            : MAX_KEY_SIZE,
+            maxValueSize          : MAX_VALUE_SIZE,
+            disableGraphValidation: false,
+            peers                 : [],
+            putToPeers            : true,
+            reversePeerSync       : true,
+            peerSecretKey         : 'peerSecretKey'
+        };
+
+        this.options = Object.assign(defaultOptions, options || {});
+        this.gateway = listen(this.options.port, this.options);
+
+        this.#persistServerName();
+        this.#createLogger();
+
         this.validator       = createValidator();
         this.internalAdapter = this.options.adapter || createMemoryAdapter(options);
-        this.adapter         = this.#wrapAdapter(this.internalAdapter);
-        this.gateway         = listen(this.options.port, this.options);
-        this.middleware      = new Middleware(this.gateway, this.options, this.adapter);
+        this.peers           = new TGPeers(
+            this.options.peers,
+            this.options.peerSecretKey,
+            this.logger.extend('Peers')
+        );
+        this.adapter         = this.#federateInternalAdapter(this.internalAdapter);
+        this.middleware      = new Middleware(
+            this.serverName,
+            this.gateway,
+            this.options,
+            this.adapter,
+            this.logger.extend('Middleware')
+        );
+        this.listeners       = new Listeners(this.gateway, this.logger, this.options, this.serverName);
         this.#run();
     }
 
@@ -36,18 +76,26 @@ export class TGServer
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    async waitForReady(): Promise<void>
+    waitForReady(): Promise<void>
     {
-        await this.gateway.listener('ready').once();
+        return this.gateway.listener('ready').once();
+    }
+
+    waitForPeersAuth(): Promise<void[]>
+    {
+        return this.peers.waitForAuth();
     }
 
     async close(): Promise<void>
     {
+        this.listeners.close();
         if (isFunction(this.gateway.httpServer?.close))
         {
             this.gateway.httpServer.close();
         }
         await this.gateway.close();
+        this.peersDisconnector();
+        await this.peers.disconnect();
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -60,34 +108,18 @@ export class TGServer
     #run(): void
     {
         this.middleware.setupMiddleware();
-        this.#handleWebsocketConnection();
+        this.listeners.createListeners();
+        this.peersDisconnector = this.adapter.connectToPeers();
     }
 
     /**
-     * Send put data to all node subscribers
+     * Wrap internal adapter
      */
-    #publishDiff(
-        soul: string,
-        msgId: string,
-        nodeDiff: TGGraphData,
-    ): void
-    {
-        this.gateway.exchange.publish(`topgun/nodes/${soul}`, {
-            '#'  : `${msgId}/${soul}`,
-            'put': {
-                [soul]: nodeDiff,
-            },
-        });
-    }
-
-    /**
-     * Wrap adapter
-     */
-    #wrapAdapter(adapter: TGGraphAdapter): TGGraphAdapter
+    #federateInternalAdapter(adapter: TGGraphAdapter): TGFederationAdapter
     {
         const withPublish: TGGraphAdapter = {
             ...adapter,
-            put: async (graph: TGGraphData) =>
+            put: async (graph: TGGraphData, originators?: TGOriginators) =>
             {
                 const diff = await adapter.put(graph);
 
@@ -96,6 +128,7 @@ export class TGServer
                     this.#publishIsDiff({
                         '#'  : pseudoRandomText(),
                         'put': diff,
+                        originators
                     });
                 }
 
@@ -103,9 +136,9 @@ export class TGServer
             },
         };
 
-        return {
+        const withValidation = {
             ...withPublish,
-            put: async (graph: TGGraphData) =>
+            put: async (graph: TGGraphData, originators?: TGOriginators) =>
             {
                 const result = this.#validatePut(graph);
 
@@ -114,9 +147,21 @@ export class TGServer
                     throw result.error;
                 }
 
-                return withPublish.put(graph);
+                return withPublish.put(graph, originators);
             },
         };
+
+        return new TGFederationAdapter(
+            this.serverName,
+            withPublish,
+            this.peers,
+            withValidation,
+            {
+                putToPeers     : this.options.putToPeers,
+                reversePeerSync: this.options.reversePeerSync
+            },
+            this.logger.extend('FederationAdapter')
+        )
     }
 
     /**
@@ -124,8 +169,9 @@ export class TGServer
      */
     #publishIsDiff(msg: TGMessage): void
     {
-        const msgId = msg['#'] || uuidv4();
-        const diff  = msg.put;
+        const msgId       = msg['#'] || uuidv4();
+        const diff        = msg.put;
+        const originators = msg.originators;
 
         if (!diff)
         {
@@ -146,8 +192,33 @@ export class TGServer
                 continue;
             }
 
-            this.#publishDiff(soul, msgId, nodeDiff);
+            this.#publishDiff(soul, msgId, nodeDiff, originators);
         }
+    }
+
+    /**
+     * Send put data to all node subscribers
+     */
+    #publishDiff(
+        soul: string,
+        msgId: string,
+        nodeDiff: TGPartialNode,
+        originators?: Record<string, number>
+    ): void
+    {
+        const message: TGMessage = {
+            '#'  : `${msgId}/${soul}`,
+            'put': {
+                [soul]: nodeDiff,
+            },
+            'originators': {
+                ...(originators || {}),
+                [this.serverName]: 1
+            }
+        };
+
+        this.gateway.exchange.publish(`topgun/nodes/${soul}`, message);
+        this.listeners.publishChangeLog(message);
     }
 
     /**
@@ -155,98 +226,41 @@ export class TGServer
      */
     #validatePut(graph: TGGraphData): Result<TGGraphData>
     {
-        if (this.options.disableValidation)
+        if (this.options.disableGraphValidation)
         {
             return ok(graph);
         }
         return this.validator(graph);
     }
 
-    /**
-     * Set up a loop to handle websocket connections.
-     */
-    async #handleWebsocketConnection(): Promise<void>
+    #createLogger(): void
     {
-        for await (const { socket } of this.gateway.listener('connection'))
+        if (!isObject(this.options.log))
         {
-            (async () =>
-            {
-                // Set up a loop to handle and respond to RPCs.
-                for await (const request of (socket as TGSocket).procedure('login'))
-                {
-                    this.#authenticateLogin(socket, request);
-                }
-            })();
+            this.options.log = {};
         }
+        if (!isDefined(this.options.log.appId) && isString(this.serverName))
+        {
+            this.options.log.appId = this.serverName;
+        }
+        this.logger = createLogger(this.options.log);
     }
 
-    /**
-     * Authenticate a connection for extra privileges
-     */
-    async #authenticateLogin(
-        socket: TGSocket,
-        request: {
-            data: {
-                pub: string;
-                proof: {
-                    m: string;
-                    s: string;
-                };
-            },
-            end: (reason?: string) => void,
-            error: (error?: Error) => void
-        },
-    ): Promise<void>
+    #persistServerName(): void
     {
-        const data = request.data;
+        this.serverName = this.options.serverName;
 
-        if (!data.pub || !data.proof)
+        if (!isString(this.options.serverName))
         {
-            request.end('Missing login info');
-            return;
-        }
-
-        try
-        {
-            const [socketId, timestampStr] = data.proof.m.split('/');
-            const timestamp                = parseInt(timestampStr, 10);
-            const now                      = new Date().getTime();
-            const drift                    = Math.abs(now - timestamp);
-            const maxDrift                 =
-                      (this.options.authMaxDrift &&
-                          parseInt(`${this.options.authMaxDrift}`, 10)) ||
-                      1000 * 60 * 5;
-
-            if (drift > maxDrift)
+            if (isFunction(this.gateway.httpServer?.address))
             {
-                request.error(new Error('Exceeded max clock drift'));
-                return;
+                const address   = this.gateway.httpServer?.address();
+                this.serverName = address.address + address.port;
             }
-
-            if (!socketId || socketId !== socket.id)
+            else if (this.options.port)
             {
-                request.error(new Error('Socket ID doesn\'t match'));
-                return;
+                this.serverName = String(this.options.port);
             }
-
-            const isVerified = await verify(data.proof, data.pub);
-
-            if (isVerified)
-            {
-                await socket.setAuthToken({
-                    pub: data.pub,
-                    timestamp,
-                });
-                request.end();
-            }
-            else
-            {
-                request.end('Invalid login');
-            }
-        }
-        catch (err)
-        {
-            request.end('Invalid login');
         }
     }
 }

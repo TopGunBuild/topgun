@@ -1,5 +1,5 @@
 import {
-    CRDTOpts,
+    CRDTOptions,
     TGGraphData,
     TGNode,
     TGNodeMeta,
@@ -53,7 +53,7 @@ const DEFAULT_OPTS = {
 export function diffCRDT(
     updatedGraph: TGGraphData,
     existingGraph: TGGraphData,
-    opts: CRDTOpts = DEFAULT_OPTS,
+    opts: CRDTOptions = DEFAULT_OPTS,
 ): TGGraphData|undefined
 {
     const {

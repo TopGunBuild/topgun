@@ -6,18 +6,17 @@ import {
     TGOptionsGet,
     TGOptionsPut,
     TGValue,
-} from '../types';
-import { TGClient } from './client';
-import { TGGraph } from './graph/graph';
-import { pubFromSoul } from '../sea';
-import { assertGetPath, assertNotEmptyString, assertOptionsGet } from '../utils/assert';
-import { getNodeSoul, isNode } from '../utils/node';
+} from '../../types';
+import { TGClient } from '../client';
+import { TGGraph } from '../graph/graph';
+import { pubFromSoul } from '../../sea';
+import { assertGetPath, assertNotEmptyString, assertOptionsGet } from '../../utils/assert';
+import { getNodeSoul, isNode } from '../../utils/node';
 import { TGLexLink } from './lex-link';
-import { uuidv4 } from '../utils/uuidv4';
-import { TGStream } from '../stream/stream';
-import { TGExchange } from '../stream/exchange';
+import { uuidv4 } from '../../utils/uuidv4';
+import { TGStream } from '../../stream/stream';
+import { TGExchange } from '../../stream/exchange';
 
-/* eslint-disable @typescript-eslint/no-empty-function */
 export class TGLink
 {
     readonly id: string;
@@ -75,7 +74,7 @@ export class TGLink
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    waitForAuth(): boolean
+    authRequired(): boolean
     {
         if (this._client.user().is?.pub)
         {
@@ -127,7 +126,7 @@ export class TGLink
         // The argument is a LEX query
         if (isObject(keyOrOptions))
         {
-            return new TGLexLink(this._client, assertOptionsGet(keyOrOptions), this);
+            return new TGLexLink(this, this._client.transportMaxKeyValuePairs, assertOptionsGet(keyOrOptions));
         }
         else if (isString(keyOrOptions))
         {
@@ -170,7 +169,7 @@ export class TGLink
     {
         return new Promise<TGMessage>((resolve) =>
         {
-            if (this.waitForAuth())
+            if (this.authRequired())
             {
                 throw new Error(
                     'You cannot save data to user space if the user is not authorized.',
@@ -200,7 +199,7 @@ export class TGLink
         })
     }
 
-    set(data: any, opt?: TGOptionsPut): Promise<TGMessage>
+    set(data: TGValue, opt?: TGOptionsPut): Promise<TGMessage>
     {
         return new Promise<TGMessage>((resolve) =>
         {
@@ -210,7 +209,7 @@ export class TGLink
             {
                 throw new Error('This data type is not supported in set().');
             }
-            else if (this.waitForAuth())
+            else if (this.authRequired())
             {
                 throw new Error(
                     'You cannot save data to user space if the user is not authorized.',
@@ -305,7 +304,7 @@ export class TGLink
                 return reject(Error('For multiple use once() or on() method'));
             }
 
-            const stream = this._exchange.subscribe<TGData<T>>();
+            const stream = this._exchange.subscribe<TGData<T>>(uuidv4(), { once: true });
 
             (async () =>
             {
@@ -346,7 +345,7 @@ export class TGLink
 
     map(): TGLexLink
     {
-        return new TGLexLink(this._client, {}, this);
+        return new TGLexLink(this, this._client.transportMaxKeyValuePairs);
     }
 
     start(value: string): TGLexLink
@@ -432,7 +431,8 @@ export class TGLink
             this._endQueries[stream.name] = this._client.graph.query(
                 this.getPath(),
                 (value: TGValue) => this.#onQueryResponse(value, stream),
-                stream.name
+                stream.name,
+                !!stream.attributes['once']
             );
         });
 
@@ -446,7 +446,8 @@ export class TGLink
             this._endQueries[stream.name] = this._client.graph.queryMany(
                 this._lex.optionsGet,
                 (value: TGValue) => this.#onQueryResponse(value, stream),
-                stream.name
+                stream.name,
+                !!stream.attributes['once']
             );
         });
 
@@ -455,7 +456,7 @@ export class TGLink
 
     #maybeWaitAuth(handler: () => void): TGLink
     {
-        if (this.waitForAuth())
+        if (this.authRequired())
         {
             this._client.listener('auth').once().then((value) =>
             {

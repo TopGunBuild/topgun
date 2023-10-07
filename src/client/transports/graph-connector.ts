@@ -4,7 +4,6 @@ import { TGProcessQueue } from '../control-flow/process-queue';
 import { TGGraph } from '../graph/graph';
 
 /* eslint-disable @typescript-eslint/no-unused-vars */
-/* eslint-disable @typescript-eslint/no-empty-function */
 export abstract class TGGraphConnector extends AsyncStreamEmitter<any>
 {
     readonly name: string;

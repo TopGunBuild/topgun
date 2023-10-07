@@ -9,14 +9,8 @@
   <a href="https://npm.im/@topgunbuild/topgun">
     <img alt="npm" src="https://badgen.net/npm/v/@topgunbuild/topgun">
   </a>
-  <a href="https://bundlephobia.com/result?p=@topgunbuild/topgun">
-    <img alt="bundlephobia" src="https://img.shields.io/bundlephobia/minzip/@topgunbuild/topgun.svg">
-  </a>
   <a href="https://opensource.org/licenses/MIT">
       <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-yellow.svg">
-  </a>
-  <a href="https://snyk.io/test/github/TopGunBuild/@topgunbuild/topgun">
-      <img alt="Snyk" src="https://snyk.io/test/github/TopGunBuild/@topgunbuild/topgun/badge.svg">
   </a>
 </p>
 

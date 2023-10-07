@@ -1,14 +1,14 @@
 import { isObject, isString } from '@topgunbuild/typed';
 import { TGNode } from '../types';
 
-export function isNode(data: unknown): boolean
+export function isNode(value: unknown): value is TGNode
 {
-    return isObject(data) &&
-        isString(data && data._ && data._['#']) &&
-        isObject(data && data._ && data._['>']);
+    return isObject(value) &&
+        isString(value && value._ && value._['#']) &&
+        isObject(value && value._ && value._['>']);
 }
 
-export function getNodeSoul(data: unknown): string
+export function getNodeSoul(value: unknown): string
 {
-    return isNode(data) ? (data as TGNode)._['#'] : null;
+    return isNode(value) ? (value as TGNode)._['#'] : null;
 }

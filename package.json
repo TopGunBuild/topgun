@@ -1,6 +1,6 @@
 {
     "name": "@topgunbuild/topgun",
-    "version": "0.0.1",
+    "version": "0.0.2",
     "description": "Realtime, offline-first, secure, graph data synchronization engine. Reimplementation of gunDB in TypeScript",
     "publishConfig": {
         "access": "public"
@@ -53,6 +53,11 @@
             "require": "./dist/utils.js",
             "import": "./dist/utils.mjs"
         },
+        "./logger": {
+            "types": "./dist/logger.d.ts",
+            "require": "./dist/logger.js",
+            "import": "./dist/logger.mjs"
+        },
         "./types": {
             "types": "./dist/types.d.ts",
             "require": "./dist/types.js",
@@ -82,6 +87,9 @@
             ],
             "utils": [
                 "./dist/utils.d.ts"
+            ],
+            "logger": [
+                "./dist/logger.d.ts"
             ],
             "types": [
                 "./dist/utils.d.ts"
@@ -113,7 +121,7 @@
     "dependencies": {
         "@topgunbuild/async-stream-emitter": "^0.0.1",
         "@topgunbuild/buffer": "^0.0.1",
-        "@topgunbuild/socket": "^0.0.1",
+        "@topgunbuild/socket": "^0.0.5",
         "@topgunbuild/textencoder": "^0.0.1",
         "@topgunbuild/typed": "^0.1.0",
         "@topgunbuild/webcrypto": "^0.0.1"
@@ -124,6 +132,7 @@
         "@types/route-parser": "^0.1.4",
         "@typescript-eslint/eslint-plugin": "^5.58.0",
         "@typescript-eslint/parser": "^5.58.0",
+        "dotenv-cli": "^7.3.0",
         "eslint": "^8.38.0",
         "eslint-config-prettier": "^8.8.0",
         "eslint-plugin-import": "^2.27.5",

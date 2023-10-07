@@ -1,4 +1,4 @@
-import { LEX } from './lex';
+import { TGSocketClientOptions } from '@topgunbuild/socket/client';
 
 /**
  * Timestamp of last change for each attribute
@@ -18,19 +18,19 @@ export interface TGNodeMeta
 }
 
 /**
- * A node (or partial node data) in a Graph
- */
-export interface TGNode
-{
-    _: TGNodeMeta;
-
-    [key: string]: any;
-}
-
-/**
  * Valid values in TopGunDB
  */
 export type TGValue = object|string|number|boolean|null;
+
+export interface TGPartialNode
+{
+    [key: string]: TGValue;
+}
+
+export interface TGNode extends TGPartialNode
+{
+    _: TGNodeMeta;
+}
 
 /**
  * Graph Data consists of one or more full or partial nodes
@@ -38,6 +38,11 @@ export type TGValue = object|string|number|boolean|null;
 export interface TGGraphData
 {
     [key: string]: TGNode|null;
+}
+
+export interface TGPartialGraphData
+{
+    [key: string]: TGPartialNode|null;
 }
 
 export interface TGOptionsGet
@@ -60,7 +65,7 @@ export type TGOptionsPut = Partial<{
     [key: string]: any;
 }>;
 
-export interface CRDTOpts
+export interface CRDTOptions
 {
     machineState?: number;
     futureGrace?: number;
@@ -68,6 +73,8 @@ export interface CRDTOpts
 
     [k: string]: any;
 }
+
+export type TGOriginators = Record<string, number>;
 
 /**
  * A standard Protocol Message
@@ -78,11 +85,14 @@ export interface TGMessage
     '@'?: string;
 
     get?: TGOptionsGet;
-    put?: TGGraphData;
+    put?: {
+        [key: string]: TGPartialNode|null
+    };
 
     ack?: number|boolean;
     err?: any;
     ok?: boolean|number;
+    originators?: TGOriginators;
 }
 
 export type TGMessageCb = (msg: TGMessage) => void;
@@ -96,6 +106,7 @@ export interface TGPut
     msgId?: string;
     replyTo?: string;
     cb?: TGMessageCb;
+    originators?: TGOriginators;
 }
 
 /**
@@ -107,6 +118,7 @@ export interface TGGet
     msgId?: string;
     key?: string;
     cb?: TGMessageCb;
+    once?: boolean;
 }
 
 export interface TGUserReference
@@ -173,7 +185,7 @@ export interface TGPathData
 export type TGMiddleware = (
     updates: TGGraphData,
     existingGraph: TGGraphData,
-    opts?: CRDTOpts|TGOptionsGet|TGOptionsPut,
+    opts?: CRDTOptions|TGOptionsGet|TGOptionsPut,
     fullPath?: string[],
 ) => TGGraphData|undefined|Promise<TGGraphData|undefined>;
 export type TGMiddlewareType = 'read'|'write';
@@ -188,3 +200,45 @@ type PromisifyMethods<T> = {
 };
 
 export type TGSupportedStorage = PromisifyMethods<Pick<Storage, 'getItem'|'setItem'|'removeItem'>>;
+
+export type TGPeerOptions = string|TGSocketClientOptions;
+
+export type LEX = {
+    /** prefix match */
+    '*'?: string;
+    /** greater than or equals */
+    '>'?: string;
+    /** less than match */
+    '<'?: string;
+};
+
+export interface IPolicyLex extends LEX {
+    /** Path */
+    '#'?: IPolicyLex;
+    /** Key */
+    '.'?: IPolicyLex;
+    /**
+     * Either Path string or Key string must
+     * contain Certificate's Pub string
+     */
+    '+'?: '*';
+}
+
+export type IPolicy = string | IPolicyLex | (string | IPolicyLex)[];
+
+export interface TGGraphAdapter
+{
+    readonly close?: () => void;
+    readonly get: (opts: TGOptionsGet) => Promise<TGGraphData>;
+    readonly put: (graphData: TGPartialGraphData, originators?: TGOriginators) => Promise<TGGraphData|null>;
+    readonly onChange?: (
+        handler: (change: TGGraphData) => void
+    ) => () => void
+}
+
+export interface TGGraphAdapterOptions
+{
+    maxKeySize?: number;
+    maxValueSize?: number;
+}
+

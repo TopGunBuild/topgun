@@ -16,7 +16,7 @@ import {
     TGUserReference,
 } from '../types';
 import { assertCredentials, assertNotEmptyString } from '../utils/assert';
-import { TGLink } from './link';
+import { TGLink } from './link/link';
 import { isValidCredentials } from '../utils/is-valid-credentials';
 
 let sessionStorage: TGSupportedStorage;

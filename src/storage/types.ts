@@ -6,10 +6,10 @@ export interface TGStorage
 
     get(key: string): Promise<TGNode|null>;
 
-    list(options: StorageListOptions): Promise<TGGraphData>
+    list(options: TGQueryOptions): Promise<TGGraphData>
 }
 
-export interface StorageListOptions
+export interface TGQueryOptions
 {
     // Stage 1: filtering
     /** Returned keys must start with this string if defined */

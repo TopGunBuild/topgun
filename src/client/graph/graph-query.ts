@@ -1,8 +1,8 @@
 import { isFunction, isEmptyObject } from '@topgunbuild/typed';
 import { TGGet, TGGraphData, TGMessage, TGNode, TGOnCb, TGOptionsGet } from '../../types';
 import { TGGraph } from './graph';
-import { StorageListOptions } from '../../storage';
-import { listFilterMatch, storageListOptionsFromGetOptions } from '../../storage/utils';
+import { TGQueryOptions } from '../../storage';
+import { listFilterMatch, queryOptionsFromGetOptions } from '../../storage/utils';
 import { uuidv4 } from '../../utils/uuidv4';
 import { TGExchange } from '../../stream/exchange';
 import { TGStream } from '../../stream/stream';
@@ -13,7 +13,7 @@ export class TGGraphQuery extends TGExchange
     readonly options: TGOptionsGet;
 
     private _endCurQuery?: () => void;
-    private readonly _listOptions: StorageListOptions|null;
+    private readonly _listOptions: TGQueryOptions|null;
     private readonly _graph: TGGraph;
     private readonly _updateGraph: (
         data: TGGraphData,
@@ -34,7 +34,7 @@ export class TGGraphQuery extends TGExchange
         this.queryString         = queryString;
         this._graph              = graph;
         this._updateGraph        = updateGraph;
-        this._listOptions        = storageListOptionsFromGetOptions(this.options)
+        this._listOptions        = queryOptionsFromGetOptions(this.options)
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -46,7 +46,7 @@ export class TGGraphQuery extends TGExchange
         return this.subscriptions(true).length;
     }
 
-    getStream(cb: TGOnCb<any>, msgId?: string): TGStream<any>
+    getStream(cb: TGOnCb<any>, msgId?: string, askOnce?: boolean): TGStream<any>
     {
         const stream = this.subscribe();
 
@@ -58,7 +58,7 @@ export class TGGraphQuery extends TGExchange
             }
         })();
 
-        this.#ask(msgId);
+        this.#ask(msgId, askOnce);
         return stream;
     }
 
@@ -96,7 +96,7 @@ export class TGGraphQuery extends TGExchange
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    #ask(msgId?: string): TGGraphQuery
+    #ask(msgId?: string, once?: boolean): TGGraphQuery
     {
         if (this._endCurQuery)
         {
@@ -104,6 +104,7 @@ export class TGGraphQuery extends TGExchange
         }
 
         const data: TGGet = {
+            once,
             msgId  : msgId || uuidv4(),
             options: this.options,
             cb     : (msg: TGMessage) => this.#onDirectQueryReply(msg)

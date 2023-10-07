@@ -10,12 +10,11 @@ import { TGGet, TGMessage, TGMessageCb, TGPut } from '../../types';
 import { sign } from '../../sea';
 import { uuidv4 } from '../../utils/uuidv4';
 
-/* eslint-disable @typescript-eslint/no-empty-function */
 /* eslint-disable-next-line @typescript-eslint/no-unused-vars */
 export class TGWebSocketGraphConnector extends TGGraphWireConnector
 {
     readonly client: TGClientSocket;
-    readonly opts: TGSocketClientOptions|undefined;
+    readonly options: TGSocketClientOptions|undefined;
 
     private readonly _requestChannels: {
         [msgId: string]: TGChannel<any>;
@@ -31,8 +30,8 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
     {
         super(name);
         this._requestChannels = {};
-        this.opts             = opts;
-        this.client           = createSocketClient(this.opts || {});
+        this.options          = opts;
+        this.client           = createSocketClient(this.options || {});
         this.#onConnect();
         this.#onError();
 
@@ -53,6 +52,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
     {
         try
         {
+            this.closeAllListeners();
             this.client.disconnect();
         }
         catch (e)
@@ -75,16 +75,20 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         return this;
     }
 
-    get({ msgId, cb, options }: TGGet): () => void
+    get({ msgId, cb, options, once }: TGGet): () => void
     {
         const soul   = options['#'];
         msgId        = msgId || uuidv4();
-        const cbWrap = (msg: any) =>
+        const cbWrap = (msg: TGMessage) =>
         {
             this.ingest([msg]);
             if (cb)
             {
                 cb(msg);
+            }
+            if (once)
+            {
+                this.off(msgId);
             }
         };
 
@@ -99,7 +103,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         return super.get({ msgId, cb, options });
     }
 
-    put({ graph, msgId = '', replyTo = '', cb }: TGPut): () => void
+    put({ graph, msgId = '', replyTo = '', cb, originators }: TGPut): () => void
     {
         if (!graph)
         {
@@ -112,11 +116,14 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
 
         if (cb)
         {
-            const cbWrap = (response: any) =>
+            const cbWrap = (response: TGMessage) =>
             {
                 this.ingest([response]);
-                cb(response);
                 this.off(msgId);
+                if (cb)
+                {
+                    cb(response);
+                }
             };
 
             this._requestChannels[msgId] = this.subscribeToChannel(
@@ -124,11 +131,11 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
                 cbWrap,
             );
 
-            return super.put({ graph, msgId, replyTo, cb: cbWrap });
+            return super.put({ graph, msgId, replyTo, cb: cbWrap, originators });
         }
         else
         {
-            return super.put({ graph, msgId, replyTo, cb });
+            return super.put({ graph, msgId, replyTo, cb, originators });
         }
     }
 

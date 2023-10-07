@@ -1,7 +1,7 @@
 import { isObject, isNumber } from '@topgunbuild/typed';
 import { TGGraphData, TGNode, TGOptionsGet, TGPathData, TGValue } from '../../types';
 import { isSupportValue } from '../../utils/is-support';
-import { filterNodesByListOptions, storageListOptionsFromGetOptions } from '../../storage/utils';
+import { filterNodesByQueryOptions, queryOptionsFromGetOptions } from '../../storage/utils';
 
 export function diffSets(
     initial: readonly string[],
@@ -20,8 +20,8 @@ export function getNodesFromGraph(
 ): TGNode[]
 {
     const allNodes    = Object.values(graph);
-    const listOptions = storageListOptionsFromGetOptions(options);
-    let filteredNodes = filterNodesByListOptions(allNodes, listOptions);
+    const listOptions = queryOptionsFromGetOptions(options);
+    let filteredNodes = filterNodesByQueryOptions(allNodes, listOptions);
 
     if (isNumber(listOptions?.limit) && filteredNodes.length > listOptions?.limit)
     {
@@ -71,11 +71,11 @@ export function getPathData(
     graph: TGGraphData,
 ): TGPathData
 {
-    const souls    = getSoulsFromKeys(keys);
-    const lastSoul = souls[souls.length - 1];
-    const lastKey  = keys[keys.length - 1];
-    let complete   = lastSoul in graph;
-    let value      = graph[lastSoul];
+    const souls               = getSoulsFromKeys(keys);
+    const lastSoul            = souls[souls.length - 1];
+    const lastKey             = keys[keys.length - 1];
+    let complete              = lastSoul in graph;
+    let value: TGNode|TGValue = graph[lastSoul];
 
     if (souls.length === 1 || complete)
     {
