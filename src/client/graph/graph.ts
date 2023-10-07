@@ -216,7 +216,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
     /**
      * Read a matching nodes from the graph
      */
-    queryMany<T extends TGValue>(opts: TGOptionsGet, cb: TGOnCb<T>, msgId: string): () => void
+    queryMany<T extends TGValue>(opts: TGOptionsGet, cb: TGOnCb<T>, msgId: string, askOnce?: boolean): () => void
     {
         getNodesFromGraph(opts, this._graph).forEach((node) =>
         {
@@ -224,7 +224,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
         });
 
         const queryString = stringifyOptionsGet(opts);
-        const stream      = this.#listen(queryString, cb, msgId);
+        const stream      = this.#listen(queryString, cb, msgId, askOnce);
 
         return () =>
         {
@@ -235,7 +235,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
     /**
      * Read a potentially multi-level deep path from the graph
      */
-    query<T extends TGValue>(path: string[], cb: TGOnCb<T>, msgId: string): () => void
+    query<T extends TGValue>(path: string[], cb: TGOnCb<T>, msgId: string, askOnce?: boolean): () => void
     {
         let currentValue: TGValue|undefined;
         let lastSouls   = [] as string[];
@@ -257,7 +257,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
 
             for (const soul of added)
             {
-                const stream = this.#listen(this.#queryStringForSoul(soul), updateQuery, msgId);
+                const stream = this.#listen(this.#queryStringForSoul(soul), updateQuery, msgId, askOnce);
                 streamMap.set(soul, stream);
             }
 
@@ -462,9 +462,9 @@ export class TGGraph extends AsyncStreamEmitter<any>
             new TGGraphQuery(this, queryString, this.receiveGraphData));
     }
 
-    #listen<T extends TGValue>(queryString: string, cb: TGOnCb<T>, msgId?: string): TGStream<any>
+    #listen<T extends TGValue>(queryString: string, cb: TGOnCb<T>, msgId?: string, askOnce?: boolean): TGStream<any>
     {
-        return this.#query(queryString).getStream(cb, msgId);
+        return this.#query(queryString).getStream(cb, msgId, askOnce);
     }
 
     #unlisten(queryString: string, stream: TGStream<any>): TGGraph

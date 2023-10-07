@@ -118,6 +118,7 @@ export interface TGGet
     msgId?: string;
     key?: string;
     cb?: TGMessageCb;
+    once?: boolean;
 }
 
 export interface TGUserReference

@@ -75,7 +75,7 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         return this;
     }
 
-    get({ msgId, cb, options }: TGGet): () => void
+    get({ msgId, cb, options, once }: TGGet): () => void
     {
         const soul   = options['#'];
         msgId        = msgId || uuidv4();
@@ -85,6 +85,10 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
             if (cb)
             {
                 cb(msg);
+            }
+            if (once)
+            {
+                this.off(msgId);
             }
         };
 
@@ -115,8 +119,11 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
             const cbWrap = (response: TGMessage) =>
             {
                 this.ingest([response]);
-                cb(response);
                 this.off(msgId);
+                if (cb)
+                {
+                    cb(response);
+                }
             };
 
             this._requestChannels[msgId] = this.subscribeToChannel(

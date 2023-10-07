@@ -304,7 +304,7 @@ export class TGLink
                 return reject(Error('For multiple use once() or on() method'));
             }
 
-            const stream = this._exchange.subscribe<TGData<T>>();
+            const stream = this._exchange.subscribe<TGData<T>>(uuidv4(), { once: true });
 
             (async () =>
             {
@@ -431,7 +431,8 @@ export class TGLink
             this._endQueries[stream.name] = this._client.graph.query(
                 this.getPath(),
                 (value: TGValue) => this.#onQueryResponse(value, stream),
-                stream.name
+                stream.name,
+                !!stream.attributes['once']
             );
         });
 
@@ -445,7 +446,8 @@ export class TGLink
             this._endQueries[stream.name] = this._client.graph.queryMany(
                 this._lex.optionsGet,
                 (value: TGValue) => this.#onQueryResponse(value, stream),
-                stream.name
+                stream.name,
+                !!stream.attributes['once']
             );
         });
 
