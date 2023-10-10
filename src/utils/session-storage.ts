@@ -1,7 +1,6 @@
 import { TGSupportedStorage } from '../types';
 import { storageStruct } from './assert';
 import { localStorageAdapter } from './local-storage';
-import { TG_CLIENT_DEFAULT_OPTIONS } from '../client/client-options';
 
 export function getSessionStorage(sessionStorage: TGSupportedStorage|undefined|boolean): TGSupportedStorage|null
 {
@@ -14,5 +13,5 @@ export function getSessionStorage(sessionStorage: TGSupportedStorage|undefined|b
 
 export function getSessionStorageKey(sessionStorageKey: string): string
 {
-    return sessionStorageKey || TG_CLIENT_DEFAULT_OPTIONS.sessionStorageKey
+    return sessionStorageKey || 'topgun-session';
 }

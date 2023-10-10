@@ -4,7 +4,7 @@ import { diffCRDT } from '../crdt';
 import { TGLink } from './link/link';
 import { TGGraph } from './graph/graph';
 import { TGGraphConnector } from './transports/graph-connector';
-import { TG_CLIENT_DEFAULT_OPTIONS, TGClientOptions } from './client-options';
+import { TGClientOptions } from './client-options';
 import { createConnector } from './transports/web-socket-graph-connector';
 import { TGUserApi } from './user-api';
 import { pubFromSoul, unpackGraph } from '../sea';
@@ -12,10 +12,9 @@ import { TGIndexedDBConnector } from '../indexeddb/indexeddb-connector';
 import { TGPeerOptions, TGNode } from '../types';
 import { match } from '../utils/match';
 import { assertObject, assertGetPath } from '../utils/assert';
-import { getSessionStorage, getSessionStorageKey } from '../utils';
+import { getSessionStorage, getSessionStorageKey, localStorageAdapter } from '../utils';
 import { socketOptionsFromPeer } from '../utils/socket-options-from-peer';
-
-let clientOptions: TGClientOptions;
+import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from '../storage';
 
 /**
  * Main entry point for TopGun in browser
@@ -25,9 +24,7 @@ export class TGClient extends AsyncStreamEmitter<any>
     static match = match;
 
     pub: string|undefined;
-    passwordMinLength: number;
-    passwordMaxLength: number;
-    transportMaxKeyValuePairs: number;
+    options: TGClientOptions;
 
     readonly graph: TGGraph;
     protected _user?: TGUserApi;
@@ -39,15 +36,27 @@ export class TGClient extends AsyncStreamEmitter<any>
     constructor(options?: TGClientOptions)
     {
         super();
-        options                = isObject(options) ? options : {};
-        clientOptions          = { ...TG_CLIENT_DEFAULT_OPTIONS, ...options };
+        const defaultOptions: TGClientOptions = {
+            peers                    : [],
+            connectors               : [],
+            localStorage             : false,
+            localStorageKey          : 'topgun-nodes',
+            sessionStorage           : localStorageAdapter,
+            sessionStorageKey        : 'topgun-session',
+            passwordMinLength        : 8,
+            passwordMaxLength        : 48,
+            transportMaxKeyValuePairs: 200,
+            maxKeySize               : MAX_KEY_SIZE,
+            maxValueSize             : MAX_VALUE_SIZE
+        };
+
         this.graph             = new TGGraph(this);
         this.WAIT_FOR_USER_PUB = '__WAIT_FOR_USER_PUB__';
 
         this.graph.use(diffCRDT);
         this.graph.use(diffCRDT, 'write');
 
-        this.opt(clientOptions);
+        this.opt(Object.assign(defaultOptions, options || {}));
         this.#registerSeaMiddleware();
         this.user().recoverCredentials();
     }
@@ -87,8 +96,8 @@ export class TGClient extends AsyncStreamEmitter<any>
             this._user ||
             new TGUserApi(
                 this,
-                getSessionStorage(clientOptions?.sessionStorage),
-                getSessionStorageKey(clientOptions?.sessionStorageKey),
+                getSessionStorage(this.options?.sessionStorage),
+                getSessionStorageKey(this.options?.sessionStorageKey),
             ));
     }
 
@@ -97,22 +106,19 @@ export class TGClient extends AsyncStreamEmitter<any>
      */
     opt(options: TGClientOptions): TGClient
     {
-        clientOptions                  = assertObject(options);
-        this.passwordMaxLength         = clientOptions.passwordMaxLength || TG_CLIENT_DEFAULT_OPTIONS.passwordMaxLength;
-        this.passwordMinLength         = clientOptions.passwordMinLength || TG_CLIENT_DEFAULT_OPTIONS.passwordMinLength;
-        this.transportMaxKeyValuePairs = clientOptions.transportMaxKeyValuePairs || TG_CLIENT_DEFAULT_OPTIONS.transportMaxKeyValuePairs;
+        this.options = assertObject(options);
 
-        if (Array.isArray(clientOptions.peers))
+        if (Array.isArray(this.options.peers))
         {
-            this.#handlePeers(clientOptions.peers);
+            this.#handlePeers(this.options.peers);
         }
-        if (clientOptions.localStorage)
+        if (this.options.localStorage)
         {
-            this.#useConnector(new TGIndexedDBConnector(clientOptions.localStorageKey, clientOptions));
+            this.#useConnector(new TGIndexedDBConnector(this.options.localStorageKey, this.options));
         }
-        if (Array.isArray(clientOptions.connectors))
+        if (Array.isArray(this.options.connectors))
         {
-            clientOptions.connectors.forEach(connector =>
+            this.options.connectors.forEach(connector =>
                 this.#useConnector(connector),
             );
         }
