@@ -44,7 +44,10 @@ export class TGServer extends AsyncStreamEmitter<any>
             peers                 : [],
             putToPeers            : true,
             reversePeerSync       : true,
-            peerSecretKey         : 'peerSecretKey'
+            peerSecretKey         : 'peerSecretKey',
+            log                   : {
+                enabled: true
+            }
         };
 
         this.options = Object.assign(defaultOptions, options || {});
