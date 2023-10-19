@@ -383,19 +383,17 @@ export class TGLink
         {
             this._parent.__setUserPub(pub);
         }
-        else
-        {
-            this._client.pub = pub;
-            this.key         = this.key.replace(this._client.WAIT_FOR_USER_PUB, pub);
 
-            if (
-                this._lex instanceof TGLexLink &&
-                isObject(this._lex.optionsGet) &&
-                isString(this._lex.optionsGet['#'])
-            )
-            {
-                this._lex.optionsGet['#'] = this._lex.optionsGet['#'].replace(this._client.WAIT_FOR_USER_PUB, pub);
-            }
+        this._client.pub = pub;
+        this.key         = this.key.replace(this._client.WAIT_FOR_USER_PUB, pub);
+
+        if (
+            this._lex instanceof TGLexLink &&
+            isObject(this._lex.optionsGet) &&
+            isString(this._lex.optionsGet['#'])
+        )
+        {
+            this._lex.optionsGet['#'] = this._lex.optionsGet['#'].replace(this._client.WAIT_FOR_USER_PUB, pub);
         }
     }
 
