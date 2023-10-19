@@ -50,7 +50,7 @@ export class Listeners
         {
             if (!this.closed)
             {
-                this.logger.warn(`Socket ${socket.id} disconnected with code ${code}${!!reason ? ' due to ' + reason : ''}`);
+                this.logger.debug(`Socket ${socket.id} disconnected with code ${code}${!!reason ? ' due to ' + reason : ''}`);
             }
 
             if (this.inboundPeerConnections.has(socket.id))
