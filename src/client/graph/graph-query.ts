@@ -1,4 +1,4 @@
-import { isFunction, isEmptyObject } from '@topgunbuild/typed';
+import { isFunction, isEmptyObject, isObject } from '@topgunbuild/typed';
 import { TGGet, TGGraphData, TGMessage, TGNode, TGOnCb, TGOptionsGet } from '../../types';
 import { TGGraph } from './graph';
 import { TGQueryOptions } from '../../storage';
@@ -13,7 +13,8 @@ export class TGGraphQuery extends TGExchange
     readonly options: TGOptionsGet;
 
     private _endCurQuery?: () => void;
-    private readonly _listOptions: TGQueryOptions|null;
+    protected readonly _isMultiQuery: boolean;
+    private readonly _queryOptions: TGQueryOptions|null;
     private readonly _graph: TGGraph;
     private readonly _updateGraph: (
         data: TGGraphData,
@@ -30,11 +31,12 @@ export class TGGraphQuery extends TGExchange
     )
     {
         super();
-        this.options             = JSON.parse(queryString);
-        this.queryString         = queryString;
-        this._graph              = graph;
-        this._updateGraph        = updateGraph;
-        this._listOptions        = queryOptionsFromGetOptions(this.options)
+        this.options       = JSON.parse(queryString);
+        this.queryString   = queryString;
+        this._graph        = graph;
+        this._updateGraph  = updateGraph;
+        this._queryOptions = queryOptionsFromGetOptions(this.options);
+        this._isMultiQuery = isObject(this.options['.']);
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -73,9 +75,9 @@ export class TGGraphQuery extends TGExchange
 
     match(soul: string): boolean
     {
-        if (this._listOptions)
+        if (this._queryOptions)
         {
-            return listFilterMatch(this._listOptions, soul)
+            return listFilterMatch(this._queryOptions, soul)
         }
 
         return soul === this.options['#'];
@@ -116,7 +118,8 @@ export class TGGraphQuery extends TGExchange
 
     #onDirectQueryReply(msg: TGMessage): void
     {
-        if (isEmptyObject(msg.put))
+        // Return an empty response when requesting a node or property
+        if (isEmptyObject(msg.put) && !this._isMultiQuery)
         {
             const soul = this.options['#'];
 
