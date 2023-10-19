@@ -191,6 +191,12 @@ export class TGWebSocketGraphConnector extends TGGraphWireConnector
         return channel;
     }
 
+
+    rpc<T>(functionName: string, data?: any): Promise<T>
+    {
+        return this.client.invoke(functionName, data);
+    }
+
     // -----------------------------------------------------------------------------------------------------
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------

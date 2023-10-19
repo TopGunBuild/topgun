@@ -159,6 +159,11 @@ export abstract class TGGraphConnector extends AsyncStreamEmitter<any>
     {
     }
 
+    rpc<T>(functionName: string, data?: any): Promise<T>
+    {
+        return Promise.resolve(null);
+    }
+
     // -----------------------------------------------------------------------------------------------------
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------

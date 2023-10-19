@@ -42,6 +42,7 @@ export class Middleware
 
     /**
      * Handles inbound socket requests
+     * Handle `put` queries
      */
     #inboundMiddlewareHandler(req: RequestObject): void
     {
@@ -65,6 +66,7 @@ export class Middleware
 
     /**
      * Handles all traffic out to connected sockets, this is always publish out
+     * Handle `get` queries
      */
     async #outboundMiddlewareHandler(req: RequestObject): Promise<void>
     {

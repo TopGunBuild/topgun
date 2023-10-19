@@ -89,14 +89,14 @@ export class TGPeer extends TGWebSocketGraphConnector
     {
         for await (const event of this.client.listener('connect'))
         {
-            this.logger.log('Peer is connected');
+            this.logger.debug('Peer is connected');
             try
             {
                 await Promise.all([
                     this.#doAuth(secret),
                     this.client.listener('authenticate').once(),
                 ]);
-                this.logger.log('Peer is auth!');
+                this.logger.debug('Peer is auth!');
             }
             catch (e)
             {

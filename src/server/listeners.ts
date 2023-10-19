@@ -50,7 +50,7 @@ export class Listeners
         {
             if (!this.closed)
             {
-                this.logger.warn(`socket ${socket.id} disconnected with code ${code} due to ${reason}`);
+                this.logger.debug(`Socket ${socket.id} disconnected with code ${code}${!!reason ? ' due to ' + reason : ''}`);
             }
 
             if (this.inboundPeerConnections.has(socket.id))
@@ -67,6 +67,7 @@ export class Listeners
     {
         for await (const { socket } of this.gateway.listener('connection'))
         {
+            this.logger.debug(`Socket ${socket.id} is connected`);
             this.#authListener(socket);
             this.#peerAutListener(socket);
         }
@@ -188,6 +189,7 @@ export class Listeners
                     pub: data.pub,
                     timestamp,
                 });
+                this.logger.debug(`Socket ${socket.id} is auth!`);
                 request.end();
             }
             else
@@ -247,6 +249,7 @@ export class Listeners
                     serverName,
                     timestamp,
                 });
+                this.logger.debug(`Peer socket ${socket.id} is auth!`);
                 request.end();
                 return true;
             }

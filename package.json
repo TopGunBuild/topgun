@@ -1,6 +1,6 @@
 {
     "name": "@topgunbuild/topgun",
-    "version": "0.0.2",
+    "version": "0.0.3",
     "description": "Realtime, offline-first, secure, graph data synchronization engine. Reimplementation of gunDB in TypeScript",
     "publishConfig": {
         "access": "public"
@@ -13,7 +13,7 @@
         "test": "jest",
         "lint": "eslint \"src/**/*.ts\" --fix",
         "prepare": "simple-git-hooks",
-        "release": "release-it",
+        "release": "dotenv release-it --",
         "tarball": "rimraf tar && pnpm pack --pack-destination ./tar"
     },
     "browser": "./dist/client.global.js",

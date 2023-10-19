@@ -7,7 +7,7 @@ export interface TGServerOptions extends TGSocketServerOptions, TGGraphAdapterOp
     disableGraphValidation?: boolean;
     adapter?: TGGraphAdapter;
     port?: number;
-    log?: TGLoggerOptions;
+    log?: TGLoggerOptions|boolean;
     serverName?: string;
     peers?: TGPeerOptions[];
     putToPeers?: boolean;
