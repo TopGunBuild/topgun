@@ -1,4 +1,4 @@
-import { Struct, Result, ok, isErr, isFunction, isObject, isDefined, isString } from '@topgunbuild/typed';
+import { Struct, Result, ok, isErr, isFunction, isObject, isDefined, isString, isBoolean } from '@topgunbuild/typed';
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { listen, TGSocketServer } from '@topgunbuild/socket/server';
 import { pseudoRandomText } from '../sea';
@@ -238,7 +238,13 @@ export class TGServer extends AsyncStreamEmitter<any>
 
     #createLogger(): void
     {
-        if (!isObject(this.options.log))
+        if (isBoolean(this.options.log))
+        {
+            this.options.log = {
+                enabled: this.options.log
+            };
+        }
+        else if (!isObject(this.options.log))
         {
             this.options.log = {};
         }
