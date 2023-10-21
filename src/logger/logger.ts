@@ -61,16 +61,18 @@ export class TGLogger implements TGLoggerType
         /** Bind correct log levels methods */
         /* eslint-disable-next-line @typescript-eslint/no-this-alias */
         const _this: any = this;
+
         this._levels.forEach((level: string) =>
         {
             if (!['debug', 'log', 'warn', 'error'].includes(level))
             {
                 throw Error(`[topgun-logs] ERROR: [${level}] wrong level config, levels must be one of 'debug', 'log', 'warn', 'error'`);
             }
-            else
-            {
-                _this[level] = this.#log.bind(this, level, null);
-            }
+        });
+
+        defaultLoggerOptions.levels.forEach((level: TGLoggerLevel) =>
+        {
+            _this[level] = this.#log.bind(this, level, null);
         }, this);
     }
 

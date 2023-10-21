@@ -52,6 +52,7 @@ export class TGLink
         {
             this.soul = key;
 
+            // If this is user space
             if (key.startsWith('~') && pubFromSoul(key))
             {
                 this._client.pub = pubFromSoul(key);
@@ -60,6 +61,7 @@ export class TGLink
 
         (async () =>
         {
+            // Unsubscribe from requests when link is destroyed
             for await (const { streamName } of this._exchange.listener('destroy'))
             {
                 if (isFunction(this._endQueries[streamName]))
@@ -74,6 +76,9 @@ export class TGLink
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
+    /**
+     * True, if link requires user authorization
+     */
     authRequired(): boolean
     {
         if (this._client.user().is?.pub)
@@ -87,6 +92,9 @@ export class TGLink
         return this.userPubExpected();
     }
 
+    /**
+     * True, if the user’s public key has not yet been recorded in the path
+     */
     userPubExpected(): boolean
     {
         return this.getPath().some(path => path.includes(this._client.WAIT_FOR_USER_PUB));
@@ -115,9 +123,6 @@ export class TGLink
 
     /**
      * Traverse a location in the graph
-     *
-     * @param query Key to read data from or LEX query
-     * @returns New chain context corresponding to given key
      */
     get(query: TGOptionsGet): TGLexLink;
     get(key: string): TGLink;
@@ -142,9 +147,6 @@ export class TGLink
      * Move up to the parent context on the chain.
      *
      * Every time a new chain is created, a reference to the old context is kept to go back to.
-     *
-     * @param amount The number of times you want to go back up the chain. {-1} or {Infinity} will take you to the root.
-     * @returns a parent chain context
      */
     back(amount = 1): TGLink|TGClient
     {
@@ -157,6 +159,25 @@ export class TGLink
             return this._parent || this._client;
         }
         return this._parent.back(amount - 1);
+    }
+
+    /**
+     * Set null data instead of node at this path
+     */
+    async deleteNode(opt?: TGOptionsPut): Promise<void>
+    {
+        const cb = () =>
+        {
+        };
+
+        await this._client.graph.putPath(
+            [
+                this.getPath().join('/')
+            ],
+            null,
+            cb,
+            opt
+        );
     }
 
     /**
@@ -199,6 +220,9 @@ export class TGLink
         })
     }
 
+    /**
+     * Add a unique item to an unordered list
+     */
     set(data: TGValue, opt?: TGOptionsPut): Promise<TGMessage>
     {
         return new Promise<TGMessage>((resolve) =>
@@ -247,18 +271,23 @@ export class TGLink
         });
     }
 
+    /**
+     * Get the current data without subscribing to updates
+     */
     once<T extends TGValue>(cb?: TGOnCb<T>): TGStream<TGData<T>>
     {
-        const stream = this._exchange.subscribe<TGData<T>>(uuidv4(), { once: true });
+        const stream = this.#createQueryStream<T>({ once: true });
 
         if (isFunction(cb))
         {
+            // Get data for callback function
             (async () =>
             {
                 for await (const { value, key } of stream)
                 {
                     cb(value, key);
 
+                    // Destroy query for one element after the result is received
                     if (!this.#multiQuery())
                     {
                         stream.destroy();
@@ -270,12 +299,16 @@ export class TGLink
         return this.#multiQuery() ? this.#onMap(stream) : this.#on(stream);
     }
 
+    /**
+     * Subscribe to updates and changes on a node or property in realtime
+     */
     on<T extends TGValue>(cb?: TGOnCb<T>): TGStream<TGData<T>>
     {
-        const stream = this._exchange.subscribe<TGData<T>>();
+        const stream = this.#createQueryStream<T>();
 
         if (isFunction(cb))
         {
+            // Get data for callback function
             (async () =>
             {
                 for await (const { value, key } of stream)
@@ -288,6 +321,9 @@ export class TGLink
         return this.#multiQuery() ? this.#onMap(stream) : this.#on(stream);
     }
 
+    /**
+     * Destroy all queries
+     */
     off(): void
     {
         this._exchange.destroy();
@@ -295,6 +331,9 @@ export class TGLink
         this._endQueries   = {};
     }
 
+    /**
+     * Get current data once as a promise
+     */
     promise<T extends TGValue>(opts?: {timeout?: number}): Promise<T>
     {
         return new Promise<T>((resolve, reject) =>
@@ -304,7 +343,7 @@ export class TGLink
                 return reject(Error('For multiple use once() or on() method'));
             }
 
-            const stream = this._exchange.subscribe<TGData<T>>(uuidv4(), { once: true });
+            const stream = this.#createQueryStream<T>({ once: true });
 
             (async () =>
             {
@@ -325,6 +364,7 @@ export class TGLink
                 opts.timeout = 50;
             }
 
+            // End after timeout
             if (isNumber(opts?.timeout))
             {
                 setTimeout(() =>
@@ -397,15 +437,22 @@ export class TGLink
         }
     }
 
+    #createQueryStream<T>(attributes?: {[key: string]: any}): TGStream<TGData<T>>
+    {
+        return this._exchange.subscribe<TGData<T>>(uuidv4(), attributes);
+    }
+
     #multiQuery(): boolean
     {
         return this._lex instanceof TGLexLink;
     }
 
-    #onQueryResponse<T extends TGValue>(value: T, stream: TGStream<TGData<T>>): void
+    #onQueryResponse<T extends TGValue>(value: T, soul: string, stream: TGStream<TGData<T>>): void
     {
-        const key = getNodeSoul(value) || this.key;
+        const key = soul || getNodeSoul(value) || this.key;
 
+        // Handle once query
+        // Break when data for the current key has already been received
         if (stream.attributes['once'])
         {
             if (!isObject(this._receivedData[stream.name]))
@@ -428,7 +475,7 @@ export class TGLink
         {
             this._endQueries[stream.name] = this._client.graph.query(
                 this.getPath(),
-                (value: TGValue) => this.#onQueryResponse(value, stream),
+                (value: TGValue, soul: string) => this.#onQueryResponse(value, soul, stream),
                 stream.name,
                 !!stream.attributes['once']
             );
@@ -443,7 +490,7 @@ export class TGLink
         {
             this._endQueries[stream.name] = this._client.graph.queryMany(
                 this._lex.optionsGet,
-                (value: TGValue) => this.#onQueryResponse(value, stream),
+                (value: TGValue, soul: string) => this.#onQueryResponse(value, soul, stream),
                 stream.name,
                 !!stream.attributes['once']
             );

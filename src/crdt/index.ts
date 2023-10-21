@@ -150,7 +150,11 @@ export function mergeNodes(
     {
         return updates;
     }
-    if (!updates)
+    if (updates === null)
+    {
+        return null;
+    }
+    else if (!updates)
     {
         return existing;
     }

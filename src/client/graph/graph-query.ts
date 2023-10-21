@@ -1,5 +1,5 @@
 import { isFunction, isEmptyObject, isObject } from '@topgunbuild/typed';
-import { TGGet, TGGraphData, TGMessage, TGNode, TGOnCb, TGOptionsGet } from '../../types';
+import { TGGet, TGGraphData, TGMessage, TGNode, TGOnCb, TGOptionsGet, TGValue } from '../../types';
 import { TGGraph } from './graph';
 import { TGQueryOptions } from '../../storage';
 import { listFilterMatch, queryOptionsFromGetOptions } from '../../storage/utils';
@@ -43,20 +43,26 @@ export class TGGraphQuery extends TGExchange
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
+    /**
+     * Number of subscribers for this query
+     */
     listenerCount(): number
     {
         return this.subscriptions(true).length;
     }
 
+    /**
+     * Create a data stream for this query
+     */
     getStream(cb: TGOnCb<any>, msgId?: string, askOnce?: boolean): TGStream<any>
     {
-        const stream = this.subscribe();
+        const stream = this.subscribe<{value: TGValue, key: string}>();
 
         (async () =>
         {
-            for await (const packet of stream)
+            for await (const { value, key } of stream)
             {
-                cb(packet);
+                cb(value, key);
             }
         })();
 
@@ -64,15 +70,21 @@ export class TGGraphQuery extends TGExchange
         return stream;
     }
 
-    receive(value: TGNode|undefined): TGGraphQuery
+    /**
+     * Publish data to all subscriptions
+     */
+    receive(value: TGNode|undefined, soul: string): TGGraphQuery
     {
         this.subscriptions(true).forEach((streamName) =>
         {
-            this.publish(streamName, value);
+            this.publish(streamName, { value, key: soul });
         });
         return this;
     }
 
+    /**
+     * Yes, if the request is subscribed to this soul
+     */
     match(soul: string): boolean
     {
         if (this._queryOptions)
@@ -83,6 +95,9 @@ export class TGGraphQuery extends TGExchange
         return soul === this.options['#'];
     }
 
+    /**
+     * Destroy request
+     */
     off(): TGGraphQuery
     {
         if (isFunction(this._endCurQuery))
@@ -98,6 +113,9 @@ export class TGGraphQuery extends TGExchange
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
+    /**
+     * Request data from peers
+     */
     #ask(msgId?: string, once?: boolean): TGGraphQuery
     {
         if (this._endCurQuery)
@@ -116,6 +134,9 @@ export class TGGraphQuery extends TGExchange
         return this;
     }
 
+    /**
+     * Processing a direct peer response
+     */
     #onDirectQueryReply(msg: TGMessage): void
     {
         // Return an empty response when requesting a node or property

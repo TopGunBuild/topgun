@@ -58,16 +58,16 @@ export class TGGraph extends AsyncStreamEmitter<any>
     )
     {
         super();
-        this.id                  = uuidv4();
-        this.receiveGraphData    = this.receiveGraphData.bind(this);
-        this.activeConnectors    = 0;
-        this._opt                = {};
-        this._graph              = {};
-        this._queries            = {};
-        this.connectors          = [];
-        this._readMiddleware     = [];
-        this._writeMiddleware    = [];
-        this.rootEventEmitter    = rootEventEmitter;
+        this.id               = uuidv4();
+        this.receiveGraphData = this.receiveGraphData.bind(this);
+        this.activeConnectors = 0;
+        this._opt             = {};
+        this._graph           = {};
+        this._queries         = {};
+        this.connectors       = [];
+        this._readMiddleware  = [];
+        this._writeMiddleware = [];
+        this.rootEventEmitter = rootEventEmitter;
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -224,7 +224,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
         });
 
         const queryString = stringifyOptionsGet(opts);
-        const stream      = this.#listen(queryString, cb, msgId, askOnce);
+        const stream      = this.#createQueryStream(queryString, cb, msgId, askOnce);
 
         return () =>
         {
@@ -257,7 +257,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
 
             for (const soul of added)
             {
-                const stream = this.#listen(this.#queryStringForSoul(soul), updateQuery, msgId, askOnce);
+                const stream = this.#createQueryStream(this.#queryStringForSoul(soul), updateQuery, msgId, askOnce);
                 streamMap.set(soul, stream);
             }
 
@@ -295,11 +295,6 @@ export class TGGraph extends AsyncStreamEmitter<any>
 
     /**
      * Write graph data to a potentially multi-level deep path in the graph
-     *
-     * @param fullPath The path to read
-     * @param data The value to write
-     * @param cb Callback function to be invoked for write acks
-     * @param putOpt
      */
     putPath(
         fullPath: string[],
@@ -329,14 +324,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
     }
 
     /**
-     * Write node data
-     *
-     * @param data one or more nodes keyed by soul
-     * @param cb optional callback for response messages
-     * @param msgId optional unique message identifier
-     * @param soul string
-     * @param putOpt put options
-     * @returns a function to clean up listeners when done
+     * Write node data. Returns a function to clean up listeners when done
      */
     put(
         data: TGGraphData,
@@ -412,6 +400,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
     {
         let diff = data;
 
+        // Pass received data through read middleware
         for (const fn of this._readMiddleware)
         {
             if (!diff)
@@ -443,7 +432,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
             {
                 if (query.match(soul))
                 {
-                    query.receive(node);
+                    query.receive(node, soul);
                 }
             });
         }
@@ -455,18 +444,27 @@ export class TGGraph extends AsyncStreamEmitter<any>
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    #query(queryString: string): TGGraphQuery
+    /**
+     * Get handler for query
+     */
+    #getQuery(queryString: string): TGGraphQuery
     {
         return (this._queries[queryString] =
             this._queries[queryString] ||
             new TGGraphQuery(this, queryString, this.receiveGraphData));
     }
 
-    #listen<T extends TGValue>(queryString: string, cb: TGOnCb<T>, msgId?: string, askOnce?: boolean): TGStream<any>
+    /**
+     * Create a new data stream for query
+     */
+    #createQueryStream<T extends TGValue>(queryString: string, cb: TGOnCb<T>, msgId?: string, askOnce?: boolean): TGStream<any>
     {
-        return this.#query(queryString).getStream(cb, msgId, askOnce);
+        return this.#getQuery(queryString).getStream(cb, msgId, askOnce);
     }
 
+    /**
+     * Unsubscribe from receiving data for this request
+     */
     #unlisten(queryString: string, stream: TGStream<any>): TGGraph
     {
         if (stream instanceof TGStream)
@@ -476,12 +474,16 @@ export class TGGraph extends AsyncStreamEmitter<any>
         const query = this._queries[queryString];
         if (query instanceof TGGraphQuery && query.listenerCount() <= 0)
         {
+            // Destroy a query handler if it has no subscribers
             query.off();
             delete this._queries[queryString];
         }
         return this;
     }
 
+    /**
+     * Loop through each query handler
+     */
     async #eachQuery(cb: (query: TGGraphQuery) => void): Promise<TGGraph>
     {
         for (const queryString in this._queries)
@@ -492,11 +494,17 @@ export class TGGraph extends AsyncStreamEmitter<any>
         return this;
     }
 
+    /**
+     * Convert soul based get parameters to string
+     */
     #queryStringForSoul(soul: string): string
     {
         return stringifyOptionsGet({ ['#']: soul });
     }
 
+    /**
+     * Update active connector counter
+     */
     #onConnectorStatus(connected?: boolean): void
     {
         if (connected)
