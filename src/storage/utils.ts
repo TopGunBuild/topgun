@@ -1,4 +1,4 @@
-import { isNumber, isString, isDefined } from '@topgunbuild/typed';
+import { isNumber, isString, isDefined, isEmptyObject, isUndefined } from '@topgunbuild/typed';
 import textEncoder from '@topgunbuild/textencoder';
 import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from './constants';
 import { LEX, TGGraphAdapterOptions, TGGraphData, TGNode, TGOptionsGet } from '../types';
@@ -37,9 +37,21 @@ export function queryOptionsFromGetOptions(opts: TGOptionsGet): TGQueryOptions|n
     const start: string|undefined    = lexQuery && lexQuery['>'];
     const end: string|undefined      = lexQuery && lexQuery['<'];
 
-    const getPath                 = (path: string) => [soul, path]
-        .filter(value => value && value.length > 0)
-        .join('/');
+    if (!!(isEmptyObject(lexQuery) || !lexQuery) && isUndefined(reverse) && !limit)
+    {
+        return null;
+    }
+
+    const getPath                 = (path: string) =>
+    {
+        if (!path)
+        {
+            return `${soul}/`;
+        }
+        return [soul, path]
+            .filter(value => value && value.length > 0)
+            .join('/');
+    };
     const options: TGQueryOptions = {
         prefix: getPath(prefix)
     };

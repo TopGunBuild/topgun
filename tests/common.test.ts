@@ -4,6 +4,7 @@ import { TGServer } from '../src/server';
 import { authenticate } from '../src/sea/authenticate';
 import { genString, wait } from './test-util';
 import { flattenGraphData } from '../src/client/graph/graph-utils';
+import { queryOptionsFromGetOptions } from '../src/storage';
 
 const PORT_NUMBER = 3457;
 let server: TGServer, client: TGClient;
@@ -141,5 +142,18 @@ describe('Common', () =>
 
         expect(receivedPackets[0].key === soul).toBeTruthy();
         expect(receivedPackets[1].key === soul).toBeTruthy();
+    });
+
+    it('Get options to query options', () =>
+    {
+        const notList = queryOptionsFromGetOptions({
+            '#': 'soul',
+            // '%': 200,
+            // '.': {
+            //     '*': 'my-prefix'
+            // }
+        });
+
+        expect(soulOnly).toBeNull();
     });
 });
