@@ -164,7 +164,7 @@ export class TGLink
     /**
      * Set null data instead of node at this path
      */
-    async deleteNode(opt?: TGOptionsPut): Promise<void>
+    async remove(opt?: TGOptionsPut): Promise<void>
     {
         const cb = () =>
         {

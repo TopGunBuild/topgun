@@ -129,7 +129,7 @@ describe('Common', () =>
         await client.user()
             .get('deep')
             .get('deeper')
-            .deleteNode();
+            .remove();
 
         await wait(50);
 

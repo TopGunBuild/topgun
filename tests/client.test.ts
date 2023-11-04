@@ -337,7 +337,7 @@ describe('Client', () =>
             }
         })();
 
-        await link.get('2019-06-20T00:00').deleteNode();
+        await link.get('2019-06-20T00:00').remove();
 
         await wait(500);
 
