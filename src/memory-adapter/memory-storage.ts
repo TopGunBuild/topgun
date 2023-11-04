@@ -1,6 +1,6 @@
 import { isNumber } from '@topgunbuild/typed';
 import { TGGraphData, TGNode } from '../types';
-import { TGQueryOptions, TGStorage } from '../storage';
+import { TGQueryListOptions, TGStorage } from '../storage';
 import { lexicographicCompare, listFilterMatch } from '../storage/utils';
 
 export class MemoryStorage implements TGStorage
@@ -11,7 +11,7 @@ export class MemoryStorage implements TGStorage
     {
     }
 
-    list(options: TGQueryOptions): Promise<TGGraphData>
+    list(options: TGQueryListOptions): Promise<TGGraphData>
     {
         const direction = options?.reverse ? -1 : 1;
         let keys        = Array.from(this.map.keys())

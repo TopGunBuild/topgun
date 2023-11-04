@@ -26,16 +26,11 @@ export function assertOptionsGet(value: unknown, msg = 'Expected query object')
 {
     const struct = object(
         {
-            '.': optional(
-                object({
-                    '*': optional(string('Expected string in \'*\'')),
-                    '>': optional(string('Expected string in \'>\'')),
-                    '<': optional(string('Expected string in \'<\'')),
-                }, 'Expected LEX query')
-            ),
-            '#': optional(string('Expected number in \'#\'')),
-            '%': optional(number('Expected number in \'%\'')),
-            '-': optional(boolean('Expected boolean in \'-\'')),
+            prefix : optional(string('Expected string in \'prefix\'')),
+            start  : optional(string('Expected string in \'start\'')),
+            end    : optional(string('Expected string in \'end\'')),
+            reverse: optional(boolean('Expected boolean in \'reverse\'')),
+            limit  : optional(number('Expected number in \'limit\'')),
         },
         msg,
     );

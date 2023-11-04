@@ -1,17 +1,15 @@
-import { isNumber, isString, isDefined, isEmptyObject, isUndefined } from '@topgunbuild/typed';
+import { isNumber, isString, isEmptyObject, isBoolean } from '@topgunbuild/typed';
 import textEncoder from '@topgunbuild/textencoder';
 import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from './constants';
-import { LEX, TGGraphAdapterOptions, TGGraphData, TGNode, TGOptionsGet } from '../types';
-import { TGQueryOptions } from './types';
+import { TGGraphAdapterOptions, TGGraphData, TGNode, TGOptionsGet, TGQueryListOptions } from '../types';
 import { getNodeSoul } from '../utils/node';
-import { assertNotEmptyString } from '../utils/assert';
 
 export function arrayNodesToObject(nodes: TGNode[]): TGGraphData
 {
     return nodes.reduce((accum: TGGraphData, node: TGNode) => ({ ...accum, [node._['#']]: node }), {});
 }
 
-export function filterNodesByQueryOptions(nodes: TGNode[], options: TGQueryOptions): TGNode[]
+export function filterNodesByQueryOptions(nodes: TGNode[], options: TGQueryListOptions): TGNode[]
 {
     const direction   = options?.reverse ? -1 : 1;
     let filteredNodes = nodes
@@ -26,54 +24,45 @@ export function filterNodesByQueryOptions(nodes: TGNode[], options: TGQueryOptio
     return filteredNodes;
 }
 
-export function queryOptionsFromGetOptions(opts: TGOptionsGet): TGQueryOptions|null
+export function getStorageListOptions(optionsGet: TGOptionsGet): TGQueryListOptions|null
 {
-    opts                             = opts || {};
-    const soul: string               = assertNotEmptyString(opts['#'], 'The soul must be defined');
-    const lexQuery: LEX|undefined    = opts && opts['.'];
-    const limit: number|undefined    = opts && opts['%'];
-    const reverse: boolean|undefined = opts && opts['-'];
-    const prefix: string|undefined   = lexQuery && lexQuery['*'];
-    const start: string|undefined    = lexQuery && lexQuery['>'];
-    const end: string|undefined      = lexQuery && lexQuery['<'];
-
-    if (!!(isEmptyObject(lexQuery) || !lexQuery) && isUndefined(reverse) && !limit)
+    if (isEmptyObject(optionsGet))
     {
         return null;
     }
 
-    const getPath                 = (path: string) =>
-    {
-        if (!path)
-        {
-            return `${soul}/`;
-        }
-        return [soul, path]
-            .filter(value => value && value.length > 0)
-            .join('/');
-    };
-    const options: TGQueryOptions = {
-        prefix: getPath(prefix)
-    };
+    const listOptions: TGQueryListOptions = {};
+    const getPath                         = (path: string) => isString(optionsGet.equals)
+        ? [optionsGet.equals, path].join('/')
+        : path;
 
-    if (start)
+    if (isString(optionsGet.start))
     {
-        options.start = getPath(start);
+        listOptions.start = getPath(optionsGet.start);
     }
-    if (end)
+    if (isString(optionsGet.end))
     {
-        options.end = getPath(end);
+        listOptions.end = getPath(optionsGet.end);
     }
-    if (limit)
+    if (isBoolean(optionsGet.reverse))
     {
-        options.limit = limit;
+        listOptions.reverse = optionsGet.reverse;
     }
-    if (isDefined(reverse))
+    if (isNumber(optionsGet.limit))
     {
-        options.reverse = reverse;
+        listOptions.limit = optionsGet.limit;
     }
 
-    return options;
+    if (isString(optionsGet.prefix))
+    {
+        listOptions.prefix = getPath(optionsGet.prefix);
+    }
+    else if (isString(optionsGet.equals) && !isEmptyObject(listOptions))
+    {
+        listOptions.prefix = `${optionsGet.equals}/`;
+    }
+
+    return isEmptyObject(listOptions) ? null : listOptions;
 }
 
 export function assertPutEntry(soul: string, node: TGNode, options: TGGraphAdapterOptions): void
@@ -171,8 +160,18 @@ export function lexicographicCompare(x: string, y: string): number
     return arrayCompare(xEncoded, yEncoded);
 }
 
+export function filterMatch(template: string, options: TGOptionsGet)
+{
+    if (template === options?.equals)
+    {
+        return true;
+    }
+
+    return listFilterMatch(options, template);
+}
+
 export function listFilterMatch(
-    options: TGQueryOptions|undefined,
+    options: TGQueryListOptions|undefined,
     name: string
 ): boolean
 {

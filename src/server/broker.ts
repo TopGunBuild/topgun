@@ -1,5 +1,5 @@
 import { SimpleBroker, PublishData } from '@topgunbuild/socket/simple-broker';
-import { listFilterMatch, queryOptionsFromGetOptions } from '../storage';
+import { listFilterMatch, getStorageListOptions } from '../storage';
 
 export class TGBroker extends SimpleBroker
 {
@@ -35,7 +35,10 @@ export class TGBroker extends SimpleBroker
         const soul = originalChannelName.replace(/^topgun\/nodes\//, '');
 
         // Get 'topgun/nodes/{soul}' from original channel name
-        const channelName = originalChannelName.split('/').slice(0, 3).join('/');
+        const channelName = originalChannelName
+            .split('/')
+            .slice(0, 3)
+            .join('/');
 
         const packet: PublishData = {
             channel: channelName,
@@ -47,7 +50,7 @@ export class TGBroker extends SimpleBroker
         Object.keys(subscriberSockets)
             .filter((socketId) =>
             {
-                const queryOptions = queryOptionsFromGetOptions(subscriberOptions[socketId]?.data);
+                const queryOptions = getStorageListOptions(subscriberOptions[socketId]?.data);
                 return listFilterMatch(queryOptions, soul);
             })
             .forEach((socketId) =>

@@ -1,8 +1,8 @@
 import { isNumber, isString } from '@topgunbuild/typed';
-import { TGQueryOptions, TGStorage } from './types';
-import { TGGraphAdapter, TGGraphAdapterOptions, TGGraphData, TGOptionsGet } from '../types';
+import { TGStorage } from './types';
+import { TGGraphAdapter, TGGraphAdapterOptions, TGGraphData, TGOptionsGet, TGQueryListOptions } from '../types';
 import { diffCRDT, mergeGraph } from '../crdt';
-import { assertPutEntry, queryOptionsFromGetOptions } from './utils';
+import { assertPutEntry, getStorageListOptions } from './utils';
 
 const DEFAULT_CRDT_OPTS = {
     diffFn : diffCRDT,
@@ -22,14 +22,14 @@ async function get(
     opts: TGOptionsGet
 ): Promise<TGGraphData>
 {
-    const listOptions = queryOptionsFromGetOptions(opts);
+    const listOptions = getStorageListOptions(opts);
 
     if (listOptions)
     {
         return await getList(db, listOptions);
     }
 
-    const soul = opts['#'];
+    const soul = opts?.equals;
 
     if (isString(soul))
     {
@@ -41,7 +41,7 @@ async function get(
     return {};
 }
 
-async function getList(db: TGStorage, options: TGQueryOptions): Promise<TGGraphData>
+async function getList(db: TGStorage, options: TGQueryListOptions): Promise<TGGraphData>
 {
     if (isNumber(options.limit) && options.limit <= 0)
     {

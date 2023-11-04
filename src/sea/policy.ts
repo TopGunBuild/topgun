@@ -1,8 +1,8 @@
 import { isObject, isString } from '@topgunbuild/typed';
-import { match } from '../utils/match';
+// import { match } from '../utils/match';
 import { IPolicy, IPolicyLex } from '../types';
 
-export interface PolicyLexOptions
+export interface PolicyLexUIOptions
 {
     greaterThanOrEqual?: string;
     lessThanOrEqual?: string;
@@ -10,15 +10,15 @@ export interface PolicyLexOptions
     startsWith?: string;
 }
 
-export interface PolicyOptions extends PolicyLexOptions
+export interface PolicyOptions extends PolicyLexUIOptions
 {
     pubInPatch?: boolean;
-    key?: PolicyLexOptions;
-    path?: PolicyLexOptions;
+    key?: PolicyLexUIOptions;
+    path?: PolicyLexUIOptions;
 }
 
 function mapPolicyLex(
-    options: PolicyLexOptions|undefined,
+    options: PolicyLexUIOptions|undefined,
 ): IPolicyLex|null
 {
     if (!isObject(options))

@@ -1,13 +1,10 @@
-import { cloneValue, isNumber, isObject, isString } from '@topgunbuild/typed';
-import { LEX, TGOptionsGet } from '../../types';
+import { isObject, isString } from '@topgunbuild/typed';
+import { TGOptionsGet } from '../../types';
 import { assertBoolean, assertNotEmptyString, assertNumber, replacerSortKeys } from '../../utils';
-
-type KeyOfLex = keyof LEX;
-type ValueOfLex = LEX[KeyOfLex];
 
 export class TGLex
 {
-    readonly optionsGet: TGOptionsGet;
+    readonly options: TGOptionsGet;
     readonly maxLimit: number;
 
     /**
@@ -15,25 +12,18 @@ export class TGLex
      */
     constructor(optionsGetOrSoul: TGOptionsGet|string, maxLimit = 200)
     {
-        this.maxLimit  =  maxLimit;
-        this.optionsGet = {
-            '.': {},
-            '%': this.maxLimit
-        };
+        this.maxLimit = maxLimit;
+        this.options  = {};
         if (isObject(optionsGetOrSoul))
         {
-            if (isObject(optionsGetOrSoul['.']))
-            {
-                this.optionsGet['.'] = cloneValue(optionsGetOrSoul['.']);
-            }
-            if (isNumber(optionsGetOrSoul['%']))
-            {
-                this.optionsGet['%'] = optionsGetOrSoul['%'];
-            }
+            this.options = {
+                limit: this.maxLimit,
+                ...optionsGetOrSoul,
+            };
         }
         else if (isString(optionsGetOrSoul))
         {
-            this.optionsGet['#'] = optionsGetOrSoul;
+            this.options.equals = optionsGetOrSoul;
         }
     }
 
@@ -43,19 +33,19 @@ export class TGLex
 
     start(value: string): TGLex
     {
-        this.#setLex('>', assertNotEmptyString(value));
+        this.#setLex('start', assertNotEmptyString(value));
         return this;
     }
 
     end(value: string): TGLex
     {
-        this.#setLex('<', assertNotEmptyString(value));
+        this.#setLex('end', assertNotEmptyString(value));
         return this;
     }
 
     prefix(value: string): TGLex
     {
-        this.#setLex('*', assertNotEmptyString(value));
+        this.#setLex('prefix', assertNotEmptyString(value));
         return this;
     }
 
@@ -67,37 +57,32 @@ export class TGLex
                 `Limit exceeds the maximum allowed. The maximum length is ${this.maxLimit}`
             );
         }
-        this.optionsGet['%'] = assertNumber(value);
+        this.#setLex('limit', assertNumber(value));
         return this;
     }
 
     reverse(value = true): TGLex
     {
-        this.optionsGet['-'] = assertBoolean(value);
+        this.#setLex('reverse', assertBoolean(value));
         return this;
     }
 
     toString(): string
     {
-        return JSON.stringify(this.optionsGet, replacerSortKeys);
+        return JSON.stringify(this.options, replacerSortKeys);
     }
 
     getQuery(): TGOptionsGet
     {
-        return this.optionsGet;
+        return this.options;
     }
 
     // -----------------------------------------------------------------------------------------------------
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    #setLex(key: KeyOfLex, value: ValueOfLex): void
+    #setLex(key: keyof TGOptionsGet, value: TGOptionsGet[keyof TGOptionsGet]): void
     {
-        this.optionsGet['.'][key] = value;
+        this.options['.'][key] = value;
     }
-}
-
-export function createLex(optionsGetOrSoul: TGOptionsGet|string, maxLimit = 200): TGLex
-{
-    return new TGLex(optionsGetOrSoul, maxLimit);
 }

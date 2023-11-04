@@ -1,5 +1,5 @@
 import global from '../utils/window-or-global';
-import { TGQueryOptions, TGStorage } from '../storage';
+import { TGQueryListOptions, TGStorage } from '../storage';
 import { arrayNodesToObject, filterNodesByQueryOptions } from '../storage/utils';
 import { TGGraphData, TGNode } from '../types';
 
@@ -32,7 +32,7 @@ export class IndexedDBStorage implements TGStorage
         }).then(() => req.result);
     }
 
-    async list(options: TGQueryOptions): Promise<TGGraphData>
+    async list(options: TGQueryListOptions): Promise<TGGraphData>
     {
         const allNodes = await this.getAll();
         const nodes    = filterNodesByQueryOptions(allNodes, options);

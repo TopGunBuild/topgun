@@ -45,17 +45,47 @@ export interface TGPartialGraphData
     [key: string]: TGPartialNode|null;
 }
 
-export interface TGOptionsGet
+export type TGLex = {
+    /** Returned keys must equals with this string if defined */
+    equals?: string;
+    /** Returned keys must start with this string if defined */
+    prefix?: string;
+    /** Returned keys must be lexicographically >= this string if defined */
+    start?: string;
+    /** Returned keys must be lexicographically < this string if defined */
+    end?: string;
+};
+
+export interface TGOptionsGet extends TGLex
 {
-    /** soul */
-    '#'?: string;
-    /** LEX query */
-    '.'?: LEX;
-    /** Maximum number of key-value pairs to return */
-    '%'?: number;
-    /** true for reverse */
-    '-'?: boolean;
+    /** Return keys in reverse order, MUST be applied before the limit/cursor */
+    reverse?: boolean;
+    /** Maximum number of keys to return if defined */
+    limit?: number;
 }
+
+export interface IPolicyOptions
+{
+    '>': string;
+    '<': string;
+    '=': string;
+    '*': string;
+    '+': string;
+}
+
+export interface IPolicyLex extends TGLex {
+    /** Path */
+    '#'?: IPolicyLex;
+    /** Key */
+    '.'?: IPolicyLex;
+    /**
+     * Either Path string or Key string must
+     * contain Certificate's Pub string
+     */
+    '+'?: '*';
+}
+
+export type IPolicy = string | IPolicyLex | (string | IPolicyLex)[];
 
 export type TGOptionsPut = Partial<{
     opt: {
@@ -208,29 +238,6 @@ type PromisifyMethods<T> = {
 export type TGSupportedStorage = PromisifyMethods<Pick<Storage, 'getItem'|'setItem'|'removeItem'>>;
 
 export type TGPeerOptions = string|TGSocketClientOptions;
-
-export type LEX = {
-    /** prefix match */
-    '*'?: string;
-    /** greater than or equals */
-    '>'?: string;
-    /** less than match */
-    '<'?: string;
-};
-
-export interface IPolicyLex extends LEX {
-    /** Path */
-    '#'?: IPolicyLex;
-    /** Key */
-    '.'?: IPolicyLex;
-    /**
-     * Either Path string or Key string must
-     * contain Certificate's Pub string
-     */
-    '+'?: '*';
-}
-
-export type IPolicy = string | IPolicyLex | (string | IPolicyLex)[];
 
 export interface TGGraphAdapter
 {

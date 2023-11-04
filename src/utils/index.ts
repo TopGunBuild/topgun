@@ -2,7 +2,6 @@ export * from './assert';
 export * from './is-browser';
 export * from './is-support';
 export * from './local-storage';
-export * from './match';
 export * from './node';
 export * from './random';
 export * from './replacer-sort-keys';

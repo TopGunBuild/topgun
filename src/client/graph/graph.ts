@@ -499,7 +499,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
      */
     #queryStringForSoul(soul: string): string
     {
-        return stringifyOptionsGet({ ['#']: soul });
+        return stringifyOptionsGet({ ['exact']: soul });
     }
 
     /**

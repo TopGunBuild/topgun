@@ -434,11 +434,11 @@ export class TGLink
 
         if (
             this._lex instanceof TGLexLink &&
-            isObject(this._lex.optionsGet) &&
-            isString(this._lex.optionsGet['#'])
+            isObject(this._lex.options) &&
+            isString(this._lex.options.equals)
         )
         {
-            this._lex.optionsGet['#'] = this._lex.optionsGet['#'].replace(this._client.WAIT_FOR_USER_PUB, pub);
+            this._lex.options.equals = this._lex.options.equals.replace(this._client.WAIT_FOR_USER_PUB, pub);
         }
     }
 
@@ -494,7 +494,7 @@ export class TGLink
         this.#maybeWaitAuth(() =>
         {
             this._endQueries[stream.name] = this._client.graph.queryMany(
-                this._lex.optionsGet,
+                this._lex.options,
                 (value: TGValue, soul: string) => this.#onQueryResponse(value, soul, stream),
                 stream.name,
                 !!stream.attributes['once']

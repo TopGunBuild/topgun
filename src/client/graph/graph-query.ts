@@ -1,8 +1,7 @@
 import { isFunction, isEmptyObject, isObject } from '@topgunbuild/typed';
 import { TGGet, TGGraphData, TGMessage, TGNode, TGOnCb, TGOptionsGet, TGValue } from '../../types';
 import { TGGraph } from './graph';
-import { TGQueryOptions } from '../../storage';
-import { listFilterMatch, queryOptionsFromGetOptions } from '../../storage/utils';
+import { filterMatch } from '../../storage/utils';
 import { uuidv4 } from '../../utils/uuidv4';
 import { TGExchange } from '../../stream/exchange';
 import { TGStream } from '../../stream/stream';
@@ -14,7 +13,6 @@ export class TGGraphQuery extends TGExchange
 
     private _endCurQuery?: () => void;
     protected readonly _isMultiQuery: boolean;
-    private readonly _queryOptions: TGQueryOptions|null;
     private readonly _graph: TGGraph;
     private readonly _updateGraph: (
         data: TGGraphData,
@@ -35,7 +33,6 @@ export class TGGraphQuery extends TGExchange
         this.queryString   = queryString;
         this._graph        = graph;
         this._updateGraph  = updateGraph;
-        this._queryOptions = queryOptionsFromGetOptions(this.options);
         this._isMultiQuery = isObject(this.options['.']);
     }
 
@@ -87,12 +84,7 @@ export class TGGraphQuery extends TGExchange
      */
     match(soul: string): boolean
     {
-        if (this._queryOptions)
-        {
-            return listFilterMatch(this._queryOptions, soul)
-        }
-
-        return soul === this.options['#'];
+        return filterMatch(soul, this.options);
     }
 
     /**
