@@ -1,5 +1,14 @@
 import { isEmptyObject } from '@topgunbuild/typed';
-import { diffCRDT, TGClient, TGUserReference, TGLink, TGUserCredentials, TGUserGraph, TGMessage } from '../src/client';
+import {
+    diffCRDT,
+    TGClient,
+    TGUserReference,
+    TGLink,
+    TGUserCredentials,
+    TGUserGraph,
+    TGMessage,
+    TGCollectionChangeEvent
+} from '../src/client';
 import { genString, wait } from './test-util';
 import { TGLexLink } from '../src/client/link/lex-link';
 import { getPathData } from '../src/client/graph/graph-utils';
@@ -291,6 +300,14 @@ describe('Client', () =>
             }
         })();
 
+        (async () =>
+        {
+            for await (const { newValue } of stream.listener<TGCollectionChangeEvent>('collectionChange'))
+            {
+                console.log(newValue);
+            }
+        })();
+
         await wait(500);
 
         stream.destroy();
@@ -298,6 +315,37 @@ describe('Client', () =>
         expect(isEmptyObject(client.graph['_queries'])).toBeTruthy();
         expect(receivedPackets2.length).toBe(4);
         expect(receivedPackets.length).toBe(4);
+    });
+
+    it('collections', async () =>
+    {
+        const link            = client.get('chat');
+        const receivedPackets = [];
+
+        await link.get('2019-06-20T00:00').put({ say: 'one' });
+        await link.get('2019-06-20T11:59').put({ say: 'two' });
+        await link.get('2019-06-21T00:00').put({ say: 'three' });
+        await link.get('2019-06-22T00:00').put({ say: 'four' });
+
+        const stream = link.map().on<{say: string}>();
+
+        (async () =>
+        {
+            for await (const { newValue, oldValue } of stream.listener<TGCollectionChangeEvent>('collectionChange'))
+            {
+                receivedPackets.push({ newValue, oldValue })
+            }
+        })();
+
+        await link.get('2019-06-20T00:00').deleteNode();
+
+        await wait(500);
+
+        stream.destroy();
+        expect(receivedPackets.length).toBe(5);
+        const lastPacket = receivedPackets.pop();
+        expect(lastPacket.newValue.length).toBe(3);
+        expect(lastPacket.oldValue.length).toBe(4);
     });
 
     it('lex query', async () =>

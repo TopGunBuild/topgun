@@ -175,6 +175,12 @@ export interface TGData<T>
     key: string;
 }
 
+export interface TGCollectionChangeEvent
+{
+    oldValue: TGNode[];
+    newValue: TGNode[];
+}
+
 export interface TGPathData
 {
     souls: string[];

@@ -4,9 +4,12 @@ import {
     StreamDemux,
     ConsumableStreamConsumer
 } from '@topgunbuild/async-stream-emitter';
+import { isNull } from '@topgunbuild/typed';
 import { uuidv4 } from '../utils/uuidv4';
 import { TGStreamState } from './types';
 import { TGExchange } from './exchange';
+import { TGCollectionChangeEvent, TGData, TGNode } from '../types';
+import { getNodeSoul, isNode } from '../utils';
 
 export class TGStream<T> extends ConsumableStream<T>
 {
@@ -24,8 +27,12 @@ export class TGStream<T> extends ConsumableStream<T>
     readonly exchange: TGExchange;
     readonly attributes: {[key: string]: any};
 
-    private _eventDemux: StreamDemux<T>;
+    private _eventDemux: StreamDemux<any>;
     private _dataStream: DemuxedConsumableStream<T>;
+
+    nodes: TGNode[];
+    lastNode: TGNode;
+    existingNodesMap: Record<string, TGNode>;
 
     /**
      * Constructor
@@ -33,21 +40,71 @@ export class TGStream<T> extends ConsumableStream<T>
     constructor(
         name: string = uuidv4(),
         exchange: TGExchange,
-        eventDemux: StreamDemux<T>,
+        eventDemux: StreamDemux<any>,
         dataStream: DemuxedConsumableStream<T>,
         attributes: {[key: string]: any}
     )
     {
         super();
-        this.name         = name;
-        this.PENDING      = TGStream.PENDING;
-        this.SUBSCRIBED   = TGStream.SUBSCRIBED;
-        this.UNSUBSCRIBED = TGStream.UNSUBSCRIBED;
-        this.DESTROYED    = TGStream.DESTROYED;
-        this.exchange     = exchange;
-        this._eventDemux  = eventDemux;
-        this._dataStream  = dataStream;
-        this.attributes   = attributes;
+        this.name             = name;
+        this.PENDING          = TGStream.PENDING;
+        this.SUBSCRIBED       = TGStream.SUBSCRIBED;
+        this.UNSUBSCRIBED     = TGStream.UNSUBSCRIBED;
+        this.DESTROYED        = TGStream.DESTROYED;
+        this.exchange         = exchange;
+        this._eventDemux      = eventDemux;
+        this._dataStream      = dataStream;
+        this.attributes       = attributes;
+        this.existingNodesMap = {};
+        this.nodes            = [];
+        this.lastNode         = null;
+
+        if (this.attributes['topGunCollection'])
+        {
+            (async () =>
+            {
+                for await (const { key, value } of this._dataStream as DemuxedConsumableStream<TGData<TGNode>>)
+                {
+                    const oldValue = [...this.nodes];
+                    // const newValue = [...this.nodes];
+
+                    if (isNode(value))
+                    {
+                        if (!this.existingNodesMap[key])
+                        {
+                            this.nodes.push(value);
+                        }
+                        else
+                        {
+                            const index = this.#getNodeIndex(key);
+                            if (index > -1)
+                            {
+                                this.nodes[index] = value;
+                            }
+                        }
+
+                        this.existingNodesMap[key] = value;
+                    }
+                    else if (!value && this.existingNodesMap[key])
+                    {
+                        this.existingNodesMap[key] = null;
+
+                        const index = this.#getNodeIndex(key);
+                        if (index > -1)
+                        {
+                            this.nodes.splice(index, 1);
+                        }
+                    }
+
+                    const event: TGCollectionChangeEvent = {
+                        oldValue,
+                        newValue: [...this.nodes]
+                    };
+
+                    this._eventDemux.write(`${this.name}/collectionChange`, event);
+                }
+            })();
+        }
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -93,7 +150,7 @@ export class TGStream<T> extends ConsumableStream<T>
         this.exchange.destroy(this.name);
     }
 
-    listener(eventName: string): DemuxedConsumableStream<T>
+    listener<E>(eventName: string): DemuxedConsumableStream<E>
     {
         return this._eventDemux.stream(`${this.name}/${eventName}`);
     }
@@ -106,5 +163,14 @@ export class TGStream<T> extends ConsumableStream<T>
     closeAllListeners(): void
     {
         this._eventDemux.closeAll();
+    }
+
+    // -----------------------------------------------------------------------------------------------------
+    // @ Private methods
+    // -----------------------------------------------------------------------------------------------------
+
+    #getNodeIndex(soul: string)
+    {
+        return this.nodes.findIndex(node => getNodeSoul(node) === soul);
     }
 }

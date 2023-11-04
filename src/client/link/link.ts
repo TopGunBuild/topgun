@@ -276,7 +276,10 @@ export class TGLink
      */
     once<T extends TGValue>(cb?: TGOnCb<T>): TGStream<TGData<T>>
     {
-        const stream = this.#createQueryStream<T>({ once: true });
+        const stream = this.#createQueryStream<T>({
+            once            : true,
+            topGunCollection: this.#multiQuery()
+        });
 
         if (isFunction(cb))
         {
@@ -304,7 +307,9 @@ export class TGLink
      */
     on<T extends TGValue>(cb?: TGOnCb<T>): TGStream<TGData<T>>
     {
-        const stream = this.#createQueryStream<T>();
+        const stream = this.#createQueryStream<T>({
+            topGunCollection: this.#multiQuery()
+        });
 
         if (isFunction(cb))
         {

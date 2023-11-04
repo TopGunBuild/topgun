@@ -68,7 +68,6 @@ export class TGExchange extends AsyncStreamEmitter<any>
             }
 
             this._streamDataDemux.close(streamName);
-            this._streamDataDemux.close(streamName);
         }
         else
         {
