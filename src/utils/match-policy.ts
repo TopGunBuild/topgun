@@ -1,6 +1,7 @@
 import { isString, isObject, isDefined } from '@topgunbuild/typed';
+import { IPolicyLex } from '../types';
 
-export function match(template: string, options: LEX|string): boolean
+export function matchPolicy(template: string, options: IPolicyLex|string): boolean
 {
     if (!isString(template))
     {

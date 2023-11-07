@@ -1,68 +1,117 @@
-import { isNumber, isString, isEmptyObject, isBoolean } from '@topgunbuild/typed';
+import {
+    isNumber,
+    isString,
+    isEmptyObject,
+    isBoolean,
+    isDefined,
+    isNotEmptyObject,
+    isObject
+} from '@topgunbuild/typed';
 import textEncoder from '@topgunbuild/textencoder';
 import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from './constants';
-import { TGGraphAdapterOptions, TGGraphData, TGNode, TGOptionsGet, TGQueryListOptions } from '../types';
+import { TGGraphAdapterOptions, TGGraphData, TGNode, TGOptionsGet } from '../types';
 import { getNodeSoul } from '../utils/node';
 
 export function arrayNodesToObject(nodes: TGNode[]): TGGraphData
 {
-    return nodes.reduce((accum: TGGraphData, node: TGNode) => ({ ...accum, [node._['#']]: node }), {});
+    return nodes.reduce((accum: TGGraphData, node: TGNode) => ({ ...accum, [getNodeSoul(node)]: node }), {});
 }
 
-export function filterNodesByQueryOptions(nodes: TGNode[], options: TGQueryListOptions): TGNode[]
+export function filterNodes(nodes: TGNode[], options: TGOptionsGet): TGNode[]
 {
-    const direction   = options?.reverse ? -1 : 1;
+    if (isEmptyObject(options))
+    {
+        return nodes;
+    }
+
+    const direction   = options['-'] ? -1 : 1;
     let filteredNodes = nodes
-        .filter(node => listFilterMatch(options, getNodeSoul(node)))
+        .filter(node => filterMatch(getNodeSoul(node), options))
         .sort((a, b) => direction * lexicographicCompare(getNodeSoul(a), getNodeSoul(b)));
 
-    if (isNumber(options?.limit) && filteredNodes.length > options?.limit)
+    if (isNumber(options['%']) && filteredNodes.length > options['%'])
     {
-        filteredNodes = filteredNodes.slice(0, options.limit);
+        filteredNodes = filteredNodes.slice(0, options['%']);
     }
 
     return filteredNodes;
 }
 
-export function getStorageListOptions(optionsGet: TGOptionsGet): TGQueryListOptions|null
+export function getListOptions(options: TGOptionsGet): TGOptionsGet|null
 {
-    if (isEmptyObject(optionsGet))
+    if (isEmptyObject(options))
     {
         return null;
     }
 
-    const listOptions: TGQueryListOptions = {};
-    const getPath                         = (path: string) => isString(optionsGet.equals)
-        ? [optionsGet.equals, path].join('/')
+    const listOptions: TGOptionsGet = {};
+    const getPath                   = (path: string) => isString(options['#'])
+        ? [options['#'], path].join('/')
         : path;
 
-    if (isString(optionsGet.start))
+    // List options
+    if (isBoolean(options['-']))
     {
-        listOptions.start = getPath(optionsGet.start);
+        listOptions['-'] = options['-'];
     }
-    if (isString(optionsGet.end))
+    if (isNumber(options['%']))
     {
-        listOptions.end = getPath(optionsGet.end);
-    }
-    if (isBoolean(optionsGet.reverse))
-    {
-        listOptions.reverse = optionsGet.reverse;
-    }
-    if (isNumber(optionsGet.limit))
-    {
-        listOptions.limit = optionsGet.limit;
+        listOptions['%'] = options['%'];
     }
 
-    if (isString(optionsGet.prefix))
+    // Lex options
+
+    // Prefix for query list
+    if (isString(options['*']))
     {
-        listOptions.prefix = getPath(optionsGet.prefix);
+        listOptions['*'] = getPath(options['*']);
     }
-    else if (isString(optionsGet.equals) && !isEmptyObject(listOptions))
+    else if (isString(options['#']) && isNotEmptyObject(listOptions))
     {
-        listOptions.prefix = `${optionsGet.equals}/`;
+        listOptions['*'] = `${options['#']}/`;
+    }
+
+    if (isString(options['<']))
+    {
+        listOptions['<'] = getPath(options['<']);
+    }
+    if (isString(options['>']))
+    {
+        listOptions['>'] = getPath(options['>']);
     }
 
     return isEmptyObject(listOptions) ? null : listOptions;
+}
+
+export function filterMatch(name: string, options: TGOptionsGet|undefined): boolean
+{
+    if (!isString(name))
+    {
+        return false;
+    }
+
+    if (isEmptyObject(options) || !isObject(options))
+    {
+        return true;
+    }
+
+    if (name === options['#'])
+    {
+        return true;
+    }
+
+    const listOptions = getListOptions(options);
+
+    if (!listOptions)
+    {
+        return false;
+    }
+
+    return !(
+        (isDefined(listOptions['*']) && !name.startsWith(listOptions['*'])) ||
+        (isDefined(listOptions['>']) && lexicographicCompare(name, listOptions['>']) < 0) ||
+        (isDefined(listOptions['<']) && lexicographicCompare(name, listOptions['<']) >= 0)
+    );
 }
 
 export function assertPutEntry(soul: string, node: TGNode, options: TGGraphAdapterOptions): void
@@ -158,31 +207,4 @@ export function lexicographicCompare(x: string, y: string): number
     const xEncoded = textEncoder.encode(x);
     const yEncoded = textEncoder.encode(y);
     return arrayCompare(xEncoded, yEncoded);
-}
-
-export function filterMatch(template: string, options: TGOptionsGet)
-{
-    if (template === options?.equals)
-    {
-        return true;
-    }
-
-    return listFilterMatch(options, template);
-}
-
-export function listFilterMatch(
-    options: TGQueryListOptions|undefined,
-    name: string
-): boolean
-{
-    if (!isString(name))
-    {
-        return false;
-    }
-
-    return !(
-        (options?.prefix !== undefined && !name.startsWith(options.prefix)) ||
-        (options?.start !== undefined && lexicographicCompare(name, options.start) < 0) ||
-        (options?.end !== undefined && lexicographicCompare(name, options.end) >= 0)
-    );
 }

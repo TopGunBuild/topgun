@@ -46,7 +46,7 @@ describe('Range query', () =>
             peers: [{
                 hostname: '127.0.0.1',
                 port    : 5000,
-            }]
+            }],
         });
         client2 = new TGClient({
             peers: [{
@@ -56,6 +56,7 @@ describe('Range query', () =>
         });
         server  = new TGServer({
             port: 5000,
+            log: false
         });
 
         await Promise.all([
@@ -83,7 +84,6 @@ describe('Range query', () =>
         const stream          = client1
             .get('countries')
             .prefix('A')
-            .limit(2)
             .on<{name: string, code: string}>();
 
         (async () =>
@@ -95,13 +95,12 @@ describe('Range query', () =>
         })();
 
         await wait(40);
-        expect(receivedPackets.length).toBe(2);
+        expect(receivedPackets.length).toBe(3);
 
         await putCountries(client2, isEven);
         await wait(40);
 
-        // console.log(receivedPackets);
-        expect(receivedPackets.length).toBe(6);
+        expect(receivedPackets.length).toBe(7);
         stream.destroy();
     });
 });

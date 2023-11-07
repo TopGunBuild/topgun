@@ -6,7 +6,6 @@ import {
     TGLink,
     TGUserCredentials,
     TGUserGraph,
-    TGMessage,
     TGCollectionChangeEvent
 } from '../src/client';
 import { genString, wait } from './test-util';
@@ -208,7 +207,7 @@ describe('Client', () =>
     it('check link instance', function ()
     {
         const link1 = client.get('chat').get('122');
-        const link2 = client.get('chat').get({ '.': { '*': '2019-06-20T' } });
+        const link2 = client.get('chat').get({ '*': '2019-06-20T' });
 
         expect(link1 instanceof TGLink).toBeTruthy();
         expect(link2 instanceof TGLexLink).toBeTruthy();
@@ -279,6 +278,7 @@ describe('Client', () =>
         link.set({ say: 'Awesome! Call me in 5 minutes..' });
         link.set({ say: '👍' });
 
+        const collections = [];
         const receivedPackets = [];
         const callback        = (data, id) =>
         {
@@ -304,13 +304,19 @@ describe('Client', () =>
         {
             for await (const { newValue } of stream.listener<TGCollectionChangeEvent>('collectionChange'))
             {
-                console.log(newValue);
+                collections.push(newValue);
             }
         })();
 
         await wait(500);
 
         stream.destroy();
+
+        expect(collections.length).toBe(4);
+        expect(collections[0].length).toBe(1);
+        expect(collections[1].length).toBe(2);
+        expect(collections[2].length).toBe(3);
+        expect(collections[3].length).toBe(4);
 
         expect(isEmptyObject(client.graph['_queries'])).toBeTruthy();
         expect(receivedPackets2.length).toBe(4);

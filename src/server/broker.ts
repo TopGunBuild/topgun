@@ -1,5 +1,5 @@
 import { SimpleBroker, PublishData } from '@topgunbuild/socket/simple-broker';
-import { listFilterMatch, getStorageListOptions } from '../storage';
+import { filterMatch } from '../storage';
 
 export class TGBroker extends SimpleBroker
 {
@@ -50,8 +50,8 @@ export class TGBroker extends SimpleBroker
         Object.keys(subscriberSockets)
             .filter((socketId) =>
             {
-                const queryOptions = getStorageListOptions(subscriberOptions[socketId]?.data);
-                return listFilterMatch(queryOptions, soul);
+                const queryOptions = subscriberOptions[socketId]?.data;
+                return filterMatch(soul, queryOptions);
             })
             .forEach((socketId) =>
             {

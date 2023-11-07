@@ -10,7 +10,6 @@ import { TGUserApi } from './user-api';
 import { pubFromSoul, unpackGraph } from '../sea';
 import { TGIndexedDBConnector } from '../indexeddb/indexeddb-connector';
 import { TGPeerOptions, TGNode } from '../types';
-import { match } from '../utils/match';
 import { assertObject, assertGetPath } from '../utils/assert';
 import { getSessionStorage, getSessionStorageKey, localStorageAdapter } from '../utils';
 import { socketOptionsFromPeer } from '../utils/socket-options-from-peer';
@@ -21,8 +20,6 @@ import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from '../storage';
  */
 export class TGClient extends AsyncStreamEmitter<any>
 {
-    static match = match;
-
     pub: string|undefined;
     options: TGClientOptions;
 

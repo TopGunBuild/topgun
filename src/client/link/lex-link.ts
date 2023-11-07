@@ -78,6 +78,6 @@ export class TGLexLink extends TGLex
 
     #setSoul(): void
     {
-        this.options.equals = this._link.soul = this._link.getPath().join('/');
+        this.options['#'] = this._link.soul = this._link.getPath().join('/');
     }
 }

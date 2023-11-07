@@ -4,7 +4,7 @@ import { TGServer } from '../src/server';
 import { authenticate } from '../src/sea/authenticate';
 import { genString, wait } from './test-util';
 import { flattenGraphData } from '../src/client/graph/graph-utils';
-import { getStorageListOptions } from '../src/storage';
+import { filterMatch, getListOptions } from '../src/storage';
 
 const PORT_NUMBER = 3457;
 let server: TGServer, client: TGClient;
@@ -113,6 +113,7 @@ describe('Common', () =>
         {
             for await (const { value, key } of stream)
             {
+                // console.log(key, value);
                 receivedPackets.push({ value, key });
             }
         })();
@@ -135,6 +136,10 @@ describe('Common', () =>
 
         stream.destroy();
 
+        // console.log(
+        //     client.graph.state
+        // );
+
         expect(typeof receivedPackets[0].value === 'object').toBeTruthy();
         expect(receivedPackets[1].value === null).toBeTruthy();
 
@@ -144,16 +149,27 @@ describe('Common', () =>
         expect(receivedPackets[1].key === soul).toBeTruthy();
     });
 
-    it('Get options to query options', () =>
+    it('filterMatch', () =>
     {
-        const notList = getStorageListOptions({
-            '#': 'soul',
-            // '%': 200,
-            // '.': {
-            //     '*': 'my-prefix'
-            // }
-        });
+        const result1  = filterMatch(
+            '~S8clCMII_u1YwuUeKbGEWCCpknfa8xt9jvPaOWmhgBo.x5EWl2pw3j1rd1RoUSIf4-iQD_QMrX-qEpYnvydiOYI', {
+                '#': '~S8clCMII_u1YwuUeKbGEWCCpknfa8xt9jvPaOWmhgBo.x5EWl2pw3j1rd1RoUSIf4-iQD_QMrX-qEpYnvydiOYI/who/said'
+            }
+        );
+        expect(result1).toBeFalsy();
 
-        expect(soulOnly).toBeNull();
+        const result2  = filterMatch(
+            '~S8clCMII_u1YwuUeKbGEWCCpknfa8xt9jvPaOWmhgBo.x5EWl2pw3j1rd1RoUSIf4-iQD_QMrX-qEpYnvydiOYI', {
+                '#': '~S8clCMII_u1YwuUeKbGEWCCpknfa8xt9jvPaOWmhgBo.x5EWl2pw3j1rd1RoUSIf4-iQD_QMrX-qEpYnvydiOYI'
+            }
+        );
+        expect(result2).toBeTruthy();
+
+        const result3  = filterMatch(
+            '~S8clCMII_u1YwuUeKbGEWCCpknfa8xt9jvPaOWmhgBo.x5EWl2pw3j1rd1RoUSIf4-iQD_QMrX-qEpYnvydiOYI/who/said', {
+                '*': '~S8clCMII_u1YwuUeKbGEWCCpknfa8xt9jvPaOWmhgBo.x5EWl2pw3j1rd1RoUSIf4-iQD_QMrX-qEpYnvydiOYI/'
+            }
+        );
+        expect(result3).toBeTruthy();
     });
 });

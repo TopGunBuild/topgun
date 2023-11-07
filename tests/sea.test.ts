@@ -1,5 +1,6 @@
 import * as SEA from '../src/sea';
 import { TGClient } from '../src/client';
+import { wait } from './test-util';
 
 describe('SEA', () =>
 {
@@ -119,26 +120,32 @@ describe('SEA', () =>
             });
     });
 
-    /*it('set user ref should be found', async () => {
+    it('set user ref should be found', async () =>
+    {
         const user = client.user();
         await user.create('zach', 'password');
 
         const msg = { what: 'hello world' };
-        const ref = user
+        const ref = await user
             .get('who')
             .get('all')
             .set(msg);
 
-        user.get('who')
+        await user.get('who')
             .get('said')
             .set(ref);
+
+        await wait(100);
 
         user.get('who')
             .get('said')
             .map()
-            .once((data: any) => {
-                console.log('*****', data);
-                expect(data.what).toBe(msg.what);
+            .once((data: any) =>
+            {
+                client.get(data['#']).promise<{what: string}>().then(value =>
+                {
+                    expect(value.what).toBe(msg.what);
+                });
             });
-    });*/
+    });
 });

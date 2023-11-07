@@ -17,13 +17,13 @@ export class TGLex
         if (isObject(optionsGetOrSoul))
         {
             this.options = {
-                limit: this.maxLimit,
+                '%': this.maxLimit,
                 ...optionsGetOrSoul,
             };
         }
         else if (isString(optionsGetOrSoul))
         {
-            this.options.equals = optionsGetOrSoul;
+            this.options['#'] = optionsGetOrSoul;
         }
     }
 
@@ -33,19 +33,19 @@ export class TGLex
 
     start(value: string): TGLex
     {
-        this.#setLex('start', assertNotEmptyString(value));
+        this.options['>'] = assertNotEmptyString(value);
         return this;
     }
 
     end(value: string): TGLex
     {
-        this.#setLex('end', assertNotEmptyString(value));
+        this.options['<'] = assertNotEmptyString(value);
         return this;
     }
 
     prefix(value: string): TGLex
     {
-        this.#setLex('prefix', assertNotEmptyString(value));
+        this.options['*'] = assertNotEmptyString(value);
         return this;
     }
 
@@ -57,13 +57,13 @@ export class TGLex
                 `Limit exceeds the maximum allowed. The maximum length is ${this.maxLimit}`
             );
         }
-        this.#setLex('limit', assertNumber(value));
+        this.options['%'] = assertNumber(value);
         return this;
     }
 
     reverse(value = true): TGLex
     {
-        this.#setLex('reverse', assertBoolean(value));
+        this.options['-'] = assertBoolean(value);
         return this;
     }
 
@@ -75,14 +75,5 @@ export class TGLex
     getQuery(): TGOptionsGet
     {
         return this.options;
-    }
-
-    // -----------------------------------------------------------------------------------------------------
-    // @ Private methods
-    // -----------------------------------------------------------------------------------------------------
-
-    #setLex(key: keyof TGOptionsGet, value: TGOptionsGet[keyof TGOptionsGet]): void
-    {
-        this.options['.'][key] = value;
     }
 }

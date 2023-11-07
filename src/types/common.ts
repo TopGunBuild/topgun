@@ -46,31 +46,22 @@ export interface TGPartialGraphData
 }
 
 export type TGLex = {
-    /** Returned keys must equals with this string if defined */
-    equals?: string;
-    /** Returned keys must start with this string if defined */
-    prefix?: string;
-    /** Returned keys must be lexicographically >= this string if defined */
-    start?: string;
-    /** Returned keys must be lexicographically < this string if defined */
-    end?: string;
+    /** prefix match */
+    '*'?: string;
+    /** greater than or equals */
+    '>'?: string;
+    /** less than match */
+    '<'?: string;
 };
 
 export interface TGOptionsGet extends TGLex
 {
-    /** Return keys in reverse order, MUST be applied before the limit/cursor */
-    reverse?: boolean;
-    /** Maximum number of keys to return if defined */
-    limit?: number;
-}
-
-export interface IPolicyOptions
-{
-    '>': string;
-    '<': string;
-    '=': string;
-    '*': string;
-    '+': string;
+    /** soul */
+    '#'?: string;
+    /** true for reverse */
+    '-'?: boolean;
+    /** Maximum number of key-value pairs to return */
+    '%'?: number;
 }
 
 export interface IPolicyLex extends TGLex {
@@ -78,6 +69,8 @@ export interface IPolicyLex extends TGLex {
     '#'?: IPolicyLex;
     /** Key */
     '.'?: IPolicyLex;
+    /** equals this string */
+    '='?: string;
     /**
      * Either Path string or Key string must
      * contain Certificate's Pub string
@@ -255,3 +248,17 @@ export interface TGGraphAdapterOptions
     maxValueSize?: number;
 }
 
+export interface TGPolicyLexUIOptions
+{
+    start?: string;
+    end?: string;
+    equals?: string;
+    prefix?: string;
+}
+
+export interface TGPolicyOptions extends TGPolicyLexUIOptions
+{
+    pubInPatch?: boolean;
+    key?: TGPolicyLexUIOptions;
+    path?: TGPolicyLexUIOptions;
+}

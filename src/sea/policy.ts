@@ -1,24 +1,9 @@
 import { isObject, isString } from '@topgunbuild/typed';
-// import { match } from '../utils/match';
-import { IPolicy, IPolicyLex } from '../types';
-
-export interface PolicyLexUIOptions
-{
-    greaterThanOrEqual?: string;
-    lessThanOrEqual?: string;
-    equals?: string;
-    startsWith?: string;
-}
-
-export interface PolicyOptions extends PolicyLexUIOptions
-{
-    pubInPatch?: boolean;
-    key?: PolicyLexUIOptions;
-    path?: PolicyLexUIOptions;
-}
+import { IPolicy, IPolicyLex, TGPolicyLexUIOptions, TGPolicyOptions } from '../types';
+import { matchPolicy } from '../utils/match-policy';
 
 function mapPolicyLex(
-    options: PolicyLexUIOptions|undefined,
+    options: TGPolicyLexUIOptions|undefined,
 ): IPolicyLex|null
 {
     if (!isObject(options))
@@ -59,7 +44,7 @@ function mapPolicyLex(
     return Object.keys(lex).length > 0 ? lex : null;
 }
 
-export function createPolicy(options: PolicyOptions): IPolicyLex|IPolicy
+export function createPolicy(options: TGPolicyOptions): IPolicyLex|IPolicy
 {
     const keyPolicy  = mapPolicyLex(options.key);
     const pathPolicy = mapPolicyLex(options.path);
@@ -129,17 +114,17 @@ export class Policy
     match(): boolean
     {
         let valid = true;
-        if (this.hasPathPolicy() && !match(this.path, this.policy['#']))
+        if (this.hasPathPolicy() && !matchPolicy(this.path, this.policy['#']))
         {
             valid = false;
         }
-        if (this.hasKeyPolicy() && match(this.key, this.policy['.']))
+        if (this.hasKeyPolicy() && matchPolicy(this.key, this.policy['.']))
         {
             valid = false;
         }
         if (this.hasPlainPolicy())
         {
-            valid = match(this.fullPath, this.policy as IPolicyLex);
+            valid = matchPolicy(this.fullPath, this.policy as IPolicyLex);
         }
 
         return valid;

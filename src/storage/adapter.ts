@@ -1,8 +1,8 @@
 import { isNumber, isString } from '@topgunbuild/typed';
 import { TGStorage } from './types';
-import { TGGraphAdapter, TGGraphAdapterOptions, TGGraphData, TGOptionsGet, TGQueryListOptions } from '../types';
+import { TGGraphAdapter, TGGraphAdapterOptions, TGGraphData, TGOptionsGet } from '../types';
 import { diffCRDT, mergeGraph } from '../crdt';
-import { assertPutEntry, getStorageListOptions } from './utils';
+import { assertPutEntry, getListOptions } from './utils';
 
 const DEFAULT_CRDT_OPTS = {
     diffFn : diffCRDT,
@@ -22,14 +22,14 @@ async function get(
     opts: TGOptionsGet
 ): Promise<TGGraphData>
 {
-    const listOptions = getStorageListOptions(opts);
+    const listOptions = getListOptions(opts);
 
     if (listOptions)
     {
         return await getList(db, listOptions);
     }
 
-    const soul = opts?.equals;
+    const soul = opts && opts['#'];
 
     if (isString(soul))
     {
@@ -41,17 +41,17 @@ async function get(
     return {};
 }
 
-async function getList(db: TGStorage, options: TGQueryListOptions): Promise<TGGraphData>
+async function getList(db: TGStorage, options: TGOptionsGet): Promise<TGGraphData>
 {
-    if (isNumber(options.limit) && options.limit <= 0)
+    if (isNumber(options['%']) && options['%'] <= 0)
     {
         throw new TypeError('List limit must be positive.');
     }
-    if (isNumber(options.start))
+    if (isNumber(options['>']))
     {
-        if (isNumber(options.limit))
+        if (isNumber(options['%']))
         {
-            options.limit++;
+            options['%']++;
         }
     }
 

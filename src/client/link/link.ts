@@ -16,6 +16,7 @@ import { TGLexLink } from './lex-link';
 import { uuidv4 } from '../../utils/uuidv4';
 import { TGStream } from '../../stream/stream';
 import { TGExchange } from '../../stream/exchange';
+import { createSoul, isMessage } from '../../utils';
 
 export class TGLink
 {
@@ -121,6 +122,13 @@ export class TGLink
         return [this.key];
     }
 
+    getSoul(): string
+    {
+        return createSoul(
+            ...this.getPath()
+        );
+    }
+
     /**
      * Traverse a location in the graph
      */
@@ -210,6 +218,10 @@ export class TGLink
                 }
                 value = { '#': value.getPath().join('/') };
             }
+            else if (isMessage(value))
+            {
+                value = { '#': value['#'] };
+            }
 
             this._client.graph.putPath(
                 this.getPath(),
@@ -227,7 +239,7 @@ export class TGLink
     {
         return new Promise<TGMessage>((resolve) =>
         {
-            let soulSuffix, value = cloneValue(data);
+            let value = cloneValue(data);
 
             if (!isObject(value) || isEmptyObject(value))
             {
@@ -247,20 +259,20 @@ export class TGLink
                     throw new Error('Link is empty.');
                 }
 
-                soulSuffix = assertNotEmptyString(data.getPath()[0]);
-                value      = { '#': soulSuffix };
+                value = { '#': data.getSoul() };
+            }
+            else if (isMessage(data))
+            {
+                value = { '#': data['#'] };
             }
             else if (isNode(data))
             {
-                soulSuffix = assertNotEmptyString(data._['#']);
-            }
-            else
-            {
-                soulSuffix = uuidv4();
+                delete data['_'];
             }
 
-            const pathArr               = this.getPath();
-            pathArr[pathArr.length - 1] = [this.key, soulSuffix].join('/');
+            const pathArr = [
+                createSoul(...this.getPath(), uuidv4())
+            ];
 
             this._client.graph.putPath(
                 pathArr,
@@ -278,7 +290,7 @@ export class TGLink
     {
         const stream = this.#createQueryStream<T>({
             once            : true,
-            topGunCollection: this.#multiQuery()
+            topGunCollection: this.#collectionQuery()
         });
 
         if (isFunction(cb))
@@ -291,7 +303,7 @@ export class TGLink
                     cb(value, key);
 
                     // Destroy query for one element after the result is received
-                    if (!this.#multiQuery())
+                    if (!this.#collectionQuery())
                     {
                         stream.destroy();
                     }
@@ -299,7 +311,7 @@ export class TGLink
             })();
         }
 
-        return this.#multiQuery() ? this.#onMap(stream) : this.#on(stream);
+        return this.#collectionQuery() ? this.#onMap(stream) : this.#on(stream);
     }
 
     /**
@@ -308,7 +320,7 @@ export class TGLink
     on<T extends TGValue>(cb?: TGOnCb<T>): TGStream<TGData<T>>
     {
         const stream = this.#createQueryStream<T>({
-            topGunCollection: this.#multiQuery()
+            topGunCollection: this.#collectionQuery()
         });
 
         if (isFunction(cb))
@@ -323,7 +335,7 @@ export class TGLink
             })();
         }
 
-        return this.#multiQuery() ? this.#onMap(stream) : this.#on(stream);
+        return this.#collectionQuery() ? this.#onMap(stream) : this.#on(stream);
     }
 
     /**
@@ -343,7 +355,7 @@ export class TGLink
     {
         return new Promise<T>((resolve, reject) =>
         {
-            if (this.#multiQuery())
+            if (this.#collectionQuery())
             {
                 return reject(Error('For multiple use once() or on() method'));
             }
@@ -435,10 +447,10 @@ export class TGLink
         if (
             this._lex instanceof TGLexLink &&
             isObject(this._lex.options) &&
-            isString(this._lex.options.equals)
+            isString(this._lex.options['#'])
         )
         {
-            this._lex.options.equals = this._lex.options.equals.replace(this._client.WAIT_FOR_USER_PUB, pub);
+            this._lex.options['#'] = this._lex.options['#'].replace(this._client.WAIT_FOR_USER_PUB, pub);
         }
     }
 
@@ -447,7 +459,7 @@ export class TGLink
         return this._exchange.subscribe<TGData<T>>(uuidv4(), attributes);
     }
 
-    #multiQuery(): boolean
+    #collectionQuery(): boolean
     {
         return this._lex instanceof TGLexLink;
     }

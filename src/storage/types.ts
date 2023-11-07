@@ -1,4 +1,4 @@
-import { TGGraphData, TGNode, TGQueryListOptions } from '../types/common';
+import { TGGraphData, TGNode, TGOptionsGet, } from '../types/common';
 
 export interface TGStorage
 {
@@ -6,5 +6,5 @@ export interface TGStorage
 
     get(key: string): Promise<TGNode|null>;
 
-    list(options: TGQueryListOptions): Promise<TGGraphData>;
+    list(options: TGOptionsGet): Promise<TGGraphData>;
 }

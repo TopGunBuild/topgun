@@ -1,4 +1,4 @@
-import { isFunction, isEmptyObject, isObject } from '@topgunbuild/typed';
+import { isFunction, isEmptyObject, isDefined } from '@topgunbuild/typed';
 import { TGGet, TGGraphData, TGMessage, TGNode, TGOnCb, TGOptionsGet, TGValue } from '../../types';
 import { TGGraph } from './graph';
 import { filterMatch } from '../../storage/utils';
@@ -12,7 +12,7 @@ export class TGGraphQuery extends TGExchange
     readonly options: TGOptionsGet;
 
     private _endCurQuery?: () => void;
-    protected readonly _isMultiQuery: boolean;
+    protected readonly _isCollectionQuery: boolean;
     private readonly _graph: TGGraph;
     private readonly _updateGraph: (
         data: TGGraphData,
@@ -29,11 +29,11 @@ export class TGGraphQuery extends TGExchange
     )
     {
         super();
-        this.options       = JSON.parse(queryString);
-        this.queryString   = queryString;
-        this._graph        = graph;
-        this._updateGraph  = updateGraph;
-        this._isMultiQuery = isObject(this.options['.']);
+        this.options            = JSON.parse(queryString);
+        this.queryString        = queryString;
+        this._graph             = graph;
+        this._updateGraph       = updateGraph;
+        this._isCollectionQuery = isDefined(this.options['%']);
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -132,7 +132,7 @@ export class TGGraphQuery extends TGExchange
     #onDirectQueryReply(msg: TGMessage): void
     {
         // Return an empty response when requesting a node or property
-        if (isEmptyObject(msg.put) && !this._isMultiQuery)
+        if (isEmptyObject(msg.put) && !this._isCollectionQuery)
         {
             const soul = this.options['#'];
 

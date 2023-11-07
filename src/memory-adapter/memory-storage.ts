@@ -1,7 +1,7 @@
 import { isNumber } from '@topgunbuild/typed';
-import { TGGraphData, TGNode } from '../types';
-import { TGQueryListOptions, TGStorage } from '../storage';
-import { lexicographicCompare, listFilterMatch } from '../storage/utils';
+import { TGGraphData, TGNode, TGOptionsGet } from '../types';
+import { TGStorage } from '../storage';
+import { lexicographicCompare, filterMatch } from '../storage/utils';
 
 export class MemoryStorage implements TGStorage
 {
@@ -11,16 +11,16 @@ export class MemoryStorage implements TGStorage
     {
     }
 
-    list(options: TGQueryListOptions): Promise<TGGraphData>
+    list(options: TGOptionsGet): Promise<TGGraphData>
     {
-        const direction = options?.reverse ? -1 : 1;
+        const direction = options && options['-'] ? -1 : 1;
         let keys        = Array.from(this.map.keys())
-            .filter(key => listFilterMatch(options, key))
+            .filter(key => filterMatch(key, options))
             .sort((a, b) => direction * lexicographicCompare(a, b));
 
-        if (isNumber(options?.limit) && keys.length > options?.limit)
+        if (isNumber(options && options['%']) && keys.length > options['%'])
         {
-            keys = keys.slice(0, options.limit);
+            keys = keys.slice(0, options['%']);
         }
 
         const result = keys.reduce((accum: TGGraphData, key: string) => ({ ...accum, [key]: this.map.get(key) }), {});

@@ -12,4 +12,6 @@ export * from './window-or-global';
 export * from './is-valid-credentials';
 export * from './session-storage';
 export * from './create-soul';
+export * from './is-message';
+
 

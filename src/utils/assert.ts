@@ -26,11 +26,11 @@ export function assertOptionsGet(value: unknown, msg = 'Expected query object')
 {
     const struct = object(
         {
-            prefix : optional(string('Expected string in \'prefix\'')),
-            start  : optional(string('Expected string in \'start\'')),
-            end    : optional(string('Expected string in \'end\'')),
-            reverse: optional(boolean('Expected boolean in \'reverse\'')),
-            limit  : optional(number('Expected number in \'limit\'')),
+            '*': optional(string('Expected string in \'prefix\'')),
+            '>': optional(string('Expected string in \'start\'')),
+            '<': optional(string('Expected string in \'end\'')),
+            '-': optional(boolean('Expected boolean in \'reverse\'')),
+            '%': optional(number('Expected number in \'%\'')),
         },
         msg,
     );
