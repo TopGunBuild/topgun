@@ -1,16 +1,10 @@
 import { isEmptyObject } from '@topgunbuild/typed';
-import {
-    diffCRDT,
-    TGClient,
-    TGUserReference,
-    TGLink,
-    TGUserCredentials,
-    TGUserGraph,
-    TGCollectionChangeEvent
-} from '../src/client';
+import { TGClient, TGLink } from '../src/client';
 import { genString, wait } from './test-util';
 import { TGLexLink } from '../src/client/link/lex-link';
 import { getPathData } from '../src/client/graph/graph-utils';
+import { diffCRDT } from '../src/crdt';
+import { TGCollectionChangeEvent, TGUserCredentials, TGUserGraph, TGUserReference } from '../src/types';
 
 let client: TGClient;
 

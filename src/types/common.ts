@@ -45,7 +45,7 @@ export interface TGPartialGraphData
     [key: string]: TGPartialNode|null;
 }
 
-export type TGLex = {
+export type Lex = {
     /** prefix match */
     '*'?: string;
     /** greater than or equals */
@@ -54,7 +54,7 @@ export type TGLex = {
     '<'?: string;
 };
 
-export interface TGOptionsGet extends TGLex
+export interface TGOptionsGet extends Lex
 {
     /** soul */
     '#'?: string;
@@ -64,7 +64,7 @@ export interface TGOptionsGet extends TGLex
     '%'?: number;
 }
 
-export interface IPolicyLex extends TGLex {
+export interface IPolicyLex extends Lex {
     /** Path */
     '#'?: IPolicyLex;
     /** Key */
