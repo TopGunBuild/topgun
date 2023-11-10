@@ -1,6 +1,6 @@
 {
     "name": "@topgunbuild/topgun",
-    "version": "0.0.7",
+    "version": "0.0.8",
     "description": "Realtime, offline-first, secure, graph data synchronization engine. Reimplementation of gunDB in TypeScript",
     "publishConfig": {
         "access": "public"
