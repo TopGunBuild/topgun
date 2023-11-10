@@ -25,6 +25,7 @@
     "hooks": {
         "before:init": ["git pull", "pnpm lint", "pnpm test"],
         "after:bump": "pnpm build && pnpm tarball",
+        "after:npm:release": "pnpm clear-package",
         "after:release": "echo Successfully created a release v${version} for ${repo.repository}."
     }
 }

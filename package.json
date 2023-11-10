@@ -5,9 +5,6 @@
     "publishConfig": {
         "access": "public"
     },
-    "hooks": {
-        "after:npm:release": "pnpm run clear-package"
-    },
     "scripts": {
         "build": "tsup",
         "build:dev": "tsup --watch",
