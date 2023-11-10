@@ -5,11 +5,15 @@
     "publishConfig": {
         "access": "public"
     },
+    "hooks": {
+        "after:npm:release": "pnpm run clear-package"
+    },
     "scripts": {
         "build": "tsup",
         "build:dev": "tsup --watch",
-        "build:package": "node ./tools/prepare-package.js",
-        "prepublishOnly": "pnpm run build",
+        "build:package": "node tools/prepare-package.js",
+        "clear-package": "node tools/clear-package.js",
+        "prepublishOnly": "pnpm run build && pnpm build:package",
         "test": "jest",
         "lint": "eslint \"src/**/*.ts\" --fix",
         "prepare": "simple-git-hooks",
@@ -19,93 +23,123 @@
     "exports": {
         ".": {
             "types": "./dist/index.d.ts",
+            "node": "./dist/index.js",
             "require": "./dist/index.js",
             "import": "./dist/index.mjs",
-            "default": "./dist/index.js"
+            "default": "./dist/index.mjs"
         },
         "./client": {
-            "types": "./dist/client.d.ts",
-            "require": "./dist/client.js",
-            "import": "./dist/client.mjs",
-            "default": "./dist/client.mjs"
+            "types": "./dist/client/index.d.ts",
+            "node": "./dist/client/index.js",
+            "require": "./dist/client/index.js",
+            "import": "./dist/client/index.mjs",
+            "default": "./dist/client/index.mjs"
         },
         "./crdt": {
-            "types": "./dist/crdt.d.ts",
-            "require": "./dist/crdt.js",
-            "import": "./dist/crdt.mjs",
-            "default": "./dist/crdt.mjs"
+            "types": "./dist/crdt/index.d.ts",
+            "node": "./dist/crdt/index.js",
+            "require": "./dist/crdt/index.js",
+            "import": "./dist/crdt/index.mjs",
+            "default": "./dist/crdt/index.mjs"
         },
         "./federation-adapter": {
-            "types": "./dist/federation-adapter.d.ts",
-            "require": "./dist/federation-adapter.js",
-            "import": "./dist/federation-adapter.mjs",
-            "default": "./dist/federation-adapter.mjs"
+            "types": "./dist/federation-adapter/index.d.ts",
+            "node": "./dist/federation-adapter/index.js",
+            "require": "./dist/federation-adapter/index.js",
+            "import": "./dist/federation-adapter/index.mjs",
+            "default": "./dist/federation-adapter/index.mjs"
         },
         "./indexeddb": {
-            "types": "./dist/indexeddb.d.ts",
-            "require": "./dist/indexeddb.js",
-            "import": "./dist/indexeddb.mjs",
-            "default": "./dist/indexeddb.mjs"
+            "types": "./dist/indexeddb/index.d.ts",
+            "node": "./dist/indexeddb/index.js",
+            "require": "./dist/indexeddb/index.js",
+            "import": "./dist/indexeddb/index.mjs",
+            "default": "./dist/indexeddb/index.mjs"
         },
         "./logger": {
-            "types": "./dist/logger.d.ts",
-            "require": "./dist/logger.js",
-            "import": "./dist/logger.mjs",
-            "default": "./dist/logger.mjs"
+            "types": "./dist/logger/index.d.ts",
+            "node": "./dist/logger/index.js",
+            "require": "./dist/logger/index.js",
+            "import": "./dist/logger/index.mjs",
+            "default": "./dist/logger/index.mjs"
         },
         "./memory-adapter": {
-            "types": "./dist/memory-adapter.d.ts",
-            "require": "./dist/memory-adapter.js",
-            "import": "./dist/memory-adapter.mjs",
-            "default": "./dist/memory-adapter.mjs"
+            "types": "./dist/memory-adapter/index.d.ts",
+            "node": "./dist/memory-adapter/index.js",
+            "require": "./dist/memory-adapter/index.js",
+            "import": "./dist/memory-adapter/index.mjs",
+            "default": "./dist/memory-adapter/index.mjs"
         },
         "./sea": {
-            "types": "./dist/sea.d.ts",
-            "require": "./dist/sea.js",
-            "import": "./dist/sea.mjs",
-            "default": "./dist/sea.mjs"
+            "types": "./dist/sea/index.d.ts",
+            "node": "./dist/sea/index.js",
+            "require": "./dist/sea/index.js",
+            "import": "./dist/sea/index.mjs",
+            "default": "./dist/sea/index.mjs"
         },
         "./server": {
-            "types": "./dist/server.d.ts",
-            "require": "./dist/server.js",
-            "import": "./dist/server.mjs",
-            "default": "./dist/server.mjs"
+            "types": "./dist/server/index.d.ts",
+            "node": "./dist/server/index.js",
+            "require": "./dist/server/index.js",
+            "import": "./dist/server/index.mjs",
+            "default": "./dist/server/index.mjs"
         },
         "./storage": {
-            "types": "./dist/storage.d.ts",
-            "require": "./dist/storage.js",
-            "import": "./dist/storage.mjs",
-            "default": "./dist/storage.mjs"
+            "types": "./dist/storage/index.d.ts",
+            "node": "./dist/storage/index.js",
+            "require": "./dist/storage/index.js",
+            "import": "./dist/storage/index.mjs",
+            "default": "./dist/storage/index.mjs"
         },
         "./stream": {
-            "types": "./dist/stream.d.ts",
-            "require": "./dist/stream.js",
-            "import": "./dist/stream.mjs",
-            "default": "./dist/stream.mjs"
+            "types": "./dist/stream/index.d.ts",
+            "node": "./dist/stream/index.js",
+            "require": "./dist/stream/index.js",
+            "import": "./dist/stream/index.mjs",
+            "default": "./dist/stream/index.mjs"
         },
         "./types": {
-            "types": "./dist/types.d.ts",
-            "require": "./dist/types.js",
-            "import": "./dist/types.mjs",
-            "default": "./dist/types.mjs"
+            "types": "./dist/types/index.d.ts",
+            "node": "./dist/types/index.js",
+            "require": "./dist/types/index.js",
+            "import": "./dist/types/index.mjs",
+            "default": "./dist/types/index.mjs"
         },
         "./utils": {
-            "types": "./dist/utils.d.ts",
-            "require": "./dist/utils.js",
-            "import": "./dist/utils.mjs",
-            "default": "./dist/utils.mjs"
+            "types": "./dist/utils/index.d.ts",
+            "node": "./dist/utils/index.js",
+            "require": "./dist/utils/index.js",
+            "import": "./dist/utils/index.mjs",
+            "default": "./dist/utils/index.mjs"
         },
         "./validator": {
-            "types": "./dist/validator.d.ts",
-            "require": "./dist/validator.js",
-            "import": "./dist/validator.mjs",
-            "default": "./dist/validator.mjs"
-        }
+            "types": "./dist/validator/index.d.ts",
+            "node": "./dist/validator/index.js",
+            "require": "./dist/validator/index.js",
+            "import": "./dist/validator/index.mjs",
+            "default": "./dist/validator/index.mjs"
+        },
+        "./package.json": "./package.json"
     },
     "files": [
         "dist/**",
-        "README.md"
+        "client/**",
+        "crdt/**",
+        "federation-adapter/**",
+        "indexeddb/**",
+        "logger/**",
+        "memory-adapter/**",
+        "sea/**",
+        "server/**",
+        "storage/**",
+        "stream/**",
+        "types/**",
+        "utils/**",
+        "validator/**",
+        "README.md",
+        "LICENSE"
     ],
+    "sideEffects": false,
     "repository": {
         "type": "git",
         "url": "git+https://github.com/TopGunBuild/topgun.git"
@@ -142,7 +176,6 @@
     "devDependencies": {
         "@types/jest": "^29.5.0",
         "@types/node": "^18.15.11",
-        "@types/route-parser": "^0.1.4",
         "@typescript-eslint/eslint-plugin": "^5.58.0",
         "@typescript-eslint/parser": "^5.58.0",
         "dotenv-cli": "^7.3.0",
