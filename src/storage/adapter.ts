@@ -197,7 +197,7 @@ async function writeRawGraph(
 
             if (!nodeToWrite)
             {
-                // TODO db.removeItem(soul)?
+                await db.put(soul, null);
                 continue;
             }
 

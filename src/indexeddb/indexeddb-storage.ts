@@ -1,3 +1,4 @@
+import { isNull } from '@topgunbuild/typed';
 import global from '../utils/window-or-global';
 import { TGStorage } from '../storage';
 import { arrayNodesToObject, filterNodes } from '../storage/utils';
@@ -44,7 +45,14 @@ export class IndexedDBStorage implements TGStorage
     {
         return this.#withIDBStore('readwrite', (store) =>
         {
-            store.put(value, key);
+            if (isNull(value))
+            {
+                store.delete(key);
+            }
+            else
+            {
+                store.put(value, key);
+            }
         });
     }
 

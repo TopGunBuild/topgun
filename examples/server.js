@@ -1,4 +1,4 @@
-const {TGServer} = require('../dist/server.js');
+const {TGServer} = require('../dist/server/index.js');
 
 const server = new TGServer({
     port: 8765
