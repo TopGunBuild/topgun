@@ -1,5 +1,6 @@
 import { cloneValue, isEmptyObject, isNumber, isObject, isString, isFunction } from '@topgunbuild/typed';
 import {
+    TGCollectionOptions,
     TGData,
     TGMessage,
     TGOnCb,
@@ -10,7 +11,7 @@ import {
 import { TGClient } from '../client';
 import { TGGraph } from '../graph/graph';
 import { pubFromSoul } from '../../sea';
-import { assertGetPath, assertNotEmptyString, assertOptionsGet } from '../../utils/assert';
+import { assertGetPath, assertOptionsGet } from '../../utils/assert';
 import { getNodeSoul, isNode } from '../../utils/node';
 import { TGLexLink } from './lex-link';
 import { uuidv4 } from '../../utils/uuidv4';
@@ -400,34 +401,34 @@ export class TGLink
     // @ Public methods for collections
     // -----------------------------------------------------------------------------------------------------
 
-    map(): TGLexLink
+    collection(collectionOptions: TGCollectionOptions = {}): TGLexLink
     {
-        return new TGLexLink(this, this._client.options.transportMaxKeyValuePairs);
+        return new TGLexLink(this, this._client.options.transportMaxKeyValuePairs).collection(collectionOptions);
     }
 
     start(value: string): TGLexLink
     {
-        return this.map().start(value);
+        return this.collection().start(value);
     }
 
     end(value: string): TGLexLink
     {
-        return this.map().end(value);
+        return this.collection().end(value);
     }
 
     prefix(value: string): TGLexLink
     {
-        return this.map().prefix(value);
+        return this.collection().prefix(value);
     }
 
     limit(value: number): TGLexLink
     {
-        return this.map().limit(value);
+        return this.collection().limit(value);
     }
 
     reverse(value = true): TGLexLink
     {
-        return this.map().reverse(value);
+        return this.collection().reverse(value);
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -459,9 +460,9 @@ export class TGLink
         return this._exchange.subscribe<TGData<T>>(uuidv4(), attributes);
     }
 
-    #collectionQuery(): boolean
+    #collectionQuery(): TGCollectionOptions
     {
-        return this._lex instanceof TGLexLink;
+        return this._lex instanceof TGLexLink && this._lex.collectionOptions;
     }
 
     #onQueryResponse<T extends TGValue>(value: T, soul: string, stream: TGStream<TGData<T>>): void

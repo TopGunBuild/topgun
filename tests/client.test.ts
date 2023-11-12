@@ -272,14 +272,16 @@ describe('Client', () =>
         link.set({ say: 'Awesome! Call me in 5 minutes..' });
         link.set({ say: '👍' });
 
-        const collections = [];
+        const collections     = [];
         const receivedPackets = [];
         const callback        = (data, id) =>
         {
             receivedPackets.push({ data, id })
         };
 
-        const stream           = link.map().on<{say: string}>(callback);
+        const stream           = link
+            .collection({ idField: '$id', keyField: '$key' })
+            .on<{say: string}>(callback);
         const receivedPackets2 = [];
 
         (async () =>
@@ -307,6 +309,13 @@ describe('Client', () =>
         stream.destroy();
 
         expect(collections.length).toBe(4);
+
+        const id = collections[0][0]['$id'];
+        const key = collections[0][0]['$key'];
+        expect(typeof id === 'string').toBeTruthy();
+        expect(typeof key === 'string').toBeTruthy();
+        expect(key.endsWith(id)).toBeTruthy();
+
         expect(collections[0].length).toBe(1);
         expect(collections[1].length).toBe(2);
         expect(collections[2].length).toBe(3);
@@ -327,7 +336,7 @@ describe('Client', () =>
         await link.get('2019-06-21T00:00').put({ say: 'three' });
         await link.get('2019-06-22T00:00').put({ say: 'four' });
 
-        const stream = link.map().on<{say: string}>();
+        const stream = link.collection().on<{say: string}>();
 
         (async () =>
         {
@@ -476,7 +485,7 @@ describe('Client', () =>
         link.set({ say: 'Awesome! Call me in 5 minutes..' });
         link.set({ say: '👍' });
 
-        const stream          = link.map().on<{say: string}>();
+        const stream          = link.collection().on<{say: string}>();
         const receivedPackets = [];
 
         (async () =>

@@ -37,7 +37,7 @@ describe('Conversation', () =>
 
         const requestsStream = client.user()
             .get('participantRequests')
-            .map()
+            .collection()
             .once<any>();
 
         let result: TGMessage;

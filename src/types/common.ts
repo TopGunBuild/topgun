@@ -88,6 +88,13 @@ export type TGOptionsPut = Partial<{
     [key: string]: any;
 }>;
 
+
+export interface TGCollectionOptions
+{
+    idField?: string;
+    keyField?: string;
+}
+
 export interface CRDTOptions
 {
     machineState?: number;

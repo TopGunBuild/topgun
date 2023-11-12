@@ -139,7 +139,7 @@ describe('SEA', () =>
 
         user.get('who')
             .get('said')
-            .map()
+            .collection()
             .once((data: any) =>
             {
                 client.get(data['#']).promise<{what: string}>().then(value =>

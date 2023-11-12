@@ -4,11 +4,11 @@ import {
     StreamDemux,
     ConsumableStreamConsumer
 } from '@topgunbuild/async-stream-emitter';
-import { isNull } from '@topgunbuild/typed';
+import { isObject, isString, cloneValue } from '@topgunbuild/typed';
 import { uuidv4 } from '../utils/uuidv4';
 import { TGStreamState } from './types';
 import { TGExchange } from './exchange';
-import { TGCollectionChangeEvent, TGData, TGNode } from '../types';
+import { TGCollectionChangeEvent, TGCollectionOptions, TGData, TGNode } from '../types';
 import { getNodeSoul, isNode } from '../utils';
 
 export class TGStream<T> extends ConsumableStream<T>
@@ -59,27 +59,39 @@ export class TGStream<T> extends ConsumableStream<T>
         this.nodes            = [];
         this.lastNode         = null;
 
-        if (this.attributes['topGunCollection'])
+        if (isObject(this.attributes['topGunCollection']))
         {
+            const collectionOptions = this.attributes['topGunCollection'] as TGCollectionOptions;
+
             (async () =>
             {
                 for await (const { key, value } of this._dataStream as DemuxedConsumableStream<TGData<TGNode>>)
                 {
                     const oldValue = [...this.nodes];
-                    // const newValue = [...this.nodes];
 
                     if (isNode(value))
                     {
+                        const node = cloneValue(value);
+
+                        if (isString(collectionOptions?.idField))
+                        {
+                            node[collectionOptions.idField] = getNodeSoul(node).split('/').pop();
+                        }
+                        if (isString(collectionOptions?.keyField))
+                        {
+                            node[collectionOptions.keyField] = key;
+                        }
+
                         if (!this.existingNodesMap[key])
                         {
-                            this.nodes.push(value);
+                            this.nodes.push(node);
                         }
                         else
                         {
                             const index = this.#getNodeIndex(key);
                             if (index > -1)
                             {
-                                this.nodes[index] = value;
+                                this.nodes[index] = node;
                             }
                         }
 

@@ -106,7 +106,7 @@ describe('Common', () =>
     it('delete node', async () =>
     {
         const user   = await client.user().create('billy', '12345678');
-        const stream = client.user().get('deep').map().on();
+        const stream = client.user().get('deep').collection().on();
 
         const receivedPackets: {value: TGValue, key: string}[] = [];
 

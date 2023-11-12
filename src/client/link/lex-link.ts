@@ -1,10 +1,11 @@
 import { TGLink } from './link';
-import { TGData, TGOnCb, TGOptionsGet, TGValue } from '../../types';
+import { TGCollectionOptions, TGData, TGOnCb, TGOptionsGet, TGValue } from '../../types';
 import { TGStream } from '../../stream/stream';
 import { TGLex } from './lex';
 
 export class TGLexLink extends TGLex
 {
+    collectionOptions: TGCollectionOptions;
     private readonly _link: TGLink;
 
     /**
@@ -13,8 +14,9 @@ export class TGLexLink extends TGLex
     constructor(link: TGLink, maxLimit = 200, optionsGet: TGOptionsGet = {})
     {
         super(optionsGet, maxLimit);
-        this._link      = link;
-        this._link._lex = this;
+        this._link             = link;
+        this._link._lex        = this;
+        this.collectionOptions = {};
         this.#setSoul();
     }
 
@@ -67,8 +69,12 @@ export class TGLexLink extends TGLex
         return this._link.off();
     }
 
-    map(): TGLexLink
+    collection(collectionOptions: TGCollectionOptions = {}): TGLexLink
     {
+        this.collectionOptions = {
+            ...this.collectionOptions,
+            ...collectionOptions
+        };
         return this;
     }
 
