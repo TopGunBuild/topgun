@@ -257,10 +257,8 @@ export class TGUserApi
 
     async #authSuccess(credentials: TGUserCredentials): Promise<void>
     {
-        await Promise.all([
-            this.#authConnectors(credentials),
-            this.#persistCredentials(credentials)
-        ]);
+        this.#authConnectors(credentials);
+        await this.#persistCredentials(credentials);
 
         this.#client.emit('auth', {
             alias: credentials.alias,
