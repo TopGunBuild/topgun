@@ -75,6 +75,8 @@ describe('Common', () =>
 
         const user = await client.user().create('john', genString(20));
 
+        await wait(50);
+
         expect(clientToken).not.toBeUndefined();
         expect(serverToken).not.toBeUndefined();
         expect(clientToken.pub).toBe(serverToken.pub);
