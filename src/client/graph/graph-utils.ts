@@ -1,4 +1,4 @@
-import { isObject, isNumber } from '@topgunbuild/typed';
+import { isObject, isNumber, isDefined } from '@topgunbuild/typed';
 import { TGGraphData, TGNode, TGOptionsGet, TGPathData, TGValue } from '../../types';
 import { isSupportValue } from '../../utils/is-support';
 import { filterNodes } from '../../storage/utils';
@@ -52,7 +52,7 @@ function graphData(souls: string[], value: TGValue, complete: boolean, graph: TG
 
 function getSoulsFromKeys(keys: string[]): string[]
 {
-    return keys.reduce((accum, key) =>
+    const souls = keys.reduce((accum, key) =>
     {
         const lastPath = accum[accum.length - 1];
 
@@ -63,6 +63,8 @@ function getSoulsFromKeys(keys: string[]): string[]
 
         return [key];
     }, []);
+
+    return souls.length > 2 ? souls.slice(-2) : souls;
 }
 
 export function getPathData(
@@ -83,9 +85,9 @@ export function getPathData(
 
     const preLastSoul = souls[souls.length - 2];
     complete          = preLastSoul in graph;
-    value             = graph[preLastSoul] && graph[preLastSoul][lastKey];
+    value             = isObject(graph[preLastSoul]) ? graph[preLastSoul][lastKey] : undefined;
 
-    if (complete)
+    if (complete && isDefined(value))
     {
         return graphData([preLastSoul], value, complete, graph);
     }

@@ -244,7 +244,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
         const updateQuery = () =>
         {
             const { souls, value, complete } = getPathData(path, this._graph);
-            const [added, removed]           = diffSets(lastSouls, souls);
+            const [added]                    = diffSets(lastSouls, souls);
 
             if (
                 (complete && isUndefined(currentValue)) ||
@@ -261,11 +261,6 @@ export class TGGraph extends AsyncStreamEmitter<any>
                 streamMap.set(soul, stream);
             }
 
-            for (const soul of removed)
-            {
-                this.#unlisten(this.#queryStringForSoul(soul), streamMap.get(soul));
-            }
-
             lastSouls = souls;
         };
 
@@ -273,7 +268,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
 
         return () =>
         {
-            for (const soul of lastSouls)
+            for (const soul of streamMap.keys())
             {
                 this.#unlisten(this.#queryStringForSoul(soul), streamMap.get(soul));
             }
