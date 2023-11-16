@@ -143,9 +143,20 @@ export class TGClient extends AsyncStreamEmitter<any>
         this.closeAllListeners();
     }
 
+    /**
+     * Wait at least one connector is connected
+     */
     async waitForConnect<T extends TGGraphConnector>(): Promise<T>
     {
         return await this.listener('connectorConnected').once();
+    }
+
+    /**
+     * Clear graph data
+     */
+    clear(): void
+    {
+        this.graph.clear();
     }
 
     /**

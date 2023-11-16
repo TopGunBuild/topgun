@@ -1,4 +1,4 @@
-import { isObject, isNumber, isDefined } from '@topgunbuild/typed';
+import { isObject, isNumber, isDefined, isString } from '@topgunbuild/typed';
 import { TGGraphData, TGNode, TGOptionsGet, TGPathData, TGValue } from '../../types';
 import { isSupportValue } from '../../utils/is-support';
 import { filterNodes } from '../../storage/utils';
@@ -28,6 +28,17 @@ export function getNodesFromGraph(
     }
 
     return filteredNodes;
+    //     .map(node =>
+    // {
+    //     const edgeSoul = node && node['#'];
+    //
+    //     if (isString(edgeSoul) && edgeSoul in graph)
+    //     {
+    //         return graph[edgeSoul];
+    //     }
+    //
+    //     return node;
+    // });
 }
 
 function graphData(souls: string[], value: TGValue, complete: boolean, graph: TGGraphData): TGPathData

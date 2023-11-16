@@ -143,6 +143,18 @@ export class TGGraph extends AsyncStreamEmitter<any>
         return this;
     }
 
+    clear(): void
+    {
+        Object.keys(this._graph).forEach((key) =>
+        {
+            delete this._graph[key];
+        });
+        Object.keys(this._queries).forEach((key) =>
+        {
+            this._queries[key].destroy();
+        });
+    }
+
     /**
      * Disconnect from a source/destination for graph data
      *

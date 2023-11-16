@@ -4,7 +4,7 @@ import { TGServer } from '../src/server';
 import { authenticate } from '../src/sea/authenticate';
 import { genString, wait } from './test-util';
 import { flattenGraphData } from '../src/client/graph/graph-utils';
-import { filterMatch, getListOptions } from '../src/storage';
+import { filterMatch } from '../src/storage';
 import { TGUserGraph, TGValue } from '../src/types';
 
 const PORT_NUMBER = 3457;
@@ -26,6 +26,10 @@ describe('Common', () =>
                 levels: ['log']
             }
         });
+        await Promise.all([
+            server.waitForReady(),
+            client.waitForConnect()
+        ]);
     });
     afterEach(async () =>
     {
@@ -34,6 +38,79 @@ describe('Common', () =>
             server.close()
         ]);
     });
+
+    it('reference', async () =>
+    {
+        // const node    = { name: 'Node 1' };
+        // const message = await client.get('nodes').set(node);
+        // await client.get('events').get('event').put(message);
+        //
+        // const result = await client.get('events').get('event').promise<{name: string}>();
+        //
+        // await wait(50);
+        //
+        // console.log(result.name === node.name);
+        //
+        // expect(result).not.toBeTruthy();
+
+        const node1 = { name: 'Node 1' };
+        const node2 = { name: 'Node 2' };
+
+        await client.get('nodes').get('node').put(node1);
+        await client.get('events').get('reference').put({
+            '#': 'nodes/node'
+        });
+
+        const eventStream     = client.get('events').get('reference').on();
+        const receivedPackets = [];
+
+        (async () =>
+        {
+            for await (const { value } of eventStream)
+            {
+                receivedPackets.push(value);
+            }
+        })();
+
+        await client.get('nodes').get('node').put(node2);
+
+        await wait(50);
+        eventStream.destroy();
+
+        expect(receivedPackets[0].name).toBe(node1.name);
+        expect(receivedPackets[1].name).toBe(node2.name);
+    });
+
+    // it('edge', async () =>
+    // {
+    //     const node1 = { name: 'Node 1' };
+    //     const node2 = { name: 'Node 2' };
+    //
+    //     const node1Meta = await client.get('nodes').set(node1);
+    //     const node2Meta = await client.get('nodes').set(node2);
+    //
+    //     await client.get('events').set(node1Meta);
+    //
+    //     await wait(50);
+    //
+    //     const eventStream     = client.get('events').collection().on();
+    //     const receivedPackets = [];
+    //
+    //     (async () =>
+    //     {
+    //         for await (const { value, key } of eventStream)
+    //         {
+    //             console.log(key, value);
+    //             receivedPackets.push({ value, key });
+    //         }
+    //     })();
+    //
+    //     await wait(50);
+    //     await client.get('events').set(node2Meta);
+    //     await wait(50);
+    //
+    //     expect(receivedPackets.length).not.toBe(0);
+    // });
 
     it('should client/server authenticate', async () =>
     {
@@ -154,21 +231,21 @@ describe('Common', () =>
 
     it('filterMatch', () =>
     {
-        const result1  = filterMatch(
+        const result1 = filterMatch(
             '~S8clCMII_u1YwuUeKbGEWCCpknfa8xt9jvPaOWmhgBo.x5EWl2pw3j1rd1RoUSIf4-iQD_QMrX-qEpYnvydiOYI', {
                 '#': '~S8clCMII_u1YwuUeKbGEWCCpknfa8xt9jvPaOWmhgBo.x5EWl2pw3j1rd1RoUSIf4-iQD_QMrX-qEpYnvydiOYI/who/said'
             }
         );
         expect(result1).toBeFalsy();
 
-        const result2  = filterMatch(
+        const result2 = filterMatch(
             '~S8clCMII_u1YwuUeKbGEWCCpknfa8xt9jvPaOWmhgBo.x5EWl2pw3j1rd1RoUSIf4-iQD_QMrX-qEpYnvydiOYI', {
                 '#': '~S8clCMII_u1YwuUeKbGEWCCpknfa8xt9jvPaOWmhgBo.x5EWl2pw3j1rd1RoUSIf4-iQD_QMrX-qEpYnvydiOYI'
             }
         );
         expect(result2).toBeTruthy();
 
-        const result3  = filterMatch(
+        const result3 = filterMatch(
             '~S8clCMII_u1YwuUeKbGEWCCpknfa8xt9jvPaOWmhgBo.x5EWl2pw3j1rd1RoUSIf4-iQD_QMrX-qEpYnvydiOYI/who/said', {
                 '*': '~S8clCMII_u1YwuUeKbGEWCCpknfa8xt9jvPaOWmhgBo.x5EWl2pw3j1rd1RoUSIf4-iQD_QMrX-qEpYnvydiOYI/'
             }
