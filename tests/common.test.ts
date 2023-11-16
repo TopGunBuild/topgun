@@ -26,10 +26,6 @@ describe('Common', () =>
                 levels: ['log']
             }
         });
-        await Promise.all([
-            server.waitForReady(),
-            client.waitForConnect()
-        ]);
     });
     afterEach(async () =>
     {
@@ -41,17 +37,10 @@ describe('Common', () =>
 
     it('reference', async () =>
     {
-        // const node    = { name: 'Node 1' };
-        // const message = await client.get('nodes').set(node);
-        // await client.get('events').get('event').put(message);
-        //
-        // const result = await client.get('events').get('event').promise<{name: string}>();
-        //
-        // await wait(50);
-        //
-        // console.log(result.name === node.name);
-        //
-        // expect(result).not.toBeTruthy();
+        await Promise.all([
+            server.waitForReady(),
+            client.waitForConnect()
+        ]);
 
         const node1 = { name: 'Node 1' };
         const node2 = { name: 'Node 2' };
