@@ -1,10 +1,11 @@
-import { isFunction, isEmptyObject, isDefined } from '@topgunbuild/typed';
-import { TGGet, TGGraphData, TGMessage, TGNode, TGOnCb, TGOptionsGet, TGValue } from '../../types';
+import { isFunction, isEmptyObject, isDefined, isNull } from '@topgunbuild/typed';
+import { TGGet, TGGraphData, TGMessage, TGNode, TGOnCb, TGOptionsGet, TGRefNode, TGValue } from '../../types';
 import { TGGraph } from './graph';
 import { filterMatch } from '../../storage/utils';
 import { uuidv4 } from '../../utils/uuidv4';
 import { TGExchange } from '../../stream/exchange';
 import { TGStream } from '../../stream/stream';
+import { getNodeSoul } from '../../utils';
 
 export class TGGraphQuery extends TGExchange
 {
@@ -18,6 +19,9 @@ export class TGGraphQuery extends TGExchange
         data: TGGraphData,
         replyToId?: string,
     ) => void;
+
+    readonly targetNodesMap: Map<string, string>;
+    readonly referenceNodesMap: Map<string, string>;
 
     /**
      * Constructor
@@ -34,6 +38,8 @@ export class TGGraphQuery extends TGExchange
         this._graph             = graph;
         this._updateGraph       = updateGraph;
         this._isCollectionQuery = isDefined(this.options['%']);
+        this.targetNodesMap     = new Map<string, string>();
+        this.referenceNodesMap  = new Map<string, string>();
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -68,15 +74,47 @@ export class TGGraphQuery extends TGExchange
     }
 
     /**
-     * Publish data to all subscriptions
+     * Receive reference node
      */
-    receive(value: TGNode|undefined, soul: string): TGGraphQuery
+    setRef(node: TGRefNode): void
     {
-        this.subscriptions(true).forEach((streamName) =>
+        const soul = getNodeSoul(node);
+
+        if (!this.targetNodesMap.has(node['#']))
         {
-            this.publish(streamName, { value, key: soul });
-        });
-        return this;
+            this.targetNodesMap.set(node['#'], soul);
+            this.referenceNodesMap.set(soul, node['#']);
+        }
+    }
+
+    /**
+     * Receive reference target node
+     */
+    receiveRefTarget(node: TGNode|undefined, soul: string): void
+    {
+        this.#publishNode(node, soul);
+    }
+
+    /**
+     * Receive data from some local or external source
+     */
+    receive(node: TGNode|undefined, soul: string): void
+    {
+        if (isNull(node) && this.referenceNodesMap.has(soul))
+        {
+            this.targetNodesMap.delete(this.referenceNodesMap.get(soul));
+            this.referenceNodesMap.delete(soul);
+        }
+
+        this.#publishNode(node, soul);
+    }
+
+    /**
+     * If there is a reference target node
+     */
+    isRefTarget(soul: string): boolean
+    {
+        return this.targetNodesMap.has(soul);
     }
 
     /**
@@ -97,6 +135,8 @@ export class TGGraphQuery extends TGExchange
             this._endCurQuery();
         }
         this.destroy();
+        this.referenceNodesMap.clear();
+        this.targetNodesMap.clear();
 
         return this;
     }
@@ -124,6 +164,17 @@ export class TGGraphQuery extends TGExchange
 
         this._endCurQuery = this._graph.get(data);
         return this;
+    }
+
+    /**
+     * Publish node to all subscriptions
+     */
+    #publishNode(value: TGNode|undefined, soul: string): void
+    {
+        this.subscriptions(true).forEach((streamName) =>
+        {
+            this.publish(streamName, { value, key: soul });
+        });
     }
 
     /**

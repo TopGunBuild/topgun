@@ -30,11 +30,11 @@ export function getNodesFromGraph(
     return filteredNodes;
     //     .map(node =>
     // {
-    //     const edgeSoul = node && node['#'];
+    //     const refSoul = node && node['#'];
     //
-    //     if (isString(edgeSoul) && edgeSoul in graph)
+    //     if (isString(refSoul) && refSoul in graph)
     //     {
-    //         return graph[edgeSoul];
+    //         return graph[refSoul];
     //     }
     //
     //     return node;
@@ -43,14 +43,14 @@ export function getNodesFromGraph(
 
 function graphData(souls: string[], value: TGValue, complete: boolean, graph: TGGraphData): TGPathData
 {
-    const edgeSoul = value && value['#'];
+    const refSoul = value && value['#'];
 
-    if (edgeSoul)
+    if (isString(refSoul))
     {
         return {
-            complete: edgeSoul in graph,
-            souls   : [...souls, edgeSoul],
-            value   : graph[edgeSoul],
+            complete: refSoul in graph,
+            souls   : [...souls, refSoul],
+            value   : graph[refSoul],
         };
     }
 

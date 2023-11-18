@@ -70,36 +70,46 @@ describe('Common', () =>
         expect(receivedPackets[1].name).toBe(node2.name);
     });
 
-    // it('edge', async () =>
-    // {
-    //     const node1 = { name: 'Node 1' };
-    //     const node2 = { name: 'Node 2' };
-    //
-    //     const node1Meta = await client.get('nodes').set(node1);
-    //     const node2Meta = await client.get('nodes').set(node2);
-    //
-    //     await client.get('events').set(node1Meta);
-    //
-    //     await wait(50);
-    //
-    //     const eventStream     = client.get('events').collection().on();
-    //     const receivedPackets = [];
-    //
-    //     (async () =>
-    //     {
-    //         for await (const { value, key } of eventStream)
-    //         {
-    //             console.log(key, value);
-    //             receivedPackets.push({ value, key });
-    //         }
-    //     })();
-    //
-    //     await wait(50);
-    //     await client.get('events').set(node2Meta);
-    //     await wait(50);
-    //
-    //     expect(receivedPackets.length).not.toBe(0);
-    // });
+    it('reference with collections', async () =>
+    {
+        const node1 = { name: 'Node 1' };
+        const node2 = { name: 'Node 2' };
+
+        const node1Meta = await client.get('nodes').set(node1);
+        const node2Meta = await client.get('nodes').set(node2);
+
+        await client.get('events').set(node1Meta);
+
+        await wait(50);
+
+        const eventStream     = client.get('events').collection().on();
+        const receivedPackets = [];
+
+        (async () =>
+        {
+            for await (const { value } of eventStream)
+            {
+                // console.log(value);
+                receivedPackets.push(value);
+            }
+        })();
+
+        await wait(20);
+        await client.get('events').set(node2Meta);
+        await wait(20);
+        await client.get(node1Meta['#']).put({
+            name: 'Node 1 updated'
+        });
+        await wait(20);
+        await client.get(node1Meta['#']).remove();
+        await wait(20);
+
+        expect(receivedPackets.length).toBe(4);
+        expect(receivedPackets[0].name).toBe('Node 1');
+        expect(receivedPackets[1].name).toBe('Node 2');
+        expect(receivedPackets[2].name).toBe('Node 1 updated');
+        expect(receivedPackets[3]).toBeNull();
+    });
 
     it('should client/server authenticate', async () =>
     {

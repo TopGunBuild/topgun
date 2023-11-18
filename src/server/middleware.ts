@@ -90,7 +90,7 @@ export class Middleware
             .slice(2);
 
         this.#readNodes(opts)
-            .then(graphData => this.#getEdgeNodes(graphData))
+            .then(graphData => this.#getRefNodes(graphData))
             .then(graphData => ({
                 channel: req.channel,
                 data   : {
@@ -118,20 +118,25 @@ export class Middleware
     }
 
     /**
-     * Get edge nodes if any
+     * Get reference nodes if any
      */
-    async #getEdgeNodes(graphData: TGGraphData): Promise<TGGraphData>
+    async #getRefNodes(graphData: TGGraphData): Promise<TGGraphData>
     {
         try
         {
             for (const soul in graphData)
             {
-                const edgeSoul = graphData[soul] && graphData[soul]['#'];
-
-                if (isString(edgeSoul))
+                if (!soul)
                 {
-                    const edgeGraph     = await this.#readNodes({ ['#']: edgeSoul });
-                    graphData[edgeSoul] = edgeGraph[edgeSoul];
+                    continue;
+                }
+
+                const refSoul = graphData[soul] && graphData[soul]['#'];
+
+                if (isString(refSoul))
+                {
+                    const refGraph     = await this.#readNodes({ ['#']: refSoul });
+                    graphData[refSoul] = refGraph[refSoul];
                 }
             }
 

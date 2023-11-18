@@ -9,7 +9,7 @@ import {
     TGOptionsPut,
     TGMiddleware,
     TGMiddlewareType,
-    TGOnCb, TGOptionsGet,
+    TGOnCb, TGOptionsGet
 } from '../../types';
 import { TGGraphConnector } from '../transports/graph-connector';
 import {
@@ -18,7 +18,7 @@ import {
     getPathData,
     flattenGraphData
 } from './graph-utils';
-import { getNodeSoul } from '../../utils/node';
+import { getNodeSoul, isRefNode } from '../../utils/node';
 import { TGGraphQuery } from './graph-query';
 import { stringifyOptionsGet } from '../../utils/stringify-options-get';
 import { uuidv4 } from '../../utils/uuidv4';
@@ -230,13 +230,27 @@ export class TGGraph extends AsyncStreamEmitter<any>
      */
     queryMany<T extends TGValue>(opts: TGOptionsGet, cb: TGOnCb<T>, msgId: string, askOnce?: boolean): () => void
     {
-        getNodesFromGraph(opts, this._graph).forEach((node) =>
-        {
-            cb(node as T, getNodeSoul(node));
-        });
-
         const queryString = stringifyOptionsGet(opts);
         const stream      = this.#createQueryStream(queryString, cb, msgId, askOnce);
+        const query       = this.#getQuery(queryString);
+
+        getNodesFromGraph(opts, this._graph).forEach((node) =>
+        {
+            if (isRefNode(node))
+            {
+                query.setRef(node);
+                const refSoul = node['#'];
+
+                if (this._graph.hasOwnProperty(refSoul))
+                {
+                    cb(this._graph[refSoul] as T);
+                }
+            }
+            else
+            {
+                cb(node as T, getNodeSoul(node));
+            }
+        });
 
         return () =>
         {
@@ -422,6 +436,8 @@ export class TGGraph extends AsyncStreamEmitter<any>
             return;
         }
 
+        const targetMap = new Map();
+
         for (const soul in diff)
         {
             if (!soul)
@@ -435,14 +451,44 @@ export class TGGraph extends AsyncStreamEmitter<any>
                 this._opt.mutable ? 'mutable' : 'immutable',
             );
 
+            targetMap.set(soul, node);
+
             this.#eachQuery((query) =>
             {
                 if (query.match(soul))
                 {
-                    query.receive(node, soul);
+                    if (isRefNode(node))
+                    {
+                        // Save reference
+                        query.setRef(node);
+                        const refSoul = node['#'];
+
+                        // Get target node from diff
+                        if (targetMap.has(refSoul))
+                        {
+                            query.receiveRefTarget(targetMap.get(refSoul), soul);
+                        }
+                        // Get target node from graph
+                        else if (!diff.hasOwnProperty(refSoul) && this._graph.hasOwnProperty(refSoul))
+                        {
+                            query.receiveRefTarget(this._graph[refSoul], soul);
+                        }
+                    }
+                    else
+                    {
+                        // Receive base node
+                        query.receive(node, soul);
+                    }
+                }
+                else if (query.isRefTarget(soul))
+                {
+                    // Receive target node
+                    query.receiveRefTarget(node, soul);
                 }
             });
         }
+
+        targetMap.clear();
 
         this.emit('graphData', { diff, id, replyToId });
     }

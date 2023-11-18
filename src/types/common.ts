@@ -32,6 +32,11 @@ export interface TGNode extends TGPartialNode
     _: TGNodeMeta;
 }
 
+export interface TGRefNode extends TGNode
+{
+    '#': string;
+}
+
 /**
  * Graph Data consists of one or more full or partial nodes
  */
