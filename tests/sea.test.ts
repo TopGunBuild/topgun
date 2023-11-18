@@ -142,10 +142,7 @@ describe('SEA', () =>
             .collection()
             .once((data: any) =>
             {
-                client.get(data['#']).promise<{what: string}>().then(value =>
-                {
-                    expect(value.what).toBe(msg.what);
-                });
+                expect(data.what).toBe(msg.what);
             });
     });
 });
