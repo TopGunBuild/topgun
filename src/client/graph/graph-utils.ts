@@ -28,17 +28,6 @@ export function getNodesFromGraph(
     }
 
     return filteredNodes;
-    //     .map(node =>
-    // {
-    //     const refSoul = node && node['#'];
-    //
-    //     if (isString(refSoul) && refSoul in graph)
-    //     {
-    //         return graph[refSoul];
-    //     }
-    //
-    //     return node;
-    // });
 }
 
 function graphData(souls: string[], value: TGValue, complete: boolean, graph: TGGraphData): TGPathData
