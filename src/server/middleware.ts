@@ -1,10 +1,8 @@
-import { isObject, isString } from '@topgunbuild/typed';
 import { TGSocketServer, RequestObject } from '@topgunbuild/socket/server';
 import { TGServerOptions } from './server-options';
-import { TGGraphAdapter, TGGraphData, TGMessage, TGNode, TGOptionsGet } from '../types';
+import { TGGraphAdapter, TGGraphData, TGMessage, TGOptionsGet } from '../types';
 import { pseudoRandomText } from '../sea';
 import { TGExtendedLoggerType } from '../logger';
-import { getNodeSoul, isNode } from '../utils';
 
 export class Middleware
 {
@@ -90,7 +88,6 @@ export class Middleware
             .slice(2);
 
         this.#readNodes(opts)
-            .then(graphData => this.#getRefNodes(graphData))
             .then(graphData => ({
                 channel: req.channel,
                 data   : {
@@ -115,37 +112,6 @@ export class Middleware
             {
                 req.socket.transmit('#publish', msg);
             })
-    }
-
-    /**
-     * Get reference nodes if any
-     */
-    async #getRefNodes(graphData: TGGraphData): Promise<TGGraphData>
-    {
-        try
-        {
-            for (const soul in graphData)
-            {
-                if (!soul)
-                {
-                    continue;
-                }
-
-                const refSoul = graphData[soul] && graphData[soul]['#'];
-
-                if (isString(refSoul))
-                {
-                    const refGraph     = await this.#readNodes({ ['#']: refSoul });
-                    graphData[refSoul] = refGraph[refSoul];
-                }
-            }
-
-            return graphData;
-        }
-        catch (e)
-        {
-            return graphData;
-        }
     }
 
     /**

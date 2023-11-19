@@ -4,12 +4,13 @@ import {
     StreamDemux,
     ConsumableStreamConsumer
 } from '@topgunbuild/async-stream-emitter';
-import { isObject, isString, cloneValue } from '@topgunbuild/typed';
+import { isObject, isString, cloneValue, isNull } from '@topgunbuild/typed';
 import { uuidv4 } from '../utils/uuidv4';
 import { TGStreamState } from './types';
 import { TGExchange } from './exchange';
 import { TGCollectionChangeEvent, TGCollectionOptions, TGData, TGNode } from '../types';
 import { getNodeSoul, isNode } from '../utils';
+import { diffCRDT } from '../crdt';
 
 export class TGStream<T> extends ConsumableStream<T>
 {
@@ -67,6 +68,20 @@ export class TGStream<T> extends ConsumableStream<T>
             {
                 for await (const { key, value } of this._dataStream as DemuxedConsumableStream<TGData<TGNode>>)
                 {
+                    // Detect changes
+                    const emptyChange = !value && (this.nodes.length === 0 || !this.existingNodesMap[key]);
+                    const nodeChange  = this.existingNodesMap[key] && diffCRDT({
+                        [key]: value
+                    }, {
+                        [key]: this.existingNodesMap[key]
+                    });
+
+                    // Abort if data has not changed
+                    if (emptyChange || isNull(nodeChange))
+                    {
+                        continue;
+                    }
+
                     const oldValue = [...this.nodes];
 
                     if (isNode(value))

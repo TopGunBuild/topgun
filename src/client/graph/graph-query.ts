@@ -22,6 +22,7 @@ export class TGGraphQuery extends TGExchange
 
     readonly targetNodesMap: Map<string, string>;
     readonly referenceNodesMap: Map<string, string>;
+    readonly streamMap: Map<string, TGStream<any>>;
 
     /**
      * Constructor
@@ -40,6 +41,7 @@ export class TGGraphQuery extends TGExchange
         this._isCollectionQuery = isDefined(this.options['%']);
         this.targetNodesMap     = new Map<string, string>();
         this.referenceNodesMap  = new Map<string, string>();
+        this.streamMap = new Map<string, TGStream<any>>();
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -57,17 +59,20 @@ export class TGGraphQuery extends TGExchange
     /**
      * Create a data stream for this query
      */
-    getStream(cb: TGOnCb<any>, msgId?: string, askOnce?: boolean): TGStream<any>
+    getStream(cb?: TGOnCb<any>, msgId?: string, askOnce?: boolean): TGStream<any>
     {
         const stream = this.subscribe<{value: TGValue, key: string}>();
 
-        (async () =>
+        if (isFunction(cb))
         {
-            for await (const { value, key } of stream)
+            (async () =>
             {
-                cb(value, key);
-            }
-        })();
+                for await (const { value, key } of stream)
+                {
+                    cb(value, key);
+                }
+            })();
+        }
 
         this.#ask(msgId, askOnce);
         return stream;
@@ -137,6 +142,12 @@ export class TGGraphQuery extends TGExchange
         this.destroy();
         this.referenceNodesMap.clear();
         this.targetNodesMap.clear();
+
+        for (const soul of this.streamMap.keys())
+        {
+            this._graph.unlisten(this._graph.queryStringForSoul(soul), this.streamMap.get(soul));
+        }
+        this.streamMap.clear();
 
         return this;
     }

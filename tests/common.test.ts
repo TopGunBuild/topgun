@@ -89,7 +89,7 @@ describe('Common', () =>
         {
             for await (const { value } of eventStream)
             {
-                // console.log(value);
+                console.log(value);
                 receivedPackets.push(value);
             }
         })();

@@ -254,7 +254,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
 
         return () =>
         {
-            this.#unlisten(queryString, stream);
+            this.unlisten(queryString, stream);
         };
     }
 
@@ -283,7 +283,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
 
             for (const soul of added)
             {
-                const stream = this.#createQueryStream(this.#queryStringForSoul(soul), updateQuery, msgId, askOnce);
+                const stream = this.#createQueryStream(this.queryStringForSoul(soul), updateQuery, msgId, askOnce);
                 streamMap.set(soul, stream);
             }
 
@@ -296,7 +296,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
         {
             for (const soul of streamMap.keys())
             {
-                this.#unlisten(this.#queryStringForSoul(soul), streamMap.get(soul));
+                this.unlisten(this.queryStringForSoul(soul), streamMap.get(soul));
             }
             streamMap.clear();
         };
@@ -463,6 +463,13 @@ export class TGGraph extends AsyncStreamEmitter<any>
                         query.setRef(node);
                         const refSoul = node['#'];
 
+                        // Query target node
+                        if (!query.streamMap.has(refSoul))
+                        {
+                            const stream = this.#createQueryStream(this.queryStringForSoul(refSoul));
+                            query.streamMap.set(refSoul, stream);
+                        }
+
                         // Get target node from diff
                         if (targetMap.has(refSoul))
                         {
@@ -493,6 +500,33 @@ export class TGGraph extends AsyncStreamEmitter<any>
         this.emit('graphData', { diff, id, replyToId });
     }
 
+    /**
+     * Unsubscribe from receiving data for this request
+     */
+    unlisten(queryString: string, stream: TGStream<any>): TGGraph
+    {
+        if (stream instanceof TGStream)
+        {
+            stream.destroy();
+        }
+        const query = this._queries[queryString];
+        if (query instanceof TGGraphQuery && query.listenerCount() <= 0)
+        {
+            // Destroy a query handler if it has no subscribers
+            query.off();
+            delete this._queries[queryString];
+        }
+        return this;
+    }
+
+    /**
+     * Convert soul based get parameters to string
+     */
+    queryStringForSoul(soul: string): string
+    {
+        return stringifyOptionsGet({ ['#']: soul });
+    }
+
     // -----------------------------------------------------------------------------------------------------
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
@@ -510,28 +544,9 @@ export class TGGraph extends AsyncStreamEmitter<any>
     /**
      * Create a new data stream for query
      */
-    #createQueryStream<T extends TGValue>(queryString: string, cb: TGOnCb<T>, msgId?: string, askOnce?: boolean): TGStream<any>
+    #createQueryStream<T extends TGValue>(queryString: string, cb?: TGOnCb<T>, msgId?: string, askOnce?: boolean): TGStream<any>
     {
         return this.#getQuery(queryString).getStream(cb, msgId, askOnce);
-    }
-
-    /**
-     * Unsubscribe from receiving data for this request
-     */
-    #unlisten(queryString: string, stream: TGStream<any>): TGGraph
-    {
-        if (stream instanceof TGStream)
-        {
-            stream.destroy();
-        }
-        const query = this._queries[queryString];
-        if (query instanceof TGGraphQuery && query.listenerCount() <= 0)
-        {
-            // Destroy a query handler if it has no subscribers
-            query.off();
-            delete this._queries[queryString];
-        }
-        return this;
     }
 
     /**
@@ -545,14 +560,6 @@ export class TGGraph extends AsyncStreamEmitter<any>
         }
 
         return this;
-    }
-
-    /**
-     * Convert soul based get parameters to string
-     */
-    #queryStringForSoul(soul: string): string
-    {
-        return stringifyOptionsGet({ ['#']: soul });
     }
 
     /**
