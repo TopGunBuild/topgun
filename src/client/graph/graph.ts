@@ -473,12 +473,12 @@ export class TGGraph extends AsyncStreamEmitter<any>
                         // Get target node from diff
                         if (targetMap.has(refSoul))
                         {
-                            query.receiveRefTarget(targetMap.get(refSoul), soul);
+                            query.receiveTarget(targetMap.get(refSoul), soul);
                         }
                         // Get target node from graph
                         else if (!diff.hasOwnProperty(refSoul) && this._graph.hasOwnProperty(refSoul))
                         {
-                            query.receiveRefTarget(this._graph[refSoul], soul);
+                            query.receiveTarget(this._graph[refSoul], soul);
                         }
                     }
                     else
@@ -487,10 +487,11 @@ export class TGGraph extends AsyncStreamEmitter<any>
                         query.receive(node, soul);
                     }
                 }
-                else if (query.isRefTarget(soul))
+                else if (query.isTarget(soul))
                 {
                     // Receive target node
-                    query.receiveRefTarget(node, soul);
+                    const parentSoul = query.targetNodesMap.get(soul);
+                    query.receiveTarget(node, parentSoul);
                 }
             });
         }

@@ -69,15 +69,15 @@ export class TGStream<T> extends ConsumableStream<T>
                 for await (const { key, value } of this._dataStream as DemuxedConsumableStream<TGData<TGNode>>)
                 {
                     // Detect changes
-                    const emptyChange = !value && (this.nodes.length === 0 || !this.existingNodesMap[key]);
-                    const nodeChange  = this.existingNodesMap[key] && diffCRDT({
+                    const emptyChange    = !value && (this.nodes.length === 0 || !this.existingNodesMap[key]);
+                    const nodeNotChanged = isObject(this.existingNodesMap[key]) && isObject(value) && !diffCRDT({
                         [key]: value
                     }, {
                         [key]: this.existingNodesMap[key]
                     });
 
                     // Abort if data has not changed
-                    if (emptyChange || isNull(nodeChange))
+                    if (emptyChange || nodeNotChanged)
                     {
                         continue;
                     }
@@ -114,12 +114,11 @@ export class TGStream<T> extends ConsumableStream<T>
                     }
                     else if (!value && this.existingNodesMap[key])
                     {
-                        this.existingNodesMap[key] = null;
-
                         const index = this.#getNodeIndex(key);
                         if (index > -1)
                         {
                             this.nodes.splice(index, 1);
+                            this.existingNodesMap[key] = null;
                         }
                     }
 
@@ -198,6 +197,6 @@ export class TGStream<T> extends ConsumableStream<T>
 
     #getNodeIndex(soul: string)
     {
-        return this.nodes.findIndex(node => getNodeSoul(node) === soul);
+        return this.nodes.findIndex(node => getNodeSoul(node) === getNodeSoul(this.existingNodesMap[soul]));
     }
 }

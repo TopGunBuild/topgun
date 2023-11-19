@@ -41,7 +41,7 @@ export class TGGraphQuery extends TGExchange
         this._isCollectionQuery = isDefined(this.options['%']);
         this.targetNodesMap     = new Map<string, string>();
         this.referenceNodesMap  = new Map<string, string>();
-        this.streamMap = new Map<string, TGStream<any>>();
+        this.streamMap          = new Map<string, TGStream<any>>();
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -95,7 +95,7 @@ export class TGGraphQuery extends TGExchange
     /**
      * Receive reference target node
      */
-    receiveRefTarget(node: TGNode|undefined, soul: string): void
+    receiveTarget(node: TGNode|undefined, soul: string): void
     {
         this.#publishNode(node, soul);
     }
@@ -117,7 +117,7 @@ export class TGGraphQuery extends TGExchange
     /**
      * If there is a reference target node
      */
-    isRefTarget(soul: string): boolean
+    isTarget(soul: string): boolean
     {
         return this.targetNodesMap.has(soul);
     }
@@ -182,6 +182,10 @@ export class TGGraphQuery extends TGExchange
      */
     #publishNode(value: TGNode|undefined, soul: string): void
     {
+        // if (soul.includes('/node/') && this.queryString.includes('favorite'))
+        // {
+        //     console.trace('publishNode-', { soul, value });
+        // }
         this.subscriptions(true).forEach((streamName) =>
         {
             this.publish(streamName, { value, key: soul });
