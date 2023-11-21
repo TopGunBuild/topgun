@@ -164,7 +164,7 @@
     "homepage": "https://github.com/TopGunBuild/topgun#readme",
     "dependencies": {
         "@topgunbuild/async-stream-emitter": "^0.0.1",
-        "@topgunbuild/buffer": "^0.0.1",
+        "@topgunbuild/buffer": "^0.0.2",
         "@topgunbuild/socket": "^0.0.5",
         "@topgunbuild/textencoder": "^0.0.1",
         "@topgunbuild/typed": "^0.1.0",
