@@ -1,3 +1,4 @@
+import * as http from 'http';
 import { AuthToken } from '@topgunbuild/socket/types';
 import { TGClient } from '../src/client';
 import { TGServer } from '../src/server';
@@ -250,5 +251,20 @@ describe('Common', () =>
             }
         );
         expect(result3).toBeTruthy();
+    });
+
+    it('http server', async () =>
+    {
+        const port       = 8765;
+        const httpServer = http.createServer();
+        const listenFn   = () => console.log(`Listen on ${port} port`);
+        const server     = new TGServer({ httpServer });
+
+        httpServer.listen(port, listenFn);
+
+        await server.waitForReady();
+        await server.close();
+
+        expect(port).toBe(8765);
     });
 });

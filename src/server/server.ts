@@ -1,6 +1,6 @@
 import { Struct, Result, ok, isErr, isFunction, isObject, isDefined, isString, isBoolean } from '@topgunbuild/typed';
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
-import { listen, TGSocketServer } from '@topgunbuild/socket/server';
+import { attach, listen, TGSocketServer } from '@topgunbuild/socket/server';
 import { pseudoRandomText } from '../sea';
 import { TGGraphAdapter, TGGraphData, TGMessage, TGOriginators, TGPartialNode } from '../types';
 import { TGServerOptions } from './server-options';
@@ -17,7 +17,7 @@ import { TGBroker } from './broker';
 
 export class TGServer extends AsyncStreamEmitter<any>
 {
-    serverName: string;
+    name: string;
     readonly adapter: TGFederationAdapter;
     readonly internalAdapter: TGGraphAdapter;
     readonly gateway: TGSocketServer;
@@ -51,7 +51,16 @@ export class TGServer extends AsyncStreamEmitter<any>
         };
 
         this.options = Object.assign(defaultOptions, options || {});
-        this.gateway = listen(this.options.port, this.options);
+
+        if (this.options.httpServer)
+        {
+            this.gateway            = attach(this.options.httpServer, this.options);
+            this.gateway.httpServer = this.options.httpServer;
+        }
+        else
+        {
+            this.gateway = listen(this.options.port, this.options);
+        }
 
         this.#persistServerName();
         this.#createLogger();
@@ -65,13 +74,13 @@ export class TGServer extends AsyncStreamEmitter<any>
         );
         this.adapter         = this.#federateInternalAdapter(this.internalAdapter);
         this.middleware      = new Middleware(
-            this.serverName,
+            this.name,
             this.gateway,
             this.options,
             this.adapter,
             this.logger.extend('Middleware')
         );
-        this.listeners       = new Listeners(this.gateway, this.logger, this.options, this.serverName);
+        this.listeners       = new Listeners(this.gateway, this.logger, this.options, this.name);
         this.#run();
     }
 
@@ -155,7 +164,7 @@ export class TGServer extends AsyncStreamEmitter<any>
         };
 
         return new TGFederationAdapter(
-            this.serverName,
+            this.name,
             withPublish,
             this.peers,
             withValidation,
@@ -216,7 +225,7 @@ export class TGServer extends AsyncStreamEmitter<any>
             },
             'originators': {
                 ...(originators || {}),
-                [this.serverName]: 1
+                [this.name]: 1
             }
         };
 
@@ -248,27 +257,31 @@ export class TGServer extends AsyncStreamEmitter<any>
         {
             this.options.log = {};
         }
-        if (!isDefined(this.options.log.appId) && isString(this.serverName))
+        if (!isDefined(this.options.log.appId) && isString(this.name))
         {
-            this.options.log.appId = this.serverName;
+            this.options.log.appId = this.name;
         }
         this.logger = createLogger(this.options.log);
     }
 
     #persistServerName(): void
     {
-        this.serverName = this.options.serverName;
+        this.name = this.options.serverName;
 
         if (!isString(this.options.serverName))
         {
             if (isFunction(this.gateway.httpServer?.address))
             {
                 const address   = this.gateway.httpServer?.address();
-                this.serverName = address.address + address.port;
+
+                if (address?.address && address?.port)
+                {
+                    this.name = address.address + address.port;
+                }
             }
             else if (this.options.port)
             {
-                this.serverName = String(this.options.port);
+                this.name = String(this.options.port);
             }
         }
     }
