@@ -198,16 +198,16 @@ export class TGGraphQuery extends TGExchange
     #onDirectQueryReply(msg: TGMessage): void
     {
         // Return an empty response when requesting a node or property
-        if (isEmptyObject(msg.put) && !this._isCollectionQuery)
-        {
-            const soul = this.options['#'];
-
-            this._updateGraph(
-                {
-                    [soul]: undefined,
-                },
-                msg['@'],
-            );
-        }
+        // if (isEmptyObject(msg.put) && !this._isCollectionQuery)
+        // {
+        //     const soul = this.options['#'];
+        //
+        //     this._updateGraph(
+        //         {
+        //             [soul]: undefined,
+        //         },
+        //         msg['@'],
+        //     );
+        // }
     }
 }

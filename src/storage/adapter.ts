@@ -3,6 +3,7 @@ import { TGStorage } from './types';
 import { TGGraphAdapter, TGGraphAdapterOptions, TGGraphData, TGOptionsGet } from '../types';
 import { diffCRDT, mergeGraph } from '../crdt';
 import { assertPutEntry, getListOptions } from './utils';
+import { isNode } from '../utils';
 
 const DEFAULT_CRDT_OPTS = {
     diffFn : diffCRDT,
@@ -33,9 +34,14 @@ async function get(
 
     if (isString(soul))
     {
-        return {
-            [soul]: (await db.get(soul) || null)
-        };
+        const node = await db.get(soul);
+
+        if (isNode(node))
+        {
+            return {
+                [soul]: node
+            };
+        }
     }
 
     return {};
@@ -184,31 +190,24 @@ async function writeRawGraph(
     adapterOptions?: TGGraphAdapterOptions
 ): Promise<boolean>
 {
-    try
+    for (const soul in data)
     {
-        for (const soul in data)
+        if (!soul)
         {
-            if (!soul)
-            {
-                continue;
-            }
-
-            const nodeToWrite = data[soul];
-
-            if (!nodeToWrite)
-            {
-                await db.put(soul, null);
-                continue;
-            }
-
-            assertPutEntry(soul, nodeToWrite, adapterOptions);
-            await db.put(soul, nodeToWrite);
+            continue;
         }
 
-        return true;
+        const nodeToWrite = data[soul];
+
+        if (!nodeToWrite)
+        {
+            await db.put(soul, null);
+            continue;
+        }
+
+        assertPutEntry(soul, nodeToWrite, adapterOptions);
+        await db.put(soul, nodeToWrite);
     }
-    catch (e)
-    {
-        throw e;
-    }
+
+    return true;
 }

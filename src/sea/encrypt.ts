@@ -1,11 +1,8 @@
-import Buffer from '@topgunbuild/buffer';
-import WebCrypto from '@topgunbuild/webcrypto';
-import textEncoder from '@topgunbuild/textencoder';
 import { isObject, isString } from '@topgunbuild/typed';
 import { importAesKey } from './import-aes-key';
 import { Pair } from './pair';
-import { random } from '../utils/random';
 import { TGEncryptData } from '../types';
+import { random, crypto, TextEncoder, Buffer } from './shims';
 
 const DEFAULT_OPTS: {
     readonly name?: string;
@@ -52,13 +49,13 @@ export async function encrypt(
                   : isString(keyOrPair)
                       ? keyOrPair
                       : '';
-    const ct       = await WebCrypto.subtle.encrypt(
+    const ct       = await crypto.subtle.encrypt(
         {
             iv  : new Uint8Array(rand.iv),
             name: opt.name || DEFAULT_OPTS.name || 'AES-GCM',
         },
         await importAesKey(key, rand.s),
-        textEncoder.encode(msg),
+        TextEncoder.encode(msg),
     );
     const encoding = opt.encode || DEFAULT_OPTS.encode;
     const r        = {

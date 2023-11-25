@@ -1,4 +1,4 @@
-import Buffer from '@topgunbuild/buffer';
+import { Buffer } from './shims';
 import { isString } from '@topgunbuild/typed';
 
 export const shuffleAttackCutoff = 1546329600000; // Jan 1, 2019

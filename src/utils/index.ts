@@ -3,7 +3,6 @@ export * from './is-browser';
 export * from './is-support';
 export * from './local-storage';
 export * from './node';
-export * from './random';
 export * from './replacer-sort-keys';
 export * from './storage-helpers';
 export * from './stringify-options-get';

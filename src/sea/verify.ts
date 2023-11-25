@@ -1,5 +1,4 @@
-import Buffer from '@topgunbuild/buffer';
-import WebCrypto from '@topgunbuild/webcrypto';
+import { crypto, Buffer } from './shims';
 import { isObject, isString } from '@topgunbuild/typed';
 import { ecdsa, jwk, parse } from './settings';
 import { sha256 } from './sha256';
@@ -20,7 +19,7 @@ const DEFAULT_OPTS: {
 function importKey(pub: string): Promise<any>
 {
     const token   = jwk(pub);
-    const promise = WebCrypto.subtle.importKey('jwk', token, ecdsa.pair, false, [
+    const promise = crypto.subtle.importKey('jwk', token, ecdsa.pair, false, [
         'verify',
     ]);
     return promise;
@@ -39,7 +38,7 @@ export async function verifyHashSignature(
     const sig      = new Uint8Array(buf);
 
     if (
-        await WebCrypto.subtle.verify(
+        await crypto.subtle.verify(
             ecdsa.sign,
             key,
             sig,

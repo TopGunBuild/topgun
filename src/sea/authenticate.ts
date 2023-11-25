@@ -10,7 +10,7 @@ export type AuthOptions = {
 };
 
 const DEFAULT_OPTS = {
-    timeout: 1000,
+    timeout: 5000,
 };
 
 export async function authenticateAccount(
@@ -109,12 +109,9 @@ export async function authenticate(
             options.timeout = DEFAULT_OPTS.timeout;
         }
 
-        let idents: object =
-                client.graph.activeConnectors === 0
-                    ? await client
-                        .get(aliasSoul)
-                        .promise({ timeout: options.timeout })
-                    : await client.get(aliasSoul).promise();
+        let idents: object = await client
+            .get(aliasSoul)
+            .promise({ timeout: options.timeout });
 
         if (!isObject(idents))
         {

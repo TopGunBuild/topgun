@@ -98,7 +98,7 @@ export class TGLogger implements TGLoggerType
         this._extendedLogs[extension] = {};
         this._extensions.push(extension);
         const extendedLog = this._extendedLogs[extension];
-        this._levels.forEach((level: TGLoggerLevel) =>
+        defaultLoggerOptions.levels.forEach((level: TGLoggerLevel) =>
         {
             extendedLog[level]                = (...msgs: any) =>
             {

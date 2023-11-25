@@ -7,7 +7,7 @@ import {
     isNotEmptyObject,
     isObject
 } from '@topgunbuild/typed';
-import textEncoder from '@topgunbuild/textencoder';
+import { TextEncoder } from '../sea/shims';
 import { MAX_KEY_SIZE, MAX_VALUE_SIZE } from './constants';
 import { TGGraphAdapterOptions, TGGraphData, TGNode, TGOptionsGet } from '../types';
 import { getNodeSoul } from '../utils/node';
@@ -124,7 +124,7 @@ export function assertPutEntry(soul: string, node: TGNode, options: TGGraphAdapt
 
 export function assertKeySize(key: string, maxKeySize: number): void
 {
-    if (new Blob([key]).size <= maxKeySize)
+    if (TextEncoder.encode(key).length <= maxKeySize)
     {
         return;
     }
@@ -204,7 +204,7 @@ export function arrayCompare<T extends any[]|NodeJS.TypedArray>(
 // Compares x and y lexicographically using a UTF-8 collation
 export function lexicographicCompare(x: string, y: string): number
 {
-    const xEncoded = textEncoder.encode(x);
-    const yEncoded = textEncoder.encode(y);
+    const xEncoded = TextEncoder.encode(x);
+    const yEncoded = TextEncoder.encode(y);
     return arrayCompare(xEncoded, yEncoded);
 }

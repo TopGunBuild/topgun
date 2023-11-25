@@ -14,6 +14,7 @@ import { TGPeers } from '../federation-adapter/peers';
 import { createLogger, TGLoggerType } from '../logger';
 import { Listeners } from './listeners';
 import { TGBroker } from './broker';
+import { defaultLoggerOptions } from '../logger/constants';
 
 export class TGServer extends AsyncStreamEmitter<any>
 {
@@ -255,7 +256,7 @@ export class TGServer extends AsyncStreamEmitter<any>
         }
         else if (!isObject(this.options.log))
         {
-            this.options.log = {};
+            this.options.log = defaultLoggerOptions;
         }
         if (!isDefined(this.options.log.appId) && isString(this.name))
         {
@@ -278,11 +279,15 @@ export class TGServer extends AsyncStreamEmitter<any>
                 {
                     this.name = address.address + address.port;
                 }
+                else if (this.options.port)
+                {
+                    this.name = String(this.options.port);
+                }
             }
-            else if (this.options.port)
-            {
-                this.name = String(this.options.port);
-            }
+        }
+        if (!isString(this.options.serverName))
+        {
+            this.name = pseudoRandomText(8);
         }
     }
 }

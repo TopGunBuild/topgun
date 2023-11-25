@@ -148,6 +148,7 @@ export class Middleware
         }
         catch (e)
         {
+            this.logger.error(e);
             return {
                 '#'  : msgId,
                 '@'  : msg['#'],

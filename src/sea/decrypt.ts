@@ -1,7 +1,5 @@
-import Buffer from '@topgunbuild/buffer';
-import WebCrypto from '@topgunbuild/webcrypto';
-import textEncoder from '@topgunbuild/textencoder';
 import { isString, isObject } from '@topgunbuild/typed';
+import { crypto, TextEncoder, Buffer } from './shims';
 import { importAesKey } from './import-aes-key';
 import { parse } from './settings';
 import { Pair } from './pair';
@@ -36,7 +34,7 @@ export async function decrypt<T>(
         const aeskey    = await importAesKey(key, Buffer.from(json.s, encoding));
         const encrypted = new Uint8Array(Buffer.from(json.ct, encoding));
         const iv        = new Uint8Array(Buffer.from(json.iv, encoding));
-        const ct        = await WebCrypto.subtle.decrypt(
+        const ct        = await crypto.subtle.decrypt(
             {
                 iv,
                 name     : opt.name || DEFAULT_OPTS.name || 'AES-GCM',
@@ -45,7 +43,7 @@ export async function decrypt<T>(
             aeskey,
             encrypted,
         );
-        return parse(textEncoder.decode(ct));
+        return parse(TextEncoder.decode(ct));
     }
     catch (e: any)
     {
