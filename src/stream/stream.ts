@@ -4,7 +4,7 @@ import {
     StreamDemux,
     ConsumableStreamConsumer
 } from '@topgunbuild/async-stream-emitter';
-import { isObject, isString, cloneValue, isNull } from '@topgunbuild/typed';
+import { isObject, isString, cloneValue } from '@topgunbuild/typed';
 import { uuidv4 } from '../utils/uuidv4';
 import { TGStreamState } from './types';
 import { TGExchange } from './exchange';
@@ -124,7 +124,8 @@ export class TGStream<T> extends ConsumableStream<T>
 
                     const event: TGCollectionChangeEvent = {
                         oldValue,
-                        newValue: [...this.nodes]
+                        newValue: [...this.nodes],
+                        nodes   : this.nodes
                     };
 
                     this._eventDemux.write(`${this.name}/collectionChange`, event);

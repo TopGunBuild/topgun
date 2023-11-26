@@ -69,7 +69,8 @@ export interface TGOptionsGet extends Lex
     '%'?: number;
 }
 
-export interface IPolicyLex extends Lex {
+export interface IPolicyLex extends Lex
+{
     /** Path */
     '#'?: IPolicyLex;
     /** Key */
@@ -83,7 +84,7 @@ export interface IPolicyLex extends Lex {
     '+'?: '*';
 }
 
-export type IPolicy = string | IPolicyLex | (string | IPolicyLex)[];
+export type IPolicy = string|IPolicyLex|(string|IPolicyLex)[];
 
 export type TGOptionsPut = Partial<{
     opt: {
@@ -214,6 +215,7 @@ export interface TGCollectionChangeEvent
 {
     oldValue: TGNode[];
     newValue: TGNode[];
+    nodes: TGNode[];
 }
 
 export interface TGPathData
