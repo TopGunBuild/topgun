@@ -78,9 +78,9 @@ export class TGStream<T> extends ConsumableStream<T>
                     const emptyChange    = !value && (this.nodes.length === 0 || !this.existingNodesMap[key]);
                     const updatedGraph   = { [key]: value };
                     const existingGraph  = { [key]: this.existingNodesMap[key] };
-                    const nodeNotChanged = isObject(this.existingNodesMap[key])
-                        && isObject(value)
-                        && !diffCRDT(updatedGraph, existingGraph);
+                    const valueIsNode    = isNode(value);
+                    const exists         = isNode(this.existingNodesMap[key]);
+                    const nodeNotChanged = exists && valueIsNode && !diffCRDT(updatedGraph, existingGraph);
 
                     // Abort if data has not changed
                     if (emptyChange || nodeNotChanged)
@@ -90,7 +90,7 @@ export class TGStream<T> extends ConsumableStream<T>
 
                     const oldValue = [...this.nodes];
 
-                    if (isNode(value))
+                    if (valueIsNode)
                     {
                         const node = cloneValue(value);
 
@@ -103,29 +103,22 @@ export class TGStream<T> extends ConsumableStream<T>
                             node[collectionOptions.keyField] = key;
                         }
 
-                        if (!this.existingNodesMap.hasOwnProperty(key))
+                        if (exists)
                         {
-                            this.nodes.push(node);
+                            const index       = this.#getNodeIndex(key);
+                            this.nodes[index] = node;
                         }
                         else
                         {
-                            const index = this.#getNodeIndex(key);
-                            if (index > -1)
-                            {
-                                this.nodes[index] = node;
-                            }
+                            this.nodes.push(node);
                         }
-
-                        this.existingNodesMap[key] = value;
+                        this.existingNodesMap[key] = node;
                     }
-                    else if (!value && this.existingNodesMap[key])
+                    else if (exists)
                     {
                         const index = this.#getNodeIndex(key);
-                        if (index > -1)
-                        {
-                            this.nodes.splice(index, 1);
-                            this.existingNodesMap[key] = null;
-                        }
+                        this.nodes.splice(index, 1);
+                        delete this.existingNodesMap[key];
                     }
 
                     const event: TGCollectionChangeEvent = {
