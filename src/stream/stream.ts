@@ -4,13 +4,14 @@ import {
     StreamDemux,
     ConsumableStreamConsumer
 } from '@topgunbuild/async-stream-emitter';
-import { isObject, isString, cloneValue } from '@topgunbuild/typed';
+import { isObject, isString, isNumber, cloneValue } from '@topgunbuild/typed';
 import { uuidv4 } from '../utils/uuidv4';
 import { TGStreamState } from './types';
 import { TGExchange } from './exchange';
 import { TGCollectionChangeEvent, TGCollectionOptions, TGData, TGNode } from '../types';
 import { getNodeSoul, isNode } from '../utils';
 import { diffCRDT } from '../crdt';
+import { debounce } from '../utils/debounce';
 
 export class TGStream<T> extends ConsumableStream<T>
 {
@@ -64,17 +65,22 @@ export class TGStream<T> extends ConsumableStream<T>
         {
             const collectionOptions = this.attributes['topGunCollection'] as TGCollectionOptions;
 
+            const eventPublish = event => this._eventDemux.write(`${this.name}/collectionChange`, event);
+            const publish      = isNumber(collectionOptions.debounce)
+                ? debounce(eventPublish, collectionOptions.debounce)
+                : eventPublish;
+
             (async () =>
             {
                 for await (const { key, value } of this._dataStream as DemuxedConsumableStream<TGData<TGNode>>)
                 {
                     // Detect changes
                     const emptyChange    = !value && (this.nodes.length === 0 || !this.existingNodesMap[key]);
-                    const nodeNotChanged = isObject(this.existingNodesMap[key]) && isObject(value) && !diffCRDT({
-                        [key]: value
-                    }, {
-                        [key]: this.existingNodesMap[key]
-                    });
+                    const updatedGraph   = { [key]: value };
+                    const existingGraph  = { [key]: this.existingNodesMap[key] };
+                    const nodeNotChanged = isObject(this.existingNodesMap[key])
+                        && isObject(value)
+                        && !diffCRDT(updatedGraph, existingGraph);
 
                     // Abort if data has not changed
                     if (emptyChange || nodeNotChanged)
@@ -97,7 +103,7 @@ export class TGStream<T> extends ConsumableStream<T>
                             node[collectionOptions.keyField] = key;
                         }
 
-                        if (!this.existingNodesMap[key])
+                        if (!this.existingNodesMap.hasOwnProperty(key))
                         {
                             this.nodes.push(node);
                         }
@@ -128,7 +134,7 @@ export class TGStream<T> extends ConsumableStream<T>
                         nodes   : this.nodes
                     };
 
-                    this._eventDemux.write(`${this.name}/collectionChange`, event);
+                    publish(event);
                 }
             })();
         }

@@ -99,6 +99,7 @@ export interface TGCollectionOptions
 {
     idField?: string;
     keyField?: string;
+    debounce?: number;
 }
 
 export interface CRDTOptions
