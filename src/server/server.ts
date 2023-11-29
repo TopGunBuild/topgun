@@ -200,10 +200,10 @@ export class TGServer extends AsyncStreamEmitter<any>
 
             const nodeDiff = diff[soul];
 
-            if (!nodeDiff)
-            {
-                continue;
-            }
+            // if (!nodeDiff)
+            // {
+            //     continue;
+            // }
 
             this.#publishDiff(soul, msgId, nodeDiff, originators);
         }

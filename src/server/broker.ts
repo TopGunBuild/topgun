@@ -3,6 +3,10 @@ import { filterMatch } from '../storage';
 
 export class TGBroker extends SimpleBroker
 {
+    // -----------------------------------------------------------------------------------------------------
+    // @ Public methods
+    // -----------------------------------------------------------------------------------------------------
+
     publish(channelName: string, data: any, suppressEvent?: boolean): Promise<void>
     {
         const packet: PublishData = {
@@ -19,7 +23,7 @@ export class TGBroker extends SimpleBroker
 
         if (channelName.startsWith('topgun/nodes/'))
         {
-            this.handleLexQueries(channelName, data);
+            this.publishToCollections(channelName, data);
         }
 
         if (!suppressEvent)
@@ -29,23 +33,28 @@ export class TGBroker extends SimpleBroker
         return Promise.resolve();
     }
 
-    handleLexQueries(originalChannelName: string, data: any): void
+    // -----------------------------------------------------------------------------------------------------
+    // @ Private methods
+    // -----------------------------------------------------------------------------------------------------
+
+    private publishToCollections(channel: string, data: any): void
     {
         // Get node soul
-        const soul = originalChannelName.replace(/^topgun\/nodes\//, '');
+        const soul = channel.replace(/^topgun\/nodes\//, '');
 
-        // Get 'topgun/nodes/{soul}' from original channel name
-        const channelName = originalChannelName
+        // Get 'topgun/nodes/{soul}' from original channel name for collection queries
+        const collectionChannel = channel
             .split('/')
-            .slice(0, 3)
+            .slice(0, -1)
             .join('/');
 
-        const packet: PublishData = {
-            channel: channelName,
+        const packet = {
+            channel: collectionChannel,
             data
         };
-        const subscriberSockets   = this._clientSubscribers[channelName] || {};
-        const subscriberOptions   = this._clientSubscribersOptions[channelName] || {};
+
+        const subscriberSockets = this._clientSubscribers[collectionChannel] || {};
+        const subscriberOptions = this._clientSubscribersOptions[collectionChannel] || {};
 
         Object.keys(subscriberSockets)
             .filter((socketId) =>
