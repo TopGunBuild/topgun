@@ -1,7 +1,6 @@
-import { isObject, isNumber, isDefined, isString } from '@topgunbuild/typed';
-import { TGGraphData, TGNode, TGOptionsGet, TGPathData, TGValue } from '../../types';
+import { isObject, isDefined, isString } from '@topgunbuild/typed';
+import { TGGraphData, TGNode, TGPathData, TGValue } from '../../types';
 import { isSupportValue } from '../../utils/is-support';
-import { filterNodes } from '../../storage/utils';
 
 export function diffSets(
     initial: readonly string[],
@@ -12,22 +11,6 @@ export function diffSets(
         updated.filter(key => initial.indexOf(key) === -1),
         initial.filter(key => updated.indexOf(key) === -1),
     ];
-}
-
-export function getNodesFromGraph(
-    options: TGOptionsGet,
-    graph: TGGraphData
-): TGNode[]
-{
-    const allNodes    = Object.values(graph);
-    let filteredNodes = filterNodes(allNodes, options);
-
-    if (isNumber(options['%']) && filteredNodes.length > options['%'])
-    {
-        filteredNodes = filteredNodes.slice(0, options['%']);
-    }
-
-    return filteredNodes;
 }
 
 function graphData(souls: string[], value: TGValue, complete: boolean, graph: TGGraphData): TGPathData

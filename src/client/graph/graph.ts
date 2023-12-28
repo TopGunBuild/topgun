@@ -1,4 +1,4 @@
-import { isUndefined, isDefined } from '@topgunbuild/typed';
+import { isUndefined, isDefined, isNumber } from '@topgunbuild/typed';
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { addMissingState, mergeNodes } from '../../crdt';
 import {
@@ -9,12 +9,11 @@ import {
     TGOptionsPut,
     TGMiddleware,
     TGMiddlewareType,
-    TGOnCb, TGOptionsGet
+    TGOnCb, TGOptionsGet, TGNode
 } from '../../types';
 import { TGGraphConnector } from '../transports/graph-connector';
 import {
     diffSets,
-    getNodesFromGraph,
     getPathData,
     flattenGraphData
 } from './graph-utils';
@@ -23,6 +22,7 @@ import { TGGraphQuery } from './graph-query';
 import { stringifyOptionsGet } from '../../utils/stringify-options-get';
 import { uuidv4 } from '../../utils/uuidv4';
 import { TGStream } from '../../stream/stream';
+import { filterNodes } from '../../storage';
 
 interface TGGraphOptions
 {
@@ -225,6 +225,30 @@ export class TGGraph extends AsyncStreamEmitter<any>
         return this;
     }
 
+    getNodesFromGraph(options: TGOptionsGet): TGNode[]
+    {
+        const allNodes    = Object.values(this._graph);
+        let filteredNodes = filterNodes(allNodes, options);
+
+        if (isNumber(options['%']) && filteredNodes.length > options['%'])
+        {
+            filteredNodes = filteredNodes.slice(0, options['%']);
+        }
+
+        return filteredNodes;
+    }
+
+    getFromGraph(options: TGOptionsGet): TGGraphData
+    {
+        return this.getNodesFromGraph(options).reduce((accum, node) =>
+        {
+            return {
+                ...accum,
+                [node._['#']]: node
+            }
+        }, {});
+    }
+
     /**
      * Read a matching nodes from the graph
      */
@@ -234,7 +258,7 @@ export class TGGraph extends AsyncStreamEmitter<any>
         const stream      = this.#createQueryStream(queryString, cb, msgId, askOnce);
         const query       = this.#getQuery(queryString);
 
-        getNodesFromGraph(opts, this._graph).forEach((node) =>
+        this.getNodesFromGraph(opts).forEach((node) =>
         {
             if (isRefNode(node))
             {
