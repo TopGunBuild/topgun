@@ -1,28 +1,37 @@
 {
-    "$schema": "https://turbo.build/schema.json",
-    "globalDependencies": ["**/.env.*local"],
-    "globalEnv": ["PORT"],
+    "$schema": "https://turborepo.org/schema.json",
     "pipeline": {
         "build": {
-            // "outputs" are defined in Workspace Configurations: https://turbo.build/repo/docs/core-concepts/monorepos/configuring-workspaces
-            "dependsOn": ["^build"]
+            "dependsOn": ["^build"],
+            "inputs": ["src/**/*.ts", "test/**/*.js"],
+            "outputs": ["dist/**"]
         },
         "test": {
-            "outputs": ["coverage/**"],
-            "dependsOn": []
+            "dependsOn": [],
+            "inputs": ["src/**/*.ts", "test/**/*.js"]
         },
         "lint": {
-            "dependsOn": ["^build"]
+            "inputs": ["src/**/*.ts", "test/**/*.js"],
+            "outputs": []
         },
-        "typecheck": {
-            "dependsOn": ["^build"]
+        "lint:js": {
+            "inputs": ["test/**/*.js"],
+            "outputs": []
         },
-        "dev": {
-            "dependsOn": ["^build"],
-            "cache": false,
-            "persistent": true
+        "lint:js:fix": {
+            "inputs": ["test/**/*.js"],
+            "outputs": []
+        },
+        "lint:ts": {
+            "inputs": ["src/**/*.ts"],
+            "outputs": []
+        },
+        "lint:ts:fix": {
+            "inputs": ["src/**/*.ts"],
+            "outputs": []
         },
         "clean": {
+            "outputs": [],
             "cache": false
         }
     }
