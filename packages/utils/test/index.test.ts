@@ -1,0 +1,4 @@
+it('compare', () =>
+{
+    expect([]).toEqual([]);
+});
