@@ -1,34 +1,15 @@
-export function isObject(value: any): boolean
+import { windowOrGlobal } from '@topgunbuild/utils';
+
+export function createWebSocket(uri: string, options?: any)
 {
-    return (
-        !!value &&
-        typeof value === 'object' &&
-        Object.prototype.toString.call(value) !== '[object Array]'
-    );
-}
-
-export function cloneDeep(value: any): any
-{
-    if (Array.isArray(value))
+    if (windowOrGlobal && typeof windowOrGlobal.WebSocket === 'function')
     {
-        return [...value].map(_value => cloneDeep(_value));
+        return new windowOrGlobal.WebSocket(uri);
     }
-
-    if (value instanceof Map || value instanceof Set)
+    else
     {
-        return value;
+        const WebSocket: any = require('ws');
+        return new WebSocket(uri, [], options);
     }
-
-    if (isObject(value))
-    {
-        const result: {[key: string]: any} = {};
-
-        for (const key of Object.keys(value))
-        {
-            result[key] = cloneDeep(value[key]);
-        }
-        return result;
-    }
-    return value;
 }
 

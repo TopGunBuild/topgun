@@ -8,7 +8,7 @@ import {
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { SimpleBroker, SimpleExchange } from '../simple-broker';
 import { Socket } from './socket';
-import { applyEachSeries, AsyncFunction, isNode, randomBytes } from '@topgunbuild/utils';
+import { applyEachSeries, AsyncFunction, isNode } from '@topgunbuild/utils';
 import { v4 as uuidv4 } from 'uuid';
 import {
     BrokerError,
@@ -28,7 +28,6 @@ export class SocketServer extends AsyncStreamEmitter<any>
     MIDDLEWARE_SUBSCRIBE: Middlewares;
     MIDDLEWARE_PUBLISH_IN: Middlewares;
     MIDDLEWARE_PUBLISH_OUT: Middlewares;
-    MIDDLEWARE_AUTHENTICATE: Middlewares;
 
     origins: string;
     ackTimeout: number;
@@ -102,7 +101,6 @@ export class SocketServer extends AsyncStreamEmitter<any>
         this._middleware[this.MIDDLEWARE_SUBSCRIBE]    = [];
         this._middleware[this.MIDDLEWARE_PUBLISH_IN]   = [];
         this._middleware[this.MIDDLEWARE_PUBLISH_OUT]  = [];
-        this._middleware[this.MIDDLEWARE_AUTHENTICATE] = [];
 
         this.origins          = opts.origins;
         this._allowAllOrigins = this.origins.indexOf('*:*') !== -1;
@@ -191,7 +189,7 @@ export class SocketServer extends AsyncStreamEmitter<any>
         }
     }
 
-    handleSocketConnection(wsSocket: WebSocket, upgradeReq?: any): void
+    handleSocketConnection(wsSocket: any, upgradeReq?: any): void
     {
         if (!wsSocket['upgradeReq'] && upgradeReq)
         {
@@ -356,7 +354,6 @@ export class SocketServer extends AsyncStreamEmitter<any>
         {
             for await (const rpc of tgSocket.procedure('#handshake'))
             {
-                const data = rpc.data || {};
                 clearTimeout(tgSocket._handshakeTimeoutRef);
 
                 this._passThroughHandshakeAGMiddleware({
@@ -864,10 +861,6 @@ export class SocketServer extends AsyncStreamEmitter<any>
                 if (event === '#publish')
                 {
                     this._processPublishAction(options, request, callback);
-                }
-                else if (event === '#removeAuthToken')
-                {
-                    callback(null, options.data);
                 }
                 else
                 {

@@ -53,7 +53,7 @@ export class Socket extends AsyncStreamEmitter<any>
     /**
      * Constructor
      */
-    constructor(id: string, server: SocketServer, socket: WebSocket)
+    constructor(id: string, server: SocketServer, socket: any)
     {
         super();
 

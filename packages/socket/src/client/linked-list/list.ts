@@ -5,7 +5,7 @@ import { ItemIterator } from './item-iterator';
 /**
  * Double linked list.
  */
-export class LinkedList<T extends Item> implements Iterable<T> 
+export class LinkedList<T extends Item> implements Iterable<T>
 {
     size: number;
     head: T | null;
@@ -18,7 +18,7 @@ export class LinkedList<T extends Item> implements Iterable<T>
      * Throws an error when a given item has no `detach`, `append`, or `prepend`
      * methods.
      */
-    static from<T extends Item>(items: Array<T | null | undefined>) 
+    static from<T extends Item>(items: Array<T | null | undefined>)
     {
         const list = new this();
         return appendAll(list, items);
@@ -33,7 +33,7 @@ export class LinkedList<T extends Item> implements Iterable<T>
      */
     static of<T extends Item>(
         ...items: Array<T | null | undefined>
-    ): LinkedList<T> 
+    ): LinkedList<T>
     {
         const list = new this() as LinkedList<T>;
         return appendAll<T>(list, items);
@@ -46,7 +46,7 @@ export class LinkedList<T extends Item> implements Iterable<T>
      * Throws an error when a given item has no `detach`, `append`, or `prepend`
      * methods.
      */
-    constructor(...items: Array<T | null | undefined>) 
+    constructor(...items: Array<T | null | undefined>)
     {
         this.size = 0;
         this.tail = null;
@@ -61,14 +61,14 @@ export class LinkedList<T extends Item> implements Iterable<T>
      * methods.
      * Returns the given item.
      */
-    append(item: T | null | undefined): T | false 
+    append(item: T | null | undefined): T | false
     {
-        if (!item) 
+        if (!item)
         {
             return false;
         }
 
-        if (!item.append || !item.prepend || !item.detach) 
+        if (!item.append || !item.prepend || !item.detach)
         {
             throw new Error(
                 'An argument without append, prepend, or detach methods was given to `List#append`.'
@@ -77,14 +77,14 @@ export class LinkedList<T extends Item> implements Iterable<T>
 
         // If self has a last item, defer appending to the last items append method,
         // and return the result.
-        if (this.tail) 
+        if (this.tail)
         {
             return this.tail.append(item) as T;
         }
 
         // If self has a first item, defer appending to the first items append method,
         // and return the result.
-        if (this.head) 
+        if (this.head)
         {
             return this.head.append(item) as T;
         }
@@ -99,67 +99,11 @@ export class LinkedList<T extends Item> implements Iterable<T>
     }
 
     /**
-     * Prepend an item to a list.
-     *
-     * Throws an error when the given item has no `detach`, `append`, or `prepend`
-     * methods.
-     * Returns the given item.
-     */
-    prepend(item: T | null | undefined): T | false 
-    {
-        if (!item) 
-        {
-            return false;
-        }
-
-        if (!item.append || !item.prepend || !item.detach) 
-        {
-            throw new Error(
-                'An argument without append, prepend, or detach methods was given to `List#prepend`.'
-            );
-        }
-
-        if (this.head) 
-        {
-            return this.head.prepend(item) as T;
-        }
-
-        item.detach();
-        item.list = this;
-        this.head = item;
-        this.size++;
-
-        return item;
-    }
-
-    /**
-     * Returns the items of the list as an array.
-     *
-     * This does *not* detach the items.
-     *
-     * > **Note**: `List` also implements an iterator.
-     * > That means you can also do `[...list]` to get an array.
-     */
-    toArray(): Array<T> 
-    {
-        let item = this.head;
-        const result: Array<T> = [];
-
-        while (item) 
-        {
-            result.push(item);
-            item = item.next as T;
-        }
-
-        return result;
-    }
-
-    /**
      * Creates an iterator from the list.
      *
      * @returns {ItemIterator<T>}
      */
-    [Symbol.iterator]() 
+    [Symbol.iterator]()
     {
         return new ItemIterator(this.head);
     }

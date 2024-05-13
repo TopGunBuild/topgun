@@ -1,8 +1,10 @@
+import { Channel, ChannelOptions, ChannelState } from '../channel';
+import { CodecEngine } from '../types';
 
 
 export interface IClientSocket
 {
-    subscribe?(channelName: string, options?: any): TGChannel<any>;
+    subscribe?(channelName: string, options?: any): Channel<any>;
 
     unsubscribe?(channelName: string): void;
 
@@ -14,7 +16,7 @@ export interface IClientSocket
 
     getChannelState?(channelName: string): ChannelState;
 
-    getChannelOptions?(channelName: string): TGChannelOptions;
+    getChannelOptions?(channelName: string): ChannelOptions;
 
     closeChannel?(channelName: string): void;
 }
@@ -27,7 +29,7 @@ export interface AutoReconnectOptions
     maxDelay?: number|undefined;
 }
 
-export interface TGSocketClientOptions
+export interface SocketClientOptions
 {
     // (milliseconds) - This is the timeout for getting a response to a AGClientSocket invoke action.
     ackTimeout?: number|undefined;
@@ -93,7 +95,7 @@ export interface TGSocketClientOptions
     path?: string|undefined;
 
     // The type to use to represent binary on the client. Defaults to 'arraybuffer'.
-    binaryType?: string|undefined|BinaryType;
+    binaryType?: string|undefined;
 
     // pingTimeout will be connectTimeout at the start, but it will be updated with values provided by the 'connect' event.
     pingTimeout?: number|undefined;
@@ -118,22 +120,7 @@ export interface TGSocketClientOptions
     protocol?: string|undefined|null;
 }
 
-export type ProtocolVersions = 1|2;
 export type CallIdGenerator = () => number;
-export type WatcherFunction = (data: any) => void;
-
-export interface TGAuthEngine
-{
-    saveToken(
-        name: string,
-        token: AuthToken|string,
-        options?: {[key: string]: any}
-    ): Promise<AuthToken|string>;
-
-    removeToken(name: string): Promise<AuthToken|string|null>;
-
-    loadToken(name: string): Promise<AuthToken|string|null>;
-}
 
 export interface TransmitOptions
 {
@@ -150,15 +137,8 @@ export interface InvokeOptions
     ackTimeout?: number|undefined;
 }
 
-export interface AuthStatus
-{
-    isAuthenticated: AuthState;
-    authError: Error;
-}
-
 export interface SubscribeOptions
 {
-    waitForAuth?: boolean|undefined;
     priority?: number|undefined;
     data?: any;
     batch?: boolean;
