@@ -29,7 +29,7 @@ export interface CodecEngine {
 }
 
 export const MIDDLEWARE_HANDSHAKE_WS = 'handshakeWS';
-export const MIDDLEWARE_HANDSHAKE_AG = 'handshakeAG';
+export const MIDDLEWARE_HANDSHAKE_TG = 'handshakeTG';
 export const MIDDLEWARE_TRANSMIT     = 'transmit';
 export const MIDDLEWARE_INVOKE       = 'invoke';
 export const MIDDLEWARE_SUBSCRIBE    = 'subscribe';
@@ -38,7 +38,7 @@ export const MIDDLEWARE_PUBLISH_OUT  = 'publishOut';
 
 export type Middlewares =
     typeof MIDDLEWARE_HANDSHAKE_WS
-    |typeof MIDDLEWARE_HANDSHAKE_AG
+    |typeof MIDDLEWARE_HANDSHAKE_TG
     |typeof MIDDLEWARE_TRANSMIT
     |typeof MIDDLEWARE_INVOKE
     |typeof MIDDLEWARE_SUBSCRIBE

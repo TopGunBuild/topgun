@@ -2,6 +2,11 @@ import { IncomingMessage, RequestObject, ServerChannelOptions, SocketServerOptio
 import {
     CodecEngine,
     EventObject,
+    MIDDLEWARE_HANDSHAKE_TG,
+    MIDDLEWARE_HANDSHAKE_WS,
+    MIDDLEWARE_INVOKE, MIDDLEWARE_PUBLISH_IN, MIDDLEWARE_PUBLISH_OUT,
+    MIDDLEWARE_SUBSCRIBE,
+    MIDDLEWARE_TRANSMIT,
     MiddlewareFunction,
     Middlewares,
 } from '../types';
@@ -22,7 +27,7 @@ export class SocketServer extends AsyncStreamEmitter<any>
 {
     options: SocketServerOptions;
     MIDDLEWARE_HANDSHAKE_WS: Middlewares;
-    MIDDLEWARE_HANDSHAKE_AG: Middlewares;
+    MIDDLEWARE_HANDSHAKE_TG: Middlewares;
     MIDDLEWARE_TRANSMIT: Middlewares;
     MIDDLEWARE_INVOKE: Middlewares;
     MIDDLEWARE_SUBSCRIBE: Middlewares;
@@ -85,17 +90,17 @@ export class SocketServer extends AsyncStreamEmitter<any>
 
         this.options = Object.assign(opts, options || {});
 
-        this.MIDDLEWARE_HANDSHAKE_WS = 'handshakeWS';
-        this.MIDDLEWARE_HANDSHAKE_AG = 'handshakeAG';
-        this.MIDDLEWARE_TRANSMIT     = 'transmit';
-        this.MIDDLEWARE_INVOKE       = 'invoke';
-        this.MIDDLEWARE_SUBSCRIBE    = 'subscribe';
-        this.MIDDLEWARE_PUBLISH_IN   = 'publishIn';
-        this.MIDDLEWARE_PUBLISH_OUT  = 'publishOut';
+        this.MIDDLEWARE_HANDSHAKE_WS = MIDDLEWARE_HANDSHAKE_WS;
+        this.MIDDLEWARE_HANDSHAKE_TG = MIDDLEWARE_HANDSHAKE_TG;
+        this.MIDDLEWARE_TRANSMIT     = MIDDLEWARE_TRANSMIT;
+        this.MIDDLEWARE_INVOKE       = MIDDLEWARE_INVOKE;
+        this.MIDDLEWARE_SUBSCRIBE    = MIDDLEWARE_SUBSCRIBE;
+        this.MIDDLEWARE_PUBLISH_IN   = MIDDLEWARE_PUBLISH_IN;
+        this.MIDDLEWARE_PUBLISH_OUT  = MIDDLEWARE_PUBLISH_OUT;
 
         this._middleware                               = {};
         this._middleware[this.MIDDLEWARE_HANDSHAKE_WS] = [];
-        this._middleware[this.MIDDLEWARE_HANDSHAKE_AG] = [];
+        this._middleware[this.MIDDLEWARE_HANDSHAKE_TG] = [];
         this._middleware[this.MIDDLEWARE_TRANSMIT]     = [];
         this._middleware[this.MIDDLEWARE_INVOKE]       = [];
         this._middleware[this.MIDDLEWARE_SUBSCRIBE]    = [];
@@ -1062,14 +1067,14 @@ export class SocketServer extends AsyncStreamEmitter<any>
             socket: options.socket,
         };
 
-        await applyEachSeries(this._middleware[this.MIDDLEWARE_HANDSHAKE_AG], request,
+        await applyEachSeries(this._middleware[this.MIDDLEWARE_HANDSHAKE_TG], request,
             (err, results) =>
             {
                 if (callbackInvoked)
                 {
                     this.emitWarning(
                         new InvalidActionError(
-                            `Callback for ${this.MIDDLEWARE_HANDSHAKE_AG} middleware was already invoked`,
+                            `Callback for ${this.MIDDLEWARE_HANDSHAKE_TG} middleware was already invoked`,
                         ),
                     );
                 }
@@ -1094,8 +1099,8 @@ export class SocketServer extends AsyncStreamEmitter<any>
                         if (err === true || err.silent)
                         {
                             err = new SilentMiddlewareBlockedError(
-                                `Action was silently blocked by ${this.MIDDLEWARE_HANDSHAKE_AG} middleware`,
-                                this.MIDDLEWARE_HANDSHAKE_AG,
+                                `Action was silently blocked by ${this.MIDDLEWARE_HANDSHAKE_TG} middleware`,
+                                this.MIDDLEWARE_HANDSHAKE_TG,
                             );
                         }
                         else if (this.middlewareEmitWarnings)
