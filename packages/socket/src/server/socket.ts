@@ -1,3 +1,4 @@
+import { AsyncStreamEmitter, DemuxedConsumableStream, StreamDemux } from '@topgunbuild/async-stream-emitter';
 import { isNode } from '@topgunbuild/utils';
 import {
     hydrateError,
@@ -6,7 +7,6 @@ import {
     socketProtocolIgnoreStatuses, TimeoutError,
 } from '../errors/errors';
 import { Response } from '../response';
-import { AsyncStreamEmitter, DemuxedConsumableStream, StreamDemux } from '@topgunbuild/async-stream-emitter';
 import { EventObject, SocketState } from '../types';
 import { SimpleExchange } from '../simple-broker';
 import { SocketServer } from './server';

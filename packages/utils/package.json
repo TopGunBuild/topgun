@@ -1,7 +1,7 @@
 {
     "name": "@topgunbuild/utils",
     "version": "0.0.0",
-    "description": "Common methods and constants for the TopGun",
+    "description": "Common methods and constants for TopGun",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
     "files": [

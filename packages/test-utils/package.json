@@ -1,7 +1,7 @@
 {
-    "name": "@topgunbuild/async-stream-emitter",
+    "name": "@topgunbuild/test-utils",
     "version": "0.0.0",
-    "description": "EventEmitter using async iterable streams",
+    "description": "Test utils for TopGun",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
     "files": [
@@ -17,10 +17,12 @@
     "keywords": [],
     "author": "",
     "license": "ISC",
+    "dependencies": {
+        "net": "^1.0.2"
+    },
     "devDependencies": {
         "@types/jest": "^29.5.0",
         "@types/node": "^18.15.11",
-        "@topgunbuild/test-utils": "workspace:*",
         "jest": "^29.5.0",
         "ts-jest": "^29.1.0",
         "tsup": "6.5.0",

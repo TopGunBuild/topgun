@@ -1,9 +1,10 @@
+import { cleanupTasks, randomPort, wait } from '@topgunbuild/test-utils';
 import { create, EventObject, listen } from '../src';
-import { cleanupTasks, wait } from './test-util';
 
 it('Server-side socket connect event and server connection event should trigger', async () =>
 {
-    const server = listen(910, {
+    const port = await randomPort();
+    const server = listen(port, {
         wsEngine: 'ws',
     });
 
@@ -23,7 +24,7 @@ it('Server-side socket connect event and server connection event should trigger'
 
     const client = create({
         hostname: '127.0.0.1',
-        port    : 910,
+        port
     });
 
     let connectEmitted = false;

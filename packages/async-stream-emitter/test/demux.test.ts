@@ -1,5 +1,5 @@
 import { StreamDemux } from '../src/stream-demux';
-import { wait } from './test-util';
+import { wait } from '@topgunbuild/test-utils';
 
 
 describe('StreamDemux', () =>
