@@ -186,6 +186,8 @@ export class SocketServer extends AsyncStreamEmitter<any>
             this.wsServer = new WSServer(wsServerOptions);
             this.wsServer.on('error', this._handleServerError.bind(this));
             this.wsServer.on('connection', this.handleSocketConnection.bind(this));
+            // this.wsServer.on('connection', e => console.log('connection', e));
+            // this.wsServer.on('error', e => console.log('error', e));
         }
     }
 
@@ -370,6 +372,35 @@ export class SocketServer extends AsyncStreamEmitter<any>
                         tgSocket.disconnect(err.statusCode);
                         return;
                     }
+
+                    if (tgSocket.state === tgSocket.CLOSED)
+                    {
+                        return;
+                    }
+
+                    const clientSocketStatus: EventObject = {
+                        id         : tgSocket.id,
+                        pingTimeout: this.pingTimeout
+                    };
+                    const serverSocketStatus: EventObject = {
+                        id         : tgSocket.id,
+                        pingTimeout: this.pingTimeout
+                    };
+
+                    if (this.pendingClients[id])
+                    {
+                        delete this.pendingClients[id];
+                        this.pendingClientsCount--;
+                    }
+                    this.clients[id] = tgSocket;
+                    this.clientsCount++;
+
+                    tgSocket.state = tgSocket.OPEN;
+
+                    tgSocket.emit('connect', serverSocketStatus);
+                    this.emit('connection', { socket: tgSocket, ...serverSocketStatus });
+
+                    rpc.end(clientSocketStatus);
                 });
             }
         };
