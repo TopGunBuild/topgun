@@ -1,4 +1,17 @@
-it('compare', () =>
+import { isNode, windowOrGlobal, randomBytes } from '../src';
+
+it('windowOrGlobal', () =>
 {
-    expect([]).toEqual([]);
+    expect(typeof windowOrGlobal.setInterval === 'function').toEqual(true);
+});
+
+it('isNode', () =>
+{
+    expect(isNode()).toBeTruthy();
+});
+
+it('randomBytes', () =>
+{
+    expect(randomBytes(12) instanceof Uint8Array).toBeTruthy();
+    expect(randomBytes(12).length).toBe(12);
 });
