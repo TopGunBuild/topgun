@@ -4,9 +4,7 @@ import { create, EventObject, listen } from '../src';
 it('Server-side socket connect event and server connection event should trigger', async () =>
 {
     const port = await randomPort();
-    const server = listen(port, {
-        wsEngine: 'ws',
-    });
+    const server = listen(port);
 
     let connectionEmitted = false;
     let connectionEvent: EventObject;

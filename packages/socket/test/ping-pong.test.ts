@@ -11,7 +11,6 @@ describe('Socket Ping/pong', () =>
         // Intentionally make pingInterval higher than pingTimeout, that
         // way the client will never receive a ping or send back a pong.
         server = listen(port, {
-            wsEngine    : 'ws',
             pingInterval: 2000,
             pingTimeout : 500,
         });
@@ -80,7 +79,6 @@ describe('Socket Ping/pong', () =>
         // Intentionally make pingInterval higher than pingTimeout, that
         // way the client will never receive a ping or send back a pong.
         server = listen(port, {
-            wsEngine           : 'ws',
             pingInterval       : 2000,
             pingTimeout        : 500,
             pingTimeoutDisabled: true,

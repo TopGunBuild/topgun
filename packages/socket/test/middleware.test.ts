@@ -9,9 +9,7 @@ let server: SocketServer,
 beforeEach(async () =>
 {
     const port = await randomPort();
-    server     = listen(port, {
-        wsEngine: 'ws',
-    });
+    server     = listen(port);
     client     = create({
         hostname: '127.0.0.1',
         port,
