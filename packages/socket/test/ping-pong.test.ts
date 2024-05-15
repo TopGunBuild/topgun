@@ -3,7 +3,7 @@ import { ClientSocket, create, listen, SocketServer } from '../src';
 
 let server: SocketServer, client: ClientSocket;
 
-describe('Socket Ping/pong', () =>
+describe('Server socket ping/pong test', () =>
 {
     it('Should disconnect socket if server does not receive a pong from client before timeout', async () =>
     {
@@ -137,4 +137,101 @@ describe('Socket Ping/pong', () =>
 
         await cleanupTasks(client, server);
     });
+});
+
+describe('Client socket ping/pong test', () =>
+{
+    it('Should disconnect if ping is not received before timeout', async () =>
+    {
+        const port = await randomPort();
+
+        server = listen(port, {
+            ackTimeout: 200
+        });
+        await server.listener('ready').once();
+
+        client     = create({
+            hostname      : '127.0.0.1',
+            port,
+            ackTimeout    : 200,
+            connectTimeout: 500,
+        });
+
+        expect(client.pingTimeout).toEqual(500);
+
+        (async () =>
+        {
+            for await (let _ of client.listener('connect'))
+            {
+                expect(client.transport.pingTimeout).toEqual(server.options.pingTimeout);
+                // Hack to make the client ping independent from the server ping.
+                client.transport.pingTimeout = 500;
+                client.transport._resetPingTimeout();
+            }
+        })();
+
+        let disconnectCode = null;
+        let clientError    = null;
+
+        (async () =>
+        {
+            for await (let { error } of client.listener('error'))
+            {
+                clientError = error;
+            }
+        })();
+
+        (async () =>
+        {
+            for await (let event of client.listener('disconnect'))
+            {
+                disconnectCode = event.code;
+            }
+        })();
+
+        await wait(1000);
+
+        expect(disconnectCode).toEqual(4000);
+        expect(clientError).not.toEqual(null);
+        expect(clientError.name).toEqual('SocketProtocolError');
+
+        await new Promise<void>(resolve => setTimeout(() => resolve(), 2000));
+        await cleanupTasks(client, server);
+    });
+
+    it(
+        'Should not disconnect if ping is not received before timeout when pingTimeoutDisabled is true',
+        async () =>
+        {
+            const port = await randomPort();
+
+            server = listen(port, {
+                ackTimeout: 200
+            });
+            await server.listener('ready').once();
+
+            client     = create({
+                hostname      : '127.0.0.1',
+                port,
+                ackTimeout    : 200,
+                connectTimeout: 500,
+                pingTimeoutDisabled: true
+            });
+
+            expect(client.pingTimeout).toEqual(500);
+
+            let clientError = null;
+            (async () =>
+            {
+                for await (let { error } of client.listener('error'))
+                {
+                    clientError = error;
+                }
+            })();
+
+            await wait(1000);
+            expect(clientError).toEqual(null);
+            await cleanupTasks(client, server);
+        },
+    );
 });
