@@ -17,6 +17,11 @@
     "keywords": [],
     "author": "",
     "license": "ISC",
+    "dependencies": {
+        "@dao-xyz/borsh": "^5.2.2",
+        "@noble/curves": "1.2.0",
+        "@topgunbuild/utils": "workspace:*"
+    },
     "devDependencies": {
         "@types/jest": "^29.5.0",
         "@types/node": "^18.15.11",
