@@ -1,5 +1,5 @@
 import { baseEncode, sha256 } from '@topgunbuild/utils';
-import { KeyPairEd25519, PublicKeyEd25519 } from '../src/ed25519';
+import { KeyPairEd25519, PublicKeyEd25519 } from '../src/old/ed25519';
 import { deserialize, serialize } from '@dao-xyz/borsh';
 
 test('ser/der', async () =>

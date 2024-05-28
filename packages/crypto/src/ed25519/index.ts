@@ -1,2 +1,5 @@
-export * from './public-key-ed25519';
-export * from './key-pair-ed25519';
+export * from './keypair';
+export * from './private-key';
+export * from './public-key';
+export * from './sign';
+export * from './verify';

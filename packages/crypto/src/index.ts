@@ -1,3 +1,9 @@
 export * from './constants';
-export * from './ed25519/public-key-ed25519';
-export * from './utils';
+export * from './hash';
+export * from './keypair';
+export * from './keys';
+export * from './signature';
+export * from './ed25519';
+
+
+

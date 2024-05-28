@@ -1,0 +1,12 @@
+{
+    "extends": "../../tsconfig.browser.json",
+    "compilerOptions": {
+        "outDir": "./dist",
+        "experimentalDecorators": true,
+        "emitDecoratorMetadata": true,
+        "strictNullChecks": false
+    },
+    "files": [
+        "src/index.ts"
+    ]
+}

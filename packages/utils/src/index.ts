@@ -6,6 +6,8 @@ export * from './is-node';
 export * from './logger';
 export * from './format';
 export * from './hash';
+export * from './base64';
+
 
 
 
