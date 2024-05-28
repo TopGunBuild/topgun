@@ -1,4 +1,4 @@
-import { BaseCondition } from './base-condition';
+import { FieldQuery } from './field-query';
 import { field, variant } from '@dao-xyz/borsh';
 
 export enum NumberMatchEnum
@@ -14,7 +14,7 @@ export enum NumberMatchEnum
 }
 
 @variant(3)
-export class NumberCondition extends BaseCondition
+export class NumberCondition extends FieldQuery
 {
     @field({ type: 'f64' })
     value: number;

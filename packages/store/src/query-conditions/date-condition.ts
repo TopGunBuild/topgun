@@ -1,5 +1,5 @@
 import { field, variant } from '@dao-xyz/borsh';
-import { BaseCondition } from './base-condition';
+import { FieldQuery } from './field-query';
 
 export enum DateMatchEnum
 {
@@ -20,7 +20,7 @@ export enum DateMatchEnum
 }
 
 @variant(5)
-export class DateCondition extends BaseCondition
+export class DateCondition extends FieldQuery
 {
     @field({ type: 'string' })
     value: number;

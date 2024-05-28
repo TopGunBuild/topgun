@@ -1,5 +1,5 @@
 import { field, variant } from '@dao-xyz/borsh';
-import { BaseCondition } from './base-condition';
+import { FieldQuery } from './field-query';
 
 export enum ByteMatchEnum
 {
@@ -10,7 +10,7 @@ export enum ByteMatchEnum
 }
 
 @variant(2)
-export class ByteCondition extends BaseCondition
+export class ByteCondition extends FieldQuery
 {
     @field({ type: Uint8Array })
     value: Uint8Array;

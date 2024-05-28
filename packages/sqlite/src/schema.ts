@@ -1,15 +1,13 @@
 import { FieldValue, SQLLiteValue, Table } from './types';
 import { Constructor, FieldType, getSchema, OptionKind } from '@dao-xyz/borsh';
 import {
-    And,
-    BoolQuery, ByteMatchQuery, Compare, IntegerCompare,
-    LogicalQuery, MissingField,
+    And, BoolCondition, BoolMatchEnum, ByteCondition, ByteMatchEnum, DateCondition, DateMatchEnum, FieldQuery,
+    LogicalQuery, NumberCondition, NumberMatchEnum,
     Or,
     Query,
     SearchRequest,
     Sort,
-    SortDirection,
-    StateFieldQuery, StringMatch, StringMatchMethod,
+    SortDirection, StringCondition, StringMatchEnum,
 } from '@topgunbuild/store';
 import { Logger, toHexString } from '@topgunbuild/utils';
 
@@ -31,22 +29,6 @@ export const coerceSQLType = (
         return value == null ? 0 : 1;
     }
     return value as SQLLiteValue;
-};
-
-const stringArraysEquals = (a: string[], b: string[]): boolean =>
-{
-    if (a.length !== b.length)
-    {
-        return false;
-    }
-    for (let i = 0; i < a.length; i++)
-    {
-        if (a[i] !== b[i])
-        {
-            return false;
-        }
-    }
-    return true;
 };
 
 export const resolveFieldValues = (obj: any, table: Table): FieldValue[] =>
@@ -187,7 +169,7 @@ export const convertQueryToSQLQuery = (
     let whereBuilder = '';
     let joinBuilder  = '';
 
-    if (query instanceof StateFieldQuery)
+    if (query instanceof FieldQuery)
     {
         const { where, join } = convertStateFieldQuery(query, tables, table);
         whereBuilder += where;
@@ -228,84 +210,212 @@ export const convertQueryToSQLQuery = (
 };
 
 const convertStateFieldQuery = (
-    query: StateFieldQuery,
+    query: FieldQuery,
     tables: Map<string, Table>,
     table: Table,
 ): { join?: string; where: string } =>
 {
-    // if field id represented as foreign table, do join and compare
-    const field = table.fields.find((x) => stringArraysEquals(x.name, query.key));
-
     const keyWithTable = table.name + '.' + query.key.join('.');
     let where: string;
-    if (query instanceof StringMatch)
+    if (query instanceof StringCondition)
     {
         let statement = '';
 
-        if (query.method === StringMatchMethod.contains)
+        switch (query.method)
         {
-            statement = `${keyWithTable} LIKE '%${query.value}%'`;
+            case StringMatchEnum.contains:
+                statement = `${keyWithTable} LIKE '%${query.value}%'`;
+                break;
+
+            case StringMatchEnum.doesNotContain:
+                statement = `${keyWithTable} NOT LIKE '%${query.value}%'`;
+                break;
+
+            case StringMatchEnum.startsWith:
+                statement = `${keyWithTable} LIKE '${query.value}%'`;
+                break;
+
+            case StringMatchEnum.endsWith:
+                statement = `${keyWithTable} LIKE '%${query.value}'`;
+                break;
+
+            case StringMatchEnum.equals:
+                statement = `${keyWithTable} = '${query.value}'`;
+                break;
+
+            case StringMatchEnum.doesNotEqual:
+                statement = `${keyWithTable} != '${query.value}'`;
+                break;
+
+            case StringMatchEnum.empty:
+                statement = `${keyWithTable} is null or ${keyWithTable} = ''`;
+                break;
+
+            case StringMatchEnum.notEmpty:
+                statement = `${keyWithTable} is not null or ${keyWithTable} != ''`;
+                break;
+
+            default:
+                throw new Error(`Unsupported query method: ${query.method}`);
         }
-        else if (query.method === StringMatchMethod.prefix)
-        {
-            statement = `${keyWithTable} LIKE '${query.value}%'`;
-        }
-        else if (query.method === StringMatchMethod.exact)
-        {
-            statement = `${keyWithTable} = '${query.value}'`;
-        }
+
         if (query.caseInsensitive)
         {
             statement += ' COLLATE NOCASE';
         }
         where = statement;
     }
-    else if (query instanceof ByteMatchQuery)
+    else if (query instanceof ByteCondition)
     {
-        // compare Blob compule with f.value
+        switch (query.method)
+        {
+            case ByteMatchEnum.equals:
+                where = `${keyWithTable} = x'${toHexString(query.value)}'`;
+                break;
 
-        const statement = `${keyWithTable} = x'${toHexString(query.value)}'`;
-        where           = statement;
-    }
-    else if (query instanceof IntegerCompare)
-    {
-        if (field.type === 'BLOB')
-        {
-            // TODO perf
-            where = `hex(${keyWithTable}) LIKE '%${toHexString(new Uint8Array([Number(query.value.value)]))}%'`;
-        }
-        else if (query.compare === Compare.Equal)
-        {
-            where = `${keyWithTable} = ${query.value.value}`;
-        }
-        else if (query.compare === Compare.Greater)
-        {
-            where = `${keyWithTable} > ${query.value.value}`;
-        }
-        else if (query.compare === Compare.Less)
-        {
-            where = `${keyWithTable} < ${query.value.value}`;
-        }
-        else if (query.compare === Compare.GreaterOrEqual)
-        {
-            where = `${keyWithTable} >= ${query.value.value}`;
-        }
-        else if (query.compare === Compare.LessOrEqual)
-        {
-            where = `${keyWithTable} <= ${query.value.value}`;
-        }
-        else
-        {
-            throw new Error(`Unsupported compare type: ${query.compare}`);
+            case ByteMatchEnum.doesNotEqual:
+                where = `${keyWithTable} != x'${toHexString(query.value)}'`;
+                break;
+
+            case ByteMatchEnum.empty:
+                where = `${keyWithTable} is null or ${keyWithTable} = ''`;
+                break;
+
+            case ByteMatchEnum.notEmpty:
+                where = `${keyWithTable} is not null or ${keyWithTable} != ''`;
+                break;
+
+            default:
+                throw new Error(`Unsupported query method: ${query.method}`);
         }
     }
-    else if (query instanceof MissingField)
+    else if (query instanceof NumberCondition)
     {
-        where = `${keyWithTable} IS NULL`;
+        switch (query.method)
+        {
+            case NumberMatchEnum.equals:
+                where = `${keyWithTable} = ${query.value}`;
+                break;
+
+            case NumberMatchEnum.doesNotEqual:
+                where = `${keyWithTable} != ${query.value}`;
+                break;
+
+            case NumberMatchEnum.greaterThan:
+                where = `${keyWithTable} > ${query.value}`;
+                break;
+
+            case NumberMatchEnum.lessThan:
+                where = `${keyWithTable} < ${query.value}`;
+                break;
+
+            case NumberMatchEnum.greaterThanOrEqualTo:
+                where = `${keyWithTable} >= ${query.value}`;
+                break;
+
+            case NumberMatchEnum.lessThanOrEqualTo:
+                where = `${keyWithTable} <= ${query.value}`;
+                break;
+
+            case NumberMatchEnum.empty:
+                where = `${keyWithTable} is null or ${keyWithTable} = ''`;
+                break;
+
+            case NumberMatchEnum.notEmpty:
+                where = `${keyWithTable} is not null or ${keyWithTable} != ''`;
+                break;
+
+            default:
+                throw new Error(`Unsupported query method: ${query.method}`);
+        }
     }
-    else if (query instanceof BoolQuery)
+    else if (query instanceof DateCondition)
     {
-        where = `${keyWithTable} = ${query.value}`;
+        switch (query.method)
+        {
+            case DateMatchEnum.equals:
+                where = `${keyWithTable} = ${query.value}`;
+                break;
+
+            case DateMatchEnum.doesNotEqual:
+                where = `${keyWithTable} != ${query.value}`;
+                break;
+
+            case DateMatchEnum.before:
+                where = `${keyWithTable} < ${query.value}`;
+                break;
+
+            case DateMatchEnum.after:
+                where = `${keyWithTable} > ${query.value}`;
+                break;
+
+            case DateMatchEnum.today:
+                where = `strftime('%Y-%m-%d', ${keyWithTable}) = DATE('now')`;
+                break;
+
+            case DateMatchEnum.yesterday:
+                where = `strftime('%Y-%m-%d', ${keyWithTable}) = DATE('now','-1 day')`;
+                break;
+
+            case DateMatchEnum.thisMonth:
+                where = `strftime('%Y-%m', ${keyWithTable}) = strftime('%Y-%m', DATE('now'))`;
+                break;
+
+            case DateMatchEnum.lastMonth:
+                where = `strftime('%Y-%m', ${keyWithTable}) = strftime('%Y-%m', DATE('now','-1 month'))`;
+                break;
+
+            case DateMatchEnum.nextMonth:
+                where = `strftime('%Y-%m', ${keyWithTable}) = strftime('%Y-%m', DATE('now','+1 month'))`;
+                break;
+
+            case DateMatchEnum.thisYear:
+                where = `strftime('%Y', ${keyWithTable}) = strftime('%Y', 'now')`;
+                break;
+
+            case DateMatchEnum.lastYear:
+                where = `strftime('%Y', ${keyWithTable}) = strftime('%Y', DATE('now','-1 year'))`;
+                break;
+
+            case DateMatchEnum.nextYear:
+                where = `strftime('%Y', ${keyWithTable}) = strftime('%Y', DATE('now','+1 year'))`;
+                break;
+
+            case DateMatchEnum.empty:
+                where = `${keyWithTable} is null or ${keyWithTable} = ''`;
+                break;
+
+            case DateMatchEnum.notEmpty:
+                where = `${keyWithTable} is not null or ${keyWithTable} != ''`;
+                break;
+
+            default:
+                throw new Error(`Unsupported query method: ${query.method}`);
+        }
+    }
+    else if (query instanceof BoolCondition)
+    {
+        switch (query.method)
+        {
+            case BoolMatchEnum.true:
+                where = `${keyWithTable} = 1`;
+                break;
+
+            case BoolMatchEnum.false:
+                where = `${keyWithTable} = 0`;
+                break;
+
+            case BoolMatchEnum.empty:
+                where = `${keyWithTable} is null or ${keyWithTable} = ''`;
+                break;
+
+            case BoolMatchEnum.notEmpty:
+                where = `${keyWithTable} is not null or ${keyWithTable} != ''`;
+                break;
+
+            default:
+                throw new Error(`Unsupported query method: ${query.method}`);
+        }
     }
     else
     {

@@ -2,7 +2,7 @@ import { field, vec } from '@dao-xyz/borsh';
 import { toArray } from '../utils';
 import { Query } from '../query';
 
-export class BaseCondition extends Query
+export class FieldQuery extends Query
 {
     @field({ type: vec('string') })
     key: string[];

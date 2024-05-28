@@ -1,4 +1,4 @@
-import { BaseCondition } from './base-condition';
+import { FieldQuery } from './field-query';
 import { field, variant } from '@dao-xyz/borsh';
 
 export enum BoolMatchEnum
@@ -10,7 +10,7 @@ export enum BoolMatchEnum
 }
 
 @variant(1)
-export class BoolCondition extends BaseCondition
+export class BoolCondition extends FieldQuery
 {
     @field({ type: 'bool' })
     value: boolean;
