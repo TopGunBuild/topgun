@@ -21,8 +21,6 @@ export type Statement = {
     all: (values: SQLLiteValue[], err?: (err: any, rows: any[]) => any) => Promise<any>|any
 }
 
-export type FieldValue = { table: Table; values: any[] };
-
 export type SQLLiteValue =
     |string
     |number

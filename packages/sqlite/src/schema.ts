@@ -1,5 +1,4 @@
-import { FieldValue, SQLLiteValue, Table } from './types';
-import { Constructor, FieldType, getSchema, OptionKind } from '@dao-xyz/borsh';
+import { SQLLiteValue } from './types';
 import {
     And, BoolCondition, BoolMatchEnum, ByteCondition, ByteMatchEnum, DateCondition, DateMatchEnum, FieldQuery,
     LogicalQuery, NumberCondition, NumberMatchEnum,
@@ -9,102 +8,37 @@ import {
     Sort,
     SortDirection, StringCondition, StringMatchEnum,
 } from '@topgunbuild/store';
-import { Logger, toHexString } from '@topgunbuild/utils';
+import { toHexString } from '@topgunbuild/utils';
 
-export const coerceSQLIndexType = (
-    value: SQLLiteValue,
-    type?: FieldType,
+export const toSQLType = (
+    value: boolean|string|number|Uint8Array,
 ): SQLLiteValue =>
 {
-    return value;
-};
-
-export const coerceSQLType = (
-    value: boolean|bigint|string|number|Uint8Array,
-    type?: FieldType,
-): SQLLiteValue =>
-{
-    if (type === 'bool')
+    if (typeof value === 'boolean')
     {
-        return value == null ? 0 : 1;
-    }
-    return value as SQLLiteValue;
-};
-
-export const resolveFieldValues = (obj: any, table: Table): FieldValue[] =>
-{
-    const { fields }                              = getSchema(table.ctor);
-    const result: FieldValue = { table, values: [] };
-    const ret: FieldValue[]  = [];
-
-    for (const field of fields)
-    {
-        if (typeof field.type === 'string' || field.type == Uint8Array)
-        {
-            result.values.push(coerceSQLType(obj[field.key], field.type));
-        }
-        else if (field.type instanceof OptionKind)
-        {
-            result.values.push(
-                coerceSQLType(obj[field.key], field.type.elementType),
-            );
-        }
-    }
-    return [result, ...ret];
-};
-
-export const getTableName = (ctor: Constructor<any>, includePrefix = true) =>
-{
-    let name: string;
-    const schema = getSchema(ctor);
-    if (schema.variant === undefined)
-    {
-        Logger.warn(
-            `Schema associated with ${ctor.name} has no variant.  This will results in SQL table with name generated from the Class name. This is not recommended since changing the class name will result in a new table`,
-        );
-        name = ctor.name;
+        return value ? 1 : 0 as SQLLiteValue;
     }
     else
     {
-        name =
-            typeof schema.variant === 'string'
-                ? schema.variant
-                : JSON.stringify(schema.variant);
+        return value as SQLLiteValue;
     }
-
-    // prefix the generated table name so that the name is a valid SQL identifier (table name)
-    // choose prefix which is readable and explains that this is a generated table name
-    return (includePrefix ? '__' : '') + name.replace(/[^a-zA-Z0-9_]/g, '_');
 };
 
-export const getSubTableName = (
-    ctor: Constructor<any>,
-    key: string[],
-    includePrefix = true,
-) =>
+export const resolveTableValues = (obj: any, tableFields: Record<string, string>): any[] =>
 {
-    return `${getTableName(ctor, includePrefix)}__${key.join('_')}`;
-};
+    const values: any[] = [];
 
-export const resolveTable = (
-    tables: Map<string, Table>,
-    ctor: Constructor<any>,
-    key?: string[],
-) =>
-{
-    const name  = key == null ? getTableName(ctor) : getSubTableName(ctor, key);
-    const table = tables.get(name);
-    if (!table)
+    for (const fieldName of Object.keys(tableFields))
     {
-        throw new Error(`Table not found for ${name}`);
+        values.push(toSQLType(obj[fieldName]));
     }
-    return table;
+
+    return values;
 };
 
-export const convertSearchRequestToQuery = (
+export const convertSearchRequestToSQLQuery = (
     request: SearchRequest,
-    tables: Map<string, Table>,
-    table: Table,
+    tableName: string,
 ) =>
 {
     let whereBuilder                     = '';
@@ -115,8 +49,7 @@ export const convertSearchRequestToQuery = (
     {
         const { where, join } = convertQueryToSQLQuery(
             request.query[0],
-            tables,
-            table,
+            tableName,
         );
         whereBuilder += where;
         if (join)
@@ -128,8 +61,7 @@ export const convertSearchRequestToQuery = (
     {
         const { where, join } = convertQueryToSQLQuery(
             new And(request.query),
-            tables,
-            table,
+            tableName,
         );
         whereBuilder += where;
         if (join)
@@ -148,7 +80,7 @@ export const convertSearchRequestToQuery = (
         orderByBuilder += request.sort
             .map(
                 (sort: Sort) =>
-                    `${table.name}.${sort.key} ${sort.direction === SortDirection.ASC ? 'ASC' : 'DESC'}`,
+                    `${tableName}.${sort.key} ${sort.direction === SortDirection.ASC ? 'ASC' : 'DESC'}`,
             )
             .join(', ');
     }
@@ -160,10 +92,9 @@ export const convertSearchRequestToQuery = (
     };
 };
 
-export const convertQueryToSQLQuery = (
+const convertQueryToSQLQuery = (
     query: Query,
-    tables: Map<string, Table>,
-    table: Table,
+    tableName: string,
 ): { where: string; join?: string } =>
 {
     let whereBuilder = '';
@@ -171,7 +102,7 @@ export const convertQueryToSQLQuery = (
 
     if (query instanceof FieldQuery)
     {
-        const { where, join } = convertStateFieldQuery(query, tables, table);
+        const { where, join } = convertStateFieldQuery(query, tableName);
         whereBuilder += where;
         join && (joinBuilder += join);
     }
@@ -181,7 +112,7 @@ export const convertQueryToSQLQuery = (
         {
             for (const subquery of query.and)
             {
-                const { where, join } = convertQueryToSQLQuery(subquery, tables, table);
+                const { where, join } = convertQueryToSQLQuery(subquery, tableName);
                 whereBuilder          =
                     whereBuilder.length > 0 ? `(${whereBuilder}) AND (${where})` : where;
                 join && (joinBuilder += join);
@@ -191,7 +122,7 @@ export const convertQueryToSQLQuery = (
         {
             for (const subquery of query.or)
             {
-                const { where, join } = convertQueryToSQLQuery(subquery, tables, table);
+                const { where, join } = convertQueryToSQLQuery(subquery, tableName);
                 whereBuilder          =
                     whereBuilder.length > 0 ? `(${whereBuilder}) OR (${where})` : where;
                 join && (joinBuilder += join);
@@ -211,11 +142,10 @@ export const convertQueryToSQLQuery = (
 
 const convertStateFieldQuery = (
     query: FieldQuery,
-    tables: Map<string, Table>,
-    table: Table,
+    tableName: string,
 ): { join?: string; where: string } =>
 {
-    const keyWithTable = table.name + '.' + query.key.join('.');
+    const keyWithTable = tableName + '.' + query.key.join('.');
     let where: string;
     if (query instanceof StringCondition)
     {

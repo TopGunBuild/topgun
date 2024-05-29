@@ -1,6 +1,5 @@
 import type { PreparedStatement as SQLStatement } from '@sqlite.org/sqlite-wasm';
-import type { Statement as IStatement } from '../types';
-import type { BindableValue } from '../schema';
+import { SQLLiteValue, Statement as IStatement } from '../types';
 
 export class Statement implements IStatement
 {
@@ -18,7 +17,7 @@ export class Statement implements IStatement
         return this.statement.finalize();
     }
 
-    get(values: BindableValue[])
+    get(values: SQLLiteValue[])
     {
         this.statement.bind(values as any);
         let step = this.statement.step();
@@ -32,7 +31,7 @@ export class Statement implements IStatement
         return results;
     }
 
-    run(values: BindableValue[])
+    run(values: SQLLiteValue[])
     {
         this.statement.bind(values as any);
         this.statement.stepReset();
@@ -43,7 +42,7 @@ export class Statement implements IStatement
         return this.statement.reset();
     }
 
-    all(values: BindableValue[])
+    all(values: SQLLiteValue[])
     {
         if (values && values.length > 0)
         {

@@ -6,6 +6,8 @@ export * from './query';
 export * from './result';
 export * from './search-request';
 export * from './sort';
+export * from './data-type';
+
 
 
 

@@ -1,69 +1,50 @@
 import { PublicKey } from '@topgunbuild/crypto';
 import {
     CloseIteratorRequest, CollectNextRequest,
-    SearchRequest,
-    StoreInitProperties,
-    StoreResult,
-    StoreResults,
+    SearchRequest, StoreRecord, StoreResults,
 } from '@topgunbuild/store';
-import { Database, SQLLite, Statement, Table } from './types';
-import { getSQLTable } from './utils';
-import {
-    coerceSQLIndexType,
-    coerceSQLType,
-    convertSearchRequestToQuery,
-    resolveFieldValues,
-    resolveTable,
-} from './schema';
+import { Database, SQLLite, Statement } from './types';
+import { convertSearchRequestToSQLQuery, resolveTableValues } from './schema';
 
 export class SQLLiteStore
 {
     db: Database;
     putStatement: Map<string, Statement>;
-    primaryKeyArr: string[];
     cursor: Map<
         string,
         {
-            kept: number;
+            left: number;
             from: PublicKey;
             fetch: (
                 amount: number,
-            ) => Promise<{ results: StoreResult[]; kept: number }>;
+            ) => Promise<{ results: StoreRecord[]; left: number }>;
             fetchStatement: Statement;
             countStatement: Statement;
             timeout: ReturnType<typeof setTimeout>;
         }
     >;
     iteratorTimeout: number;
-    rootTableName = 'tg_node_field';
-    closed        = true;
-    properties: StoreInitProperties<any>;
-    tables: Map<string, Table>;
+    closed: boolean;
+    rootTableName: string;
+    rootTableFields: Record<string, string>;
 
     constructor(
-        readonly sqllite: SQLLite,
-        options?: {iteratorTimeout?: number}
+        readonly sqlLite: SQLLite,
+        options?: { iteratorTimeout?: number },
     )
     {
+        this.closed          = true;
+        this.rootTableName   = 'tg_node_field';
+        this.rootTableFields = {
+            node_name : 'text',
+            field_name: 'text',
+            value     : 'any',
+            state     : 'text',
+            size      : 'integer',
+            type      : 'integer',
+            deleted   : 'integer',
+        };
         this.iteratorTimeout = options?.iteratorTimeout || 1e4;
-    }
-
-    async init(properties: StoreInitProperties<any>): Promise<void>
-    {
-        this.properties    = properties;
-        this.primaryKeyArr = Array.isArray(properties.indexBy)
-            ? properties.indexBy
-            : [properties.indexBy];
-
-        if (this.primaryKeyArr.length > 1)
-        {
-            throw new Error('Indexed by property can only be a root property');
-        }
-
-        if (!this.properties.schema)
-        {
-            throw new Error('Missing schema');
-        }
     }
 
     async start(): Promise<void>
@@ -73,42 +54,39 @@ export class SQLLiteStore
             throw new Error('Already started');
         }
         this.closed = false;
-        this.db     = await this.sqllite.createDatabase(undefined);
+        this.db     = await this.sqlLite.createDatabase(undefined);
 
-        const tables = getSQLTable(
-            this.properties.schema!,
-            [],
-            this.primaryKeyArr[0]
-        );
+        const columnNames = Object.keys(this.rootTableFields);
+        const sql         = `create table if not exists ${this.rootTableName}
+                             (
+                                 ${columnNames.join(', ')}
+                             )
 
-        this.rootTableName = tables[0].name;
-        for (const table of tables)
-        {
-            const sql = `create table if not exists ${table.name}
-                         (
-                             ${[...table.fields, ...table.constraints].map((s) => s.definition).join(', ')}
-                         )`
-            this.db.exec(sql);
-        }
+        create unique index if not exists ${this.rootTableFields}_node_name_field_name_uindex
+            on ${this.rootTableFields} (node_name, field_name);
+
+        create index if not exists ${this.rootTableFields}_node_name_index
+            on ${this.rootTableFields} (node_name);
+
+        create index if not exists ${this.rootTableFields}_deleted_index
+            on ${this.rootTableFields} (deleted);`;
+        this.db.exec(sql);
 
         this.putStatement = new Map();
-        this.tables       = new Map();
-        for (const table of tables)
-        {
-            const sqlPut = `insert
-            or replace into
-            ${table.name}
-            (
-            ${table.fields.map((field) => field.name).join(', ')}
-            )
-            VALUES
-            (
-            ${table.fields.map((_x) => '?').join(', ')}
-            );`;
 
-            this.putStatement.set(table.name, await this.db.prepare(sqlPut));
-            this.tables.set(table.name, table);
-        }
+        const sqlPut = `insert
+        or replace into
+        ${this.rootTableName}
+        (
+        ${columnNames.join(', ')}
+        )
+        VALUES
+        (
+        ${columnNames.map((_x) => '?').join(', ')}
+        );`;
+
+        this.putStatement.set(this.rootTableName, await this.db.prepare(sqlPut));
+
         this.cursor = new Map();
     }
 
@@ -124,64 +102,49 @@ export class SQLLiteStore
             v.finalize?.();
         }
         this.putStatement.clear();
-        this.tables.clear();
 
         for (const [k, _v] of this.cursor)
         {
-            this.clearupIterator(k);
+            this.clearUpIterator(k);
         }
         await this.db.close();
     }
 
-    async get(id: string): Promise<StoreResult|undefined>
+    async put(value: StoreRecord): Promise<void>
     {
-        const sql  = `select *
-                      from ${this.rootTableName}
-                      where ${this.primaryKeyArr[0]} = ? `;
-        const stmt = await this.db.prepare(sql);
-        const rows = await stmt.get([coerceSQLIndexType(id)]);
-        stmt.finalize?.();
-        return rows;
+        const statement = this.putStatement.get(this.rootTableName);
+        const values    = resolveTableValues(value, this.rootTableFields);
+        await statement.run(values);
     }
 
-    async put(value: StoreResult): Promise<void>
-    {
-        const valuesToPut = resolveFieldValues(
-            value,
-            resolveTable(this.tables, this.properties.schema)
-        );
+    // async get(id: string): Promise<StoreRecord|undefined>
+    // {
+    //     const sql  = `select *
+    //                   from ${this.rootTableName}
+    //                   where ${this.primaryKeyArr[0]} = ? `;
+    //     const stmt = await this.db.prepare(sql);
+    //     const rows = await stmt.get([id]);
+    //     stmt.finalize?.();
+    //     return rows;
+    // }
 
-        for (const { table, values } of valuesToPut)
-        {
-            const statement = this.putStatement.get(table.name);
-            if (!statement)
-            {
-                throw new Error('No statement found');
-            }
-            await statement.run(values.map((x: any) => typeof x === 'boolean' ? (x ? 1 : 0) : x));
-        }
-    }
-
-    async del(id: string): Promise<void>
-    {
-        let statement = await this.db.prepare(`delete
-                                               from ${this.rootTableName}
-                                               where ${this.primaryKeyArr[0]} = ?`)
-        await statement.run([coerceSQLType(id)])
-        await statement.finalize?.();
-    }
+    // async del(id: string): Promise<void>
+    // {
+    //     let statement = await this.db.prepare(`delete
+    //                                            from ${this.rootTableName}
+    //                                            where ${this.primaryKeyArr[0]} = ?`);
+    //     await statement.run([toSQLType(id)]);
+    //     await statement.finalize?.();
+    // }
 
     async query(
         request: SearchRequest,
-        from: PublicKey
+        from: PublicKey,
     ): Promise<StoreResults>
     {
-        // create a sql statement where the offset and the limit id dynamic and can be updated
-        // TODO don't use offset but sort and limit 'next' calls by the last value of the sort
-        const { where, join, orderBy } = convertSearchRequestToQuery(
+        const { where, join, orderBy } = convertSearchRequestToSQLQuery(
             request,
-            this.tables,
-            this.tables.get(this.rootTableName)!
+            this.rootTableName
         );
 
         const query         = `${join ? join : ''} ${where ? where : ''}`;
@@ -207,8 +170,8 @@ export class SQLLiteStore
                 // Bump timeout timer
                 clearTimeout(iterator.timeout);
                 iterator.timeout = setTimeout(
-                    () => this.clearupIterator(request.idString),
-                    this.iteratorTimeout
+                    () => this.clearUpIterator(request.idString),
+                    this.iteratorTimeout,
                 );
             }
 
@@ -220,30 +183,30 @@ export class SQLLiteStore
             if (results.length > 0)
             {
                 const totalCount = countStmt.get()[totalCountKey];
-                iterator.kept    = totalCount - results.length - offsetStart;
+                iterator.left    = totalCount - results.length - offsetStart;
             }
             else
             {
-                iterator.kept = 0;
+                iterator.left = 0;
             }
 
-            if (iterator.kept === 0)
+            if (iterator.left === 0)
             {
-                this.clearupIterator(request.idString);
+                this.clearUpIterator(request.idString);
                 clearTimeout(iterator.timeout);
             }
-            return { results, kept: iterator.kept };
+            return { results, left: iterator.left };
         };
         const iterator = {
-            kept          : 0,
+            left          : 0,
             fetch,
             from,
             fetchStatement: stmt,
             countStatement: countStmt,
             timeout       : setTimeout(
-                () => this.clearupIterator(request.idString),
-                this.iteratorTimeout
-            )
+                () => this.clearUpIterator(request.idString),
+                this.iteratorTimeout,
+            ),
         };
 
         this.cursor.set(request.idString, iterator);
@@ -252,7 +215,7 @@ export class SQLLiteStore
 
     async next(
         query: CollectNextRequest,
-        from: PublicKey
+        from: PublicKey,
     ): Promise<StoreResults>
     {
         const cache = this.cursor.get(query.idString);
@@ -267,13 +230,13 @@ export class SQLLiteStore
 
     close(
         query: CloseIteratorRequest,
-        from: PublicKey
+        from: PublicKey,
     ): void|Promise<void>
     {
-        this.clearupIterator(query.idString, from);
+        this.clearUpIterator(query.idString, from);
     }
 
-    private clearupIterator(id: string, from?: PublicKey)
+    private clearUpIterator(id: string, from?: PublicKey)
     {
         const cache = this.cursor.get(id);
         if (!cache)
@@ -294,7 +257,7 @@ export class SQLLiteStore
     }
 
     iterator(): IterableIterator<
-        [string, StoreResult]
+        [string, StoreRecord]
     >
     {
         throw new Error('Method not implemented.');
@@ -304,9 +267,9 @@ export class SQLLiteStore
     {
         const stmt   = await this.db.prepare(`select count(*) as total
                                               from ${this.rootTableName}`);
-        const result = stmt.get()
+        const result = stmt.get();
         stmt.finalize?.();
-        return result.total
+        return result.total;
     }
 
     getPending(cursorId: string): number|void
@@ -316,7 +279,7 @@ export class SQLLiteStore
         {
             return;
         }
-        return cursor.kept;
+        return cursor.left;
     }
 
     get cursorCount(): number

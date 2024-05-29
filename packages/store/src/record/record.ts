@@ -2,7 +2,20 @@ import { field } from '@dao-xyz/borsh';
 import { RecordValue } from './record-values';
 import { typeOf } from '../utils';
 
-export class Record
+export interface StoreRecord
+{
+    node_name: string;
+    field_name: string;
+    state: string;
+    value: any;
+    type: number;
+    size: number;
+    deleted: boolean;
+}
+
+export type RecordDataType = boolean|string|number|Uint8Array;
+
+export class TransportRecord
 {
     @field({ type: 'string' })
     node_name: string;
