@@ -1,5 +1,3 @@
-import { Constructor } from '@dao-xyz/borsh';
-
 export type SQLLite = {
     createDatabase: (directory?: string) => Promise<Database>|Database,
 }
@@ -28,15 +26,3 @@ export type SQLLiteValue =
     |Uint8Array
     |Int8Array
     |ArrayBuffer;
-
-export type SQLField = { name: string[]; definition: string; type: string };
-export type SQLConstraint = { definition: string };
-
-export interface Table
-{
-    name: string;
-    ctor: Constructor<any>;
-    primary: string;
-    fields: SQLField[];
-    constraints: SQLConstraint[];
-}

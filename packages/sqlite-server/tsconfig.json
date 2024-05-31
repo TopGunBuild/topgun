@@ -4,9 +4,10 @@
         "outDir": "./dist",
         "experimentalDecorators": true,
         "emitDecoratorMetadata": true,
-        "strictNullChecks": false
+        "strictNullChecks": false,
+        "allowSyntheticDefaultImports": true
     },
     "files": [
-      "src/index.ts"
+        "src/sqlite-store.ts"
     ]
 }

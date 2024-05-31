@@ -1,7 +1,7 @@
 {
-    "name": "@topgunbuild/sqlite",
+    "name": "@topgunbuild/sqlite-browser",
     "version": "0.0.0",
-    "description": "SQLite storage",
+    "description": "SQLite storage in browser",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
     "files": [
@@ -18,9 +18,8 @@
     "author": "",
     "license": "ISC",
     "dependencies": {
-        "@topgunbuild/crypto": "workspace:*",
-        "@topgunbuild/store": "workspace:*",
-        "@topgunbuild/utils": "workspace:*"
+        "@sqlite.org/sqlite-wasm": "^3.45.2-build1",
+        "@topgunbuild/sqlite": "workspace:*"
     },
     "devDependencies": {
         "@types/jest": "^29.5.0",

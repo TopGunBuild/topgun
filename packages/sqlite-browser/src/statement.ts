@@ -1,5 +1,5 @@
 import type { PreparedStatement as SQLStatement } from '@sqlite.org/sqlite-wasm';
-import { SQLLiteValue, Statement as IStatement } from '../types';
+import { SQLLiteValue, Statement as IStatement } from '@topgunbuild/sqlite';
 
 export class Statement implements IStatement
 {

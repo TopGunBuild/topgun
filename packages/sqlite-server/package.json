@@ -1,7 +1,7 @@
 {
-    "name": "@topgunbuild/sqlite",
+    "name": "@topgunbuild/sqlite-server",
     "version": "0.0.0",
-    "description": "SQLite storage",
+    "description": "SQLite storage in Node.js",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
     "files": [
@@ -18,11 +18,11 @@
     "author": "",
     "license": "ISC",
     "dependencies": {
-        "@topgunbuild/crypto": "workspace:*",
-        "@topgunbuild/store": "workspace:*",
-        "@topgunbuild/utils": "workspace:*"
+        "better-sqlite3": "^9.4.5",
+        "@topgunbuild/sqlite": "workspace:*"
     },
     "devDependencies": {
+        "@types/better-sqlite3": "^7.6.9",
         "@types/jest": "^29.5.0",
         "@types/node": "^18.15.11",
         "jest": "^29.5.0",

@@ -1,6 +1,8 @@
 import sqlitePromise, { Database as SQLDatabase, PreparedStatement as SQLStatement } from '@sqlite.org/sqlite-wasm';
-import type { Database as IDatabase } from '../types';
+import type { Database as IDatabase } from '@topgunbuild/sqlite';
 import { Statement } from './statement';
+
+export * from '@topgunbuild/sqlite';
 
 class Database implements IDatabase
 {
