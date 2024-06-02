@@ -1,4 +1,0 @@
-# @topgunbuild/sqlite-browser
-
-
-
