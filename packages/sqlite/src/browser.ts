@@ -1,5 +1,5 @@
 import sqlitePromise, { Database as SQLDatabase, PreparedStatement as SQLStatement } from '@sqlite.org/sqlite-wasm';
-import type { Database as IDatabase } from '../types';
+import type { Database as IDatabase } from './types';
 import { Statement } from './statement';
 
 class Database implements IDatabase
@@ -46,3 +46,7 @@ export const createDatabase = async (directory?: string) =>
 
     return new Database(new sqlite.oo1.DB(directory ?? ':memory:', 'c'));
 };
+
+export * from './sqlite-store';
+export * from './schema';
+export * from './types';

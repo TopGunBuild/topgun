@@ -1,5 +1,4 @@
-import { SQLLiteStore } from '../src';
-import { createDatabase } from '../src/node';
+import { createDatabase, SQLLiteStore } from '../src';
 
 it('should', async () =>
 {

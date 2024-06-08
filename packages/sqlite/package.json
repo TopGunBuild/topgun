@@ -2,12 +2,13 @@
     "name": "@topgunbuild/sqlite",
     "version": "0.0.0",
     "description": "SQLite storage",
-    "types": "./dist/index.d.ts",
-    "module": "./dist/browser.mjs",
-    "exports": {
-        "require": "./dist/node.js",
-        "import": "./dist/browser.mjs"
+    "main": "./dist/index.js",
+    "module": "./dist/index.mjs",
+    "browser": {
+        "./dist/index.js": "./dist/browser.js",
+        "./dist/index.mjs": "./dist/browser.mjs"
     },
+    "types": "./dist/index.d.ts",
     "files": [
         "dist"
     ],
@@ -22,14 +23,11 @@
     "author": "",
     "license": "ISC",
     "dependencies": {
-        "better-sqlite3": "^9.4.5",
-        "@sqlite.org/sqlite-wasm": "^3.45.2-build1",
         "@topgunbuild/crypto": "workspace:*",
         "@topgunbuild/store": "workspace:*",
         "@topgunbuild/utils": "workspace:*"
     },
     "devDependencies": {
-        "@types/better-sqlite3": "^7.6.9",
         "@types/jest": "^29.5.0",
         "@types/node": "^18.15.11",
         "jest": "^29.5.0",

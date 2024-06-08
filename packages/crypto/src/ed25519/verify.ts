@@ -3,7 +3,7 @@ import { Ed25519PublicKey } from './public-key';
 import { Signature } from '../signature';
 import { createHash } from '../hash';
 
-export const verifySignatureEd25519 = async (signature: Signature, data: Uint8Array): Promise<boolean> =>
+export const verifySignatureEd25519 = (signature: Signature, data: Uint8Array): boolean =>
 {
     let res = false;
     try

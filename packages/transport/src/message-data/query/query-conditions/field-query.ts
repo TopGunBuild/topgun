@@ -1,5 +1,5 @@
 import { field, vec } from '@dao-xyz/borsh';
-import { toArray } from '../utils';
+import { toArray } from '@topgunbuild/utils';
 import { Query } from '../query';
 
 export class FieldQuery extends Query

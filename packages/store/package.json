@@ -19,6 +19,8 @@
     "license": "ISC",
     "dependencies": {
         "@dao-xyz/borsh": "^5.2.2",
+        "@topgunbuild/crypto": "workspace:*",
+        "@topgunbuild/transport":"workspace:*",
         "@topgunbuild/utils": "workspace:*"
     },
     "devDependencies": {

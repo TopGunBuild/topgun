@@ -1,12 +1,12 @@
 import { PublicKey } from '@topgunbuild/crypto';
 import {
-    CloseIteratorRequest, CollectNextRequest,
-    SearchRequest, StoreRecord, StoreResults,
+    CloseIteratorRequest, CollectNextRequest, IdKey,
+    SearchRequest, Store, StoreRecord, StoreResults,
 } from '@topgunbuild/store';
 import { Database, SQLLite, Statement } from './types';
 import { convertSearchRequestToSQLQuery, resolveTableValues } from './schema';
 
-export class SQLLiteStore
+export class SQLLiteStore implements Store
 {
     db: Database;
     putStatement: Map<string, Statement>;
@@ -24,13 +24,14 @@ export class SQLLiteStore
         }
     >;
     iteratorTimeout: number;
+    directory: string;
     closed: boolean;
     rootTableName: string;
     rootTableFields: Record<string, string>;
 
     constructor(
         readonly sqlLite: SQLLite,
-        options?: { iteratorTimeout?: number },
+        options?: { iteratorTimeout?: number, directory?: string },
     )
     {
         this.closed          = true;
@@ -54,7 +55,7 @@ export class SQLLiteStore
             throw new Error('Already started');
         }
         this.closed = false;
-        this.db     = await this.sqlLite.createDatabase(undefined);
+        this.db     = await this.sqlLite.createDatabase(this.directory);
 
         const columnNames = Object.keys(this.rootTableFields);
         const sql         = `create table if not exists ${this.rootTableName}
@@ -117,25 +118,25 @@ export class SQLLiteStore
         await statement.run(values);
     }
 
-    // async get(id: string): Promise<StoreRecord|undefined>
-    // {
-    //     const sql  = `select *
-    //                   from ${this.rootTableName}
-    //                   where ${this.primaryKeyArr[0]} = ? `;
-    //     const stmt = await this.db.prepare(sql);
-    //     const rows = await stmt.get([id]);
-    //     stmt.finalize?.();
-    //     return rows;
-    // }
+    async get(id: IdKey): Promise<StoreRecord|undefined>
+    {
+        const sql  = `select *
+                      from ${this.rootTableName}
+                      where node_name = ? and field_name = ?`;
+        const stmt = await this.db.prepare(sql);
+        const rows = await stmt.get([id.node_name, id.field_name]);
+        stmt.finalize?.();
+        return rows;
+    }
 
-    // async del(id: string): Promise<void>
-    // {
-    //     let statement = await this.db.prepare(`delete
-    //                                            from ${this.rootTableName}
-    //                                            where ${this.primaryKeyArr[0]} = ?`);
-    //     await statement.run([toSQLType(id)]);
-    //     await statement.finalize?.();
-    // }
+    async del(id: IdKey): Promise<void>
+    {
+        let statement = await this.db.prepare(`delete
+                                               from ${this.rootTableName}
+                                               where node_name = ? and field_name = ?`);
+        await statement.run([id.node_name, id.field_name]);
+        await statement.finalize?.();
+    }
 
     async query(
         request: SearchRequest,
@@ -272,12 +273,12 @@ export class SQLLiteStore
         return result.total;
     }
 
-    getPending(cursorId: string): number|void
+    getPending(cursorId: string): number|undefined
     {
         const cursor = this.cursor.get(cursorId);
         if (!cursor)
         {
-            return;
+            return undefined;
         }
         return cursor.left;
     }

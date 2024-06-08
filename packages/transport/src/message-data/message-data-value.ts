@@ -1,11 +1,11 @@
 import { field, variant } from '@dao-xyz/borsh';
 
-export abstract class RecordValue
+export abstract class AbstractValue
 {
 }
 
 @variant(0)
-export class ValueString extends RecordValue
+export class ValueString extends AbstractValue
 {
     @field({ type: 'string' })
     public value: string;
@@ -18,7 +18,7 @@ export class ValueString extends RecordValue
 }
 
 @variant(1)
-export class ValueBool extends RecordValue
+export class ValueBool extends AbstractValue
 {
     @field({ type: 'bool' })
     public value: boolean;
@@ -31,7 +31,7 @@ export class ValueBool extends RecordValue
 }
 
 @variant(2)
-export class ValueF64 extends RecordValue
+export class ValueNumber extends AbstractValue
 {
     @field({ type: 'f64' })
     public value: number;
@@ -44,9 +44,9 @@ export class ValueF64 extends RecordValue
 }
 
 @variant(3)
-export class ValueU8 extends RecordValue
+export class ValueDate extends AbstractValue
 {
-    @field({ type: 'u8' })
+    @field({ type: 'f64' })
     public value: number;
 
     constructor(value: number)
@@ -57,33 +57,7 @@ export class ValueU8 extends RecordValue
 }
 
 @variant(4)
-export class ValueU16 extends RecordValue
-{
-    @field({ type: 'u16' })
-    public value: number;
-
-    constructor(value: number)
-    {
-        super();
-        this.value = value;
-    }
-}
-
-@variant(5)
-export class ValueU32 extends RecordValue
-{
-    @field({ type: 'u32' })
-    public value: number;
-
-    constructor(value: number)
-    {
-        super();
-        this.value = value;
-    }
-}
-
-@variant(6)
-export class ValueUint8Array extends RecordValue
+export class ValueUint8Array extends AbstractValue
 {
     @field({ type: Uint8Array })
     public value: Uint8Array;
@@ -95,8 +69,8 @@ export class ValueUint8Array extends RecordValue
     }
 }
 
-@variant(7)
-export class ValueEmpty extends RecordValue
+@variant(5)
+export class ValueEmpty extends AbstractValue
 {
     constructor()
     {

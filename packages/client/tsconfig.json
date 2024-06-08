@@ -4,7 +4,10 @@
         "outDir": "./dist",
         "experimentalDecorators": true,
         "emitDecoratorMetadata": true,
-        "strictNullChecks": false
+        "strictNullChecks": false,
+        "allowSyntheticDefaultImports": true,
+        "target": "es2020",
+        "noUnusedLocals": false
     },
     "files": [
       "src/index.ts"

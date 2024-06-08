@@ -1,13 +1,13 @@
 import { field, vec } from '@dao-xyz/borsh';
-import { StoreRecord } from './record';
+import { StoreValue } from './store-value';
 
 export interface StoreResults
 {
-    results: StoreRecord[];
+    results: StoreValue[];
     left: number;
 }
 
-export class Result<T>
+export class Result
 {
     @field({ type: Uint8Array })
     source: Uint8Array;
@@ -18,15 +18,15 @@ export class Result<T>
     }
 }
 
-export class Results<T>
+export class Results
 {
     @field({ type: vec(Result) })
-    results: Result<T>[];
+    results: Result[];
 
     @field({ type: 'f64' })
     left: number;
 
-    constructor(properties: { results: Result<T>[]; left: number })
+    constructor(properties: { results: Result[]; left: number })
     {
         this.left    = properties.left;
         this.results = properties.results;

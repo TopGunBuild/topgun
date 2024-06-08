@@ -1,12 +1,10 @@
 {
-    "extends": "../../tsconfig.browser.json",
+    "extends": "../../tsconfig.node.json",
     "compilerOptions": {
         "outDir": "./dist",
         "experimentalDecorators": true,
         "emitDecoratorMetadata": true,
-        "strictNullChecks": false,
-        "allowSyntheticDefaultImports": true,
-        "target": "es2020"
+        "strictNullChecks": false
     },
     "files": [
         "src/index.ts"

@@ -145,7 +145,6 @@ const convertStateFieldQuery = (
     tableName: string,
 ): { join?: string; where: string } =>
 {
-    const keyWithTable = tableName + '.' + query.key.join('.');
     let where: string;
     if (query instanceof StringCondition)
     {
@@ -154,35 +153,35 @@ const convertStateFieldQuery = (
         switch (query.method)
         {
             case StringMatchEnum.contains:
-                statement = `${keyWithTable} LIKE '%${query.value}%'`;
+                statement = `${tableName}.value_string LIKE '%${query.value}%'`;
                 break;
 
             case StringMatchEnum.doesNotContain:
-                statement = `${keyWithTable} NOT LIKE '%${query.value}%'`;
+                statement = `${tableName}.value_string NOT LIKE '%${query.value}%'`;
                 break;
 
             case StringMatchEnum.startsWith:
-                statement = `${keyWithTable} LIKE '${query.value}%'`;
+                statement = `${tableName}.value_string LIKE '${query.value}%'`;
                 break;
 
             case StringMatchEnum.endsWith:
-                statement = `${keyWithTable} LIKE '%${query.value}'`;
+                statement = `${tableName}.value_string LIKE '%${query.value}'`;
                 break;
 
             case StringMatchEnum.equals:
-                statement = `${keyWithTable} = '${query.value}'`;
+                statement = `${tableName}.value_string = '${query.value}'`;
                 break;
 
             case StringMatchEnum.doesNotEqual:
-                statement = `${keyWithTable} != '${query.value}'`;
+                statement = `${tableName}.value_string != '${query.value}'`;
                 break;
 
             case StringMatchEnum.empty:
-                statement = `${keyWithTable} is null or ${keyWithTable} = ''`;
+                statement = `${tableName}.value_is_empty = 1`;
                 break;
 
             case StringMatchEnum.notEmpty:
-                statement = `${keyWithTable} is not null or ${keyWithTable} != ''`;
+                statement = `${tableName}.value_string is not null and ${tableName}.value_string != ''`;
                 break;
 
             default:
@@ -200,19 +199,19 @@ const convertStateFieldQuery = (
         switch (query.method)
         {
             case ByteMatchEnum.equals:
-                where = `${keyWithTable} = x'${toHexString(query.value)}'`;
+                where = `${tableName}.value_byte = x'${toHexString(query.value)}'`;
                 break;
 
             case ByteMatchEnum.doesNotEqual:
-                where = `${keyWithTable} != x'${toHexString(query.value)}'`;
+                where = `${tableName}.value_byte != x'${toHexString(query.value)}'`;
                 break;
 
             case ByteMatchEnum.empty:
-                where = `${keyWithTable} is null or ${keyWithTable} = ''`;
+                where = `${tableName}.value_is_empty = 1`;
                 break;
 
             case ByteMatchEnum.notEmpty:
-                where = `${keyWithTable} is not null or ${keyWithTable} != ''`;
+                where = `${tableName}.value_byte is not null and ${tableName}.value_byte != ''`;
                 break;
 
             default:
@@ -224,35 +223,35 @@ const convertStateFieldQuery = (
         switch (query.method)
         {
             case NumberMatchEnum.equals:
-                where = `${keyWithTable} = ${query.value}`;
+                where = `${tableName}.value_number = ${query.value}`;
                 break;
 
             case NumberMatchEnum.doesNotEqual:
-                where = `${keyWithTable} != ${query.value}`;
+                where = `${tableName}.value_number != ${query.value}`;
                 break;
 
             case NumberMatchEnum.greaterThan:
-                where = `${keyWithTable} > ${query.value}`;
+                where = `${tableName}.value_number > ${query.value}`;
                 break;
 
             case NumberMatchEnum.lessThan:
-                where = `${keyWithTable} < ${query.value}`;
+                where = `${tableName}.value_number < ${query.value}`;
                 break;
 
             case NumberMatchEnum.greaterThanOrEqualTo:
-                where = `${keyWithTable} >= ${query.value}`;
+                where = `${tableName}.value_number >= ${query.value}`;
                 break;
 
             case NumberMatchEnum.lessThanOrEqualTo:
-                where = `${keyWithTable} <= ${query.value}`;
+                where = `${tableName}.value_number <= ${query.value}`;
                 break;
 
             case NumberMatchEnum.empty:
-                where = `${keyWithTable} is null or ${keyWithTable} = ''`;
+                where = `${tableName}.value_is_empty = 1`;
                 break;
 
             case NumberMatchEnum.notEmpty:
-                where = `${keyWithTable} is not null or ${keyWithTable} != ''`;
+                where = `${tableName}.value_number is not null and ${tableName}.value_number != ''`;
                 break;
 
             default:
@@ -264,59 +263,59 @@ const convertStateFieldQuery = (
         switch (query.method)
         {
             case DateMatchEnum.equals:
-                where = `${keyWithTable} = ${query.value}`;
+                where = `${tableName}.value_date = ${query.value}`;
                 break;
 
             case DateMatchEnum.doesNotEqual:
-                where = `${keyWithTable} != ${query.value}`;
+                where = `${tableName}.value_date != ${query.value}`;
                 break;
 
             case DateMatchEnum.before:
-                where = `${keyWithTable} < ${query.value}`;
+                where = `${tableName}.value_date < ${query.value}`;
                 break;
 
             case DateMatchEnum.after:
-                where = `${keyWithTable} > ${query.value}`;
+                where = `${tableName}.value_date > ${query.value}`;
                 break;
 
             case DateMatchEnum.today:
-                where = `strftime('%Y-%m-%d', ${keyWithTable}) = DATE('now')`;
+                where = `strftime('%Y-%m-%d', ${tableName}.value_date) = DATE('now')`;
                 break;
 
             case DateMatchEnum.yesterday:
-                where = `strftime('%Y-%m-%d', ${keyWithTable}) = DATE('now','-1 day')`;
+                where = `strftime('%Y-%m-%d', ${tableName}.value_date) = DATE('now','-1 day')`;
                 break;
 
             case DateMatchEnum.thisMonth:
-                where = `strftime('%Y-%m', ${keyWithTable}) = strftime('%Y-%m', DATE('now'))`;
+                where = `strftime('%Y-%m', ${tableName}.value_date) = strftime('%Y-%m', DATE('now'))`;
                 break;
 
             case DateMatchEnum.lastMonth:
-                where = `strftime('%Y-%m', ${keyWithTable}) = strftime('%Y-%m', DATE('now','-1 month'))`;
+                where = `strftime('%Y-%m', ${tableName}.value_date) = strftime('%Y-%m', DATE('now','-1 month'))`;
                 break;
 
             case DateMatchEnum.nextMonth:
-                where = `strftime('%Y-%m', ${keyWithTable}) = strftime('%Y-%m', DATE('now','+1 month'))`;
+                where = `strftime('%Y-%m', ${tableName}.value_date) = strftime('%Y-%m', DATE('now','+1 month'))`;
                 break;
 
             case DateMatchEnum.thisYear:
-                where = `strftime('%Y', ${keyWithTable}) = strftime('%Y', 'now')`;
+                where = `strftime('%Y', ${tableName}.value_date) = strftime('%Y', 'now')`;
                 break;
 
             case DateMatchEnum.lastYear:
-                where = `strftime('%Y', ${keyWithTable}) = strftime('%Y', DATE('now','-1 year'))`;
+                where = `strftime('%Y', ${tableName}.value_date) = strftime('%Y', DATE('now','-1 year'))`;
                 break;
 
             case DateMatchEnum.nextYear:
-                where = `strftime('%Y', ${keyWithTable}) = strftime('%Y', DATE('now','+1 year'))`;
+                where = `strftime('%Y', ${tableName}.value_date) = strftime('%Y', DATE('now','+1 year'))`;
                 break;
 
             case DateMatchEnum.empty:
-                where = `${keyWithTable} is null or ${keyWithTable} = ''`;
+                where = `${tableName}.value_is_empty = 1`;
                 break;
 
             case DateMatchEnum.notEmpty:
-                where = `${keyWithTable} is not null or ${keyWithTable} != ''`;
+                where = `${tableName}.value_date is not null and ${tableName}.value_date != ''`;
                 break;
 
             default:
@@ -328,19 +327,19 @@ const convertStateFieldQuery = (
         switch (query.method)
         {
             case BoolMatchEnum.true:
-                where = `${keyWithTable} = 1`;
+                where = `${tableName}.value_bool = 1`;
                 break;
 
             case BoolMatchEnum.false:
-                where = `${keyWithTable} = 0`;
+                where = `${tableName}.value_bool = 0`;
                 break;
 
             case BoolMatchEnum.empty:
-                where = `${keyWithTable} is null or ${keyWithTable} = ''`;
+                where = `${tableName}.value_is_empty = 1`;
                 break;
 
             case BoolMatchEnum.notEmpty:
-                where = `${keyWithTable} is not null or ${keyWithTable} != ''`;
+                where = `${tableName}.value_bool is not null and ${tableName}.value_bool != ''`;
                 break;
 
             default:
