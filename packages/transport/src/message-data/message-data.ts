@@ -32,10 +32,13 @@ export abstract class AbstractDataMessage
 export class PutMessage extends AbstractDataMessage
 {
     @field({ type: 'string' })
-    node_name: string;
+    section: string;
 
     @field({ type: 'string' })
-    field_name: string;
+    node_id: string;
+
+    @field({ type: 'string' })
+    field: string;
 
     @field({ type: 'u64' })
     state: bigint;
@@ -48,13 +51,14 @@ export class PutMessage extends AbstractDataMessage
         return deserialize(bytes, PutMessage);
     }
 
-    constructor(node_name: string, field_name: string, state: bigint, value: unknown)
+    constructor(section: string, node_id: string, field: string, state: bigint, value: unknown)
     {
         super();
-        this.node_name  = node_name;
-        this.field_name = field_name;
-        this.state      = state;
-        this.value      = typeOf(value);
+        this.section = section;
+        this.node_id = node_id;
+        this.field   = field;
+        this.state   = state;
+        this.value   = typeOf(value);
     }
 
     encode(): Uint8Array

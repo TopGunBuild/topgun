@@ -15,6 +15,12 @@ export class Queue<T> extends AsyncStreamEmitter<any>
         this._queue       = [];
     }
 
+    enqueue(item: T): Queue<T>
+    {
+        this._queue.splice(0, 0, item);
+        return this;
+    }
+
     dequeue(): T|undefined
     {
         return this._queue.pop();

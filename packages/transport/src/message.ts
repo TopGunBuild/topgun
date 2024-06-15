@@ -1,7 +1,7 @@
 import { MessageHeader } from './message-header';
 import { field, option, serialize, deserialize } from '@dao-xyz/borsh';
 import { Signature, verify } from '@topgunbuild/crypto';
-import { isBoolean } from '@topgunbuild/utils';
+import { isBoolean, sha256Base64 } from '@topgunbuild/utils';
 
 export class Message
 {
@@ -13,14 +13,30 @@ export class Message
 
     verified: boolean;
 
+    private _idString: string;
+    private _replyToIdString: string;
+
+    get idString(): string
+    {
+        if (!this._idString)
+        {
+            this._idString = sha256Base64(this.header.id);
+        }
+        return this._idString;
+    }
+
+    get replyToIdString(): string
+    {
+        if (!this._replyToIdString && this.header.replyToId)
+        {
+            this._replyToIdString = sha256Base64(this.header.replyToId);
+        }
+        return this._replyToIdString;
+    }
+
     static decode(bytes: Uint8Array): Message
     {
         return deserialize(bytes, Message);
-    }
-
-    get id(): Uint8Array
-    {
-        return this.header.id;
     }
 
     constructor(properties: { header: MessageHeader; data?: Uint8Array })

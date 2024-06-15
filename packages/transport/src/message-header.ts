@@ -1,4 +1,4 @@
-import { field, fixedArray, vec } from '@dao-xyz/borsh';
+import { field, fixedArray, option, vec } from '@dao-xyz/borsh';
 import { Signature } from '@topgunbuild/crypto';
 import { randomBytes, toArray } from '@topgunbuild/utils';
 
@@ -8,6 +8,9 @@ export class MessageHeader
 {
     @field({ type: fixedArray('u8', 32) })
     id: Uint8Array;
+
+    @field({ type: option(fixedArray('u8', 32)) })
+    replyToId?: Uint8Array;
 
     @field({ type: vec('string') })
     origin: string[];
@@ -25,6 +28,7 @@ export class MessageHeader
         id?: Uint8Array;
         expires?: number;
         origin?: string[];
+        replyToId?: Uint8Array
     })
     {
         this.id         = properties?.id || randomBytes(32);
@@ -32,6 +36,7 @@ export class MessageHeader
         this.timestamp  = BigInt(+new Date());
         this.signatures = [];
         this.origin     = toArray(properties?.origin);
+        this.replyToId  = properties?.replyToId;
     }
 
     verify(): boolean

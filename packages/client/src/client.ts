@@ -1,56 +1,33 @@
-import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
-import { StoreWrapper } from '@topgunbuild/store';
-import { ClientOptions } from './options';
-import * as sqlite from '@topgunbuild/sqlite';
-import { StoreClient } from './store-client';
-import { Ed25519Keypair } from '@topgunbuild/crypto';
-import { ClientEvents } from './constants';
+import { ClientOptions } from './types';
+import { ClientQueryBuilder } from './client-query-builder';
+import { ClientProviders } from './client-providers';
 
 export class Client
 {
-    public readonly options: ClientOptions;
-
-    #store: StoreWrapper;
-    #eventBus: AsyncStreamEmitter<any>;
+    readonly #providers: ClientProviders;
 
     constructor(options: ClientOptions)
     {
-        const defaultOptions: ClientOptions = {
-            peers   : [],
-            identity: Ed25519Keypair.create(),
-        };
-
-        this.options   = Object.assign(defaultOptions, options || {});
-        this.#eventBus = new AsyncStreamEmitter();
-        this.start();
+        this.#providers = new ClientProviders(options);
     }
 
-    async start(): Promise<void>
+    section(section: string): ClientQueryBuilder
     {
-        let store = this.options.store;
+        return new ClientQueryBuilder(section, this.#providers);
+    }
 
-        if (!store)
-        {
-            store = new sqlite.SQLLiteStore(sqlite, {
-                directory: this.options.directory,
-            });
-            await store.start();
+    user(publicKey: string)
+    {
+        return {
+            from: (section: string) =>
+            {
+                return new ClientQueryBuilder(section, this.#providers);
+            }
         }
-
-        this.#store = new StoreWrapper(store);
-        this.#eventBus.emit(ClientEvents.storeInit, this.#store);
     }
 
-    get(path: string): StoreClient
+    auth()
     {
-        return new StoreClient(path, this.#store, this.#eventBus);
-    }
 
-    async waitForStoreInit(): Promise<void>
-    {
-        if (!this.#store)
-        {
-            this.#store = await this.#eventBus.listener(ClientEvents.storeInit).once()
-        }
     }
 }

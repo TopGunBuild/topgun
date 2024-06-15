@@ -1,15 +1,14 @@
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
-import { TransportRecord } from '@topgunbuild/store';
-import { Queue } from './control-flow/queue';
-import { PublicKey } from '@topgunbuild/crypto';
+import { Message } from '@topgunbuild/transport';
+import { Queue } from '../control-flow/queue';
 
 export abstract class Connector extends AsyncStreamEmitter<any>
 {
     readonly name: string;
     isConnected: boolean;
 
-    protected readonly inputQueue: Queue<TransportRecord>;
-    protected readonly outputQueue: Queue<TransportRecord>;
+    protected readonly inputQueue: Queue<Message>;
+    protected readonly outputQueue: Queue<Message>;
 
     /**
      * Constructor
@@ -19,8 +18,8 @@ export abstract class Connector extends AsyncStreamEmitter<any>
         super();
         this.isConnected = false;
         this.name        = name;
-        this.inputQueue  = new Queue<TransportRecord>(`${name}.inputQueue`);
-        this.outputQueue = new Queue<TransportRecord>(`${name}.outputQueue`);
+        this.inputQueue  = new Queue<Message>(`${name}.inputQueue`);
+        this.outputQueue = new Queue<Message>(`${name}.outputQueue`);
 
         (async () =>
         {
@@ -39,6 +38,11 @@ export abstract class Connector extends AsyncStreamEmitter<any>
         })();
     }
 
+    off(_msgId: string): Connector
+    {
+        return this;
+    }
+
     waitForConnection(): Promise<void>
     {
         if (this.isConnected)
@@ -53,11 +57,22 @@ export abstract class Connector extends AsyncStreamEmitter<any>
     {
     }
 
-    publishMessage(from: PublicKey, message: any): () => void
+    send(message: Message): Connector
     {
-        return () =>
+        this.outputQueue.enqueue(message);
+        if (this.isConnected)
         {
-        };
+            this.outputQueue.process();
+        }
+
+        return this;
+    }
+
+    ingest(message: Message): Connector
+    {
+        this.inputQueue.enqueue(message).process();
+
+        return this;
     }
 
     #onConnectedChange(connected?: boolean): void
