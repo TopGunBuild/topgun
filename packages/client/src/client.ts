@@ -1,27 +1,27 @@
 import { ClientOptions } from './types';
-import { ClientQueryBuilder } from './client-query-builder';
-import { ClientProviders } from './client-providers';
+import { SectionQueryBuilder } from './query-builders/section-query-builder';
+import { ClientService } from './client-service';
 
 export class Client
 {
-    readonly #providers: ClientProviders;
+    readonly #service: ClientService;
 
     constructor(options: ClientOptions)
     {
-        this.#providers = new ClientProviders(options);
+        this.#service = new ClientService(options);
     }
 
-    section(section: string): ClientQueryBuilder
+    section(sectionName: string): SectionQueryBuilder
     {
-        return new ClientQueryBuilder(section, this.#providers);
+        return new SectionQueryBuilder(sectionName, this.#service);
     }
 
     user(publicKey: string)
     {
         return {
-            from: (section: string) =>
+            section: (sectionId: string) =>
             {
-                return new ClientQueryBuilder(section, this.#providers);
+                return new SectionQueryBuilder(sectionId, this.#service);
             }
         }
     }

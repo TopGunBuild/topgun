@@ -1,5 +1,5 @@
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
-import { StoreWrapper } from '@topgunbuild/store';
+import { DataNode, DataValue, StoreWrapper } from '@topgunbuild/store';
 import { Connector } from './transports/connector';
 import { Ed25519Keypair } from '@topgunbuild/crypto';
 import * as sqlite from '@topgunbuild/sqlite';
@@ -7,8 +7,11 @@ import { PeerOption, ClientOptions } from './types';
 import { createConnector } from './transports/web-socket-connector';
 import { getSocketOptions } from './utils/get-socket-options';
 import { ClientEvents } from './constants';
+import { isEmptyObject, isObject } from '@topgunbuild/utils';
+import { Message, MessageHeader, PutMessage } from '@topgunbuild/transport';
+import { bigintTime } from '@topgunbuild/time';
 
-export class ClientProviders
+export class ClientService
 {
     public readonly options: ClientOptions;
     public readonly eventBus: AsyncStreamEmitter<any>;
@@ -39,6 +42,51 @@ export class ClientProviders
         {
             this.store = await this.eventBus.listener(ClientEvents.storeInit).once();
         }
+    }
+
+    async putNode(sectionId: string, nodeId: string, value: DataNode): Promise<void>
+    {
+        if (this.authRequired())
+        {
+            throw new Error(
+                'You cannot save data to user space if the user is not authorized.',
+            );
+        }
+        else if (!isObject(value))
+        {
+            throw new Error('Node must be an object.');
+        }
+        else if (isEmptyObject(value))
+        {
+            throw new Error('Node must not be an empty object.');
+        }
+        else if (!this.store)
+        {
+            await this.waitForStoreInit();
+        }
+
+        await Promise.all(
+            Object.keys(value).map(field => this.putValue(sectionId, nodeId, field, value[field])),
+        );
+    }
+
+    async putValue(sectionId: string, nodeId: string, field: string, value: DataValue): Promise<any>
+    {
+        const message = new Message({
+            header: new MessageHeader({}),
+            data  : new PutMessage(
+                sectionId,
+                nodeId,
+                field,
+                bigintTime(),
+                value,
+            ).encode(),
+        });
+    }
+
+    authRequired(): boolean
+    {
+        return false;
     }
 
     // -----------------------------------------------------------------------------------------------------
