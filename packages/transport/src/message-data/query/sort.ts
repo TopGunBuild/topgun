@@ -7,6 +7,12 @@ export enum SortDirection
     DESC = 1
 }
 
+export interface SortParams
+{
+    key: string[]|string;
+    direction?: SortDirection;
+}
+
 export class Sort
 {
     @field({ type: vec('string') })
@@ -15,10 +21,7 @@ export class Sort
     @field({ type: 'u8' })
     direction: SortDirection;
 
-    constructor(properties: {
-        key: string[]|string;
-        direction?: SortDirection;
-    })
+    constructor(properties: SortParams)
     {
         this.key       = toArray(properties.key);
         this.direction = properties.direction || SortDirection.ASC;
