@@ -1,19 +1,19 @@
-import { ClientService } from '../client-service';
 import { DataNode } from '@topgunbuild/store';
 import { SelectOptions } from '@topgunbuild/transport';
+import { ClientService } from '../client-service';
 import { FieldQueryBuilder } from './field-query-builder';
 
 export class NodeQueryBuilder
 {
-    readonly #sectionName: string;
-    readonly #nodeName: string;
+    readonly #section: string;
+    readonly #node: string;
     readonly #service: ClientService;
 
-    constructor(sectionName: string, nodeName: string, service: ClientService)
+    constructor(section: string, node: string, service: ClientService)
     {
-        this.#sectionName = sectionName;
-        this.#nodeName    = nodeName;
-        this.#service     = service;
+        this.#section = section;
+        this.#node    = node;
+        this.#service = service;
     }
 
     async select(options?: SelectOptions&{ fields?: string[] })
@@ -23,7 +23,7 @@ export class NodeQueryBuilder
 
     async put(node: DataNode)
     {
-        return this.#service.putNode(this.#sectionName, this.#nodeName, node);
+        return this.#service.putNode(this.#section, this.#node, node);
     }
 
     async delete()
@@ -34,8 +34,8 @@ export class NodeQueryBuilder
     field(fieldName: string): FieldQueryBuilder
     {
         return new FieldQueryBuilder(
-            this.#sectionName,
-            this.#nodeName,
+            this.#section,
+            this.#node,
             fieldName,
             this.#service,
         );

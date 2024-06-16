@@ -10,13 +10,13 @@ import { NodeQueryBuilder } from './node-query-builder';
 
 export class SectionQueryBuilder
 {
-    readonly #sectionName: string;
+    readonly #section: string;
     readonly #service: ClientService;
 
-    constructor(sectionName: string, service: ClientService)
+    constructor(section: string, service: ClientService)
     {
-        this.#sectionName = sectionName;
-        this.#service     = service;
+        this.#section = section;
+        this.#service = service;
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -42,7 +42,7 @@ export class SectionQueryBuilder
         await Promise.all(
             toArray(values).map(value =>
                 this.#service.putNode(
-                    this.#sectionName, uuidv4(), value,
+                    this.#section, uuidv4(), value,
                 ),
             ),
         );
@@ -50,6 +50,6 @@ export class SectionQueryBuilder
 
     node(nodeName: string): NodeQueryBuilder
     {
-        return new NodeQueryBuilder(this.#sectionName, nodeName, this.#service);
+        return new NodeQueryBuilder(this.#section, nodeName, this.#service);
     }
 }

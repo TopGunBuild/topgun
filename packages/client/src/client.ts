@@ -11,9 +11,9 @@ export class Client
         this.#service = new ClientService(options);
     }
 
-    section(sectionName: string): SectionQueryBuilder
+    section(section: string): SectionQueryBuilder
     {
-        return new SectionQueryBuilder(sectionName, this.#service);
+        return new SectionQueryBuilder(section, this.#service);
     }
 
     user(publicKey: string)
