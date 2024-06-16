@@ -1,4 +1,4 @@
-import { CloseIteratorMessage, CollectNextMessage, SearchMessage } from '@topgunbuild/transport';
+import { CloseIteratorMessage, CollectNextMessage, SelectMessage } from '@topgunbuild/transport';
 import { StoreValue } from './store-value';
 import { PublicKey } from '@topgunbuild/crypto';
 import { StoreResults } from './result';
@@ -16,7 +16,7 @@ export interface Store
 
     del(id: IdKey): Promise<void>|void;
 
-    query(query: SearchMessage, from: PublicKey): Promise<StoreResults>;
+    query(query: SelectMessage, from: PublicKey): Promise<StoreResults>;
 
     next(query: CollectNextMessage, from: PublicKey): Promise<StoreResults>;
 

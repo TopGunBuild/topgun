@@ -35,7 +35,7 @@ export class PutMessage extends AbstractDataMessage
     section: string;
 
     @field({ type: 'string' })
-    node_id: string;
+    node: string;
 
     @field({ type: 'string' })
     field: string;
@@ -51,11 +51,11 @@ export class PutMessage extends AbstractDataMessage
         return deserialize(bytes, PutMessage);
     }
 
-    constructor(section: string, node_id: string, field: string, state: bigint, value: unknown)
+    constructor(section: string, node: string, field: string, state: bigint, value: unknown)
     {
         super();
         this.section = section;
-        this.node_id = node_id;
+        this.node    = node;
         this.field   = field;
         this.state   = state;
         this.value   = typeOf(value);

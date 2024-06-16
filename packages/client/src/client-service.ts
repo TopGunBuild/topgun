@@ -28,8 +28,8 @@ export class ClientService
         this.options    = Object.assign(defaultOptions, options || {});
         this.eventBus   = new AsyncStreamEmitter();
         this.connectors = [];
-        this.peersInit(this.options.peers);
-        this.storeInit();
+        this.initPeers(this.options.peers);
+        this.initStore();
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -72,15 +72,19 @@ export class ClientService
 
     async putValue(sectionId: string, nodeId: string, field: string, value: DataValue): Promise<any>
     {
+        const data = new PutMessage(
+            sectionId,
+            nodeId,
+            field,
+            bigintTime(),
+            value,
+        );
+
+        this.store.put(data);
+
         const message = new Message({
             header: new MessageHeader({}),
-            data  : new PutMessage(
-                sectionId,
-                nodeId,
-                field,
-                bigintTime(),
-                value,
-            ).encode(),
+            data: data.encode(),
         });
     }
 
@@ -93,7 +97,7 @@ export class ClientService
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    private async storeInit(): Promise<void>
+    private async initStore(): Promise<void>
     {
         let store = this.options.store;
 
@@ -109,7 +113,7 @@ export class ClientService
         this.eventBus.emit(ClientEvents.storeInit, this.store);
     }
 
-    private peersInit(peers: PeerOption[]): void
+    private initPeers(peers: PeerOption[]): void
     {
         peers.forEach((peer: PeerOption) =>
         {

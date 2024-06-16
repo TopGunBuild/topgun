@@ -6,8 +6,7 @@ import { IdKey } from './id';
 import { Store } from './store';
 import {
     CloseIteratorMessage,
-    CollectNextMessage, PutMessage,
-    SearchMessage,
+    CollectNextMessage, PutMessage, SelectMessage,
     ValueBool,
     ValueDate,
     ValueEmpty,
@@ -40,39 +39,40 @@ export class StoreWrapper
         return this.index.get(key);
     }
 
-    put(record: PutMessage): Promise<void>|void
+    put(message: PutMessage): Promise<void>|void
     {
         const data: StoreValue = {
-            node_name     : record.node_name,
-            field_name    : record.field_name,
-            state         : record.state,
+            section       : message.section,
+            node          : message.node,
+            field         : message.field,
+            state         : message.state,
             value_is_empty: 0,
-            size          : serialize(record).length,
+            size          : serialize(message).length,
         };
 
-        if (record.value instanceof ValueEmpty)
+        if (message.value instanceof ValueEmpty)
         {
             data.value_is_empty = 1;
         }
-        else if (record.value instanceof ValueBool)
+        else if (message.value instanceof ValueBool)
         {
-            data.value_bool = record.value.value;
+            data.value_bool = message.value.value;
         }
-        else if (record.value instanceof ValueString)
+        else if (message.value instanceof ValueString)
         {
-            data.value_string = record.value.value;
+            data.value_string = message.value.value;
         }
-        else if (record.value instanceof ValueNumber)
+        else if (message.value instanceof ValueNumber)
         {
-            data.value_string = record.value.value;
+            data.value_string = message.value.value;
         }
-        else if (record.value instanceof ValueDate)
+        else if (message.value instanceof ValueDate)
         {
-            data.value_string = record.value.value;
+            data.value_string = message.value.value;
         }
-        else if (record.value instanceof ValueUint8Array)
+        else if (message.value instanceof ValueUint8Array)
         {
-            data.value_byte = record.value.value;
+            data.value_byte = message.value.value;
         }
 
         return this.index.put(data);
@@ -84,7 +84,7 @@ export class StoreWrapper
     }
 
     search(
-        query: SearchMessage,
+        query: SelectMessage,
         from: PublicKey = new Ed25519PublicKey(randomBytes(32)),
     ): Promise<StoreResults>
     {
@@ -92,7 +92,7 @@ export class StoreWrapper
     }
 
     iterate(
-        query: SearchMessage,
+        query: SelectMessage,
         from: PublicKey = new Ed25519PublicKey(randomBytes(32)),
     )
     {

@@ -1,8 +1,6 @@
 import { PublicKey } from '@topgunbuild/crypto';
-import {
-    CloseIteratorRequest, CollectNextRequest, IdKey,
-    SearchRequest, Store, StoreRecord, StoreResults,
-} from '@topgunbuild/store';
+import { IdKey, Store, StoreResults, StoreValue } from '@topgunbuild/store';
+import { CloseIteratorMessage, CollectNextMessage, SelectMessage } from '@topgunbuild/transport';
 import { Database, SQLLite, Statement } from './types';
 import { convertSearchRequestToSQLQuery, resolveTableValues } from './schema';
 
@@ -17,7 +15,7 @@ export class SQLLiteStore implements Store
             from: PublicKey;
             fetch: (
                 amount: number,
-            ) => Promise<{ results: StoreRecord[]; left: number }>;
+            ) => Promise<{ results: StoreValue[]; left: number }>;
             fetchStatement: Statement;
             countStatement: Statement;
             timeout: ReturnType<typeof setTimeout>;
@@ -111,14 +109,14 @@ export class SQLLiteStore implements Store
         await this.db.close();
     }
 
-    async put(value: StoreRecord): Promise<void>
+    async put(value: StoreValue): Promise<void>
     {
         const statement = this.putStatement.get(this.rootTableName);
         const values    = resolveTableValues(value, this.rootTableFields);
         await statement.run(values);
     }
 
-    async get(id: IdKey): Promise<StoreRecord|undefined>
+    async get(id: IdKey): Promise<StoreValue|undefined>
     {
         const sql  = `select *
                       from ${this.rootTableName}
@@ -139,12 +137,12 @@ export class SQLLiteStore implements Store
     }
 
     async query(
-        request: SearchRequest,
+        message: SelectMessage,
         from: PublicKey,
     ): Promise<StoreResults>
     {
         const { where, join, orderBy } = convertSearchRequestToSQLQuery(
-            request,
+            message,
             this.rootTableName
         );
 
@@ -171,7 +169,7 @@ export class SQLLiteStore implements Store
                 // Bump timeout timer
                 clearTimeout(iterator.timeout);
                 iterator.timeout = setTimeout(
-                    () => this.clearUpIterator(request.idString),
+                    () => this.clearUpIterator(message.idString),
                     this.iteratorTimeout,
                 );
             }
@@ -193,7 +191,7 @@ export class SQLLiteStore implements Store
 
             if (iterator.left === 0)
             {
-                this.clearUpIterator(request.idString);
+                this.clearUpIterator(message.idString);
                 clearTimeout(iterator.timeout);
             }
             return { results, left: iterator.left };
@@ -205,17 +203,17 @@ export class SQLLiteStore implements Store
             fetchStatement: stmt,
             countStatement: countStmt,
             timeout       : setTimeout(
-                () => this.clearUpIterator(request.idString),
+                () => this.clearUpIterator(message.idString),
                 this.iteratorTimeout,
             ),
         };
 
-        this.cursor.set(request.idString, iterator);
-        return fetch(request.fetch);
+        this.cursor.set(message.idString, iterator);
+        return fetch(message.fetch);
     }
 
     async next(
-        query: CollectNextRequest,
+        query: CollectNextMessage,
         from: PublicKey,
     ): Promise<StoreResults>
     {
@@ -230,7 +228,7 @@ export class SQLLiteStore implements Store
     }
 
     close(
-        query: CloseIteratorRequest,
+        query: CloseIteratorMessage,
         from: PublicKey,
     ): void|Promise<void>
     {
@@ -258,7 +256,7 @@ export class SQLLiteStore implements Store
     }
 
     iterator(): IterableIterator<
-        [string, StoreRecord]
+        [string, StoreValue]
     >
     {
         throw new Error('Method not implemented.');

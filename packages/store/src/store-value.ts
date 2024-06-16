@@ -1,7 +1,8 @@
 export interface StoreValue
 {
-    node_name: string;
-    field_name: string;
+    section: string;
+    node: string;
+    field: string;
     state: bigint;
     value_is_empty: number|boolean;
     value_string?: any;
