@@ -2,12 +2,11 @@ import { bigintTime } from '@topgunbuild/time';
 import {
     Message,
     MessageHeader,
-    PutMessage,
-    SearchMessage,
-    SearchOptions,
+    PutMessage, Query, SelectOptions,
+    Sort,
 } from '@topgunbuild/transport';
 import { DataNode, DataValue } from '@topgunbuild/store';
-import { isObject, toArray } from '@topgunbuild/utils';
+import { isEmptyObject, isObject, toArray } from '@topgunbuild/utils';
 import { v4 as uuidv4 } from 'uuid';
 import { ClientProviders } from './client-providers';
 
@@ -26,10 +25,16 @@ export class ClientQueryBuilder
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    async query(queryMessage: SearchMessage, options?: SearchOptions)
+    async select(
+        options?: SelectOptions&{
+            fields?: string[];
+            query?: Query[];
+            sort?: Sort[];
+        },
+    )
     {
         // Set fetch based on either the size or the maximum value (default to maximum u32 (4294967295))
-        queryMessage.fetch = queryMessage.fetch ?? 0xffffffff;
+        // queryMessage.fetch = queryMessage.fetch ?? 0xffffffff;
     }
 
     async insert(values: DataNode): Promise<void>
@@ -44,7 +49,11 @@ export class ClientQueryBuilder
     node(nodeId: string)
     {
         return {
-            query : async () =>
+            select: async (
+                options?: SelectOptions&{
+                    fields?: string[];
+                },
+            ) =>
             {
 
             },
@@ -59,7 +68,7 @@ export class ClientQueryBuilder
             field : (field: string) =>
             {
                 return {
-                    query : async () =>
+                    select: async () =>
                     {
 
                     },
@@ -90,9 +99,11 @@ export class ClientQueryBuilder
         }
         else if (!isObject(value))
         {
-            throw new Error(
-                'Node must be an object.',
-            );
+            throw new Error('Node must be an object.');
+        }
+        else if (isEmptyObject(value))
+        {
+            throw new Error('Node must not be an empty object.');
         }
         else if (!this.#providers.store)
         {

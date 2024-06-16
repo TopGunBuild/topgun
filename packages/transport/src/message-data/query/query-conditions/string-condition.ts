@@ -1,7 +1,7 @@
 import { FieldQuery } from './field-query';
 import { field, variant } from '@dao-xyz/borsh';
 
-export enum StringMatchEnum
+export enum StringCondition
 {
     contains,
     doesNotContain,
@@ -13,28 +13,31 @@ export enum StringMatchEnum
     notEmpty
 }
 
+export interface StringConditionParams
+{
+    key: string;
+    condition: StringCondition;
+    value?: any;
+    caseInsensitive?: boolean;
+}
+
 @variant(4)
-export class StringCondition extends FieldQuery
+export class StringConditionQuery extends FieldQuery
 {
     @field({ type: 'string' })
     value: number;
 
     @field({ type: 'u8' })
-    method: StringMatchEnum;
+    condition: StringCondition;
 
     @field({ type: 'bool' })
     caseInsensitive: boolean;
 
-    constructor(props: {
-        key: string[]|string;
-        method: StringMatchEnum;
-        value?: number;
-        caseInsensitive?: boolean;
-    })
+    constructor(props: StringConditionParams)
     {
         super(props);
         this.value           = props.value;
-        this.method          = props.method ?? StringMatchEnum.contains;
+        this.condition       = props.condition ?? StringCondition.contains;
         this.caseInsensitive = props.caseInsensitive ?? false;
     }
 }

@@ -1,7 +1,7 @@
 import { field, variant } from '@dao-xyz/borsh';
 import { FieldQuery } from './field-query';
 
-export enum ByteMatchEnum
+export enum ByteCondition
 {
     equals,
     doesNotEqual,
@@ -9,23 +9,26 @@ export enum ByteMatchEnum
     notEmpty
 }
 
+export interface ByteConditionParams
+{
+    key: string;
+    condition: ByteCondition;
+    value?: Uint8Array
+}
+
 @variant(2)
-export class ByteCondition extends FieldQuery
+export class ByteConditionQuery extends FieldQuery
 {
     @field({ type: Uint8Array })
     value: Uint8Array;
 
     @field({ type: 'u8' })
-    method: ByteMatchEnum;
+    condition: ByteCondition;
 
-    constructor(props: {
-        key: string[]|string;
-        method: ByteMatchEnum;
-        value?: Uint8Array
-    })
+    constructor(props: ByteConditionParams)
     {
         super(props);
-        this.value  = props.value;
-        this.method = props.method;
+        this.value     = props.value;
+        this.condition = props.condition;
     }
 }

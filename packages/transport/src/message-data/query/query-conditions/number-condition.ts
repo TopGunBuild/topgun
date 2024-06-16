@@ -1,7 +1,7 @@
 import { FieldQuery } from './field-query';
 import { field, variant } from '@dao-xyz/borsh';
 
-export enum NumberMatchEnum
+export enum NumberCondition
 {
     equals,
     doesNotEqual,
@@ -13,23 +13,26 @@ export enum NumberMatchEnum
     notEmpty
 }
 
+export interface NumberConditionParams
+{
+    key: string;
+    condition: NumberCondition;
+    value?: number
+}
+
 @variant(3)
-export class NumberCondition extends FieldQuery
+export class NumberConditionQuery extends FieldQuery
 {
     @field({ type: 'f64' })
     value: number;
 
     @field({ type: 'u8' })
-    method: NumberMatchEnum;
+    condition: NumberCondition;
 
-    constructor(props: {
-        key: string[]|string;
-        method: NumberMatchEnum;
-        value?: number
-    })
+    constructor(props: NumberConditionParams)
     {
         super(props);
-        this.value  = props.value;
-        this.method = props.method;
+        this.value     = props.value;
+        this.condition = props.condition;
     }
 }

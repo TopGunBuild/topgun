@@ -1,7 +1,7 @@
 import { field, variant } from '@dao-xyz/borsh';
 import { FieldQuery } from './field-query';
 
-export enum DateMatchEnum
+export enum DateCondition
 {
     equals,
     doesNotEqual,
@@ -19,23 +19,26 @@ export enum DateMatchEnum
     notEmpty
 }
 
+export interface DateConditionParams
+{
+    key: string;
+    condition: DateCondition;
+    value?: number
+}
+
 @variant(5)
-export class DateCondition extends FieldQuery
+export class DateConditionQuery extends FieldQuery
 {
     @field({ type: 'string' })
     value: number;
 
     @field({ type: 'u8' })
-    method: DateMatchEnum;
+    condition: DateCondition;
 
-    constructor(props: {
-        key: string[]|string;
-        method: DateMatchEnum;
-        value?: number
-    })
+    constructor(props: DateConditionParams)
     {
         super(props);
-        this.value  = props.value;
-        this.method = props.method;
+        this.value     = props.value;
+        this.condition = props.condition;
     }
 }

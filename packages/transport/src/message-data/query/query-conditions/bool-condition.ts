@@ -1,7 +1,7 @@
 import { FieldQuery } from './field-query';
 import { field, variant } from '@dao-xyz/borsh';
 
-export enum BoolMatchEnum
+export enum BoolCondition
 {
     true,
     false,
@@ -9,23 +9,26 @@ export enum BoolMatchEnum
     notEmpty
 }
 
+export interface BoolConditionParams
+{
+    key: string;
+    condition: BoolCondition;
+    value?: boolean;
+}
+
 @variant(1)
-export class BoolCondition extends FieldQuery
+export class BoolConditionQuery extends FieldQuery
 {
     @field({ type: 'bool' })
     value: boolean;
 
     @field({ type: 'u8' })
-    method: BoolMatchEnum;
+    condition: BoolCondition;
 
-    constructor(props: {
-        key: string[]|string;
-        method: BoolMatchEnum;
-        value?: boolean;
-    })
+    constructor(props: BoolConditionParams)
     {
         super(props);
-        this.method = props.method;
-        this.value  = props.value;
+        this.condition = props.condition;
+        this.value     = props.value;
     }
 }

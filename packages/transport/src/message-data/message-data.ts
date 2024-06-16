@@ -21,7 +21,7 @@ export abstract class AbstractDataMessage
         }
         if (first === 2)
         {
-            return SearchMessage.decode(bytes);
+            return SelectMessage.decode(bytes);
         }
 
         throw new Error('Unsupported');
@@ -99,7 +99,7 @@ export class DeleteMessage extends AbstractDataMessage
 }
 
 @variant(2)
-export class SearchMessage extends AbstractDataMessage
+export class SelectMessage extends AbstractDataMessage
 {
     @field({ type: fixedArray('u8', 32) })
     id: Uint8Array;
@@ -113,9 +113,9 @@ export class SearchMessage extends AbstractDataMessage
     @field({ type: 'u32' })
     fetch: number;
 
-    static decode(bytes: Uint8Array): SearchMessage
+    static decode(bytes: Uint8Array): SelectMessage
     {
-        return deserialize(bytes, SearchMessage);
+        return deserialize(bytes, SelectMessage);
     }
 
     private _idString: string;
