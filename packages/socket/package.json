@@ -41,7 +41,6 @@
     "dependencies": {
         "@topgunbuild/async-stream-emitter": "workspace:*",
         "@topgunbuild/utils": "workspace:*",
-        "uuid": "^9.0.1",
         "ws": "^8.9.0"
     },
     "devDependencies": {

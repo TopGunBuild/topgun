@@ -3,8 +3,7 @@ import {
     Sort,
 } from '@topgunbuild/transport';
 import { DataNode } from '@topgunbuild/store';
-import { toArray } from '@topgunbuild/utils';
-import { v4 as uuidv4 } from 'uuid';
+import { randomId, toArray } from '@topgunbuild/utils';
 import { ClientService } from '../client-service';
 import { NodeQueryBuilder } from './node-query-builder';
 
@@ -42,7 +41,7 @@ export class SectionQueryBuilder
         await Promise.all(
             toArray(values).map(value =>
                 this.#service.putNode(
-                    this.#section, uuidv4(), value,
+                    this.#section, randomId(), value,
                 ),
             ),
         );

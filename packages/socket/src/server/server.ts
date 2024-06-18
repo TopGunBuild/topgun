@@ -13,14 +13,13 @@ import {
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { SimpleBroker, SimpleExchange } from '../simple-broker';
 import { Socket } from './socket';
-import { applyEachSeries, AsyncFunction, isNode } from '@topgunbuild/utils';
-import { v4 as uuidv4 } from 'uuid';
+import { applyEachSeries, AsyncFunction, isNode, randomId } from '@topgunbuild/utils';
 import {
     BrokerError,
     InvalidActionError,
     InvalidArgumentsError,
     InvalidOptionsError, ServerProtocolError, SilentMiddlewareBlockedError,
-} from '../errors/errors';
+} from '../errors';
 import { defaultCodecEngine } from '../default-codec-engine';
 
 export class SocketServer extends AsyncStreamEmitter<any>
@@ -82,7 +81,7 @@ export class SocketServer extends AsyncStreamEmitter<any>
             pingTimeoutDisabled   : false,
             pingInterval          : 8000,
             origins               : '*:*',
-            appName               : uuidv4(),
+            appName               : randomId(),
             path                  : '/topgunsocket/',
             pubSubBatchDuration   : null,
             middlewareEmitWarnings: true,
@@ -467,7 +466,7 @@ export class SocketServer extends AsyncStreamEmitter<any>
 
     generateId(): string
     {
-        return uuidv4();
+        return randomId();
     };
 
     addMiddleware(type: Middlewares, middleware: MiddlewareFunction): void

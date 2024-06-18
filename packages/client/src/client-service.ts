@@ -72,20 +72,23 @@ export class ClientService
 
     async putValue(sectionId: string, nodeId: string, field: string, value: DataValue): Promise<any>
     {
-        const data = new PutMessage(
+        const data    = new PutMessage(
             sectionId,
             nodeId,
             field,
             bigintTime(),
             value,
         );
-
-        this.store.put(data);
-
         const message = new Message({
             header: new MessageHeader({}),
-            data: data.encode(),
+            data  : data.encode(),
         });
+
+        // Save to local store
+        this.store.put(data);
+
+        // Send to peers
+        this.connectors.forEach(connector => connector.ingest(message));
     }
 
     authRequired(): boolean

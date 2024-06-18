@@ -1,7 +1,6 @@
-import { v4 as uuidv4 } from 'uuid';
-import { windowOrGlobal } from '@topgunbuild/utils';
+import { randomId, windowOrGlobal } from '@topgunbuild/utils';
 import { SocketClientOptions } from './types';
-import { InvalidArgumentsError } from '../errors/errors';
+import { InvalidArgumentsError } from '../errors';
 import { ClientSocket } from './client';
 
 function isUrlSecure(): boolean
@@ -55,7 +54,7 @@ export function create(options: SocketClientOptions): ClientSocket
     const isSecureDefault = isUrlSecure();
 
     const opts: SocketClientOptions = {
-        clientId: uuidv4(),
+        clientId: randomId(),
         port    : getPort(options, isSecureDefault),
         hostname: windowOrGlobal.location && windowOrGlobal.location.hostname || 'localhost',
         secure  : isSecureDefault,

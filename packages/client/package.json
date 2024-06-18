@@ -26,8 +26,7 @@
         "@topgunbuild/sqlite": "workspace:*",
         "@topgunbuild/time": "workspace:*",
         "@topgunbuild/transport":"workspace:*",
-        "@topgunbuild/utils": "workspace:*",
-        "uuid": "^9.0.1"
+        "@topgunbuild/utils": "workspace:*"
     },
     "devDependencies": {
         "@types/jest": "^29.5.0",
