@@ -1,0 +1,33 @@
+{
+    "name": "@topgunbuild/data-streams",
+    "version": "0.0.0",
+    "description": "EventEmitter using async iterable streams",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "files": [
+        "dist"
+    ],
+    "scripts": {
+        "build": "tsup",
+        "watch": "tsup --watch",
+        "lint:ts": "eslint -c ../../.eslintrc.ts.yml src/**/*.ts --no-eslintrc",
+        "lint:fix": "eslint -c ../../.eslintrc.ts.yml src/**/*.ts --no-eslintrc && eslint -c ../../.eslintrc.js.yml test/**/*.js --no-eslintrc --fix --no-error-on-unmatched-pattern",
+        "test": "jest test"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "dependencies": {
+        "@topgunbuild/async-stream-emitter": "workspace:*",
+        "@topgunbuild/utils": "workspace:*"
+    },
+    "devDependencies": {
+        "@types/jest": "^29.5.0",
+        "@types/node": "^18.15.11",
+        "@topgunbuild/test-utils": "workspace:*",
+        "jest": "^29.5.0",
+        "ts-jest": "^29.1.0",
+        "tsup": "6.5.0",
+        "typescript": "4.9.4"
+    }
+}

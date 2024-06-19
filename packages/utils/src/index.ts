@@ -8,6 +8,7 @@ export * from './format';
 export * from './hash';
 export * from './base64';
 export * from './typed';
+export * from './debounce';
 export * from './random-id';
 export * from './to-array';
 
