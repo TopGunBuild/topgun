@@ -25,7 +25,7 @@ export class Exchange extends AsyncStreamEmitter<any>
         {
             for await (const { streamName, data } of this.listener('publish'))
             {
-                if (this._streamMap[streamName])
+                if (this.getStreamState(streamName) === DataStream.SUBSCRIBED)
                 {
                     this._streamDataDemux.write(streamName, data);
                 }
@@ -104,8 +104,8 @@ export class Exchange extends AsyncStreamEmitter<any>
                 attributes
             };
             this._streamMap[streamName] = stream;
-            this.#triggerStreamSubscribe(stream);
         }
+        this.#triggerStreamSubscribe(stream);
 
         const channelDataStream = this._streamDataDemux.stream(streamName);
 
@@ -145,17 +145,6 @@ export class Exchange extends AsyncStreamEmitter<any>
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    #triggerStreamDestroy(stream: SimpleDataStream): void
-    {
-        const streamName = stream.name;
-
-        stream.state = DataStream.DESTROYED;
-
-        delete this._streamMap[streamName];
-        this._streamEventDemux.write(`${streamName}/destroy`, {});
-        this.emit('destroy', { streamName });
-    }
-
     #triggerStreamSubscribe(stream: SimpleDataStream): void
     {
         const streamName = stream.name;
@@ -170,11 +159,23 @@ export class Exchange extends AsyncStreamEmitter<any>
     {
         const streamName = stream.name;
 
-        delete this._streamMap[streamName];
+        // delete this._streamMap[streamName];
         if (stream.state === DataStream.SUBSCRIBED)
         {
+            stream.state = DataStream.UNSUBSCRIBED;
             this._streamEventDemux.write(`${streamName}/unsubscribe`, {});
             this.emit('unsubscribe', { streamName });
         }
+    }
+
+    #triggerStreamDestroy(stream: SimpleDataStream): void
+    {
+        const streamName = stream.name;
+
+        stream.state = DataStream.DESTROYED;
+
+        delete this._streamMap[streamName];
+        this._streamEventDemux.write(`${streamName}/destroy`, {});
+        this.emit('destroy', { streamName });
     }
 }

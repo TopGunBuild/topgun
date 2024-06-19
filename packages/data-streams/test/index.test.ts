@@ -5,75 +5,43 @@ it('data stream lifecycle', async () =>
 {
     const exchange = new Exchange();
 
-    const destroyed: string[]    = [];
-    const subscribed: string[]   = [];
-    const unsubscribed: string[] = [];
-    const published: any[]     = [];
+    let destroyed: boolean    = false;
+    let subscribed: boolean    = false;
+    let unsubscribed: boolean    = false;
+    let published: boolean    = false;
 
-    const promises: Promise<any>[] = [];
+    exchange.listener('destroy').once().then(() =>
+    {
+        destroyed = true;
+    });
+    exchange.listener('unsubscribe').once().then(() =>
+    {
+        unsubscribed = true;
+    });
+    exchange.listener('subscribe').once().then(() =>
+    {
+        subscribed = true;
+    });
 
-    promises.push(
-        (async () =>
-        {
-            for await (const { streamName } of exchange.listener('destroy'))
-            {
-                destroyed.push(streamName);
-                console.log('destroy')
-            }
-        })(),
-        (async () =>
-        {
-            for await (const { streamName } of exchange.listener('subscribe'))
-            {
-                subscribed.push(streamName);
-                console.log('subscribe')
-            }
-        })(),
-        (async () =>
-        {
-            for await (const { streamName } of exchange.listener('unsubscribe'))
-            {
-                unsubscribed.push(streamName);
-                console.log('unsubscribe')
-            }
-        })()
-    );
+    const stream = exchange.subscribe<string>();
 
-    const stream = exchange.subscribe<{data: string}>('abc');
-
-    // promises.push(
-    //     (async () =>
-    //     {
-    //         for await (const { data } of stream.listener<{ data: string }>('publish'))
-    //         {
-    //             published.push(data);
-    //         }
-    //         exchange.destroy();
-    //         exchange.killAllListeners();
-    //     })()
-    // );
     (async () =>
     {
-        for await (const data of stream)
+        for await (const _ of stream)
         {
-            published.push(data);
-            console.log('publish')
+            published = true;
+            stream.unsubscribe();
+            stream.destroy();
         }
-    })()
+    })();
 
-    await stream.publish({data: '123'});
-    stream.unsubscribe();
-    stream.destroy();
+    await stream.publish('123');
+    await wait(0);
 
-    // exchange.destroy();
-    // exchange.killAllListeners();
-
-    // await Promise.all(promises);
-
-    await wait(10);
-
-    console.log(destroyed.length, subscribed.length, unsubscribed.length, published.length);
-    expect(stream).not.toBeUndefined()
+    expect(subscribed).toBeTruthy();
+    expect(published).toBeTruthy();
+    expect(unsubscribed).toBeTruthy();
+    expect(destroyed).toBeTruthy();
 });
 
 it('should destroy stream after emitting all events', async () =>
@@ -106,9 +74,87 @@ it('should destroy stream after emitting all events', async () =>
             {
                 receivedPackets.push(packet);
             }
-        })()
+        })(),
     ]);
 
     expect(destroyed).toBeTruthy();
     expect(receivedPackets.length).toBe(9);
+});
+
+it('subscribe to only part of the events', async () =>
+{
+    const exchange = new Exchange();
+    const stream   = exchange.subscribe();
+
+    (async () =>
+    {
+        for (let i = 0; i < 10; i++)
+        {
+            await wait(10);
+
+            if (i === 3)
+            {
+                stream.unsubscribe();
+            }
+            else if (i === 7)
+            {
+                stream.subscribe();
+            }
+            await stream.publish('world' + i);
+        }
+        stream.destroy();
+    })();
+
+    const receivedPackets = [];
+
+    for await (let packet of stream)
+    {
+        receivedPackets.push(packet);
+    }
+
+    expect(receivedPackets.length).toBe(5);
+});
+
+it('the stream can have multiple subscriptions', async () =>
+{
+    const exchange = new Exchange();
+    const stream   = exchange.subscribe();
+
+    (async () =>
+    {
+        for (let i = 0; i < 10; i++)
+        {
+            await wait(10);
+            await exchange.publish(stream.name, 'world' + i);
+        }
+        stream.destroy();
+    })();
+
+    const receivedPackets = [];
+
+    await Promise.all([
+        (async () =>
+        {
+            for await (let packet of stream)
+            {
+                receivedPackets.push(packet);
+            }
+        })(),
+        (async () =>
+        {
+            for await (let packet of stream)
+            {
+                receivedPackets.push(packet);
+            }
+        })(),
+        (async () =>
+        {
+            for await (let packet of stream)
+            {
+                receivedPackets.push(packet);
+            }
+        })()
+    ]);
+
+    expect(receivedPackets.length).toBe(27);
 });
