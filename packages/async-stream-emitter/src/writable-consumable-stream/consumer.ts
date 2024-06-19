@@ -5,7 +5,7 @@ import { WritableConsumableStream } from './writable-consumable-stream';
 export class Consumer<T>
 {
     readonly id: number;
-    readonly timeout: number;
+    readonly timeout?: number;
     currentNode: ConsumerNode<T>;
     stream: WritableConsumableStream<T>;
 
@@ -18,7 +18,12 @@ export class Consumer<T>
     /**
      * Constructor
      */
-    constructor(stream, id, startNode, timeout)
+    constructor(
+        stream: WritableConsumableStream<T>,
+        id: number,
+        startNode: ConsumerNode<T>,
+        timeout?: number
+    )
     {
         this.id            = id;
         this._backpressure = 0;
@@ -39,7 +44,7 @@ export class Consumer<T>
             id          : this.id,
             backpressure: this._backpressure
         };
-        if (this.timeout != null)
+        if (typeof this.timeout === 'number')
         {
             stats.timeout = this.timeout;
         }
@@ -173,7 +178,7 @@ export class Consumer<T>
         {
             this._resolve = resolve;
             let timeoutId;
-            if (timeout !== undefined)
+            if (typeof timeout === 'number')
             {
                 // Create the error object in the outer scope in order
                 // to get the full stack trace.
