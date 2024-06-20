@@ -67,7 +67,7 @@ export class Exchange extends AsyncStreamEmitter<any>
                 this.#triggerStreamDestroy(stream);
             }
 
-            this._streamDataDemux.close(streamName);
+            this._streamDataDemux.kill(streamName);
         }
         else
         {
@@ -76,9 +76,9 @@ export class Exchange extends AsyncStreamEmitter<any>
                 const stream = this._streamMap[streamName];
                 this.#triggerStreamDestroy(stream);
             });
-            this.closeAllListeners();
-            this._streamDataDemux.closeAll();
-            this._streamEventDemux.closeAll();
+            this.killAllListeners();
+            this._streamDataDemux.killAll();
+            this._streamEventDemux.killAll();
         }
     }
 
