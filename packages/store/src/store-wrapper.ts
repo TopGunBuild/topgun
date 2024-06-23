@@ -5,8 +5,7 @@ import { StoreResults } from './result';
 import { IdKey } from './id';
 import { Store } from './store';
 import {
-    CloseIteratorMessage,
-    CollectNextMessage, PutMessage, SelectMessage,
+    PutMessage, SelectMessage,
     ValueBool,
     ValueDate,
     ValueEmpty,
@@ -80,52 +79,14 @@ export class StoreWrapper
 
     stop(): Promise<void>|void
     {
-        return this.index.stop?.();
+        return this.index.stop();
     }
 
-    search(
+    select(
         query: SelectMessage,
         from: PublicKey = new Ed25519PublicKey(randomBytes(32)),
     ): Promise<StoreResults>
     {
         return this.index.query(query, from);
-    }
-
-    iterate(
-        query: SelectMessage,
-        from: PublicKey = new Ed25519PublicKey(randomBytes(32)),
-    )
-    {
-        let done        = false;
-        let fetchedOnce = false;
-        return {
-            next : async (count: number) =>
-            {
-                let res: StoreResults;
-                if (!fetchedOnce)
-                {
-                    fetchedOnce = true;
-                    query.fetch = count;
-                    res         = await this.index.query(query, from);
-                }
-                else
-                {
-                    res = await this.index.next(
-                        new CollectNextMessage({ id: query.id, amount: count }),
-                        from,
-                    );
-                }
-                done = res.left === 0;
-                return res;
-            },
-            done : () => done,
-            close: () =>
-            {
-                return this.index.close(
-                    new CloseIteratorMessage({ id: query.id }),
-                    from,
-                );
-            },
-        };
     }
 }

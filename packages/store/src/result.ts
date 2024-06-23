@@ -4,31 +4,15 @@ import { StoreValue } from './store-value';
 export interface StoreResults
 {
     results: StoreValue[];
-    left: number;
-}
-
-export class Result
-{
-    @field({ type: Uint8Array })
-    source: Uint8Array;
-
-    constructor(value: { source: Uint8Array; })
-    {
-        this.source = value.source;
-    }
 }
 
 export class Results
 {
-    @field({ type: vec(Result) })
-    results: Result[];
+    @field({ type: vec(Uint8Array) })
+    results: Uint8Array[];
 
-    @field({ type: 'f64' })
-    left: number;
-
-    constructor(properties: { results: Result[]; left: number })
+    constructor(properties: { results: Uint8Array[] })
     {
-        this.left    = properties.left;
         this.results = properties.results;
     }
 }

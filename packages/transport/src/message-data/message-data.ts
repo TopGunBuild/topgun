@@ -110,8 +110,14 @@ export class SelectMessage extends AbstractDataMessage
     @field({ type: vec(Sort) })
     sort: Sort[];
 
+    @field({ type: 'string' })
+    fields: string[];
+
     @field({ type: 'u32' })
-    fetch: number;
+    limit: number;
+
+    @field({ type: 'u32' })
+    offset: number;
 
     static decode(bytes: Uint8Array): SelectMessage
     {
@@ -129,13 +135,20 @@ export class SelectMessage extends AbstractDataMessage
         return this._idString;
     }
 
-    constructor(props?: { query?: Query[]|Query; sort?: Sort[]|Sort })
+    constructor(props?: {
+        query?: Query[]|Query;
+        sort?: Sort[]|Sort;
+        fields?: string[];
+        offset?: number;
+        limit?: number;
+    })
     {
         super();
-        this.id    = randomBytes(32);
-        this.query = toArray(props?.query);
-        this.sort  = toArray(props?.sort);
-        this.fetch = 1;
+        this.id     = randomBytes(32);
+        this.query  = toArray(props?.query);
+        this.sort   = toArray(props?.sort);
+        this.offset = props?.offset || 0;
+        this.limit  = props?.limit;
     }
 
     encode(): Uint8Array
