@@ -1,15 +1,15 @@
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { DataNode, DataValue, StoreWrapper } from '@topgunbuild/store';
 import { isEmptyObject, isObject, isFunction } from '@topgunbuild/utils';
-import { Message, MessageHeader, PutMessage, SelectMessage } from '@topgunbuild/transport';
+import { Message, MessageHeader, PutMessage, SelectMessage, SelectOptions } from '@topgunbuild/transport';
 import { bigintTime } from '@topgunbuild/time';
 import { DataStream, Exchange } from '@topgunbuild/data-streams/src';
 import { Connector } from './transports/connector';
-import { PeerOption, ClientOptions, SelectCb } from './types';
+import { PeerOption, ClientOptions, SelectCb, SqlSelectOptions } from './types';
 import { createConnector } from './transports/web-socket-connector';
 import { getSocketOptions } from './utils/get-socket-options';
 import { ClientEvents } from './constants';
-import { QueryService } from './query-service';
+import { SelectService } from './select-service';
 import { createStore } from './utils/create-store';
 
 export class ClientService
@@ -20,7 +20,7 @@ export class ClientService
     public readonly exchange: Exchange;
     public store: StoreWrapper;
 
-    #queryServices: Map<string, QueryService>;
+    #queryServices: Map<string, SelectService>;
 
     constructor(options: ClientOptions)
     {
@@ -43,10 +43,11 @@ export class ClientService
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    select(query: SelectMessage, local: boolean, remote: boolean, cb?: SelectCb): DataStream<any>
+    select(selectOptions: SqlSelectOptions, cb?: SelectCb): DataStream<any>
     {
+        const select = new SelectMessage(selectOptions);
         const stream = this.exchange.subscribe();
-        this.#handleQuery(stream, query, local, remote, cb);
+        this.#handleSelect(stream, select, selectOptions, cb);
         return stream;
     }
 
@@ -155,29 +156,28 @@ export class ClientService
         })();
     }
 
-    async #handleQuery(
-        stream: DataStream<any>,
-        query: SelectMessage,
-        local: boolean,
-        remote: boolean,
+    async #handleSelect(
+        dataStream: DataStream<any>,
+        selectMessage: SelectMessage,
+        selectOptions: SelectOptions,
         cb?: SelectCb,
     ): Promise<void>
     {
-        const service = await QueryService.create(stream, query, local, remote, cb);
-        this.#queryServices.set(stream.name, service);
+        const queryService = await SelectService.create(dataStream, selectMessage, selectOptions, cb);
+        this.#queryServices.set(dataStream.name, queryService);
 
-        if (local)
+        if (selectOptions.local)
         {
             await this.#waitForStoreInit();
-            const result = await this.store.select(query);
-            await service.putValues(result.results);
+            const result = await this.store.select(selectMessage);
+            await queryService.putValues(result.results);
         }
 
-        if (remote)
+        if (selectOptions.remote)
         {
             const message = new Message({
                 header: new MessageHeader({}),
-                data  : query.encode(),
+                data  : selectMessage.encode(),
             });
             this.connectors.forEach(connector => connector.send(message));
         }

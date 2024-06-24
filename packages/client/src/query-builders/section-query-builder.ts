@@ -1,11 +1,8 @@
-import {
-    Query, SelectMessage, SelectOptions,
-    Sort,
-} from '@topgunbuild/transport';
 import { DataNode } from '@topgunbuild/store';
 import { randomId, toArray } from '@topgunbuild/utils';
 import { ClientService } from '../client-service';
 import { NodeQueryBuilder } from './node-query-builder';
+import { SqlSelectOptions } from '../types';
 
 export class SectionQueryBuilder
 {
@@ -22,15 +19,7 @@ export class SectionQueryBuilder
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    select(
-        options?: SelectOptions&{
-            fields?: string[];
-            query?: Query[];
-            sort?: Sort[];
-            limit?: number,
-            offset?: number
-        },
-    )
+    select(options?: SqlSelectOptions)
     {
         const defaultOptions = {
             offset: 0,
@@ -45,11 +34,7 @@ export class SectionQueryBuilder
             throw new Error(`Limit for rows (controlled by 'rowLimit' setting) exceeded, max rows: ${this.#service.options.rowLimit}`);
         }
 
-        return this.#service.select(
-            new SelectMessage(options),
-            options.local,
-            options.remote
-        );
+        return this.#service.select(options);
     }
 
     async insert(values: DataNode): Promise<void>

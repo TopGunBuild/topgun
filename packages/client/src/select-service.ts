@@ -1,45 +1,45 @@
 import { StoreValue, StoreWrapper } from '@topgunbuild/store';
 import { DataStream } from '@topgunbuild/data-streams/src';
-import { SelectMessage } from '@topgunbuild/transport';
+import { SelectMessage, SelectOptions } from '@topgunbuild/transport';
 import { SelectCb } from './types';
 import { createStore } from './utils/create-store';
 
-export class QueryService
+export class SelectService
 {
-    store: StoreWrapper;
-    stream: DataStream<any>;
-    query: SelectMessage;
+    memoryStore: StoreWrapper;
+    dataStream: DataStream<any>;
+    selectMessage: SelectMessage;
     local: boolean;
     remote: boolean;
+    sync: boolean;
     cb?: SelectCb;
 
     static async create(
-        stream: DataStream<any>,
-        query: SelectMessage,
-        local: boolean,
-        remote: boolean,
+        dataStream: DataStream<any>,
+        selectMessage: SelectMessage,
+        selectOptions: SelectOptions,
         cb?: SelectCb,
-    ): Promise<QueryService>
+    ): Promise<SelectService>
     {
         const store = await createStore(':memory:');
-        return new QueryService(store, stream, query, local, remote, cb);
+        return new SelectService(store, dataStream, selectMessage, selectOptions, cb);
     }
 
     constructor(
         store: StoreWrapper,
-        stream: DataStream<any>,
-        query: SelectMessage,
-        local: boolean,
-        remote: boolean,
+        dataStream: DataStream<any>,
+        selectMessage: SelectMessage,
+        selectOptions: SelectOptions,
         cb?: SelectCb,
     )
     {
-        this.store  = store;
-        this.stream = stream;
-        this.query  = query;
-        this.local  = local;
-        this.remote = remote;
-        this.cb     = cb;
+        this.memoryStore   = store;
+        this.dataStream    = dataStream;
+        this.selectMessage = selectMessage;
+        this.local         = selectOptions.local;
+        this.remote        = selectOptions.remote;
+        this.sync          = selectOptions.sync;
+        this.cb            = cb;
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -58,15 +58,15 @@ export class QueryService
     async putValues(values: StoreValue[]): Promise<void>
     {
         await Promise.all(
-            values.map(value => this.store.index.put(value)),
+            values.map(value => this.memoryStore.index.put(value)),
         );
         this.#triggerChanges();
     }
 
     async destroy(): Promise<void>
     {
-        this.stream.destroy();
-        await this.store?.stop();
+        this.dataStream.destroy();
+        await this.memoryStore?.stop();
     }
 
     // -----------------------------------------------------------------------------------------------------
