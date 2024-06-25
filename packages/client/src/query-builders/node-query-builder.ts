@@ -1,5 +1,5 @@
 import { DataNode } from '@topgunbuild/store';
-import { SelectOptions } from '@topgunbuild/transport';
+import { SelectNodeOptions } from '@topgunbuild/transport';
 import { ClientService } from '../client-service';
 import { FieldQueryBuilder } from './field-query-builder';
 
@@ -16,7 +16,7 @@ export class NodeQueryBuilder
         this.#service = service;
     }
 
-    async select(options?: SelectOptions&{ fields?: string[] })
+    async select(options?: SelectNodeOptions)
     {
 
     }

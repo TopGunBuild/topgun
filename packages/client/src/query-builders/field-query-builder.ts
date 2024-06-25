@@ -1,5 +1,5 @@
 import { DataValue } from '@topgunbuild/store';
-import { SelectOptions } from '@topgunbuild/transport';
+import { SelectFieldOptions } from '@topgunbuild/transport';
 import { ClientService } from '../client-service';
 
 export class FieldQueryBuilder
@@ -22,7 +22,7 @@ export class FieldQueryBuilder
         this.#service = service;
     }
 
-    async select(options?: SelectOptions)
+    async select(options?: SelectFieldOptions)
     {
 
     }

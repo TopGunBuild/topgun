@@ -5,6 +5,7 @@ import { StoreResults } from './result';
 import { IdKey } from './id';
 import { Store } from './store';
 import {
+    CloseIteratorMessage, SelectNextMessage,
     PutMessage, SelectMessage,
     ValueBool,
     ValueDate,
@@ -87,6 +88,44 @@ export class StoreWrapper
         from: PublicKey = new Ed25519PublicKey(randomBytes(32)),
     ): Promise<StoreResults>
     {
-        return this.index.query(query, from);
+        return this.index.select(query, from);
+    }
+
+    iterate(
+        selectMessage: SelectMessage,
+        from: PublicKey = new Ed25519PublicKey(randomBytes(32)),
+    )
+    {
+        let done        = false;
+        let fetchedOnce = false;
+        return {
+            next : async (pageSize: number) =>
+            {
+                let res: StoreResults;
+                if (!fetchedOnce)
+                {
+                    fetchedOnce            = true;
+                    selectMessage.pageSize = pageSize;
+                    res                    = await this.index.select(selectMessage, from);
+                }
+                else
+                {
+                    res = await this.index.next(
+                        new SelectNextMessage({ id: selectMessage.id, pageSize }),
+                        from,
+                    );
+                }
+                done = res.left === 0;
+                return res;
+            },
+            done : () => done,
+            close: () =>
+            {
+                return this.index.close(
+                    new CloseIteratorMessage({ id: selectMessage.id }),
+                    from,
+                );
+            },
+        };
     }
 }

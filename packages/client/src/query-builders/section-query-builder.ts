@@ -2,7 +2,7 @@ import { DataNode } from '@topgunbuild/store';
 import { randomId, toArray } from '@topgunbuild/utils';
 import { ClientService } from '../client-service';
 import { NodeQueryBuilder } from './node-query-builder';
-import { SqlSelectOptions } from '../types';
+import { SelectSectionOptions } from '@topgunbuild/transport';
 
 export class SectionQueryBuilder
 {
@@ -19,15 +19,15 @@ export class SectionQueryBuilder
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    select(options?: SqlSelectOptions)
+    select(options?: SelectSectionOptions)
     {
-        const defaultOptions = {
-            offset: 0,
+        const defaultOptions: SelectSectionOptions = {
             limit : this.#service.options.rowLimit,
             local : true,
             remote: true,
+            sync  : false,
         };
-        options              = Object.assign(defaultOptions, options || {});
+        options                                    = Object.assign(defaultOptions, options || {});
 
         if (options?.limit > this.#service.options.rowLimit)
         {

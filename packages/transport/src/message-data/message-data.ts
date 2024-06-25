@@ -1,5 +1,5 @@
 import { deserialize, field, fixedArray, serialize, variant, vec } from '@dao-xyz/borsh';
-import { randomBytes, sha256Base64, toArray } from '@topgunbuild/utils';
+import { randomBytes, toArray } from '@topgunbuild/utils';
 import { AbstractValue } from './message-data-value';
 import { typeOf } from './typeof';
 import { Query, Sort } from './query';
@@ -71,10 +71,13 @@ export class PutMessage extends AbstractDataMessage
 export class DeleteMessage extends AbstractDataMessage
 {
     @field({ type: 'string' })
-    node_name: string;
+    section: string;
 
     @field({ type: 'string' })
-    field_name: string;
+    node: string;
+
+    @field({ type: 'string' })
+    field: string;
 
     @field({ type: 'u64' })
     state: bigint;
@@ -84,12 +87,14 @@ export class DeleteMessage extends AbstractDataMessage
         return deserialize(bytes, DeleteMessage);
     }
 
-    constructor(node_name: string, field_name: string, state: bigint)
+    constructor(section: string, node: string, field: string, state: bigint)
     {
         super();
-        this.node_name  = node_name;
-        this.field_name = field_name;
-        this.state      = state;
+        this.section = section;
+        this.node    = node;
+        this.field   = field;
+        this.state   = state;
+        this.state   = state;
     }
 
     encode(): Uint8Array
@@ -114,41 +119,25 @@ export class SelectMessage extends AbstractDataMessage
     fields: string[];
 
     @field({ type: 'u32' })
-    limit: number;
-
-    @field({ type: 'u32' })
-    offset: number;
+    pageSize: number;
 
     static decode(bytes: Uint8Array): SelectMessage
     {
         return deserialize(bytes, SelectMessage);
     }
 
-    private _idString: string;
-
-    get idString(): string
-    {
-        if (!this._idString)
-        {
-            this._idString = sha256Base64(this.id);
-        }
-        return this._idString;
-    }
-
     constructor(props?: {
         query?: Query[]|Query;
         sort?: Sort[]|Sort;
         fields?: string[];
-        offset?: number;
-        limit?: number;
+        pageSize?: number;
     })
     {
         super();
-        this.id     = randomBytes(32);
-        this.query  = toArray(props?.query);
-        this.sort   = toArray(props?.sort);
-        this.offset = props?.offset || 0;
-        this.limit  = props?.limit;
+        this.id       = randomBytes(32);
+        this.query    = toArray(props?.query);
+        this.sort     = toArray(props?.sort);
+        this.pageSize = props?.pageSize || 1;
     }
 
     encode(): Uint8Array
@@ -158,35 +147,24 @@ export class SelectMessage extends AbstractDataMessage
 }
 
 @variant(2)
-export class CollectNextMessage extends AbstractDataMessage
+export class SelectNextMessage extends AbstractDataMessage
 {
     @field({ type: fixedArray('u8', 32) })
     id: Uint8Array;
 
     @field({ type: 'u32' })
-    amount: number;
+    pageSize: number;
 
-    static decode(bytes: Uint8Array): CollectNextMessage
+    static decode(bytes: Uint8Array): SelectNextMessage
     {
-        return deserialize(bytes, CollectNextMessage);
+        return deserialize(bytes, SelectNextMessage);
     }
 
-    private _idString: string;
-
-    get idString(): string
-    {
-        if (!this._idString)
-        {
-            this._idString = sha256Base64(this.id);
-        }
-        return this._idString;
-    }
-
-    constructor(properties: { id: Uint8Array; amount: number })
+    constructor(properties: { id: Uint8Array; pageSize: number })
     {
         super();
-        this.id     = properties.id;
-        this.amount = properties.amount;
+        this.id       = properties.id;
+        this.pageSize = properties.pageSize;
     }
 
     encode(): Uint8Array
@@ -200,22 +178,6 @@ export class CloseIteratorMessage extends AbstractDataMessage
 {
     @field({ type: fixedArray('u8', 32) })
     id: Uint8Array;
-
-    static decode(bytes: Uint8Array): CloseIteratorMessage
-    {
-        return deserialize(bytes, CloseIteratorMessage);
-    }
-
-    private _idString: string;
-
-    get idString(): string
-    {
-        if (!this._idString)
-        {
-            this._idString = sha256Base64(this.id);
-        }
-        return this._idString;
-    }
 
     constructor(properties: { id: Uint8Array })
     {

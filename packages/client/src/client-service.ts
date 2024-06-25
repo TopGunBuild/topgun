@@ -1,11 +1,11 @@
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { DataNode, DataValue, StoreWrapper } from '@topgunbuild/store';
-import { isEmptyObject, isObject, isFunction } from '@topgunbuild/utils';
+import { isEmptyObject, isObject } from '@topgunbuild/utils';
 import { Message, MessageHeader, PutMessage, SelectMessage, SelectOptions } from '@topgunbuild/transport';
 import { bigintTime } from '@topgunbuild/time';
 import { DataStream, Exchange } from '@topgunbuild/data-streams/src';
 import { Connector } from './transports/connector';
-import { PeerOption, ClientOptions, SelectCb, SqlSelectOptions } from './types';
+import { PeerOption, ClientOptions, QueryCb, SqlSelectOptions } from './types';
 import { createConnector } from './transports/web-socket-connector';
 import { getSocketOptions } from './utils/get-socket-options';
 import { ClientEvents } from './constants';
@@ -43,7 +43,7 @@ export class ClientService
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    select(selectOptions: SqlSelectOptions, cb?: SelectCb): DataStream<any>
+    select(selectOptions: SqlSelectOptions, cb?: QueryCb): DataStream<any>
     {
         const select = new SelectMessage(selectOptions);
         const stream = this.exchange.subscribe();
@@ -160,7 +160,7 @@ export class ClientService
         dataStream: DataStream<any>,
         selectMessage: SelectMessage,
         selectOptions: SelectOptions,
-        cb?: SelectCb,
+        cb?: QueryCb,
     ): Promise<void>
     {
         const queryService = await SelectService.create(dataStream, selectMessage, selectOptions, cb);

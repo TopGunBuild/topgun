@@ -1,7 +1,7 @@
 import { StoreValue, StoreWrapper } from '@topgunbuild/store';
 import { DataStream } from '@topgunbuild/data-streams/src';
-import { SelectMessage, SelectOptions } from '@topgunbuild/transport';
-import { SelectCb } from './types';
+import { SelectMessage } from '@topgunbuild/transport';
+import { QueryCb } from './types';
 import { createStore } from './utils/create-store';
 
 export class SelectService
@@ -12,13 +12,14 @@ export class SelectService
     local: boolean;
     remote: boolean;
     sync: boolean;
-    cb?: SelectCb;
+    once: boolean;
+    cb?: QueryCb;
 
     static async create(
         dataStream: DataStream<any>,
         selectMessage: SelectMessage,
         selectOptions: SelectOptions,
-        cb?: SelectCb,
+        cb?: QueryCb,
     ): Promise<SelectService>
     {
         const store = await createStore(':memory:');
@@ -30,7 +31,7 @@ export class SelectService
         dataStream: DataStream<any>,
         selectMessage: SelectMessage,
         selectOptions: SelectOptions,
-        cb?: SelectCb,
+        cb?: QueryCb,
     )
     {
         this.memoryStore   = store;

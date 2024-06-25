@@ -1,4 +1,4 @@
-import { SelectMessage } from '@topgunbuild/transport';
+import { CloseIteratorMessage, SelectNextMessage, SelectMessage } from '@topgunbuild/transport';
 import { StoreValue } from './store-value';
 import { PublicKey } from '@topgunbuild/crypto';
 import { StoreResults } from './result';
@@ -16,7 +16,15 @@ export interface Store
 
     del(id: IdKey): Promise<void>|void;
 
-    query(query: SelectMessage, from: PublicKey): Promise<StoreResults>;
+    select(query: SelectMessage, from: PublicKey): Promise<StoreResults>;
 
     getSize(): number|Promise<number>;
+
+    next(query: SelectNextMessage, from: PublicKey): Promise<StoreResults>;
+
+    close(query: CloseIteratorMessage, from: PublicKey): Promise<void>|void;
+
+    iterator(): IterableIterator<[string, StoreValue]>;
+
+    get cursorCount(): number;
 }
