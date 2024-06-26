@@ -25,7 +25,7 @@ export class FieldQueryBuilder
         this.#service = service;
     }
 
-    async select(options?: SelectFieldOptions)
+    select(options?: SelectFieldOptions): SelectBuilder<DataValue>
     {
         const handler = new FieldQueryHandler({
             service: this.#service,

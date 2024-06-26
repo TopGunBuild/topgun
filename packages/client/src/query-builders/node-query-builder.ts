@@ -19,7 +19,7 @@ export class NodeQueryBuilder
         this.#service = service;
     }
 
-    async select(options?: SelectNodeOptions)
+    select(options?: SelectNodeOptions): SelectBuilder<DataNode>
     {
         const handler = new NodeQueryHandler({
             service: this.#service,
