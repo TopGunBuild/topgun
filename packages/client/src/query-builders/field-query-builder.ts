@@ -1,6 +1,9 @@
 import { DataValue } from '@topgunbuild/store';
-import { SelectFieldOptions } from '@topgunbuild/transport';
+import { SelectFieldMessage, SelectFieldOptions } from '@topgunbuild/transport';
 import { ClientService } from '../client-service';
+import { mergeObjects } from '@topgunbuild/utils';
+import { FieldQueryHandler } from '../query-handlers/field-query-handler';
+import { SelectBuilder } from './select-builder';
 
 export class FieldQueryBuilder
 {
@@ -24,7 +27,20 @@ export class FieldQueryBuilder
 
     async select(options?: SelectFieldOptions)
     {
-
+        const handler = new FieldQueryHandler({
+            service: this.#service,
+            message: new SelectFieldMessage({
+                section: this.#section,
+                node   : this.#node,
+                field  : this.#field,
+            }),
+            options: mergeObjects<SelectFieldOptions>({
+                local : true,
+                remote: true,
+                sync  : false,
+            }, options),
+        });
+        return new SelectBuilder<DataValue>(handler);
     }
 
     async put(value: DataValue)

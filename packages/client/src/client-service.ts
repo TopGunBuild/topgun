@@ -1,16 +1,25 @@
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { DataNode, DataValue, StoreWrapper } from '@topgunbuild/store';
-import { isEmptyObject, isObject } from '@topgunbuild/utils';
-import { Message, MessageHeader, PutMessage, SelectMessage, SelectOptions } from '@topgunbuild/transport';
+import { isEmptyObject, isObject, mergeObjects } from '@topgunbuild/utils';
+import {
+    Message,
+    MessageHeader,
+    PutMessage, SelectFieldOptions,
+    SelectMessage, SelectNodeOptions,
+    SelectSectionOptions,
+} from '@topgunbuild/transport';
 import { bigintTime } from '@topgunbuild/time';
-import { DataStream, Exchange } from '@topgunbuild/data-streams/src';
+import { DataStream, Exchange } from '@topgunbuild/data-streams';
 import { Connector } from './transports/connector';
-import { PeerOption, ClientOptions, QueryCb, SqlSelectOptions } from './types';
+import { PeerOption, ClientOptions, QueryCb } from './types';
 import { createConnector } from './transports/web-socket-connector';
 import { getSocketOptions } from './utils/get-socket-options';
 import { ClientEvents } from './constants';
-import { SelectService } from './select-service';
 import { createStore } from './utils/create-store';
+import { QueryHandler } from './query-handlers/query-handler';
+import { SectionQueryHandler } from './query-handlers/section-query-handler';
+import { NodeQueryHandler } from './query-handlers/node-query-handler';
+import { FieldQueryHandler } from './query-handlers/field-query-handler';
 
 export class ClientService
 {
@@ -18,22 +27,20 @@ export class ClientService
     public readonly eventBus: AsyncStreamEmitter<any>;
     public readonly connectors: Connector[];
     public readonly exchange: Exchange;
+    public readonly queryHandlers: Map<string, QueryHandler<DataNode[]|DataNode|DataValue>>;
     public store: StoreWrapper;
-
-    #queryServices: Map<string, SelectService>;
 
     constructor(options: ClientOptions)
     {
-        const defaultOptions: ClientOptions = {
+        this.options = mergeObjects<ClientOptions>({
             peers   : [],
             rowLimit: 1000,
-        };
+        }, options);
 
-        this.options        = Object.assign(defaultOptions, options || {});
-        this.eventBus       = new AsyncStreamEmitter();
-        this.exchange       = new Exchange();
-        this.connectors     = [];
-        this.#queryServices = new Map();
+        this.eventBus      = new AsyncStreamEmitter();
+        this.exchange      = new Exchange();
+        this.connectors    = [];
+        this.queryHandlers = new Map();
         this.#initPeers(this.options.peers);
         this.#initStore();
         this.#handleListeners();
@@ -43,13 +50,41 @@ export class ClientService
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    select(selectOptions: SqlSelectOptions, cb?: QueryCb): DataStream<any>
+    createDataStream<T>(): DataStream<T>
     {
-        const select = new SelectMessage(selectOptions);
-        const stream = this.exchange.subscribe();
-        this.#handleSelect(stream, select, selectOptions, cb);
-        return stream;
+        return this.exchange.subscribe<T>();
     }
+
+    initQueryHandler<T extends DataNode[]|DataNode|DataValue>(handler: QueryHandler<T>): void
+    {
+        this.queryHandlers.set(handler.id, handler);
+    }
+
+    createSectionQueryHandler(options: SelectSectionOptions): SectionQueryHandler
+    {
+        const stream  = this.exchange.subscribe<DataNode[]>();
+        const handler = new SectionQueryHandler(stream, options);
+        this.queryHandlers.set(stream.name, handler);
+        return handler;
+    }
+
+    createNodeQueryHandler(options: SelectNodeOptions): NodeQueryHandler
+    {
+        const stream  = this.exchange.subscribe<DataNode>();
+        const handler = new NodeQueryHandler(stream, options);
+        this.queryHandlers.set(stream.name, handler);
+        return handler;
+    }
+
+    createFieldQueryHandler(options: SelectFieldOptions): FieldQueryHandler
+    {
+        const stream  = this.exchange.subscribe<DataValue>();
+        const handler = new FieldQueryHandler(stream, options);
+        this.queryHandlers.set(stream.name, handler);
+        return handler;
+    }
+
+    #initQueryHandler<T extends QueryHandler<any>>()
 
     async putNode(sectionId: string, nodeId: string, value: DataNode): Promise<void>
     {
@@ -101,8 +136,8 @@ export class ClientService
     destroy(): void
     {
         this.exchange.destroy();
-        this.#queryServices.forEach(service => service.destroy());
-        this.#queryServices.clear();
+        // this.#queryServices.forEach(service => service.destroy());
+        // this.#queryServices.clear();
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -150,8 +185,8 @@ export class ClientService
             // Unsubscribe from requests when link is destroyed
             for await (const { streamName } of this.exchange.listener('destroy'))
             {
-                this.#queryServices.get(streamName)?.destroy();
-                this.#queryServices.delete(streamName);
+                // this.#queryServices.get(streamName)?.destroy();
+                // this.#queryServices.delete(streamName);
             }
         })();
     }

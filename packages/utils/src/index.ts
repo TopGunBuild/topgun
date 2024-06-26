@@ -11,6 +11,8 @@ export * from './typed';
 export * from './debounce';
 export * from './random-id';
 export * from './to-array';
+export * from './merge-objects';
+
 
 
 

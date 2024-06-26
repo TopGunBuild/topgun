@@ -51,14 +51,14 @@ export class PutMessage extends AbstractDataMessage
         return deserialize(bytes, PutMessage);
     }
 
-    constructor(section: string, node: string, field: string, state: bigint, value: unknown)
+    constructor(props: { section: string, node: string, field: string, state: bigint, value: unknown })
     {
         super();
-        this.section = section;
-        this.node    = node;
-        this.field   = field;
-        this.state   = state;
-        this.value   = typeOf(value);
+        this.section = props.section;
+        this.node    = props.node;
+        this.field   = props.field;
+        this.state   = props.state;
+        this.value   = typeOf(props.value);
     }
 
     encode(): Uint8Array
@@ -87,14 +87,14 @@ export class DeleteMessage extends AbstractDataMessage
         return deserialize(bytes, DeleteMessage);
     }
 
-    constructor(section: string, node: string, field: string, state: bigint)
+    constructor(props: { section: string, node: string, field: string, state: bigint })
     {
         super();
-        this.section = section;
-        this.node    = node;
-        this.field   = field;
-        this.state   = state;
-        this.state   = state;
+        this.section = props.section;
+        this.node    = props.node;
+        this.field   = props.field;
+        this.state   = props.state;
+        this.state   = props.state;
     }
 
     encode(): Uint8Array
@@ -115,7 +115,7 @@ export class SelectMessage extends AbstractDataMessage
     @field({ type: vec(Sort) })
     sort: Sort[];
 
-    @field({ type: 'string' })
+    @field({ type: vec('string') })
     fields: string[];
 
     @field({ type: 'u32' })
@@ -146,7 +146,77 @@ export class SelectMessage extends AbstractDataMessage
     }
 }
 
-@variant(2)
+@variant(3)
+export class SelectNodeMessage extends AbstractDataMessage
+{
+    @field({ type: fixedArray('u8', 32) })
+    id: Uint8Array;
+
+    @field({ type: 'string' })
+    section: string;
+
+    @field({ type: 'string' })
+    node: string;
+
+    @field({ type: vec('string') })
+    fields: string[];
+
+    static decode(bytes: Uint8Array): SelectNodeMessage
+    {
+        return deserialize(bytes, SelectNodeMessage);
+    }
+
+    constructor(props: { section: string, node: string, fields: string[] })
+    {
+        super();
+        this.id      = randomBytes(32);
+        this.section = props.section;
+        this.node    = props.node;
+        this.fields  = toArray(props.fields);
+    }
+
+    encode(): Uint8Array
+    {
+        return serialize(this);
+    }
+}
+
+@variant(4)
+export class SelectFieldMessage extends AbstractDataMessage
+{
+    @field({ type: fixedArray('u8', 32) })
+    id: Uint8Array;
+
+    @field({ type: 'string' })
+    section: string;
+
+    @field({ type: 'string' })
+    node: string;
+
+    @field({ type: 'string' })
+    field: string;
+
+    static decode(bytes: Uint8Array): SelectNodeMessage
+    {
+        return deserialize(bytes, SelectNodeMessage);
+    }
+
+    constructor(props: { section: string, node: string, field: string })
+    {
+        super();
+        this.id      = randomBytes(32);
+        this.section = props.section;
+        this.node    = props.node;
+        this.field   = props.field;
+    }
+
+    encode(): Uint8Array
+    {
+        return serialize(this);
+    }
+}
+
+@variant(5)
 export class SelectNextMessage extends AbstractDataMessage
 {
     @field({ type: fixedArray('u8', 32) })
@@ -173,7 +243,7 @@ export class SelectNextMessage extends AbstractDataMessage
     }
 }
 
-@variant(3)
+@variant(6)
 export class CloseIteratorMessage extends AbstractDataMessage
 {
     @field({ type: fixedArray('u8', 32) })
