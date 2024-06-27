@@ -4,22 +4,17 @@ import { isEmptyObject, isObject, mergeObjects } from '@topgunbuild/utils';
 import {
     Message,
     MessageHeader,
-    PutMessage, SelectFieldOptions,
-    SelectMessage, SelectNodeOptions,
-    SelectSectionOptions,
+    PutMessage,
 } from '@topgunbuild/transport';
 import { bigintTime } from '@topgunbuild/time';
 import { DataStream, Exchange } from '@topgunbuild/data-streams';
 import { Connector } from './transports/connector';
-import { PeerOption, ClientOptions, QueryCb } from './types';
+import { PeerOption, ClientOptions } from './types';
 import { createConnector } from './transports/web-socket-connector';
 import { getSocketOptions } from './utils/get-socket-options';
 import { ClientEvents } from './constants';
 import { createStore } from './utils/create-store';
 import { QueryHandler } from './query-handlers/query-handler';
-import { SectionQueryHandler } from './query-handlers/section-query-handler';
-import { NodeQueryHandler } from './query-handlers/node-query-handler';
-import { FieldQueryHandler } from './query-handlers/field-query-handler';
 
 export class ClientService
 {
@@ -60,32 +55,6 @@ export class ClientService
         this.queryHandlers.set(handler.id, handler);
     }
 
-    createSectionQueryHandler(options: SelectSectionOptions): SectionQueryHandler
-    {
-        const stream  = this.exchange.subscribe<DataNode[]>();
-        const handler = new SectionQueryHandler(stream, options);
-        this.queryHandlers.set(stream.name, handler);
-        return handler;
-    }
-
-    createNodeQueryHandler(options: SelectNodeOptions): NodeQueryHandler
-    {
-        const stream  = this.exchange.subscribe<DataNode>();
-        const handler = new NodeQueryHandler(stream, options);
-        this.queryHandlers.set(stream.name, handler);
-        return handler;
-    }
-
-    createFieldQueryHandler(options: SelectFieldOptions): FieldQueryHandler
-    {
-        const stream  = this.exchange.subscribe<DataValue>();
-        const handler = new FieldQueryHandler(stream, options);
-        this.queryHandlers.set(stream.name, handler);
-        return handler;
-    }
-
-    #initQueryHandler<T extends QueryHandler<any>>()
-
     async putNode(sectionId: string, nodeId: string, value: DataNode): Promise<void>
     {
         if (this.authRequired())
@@ -107,15 +76,15 @@ export class ClientService
         );
     }
 
-    async putValue(sectionId: string, nodeId: string, field: string, value: DataValue): Promise<any>
+    async putValue(section: string, node: string, field: string, value: DataValue): Promise<any>
     {
-        const data    = new PutMessage(
-            sectionId,
-            nodeId,
+        const data    = new PutMessage({
+            section,
+            node,
             field,
-            bigintTime(),
             value,
-        );
+            state: bigintTime(),
+        });
         const message = new Message({
             header: new MessageHeader({}),
             data  : data.encode(),
@@ -136,21 +105,21 @@ export class ClientService
     destroy(): void
     {
         this.exchange.destroy();
-        // this.#queryServices.forEach(service => service.destroy());
-        // this.#queryServices.clear();
+        this.queryHandlers.forEach(service => service.destroy());
+        this.queryHandlers.clear();
     }
 
-    // -----------------------------------------------------------------------------------------------------
-    // @ Private methods
-    // -----------------------------------------------------------------------------------------------------
-
-    async #waitForStoreInit(): Promise<void>
+    async waitForStoreInit(): Promise<void>
     {
         if (!this.store)
         {
             this.store = await this.eventBus.listener(ClientEvents.storeInit).once();
         }
     }
+
+    // -----------------------------------------------------------------------------------------------------
+    // @ Private methods
+    // -----------------------------------------------------------------------------------------------------
 
     async #initStore(): Promise<void>
     {
@@ -185,36 +154,12 @@ export class ClientService
             // Unsubscribe from requests when link is destroyed
             for await (const { streamName } of this.exchange.listener('destroy'))
             {
-                // this.#queryServices.get(streamName)?.destroy();
-                // this.#queryServices.delete(streamName);
+                if (this.queryHandlers.has(streamName))
+                {
+                    this.queryHandlers.delete(streamName);
+                    await this.queryHandlers.get(streamName).destroy();
+                }
             }
         })();
-    }
-
-    async #handleSelect(
-        dataStream: DataStream<any>,
-        selectMessage: SelectMessage,
-        selectOptions: SelectOptions,
-        cb?: QueryCb,
-    ): Promise<void>
-    {
-        const queryService = await SelectService.create(dataStream, selectMessage, selectOptions, cb);
-        this.#queryServices.set(dataStream.name, queryService);
-
-        if (selectOptions.local)
-        {
-            await this.#waitForStoreInit();
-            const result = await this.store.select(selectMessage);
-            await queryService.putValues(result.results);
-        }
-
-        if (selectOptions.remote)
-        {
-            const message = new Message({
-                header: new MessageHeader({}),
-                data  : selectMessage.encode(),
-            });
-            this.connectors.forEach(connector => connector.send(message));
-        }
     }
 }

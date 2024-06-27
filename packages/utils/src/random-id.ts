@@ -1,7 +1,7 @@
 import { toHexString } from './hash';
 import { randomBytes } from './random-bytes';
 
-export function randomId(): string
+export function randomId(bytesLength = 16): string
 {
-    return toHexString(randomBytes(16));
+    return toHexString(randomBytes(bytesLength));
 }

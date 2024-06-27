@@ -1,6 +1,6 @@
 import { PublicKey } from '@topgunbuild/crypto';
 import { IdKey, Store, StoreResults, StoreValue } from '@topgunbuild/store';
-import { CloseIteratorMessage, CollectNextMessage, SelectMessage } from '@topgunbuild/transport';
+import { SelectQuery, SelectNextQuery, CloseIteratorQuery } from '@topgunbuild/transport';
 import { Database, SQLLite, Statement } from './types';
 import { convertSearchRequestToSQLQuery, resolveTableValues } from './schema';
 
@@ -136,10 +136,7 @@ export class SQLLiteStore implements Store
         await statement.finalize?.();
     }
 
-    async query(
-        message: SelectMessage,
-        from: PublicKey,
-    ): Promise<StoreResults>
+    async select(message: SelectQuery, from: PublicKey): Promise<StoreResults>
     {
         const { where, join, orderBy } = convertSearchRequestToSQLQuery(
             message,
@@ -169,7 +166,7 @@ export class SQLLiteStore implements Store
                 // Bump timeout timer
                 clearTimeout(iterator.timeout);
                 iterator.timeout = setTimeout(
-                    () => this.clearUpIterator(message.idString),
+                    () => this.clearUpIterator(message.id),
                     this.iteratorTimeout,
                 );
             }
@@ -191,7 +188,7 @@ export class SQLLiteStore implements Store
 
             if (iterator.left === 0)
             {
-                this.clearUpIterator(message.idString);
+                this.clearUpIterator(message.id);
                 clearTimeout(iterator.timeout);
             }
             return { results, left: iterator.left };
@@ -203,36 +200,33 @@ export class SQLLiteStore implements Store
             fetchStatement: stmt,
             countStatement: countStmt,
             timeout       : setTimeout(
-                () => this.clearUpIterator(message.idString),
+                () => this.clearUpIterator(message.id),
                 this.iteratorTimeout,
             ),
         };
 
-        this.cursor.set(message.idString, iterator);
-        return fetch(message.fetch);
+        this.cursor.set(message.id, iterator);
+        return fetch(message.pageSize);
     }
 
     async next(
-        query: CollectNextMessage,
+        query: SelectNextQuery,
         from: PublicKey,
     ): Promise<StoreResults>
     {
-        const cache = this.cursor.get(query.idString);
+        const cache = this.cursor.get(query.id);
         if (!cache)
         {
             throw new Error('No statement found');
         }
 
         // reuse statement
-        return cache.fetch(query.amount);
+        return cache.fetch(query.pageSize);
     }
 
-    close(
-        query: CloseIteratorMessage,
-        from: PublicKey,
-    ): void|Promise<void>
+    close(query: CloseIteratorQuery, from: PublicKey): void|Promise<void>
     {
-        this.clearUpIterator(query.idString, from);
+        this.clearUpIterator(query.id, from);
     }
 
     private clearUpIterator(id: string, from?: PublicKey)

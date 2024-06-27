@@ -1,27 +1,27 @@
-import { deserialize, field, fixedArray, serialize, variant, vec } from '@dao-xyz/borsh';
-import { randomBytes, toArray } from '@topgunbuild/utils';
-import { AbstractValue } from './message-data-value';
+import { deserialize, field, serialize, variant, vec } from '@dao-xyz/borsh';
+import { randomId, toArray } from '@topgunbuild/utils';
+import { AbstractValue } from './query-data-value';
 import { typeOf } from './typeof';
 import { Query, Sort } from './query';
 
-export abstract class AbstractDataMessage
+export abstract class AbstractQuery
 {
     abstract encode(): Uint8Array;
 
-    static decode(bytes: Uint8Array): AbstractDataMessage
+    static decode(bytes: Uint8Array): AbstractQuery
     {
         const first = bytes[0];
         if (first === 0)
         {
-            return PutMessage.decode(bytes);
+            return PutQuery.decode(bytes);
         }
         if (first === 1)
         {
-            return DeleteMessage.decode(bytes);
+            return DeleteQuery.decode(bytes);
         }
         if (first === 2)
         {
-            return SelectMessage.decode(bytes);
+            return SelectQuery.decode(bytes);
         }
 
         throw new Error('Unsupported');
@@ -29,7 +29,7 @@ export abstract class AbstractDataMessage
 }
 
 @variant(0)
-export class PutMessage extends AbstractDataMessage
+export class PutQuery extends AbstractQuery
 {
     @field({ type: 'string' })
     section: string;
@@ -46,9 +46,9 @@ export class PutMessage extends AbstractDataMessage
     @field({ type: AbstractValue })
     value: AbstractValue;
 
-    static decode(bytes: Uint8Array): PutMessage
+    static decode(bytes: Uint8Array): PutQuery
     {
-        return deserialize(bytes, PutMessage);
+        return deserialize(bytes, PutQuery);
     }
 
     constructor(props: { section: string, node: string, field: string, state: bigint, value: unknown })
@@ -68,7 +68,7 @@ export class PutMessage extends AbstractDataMessage
 }
 
 @variant(1)
-export class DeleteMessage extends AbstractDataMessage
+export class DeleteQuery extends AbstractQuery
 {
     @field({ type: 'string' })
     section: string;
@@ -82,9 +82,9 @@ export class DeleteMessage extends AbstractDataMessage
     @field({ type: 'u64' })
     state: bigint;
 
-    static decode(bytes: Uint8Array): DeleteMessage
+    static decode(bytes: Uint8Array): DeleteQuery
     {
-        return deserialize(bytes, DeleteMessage);
+        return deserialize(bytes, DeleteQuery);
     }
 
     constructor(props: { section: string, node: string, field: string, state: bigint })
@@ -104,10 +104,10 @@ export class DeleteMessage extends AbstractDataMessage
 }
 
 @variant(2)
-export class SelectMessage extends AbstractDataMessage
+export class SelectQuery extends AbstractQuery
 {
-    @field({ type: fixedArray('u8', 32) })
-    id: Uint8Array;
+    @field({ type: 'string' })
+    id: string;
 
     @field({ type: vec(Query) })
     query: Query[];
@@ -121,9 +121,9 @@ export class SelectMessage extends AbstractDataMessage
     @field({ type: 'u32' })
     pageSize: number;
 
-    static decode(bytes: Uint8Array): SelectMessage
+    static decode(bytes: Uint8Array): SelectQuery
     {
-        return deserialize(bytes, SelectMessage);
+        return deserialize(bytes, SelectQuery);
     }
 
     constructor(props?: {
@@ -134,7 +134,7 @@ export class SelectMessage extends AbstractDataMessage
     })
     {
         super();
-        this.id       = randomBytes(32);
+        this.id       = randomId(32);
         this.query    = toArray(props?.query);
         this.sort     = toArray(props?.sort);
         this.pageSize = props?.pageSize || 1;
@@ -147,10 +147,10 @@ export class SelectMessage extends AbstractDataMessage
 }
 
 @variant(3)
-export class SelectNodeMessage extends AbstractDataMessage
+export class SelectNodeQuery extends AbstractQuery
 {
-    @field({ type: fixedArray('u8', 32) })
-    id: Uint8Array;
+    @field({ type: 'string' })
+    id: string;
 
     @field({ type: 'string' })
     section: string;
@@ -161,15 +161,15 @@ export class SelectNodeMessage extends AbstractDataMessage
     @field({ type: vec('string') })
     fields: string[];
 
-    static decode(bytes: Uint8Array): SelectNodeMessage
+    static decode(bytes: Uint8Array): SelectNodeQuery
     {
-        return deserialize(bytes, SelectNodeMessage);
+        return deserialize(bytes, SelectNodeQuery);
     }
 
     constructor(props: { section: string, node: string, fields: string[] })
     {
         super();
-        this.id      = randomBytes(32);
+        this.id      = randomId(32);
         this.section = props.section;
         this.node    = props.node;
         this.fields  = toArray(props.fields);
@@ -182,10 +182,10 @@ export class SelectNodeMessage extends AbstractDataMessage
 }
 
 @variant(4)
-export class SelectFieldMessage extends AbstractDataMessage
+export class SelectFieldQuery extends AbstractQuery
 {
-    @field({ type: fixedArray('u8', 32) })
-    id: Uint8Array;
+    @field({ type: 'string' })
+    id: string;
 
     @field({ type: 'string' })
     section: string;
@@ -196,15 +196,15 @@ export class SelectFieldMessage extends AbstractDataMessage
     @field({ type: 'string' })
     field: string;
 
-    static decode(bytes: Uint8Array): SelectNodeMessage
+    static decode(bytes: Uint8Array): SelectNodeQuery
     {
-        return deserialize(bytes, SelectNodeMessage);
+        return deserialize(bytes, SelectNodeQuery);
     }
 
     constructor(props: { section: string, node: string, field: string })
     {
         super();
-        this.id      = randomBytes(32);
+        this.id      = randomId(32);
         this.section = props.section;
         this.node    = props.node;
         this.field   = props.field;
@@ -217,20 +217,20 @@ export class SelectFieldMessage extends AbstractDataMessage
 }
 
 @variant(5)
-export class SelectNextMessage extends AbstractDataMessage
+export class SelectNextQuery extends AbstractQuery
 {
-    @field({ type: fixedArray('u8', 32) })
-    id: Uint8Array;
+    @field({ type: 'string' })
+    id: string;
 
     @field({ type: 'u32' })
     pageSize: number;
 
-    static decode(bytes: Uint8Array): SelectNextMessage
+    static decode(bytes: Uint8Array): SelectNextQuery
     {
-        return deserialize(bytes, SelectNextMessage);
+        return deserialize(bytes, SelectNextQuery);
     }
 
-    constructor(properties: { id: Uint8Array; pageSize: number })
+    constructor(properties: { id: string; pageSize: number })
     {
         super();
         this.id       = properties.id;
@@ -244,12 +244,12 @@ export class SelectNextMessage extends AbstractDataMessage
 }
 
 @variant(6)
-export class CloseIteratorMessage extends AbstractDataMessage
+export class CloseIteratorQuery extends AbstractQuery
 {
-    @field({ type: fixedArray('u8', 32) })
-    id: Uint8Array;
+    @field({ type: 'string' })
+    id: string;
 
-    constructor(properties: { id: Uint8Array })
+    constructor(properties: { id: string })
     {
         super();
         this.id = properties.id;

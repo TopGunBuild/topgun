@@ -5,7 +5,7 @@ import {
     ValueNumber,
     ValueString,
     ValueUint8Array,
-} from './message-data-value';
+} from './query-data-value';
 
 function unsupportedError(v: unknown)
 {

@@ -1,11 +1,12 @@
 import { DataNode, StoreValue, StoreWrapper } from '@topgunbuild/store';
-import { SelectMessage, SelectSectionOptions } from '@topgunbuild/transport';
+import { Message, MessageHeader, SelectMessage, SelectSectionOptions } from '@topgunbuild/transport';
 import { QueryHandler } from './query-handler';
 import { createStore } from '../utils/create-store';
 import { ClientService } from '../client-service';
 
 export class SectionQueryHandler extends QueryHandler<DataNode[]>
 {
+    service: ClientService;
     memoryStore: StoreWrapper;
     selectMessage: SelectMessage;
 
@@ -17,7 +18,8 @@ export class SectionQueryHandler extends QueryHandler<DataNode[]>
     {
         super(props.service, props.options.local, props.options.remote, props.options.sync);
         this.selectMessage = props.message;
-        this.#createStore();
+        this.service       = props.service;
+        this.#fetchFirst();
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -61,8 +63,27 @@ export class SectionQueryHandler extends QueryHandler<DataNode[]>
 
     }
 
-    async #createStore(): Promise<void>
+    async #fetchFirst(): Promise<void>
     {
         this.memoryStore = await createStore(':memory:');
+
+        // Get local data
+        if (this.local)
+        {
+            await this.service.waitForStoreInit();
+            const result = await this.service.store.select(this.selectMessage);
+            await this.#putValues(result.results);
+            this.#triggerChanges();
+        }
+
+        // Request remote data
+        if (this.remote)
+        {
+            const message = new Message({
+                header: new MessageHeader({}),
+                data  : this.selectMessage.encode(),
+            });
+            this.service.connectors.forEach(connector => connector.send(message));
+        }
     }
 }
