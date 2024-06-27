@@ -1,5 +1,5 @@
 import { DataValue } from '@topgunbuild/store';
-import { SelectFieldMessage, SelectFieldOptions } from '@topgunbuild/transport';
+import { SelectQuery, SelectFieldOptions } from '@topgunbuild/transport';
 import { ClientService } from '../client-service';
 import { mergeObjects } from '@topgunbuild/utils';
 import { FieldQueryHandler } from '../query-handlers/field-query-handler';
@@ -29,7 +29,7 @@ export class FieldQueryBuilder
     {
         const handler = new FieldQueryHandler({
             service: this.#service,
-            message: new SelectFieldMessage({
+            message: new SelectQuery({
                 section: this.#section,
                 node   : this.#node,
                 field  : this.#field,

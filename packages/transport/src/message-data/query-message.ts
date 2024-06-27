@@ -1,4 +1,4 @@
-import { deserialize, field, serialize, variant, vec } from '@dao-xyz/borsh';
+import { deserialize, field, option, serialize, variant, vec } from '@dao-xyz/borsh';
 import { randomId, toArray } from '@topgunbuild/utils';
 import { AbstractValue } from './query-data-value';
 import { typeOf } from './typeof';
@@ -109,6 +109,15 @@ export class SelectQuery extends AbstractQuery
     @field({ type: 'string' })
     id: string;
 
+    @field({ type: option('string') })
+    section: string;
+
+    @field({ type: option('string') })
+    node: string;
+
+    @field({ type: option('string') })
+    field: string;
+
     @field({ type: vec(Query) })
     query: Query[];
 
@@ -131,12 +140,18 @@ export class SelectQuery extends AbstractQuery
         sort?: Sort[]|Sort;
         fields?: string[];
         pageSize?: number;
+        section?: string;
+        node?: string;
+        field?: string;
     })
     {
         super();
         this.id       = randomId(32);
         this.query    = toArray(props?.query);
         this.sort     = toArray(props?.sort);
+        this.section  = props.section;
+        this.node     = props.node;
+        this.field    = props.field;
         this.pageSize = props?.pageSize || 1;
     }
 
@@ -147,76 +162,6 @@ export class SelectQuery extends AbstractQuery
 }
 
 @variant(3)
-export class SelectNodeQuery extends AbstractQuery
-{
-    @field({ type: 'string' })
-    id: string;
-
-    @field({ type: 'string' })
-    section: string;
-
-    @field({ type: 'string' })
-    node: string;
-
-    @field({ type: vec('string') })
-    fields: string[];
-
-    static decode(bytes: Uint8Array): SelectNodeQuery
-    {
-        return deserialize(bytes, SelectNodeQuery);
-    }
-
-    constructor(props: { section: string, node: string, fields: string[] })
-    {
-        super();
-        this.id      = randomId(32);
-        this.section = props.section;
-        this.node    = props.node;
-        this.fields  = toArray(props.fields);
-    }
-
-    encode(): Uint8Array
-    {
-        return serialize(this);
-    }
-}
-
-@variant(4)
-export class SelectFieldQuery extends AbstractQuery
-{
-    @field({ type: 'string' })
-    id: string;
-
-    @field({ type: 'string' })
-    section: string;
-
-    @field({ type: 'string' })
-    node: string;
-
-    @field({ type: 'string' })
-    field: string;
-
-    static decode(bytes: Uint8Array): SelectNodeQuery
-    {
-        return deserialize(bytes, SelectNodeQuery);
-    }
-
-    constructor(props: { section: string, node: string, field: string })
-    {
-        super();
-        this.id      = randomId(32);
-        this.section = props.section;
-        this.node    = props.node;
-        this.field   = props.field;
-    }
-
-    encode(): Uint8Array
-    {
-        return serialize(this);
-    }
-}
-
-@variant(5)
 export class SelectNextQuery extends AbstractQuery
 {
     @field({ type: 'string' })
@@ -243,7 +188,7 @@ export class SelectNextQuery extends AbstractQuery
     }
 }
 
-@variant(6)
+@variant(4)
 export class CloseIteratorQuery extends AbstractQuery
 {
     @field({ type: 'string' })

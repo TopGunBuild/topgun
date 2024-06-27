@@ -1,5 +1,5 @@
 import { DataNode } from '@topgunbuild/store';
-import { SelectNodeMessage, SelectNodeOptions } from '@topgunbuild/transport';
+import { SelectQuery, SelectNodeOptions } from '@topgunbuild/transport';
 import { ClientService } from '../client-service';
 import { FieldQueryBuilder } from './field-query-builder';
 import { mergeObjects } from '@topgunbuild/utils';
@@ -23,17 +23,17 @@ export class NodeQueryBuilder
     {
         const handler = new NodeQueryHandler({
             service: this.#service,
-            message: new SelectNodeMessage({
+            query  : new SelectQuery({
+                fields : options.fields,
                 section: this.#section,
                 node   : this.#node,
-                fields : options.fields,
             }),
             options: mergeObjects<SelectNodeOptions>({
                 local : true,
                 remote: true,
                 sync  : false,
                 fields: [],
-            }, options)
+            }, options),
         });
         return new SelectBuilder<DataNode>(handler);
     }

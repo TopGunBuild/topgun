@@ -1,20 +1,20 @@
 import { DataNode, StoreValue } from '@topgunbuild/store';
 import { QueryHandler } from './query-handler';
-import { SelectNodeMessage, SelectNodeOptions } from '@topgunbuild/transport';
+import { SelectQuery, SelectNodeOptions } from '@topgunbuild/transport';
 import { ClientService } from '../client-service';
 
 export class NodeQueryHandler extends QueryHandler<DataNode>
 {
-    selectMessage: SelectNodeMessage;
+    query: SelectQuery;
 
     constructor(props: {
         service: ClientService,
         options: SelectNodeOptions,
-        message: SelectNodeMessage,
+        query: SelectQuery,
     })
     {
         super(props.service, props.options.local, props.options.remote, props.options.sync);
-        this.selectMessage = props.message;
+        this.query = props.query;
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -29,4 +29,13 @@ export class NodeQueryHandler extends QueryHandler<DataNode>
     // -----------------------------------------------------------------------------------------------------
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
+
+    async #fetchFirst(): Promise<void>
+    {
+        // Get local data
+        if (this.local)
+        {
+
+        }
+    }
 }

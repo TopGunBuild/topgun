@@ -4,15 +4,14 @@ import { isEmptyObject, isObject, mergeObjects } from '@topgunbuild/utils';
 import {
     Message,
     MessageHeader,
-    PutMessage,
+    PutQuery, SelectOptions,
 } from '@topgunbuild/transport';
 import { bigintTime } from '@topgunbuild/time';
 import { DataStream, Exchange } from '@topgunbuild/data-streams';
 import { Connector } from './transports/connector';
-import { PeerOption, ClientOptions } from './types';
+import { PeerOption, ClientOptions, DataType, ClientEvents } from './types';
 import { createConnector } from './transports/web-socket-connector';
 import { getSocketOptions } from './utils/get-socket-options';
-import { ClientEvents } from './constants';
 import { createStore } from './utils/create-store';
 import { QueryHandler } from './query-handlers/query-handler';
 
@@ -22,7 +21,7 @@ export class ClientService
     public readonly eventBus: AsyncStreamEmitter<any>;
     public readonly connectors: Connector[];
     public readonly exchange: Exchange;
-    public readonly queryHandlers: Map<string, QueryHandler<DataNode[]|DataNode|DataValue>>;
+    public readonly queryHandlers: Map<string, QueryHandler<DataType, SelectOptions>>;
     public store: StoreWrapper;
 
     constructor(options: ClientOptions)
@@ -50,7 +49,7 @@ export class ClientService
         return this.exchange.subscribe<T>();
     }
 
-    initQueryHandler<T extends DataNode[]|DataNode|DataValue>(handler: QueryHandler<T>): void
+    initQueryHandler<T extends DataType, O extends SelectOptions>(handler: QueryHandler<T, O>): void
     {
         this.queryHandlers.set(handler.id, handler);
     }
@@ -70,7 +69,7 @@ export class ClientService
             throw new Error('Node must not be an empty object.');
         }
 
-        await this.#waitForStoreInit();
+        await this.waitForStoreInit();
         await Promise.all(
             Object.keys(value).map(field => this.putValue(sectionId, nodeId, field, value[field])),
         );
@@ -78,7 +77,7 @@ export class ClientService
 
     async putValue(section: string, node: string, field: string, value: DataValue): Promise<any>
     {
-        const data    = new PutMessage({
+        const data    = new PutQuery({
             section,
             node,
             field,
@@ -113,7 +112,7 @@ export class ClientService
     {
         if (!this.store)
         {
-            this.store = await this.eventBus.listener(ClientEvents.storeInit).once();
+            await this.eventBus.listener(ClientEvents.storeInit).once();
         }
     }
 

@@ -2,7 +2,7 @@ import { DataNode } from '@topgunbuild/store';
 import { mergeObjects, randomId, toArray } from '@topgunbuild/utils';
 import { ClientService } from '../client-service';
 import { NodeQueryBuilder } from './node-query-builder';
-import { SelectMessage, SelectSectionOptions } from '@topgunbuild/transport';
+import { SelectQuery, SelectSectionOptions } from '@topgunbuild/transport';
 import { SelectBuilder } from './select-builder';
 import { SectionQueryHandler } from '../query-handlers/section-query-handler';
 
@@ -30,7 +30,7 @@ export class SectionQueryBuilder
 
         const handler = new SectionQueryHandler({
             service: this.#service,
-            message: new SelectMessage(options),
+            query  : new SelectQuery(options),
             options: mergeObjects<SelectSectionOptions>({
                 limit : this.#service.options.rowLimit,
                 local : true,

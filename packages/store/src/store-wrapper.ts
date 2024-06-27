@@ -5,8 +5,8 @@ import { StoreResults } from './result';
 import { IdKey } from './id';
 import { Store } from './store';
 import {
-    CloseIteratorMessage, SelectNextMessage,
-    PutMessage, SelectMessage,
+    CloseIteratorQuery, SelectNextQuery,
+    PutQuery, SelectQuery,
     ValueBool,
     ValueDate,
     ValueEmpty,
@@ -39,7 +39,7 @@ export class StoreWrapper
         return this.index.get(key);
     }
 
-    put(message: PutMessage): Promise<void>|void
+    put(message: PutQuery): Promise<void>|void
     {
         const data: StoreValue = {
             section       : message.section,
@@ -84,7 +84,7 @@ export class StoreWrapper
     }
 
     select(
-        query: SelectMessage,
+        query: SelectQuery,
         from: PublicKey = new Ed25519PublicKey(randomBytes(32)),
     ): Promise<StoreResults>
     {
@@ -92,7 +92,7 @@ export class StoreWrapper
     }
 
     iterate(
-        selectMessage: SelectMessage,
+        selectQuery: SelectQuery,
         from: PublicKey = new Ed25519PublicKey(randomBytes(32)),
     )
     {
@@ -105,13 +105,13 @@ export class StoreWrapper
                 if (!fetchedOnce)
                 {
                     fetchedOnce            = true;
-                    selectMessage.pageSize = pageSize;
-                    res                    = await this.index.select(selectMessage, from);
+                    selectQuery.pageSize = pageSize;
+                    res                    = await this.index.select(selectQuery, from);
                 }
                 else
                 {
                     res = await this.index.next(
-                        new SelectNextMessage({ id: selectMessage.id, pageSize }),
+                        new SelectNextQuery({ id: selectQuery.id, pageSize }),
                         from,
                     );
                 }
@@ -122,7 +122,7 @@ export class StoreWrapper
             close: () =>
             {
                 return this.index.close(
-                    new CloseIteratorMessage({ id: selectMessage.id }),
+                    new CloseIteratorQuery({ id: selectQuery.id }),
                     from,
                 );
             },

@@ -1,9 +1,9 @@
 import { DataStream } from '@topgunbuild/data-streams';
 import { isFunction } from '@topgunbuild/utils';
-import { QueryCb } from '../types';
+import { DataType, QueryCb } from '../types';
 import { QueryHandler } from '../query-handlers/query-handler';
 
-export class SelectBuilder<T>
+export class SelectBuilder<T extends DataType>
 {
     readonly #queryHandler: QueryHandler<T>;
 

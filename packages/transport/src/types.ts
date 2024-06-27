@@ -1,13 +1,13 @@
 import { Query, Sort } from './message-data';
 
-export interface SelectFieldOptions
+export interface SelectOptions
 {
     remote?: boolean;
     local?: boolean;
     sync?: boolean;
 }
 
-export interface SelectNodeOptions extends SelectFieldOptions
+export interface SelectNodeOptions extends SelectOptions
 {
     fields?: string[];
 }
