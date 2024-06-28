@@ -9,9 +9,12 @@ export * from './hash';
 export * from './base64';
 export * from './typed';
 export * from './debounce';
+export * from './clone-value';
 export * from './random-id';
 export * from './to-array';
 export * from './merge-objects';
+export * from './equal-objects';
+
 
 
 

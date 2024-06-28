@@ -1,41 +1,40 @@
-import { DataNode, StoreValue } from '@topgunbuild/store';
-import { QueryHandler } from './query-handler';
+import { DataNode, StoreResults, StoreValue } from '@topgunbuild/store';
 import { SelectQuery, SelectNodeOptions } from '@topgunbuild/transport';
+import { cloneValue, equalObjects } from '@topgunbuild/utils';
+import { QueryHandler } from './query-handler';
 import { ClientService } from '../client-service';
+import { toDataNodes } from '../utils/to-data-nodes';
 
-export class NodeQueryHandler extends QueryHandler<DataNode>
+export class NodeQueryHandler extends QueryHandler<DataNode, SelectNodeOptions>
 {
-    query: SelectQuery;
-
     constructor(props: {
         service: ClientService,
         options: SelectNodeOptions,
         query: SelectQuery,
     })
     {
-        super(props.service, props.options.local, props.options.remote, props.options.sync);
-        this.query = props.query;
+        super(props);
     }
 
     // -----------------------------------------------------------------------------------------------------
-    // @ Public methods
+    // @ Protected methods
     // -----------------------------------------------------------------------------------------------------
 
-    async maybePutValues(values: StoreValue[]): Promise<void>
+    protected isQualify(value: StoreValue): boolean
     {
-
+        return value.section === this.query.section
+            && value.node === this.query.node;
     }
 
-    // -----------------------------------------------------------------------------------------------------
-    // @ Private methods
-    // -----------------------------------------------------------------------------------------------------
-
-    async #fetchFirst(): Promise<void>
+    protected onOutput(results: StoreResults): void
     {
-        // Get local data
-        if (this.local)
+        const nodes           = toDataNodes(results.results);
+        const value: DataNode = nodes.length > 0 ? nodes[0] : null;
+
+        if (!equalObjects(value, this.lastValue))
         {
-
+            this.lastValue = value;
+            this.dataStream.publish(cloneValue(value));
         }
     }
 }

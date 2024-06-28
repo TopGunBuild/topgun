@@ -18,8 +18,3 @@ export enum ClientEvents
     storeInit = 'storeInit'
 }
 
-export enum QueryHandlerEvents
-{
-    storeInit        = 'storeInit',
-    localDataFetched = 'localDataFetched'
-}

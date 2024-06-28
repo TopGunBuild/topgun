@@ -1,32 +1,41 @@
-import { DataValue, StoreValue } from '@topgunbuild/store';
-import { SelectQuery, SelectFieldOptions } from '@topgunbuild/transport';
+import { DataValue, StoreResults, StoreValue } from '@topgunbuild/store';
+import { SelectQuery, SelectOptions } from '@topgunbuild/transport';
 import { QueryHandler } from './query-handler';
 import { ClientService } from '../client-service';
+import { coerceDataValue } from '../utils/to-data-nodes';
 
-export class FieldQueryHandler extends QueryHandler<DataValue>
+export class FieldQueryHandler extends QueryHandler<DataValue, SelectOptions>
 {
-    selectMessage: SelectQuery;
-
     constructor(props: {
         service: ClientService,
-        options: SelectFieldOptions,
-        message: SelectQuery
+        options: SelectOptions,
+        query: SelectQuery
     })
     {
-        super(props.service, props.options.local, props.options.remote, props.options.sync);
-        this.selectMessage = props.message;
+        super(props);
     }
 
     // -----------------------------------------------------------------------------------------------------
-    // @ Public methods
+    // @ Protected methods
     // -----------------------------------------------------------------------------------------------------
 
-    async maybePutValues(values: StoreValue[]): Promise<void>
+    protected isQualify(value: StoreValue): boolean
     {
-
+        return value.section === this.query.section
+            && value.node === this.query.node
+            && value.field === this.query.field;
     }
 
-    // -----------------------------------------------------------------------------------------------------
-    // @ Private methods
-    // -----------------------------------------------------------------------------------------------------
+    protected onOutput(results: StoreResults): void
+    {
+        let value: DataValue = results.results.length > 0
+            ? coerceDataValue(results.results[0])
+            : null;
+
+        if (value !== this.lastValue)
+        {
+            this.lastValue = value;
+            this.dataStream.publish(value);
+        }
+    }
 }

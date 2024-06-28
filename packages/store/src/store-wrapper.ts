@@ -64,11 +64,11 @@ export class StoreWrapper
         }
         else if (message.value instanceof ValueNumber)
         {
-            data.value_string = message.value.value;
+            data.value_number = message.value.value;
         }
         else if (message.value instanceof ValueDate)
         {
-            data.value_string = message.value.value;
+            data.value_date = message.value.value;
         }
         else if (message.value instanceof ValueUint8Array)
         {
