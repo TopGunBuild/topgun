@@ -1,12 +1,12 @@
 import { ed25519 } from '@noble/curves/ed25519';
+import { concatBytes } from '@noble/curves/abstract/utils';
+import { field } from '@dao-xyz/borsh';
 import { Ed25519PublicKey } from './public-key';
 import { Ed25519PrivateKey } from './private-key';
 import { PreHash } from '../hash';
 import { Keypair } from '../keypair';
-import { concatBytes } from '@noble/curves/src/abstract/utils';
 import { Signature } from '../signature';
 import { sign } from './sign';
-import { field } from '@dao-xyz/borsh';
 
 
 export class Ed25519Keypair extends Keypair

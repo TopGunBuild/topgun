@@ -5,7 +5,7 @@ import {
     FieldQuery,
     LogicalQuery, NumberCondition, NumberConditionQuery,
     Or,
-    Query, SelectMessage,
+    Query, SelectQuery,
     Sort,
     SortDirection, StringCondition,
     StringConditionQuery,
@@ -38,7 +38,7 @@ export const resolveTableValues = (obj: any, tableFields: Record<string, string>
 };
 
 export const convertSearchRequestToSQLQuery = (
-    message: SelectMessage,
+    message: SelectQuery,
     tableName: string,
 ) =>
 {
