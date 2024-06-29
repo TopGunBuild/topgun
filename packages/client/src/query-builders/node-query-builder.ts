@@ -1,8 +1,8 @@
 import { DataNode } from '@topgunbuild/store';
 import { SelectQuery, SelectNodeOptions } from '@topgunbuild/transport';
+import { mergeObjects } from '@topgunbuild/utils';
 import { ClientService } from '../client-service';
 import { FieldQueryBuilder } from './field-query-builder';
-import { mergeObjects } from '@topgunbuild/utils';
 import { NodeQueryHandler } from '../query-handlers/node-query-handler';
 import { SelectBuilder } from './select-builder';
 
@@ -19,33 +19,34 @@ export class NodeQueryBuilder
         this.#service = service;
     }
 
-    select(options?: SelectNodeOptions): SelectBuilder<DataNode>
+    select(options?: SelectNodeOptions): SelectBuilder<DataNode, SelectNodeOptions>
     {
-        const handler = new NodeQueryHandler({
-            service: this.#service,
-            query  : new SelectQuery({
-                fields : options.fields,
-                section: this.#section,
-                node   : this.#node,
-            }),
-            options: mergeObjects<SelectNodeOptions>({
-                local : true,
-                remote: true,
-                sync  : false,
-                fields: [],
-            }, options),
-        });
-        return new SelectBuilder<DataNode>(handler);
+        return new SelectBuilder<DataNode, SelectNodeOptions>(
+            new NodeQueryHandler({
+                service: this.#service,
+                query  : new SelectQuery({
+                    fields : options.fields,
+                    section: this.#section,
+                    node   : this.#node,
+                }),
+                options: mergeObjects<SelectNodeOptions>({
+                    local : true,
+                    remote: true,
+                    sync  : false,
+                    fields: [],
+                }, options),
+            })
+        );
     }
 
-    async put(node: DataNode)
+    put(node: DataNode): Promise<void>
     {
         return this.#service.putNode(this.#section, this.#node, node);
     }
 
-    async delete()
+    delete(): Promise<void>
     {
-
+        return this.#service.delete(this.#section, this.#node);
     }
 
     field(fieldName: string): FieldQueryBuilder

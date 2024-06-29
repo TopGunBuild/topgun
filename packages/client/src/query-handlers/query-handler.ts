@@ -2,7 +2,7 @@ import { DataStream } from '@topgunbuild/data-streams';
 import { StoreResults, StoreValue, StoreWrapper } from '@topgunbuild/store';
 import { SelectQuery, SelectOptions, Message, MessageHeader } from '@topgunbuild/transport';
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
-import { isNumber, debounce, randomBytes } from '@topgunbuild/utils';
+import { isNumber, debounce, randomBytes, toArray } from '@topgunbuild/utils';
 import { ClientService } from '../client-service';
 import { DataType } from '../types';
 import { createStore } from '../utils/create-store';
@@ -12,7 +12,7 @@ const INPUT_TRIGGER_EVENT  = 'input';
 
 export class QueryHandler<D extends DataType, S extends SelectOptions> extends AsyncStreamEmitter<any>
 {
-    private memoryStore: StoreWrapper;
+    private queryStore: StoreWrapper;
     readonly service: ClientService;
     readonly query: SelectQuery;
     readonly dataStream: DataStream<D>;
@@ -36,14 +36,11 @@ export class QueryHandler<D extends DataType, S extends SelectOptions> extends A
         super();
         this.service    = props.service;
         this.query      = props.query;
-        this.dataStream = this.service.createDataStream<D>();
         this.options    = props.options;
         this.debounce   = props.debounce;
-        this.service.initQueryHandler<D, S>(this);
-        this._listenEvents(() =>
-        {
-            this.emit(OUTPUT_TRIGGER_EVENT, randomBytes());
-        });
+        this.dataStream = this.service.createDataStream<D>();
+        this.service.setQueryHandler<D, S>(this);
+        this._listenEvents(() => this.emit(OUTPUT_TRIGGER_EVENT, randomBytes()));
         this._initStore().then(() => this._fetchFirst());
     }
 
@@ -51,25 +48,25 @@ export class QueryHandler<D extends DataType, S extends SelectOptions> extends A
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    preprocess(values: StoreValue[]): void
+    preprocess(values: StoreValue[]|StoreValue): void
     {
-        const filtered = values.filter(value => this.isQualify(value));
+        const filtered = toArray(values).filter(value => this.isQualify(value));
         if (filtered.length > 0)
         {
             this.process(filtered);
         }
     }
 
-    process(values: StoreValue[]): void
+    process(values: StoreValue[]|StoreValue): void
     {
-        this.emit(INPUT_TRIGGER_EVENT, values);
+        this.emit(INPUT_TRIGGER_EVENT, toArray(values));
     }
 
     async destroy(): Promise<void>
     {
         this.dataStream.destroy();
         this.killAllListeners();
-        await this.memoryStore?.stop();
+        await this.queryStore?.stop();
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -83,7 +80,6 @@ export class QueryHandler<D extends DataType, S extends SelectOptions> extends A
 
     protected onOutput(results: StoreResults): void
     {
-
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -94,7 +90,7 @@ export class QueryHandler<D extends DataType, S extends SelectOptions> extends A
     {
         try
         {
-            this.memoryStore = await createStore(':memory:');
+            this.queryStore = await createStore(':memory:');
         }
         catch (e)
         {
@@ -128,18 +124,18 @@ export class QueryHandler<D extends DataType, S extends SelectOptions> extends A
         }
     }
 
-    private _listenEvents(onChanges: () => void): void
+    private _listenEvents(onChange: () => void): void
     {
-        const outputTrigger = isNumber(this.debounce)
-            ? debounce(onChanges, this.debounce)
-            : onChanges;
+        const debounceOnChange = isNumber(this.debounce)
+            ? debounce(onChange, this.debounce)
+            : onChange;
 
         (async () =>
         {
             for await (const values of this.listener(INPUT_TRIGGER_EVENT))
             {
                 await this._inputHandler(values);
-                outputTrigger();
+                debounceOnChange();
             }
         })();
 
@@ -157,9 +153,7 @@ export class QueryHandler<D extends DataType, S extends SelectOptions> extends A
         try
         {
             await Promise.any(
-                values.map(value =>
-                    this.memoryStore.index.put(value),
-                ),
+                values.map(value => this.queryStore.put(value)),
             );
         }
         catch (e)
@@ -171,7 +165,7 @@ export class QueryHandler<D extends DataType, S extends SelectOptions> extends A
     {
         try
         {
-            const results = await this.memoryStore.select(this.query);
+            const results = await this.queryStore.select(this.query);
             this.onOutput(results);
         }
         catch (e)

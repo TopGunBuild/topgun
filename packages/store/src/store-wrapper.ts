@@ -1,19 +1,9 @@
-import { serialize } from '@dao-xyz/borsh';
 import { Ed25519PublicKey, PublicKey } from '@topgunbuild/crypto';
 import { randomBytes } from '@topgunbuild/utils';
+import { CloseIteratorQuery, SelectNextQuery, SelectQuery } from '@topgunbuild/transport';
 import { StoreResults } from './result';
 import { IdKey } from './id';
 import { Store } from './store';
-import {
-    CloseIteratorQuery, SelectNextQuery,
-    PutQuery, SelectQuery,
-    ValueBool,
-    ValueDate,
-    ValueEmpty,
-    ValueNumber,
-    ValueString,
-    ValueUint8Array,
-} from '@topgunbuild/transport';
 import { StoreValue } from './store-value';
 
 export class StoreWrapper
@@ -39,42 +29,8 @@ export class StoreWrapper
         return this.index.get(key);
     }
 
-    put(message: PutQuery): Promise<void>|void
+    put(data: StoreValue): Promise<void>|void
     {
-        const data: StoreValue = {
-            section       : message.section,
-            node          : message.node,
-            field         : message.field,
-            state         : message.state,
-            value_is_empty: 0,
-            size          : serialize(message).length,
-        };
-
-        if (message.value instanceof ValueEmpty)
-        {
-            data.value_is_empty = 1;
-        }
-        else if (message.value instanceof ValueBool)
-        {
-            data.value_bool = message.value.value;
-        }
-        else if (message.value instanceof ValueString)
-        {
-            data.value_string = message.value.value;
-        }
-        else if (message.value instanceof ValueNumber)
-        {
-            data.value_number = message.value.value;
-        }
-        else if (message.value instanceof ValueDate)
-        {
-            data.value_date = message.value.value;
-        }
-        else if (message.value instanceof ValueUint8Array)
-        {
-            data.value_byte = message.value.value;
-        }
-
         return this.index.put(data);
     }
 
@@ -104,9 +60,9 @@ export class StoreWrapper
                 let res: StoreResults;
                 if (!fetchedOnce)
                 {
-                    fetchedOnce            = true;
+                    fetchedOnce          = true;
                     selectQuery.pageSize = pageSize;
-                    res                    = await this.index.select(selectQuery, from);
+                    res                  = await this.index.select(selectQuery, from);
                 }
                 else
                 {

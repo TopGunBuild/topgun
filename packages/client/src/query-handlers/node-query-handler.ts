@@ -1,6 +1,6 @@
 import { DataNode, StoreResults, StoreValue } from '@topgunbuild/store';
 import { SelectQuery, SelectNodeOptions } from '@topgunbuild/transport';
-import { cloneValue, equalObjects } from '@topgunbuild/utils';
+import { cloneValue, equal } from '@topgunbuild/utils';
 import { QueryHandler } from './query-handler';
 import { ClientService } from '../client-service';
 import { toDataNodes } from '../utils/to-data-nodes';
@@ -31,7 +31,7 @@ export class NodeQueryHandler extends QueryHandler<DataNode, SelectNodeOptions>
         const nodes           = toDataNodes(results.results);
         const value: DataNode = nodes.length > 0 ? nodes[0] : null;
 
-        if (!equalObjects(value, this.lastValue))
+        if (!equal(value, this.lastValue))
         {
             this.lastValue = value;
             this.dataStream.publish(cloneValue(value));

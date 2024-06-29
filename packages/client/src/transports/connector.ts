@@ -68,6 +68,13 @@ export abstract class Connector extends AsyncStreamEmitter<any>
         return this;
     }
 
+    ingest(message: Message): Connector
+    {
+        this.inputQueue.enqueue(message).process();
+
+        return this;
+    }
+
     #onConnectedChange(connected?: boolean): void
     {
         if (connected)

@@ -43,6 +43,9 @@ export class PutQuery extends AbstractQuery
     @field({ type: 'u64' })
     state: bigint;
 
+    @field({ type: 'u8' })
+    deleted: number;
+
     @field({ type: AbstractValue })
     value: AbstractValue;
 
@@ -51,7 +54,7 @@ export class PutQuery extends AbstractQuery
         return deserialize(bytes, PutQuery);
     }
 
-    constructor(props: { section: string, node: string, field: string, state: bigint, value: unknown })
+    constructor(props: { section: string, node: string, field: string, state: bigint, value: unknown, deleted?: number })
     {
         super();
         this.section = props.section;
@@ -76,8 +79,8 @@ export class DeleteQuery extends AbstractQuery
     @field({ type: 'string' })
     node: string;
 
-    @field({ type: 'string' })
-    field: string;
+    @field({ type: option('string') })
+    field?: string;
 
     @field({ type: 'u64' })
     state: bigint;
@@ -87,7 +90,7 @@ export class DeleteQuery extends AbstractQuery
         return deserialize(bytes, DeleteQuery);
     }
 
-    constructor(props: { section: string, node: string, field: string, state: bigint })
+    constructor(props: { section: string, node: string, field?: string, state: bigint })
     {
         super();
         this.section = props.section;

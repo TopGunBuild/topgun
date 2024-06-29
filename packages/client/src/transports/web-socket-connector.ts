@@ -88,7 +88,7 @@ export class WebSocketConnector extends WireConnector
         };
 
         this._requestChannels[msgId] = this.subscribeToChannel(
-            `topgun/nodes/${soul}`,
+            `topgun/nodes/${msgId}`,
             cbWrap,
             {},
         );
@@ -153,27 +153,19 @@ export class WebSocketConnector extends WireConnector
         }
     }
 
-    #onOutputProcessed(msg: Message): void
+    #onOutputProcessed(message: Message): void
     {
-        if (msg && this.client)
+        if (message && this.client)
         {
-            const replyTo = msg.replyToIdString;
+            const replyTo = message.replyToIdString;
 
             if (replyTo)
             {
-                this.#publishToChannel(`topgun/@${replyTo}`, msg);
+                this.#publishToChannel(`topgun/@${replyTo}`, message);
             }
-            // TODO: pass channel name
             else
             {
-                if ('get' in msg)
-                {
-                    this.#publishToChannel('topgun/get', msg);
-                }
-                else if ('put' in msg)
-                {
-                    this.#publishToChannel('topgun/put', msg);
-                }
+                this.#publishToChannel('topgun/message', message);
             }
         }
     }

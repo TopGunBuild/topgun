@@ -21,24 +21,25 @@ export class SectionQueryBuilder
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    select(options?: SelectSectionOptions): SelectBuilder<DataNode[]>
+    select(options?: SelectSectionOptions): SelectBuilder<DataNode[], SelectSectionOptions>
     {
         if (options?.limit > this.#service.options.rowLimit)
         {
             throw new Error(`Limit for rows (controlled by 'rowLimit' setting) exceeded, max rows: ${this.#service.options.rowLimit}`);
         }
 
-        const handler = new SectionQueryHandler({
-            service: this.#service,
-            query  : new SelectQuery(options),
-            options: mergeObjects<SelectSectionOptions>({
-                limit : this.#service.options.rowLimit,
-                local : true,
-                remote: true,
-                sync  : false,
-            }, options),
-        });
-        return new SelectBuilder<DataNode[]>(handler);
+        return new SelectBuilder<DataNode[], SelectSectionOptions>(
+            new SectionQueryHandler({
+                service: this.#service,
+                query  : new SelectQuery(options),
+                options: mergeObjects<SelectSectionOptions>({
+                    limit : this.#service.options.rowLimit,
+                    local : true,
+                    remote: true,
+                    sync  : false,
+                }, options),
+            })
+        );
     }
 
     async insert(values: DataNode): Promise<void>
@@ -58,10 +59,4 @@ export class SectionQueryBuilder
     {
         return new NodeQueryBuilder(this.#section, nodeName, this.#service);
     }
-
-    // -----------------------------------------------------------------------------------------------------
-    // @ Private methods
-    // -----------------------------------------------------------------------------------------------------
-
-
 }

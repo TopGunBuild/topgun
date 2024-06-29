@@ -11,7 +11,7 @@ export interface StoreValue
     value_byte?: Uint8Array;
     value_date?: number|string;
     size?: number;
-    deleted?: boolean;
+    deleted?: number;
 }
 
 

@@ -2,12 +2,13 @@ import { DataStream } from '@topgunbuild/data-streams';
 import { isFunction } from '@topgunbuild/utils';
 import { DataType, QueryCb } from '../types';
 import { QueryHandler } from '../query-handlers/query-handler';
+import { SelectOptions } from '@topgunbuild/transport';
 
-export class SelectBuilder<T extends DataType>
+export class SelectBuilder<D extends DataType, S extends SelectOptions>
 {
-    readonly #queryHandler: QueryHandler<T>;
+    readonly #queryHandler: QueryHandler<D, S>;
 
-    constructor(queryHandler: QueryHandler<T>)
+    constructor(queryHandler: QueryHandler<D, S>)
     {
         this.#queryHandler = queryHandler;
     }
@@ -16,12 +17,12 @@ export class SelectBuilder<T extends DataType>
     // @ Public methods
     // -----------------------------------------------------------------------------------------------------
 
-    on(cb?: QueryCb<T>): DataStream<T>
+    on(cb?: QueryCb<D>): DataStream<D>
     {
         return this.#handle(false, cb);
     }
 
-    once(cb?: QueryCb<T>): DataStream<T>
+    once(cb?: QueryCb<D>): DataStream<D>
     {
         return this.#handle(true, cb);
     }
@@ -30,7 +31,7 @@ export class SelectBuilder<T extends DataType>
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
 
-    #handle(once: boolean, cb?: QueryCb<T>): DataStream<T>
+    #handle(once: boolean, cb?: QueryCb<D>): DataStream<D>
     {
         this.#queryHandler.once = once;
 
@@ -46,7 +47,8 @@ export class SelectBuilder<T extends DataType>
                     // Destroy query after the result is received
                     if (once)
                     {
-                        this.#queryHandler.dataStream.destroy();
+                        // TODO: Wait for connector response
+                        // await this.#queryHandler.destroy();
                     }
                 }
             })();

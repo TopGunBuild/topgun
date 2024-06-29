@@ -1,7 +1,8 @@
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
-import { DataNode, DataValue, StoreWrapper } from '@topgunbuild/store';
+import { DataNode, DataValue, StoreWrapper, toStoreValue } from '@topgunbuild/store';
 import { isEmptyObject, isObject, mergeObjects } from '@topgunbuild/utils';
 import {
+    DeleteQuery,
     Message,
     MessageHeader,
     PutQuery, SelectOptions,
@@ -49,18 +50,14 @@ export class ClientService
         return this.exchange.subscribe<T>();
     }
 
-    initQueryHandler<T extends DataType, O extends SelectOptions>(handler: QueryHandler<T, O>): void
+    setQueryHandler<T extends DataType, O extends SelectOptions>(handler: QueryHandler<T, O>): void
     {
         this.queryHandlers.set(handler.id, handler);
     }
 
-    async putNode(sectionId: string, nodeId: string, value: DataNode): Promise<void>
+    async putNode(section: string, node: string, value: DataNode): Promise<void>
     {
-        if (this.authRequired())
-        {
-            throw new Error('You cannot save data to user space if the user is not authorized.');
-        }
-        else if (!isObject(value))
+        if (!isObject(value))
         {
             throw new Error('Node must be an object.');
         }
@@ -69,36 +66,34 @@ export class ClientService
             throw new Error('Node must not be an empty object.');
         }
 
-        await this.waitForStoreInit();
         await Promise.all(
-            Object.keys(value).map(field => this.putValue(sectionId, nodeId, field, value[field])),
+            Object.keys(value).map(field => this.putValue(section, node, field, value[field])),
         );
     }
 
-    async putValue(section: string, node: string, field: string, value: DataValue): Promise<any>
+    putValue(section: string, node: string, field: string, value: DataValue): Promise<void>
     {
-        const data    = new PutQuery({
-            section,
-            node,
-            field,
-            value,
-            state: bigintTime(),
-        });
-        const message = new Message({
-            header: new MessageHeader({}),
-            data  : data.encode(),
-        });
-
-        // Save to local store
-        this.store.put(data);
-
-        // Send to peers
-        this.connectors.forEach(connector => connector.send(message));
+        return this.#processDataChangeQuery(
+            new PutQuery({
+                section,
+                node,
+                field,
+                value,
+                state: bigintTime(),
+            }),
+        );
     }
 
-    authRequired(): boolean
+    async delete(section: string, node: string, field?: string): Promise<void>
     {
-        return false;
+        return this.#processDataChangeQuery(
+            new DeleteQuery({
+                section,
+                node,
+                field,
+                state: bigintTime(),
+            }),
+        );
     }
 
     destroy(): void
@@ -119,6 +114,29 @@ export class ClientService
     // -----------------------------------------------------------------------------------------------------
     // @ Private methods
     // -----------------------------------------------------------------------------------------------------
+
+    async #processDataChangeQuery(query: PutQuery|DeleteQuery): Promise<void>
+    {
+        const storeValue = toStoreValue(query);
+
+        // Save to local store
+        await this.waitForStoreInit();
+        this.store.put(storeValue);
+
+        // Save to query handlers
+        this.queryHandlers.forEach(handler =>
+        {
+            handler.preprocess(storeValue);
+        });
+
+        const message = new Message({
+            header: new MessageHeader({}),
+            data  : query.encode(),
+        });
+
+        // Send to peers
+        this.connectors.forEach(connector => connector.send(message));
+    }
 
     async #initStore(): Promise<void>
     {

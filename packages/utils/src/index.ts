@@ -13,7 +13,7 @@ export * from './clone-value';
 export * from './random-id';
 export * from './to-array';
 export * from './merge-objects';
-export * from './equal-objects';
+export * from './equal';
 
 
 

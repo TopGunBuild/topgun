@@ -1,5 +1,6 @@
 import { DataValue, StoreResults, StoreValue } from '@topgunbuild/store';
 import { SelectQuery, SelectOptions } from '@topgunbuild/transport';
+import { equal } from '@topgunbuild/utils';
 import { QueryHandler } from './query-handler';
 import { ClientService } from '../client-service';
 import { coerceDataValue } from '../utils/to-data-nodes';
@@ -32,7 +33,7 @@ export class FieldQueryHandler extends QueryHandler<DataValue, SelectOptions>
             ? coerceDataValue(results.results[0])
             : null;
 
-        if (value !== this.lastValue)
+        if (!equal(value, this.lastValue))
         {
             this.lastValue = value;
             this.dataStream.publish(value);
