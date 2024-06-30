@@ -5,7 +5,7 @@ import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { isNumber, debounce, randomBytes, toArray } from '@topgunbuild/utils';
 import { ClientService } from '../client-service';
 import { DataType } from '../types';
-import { createStore } from '../utils/create-store';
+import { createStore } from '../utils';
 
 const OUTPUT_TRIGGER_EVENT = 'output';
 const INPUT_TRIGGER_EVENT  = 'input';
