@@ -6,24 +6,10 @@ export class FilterCondition
 
     constructor()
     {
-        this.elements = [
-            {
-                name : 'null',
-                logic: (target: any) =>
-                {
-                    return target === null;
-                },
-            }, {
-                name : 'notNull',
-                logic: (target: any) =>
-                {
-                    return target !== null;
-                },
-            },
-        ];
+        this.elements = [];
     }
 
-    condition(name: string, withFunctions = true): FilterElement
+    condition(name: number, withFunctions = true): FilterElement
     {
         const condition = this.elements.find((_element) => _element.name === name);
 
@@ -31,7 +17,6 @@ export class FilterCondition
         {
             return {
                 name: condition.name,
-                type: condition.type,
             };
         }
         return condition;

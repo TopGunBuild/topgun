@@ -1,6 +1,12 @@
-import { FilterElement } from '../types/filter-element';
 import { FilterCondition } from './filter-condition';
-import { FilterDataType } from '../types/data-type';
+
+export enum BooleanCondition
+{
+    true,
+    false,
+    empty,
+    notEmpty
+}
 
 export class BooleanFilterCondition extends FilterCondition
 {
@@ -9,36 +15,30 @@ export class BooleanFilterCondition extends FilterCondition
         super();
         this.elements.push(
             {
-                name : 'true',
+                name : BooleanCondition.true,
                 logic: (target: boolean) =>
                 {
                     return !!(target && target !== null && target !== undefined);
                 },
             }, {
-                name : 'false',
+                name : BooleanCondition.false,
                 logic: (target: boolean) =>
                 {
                     return !target && target !== null && target !== undefined;
                 },
             }, {
-                name : 'empty',
+                name : BooleanCondition.empty,
                 logic: (target: boolean) =>
                 {
                     return target === null || target === undefined;
                 },
             }, {
-                name : 'notEmpty',
+                name : BooleanCondition.notEmpty,
                 logic: (target: boolean) =>
                 {
                     return target !== null && target !== undefined;
                 },
             },
         );
-
-        this.elements.map((item: FilterElement) =>
-        {
-            item.type = FilterDataType.boolean;
-            return item;
-        });
     }
 }

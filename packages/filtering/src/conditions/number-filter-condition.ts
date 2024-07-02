@@ -1,6 +1,16 @@
-import { FilterElement } from '../types/filter-element';
 import { FilterCondition } from './filter-condition';
-import { FilterDataType } from '../types/data-type';
+
+export enum NumberCondition
+{
+    equals,
+    doesNotEqual,
+    greaterThan,
+    lessThan,
+    greaterThanOrEqualTo,
+    lessThanOrEqualTo,
+    empty,
+    notEmpty
+}
 
 export class NumberFilterCondition extends FilterCondition
 {
@@ -9,60 +19,54 @@ export class NumberFilterCondition extends FilterCondition
         super();
         this.elements.push(
             {
-                name : 'equals',
+                name : NumberCondition.equals,
                 logic: (target: number, searchVal: number) =>
                 {
                     return target === searchVal;
                 },
             }, {
-                name : 'doesNotEqual',
+                name : NumberCondition.doesNotEqual,
                 logic: (target: number, searchVal: number) =>
                 {
                     return target !== searchVal;
                 },
             }, {
-                name : 'greaterThan',
+                name : NumberCondition.greaterThan,
                 logic: (target: number, searchVal: number) =>
                 {
                     return target > searchVal;
                 },
             }, {
-                name : 'lessThan',
+                name : NumberCondition.lessThan,
                 logic: (target: number, searchVal: number) =>
                 {
                     return target < searchVal;
                 },
             }, {
-                name : 'greaterThanOrEqualTo',
+                name : NumberCondition.greaterThanOrEqualTo,
                 logic: (target: number, searchVal: number) =>
                 {
                     return target >= searchVal;
                 },
             }, {
-                name : 'lessThanOrEqualTo',
+                name : NumberCondition.lessThanOrEqualTo,
                 logic: (target: number, searchVal: number) =>
                 {
                     return target <= searchVal;
                 },
             }, {
-                name : 'empty',
+                name : NumberCondition.empty,
                 logic: (target: number) =>
                 {
                     return target === null || target === undefined || isNaN(target);
                 },
             }, {
-                name : 'notEmpty',
+                name : NumberCondition.notEmpty,
                 logic: (target: number) =>
                 {
                     return target !== null && target !== undefined && !isNaN(target);
                 },
             },
         );
-
-        this.elements.map((item: FilterElement) =>
-        {
-            item.type = FilterDataType.number;
-            return item;
-        });
     }
 }

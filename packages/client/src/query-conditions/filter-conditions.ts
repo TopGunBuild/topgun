@@ -1,46 +1,50 @@
 import {
-    And,
-    BoolConditionParams, BoolConditionQuery,
-    ByteConditionParams,
-    ByteConditionQuery,
-    DateConditionParams, DateConditionQuery,
-    NumberConditionParams,
+    And, BoolConditionQuery,
+    ByteConditionQuery, DateConditionQuery,
     NumberConditionQuery, Or, Query,
-    StringConditionParams,
     StringConditionQuery,
 } from '@topgunbuild/transport';
+import {
+    BooleanCondition,
+    ByteCondition,
+    DateCondition,
+    NumberCondition,
+    StringCondition,
+} from '@topgunbuild/filtering';
 
-export const string = (params: StringConditionParams) =>
+export const string = (
+    key: string,
+    condition: StringCondition,
+    value?: string,
+    caseInsensitive?: boolean,
+): StringConditionQuery =>
 {
-    return new StringConditionQuery(params);
-}
+    return new StringConditionQuery({ key, condition, value, caseInsensitive });
+};
 
-export const number = (params: NumberConditionParams) =>
-{
-    return new NumberConditionQuery(params);
-}
+export const number = (
+    key: string,
+    condition: NumberCondition,
+    value?: number,
+): NumberConditionQuery => new NumberConditionQuery({ key, condition, value });
 
-export const date = (params: DateConditionParams) =>
-{
-    return new DateConditionQuery(params);
-}
+export const date = (
+    key: string,
+    condition: DateCondition,
+    value?: string
+): DateConditionQuery => new DateConditionQuery({ key, condition, value });
 
-export const byte = (params: ByteConditionParams) =>
-{
-    return new ByteConditionQuery(params);
-}
+export const byte = (
+    key: string,
+    condition: ByteCondition,
+    value?: Uint8Array
+): ByteConditionQuery => new ByteConditionQuery({ key, condition, value });
 
-export const bool = (params: BoolConditionParams) =>
-{
-    return new BoolConditionQuery(params);
-}
+export const boolean = (
+    key: string,
+    condition: BooleanCondition,
+    value?: boolean
+): BoolConditionQuery => new BoolConditionQuery({ key, condition, value });
 
-export const or = (value: Query[]) =>
-{
-    return new Or(value);
-}
-
-export const and = (value: Query[]) =>
-{
-    return new And(value);
-}
+export const or = (value: Query[]): Or => new Or(value);
+export const and = (value: Query[]): And => new And(value);

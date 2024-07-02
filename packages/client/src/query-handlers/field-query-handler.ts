@@ -3,7 +3,7 @@ import { SelectQuery, SelectOptions } from '@topgunbuild/transport';
 import { equal } from '@topgunbuild/utils';
 import { QueryHandler } from './query-handler';
 import { ClientService } from '../client-service';
-import { coerceDataValue } from '../utils/to-data-nodes';
+import { coerceDataValue } from '../utils';
 
 export class FieldQueryHandler extends QueryHandler<DataValue, SelectOptions>
 {

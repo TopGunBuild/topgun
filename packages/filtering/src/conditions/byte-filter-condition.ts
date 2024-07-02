@@ -1,7 +1,13 @@
-import { equalBytes } from '@noble/curves/abstract/utils';
-import { FilterElement } from '../types/filter-element';
+import { equalBytes } from '@topgunbuild/utils';
 import { FilterCondition } from './filter-condition';
-import { FilterDataType } from '../types/data-type';
+
+export enum ByteCondition
+{
+    equals,
+    doesNotEqual,
+    empty,
+    notEmpty
+}
 
 export class ByteFilterCondition extends FilterCondition
 {
@@ -10,36 +16,30 @@ export class ByteFilterCondition extends FilterCondition
         super();
         this.elements.push(
             {
-                name : 'equals',
+                name : ByteCondition.equals,
                 logic: (target: Uint8Array, searchVal: Uint8Array) =>
                 {
                     return equalBytes(target, searchVal);
                 },
             }, {
-                name : 'doesNotEqual',
+                name : ByteCondition.doesNotEqual,
                 logic: (target: Uint8Array, searchVal: Uint8Array) =>
                 {
                     return !equalBytes(target, searchVal);
                 },
             }, {
-                name : 'empty',
+                name : ByteCondition.empty,
                 logic: (target: boolean) =>
                 {
                     return target === null || target === undefined;
                 },
             }, {
-                name : 'notEmpty',
+                name : ByteCondition.notEmpty,
                 logic: (target: boolean) =>
                 {
                     return target !== null && target !== undefined;
                 },
             },
         );
-
-        this.elements.map((item: FilterElement) =>
-        {
-            item.type = FilterDataType.byte;
-            return item;
-        });
     }
 }

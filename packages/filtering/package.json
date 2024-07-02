@@ -18,7 +18,7 @@
     "author": "",
     "license": "ISC",
     "dependencies": {
-        "@noble/curves": "1.2.0"
+        "@topgunbuild/utils": "workspace:*"
     },
     "devDependencies": {
         "@types/jest": "^29.5.0",

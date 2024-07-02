@@ -1,7 +1,7 @@
-import { Sort, SortParams } from '@topgunbuild/transport';
+import { Sort, SortDirection } from '@topgunbuild/transport';
 
-export const sort = (params: SortParams) =>
+export const sort = (key: string, direction?: SortDirection) =>
 {
-    return new Sort(params);
+    return new Sort({ key, direction });
 };
 

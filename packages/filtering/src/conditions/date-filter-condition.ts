@@ -1,7 +1,23 @@
 import { DateParts } from '../types/date-parts';
-import { FilterElement } from '../types/filter-element';
 import { FilterCondition } from './filter-condition';
-import { FilterDataType } from '../types/data-type';
+
+export enum DateCondition
+{
+    equals,
+    doesNotEqual,
+    before,
+    after,
+    today,
+    yesterday,
+    thisMonth,
+    lastMonth,
+    nextMonth,
+    thisYear,
+    lastYear,
+    nextYear,
+    empty,
+    notEmpty
+}
 
 export class DateFilterCondition extends FilterCondition
 {
@@ -10,7 +26,7 @@ export class DateFilterCondition extends FilterCondition
         super();
         this.elements.push(
             {
-                name : 'equals',
+                name : DateCondition.equals,
                 logic: (target: Date, searchVal: Date) =>
                 {
                     if (!target)
@@ -28,7 +44,7 @@ export class DateFilterCondition extends FilterCondition
                 },
             },
             {
-                name : 'doesNotEqual',
+                name : DateCondition.doesNotEqual,
                 logic: (target: Date, searchVal: Date) =>
                 {
                     if (!target)
@@ -46,7 +62,7 @@ export class DateFilterCondition extends FilterCondition
                 },
             },
             {
-                name : 'before',
+                name : DateCondition.before,
                 logic: (target: Date, searchVal: Date) =>
                 {
                     if (!target)
@@ -60,7 +76,7 @@ export class DateFilterCondition extends FilterCondition
                 },
             },
             {
-                name : 'after',
+                name : DateCondition.after,
                 logic: (target: Date, searchVal: Date) =>
                 {
                     if (!target)
@@ -74,7 +90,7 @@ export class DateFilterCondition extends FilterCondition
                 },
             },
             {
-                name : 'today',
+                name : DateCondition.today,
                 logic: (target: Date) =>
                 {
                     if (!target)
@@ -92,7 +108,7 @@ export class DateFilterCondition extends FilterCondition
                 },
             },
             {
-                name : 'yesterday',
+                name : DateCondition.yesterday,
                 logic: (target: Date) =>
                 {
                     if (!target)
@@ -111,7 +127,7 @@ export class DateFilterCondition extends FilterCondition
                 },
             },
             {
-                name : 'thisMonth',
+                name : DateCondition.thisMonth,
                 logic: (target: Date) =>
                 {
                     if (!target)
@@ -128,7 +144,7 @@ export class DateFilterCondition extends FilterCondition
                 },
             },
             {
-                name : 'lastMonth',
+                name : DateCondition.lastMonth,
                 logic: (target: Date) =>
                 {
                     if (!target)
@@ -154,7 +170,7 @@ export class DateFilterCondition extends FilterCondition
                 },
             },
             {
-                name : 'nextMonth',
+                name : DateCondition.nextMonth,
                 logic: (target: Date) =>
                 {
                     if (!target)
@@ -180,7 +196,7 @@ export class DateFilterCondition extends FilterCondition
                 },
             },
             {
-                name : 'thisYear',
+                name : DateCondition.thisYear,
                 logic: (target: Date) =>
                 {
                     if (!target)
@@ -196,7 +212,7 @@ export class DateFilterCondition extends FilterCondition
                 },
             },
             {
-                name : 'lastYear',
+                name : DateCondition.lastYear,
                 logic: (target: Date) =>
                 {
                     if (!target)
@@ -212,7 +228,7 @@ export class DateFilterCondition extends FilterCondition
                 },
             },
             {
-                name : 'nextYear',
+                name : DateCondition.nextYear,
                 logic: (target: Date) =>
                 {
                     if (!target)
@@ -228,26 +244,20 @@ export class DateFilterCondition extends FilterCondition
                 },
             },
             {
-                name : 'empty',
+                name : DateCondition.empty,
                 logic: (target: Date) =>
                 {
                     return target === null || target === undefined;
                 },
             },
             {
-                name : 'notEmpty',
+                name : DateCondition.notEmpty,
                 logic: (target: Date) =>
                 {
                     return target !== null && target !== undefined;
                 },
             },
         );
-
-        this.elements.map((item: FilterElement) =>
-        {
-            item.type = FilterDataType.date;
-            return item;
-        });
     }
 
     static getDateParts(date: Date|string, dateFormat?: string): DateParts

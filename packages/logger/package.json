@@ -1,7 +1,7 @@
 {
-    "name": "@topgunbuild/utils",
+    "name": "@topgunbuild/logger",
     "version": "0.0.0",
-    "description": "Common methods and constants for TopGun",
+    "description": "",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
     "files": [
@@ -17,11 +17,6 @@
     "keywords": [],
     "author": "",
     "license": "ISC",
-    "dependencies": {
-        "@noble/curves": "1.4.0",
-        "@noble/hashes": "1.4.0",
-        "@scure/base": "1.1.7"
-    },
     "devDependencies": {
         "@types/jest": "^29.5.0",
         "@types/node": "^18.15.11",

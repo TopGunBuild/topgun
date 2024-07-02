@@ -1,4 +1,4 @@
-import { Query, Sort } from './message-data';
+import { Query, Sort } from './query';
 
 export interface SelectOptions
 {

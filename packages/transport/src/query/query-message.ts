@@ -2,7 +2,8 @@ import { deserialize, field, option, serialize, variant, vec } from '@dao-xyz/bo
 import { randomId, toArray } from '@topgunbuild/utils';
 import { AbstractValue } from './query-data-value';
 import { typeOf } from './typeof';
-import { Query, Sort } from './query';
+import { Query } from './query';
+import { Sort } from './sort';
 
 export abstract class AbstractQuery
 {
