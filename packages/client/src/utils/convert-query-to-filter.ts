@@ -4,76 +4,71 @@ import {
     FieldQuery,
     LogicalQuery, NumberConditionQuery,
     Or,
-    Query,
-    SelectQuery,
+    Query, SelectQuery,
     StringConditionQuery,
 } from '@topgunbuild/transport';
 import {
     BooleanFilterCondition, ByteFilterCondition,
     DateFilterCondition,
-    FilterChain,
-    FilterExpression, FilterLogic,
+    FilterExpression, FilterExpressionTree, FilterLogic,
     NumberFilterCondition, StringFilterCondition,
 } from '@topgunbuild/filtering';
 
-export const convertQueryToFilter = (query: SelectQuery): FilterChain =>
+export const convertQueryToFilterExpressionTree = (select: SelectQuery): FilterExpressionTree =>
 {
-    return convertQueryToFilterChain(query.query);
+    const tree       = new FilterExpressionTree(FilterLogic.And);
+    tree.expressions = select.query.map(q => convertQuery(q));
+    return tree;
 };
 
-const convertQueryToFilterChain = (query: Query): FilterChain =>
+const convertQuery = (query: Query): FilterExpressionTree|FilterExpression =>
 {
     if (query instanceof FieldQuery)
     {
-        const filterChain       = new FilterChain(FilterLogic.And);
-        filterChain.expressions = [
-            convertFieldQueryToFilterExpression(query),
-        ];
-        return filterChain;
+        return convertFieldQuery(query);
     }
     else if (query instanceof LogicalQuery)
     {
         if (query instanceof And)
         {
-            const filterChain = new FilterChain(FilterLogic.And);
+            const tree = new FilterExpressionTree(FilterLogic.And);
 
             for (const subquery of query.and)
             {
-                filterChain.expressions.push(
-                    convertQueryToFilterChain(subquery),
+                tree.expressions.push(
+                    convertQuery(subquery),
                 );
             }
 
-            return filterChain;
+            return tree;
         }
         else if (query instanceof Or)
         {
-            const filterChain = new FilterChain(FilterLogic.Or);
+            const tree = new FilterExpressionTree(FilterLogic.Or);
 
             for (const subquery of query.or)
             {
-                filterChain.expressions.push(
-                    convertQueryToFilterChain(subquery),
+                tree.expressions.push(
+                    convertQuery(subquery),
                 );
             }
 
-            return filterChain;
+            return tree;
         }
     }
-    else
-    {
-        throw new Error('Unsupported query type: ' + query.constructor.name);
-    }
+
+    return new FilterExpressionTree(FilterLogic.And);
 };
 
-const convertFieldQueryToFilterExpression = (query: FieldQuery): FilterExpression =>
+const convertFieldQuery = (query: FieldQuery): FilterExpression =>
 {
     if (query instanceof StringConditionQuery)
     {
         return {
-            condition: new StringFilterCondition().condition(query.condition),
-            key      : query.key,
-            value    : query.value,
+            condition      : new StringFilterCondition().condition(query.condition),
+            key            : query.key,
+            value          : query.value,
+            caseInsensitive: query.caseInsensitive,
         };
     }
     else if (query instanceof ByteConditionQuery)

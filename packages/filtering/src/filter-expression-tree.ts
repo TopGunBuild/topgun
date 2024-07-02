@@ -1,5 +1,5 @@
-import { FilterExpression } from '../types/filter-expression';
-import { FilterLogic } from '../types/filter-logic';
+import { FilterExpression } from './types/filter-expression';
+import { FilterLogic } from './types/filter-logic';
 
 export class FilterExpressionTree
 {

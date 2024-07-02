@@ -1,14 +1,15 @@
 import { DataNode, StoreResults, StoreValue } from '@topgunbuild/store';
 import { SelectQuery, SelectSectionOptions } from '@topgunbuild/transport';
-import { cloneValue } from '@topgunbuild/utils';
-import { FilterChain, FilterService } from '@topgunbuild/filtering';
+import { cloneValue, equal } from '@topgunbuild/utils';
+import { FilterExpressionTree, FilterService } from '@topgunbuild/filtering';
 import { QueryHandler } from './query-handler';
 import { ClientService } from '../client-service';
 import { coerceDataValue, toDataNodes } from '../utils';
+import { convertQueryToFilterExpressionTree } from '../utils/convert-query-to-filter';
 
 export class SectionQueryHandler extends QueryHandler<DataNode[], SelectSectionOptions>
 {
-    filterChain: FilterChain;
+    filterExpressionTree: FilterExpressionTree;
     filterService: FilterService;
 
     constructor(props: {
@@ -19,7 +20,8 @@ export class SectionQueryHandler extends QueryHandler<DataNode[], SelectSectionO
     })
     {
         super(props);
-        this.filterService = new FilterService();
+        this.filterService        = new FilterService();
+        this.filterExpressionTree = convertQueryToFilterExpressionTree(props.query);
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -34,15 +36,19 @@ export class SectionQueryHandler extends QueryHandler<DataNode[], SelectSectionO
         }
 
         const record = {
-            [value.field]: coerceDataValue(value)
+            [value.field]: coerceDataValue(value),
         };
-        return this.filterService.matchRecord(record, this.filterChain);
+        return this.filterService.matchRecord(record, this.filterExpressionTree, value.field);
     }
 
     protected onOutput(results: StoreResults): void
     {
-        const nodes    = toDataNodes(results.results);
-        this.lastValue = nodes;
-        this.dataStream.publish(cloneValue(nodes));
+        const nodes = toDataNodes(results.results);
+
+        if (!equal(nodes, this.lastValue))
+        {
+            this.lastValue = nodes;
+            this.dataStream.publish(cloneValue(nodes));
+        }
     }
 }
