@@ -1,4 +1,3 @@
-import { field, vec } from '@dao-xyz/borsh';
 import { StoreValue } from './store-value';
 
 export interface StoreResults
@@ -7,13 +6,3 @@ export interface StoreResults
     left: number;
 }
 
-export class Results
-{
-    @field({ type: vec(Uint8Array) })
-    results: Uint8Array[];
-
-    constructor(properties: { results: Uint8Array[] })
-    {
-        this.results = properties.results;
-    }
-}

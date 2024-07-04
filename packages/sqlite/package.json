@@ -12,6 +12,7 @@
     "files": [
         "dist"
     ],
+    "sideEffects": false,
     "scripts": {
         "build": "tsup",
         "watch": "tsup --watch",
@@ -28,6 +29,7 @@
         "@topgunbuild/crypto": "workspace:*",
         "@topgunbuild/store": "workspace:*",
         "@topgunbuild/transport":"workspace:*",
+        "@topgunbuild/filtering": "workspace:*",
         "@topgunbuild/utils": "workspace:*"
     },
     "devDependencies": {

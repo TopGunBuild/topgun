@@ -45,6 +45,12 @@ export class SectionQueryHandler extends QueryHandler<DataNode[], SelectSectionO
     {
         const nodes = toDataNodes(results.results);
 
+        // SELECT name, age
+        // FROM clients
+        // EXCEPT SELECT name, age
+        // FROM employees;
+
+        // TODO: need performance test with string merging or sqlite EXCEPT
         if (!equal(nodes, this.lastValue))
         {
             this.lastValue = nodes;

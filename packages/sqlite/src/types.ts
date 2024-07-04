@@ -26,3 +26,10 @@ export type SQLLiteValue =
     |Uint8Array
     |Int8Array
     |ArrayBuffer;
+
+export type SQLLiteColumnDefinition = {
+    name: string,
+    type: string,
+    primary?: boolean
+};
+

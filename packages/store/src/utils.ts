@@ -1,4 +1,3 @@
-import { serialize } from '@dao-xyz/borsh';
 import {
     DeleteQuery,
     PutQuery,
@@ -19,7 +18,6 @@ export const toStoreValue = (query: PutQuery|DeleteQuery): StoreValue =>
         field         : query.field,
         state         : query.state,
         value_is_empty: 0,
-        size          : serialize(query).length,
         deleted       : 0,
     };
 
@@ -57,3 +55,4 @@ export const toStoreValue = (query: PutQuery|DeleteQuery): StoreValue =>
 
     return data;
 };
+

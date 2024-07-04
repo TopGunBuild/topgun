@@ -7,7 +7,6 @@ export default defineConfig((options: Options) => ({
         index : 'src/index.ts',
     },
     treeshake: true,
-    clean    : true,
     dts      : true,
     minify   : true,
     format   : ['cjs', 'esm'],

@@ -1,4 +1,4 @@
-export * from './bool-condition';
+export * from './boolean-condition';
 export * from './byte-condition';
 export * from './number-condition';
 export * from './string-condition';

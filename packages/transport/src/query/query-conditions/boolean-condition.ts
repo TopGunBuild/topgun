@@ -2,7 +2,7 @@ import { FieldQuery } from './field-query';
 import { field, option, variant } from '@dao-xyz/borsh';
 
 @variant(1)
-export class BoolConditionQuery extends FieldQuery
+export class BooleanConditionQuery extends FieldQuery
 {
     @field({ type: option('bool') })
     value?: boolean;

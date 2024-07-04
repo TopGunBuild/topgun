@@ -19,22 +19,22 @@ export class StoreWrapper
         return this.index.getSize();
     }
 
-    del(key: IdKey): Promise<void>|void
+    del(key: IdKey): Promise<void>
     {
         return this.index.del(key);
     }
 
-    get(key: IdKey): Promise<StoreValue|undefined>
+    get(key: IdKey): Promise<StoreValue[]>
     {
         return this.index.get(key);
     }
 
-    put(data: StoreValue): Promise<void>|void
+    put(data: StoreValue): Promise<void>
     {
         return this.index.put(data);
     }
 
-    stop(): Promise<void>|void
+    stop(): Promise<void>
     {
         return this.index.stop();
     }

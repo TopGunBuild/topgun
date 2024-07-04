@@ -6,19 +6,19 @@ import { IdKey } from './id';
 
 export interface Store
 {
-    start(): Promise<void>|void;
+    start(): Promise<void>;
 
-    stop(): Promise<void>|void;
+    stop(): Promise<void>;
 
-    get(id: IdKey): Promise<StoreValue|undefined>;
+    get(id: IdKey): Promise<StoreValue[]>;
 
-    put(value: StoreValue): Promise<void>|void;
+    put(value: StoreValue): Promise<void>;
 
-    del(id: IdKey): Promise<void>|void;
+    del(id: IdKey): Promise<void>;
 
     select(query: SelectQuery, from: PublicKey): Promise<StoreResults>;
 
-    getSize(): number|Promise<number>;
+    getSize(): Promise<number>;
 
     next(query: SelectNextQuery, from: PublicKey): Promise<StoreResults>;
 

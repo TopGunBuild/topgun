@@ -12,6 +12,7 @@
     "files": [
         "dist"
     ],
+    "sideEffects": false,
     "scripts": {
         "build": "tsup",
         "watch": "tsup --watch",

@@ -1,15 +1,22 @@
-import { SQLLiteValue } from './types';
 import { toHexString } from '@topgunbuild/utils';
 import {
-    And, BoolCondition, BoolConditionQuery, ByteCondition, ByteConditionQuery, DateCondition, DateConditionQuery,
+    And, BooleanConditionQuery, ByteConditionQuery, DateConditionQuery,
     FieldQuery,
-    LogicalQuery, NumberCondition, NumberConditionQuery,
+    LogicalQuery, NumberConditionQuery,
     Or,
     Query, SelectQuery,
     Sort,
-    SortDirection, StringCondition,
+    SortDirection,
     StringConditionQuery,
 } from '@topgunbuild/transport';
+import {
+    BooleanCondition,
+    ByteCondition,
+    DateCondition,
+    NumberCondition,
+    StringCondition,
+} from '@topgunbuild/filtering';
+import { SQLLiteColumnDefinition, SQLLiteValue } from './types';
 
 export const toSQLType = (
     value: boolean|string|number|Uint8Array,
@@ -25,13 +32,13 @@ export const toSQLType = (
     }
 };
 
-export const resolveTableValues = (obj: any, tableFields: Record<string, string>): any[] =>
+export const resolveTableValues = (obj: any, columns: SQLLiteColumnDefinition[]): any[] =>
 {
     const values: any[] = [];
 
-    for (const fieldName of Object.keys(tableFields))
+    for (const column of columns)
     {
-        values.push(toSQLType(obj[fieldName]));
+        values.push(toSQLType(obj[column.name]));
     }
 
     return values;
@@ -42,9 +49,9 @@ export const convertSearchRequestToSQLQuery = (
     tableName: string,
 ) =>
 {
-    let whereBuilder                     = '';
-    let joinBuilder                      = '';
-    let orderByBuilder: string|undefined = undefined;
+    let whereBuilder                  = '';
+    let joinBuilder                   = '';
+    let sortBuilder: string|undefined = undefined;
 
     if (message.query.length === 1)
     {
@@ -75,10 +82,10 @@ export const convertSearchRequestToSQLQuery = (
     {
         if (message.sort.length > 0)
         {
-            orderByBuilder = 'ORDER BY ';
+            sortBuilder = 'ORDER BY ';
         }
 
-        orderByBuilder += message.sort
+        sortBuilder += message.sort
             .map(
                 (sort: Sort) =>
                     `${tableName}.${sort.key} ${sort.direction === SortDirection.ASC ? 'ASC' : 'DESC'}`,
@@ -87,9 +94,9 @@ export const convertSearchRequestToSQLQuery = (
     }
 
     return {
-        where  : whereBuilder.length > 0 ? 'where ' + whereBuilder : undefined,
-        join   : joinBuilder.length > 0 ? joinBuilder : undefined,
-        orderBy: orderByBuilder,
+        where: whereBuilder.length > 0 ? 'where ' + whereBuilder : undefined,
+        join : joinBuilder.length > 0 ? joinBuilder : undefined,
+        sort : sortBuilder,
     };
 };
 
@@ -323,23 +330,23 @@ const convertStateFieldQuery = (
                 throw new Error(`Unsupported query method: ${query.condition}`);
         }
     }
-    else if (query instanceof BoolConditionQuery)
+    else if (query instanceof BooleanConditionQuery)
     {
         switch (query.condition)
         {
-            case BoolCondition.true:
+            case BooleanCondition.true:
                 where = `${tableName}.value_bool = 1`;
                 break;
 
-            case BoolCondition.false:
+            case BooleanCondition.false:
                 where = `${tableName}.value_bool = 0`;
                 break;
 
-            case BoolCondition.empty:
+            case BooleanCondition.empty:
                 where = `${tableName}.value_is_empty = 1`;
                 break;
 
-            case BoolCondition.notEmpty:
+            case BooleanCondition.notEmpty:
                 where = `${tableName}.value_bool is not null and ${tableName}.value_bool != ''`;
                 break;
 
