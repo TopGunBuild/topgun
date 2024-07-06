@@ -10,7 +10,7 @@ import {
 import { bigintTime } from '@topgunbuild/time';
 import { DataStream, Exchange } from '@topgunbuild/data-streams';
 import { Connector } from './transports/connector';
-import { PeerOption, ClientOptions, DataType, ClientEvents } from './types';
+import { PeerOptions, ClientOptions, DataType, ClientEvents } from './types';
 import { createConnector } from './transports/web-socket-connector';
 import { getSocketOptions } from './utils/get-socket-options';
 import { createStore } from './utils/create-store';
@@ -144,9 +144,9 @@ export class ClientService
         this.eventBus.emit(ClientEvents.storeInit, this.store);
     }
 
-    #initPeers(peers: PeerOption[]): void
+    #initPeers(peers: PeerOptions[]): void
     {
-        peers.forEach((peer: PeerOption) =>
+        peers.forEach((peer: PeerOptions) =>
         {
             try
             {

@@ -113,14 +113,21 @@ export class QueryHandler<D extends DataType, S extends SelectOptions> extends A
             if (this.options.remote)
             {
                 const message = new Message({
-                    header: new MessageHeader({}),
+                    header: new MessageHeader({
+                    }),
                     data  : this.query.encode(),
                 });
-                this.service.connectors.forEach(connector => connector.send(message));
+                this.service.connectors.forEach(connector =>
+                {
+                    connector.send(message, {
+                        once: this.once,
+                    });
+                });
             }
         }
         catch (e)
         {
+            console.error(e);
         }
     }
 

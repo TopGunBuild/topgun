@@ -6,7 +6,7 @@ import {
 } from '@topgunbuild/socket';
 import { Message } from '@topgunbuild/transport';
 import { WireConnector } from './wire-connector';
-import { MessageCb } from '../types';
+import { ConnectorSendOptions, MessageCb } from '../types';
 
 export class WebSocketConnector extends WireConnector
 {
@@ -36,7 +36,7 @@ export class WebSocketConnector extends WireConnector
         {
             for await (const value of this.outputQueue.listener('completed'))
             {
-                this.#onOutputProcessed(value);
+                await this.#onOutputProcessed(value);
             }
         })();
     }
@@ -49,12 +49,13 @@ export class WebSocketConnector extends WireConnector
     {
         try
         {
+            await super.disconnect();
             this.closeAllListeners();
             this.client.disconnect();
         }
         catch (e)
         {
-
+            console.error(e);
         }
     }
 
@@ -72,52 +73,38 @@ export class WebSocketConnector extends WireConnector
         return this;
     }
 
-    get(msg: Message, once: boolean, cb?: MessageCb): () => void
+    send(message: Message, options: ConnectorSendOptions): () => void
     {
-        const msgId  = msg.idString;
+        const msgId  = message.idString;
         const cbWrap = (msg: Message) =>
         {
-            if (cb)
+            if (options?.cb)
             {
-                cb(msg);
+                options.cb(msg);
             }
-            if (once)
+            if (options?.once)
             {
                 this.off(msgId);
             }
         };
 
-        this._requestChannels[msgId] = this.subscribeToChannel(
-            `topgun/nodes/${msgId}`,
+        this._requestChannels[msgId] = this.#subscribeToChannel(
+            `topgun/${msgId}`,
             cbWrap,
             {},
         );
 
-        return super.sendMessage(msg, cbWrap);
+        return super.send(message, {
+            cb  : cbWrap,
+            once: options.once,
+        });
     }
 
-    put(msg: Message, cb?: MessageCb): () => void
-    {
-        const messageId = msg.idString;
+    // -----------------------------------------------------------------------------------------------------
+    // @ Private methods
+    // -----------------------------------------------------------------------------------------------------
 
-        const cbWrap = (response: Message) =>
-        {
-            this.off(messageId);
-            if (cb)
-            {
-                cb(response);
-            }
-        };
-
-        this._requestChannels[messageId] = this.subscribeToChannel(
-            `topgun/@${messageId}`,
-            cbWrap,
-        );
-
-        return super.sendMessage(msg, cbWrap);
-    }
-
-    subscribeToChannel(
+    #subscribeToChannel(
         channelName: string,
         cb?: MessageCb,
         opts?: SubscribeOptions,
@@ -128,15 +115,6 @@ export class WebSocketConnector extends WireConnector
 
         return channel;
     }
-
-    rpc<T>(functionName: string, data?: any): Promise<T>
-    {
-        return this.client.invoke(functionName, data);
-    }
-
-    // -----------------------------------------------------------------------------------------------------
-    // @ Private methods
-    // -----------------------------------------------------------------------------------------------------
 
     async #onChannelMessage(
         channel: Channel<any>,
@@ -153,47 +131,26 @@ export class WebSocketConnector extends WireConnector
         }
     }
 
-    #onOutputProcessed(message: Message): void
+    async #publishToChannel(channelName: string, message: Message): Promise<void>
     {
-        if (message && this.client)
+        try
         {
-            const replyTo = message.replyToIdString;
-
-            if (replyTo)
+            if (message && this.client)
             {
-                this.#publishToChannel(`topgun/@${replyTo}`, message);
-            }
-            else
-            {
-                this.#publishToChannel('topgun/message', message);
-            }
-        }
-    }
+                const messageId = message.idString;
+                const channel   = this._requestChannels[messageId];
 
-    #publishToChannel(
-        channelName: string,
-        message: Message,
-    ): WebSocketConnector
-    {
-        const messageId = message.idString;
-        const channel   = this._requestChannels[messageId];
-
-        if (channel)
-        {
-            channel
-                .listener('subscribe')
-                .once()
-                .then(() =>
+                if (channel && !channel.isSubscribed())
                 {
-                    this.client.publish(channelName, message);
-                });
+                    await channel.listener('subscribe').once();
+                }
+                await this.client.publish(channelName, message);
+            }
         }
-        else
+        catch (e)
         {
-            this.client.publish(channelName, message);
+            console.error(e);
         }
-
-        return this;
     }
 
     async #onConnect(): Promise<void>
@@ -221,6 +178,23 @@ export class WebSocketConnector extends WireConnector
                 _event.error.message,
             );
             this.emit('disconnect', {});
+        }
+    }
+
+    async #onOutputProcessed(msg: Message): Promise<void>
+    {
+        if (msg && this.client)
+        {
+            const replyTo = msg.replyToIdString;
+
+            if (replyTo)
+            {
+                await this.#publishToChannel(`topgun/@${replyTo}`, msg);
+            }
+            else
+            {
+                await this.#publishToChannel('topgun/message', msg);
+            }
         }
     }
 }

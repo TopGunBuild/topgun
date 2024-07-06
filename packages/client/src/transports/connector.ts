@@ -1,6 +1,7 @@
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { Message } from '@topgunbuild/transport';
-import { Queue } from '../control-flow/queue';
+import { Queue } from '../control-flow';
+import { ConnectorSendOptions } from '../types';
 
 export abstract class Connector extends AsyncStreamEmitter<any>
 {
@@ -57,7 +58,7 @@ export abstract class Connector extends AsyncStreamEmitter<any>
     {
     }
 
-    send(message: Message): Connector
+    send(message: Message, options: ConnectorSendOptions): () => void
     {
         this.outputQueue.enqueue(message);
         if (this.isConnected)
@@ -65,7 +66,10 @@ export abstract class Connector extends AsyncStreamEmitter<any>
             this.outputQueue.process();
         }
 
-        return this;
+        return () =>
+        {
+            this.off(message.idString);
+        };
     }
 
     ingest(message: Message): Connector

@@ -1,6 +1,6 @@
 import { Message } from '@topgunbuild/transport';
 import { Connector } from './connector';
-import { MessageCb } from '../types';
+import { ConnectorSendOptions, MessageCb } from '../types';
 
 export class WireConnector extends Connector
 {
@@ -36,18 +36,19 @@ export class WireConnector extends Connector
         return this;
     }
 
-    sendMessage(message: Message, cb?: MessageCb): () => void
+    async disconnect(): Promise<void>
     {
-        const reqId = message.idString;
-        if (cb)
+        Object.keys(this._callbacks).forEach(msgId => this.off(msgId));
+        return super.disconnect();
+    }
+
+    send(message: Message, options: ConnectorSendOptions): () => void
+    {
+        if (options?.cb)
         {
-            this._callbacks[reqId] = cb;
+            this._callbacks[message.idString] = options.cb;
         }
-        this.send(message);
-        return () =>
-        {
-            this.off(reqId);
-        };
+        return super.send(message, options);
     }
 
     // -----------------------------------------------------------------------------------------------------
@@ -56,17 +57,7 @@ export class WireConnector extends Connector
 
     #onProcessedInput(msg: Message): void
     {
-        const id        = msg.idString;
         const replyToId = msg.replyToIdString;
-
-        // if (msg.put)
-        // {
-        //     this.emit('graphData', {
-        //         data: msg.put,
-        //         id,
-        //         replyToId,
-        //     });
-        // }
 
         if (replyToId)
         {
