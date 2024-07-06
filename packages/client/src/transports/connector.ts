@@ -8,8 +8,8 @@ export abstract class Connector extends AsyncStreamEmitter<any>
     readonly name: string;
     isConnected: boolean;
 
-    protected readonly inputQueue: Queue<Message>;
-    protected readonly outputQueue: Queue<Message>;
+    readonly inputQueue: Queue<Message>;
+    readonly outputQueue: Queue<Message>;
 
     /**
      * Constructor

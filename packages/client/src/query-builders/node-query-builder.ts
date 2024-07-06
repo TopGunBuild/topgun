@@ -3,7 +3,7 @@ import { SelectQuery, SelectNodeOptions } from '@topgunbuild/transport';
 import { mergeObjects } from '@topgunbuild/utils';
 import { ClientService } from '../client-service';
 import { FieldQueryBuilder } from './field-query-builder';
-import { NodeQueryHandler } from '../query-handlers/node-query-handler';
+import { NodeQueryHandler } from '../query-handlers';
 import { SelectBuilder } from './select-builder';
 
 export class NodeQueryBuilder

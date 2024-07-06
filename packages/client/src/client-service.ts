@@ -9,21 +9,19 @@ import {
 } from '@topgunbuild/transport';
 import { bigintTime } from '@topgunbuild/time';
 import { DataStream, Exchange } from '@topgunbuild/data-streams';
-import { Connector } from './transports/connector';
+import { createConnector, Connector } from './transports';
 import { PeerOptions, ClientOptions, DataType, ClientEvents } from './types';
-import { createConnector } from './transports/web-socket-connector';
-import { getSocketOptions } from './utils/get-socket-options';
-import { createStore } from './utils/create-store';
-import { QueryHandler } from './query-handlers/query-handler';
+import { createStore, getSocketOptions } from './utils';
+import { QueryHandler } from './query-handlers';
 
 export class ClientService
 {
-    public readonly options: ClientOptions;
-    public readonly eventBus: AsyncStreamEmitter<any>;
-    public readonly connectors: Connector[];
-    public readonly exchange: Exchange;
-    public readonly queryHandlers: Map<string, QueryHandler<DataType, SelectOptions>>;
-    public store: StoreWrapper;
+    readonly options: ClientOptions;
+    readonly eventBus: AsyncStreamEmitter<any>;
+    readonly connectors: Connector[];
+    readonly exchange: Exchange;
+    readonly queryHandlers: Map<string, QueryHandler<DataType, SelectOptions>>;
+    store: StoreWrapper;
 
     constructor(options: ClientOptions)
     {
@@ -40,10 +38,6 @@ export class ClientService
         this.#initStore();
         this.#handleListeners();
     }
-
-    // -----------------------------------------------------------------------------------------------------
-    // @ Public methods
-    // -----------------------------------------------------------------------------------------------------
 
     createDataStream<T>(): DataStream<T>
     {
@@ -111,10 +105,6 @@ export class ClientService
         }
     }
 
-    // -----------------------------------------------------------------------------------------------------
-    // @ Private methods
-    // -----------------------------------------------------------------------------------------------------
-
     async #processDataChangeQuery(query: PutQuery|DeleteQuery): Promise<void>
     {
         const storeValue = toStoreValue(query);
@@ -130,12 +120,18 @@ export class ClientService
         });
 
         const message = new Message({
-            header: new MessageHeader({}),
+            header: new MessageHeader({
+            }),
             data  : query.encode(),
         });
 
         // Send to peers
-        this.connectors.forEach(connector => connector.send(message));
+        this.connectors.forEach(connector =>
+        {
+            connector.send(message, {
+                once: true
+            });
+        });
     }
 
     async #initStore(): Promise<void>

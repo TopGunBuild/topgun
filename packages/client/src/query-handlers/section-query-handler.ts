@@ -27,11 +27,7 @@ export class SectionQueryHandler extends QueryHandler<DataNode[], SelectSectionO
         this.filterExpressionTree = convertQueryToFilterExpressionTree(props.query);
     }
 
-    // -----------------------------------------------------------------------------------------------------
-    // @ Protected methods
-    // -----------------------------------------------------------------------------------------------------
-
-    protected isQualify(value: StoreValue): boolean
+    isQualify(value: StoreValue): boolean
     {
         if (value.section !== this.query.section)
         {
@@ -44,7 +40,7 @@ export class SectionQueryHandler extends QueryHandler<DataNode[], SelectSectionO
         return this.filterService.matchRecord(record, this.filterExpressionTree, value.field);
     }
 
-    protected onOutput(results: StoreResults): void
+    onOutput(results: StoreResults): void
     {
         const nodes = toDataNodes(results.results);
 

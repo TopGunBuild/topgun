@@ -2,7 +2,7 @@ import { DataValue } from '@topgunbuild/store';
 import { SelectOptions, SelectQuery } from '@topgunbuild/transport';
 import { mergeObjects } from '@topgunbuild/utils';
 import { ClientService } from '../client-service';
-import { FieldQueryHandler } from '../query-handlers/field-query-handler';
+import { FieldQueryHandler } from '../query-handlers';
 import { SelectBuilder } from './select-builder';
 
 export class FieldQueryBuilder

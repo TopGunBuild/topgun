@@ -1,5 +1,5 @@
 import {
-    And, BoolConditionQuery,
+    And, BooleanConditionQuery,
     ByteConditionQuery, DateConditionQuery,
     NumberConditionQuery, Or, Query,
     StringConditionQuery,
@@ -44,7 +44,7 @@ export const boolean = (
     key: string,
     condition: BooleanCondition,
     value?: boolean
-): BoolConditionQuery => new BoolConditionQuery({ key, condition, value });
+): BooleanConditionQuery => new BooleanConditionQuery({ key, condition, value });
 
 export const or = (value: Query[]): Or => new Or(value);
 export const and = (value: Query[]): And => new And(value);

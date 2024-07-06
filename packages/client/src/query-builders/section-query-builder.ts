@@ -1,10 +1,10 @@
 import { DataNode } from '@topgunbuild/store';
 import { mergeObjects, randomId, toArray } from '@topgunbuild/utils';
+import { SelectQuery, SelectSectionOptions } from '@topgunbuild/transport';
 import { ClientService } from '../client-service';
 import { NodeQueryBuilder } from './node-query-builder';
-import { SelectQuery, SelectSectionOptions } from '@topgunbuild/transport';
 import { SelectBuilder } from './select-builder';
-import { SectionQueryHandler } from '../query-handlers/section-query-handler';
+import { SectionQueryHandler } from '../query-handlers';
 
 export class SectionQueryBuilder
 {
@@ -16,10 +16,6 @@ export class SectionQueryBuilder
         this.#section = section;
         this.#service = service;
     }
-
-    // -----------------------------------------------------------------------------------------------------
-    // @ Public methods
-    // -----------------------------------------------------------------------------------------------------
 
     select(options?: SelectSectionOptions): SelectBuilder<DataNode[], SelectSectionOptions>
     {

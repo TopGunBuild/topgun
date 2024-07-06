@@ -10,8 +10,8 @@ import { ConnectorSendOptions, MessageCb } from '../types';
 
 export class WebSocketConnector extends WireConnector
 {
-    readonly client: ClientSocket;
-    readonly options: SocketClientOptions|undefined;
+    client: ClientSocket;
+    options: SocketClientOptions|undefined;
 
     private readonly _requestChannels: {
         [msgId: string]: Channel<any>;
@@ -40,10 +40,6 @@ export class WebSocketConnector extends WireConnector
             }
         })();
     }
-
-    // -----------------------------------------------------------------------------------------------------
-    // @ Public methods
-    // -----------------------------------------------------------------------------------------------------
 
     async disconnect(): Promise<void>
     {
@@ -100,10 +96,6 @@ export class WebSocketConnector extends WireConnector
         });
     }
 
-    // -----------------------------------------------------------------------------------------------------
-    // @ Private methods
-    // -----------------------------------------------------------------------------------------------------
-
     #subscribeToChannel(
         channelName: string,
         cb?: MessageCb,
@@ -112,7 +104,6 @@ export class WebSocketConnector extends WireConnector
     {
         const channel = this.client.subscribe(channelName, opts);
         this.#onChannelMessage(channel, cb);
-
         return channel;
     }
 

@@ -1,5 +1,5 @@
 import { ClientOptions } from './types';
-import { SectionQueryBuilder } from './query-builders/section-query-builder';
+import { SectionQueryBuilder } from './query-builders';
 import { ClientService } from './client-service';
 
 export class Client

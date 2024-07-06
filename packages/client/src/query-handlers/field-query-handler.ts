@@ -16,18 +16,14 @@ export class FieldQueryHandler extends QueryHandler<DataValue, SelectOptions>
         super(props);
     }
 
-    // -----------------------------------------------------------------------------------------------------
-    // @ Protected methods
-    // -----------------------------------------------------------------------------------------------------
-
-    protected isQualify(value: StoreValue): boolean
+    isQualify(value: StoreValue): boolean
     {
         return value.section === this.query.section
             && value.node === this.query.node
             && value.field === this.query.field;
     }
 
-    protected onOutput(results: StoreResults): void
+    onOutput(results: StoreResults): void
     {
         let value: DataValue = results.results.length > 0
             ? coerceDataValue(results.results[0])

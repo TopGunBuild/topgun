@@ -3,7 +3,7 @@ import { SelectQuery, SelectNodeOptions } from '@topgunbuild/transport';
 import { cloneValue, equal } from '@topgunbuild/utils';
 import { QueryHandler } from './query-handler';
 import { ClientService } from '../client-service';
-import { toDataNodes } from '../utils/to-data-nodes';
+import { toDataNodes } from '../utils';
 
 export class NodeQueryHandler extends QueryHandler<DataNode, SelectNodeOptions>
 {
@@ -16,17 +16,13 @@ export class NodeQueryHandler extends QueryHandler<DataNode, SelectNodeOptions>
         super(props);
     }
 
-    // -----------------------------------------------------------------------------------------------------
-    // @ Protected methods
-    // -----------------------------------------------------------------------------------------------------
-
-    protected isQualify(value: StoreValue): boolean
+    isQualify(value: StoreValue): boolean
     {
         return value.section === this.query.section
             && value.node === this.query.node;
     }
 
-    protected onOutput(results: StoreResults): void
+    onOutput(results: StoreResults): void
     {
         const nodes           = toDataNodes(results.results);
         const value: DataNode = nodes.length > 0 ? nodes[0] : null;

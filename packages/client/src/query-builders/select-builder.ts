@@ -1,8 +1,8 @@
 import { DataStream } from '@topgunbuild/data-streams';
 import { isFunction } from '@topgunbuild/utils';
-import { DataType, QueryCb } from '../types';
-import { QueryHandler } from '../query-handlers/query-handler';
 import { SelectOptions } from '@topgunbuild/transport';
+import { DataType, QueryCb } from '../types';
+import { QueryHandler } from '../query-handlers';
 
 export class SelectBuilder<D extends DataType, S extends SelectOptions>
 {
@@ -13,10 +13,6 @@ export class SelectBuilder<D extends DataType, S extends SelectOptions>
         this.#queryHandler = queryHandler;
     }
 
-    // -----------------------------------------------------------------------------------------------------
-    // @ Public methods
-    // -----------------------------------------------------------------------------------------------------
-
     on(cb?: QueryCb<D>): DataStream<D>
     {
         return this.#handle(false, cb);
@@ -26,10 +22,6 @@ export class SelectBuilder<D extends DataType, S extends SelectOptions>
     {
         return this.#handle(true, cb);
     }
-
-    // -----------------------------------------------------------------------------------------------------
-    // @ Private methods
-    // -----------------------------------------------------------------------------------------------------
 
     #handle(once: boolean, cb?: QueryCb<D>): DataStream<D>
     {

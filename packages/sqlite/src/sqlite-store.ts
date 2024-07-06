@@ -35,19 +35,6 @@ export class SQLLiteStore implements Store
     {
         this.closed        = true;
         this.rootTableName = 'tg_entry';
-        /*this.rootTableFields = {
-            section       : 'TEXT',
-            node          : 'TEXT',
-            field         : 'TEXT',
-            state         : 'REAL',
-            value_is_empty: 'INTEGER',
-            value_string  : 'TEXT',
-            value_bool    : 'INTEGER',
-            value_number  : 'REAL',
-            value_byte    : 'BLOB',
-            value_date    : 'TEXT',
-            deleted       : 'INTEGER',
-        };*/
         this.rootTableColumns = [
             { name: 'section', type: 'TEXT', primary: true },
             { name: 'node', type: 'TEXT', primary: true },

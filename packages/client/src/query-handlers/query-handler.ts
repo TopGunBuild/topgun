@@ -1,25 +1,23 @@
 import { DataStream } from '@topgunbuild/data-streams';
 import { StoreResults, StoreValue, StoreWrapper } from '@topgunbuild/store';
 import { SelectQuery, SelectOptions, Message, MessageHeader } from '@topgunbuild/transport';
-import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
-import { isNumber, debounce, randomBytes, toArray } from '@topgunbuild/utils';
+import { debounce, toArray } from '@topgunbuild/utils';
 import { ClientService } from '../client-service';
 import { DataType } from '../types';
 import { createStore } from '../utils';
+import { Queue } from '../control-flow';
 
-const OUTPUT_TRIGGER_EVENT = 'output';
-const INPUT_TRIGGER_EVENT  = 'input';
-
-export class QueryHandler<D extends DataType, S extends SelectOptions> extends AsyncStreamEmitter<any>
+export abstract class QueryHandler<D extends DataType, S extends SelectOptions>
 {
-    private queryStore: StoreWrapper;
+    lastValue: D;
+    once: boolean;
+    queryStore: StoreWrapper;
     readonly service: ClientService;
     readonly query: SelectQuery;
     readonly dataStream: DataStream<D>;
     readonly options: S;
     readonly debounce: number;
-    lastValue: D;
-    once: boolean;
+    readonly inputQueue: Queue<StoreValue[]>;
 
     get id(): string
     {
@@ -33,20 +31,27 @@ export class QueryHandler<D extends DataType, S extends SelectOptions> extends A
         debounce?: number
     })
     {
-        super();
         this.service    = props.service;
         this.query      = props.query;
         this.options    = props.options;
-        this.debounce   = props.debounce;
+        this.debounce   = props.debounce || 0;
         this.dataStream = this.service.createDataStream<D>();
+        this.inputQueue = new Queue<StoreValue[]>();
         this.service.setQueryHandler<D, S>(this);
-        this._listenEvents(() => this.emit(OUTPUT_TRIGGER_EVENT, randomBytes()));
-        this._initStore().then(() => this._fetchFirst());
-    }
 
-    // -----------------------------------------------------------------------------------------------------
-    // @ Public methods
-    // -----------------------------------------------------------------------------------------------------
+        const onProcessedOutput = debounce(this.#onProcessedOutput.bind(this), this.debounce);
+
+        (async () =>
+        {
+            for await (const value of this.inputQueue.listener('completed'))
+            {
+                await this.#onProcessedInput(value);
+                onProcessedOutput();
+            }
+        })();
+
+        this.#fetchFirst();
+    }
 
     preprocess(values: StoreValue[]|StoreValue): void
     {
@@ -59,48 +64,30 @@ export class QueryHandler<D extends DataType, S extends SelectOptions> extends A
 
     process(values: StoreValue[]|StoreValue): void
     {
-        this.emit(INPUT_TRIGGER_EVENT, toArray(values));
+        this.inputQueue.enqueue(toArray(values)).process();
     }
 
     async destroy(): Promise<void>
     {
         this.dataStream.destroy();
-        this.killAllListeners();
         await this.queryStore?.stop();
     }
 
-    // -----------------------------------------------------------------------------------------------------
-    // @ Private methods
-    // -----------------------------------------------------------------------------------------------------
-
-    protected isQualify(value: StoreValue): boolean
+    isQualify(value: StoreValue): boolean
     {
         return false;
     }
 
-    protected onOutput(results: StoreResults): void
+    onOutput(results: StoreResults): void
     {
     }
 
-    // -----------------------------------------------------------------------------------------------------
-    // @ Private methods
-    // -----------------------------------------------------------------------------------------------------
-
-    private async _initStore(): Promise<void>
+    async #fetchFirst(): Promise<void>
     {
         try
         {
             this.queryStore = await createStore(':memory:');
-        }
-        catch (e)
-        {
-        }
-    }
 
-    private async _fetchFirst(): Promise<void>
-    {
-        try
-        {
             // Get local data
             if (this.options.local)
             {
@@ -113,8 +100,7 @@ export class QueryHandler<D extends DataType, S extends SelectOptions> extends A
             if (this.options.remote)
             {
                 const message = new Message({
-                    header: new MessageHeader({
-                    }),
+                    header: new MessageHeader({}),
                     data  : this.query.encode(),
                 });
                 this.service.connectors.forEach(connector =>
@@ -131,31 +117,7 @@ export class QueryHandler<D extends DataType, S extends SelectOptions> extends A
         }
     }
 
-    private _listenEvents(onChange: () => void): void
-    {
-        const debounceOnChange = isNumber(this.debounce)
-            ? debounce(onChange, this.debounce)
-            : onChange;
-
-        (async () =>
-        {
-            for await (const values of this.listener(INPUT_TRIGGER_EVENT))
-            {
-                await this._inputHandler(values);
-                debounceOnChange();
-            }
-        })();
-
-        (async () =>
-        {
-            for await (const _ of this.listener(OUTPUT_TRIGGER_EVENT))
-            {
-                await this._outputHandler();
-            }
-        })();
-    }
-
-    private async _inputHandler(values: StoreValue[]): Promise<void>
+    async #onProcessedInput(values: StoreValue[]): Promise<void>
     {
         try
         {
@@ -168,7 +130,7 @@ export class QueryHandler<D extends DataType, S extends SelectOptions> extends A
         }
     }
 
-    private async _outputHandler(): Promise<void>
+    async #onProcessedOutput(): Promise<void>
     {
         try
         {

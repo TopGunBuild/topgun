@@ -33,10 +33,6 @@ export class Exchange extends AsyncStreamEmitter<any>
         })();
     }
 
-    // -----------------------------------------------------------------------------------------------------
-    // @ Public methods
-    // -----------------------------------------------------------------------------------------------------
-
     publish(streamName: string, data: any): Promise<void>
     {
         this.emit('publish', { streamName, data });
@@ -140,10 +136,6 @@ export class Exchange extends AsyncStreamEmitter<any>
         });
         return subs;
     }
-
-    // -----------------------------------------------------------------------------------------------------
-    // @ Private methods
-    // -----------------------------------------------------------------------------------------------------
 
     #triggerStreamSubscribe(stream: SimpleDataStream): void
     {

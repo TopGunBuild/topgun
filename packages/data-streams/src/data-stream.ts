@@ -59,10 +59,6 @@ export class DataStream<T> extends ConsumableStream<T>
         }
     }
 
-    // -----------------------------------------------------------------------------------------------------
-    // @ Accessors
-    // -----------------------------------------------------------------------------------------------------
-
     get state(): DataStreamState
     {
         return this.exchange.getStreamState(this.name);
@@ -72,10 +68,6 @@ export class DataStream<T> extends ConsumableStream<T>
     {
         throw new Error('Cannot directly set channel state');
     }
-
-    // -----------------------------------------------------------------------------------------------------
-    // @ Public methods
-    // -----------------------------------------------------------------------------------------------------
 
     createConsumer(timeout?: number): ConsumableStreamConsumer<T>
     {
@@ -116,10 +108,6 @@ export class DataStream<T> extends ConsumableStream<T>
     {
         this._eventDemux.closeAll();
     }
-
-    // -----------------------------------------------------------------------------------------------------
-    // @ Private methods
-    // -----------------------------------------------------------------------------------------------------
 
     // #getNodeIndex(soul: string)
     // {

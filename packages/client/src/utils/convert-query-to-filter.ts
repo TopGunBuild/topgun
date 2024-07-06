@@ -1,5 +1,5 @@
 import {
-    And, BoolConditionQuery,
+    And, BooleanConditionQuery,
     ByteConditionQuery, DateConditionQuery,
     FieldQuery,
     LogicalQuery, NumberConditionQuery,
@@ -95,7 +95,7 @@ const convertFieldQuery = (query: FieldQuery): FilterExpression =>
             value    : query.value,
         };
     }
-    else if (query instanceof BoolConditionQuery)
+    else if (query instanceof BooleanConditionQuery)
     {
         return {
             condition: new BooleanFilterCondition().condition(query.condition),
