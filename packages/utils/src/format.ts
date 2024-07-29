@@ -1,9 +1,7 @@
 import { base58 } from '@scure/base';
 
 /**
- * Encodes a Uint8Array or string into base58
- * @param value Uint8Array or string representing a borsh encoded object
- * @returns string base58 encoding of the value
+ * Encode a Uint8Array or string into base58.
  */
 export function baseEncode(value: Uint8Array|string): string
 {
@@ -20,9 +18,7 @@ export function baseEncode(value: Uint8Array|string): string
 }
 
 /**
- * Decodes a base58 string into a Uint8Array
- * @param value base58 encoded string
- * @returns Uint8Array representing the decoded value
+ * Decode a base58 string into a Uint8Array.
  */
 export function baseDecode(value: string): Uint8Array
 {

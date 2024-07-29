@@ -12,7 +12,6 @@ export * from './random-id';
 export * from './to-array';
 export * from './merge-objects';
 export * from './equal';
-export * from './mkenum';
 
 export { equalBytes } from '@noble/curves/abstract/utils';
 export { randomBytes } from '@noble/hashes/utils';

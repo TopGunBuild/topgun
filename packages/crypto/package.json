@@ -20,8 +20,12 @@
     "license": "ISC",
     "dependencies": {
         "@dao-xyz/borsh": "^5.2.2",
-        "@noble/curves": "1.2.0",
-        "@topgunbuild/utils": "workspace:*"
+        "@noble/curves": "1.4.0",
+        "@noble/ciphers": "0.5.3",
+        "@noble/hashes": "1.4.0",
+        "@topgunbuild/textencoder": "workspace:*",
+        "@topgunbuild/utils": "workspace:*",
+        "@scure/base": "1.1.7"
     },
     "devDependencies": {
         "@types/jest": "^29.5.0",

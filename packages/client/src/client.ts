@@ -21,9 +21,9 @@ export class Client
         return {
             section: (sectionId: string) =>
             {
-                return new SectionQueryBuilder(sectionId, this.#service);
-            }
-        }
+                return new SectionQueryBuilder(`~@${publicKey}/${sectionId}`, this.#service);
+            },
+        };
     }
 
     auth()

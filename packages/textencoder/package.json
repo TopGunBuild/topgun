@@ -1,9 +1,14 @@
 {
-    "name": "@topgunbuild/server",
+    "name": "@topgunbuild/textencoder",
     "version": "0.0.0",
-    "description": "TopGun server",
-    "main": "./dist/index.js",
-    "types": "./dist/index.d.ts",
+    "description": "",
+    "main": "./dist/textencoder.js",
+    "module": "./dist/textencoder.mjs",
+    "browser": {
+        "./dist/textencoder.js": "./dist/textencoder.browser.js",
+        "./dist/textencoder.mjs": "./dist/textencoder.browser.mjs"
+    },
+    "types": "./dist/textencoder.d.ts",
     "files": [
         "dist"
     ],
@@ -18,11 +23,6 @@
     "keywords": [],
     "author": "",
     "license": "ISC",
-    "dependencies": {
-        "@topgunbuild/sqlite": "workspace:*",
-        "fido2-lib": "^3.5.3",
-        "@hexagon/base64": "^1.1.28"
-    },
     "devDependencies": {
         "@types/jest": "^29.5.0",
         "@types/node": "^18.15.11",
