@@ -2,19 +2,18 @@ import { randomBytes } from '@noble/hashes/utils';
 import { secretbox } from '@noble/ciphers/salsa';
 import { base58 } from '@scure/base';
 import { deserialize, serialize } from '@dao-xyz/borsh';
-import { stretch } from './stretch';
-import type { Password, Payload } from './types';
+import { hashPassword } from './hash-password';
+import type { Password } from './types';
 import { Cipher } from './cipher';
 import { keyToBytes } from './utils';
-
-const NONCE_LENGTH = 24;
+import { NONCE_LENGTH } from './const';
 
 /**
  * Encrypts a byte array in a symmetrical manner.
  */
 const encryptBytes = (payload: Uint8Array, password: Password): Uint8Array =>
 {
-    const key     = stretch(password);
+    const key     = hashPassword(password);
     const nonce   = randomBytes(NONCE_LENGTH);
     const message = secretbox(key, nonce).seal(payload);
     const cipher  = new Cipher({ nonce, message });
@@ -27,7 +26,7 @@ const encryptBytes = (payload: Uint8Array, password: Password): Uint8Array =>
  */
 const decryptBytes = (cipher: Uint8Array, password: Password): Uint8Array =>
 {
-    const key                = stretch(password);
+    const key                = hashPassword(password);
     const { nonce, message } = deserialize(cipher, Cipher);
     return secretbox(key, nonce).open(message);
 };
@@ -44,7 +43,7 @@ const encrypt = (payload: Uint8Array, password: Password): string =>
 /**
  * Symmetrically decrypts a message encrypted by `symmetric.encrypt`.
  */
-const decrypt = (cipher: string, password: Password): Payload =>
+const decrypt = (cipher: string, password: Password): Uint8Array =>
 {
     const cipherBytes = keyToBytes(cipher);
     return decryptBytes(cipherBytes, password);

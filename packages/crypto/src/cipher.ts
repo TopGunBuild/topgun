@@ -1,8 +1,6 @@
-import { field, variant } from '@dao-xyz/borsh';
-import type { ICipher } from './types';
+import { field, option } from '@dao-xyz/borsh';
 
-@variant(0)
-export class Cipher implements ICipher
+export class Cipher
 {
     @field({ type: Uint8Array })
     nonce: Uint8Array;
@@ -10,9 +8,17 @@ export class Cipher implements ICipher
     @field({ type: Uint8Array })
     message: Uint8Array;
 
-    constructor(props: { nonce: Uint8Array; message: Uint8Array })
+    @field({ type: option('string') })
+    senderPublicKey?: string;
+
+    constructor(props: {
+        nonce: Uint8Array;
+        message: Uint8Array;
+        senderPublicKey?: string;
+    })
     {
-        this.nonce   = props.nonce;
-        this.message = props.message;
+        this.nonce           = props.nonce;
+        this.message         = props.message;
+        this.senderPublicKey = props.senderPublicKey;
     }
 }

@@ -2,6 +2,7 @@
     "extends": "../../tsconfig.node.json",
     "compilerOptions": {
         "outDir": "./dist",
+        "types": ["jest", "node"]
     },
     "files": [
         "src/index.ts"

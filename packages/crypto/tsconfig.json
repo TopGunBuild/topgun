@@ -4,7 +4,8 @@
         "outDir": "./dist",
         "experimentalDecorators": true,
         "emitDecoratorMetadata": true,
-        "strictNullChecks": false
+        "strictNullChecks": false,
+        "types": ["jest", "node"]
     },
     "files": [
         "src/index.ts"
