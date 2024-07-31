@@ -1,23 +1,6 @@
 import { asymmetric } from '../src';
-import { deserialize, field, serialize } from '@dao-xyz/borsh';
-
-class TestStruct
-{
-    @field({ type: 'u8' })
-    a: number;
-
-    @field({ type: 'string' })
-    b: string;
-
-    constructor(a: number, b: string)
-    {
-        this.a = a;
-        this.b = b;
-    }
-}
-
-const sentStruct = new TestStruct(123, 'xyz');
-const payload    = serialize(sentStruct);
+import { deserialize } from '@dao-xyz/borsh';
+import { payload, sentStruct, TestStruct } from './data.utils';
 
 describe('crypto', () =>
 {

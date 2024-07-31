@@ -8,8 +8,10 @@ export const hash = (seed: string, payload: Uint8Array): string =>
     return base58.encode(hashBytes(seed, payload));
 };
 
-export const hashBytes = (seed: string, payload: Uint8Array): Uint8Array =>
+export const hashBytes = (seed: string|Uint8Array, payload: Uint8Array): Uint8Array =>
 {
-    const seedBytes = keyToBytes(seed, 'utf8');
+    const seedBytes = typeof seed === 'string'
+        ? keyToBytes(seed, 'utf8')
+        : seed;
     return blake2s(payload, { dkLen: 32, key: seedBytes });
 };
