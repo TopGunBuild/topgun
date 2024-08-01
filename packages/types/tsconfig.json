@@ -3,7 +3,7 @@
     "compilerOptions": {
         "outDir": "./dist",
         "include": ["."],
-        "types": ["jest", "node"]
+        "types": ["jest"]
     },
     "files": [
         "src/index.ts"
