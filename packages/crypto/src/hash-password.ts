@@ -1,7 +1,7 @@
 import { base58 } from '@scure/base';
 import { pbkdf2 } from '@noble/hashes/pbkdf2';
 import { sha256 } from '@noble/hashes/sha2';
-import type { Password } from './types';
+import type { Password } from '@topgunbuild/types';
 import { keyToBytes } from './utils';
 import { hashBytes } from './hash';
 
