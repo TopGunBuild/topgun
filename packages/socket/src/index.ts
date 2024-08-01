@@ -6,5 +6,5 @@ export * from './simple-broker';
 export * from './default-codec-engine';
 export * from './response';
 export * from './types';
-export * from './utils';
+export * from './utils/create-websocket';
 

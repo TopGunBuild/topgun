@@ -1,7 +1,7 @@
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { CodecEngine, EventObject, EventObjectCallback, SocketState } from '../types';
 import { InvokeOptions, SocketClientOptions, TransmitOptions } from './types';
-import { createWebSocket } from '../utils';
+import { createWebSocket } from '../utils/create-websocket';
 import { BadConnectionError, hydrateError, TimeoutError } from '../errors/errors';
 import { Response } from '../response';
 

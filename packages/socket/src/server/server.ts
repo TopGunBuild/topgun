@@ -13,7 +13,7 @@ import {
 import { AsyncStreamEmitter } from '@topgunbuild/async-stream-emitter';
 import { SimpleBroker, SimpleExchange } from '../simple-broker';
 import { Socket } from './socket';
-import { applyEachSeries, AsyncFunction, isNode, randomId } from '@topgunbuild/utils';
+import { AsyncFunction, isNode, randomId } from '@topgunbuild/utils';
 import {
     BrokerError,
     InvalidActionError,
@@ -21,6 +21,7 @@ import {
     InvalidOptionsError, ServerProtocolError, SilentMiddlewareBlockedError,
 } from '../errors';
 import { defaultCodecEngine } from '../default-codec-engine';
+import { applyEachSeries } from '../utils/apply-each-series';
 
 export class SocketServer extends AsyncStreamEmitter<any>
 {

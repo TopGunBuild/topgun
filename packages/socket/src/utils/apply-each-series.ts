@@ -1,4 +1,4 @@
-import { asyncForEach } from './async-for-each';
+import { asyncForEach } from '@topgunbuild/utils';
 
 export type AsyncFunction<T = any> = (...args: any[]) => T|Promise<T>;
 
