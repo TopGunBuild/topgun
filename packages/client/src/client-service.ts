@@ -67,6 +67,7 @@ export class ClientService
 
     putValue(section: string, node: string, field: string, value: DataValue): Promise<void>
     {
+        // TODO: Add validation for value data type. Rename "processDataChangeQuery" method
         return this.#processDataChangeQuery(
             new PutQuery({
                 section,

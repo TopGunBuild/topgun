@@ -6,14 +6,14 @@ import { NodeQueryBuilder } from './node-query-builder';
 import { SelectBuilder } from './select-builder';
 import { SectionQueryHandler } from '../query-handlers';
 
-export class SectionQueryBuilder
+export class RoomQueryBuilder
 {
-    readonly #section: string;
+    readonly #roomSid: string;
     readonly #service: ClientService;
 
-    constructor(section: string, service: ClientService)
+    constructor(roomSid: string, service: ClientService)
     {
-        this.#section = section;
+        this.#roomSid = roomSid;
         this.#service = service;
     }
 
@@ -45,7 +45,7 @@ export class SectionQueryBuilder
         await Promise.all(
             toArray(values).map(value =>
                 this.#service.putNode(
-                    this.#section, randomId(), value,
+                    this.#roomSid, randomId(), value,
                 ),
             ),
         );
@@ -53,6 +53,6 @@ export class SectionQueryBuilder
 
     node(nodeName: string): NodeQueryBuilder
     {
-        return new NodeQueryBuilder(this.#section, nodeName, this.#service);
+        return new NodeQueryBuilder(this.#roomSid, nodeName, this.#service);
     }
 }

@@ -1,5 +1,5 @@
 import { ClientOptions } from './types';
-import { SectionQueryBuilder } from './query-builders';
+import { RoomQueryBuilder } from './query-builders';
 import { ClientService } from './client-service';
 
 export class Client
@@ -11,9 +11,9 @@ export class Client
         this.#service = new ClientService(options);
     }
 
-    section(section: string): SectionQueryBuilder
+    room(roomSid: string): RoomQueryBuilder
     {
-        return new SectionQueryBuilder(section, this.#service);
+        return new RoomQueryBuilder(roomSid, this.#service);
     }
 
     user(publicKey: string)
@@ -21,7 +21,7 @@ export class Client
         return {
             section: (sectionId: string) =>
             {
-                return new SectionQueryBuilder(`~@${publicKey}/${sectionId}`, this.#service);
+                return new RoomQueryBuilder(`~@${publicKey}/${sectionId}`, this.#service);
             },
         };
     }
