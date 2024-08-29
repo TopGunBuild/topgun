@@ -1,9 +1,8 @@
-import { ConsoleLogger } from '@topgunbuild/logger';
 import { mergeOverlapping, RangeList } from './range-list';
 import { DiffRange } from './diff-range';
 import { HasherInput } from '../digest';
 
-const logger = new ConsoleLogger('mst:diff-builder');
+// const logger = new ConsoleLogger('mst:diff-builder');
 
 /**
  * Helper to construct an ordered, minimal list of non-overlapping
@@ -32,7 +31,7 @@ export class DiffListBuilder<K extends HasherInput>
      */
     inconsistent(start: K, end: K): void
     {
-        logger.debug('marking range inconsistent', { start, end });
+        // logger.debug('marking range inconsistent', { start, end });
         this._inconsistent.insert(start, end);
     }
 
@@ -41,7 +40,7 @@ export class DiffListBuilder<K extends HasherInput>
      */
     consistent(start: K, end: K): void
     {
-        logger.debug('marking range as consistent', { start, end });
+        // logger.debug('marking range as consistent', { start, end });
         this._consistent.insert(start, end);
     }
 

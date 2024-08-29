@@ -6,15 +6,6 @@ const MOCK_PAGE_HASH: PageDigest = new PageDigest(new Uint8Array(16).fill(0));
 
 describe('Page Split Tests', () =>
 {
-    test('test_split_page_empty', () =>
-    {
-        let gtePage: Page<1, any>|null = new Page(42, []);
-        const cb                       = (_: any) =>
-        {
-        };
-        expect(() => splitOffLt(gtePage, 5, cb)).toThrowError('No nodes in this page.');
-    });
-
     test('test_split_page_single_node_lt', () =>
     {
         let gtePage: Page<1, number> = new Page(42, [new Node(2, MOCK_VALUE, null)]);

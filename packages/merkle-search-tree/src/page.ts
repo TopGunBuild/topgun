@@ -1,9 +1,8 @@
 import { Node } from './node';
 import { Hasher, PageDigest, ValueDigest } from './digest';
 import { Visitor } from './visitor';
-import { ConsoleLogger } from '@topgunbuild/logger';
 
-const logger = new ConsoleLogger('mst:page');
+// const logger = new ConsoleLogger('mst:page');
 
 export enum UpsertResult
 {
@@ -215,10 +214,10 @@ export class Page<N extends number, K>
         {
             // A non-zero page can never be empty, and level is less than
             // this page, which means this page must be non-zero.
-            if (this.level !== 0 && this.nodes.length > 0)
-            {
-                logger.warn('Page can never be empty');
-            }
+            // if (this.level !== 0 && this.nodes.length > 0)
+            // {
+            //     logger.warn('Page can never be empty');
+            // }
 
             // Find the node that is greater-than-or-equal-to key to descend
             // into.
@@ -541,7 +540,7 @@ export function splitOffLt<N extends number, K>(
 ): Page<N, K>|null
 {
     if (!page) return null;
-    // assert(page.nodes.length > 0);
+    if (page.nodes.length === 0) return null;
 
     // A page should be split into two parts - one page containing the elements
     // less-than "key", and one containing parts greater-or-equal to "key".

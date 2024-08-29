@@ -1,20 +1,9 @@
 import { isNil } from '@topgunbuild/utils';
-import { ConsoleLogger } from '@topgunbuild/logger';
 import { PageRange } from './page-range';
 import { DiffRange } from './diff-range';
 import { DiffListBuilder } from './diff-builder';
 import { HasherInput } from '../digest';
 import { Peekable } from '../utils/pickable';
-
-const logger         = new ConsoleLogger('mst:diff');
-const rangeLogHelper = (value: PageRange<any>) =>
-{
-    return {
-        start: value.start,
-        end  : value.end,
-        hash : Array.from(value.hash.asBytes()).join(),
-    };
-};
 
 /**
  *  Compute the difference between 'local' and 'peer' and return the set of
@@ -77,7 +66,7 @@ export function diff<T extends Iterable<PageRange<K>>, U extends Iterable<PageRa
     const localPeekable = new Peekable<PageRange<K>>(localIterator);
     const peerPeekable  = new Peekable<PageRange<K>>(peerIterator);
 
-    logger.log('calculating diff');
+    // logger.log('calculating diff');
 
     const root = peerPeekable.peek();
     if (!root) return [];
@@ -106,7 +95,7 @@ function recurseSubtree<K extends HasherInput>(
         const range = peer.peek();
         if (range)
         {
-            logger.debug('requesting unevaluated subtree page', { peer_page: rangeLogHelper(range) });
+            // logger.debug('requesting unevaluated subtree page', { peer_page: rangeLogHelper(range) });
             // Add all the un-evaluated peer sub-tree pages to the sync list.
             diffBuilder.inconsistent(range.start, range.end);
         }
@@ -131,7 +120,7 @@ function recurseDiff<K extends HasherInput>(
 
         if (!p)
         {
-            logger.log('no more peer pages in subtree');
+            // logger.log('no more peer pages in subtree');
             return;
         }
 
@@ -147,10 +136,10 @@ function recurseDiff<K extends HasherInput>(
             // spurious, causing no useful advancement of state.
             if (local.peek() && local.peek().isSupersetOf(p))
             {
-                logger.log('local page is a superset of peer', {
-                    peer_page : rangeLogHelper(p),
-                    local_page: rangeLogHelper(l),
-                });
+                // logger.log('local page is a superset of peer', {
+                //     peer_page : rangeLogHelper(p),
+                //     local_page: rangeLogHelper(l),
+                // });
                 return;
             }
 
@@ -169,26 +158,26 @@ function recurseDiff<K extends HasherInput>(
             // will be added by the caller (recurse_subtree).
             if (end >= start)
             {
-                logger.debug('no more local pages in subtree - requesting missing page ranges', {
-                    peer_page: rangeLogHelper(p),
-                });
+                // logger.debug('no more local pages in subtree - requesting missing page ranges', {
+                //     peer_page: rangeLogHelper(p),
+                // });
                 diffBuilder.inconsistent(start, end as K);
             }
             else
             {
-                logger.log('no more local pages in subtree', {
-                    peer_page: rangeLogHelper(p),
-                });
+                // logger.log('no more local pages in subtree', {
+                //     peer_page: rangeLogHelper(p),
+                // });
             }
             return;
         }
 
         lastP = p;
 
-        logger.log('visit page', {
-            peer_page : rangeLogHelper(p),
-            local_page: rangeLogHelper(l),
-        });
+        // logger.log('visit page', {
+        //     peer_page : rangeLogHelper(p),
+        //     local_page: rangeLogHelper(l),
+        // });
 
         // Advance the local cursor to minimise the comparable range, in turn
         // minimising the sync range.
@@ -197,20 +186,20 @@ function recurseDiff<K extends HasherInput>(
             const v = local.nextIf(value => value.isSupersetOf(p));
             if (isNil(v)) break;
 
-            logger.log('shrink local diff range', {
-                peer_page      : rangeLogHelper(p),
-                skip_local_page: rangeLogHelper(l),
-                local_page     : rangeLogHelper(v),
-            });
+            // logger.log('shrink local diff range', {
+            //     peer_page      : rangeLogHelper(p),
+            //     skip_local_page: rangeLogHelper(l),
+            //     local_page     : rangeLogHelper(v),
+            // });
             l = v;
         }
 
         if (l.hash.equals(p.hash))
         {
-            logger.debug('hash match - consistent page', {
-                peer_page : rangeLogHelper(p),
-                local_page: rangeLogHelper(l),
-            });
+            // logger.debug('hash match - consistent page', {
+            //     peer_page : rangeLogHelper(p),
+            //     local_page: rangeLogHelper(l),
+            // });
 
             // Record this page as fully consistent.
             diffBuilder.consistent(p.start, p.end);
@@ -222,10 +211,10 @@ function recurseDiff<K extends HasherInput>(
         }
         else
         {
-            logger.debug('hash mismatch', {
-                peer_page : rangeLogHelper(p),
-                local_page: rangeLogHelper(l),
-            });
+            // logger.debug('hash mismatch', {
+            //     peer_page : rangeLogHelper(p),
+            //     local_page: rangeLogHelper(l),
+            // });
             diffBuilder.inconsistent(p.start, p.end);
         }
 

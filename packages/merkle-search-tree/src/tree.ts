@@ -1,4 +1,3 @@
-import { ConsoleLogger } from '@topgunbuild/logger';
 import { Digest, Hasher, HasherInput, RootHash, BaseHasher, ValueDigest } from './digest';
 import { Page, UpsertResult, insertIntermediatePage } from './page';
 import { Node } from './node';
@@ -6,7 +5,7 @@ import { NodeIter } from './node-iter';
 import { PageRangeHashVisitor, Visitor } from './visitor';
 import { PageRange } from './diff';
 
-const logger = new ConsoleLogger('mst:tree');
+// const logger = new ConsoleLogger('mst:tree');
 
 /**
  * An implementation of the Merkle Search Tree as described in [Merkle Search
@@ -155,7 +154,7 @@ export class MerkleSearchTree<K extends HasherInput, V extends HasherInput, N ex
         const rootPageDigest = this.root.hash()?.clone();
         this._rootHash       = !!rootPageDigest ? new RootHash(rootPageDigest) : null;
 
-        logger.debug(`regenerated root hash: ${this._rootHash}`);
+        // logger.debug(`regenerated root hash: ${this._rootHash}`);
 
         return this._rootHash!;
     }

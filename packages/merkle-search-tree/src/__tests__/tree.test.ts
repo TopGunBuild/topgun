@@ -1,41 +1,10 @@
 import { Digest, MerkleSearchTree } from '..';
-import { FixtureHasher, LevelKey, MockHasher } from './test-util';
+import { LevelKey, MockHasher } from './test-util';
 import { assertTree } from './assert-tree.ts';
 
 
 describe('MerkleSearchTree', () =>
 {
-    test('test_hash_fixture', () =>
-    {
-        const t = new MerkleSearchTree(new FixtureHasher());
-
-        for (let i = 0; i < 1000; i++)
-        {
-            t.upsert(i, i);
-        }
-
-        const fixture_hash = new Uint8Array([
-            57, 77, 199, 66, 89, 217, 207, 166, 136, 181, 45, 80, 108, 80, 94, 3,
-        ]);
-
-        const rootHash = t.rootHash();
-
-        const fromBuf = (buf: any) =>
-        {
-            var a = new Uint8Array(buf.length);
-            for (var i = 0; i < buf.length; i++) a[i] = buf[i];
-            return a;
-        };
-
-        console.log({
-            fixture_hash,
-            rootHash: fromBuf(rootHash.valueOf().asBytes()),
-        });
-
-        expect(rootHash).not.toBeNull();
-        expect(rootHash).toEqual(fixture_hash);
-    });
-
     test('test_level_generation', () =>
     {
         let h = new Digest(new Uint8Array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));

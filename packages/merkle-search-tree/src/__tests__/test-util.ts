@@ -1,4 +1,4 @@
-import { PageRange, MerkleSearchTree, Digest } from '../src';
+import { PageRange, MerkleSearchTree, Digest } from '..';
 import { createHash } from 'crypto';
 
 export class MockHasher
