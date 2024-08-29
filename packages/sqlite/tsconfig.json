@@ -1,14 +1,11 @@
 {
-    "extends": "../../tsconfig.browser.json",
+    "extends": "@topgunbuild/typescript-config/base.json",
     "compilerOptions": {
+        "lib": ["ES2020"],
+        "target": "es2020",
         "outDir": "./dist",
-        "experimentalDecorators": true,
-        "emitDecoratorMetadata": true,
-        "strictNullChecks": false,
-        "allowSyntheticDefaultImports": true,
-        "target": "es2020"
+        "types": ["jest", "node"]
     },
-    "files": [
-        "src/index.ts"
-    ]
+    "include": ["."],
+    "exclude": ["node_modules", "dist"],
 }

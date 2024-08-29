@@ -169,6 +169,7 @@ export class StreamDemux<T>
         {
             while (true)
             {
+                // @ts-ignore
                 const argumentsTyped: any = arguments;
                 const packet              = await consumerNext.apply(this, argumentsTyped);
                 if (packet.value)

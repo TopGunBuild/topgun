@@ -1,37 +1,33 @@
 {
-    "$schema": "https://turborepo.org/schema.json",
-    "pipeline": {
+    "$schema": "https://turbo.build/schema.json",
+    "tasks": {
         "build": {
+            "inputs": ["$TURBO_DEFAULT$", ".env*"],
             "dependsOn": ["^build"],
-            "inputs": ["src/**/*.ts", "test/**/*.js"],
-            "outputs": ["dist/**"]
+            "outputs": [
+                "build/**",
+                ".vercel/**",
+                "dist/**",
+                ".next/**",
+                "!.next/cache/**"
+            ]
         },
         "test": {
-            "dependsOn": [],
-            "inputs": ["src/**/*.ts", "test/**/*.js"]
+            "outputs": ["coverage/**"],
+            "dependsOn": []
         },
         "lint": {
-            "inputs": ["src/**/*.ts", "test/**/*.js"],
-            "outputs": []
+            "dependsOn": ["^build"]
         },
-        "lint:js": {
-            "inputs": ["test/**/*.js"],
-            "outputs": []
+        "typecheck": {
+            "dependsOn": ["^build"]
         },
-        "lint:js:fix": {
-            "inputs": ["test/**/*.js"],
-            "outputs": []
-        },
-        "lint:ts": {
-            "inputs": ["src/**/*.ts"],
-            "outputs": []
-        },
-        "lint:ts:fix": {
-            "inputs": ["src/**/*.ts"],
-            "outputs": []
+        "dev": {
+            "dependsOn": ["^build"],
+            "cache": false,
+            "persistent": true
         },
         "clean": {
-            "outputs": [],
             "cache": false
         }
     }

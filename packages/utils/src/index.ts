@@ -11,7 +11,6 @@ export * from './random-id';
 export * from './to-array';
 export * from './merge-objects';
 export * from './equal';
-export * from './debug';
 export * from './uint8array';
 
 export { randomBytes } from '@noble/hashes/utils';
