@@ -7,12 +7,12 @@ export interface SelectOptions
     sync?: boolean;
 }
 
-export interface SelectNodeOptions extends SelectOptions
+export interface SelectMessageOptions extends SelectOptions
 {
     fields?: string[];
 }
 
-export interface SelectSectionOptions extends SelectNodeOptions
+export interface SelectMessagesOptions extends SelectMessageOptions
 {
     query?: Query[];
     sort?: Sort[];

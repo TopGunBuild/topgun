@@ -1,7 +1,7 @@
 {
-    "name": "@topgunbuild/client",
+    "name": "@topgunbuild/merkle-search-tree",
     "version": "0.0.0",
-    "description": "TopGun client",
+    "description": "",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
     "files": [
@@ -19,18 +19,10 @@
     "author": "",
     "license": "ISC",
     "dependencies": {
-        "@dao-xyz/borsh": "^5.2.2",
-        "@topgunbuild/async-stream-emitter": "workspace:*",
-        "@topgunbuild/crypto": "workspace:*",
-        "@topgunbuild/data-streams": "workspace:*",
-        "@topgunbuild/socket": "workspace:*",
-        "@topgunbuild/store": "workspace:*",
-        "@topgunbuild/sqlite": "workspace:*",
-        "@topgunbuild/time": "workspace:*",
-        "@topgunbuild/transport": "workspace:*",
-        "@topgunbuild/types": "workspace:*",
-        "@topgunbuild/filtering": "workspace:*",
-        "@topgunbuild/utils": "workspace:*"
+        "@topgunbuild/logger": "workspace:*",
+        "@topgunbuild/utils": "workspace:*",
+        "@noble/hashes": "1.4.0",
+        "@scure/base": "1.1.7"
     },
     "devDependencies": {
         "@types/jest": "^29.5.0",

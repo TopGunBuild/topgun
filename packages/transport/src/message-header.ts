@@ -1,8 +1,7 @@
-import { field, fixedArray, option, vec } from '@dao-xyz/borsh';
-import { Signature } from '@topgunbuild/crypto';
-import { randomBytes, toArray } from '@topgunbuild/utils';
+import { field, fixedArray, option } from '@dao-xyz/borsh';
+import { randomBytes } from '@topgunbuild/utils';
 
-const WEEK_MS = 7 * 24 * 60 * 60 + 1000;
+// const WEEK_MS = 7 * 24 * 60 * 60 + 1000;
 
 export class MessageHeader
 {
@@ -12,17 +11,17 @@ export class MessageHeader
     @field({ type: option(fixedArray('u8', 32)) })
     replyToId?: Uint8Array;
 
-    @field({ type: vec('string') })
-    origin: string[];
+    // @field({ type: vec('string') })
+    // origin: string[];
 
-    @field({ type: vec(Signature, 'u8') })
-    signatures: Signature[];
+    // @field({ type: vec(Signature, 'u8') })
+    // signatures: Signature[];
 
-    @field({ type: 'u64' })
-    expires: bigint;
+    // @field({ type: 'u64' })
+    // expires: bigint;
 
-    @field({ type: 'u64' })
-    timestamp: bigint;
+    // @field({ type: 'u64' })
+    // timestamp: bigint;
 
     constructor(properties: {
         id?: Uint8Array;
@@ -32,15 +31,15 @@ export class MessageHeader
     })
     {
         this.id         = properties?.id || randomBytes(32);
-        this.expires    = BigInt(properties?.expires || +new Date() + WEEK_MS);
-        this.timestamp  = BigInt(+new Date());
-        this.signatures = [];
-        this.origin     = toArray(properties?.origin);
+        // this.expires    = BigInt(properties?.expires || +new Date() + WEEK_MS);
+        // this.timestamp  = BigInt(+new Date());
+        // this.signatures = [];
+        // this.origin     = toArray(properties?.origin);
         this.replyToId  = properties?.replyToId;
     }
 
-    verify(): boolean
-    {
-        return this.expires >= +new Date();
-    }
+    // verify(): boolean
+    // {
+    //     return this.expires >= +new Date();
+    // }
 }

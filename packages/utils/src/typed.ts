@@ -95,3 +95,44 @@ export function isFunction(value: unknown): value is (...params: any[]) => any
 {
     return typeof value === 'function';
 }
+
+/**
+ * Check if value is an plain object.
+ */
+export const isPlainObject = (fn: any): fn is object =>
+{
+    if (!isObject(fn))
+    {
+        return false;
+    }
+    const proto = Object.getPrototypeOf(fn);
+    if (proto === null)
+    {
+        return true;
+    }
+    const ctor =
+              Object.prototype.hasOwnProperty.call(proto, 'constructor') &&
+              proto.constructor;
+    return (
+        typeof ctor === 'function' &&
+        ctor instanceof ctor &&
+        Function.prototype.toString.call(ctor) ===
+        Function.prototype.toString.call(Object)
+    );
+};
+
+/**
+ * Check if value is not null or undefined.
+ */
+export function notNil(value: unknown): boolean
+{
+    return !isNull(value) && !isUndefined(value);
+}
+
+/**
+ * Check if value is null or undefined.
+ */
+export function isNil(value: unknown): boolean
+{
+    return isNull(value) || isUndefined(value);
+}

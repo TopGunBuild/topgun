@@ -12,12 +12,15 @@
         "build": "tsup",
         "watch": "tsup --watch",
         "lint:ts": "eslint -c ../../.eslintrc.ts.yml src/**/*.ts --no-eslintrc",
-        "lint:fix": "eslint -c ../../.eslintrc.ts.yml src/**/*.ts --no-eslintrc && eslint -c ../../.eslintrc.js.yml test/**/*.js --no-eslintrc --fix --no-error-on-unmatched-pattern",
-        "test": "jest test"
+        "lint:fix": "eslint -c ../../.eslintrc.ts.yml src/**/*.ts --no-eslintrc && eslint -c ../../.eslintrc.js.yml tests/**/*.js --no-eslintrc --fix --no-error-on-unmatched-pattern",
+        "test": "jest tests"
     },
     "keywords": [],
     "author": "",
     "license": "ISC",
+    "dependencies": {
+        "@topgunbuild/utils": "workspace:*"
+    },
     "devDependencies": {
         "@types/jest": "^29.5.0",
         "@types/node": "^18.15.11",

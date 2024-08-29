@@ -1,2 +1,4 @@
-export { Logger } from './logger';
-export type { LoggerService } from './interface';
+export * from './console-logger.service';
+export * from './types';
+export * from './is-log-level-enabled.util';
+

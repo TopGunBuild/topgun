@@ -2,10 +2,11 @@ import { ClientService } from '../client-service';
 import { SelectBuilder } from '../query-builders';
 import { SectionQueryHandler } from '../query-handlers';
 import { mergeObjects, randomId, toArray } from '@topgunbuild/utils';
-import { DataNode } from '@topgunbuild/store';
 import { SelectQuery, SelectSectionOptions } from '@topgunbuild/transport';
+import { Message } from '@topgunbuild/types';
+import { MessageApi } from './message-api';
 
-export class Room
+export class RoomApi
 {
     readonly #roomSid: string;
     readonly #service: ClientService;
@@ -20,14 +21,14 @@ export class Room
     // @ Messages
     // -----------------------------------------------------------------------------------------------------
 
-    messages(options?: SelectSectionOptions): SelectBuilder<DataNode[], SelectSectionOptions>
+    messages(options?: SelectSectionOptions): SelectBuilder<Message[], SelectSectionOptions>
     {
         if (options?.limit > this.#service.options.rowLimit)
         {
             throw new Error(`Limit for rows (controlled by 'rowLimit' setting) exceeded, max rows: ${this.#service.options.rowLimit}`);
         }
 
-        return new SelectBuilder<DataNode[], SelectSectionOptions>(
+        return new SelectBuilder<Message[], SelectSectionOptions>(
             new SectionQueryHandler({
                 service: this.#service,
                 query  : new SelectQuery(options),
@@ -41,9 +42,9 @@ export class Room
         );
     }
 
-    async addMessages(values: DataNode): Promise<void>
-    async addMessages(values: DataNode[]): Promise<void>
-    async addMessages(values: DataNode[]|DataNode): Promise<void>
+    async addMessages(values: Message): Promise<void>
+    async addMessages(values: Message[]): Promise<void>
+    async addMessages(values: Message[]|Message): Promise<void>
     {
         // TODO: Add values validation
         await Promise.all(
@@ -55,15 +56,16 @@ export class Room
         );
     }
 
-    message(sid: string)
+    message(messageSid: string): MessageApi
     {
+        return new MessageApi(this.#roomSid, messageSid, this.#service);
     }
 
     // -----------------------------------------------------------------------------------------------------
     // @ Crypto
     // -----------------------------------------------------------------------------------------------------
 
-    encrypt(payload: DataNode, roleName?: string)
+    encrypt(payload: Message, roleName?: string)
     {
     }
 
