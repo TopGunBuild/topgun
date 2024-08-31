@@ -20,6 +20,10 @@ describe('Keys order', () =>
         t.upsert(new LevelKey('G', 0), 'bananas');
         t.upsert(new LevelKey('H', 0), 'bananas');
 
+        const got  = Array.from(t.nodeIter()).map(v => v.key.toString());
+        const keys = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K'];
+
+        expect(keys).toEqual(got);
         assertTree(t);
     });
 });

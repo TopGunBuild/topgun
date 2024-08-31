@@ -1,6 +1,9 @@
 import { Digest, MerkleSearchTree } from '..';
 import { LevelKey, MockHasher } from './test-util';
 import { assertTree } from './assert-tree.ts';
+import { InvariantAssertCount } from '../visitor/assert-count.ts';
+import { InvariantAssertOrder } from '../visitor/assert-order.ts';
+import { NopVisitor } from '../visitor/nop.ts';
 
 
 describe('MerkleSearchTree', () =>
@@ -231,7 +234,7 @@ describe('MerkleSearchTree', () =>
         if (unique.add(key))
         {
           wantLen++;
-          t.upsert(new IntKey(key), 'bananas');
+          t.upsert(key, 'bananas');
         }
       }
 
@@ -240,88 +243,105 @@ describe('MerkleSearchTree', () =>
       expect(asserter.getCount()).toBe(wantLen);
     });*/
 
-    // Invariant 3: two independent trees contain the same data iff their root hashes are identical.
-    /*test('root hash data equality', () =>
+    test('xxx', () =>
     {
-      const keys = Array.from({ length: Math.floor(Math.random() * 65) }, () => Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
+        const t = new MerkleSearchTree<string, string>();
+        t.upsert('bananas', 'great');
+        t.upsert('plátano', 'muy bien');
 
-      let a = new MerkleSearchTree();
-      let b = new MerkleSearchTree();
+        // Obtain a root hash / merkle proof covering all the tree data
+        const hash1 = t.rootHash();
+        // console.log(hash1);
 
-      // They are equal when empty.
-      expect(a.rootHash()).toEqual(b.rootHash());
+        // Modify the MST, reflecting the new value of an existing key
+        t.upsert('bananas', 'amazing');
 
-      const unique    = new Set<number>();
-      const lastEntry = keys[0];
-      for (const key of keys)
-      {
-        if (!unique.add(key))
+        // Obtain an updated root hash
+        const hash2 = t.rootHash();
+        // console.log(hash2);
+
+        // The root hash changes to reflect the changed state
+        expect(hash1.equals(hash2)).toBeFalsy();
+    });
+
+    // Invariant 3: two independent trees contain the same data iff their root hashes are identical.
+    test('root hash data equality', () =>
+    {
+        const keys = Array.from({ length: Math.floor(Math.random() * 65) }, () => Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
+
+        let a = new MerkleSearchTree();
+        let b = new MerkleSearchTree();
+
+        // They are equal when empty.
+        expect(a.rootHash().equals(b.rootHash())).toBeTruthy();
+
+        const unique    = new Set<number>();
+        const lastEntry = keys[0];
+        for (const key of keys)
         {
-          continue;
+            if (!unique.add(key))
+            {
+                continue;
+            }
+
+            // Add the key to tree A
+            a.upsert(key, 'bananas');
+            expect(a.rootHashCached()).toBeNull();
+
+            // The trees have now diverged
+            expect(a.rootHash().equals(b.rootHash())).toBeFalsy();
+
+            // Add the key to tree B
+            b.upsert(key, 'bananas');
+            expect(b.rootHashCached()).toBeNull();
+
+            // And now the trees have converged
+            expect(a.rootHash().equals(b.rootHash())).toBeTruthy();
         }
 
-        // Add the key to tree A
-        a.upsert(new IntKey(key), 'bananas');
-        expect(a.rootHashCached()).toBeNull();
+        // Update a value for an existing key
+        if (lastEntry !== undefined)
+        {
+            b.upsert(lastEntry, 'platanos');
+            expect(b.rootHashCached()).toBeNull();
 
-        // The trees have now diverged
-        expect(a).not.toEqual(b);
+            // The trees diverge
+            expect(a.rootHash().equals(b.rootHash())).toBeFalsy();
 
-        // Add the key to tree B
-        b.upsert(new IntKey(key), 'bananas');
-        expect(b.rootHashCached()).toBeNull();
+            // And converge once again
+            a.upsert(lastEntry, 'platanos');
+            expect(a.rootHashCached()).toBeNull();
 
-        // And now the trees have converged
-        expect(a).toEqual(b);
-      }
+            // And now the trees have converged
+            expect(a.rootHash().equals(b.rootHash())).toBeTruthy();
+        }
 
-      // Update a value for an existing key
-      if (lastEntry !== undefined)
-      {
-        b.upsert(new IntKey(lastEntry), 'platanos');
-        expect(b.rootHashCached()).toBeNull();
+        let asserter = new InvariantAssertCount(new InvariantAssertOrder(new NopVisitor()));
+        a.inOrderTraversal(asserter);
+        expect(asserter.getCount()).toBe(unique.size);
 
-        // The trees diverge
-        expect(a).not.toEqual(b);
-
-        // And converge once again
-        a.upsert(new IntKey(lastEntry), 'platanos');
-        expect(a.rootHashCached()).toBeNull();
-
-        // And now the trees have converged
-        expect(a).toEqual(b);
-      }
-
-      // let asserter = new InvariantAssertCount(new InvariantAssertOrder(new NopVisitor()));
-      // a.inOrderTraversal(asserter);
-      // expect(asserter.getCount()).toBe(unique.size);
-
-      // asserter = new InvariantAssertCount(new InvariantAssertOrder(new NopVisitor()));
-      // b.inOrderTraversal(asserter);
-      // expect(asserter.getCount()).toBe(unique.size);
-    });*/
+        asserter = new InvariantAssertCount(new InvariantAssertOrder(new NopVisitor()));
+        b.inOrderTraversal(asserter);
+        expect(asserter.getCount()).toBe(unique.size);
+    });
 
     // Invariant: the node iter yields every node in the tree in ascending key order.
-    /*test('node iterator', () =>
+    test('node iterator', () =>
     {
-      const keys = Array.from({ length: Math.floor(Math.random() * 65) }, () => Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
+      const keys = Array.from({ length: Math.floor(Math.random() * 15) }, () => Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
 
       let t = new MerkleSearchTree();
 
-      const inserted = new Set<string>();
       for (const key of keys)
       {
         const value = key.toString();
-        t.upsert(value, value);
-        inserted.add(value);
+        t.upsert(key, value);
       }
 
-      const data = Array.from(inserted).sort((a, b) => Number(a) - Number(b));
-      const got = Array.from(t.nodeIter()).map(v => v.key);
-
-      console.log({ data, got });
+      const data = Array.from(keys).sort((a, b) => Number(a) - Number(b));
+      const got = Array.from(t.nodeIter()).map(v => Number(v.key));
 
       expect(data).toEqual(got);
-    });*/
+    });
 });
 
