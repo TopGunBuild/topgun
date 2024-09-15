@@ -16,7 +16,7 @@ import {
     NumberCondition,
     StringCondition,
 } from '@topgunbuild/filtering';
-import { SQLLiteColumnDefinition, SQLLiteValue } from './types';
+import { SQLLiteColumn, SQLLiteValue } from './types';
 
 export const toSQLType = (
     value: boolean|string|number|Uint8Array,
@@ -32,7 +32,7 @@ export const toSQLType = (
     }
 };
 
-export const resolveTableValues = (obj: any, columns: SQLLiteColumnDefinition[]): any[] =>
+export const resolveTableValues = (obj: any, columns: SQLLiteColumn[]): any[] =>
 {
     const values: any[] = [];
 

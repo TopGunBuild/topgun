@@ -243,7 +243,7 @@ describe('MerkleSearchTree', () =>
       expect(asserter.getCount()).toBe(wantLen);
     });*/
 
-    test('xxx', () =>
+    test('root hash comparison', () =>
     {
         const t = new MerkleSearchTree<string, string>();
         t.upsert('bananas', 'great');
@@ -258,7 +258,6 @@ describe('MerkleSearchTree', () =>
 
         // Obtain an updated root hash
         const hash2 = t.rootHash();
-        // console.log(hash2);
 
         // The root hash changes to reflect the changed state
         expect(hash1.equals(hash2)).toBeFalsy();
@@ -328,20 +327,20 @@ describe('MerkleSearchTree', () =>
     // Invariant: the node iter yields every node in the tree in ascending key order.
     test('node iterator', () =>
     {
-      const keys = Array.from({ length: Math.floor(Math.random() * 15) }, () => Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
+        const keys = Array.from({ length: Math.floor(Math.random() * 15) }, () => Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
 
-      let t = new MerkleSearchTree();
+        let t = new MerkleSearchTree();
 
-      for (const key of keys)
-      {
-        const value = key.toString();
-        t.upsert(key, value);
-      }
+        for (const key of keys)
+        {
+            const value = key.toString();
+            t.upsert(key, value);
+        }
 
-      const data = Array.from(keys).sort((a, b) => Number(a) - Number(b));
-      const got = Array.from(t.nodeIter()).map(v => Number(v.key));
+        const data = Array.from(keys).sort((a, b) => Number(a) - Number(b));
+        const got  = Array.from(t.nodeIter()).map(v => Number(v.key));
 
-      expect(data).toEqual(got);
+        expect(data).toEqual(got);
     });
 });
 

@@ -28,7 +28,7 @@ export class Page<N extends number, K>
     // The cached hash in this page; the cumulation of the hashes of the sub-tree rooted at this page.
     treeHash: PageDigest|null;
 
-    // A vector of nodes in this page, ordered min to max by key.
+    // An array of nodes in this page, ordered min to max by key.
     nodes: Node<N, K>[];
 
     // The page for keys greater-than all keys in nodes.

@@ -1,7 +1,7 @@
 import { PublicKey } from '@topgunbuild/crypto';
 import { IdKey, Store, StoreResults, StoreValue } from '@topgunbuild/store';
 import { SelectQuery, SelectNextQuery, CloseIteratorQuery } from '@topgunbuild/transport';
-import { Database, SQLLite, SQLLiteColumnDefinition, Statement } from './types';
+import { Database, SQLLite, SQLLiteColumn, Statement } from './types';
 import { convertSearchRequestToSQLQuery, resolveTableValues } from './schema';
 import { extractIdKey } from './utils';
 
@@ -26,7 +26,7 @@ export class SQLLiteStore implements Store
     directory: string;
     closed: boolean;
     rootTableName: string;
-    rootTableColumns: SQLLiteColumnDefinition[]; // Record<keyof StoreValue, string>;
+    rootTableColumns: SQLLiteColumn[]; // Record<keyof StoreValue, string>;
 
     constructor(
         readonly sqlLite: SQLLite,

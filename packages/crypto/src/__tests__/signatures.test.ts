@@ -1,6 +1,6 @@
 import { payload } from './data-utils.ts';
 import { signatures } from '..';
-import { SignedMessage } from '@topgunbuild/types';
+import type { SignedMessage } from '@topgunbuild/types';
 
 describe('crypto', () =>
 {

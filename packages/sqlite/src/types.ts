@@ -27,9 +27,59 @@ export type SQLLiteValue =
     |Int8Array
     |ArrayBuffer;
 
-export type SQLLiteColumnDefinition = {
+export type UpdateDeleteAction = 'cascade' | 'restrict' | 'no action' | 'set null' | 'set default';
+
+export type SQLLiteColumn = {
     name: string,
-    type: string,
-    primary?: boolean
+    type?: string,
+    primary?: boolean,
+    target?: SQLLiteTable,
+    targetColumn?: string;
+    actions?: {
+        onUpdate?: UpdateDeleteAction;
+        onDelete?: UpdateDeleteAction;
+    }
 };
 
+export type SQLConstraint = {
+    definition: string
+};
+
+export class SQLLiteTable
+{
+    name: string;
+    columns: SQLLiteColumn[];
+    constraints: SQLConstraint[];
+
+    static create(name: string): SQLLiteTable
+    {
+        return new SQLLiteTable(name);
+    }
+
+    get primaryColumnNames(): string
+    {
+        return this.columns
+            .filter(col => col.primary)
+            .map(col => col.name)
+            .join();
+    }
+
+    constructor(name: string)
+    {
+        this.name    = name;
+        this.columns = [];
+        this.constraints = [];
+    }
+
+    setColumns(cb: (table: SQLLiteTable) => SQLLiteColumn[]): SQLLiteTable
+    {
+        this.columns = cb(this);
+        return this;
+    }
+
+    setConstraints(cb: (table: SQLLiteTable) => SQLConstraint[]): SQLLiteTable
+    {
+        this.constraints = cb(this);
+        return this;
+    }
+}
