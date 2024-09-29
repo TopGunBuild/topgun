@@ -1,5 +1,5 @@
 import { field, option, variant } from '@dao-xyz/borsh';
-import { FieldQuery } from './field-query';
+import { FieldQuery } from '../query';
 
 @variant(5)
 export class DateConditionQuery extends FieldQuery

@@ -12,6 +12,7 @@ export * from './to-array';
 export * from './merge-objects';
 export * from './equal';
 export * from './uint8array';
+export * from './assert';
 
 export { randomBytes } from '@noble/hashes/utils';
 

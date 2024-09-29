@@ -24,6 +24,8 @@
     "dependencies": {
         "@dao-xyz/borsh": "^5.2.2",
         "@topgunbuild/crypto": "workspace:*",
+        "@topgunbuild/time": "workspace:*",
+        "@topgunbuild/types": "workspace:*",
         "@topgunbuild/utils": "workspace:*"
     },
     "devDependencies": {

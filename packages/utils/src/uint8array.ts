@@ -3,25 +3,25 @@
  */
 export function equalBytes(a: Uint8Array, b: Uint8Array): boolean
 {
-  if (a === b)
-  {
-    return true
-  }
-
-  if (a.byteLength !== b.byteLength)
-  {
-    return false
-  }
-
-  for (let i = 0; i < a.byteLength; i++)
-  {
-    if (a[i] !== b[i])
+    if (a === b)
     {
-      return false
+        return true;
     }
-  }
 
-  return true
+    if (a.byteLength !== b.byteLength)
+    {
+        return false;
+    }
+
+    for (let i = 0; i < a.byteLength; i++)
+    {
+        if (a[i] !== b[i])
+        {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 
@@ -30,7 +30,7 @@ const toStr         = Object.prototype.toString;
 
 function nativeClass(v: unknown): string
 {
-  return toStr.call(v);
+    return toStr.call(v);
 }
 
 /**
@@ -38,16 +38,26 @@ function nativeClass(v: unknown): string
  */
 export function isUint8Array(value: unknown): value is Uint8Array
 {
-  return (
-    (hasUint8Array && value instanceof Uint8Array) || nativeClass(value) === '[object Uint8Array]'
-  );
+    return (
+        (hasUint8Array && value instanceof Uint8Array) || nativeClass(value) === '[object Uint8Array]'
+    );
 }
 
-export function persistUint8Array(value: Uint8Array|number[]): Uint8Array
+// export function persistUint8Array(value: Uint8Array|number[]): Uint8Array
+// {
+//   if (isUint8Array(value)) {
+//     return value;
+//   }
+//
+//   return new Uint8Array(value);
+// }
+
+export const toUint8Array = (buf: globalThis.Buffer|Uint8Array|number[]) =>
 {
-  if (isUint8Array(value)) {
-    return value;
-  }
+    return !isBuffer(buf)
+        ? new Uint8Array(buf)
+        : new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+};
 
-  return new Uint8Array(value);
-}
+export const isBuffer = (buf: globalThis.Buffer|Uint8Array|number[]): buf is globalThis.Buffer =>
+    'buffer' in buf && 'byteOffset' in buf && 'byteLength' in buf;

@@ -12,7 +12,7 @@ export const xxxTable = SQLLiteTable.create('')
  * Team table definition
  * @type {SQLLiteTable}
  */
-export const teamTable = SQLLiteTable.create('tg_team')
+export const teamTable = SQLLiteTable.create('team')
     .setColumns(() => [
         { name: 'id', type: 'TEXT', primary: true },
         { name: 'name', type: 'TEXT' },
@@ -27,7 +27,7 @@ export const teamTable = SQLLiteTable.create('tg_team')
  * Action table definition
  * @type {SQLLiteTable}
  */
-export const actionTable = SQLLiteTable.create('tg_action')
+export const actionTable = SQLLiteTable.create('action')
     .setColumns(() => [
         { name: 'is_invalid', type: 'INTEGER' },
         { name: 'hash', type: 'TEXT' },
@@ -54,10 +54,10 @@ export const actionTable = SQLLiteTable.create('tg_action')
     .setConstraints(({ name }) => []);
 
 /**
- * KeySet table definition
+ * Keyset table definition
  * @type {SQLLiteTable}
  */
-export const keysetTable = SQLLiteTable.create('tg_keyset')
+export const keysetTable = SQLLiteTable.create('keyset')
     .setColumns(() => [
         { name: 'id', type: 'TEXT', primary: true },
         { name: 'team_id', type: 'TEXT', target: teamTable },
@@ -77,7 +77,7 @@ export const keysetTable = SQLLiteTable.create('tg_keyset')
  * Lockbox table definition
  * @type {SQLLiteTable}
  */
-export const lockboxTable = SQLLiteTable.create('tg_lockbox')
+export const lockboxTable = SQLLiteTable.create('lockbox')
     .setColumns(() => [
 
         /** Every action might include new lockboxes */
@@ -124,7 +124,7 @@ export const lockboxTable = SQLLiteTable.create('tg_lockbox')
  * Member table definition
  * @type {SQLLiteTable}
  */
-export const memberTable = SQLLiteTable.create('tg_member')
+export const memberTable = SQLLiteTable.create('member')
     .setColumns(() => [
         { name: 'id', type: 'TEXT', primary: true },
         { name: 'team_id', type: 'TEXT' },
@@ -141,7 +141,7 @@ export const memberTable = SQLLiteTable.create('tg_member')
  * Role table definition
  * @type {SQLLiteTable}
  */
-export const roleTable = SQLLiteTable.create('tg_role')
+export const roleTable = SQLLiteTable.create('role')
     .setColumns(() => [
         { name: 'id', type: 'TEXT', primary: true },
         { name: 'team_id', type: 'TEXT', target: teamTable },
@@ -157,7 +157,7 @@ export const roleTable = SQLLiteTable.create('tg_role')
  * Server table definition
  * @type {SQLLiteTable}
  */
-export const serverTable = SQLLiteTable.create('tg_server')
+export const serverTable = SQLLiteTable.create('server')
     .setColumns(() => [
         { name: 'id', type: 'TEXT', primary: true },
         { name: 'host', type: 'TEXT' },
@@ -169,7 +169,7 @@ export const serverTable = SQLLiteTable.create('tg_server')
  * Message table definition
  * @type {SQLLiteTable}
  */
-export const messageTable = SQLLiteTable.create('tg_message')
+export const messageTable = SQLLiteTable.create('message')
     .setColumns(() => [
         { name: 'team_id', type: 'TEXT', primary: true, target: teamTable },
         { name: 'section', type: 'TEXT', primary: true },

@@ -66,7 +66,7 @@ export class SQLLiteTable
 
     constructor(name: string)
     {
-        this.name    = name;
+        this.name    = `tg_${name}`;
         this.columns = [];
         this.constraints = [];
     }

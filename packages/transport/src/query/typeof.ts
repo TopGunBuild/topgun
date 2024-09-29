@@ -5,7 +5,7 @@ import {
     ValueNumber,
     ValueString,
     ValueUint8Array,
-} from './query-data-value';
+} from './values.ts';
 
 function unsupportedError(v: unknown)
 {
