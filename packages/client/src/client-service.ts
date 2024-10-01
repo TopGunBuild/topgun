@@ -8,7 +8,7 @@ import {
     PutQuery, SelectOptions,
 } from '@topgunbuild/transport';
 import { bigintTime } from '@topgunbuild/time';
-import { DataStream, Exchange } from '@topgunbuild/data-streams';
+import { DataStream, Exchange } from '../../async-data-stream';
 import { createConnector, Connector } from './transports';
 import { PeerOptions, ClientOptions, DataType, ClientEvents } from './types';
 import { createStore, getSocketOptions } from './utils';

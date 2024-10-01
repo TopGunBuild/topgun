@@ -1,4 +1,4 @@
-import { DataStream } from '@topgunbuild/data-streams';
+import { DataStream } from '../../../async-data-stream';
 import { isFunction } from '@topgunbuild/utils';
 import { SelectOptions } from '@topgunbuild/transport';
 import { DataType, QueryCb } from '../types';

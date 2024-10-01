@@ -1,4 +1,4 @@
-import { DataStream } from '@topgunbuild/data-streams';
+import { DataStream } from '../../../async-data-stream';
 import { StoreResults, StoreValue, StoreWrapper } from '@topgunbuild/store';
 import { SelectQuery, SelectOptions, Message, MessageHeader } from '@topgunbuild/transport';
 import { debounce, toArray } from '@topgunbuild/utils';

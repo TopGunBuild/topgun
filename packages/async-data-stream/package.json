@@ -1,5 +1,5 @@
 {
-    "name": "@topgunbuild/data-streams",
+    "name": "@topgunbuild/async-data-stream",
     "version": "0.0.0",
     "description": "EventEmitter using async iterable streams",
     "main": "./dist/index.js",
