@@ -1,7 +1,7 @@
 import { base58 } from '@scure/base';
 import { ed25519 } from '@noble/curves/ed25519';
 import { hashPassword } from './hash-password';
-import { type Base58Keypair, type KeyPair, type SignedMessage } from '@topgunbuild/types';
+import { type Base58Keypair, type KeyPair, type SignedMessage } from './types';
 import { keypairToBase58, keyToBytes } from './utils';
 
 /**

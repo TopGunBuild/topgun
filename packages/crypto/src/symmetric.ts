@@ -1,7 +1,7 @@
 import { randomBytes } from '@noble/hashes/utils';
 import { secretbox } from '@noble/ciphers/salsa';
 import { base58 } from '@scure/base';
-import type { Password } from '@topgunbuild/types';
+import type { Password } from './types';
 import { deserialize, serialize } from '@dao-xyz/borsh';
 import { hashPassword } from './hash-password';
 import { Cipher } from './cipher';

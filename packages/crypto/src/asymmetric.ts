@@ -3,7 +3,7 @@ import { randomBytes } from '@noble/hashes/utils';
 import { deserialize, serialize } from '@dao-xyz/borsh';
 import { base58 } from '@scure/base';
 import { secretbox } from '@noble/ciphers/salsa';
-import type { Base58Keypair, KeyPair } from '@topgunbuild/types';
+import type { Base58Keypair, KeyPair } from './types';
 import { hashPassword } from './hash-password';
 import { keypairToBase58, keyToBytes } from './utils';
 import { Cipher } from './cipher';

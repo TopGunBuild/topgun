@@ -21,6 +21,9 @@
     "jest": {
         "preset": "@topgunbuild/jest-presets/node"
     },
+    "dependencies": {
+        "@topgunbuild/utils": "workspace:*"
+    },
     "devDependencies": {
         "@topgunbuild/eslint-config": "workspace:*",
         "@topgunbuild/jest-presets": "workspace:*",

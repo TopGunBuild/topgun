@@ -13,6 +13,7 @@ export * from './merge-objects';
 export * from './equal';
 export * from './uint8array';
 export * from './assert';
+export * from './async-queue.ts';
 
 export { randomBytes } from '@noble/hashes/utils';
 

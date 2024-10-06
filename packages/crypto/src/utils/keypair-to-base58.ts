@@ -1,5 +1,5 @@
 import { base58 } from '@scure/base';
-import { type Base58Keypair, type KeyPair } from '@topgunbuild/types';
+import { type Base58Keypair, type KeyPair } from '../types';
 
 export const keypairToBase58 = (keypair: KeyPair): Base58Keypair => ({
     publicKey: base58.encode(keypair.publicKey),

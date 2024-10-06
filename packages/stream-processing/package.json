@@ -1,13 +1,13 @@
 {
-    "name": "@topgunbuild/crypto",
+    "name": "@topgunbuild/stream-processing",
     "version": "0.0.0",
-    "description": "Abstractions around TopGun-compatible elliptical curves and cryptographic keys",
+    "description": "",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
-    "sideEffects": false,
     "files": [
         "dist/**"
     ],
+    "sideEffects": false,
     "scripts": {
         "build": "tsup",
         "dev": "tsup --watch",
@@ -22,12 +22,8 @@
         "preset": "@topgunbuild/jest-presets/node"
     },
     "dependencies": {
-        "@dao-xyz/borsh": "^5.2.2",
-        "@noble/curves": "1.4.0",
-        "@noble/ciphers": "0.5.3",
-        "@noble/hashes": "1.4.0",
-        "@topgunbuild/textencoder": "workspace:*",
-        "@scure/base": "1.1.7"
+        "@topgunbuild/types": "workspace:*",
+        "@topgunbuild/utils": "workspace:*"
     },
     "devDependencies": {
         "@topgunbuild/eslint-config": "workspace:*",
