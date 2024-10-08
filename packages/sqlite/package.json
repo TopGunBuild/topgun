@@ -32,7 +32,6 @@
         "@topgunbuild/crypto": "workspace:*",
         "@topgunbuild/store": "workspace:*",
         "@topgunbuild/transport": "workspace:*",
-        "@topgunbuild/filtering": "workspace:*",
         "@topgunbuild/utils": "workspace:*"
     },
     "devDependencies": {

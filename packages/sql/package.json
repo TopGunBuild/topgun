@@ -1,8 +1,9 @@
 {
-    "name": "@topgunbuild/filtering",
+    "name": "@topgunbuild/sql",
     "version": "0.0.0",
-    "description": "",
+    "description": "SQL utils",
     "main": "./dist/index.js",
+    "module": "./dist/index.mjs",
     "types": "./dist/index.d.ts",
     "files": [
         "dist/**"
@@ -20,9 +21,6 @@
     "license": "ISC",
     "jest": {
         "preset": "@topgunbuild/jest-presets/node"
-    },
-    "dependencies": {
-        "@topgunbuild/utils": "workspace:*"
     },
     "devDependencies": {
         "@topgunbuild/eslint-config": "workspace:*",

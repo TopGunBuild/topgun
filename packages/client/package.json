@@ -25,12 +25,9 @@
         "@dao-xyz/borsh": "^5.2.2",
         "@topgunbuild/async-stream-emitter": "workspace:*",
         "@topgunbuild/crypto": "workspace:*",
-        "@topgunbuild/store": "workspace:*",
         "@topgunbuild/sqlite": "workspace:*",
         "@topgunbuild/time": "workspace:*",
-        "@topgunbuild/transport": "workspace:*",
         "@topgunbuild/types": "workspace:*",
-        "@topgunbuild/filtering": "workspace:*",
         "@topgunbuild/utils": "workspace:*"
     },
     "devDependencies": {

@@ -1,7 +1,10 @@
 import { defineConfig, type Options } from 'tsup';
 
 export default defineConfig((options: Options) => ({
-    entry    : ['src/index.ts'],
+    entry    : {
+        browser: 'src/browser.ts',
+        index  : 'src/index.ts',
+    },
     treeshake: true,
     dts      : true,
     minify   : true,

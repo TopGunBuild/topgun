@@ -1,7 +1,8 @@
 {
     "extends": "@topgunbuild/typescript-config/base.json",
     "compilerOptions": {
-        "lib": ["ES2015"],
+        "lib": ["ES2020"],
+        "target": "es2020",
         "outDir": "./dist",
         "types": ["jest", "node"]
     },
