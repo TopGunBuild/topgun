@@ -2,14 +2,14 @@ import { RowCollection } from './collection';
 
 /**
  * This interface can encapsulate the metadata associated with a field,
- * including its name, team_id, section_id, entity_id
+ * including fieldName, teamId, channelId, messageId
  */
 export interface FieldMetadata
 {
-    team_id: string;
-    section_id: string;
-    entity_id: string;
-    field_name: string;
+    teamId: string;
+    channelId: string;
+    messageId: string;
+    fieldName: string;
 }
 
 /**

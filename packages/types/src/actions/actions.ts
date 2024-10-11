@@ -1,5 +1,5 @@
 import { field, option, serialize, variant, vec } from '@dao-xyz/borsh';
-import { toArray } from '@topgunbuild/utils';
+import { randomId, toArray } from '@topgunbuild/utils';
 import { AbstractValue, Device, Invitation, Keyset, Lockbox, Member, Role, Server } from '../common';
 import { typeOf } from '../utils/typeof';
 import { Query, Sort } from './query';
@@ -7,28 +7,33 @@ import { Query, Sort } from './query';
 export class ActionHeader
 {
     @field({ type: 'string' })
+    actionId: string;
+
+    @field({ type: 'string' })
     userId: string;
 
     @field({ type: 'string' })
     teamId: string;
 
     @field({ type: 'u64' })
-    time: bigint;
+    state: bigint;
 
     @field({ type: option(Uint8Array) })
     context?: Uint8Array;
 
     constructor(data: {
+        id: string,
         userId: string,
         teamId: string,
-        time: bigint,
+        state: bigint,
         context: Uint8Array,
     })
     {
-        this.userId  = data.userId;
-        this.teamId  = data.teamId;
-        this.time    = data.time;
-        this.context = data.context;
+        this.actionId = data.id || randomId();
+        this.userId   = data.userId;
+        this.teamId   = data.teamId;
+        this.state    = data.state;
+        this.context  = data.context;
     }
 }
 
@@ -363,13 +368,13 @@ export class SetTeamNameAction extends Action
 export class PutMessageAction extends Action
 {
     @field({ type: 'string' })
-    section: string;
+    channelId: string;
 
     @field({ type: 'string' })
-    node: string;
+    messageId: string;
 
     @field({ type: 'string' })
-    field: string;
+    fieldName: string;
 
     @field({ type: 'u8' })
     deleted: number;
@@ -378,19 +383,19 @@ export class PutMessageAction extends Action
     value: AbstractValue;
 
     constructor(data: {
-        section: string,
-        node: string,
-        field: string,
+        channelId: string,
+        messageId: string,
+        fieldName: string,
         value: unknown,
         deleted?: number,
         lockboxes?: Lockbox[],
     })
     {
         super(data);
-        this.section = data.section;
-        this.node    = data.node;
-        this.field   = data.field;
-        this.value   = typeOf(data.value);
+        this.channelId = data.channelId;
+        this.messageId = data.messageId;
+        this.fieldName = data.fieldName;
+        this.value     = typeOf(data.value);
     }
 }
 
@@ -398,24 +403,24 @@ export class PutMessageAction extends Action
 export class DeleteMessageAction extends Action
 {
     @field({ type: 'string' })
-    section: string;
+    channelId: string;
 
     @field({ type: 'string' })
-    node: string;
+    messageId: string;
 
     @field({ type: option('string') })
-    field?: string;
+    fieldName?: string;
 
     constructor(data: {
-        section: string,
-        node: string,
-        field: string,
+        channelId: string,
+        messageId: string,
+        fieldName: string,
     })
     {
         super({});
-        this.section = data.section;
-        this.node    = data.node;
-        this.field   = data.field;
+        this.channelId = data.channelId;
+        this.messageId = data.messageId;
+        this.fieldName = data.fieldName;
     }
 }
 
@@ -426,13 +431,13 @@ export class SelectMessagesAction extends Action
     id: string;
 
     @field({ type: option('string') })
-    section: string;
+    channelId: string;
 
     @field({ type: option('string') })
-    node: string;
+    messageId: string;
 
     @field({ type: option('string') })
-    field: string;
+    fieldName: string;
 
     @field({ type: vec(Query) })
     query: Query[];
@@ -451,9 +456,9 @@ export class SelectMessagesAction extends Action
 
     constructor(data: {
         id: string,
-        section: string,
-        node: string,
-        field: string,
+        channelId: string,
+        messageId: string,
+        fieldName: string,
         query: Query[]|Query,
         sort: Sort[]|Sort,
         fields: string[],
@@ -463,9 +468,9 @@ export class SelectMessagesAction extends Action
     {
         super({});
         this.id         = data.id;
-        this.section    = data.section;
-        this.node       = data.node;
-        this.field      = data.field;
+        this.channelId  = data.channelId;
+        this.messageId  = data.messageId;
+        this.fieldName  = data.fieldName;
         this.query      = toArray(data.query);
         this.sort       = toArray(data.sort);
         this.fields     = data.fields;

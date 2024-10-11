@@ -1,5 +1,6 @@
 import { SqlTable } from './sql-table';
-import { ColumnType, UpdateDeleteAction } from './sql-column.ts';
+import { ColumnType, UpdateDeleteAction } from './sql-column';
+import { SqlColumnGenerator } from './sql-column-generator';
 
 /**
  * Team table definition
@@ -8,19 +9,17 @@ import { ColumnType, UpdateDeleteAction } from './sql-column.ts';
 export const teamTable = SqlTable.create('team')
     .setColumns(() => [
         {
-            name   : 'id',
-            type   : ColumnType.text,
-            primary: true,
+            name       : 'team_id',
+            type       : ColumnType.TEXT,
+            primary    : true,
+            uniqueIndex: true,
         },
         {
             name: 'name',
-            type: ColumnType.text,
+            type: ColumnType.TEXT,
         },
-    ])
-    .setConstraints(({ name }) => [
-        {
-            definition: `create unique index ${name}_uniq_idx on ${name} (id)`,
-        },
+        SqlColumnGenerator.createdAt(),
+        SqlColumnGenerator.updatedAt(),
     ]);
 
 /**
@@ -30,65 +29,39 @@ export const teamTable = SqlTable.create('team')
 export const actionTable = SqlTable.create('action')
     .setColumns(() => [
         {
-            name   : 'id',
-            type   : ColumnType.text,
-            primary: true,
+            name       : 'action_id',
+            type       : ColumnType.TEXT,
+            primary    : true,
+            uniqueIndex: true,
         },
         {
-            name: 'type',
-            type: ColumnType.text,
+            name : 'type',
+            type : ColumnType.TEXT,
+            index: true,
         },
         {
-            name: 'encrypted_body',
-            type: ColumnType.blob
-        },
-        {
-            name: 'is_invalid',
-            type: ColumnType.integer,
+            name: 'state',
+            type: ColumnType.BIGINT,
         },
         {
             name: 'hash',
-            type: ColumnType.text,
+            type: ColumnType.TEXT,
         },
         {
-            name: 'sender_public_key',
-            type: ColumnType.text,
+            name: 'prev',
+            type: ColumnType.TEXT,
         },
         {
-            name: 'recipient_public_key',
-            type: ColumnType.text,
+            name: 'body',
+            type: ColumnType.JSON,
         },
         {
-            name: 'time',
-            type: ColumnType.integer,
+            name: 'is_invalid',
+            type: ColumnType.INTEGER,
         },
-        {
-            name   : 'user_id',
-            type   : ColumnType.text,
-            target : memberTable,
-            actions: {
-                onDelete: UpdateDeleteAction.cascade,
-            },
-        },
-        {
-            name   : 'team_id',
-            type   : ColumnType.text,
-            target : teamTable,
-            actions: {
-                onDelete: UpdateDeleteAction.cascade,
-            },
-        },
-    ])
-    .setConstraints(({ name }) => [
-        {
-            definition: `create unique index ${name}_uniq_idx on ${name} (id)`,
-        },
-        {
-            definition: `create index ${name}_user_id_idx on ${name} (user_id)`,
-        },
-        {
-            definition: `create index ${name}_team_id_idx on ${name} (team_id)`,
-        },
+        SqlColumnGenerator.createdAt(),
+        SqlColumnGenerator.userReference(),
+        SqlColumnGenerator.teamReference(),
     ]);
 
 /**
@@ -98,46 +71,33 @@ export const actionTable = SqlTable.create('action')
 export const keysetTable = SqlTable.create('keyset')
     .setColumns(() => [
         {
-            name   : 'id',
-            type   : ColumnType.text,
-            primary: true,
+            name       : 'keyset_id',
+            type       : ColumnType.TEXT,
+            primary    : true,
+            uniqueIndex: true,
         },
         {
             name: 'type',
-            type: ColumnType.text,
+            type: ColumnType.TEXT,
         },
         {
             name: 'name',
-            type: ColumnType.text,
+            type: ColumnType.TEXT,
         },
         {
             name: 'encryption',
-            type: ColumnType.text,
+            type: ColumnType.TEXT,
         },
         {
             name: 'signature',
-            type: ColumnType.text,
+            type: ColumnType.TEXT,
         },
         {
             name: 'generation',
-            type: ColumnType.integer,
+            type: ColumnType.INTEGER,
         },
-        {
-            name   : 'team_id',
-            type   : ColumnType.text,
-            target : teamTable,
-            actions: {
-                onDelete: UpdateDeleteAction.cascade,
-            },
-        },
-    ])
-    .setConstraints(({ name }) => [
-        {
-            definition: `create unique index ${name}_uniq_idx on ${name} (id)`,
-        },
-        {
-            definition: `create index ${name}_team_id_idx on ${name} (team_id)`,
-        },
+        SqlColumnGenerator.createdAt(),
+        SqlColumnGenerator.teamReference(),
     ]);
 
 /**
@@ -147,62 +107,41 @@ export const keysetTable = SqlTable.create('keyset')
 export const lockboxTable = SqlTable.create('lockbox')
     .setColumns(() => [
         {
-            name   : 'id',
-            type   : ColumnType.text,
-            primary: true,
+            name       : 'lockbox_id',
+            type       : ColumnType.TEXT,
+            primary    : true,
+            uniqueIndex: true,
         },
-        {
-            name   : 'team_id',
-            type   : ColumnType.text,
-            target : teamTable,
-            actions: {
-                onDelete: UpdateDeleteAction.cascade,
-            },
-        },
-
-        /** Every action might include new lockboxes */
         {
             name   : 'action',
-            type   : ColumnType.text,
+            type   : ColumnType.TEXT,
             target : actionTable,
             actions: {
-                onDelete: UpdateDeleteAction.cascade,
+                onDelete: UpdateDeleteAction.CASCADE,
             },
         },
-
-        /** The public key of the keypair used to encrypt this lockbox  */
         {
             name: 'encryption_public_key',
-            type: ColumnType.text,
+            type: ColumnType.TEXT,
         },
-
-        /** Manifest for the keyset that can open this lockbox (the lockbox recipient's keys) */
         {
             name   : 'recipient',
-            type   : ColumnType.text,
+            type   : ColumnType.TEXT,
             target : keysetTable,
             actions: {
-                onDelete: UpdateDeleteAction.cascade,
+                onDelete: UpdateDeleteAction.CASCADE,
             },
         },
-
-        /** Manifest for the keyset that is in this lockbox (the lockbox contents) */
         {
             name   : 'contents',
-            type   : ColumnType.text,
+            type   : ColumnType.TEXT,
             target : keysetTable,
             actions: {
-                onDelete: UpdateDeleteAction.cascade,
+                onDelete: UpdateDeleteAction.CASCADE,
             },
         },
-    ])
-    .setConstraints(({ name }) => [
-        {
-            definition: `create unique index ${name}_uniq_idx on ${name} (id)`,
-        },
-        {
-            definition: `create index ${name}_team_id_idx on ${name} (team_id)`,
-        },
+        SqlColumnGenerator.createdAt(),
+        SqlColumnGenerator.teamReference(),
     ]);
 
 /**
@@ -212,35 +151,19 @@ export const lockboxTable = SqlTable.create('lockbox')
 export const memberTable = SqlTable.create('member')
     .setColumns(() => [
         {
-            name   : 'id',
-            type   : ColumnType.text,
-            primary: true,
+            name       : 'member_id',
+            type       : ColumnType.TEXT,
+            primary    : true,
+            uniqueIndex: true,
         },
         {
             name: 'name',
-            type: ColumnType.text,
+            type: ColumnType.TEXT,
         },
-        {
-            name  : 'keyset_id',
-            type  : ColumnType.text,
-            target: keysetTable,
-        },
-        {
-            name   : 'team_id',
-            type   : ColumnType.text,
-            target : teamTable,
-            actions: {
-                onDelete: UpdateDeleteAction.cascade,
-            },
-        },
-    ])
-    .setConstraints(({ name }) => [
-        {
-            definition: `create unique index ${name}_uniq_idx on ${name} (id)`,
-        },
-        {
-            definition: `create index ${name}_team_id_idx on ${name} (team_id)`,
-        },
+        SqlColumnGenerator.createdAt(),
+        SqlColumnGenerator.updatedAt(),
+        SqlColumnGenerator.keysetReference(),
+        SqlColumnGenerator.teamReference(),
     ]);
 
 /**
@@ -250,30 +173,18 @@ export const memberTable = SqlTable.create('member')
 export const roleTable = SqlTable.create('role')
     .setColumns(() => [
         {
-            name   : 'id',
-            type   : ColumnType.text,
-            primary: true,
+            name       : 'role_id',
+            type       : ColumnType.TEXT,
+            primary    : true,
+            uniqueIndex: true,
         },
         {
             name: 'name',
-            type: ColumnType.text,
+            type: ColumnType.TEXT,
         },
-        {
-            name   : 'team_id',
-            type   : ColumnType.text,
-            target : teamTable,
-            actions: {
-                onDelete: UpdateDeleteAction.cascade,
-            },
-        },
-    ])
-    .setConstraints(({ name }) => [
-        {
-            definition: `create unique index ${name}_uniq_idx on ${name} (id)`,
-        },
-        {
-            definition: `create index ${name}_team_id_idx on ${name} (team_id)`,
-        },
+        SqlColumnGenerator.createdAt(),
+        SqlColumnGenerator.updatedAt(),
+        SqlColumnGenerator.teamReference(),
     ]);
 
 /**
@@ -283,24 +194,18 @@ export const roleTable = SqlTable.create('role')
 export const serverTable = SqlTable.create('server')
     .setColumns(() => [
         {
-            name   : 'id',
-            type   : ColumnType.text,
-            primary: true,
+            name       : 'server_id',
+            type       : ColumnType.TEXT,
+            primary    : true,
+            uniqueIndex: true,
         },
         {
             name: 'host',
-            type: ColumnType.text,
+            type: ColumnType.TEXT,
         },
-        {
-            name  : 'keyset_id',
-            type  : ColumnType.text,
-            target: keysetTable,
-        },
-    ])
-    .setConstraints(({ name }) => [
-        {
-            definition: `create unique index ${name}_uniq_idx on ${name} (id)`,
-        },
+        SqlColumnGenerator.keysetReference(),
+        SqlColumnGenerator.createdAt(),
+        SqlColumnGenerator.updatedAt(),
     ]);
 
 /**
@@ -310,50 +215,20 @@ export const serverTable = SqlTable.create('server')
 export const deviceTable = SqlTable.create('device')
     .setColumns(() => [
         {
-            name   : 'device_id',
-            type   : ColumnType.text,
-            primary: true,
-        },
-        {
-            name  : 'keyset_id',
-            type  : ColumnType.text,
-            target: keysetTable,
+            name       : 'device_id',
+            type       : ColumnType.TEXT,
+            primary    : true,
+            uniqueIndex: true,
         },
         {
             name: 'device_info',
-            type: ColumnType.text,
+            type: ColumnType.TEXT,
         },
-        {
-            name: 'created',
-            type: ColumnType.datetime,
-        },
-        {
-            name   : 'user_id',
-            type   : ColumnType.text,
-            target : memberTable,
-            actions: {
-                onDelete: UpdateDeleteAction.cascade,
-            },
-        },
-        {
-            name   : 'team_id',
-            type   : ColumnType.text,
-            target : teamTable,
-            actions: {
-                onDelete: UpdateDeleteAction.cascade,
-            },
-        },
-    ])
-    .setConstraints(({ name }) => [
-        {
-            definition: `create unique index ${name}_uniq_idx on ${name} (device_id)`,
-        },
-        {
-            definition: `create index ${name}_user_id_idx on ${name} (user_id)`,
-        },
-        {
-            definition: `create index ${name}_team_id_idx on ${name} (team_id)`,
-        },
+        SqlColumnGenerator.createdAt(),
+        SqlColumnGenerator.updatedAt(),
+        SqlColumnGenerator.keysetReference(),
+        SqlColumnGenerator.teamReference(),
+        SqlColumnGenerator.userReference(),
     ]);
 
 /**
@@ -363,49 +238,26 @@ export const deviceTable = SqlTable.create('device')
 export const invitationTable = SqlTable.create('invitation')
     .setColumns(() => [
         {
-            name   : 'id',
-            type   : ColumnType.text,
-            primary: true,
+            name       : 'invitation_id',
+            type       : ColumnType.TEXT,
+            primary    : true,
+            uniqueIndex: true,
         },
         {
             name: 'public_key',
-            type: ColumnType.text,
+            type: ColumnType.TEXT,
         },
         {
-            name  : 'expiration',
-            type  : ColumnType.datetime,
+            name: 'expiration',
+            type: ColumnType.DATETIME,
         },
         {
-            name  : 'max_uses',
-            type  : ColumnType.integer,
+            name: 'max_uses',
+            type: ColumnType.INTEGER,
         },
-        {
-            name   : 'user_id',
-            type   : ColumnType.text,
-            target : memberTable,
-            actions: {
-                onDelete: UpdateDeleteAction.cascade,
-            },
-        },
-        {
-            name   : 'team_id',
-            type   : ColumnType.text,
-            target : teamTable,
-            actions: {
-                onDelete: UpdateDeleteAction.cascade,
-            },
-        },
-    ])
-    .setConstraints(({ name }) => [
-        {
-            definition: `create unique index ${name}_uniq_idx on ${name} (id)`,
-        },
-        {
-            definition: `create index ${name}_user_id_idx on ${name} (user_id)`,
-        },
-        {
-            definition: `create index ${name}_team_id_idx on ${name} (team_id)`,
-        },
+        SqlColumnGenerator.createdAt(),
+        SqlColumnGenerator.teamReference(),
+        SqlColumnGenerator.userReference(),
     ]);
 
 /**
@@ -415,75 +267,133 @@ export const invitationTable = SqlTable.create('invitation')
 export const messageTable = SqlTable.create('message')
     .setColumns(() => [
         {
-            name   : 'section',
-            type   : ColumnType.text,
+            name   : 'channel_id',
+            type   : ColumnType.TEXT,
             primary: true,
         },
         {
-            name   : 'node',
-            type   : ColumnType.text,
+            name   : 'message_id',
+            type   : ColumnType.TEXT,
             primary: true,
-        },
-        {
-            name   : 'field',
-            type   : ColumnType.text,
-            primary: true,
-        },
-        {
-            name: 'state',
-            type: ColumnType.bigint,
-        },
-        {
-            name: 'value_is_empty',
-            type: ColumnType.boolean,
-        },
-        {
-            name: 'value_string',
-            type: ColumnType.text,
-        },
-        {
-            name: 'value_bool',
-            type: ColumnType.boolean,
-        },
-        {
-            name: 'value_number',
-            type: ColumnType.numeric,
-        },
-        {
-            name: 'value_byte',
-            type: ColumnType.blob,
-        },
-        {
-            name: 'value_date',
-            type: ColumnType.datetime,
         },
         {
             name: 'deleted',
-            type: ColumnType.boolean,
+            type: ColumnType.BOOLEAN,
         },
         {
-            name   : 'team_id',
-            type   : ColumnType.text,
-            target : teamTable,
-            actions: {
-                onDelete: UpdateDeleteAction.cascade,
-            },
+            name: 'values',
+            type: ColumnType.HSTORE,
+        },
+        {
+            name: 'state',
+            type: ColumnType.HSTORE,
+        },
+        SqlColumnGenerator.updatedAt(),
+        SqlColumnGenerator.createdAt(),
+        SqlColumnGenerator.teamReference(),
+        SqlColumnGenerator.userReference(),
+    ])
+    .setIndexes(({ name }) => [
+        {
+            name   : `${name}_uniq_idx`,
+            columns: ['team_id', 'channel_id', 'message_id'],
+            unique : true,
         },
     ])
     .setConstraints(({ name }) => [
         {
-            definition: `create unique index ${name}_uniq_idx on ${name} (team_id, section, node, field)`,
+            definition: `create index ${name}_values_idx ON ${name} USING GIN (values)`,
         },
         {
-            definition: `create index ${name}_section_node_idx on ${name} (section, node)`,
-        },
-        {
-            definition: `create index ${name}_section_idx on ${name} (section)`,
-        },
-        {
-            definition: `create index ${name}_deleted_idx on ${name} (deleted);`,
-        },
-        {
-            definition: `create index ${name}_team_id_idx on ${name} (team_id)`,
+            definition: `create index ${name}_state_idx ON ${name} USING GIN (state)`,
         },
     ]);
+/*export const messageTable = SqlTable.create('message')
+    .setColumns(() => [
+        {
+            name   : 'channel_id',
+            type   : ColumnType.TEXT,
+            primary: true,
+        },
+        {
+            name   : 'message_id',
+            type   : ColumnType.TEXT,
+            primary: true,
+        },
+        {
+            name   : 'field_name',
+            type   : ColumnType.TEXT,
+            primary: true,
+        },
+        {
+            name: 'state',
+            type: ColumnType.BIGINT,
+        },
+        {
+            name: 'value_is_empty',
+            type: ColumnType.BOOLEAN,
+        },
+        {
+            name: 'value_string',
+            type: ColumnType.TEXT,
+        },
+        {
+            name: 'value_bool',
+            type: ColumnType.BOOLEAN,
+        },
+        {
+            name: 'value_number',
+            type: ColumnType.NUMERIC,
+        },
+        {
+            name: 'value_byte',
+            type: ColumnType.BLOB,
+        },
+        {
+            name: 'value_date',
+            type: ColumnType.DATETIME,
+        },
+        {
+            name: 'deleted',
+            type: ColumnType.BOOLEAN,
+        },
+        {
+            name   : 'user_id',
+            type   : ColumnType.TEXT,
+            target : memberTable,
+            actions: {
+                onDelete: UpdateDeleteAction.CASCADE,
+            },
+        },
+        {
+            name   : 'team_id',
+            type   : ColumnType.TEXT,
+            target : teamTable,
+            actions: {
+                onDelete: UpdateDeleteAction.CASCADE,
+            },
+        },
+        {
+            name: 'created_at',
+            type: ColumnType.DATETIME,
+        },
+    ])
+    .setIndexes(({ name }) => [
+        {
+            name   : `${name}_uniq_idx`,
+            columns: ['team_id', 'channel_id', 'message_id', 'field_name'],
+            unique : true,
+        },
+        {
+            name   : `${name}_section_node_idx`,
+            columns: ['team_id', 'channel_id', 'message_id'],
+        },
+        {
+            name   : `${name}_team_id_idx`,
+            columns: ['team_id'],
+        },
+        {
+            name   : `${name}_team_id_idx`,
+            columns: ['user_id'],
+        },
+    ]);*/

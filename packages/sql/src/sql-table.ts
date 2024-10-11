@@ -1,10 +1,12 @@
-import { SqlColumn } from './sql-column.ts';
+import { SqlColumn } from './sql-column';
+import { SqlIndex } from './sql-index';
 import { SqlConstraint } from './sql-constraint.ts';
 
 export class SqlTable
 {
   name: string;
   columns: SqlColumn[];
+  indexes: SqlIndex[];
   constraints: SqlConstraint[];
 
   static create(name: string): SqlTable
@@ -24,7 +26,13 @@ export class SqlTable
   {
     this.name    = `tg_${tableName}`;
     this.columns = [];
-    this.constraints = [];
+    this.indexes = [];
+  }
+
+  setIndexes(cb: (table: SqlTable) => SqlIndex[]): SqlTable
+  {
+    this.indexes = cb(this);
+    return this;
   }
 
   setColumns(cb: (table: SqlTable) => SqlColumn[]): SqlTable

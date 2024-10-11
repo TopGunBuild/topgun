@@ -1,26 +1,25 @@
 import { SqlTable } from './sql-table';
 
-// export type UpdateDeleteAction = 'cascade'|'restrict'|'no action'|'set null'|'set default';
-// export type ColumnType = 'INTEGER'|'NUMERIC'|'BIGINT'|'BLOB'|'TEXT'|'DATE'|'BOOLEAN';
-
 export enum UpdateDeleteAction
 {
-    cascade    = 'cascade',
-    restrict   = 'restrict',
-    noAction   = 'no action',
-    setNull    = 'set null',
-    setDefault = 'set default',
+    CASCADE     = 'CASCADE',
+    RESTRICT    = 'RESTRICT',
+    NO_ACTION   = 'no action',
+    SET_NULL    = 'set null',
+    SET_DEFAULT = 'set default',
 }
 
 export enum ColumnType
 {
-    integer  = 'integer',
-    numeric  = 'numeric',
-    bigint   = 'bigint',
-    blob     = 'blob',
-    text     = 'text',
-    datetime = 'datetime',
-    boolean  = 'boolean',
+    INTEGER  = 'INTEGER',
+    NUMERIC  = 'NUMERIC',
+    BIGINT   = 'BIGINT',
+    BLOB     = 'BLOB',
+    TEXT     = 'TEXT',
+    DATETIME = 'DATETIME',
+    BOOLEAN  = 'BOOLEAN',
+    JSON     = 'JSON',
+    HSTORE   = 'HSTORE'
 }
 
 export type SqlColumn = {
@@ -29,6 +28,8 @@ export type SqlColumn = {
     primary?: boolean,
     target?: SqlTable,
     targetColumn?: string;
+    index?: boolean,
+    uniqueIndex?: boolean,
     actions?: {
         onUpdate?: UpdateDeleteAction;
         onDelete?: UpdateDeleteAction;
