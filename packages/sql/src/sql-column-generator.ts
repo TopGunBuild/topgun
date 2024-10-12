@@ -1,8 +1,15 @@
 import { ColumnType, SqlColumn, UpdateDeleteAction } from './sql-column';
 import { keysetTable, memberTable, teamTable } from './tables';
 
+/**
+ * Generates SQL columns
+ */
 export class SqlColumnGenerator
 {
+    /**
+     * Timestamp for the last update to the record
+     * @returns {SqlColumn}
+     */
     static updatedAt(): SqlColumn
     {
         return {
@@ -11,6 +18,10 @@ export class SqlColumnGenerator
         };
     }
 
+    /**
+     * Timestamp for when the record was created
+     * @returns {SqlColumn}
+     */
     static createdAt(): SqlColumn
     {
         return {
@@ -19,6 +30,10 @@ export class SqlColumnGenerator
         };
     }
 
+    /**
+     * Foreign key reference to the team table
+     * @returns {SqlColumn}
+     */
     static teamReference(): SqlColumn
     {
         return {
@@ -32,6 +47,10 @@ export class SqlColumnGenerator
         };
     }
 
+    /**
+     * Foreign key reference to the member table
+     * @returns {SqlColumn}
+     */
     static userReference(): SqlColumn
     {
         return {
@@ -45,6 +64,10 @@ export class SqlColumnGenerator
         };
     }
 
+    /**
+     * Foreign key reference to the keyset table
+     * @returns {SqlColumn}
+     */
     static keysetReference(): SqlColumn
     {
         return {

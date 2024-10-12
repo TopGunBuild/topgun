@@ -4,18 +4,19 @@ import { SqlColumnGenerator } from './sql-column-generator';
 
 /**
  * Team table definition
+ * Defines a table for storing team information.
  * @type {SqlTable}
  */
-export const teamTable = SqlTable.create('team')
+export const teamTable: SqlTable = SqlTable.create('team')
     .setColumns(() => [
         {
-            name       : 'team_id',
+            name       : 'team_id',  // Unique identifier for the team
             type       : ColumnType.TEXT,
             primary    : true,
             uniqueIndex: true,
         },
         {
-            name: 'name',
+            name: 'name', // Name of the team
             type: ColumnType.TEXT,
         },
         SqlColumnGenerator.createdAt(),
@@ -24,39 +25,40 @@ export const teamTable = SqlTable.create('team')
 
 /**
  * Action table definition
+ * Defines a table for storing actions.
  * @type {SqlTable}
  */
-export const actionTable = SqlTable.create('action')
+export const actionTable: SqlTable = SqlTable.create('action')
     .setColumns(() => [
         {
-            name       : 'action_id',
+            name       : 'action_id', // Unique identifier for the action
             type       : ColumnType.TEXT,
             primary    : true,
             uniqueIndex: true,
         },
         {
-            name : 'type',
+            name : 'type', // Type of action
             type : ColumnType.TEXT,
             index: true,
         },
         {
-            name: 'state',
+            name: 'state', // The "bigint" value is used based on a last-write-wins method.
             type: ColumnType.BIGINT,
         },
         {
-            name: 'hash',
+            name: 'hash', // Hash value associated with the action
             type: ColumnType.TEXT,
         },
         {
-            name: 'prev',
+            name: 'prev', // Hash value of the previous action
             type: ColumnType.TEXT,
         },
         {
-            name: 'body',
+            name: 'body', // JSON body containing action details
             type: ColumnType.JSON,
         },
         {
-            name: 'is_invalid',
+            name: 'is_invalid', // Indicates if the action is invalid
             type: ColumnType.INTEGER,
         },
         SqlColumnGenerator.createdAt(),
@@ -68,32 +70,32 @@ export const actionTable = SqlTable.create('action')
  * Keyset table definition
  * @type {SqlTable}
  */
-export const keysetTable = SqlTable.create('keyset')
+export const keysetTable: SqlTable = SqlTable.create('keyset')
     .setColumns(() => [
         {
-            name       : 'keyset_id',
+            name       : 'keyset_id', // Unique identifier for the keyset
             type       : ColumnType.TEXT,
             primary    : true,
             uniqueIndex: true,
         },
         {
-            name: 'type',
+            name: 'type', // Type of keyset
             type: ColumnType.TEXT,
         },
         {
-            name: 'name',
+            name: 'name', // Name of the keyset
             type: ColumnType.TEXT,
         },
         {
-            name: 'encryption',
+            name: 'encryption', // Encryption method used
             type: ColumnType.TEXT,
         },
         {
-            name: 'signature',
+            name: 'signature', // Signature method used
             type: ColumnType.TEXT,
         },
         {
-            name: 'generation',
+            name: 'generation', // Generation number for the keyset
             type: ColumnType.INTEGER,
         },
         SqlColumnGenerator.createdAt(),
@@ -104,16 +106,16 @@ export const keysetTable = SqlTable.create('keyset')
  * Lockbox table definition
  * @type {SqlTable}
  */
-export const lockboxTable = SqlTable.create('lockbox')
+export const lockboxTable: SqlTable = SqlTable.create('lockbox')
     .setColumns(() => [
         {
-            name       : 'lockbox_id',
+            name       : 'lockbox_id', // Unique identifier for the lockbox
             type       : ColumnType.TEXT,
             primary    : true,
             uniqueIndex: true,
         },
         {
-            name   : 'action',
+            name   : 'action', // Foreign key reference to the action table
             type   : ColumnType.TEXT,
             target : actionTable,
             actions: {
@@ -121,11 +123,11 @@ export const lockboxTable = SqlTable.create('lockbox')
             },
         },
         {
-            name: 'encryption_public_key',
+            name: 'encryption_public_key', // Public key for encryption
             type: ColumnType.TEXT,
         },
         {
-            name   : 'recipient',
+            name   : 'recipient', // Recipient of the lockbox
             type   : ColumnType.TEXT,
             target : keysetTable,
             actions: {
@@ -133,7 +135,7 @@ export const lockboxTable = SqlTable.create('lockbox')
             },
         },
         {
-            name   : 'contents',
+            name   : 'contents', // Contents of the lockbox
             type   : ColumnType.TEXT,
             target : keysetTable,
             actions: {
@@ -148,16 +150,16 @@ export const lockboxTable = SqlTable.create('lockbox')
  * Member table definition
  * @type {SqlTable}
  */
-export const memberTable = SqlTable.create('member')
+export const memberTable: SqlTable = SqlTable.create('member')
     .setColumns(() => [
         {
-            name       : 'member_id',
+            name       : 'member_id', // Unique identifier for the member
             type       : ColumnType.TEXT,
             primary    : true,
             uniqueIndex: true,
         },
         {
-            name: 'name',
+            name: 'name', // Name of the member
             type: ColumnType.TEXT,
         },
         SqlColumnGenerator.createdAt(),
@@ -170,16 +172,16 @@ export const memberTable = SqlTable.create('member')
  * Role table definition
  * @type {SqlTable}
  */
-export const roleTable = SqlTable.create('role')
+export const roleTable: SqlTable = SqlTable.create('role')
     .setColumns(() => [
         {
-            name       : 'role_id',
+            name       : 'role_id', // Unique identifier for the role
             type       : ColumnType.TEXT,
             primary    : true,
             uniqueIndex: true,
         },
         {
-            name: 'name',
+            name: 'name', // Name of the role
             type: ColumnType.TEXT,
         },
         SqlColumnGenerator.createdAt(),
@@ -191,16 +193,16 @@ export const roleTable = SqlTable.create('role')
  * Server table definition
  * @type {SqlTable}
  */
-export const serverTable = SqlTable.create('server')
+export const serverTable: SqlTable = SqlTable.create('server')
     .setColumns(() => [
         {
-            name       : 'server_id',
+            name       : 'server_id', // Unique identifier for the server
             type       : ColumnType.TEXT,
             primary    : true,
             uniqueIndex: true,
         },
         {
-            name: 'host',
+            name: 'host', // Host address of the server
             type: ColumnType.TEXT,
         },
         SqlColumnGenerator.keysetReference(),
@@ -212,16 +214,16 @@ export const serverTable = SqlTable.create('server')
  * Device table definition
  * @type {SqlTable}
  */
-export const deviceTable = SqlTable.create('device')
+export const deviceTable: SqlTable = SqlTable.create('device')
     .setColumns(() => [
         {
-            name       : 'device_id',
+            name       : 'device_id', // Unique identifier for the device
             type       : ColumnType.TEXT,
             primary    : true,
             uniqueIndex: true,
         },
         {
-            name: 'device_info',
+            name: 'device_info', // Information about the device
             type: ColumnType.TEXT,
         },
         SqlColumnGenerator.createdAt(),
@@ -235,24 +237,24 @@ export const deviceTable = SqlTable.create('device')
  * Invitation table definition
  * @type {SqlTable}
  */
-export const invitationTable = SqlTable.create('invitation')
+export const invitationTable: SqlTable = SqlTable.create('invitation')
     .setColumns(() => [
         {
-            name       : 'invitation_id',
+            name       : 'invitation_id', // Unique identifier for the invitation
             type       : ColumnType.TEXT,
             primary    : true,
             uniqueIndex: true,
         },
         {
-            name: 'public_key',
+            name: 'public_key', // Public key for the invitation
             type: ColumnType.TEXT,
         },
         {
-            name: 'expiration',
+            name: 'expiration', // Expiration date of the invitation
             type: ColumnType.DATETIME,
         },
         {
-            name: 'max_uses',
+            name: 'max_uses', // Maximum number of uses for the invitation
             type: ColumnType.INTEGER,
         },
         SqlColumnGenerator.createdAt(),
@@ -264,28 +266,28 @@ export const invitationTable = SqlTable.create('invitation')
  * Message table definition
  * @type {SqlTable}
  */
-export const messageTable = SqlTable.create('message')
+export const messageTable: SqlTable = SqlTable.create('message')
     .setColumns(() => [
         {
-            name   : 'channel_id',
+            name   : 'channel_id', // Unique identifier for the channel where the message belongs
             type   : ColumnType.TEXT,
             primary: true,
         },
         {
-            name   : 'message_id',
+            name   : 'message_id', // Unique identifier for the message within the channel
             type   : ColumnType.TEXT,
             primary: true,
         },
         {
-            name: 'deleted',
+            name: 'deleted', // Indicates whether the message has been deleted
             type: ColumnType.BOOLEAN,
         },
         {
-            name: 'values',
+            name: 'values', // Values associated with the message
             type: ColumnType.HSTORE,
         },
         {
-            name: 'state',
+            name: 'state', // The modification time for each field in the "values" column is stored
             type: ColumnType.HSTORE,
         },
         SqlColumnGenerator.updatedAt(),
@@ -295,105 +297,18 @@ export const messageTable = SqlTable.create('message')
     ])
     .setIndexes(({ name }) => [
         {
-            name   : `${name}_uniq_idx`,
+            name   : `${name}_uniq_idx`, // Unique index for the message
             columns: ['team_id', 'channel_id', 'message_id'],
             unique : true,
         },
-    ])
-    .setConstraints(({ name }) => [
         {
-            definition: `create index ${name}_values_idx ON ${name} USING GIN (values)`,
+            name   : `${name}_values_idx`, // Index for the values of the message
+            columns: ['values'],
+            using  : 'GIN',
         },
         {
-            definition: `create index ${name}_state_idx ON ${name} USING GIN (state)`,
+            name   : `${name}_state_idx`, // Index for the state of the message
+            columns: ['state'],
+            using  : 'GIN',
         },
     ]);
-/*export const messageTable = SqlTable.create('message')
-    .setColumns(() => [
-        {
-            name   : 'channel_id',
-            type   : ColumnType.TEXT,
-            primary: true,
-        },
-        {
-            name   : 'message_id',
-            type   : ColumnType.TEXT,
-            primary: true,
-        },
-        {
-            name   : 'field_name',
-            type   : ColumnType.TEXT,
-            primary: true,
-        },
-        {
-            name: 'state',
-            type: ColumnType.BIGINT,
-        },
-        {
-            name: 'value_is_empty',
-            type: ColumnType.BOOLEAN,
-        },
-        {
-            name: 'value_string',
-            type: ColumnType.TEXT,
-        },
-        {
-            name: 'value_bool',
-            type: ColumnType.BOOLEAN,
-        },
-        {
-            name: 'value_number',
-            type: ColumnType.NUMERIC,
-        },
-        {
-            name: 'value_byte',
-            type: ColumnType.BLOB,
-        },
-        {
-            name: 'value_date',
-            type: ColumnType.DATETIME,
-        },
-        {
-            name: 'deleted',
-            type: ColumnType.BOOLEAN,
-        },
-        {
-            name   : 'user_id',
-            type   : ColumnType.TEXT,
-            target : memberTable,
-            actions: {
-                onDelete: UpdateDeleteAction.CASCADE,
-            },
-        },
-        {
-            name   : 'team_id',
-            type   : ColumnType.TEXT,
-            target : teamTable,
-            actions: {
-                onDelete: UpdateDeleteAction.CASCADE,
-            },
-        },
-        {
-            name: 'created_at',
-            type: ColumnType.DATETIME,
-        },
-    ])
-    .setIndexes(({ name }) => [
-        {
-            name   : `${name}_uniq_idx`,
-            columns: ['team_id', 'channel_id', 'message_id', 'field_name'],
-            unique : true,
-        },
-        {
-            name   : `${name}_section_node_idx`,
-            columns: ['team_id', 'channel_id', 'message_id'],
-        },
-        {
-            name   : `${name}_team_id_idx`,
-            columns: ['team_id'],
-        },
-        {
-            name   : `${name}_team_id_idx`,
-            columns: ['user_id'],
-        },
-    ]);*/

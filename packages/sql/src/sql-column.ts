@@ -1,5 +1,8 @@
 import { SqlTable } from './sql-table';
 
+/**
+ * Represents an action to be taken on update or delete
+ */
 export enum UpdateDeleteAction
 {
     CASCADE     = 'CASCADE',
@@ -9,6 +12,9 @@ export enum UpdateDeleteAction
     SET_DEFAULT = 'set default',
 }
 
+/**
+ * Represents a SQL column type
+ */
 export enum ColumnType
 {
     INTEGER  = 'INTEGER',
@@ -22,6 +28,9 @@ export enum ColumnType
     HSTORE   = 'HSTORE'
 }
 
+/**
+ * Represents a SQL column
+ */
 export type SqlColumn = {
     name: string,
     type?: ColumnType,
