@@ -13,27 +13,23 @@ export interface DatabaseOutputData<T>
 }
 
 // Define a type for the function that queries the database
-export type DatabaseQueryFunction<T> = (params: SelectMessagesAction) => Promise<RowCollection<T>>; // Function that returns a promise resolving to a RowCollection
+export type DatabaseQueryFn<T> = (params: SelectMessagesAction) => Promise<RowCollection<T>>; // Function that returns a promise resolving to a RowCollection
 
 // Define a type for the function that compares two rows
-export type RowComparator<T> = (rowA: T, rowB: T) => boolean; // Function that compares two rows of type T
+export type RowComparatorFn<T> = (rowA: T, rowB: T) => boolean; // Function that compares two rows of type T
 
 // Define the interface for the constructor parameters of the stream processing class
-export interface StreamProcessingParams<T, D = null>
+export interface StreamProcessingParams<T>
 {
     query: SelectMessagesAction; // The parameters for the query
-    queryFunction: DatabaseQueryFunction<T>; // The function to query the database
-    compareRows: RowComparator<T>; // Function to compare two rows of type T
-    additionalRowsBefore: number; // Number of additional rows to return before the main data
-    additionalRowsAfter: number; // Number of additional rows to return after the main data
-    emitChanges: StreamChangesFunction<T>; // Emit changes in data stream
-    databaseChangesToRowConverter: DatabaseChangesToRowConverter<D, T>; // Converts modified data of type D into a database row format.
-    identifierExtractor: UniqueIdentifierExtractor<T>;
+    rowsBeforeSize: number; // Number of additional rows to return before the main data
+    rowsAfterSize: number; // Number of additional rows to return after the main data
+    databaseQueryFn: DatabaseQueryFn<T>; // The function to query the database
+    compareRowsFn: RowComparatorFn<T>; // Function to compare two rows of type T
+    emitChangesFn: StreamChangesFn<T>; // Emit changes in data stream
 }
 
-export type DatabaseChangesToRowConverter<D, R> = (data: D) => R;
-
-export interface DataChanges<T>
+export interface StreamDataChanges<T>
 {
     added: T; // Represents the data that has been added during the change process.
     deleted: T; // Represents the data that has been removed during the change process.
@@ -41,14 +37,5 @@ export interface DataChanges<T>
 }
 
 // Tracking changes in data streams
-export type StreamChangesFunction<T> = (data: DataChanges<T>) => void;
+export type StreamChangesFn<T> = (data: StreamDataChanges<T>) => void;
 
-export interface UniqueIdentifierExtractor<T> {
-    /**
-     * Extracts a unique identifier from the given object.
-     *
-     * @param obj - The object from which to extract the unique identifier.
-     * @returns A unique identifier, typically a string or number.
-     */
-    (obj: T): string | number;
-}

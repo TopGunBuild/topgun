@@ -18,10 +18,10 @@ describe('Unit testing Filtering', () =>
     {
         const res = sortService.sort(data, [
             {
-                direction: SortDirection.Asc,
+                direction: SortDirection.ASC,
                 key      : 'boolean',
             }, {
-                direction: SortDirection.Desc,
+                direction: SortDirection.DESC,
                 key      : 'number',
             }]);
 
@@ -32,7 +32,7 @@ describe('Unit testing Filtering', () =>
     {
         (data[4] as { string: string }).string = 'ROW';
         const res                              = sortService.sort(data, [{
-            direction      : SortDirection.Asc,
+            direction      : SortDirection.ASC,
             key            : 'string',
             caseInsensitive: true,
         }]);

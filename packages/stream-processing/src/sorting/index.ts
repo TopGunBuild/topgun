@@ -175,3 +175,5 @@ export class SortingService
     }
 }
 
+
+export { SortDirection };

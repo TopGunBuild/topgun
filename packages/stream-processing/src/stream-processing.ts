@@ -1,105 +1,116 @@
 import { AsyncQueue } from '@topgunbuild/utils';
 import {
     DatabaseOutputData,
-    DatabaseQueryFunction,
-    DatabaseChangesToRowConverter,
-    StreamChangesFunction,
-    StreamProcessingParams, UniqueIdentifierExtractor,
+    DatabaseQueryFn,
+    StreamChangesFn,
+    StreamProcessingParams,
 } from './types';
 import { StreamDataCollection } from './collection.ts';
 import { SelectMessagesAction } from '@topgunbuild/types';
 import { FilterExpressionTree } from './filtering';
-import { convertSelectToFilterExpressionTree } from './utils/convert-select.ts';
+import { convertSelectToFilterExpressionTree } from './utils/convert-select';
 
-export class StreamProcessing<T, D = null>
-{
+/**
+ * An in-memory data grid contains a master dataset retrieved from the database
+ * based on query parameters, along with a fixed dataset before and after the master dataset.
+ * It responds to changes in the database by updating the master dataset and sends a change event,
+ * providing a continuous data stream.
+ * @class StreamProcessing
+ * @template T
+ */
+export class StreamProcessing<T> {
     readonly query: SelectMessagesAction;
-    readonly queryFunction: DatabaseQueryFunction<T>;
-    readonly emitChanges: StreamChangesFunction<T>;
+    readonly databaseQueryFn: DatabaseQueryFn<T>;
+    readonly emitChangesFn: StreamChangesFn<T>;
     readonly queue: AsyncQueue;
     readonly filterExpressionTree: FilterExpressionTree;
-    readonly dataToRowConverter: DatabaseChangesToRowConverter<D, T>;
-    readonly identifierExtractor: UniqueIdentifierExtractor<T>;
 
     readonly rowsBefore: StreamDataCollection<T>;
     readonly rowsAfter: StreamDataCollection<T>;
-    readonly rowsCurrent: StreamDataCollection<T>;
+    readonly rowsMain: StreamDataCollection<T>;
 
-    rowAdded: T;
-    rowDeleted: T;
+    lastRowAdded: T;
+    lastRowDeleted: T;
 
-    constructor(params: StreamProcessingParams<T, D>)
-    {
+    /**
+     * @param {StreamProcessingParams<T>} params
+     */
+    constructor(params: StreamProcessingParams<T>) {
         const {
-                  query,
-                  query: { sort: sortingExpressions, pageOffset },
-                  compareRows,
-                  additionalRowsBefore,
-                  additionalRowsAfter,
-                  queryFunction,
-                  emitChanges,
-                  databaseChangesToRowConverter,
-                  identifierExtractor,
-              } = params;
+            query,
+            query: { sort: sortingExpressions, pageOffset, pageSize },
+            compareRowsFn,
+            rowsBeforeSize: additionalRowsBefore,
+            rowsAfterSize: additionalRowsAfter,
+            databaseQueryFn,
+            emitChangesFn,
+        } = params;
 
-        this.query                = query;
-        this.queryFunction        = queryFunction;
-        this.emitChanges          = emitChanges;
-        this.dataToRowConverter   = databaseChangesToRowConverter;
-        this.identifierExtractor  = identifierExtractor;
+        this.query = query;
+        this.databaseQueryFn = databaseQueryFn;
+        this.emitChangesFn = emitChangesFn;
         this.filterExpressionTree = convertSelectToFilterExpressionTree(query);
-        this.queue                = new AsyncQueue();
+        this.queue = new AsyncQueue();
 
-        this.rowsBefore  = new StreamDataCollection({
+        // Initialize the row collections before the main set
+        this.rowsBefore = new StreamDataCollection({
             sortingExpressions,
-            compareRows,
-            additionalRows: additionalRowsBefore > pageOffset ? pageOffset : additionalRowsBefore,
-            identifierExtractor,
+            compareRowsFn,
+            pageSize: additionalRowsBefore > pageOffset ? pageOffset : additionalRowsBefore,
         });
-        this.rowsAfter   = new StreamDataCollection({
+        // Initialize the row collection after the main set
+        this.rowsAfter = new StreamDataCollection({
             sortingExpressions,
-            compareRows,
-            additionalRows: additionalRowsAfter,
-            identifierExtractor,
+            compareRowsFn,
+            pageSize: additionalRowsAfter,
         });
-        this.rowsCurrent = new StreamDataCollection({
+        // Initialize the row collection that contains the main set
+        this.rowsMain = new StreamDataCollection({
             sortingExpressions,
-            compareRows,
-            identifierExtractor,
+            compareRowsFn,
+            pageSize,
         });
     }
 
-    async fetchFromDatabase(emitChanges = false)
-    {
-        const query      = this.query;
-        query.pageOffset = this.query.pageOffset - this.rowsBefore.additionalRows;
-        query.pageSize   = this.query.pageSize + this.rowsBefore.additionalRows + this.rowsAfter.additionalRows;
+    /**
+     * Fetch data from the database
+     * @param {boolean} emitChanges
+     */
+    async fetchFromDatabase(emitChanges: boolean = false): Promise<void> {
+        const query = this.query;
 
-        const queryResult = await this.queryFunction(query);
+        // Increase the size of the requested data to include the data set before and after the main one.
+        query.pageOffset = this.query.pageOffset - this.rowsBefore.pageSize;
+        query.pageSize = this.query.pageSize + this.rowsBefore.pageSize + this.rowsAfter.pageSize;
 
-        this.rowsCurrent.init(queryResult.rows);
+        // Fetch the data from the database
+        const queryResult = await this.databaseQueryFn(query);
 
+        // Initialize the main data set
+        this.rowsMain.init(queryResult.rows);
+
+        // Initialize the data set before the main one
         this.rowsBefore.init(
-            this.rowsCurrent.splice(0, this.rowsBefore.additionalRows),
+            this.rowsMain.splice(0, this.rowsBefore.pageSize),
         );
+        // Initialize the data set after the main one
         this.rowsAfter.init(
-            this.rowsCurrent.splice(this.query.pageSize, this.rowsAfter.additionalRows),
+            this.rowsMain.splice(this.query.pageSize, this.rowsAfter.pageSize),
         );
 
-        if (emitChanges)
-        {
+        if (emitChanges) {
             this.#emitChanges(true);
         }
     }
 
-    databaseOutput(value: DatabaseOutputData<D>)
-    {
+    /**
+     * Handle database output
+     * @param {DatabaseOutputData<T>} value
+     */
+    databaseOutput(value: DatabaseOutputData<T>): void {
         const { operation, rowData, oldData } = value;
-        const row                             = this.dataToRowConverter(rowData);
-        const oldRow                          = this.dataToRowConverter(oldData);
 
-        switch (operation)
-        {
+        switch (operation) {
             case 'insert':
                 break;
 
@@ -111,30 +122,35 @@ export class StreamProcessing<T, D = null>
         }
     }
 
-    async updateHandler(row: T, oldRow: T): Promise<void>
-    {
+    /**
+     * Handle update operation
+     * @param {T} row
+     * @param {T} oldRow
+     */
+    async updateHandler(row: T, oldRow: T): Promise<void> {
         await this.deleteHandler(oldRow, false);
         await this.insertHandler(row, false);
 
-        this.rowAdded   = row;
-        this.rowDeleted = oldRow;
+        this.lastRowAdded = row;
+        this.lastRowDeleted = oldRow;
         this.#emitChanges();
     }
 
-    async insertHandler(row, emitChanges = true)
-    {
+    /**
+     * Handle insert operation
+     * @param {T} row
+     * @param {boolean} emitChanges
+     */
+    async insertHandler(row: T, emitChanges: boolean = true): Promise<void> {
         this.#clearPreviousValues();
 
-        if (this.#needSyncWithDB())
-        {
+        if (this.#needSyncWithDB()) {
             await this.fetchFromDatabase(emitChanges);
         }
-        else
-        {
+        else {
             const hasBefore = this.query.pageOffset > 0;
 
-            switch (true)
-            {
+            switch (true) {
                 case hasBefore && this.rowsBefore.isBefore(row):
                     await this.#shiftUp();
                     break;
@@ -144,16 +160,16 @@ export class StreamProcessing<T, D = null>
                     await this.#shiftUp();
                     break;
 
-                case this.rowsCurrent.isBefore(row):
-                    this.rowsCurrent.setToStart(row);
-                    this.rowAdded = row;
-                    await this.#shiftFromCurrentToAfter();
+                case this.rowsMain.isBefore(row):
+                    this.rowsMain.setToStart(row);
+                    this.lastRowAdded = row;
+                    this.#shiftFromCurrentToAfter();
                     break;
 
-                case this.rowsCurrent.isBelong(row):
-                    this.rowsCurrent.insert(row);
-                    this.rowAdded = row;
-                    await this.#shiftFromCurrentToAfter();
+                case this.rowsMain.isBelong(row):
+                    this.rowsMain.insert(row);
+                    this.lastRowAdded = row;
+                    this.#shiftFromCurrentToAfter();
                     break;
 
                 case this.rowsAfter.isBefore(row):
@@ -165,35 +181,35 @@ export class StreamProcessing<T, D = null>
                     break;
             }
 
-            if (emitChanges)
-            {
+            if (emitChanges) {
                 this.#emitChanges();
             }
         }
     }
 
-    async deleteHandler(row, emitChanges = true)
-    {
+    /**
+     * Handle delete operation
+     * @param {T} row
+     * @param {boolean} emitChanges
+     */
+    async deleteHandler(row: T, emitChanges: boolean = true): Promise<void> {
         this.#clearPreviousValues();
 
-        if (this.#needSyncWithDB())
-        {
+        if (this.#needSyncWithDB()) {
             await this.fetchFromDatabase(emitChanges);
         }
-        else
-        {
-            switch (true)
-            {
+        else {
+            switch (true) {
                 case this.rowsBefore.isBefore(row):
-                    await this.#shiftDown();
+                    this.#shiftDown();
                     break;
 
                 case this.rowsBefore.isBelong(row):
-                    await this.#shiftDown();
+                    this.#shiftDown();
                     this.rowsBefore.delete(row);
                     break;
 
-                case this.rowsCurrent.isBelong(row):
+                case this.rowsMain.isBelong(row):
                     await this.#deleteFromCurrent(row);
                     break;
 
@@ -202,81 +218,101 @@ export class StreamProcessing<T, D = null>
                     break;
             }
 
-            if (emitChanges)
-            {
+            if (emitChanges) {
                 this.#emitChanges();
             }
         }
     }
 
-    #emitChanges(persist = false): void
-    {
-        if (persist || this.rowAdded || this.rowDeleted)
-        {
-            this.emitChanges({
-                added     : this.rowAdded,
-                deleted   : this.rowDeleted,
-                collection: this.rowsCurrent.getData(),
+    /**
+     * Emit changes
+     * @param {boolean} persist
+     */
+    #emitChanges(persist: boolean = false): void {
+        if (persist || this.lastRowAdded || this.lastRowDeleted) {
+            this.emitChangesFn({
+                added: this.lastRowAdded,
+                deleted: this.lastRowDeleted,
+                collection: this.rowsMain.getData(),
             });
         }
     }
 
-    #needSyncWithDB(): boolean
-    {
+    /**
+     * Check if need to sync with database
+     * @returns {boolean}
+     */
+    #needSyncWithDB(): boolean {
         return (this.rowsBefore.getDataSize() === 0 && this.rowsBefore.hasLastRequestData) //  && this.selectParams.offset > 0
             || this.rowsAfter.getDataSize() === 0 && this.rowsAfter.hasLastRequestData
-            || this.rowsCurrent.getDataSize() === 0 && this.rowsCurrent.hasLastRequestData;
+            || this.rowsMain.getDataSize() === 0 && this.rowsMain.hasLastRequestData;
     }
 
-    #clearPreviousValues(): void
-    {
-        this.rowAdded   = null;
-        this.rowDeleted = null;
+    /**
+     * Clear previous values
+     */
+    #clearPreviousValues(): void {
+        this.lastRowAdded = null;
+        this.lastRowDeleted = null;
     }
 
-    async #deleteFromCurrent(row: T): Promise<void>
-    {
-        this.rowsCurrent.delete(row);
-        this.rowDeleted = row;
-        await this.#shiftFromAfterToCurrent();
+    /**
+     * Delete element from main set
+     * @param {T} row
+     */
+    async #deleteFromCurrent(row: T): Promise<void> {
+        this.rowsMain.delete(row);
+        this.lastRowDeleted = row;
+        this.#shiftFromAfterToCurrent();
     }
 
-    async #shiftUp(): Promise<void>
-    {
-        await this.#shiftFromBeforeToCurrent();
-        await this.#shiftFromCurrentToAfter();
+    /**
+     * Shift data collection up
+     */
+    async #shiftUp(): Promise<void> {
+        this.#shiftFromBeforeToCurrent();
+        this.#shiftFromCurrentToAfter();
     }
 
-    #shiftFromBeforeToCurrent()
-    {
-        this.rowAdded = this.rowsBefore.lastRemove();
-        this.rowsCurrent.setToStart(this.rowAdded);
+    /**
+     * Shift data collection up (from before to main)
+     */
+    #shiftFromBeforeToCurrent(): void {
+        this.lastRowAdded = this.rowsBefore.lastRemove();
+        this.rowsMain.setToStart(this.lastRowAdded);
     }
 
-    #shiftFromCurrentToAfter(): void
-    {
-        if (this.rowsCurrent.getDataSize() > this.query.pageSize)
-        {
-            this.rowDeleted = this.rowsCurrent.lastRemove();
-            this.rowsAfter.setToStart(this.rowDeleted);
+    /**
+     * Shift data collection up (main to after)
+     */
+    #shiftFromCurrentToAfter(): void {
+        if (this.rowsMain.getDataSize() > this.query.pageSize) {
+            this.lastRowDeleted = this.rowsMain.lastRemove();
+            this.rowsAfter.setToStart(this.lastRowDeleted);
         }
     }
 
-    async #shiftDown(): Promise<void>
-    {
-        await this.#shiftFromAfterToCurrent();
-        await this.#shiftFromCurrentToBefore();
+    /**
+     * Shift data collection down
+     */
+    #shiftDown(): void {
+        this.#shiftFromAfterToCurrent();
+        this.#shiftFromCurrentToBefore();
     }
 
-    #shiftFromAfterToCurrent(): void
-    {
-        this.rowAdded = this.rowsAfter.firstRemove();
-        this.rowsCurrent.setToEnd(this.rowAdded);
+    /**
+     * Shift data collection down (from after to main)
+     */
+    #shiftFromAfterToCurrent(): void {
+        this.lastRowAdded = this.rowsAfter.firstRemove();
+        this.rowsMain.setToEnd(this.lastRowAdded);
     }
 
-    #shiftFromCurrentToBefore(): void
-    {
-        this.rowDeleted = this.rowsCurrent.firstRemove();
-        this.rowsBefore.setToEnd(this.rowDeleted);
+    /**
+     * Shift data collection down (from main to before)
+     */
+    #shiftFromCurrentToBefore(): void {
+        this.lastRowDeleted = this.rowsMain.firstRemove();
+        this.rowsBefore.setToEnd(this.lastRowDeleted);
     }
 }
