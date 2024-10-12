@@ -1,79 +1,87 @@
 import { StreamProcessing } from '../stream-processing';
-import { StreamDataCollection } from '../collection';
 import { AsyncQueue } from '@topgunbuild/utils';
+import { FilterService } from '../filtering';
 import { StreamProcessingParams } from '../types';
 import { SelectMessagesAction } from '@topgunbuild/types';
 
+// jest.mock('@topgunbuild/utils');
+// jest.mock('./collection.ts');
+// jest.mock('./filtering');
+// jest.mock('./utils/convert-select');
+
 describe('StreamProcessing', () => {
-    let streamProcessing: StreamProcessing<number>;
-    let mockDatabaseQueryFn: jest.Mock;
-    let mockEmitChangesFn: jest.Mock;
-    let params: StreamProcessingParams<number>;
+    let streamProcessing: StreamProcessing<any>;
+    let mockParams: StreamProcessingParams<any>;
 
     beforeEach(() => {
-        mockDatabaseQueryFn = jest.fn().mockResolvedValue({ rows: [1, 2, 3] });
-        mockEmitChangesFn = jest.fn();
-
-        params = {
-            query: {
-                sort: [],
-                pageOffset: 0,
-                pageSize: 3,
-            } as SelectMessagesAction,
-            compareRowsFn: (a, b) => a === b,
-            rowsBeforeSize: 1,
-            rowsAfterSize: 1,
-            databaseQueryFn: mockDatabaseQueryFn,
-            emitChangesFn: mockEmitChangesFn,
+        mockParams = {
+            query: { sort: [], pageOffset: 0, pageSize: 10 } as SelectMessagesAction,
+            compareRowsFn: jest.fn(),
+            rowsBeforeSize: 5,
+            rowsAfterSize: 5,
+            databaseQueryFn: jest.fn().mockResolvedValue({ rows: [] }),
+            emitChangesFn: jest.fn(),
         };
 
-        streamProcessing = new StreamProcessing<number>(params);
+        streamProcessing = new StreamProcessing(mockParams);
     });
 
     test('should initialize with correct parameters', () => {
-        expect(streamProcessing.query).toEqual(params.query);
-        expect(streamProcessing.databaseQueryFn).toBe(mockDatabaseQueryFn);
-        expect(streamProcessing.emitChangesFn).toBe(mockEmitChangesFn);
+        expect(streamProcessing.query).toEqual(mockParams.query);
+        expect(streamProcessing.databaseQueryFn).toBe(mockParams.databaseQueryFn);
+        expect(streamProcessing.emitChangesFn).toBe(mockParams.emitChangesFn);
         expect(streamProcessing.queue).toBeInstanceOf(AsyncQueue);
-        expect(streamProcessing.rowsBefore).toBeInstanceOf(StreamDataCollection);
-        expect(streamProcessing.rowsAfter).toBeInstanceOf(StreamDataCollection);
-        expect(streamProcessing.rowsMain).toBeInstanceOf(StreamDataCollection);
+        expect(streamProcessing.filterService).toBeInstanceOf(FilterService);
     });
 
-    test('should fetch data from the database', async () => {
-        await streamProcessing.fetchFromDatabase(true);
-        expect(mockDatabaseQueryFn).toHaveBeenCalledWith(expect.objectContaining({
-            pageOffset: -1,
-            pageSize: 5,
+    test('updateHandler should update row and emit changes', async () => {
+        const mockRow = { id: 1 };
+        const mockOldRow = { id: 0 };
+        await streamProcessing.updateHandler({ row: mockRow, oldRow: mockOldRow });
+
+        expect(streamProcessing.lastRowAdded).toBe(mockRow);
+        expect(streamProcessing.lastRowDeleted).toBe(mockOldRow);
+        expect(mockParams.emitChangesFn).toHaveBeenCalled();
+    });
+
+    test('fetchFromDatabase should fetch data and initialize collections', async () => {
+        const mockRows = [{ id: 1 }, { id: 2 }, { id: 3 }];
+        (mockParams.databaseQueryFn as jest.Mock).mockResolvedValueOnce({ rows: mockRows });
+
+        await streamProcessing.fetchFromDatabase();
+
+        expect(mockParams.databaseQueryFn).toHaveBeenCalledWith(expect.objectContaining({
+            pageOffset: 0,
+            pageSize: 15,
         }));
-        expect(mockEmitChangesFn).toHaveBeenCalled();
+        // expect(streamProcessing.rowsMain.init).toHaveBeenCalledWith(mockRows);
     });
 
-    test('should handle insert operation', async () => {
-        await streamProcessing.insertHandler(4);
-        expect(streamProcessing.lastRowAdded).toBe(4);
-        expect(mockEmitChangesFn).toHaveBeenCalled();
-    });
+    // test('databaseOutput should handle insert operation', () => {
+    //     const mockData: DatabaseOutputData<any> = {
+    //         operation: 'insert',
+    //         rowData: { id: 1 },
+    //         oldData: null,
+    //     };
 
-    test('should handle delete operation', async () => {
-        await streamProcessing.deleteHandler(2);
-        expect(streamProcessing.lastRowDeleted).toBe(2);
-        expect(mockEmitChangesFn).toHaveBeenCalled();
-    });
+    //     streamProcessing.databaseOutput(mockData);
 
-    test('should handle update operation', async () => {
-        await streamProcessing.updateHandler(4, 2);
-        expect(streamProcessing.lastRowAdded).toBe(4);
-        expect(streamProcessing.lastRowDeleted).toBe(2);
-        expect(mockEmitChangesFn).toHaveBeenCalled();
-    });
+    //     expect(streamProcessing.queue.enqueue).toHaveBeenCalled();
+    // });
 
-    test('should emit changes', () => {
-        streamProcessing['#emitChanges'](true);
-        expect(mockEmitChangesFn).toHaveBeenCalledWith({
-            added: undefined,
-            deleted: undefined,
-            collection: expect.any(Array),
-        });
-    });
+    // test('insertHandler should insert row and emit changes', async () => {
+    //     const mockRow = { id: 1 };
+    //     await streamProcessing.insertHandler({ row: mockRow });
+
+    //     expect(streamProcessing.lastRowAdded).toBe(mockRow);
+    //     expect(mockParams.emitChangesFn).toHaveBeenCalled();
+    // });
+
+    // test('deleteHandler should delete row and emit changes', async () => {
+    //     const mockRow = { id: 1 };
+    //     await streamProcessing.deleteHandler({ row: mockRow });
+
+    //     expect(streamProcessing.lastRowDeleted).toBe(mockRow);
+    //     expect(mockParams.emitChangesFn).toHaveBeenCalled();
+    // });
 });

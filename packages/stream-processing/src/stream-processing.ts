@@ -4,10 +4,11 @@ import {
     DatabaseQueryFn,
     StreamChangesFn,
     StreamProcessingParams,
+    RowOperationParams,
 } from './types';
 import { StreamDataCollection } from './collection.ts';
 import { SelectMessagesAction } from '@topgunbuild/types';
-import { FilterExpressionTree } from './filtering';
+import { FilterExpressionTree, FilterService } from './filtering';
 import { convertSelectToFilterExpressionTree } from './utils/convert-select';
 
 /**
@@ -24,6 +25,7 @@ export class StreamProcessing<T> {
     readonly emitChangesFn: StreamChangesFn<T>;
     readonly queue: AsyncQueue;
     readonly filterExpressionTree: FilterExpressionTree;
+    readonly filterService: FilterService;
 
     readonly rowsBefore: StreamDataCollection<T>;
     readonly rowsAfter: StreamDataCollection<T>;
@@ -51,6 +53,7 @@ export class StreamProcessing<T> {
         this.emitChangesFn = emitChangesFn;
         this.filterExpressionTree = convertSelectToFilterExpressionTree(query);
         this.queue = new AsyncQueue();
+        this.filterService = new FilterService();
 
         // Initialize the row collections before the main set
         this.rowsBefore = new StreamDataCollection({
@@ -110,26 +113,55 @@ export class StreamProcessing<T> {
     databaseOutput(value: DatabaseOutputData<T>): void {
         const { operation, rowData, oldData } = value;
 
+        const isMatch = this.filterService.matchRecord(rowData as object, this.filterExpressionTree);
+        const isOldMatch = oldData && this.filterService.matchRecord(oldData as object, this.filterExpressionTree);
+
         switch (operation) {
             case 'insert':
+                // If the value matches the filter, add it to the queue for insertion
+                if (isMatch) {
+                    this.queue.enqueue(async () => {
+                        await this.insertHandler({ row: rowData });
+                    });
+                }
                 break;
 
             case 'update':
+                // If the value matches the filter, add it to the queue for update
+                if (isMatch) {
+                    const handler = isOldMatch ? this.updateHandler : this.insertHandler;
+                    this.queue.enqueue(async () => {
+                        await handler({ row: rowData, oldRow: oldData });
+                    });
+                }
+                // If the old value matches the filter, add it to the queue for deletion
+                else if (isOldMatch) {
+                    this.queue.enqueue(async () => {
+                        await this.deleteHandler({ row: oldData });
+                    });
+                }
                 break;
 
             case 'delete':
+                // If the value matches the filter, add it to the queue for deletion
+                if (isMatch) {
+                    this.queue.enqueue(async () => {
+                        await this.deleteHandler({ row: rowData });
+                    });
+                }
                 break;
         }
     }
 
     /**
      * Handle update operation
-     * @param {T} row
-     * @param {T} oldRow
+     * @param {RowOperationParams<T>} params
      */
-    async updateHandler(row: T, oldRow: T): Promise<void> {
-        await this.deleteHandler(oldRow, false);
-        await this.insertHandler(row, false);
+    async updateHandler(params: RowOperationParams<T>): Promise<void> {
+        const { row, oldRow } = params;
+
+        await this.deleteHandler({ row: oldRow }, false);
+        await this.insertHandler({ row }, false);
 
         this.lastRowAdded = row;
         this.lastRowDeleted = oldRow;
@@ -138,10 +170,12 @@ export class StreamProcessing<T> {
 
     /**
      * Handle insert operation
-     * @param {T} row
+     * @param {RowOperationParams<T>} params
      * @param {boolean} emitChanges
      */
-    async insertHandler(row: T, emitChanges: boolean = true): Promise<void> {
+    async insertHandler(params: RowOperationParams<T>, emitChanges: boolean = true): Promise<void> {
+        const { row } = params;
+
         this.#clearPreviousValues();
 
         if (this.#needSyncWithDB()) {
@@ -189,10 +223,12 @@ export class StreamProcessing<T> {
 
     /**
      * Handle delete operation
-     * @param {T} row
+     * @param {RowOperationParams<T>} params
      * @param {boolean} emitChanges
      */
-    async deleteHandler(row: T, emitChanges: boolean = true): Promise<void> {
+    async deleteHandler(params: RowOperationParams<T>, emitChanges: boolean = true): Promise<void> {
+        const { row } = params;
+
         this.#clearPreviousValues();
 
         if (this.#needSyncWithDB()) {
@@ -316,3 +352,4 @@ export class StreamProcessing<T> {
         this.rowsBefore.setToEnd(this.lastRowDeleted);
     }
 }
+

@@ -39,3 +39,8 @@ export interface StreamDataChanges<T>
 // Tracking changes in data streams
 export type StreamChangesFn<T> = (data: StreamDataChanges<T>) => void;
 
+export interface RowOperationParams<T> // Renamed from UpdateHandlerParams
+{
+    row: T;
+    oldRow?: T;
+}

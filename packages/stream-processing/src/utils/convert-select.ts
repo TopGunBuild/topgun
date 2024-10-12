@@ -16,8 +16,8 @@ import {
 
 export const convertSelectToFilterExpressionTree = (select: SelectMessagesAction): FilterExpressionTree =>
 {
-    const tree       = new FilterExpressionTree(FilterLogic.And);
-    tree.expressions = select.query.map(q => convertQuery(q));
+    const tree = new FilterExpressionTree(FilterLogic.And);
+    tree.expressions = Array.isArray(select.query) ? select.query.map(q => convertQuery(q)) : [];
     return tree;
 };
 
