@@ -14,7 +14,7 @@ export class SqlColumnGenerator
     {
         return {
             name: 'updated_at',
-            type: ColumnType.DATETIME,
+            type: ColumnType.TIMESTAMP,
         };
     }
 
@@ -26,7 +26,7 @@ export class SqlColumnGenerator
     {
         return {
             name: 'created_at',
-            type: ColumnType.DATETIME,
+            type: ColumnType.TIMESTAMP,
         };
     }
 

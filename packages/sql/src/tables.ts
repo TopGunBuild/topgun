@@ -251,7 +251,7 @@ export const invitationTable: SqlTable = SqlTable.create('invitation')
         },
         {
             name: 'expiration', // Expiration date of the invitation
-            type: ColumnType.DATETIME,
+            type: ColumnType.TIMESTAMP,
         },
         {
             name: 'max_uses', // Maximum number of uses for the invitation

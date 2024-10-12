@@ -22,10 +22,10 @@ export enum ColumnType
     BIGINT   = 'BIGINT',
     BLOB     = 'BLOB',
     TEXT     = 'TEXT',
-    DATETIME = 'DATETIME',
     BOOLEAN  = 'BOOLEAN',
     JSON     = 'JSON',
-    HSTORE   = 'HSTORE'
+    HSTORE   = 'HSTORE',
+    TIMESTAMP = "TIMESTAMP"
 }
 
 /**
