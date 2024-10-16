@@ -1,8 +1,8 @@
-# @topgunbuild/sql
+# @topgunbuild/sql-schema
 
 ## Overview
 
-`@topgunbuild/sql` is a TypeScript library providing utilities for defining and managing SQL tables, columns, indexes, and constraints. It is designed to facilitate the creation and manipulation of SQL database schemas in a programmatic way.
+`@topgunbuild/sql-schema` is a TypeScript library providing utilities for defining and managing SQL tables, columns, indexes, and constraints. It is designed to facilitate the creation and manipulation of SQL database schemas in a programmatic way.
 
 ## Features
 
@@ -16,11 +16,11 @@
 To install the package, use npm or yarn:
 
 ```bash
-npm install @topgunbuild/sql
+npm install @topgunbuild/sql-schema
 ```
 
 or
 
 ```bash
-yarn add @topgunbuild/sql
+yarn add @topgunbuild/sql-schema
 ```

@@ -1,13 +1,9 @@
 {
-    "name": "@topgunbuild/sqlite",
+    "name": "@topgunbuild/sql-schema",
     "version": "0.0.0",
-    "description": "SQLite storage",
+    "description": "SQL schema",
     "main": "./dist/index.js",
     "module": "./dist/index.mjs",
-    "browser": {
-        "./dist/index.js": "./dist/browser.js",
-        "./dist/index.mjs": "./dist/browser.mjs"
-    },
     "types": "./dist/index.d.ts",
     "files": [
         "dist/**"
@@ -25,14 +21,6 @@
     "license": "ISC",
     "jest": {
         "preset": "@topgunbuild/jest-presets/node"
-    },
-    "dependencies": {
-        "better-sqlite3": "^9.4.5",
-        "@sqlite.org/sqlite-wasm": "^3.45.2-build1",
-        "@topgunbuild/crypto": "workspace:*",
-        "@topgunbuild/store": "workspace:*",
-        "@topgunbuild/transport": "workspace:*",
-        "@topgunbuild/utils": "workspace:*"
     },
     "devDependencies": {
         "@topgunbuild/eslint-config": "workspace:*",
