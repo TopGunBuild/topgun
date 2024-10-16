@@ -3,7 +3,6 @@
  */
 export interface FilteringState {
     tree: FilteringCriteriaTree;
-    operator?: FilteringOperator;
     algorithm?: FilteringImplementation;
 }
 

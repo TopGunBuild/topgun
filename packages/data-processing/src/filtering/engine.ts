@@ -1,4 +1,4 @@
-import { FilteringCriteria, FilteringCriteriaTree, FilteringImplementation, FilteringOperator } from "./types";
+import { FilteringCriteria, FilteringCriteriaTree, FilteringImplementation, FilteringOperator, FilteringState } from "./types";
 
 /**
  * Data filter engine implementation.
@@ -111,7 +111,10 @@ export class DataFilteringEngine implements FilteringImplementation {
 /**
  * Default filter configuration.
  */
-export const FilteringDefaults = {
-    operator: FilteringOperator.And,
-    filterImplementation: new DataFilteringEngine()
+export const FilteringDefaults: FilteringState = {
+    algorithm: new DataFilteringEngine(),
+    tree: {
+        conditions: [],
+        operator: FilteringOperator.And
+    }
 };

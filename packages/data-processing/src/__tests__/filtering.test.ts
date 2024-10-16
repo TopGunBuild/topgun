@@ -11,18 +11,18 @@ import {
 } from '../filtering';
 
 
-describe('Unit testing FilteringStrategy', () => {
+describe('Unit testing DataFilteringEngine', () => {
     let dataGenerator: DataGenerator;
     let data: object[];
-    let fs: DataFilteringEngine;
+    let dfe: DataFilteringEngine;
     
     beforeEach(() => {
         dataGenerator = new DataGenerator();
         data = dataGenerator.data;
-        fs = new DataFilteringEngine();
+        dfe = new DataFilteringEngine();
     });
 
-    it ('tests `filter`', () => {
+    it ('tests `process`', () => {
         const expressionTree: FilteringCriteriaTree = {
             operator: FilteringOperator.And,
             conditions: [
@@ -33,11 +33,11 @@ describe('Unit testing FilteringStrategy', () => {
                 },
             ],
         };
-        const res = fs.process(data, expressionTree);
+        const res = dfe.process(data, expressionTree);
         expect(res.map((d: any) => d.number)).toEqual([2, 3, 4]);
     });
 
-    it ('tests `matchRecordByExpressions`', () => {
+    it ('tests `matchRecord`', () => {
         const rec = data[0];
         const expressionTree: FilteringCriteriaTree = {
             operator: FilteringOperator.Or,
@@ -54,13 +54,13 @@ describe('Unit testing FilteringStrategy', () => {
                 }
             ]
         };
-        const res = fs.matchRecord(rec, expressionTree);
+        const res = dfe.matchRecord(rec, expressionTree);
         expect(res).toBeTruthy();
     });
 
     it ('tests `matchByCriteria`', () => {
         const rec = data[0];
-        const res = fs.matchByCriteria(rec, {
+        const res = dfe.matchByCriteria(rec, {
             evaluator: BOOLEAN_FILTER_CONDITIONS[BooleanCondition.False],
             key: 'boolean'
         });

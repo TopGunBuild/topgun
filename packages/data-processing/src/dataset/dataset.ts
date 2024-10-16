@@ -5,9 +5,9 @@ import { DatasetState, DataSource, RecordMetadata } from "./types";
  * Class representing a dataset with CRUD operations and data processing capabilities.
  */
 export class Dataset {
-    private rawData: any[];
-    private transformedData: any[];
-    private configuration: DatasetState;
+    public rawData: any[];
+    public transformedData: any[];
+    public configuration: DatasetState;
 
     /**
      * Constructs a new Dataset instance.
@@ -24,7 +24,7 @@ export class Dataset {
      * @param config - The configuration for the transformations.
      * @returns The dataset with the applied transformations.
      */
-    public applyTransformations(config?: DatasetState): Dataset {
+    public process(config?: DatasetState): Dataset {
         if (config) {
             this.configuration = config;
         }

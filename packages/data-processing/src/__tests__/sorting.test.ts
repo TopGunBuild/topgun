@@ -1,7 +1,8 @@
 import { DataGenerator } from '@topgunbuild/test-utils';
 import { DataSortingEngine } from '../sorting/engine';
 import { SortDirection } from '@topgunbuild/types';
-describe('Unit testing Filtering', () => {
+
+describe('Unit testing Sorting', () => {
     let dataGenerator: DataGenerator;
     let data: any[];
     let sortService: DataSortingEngine;
@@ -12,7 +13,7 @@ describe('Unit testing Filtering', () => {
         sortService = new DataSortingEngine();
     });
 
-    it('tests `sort`', () => {
+    it('tests `process`', () => {
         const res = sortService.process(data, [
             {
                 direction: SortDirection.ASC,
