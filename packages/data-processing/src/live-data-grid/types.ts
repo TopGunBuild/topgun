@@ -1,4 +1,4 @@
-import { SelectMessagesAction, RowCollection } from '@topgunbuild/types';
+import { RowCollection, Sort, Query } from '@topgunbuild/types';
 
 
 export interface DatabaseOutputData<T> {
@@ -16,7 +16,7 @@ export interface DatabaseOutputData<T> {
  * Type for the function that queries the database
  * @template T
  */
-export type DatabaseQueryFn<T> = (params: SelectMessagesAction) => Promise<RowCollection<T>>; // Function that returns a promise resolving to a RowCollection
+export type DatabaseQueryFn<T> = (params: DataStreamQuery) => Promise<RowCollection<T>>; // Function that returns a promise resolving to a RowCollection
 
 /**
  * Type for the function that compares two rows
@@ -24,12 +24,24 @@ export type DatabaseQueryFn<T> = (params: SelectMessagesAction) => Promise<RowCo
  */
 export type RowComparatorFn<T> = (rowA: T, rowB: T) => boolean; // Function that compares two rows of type T
 
+
+/**
+ * Interface for the constructor parameters of the stream processing class
+ * @template T
+ */
+export interface DataStreamQuery {
+    pageOffset: number;
+    pageSize: number;
+    query: Query[];
+    sort: Sort[];
+}
+
 /**
  * Interface for the constructor parameters of the stream processing class
  * @template T
  */
 export interface DataStreamOptions<T> {
-    query: SelectMessagesAction; // The parameters for the query
+    query: DataStreamQuery; // The parameters for the query
     precedingRowsSize: number; // The number of rows to return before the main data
     followingRowsSize: number; // The number of rows to return after the main data
     databaseQueryFn: DatabaseQueryFn<T>; // The function to query the database

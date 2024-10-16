@@ -1,5 +1,7 @@
 import { SortParams } from "@topgunbuild/types";
+import { SortDirection } from "@topgunbuild/types";
 
+export { SortDirection as SortingDirection };
 
 /**
  * Interface for sorting criteria.

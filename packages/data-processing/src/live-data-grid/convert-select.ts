@@ -4,7 +4,7 @@ import {
     FieldQuery,
     LogicalQuery, NumberConditionQuery,
     Or,
-    Query, SelectMessagesAction,
+    Query,
     StringConditionQuery,
 } from '@topgunbuild/types';
 import { FilteringCriteria, FilteringCriteriaTree, FilteringOperator } from '../filtering/types';
@@ -15,13 +15,14 @@ import {
     NUMBER_FILTER_CONDITIONS, 
     BYTE_FILTER_CONDITIONS 
 } from '../filtering/conditions';
+import { DataStreamQuery } from './types';
 
 /**
  * Converts a select query to a filtering criteria tree.
  * @param select - The select query to convert.
  * @returns The filtering criteria tree.
  */
-export const convertSelectToFilterExpressionTree = (select: SelectMessagesAction): FilteringCriteriaTree =>
+export const convertSelectToFilterExpressionTree = (select: DataStreamQuery): FilteringCriteriaTree =>
 {
     const tree: FilteringCriteriaTree = {
         conditions: Array.isArray(select.query) ? select.query.map(q => convertQuery(q)) : [],

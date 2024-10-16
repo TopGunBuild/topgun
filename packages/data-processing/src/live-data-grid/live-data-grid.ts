@@ -4,11 +4,11 @@ import {
     DatabaseQueryFn,
     DataStreamChangesFn,
     DataStreamOptions,
+    DataStreamQuery,
     RowOperationParams,
 } from './types';
 import { LiveDataGridCollection } from './live-data-grid-collection';
-import { SelectMessagesAction } from '@topgunbuild/types';
-import { convertSelectToFilterExpressionTree } from '../utils/convert-select';
+import { convertSelectToFilterExpressionTree } from './convert-select';
 import { FilteringCriteriaTree } from '../filtering/types';
 import { DataFilteringEngine } from '../filtering/engine';
 
@@ -21,7 +21,7 @@ import { DataFilteringEngine } from '../filtering/engine';
  * @template T
  */
 export class LiveDataGrid<T> {
-    readonly query: SelectMessagesAction;
+    readonly query: DataStreamQuery;
     readonly databaseQueryFn: DatabaseQueryFn<T>;
     readonly dataStreamChangesFn: DataStreamChangesFn<T>;
     readonly queue: AsyncQueue;
@@ -81,7 +81,7 @@ export class LiveDataGrid<T> {
      * @param {boolean} emitChanges
      */
     async fetchFromDatabase(emitChanges: boolean = false): Promise<void> {
-        const query = this.query;
+        const query = { ...this.query };
 
         // Increase the size of the requested data to include the data set before and after the main one.
         query.pageOffset = this.query.pageOffset - this.precedingCollection.pageSize;
@@ -99,7 +99,7 @@ export class LiveDataGrid<T> {
         );
         // Initialize the data set after the main one
         this.followingCollection.init(
-            this.mainCollection.splice(this.query.pageSize, this.followingCollection.pageSize),
+            this.mainCollection.splice(this.query.pageSize, this.query.pageSize +this.followingCollection.pageSize),
         );
 
         if (emitChanges) {
@@ -272,6 +272,9 @@ export class LiveDataGrid<T> {
                 deleted: this.lastRowDeleted,
                 collection: this.mainCollection.getData(),
             });
+            // console.log('main', this.mainCollection.getData());
+            // console.log('preceding', this.precedingCollection.getData());
+            // console.log('following', this.followingCollection.getData());
         }
     }
 

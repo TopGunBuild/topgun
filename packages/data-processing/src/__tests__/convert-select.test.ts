@@ -1,7 +1,7 @@
 import {
     And, Or, StringConditionQuery, NumberConditionQuery,
     SelectMessagesAction} from '@topgunbuild/types';
-import { convertSelectToFilterExpressionTree } from '../utils/convert-select';
+import { convertSelectToFilterExpressionTree } from '../live-data-grid/convert-select';
 
 describe('convertSelectToFilterExpressionTree', () => {
     it('should return an empty FilterExpressionTree when select.query is not an array', () => {

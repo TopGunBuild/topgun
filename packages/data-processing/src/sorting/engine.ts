@@ -1,5 +1,4 @@
-import { SortDirection } from "@topgunbuild/types";
-import { SortingCriteria, SortingImplementation, SortingState } from "./types";
+import { SortingCriteria, SortingImplementation, SortingState, SortingDirection } from "./types";
 
 /**
  * Class for sorting algorithm.
@@ -101,7 +100,7 @@ export class DataSortingEngine implements SortingImplementation {
     private sortByAttribute<T>(items: T[], criteria: SortingCriteria): T[] {
         const attribute = criteria.key;
         const caseSensitive = criteria.caseSensitive ?? false;
-        const multiplier = (criteria.direction === SortDirection.DESC ? -1 : 1);
+        const multiplier = (criteria.direction === SortingDirection.DESC ? -1 : 1);
 
         const comparator = (item1: any, item2: any): number => {
             return this.compareAttributes(item1, item2, attribute, multiplier, caseSensitive);
