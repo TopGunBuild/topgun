@@ -22,7 +22,6 @@
         "preset": "@topgunbuild/jest-presets/node"
     },
     "dependencies": {
-        "@topgunbuild/sqlite": "workspace:*",
         "fido2-lib": "^3.5.3",
         "@hexagon/base64": "^1.1.28"
     },

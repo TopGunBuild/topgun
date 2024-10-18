@@ -1,26 +1,36 @@
-import { SocketClientOptions } from '@topgunbuild/socket';
-import { DataNode, DataValue } from '@topgunbuild/store';
+import { Action } from "@topgunbuild/types";
 
-export interface ClientOptions
-{
-    peers?: PeerOptions[];
-    dbDirectory?: string;
-    rowLimit?: number;
-}
+export type ClientConfig = {
+    websocketURIs?: string[];
+    appId?: string;
+    windowNetworkListener?: NetworkListenerDerived;
+    storage?: StorageDerived;
+};
 
-export interface ConnectorSendOptions
-{
-    cb?: MessageCb;
-    once?: boolean;
+export interface NetworkListenerAdapter {
+    isOnline(): boolean;
+    listen(f: (isOnline: boolean) => void): () => void;
 }
+export type NetworkListenerDerived = new () => NetworkListenerAdapter;
+
+export type IDBValidKey = number | string | Uint8Array;
+export type StorageParams = { dbName?: string, storeName?: string };
+
+export interface StorageAdapter<T> {
+    get(key: IDBValidKey): Promise<T>;
+    put(key: IDBValidKey, value: T): Promise<void>;
+    getAll(): Promise<T[]>;
+    update(key: IDBValidKey, updater: (val: Partial<T>) => T): Promise<void>;
+    delete(key: IDBValidKey): Promise<void>;
+}
+export type StorageDerived = new (params: StorageParams) => StorageAdapter<any>; // { new (): StorageAdapter<any> } & typeof StorageAdapter;
 
 export type QueryCb<T> = (value: T) => void;
-export type MessageCb = (msg: any) => void;
-export type PeerOptions = string|SocketClientOptions;
-export type DataType = DataNode[]|DataNode|DataValue;
-
-export enum ClientEvents
-{
-    storeInit = 'storeInit'
+export interface QueryState<T> {
+    action: Action;
+    cbs: QueryCb<T>[];
+    result: T;
+    resultHash: string;
 }
 
+export type NetworkStatus = 'online' | 'offline';

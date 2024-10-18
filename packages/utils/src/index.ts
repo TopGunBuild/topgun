@@ -14,6 +14,7 @@ export * from './equal';
 export * from './uint8array';
 export * from './assert';
 export * from './async-queue.ts';
+export * from './deferred';
 
 export { randomBytes } from '@noble/hashes/utils';
 
