@@ -1,4 +1,6 @@
-import { DataChagesEvent } from "../live-data-grid/types";
+import { DataFrame } from "../data-frame/data-frame";
+import { DataChagesEvent, DataFrameChangesCb, DataFrameQuery } from "../data-frame/types";
+import { convertQueryToDatagridState } from "../data-frame/utils";
 import { DataUtil } from "./data-util";
 import { DatasetState, RecordMetadata } from "./types";
 
@@ -15,6 +17,49 @@ export class Dataset {
      */
     constructor(initialData: any[] = []) {
         this.rawData = initialData;
+    }
+
+    /**
+     * Creates a DataFrame instance based on the provided query.
+     * @param params - The parameters for the DataFrame.
+     * @returns A new DataFrame instance.
+     */
+    createDataFrame<T>(
+            params: {
+                query: DataFrameQuery, 
+                precedingRowsSize: number, 
+                followingRowsSize: number,
+                dataFrameChangesCb: DataFrameChangesCb<T>,
+                compareRowsCb: (rowA: T, rowB: T) => boolean
+            }
+    ): DataFrame<T> {
+        const {query, precedingRowsSize, followingRowsSize, dataFrameChangesCb, compareRowsCb} = params;
+        const config: DatasetState = convertQueryToDatagridState(query);
+
+        return new DataFrame<T>({
+            query,
+            precedingRowsSize,
+            followingRowsSize,
+            dataFrameChangesCb,
+            compareRowsCb,
+            databaseQueryCb: async (params: DataFrameQuery) => {
+                const { rows, total } = this.process(config);
+
+                return {
+                    rows,
+                    total,
+                    hasNextPage: params.pageOffset + params.pageSize < total,
+                    hasPreviousPage: params.pageOffset > 0
+                };
+            },
+            databaseChangesCb: (cb: (data: DataChagesEvent<T>) => void) => {
+                const off = this.onChanges(cb);
+
+                return () => {
+                    off();
+                };
+            }
+        });
     }
 
     /**

@@ -1,14 +1,14 @@
-import { LiveDataGridCollection } from '../live-data-grid/live-data-grid-collection';
-import { RowComparatorCb } from '../live-data-grid/types';
+import { DataFrameCollection } from '../data-frame/data-frame-collection';
+import { RowComparator } from '../data-frame/types';
 
-describe('StreamDataCollection', () => {
-    let collection: LiveDataGridCollection<number>;
-    const compareRowsFn: RowComparatorCb<number> = (a, b) => a === b;
+describe('DataFrameCollection', () => {
+    let collection: DataFrameCollection<number>;
+    const compareRowsFn: RowComparator<number> = (a, b) => a === b;
 
     beforeEach(() => {
-        collection = new LiveDataGridCollection<number>({
+        collection = new DataFrameCollection<number>({
             sortingCriteria: [],
-            compareRowsFn,
+            compareRowsCb: compareRowsFn,
             pageSize: 10,
         });
     });

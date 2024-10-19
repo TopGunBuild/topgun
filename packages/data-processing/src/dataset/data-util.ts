@@ -1,7 +1,7 @@
-import { FILTER_CONDITIONS, FilteringCriteria, FilteringDefaults, FilteringState } from "../filtering";
-import { PagingError, PagingState } from "../paging";
+import { FilteringDefaults, FilteringState } from "../filtering";
+import { PagingState } from "../paging";
 import { SortingDefaults, SortingState } from "../sorting";
-import { DatasetState, DataType } from "./types";
+import { DatasetState } from "./types";
 
 /**
  * Utility class for data processing operations.
@@ -33,39 +33,6 @@ export class DataUtil {
     }
 
     /**
-     * Retrieves filtering conditions for a specific data type.
-     * @param dataType The data type to get conditions for.
-     * @returns An array of FilterCriteria for the specified data type.
-     */
-    static getFilterConditions(dataType: DataType): FilteringCriteria[] {
-        let dt: string;
-        switch (dataType) {
-            case DataType.String:
-                dt = "string";
-                break;
-            case DataType.Number:
-                dt = "number";
-                break;
-            case DataType.Boolean:
-                dt = "boolean";
-                break;
-            case DataType.Date:
-                dt = "date";
-                break;
-        }
-        return FILTER_CONDITIONS[dt];
-    }
-
-    /**
-     * Gets a list of filtering condition names for a specific data type.
-     * @param dataType The data type to get condition names for.
-     * @returns An array of condition names as strings.
-     */
-    static getFilterConditionNames(dataType: DataType): string[] {
-        return Object.keys(DataUtil.getFilterConditions(dataType));
-    }
-
-    /**
      * Applies sorting to a dataset.
      * @param data The dataset to sort.
      * @param state The sorting state to apply.
@@ -90,28 +57,14 @@ export class DataUtil {
         }
         const len = data.length;
         const index = state.currentPage;
-        const res = [];
         const recordsPerPage = state.itemsPerPage;
         state.details = {
-            totalPages: 0,
+            totalPages: Math.ceil(len / recordsPerPage),
             totalItems: data.length,
-            errorType: PagingError.None
+            errorType: 0 // Assuming 0 is the value for PagingError.None
         };
-        if (index < 0 || isNaN(index)) {
-            state.details.errorType = PagingError.InvalidPageNumber;
-            return res;
-        }
-        if (recordsPerPage <= 0 || isNaN(recordsPerPage)) {
-            state.details.errorType = PagingError.InvalidItemsPerPage;
-            return res;
-        }
-        state.details.totalPages = Math.ceil(len / recordsPerPage);
         if (!len) {
             return data;
-        }
-        if (index >= state.details.totalPages) {
-            state.details.errorType = PagingError.InvalidPageNumber;
-            return res;
         }
         return data.slice(index * recordsPerPage, (index + 1) * recordsPerPage);
     }

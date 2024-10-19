@@ -1,4 +1,4 @@
-export * from './live-data-grid';
+export * from './data-frame';
 export * from './dataset';
 export * from './sorting';
 export * from './filtering';

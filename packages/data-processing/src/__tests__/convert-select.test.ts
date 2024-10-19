@@ -1,19 +1,25 @@
 import {
     And, Or, StringConditionQuery, NumberConditionQuery,
-    SelectMessagesAction} from '@topgunbuild/types';
-import { convertSelectToFilterExpressionTree } from '../live-data-grid/utils';
+    SelectMessagesAction
+} from '@topgunbuild/types';
+import { convertQueryToFilterTree } from '../data-frame/utils';
 
 describe('convertSelectToFilterExpressionTree', () => {
     it('should return an empty FilterExpressionTree when select.query is not an array', () => {
         const select: SelectMessagesAction = { query: null } as any;
-        const result = convertSelectToFilterExpressionTree(select);
+        const result = convertQueryToFilterTree(select);
         expect(result.conditions).toEqual([]);
     });
 
     it('should convert a simple FieldQuery to a FilterExpression', () => {
-        const query: StringConditionQuery = new StringConditionQuery({ key: 'key', condition: 0, value: 'value', caseInsensitive: false });
+        const query: StringConditionQuery = new StringConditionQuery({ 
+            key: 'key', 
+            condition: 0, 
+            value: 'value', 
+            caseInsensitive: false 
+        });
         const select: SelectMessagesAction = { query: [query] } as any;
-        const result = convertSelectToFilterExpressionTree(select);
+        const result = convertQueryToFilterTree(select);
         expect(result.conditions.length).toBe(1);
     });
 
@@ -22,7 +28,7 @@ describe('convertSelectToFilterExpressionTree', () => {
         const subQuery2: NumberConditionQuery = new NumberConditionQuery({ key: 'key2', condition: 0, value: 20 });
         const andQuery: And = new And([subQuery1, subQuery2]);
         const select: SelectMessagesAction = { query: [andQuery] } as any;
-        const result = convertSelectToFilterExpressionTree(select);
+        const result = convertQueryToFilterTree(select);
         expect(result.conditions.length).toBe(1);
         // expect(result.conditions[0]).toBeInstanceOf(FilteringCriteriaTree);
     });
@@ -32,7 +38,7 @@ describe('convertSelectToFilterExpressionTree', () => {
         const subQuery2: NumberConditionQuery = new NumberConditionQuery({ key: 'key2', condition: 0, value: 20 });
         const orQuery: Or = new Or([subQuery1, subQuery2]);
         const select: SelectMessagesAction = { query: [orQuery] } as any;
-        const result = convertSelectToFilterExpressionTree(select);
+        const result = convertQueryToFilterTree(select);
         expect(result.conditions.length).toBe(1);
         // expect(result.conditions[0]).toBeInstanceOf(FilteringCriteriaTree);
     });

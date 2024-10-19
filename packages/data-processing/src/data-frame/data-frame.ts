@@ -1,14 +1,14 @@
 import { AsyncQueue } from '@topgunbuild/utils';
 import {
     DataChagesEvent,
-    DatabaseQueryCb,
-    LiveDataGridConfig,
-    LiveDataGridQuery,
+    DataQueryCb,
+    DataFrameChangesCb,
     RowOperationParams,
-    LiveDataGridChangesCb,
+    DataFrameQuery,
+    DataFrameConfig,
 } from './types';
-import { LiveDataGridCollection } from './live-data-grid-collection';
-import { convertSelectToFilterExpressionTree } from './utils';
+import { DataFrameCollection } from './data-frame-collection';
+import { convertQueryToFilterTree } from './utils';
 import { FilteringCriteriaTree } from '../filtering/types';
 import { DataFilteringEngine } from '../filtering/engine';
 
@@ -17,21 +17,21 @@ import { DataFilteringEngine } from '../filtering/engine';
  * based on query parameters, along with a fixed dataset before and after the master dataset.
  * It responds to changes in the database by updating the master dataset and sends a change event,
  * providing a continuous data stream.
- * @class LiveDataGrid
+ * @class DataFrame
  * @template T
  */
-export class LiveDataGrid<T> {
-    readonly query: LiveDataGridQuery;
-    readonly databaseQueryFn: DatabaseQueryCb<T>;
-    readonly liveDataGridChangesFn: LiveDataGridChangesCb<T>;
+export class DataFrame<T> {
+    readonly query: DataFrameQuery;
+    readonly databaseQueryFn: DataQueryCb<T>;
+    readonly dataFrameChangesFn: DataFrameChangesCb<T>;
     readonly queue: AsyncQueue;
     readonly filteringCriteriaTree: FilteringCriteriaTree;
     readonly filteringEngine: DataFilteringEngine;
     readonly databaseChangesOff: () => void;
 
-    readonly precedingCollection: LiveDataGridCollection<T>;
-    readonly followingCollection: LiveDataGridCollection<T>;
-    readonly mainCollection: LiveDataGridCollection<T>;
+    readonly precedingCollection: DataFrameCollection<T>;
+    readonly followingCollection: DataFrameCollection<T>;
+    readonly mainCollection: DataFrameCollection<T>;
 
     lastRowAdded: T;
     lastRowDeleted: T;
@@ -39,7 +39,7 @@ export class LiveDataGrid<T> {
     /**
      * @param {DataStreamOptions<T>} params
      */
-    constructor(params: LiveDataGridConfig<T>) {
+    constructor(params: DataFrameConfig<T>) {
         const {
             query,
             query: { sort: sortingCriteria, pageOffset, pageSize },
@@ -47,31 +47,31 @@ export class LiveDataGrid<T> {
             followingRowsSize,
             precedingRowsSize,
             databaseQueryCb,
-            liveDataGridChangesCb,
+            dataFrameChangesCb,
             databaseChangesCb,
         } = params;
 
         this.query = query;
         this.databaseQueryFn = databaseQueryCb;
-        this.liveDataGridChangesFn = liveDataGridChangesCb;
+        this.dataFrameChangesFn = dataFrameChangesCb;
         this.filteringEngine = new DataFilteringEngine();
         this.queue = new AsyncQueue();
-        this.filteringCriteriaTree = convertSelectToFilterExpressionTree(query);
+        this.filteringCriteriaTree = convertQueryToFilterTree(query);
 
         // Initialize the row collections before the main set
-        this.precedingCollection = new LiveDataGridCollection({
+        this.precedingCollection = new DataFrameCollection({
             sortingCriteria,
             compareRowsCb,
             pageSize: precedingRowsSize > pageOffset ? pageOffset : precedingRowsSize,
         });
         // Initialize the row collection after the main set
-        this.followingCollection = new LiveDataGridCollection({
+        this.followingCollection = new DataFrameCollection({
             sortingCriteria,
             compareRowsCb,
             pageSize: followingRowsSize,
         });
         // Initialize the row collection that contains the main set
-        this.mainCollection = new LiveDataGridCollection({
+        this.mainCollection = new DataFrameCollection({
             sortingCriteria,
             compareRowsCb,
             pageSize,
@@ -294,7 +294,7 @@ export class LiveDataGrid<T> {
      */
     #emitChanges(persist: boolean = false): void {
         if (persist || this.lastRowAdded || this.lastRowDeleted) {
-            this.liveDataGridChangesFn({
+            this.dataFrameChangesFn({
                 added: this.lastRowAdded,
                 deleted: this.lastRowDeleted,
                 collection: this.mainCollection.getData(),

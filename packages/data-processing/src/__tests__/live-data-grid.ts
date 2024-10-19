@@ -1,7 +1,7 @@
 import { AsyncQueue } from '@topgunbuild/utils';
-import { DataStreamOptions } from '../live-data-grid/types';
+import { DataStreamOptions } from '../data-frame/types';
 import { SelectMessagesAction } from '@topgunbuild/types';
-import { LiveDataGrid } from '../live-data-grid/live-data-grid';
+import { LiveDataGrid } from '../data-frame/data-frame';
 import { DataFilteringEngine } from '../filtering/engine';
 
 // jest.mock('@topgunbuild/utils');

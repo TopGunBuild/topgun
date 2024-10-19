@@ -1,9 +1,10 @@
 import { 
     DataChagesEvent,
-    LiveDataGrid, 
-    LiveDataGridChanges, 
-    LiveDataGridQuery, 
-    SortingDirection } from "..";
+    DataFrame,
+    DataFrameQuery,
+    DataFrameChanges,
+    SortingDirection 
+} from "..";
 
 /**
  * Test database row interface for testing the LiveDataGrid.
@@ -106,7 +107,7 @@ export class TestDatabase {
  */
 export class LiveDataGridTestData {
     db: TestDatabase;
-    grid: LiveDataGrid<TestDatabaseRow>;
+    grid: DataFrame<TestDatabaseRow>;
     result: number[] = [];
 }
 
@@ -120,7 +121,7 @@ export function createTestData(pageOffset: number, pageSize: number): LiveDataGr
     const testData = new LiveDataGridTestData();
 
     testData.db = new TestDatabase();
-    testData.grid = new LiveDataGrid<TestDatabaseRow>({
+    testData.grid = new DataFrame<TestDatabaseRow>({
         query: {
             pageOffset: pageOffset,
             pageSize: pageSize,
@@ -132,7 +133,7 @@ export function createTestData(pageOffset: number, pageSize: number): LiveDataGr
             ],
             query: []
         },
-        databaseQueryFn: async (params: LiveDataGridQuery) => {
+        databaseQueryCb: async (params: DataFrameQuery) => {
             let rows: any[] = [];
 
             for (let i = params.pageOffset; i < params.pageOffset + params.pageSize; i++) {
@@ -148,13 +149,13 @@ export function createTestData(pageOffset: number, pageSize: number): LiveDataGr
                 hasPreviousPage: params.pageOffset > 0
             };
         },
-        liveDataGridChangesFn: (data: LiveDataGridChanges<TestDatabaseRow>) => {
+        dataFrameChangesCb: (data: DataFrameChanges<TestDatabaseRow>) => {
             testData.result = data.collection.map(row => row.id);
         },
-        compareRowsFn: (rowA: TestDatabaseRow, rowB: TestDatabaseRow) => rowA.id === rowB.id,
+        compareRowsCb: (rowA: TestDatabaseRow, rowB: TestDatabaseRow) => rowA.id === rowB.id,
         precedingRowsSize: 10,
         followingRowsSize: 10,
-        databaseChangesFn: (cb: (data: DataChagesEvent<any>) => void) => {
+        databaseChangesCb: (cb: (data: DataChagesEvent<any>) => void) => {
             const off = testData.db.onChanges(cb);
 
             return () => {

@@ -1,9 +1,9 @@
 import { DataGenerator } from "@topgunbuild/test-utils";
-import { Dataset, DataSource } from "../dataset";
+import { Dataset } from "../dataset";
 import { FilteringOperator, FilteringState, NUMBER_FILTER_CONDITIONS, NumberCondition } from "../filtering";
 import { SortDirection } from "@topgunbuild/types";
 import { SortingState } from "../sorting";
-import { PagingState, PagingError } from "../paging";
+import { PagingState } from "../paging";
 
 describe('Dataset', () => {
 
@@ -18,7 +18,7 @@ describe('Dataset', () => {
     });
 
     it('should be defined', () => {
-        dataset.configuration = {
+        const transformedData = dataset.process({
             filtering: {
                 tree: {
                     conditions: [
@@ -43,15 +43,13 @@ describe('Dataset', () => {
                 currentPage: 0,
                 itemsPerPage: 2
             }
-        };
-
-        dataset.process();
-        expect(dataset.transformedData.map((d: any) => d.number)).toEqual([4, 3]);
+        });
+        expect(transformedData.rows.map((d: any) => d.number)).toEqual([4, 3]);
     });
 
     it("tests process", () => {
         // test filtering
-        dataset.configuration = {
+        let transformedData = dataset.process({
             filtering: {
                 tree: {
                     conditions: [
@@ -64,36 +62,36 @@ describe('Dataset', () => {
                     operator: FilteringOperator.And,
                 }
             }
-        };
-        dataset.process();
-        expect(dataset.transformedData.map((d: any) => d.number))
+        });
+        expect(transformedData.rows.map((d: any) => d.number))
             .toEqual([1, 2, 3, 4]);
         expect(dataset.rawData.map((d: any) => d.number))
             .toEqual([0, 1, 2, 3, 4]);
         // apply sorting without removing filtering
-        dataset.configuration.sorting = {
-            criteria: [
-                {
+        transformedData = dataset.process({
+            sorting: {
+                criteria: [
+                    {
                     key: "number",
                     direction: SortDirection.DESC
                 }
-            ]
-        };
-        dataset.process();
-        expect(dataset.transformedData.map((d: any) => d.number))
-            .toEqual([4, 3, 2, 1]);
+                ]
+            }
+        });
+        expect(transformedData.rows.map((d: any) => d.number))
+            .toEqual([4, 3, 2, 1, 0]);
         expect(dataset.rawData.map((d: any) => d.number))
             .toEqual([0, 1, 2, 3, 4]);
-        // apply paging(+filtering and sorting)
-        dataset.configuration.paging = {
-            currentPage: 1,
-            itemsPerPage: 3
-        };
-        dataset.process();
-        expect(dataset.transformedData.map((d: any) => d.number))
-            .toEqual([1]);
-        expect(dataset.configuration.paging.details.totalPages)
-            .toEqual(2);
+        transformedData = dataset.process({
+            paging: {
+                currentPage: 1,
+                itemsPerPage: 3
+            }
+        });
+        expect(transformedData.rows.map((d: any) => d.number))
+            .toEqual([3, 4]);
+        expect(transformedData.total)
+            .toEqual(5);
     });
 
     it("tests sort", () => {
@@ -105,11 +103,9 @@ describe('Dataset', () => {
                 }
             ]
         };
-        dataset.process({ sorting: sortingState });
-        expect(dataset.transformedData.map((d: any) => d.number))
+        const transformedData = dataset.process({ sorting: sortingState });
+        expect(transformedData.rows.map((d: any) => d.number))
             .toEqual([4, 3, 2, 1, 0]);
-        expect(dataset.configuration.sorting)
-            .toEqual(sortingState);
     });
 
     it("tests filter", () => {
@@ -125,11 +121,9 @@ describe('Dataset', () => {
                 operator: FilteringOperator.And
             }
         };
-        dataset.process({ filtering: filteringState });
-        expect(dataset.transformedData.map((d: any) => d.number))
+        const transformedData = dataset.process({ filtering: filteringState });
+        expect(transformedData.rows.map((d: any) => d.number))
             .toEqual([0, 1, 2, 3]);
-        expect(dataset.configuration.filtering)
-            .toEqual(filteringState);
     });
 
     it("tests page", () => {
@@ -138,21 +132,17 @@ describe('Dataset', () => {
             currentPage: 0,
             itemsPerPage: 4
         };
-        dataset.process({ paging: pagingState });
-        expect(dataset.transformedData.map((d: any) => d.number))
+        let transformedData = dataset.process({ paging: pagingState });
+        expect(transformedData.rows.map((d: any) => d.number))
             .toEqual([0, 1, 2, 3]);
-        expect(dataset.configuration.paging.details.totalPages)
-            .toEqual(2);
-        expect(dataset.configuration.paging.details.errorType)
-            .toEqual(PagingError.None);
+        expect(transformedData.total)
+            .toEqual(5);
         pagingState.currentPage = 1;
-        dataset.process({ paging: pagingState });
-        expect(dataset.transformedData.map((d: any) => d.number))
+        transformedData = dataset.process({ paging: pagingState });
+        expect(transformedData.rows.map((d: any) => d.number))
             .toEqual([4]);
-        expect(dataset.configuration.paging.details.totalPages)
-            .toEqual(2);
-        expect(dataset.configuration.paging.details.errorType)
-            .toEqual(PagingError.None);
+        expect(transformedData.total)
+            .toEqual(5);
     });
 
     // test CRUD operations
@@ -204,19 +194,5 @@ describe('Dataset', () => {
         recordInfo = dataset.findRecordByField("number", -1);
         expect(recordInfo.position === -1 && recordInfo.data === undefined)
             .toBeTruthy();
-    });
-
-    it("tests `findRecordIndex`", () => {
-        let index = dataset.findRecordIndex(data[1]);
-        expect(index).toBe(1);
-        index = dataset.findRecordIndex(data[0], DataSource.Processed);
-        expect(index).toBe(0);
-    });
-
-    it("tests `getRecordAt`", () => {
-        let rec = dataset.getRecordAt(0);
-        expect(rec).toBe(data[0]);
-        rec = dataset.getRecordAt(0, DataSource.Processed);
-        expect(rec).toBe(dataset.transformedData[0]);
     });
 });

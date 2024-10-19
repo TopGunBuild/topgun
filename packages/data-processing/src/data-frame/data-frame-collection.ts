@@ -1,18 +1,18 @@
 import { isDefined } from '@topgunbuild/utils';
-import { RowComparatorCb } from './types';
+import { RowComparator } from './types';
 import { SortingCriteria } from '../sorting/types';
 import { DataSortingEngine } from '../sorting/engine';
 
 /**
  * Class contains a set of in-memory data along with methods for efficiently manipulating the data.
- * @class LiveDataGridCollection
+ * @class DataFrameCollection
  * @template T
  */
-export class LiveDataGridCollection<T> {
+export class DataFrameCollection<T> {
     private data: T[];
     private readonly sortingCriteria: SortingCriteria[];
     private readonly sortingEngine: DataSortingEngine;
-    private readonly compareRowsCb: RowComparatorCb<T>;
+    private readonly compareRowsCb: RowComparator<T>;
 
     readonly pageSize: number;
 
@@ -20,15 +20,15 @@ export class LiveDataGridCollection<T> {
     hasLastRequestData: boolean = false;
 
     /**
-     * Constructor for DataStreamCollection
-     * @param {object} params - The parameters for initializing the DataStreamCollection
+     * Constructor for DataFrameCollection
+     * @param {object} params - The parameters for initializing the DataFrameCollection
      * @param {SortingExpression[]} params.sortingExpressions - The sorting expressions for the data
-     * @param {RowComparatorCb<T>} params.compareRowsFn - The function to compare rows
+     * @param {RowComparator<T>} params.compareRowsFn - The function to compare rows
      * @param {number} [params.pageSize] - The page size for pagination (optional)
      */
     constructor(params: {
         sortingCriteria: SortingCriteria[],
-        compareRowsCb: RowComparatorCb<T>,
+        compareRowsCb: RowComparator<T>,
         pageSize?: number
     }) {
         this.data = [];
