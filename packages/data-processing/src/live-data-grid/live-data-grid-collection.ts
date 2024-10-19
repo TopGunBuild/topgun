@@ -1,5 +1,5 @@
 import { isDefined } from '@topgunbuild/utils';
-import { RowComparatorFn } from './types';
+import { RowComparatorCb } from './types';
 import { SortingCriteria } from '../sorting/types';
 import { DataSortingEngine } from '../sorting/engine';
 
@@ -12,7 +12,7 @@ export class LiveDataGridCollection<T> {
     private data: T[];
     private readonly sortingCriteria: SortingCriteria[];
     private readonly sortingEngine: DataSortingEngine;
-    private readonly compareRowsFn: RowComparatorFn<T>;
+    private readonly compareRowsCb: RowComparatorCb<T>;
 
     readonly pageSize: number;
 
@@ -23,18 +23,18 @@ export class LiveDataGridCollection<T> {
      * Constructor for DataStreamCollection
      * @param {object} params - The parameters for initializing the DataStreamCollection
      * @param {SortingExpression[]} params.sortingExpressions - The sorting expressions for the data
-     * @param {RowComparatorFn<T>} params.compareRowsFn - The function to compare rows
+     * @param {RowComparatorCb<T>} params.compareRowsFn - The function to compare rows
      * @param {number} [params.pageSize] - The page size for pagination (optional)
      */
     constructor(params: {
         sortingCriteria: SortingCriteria[],
-        compareRowsFn: RowComparatorFn<T>,
+        compareRowsCb: RowComparatorCb<T>,
         pageSize?: number
     }) {
         this.data = [];
         this.sortingEngine = new DataSortingEngine();
         this.pageSize = params.pageSize;
-        this.compareRowsFn = params.compareRowsFn;
+        this.compareRowsCb = params.compareRowsCb;
         this.sortingCriteria = params.sortingCriteria.map(s => {
             s.caseSensitive = true;
             return s;
@@ -111,7 +111,7 @@ export class LiveDataGridCollection<T> {
      * @param {T} row
      */
     update(row: T): void {
-        const index = this.data.findIndex(_row => this.compareRowsFn(_row, row));
+        const index = this.data.findIndex(_row => this.compareRowsCb(_row, row));
         if (index > -1) {
             this.data[index] = row; // Update the row if found
         }
@@ -122,7 +122,7 @@ export class LiveDataGridCollection<T> {
      * @param {T} row
      */
     delete(row: T): void {
-        const index = this.data.findIndex(_row => this.compareRowsFn(_row, row));
+        const index = this.data.findIndex(_row => this.compareRowsCb(_row, row));
         if (index > -1) {
             this.data.splice(index, 1); // Remove the row if found
         }
@@ -183,7 +183,7 @@ export class LiveDataGridCollection<T> {
             return false; // Return false if the collection is empty
         }
         const array = this.sort([...this.getShort(), row]);
-        return this.compareRowsFn(array[0], row) && !this.compareRowsFn(array[1], row); // Check if the row is the first and not equal to the second
+        return this.compareRowsCb(array[0], row) && !this.compareRowsCb(array[1], row); // Check if the row is the first and not equal to the second
     }
 
     /**
@@ -195,15 +195,15 @@ export class LiveDataGridCollection<T> {
         if (this.getDataSize() === 0) {
             return false; // Return false if the collection is empty
         }
-        if (this.compareRowsFn(row, this.getFirst())) {
+        if (this.compareRowsCb(row, this.getFirst())) {
             return true; // Return true if the row is the first item
         }
-        if (this.compareRowsFn(row, this.getLast())) {
+        if (this.compareRowsCb(row, this.getLast())) {
             return true; // Return true if the row is the last item
         }
 
         const array = this.sort([...this.getShort(), row]);
-        return this.compareRowsFn(array[1], row); // Check if the row is the second item
+        return this.compareRowsCb(array[1], row); // Check if the row is the second item
     }
 
     /**

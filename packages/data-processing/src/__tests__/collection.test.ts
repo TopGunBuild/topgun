@@ -1,9 +1,9 @@
 import { LiveDataGridCollection } from '../live-data-grid/live-data-grid-collection';
-import { RowComparatorFn } from '../live-data-grid/types';
+import { RowComparatorCb } from '../live-data-grid/types';
 
 describe('StreamDataCollection', () => {
     let collection: LiveDataGridCollection<number>;
-    const compareRowsFn: RowComparatorFn<number> = (a, b) => a === b;
+    const compareRowsFn: RowComparatorCb<number> = (a, b) => a === b;
 
     beforeEach(() => {
         collection = new LiveDataGridCollection<number>({

@@ -19,20 +19,4 @@ export interface DatasetState {
     paging?: PagingState;   
 }
 
-/**
- * Enum for data types.
- */
-export enum DataType {
-    String,
-    Number,
-    Boolean,
-    Date
-}
 
-/**
- * Enum for data sources.
- */
-export enum DataSource {
-    Raw,
-    Processed
-}

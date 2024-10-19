@@ -1,4 +1,9 @@
-import { DatabaseOutputData, DataStreamChanges, DataStreamQuery, LiveDataGrid, SortingDirection } from "..";
+import { 
+    DataChagesEvent,
+    LiveDataGrid, 
+    LiveDataGridChanges, 
+    LiveDataGridQuery, 
+    SortingDirection } from "..";
 
 /**
  * Test database row interface for testing the LiveDataGrid.
@@ -13,7 +18,7 @@ export interface TestDatabaseRow {
  */
 export class TestDatabase {
     rows: TestDatabaseRow[] = [];
-    _cb: ((event: DatabaseOutputData<TestDatabaseRow>) => void)[] = [];
+    _cb: ((event: DataChagesEvent<TestDatabaseRow>) => void)[] = [];
 
     constructor(size = 100) {
         while (this.rows.length < size) {
@@ -27,7 +32,7 @@ export class TestDatabase {
      * @param cb The callback to add.
      * @returns A function to remove the callback.
      */
-    onChanges(cb: (event: DatabaseOutputData<TestDatabaseRow>) => void) {
+    onChanges(cb: (event: DataChagesEvent<TestDatabaseRow>) => void) {
         this._cb.push(cb);
 
         return () => {
@@ -127,7 +132,7 @@ export function createTestData(pageOffset: number, pageSize: number): LiveDataGr
             ],
             query: []
         },
-        databaseQueryFn: async (params: DataStreamQuery) => {
+        databaseQueryFn: async (params: LiveDataGridQuery) => {
             let rows: any[] = [];
 
             for (let i = params.pageOffset; i < params.pageOffset + params.pageSize; i++) {
@@ -143,15 +148,20 @@ export function createTestData(pageOffset: number, pageSize: number): LiveDataGr
                 hasPreviousPage: params.pageOffset > 0
             };
         },
-        dataStreamChangesFn: (data: DataStreamChanges<TestDatabaseRow>) => {
+        liveDataGridChangesFn: (data: LiveDataGridChanges<TestDatabaseRow>) => {
             testData.result = data.collection.map(row => row.id);
         },
         compareRowsFn: (rowA: TestDatabaseRow, rowB: TestDatabaseRow) => rowA.id === rowB.id,
         precedingRowsSize: 10,
-        followingRowsSize: 10
-    });
+        followingRowsSize: 10,
+        databaseChangesFn: (cb: (data: DataChagesEvent<any>) => void) => {
+            const off = testData.db.onChanges(cb);
 
-    testData.db.onChanges((event) => testData.grid.databaseOutput(event));
+            return () => {
+                off();
+            };
+        }
+    });
 
     return testData;
 }

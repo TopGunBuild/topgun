@@ -138,19 +138,22 @@ export class DataUtil {
      * @param state The dataset state containing filtering, ordering, and pagination information.
      * @returns The processed dataset.
      */
-    static processDataset<T>(data: T[], state: DatasetState): T[] {
+    static processDataset<T>(data: T[], state: DatasetState): {rows: T[], total: number} {
+        let total = data.length;
+        let rows = [...data];
         if (!state) {
-            return data;
+            return {rows, total};
         }
         if (state.filtering) {
-            data = DataUtil.applyFiltering(data, state.filtering);
+            rows = DataUtil.applyFiltering(rows, state.filtering);
+            total = rows.length;
         }
         if (state.sorting) {
-            data = DataUtil.applyOrdering(data, state.sorting);
+            rows = DataUtil.applyOrdering(rows, state.sorting);
         }
         if (state.paging) {
-            data = DataUtil.applyPagination(data, state.paging);
+            rows = DataUtil.applyPagination(rows, state.paging);
         }
-        return data;
+        return {rows, total};
     }
 }

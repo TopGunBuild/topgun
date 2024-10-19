@@ -1,14 +1,14 @@
 import { AsyncQueue } from '@topgunbuild/utils';
 import {
-    DatabaseOutputData,
-    DatabaseQueryFn,
-    DataStreamChangesFn,
-    DataStreamOptions,
-    DataStreamQuery,
+    DataChagesEvent,
+    DatabaseQueryCb,
+    LiveDataGridConfig,
+    LiveDataGridQuery,
     RowOperationParams,
+    LiveDataGridChangesCb,
 } from './types';
 import { LiveDataGridCollection } from './live-data-grid-collection';
-import { convertSelectToFilterExpressionTree } from './convert-select';
+import { convertSelectToFilterExpressionTree } from './utils';
 import { FilteringCriteriaTree } from '../filtering/types';
 import { DataFilteringEngine } from '../filtering/engine';
 
@@ -17,16 +17,17 @@ import { DataFilteringEngine } from '../filtering/engine';
  * based on query parameters, along with a fixed dataset before and after the master dataset.
  * It responds to changes in the database by updating the master dataset and sends a change event,
  * providing a continuous data stream.
- * @class DataGrid
+ * @class LiveDataGrid
  * @template T
  */
 export class LiveDataGrid<T> {
-    readonly query: DataStreamQuery;
-    readonly databaseQueryFn: DatabaseQueryFn<T>;
-    readonly dataStreamChangesFn: DataStreamChangesFn<T>;
+    readonly query: LiveDataGridQuery;
+    readonly databaseQueryFn: DatabaseQueryCb<T>;
+    readonly liveDataGridChangesFn: LiveDataGridChangesCb<T>;
     readonly queue: AsyncQueue;
     readonly filteringCriteriaTree: FilteringCriteriaTree;
     readonly filteringEngine: DataFilteringEngine;
+    readonly databaseChangesOff: () => void;
 
     readonly precedingCollection: LiveDataGridCollection<T>;
     readonly followingCollection: LiveDataGridCollection<T>;
@@ -38,20 +39,21 @@ export class LiveDataGrid<T> {
     /**
      * @param {DataStreamOptions<T>} params
      */
-    constructor(params: DataStreamOptions<T>) {
+    constructor(params: LiveDataGridConfig<T>) {
         const {
             query,
             query: { sort: sortingCriteria, pageOffset, pageSize },
-            compareRowsFn,
+            compareRowsCb,
             followingRowsSize,
             precedingRowsSize,
-            databaseQueryFn,
-            dataStreamChangesFn,
+            databaseQueryCb,
+            liveDataGridChangesCb,
+            databaseChangesCb,
         } = params;
 
         this.query = query;
-        this.databaseQueryFn = databaseQueryFn;
-        this.dataStreamChangesFn = dataStreamChangesFn;
+        this.databaseQueryFn = databaseQueryCb;
+        this.liveDataGridChangesFn = liveDataGridChangesCb;
         this.filteringEngine = new DataFilteringEngine();
         this.queue = new AsyncQueue();
         this.filteringCriteriaTree = convertSelectToFilterExpressionTree(query);
@@ -59,21 +61,24 @@ export class LiveDataGrid<T> {
         // Initialize the row collections before the main set
         this.precedingCollection = new LiveDataGridCollection({
             sortingCriteria,
-            compareRowsFn,
+            compareRowsCb,
             pageSize: precedingRowsSize > pageOffset ? pageOffset : precedingRowsSize,
         });
         // Initialize the row collection after the main set
         this.followingCollection = new LiveDataGridCollection({
             sortingCriteria,
-            compareRowsFn,
+            compareRowsCb,
             pageSize: followingRowsSize,
         });
         // Initialize the row collection that contains the main set
         this.mainCollection = new LiveDataGridCollection({
             sortingCriteria,
-            compareRowsFn,
+            compareRowsCb,
             pageSize,
         });
+
+        // Subscribe to database changes
+        this.databaseChangesOff = databaseChangesCb(data => this.databaseOutput(data));
     }
 
     /**
@@ -99,7 +104,7 @@ export class LiveDataGrid<T> {
         );
         // Initialize the data set after the main one
         this.followingCollection.init(
-            this.mainCollection.splice(this.query.pageSize, this.query.pageSize +this.followingCollection.pageSize),
+            this.mainCollection.splice(this.query.pageSize, this.query.pageSize + this.followingCollection.pageSize),
         );
 
         if (emitChanges) {
@@ -108,14 +113,26 @@ export class LiveDataGrid<T> {
     }
 
     /**
-     * Handle database output
-     * @param {DatabaseOutputData<T>} value
+     * Destroy the data grid
      */
-    databaseOutput(value: DatabaseOutputData<T>): void {
+    destroy(): void {
+        this.databaseChangesOff();
+        this.queue.destroy();
+    }
+
+    /**
+     * Handle database output
+     * @param {DataChagesEvent<T>} value
+     */
+    databaseOutput(value: DataChagesEvent<T>): void {
         const { operation, rowData, oldData } = value;
 
         const isMatch = this.filteringEngine.matchRecord(rowData as object, this.filteringCriteriaTree);
         const isOldMatch = oldData && this.filteringEngine.matchRecord(oldData as object, this.filteringCriteriaTree);
+
+        if (!isMatch && !isOldMatch) {
+            return;
+        }
 
         switch (operation) {
             case 'insert':
@@ -186,31 +203,37 @@ export class LiveDataGrid<T> {
             const hasBefore = this.query.pageOffset > 0;
 
             switch (true) {
+                // If the row is before the preceding collection and there is a preceding collection, shift up
                 case hasBefore && this.precedingCollection.isBefore(row):
                     await this.#shiftUp();
                     break;
 
+                // If the row is belong to the preceding collection and there is a preceding collection, insert it
                 case hasBefore && this.precedingCollection.isBelong(row):
                     this.precedingCollection.insert(row);
                     await this.#shiftUp();
                     break;
 
+                // If the row is before the main collection, set it to the start of the main collection
                 case this.mainCollection.isBefore(row):
                     this.mainCollection.setToStart(row);
                     this.lastRowAdded = row;
                     this.#shiftFromCurrentToAfter();
                     break;
 
+                // If the row is belong to the main collection, insert it
                 case this.mainCollection.isBelong(row):
                     this.mainCollection.insert(row);
                     this.lastRowAdded = row;
                     this.#shiftFromCurrentToAfter();
                     break;
 
+                // If the row is before the following collection, set it to the start of the following collection
                 case this.followingCollection.isBefore(row):
                     this.followingCollection.setToStart(row);
                     break;
 
+                // If the row is belong to the following collection, insert it
                 case this.followingCollection.isBelong(row):
                     this.followingCollection.insert(row);
                     break;
@@ -237,19 +260,23 @@ export class LiveDataGrid<T> {
         }
         else {
             switch (true) {
+                // If the row is before the preceding collection, shift down
                 case this.precedingCollection.isBefore(row):
                     this.#shiftDown();
                     break;
 
+                // If the row is belong to the preceding collection, delete it
                 case this.precedingCollection.isBelong(row):
                     this.#shiftDown();
                     this.precedingCollection.delete(row);
                     break;
 
+                // If the row is belong to the main collection, delete it
                 case this.mainCollection.isBelong(row):
                     await this.#deleteFromCurrent(row);
                     break;
 
+                // If the row is belong to the following collection, delete it
                 case this.followingCollection.isBelong(row):
                     this.followingCollection.delete(row);
                     break;
@@ -267,7 +294,7 @@ export class LiveDataGrid<T> {
      */
     #emitChanges(persist: boolean = false): void {
         if (persist || this.lastRowAdded || this.lastRowDeleted) {
-            this.dataStreamChangesFn({
+            this.liveDataGridChangesFn({
                 added: this.lastRowAdded,
                 deleted: this.lastRowDeleted,
                 collection: this.mainCollection.getData(),

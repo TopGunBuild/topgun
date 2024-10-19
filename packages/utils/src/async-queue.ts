@@ -15,6 +15,14 @@ export class AsyncQueue
     }
 
     /**
+     * Method to destroy the queue
+     */
+    destroy(): void
+    {
+        this.queue = [];
+    }
+
+    /**
      * Method to process the queue
      *
      * @returns {Promise<void>}

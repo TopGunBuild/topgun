@@ -1,13 +1,13 @@
+import { DataChagesEvent } from "../live-data-grid/types";
 import { DataUtil } from "./data-util";
-import { DatasetState, DataSource, RecordMetadata } from "./types";
+import { DatasetState, RecordMetadata } from "./types";
 
 /**
  * Class representing a dataset with CRUD operations and data processing capabilities.
  */
 export class Dataset {
     public rawData: any[];
-    public transformedData: any[];
-    public configuration: DatasetState;
+    private cbs: ((data: DataChagesEvent<any>) => void)[] = [];
 
     /**
      * Constructs a new Dataset instance.
@@ -15,8 +15,18 @@ export class Dataset {
      */
     constructor(initialData: any[] = []) {
         this.rawData = initialData;
-        this.transformedData = initialData;
-        this.configuration = {}
+    }
+
+    /**
+     * Adds a callback to the dataset.
+     * @param cb - The callback to add.
+     * @returns A function to remove the callback.
+     */
+    public onChanges(cb: (data: DataChagesEvent<any>) => void): () => void {
+        this.cbs.push(cb);
+        return () => {
+            this.cbs = this.cbs.filter(c => c !== cb);
+        };
     }
 
     /**
@@ -24,13 +34,8 @@ export class Dataset {
      * @param config - The configuration for the transformations.
      * @returns The dataset with the applied transformations.
      */
-    public process(config?: DatasetState): Dataset {
-        if (config) {
-            this.configuration = config;
-        }
-        this.transformedData = this.rawData;
-        this.transformedData = DataUtil.processDataset(this.rawData, this.configuration);
-        return this;
+    public process(config: DatasetState): {rows: any[], total: number} {
+        return DataUtil.processDataset(this.rawData, config);
     }
 
 
@@ -40,9 +45,8 @@ export class Dataset {
      * @param source - The source of the data to search in.
      * @returns The index of the record, or -1 if not found.
      */
-    public findRecordIndex(record: object, source: DataSource = DataSource.Raw): number {
-        const targetData = this.getDataSource(source);
-        return targetData.indexOf(record);
+    public findRecordIndex(record: object): number {
+        return this.rawData.indexOf(record);
     }
 
     /**
@@ -51,9 +55,8 @@ export class Dataset {
      * @param source - The source of the data to retrieve from.
      * @returns The record at the specified index, or undefined if not found.
      */
-    public getRecordAt(index: number, source: DataSource = DataSource.Raw): object {
-        const targetData = this.getDataSource(source);
-        return targetData[index];
+    public getRecordAt(index: number): object {
+        return this.rawData[index];
     }
 
     /**
@@ -63,12 +66,8 @@ export class Dataset {
      * @param source - The source of the data to search in.
      * @returns The metadata of the record, or undefined if not found.
      */
-    public findRecordByField(
-        fieldName: string,
-        value: any,
-        source: DataSource = DataSource.Raw
-    ): RecordMetadata {
-        const targetData = this.getDataSource(source);
+    public findRecordByField(fieldName: string, value: any): RecordMetadata {
+        const targetData = this.rawData;
         const dataLength = targetData.length;
         const result: RecordMetadata = {position: -1, data: undefined};
         
@@ -88,12 +87,12 @@ export class Dataset {
      * @param position - The position to insert the record at.
      */
     public insertRecord(record: object, position?: number): void {
-        const targetData = this.getDataSource(DataSource.Raw);
         if (position === null || position === undefined) {
-            targetData.push(record);
+            this.rawData.push(record);
         } else {
-            targetData.splice(position, 0, record);
+            this.rawData.splice(position, 0, record);
         }
+        this.emitChanges({operation: 'insert', rowData: record});
     }
 
     /**
@@ -102,7 +101,7 @@ export class Dataset {
      * @returns True if the record was removed, false otherwise.
      */
     public removeRecord(record: object): boolean {
-        const index: number = this.findRecordIndex(record, DataSource.Raw);
+        const index: number = this.findRecordIndex(record);
         return this.removeRecordAt(index);
     }
 
@@ -112,8 +111,11 @@ export class Dataset {
      * @returns True if the record was removed, false otherwise.
      */
     public removeRecordAt(index: number): boolean {
-        const targetData = this.getDataSource(DataSource.Raw);
-        return targetData.splice(index, 1).length === 1;
+        const result = this.rawData.splice(index, 1).length === 1;
+        if (result) {
+            this.emitChanges({operation: 'delete', rowData: this.rawData[index]});
+        }
+        return result;
     }
 
     /**
@@ -123,25 +125,20 @@ export class Dataset {
      * @returns The modified record, or undefined if not found.
      */
     public modifyRecordAt(index: number, updatedProperties: object): object {
-        const source: DataSource = DataSource.Raw;
-        const existingRecord = this.getRecordAt(index, source);
+        const existingRecord = this.getRecordAt(index);
         if (!existingRecord) {
             return undefined;
         }
-        return Object.assign(existingRecord, updatedProperties);
+        const result = Object.assign(existingRecord, updatedProperties);
+        this.emitChanges({operation: 'update', rowData: result, oldData: existingRecord});
+        return result;
     }
 
     /**
-     * Retrieves the data source based on the specified source type.
-     * @param source - The type of data source to retrieve.
-     * @returns The data source array.
+     * Emits changes to the dataset.
+     * @param data - The data to emit.
      */
-    private getDataSource(source: DataSource): any[] {
-        switch (source) {
-            case DataSource.Raw:
-                return this.rawData;
-            case DataSource.Processed:
-                return this.transformedData;
-        }
+    private emitChanges(data: DataChagesEvent<any>): void {
+        this.cbs.forEach(cb => cb(data));
     }
 }
