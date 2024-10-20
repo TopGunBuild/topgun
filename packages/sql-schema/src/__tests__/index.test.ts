@@ -1,4 +1,4 @@
-import { actionTable } from '../tables';
+import { actionTable } from '../sql-tables';
 import { ColumnType } from '../sql-column';
 
 describe('actionTable', () => {

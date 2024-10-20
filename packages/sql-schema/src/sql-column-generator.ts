@@ -1,5 +1,5 @@
 import { ColumnType, SqlColumn, UpdateDeleteAction } from './sql-column';
-import { keysetTable, memberTable, teamTable } from './tables';
+import { keysetTable, memberTable, teamTable } from './sql-tables';
 
 /**
  * Generates SQL columns
