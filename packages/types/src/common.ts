@@ -1,13 +1,4 @@
-/**
- * Represents a collection of rows with pagination information.
- */
-export interface RowCollection<T>
-{
-    hasNextPage: boolean;
-    hasPreviousPage: boolean;
-    rows: T[];
-    total: number;
-}
+import { QueryResult } from "./queries/query-result";
 
 /**
  * Represents the scope of a keyset.
@@ -83,6 +74,6 @@ export type MessageRow = Record<string, MessageFieldValue>;
  * This interface represents a collection of MessageRow instances,
  * providing information about the presence of previous and next pages.
  */
-export interface MessageRowCollection extends RowCollection<MessageRow>
+export interface MessageRowCollection extends QueryResult<MessageRow>
 {
 }
