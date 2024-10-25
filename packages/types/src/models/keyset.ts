@@ -37,7 +37,18 @@ import { randomId } from '@topgunbuild/utils';
 //
 // }
 
-export class Keyset
+export interface IKeyset
+{
+    id: string;
+    teamId: string;
+    type: string;
+    name: string;
+    encryption: string;
+    signature: string;
+    generation: number;
+}
+
+export class Keyset implements IKeyset
 {
     @field({ type: 'string' })
     id: string;

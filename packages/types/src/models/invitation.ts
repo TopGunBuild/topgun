@@ -1,6 +1,15 @@
 import { field, option } from '@dao-xyz/borsh';
 
-export class Invitation
+export interface IInvitation
+{
+    id: string;
+    publicKey: string;
+    expiration: string;
+    maxUses: number;
+    userId?: string;
+}
+
+export class Invitation implements IInvitation
 {
     @field({ type: 'string' })
     id: string;

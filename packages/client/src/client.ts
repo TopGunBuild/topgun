@@ -1,4 +1,4 @@
-import { ClientOptions } from './types';
+import { ClientConfig } from './types';
 import { RoomQueryBuilder } from './query-builders';
 import { ClientService } from './client-service';
 
@@ -6,7 +6,7 @@ export class Client
 {
     readonly #service: ClientService;
 
-    constructor(options: ClientOptions)
+    constructor(options: ClientConfig)
     {
         this.#service = new ClientService(options);
     }

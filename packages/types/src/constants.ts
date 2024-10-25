@@ -1,4 +1,4 @@
-import { KeyScope } from './common/key-scope';
+import { KeyScope } from './common';
 
 export const SIGNATURE   = 'SIGNATURE';
 export const ENCRYPTION  = 'ENCRYPTION';

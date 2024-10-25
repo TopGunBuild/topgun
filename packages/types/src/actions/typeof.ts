@@ -5,7 +5,7 @@ import {
     ValueNumber,
     ValueString,
     ValueUint8Array,
-} from '../common/values.ts';
+} from './values';
 
 function unsupportedError(v: unknown)
 {

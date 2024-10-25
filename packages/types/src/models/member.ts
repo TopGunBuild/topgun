@@ -1,7 +1,12 @@
 import { field } from '@dao-xyz/borsh';
 import { randomId } from '@topgunbuild/utils';
 
-export class Member
+export interface IMember
+{
+    id: string;
+}
+
+export class Member implements IMember
 {
     @field({ type: 'string' })
     id: string;

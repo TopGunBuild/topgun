@@ -1,36 +1,41 @@
-import { Action } from "@topgunbuild/types";
+import { SelectQuery } from "@topgunbuild/types";
+import { StorageDerived } from "./storage/types";
 
+/**
+ * The configuration for the client
+ */
 export type ClientConfig = {
-    websocketURIs?: string[];
+    websocketURI?: string;
     appId?: string;
     windowNetworkListener?: NetworkListenerDerived;
-    storage?: StorageDerived;
+    storage?: StorageDerived<any>;
 };
 
+/**
+ * The network listener adapter
+ */
 export interface NetworkListenerAdapter {
     isOnline(): boolean;
     listen(f: (isOnline: boolean) => void): () => void;
 }
 export type NetworkListenerDerived = new () => NetworkListenerAdapter;
 
-export type IDBValidKey = number | string | Uint8Array;
-export type StorageParams = { dbName?: string, storeName?: string };
-
-export interface StorageAdapter<T> {
-    get(key: IDBValidKey): Promise<T>;
-    put(key: IDBValidKey, value: T): Promise<void>;
-    getAll(): Promise<T[]>;
-    update(key: IDBValidKey, updater: (val: Partial<T>) => T): Promise<void>;
-    delete(key: IDBValidKey): Promise<void>;
-}
-export type StorageDerived = new (params: StorageParams) => StorageAdapter<any>; // { new (): StorageAdapter<any> } & typeof StorageAdapter;
-
+/**
+ * The callback for a query
+ */
 export type QueryCb<T> = (value: T) => void;
+
+/**
+ * The state of a query
+ */
 export interface QueryState<T> {
-    action: Action;
+    query: SelectQuery;
     cbs: QueryCb<T>[];
     result: T;
     resultHash: string;
 }
 
+/**
+ * The network status
+ */
 export type NetworkStatus = 'online' | 'offline';

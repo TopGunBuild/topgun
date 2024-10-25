@@ -1,7 +1,14 @@
 import { field } from '@dao-xyz/borsh';
-import { Keyset } from './keyset';
+import { Keyset } from '../models/keyset';
 
-export class Lockbox
+export interface ILockbox
+{
+    encryptionPublicKey: string;
+    recipient: Keyset;
+    contents: Keyset;
+}
+
+export class Lockbox implements ILockbox
 {
     @field({ type: 'string' })
     encryptionPublicKey: string;

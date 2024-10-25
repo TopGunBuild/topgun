@@ -1,10 +1,29 @@
 import { field, option, serialize, variant, vec } from '@dao-xyz/borsh';
-import { randomId, toArray } from '@topgunbuild/utils';
-import { AbstractValue, Device, Invitation, Keyset, Lockbox, Member, Role, Server } from '../common';
-import { typeOf } from '../utils/typeof';
-import { Query, Sort } from './query';
+import { randomId } from '@topgunbuild/utils';
+import { AbstractValue} from './values';
+import { typeOf } from './typeof';
+import { Lockbox } from '../models/lockbox';
+import { Member } from '../models/member';
+import { Device } from '../models/device';
+import { Role } from '../models/role';
+import { Server } from '../models/server';
+import { Invitation } from '../models/invitation';
+import { Keyset } from '../models/keyset';
 
-export class ActionHeader
+export interface IActionHeader {
+    actionId: string;
+    userId: string;
+    teamId: string;
+    state: bigint;
+    context?: Uint8Array;
+}
+
+export interface IAction {
+    header: ActionHeader;
+    lockboxes: Lockbox[];
+}
+
+export class ActionHeader implements IActionHeader
 {
     @field({ type: 'string' })
     actionId: string;
@@ -37,7 +56,7 @@ export class ActionHeader
     }
 }
 
-export class Action
+export class Action implements IAction
 {
     @field({ type: ActionHeader })
     header: ActionHeader;
@@ -425,90 +444,27 @@ export class DeleteMessageAction extends Action
 }
 
 @variant(22)
-export class SelectMessagesAction extends Action
+export class DataChangesAction extends Action
 {
     @field({ type: 'string' })
-    id: string;
+    operation: 'insert' | 'update' | 'delete';
 
-    @field({ type: option('string') })
-    channelId: string;
+    @field({ type: AbstractValue })
+    rowData: AbstractValue;
 
-    @field({ type: option('string') })
-    messageId: string;
-
-    @field({ type: option('string') })
-    fieldName: string;
-
-    @field({ type: vec(Query) })
-    query: Query[];
-
-    @field({ type: vec(Sort) })
-    sort: Sort[];
-
-    @field({ type: vec('string') })
-    fields: string[];
-
-    @field({ type: 'u16' })
-    pageSize: number;
-
-    @field({ type: 'u32' })
-    pageOffset: number;
+    @field({ type: option(AbstractValue) })
+    oldData?: AbstractValue;
 
     constructor(data: {
-        id: string,
-        channelId: string,
-        messageId: string,
-        fieldName: string,
-        query: Query[]|Query,
-        sort: Sort[]|Sort,
-        fields: string[],
-        pageSize: number,
-        pageOffset: number
+        operation: 'insert' | 'update' | 'delete',
+        rowData: AbstractValue,
+        oldData?: AbstractValue,
     })
     {
         super({});
-        this.id         = data.id;
-        this.channelId  = data.channelId;
-        this.messageId  = data.messageId;
-        this.fieldName  = data.fieldName;
-        this.query      = toArray(data.query);
-        this.sort       = toArray(data.sort);
-        this.fields     = data.fields;
-        this.pageSize   = data.pageSize;
-        this.pageOffset = data.pageOffset;
-    }
-}
-
-@variant(23)
-export class SelectNextMessagesAction extends Action
-{
-    @field({ type: 'string' })
-    id: string;
-
-    @field({ type: 'u32' })
-    pageSize: number;
-
-    constructor(data: {
-        id: string,
-        pageSize: number
-    })
-    {
-        super({});
-        this.id       = data.id;
-        this.pageSize = data.pageSize;
-    }
-}
-
-@variant(24)
-export class CloseMessagesIteratorAction extends Action
-{
-    @field({ type: 'string' })
-    id: string;
-
-    constructor(data: { id: string })
-    {
-        super({});
-        this.id = data.id;
+        this.operation = data.operation;
+        this.rowData   = data.rowData;
+        this.oldData  = data.oldData;
     }
 }
 
@@ -534,7 +490,5 @@ export type TeamAction =
     |ChangeServerKeysAction
     |PutMessageAction
     |DeleteMessageAction
-    |SelectMessagesAction
-    |SelectNextMessagesAction
-    |CloseMessagesIteratorAction
-    |SetTeamNameAction;
+    |SetTeamNameAction
+    |DataChangesAction;

@@ -1,17 +1,19 @@
-import { ClientConfig, NetworkListenerAdapter, QueryCb, QueryState, StorageAdapter } from "./types";
-import { IndexedDBStorage } from "./utils/indexdb-storage";
+import { ClientConfig, NetworkListenerAdapter, QueryCb, QueryState } from "./types";
+import { IndexedDBStorage } from "./storage/indexeddb-storage";
 import { WebSocketManager } from "./websocket";
 import { WindowNetworkListener } from "./utils/window-network-listener";
 import { toHexString, windowOrGlobal } from "@topgunbuild/utils";
-import { Action } from "@topgunbuild/types";
+import { Action, SelectQuery } from "@topgunbuild/types";
+import { MemoryStorage } from "./storage/memory-storage";
+import { StorageManager } from "./storage/storage-manager";
 
 /**
  * The Store class is the main entry point for the TopGun client library.
  * It manages the connection to the websocket servers and the storage of data.
  */
 export class Store {
-    private websocketManagers: WebSocketManager[];
-    private queryStorage: StorageAdapter<any>;
+    private websocketManager: WebSocketManager;
+    private storageManager: StorageManager;
     private config: ClientConfig;
     private networkListener: NetworkListenerAdapter;
     private isOnline: boolean;
@@ -24,8 +26,9 @@ export class Store {
      */
     constructor(config: ClientConfig) {
         this.config = config;
-        this.initQueryStorage();
+
         this.initWebSocketManagers();
+        this.initStorageManager();
         this.initNetworkListener();
         this.initBeforeUnload();
     }
@@ -35,26 +38,24 @@ export class Store {
      * @param query The query to execute
      * @param cb The callback to call with the result
      */
-    public subscribeQuery<T>(action: Action, cb: QueryCb<T>): () => void {
-        const encodedAction = action.encode();
-        const actionHash = toHexString(encodedAction);
-        if (!this.queryCbs[actionHash]) {
-            this.queryCbs[actionHash] = {
-                action,
+    public subscribeQuery<T>(query: SelectQuery, cb: QueryCb<T>): () => void {
+        const encodedQuery = query.encode();
+        const queryHash = toHexString(encodedQuery);
+        if (!this.queryCbs[queryHash]) {
+            this.queryCbs[queryHash] = {
+                query,
                 cbs: [],
                 result: null,
                 resultHash: null,
             };
             // Send action to all websocket managers for first action
-            this.websocketManagers.forEach(manager => {
-                manager.send(encodedAction);
-            });
+            this.websocketManager.send(encodedQuery);
         }
-        this.queryCbs[actionHash].cbs.push(cb);
-        this.queryStorage.put(actionHash, action);
+        this.queryCbs[queryHash].cbs.push(cb);
+        this.storageManager.putQuery(queryHash, query);
 
         return () => {
-            this.unsubscribeQuery(action, cb, actionHash);
+            this.unsubscribeQuery(query, cb, queryHash);
         };
     }
 
@@ -64,34 +65,49 @@ export class Store {
      * @param cb The callback to unsubscribe
      * @param actionHash The hash of the action
      */
-    public unsubscribeQuery(action: Action, cb: QueryCb<any>, actionHash?: string) {
-        if (!actionHash) {
-            const encodedAction = action.encode();
-            actionHash = toHexString(encodedAction);
+    public unsubscribeQuery(query: SelectQuery, cb: QueryCb<any>, queryHash?: string) {
+        if (!queryHash) {
+            const encodedQuery = query.encode();
+            queryHash = toHexString(encodedQuery);
         }
 
-        this.queryCbs[actionHash].cbs = this.queryCbs[actionHash].cbs.filter(q => q !== cb);
-        if (this.queryCbs[actionHash].cbs.length === 0) {
-            delete this.queryCbs[actionHash];
-            this.queryStorage.delete(actionHash);
+        this.queryCbs[queryHash].cbs = this.queryCbs[queryHash].cbs.filter(q => q !== cb);
+        if (this.queryCbs[queryHash].cbs.length === 0) {
+            delete this.queryCbs[queryHash];
+            this.storageManager.deleteQuery(queryHash);
         }
+    }
+
+    /**
+     * Add a callback to be called before the window is unloaded
+     * @param cb The callback to call
+     */
+    public beforeUnload(cb: () => void) {
+        this.beforeUnloadCbs.push(cb);
     }
 
     /**
      * Initialize the websocket managers
      */
     private initWebSocketManagers() {
-        this.websocketManagers = this.config.websocketURIs.map(uri => new WebSocketManager({ websocketURI: uri, appId: this.config.appId }));
+        this.websocketManager = new WebSocketManager({ websocketURI: this.config.websocketURI, appId: this.config.appId });
     }
 
     /**
-     * Initialize the storage
+     * Initialize the storage manager
      */
-    private initQueryStorage() {
-        const storageConfig = { dbName: `topgun-${this.config.appId}`, storeName: 'queries' };
-        this.queryStorage = this.config.storage
-            ? new this.config.storage(storageConfig)
-            : new IndexedDBStorage(storageConfig);
+    private initStorageManager() {
+        const dbName = `topgun-${this.config.appId}`;
+
+        if (this.config.storage) {
+            this.storageManager = new StorageManager(dbName, this.config.storage);
+        }
+        else if (IndexedDBStorage.isSupported()) {
+            this.storageManager = new StorageManager(dbName, IndexedDBStorage);
+        }
+        else {
+            this.storageManager = new StorageManager(dbName, MemoryStorage);
+        }
     }
 
     /**
@@ -103,9 +119,7 @@ export class Store {
             : new WindowNetworkListener();
         this.isOnline = this.networkListener.isOnline();
         if (this.isOnline) {
-            this.websocketManagers.forEach(manager => {
-                manager.connect();
-            });
+            this.websocketManager.connect();
         }
 
         this.networkListener.listen((isOnline) => {
@@ -113,13 +127,11 @@ export class Store {
                 return;
             }
             this.isOnline = isOnline;
-            this.websocketManagers.forEach(manager => {
-                if (isOnline) {
-                    manager.connect();
-                } else {
-                    manager.disconnect();
-                }
-            });
+            if (isOnline) {
+                this.websocketManager.connect();
+            } else {
+                this.websocketManager.disconnect();
+            }
         });
     }
 
@@ -130,13 +142,5 @@ export class Store {
         windowOrGlobal?.addEventListener("beforeunload", () => {
             this.beforeUnloadCbs.forEach(cb => cb());
         });
-    }
-
-    /**
-     * Add a callback to be called before the window is unloaded
-     * @param cb The callback to call
-     */
-    public beforeUnload(cb: () => void) {
-        this.beforeUnloadCbs.push(cb);
     }
 }

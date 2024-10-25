@@ -1,7 +1,13 @@
 import { field } from '@dao-xyz/borsh';
-import { Keyset } from './keyset';
+import { Keyset } from '../models/keyset';
 
-export class Server
+export interface IServer
+{
+    host: string;
+    keys: Keyset;
+}
+
+export class Server implements IServer
 {
     @field({ type: 'string' })
     host: string;

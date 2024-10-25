@@ -7,7 +7,7 @@ export interface DataChagesEvent<T> {
     // The data for the row, represented as a key-value pair
     rowData: T;
 
-    // Optional: The old data for the row in case of an update or delete
+    // Optional: Old data for a row in case of update
     oldData?: T;
 }
 

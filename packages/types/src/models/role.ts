@@ -1,6 +1,12 @@
 import { field, vec } from '@dao-xyz/borsh';
 
-export class Role
+export interface IRole
+{
+    roleName: string;
+    permissions: string[];
+}
+
+export class Role implements IRole
 {
     @field({ type: 'string' })
     roleName: string;

@@ -1,21 +1,22 @@
 import { field, option } from '@dao-xyz/borsh';
 import { Keyset } from './keyset';
 
-// export interface IDeviceInfo
-// {
-//     userId: string;
-//     deviceId: string;
-//     deviceName: string;
-//     deviceInfo?: any;
-//     created?: bigint;
-// }
+export interface IDeviceInfo
+{
+    teamId: string;
+    userId: string;
+    deviceId: string;
+    keys: Keyset;
+    deviceInfo?: string;
+    created?: string;
+}
 
 // export interface IDeviceWithSecrets extends IDeviceInfo
 // {
 //     keys: KeysetWithSecrets;
 // }
 
-export class Device
+export class Device implements IDeviceInfo
 {
     @field({ type: 'string' })
     teamId: string;

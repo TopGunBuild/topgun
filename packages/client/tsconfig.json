@@ -4,7 +4,9 @@
         "target": "es2020",
         "outDir": "./dist",
         "types": ["jest", "node"],
-        "lib": ["dom", "ES2020"]
+        "lib": ["dom", "ES2020"],
+        "noUnusedLocals": false,
+        "noUnusedParameters": false
     },
     "include": ["."],
     "exclude": ["node_modules", "dist"],

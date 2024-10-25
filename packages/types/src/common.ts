@@ -1,4 +1,35 @@
-import { RowCollection } from './collection';
+/**
+ * Represents a collection of rows with pagination information.
+ */
+export interface RowCollection<T>
+{
+    hasNextPage: boolean;
+    hasPreviousPage: boolean;
+    rows: T[];
+    total: number;
+}
+
+/**
+ * Represents the scope of a keyset.
+ * 
+ * Examples:
+ * - User: { type: 'USER', name: 'alice' }
+ * - Device: { type: 'DEVICE', name: 'laptop' }
+ * - Role: { type: 'ROLE', name: 'MANAGER' }
+ * - Single-use keyset: { type: 'EPHEMERAL', name: 'EPHEMERAL' }
+ */
+export type KeyScope = {
+    /** 
+     * The type of the keyset scope.
+     * Not limited to predefined types, as applications may define their own.
+     */
+    type: string;
+
+    /**
+     * The name or identifier within the scope.
+     */
+    name: string;
+};
 
 /**
  * This interface can encapsulate the metadata associated with a field,

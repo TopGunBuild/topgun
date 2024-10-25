@@ -1,6 +1,14 @@
 import { deserialize, field } from '@dao-xyz/borsh';
 
-export class EncryptedAction
+export interface IEncryptedAction {
+    hash: string;
+    prevHash: string;
+    recipientPublicKey: string;
+    senderPublicKey: string;
+    encryptedBody: Uint8Array;
+}
+
+export class EncryptedAction implements IEncryptedAction
 {
     @field({ type: 'string' })
     hash: string;
