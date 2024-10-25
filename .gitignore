@@ -2,7 +2,6 @@
 .idea
 .vscode
 
-storage
 node_modules
 *.map
 

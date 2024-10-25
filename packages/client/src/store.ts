@@ -52,7 +52,7 @@ export class Store {
             this.websocketManager.send(encodedQuery);
         }
         this.queryCbs[queryHash].cbs.push(cb);
-        this.storageManager.putQuery(queryHash, query);
+        // this.storageManager.putQuery<any>(queryHash, query);
 
         return () => {
             this.unsubscribeQuery(query, cb, queryHash);
