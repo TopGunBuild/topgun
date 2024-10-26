@@ -1,12 +1,14 @@
 import { ClientConfig, NetworkListenerAdapter, QueryCb, QueryState } from "./types";
 import { IndexedDBStorage } from "./storage/indexeddb-storage";
-import { WebSocketManager } from "./websocket";
+import { MessageType, WebSocketManager } from "./websocket";
 import { WindowNetworkListener } from "./utils/window-network-listener";
 import { toHexString, windowOrGlobal } from "@topgunbuild/utils";
 import { Action, SelectQuery } from "@topgunbuild/types";
 import { MemoryStorage } from "./storage/memory-storage";
 import { StorageManager } from "./storage/storage-manager";
-
+import { transformSocketUrl } from "./utils/socket-url-transformer";
+import WebSocket from "isomorphic-ws";
+import { deserialize } from "@dao-xyz/borsh";
 /**
  * The Store class is the main entry point for the TopGun client library.
  * It manages the connection to the websocket servers and the storage of data.
@@ -31,6 +33,8 @@ export class Store {
         this.initStorageManager();
         this.initNetworkListener();
         this.initBeforeUnload();
+
+        this.beforeUnload(() => this.disconnect());
     }
 
     /**
@@ -39,42 +43,51 @@ export class Store {
      * @param cb The callback to call with the result
      */
     public subscribeQuery<T>(query: SelectQuery, cb: QueryCb<T>): () => void {
+        // Encode and hash query once, store in const
         const encodedQuery = query.encode();
         const queryHash = toHexString(encodedQuery);
-        if (!this.queryCbs[queryHash]) {
+        const queryState = this.queryCbs[queryHash];
+
+        // Use existing queryState if available
+        if (!queryState) {
             this.queryCbs[queryHash] = {
                 query,
-                cbs: [],
+                cbs: [cb], // Initialize with the callback directly
                 result: null,
                 resultHash: null,
             };
-            // Send action to all websocket managers for first action
             this.websocketManager.send(encodedQuery);
+        } else {
+            queryState.cbs.push(cb);
         }
-        this.queryCbs[queryHash].cbs.push(cb);
-        // this.storageManager.putQuery<any>(queryHash, query);
 
-        return () => {
-            this.unsubscribeQuery(query, cb, queryHash);
-        };
+        // Return memoized unsubscribe function
+        return () => this.unsubscribeQuery(query, cb, queryHash);
     }
 
     /**
      * Unsubscribe from a query
-     * @param action The query to unsubscribe from
+     * @param query The query to unsubscribe from
      * @param cb The callback to unsubscribe
-     * @param actionHash The hash of the action
+     * @param queryHash The hash of the query
      */
     public unsubscribeQuery(query: SelectQuery, cb: QueryCb<any>, queryHash?: string) {
-        if (!queryHash) {
-            const encodedQuery = query.encode();
-            queryHash = toHexString(encodedQuery);
+        // Get or compute queryHash
+        const hash = queryHash || toHexString(query.encode());
+        
+        // Early return if query doesn't exist
+        const queryState = this.queryCbs[hash];
+        if (!queryState) {
+            return;
         }
 
-        this.queryCbs[queryHash].cbs = this.queryCbs[queryHash].cbs.filter(q => q !== cb);
-        if (this.queryCbs[queryHash].cbs.length === 0) {
-            delete this.queryCbs[queryHash];
-            this.storageManager.deleteQuery(queryHash);
+        // Filter callbacks
+        queryState.cbs = queryState.cbs.filter(q => q !== cb);
+        
+        // Clean up if no callbacks remain
+        if (queryState.cbs.length === 0) {
+            delete this.queryCbs[hash];
+            this.storageManager.deleteQuery(hash);
         }
     }
 
@@ -87,10 +100,30 @@ export class Store {
     }
 
     /**
+     * Disconnect from the websocket
+     */
+    public disconnect() {
+        this.websocketManager.disconnect();
+    }
+
+    /**
      * Initialize the websocket managers
      */
     private initWebSocketManagers() {
-        this.websocketManager = new WebSocketManager({ websocketURI: this.config.websocketURI, appId: this.config.appId });
+        this.websocketManager = new WebSocketManager({
+            websocketURI: transformSocketUrl(this.config.websocketURI),
+            appId: this.config.appId
+        });
+        this.websocketManager.addMessageHandler(msg => this.handleMessage(msg));
+    }
+
+    /**
+     * Handle a message from the websocket
+     * @param msg The message to handle
+     */
+    private handleMessage(msg: WebSocket.Data) {
+        console.log(msg);
+        const message = deserialize(msg);
     }
 
     /**
@@ -98,16 +131,10 @@ export class Store {
      */
     private initStorageManager() {
         const dbName = `topgun-${this.config.appId}`;
-
-        if (this.config.storage) {
-            this.storageManager = new StorageManager(dbName, this.config.storage);
-        }
-        else if (IndexedDBStorage.isSupported()) {
-            this.storageManager = new StorageManager(dbName, IndexedDBStorage);
-        }
-        else {
-            this.storageManager = new StorageManager(dbName, MemoryStorage);
-        }
+        const storageImpl = this.config.storage || 
+            (IndexedDBStorage.isSupported() ? IndexedDBStorage : MemoryStorage);
+            
+        this.storageManager = new StorageManager(dbName, storageImpl);
     }
 
     /**
@@ -129,8 +156,6 @@ export class Store {
             this.isOnline = isOnline;
             if (isOnline) {
                 this.websocketManager.connect();
-            } else {
-                this.websocketManager.disconnect();
             }
         });
     }

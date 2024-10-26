@@ -28,7 +28,8 @@
         "@topgunbuild/logger": "workspace:*",
         "@topgunbuild/time": "workspace:*",
         "@topgunbuild/types": "workspace:*",
-        "@topgunbuild/utils": "workspace:*"
+        "@topgunbuild/utils": "workspace:*",
+        "isomorphic-ws": "^5.0.0"
     },
     "devDependencies": {
         "@topgunbuild/eslint-config": "workspace:*",
@@ -37,6 +38,7 @@
         "@topgunbuild/test-utils": "workspace:*",
         "@types/jest": "^29.5.12",
         "@types/node": "^20.11.24",
+        "@types/ws": "^8.5.10",
         "jest": "^29.7.0",
         "tsup": "^8.0.2",
         "typescript": "^5.3.3"

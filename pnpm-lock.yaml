@@ -72,6 +72,9 @@ importers:
       '@topgunbuild/utils':
         specifier: workspace:*
         version: link:../utils
+      isomorphic-ws:
+        specifier: ^5.0.0
+        version: 5.0.0(ws@8.17.0)
     devDependencies:
       '@topgunbuild/eslint-config':
         specifier: workspace:*
@@ -91,6 +94,9 @@ importers:
       '@types/node':
         specifier: ^20.11.24
         version: 20.16.2
+      '@types/ws':
+        specifier: ^8.5.10
+        version: 8.5.12
       jest:
         specifier: ^29.7.0
         version: 29.7.0(@types/node@20.16.2)
@@ -1876,6 +1882,12 @@ packages:
 
   /@types/unist@3.0.3:
     resolution: {integrity: sha512-ko/gIFJRv177XgZsZcBwnqJN5x/Gien8qNOn0D5bQU/zAzVf9Zt3BlcUiLqhV9y4ARk0GbT3tnUiPNgnTXzc/Q==}
+    dev: true
+
+  /@types/ws@8.5.12:
+    resolution: {integrity: sha512-3tPRkv1EtkDpzlgyKyI8pGsGZAGPEaXeu0DOj5DI25Ja91bdAYddYHbADRYVrZMRbfW+1l5YwXVDKohDJNQxkQ==}
+    dependencies:
+      '@types/node': 20.16.2
     dev: true
 
   /@types/yargs-parser@21.0.3:
@@ -4523,6 +4535,14 @@ packages:
     resolution: {integrity: sha512-LpB/54B+/2J5hqQ7imZHfdU31OlgQqx7ZicVlkm9kzg9/w8GKLEcFfJl/t7DCEDueOyBAD6zCCwTO6Fzs0NoEQ==}
     engines: {node: '>=16'}
     dev: true
+
+  /isomorphic-ws@5.0.0(ws@8.17.0):
+    resolution: {integrity: sha512-muId7Zzn9ywDsyXgTIafTry2sV3nySZeUDe6YedVd1Hvuuep5AsIlqK+XefWpYTyJG5e503F2xIuT2lcU6rCSw==}
+    peerDependencies:
+      ws: '*'
+    dependencies:
+      ws: 8.17.0
+    dev: false
 
   /istanbul-lib-coverage@3.2.2:
     resolution: {integrity: sha512-O8dpsF+r0WV/8MNRKfnmrtCWhuKjxrq2w+jpzBL5UZKTi2LeVWnWOmWRxFlesJONmc+wLAGvKQZEOanko0LFTg==}
@@ -7573,7 +7593,6 @@ packages:
         optional: true
       utf-8-validate:
         optional: true
-    dev: true
 
   /xml-name-validator@4.0.0:
     resolution: {integrity: sha512-ICP2e+jsHvAj2E2lIHxa5tjXRlKDJo4IdvPvCXbXQGdzSfmSpNVyIKMvoZHjDY9DP0zV17iI85o90vRFXNccRw==}

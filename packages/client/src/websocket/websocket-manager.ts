@@ -1,5 +1,6 @@
 import { Deferred } from "@topgunbuild/utils";
 import { ConsoleLogger, LoggerService } from "@topgunbuild/logger";
+import WebSocket from "isomorphic-ws"
 import { MessageType, QueuedMessage, WebSocketManagerConfig, WebSocketReadyState } from "./types";
 
 /**
@@ -11,7 +12,7 @@ export class WebSocketManager {
     private isManualClose = false;
     private reconnectTimeoutMs = 0;
     private reconnectTimeoutId: NodeJS.Timeout | null = null;
-    private messageHandlers: ((msg: MessageType) => void)[] = [];
+    private messageHandlers: ((data: WebSocket.Data) => void)[] = [];
     private connectionPromise: Deferred<void> | null = null;
     private messageQueue: QueuedMessage[] = [];
     private log: LoggerService;
@@ -63,7 +64,7 @@ export class WebSocketManager {
      * @param data - The message to send.
      * @returns A promise that resolves when the message is sent.
      */
-    public send(data: MessageType): Promise<void> {
+    public send(data: WebSocket.Data): Promise<void> {
         return new Promise((resolve, reject) => {
             if (this.ws && this.ws.readyState === WebSocketReadyState.OPEN) {
                 this.sendImmediate(data).then(resolve).catch(reject);
@@ -77,7 +78,7 @@ export class WebSocketManager {
      * Adds a message handler.
      * @param handler - The handler to add.
      */
-    public addMessageHandler(handler: (msg: MessageType) => void): void {
+    public addMessageHandler(handler: (data: WebSocket.Data) => void): void {
         this.messageHandlers.push(handler);
     }
 
@@ -85,20 +86,34 @@ export class WebSocketManager {
      * Removes a message handler.
      * @param handler - The handler to remove.
      */
-    public removeMessageHandler(handler: (msg: MessageType) => void): void {
+    public removeMessageHandler(handler: (data: WebSocket.Data) => void): void {
         this.messageHandlers = this.messageHandlers.filter(h => h !== handler);
     }
 
     /**
      * Starts the WebSocket connection.
      */
-    private startSocket(): void {
+    public startSocket(): void {
         this.ensurePreviousSocketClosed();
         this.ws = new WebSocket(`${this.config.websocketURI}?app_id=${this.config.appId}`);
-        this.ws.onopen = this.onOpen.bind(this);
-        this.ws.onmessage = this.onMessage.bind(this);
-        this.ws.onclose = this.onClose.bind(this);
-        this.ws.onerror = this.onError.bind(this);
+        this.ws.binaryType = 'arraybuffer';
+        // this.ws.onopen = this.onOpen.bind(this);
+        // this.ws.onmessage = this.onMessage.bind(this);
+        // this.ws.onclose = this.onClose.bind(this);
+        // this.ws.onerror = this.onError.bind(this);
+
+        this.ws.addEventListener("open", () => {
+            this.onOpen()
+        });
+        this.ws.addEventListener("message", event => {
+            this.onMessage(event)
+        });
+        this.ws.addEventListener("close", () => {
+            this.onClose()
+        });
+        this.ws.addEventListener("error", event => {
+            this.onError(event)
+        });
     }
 
     /**
@@ -142,8 +157,8 @@ export class WebSocketManager {
      * Handles the WebSocket message event.
      * @param event - The message event.
      */
-    private onMessage(event: MessageEvent): void {
-        this.messageHandlers.forEach(handler => handler(event.data));
+    private onMessage({ data }: WebSocket.MessageEvent): void {
+        this.messageHandlers.forEach(handler => handler(data));
     }
 
     /**
@@ -167,8 +182,8 @@ export class WebSocketManager {
      * Handles the WebSocket connection error.
      * @param event - The error event.
      */
-    private onError(event: Event): void {
-        this.log.error("[socket] error: ", event);
+    private onError({ error }: WebSocket.ErrorEvent): void {
+        this.log.error("[socket] error: ", error);
     }
 
     /**
@@ -176,7 +191,7 @@ export class WebSocketManager {
      * @param data - The message to send.
      * @returns A promise that resolves when the message is sent.
      */
-    private sendImmediate(data: MessageType): Promise<void> {
+    private sendImmediate(data: WebSocket.Data): Promise<void> {
         return new Promise((resolve, reject) => {
             if (this.ws && this.ws.readyState === WebSocketReadyState.OPEN) {
                 this.ws.send(data);
