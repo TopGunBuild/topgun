@@ -1,9 +1,15 @@
 import { field, variant } from '@dao-xyz/borsh';
 
+/**
+ * Abstract value
+ */
 export abstract class AbstractValue
 {
 }
 
+/**
+ * String value
+ */
 @variant(0)
 export class ValueString extends AbstractValue
 {
@@ -17,6 +23,9 @@ export class ValueString extends AbstractValue
     }
 }
 
+/**
+ * Boolean value
+ */
 @variant(1)
 export class ValueBool extends AbstractValue
 {
@@ -30,6 +39,9 @@ export class ValueBool extends AbstractValue
     }
 }
 
+/**
+ * Number value
+ */
 @variant(2)
 export class ValueNumber extends AbstractValue
 {
@@ -43,6 +55,9 @@ export class ValueNumber extends AbstractValue
     }
 }
 
+/**
+ * Date value
+ */
 @variant(3)
 export class ValueDate extends AbstractValue
 {
@@ -56,6 +71,9 @@ export class ValueDate extends AbstractValue
     }
 }
 
+/**
+ * Uint8Array value
+ */
 @variant(4)
 export class ValueUint8Array extends AbstractValue
 {
@@ -69,6 +87,9 @@ export class ValueUint8Array extends AbstractValue
     }
 }
 
+/**
+ * Empty value
+ */
 @variant(5)
 export class ValueEmpty extends AbstractValue
 {

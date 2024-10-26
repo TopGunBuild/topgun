@@ -3,7 +3,7 @@ import { IndexedDBStorage } from "./storage/indexeddb-storage";
 import { MessageType, WebSocketManager } from "./websocket";
 import { WindowNetworkListener } from "./utils/window-network-listener";
 import { toHexString, windowOrGlobal } from "@topgunbuild/utils";
-import { Action, SelectQuery } from "@topgunbuild/types";
+import { Action, DataChangesRequest, Payload, SelectQuery, SelectRequest, SelectResult } from "@topgunbuild/types";
 import { MemoryStorage } from "./storage/memory-storage";
 import { StorageManager } from "./storage/storage-manager";
 import { transformSocketUrl } from "./utils/socket-url-transformer";
@@ -122,8 +122,16 @@ export class Store {
      * @param msg The message to handle
      */
     private handleMessage(msg: WebSocket.Data) {
-        console.log(msg);
-        const message = deserialize(msg);
+        const message = deserialize(msg as Uint8Array, Payload);
+        const action = message.body;
+
+        switch (true) {
+            case action instanceof SelectResult:
+                break;
+
+            case action instanceof DataChangesRequest:
+                break;
+        }
     }
 
     /**

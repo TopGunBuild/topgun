@@ -4,3 +4,4 @@ export * from './role';
 export * from './invitation';
 export * from './keyset';
 export * from './member';
+export * from './lockbox';

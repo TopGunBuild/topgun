@@ -1,4 +1,4 @@
-import { QueryResult, Sort, Query } from '@topgunbuild/types';
+import { Sort, Query, ISelectResult } from '@topgunbuild/types';
 
 export interface DataChagesEvent<T> {
     // The type of operation (e.g., 'insert', 'update', 'delete')
@@ -21,7 +21,7 @@ export type DataChangesCb<T> = (cb: (data: DataChagesEvent<T>) => void) => () =>
  * Type for the function that queries the database
  * @template T
  */
-export type DataQueryCb<T> = (params: DataFrameQuery) => Promise<QueryResult<T>>; // Function that returns a promise resolving to a RowCollection
+export type DataQueryCb<T> = (params: DataFrameQuery) => Promise<ISelectResult<T>>; // Function that returns a promise resolving to a RowCollection
 
 /**
  * Type for the function that compares two rows

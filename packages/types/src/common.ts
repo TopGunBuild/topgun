@@ -1,4 +1,4 @@
-import { QueryResult } from "./queries/query-result";
+import { ISelectResult } from "./requests";
 
 /**
  * Represents the scope of a keyset.
@@ -74,6 +74,6 @@ export type MessageRow = Record<string, MessageFieldValue>;
  * This interface represents a collection of MessageRow instances,
  * providing information about the presence of previous and next pages.
  */
-export interface MessageRowCollection extends QueryResult<MessageRow>
+export interface MessageRowCollection extends ISelectResult<MessageRow>
 {
 }
