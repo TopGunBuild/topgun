@@ -3,7 +3,7 @@ import { IndexedDBStorage } from "./storage/indexeddb-storage";
 import { MessageType, WebSocketManager } from "./websocket";
 import { WindowNetworkListener } from "./utils/window-network-listener";
 import { toHexString, windowOrGlobal } from "@topgunbuild/utils";
-import { CancelSelectRequest, DataChangesRequest, Payload, SelectRequest, SelectResultRequest } from "@topgunbuild/types";
+import { CancelSelectRequest, DataChangesRequest, ISelectResult, Payload, SelectRequest, SelectResultRequest } from "@topgunbuild/types";
 import { MemoryStorage } from "./storage/memory-storage";
 import { StorageManager } from "./storage/storage-manager";
 import { transformSocketUrl } from "./utils/socket-url-transformer";
@@ -62,7 +62,7 @@ export class Store {
         }
 
         // Load result from storage if available
-        this.storageManager.getQueryResult<T>(queryHash).then(result => {
+        this.storageManager.getQueryResult<T>(queryHash, query.entity).then(result => {
             if (result) {
                 queryState.result = result;
                 queryState.resultHash = queryHash;
@@ -96,7 +96,7 @@ export class Store {
         // Clean up if no callbacks remain
         if (queryState.cbs.length === 0) {
             delete this.queryCbs[hash];
-            this.storageManager.deleteQuery(hash);
+            this.storageManager.deleteQuery(hash, query.entity);
 
             // Cancel the query on the server
             const cancelRequest = new CancelSelectRequest({ queryHash: hash });
@@ -152,19 +152,19 @@ export class Store {
      * Handle a select result
      * @param action The select result to handle
      */
-    private handleSelectResult(action: SelectResultRequest): void {
-        const queryHash = toHexString(action.encode());
+    private handleSelectResult(query: ISelectResult<any>): void {
+        const queryHash = query.queryHash;
         const queryState = this.queryCbs[queryHash];
 
         if (!queryState) {
             return;
         }
 
-        queryState.result = action;
+        queryState.result = query;
         queryState.resultHash = queryHash;
-        queryState.cbs.forEach(cb => cb(action));
+        queryState.cbs.forEach(cb => cb(query));
 
-        this.storageManager.saveQueryResult(queryHash, action);
+        this.storageManager.saveQueryResult(queryHash, query, queryState.query.entity);
     }   
 
     /**

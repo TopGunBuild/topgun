@@ -1,4 +1,4 @@
-import { SelectRequest, SelectResultRequest } from "@topgunbuild/types";
+import { ISelectResult, SelectRequest, SelectResultRequest } from "@topgunbuild/types";
 import { StorageDerived } from "./storage/types";
 
 /**
@@ -31,7 +31,7 @@ export type QueryCb<T> = (value: T) => void;
 export interface QueryState<T extends { id: string }> {
     query: SelectRequest;
     cbs: QueryCb<T>[];
-    result: SelectResultRequest | null;
+    result: ISelectResult<T> | null;
     resultHash: string | null;
 }
 

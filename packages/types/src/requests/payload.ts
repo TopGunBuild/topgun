@@ -1,11 +1,16 @@
 import { field } from '@dao-xyz/borsh';
-import { RequestHeader } from './request-header';
+import { IRequestHeader, RequestHeader } from './request-header';
 import { AbstractRequest } from './requests';
+
+export interface IPayload {
+    header: IRequestHeader;
+    body: AbstractRequest;
+}
 
 /**
  * Payload
  */
-export class Payload {
+export class Payload implements IPayload {
     @field({ type: RequestHeader })
     header: RequestHeader;
 

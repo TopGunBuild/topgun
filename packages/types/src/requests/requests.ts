@@ -450,7 +450,8 @@ export class DataChangesRequest extends AbstractRequest {
  * Select request interface
  */
 export interface ISelectRequest {
-    channelId: string;
+    entity: string;
+    channelId?: string;
     messageId?: string;
     fieldName?: string;
     query: Query[];
@@ -466,7 +467,10 @@ export interface ISelectRequest {
 @variant(23)
 export class SelectRequest extends AbstractRequest implements ISelectRequest {
     @field({ type: 'string' })
-    channelId: string;
+    entity: string;
+
+    @field({ type: option('string') })
+    channelId?: string;
 
     @field({ type: option('string') })
     messageId?: string;
@@ -491,6 +495,7 @@ export class SelectRequest extends AbstractRequest implements ISelectRequest {
 
     constructor(data: ISelectRequest) {
         super({});
+        this.entity = data.entity;
         this.channelId = data.channelId;
         this.messageId = data.messageId;
         this.fieldName = data.fieldName;
