@@ -5,7 +5,7 @@ import { AbstractValue } from "./values";
 import { typeOf } from "./typeof";
 import { Query } from "./query";
 import { Sort } from "./sort";
-import { toArray } from "@topgunbuild/utils";
+import { randomId, toArray } from "@topgunbuild/utils";
 
 /**
  * Base interface for all requests
@@ -18,13 +18,17 @@ export interface IRequest {
  * Base class for all requests
  */
 export class AbstractRequest implements IRequest {
+    @field({ type: 'string' })
+    id: string;
 
     @field({ type: option(vec(Lockbox)) })
     lockboxes?: Lockbox[];
 
     constructor(data: {
+        id?: string,
         lockboxes?: Lockbox[],
     }) {
+        this.id = data.id || randomId();
         this.lockboxes = Array.isArray(data.lockboxes) ? data.lockboxes : [];
     }
 
@@ -222,11 +226,11 @@ export class InviteDeviceRequest extends AbstractRequest {
 @variant(11)
 export class RevokeInvitationRequest extends AbstractRequest {
     @field({ type: 'string' })
-    id: string; // Invitation ID
+    invitationId: string; // Invitation ID
 
-    constructor(data: { lockboxes?: Lockbox[], id: string }) {
+    constructor(data: { lockboxes?: Lockbox[], invitationId: string }) {
         super(data);
-        this.id = data.id;
+        this.invitationId = data.invitationId;
     }
 }
 
@@ -236,7 +240,7 @@ export class RevokeInvitationRequest extends AbstractRequest {
 @variant(12)
 export class AdmitMemberRequest extends AbstractRequest {
     @field({ type: 'string' })
-    id: string; // Invitation ID
+    invitationId: string; // Invitation ID
 
     @field({ type: 'string' })
     userName: string;
@@ -246,12 +250,12 @@ export class AdmitMemberRequest extends AbstractRequest {
 
     constructor(data: {
         lockboxes?: Lockbox[],
-        id: string,
+        invitationId: string,
         userName: string,
         memberKeys: Keyset,
     }) {
         super(data);
-        this.id = data.id;
+        this.invitationId = data.invitationId;
         this.userName = data.userName;
         this.memberKeys = data.memberKeys;
     }
@@ -263,14 +267,14 @@ export class AdmitMemberRequest extends AbstractRequest {
 @variant(13)
 export class AdmitDeviceRequest extends AbstractRequest {
     @field({ type: 'string' })
-    id: string; // Invitation ID
+    invitationId: string; // Invitation ID
 
     @field({ type: Device })
     device: Device;
 
-    constructor(data: { lockboxes?: Lockbox[], id: string, device: Device }) {
+    constructor(data: { lockboxes?: Lockbox[], invitationId: string, device: Device }) {
         super(data);
-        this.id = data.id;
+        this.invitationId = data.invitationId;
         this.device = data.device;
     }
 }
@@ -513,7 +517,7 @@ export type ISelectResult<T> = {
  * Select result
  */
 @variant(24)
-export class SelectResult extends AbstractRequest implements ISelectResult<string> {
+export class SelectResultRequest extends AbstractRequest implements ISelectResult<string> {
     @field({ type: vec('string') })
     rows: string[];
 
@@ -535,6 +539,20 @@ export class SelectResult extends AbstractRequest implements ISelectResult<strin
         this.total = data.total;
         this.hasNextPage = data.hasNextPage;
         this.hasPreviousPage = data.hasPreviousPage;
+        this.queryHash = data.queryHash;
+    }
+}
+
+/**
+ * Cancel select request
+ */
+@variant(25)
+export class CancelSelectRequest extends AbstractRequest {
+    @field({ type: 'string' })
+    queryHash: string;
+
+    constructor(data: { queryHash: string }) {
+        super({});
         this.queryHash = data.queryHash;
     }
 }

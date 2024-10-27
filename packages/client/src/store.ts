@@ -3,7 +3,7 @@ import { IndexedDBStorage } from "./storage/indexeddb-storage";
 import { MessageType, WebSocketManager } from "./websocket";
 import { WindowNetworkListener } from "./utils/window-network-listener";
 import { toHexString, windowOrGlobal } from "@topgunbuild/utils";
-import { Action, DataChangesRequest, Payload, SelectQuery, SelectRequest, SelectResult } from "@topgunbuild/types";
+import { CancelSelectRequest, DataChangesRequest, Payload, SelectRequest, SelectResultRequest } from "@topgunbuild/types";
 import { MemoryStorage } from "./storage/memory-storage";
 import { StorageManager } from "./storage/storage-manager";
 import { transformSocketUrl } from "./utils/socket-url-transformer";
@@ -42,7 +42,7 @@ export class Store {
      * @param query The query to execute
      * @param cb The callback to call with the result
      */
-    public subscribeQuery<T>(query: SelectQuery, cb: QueryCb<T>): () => void {
+    public subscribeQuery<T extends { id: string }>(query: SelectRequest, cb: QueryCb<T>): () => void {
         // Encode and hash query once, store in const
         const encodedQuery = query.encode();
         const queryHash = toHexString(encodedQuery);
@@ -61,6 +61,15 @@ export class Store {
             queryState.cbs.push(cb);
         }
 
+        // Load result from storage if available
+        this.storageManager.getQueryResult<T>(queryHash).then(result => {
+            if (result) {
+                queryState.result = result;
+                queryState.resultHash = queryHash;
+                queryState.cbs.forEach(cb => cb(result));
+            }
+        });
+
         // Return memoized unsubscribe function
         return () => this.unsubscribeQuery(query, cb, queryHash);
     }
@@ -71,7 +80,7 @@ export class Store {
      * @param cb The callback to unsubscribe
      * @param queryHash The hash of the query
      */
-    public unsubscribeQuery(query: SelectQuery, cb: QueryCb<any>, queryHash?: string) {
+    public unsubscribeQuery(query: SelectRequest, cb: QueryCb<any>, queryHash?: string) {
         // Get or compute queryHash
         const hash = queryHash || toHexString(query.encode());
         
@@ -88,6 +97,10 @@ export class Store {
         if (queryState.cbs.length === 0) {
             delete this.queryCbs[hash];
             this.storageManager.deleteQuery(hash);
+
+            // Cancel the query on the server
+            const cancelRequest = new CancelSelectRequest({ queryHash: hash });
+            this.websocketManager.send(cancelRequest.encode());
         }
     }
 
@@ -126,13 +139,33 @@ export class Store {
         const action = message.body;
 
         switch (true) {
-            case action instanceof SelectResult:
+            case action instanceof SelectResultRequest:
+                this.handleSelectResult(action);
                 break;
 
             case action instanceof DataChangesRequest:
                 break;
         }
     }
+
+    /**
+     * Handle a select result
+     * @param action The select result to handle
+     */
+    private handleSelectResult(action: SelectResultRequest): void {
+        const queryHash = toHexString(action.encode());
+        const queryState = this.queryCbs[queryHash];
+
+        if (!queryState) {
+            return;
+        }
+
+        queryState.result = action;
+        queryState.resultHash = queryHash;
+        queryState.cbs.forEach(cb => cb(action));
+
+        this.storageManager.saveQueryResult(queryHash, action);
+    }   
 
     /**
      * Initialize the storage manager

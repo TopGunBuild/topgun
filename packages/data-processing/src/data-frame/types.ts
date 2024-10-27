@@ -62,6 +62,7 @@ export interface DataFrameChanges<T> {
     added: T; // Represents the data that has been added during the change process.
     deleted: T; // Represents the data that has been removed during the change process.
     collection: T[]; // Represents the current collection of data after the changes have been applied.
+    total: number; // The total number of rows in database
 }
 
 // Tracking changes in data streams

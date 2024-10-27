@@ -35,6 +35,7 @@ export class DataFrame<T> {
 
     lastRowAdded: T;
     lastRowDeleted: T;
+    total: number;
 
     /**
      * @param {DataStreamOptions<T>} params
@@ -94,6 +95,8 @@ export class DataFrame<T> {
 
         // Fetch the data from the database
         const queryResult = await this.databaseQueryFn(query);
+
+        this.total = queryResult.total;
 
         // Initialize the main data set
         this.mainCollection.init(queryResult.rows);

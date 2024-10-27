@@ -92,7 +92,7 @@ export class StorageManager {
      * @param queryHash - The hash of the query
      * @param query - The query result
      */
-    public putQuery<T extends { id: string }>(queryHash: string, query: QueryResult<T>) {
+    public saveQueryResult<T extends { id: string }>(queryHash: string, query: QueryResult<T>) {
         const queryResult: QueryResult<string> = {
             rows: query.rows.map(row => row.id),
             total: query.total,
@@ -107,7 +107,7 @@ export class StorageManager {
      * Get a query from the storage
      * @param queryHash - The hash of the query
      */
-    public async getQuery<T extends { id: string }>(queryHash: string): Promise<QueryResult<T> | undefined> {
+    public async getQueryResult<T extends { id: string }>(queryHash: string): Promise<QueryResult<T> | undefined> {
         await Promise.all([
             this.queryStorage.waitForLoaded(),
             this.dataStorage.waitForLoaded()
