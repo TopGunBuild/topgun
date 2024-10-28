@@ -421,28 +421,49 @@ export class DeleteMessageRequest extends AbstractRequest {
 }
 
 /**
+ * Interface for data changes request
+ */
+export interface IDataChangesRequest<T> {
+    added?: T;
+    deleted?: T;
+    total: number;
+    collection?: T[];
+    queryHash?: string;
+}  
+
+/**
  * Data changes request
  */
 @variant(22)
-export class DataChangesRequest extends AbstractRequest {
-    @field({ type: 'string' })
-    operation: 'insert' | 'update' | 'delete';
-
-    @field({ type: 'string' })
-    rowData: string;
+export class DataChangesRequest extends AbstractRequest implements IDataChangesRequest<string> {
+    @field({ type: option('string') })
+    added?: string;
 
     @field({ type: option('string') })
-    oldData?: string;
+    deleted?: string;
+
+    @field({ type: 'u64' })
+    total: number;
+
+    @field({ type: option(vec('string')) })
+    collection?: string[];
+
+    @field({ type: option('string') })
+    queryHash?: string;
 
     constructor(data: {
-        operation: 'insert' | 'update' | 'delete',
-        rowData: string,
-        oldData?: string,
+        added?: string,
+        deleted?: string,
+        total: number,
+        collection?: string[],
+        queryHash?: string,
     }) {
         super({});
-        this.operation = data.operation;
-        this.rowData = data.rowData;
-        this.oldData = data.oldData;
+        this.added = data.added;
+        this.deleted = data.deleted;
+        this.total = data.total;
+        this.collection = data.collection;
+        this.queryHash = data.queryHash;
     }
 }
 

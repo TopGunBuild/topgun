@@ -1,4 +1,4 @@
-import { Sort, Query, ISelectResult } from '@topgunbuild/types';
+import { Sort, Query, ISelectResult, IDataChangesRequest } from '@topgunbuild/types';
 
 export interface DataChagesEvent<T> {
     // The type of operation (e.g., 'insert', 'update', 'delete')
@@ -38,6 +38,7 @@ export interface DataFrameQuery {
     pageSize: number;
     query: Query[];
     sort: Sort[];
+    queryHash?: string;
 }
 
 /**
@@ -54,19 +55,8 @@ export interface DataFrameConfig<T> {
     dataFrameChangesCb: DataFrameChangesCb<T>; // Emit changes in data stream
 }
 
-/**
- * Interface for data stream changes.
- * @template T
- */
-export interface DataFrameChanges<T> {
-    added: T; // Represents the data that has been added during the change process.
-    deleted: T; // Represents the data that has been removed during the change process.
-    collection: T[]; // Represents the current collection of data after the changes have been applied.
-    total: number; // The total number of rows in database
-}
-
 // Tracking changes in data streams
-export type DataFrameChangesCb<T> = (data: DataFrameChanges<T>) => void;
+export type DataFrameChangesCb<T> = (data: IDataChangesRequest<T>) => void;
 
 /**
  * Interface for row operation parameters.

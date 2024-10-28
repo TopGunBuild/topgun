@@ -1,6 +1,6 @@
 import { ClientConfig, NetworkListenerAdapter, QueryCb, QueryState } from "./types";
 import { IndexedDBStorage } from "./storage/indexeddb-storage";
-import { MessageType, WebSocketManager } from "./websocket";
+import { WebSocketManager } from "./websocket";
 import { WindowNetworkListener } from "./utils/window-network-listener";
 import { toHexString, windowOrGlobal } from "@topgunbuild/utils";
 import { CancelSelectRequest, DataChangesRequest, ISelectResult, Payload, SelectRequest, SelectResultRequest } from "@topgunbuild/types";
@@ -127,24 +127,88 @@ export class Store {
             websocketURI: transformSocketUrl(this.config.websocketURI),
             appId: this.config.appId
         });
-        this.websocketManager.addMessageHandler(msg => this.handleMessage(msg));
+        this.websocketManager.addMessageHandler(msg => this.handleWebSocketMessage(msg));
     }
 
     /**
      * Handle a message from the websocket
      * @param msg The message to handle
      */
-    private handleMessage(msg: WebSocket.Data) {
+    private handleWebSocketMessage(msg: WebSocket.Data) {
         const message = deserialize(msg as Uint8Array, Payload);
-        const action = message.body;
+        const messageBody = message.body;
 
         switch (true) {
-            case action instanceof SelectResultRequest:
-                this.handleSelectResult(action);
+            case messageBody instanceof SelectResultRequest:
+                this.handleSelectResult(messageBody);
                 break;
 
-            case action instanceof DataChangesRequest:
+            case messageBody instanceof DataChangesRequest:
+                this.handleDataChanges(messageBody);
                 break;
+        }
+    }
+
+    /**
+     * Handle data changes
+     * @param messageBody The data changes request
+     */
+    private handleDataChanges(messageBody: DataChangesRequest) {
+        const queryHash = messageBody.queryHash;
+        const queryState = this.queryCbs[queryHash];
+
+        if (!queryState) {
+            return;
+        }
+
+        // Parse added and deleted items
+        let parsedAdded: any;
+        if (messageBody.added) {
+            try {
+                parsedAdded = JSON.parse(messageBody.added);
+            } catch (e) {
+                console.error('Failed to parse added data:', e);
+            }
+        }
+
+        let parsedDeleted: any;
+        if (messageBody.deleted) {
+            try {
+                parsedDeleted = JSON.parse(messageBody.deleted);
+            } catch (e) {
+                console.error('Failed to parse deleted data:', e);
+            }
+        }
+
+        // Only proceed if there are actual changes
+        if (!parsedAdded && !parsedDeleted) {
+            return;
+        }
+
+        const currentResult = queryState.result;
+        if (currentResult) {
+            // Remove deleted items
+            const remainingRows = currentResult.rows.filter(row => 
+                !(parsedDeleted && parsedDeleted.id === row.id)
+            );
+
+            // Add new items if they exist
+            const updatedRows = [
+                ...remainingRows,
+                ...(parsedAdded ? [parsedAdded] : [])
+            ];
+
+            // Create updated result
+            const updatedResult = {
+                ...currentResult,
+                rows: updatedRows,
+                total: messageBody.total
+            };
+
+            // Update query state and notify only if there were changes
+            queryState.result = updatedResult;
+            this.storageManager.saveQueryResult(queryHash, updatedResult, queryState.query.entity);
+            queryState.cbs.forEach(cb => cb(updatedResult));
         }
     }
 
@@ -161,7 +225,6 @@ export class Store {
         }
 
         queryState.result = query;
-        queryState.resultHash = queryHash;
         queryState.cbs.forEach(cb => cb(query));
 
         this.storageManager.saveQueryResult(queryHash, query, queryState.query.entity);

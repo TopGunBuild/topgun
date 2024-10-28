@@ -96,6 +96,7 @@ export class DataFrame<T> {
         // Fetch the data from the database
         const queryResult = await this.databaseQueryFn(query);
 
+        // Set the total number of rows
         this.total = queryResult.total;
 
         // Initialize the main data set
@@ -203,16 +204,17 @@ export class DataFrame<T> {
             await this.fetchFromDatabase(emitChanges);
         }
         else {
-            const hasBefore = this.query.pageOffset > 0;
+            const hasPageOffset = this.query.pageOffset > 0;
+            this.total = this.total + 1;
 
             switch (true) {
                 // If the row is before the preceding collection and there is a preceding collection, shift up
-                case hasBefore && this.precedingCollection.isBefore(row):
+                case hasPageOffset && this.precedingCollection.isBefore(row):
                     await this.#shiftUp();
                     break;
 
                 // If the row is belong to the preceding collection and there is a preceding collection, insert it
-                case hasBefore && this.precedingCollection.isBelong(row):
+                case hasPageOffset && this.precedingCollection.isBelong(row):
                     this.precedingCollection.insert(row);
                     await this.#shiftUp();
                     break;
@@ -262,6 +264,7 @@ export class DataFrame<T> {
             await this.fetchFromDatabase(emitChanges);
         }
         else {
+            this.total = this.total - 1;
             switch (true) {
                 // If the row is before the preceding collection, shift down
                 case this.precedingCollection.isBefore(row):
@@ -301,6 +304,8 @@ export class DataFrame<T> {
                 added: this.lastRowAdded,
                 deleted: this.lastRowDeleted,
                 collection: this.mainCollection.getData(),
+                total: this.total,
+                queryHash: this.query.queryHash,
             });
             // console.log('main', this.mainCollection.getData());
             // console.log('preceding', this.precedingCollection.getData());

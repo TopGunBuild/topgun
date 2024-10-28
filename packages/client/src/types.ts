@@ -32,7 +32,6 @@ export interface QueryState<T extends { id: string }> {
     query: SelectRequest;
     cbs: QueryCb<T>[];
     result: ISelectResult<T> | null;
-    resultHash: string | null;
 }
 
 /**
