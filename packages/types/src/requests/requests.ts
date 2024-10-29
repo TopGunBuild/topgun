@@ -421,48 +421,46 @@ export class DeleteMessageRequest extends AbstractRequest {
 }
 
 /**
- * Interface for data changes request
+ * DataFrame change operation request
  */
-export interface IDataChangesRequest<T> {
-    added?: T;
-    deleted?: T;
-    total: number;
-    collection?: T[];
-    queryHash?: string;
-}  
+export class DataFrameChangeOperationRequest {
+    @field({ type: 'string' })
+    element: string;
+
+    @field({ type: 'string' })
+    type: 'added' | 'deleted';
+
+    @field({ type: 'u64' })
+    timestamp: number;
+
+    constructor(data: { element: string, type: 'added' | 'deleted', timestamp: number }) {
+        this.element = data.element;
+        this.type = data.type;
+        this.timestamp = data.timestamp;
+    }
+}
 
 /**
  * Data changes request
  */
 @variant(22)
-export class DataChangesRequest extends AbstractRequest implements IDataChangesRequest<string> {
-    @field({ type: option('string') })
-    added?: string;
-
-    @field({ type: option('string') })
-    deleted?: string;
-
-    @field({ type: 'u64' })
-    total: number;
+export class DataChangesRequest {
+    @field({ type: option(vec(DataFrameChangeOperationRequest)) })
+    changes?: DataFrameChangeOperationRequest[];
 
     @field({ type: option(vec('string')) })
     collection?: string[];
 
-    @field({ type: option('string') })
-    queryHash?: string;
+    @field({ type: 'u64' })
+    total: number;
 
-    constructor(data: {
-        added?: string,
-        deleted?: string,
-        total: number,
-        collection?: string[],
-        queryHash?: string,
-    }) {
-        super({});
-        this.added = data.added;
-        this.deleted = data.deleted;
-        this.total = data.total;
+    @field({ type: 'string' })
+    queryHash: string;
+
+    constructor(data: { changes?: DataFrameChangeOperationRequest[], collection?: string[], total: number, queryHash: string }) {
+        this.changes = data.changes;
         this.collection = data.collection;
+        this.total = data.total;
         this.queryHash = data.queryHash;
     }
 }

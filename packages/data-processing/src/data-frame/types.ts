@@ -69,6 +69,10 @@ export interface RowOperationParams<T> {
     oldRow?: T;
 }
 
+/**
+ * Interface for changes in the data frame
+ * @template T Type of the data elements
+ */
 export interface DataFrameChanges<T> {
     added?: T;
     deleted?: T;

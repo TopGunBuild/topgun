@@ -155,59 +155,53 @@ export class Store {
         const queryHash = messageBody.queryHash;
         const queryState = this.queryCbs[queryHash];
 
-        if (!queryState) {
+        if (!queryState || !queryState.result) {
             return;
         }
 
-        // Parse added and deleted items
-        let parsedAdded: any;
-        if (messageBody.added) {
+        let updatedRows = [...queryState.result.rows];
+
+        // Handle full collection replacement
+        if (messageBody.collection?.length) {
             try {
-                parsedAdded = JSON.parse(messageBody.added);
+                const parsedCollection = messageBody.collection.map(item => JSON.parse(item));
+                updatedRows = parsedCollection;
             } catch (e) {
-                console.error('Failed to parse added data:', e);
+                console.error('Failed to parse collection data:', e);
+                return;
             }
         }
-
-        let parsedDeleted: any;
-        if (messageBody.deleted) {
-            try {
-                parsedDeleted = JSON.parse(messageBody.deleted);
-            } catch (e) {
-                console.error('Failed to parse deleted data:', e);
+        // Handle individual changes
+        else if (messageBody.changes?.length) {
+            for (const change of messageBody.changes) {
+                try {
+                    const parsedElement = JSON.parse(change.element);
+                    
+                    if (change.type === 'deleted') {
+                        updatedRows = updatedRows.filter(row => row.id !== parsedElement.id);
+                    } else if (change.type === 'added') {
+                        updatedRows = [...updatedRows, parsedElement];
+                    }
+                } catch (e) {
+                    console.error('Failed to parse change element:', e);
+                    continue;
+                }
             }
+        } else {
+            return; // No changes to apply
         }
 
-        // Only proceed if there are actual changes
-        if (!parsedAdded && !parsedDeleted) {
-            return;
-        }
+        // Create updated result
+        const updatedResult = {
+            ...queryState.result,
+            rows: updatedRows,
+            total: messageBody.total
+        };
 
-        const currentResult = queryState.result;
-        if (currentResult) {
-            // Remove deleted items
-            const remainingRows = currentResult.rows.filter(row => 
-                !(parsedDeleted && parsedDeleted.id === row.id)
-            );
-
-            // Add new items if they exist
-            const updatedRows = [
-                ...remainingRows,
-                ...(parsedAdded ? [parsedAdded] : [])
-            ];
-
-            // Create updated result
-            const updatedResult = {
-                ...currentResult,
-                rows: updatedRows,
-                total: messageBody.total
-            };
-
-            // Update query state and notify only if there were changes
-            queryState.result = updatedResult;
-            this.storageManager.saveQueryResult(queryHash, updatedResult, queryState.query.entity);
-            queryState.cbs.forEach(cb => cb(updatedResult));
-        }
+        // Update query state and notify
+        queryState.result = updatedResult;
+        this.storageManager.saveQueryResult(queryHash, updatedResult, queryState.query.entity);
+        queryState.cbs.forEach(cb => cb(updatedResult));
     }
 
     /**
