@@ -54,7 +54,6 @@ export class Store {
                 query,
                 cbs: [cb], // Initialize with the callback directly
                 result: null,
-                resultHash: null,
             };
             this.websocketManager.send(encodedQuery);
         } else {
@@ -65,7 +64,6 @@ export class Store {
         this.storageManager.getQueryResult<T>(queryHash, query.entity).then(result => {
             if (result) {
                 queryState.result = result;
-                queryState.resultHash = queryHash;
                 queryState.cbs.forEach(cb => cb(result));
             }
         });

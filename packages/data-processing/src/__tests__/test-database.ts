@@ -1,8 +1,8 @@
 import { 
     DataChagesEvent,
     DataFrame,
-    DataFrameQuery,
     DataFrameChanges,
+    DataFrameQuery,
     SortingDirection 
 } from "..";
 
@@ -133,7 +133,7 @@ export function createTestData(pageOffset: number, pageSize: number): LiveDataGr
             ],
             query: []
         },
-        databaseQueryCb: async (params: DataFrameQuery) => {
+        databaseQueryFn: async (params: DataFrameQuery) => {
             let rows: any[] = [];
 
             for (let i = params.pageOffset; i < params.pageOffset + params.pageSize; i++) {
@@ -152,7 +152,7 @@ export function createTestData(pageOffset: number, pageSize: number): LiveDataGr
         dataFrameChangesCb: (data: DataFrameChanges<TestDatabaseRow>) => {
             testData.result = data.collection.map(row => row.id);
         },
-        compareRowsCb: (rowA: TestDatabaseRow, rowB: TestDatabaseRow) => rowA.id === rowB.id,
+        compareRowsFn: (rowA: TestDatabaseRow, rowB: TestDatabaseRow) => rowA.id === rowB.id,
         precedingRowsSize: 10,
         followingRowsSize: 10,
         databaseChangesCb: (cb: (data: DataChagesEvent<any>) => void) => {

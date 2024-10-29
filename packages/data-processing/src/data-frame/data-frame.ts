@@ -1,16 +1,18 @@
 import { AsyncQueue } from '@topgunbuild/utils';
 import {
     DataChagesEvent,
-    DataQueryCb,
+    DataQueryFn,
     DataFrameChangesCb,
     RowOperationParams,
     DataFrameQuery,
     DataFrameConfig,
+    ThrottledDataFrameChanges,
 } from './types';
 import { DataFrameCollection } from './data-frame-collection';
 import { convertQueryToFilterTree } from './utils';
 import { FilteringCriteriaTree } from '../filtering/types';
 import { DataFilteringEngine } from '../filtering/engine';
+import { debounce } from '@topgunbuild/utils';
 
 /**
  * An in-memory data grid contains a master dataset retrieved from the database
@@ -22,8 +24,8 @@ import { DataFilteringEngine } from '../filtering/engine';
  */
 export class DataFrame<T> {
     readonly query: DataFrameQuery;
-    readonly databaseQueryFn: DataQueryCb<T>;
-    readonly dataFrameChangesFn: DataFrameChangesCb<T>;
+    readonly databaseQueryFn: DataQueryFn<T>;
+    readonly dataFrameChangesCb: DataFrameChangesCb<T>;
     readonly queue: AsyncQueue;
     readonly filteringCriteriaTree: FilteringCriteriaTree;
     readonly filteringEngine: DataFilteringEngine;
@@ -37,6 +39,14 @@ export class DataFrame<T> {
     lastRowDeleted: T;
     total: number;
 
+    private readonly throttleTime: number;
+    private readonly throttledChangesCb?: (changes: ThrottledDataFrameChanges<T>) => void;
+    private accumulatedChanges: {
+        added: Set<T>;
+        deleted: Set<T>;
+    };
+    private debouncedEmitThrottledChanges: () => void;
+
     /**
      * @param {DataStreamOptions<T>} params
      */
@@ -44,37 +54,53 @@ export class DataFrame<T> {
         const {
             query,
             query: { sort: sortingCriteria, pageOffset, pageSize },
-            compareRowsCb,
+            compareRowsFn,
             followingRowsSize,
             precedingRowsSize,
-            databaseQueryCb,
+            databaseQueryFn,
             dataFrameChangesCb,
             databaseChangesCb,
+            throttleTime,
+            throttledChangesCb,
         } = params;
 
         this.query = query;
-        this.databaseQueryFn = databaseQueryCb;
-        this.dataFrameChangesFn = dataFrameChangesCb;
+        this.databaseQueryFn = databaseQueryFn;
+        this.dataFrameChangesCb = dataFrameChangesCb;
         this.filteringEngine = new DataFilteringEngine();
         this.queue = new AsyncQueue();
         this.filteringCriteriaTree = convertQueryToFilterTree(query);
 
+        this.throttleTime = throttleTime || 0;
+        this.throttledChangesCb = throttledChangesCb;
+        this.accumulatedChanges = {
+            added: new Set<T>(),
+            deleted: new Set<T>()
+        };
+
+        if (this.throttledChangesCb) {
+            this.debouncedEmitThrottledChanges = debounce(
+                () => this.#emitThrottledChanges(),
+                this.throttleTime
+            );
+        }
+
         // Initialize the row collections before the main set
         this.precedingCollection = new DataFrameCollection({
             sortingCriteria,
-            compareRowsCb,
+            compareRowsFn,
             pageSize: precedingRowsSize > pageOffset ? pageOffset : precedingRowsSize,
         });
         // Initialize the row collection after the main set
         this.followingCollection = new DataFrameCollection({
             sortingCriteria,
-            compareRowsCb,
+            compareRowsFn,
             pageSize: followingRowsSize,
         });
         // Initialize the row collection that contains the main set
         this.mainCollection = new DataFrameCollection({
             sortingCriteria,
-            compareRowsCb,
+            compareRowsFn,
             pageSize,
         });
 
@@ -122,6 +148,12 @@ export class DataFrame<T> {
     destroy(): void {
         this.databaseChangesOff();
         this.queue.destroy();
+        
+        // Clear accumulated changes
+        if (this.accumulatedChanges) {
+            this.accumulatedChanges.added.clear();
+            this.accumulatedChanges.deleted.clear();
+        }
     }
 
     /**
@@ -300,16 +332,23 @@ export class DataFrame<T> {
      */
     #emitChanges(persist: boolean = false): void {
         if (persist || this.lastRowAdded || this.lastRowDeleted) {
-            this.dataFrameChangesFn({
+            this.dataFrameChangesCb({
                 added: this.lastRowAdded,
                 deleted: this.lastRowDeleted,
                 collection: this.mainCollection.getData(),
                 total: this.total,
                 queryHash: this.query.queryHash,
             });
-            // console.log('main', this.mainCollection.getData());
-            // console.log('preceding', this.precedingCollection.getData());
-            // console.log('following', this.followingCollection.getData());
+
+            if (this.throttledChangesCb) {
+                if (this.lastRowAdded) {
+                    this.accumulatedChanges.added.add(this.lastRowAdded);
+                }
+                if (this.lastRowDeleted) {
+                    this.accumulatedChanges.deleted.add(this.lastRowDeleted);
+                }
+                this.debouncedEmitThrottledChanges();
+            }
         }
     }
 
@@ -389,6 +428,27 @@ export class DataFrame<T> {
     #shiftFromCurrentToBefore(): void {
         this.lastRowDeleted = this.mainCollection.firstRemove();
         this.precedingCollection.setToEnd(this.lastRowDeleted);
+    }
+
+    #emitThrottledChanges(): void {
+        if (!this.throttledChangesCb) {
+            return;
+        }
+
+        const changes: ThrottledDataFrameChanges<T> = {
+            added: Array.from(this.accumulatedChanges.added),
+            deleted: Array.from(this.accumulatedChanges.deleted),
+            collection: this.mainCollection.getData(),
+            total: this.total,
+            queryHash: this.query.queryHash
+        };
+
+        // Clear accumulated changes
+        this.accumulatedChanges.added.clear();
+        this.accumulatedChanges.deleted.clear();
+
+        // Emit throttled changes
+        this.throttledChangesCb(changes);
     }
 }
 

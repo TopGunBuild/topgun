@@ -41,8 +41,8 @@ export class Dataset {
             precedingRowsSize,
             followingRowsSize,
             dataFrameChangesCb,
-            compareRowsCb,
-            databaseQueryCb: async (params: DataFrameQuery) => {
+            compareRowsFn: compareRowsCb,
+            databaseQueryFn: async (params: DataFrameQuery) => {
                 const { rows, total } = this.process(config);
 
                 return {

@@ -1,5 +1,5 @@
 import { isDefined } from '@topgunbuild/utils';
-import { RowComparator } from './types';
+import { RowComparatorFn } from './types';
 import { SortingCriteria } from '../sorting/types';
 import { DataSortingEngine } from '../sorting/engine';
 
@@ -12,7 +12,7 @@ export class DataFrameCollection<T> {
     private data: T[];
     private readonly sortingCriteria: SortingCriteria[];
     private readonly sortingEngine: DataSortingEngine;
-    private readonly compareRowsCb: RowComparator<T>;
+    private readonly compareRowsCb: RowComparatorFn<T>;
 
     readonly pageSize: number;
 
@@ -23,18 +23,18 @@ export class DataFrameCollection<T> {
      * Constructor for DataFrameCollection
      * @param {object} params - The parameters for initializing the DataFrameCollection
      * @param {SortingExpression[]} params.sortingExpressions - The sorting expressions for the data
-     * @param {RowComparator<T>} params.compareRowsFn - The function to compare rows
+     * @param {RowComparatorFn<T>} params.compareRowsFn - The function to compare rows
      * @param {number} [params.pageSize] - The page size for pagination (optional)
      */
     constructor(params: {
         sortingCriteria: SortingCriteria[],
-        compareRowsCb: RowComparator<T>,
+        compareRowsFn: RowComparatorFn<T>,
         pageSize?: number
     }) {
         this.data = [];
         this.sortingEngine = new DataSortingEngine();
         this.pageSize = params.pageSize;
-        this.compareRowsCb = params.compareRowsCb;
+        this.compareRowsCb = params.compareRowsFn;
         this.sortingCriteria = params.sortingCriteria.map(s => {
             s.caseSensitive = true;
             return s;
@@ -191,6 +191,12 @@ export class DataFrameCollection<T> {
      * @param {T} row
      * @returns {boolean}
      */
+    // isBelong(row: T): boolean {
+    //     if (this.getDataSize() === 0) {
+    //         return false;
+    //     }
+    //     return this.data.some(item => this.compareRowsCb(item, row));
+    // }
     isBelong(row: T): boolean {
         if (this.getDataSize() === 0) {
             return false; // Return false if the collection is empty
@@ -212,6 +218,11 @@ export class DataFrameCollection<T> {
      * @private
      */
     private sort(rows: T[]): T[] {
-        return this.sortingEngine.process(rows, this.sortingCriteria);
+        try {
+            return this.sortingEngine.process(rows, this.sortingCriteria);
+        } catch (error) {
+            console.error('Sorting failed:', error);
+            return rows; // Return unsorted array as fallback
+        }
     }
 }

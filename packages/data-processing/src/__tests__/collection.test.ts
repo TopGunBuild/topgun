@@ -1,14 +1,14 @@
 import { DataFrameCollection } from '../data-frame/data-frame-collection';
-import { RowComparator } from '../data-frame/types';
+import { RowComparatorFn } from '../data-frame/types';
 
 describe('DataFrameCollection', () => {
     let collection: DataFrameCollection<number>;
-    const compareRowsFn: RowComparator<number> = (a, b) => a === b;
+    const compareRowsFn: RowComparatorFn<number> = (a, b) => a === b;
 
     beforeEach(() => {
         collection = new DataFrameCollection<number>({
             sortingCriteria: [],
-            compareRowsCb: compareRowsFn,
+            compareRowsFn,
             pageSize: 10,
         });
     });

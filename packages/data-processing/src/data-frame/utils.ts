@@ -26,16 +26,20 @@ import { DatasetState } from '../dataset/types';
  */
 export const convertQueryToDatagridState = (query: DataFrameQuery): DatasetState =>
 {
+    if (!query) {
+        throw new Error('Query cannot be null or undefined');
+    }
+    
     return {
         filtering: {
             tree: convertQueryToFilterTree(query)
         },
         sorting: {
-            criteria: query.sort,
+            criteria: query.sort || [],
         },
         paging: {
-            currentPage: query.pageOffset,
-            itemsPerPage: query.pageSize
+            currentPage: query.pageOffset || 0,
+            itemsPerPage: query.pageSize || 10
         }
     };
 };
@@ -142,6 +146,6 @@ const convertFieldQuery = (query: FieldQuery): FilteringCriteria =>
     }
     else
     {
-        throw new Error('Unsupported query type: ' + query.constructor.name);
+        throw new Error(`Unsupported query type: ${query?.constructor?.name || 'unknown'}`);
     }
 };

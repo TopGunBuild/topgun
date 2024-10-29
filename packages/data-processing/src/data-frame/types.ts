@@ -1,4 +1,4 @@
-import { Sort, Query, ISelectResult, IDataChangesRequest } from '@topgunbuild/types';
+import { Sort, Query, ISelectResult } from '@topgunbuild/types';
 
 export interface DataChagesEvent<T> {
     // The type of operation (e.g., 'insert', 'update', 'delete')
@@ -21,13 +21,13 @@ export type DataChangesCb<T> = (cb: (data: DataChagesEvent<T>) => void) => () =>
  * Type for the function that queries the database
  * @template T
  */
-export type DataQueryCb<T> = (params: DataFrameQuery) => Promise<ISelectResult<T>>; // Function that returns a promise resolving to a RowCollection
+export type DataQueryFn<T> = (params: DataFrameQuery) => Promise<ISelectResult<T>>; // Function that returns a promise resolving to a RowCollection
 
 /**
  * Type for the function that compares two rows
  * @template T
  */
-export type RowComparator<T> = (rowA: T, rowB: T) => boolean; // Function that compares two rows of type T
+export type RowComparatorFn<T> = (rowA: T, rowB: T) => boolean; // Function that compares two rows of type T
 
 /**
  * Interface for the constructor parameters of the stream processing class
@@ -49,14 +49,16 @@ export interface DataFrameConfig<T> {
     query: DataFrameQuery; // The parameters for the query
     precedingRowsSize: number; // The number of rows to return before the main data
     followingRowsSize: number; // The number of rows to return after the main data
-    databaseQueryCb: DataQueryCb<T>; // The function to query the database
-    databaseChangesCb: DataChangesCb<T>; // The function to emit changes in the database
-    compareRowsCb: RowComparator<T>; // Function to compare two rows of type T
+    databaseQueryFn: DataQueryFn<T>; // The function to query the database
+    databaseChangesCb: DataChangesCb<T>; // Emit changes in the database
+    compareRowsFn: RowComparatorFn<T>; // Function to compare two rows of type T
     dataFrameChangesCb: DataFrameChangesCb<T>; // Emit changes in data stream
+    throttleTime?: number;
+    throttledChangesCb?: (changes: ThrottledDataFrameChanges<T>) => void;
 }
 
 // Tracking changes in data streams
-export type DataFrameChangesCb<T> = (data: IDataChangesRequest<T>) => void;
+export type DataFrameChangesCb<T> = (data: DataFrameChanges<T>) => void;
 
 /**
  * Interface for row operation parameters.
@@ -65,5 +67,21 @@ export type DataFrameChangesCb<T> = (data: IDataChangesRequest<T>) => void;
 export interface RowOperationParams<T> {
     row: T;
     oldRow?: T;
+}
+
+export interface DataFrameChanges<T> {
+    added?: T;
+    deleted?: T;
+    collection: T[];
+    total: number;
+    queryHash: string;
+}
+
+export interface ThrottledDataFrameChanges<T> {
+    added: T[];
+    deleted: T[];
+    collection: T[];
+    total: number;
+    queryHash: string;
 }
 
