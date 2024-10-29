@@ -3,7 +3,8 @@ import {
     DataFrame,
     DataFrameChanges,
     DataFrameQuery,
-    SortingDirection 
+    SortingDirection,
+    ThrottledDataFrameChanges
 } from "..";
 
 /**
@@ -151,6 +152,16 @@ export function createTestData(pageOffset: number, pageSize: number): LiveDataGr
         },
         dataFrameChangesCb: (data: DataFrameChanges<TestDatabaseRow>) => {
             testData.result = data.collection.map(row => row.id);
+        },
+        throttleTime: 10,
+        throttledChangesCb: (data: ThrottledDataFrameChanges<TestDatabaseRow>) => {
+            // console.log({
+            //     ...data,
+            //     changes: data.changes.map(change => ({
+            //         ...change,
+            //         element: change.element.id
+            //     }))
+            // });
         },
         compareRowsFn: (rowA: TestDatabaseRow, rowB: TestDatabaseRow) => rowA.id === rowB.id,
         precedingRowsSize: 10,

@@ -77,11 +77,31 @@ export interface DataFrameChanges<T> {
     queryHash: string;
 }
 
+/**
+ * Represents a single change operation in the data frame
+ * @template T Type of the data element
+ */
+export interface DataFrameChangeOperation<T> {
+    /** The element that was changed */
+    element: T;
+    /** Timestamp of when the change occurred */
+    timestamp: number;
+    /** Type of change operation */
+    type: 'added' | 'deleted';
+}
+
+/**
+ * Interface for throttled changes in the data frame
+ * @template T Type of the data elements
+ */
 export interface ThrottledDataFrameChanges<T> {
-    added: T[];
-    deleted: T[];
+    /** Array of changes that occurred during the throttle period */
+    changes: DataFrameChangeOperation<T>[];
+    /** Current state of the collection after applying changes */
     collection: T[];
+    /** Total number of items */
     total: number;
+    /** Query hash for tracking */
     queryHash: string;
 }
 

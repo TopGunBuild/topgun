@@ -7,6 +7,7 @@ import {
     DataFrameQuery,
     DataFrameConfig,
     ThrottledDataFrameChanges,
+    DataFrameChangeOperation,
 } from './types';
 import { DataFrameCollection } from './data-frame-collection';
 import { convertQueryToFilterTree } from './utils';
@@ -41,10 +42,7 @@ export class DataFrame<T> {
 
     private readonly throttleTime: number;
     private readonly throttledChangesCb?: (changes: ThrottledDataFrameChanges<T>) => void;
-    private accumulatedChanges: {
-        added: Set<T>;
-        deleted: Set<T>;
-    };
+    private accumulatedChanges: DataFrameChangeOperation<T>[] = [];
     private debouncedEmitThrottledChanges: () => void;
 
     /**
@@ -73,10 +71,6 @@ export class DataFrame<T> {
 
         this.throttleTime = throttleTime || 0;
         this.throttledChangesCb = throttledChangesCb;
-        this.accumulatedChanges = {
-            added: new Set<T>(),
-            deleted: new Set<T>()
-        };
 
         if (this.throttledChangesCb) {
             this.debouncedEmitThrottledChanges = debounce(
@@ -150,10 +144,7 @@ export class DataFrame<T> {
         this.queue.destroy();
         
         // Clear accumulated changes
-        if (this.accumulatedChanges) {
-            this.accumulatedChanges.added.clear();
-            this.accumulatedChanges.deleted.clear();
-        }
+        this.accumulatedChanges = [];
     }
 
     /**
@@ -332,6 +323,7 @@ export class DataFrame<T> {
      */
     #emitChanges(persist: boolean = false): void {
         if (persist || this.lastRowAdded || this.lastRowDeleted) {
+            // Emit immediate changes as before
             this.dataFrameChangesCb({
                 added: this.lastRowAdded,
                 deleted: this.lastRowDeleted,
@@ -340,12 +332,21 @@ export class DataFrame<T> {
                 queryHash: this.query.queryHash,
             });
 
+            // Accumulate changes for throttled emission
             if (this.throttledChangesCb) {
-                if (this.lastRowAdded) {
-                    this.accumulatedChanges.added.add(this.lastRowAdded);
-                }
                 if (this.lastRowDeleted) {
-                    this.accumulatedChanges.deleted.add(this.lastRowDeleted);
+                    this.accumulatedChanges.push({
+                        element: this.lastRowDeleted,
+                        timestamp: Date.now(),
+                        type: 'deleted'
+                    });
+                }
+                if (this.lastRowAdded) {
+                    this.accumulatedChanges.push({
+                        element: this.lastRowAdded,
+                        timestamp: Date.now(),
+                        type: 'added'
+                    });
                 }
                 this.debouncedEmitThrottledChanges();
             }
@@ -430,22 +431,26 @@ export class DataFrame<T> {
         this.precedingCollection.setToEnd(this.lastRowDeleted);
     }
 
+    /**
+     * Emit throttled changes
+     */
     #emitThrottledChanges(): void {
-        if (!this.throttledChangesCb) {
+        if (!this.throttledChangesCb || this.accumulatedChanges.length === 0) {
             return;
         }
 
+        // Sort changes by timestamp to ensure chronological order
+        const sortedChanges = [...this.accumulatedChanges].sort((a, b) => a.timestamp - b.timestamp);
+
         const changes: ThrottledDataFrameChanges<T> = {
-            added: Array.from(this.accumulatedChanges.added),
-            deleted: Array.from(this.accumulatedChanges.deleted),
+            changes: sortedChanges,
             collection: this.mainCollection.getData(),
             total: this.total,
             queryHash: this.query.queryHash
         };
 
         // Clear accumulated changes
-        this.accumulatedChanges.added.clear();
-        this.accumulatedChanges.deleted.clear();
+        this.accumulatedChanges = [];
 
         // Emit throttled changes
         this.throttledChangesCb(changes);
