@@ -38,7 +38,7 @@ export class DataUtil {
      * @param state The sorting state to apply.
      * @returns The sorted dataset.
      */
-    static applyOrdering<T>(data: T[], state: SortingState): T[] {
+    static applySorting<T>(data: T[], state: SortingState): T[] {
         // set defaults
         DataUtil.applyDefaults(state, SortingDefaults);
         // apply default settings for each sorting expression(if not set)
@@ -102,7 +102,7 @@ export class DataUtil {
             total = rows.length;
         }
         if (state.sorting) {
-            rows = DataUtil.applyOrdering(rows, state.sorting);
+            rows = DataUtil.applySorting(rows, state.sorting);
         }
         if (state.paging) {
             rows = DataUtil.applyPagination(rows, state.paging);

@@ -9,6 +9,8 @@ import { StorageManager } from "./storage/storage-manager";
 import { transformSocketUrl } from "./utils/socket-url-transformer";
 import WebSocket from "isomorphic-ws";
 import { deserialize } from "@dao-xyz/borsh";
+import { DataUtil } from '@topgunbuild/data-processing';
+
 /**
  * The Store class is the main entry point for the TopGun client library.
  * It manages the connection to the websocket servers and the storage of data.
@@ -191,10 +193,10 @@ export class Store {
             return; // No changes to apply
         }
 
-        // Create updated result
+        // Create updated result with sorted rows
         const updatedResult = {
             ...queryState.result,
-            rows: updatedRows,
+            rows: DataUtil.applySorting(updatedRows, { criteria: queryState.query.sort }),
             total: messageBody.total
         };
 
