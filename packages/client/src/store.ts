@@ -2,7 +2,7 @@ import { ClientConfig, NetworkListenerAdapter, QueryCb, QueryState } from "./typ
 import { IndexedDBStorage } from "./storage/indexeddb-storage";
 import { WebSocketManager } from "./websocket";
 import { WindowNetworkListener } from "./utils/window-network-listener";
-import { toHexString, windowOrGlobal } from "@topgunbuild/utils";
+import { compareArraysSimple, toHexString, windowOrGlobal } from "@topgunbuild/utils";
 import { CancelSelectRequest, DataChangesRequest, ISelectResult, Payload, SelectRequest, SelectResultRequest } from "@topgunbuild/types";
 import { MemoryStorage } from "./storage/memory-storage";
 import { StorageManager } from "./storage/storage-manager";
@@ -196,14 +196,18 @@ export class Store {
         // Create updated result with sorted rows
         const updatedResult = {
             ...queryState.result,
-            rows: DataUtil.applySorting(updatedRows, { criteria: queryState.query.sort }),
+            rows: messageBody.changes?.length 
+                ? DataUtil.applySorting(updatedRows, { criteria: queryState.query.sort })
+                : updatedRows,
             total: messageBody.total
         };
 
-        // Update query state and notify
-        queryState.result = updatedResult;
-        this.storageManager.saveQueryResult(queryHash, updatedResult, queryState.query.entity);
-        queryState.cbs.forEach(cb => cb(updatedResult));
+        if (!compareArraysSimple(updatedResult.rows, queryState.result.rows)) {
+            // Update query state and notify
+            queryState.result = updatedResult;
+            this.storageManager.saveQueryResult(queryHash, updatedResult, queryState.query.entity);
+            queryState.cbs.forEach(cb => cb(updatedResult));
+        }
     }
 
     /**

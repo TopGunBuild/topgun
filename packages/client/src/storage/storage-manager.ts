@@ -1,4 +1,4 @@
-import { ISelectRequest, ISelectResult } from "@topgunbuild/types";
+import { ISelectResult } from "@topgunbuild/types";
 import { PersistedService } from "./persisted-service";
 import { StorageDerived } from "./types";
 
