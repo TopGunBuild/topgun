@@ -3,7 +3,7 @@ import { IndexedDBStorage } from "./storage/indexeddb-storage";
 import { WebSocketManager } from "./websocket";
 import { WindowNetworkListener } from "./utils/window-network-listener";
 import { compareArraysSimple, toHexString, windowOrGlobal } from "@topgunbuild/utils";
-import { CancelSelectRequest, DataChangesRequest, ISelectResult, Payload, SelectRequest, SelectResultRequest } from "@topgunbuild/types";
+import { CancelSelectRequest, DataChangesRequest, Identifiable, ISelectResult, Payload, SelectRequest, SelectResultRequest } from "@topgunbuild/types";
 import { MemoryStorage } from "./storage/memory-storage";
 import { StorageManager } from "./storage/storage-manager";
 import { transformSocketUrl } from "./utils/socket-url-transformer";
@@ -44,7 +44,7 @@ export class Store {
      * @param query The query to execute
      * @param cb The callback to call with the result
      */
-    public subscribeQuery<T extends { id: string }>(query: SelectRequest, cb: QueryCb<T>): () => void {
+    public subscribeQuery<T extends Identifiable>(query: SelectRequest, cb: QueryCb<ISelectResult<T>>): () => void {
         // Encode and hash query once, store in const
         const encodedQuery = query.encode();
         const queryHash = toHexString(encodedQuery);

@@ -1,5 +1,6 @@
 import { field } from '@dao-xyz/borsh';
 import { randomId } from '@topgunbuild/utils';
+import { Identifiable } from '../common';
 
 // /**
 //  * KeyScope represents the scope of a keyset. For example:
@@ -37,9 +38,8 @@ import { randomId } from '@topgunbuild/utils';
 //
 // }
 
-export interface IKeyset
+export interface IKeyset extends Identifiable
 {
-    id: string;
     teamId: string;
     type: string;
     name: string;
@@ -51,7 +51,7 @@ export interface IKeyset
 export class Keyset implements IKeyset
 {
     @field({ type: 'string' })
-    id: string;
+    $id: string;
 
     @field({ type: 'string' })
     teamId: string;
@@ -72,7 +72,7 @@ export class Keyset implements IKeyset
     generation: number;
 
     constructor(data: {
-        id?: string,
+        $id?: string,
         teamId: string,
         type: string,
         name: string,
@@ -81,7 +81,7 @@ export class Keyset implements IKeyset
         generation: number
     })
     {
-        this.id         = data.id || randomId(32);
+        this.$id        = data.$id || randomId(32);
         this.teamId     = data.teamId;
         this.type       = data.type;
         this.name       = data.name;

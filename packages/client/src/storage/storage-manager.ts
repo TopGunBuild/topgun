@@ -1,4 +1,4 @@
-import { ISelectResult } from "@topgunbuild/types";
+import { Identifiable, ISelectResult } from "@topgunbuild/types";
 import { PersistedService } from "./persisted-service";
 import { StorageDerived } from "./types";
 
@@ -115,7 +115,7 @@ export class StorageManager {
      * @param queryHash - The hash of the query
      * @param entity - The entity for the query
      */
-    public async getQueryResult<T extends { id: string }>(
+    public async getQueryResult<T extends Identifiable>(
         queryHash: string,
         entity: string
     ): Promise<ISelectResult<T> | undefined> {

@@ -1,5 +1,11 @@
 import { field, variant, vec } from '@dao-xyz/borsh';
 
+export interface QueryParams
+{
+    key: string;
+    value: string;
+}
+
 export abstract class Query
 {
 }

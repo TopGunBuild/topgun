@@ -1,8 +1,9 @@
 import { field, option } from '@dao-xyz/borsh';
+import { Identifiable } from '../common';
+import { randomId } from '@topgunbuild/utils';
 
-export interface IInvitation
+export interface IInvitation extends Identifiable
 {
-    id: string;
     publicKey: string;
     expiration: string;
     maxUses: number;
@@ -12,7 +13,7 @@ export interface IInvitation
 export class Invitation implements IInvitation
 {
     @field({ type: 'string' })
-    id: string;
+    $id: string;
 
     @field({ type: 'string' })
     publicKey: string;
@@ -26,9 +27,9 @@ export class Invitation implements IInvitation
     @field({ type: option('string') })
     userId?: string;
 
-    constructor(data: { id: string, publicKey: string, expiration: string, maxUses: number, userId?: string })
+    constructor(data: { $id?: string, publicKey: string, expiration: string, maxUses: number, userId?: string })
     {
-        this.id         = data.id;
+        this.$id        = data.$id || randomId(32);
         this.publicKey  = data.publicKey;
         this.expiration = data.expiration;
         this.maxUses    = data.maxUses;

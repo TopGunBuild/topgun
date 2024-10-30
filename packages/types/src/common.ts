@@ -1,4 +1,4 @@
-import { ISelectResult } from "./requests";
+import { ISelectResult, Query, Sort, SortParams } from "./requests";
 
 /**
  * Represents the scope of a keyset.
@@ -65,10 +65,19 @@ export interface MessageFieldRow extends FieldUpdateInfo
 export type MessageFieldValue = boolean|string|number|Uint8Array|null;
 
 /**
+ * Base interface for all types that have an id property.
+ * This interface should be extended by other interfaces that require an id.
+ */
+export interface Identifiable {
+    $id: string;
+}
+
+
+/**
  * This interface represents a single database row containing
  * all message information and field values.
  */
-export type MessageRow = Record<string, MessageFieldValue>;
+export type MessageRow = Record<string, MessageFieldValue> & Identifiable;
 
 /**
  * This interface represents a collection of MessageRow instances,
@@ -76,4 +85,16 @@ export type MessageRow = Record<string, MessageFieldValue>;
  */
 export interface MessageRowCollection extends ISelectResult<MessageRow>
 {
+}
+
+/**
+ * Options for a select query
+ */
+export interface SelectOptions
+{
+    query?: Query[];
+    sort?: SortParams[];
+    fields?: string[];
+    pageSize?: number;
+    pageOffset?: number;
 }
