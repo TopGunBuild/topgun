@@ -1,3 +1,4 @@
 export * from "./data-frame";
 export * from "./data-frame-collection";
 export * from "./types";
+export * from "./utils";

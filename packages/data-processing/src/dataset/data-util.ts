@@ -1,7 +1,7 @@
-import { FilteringDefaults, FilteringState } from "../filtering";
+import { DataFilteringEngine, FilteringCriteriaTree, FilteringDefaults, FilteringState } from "../filtering";
 import { PagingState } from "../paging";
 import { SortingDefaults, SortingState } from "../sorting";
-import { DatasetState } from "./types";
+import { DataChange, DatasetState } from "./types";
 
 /**
  * Utility class for data processing operations.
@@ -108,5 +108,51 @@ export class DataUtil {
             rows = DataUtil.applyPagination(rows, state.paging);
         }
         return {rows, total};
+    }
+
+    /**
+     * Process changes between old and new datasets
+     * @param oldData The original dataset
+     * @param newData The new dataset to compare against
+     * @returns Array of changes with their types
+     */
+    static processChanges<T extends { $id: string }>(
+        oldData: T[], 
+        newData: T[],
+        filterCriteria: FilteringCriteriaTree
+    ): DataChange<T>[] {
+        const changes: DataChange<T>[] = [];
+        const oldMap = new Map(oldData.map(item => [item.$id, item]));
+        const newMap = new Map(newData.map(item => [item.$id, item]));
+
+        // Find deleted and updated items
+        for (const [id, oldItem] of oldMap) {
+            const newItem = newMap.get(id);
+            if (!newItem) {
+                // Item exists in old but not in new = deleted
+                changes.push({ item: oldItem, type: 'deleted' });
+            } else if (JSON.stringify(oldItem) !== JSON.stringify(newItem)) {
+                // Item exists in both but is different = updated
+                changes.push({ item: newItem, type: 'updated' });
+            }
+        }
+
+        const filterEngine = new DataFilteringEngine();
+
+        // Find added items
+        for (const [id, newItem] of newMap) {
+            if (!oldMap.has(id)) {
+                // Only add if item passes filtering criteria
+                const passesFilter = filterCriteria ? 
+                    filterEngine.process([newItem], filterCriteria).length > 0 :
+                    true;
+                
+                if (passesFilter) {
+                    changes.push({ item: newItem, type: 'added' });
+                }
+            }
+        }
+
+        return changes;
     }
 }

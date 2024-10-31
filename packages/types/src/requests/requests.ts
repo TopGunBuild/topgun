@@ -421,19 +421,28 @@ export class DeleteMessageRequest extends AbstractRequest {
 }
 
 /**
+ * DataFrame change operation request interface
+ */
+export interface IDataFrameChangeOperationRequest<T> {
+    element: T;
+    type: 'added' | 'deleted' | 'updated';
+    timestamp: number;
+}
+
+/**
  * DataFrame change operation request
  */
-export class DataFrameChangeOperationRequest {
+export class DataFrameChangeOperationRequest implements IDataFrameChangeOperationRequest<string> {
     @field({ type: 'string' })
     element: string;
 
     @field({ type: 'string' })
-    type: 'added' | 'deleted';
+    type: 'added' | 'deleted' | 'updated';
 
     @field({ type: 'u64' })
     timestamp: number;
 
-    constructor(data: { element: string, type: 'added' | 'deleted', timestamp: number }) {
+    constructor(data: { element: string, type: 'added' | 'deleted' | 'updated', timestamp: number }) {
         this.element = data.element;
         this.type = data.type;
         this.timestamp = data.timestamp;
@@ -441,10 +450,20 @@ export class DataFrameChangeOperationRequest {
 }
 
 /**
+ * Data changes request interface
+ */
+export interface IDataChangesRequest<T> {
+    changes?: IDataFrameChangeOperationRequest<T>[];
+    collection?: T[];
+    total: number;
+    queryHash: string;
+}
+
+/**
  * Data changes request
  */
 @variant(22)
-export class DataChangesRequest {
+export class DataChangesRequest implements IDataChangesRequest<string> {
     @field({ type: option(vec(DataFrameChangeOperationRequest)) })
     changes?: DataFrameChangeOperationRequest[];
 
@@ -473,11 +492,11 @@ export interface ISelectRequest {
     channelId?: string;
     messageId?: string;
     fieldName?: string;
-    query: Query[];
-    sort: Sort[];
-    fields: string[];
-    pageSize: number;
-    pageOffset: number;
+    query?: Query[];
+    sort?: Sort[];
+    fields?: string[];
+    pageSize?: number;
+    pageOffset?: number;
 }
 
 /**

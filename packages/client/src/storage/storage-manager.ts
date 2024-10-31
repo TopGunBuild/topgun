@@ -93,6 +93,34 @@ export class StorageManager {
     }
 
     /**
+     * Update or insert data into entity storage
+     * @param entity - The entity type
+     * @param data - The data to store
+     */
+    public async upsert<T extends Identifiable>(entity: string, data: T[]): Promise<void> {
+        const entityStorage = this.getEntityStorage(entity);
+        await entityStorage.waitForLoaded();
+        
+        for (const item of data) {
+            entityStorage.set(item.$id, item);
+        }
+    }
+
+    /**
+     * Delete items from entity storage
+     * @param entity - The entity type 
+     * @param ids - Array of item IDs to delete
+     */
+    public async delete(entity: string, ids: string[]): Promise<void> {
+        const entityStorage = this.getEntityStorage(entity);
+        await entityStorage.waitForLoaded();
+
+        for (const id of ids) {
+            entityStorage.delete(id);
+        }
+    }
+
+    /**
      * Put a query into the storage
      * @param queryHash - The hash of the query
      * @param query - The query result
@@ -128,7 +156,7 @@ export class StorageManager {
         const query = this.queryStorage.get(queryHash);
         if (!query) return undefined;
         return {
-            rows: query.rows.map(id => entityStorage.get(id) as T),
+            rows: query.rows.map(id => entityStorage.get(id) as T).filter(Boolean) as T[],
             total: query.total,
             hasNextPage: query.hasNextPage,
             hasPreviousPage: query.hasPreviousPage

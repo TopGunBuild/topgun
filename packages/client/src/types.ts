@@ -1,5 +1,6 @@
-import { ISelectResult, SelectRequest, SelectResultRequest } from "@topgunbuild/types";
+import { ISelectResult, SelectRequest } from "@topgunbuild/types";
 import { StorageDerived } from "./storage/types";
+import { FilteringCriteriaTree } from "@topgunbuild/data-processing";
 
 /**
  * The configuration for the client
@@ -30,6 +31,7 @@ export type QueryCb<T> = (value: T) => void;
  */
 export interface QueryState<T extends { id: string }> {
     query: SelectRequest;
+    filterCriteria: FilteringCriteriaTree;
     cbs: QueryCb<T>[];
     result: ISelectResult<T> | null;
 }

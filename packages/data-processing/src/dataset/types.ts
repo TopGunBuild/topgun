@@ -19,4 +19,10 @@ export interface DatasetState {
     paging?: PagingState;   
 }
 
-
+/**
+ * Interface for a data change.
+ */
+export interface DataChange<T> {
+    item: T;
+    type: 'added' | 'updated' | 'deleted';
+}

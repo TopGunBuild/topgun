@@ -1,4 +1,4 @@
-import { ISelectResult, MessageRow } from "@topgunbuild/types";
+import { ISelectResult, MessageRow, SelectOptions, SelectRequest } from "@topgunbuild/types";
 import { Store } from "./store";
 import { QueryCb } from "./types";
 
@@ -13,8 +13,9 @@ export class TeamService
         this.store = store;
     }
 
-    subscribeMessages(options?: SelectSectionOptions, cb: QueryCb<ISelectResult<MessageRow>>): () => void
+    subscribeMessages(options: SelectOptions, cb: QueryCb<ISelectResult<MessageRow>>): () => void
     {
-        return this.store.subscribeQuery<MessageRow>(new SelectQuery(options), cb);
+        const query = new SelectRequest({ entity: 'message', ...options });
+        return this.store.subscribeQuery<MessageRow>(query, cb);
     }
 }

@@ -3,13 +3,13 @@ import { IndexedDBStorage } from "./storage/indexeddb-storage";
 import { WebSocketManager } from "./websocket";
 import { WindowNetworkListener } from "./utils/window-network-listener";
 import { compareArraysSimple, toHexString, windowOrGlobal } from "@topgunbuild/utils";
-import { CancelSelectRequest, DataChangesRequest, Identifiable, ISelectResult, Payload, SelectRequest, SelectResultRequest } from "@topgunbuild/types";
+import { CancelSelectRequest, DataChangesRequest, IDataChangesRequest, Identifiable, ISelectResult, Payload, SelectRequest, SelectResultRequest } from "@topgunbuild/types";
 import { MemoryStorage } from "./storage/memory-storage";
 import { StorageManager } from "./storage/storage-manager";
 import { transformSocketUrl } from "./utils/socket-url-transformer";
 import WebSocket from "isomorphic-ws";
 import { deserialize } from "@dao-xyz/borsh";
-import { DataUtil } from '@topgunbuild/data-processing';
+import { DataUtil, convertQueryToFilterTree } from '@topgunbuild/data-processing';
 
 /**
  * The Store class is the main entry point for the TopGun client library.
@@ -40,6 +40,46 @@ export class Store {
     }
 
     /**
+     * Update or insert data into storage
+     * @param entity The entity type being stored
+     * @param data The data to store
+     */
+    public async upsert<T extends Identifiable>(entity: string, data: T | T[]): Promise<void> {
+        const items = Array.isArray(data) ? data : [data];
+        
+        // Validate all items have IDs
+        if (items.some(item => !item.$id)) {
+            throw new Error('All items must have an $id property');
+        }
+
+        // Store in local storage
+        await this.storageManager.upsert(entity, items);
+
+        // Update any active queries that may be affected
+        Object.entries(this.queryCbs).forEach(([queryHash, state]) => {
+            if (state.query.entity === entity && state.result) {
+
+                // Process changes through data util
+                const changes = DataUtil.processChanges(state.result.rows, items, state.filterCriteria);
+                
+                // Create change notification
+                const changeRequest: IDataChangesRequest<Identifiable> = {
+                    changes: changes.map(change => ({
+                        element: change.item,
+                        type: change.type,
+                        timestamp: Date.now()
+                    })),
+                    collection: changes.map(c => c.item),
+                    total: state.result.total + (changes.filter(c => c.type === 'added').length - changes.filter(c => c.type === 'deleted').length),
+                    queryHash
+                };
+
+                this.handleDataChanges(changeRequest);
+            }
+        });
+    }
+
+    /**
      * Subscribe to a query
      * @param query The query to execute
      * @param cb The callback to call with the result
@@ -56,6 +96,7 @@ export class Store {
                 query,
                 cbs: [cb], // Initialize with the callback directly
                 result: null,
+                filterCriteria: convertQueryToFilterTree(query)
             };
             this.websocketManager.send(encodedQuery);
         } else {
@@ -144,7 +185,7 @@ export class Store {
                 break;
 
             case messageBody instanceof DataChangesRequest:
-                this.handleDataChanges(messageBody);
+                this.handleDataChanges<string>(messageBody);
                 break;
         }
     }
@@ -153,7 +194,7 @@ export class Store {
      * Handle data changes
      * @param messageBody The data changes request
      */
-    private handleDataChanges(messageBody: DataChangesRequest) {
+    private handleDataChanges<T>(messageBody: IDataChangesRequest<T>) {
         const queryHash = messageBody.queryHash;
         const queryState = this.queryCbs[queryHash];
 
@@ -166,7 +207,9 @@ export class Store {
         // Handle full collection replacement
         if (messageBody.collection?.length) {
             try {
-                const parsedCollection = messageBody.collection.map(item => JSON.parse(item));
+                const parsedCollection = messageBody.collection.map(item => 
+                    typeof item === 'string' ? JSON.parse(item) : item
+                );
                 updatedRows = parsedCollection;
             } catch (e) {
                 console.error('Failed to parse collection data:', e);
@@ -177,7 +220,9 @@ export class Store {
         else if (messageBody.changes?.length) {
             for (const change of messageBody.changes) {
                 try {
-                    const parsedElement = JSON.parse(change.element);
+                    const parsedElement = typeof change.element === 'string' 
+                        ? JSON.parse(change.element) 
+                        : change.element;
                     
                     if (change.type === 'deleted') {
                         updatedRows = updatedRows.filter(row => row.id !== parsedElement.id);

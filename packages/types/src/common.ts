@@ -1,4 +1,4 @@
-import { ISelectResult, Query, Sort, SortParams } from "./requests";
+import { ISelectResult, Query, Sort } from "./requests";
 
 /**
  * Represents the scope of a keyset.
@@ -93,7 +93,7 @@ export interface MessageRowCollection extends ISelectResult<MessageRow>
 export interface SelectOptions
 {
     query?: Query[];
-    sort?: SortParams[];
+    sort?: Sort[];
     fields?: string[];
     pageSize?: number;
     pageOffset?: number;
