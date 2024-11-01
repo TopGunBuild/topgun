@@ -1,4 +1,4 @@
-import { field } from '@dao-xyz/borsh';
+import { field, serialize } from '@dao-xyz/borsh';
 import { IRequestHeader, RequestHeader } from './request-header';
 import { AbstractRequest } from './requests';
 
@@ -23,5 +23,9 @@ export class Payload implements IPayload {
     }) {
         this.header = data.header;
         this.body = data.body;
+    }
+
+    encode(): Uint8Array {
+        return serialize(this);
     }
 }

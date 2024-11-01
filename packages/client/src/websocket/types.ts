@@ -7,13 +7,12 @@ export enum WebSocketReadyState {
     CLOSED = 3,
 }
 
-// export const WebSocketStatus = {
-//     CONNECTING: "connecting",
-//     OPENED: "opened",
-//     AUTHENTICATED: "authenticated",
-//     CLOSED: "closed",
-//     ERRORED: "errored",
-// };
+export type ConnectionState = 
+    | "connecting"
+    | "opened"
+    | "authenticated"
+    | "closed"
+    | "errored";
 
 export type MessageType = string | ArrayBuffer | Blob | Uint8Array;
 
@@ -26,4 +25,5 @@ export interface QueuedMessage {
 export interface WebSocketManagerConfig {
     websocketURI: string;
     appId: string;
+    onStateChange: (state: ConnectionState) => void;
 }

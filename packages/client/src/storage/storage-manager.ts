@@ -1,4 +1,4 @@
-import { Identifiable, ISelectResult } from "@topgunbuild/types";
+import { Identifiable, IPayload, ISelectResult } from "@topgunbuild/types";
 import { PersistedService } from "./persisted-service";
 import { StorageDerived } from "./types";
 
@@ -71,25 +71,25 @@ export class StorageManager {
      * Put a pending action into the storage
      * @param action - The action
      */
-    public putPendingAction(action: any) {
-        this.pendingActionsStorage.set(action.hash, action);
+    public putPendingAction(action: IPayload) {
+        this.pendingActionsStorage.set(action.body.id, action);
     }
 
     /**
      * Get a pending action from the storage
-     * @param hash - The hash of the action
+     * @param id - The id of the action
      */
-    public async getPendingAction(hash: string): Promise<any | undefined> {
+    public async getPendingAction(id: string): Promise<any | undefined> {
         await this.pendingActionsStorage.waitForLoaded();
-        return this.pendingActionsStorage.get(hash);
+        return this.pendingActionsStorage.get(id);
     }
 
     /**
      * Delete a pending action from the storage
-     * @param hash - The hash of the action
+     * @param id - The id of the action
      */
-    public deletePendingAction(hash: string) {
-        this.pendingActionsStorage.delete(hash);
+    public deletePendingAction(id: string) {
+        this.pendingActionsStorage.delete(id);
     }
 
     /**

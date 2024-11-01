@@ -151,6 +151,7 @@ export class WebSocketManager {
             this.connectionPromise = null;
         }
         this.flushQueue();
+        this.config.onStateChange("opened");
     }
 
     /**
@@ -168,10 +169,12 @@ export class WebSocketManager {
         if (this.isManualClose) {
             this.isManualClose = false;
             this.log.log("[socket-close] manual close, will not reconnect");
+            this.config.onStateChange("closed");
             return;
         }
 
         this.log.log("[socket-close] scheduling reconnect", this.reconnectTimeoutMs);
+        this.config.onStateChange("connecting");
         this.reconnectTimeoutId = setTimeout(() => {
             this.reconnectTimeoutMs = Math.min(this.reconnectTimeoutMs + 1000, 10000);
             this.startSocket();
@@ -184,6 +187,7 @@ export class WebSocketManager {
      */
     private onError({ error }: WebSocket.ErrorEvent): void {
         this.log.error("[socket] error: ", error);
+        this.config.onStateChange("errored");
     }
 
     /**

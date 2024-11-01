@@ -1,8 +1,6 @@
 import { field, option, variant, vec } from "@dao-xyz/borsh";
 import { serialize } from "@dao-xyz/borsh";
 import { Member, Device, Invitation, Keyset, Role, Server, Lockbox } from "../models";
-import { AbstractValue } from "./values";
-import { typeOf } from "./typeof";
 import { Query } from "./query";
 import { Sort } from "./sort";
 import { randomId, toArray } from "@topgunbuild/utils";
@@ -375,22 +373,17 @@ export class PutMessageRequest extends AbstractRequest {
     messageId: string;
 
     @field({ type: 'string' })
-    fieldName: string;
-
-    @field({ type: AbstractValue })
-    value: AbstractValue;
+    value: string;
 
     constructor(data: {
         channelId: string,
         messageId: string,
-        fieldName: string,
-        value: unknown,
+        value: string,
     }) {
         super({});
         this.channelId = data.channelId;
         this.messageId = data.messageId;
-        this.fieldName = data.fieldName;
-        this.value = typeOf(data.value);
+        this.value = data.value;
     }
 }
 
