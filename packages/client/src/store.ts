@@ -26,12 +26,6 @@ export class StoreError extends Error {
     }
 }
 
-export class ConnectionError extends StoreError {
-    constructor(message: string) {
-        super(message, 'CONNECTION_ERROR');
-    }
-}
-
 /**
  * The Store class is the main entry point for the TopGun client library.
  * It manages the connection to the websocket servers and the storage of data.
@@ -107,14 +101,9 @@ export class Store {
     /**
      * Send a request to the websocket
      * @param body The request body
-     * @throws {ConnectionError} When not connected
      * @throws {StoreError} On request failure
      */
     public async sendRequest(body: AbstractRequest): Promise<void> {
-        if (this.connectionState !== 'opened') {
-            throw new ConnectionError('Cannot send request while disconnected');
-        }
-
         const payload = new Payload({
             header: new RequestHeader({
                 userId: this.userId,
@@ -271,7 +260,7 @@ export class Store {
             const queryHash = toHexString(encodedQuery);
             
             this.initializeQueryState(queryHash, query, cb);
-            this.loadInitialQueryResult<T>(queryHash, query);
+            this.loadInitialQueryResult(queryHash, query);
 
             return () => this.unsubscribeQuery(query, cb, queryHash);
         } catch (error) {
@@ -308,12 +297,12 @@ export class Store {
      * Load initial query result from storage
      * @private
      */
-    private async loadInitialQueryResult<T>(
+    private async loadInitialQueryResult(
         queryHash: string, 
         query: SelectRequest
     ): Promise<void> {
         try {
-            const result = await this.storageManager.getQueryResult<T>(queryHash, query.entity);
+            const result = await this.storageManager.getQueryResult<Identifiable>(queryHash, query.entity);
             if (result) {
                 const queryState = this.queryCbs[queryHash];
                 queryState.result = result;
