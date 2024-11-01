@@ -114,9 +114,9 @@ export class Store {
         });
 
         try {
-            await this.storageManager.putPendingAction(payload);
+            this.storageManager.putPendingAction(payload);
             await this.websocketManager.send(payload.encode());
-            await this.storageManager.deletePendingAction(payload.body.id);
+            this.storageManager.deletePendingAction(payload.body.id);
         } catch (error) {
             console.error('Failed to send request:', error);
             throw new StoreError('Failed to send request', 'SEND_REQUEST_ERROR');
@@ -143,6 +143,30 @@ export class Store {
         } catch (error) {
             console.error('Upsert failed:', error);
             throw error instanceof StoreError ? error : new StoreError('Failed to upsert data', 'UPSERT_ERROR');
+        }
+    }
+
+    /**
+     * Delete items from storage
+     * @param entity The entity type
+     * @param ids Array of item IDs to delete
+     * @throws {StoreError} If deletion fails
+     */
+    public async delete(entity: string, ids: string[]): Promise<void> {
+        try {
+            if (!Array.isArray(ids) || ids.length === 0) {
+                throw new StoreError('Invalid ids array', 'INVALID_INPUT');
+            }
+
+            await this.storageManager.delete(entity, ids);
+
+            // Create dummy items for query updates
+            const deletedItems = ids.map(id => ({ $id: id }));
+            this.updateQueriesForEntity(entity, deletedItems);
+
+        } catch (error) {
+            console.error('Delete failed:', error);
+            throw error instanceof StoreError ? error : new StoreError('Failed to delete data', 'DELETE_ERROR');
         }
     }
 

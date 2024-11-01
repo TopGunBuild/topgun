@@ -1,7 +1,7 @@
 import { Deferred } from "@topgunbuild/utils";
 import { ConsoleLogger, LoggerService } from "@topgunbuild/logger";
 import WebSocket from "isomorphic-ws"
-import { MessageType, QueuedMessage, WebSocketManagerConfig, WebSocketReadyState } from "./types";
+import { QueuedMessage, WebSocketManagerConfig, WebSocketReadyState } from "./types";
 
 /**
  * Manages the WebSocket connection and message sending.
