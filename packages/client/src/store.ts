@@ -3,7 +3,7 @@ import { IndexedDBStorage } from "./storage/indexeddb-storage";
 import { ConnectionState, WebSocketManager } from "./websocket";
 import { WindowNetworkListener } from "./utils/window-network-listener";
 import { compareArraysSimple, toHexString, windowOrGlobal } from "@topgunbuild/utils";
-import { AbstractRequest, CancelSelectRequest, DataChangesRequest, IDataChangesRequest, Identifiable, ISelectResult, Payload, PutMessageRequest, RequestHeader, SelectRequest, SelectResultRequest } from "@topgunbuild/types";
+import { AbstractRequest, AddMemberRequest, CancelSelectRequest, DataChangesRequest, IDataChangesRequest, Identifiable, ISelectResult, Member, Payload, PutMessageRequest, RequestHeader, SelectRequest, SelectResultRequest, RemoveMemberRequest, AddRoleRequest, Role, IRole, RemoveRoleRequest, AddMemberRoleRequest, IMember, RemoveMemberRoleRequest } from "@topgunbuild/types";
 import { MemoryStorage } from "./storage/memory-storage";
 import { StorageManager } from "./storage/storage-manager";
 import { transformSocketUrl } from "./utils/socket-url-transformer";
@@ -73,10 +73,11 @@ export class Store {
 
     /**
      * Add messages to the store
+     * @param channelId The channel ID
      * @param messages Array of messages to add
      * @throws {StoreError} If messages are invalid
      */
-    public async addMessages<T extends StoreItem>(messages: T[]): Promise<void> {
+    public async addMessages<T extends StoreItem>(channelId: string, messages: T[]): Promise<void> {
         try {
             if (!Array.isArray(messages) || messages.length === 0) {
                 throw new StoreError('Invalid messages array', 'INVALID_INPUT');
@@ -86,7 +87,7 @@ export class Store {
 
             for (const message of messages) {
                 const body = new PutMessageRequest({
-                    channelId: 'test',
+                    channelId,
                     messageId: message.$id,
                     value: JSON.stringify(message)
                 });
@@ -95,6 +96,164 @@ export class Store {
         } catch (error) {
             console.error('Failed to add messages:', error);
             throw error instanceof StoreError ? error : new StoreError('Failed to add messages', 'ADD_MESSAGE_ERROR');
+        }
+    }
+
+    /**
+     * Add a member to the store
+     * @param member Member to add
+     * @throws {StoreError} If member is invalid
+     */
+    public async addMember(member: Member, roles?: string[]): Promise<void> {
+        try {
+            if (!member.$id) {
+                throw new StoreError('Member must have an $id property', 'INVALID_INPUT');
+            }
+
+            await this.upsert('member', member);
+
+            const body = new AddMemberRequest({
+                member: new Member(member),
+                roles
+            });
+            await this.sendRequest(body);
+        } catch (error) {
+            console.error('Failed to add member:', error);
+            throw error instanceof StoreError ? error : new StoreError('Failed to add member', 'ADD_MEMBER_ERROR');
+        }
+    }
+
+    /**
+     * Remove a member from the store
+     * @param userId ID of the member to remove
+     * @throws {StoreError} If removal fails
+     */
+    public async removeMember(userId: string): Promise<void> {
+        try {
+            if (!userId) {
+                throw new StoreError('User ID is required', 'INVALID_INPUT');
+            }
+
+            await this.delete('member', [userId]);
+
+            const body = new RemoveMemberRequest({
+                userId
+            });
+            await this.sendRequest(body);
+        } catch (error) {
+            console.error('Failed to remove member:', error);
+            throw error instanceof StoreError ? error : new StoreError('Failed to remove member', 'REMOVE_MEMBER_ERROR');
+        }
+    }
+
+    /**
+     * Add a role to the store
+     * @param role Role to add
+     * @throws {StoreError} If role is invalid
+     */
+    public async addRole(role: IRole): Promise<void> {
+        try {
+            if (!role.$id) {
+                throw new StoreError('Role must have an $id property', 'INVALID_INPUT');
+            }
+
+            await this.upsert('role', role);
+
+            const body = new AddRoleRequest({
+                role: new Role(role)
+            });
+            await this.sendRequest(body);
+        } catch (error) {
+            console.error('Failed to add role:', error);
+            throw error instanceof StoreError ? error : new StoreError('Failed to add role', 'ADD_ROLE_ERROR');
+        }
+    }
+
+    /**
+     * Remove a role from the store
+     * @param roleName Name of the role to remove
+     * @throws {StoreError} If removal fails
+     */
+    public async removeRole(roleName: string): Promise<void> {
+        try {
+            if (!roleName) {
+                throw new StoreError('Role name is required', 'INVALID_INPUT');
+            }
+
+            await this.delete('role', [roleName]);
+
+            const body = new RemoveRoleRequest({ roleName });
+            await this.sendRequest(body);
+        } catch (error) {
+            console.error('Failed to remove role:', error);
+            throw error instanceof StoreError ? error : new StoreError('Failed to remove role', 'REMOVE_ROLE_ERROR');
+        }
+    }
+
+    /**
+     * Add a member with a role to the store
+     * @param userId ID of the member
+     * @param roleName Name of the role to assign to the member
+     * @throws {StoreError} If member or role is invalid
+     */
+    public async addMemberRole(userId: string, roleName: string): Promise<void> {
+        try {
+            // Validate inputs
+            if (!userId || !roleName) {
+                throw new StoreError('User ID and role name are required', 'INVALID_INPUT');
+            }
+
+            // Get existing member or create new one with default roles array
+            const member = await this.storageManager.get<IMember>('member', userId) || {
+                $id: userId,
+                roles: []
+            };
+
+            // Ensure roles is an array and add new role if not present
+            member.roles = Array.isArray(member.roles) ? member.roles : [];
+            if (!member.roles.includes(roleName)) {
+                member.roles.push(roleName);
+                await this.upsert('member', member);
+            }
+
+            // Send request regardless of local changes to ensure server consistency
+            await this.sendRequest(new AddMemberRoleRequest({ userId, roleName }));
+        } catch (error) {
+            console.error('Failed to add member role:', error);
+            throw error instanceof StoreError ? error : new StoreError('Failed to add member role', 'ADD_MEMBER_ROLE_ERROR');
+        }
+    }
+
+    /**
+     * Remove a member role from the store
+     * @param userId ID of the member
+     * @param roleName Name of the role to remove
+     * @throws {StoreError} If member or role is invalid
+     */
+    public async removeMemberRole(userId: string, roleName: string): Promise<void> {
+        try {
+            // Validate inputs
+            if (!userId || !roleName) {
+                throw new StoreError('User ID and role name are required', 'INVALID_INPUT');
+            }
+
+            // Get existing member
+            const member = await this.storageManager.get<IMember>('member', userId);
+            if (member) {
+                // Ensure roles is an array and remove role if present
+                member.roles = Array.isArray(member.roles) ? member.roles : [];
+                const roleIndex = member.roles.indexOf(roleName);
+                if (roleIndex !== -1) {
+                    member.roles.splice(roleIndex, 1);
+                    await this.upsert('member', member);
+                }
+            }
+
+            // Send request regardless of local changes to ensure server consistency
+            await this.sendRequest(new RemoveMemberRoleRequest({ userId, roleName }));
+        } catch (error) {
+            console.error('Failed to remove member role:', error);
+            throw error instanceof StoreError ? error : new StoreError('Failed to remove member role', 'REMOVE_MEMBER_ROLE_ERROR');
         }
     }
 

@@ -121,6 +121,18 @@ export class StorageManager {
     }
 
     /**
+     * Get an item from entity storage
+     * @param entity - The entity type
+     * @param id - The id of the item
+     * @returns The item
+     */
+    public async get<T extends Identifiable>(entity: string, id: string): Promise<T | undefined> {
+        const entityStorage = this.getEntityStorage(entity);
+        await entityStorage.waitForLoaded();
+        return entityStorage.get(id) as T | undefined;
+    }
+
+    /**
      * Put a query into the storage
      * @param queryHash - The hash of the query
      * @param query - The query result

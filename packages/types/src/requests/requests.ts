@@ -127,25 +127,25 @@ export class RemoveRoleRequest extends AbstractRequest {
 }
 
 /**
- * Add member role request
+ * Assign a role to a member
  */
 @variant(5)
 export class AddMemberRoleRequest extends AbstractRequest {
     @field({ type: 'string' })
     userId: string;
 
-    @field({ type: Role })
-    role: Role;
+    @field({ type: 'string' })
+    roleName: string;
 
-    constructor(data: { lockboxes?: Lockbox[], userId: string, role: Role }) {
+    constructor(data: { lockboxes?: Lockbox[], userId: string, roleName: string }) {
         super(data);
         this.userId = data.userId;
-        this.role = data.role;
+        this.roleName = data.roleName;
     }
 }
 
 /**
- * Remove member role request
+ * Remove a role from a member
  */
 @variant(6)
 export class RemoveMemberRoleRequest extends AbstractRequest {
