@@ -1,4 +1,5 @@
-import { SortingCriteria, SortingImplementation, SortingState, SortingDirection } from "./types";
+import { SortDirection, SortOptions } from "@topgunbuild/types";
+import { SortingImplementation, SortingState } from "./types";
 
 /**
  * Class for sorting algorithm.
@@ -10,7 +11,7 @@ export class DataSortingEngine implements SortingImplementation {
      * @param criteria The criteria to use for arranging.
      * @returns The arranged items.
      */
-    process(items: any[], criteria: SortingCriteria[]): any[] {
+    process(items: any[], criteria: SortOptions[]): any[] {
         return this.applySortingRecursively(items, criteria);
     }
 
@@ -75,7 +76,7 @@ export class DataSortingEngine implements SortingImplementation {
      * @param criteria The criteria to use for getting the items with the same value.
      * @returns The items with the same value.
      */
-    private getItemsWithSameValue<T>(items: T[], startIndex: number, criteria: SortingCriteria): T[] {
+    private getItemsWithSameValue<T>(items: T[], startIndex: number, criteria: SortOptions): T[] {
         const result = [];
         const attribute = criteria.key;
         const referenceValue = items[startIndex][attribute];
@@ -97,10 +98,10 @@ export class DataSortingEngine implements SortingImplementation {
      * @param criteria The criteria to use for ordering.
      * @returns The ordered items.
      */
-    private sortByAttribute<T>(items: T[], criteria: SortingCriteria): T[] {
+    private sortByAttribute<T>(items: T[], criteria: SortOptions): T[] {
         const attribute = criteria.key;
-        const caseSensitive = criteria.caseSensitive ?? false;
-        const multiplier = (criteria.direction === SortingDirection.DESC ? -1 : 1);
+        const caseSensitive = false;
+        const multiplier = (criteria.direction === SortDirection.DESC ? -1 : 1);
 
         const comparator = (item1: any, item2: any): number => {
             return this.compareAttributes(item1, item2, attribute, multiplier, caseSensitive);
@@ -118,7 +119,7 @@ export class DataSortingEngine implements SortingImplementation {
      */
     private applySortingRecursively<T>(
         items: T[],
-        criteria: SortingCriteria[],
+        criteria: SortOptions[],
         criteriaIndex: number = 0
     ): T[] {
         if (criteriaIndex >= criteria.length || items.length <= 1) {

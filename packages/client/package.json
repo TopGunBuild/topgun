@@ -27,6 +27,7 @@
         "@topgunbuild/data-processing": "workspace:*",
         "@topgunbuild/logger": "workspace:*",
         "@topgunbuild/time": "workspace:*",
+        "@topgunbuild/transport": "workspace:*",
         "@topgunbuild/types": "workspace:*",
         "@topgunbuild/utils": "workspace:*",
         "isomorphic-ws": "^5.0.0"

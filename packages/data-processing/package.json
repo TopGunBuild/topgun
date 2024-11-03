@@ -22,6 +22,7 @@
         "preset": "@topgunbuild/jest-presets/node"
     },
     "dependencies": {
+        "@topgunbuild/transport": "workspace:*",
         "@topgunbuild/types": "workspace:*",
         "@topgunbuild/utils": "workspace:*"
     },

@@ -7,13 +7,13 @@ import {
     DataFrameQuery,
     DataFrameConfig,
     ThrottledDataFrameChanges,
-    DataFrameChangeOperation,
 } from './types';
 import { DataFrameCollection } from './data-frame-collection';
 import { convertQueryToFilterTree } from './utils';
 import { FilteringCriteriaTree } from '../filtering/types';
 import { DataFilteringEngine } from '../filtering/engine';
 import { debounce } from '@topgunbuild/utils';
+import { DataFrameChangeOperation } from '@topgunbuild/types';
 
 /**
  * An in-memory data grid contains a master dataset retrieved from the database

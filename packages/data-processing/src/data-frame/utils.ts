@@ -1,12 +1,3 @@
-import {
-    And, BooleanConditionQuery,
-    ByteConditionQuery, DateConditionQuery,
-    FieldQuery,
-    LogicalQuery, NumberConditionQuery,
-    Or,
-    Query,
-    StringConditionQuery,
-} from '@topgunbuild/types';
 import { FilteringCriteria, FilteringCriteriaTree, FilteringOperator } from '../filtering/types';
 import { 
     STRING_FILTER_CONDITIONS, 
@@ -17,7 +8,8 @@ import {
 } from '../filtering/conditions';
 import { DataFrameQuery } from './types';
 import { DatasetState } from '../dataset/types';
-
+import { And, BooleanConditionQuery, ByteConditionQuery, DateConditionQuery, NumberConditionQuery, Or, StringConditionQuery } from '@topgunbuild/transport';
+import { FieldQuery, LogicalQuery, Query } from '@topgunbuild/transport';
 
 /**
  * Converts a query to a datagrid state.

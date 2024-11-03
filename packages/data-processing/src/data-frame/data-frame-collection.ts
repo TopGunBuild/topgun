@@ -1,7 +1,7 @@
 import { isDefined } from '@topgunbuild/utils';
 import { RowComparatorFn } from './types';
-import { SortingCriteria } from '../sorting/types';
 import { DataSortingEngine } from '../sorting/engine';
+import { SortOptions } from '@topgunbuild/types';
 
 /**
  * Class contains a set of in-memory data along with methods for efficiently manipulating the data.
@@ -10,7 +10,7 @@ import { DataSortingEngine } from '../sorting/engine';
  */
 export class DataFrameCollection<T> {
     private data: T[];
-    private readonly sortingCriteria: SortingCriteria[];
+    private readonly sortingCriteria: SortOptions[];
     private readonly sortingEngine: DataSortingEngine;
     private readonly compareRowsCb: RowComparatorFn<T>;
 
@@ -27,7 +27,7 @@ export class DataFrameCollection<T> {
      * @param {number} [params.pageSize] - The page size for pagination (optional)
      */
     constructor(params: {
-        sortingCriteria: SortingCriteria[],
+        sortingCriteria: SortOptions[],
         compareRowsFn: RowComparatorFn<T>,
         pageSize?: number
     }) {
@@ -35,10 +35,7 @@ export class DataFrameCollection<T> {
         this.sortingEngine = new DataSortingEngine();
         this.pageSize = params.pageSize;
         this.compareRowsCb = params.compareRowsFn;
-        this.sortingCriteria = params.sortingCriteria.map(s => {
-            s.caseSensitive = true;
-            return s;
-        });
+        this.sortingCriteria = params.sortingCriteria;
     }
 
     /**

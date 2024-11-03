@@ -1,21 +1,7 @@
 import { field, vec } from '@dao-xyz/borsh';
+import { SortDirection, SortOptions } from '@topgunbuild/types';
 
-/**
- * Enum to define sorting directions
- */
-export enum SortDirection
-{
-    ASC,
-    DESC
-}
-
-export interface SortParams
-{
-    key: string;
-    direction?: SortDirection;
-}
-
-export class Sort implements SortParams
+export class Sort implements SortOptions
 {
     @field({ type: vec('string') })
     key: string;
@@ -23,7 +9,7 @@ export class Sort implements SortParams
     @field({ type: 'u8' })
     direction: SortDirection;
 
-    constructor(properties: SortParams)
+    constructor(properties: SortOptions)
     {
         this.key       = properties.key;
         this.direction = properties.direction || SortDirection.ASC;

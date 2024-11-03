@@ -1,23 +1,9 @@
 import { field, option } from '@dao-xyz/borsh';
-import { Keyset } from './keyset';
-import { Identifiable } from '../common';
+import { KeysetImpl } from './keyset';
+import { Device, UnixTimestamp } from '@topgunbuild/types';
 import { randomId } from '@topgunbuild/utils';
 
-export interface IDeviceInfo extends Identifiable
-{
-    teamId: string;
-    userId: string;
-    keys: Keyset;
-    deviceInfo?: string;
-    created?: string;
-}
-
-// export interface IDeviceWithSecrets extends IDeviceInfo
-// {
-//     keys: KeysetWithSecrets;
-// }
-
-export class Device implements IDeviceInfo
+export class DeviceImpl implements Device
 {
     @field({ type: 'string' })
     $id: string;
@@ -28,22 +14,27 @@ export class Device implements IDeviceInfo
     @field({ type: 'string' })
     userId: string;
 
-    @field({ type: Keyset })
-    keys: Keyset;
+    @field({ type: KeysetImpl })
+    keys: KeysetImpl;
 
-    @field({ type: option('string') })
-    created?: string;
+    @field({ type: option('f64') })
+    created?: UnixTimestamp;
 
     @field({ type: option('string') })
     deviceInfo?: string;
+
+    @field({ type: 'string' })
+    deviceName: string;
 
     constructor(data: {
         $id?: string,
         teamId: string,
         userId: string,
-        keys: Keyset,
-        created?: string,
-        deviceInfo?: string
+        keys: KeysetImpl,
+        created?: UnixTimestamp,
+        deviceInfo?: string,
+        deviceId?: string,
+        deviceName?: string
     })
     {
         this.$id        = data.$id || randomId(32);
@@ -52,5 +43,6 @@ export class Device implements IDeviceInfo
         this.keys       = data.keys;
         this.created    = data.created;
         this.deviceInfo = data.deviceInfo;
+        this.deviceName = data.deviceName || 'Unknown Device';
     }
 }

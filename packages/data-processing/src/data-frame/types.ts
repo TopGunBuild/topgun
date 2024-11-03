@@ -1,4 +1,5 @@
-import { Sort, Query, ISelectResult } from '@topgunbuild/types';
+import { Query } from '@topgunbuild/transport';
+import { SortOptions, SelectResult, DataFrameChangeOperation } from '@topgunbuild/types';
 
 export interface DataChagesEvent<T> {
     // The type of operation (e.g., 'insert', 'update', 'delete')
@@ -21,7 +22,7 @@ export type DataChangesCb<T> = (cb: (data: DataChagesEvent<T>) => void) => () =>
  * Type for the function that queries the database
  * @template T
  */
-export type DataQueryFn<T> = (params: DataFrameQuery) => Promise<ISelectResult<T>>; // Function that returns a promise resolving to a RowCollection
+export type DataQueryFn<T> = (params: DataFrameQuery) => Promise<SelectResult<T>>; // Function that returns a promise resolving to a RowCollection
 
 /**
  * Type for the function that compares two rows
@@ -37,7 +38,7 @@ export interface DataFrameQuery {
     pageOffset: number;
     pageSize: number;
     query: Query[];
-    sort: Sort[];
+    sort: SortOptions[];
     queryHash?: string;
 }
 
@@ -79,19 +80,6 @@ export interface DataFrameChanges<T> {
     collection: T[];
     total: number;
     queryHash: string;
-}
-
-/**
- * Represents a single change operation in the data frame
- * @template T Type of the data element
- */
-export interface DataFrameChangeOperation<T> {
-    /** The element that was changed */
-    element: T;
-    /** Timestamp of when the change occurred */
-    timestamp: number;
-    /** Type of change operation */
-    type: 'added' | 'deleted';
 }
 
 /**

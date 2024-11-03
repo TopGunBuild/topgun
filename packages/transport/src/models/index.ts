@@ -5,3 +5,4 @@ export * from './invitation';
 export * from './keyset';
 export * from './member';
 export * from './lockbox';
+export * from './encription-key';

@@ -1,14 +1,8 @@
 import { field, vec } from '@dao-xyz/borsh';
-import { Identifiable } from '../common';
 import { randomId } from '@topgunbuild/utils';
+import { Role } from '@topgunbuild/types';
 
-export interface IRole extends Identifiable
-{
-    roleName: string;
-    permissions: string[];
-}
-
-export class Role implements IRole
+export class RoleImpl implements Role<string[]>
 {
     @field({ type: 'string' })
     $id: string;

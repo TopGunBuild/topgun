@@ -1,9 +1,10 @@
 import { field, option, variant, vec } from "@dao-xyz/borsh";
 import { serialize } from "@dao-xyz/borsh";
-import { Member, Device, Invitation, Keyset, Role, Server, Lockbox } from "../models";
+import { MemberImpl, DeviceImpl, InvitationImpl, KeysetImpl, RoleImpl, ServerImpl, LockboxImpl } from "../models";
 import { Query } from "./query";
 import { Sort } from "./sort";
 import { randomId, toArray } from "@topgunbuild/utils";
+import { DataChanges, DataFrameChangeOperation, Lockbox, SelectOptions, SelectResult } from "@topgunbuild/types";
 
 /**
  * Base interface for all requests
@@ -19,7 +20,7 @@ export class AbstractRequest implements IRequest {
     @field({ type: 'string' })
     id: string;
 
-    @field({ type: option(vec(Lockbox)) })
+    @field({ type: option(vec(LockboxImpl)) })
     lockboxes?: Lockbox[];
 
     constructor(data: {
@@ -43,17 +44,17 @@ export class CreateTeamRequest extends AbstractRequest {
     @field({ type: 'string' })
     name: string;
 
-    @field({ type: Member })
-    rootMember: Member;
+    @field({ type: MemberImpl })
+    rootMember: MemberImpl;
 
-    @field({ type: Device })
-    rootDevice: Device;
+    @field({ type: DeviceImpl })
+    rootDevice: DeviceImpl;
 
     constructor(data: {
         lockboxes?: Lockbox[],
         name: string,
-        rootMember: Member,
-        rootDevice: Device
+        rootMember: MemberImpl,
+        rootDevice: DeviceImpl
     }) {
         super(data);
         this.name = data.name;
@@ -67,8 +68,8 @@ export class CreateTeamRequest extends AbstractRequest {
  */
 @variant(1)
 export class AddMemberRequest extends AbstractRequest {
-    @field({ type: Member })
-    member: Member;
+    @field({ type: MemberImpl })
+    member: MemberImpl;
 
     @field({ type: vec('string') })
     roles?: string[];
@@ -76,7 +77,7 @@ export class AddMemberRequest extends AbstractRequest {
     constructor(data: {
         lockboxes?: Lockbox[],
         roles?: string[],
-        member: Member,
+        member: MemberImpl,
     }) {
         super(data);
         this.member = data.member;
@@ -103,10 +104,10 @@ export class RemoveMemberRequest extends AbstractRequest {
  */
 @variant(3)
 export class AddRoleRequest extends AbstractRequest {
-    @field({ type: Role })
-    role: Role;
+    @field({ type: RoleImpl })
+    role: RoleImpl;
 
-    constructor(data: { lockboxes?: Lockbox[], role: Role }) {
+    constructor(data: { lockboxes?: Lockbox[], role: RoleImpl }) {
         super(data);
         this.role = data.role;
     }
@@ -167,10 +168,10 @@ export class RemoveMemberRoleRequest extends AbstractRequest {
  */
 @variant(7)
 export class AddDeviceRequest extends AbstractRequest {
-    @field({ type: Device })
-    device: Device;
+    @field({ type: DeviceImpl })
+    device: DeviceImpl;
 
-    constructor(data: { lockboxes?: Lockbox[], device: Device }) {
+    constructor(data: { lockboxes?: Lockbox[], device: DeviceImpl }) {
         super(data);
         this.device = data.device;
     }
@@ -195,10 +196,10 @@ export class RemoveDeviceRequest extends AbstractRequest {
  */
 @variant(9)
 export class InviteMemberRequest extends AbstractRequest {
-    @field({ type: Invitation })
-    invitation: Invitation;
+    @field({ type: InvitationImpl })
+    invitation: InvitationImpl;
 
-    constructor(data: { lockboxes?: Lockbox[], invitation: Invitation }) {
+    constructor(data: { lockboxes?: Lockbox[], invitation: InvitationImpl }) {
         super(data);
         this.invitation = data.invitation;
     }
@@ -209,10 +210,10 @@ export class InviteMemberRequest extends AbstractRequest {
  */
 @variant(10)
 export class InviteDeviceRequest extends AbstractRequest {
-    @field({ type: Invitation })
-    invitation: Invitation;
+    @field({ type: InvitationImpl })
+    invitation: InvitationImpl;
 
-    constructor(data: { lockboxes?: Lockbox[], invitation: Invitation }) {
+    constructor(data: { lockboxes?: Lockbox[], invitation: InvitationImpl }) {
         super(data);
         this.invitation = data.invitation;
     }
@@ -243,14 +244,14 @@ export class AdmitMemberRequest extends AbstractRequest {
     @field({ type: 'string' })
     userName: string;
 
-    @field({ type: Keyset })
-    memberKeys: Keyset;
+    @field({ type: KeysetImpl })
+    memberKeys: KeysetImpl;
 
     constructor(data: {
         lockboxes?: Lockbox[],
         invitationId: string,
         userName: string,
-        memberKeys: Keyset,
+        memberKeys: KeysetImpl,
     }) {
         super(data);
         this.invitationId = data.invitationId;
@@ -267,10 +268,10 @@ export class AdmitDeviceRequest extends AbstractRequest {
     @field({ type: 'string' })
     invitationId: string; // Invitation ID
 
-    @field({ type: Device })
-    device: Device;
+    @field({ type: DeviceImpl })
+    device: DeviceImpl;
 
-    constructor(data: { lockboxes?: Lockbox[], invitationId: string, device: Device }) {
+    constructor(data: { lockboxes?: Lockbox[], invitationId: string, device: DeviceImpl }) {
         super(data);
         this.invitationId = data.invitationId;
         this.device = data.device;
@@ -282,10 +283,10 @@ export class AdmitDeviceRequest extends AbstractRequest {
  */
 @variant(14)
 export class ChangeMemberKeysRequest extends AbstractRequest {
-    @field({ type: Keyset })
-    keys: Keyset;
+    @field({ type: KeysetImpl })
+    keys: KeysetImpl;
 
-    constructor(data: { lockboxes?: Lockbox[], keys: Keyset }) {
+    constructor(data: { lockboxes?: Lockbox[], keys: KeysetImpl }) {
         super(data);
         this.keys = data.keys;
     }
@@ -310,10 +311,10 @@ export class RotateKeysRequest extends AbstractRequest {
  */
 @variant(16)
 export class AddServerRequest extends AbstractRequest {
-    @field({ type: Server })
-    server: Server;
+    @field({ type: ServerImpl })
+    server: ServerImpl;
 
-    constructor(data: { lockboxes?: Lockbox[], server: Server }) {
+    constructor(data: { lockboxes?: Lockbox[], server: ServerImpl }) {
         super(data);
         this.server = data.server;
     }
@@ -338,10 +339,10 @@ export class RemoveServerRequest extends AbstractRequest {
  */
 @variant(18)
 export class ChangeServerKeysRequest extends AbstractRequest {
-    @field({ type: Keyset })
-    keys: Keyset;
+    @field({ type: KeysetImpl })
+    keys: KeysetImpl;
 
-    constructor(data: { lockboxes?: Lockbox[], keys: Keyset }) {
+    constructor(data: { lockboxes?: Lockbox[], keys: KeysetImpl }) {
         super(data);
         this.keys = data.keys;
     }
@@ -398,9 +399,6 @@ export class DeleteMessageRequest extends AbstractRequest {
     @field({ type: 'string' })
     messageId: string;
 
-    @field({ type: option('string') })
-    fieldName?: string;
-
     constructor(data: {
         channelId: string,
         messageId: string,
@@ -409,23 +407,14 @@ export class DeleteMessageRequest extends AbstractRequest {
         super({});
         this.channelId = data.channelId;
         this.messageId = data.messageId;
-        this.fieldName = data.fieldName;
     }
 }
 
-/**
- * DataFrame change operation request interface
- */
-export interface IDataFrameChangeOperationRequest<T> {
-    element: T;
-    type: 'added' | 'deleted' | 'updated';
-    timestamp: number;
-}
 
 /**
  * DataFrame change operation request
  */
-export class DataFrameChangeOperationRequest implements IDataFrameChangeOperationRequest<string> {
+export class DataFrameChangeOperationRequest implements DataFrameChangeOperation<string> {
     @field({ type: 'string' })
     element: string;
 
@@ -443,20 +432,10 @@ export class DataFrameChangeOperationRequest implements IDataFrameChangeOperatio
 }
 
 /**
- * Data changes request interface
- */
-export interface IDataChangesRequest<T> {
-    changes?: IDataFrameChangeOperationRequest<T>[];
-    collection?: T[];
-    total: number;
-    queryHash: string;
-}
-
-/**
  * Data changes request
  */
 @variant(22)
-export class DataChangesRequest implements IDataChangesRequest<string> {
+export class DataChangesRequest implements DataChanges<string> {
     @field({ type: option(vec(DataFrameChangeOperationRequest)) })
     changes?: DataFrameChangeOperationRequest[];
 
@@ -478,25 +457,10 @@ export class DataChangesRequest implements IDataChangesRequest<string> {
 }
 
 /**
- * Select request interface
- */
-export interface ISelectRequest {
-    entity: string;
-    channelId?: string;
-    messageId?: string;
-    fieldName?: string;
-    query?: Query[];
-    sort?: Sort[];
-    fields?: string[];
-    pageSize?: number;
-    pageOffset?: number;
-}
-
-/**
  * Select request
  */
 @variant(23)
-export class SelectRequest extends AbstractRequest implements ISelectRequest {
+export class SelectRequest extends AbstractRequest implements SelectOptions {
     @field({ type: 'string' })
     entity: string;
 
@@ -505,9 +469,6 @@ export class SelectRequest extends AbstractRequest implements ISelectRequest {
 
     @field({ type: option('string') })
     messageId?: string;
-
-    @field({ type: option('string') })
-    fieldName?: string;
 
     @field({ type: vec(Query) })
     query: Query[];
@@ -521,15 +482,18 @@ export class SelectRequest extends AbstractRequest implements ISelectRequest {
     @field({ type: 'u16' })
     pageSize: number;
 
-    @field({ type: 'u32'})
+    @field({ type: 'u32' })
     pageOffset: number;
 
-    constructor(data: ISelectRequest) {
+    constructor(data: {
+        entity: string,
+        channelId?: string,
+        messageId?: string
+    } & SelectOptions) {
         super({});
         this.entity = data.entity;
         this.channelId = data.channelId;
         this.messageId = data.messageId;
-        this.fieldName = data.fieldName;
         this.query = toArray(data.query);
         this.sort = toArray(data.sort);
         this.fields = toArray(data.fields);
@@ -539,21 +503,10 @@ export class SelectRequest extends AbstractRequest implements ISelectRequest {
 }
 
 /**
- * The query result
- */
-export type ISelectResult<T> = {
-    rows: T[];
-    total: number;
-    hasNextPage?: boolean;
-    hasPreviousPage?: boolean;
-    queryHash?: string;
-};
-
-/**
  * Select result
  */
 @variant(24)
-export class SelectResultRequest extends AbstractRequest implements ISelectResult<string> {
+export class SelectResultRequest extends AbstractRequest implements SelectResult<string> {
     @field({ type: vec('string') })
     rows: string[];
 
@@ -569,7 +522,7 @@ export class SelectResultRequest extends AbstractRequest implements ISelectResul
     @field({ type: option('string') })
     queryHash?: string;
 
-    constructor(data: ISelectResult<string>) {
+    constructor(data: SelectResult<string>) {
         super({});
         this.rows = data.rows;
         this.total = data.total;

@@ -1,7 +1,7 @@
 {
-    "name": "@topgunbuild/types",
+    "name": "@topgunbuild/transport",
     "version": "0.0.0",
-    "description": "Common types for TopGun",
+    "description": "Transport layer for TopGun",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
     "files": [
@@ -17,6 +17,11 @@
     "keywords": [],
     "author": "",
     "license": "ISC",
+    "dependencies": {
+        "@dao-xyz/borsh": "^5.2.2",
+        "@topgunbuild/types": "workspace:*",
+        "@topgunbuild/utils": "workspace:*"
+    },
     "devDependencies": {
         "@topgunbuild/eslint-config": "workspace:*",
         "@topgunbuild/jest-presets": "workspace:*",
