@@ -1,6 +1,7 @@
-import { ISelectResult, SelectRequest } from "@topgunbuild/types";
+import { SelectRequest } from "@topgunbuild/transport";
 import { StorageDerived } from "./storage/types";
 import { FilteringCriteriaTree } from "@topgunbuild/data-processing";
+import { SelectResult } from "@topgunbuild/types";
 
 /**
  * The configuration for the client
@@ -33,7 +34,7 @@ export interface QueryState<T extends { id: string }> {
     query: SelectRequest;
     filterCriteria: FilteringCriteriaTree;
     cbs: QueryCb<T>[];
-    result: ISelectResult<T> | null;
+    result: SelectResult<T> | null;
 }
 
 /**

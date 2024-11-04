@@ -3,7 +3,6 @@ import { IndexedDBStorage } from "./storage/indexeddb-storage";
 import { ConnectionState, WebSocketManager } from "./websocket";
 import { WindowNetworkListener } from "./utils/window-network-listener";
 import { compareArraysSimple, toHexString, windowOrGlobal } from "@topgunbuild/utils";
-import { AbstractRequest, AddMemberRequest, CancelSelectRequest, DataChangesRequest, IDataChangesRequest, Identifiable, ISelectResult, Member, Payload, PutMessageRequest, RequestHeader, SelectRequest, SelectResultRequest, RemoveMemberRequest, AddRoleRequest, Role, IRole, RemoveRoleRequest, AddMemberRoleRequest, IMember, RemoveMemberRoleRequest } from "@topgunbuild/types";
 import { MemoryStorage } from "./storage/memory-storage";
 import { StorageManager } from "./storage/storage-manager";
 import { transformSocketUrl } from "./utils/socket-url-transformer";
@@ -11,6 +10,27 @@ import WebSocket from "isomorphic-ws";
 import { deserialize } from "@dao-xyz/borsh";
 import { DataUtil, convertQueryToFilterTree } from '@topgunbuild/data-processing';
 import { bigintTime } from "@topgunbuild/time";
+import { DataChanges, Identifiable, LocalContext, Member, PermissionsMap, Role, SelectResult } from "@topgunbuild/types";
+import { 
+    AddMemberRequest, 
+    PutMessageRequest, 
+    RemoveMemberRequest, 
+    AddRoleRequest, 
+    RemoveRoleRequest, 
+    AddMemberRoleRequest, 
+    RemoveMemberRoleRequest, 
+    MemberImpl, 
+    RoleImpl, 
+    RequestHeader, 
+    AbstractRequest, 
+    TransportPayloadImpl, 
+    TransportMetadataImpl, 
+    DataChangesRequest, 
+    SelectRequest, 
+    CancelSelectRequest, 
+    SelectResultRequest, 
+    KeysetImpl
+} from "@topgunbuild/transport";
 
 /** Interface for items that can be stored */
 export interface StoreItem extends Identifiable {
@@ -71,6 +91,11 @@ export class Store {
         this.beforeUnloadCbs.push(() => this.disconnect());
     }
 
+    createTeam(teamName: string, context: LocalContext, seed?: string)
+    {
+
+    }
+
     /**
      * Add messages to the store
      * @param channelId The channel ID
@@ -113,7 +138,13 @@ export class Store {
             await this.upsert('member', member);
 
             const body = new AddMemberRequest({
-                member: new Member(member),
+                member: new MemberImpl({
+                    ...member,
+                    keys: new KeysetImpl({
+                        teamId: this.teamId,
+                        publicKey: this.userId
+                    })
+                }),
                 roles
             });
             await this.sendRequest(body);
@@ -151,7 +182,7 @@ export class Store {
      * @param role Role to add
      * @throws {StoreError} If role is invalid
      */
-    public async addRole(role: IRole): Promise<void> {
+    public async addRole(role: Role<PermissionsMap>): Promise<void> {
         try {
             if (!role.$id) {
                 throw new StoreError('Role must have an $id property', 'INVALID_INPUT');
@@ -160,7 +191,12 @@ export class Store {
             await this.upsert('role', role);
 
             const body = new AddRoleRequest({
-                role: new Role(role)
+                role: new RoleImpl({
+                    ...role,
+                    permissions: Object.entries(role.permissions || {})
+                        .filter(([_, value]) => value)
+                        .map(([key]) => key)
+                })
             });
             await this.sendRequest(body);
         } catch (error) {
@@ -204,7 +240,7 @@ export class Store {
             }
 
             // Get existing member or create new one with default roles array
-            const member = await this.storageManager.get<IMember>('member', userId) || {
+            const member = await this.storageManager.get<Member>('member', userId) || {
                 $id: userId,
                 roles: []
             };
@@ -238,7 +274,7 @@ export class Store {
             }
 
             // Get existing member
-            const member = await this.storageManager.get<IMember>('member', userId);
+            const member = await this.storageManager.get<Member>('member', userId);
             if (member) {
                 // Ensure roles is an array and remove role if present
                 member.roles = Array.isArray(member.roles) ? member.roles : [];
@@ -263,8 +299,8 @@ export class Store {
      * @throws {StoreError} On request failure
      */
     public async sendRequest(body: AbstractRequest): Promise<void> {
-        const payload = new Payload({
-            header: new RequestHeader({
+        const payload = new TransportPayloadImpl({
+            meta: new TransportMetadataImpl({
                 userId: this.userId,
                 teamId: this.teamId,
                 state: bigintTime()
@@ -340,7 +376,7 @@ export class Store {
                 
                 if (changes.length === 0) return;
 
-                const changeRequest: IDataChangesRequest<StoreItem> = {
+                const changeRequest: DataChanges<StoreItem> = {
                     changes: changes.map(change => ({
                         element: change.item,
                         type: change.type,
@@ -370,7 +406,7 @@ export class Store {
      * Handle data changes from websocket or local updates
      * @private
      */
-    private handleDataChanges<T extends StoreItem>(messageBody: IDataChangesRequest<T>): void {
+    private handleDataChanges<T extends StoreItem>(messageBody: DataChanges<T>): void {
         const queryState = this.queryCbs[messageBody.queryHash];
         if (!queryState?.result) return;
 
@@ -401,7 +437,7 @@ export class Store {
      */
     private processDataChanges<T extends StoreItem>(
         currentRows: T[], 
-        messageBody: IDataChangesRequest<T>
+        messageBody: DataChanges<T>
     ): T[] {
         let updatedRows = [...currentRows];
 
@@ -432,7 +468,7 @@ export class Store {
      */
     public subscribeQuery<T extends StoreItem>(
         query: SelectRequest, 
-        cb: QueryCb<ISelectResult<T>>
+        cb: QueryCb<SelectResult<T>>
     ): () => void {
         if (!query || !cb) {
             throw new StoreError('Query and callback are required', 'INVALID_INPUT');
@@ -540,7 +576,7 @@ export class Store {
      */
     private handleWebSocketMessage(msg: WebSocket.Data): void {
         try {
-            const message = deserialize(msg as Uint8Array, Payload);
+            const message = deserialize(msg as Uint8Array, TransportPayloadImpl);
             const messageBody = message.body;
 
             switch (true) {
@@ -548,7 +584,7 @@ export class Store {
                     this.handleSelectResult(messageBody);
                     break;
                 case messageBody instanceof DataChangesRequest:
-                    this.handleDataChanges<StoreItem>(messageBody as unknown as IDataChangesRequest<StoreItem>);
+                    this.handleDataChanges<StoreItem>(messageBody as unknown as DataChanges<StoreItem>);
                     break;
                 default:
                     console.warn('Unhandled message type:', messageBody);
@@ -722,7 +758,7 @@ export class Store {
      * Handle a select result
      * @param action The select result to handle
      */
-    private handleSelectResult(query: ISelectResult<any>): void {
+    private handleSelectResult(query: SelectResult<any>): void {
         const queryHash = query.queryHash;
         const queryState = this.queryCbs[queryHash];
 

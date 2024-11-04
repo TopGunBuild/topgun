@@ -60,7 +60,7 @@ export interface ProofOfInvitation extends Identifiable {
      * Matches the id of the original invitation
      * Used to look up the corresponding invitation record
      */
-    id: Base58
+    $id: Base58
 
     /** 
      * Cryptographic signature proving invitation ownership

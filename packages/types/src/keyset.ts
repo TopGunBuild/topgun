@@ -1,5 +1,3 @@
-import { Identifiable } from "./utils";
-
 /** Type alias for UTF-8 encoded strings with a phantom type for type safety */
 export type Utf8 = string & { _utf8: false }
 
@@ -80,7 +78,7 @@ export type KeyType = (typeof KeyType)[keyof typeof KeyType];
  * - Role scope: {type: 'ROLE', name: 'MANAGER'}
  * - Ephemeral scope: {type: 'EPHEMERAL', name: 'EPHEMERAL'}
  */
-export interface KeyScope extends Identifiable {
+export interface KeyScope {
     /** The type of the key scope (can be extended beyond KeyType) */
     type: string
     /** Identifier within the scope type */
