@@ -2,8 +2,9 @@ import { field } from '@dao-xyz/borsh';
 import { Base58, Lockbox } from '@topgunbuild/types';
 import { KeysetImpl } from './keyset';
 import { EncryptionKeyImpl } from './encription-key';
+import { EncodeHelper } from '../utils/encode-helper';
 
-export class LockboxImpl implements Lockbox
+export class LockboxImpl extends EncodeHelper implements Lockbox
 {
     @field({ type: 'string' })
     $id: Base58;
@@ -32,6 +33,7 @@ export class LockboxImpl implements Lockbox
         encryptionKey: EncryptionKeyImpl 
     })
     {
+        super();
         this.$id                   = data.$id;
         this.encryptionPublicKey   = data.encryptionPublicKey;
         this.recipient           = data.recipient;

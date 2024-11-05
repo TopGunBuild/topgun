@@ -2,8 +2,9 @@ import { field } from '@dao-xyz/borsh';
 import { randomId } from '@topgunbuild/utils';
 import { Server } from '@topgunbuild/types';
 import { KeysetImpl } from './keyset';
+import { EncodeHelper } from '../utils/encode-helper';
 
-export class ServerImpl implements Server
+export class ServerImpl extends EncodeHelper implements Server
 {
     @field({ type: 'string' })
     $id: string;
@@ -16,6 +17,7 @@ export class ServerImpl implements Server
 
     constructor(data: { $id?: string, host: string, keys: KeysetImpl })
     {
+        super();
         this.$id  = data.$id || randomId(32);
         this.host = data.host;
         this.keys = data.keys;

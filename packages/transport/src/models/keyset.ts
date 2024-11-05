@@ -1,8 +1,9 @@
 import { field } from '@dao-xyz/borsh';
 import { randomId } from '@topgunbuild/utils';
 import { Base58, Keyset } from '@topgunbuild/types';
+import { EncodeHelper } from '../utils/encode-helper';
 
-export class KeysetImpl implements Keyset
+export class KeysetImpl extends EncodeHelper implements Keyset
 {
     @field({ type: 'string' })
     $id: string;
@@ -39,6 +40,7 @@ export class KeysetImpl implements Keyset
         publicKey: Base58
     })
     {
+        super();
         this.$id        = data.$id || randomId(32);
         this.teamId     = data.teamId;
         this.type       = data.type;

@@ -2,8 +2,9 @@ import { field, option, vec } from '@dao-xyz/borsh';
 import { randomId } from '@topgunbuild/utils';
 import { Member } from '@topgunbuild/types';
 import { KeysetImpl } from './keyset';
+import { EncodeHelper } from '../utils/encode-helper';
 
-export class MemberImpl implements Member
+export class MemberImpl extends EncodeHelper implements Member
 {
     @field({ type: 'string' })
     $id: string;
@@ -24,6 +25,7 @@ export class MemberImpl implements Member
         keys?: KeysetImpl
     })
     {
+        super();
         this.$id = data.$id || randomId(32);
         this.roles = data.roles;
         this.userName = data.userName;

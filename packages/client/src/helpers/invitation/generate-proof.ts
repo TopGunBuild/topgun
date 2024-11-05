@@ -3,8 +3,8 @@ import { signatures } from "@topgunbuild/crypto"
 import { normalizeInvitationKey } from "./normalize"
 import { generateInvitationId } from "./generate-id"
 import { generateInviteeStarterKeys } from "./generate-starter-keys"
-import { InvitationPayload } from "./payload"
 import { CryptoError } from "../errors"
+import { InvitationPayloadImpl } from "@topgunbuild/transport"
 
 /**
  * Generates a cryptographic proof that demonstrates knowledge of the invitation secret
@@ -35,7 +35,7 @@ export const generateInvitationProof = (invitationSecret: string): ProofOfInvita
     const ephemeralKeys = generateInviteeStarterKeys(normalizedSecret)
     
     // Create and sign the proof payload
-    const payload = new InvitationPayload(invitationId)
+    const payload = new InvitationPayloadImpl(invitationId)
     const signature = signatures.sign(
       payload.encode(), 
       ephemeralKeys.signature.secretKey

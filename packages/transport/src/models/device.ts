@@ -2,8 +2,9 @@ import { field, option } from '@dao-xyz/borsh';
 import { KeysetImpl } from './keyset';
 import { Device, UnixTimestamp } from '@topgunbuild/types';
 import { randomId } from '@topgunbuild/utils';
+import { EncodeHelper } from '../utils/encode-helper';
 
-export class DeviceImpl implements Device
+export class DeviceImpl extends EncodeHelper implements Device
 {
     @field({ type: 'string' })
     $id: string;
@@ -37,6 +38,7 @@ export class DeviceImpl implements Device
         deviceName?: string
     })
     {
+        super();
         this.$id        = data.$id || randomId(32);
         this.teamId     = data.teamId;
         this.userId     = data.userId;
