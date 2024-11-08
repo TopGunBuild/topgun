@@ -1,0 +1,31 @@
+{
+    "name": "@topgunbuild/models",
+    "version": "0.0.0",
+    "description": "Common models for TopGun",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "files": [
+        "dist"
+    ],
+    "sideEffects": false,
+    "scripts": {
+        "build": "tsup",
+        "dev": "tsup --watch",
+        "lint": "eslint src/",
+        "typecheck": "tsc --noEmit"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "dependencies": {
+        "@dao-xyz/borsh": "^5.2.2",
+        "@topgunbuild/common": "workspace:*"
+    },
+    "devDependencies": {
+        "@topgunbuild/eslint-config": "workspace:*",
+        "@topgunbuild/typescript-config": "workspace:*",
+        "@types/node": "^20.11.24",
+        "tsup": "^8.0.2",
+        "typescript": "^5.3.3"
+    }
+}

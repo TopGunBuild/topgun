@@ -1,13 +1,13 @@
 {
-    "name": "@topgunbuild/client",
+    "name": "@topgunbuild/crypto",
     "version": "0.0.0",
-    "description": "TopGun client",
+    "description": "",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
+    "sideEffects": false,
     "files": [
         "dist/**"
     ],
-    "sideEffects": false,
     "scripts": {
         "build": "tsup",
         "dev": "tsup --watch",
@@ -23,14 +23,11 @@
     },
     "dependencies": {
         "@dao-xyz/borsh": "^5.2.2",
-        "@topgunbuild/crypto": "workspace:*",
-        "@topgunbuild/frames": "workspace:*",
-        "@topgunbuild/collections": "workspace:*",
-        "@topgunbuild/logger": "workspace:*",
-        "@topgunbuild/time": "workspace:*",
-        "@topgunbuild/models": "workspace:*",
-        "@topgunbuild/common": "workspace:*",
-        "isomorphic-ws": "^5.0.0"
+        "@noble/curves": "1.4.0",
+        "@noble/ciphers": "0.5.3",
+        "@noble/hashes": "1.4.0",
+        "@topgunbuild/textencoder": "workspace:*",
+        "@scure/base": "1.1.7"
     },
     "devDependencies": {
         "@topgunbuild/eslint-config": "workspace:*",
@@ -39,7 +36,6 @@
         "@topgunbuild/test-utils": "workspace:*",
         "@types/jest": "^29.5.12",
         "@types/node": "^20.11.24",
-        "@types/ws": "^8.5.10",
         "jest": "^29.7.0",
         "tsup": "^8.0.2",
         "typescript": "^5.3.3"
