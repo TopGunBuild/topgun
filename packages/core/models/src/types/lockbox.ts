@@ -1,4 +1,4 @@
-import { Base58, KeyMetadata } from "./keyset"
+import { KeyMetadata } from "./keyset"
 import { Identifiable } from "./utils"
 
 /**
@@ -7,7 +7,7 @@ import { Identifiable } from "./utils"
  */
 export interface KeyManifest extends KeyMetadata {
     /** Public key encoded in Base58 format */
-    publicKey: Base58
+    publicKey: string
 }
 
 /**
@@ -21,7 +21,7 @@ export interface Lockbox extends Identifiable {
      */
     encryptionKey: {
         type: 'EPHEMERAL'
-        publicKey: Base58
+        publicKey: string
     }
 
     /** 

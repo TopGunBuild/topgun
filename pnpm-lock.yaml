@@ -29,12 +29,18 @@ importers:
       '@topgunbuild/crypto':
         specifier: workspace:*
         version: link:../core/utils/crypto
+      '@topgunbuild/eventemitter':
+        specifier: workspace:*
+        version: link:../core/utils/eventemitter
       '@topgunbuild/frames':
         specifier: workspace:*
         version: link:../core/data/frames
       '@topgunbuild/logger':
         specifier: workspace:*
         version: link:../core/utils/logger
+      '@topgunbuild/model-utils':
+        specifier: workspace:*
+        version: link:../core/utils/models
       '@topgunbuild/models':
         specifier: workspace:*
         version: link:../core/models
@@ -268,6 +274,36 @@ importers:
       '@topgunbuild/textencoder':
         specifier: workspace:*
         version: link:../textencoder
+    devDependencies:
+      '@topgunbuild/eslint-config':
+        specifier: workspace:*
+        version: link:../../../config/config-eslint
+      '@topgunbuild/jest-presets':
+        specifier: workspace:*
+        version: link:../../../config/jest-presets
+      '@topgunbuild/test-utils':
+        specifier: workspace:*
+        version: link:../test-utils
+      '@topgunbuild/typescript-config':
+        specifier: workspace:*
+        version: link:../../../config/config-typescript
+      '@types/jest':
+        specifier: ^29.5.12
+        version: 29.5.12
+      '@types/node':
+        specifier: ^20.11.24
+        version: 20.16.2
+      jest:
+        specifier: ^29.7.0
+        version: 29.7.0(@types/node@20.16.2)
+      tsup:
+        specifier: ^8.0.2
+        version: 8.2.4(typescript@5.5.4)
+      typescript:
+        specifier: ^5.3.3
+        version: 5.5.4
+
+  packages/core/utils/eventemitter:
     devDependencies:
       '@topgunbuild/eslint-config':
         specifier: workspace:*

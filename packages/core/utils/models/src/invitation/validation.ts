@@ -1,5 +1,5 @@
 import { signatures } from "@topgunbuild/crypto"
-import { InvitationState, ProofOfInvitation, ValidationResult } from "@topgunbuild/types"
+import { InvitationPayloadImpl, InvitationState, ProofOfInvitation, ValidationResult } from "@topgunbuild/models"
 
 /**
  * Validates whether an invitation can be used at a given time.
@@ -60,7 +60,7 @@ export const validateInvitationProof = (
 
   // Verify signature
   const isSignatureValid = signatures.verify({
-    payload: { $id },
+    payload: new InvitationPayloadImpl($id).encode(),
     signature,
     publicKey: invitation.publicKey,
   })

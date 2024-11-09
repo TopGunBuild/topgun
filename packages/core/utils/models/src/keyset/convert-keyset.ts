@@ -1,5 +1,5 @@
-import { Keyset, KeysetWithSecrets } from "@topgunbuild/types";
-import { hasSecrets } from "../utils";
+import { Keyset, KeysetWithSecrets } from "@topgunbuild/models";
+import { isCompleteKeyset } from "../utils";
 
 /**
  * Converts a KeysetWithSecrets to a public-only Keyset by removing all secret keys.
@@ -22,7 +22,7 @@ import { hasSecrets } from "../utils";
  */
 export const convertToPublicKeyset = (keyset: KeysetWithSecrets | Keyset): Keyset => {
     // If the keyset doesn't have secrets, it's already public
-    if (!hasSecrets(keyset)) {
+    if (!isCompleteKeyset(keyset)) {
         return keyset;
     }
 

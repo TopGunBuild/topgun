@@ -1,7 +1,6 @@
-import { SelectRequest } from "@topgunbuild/transport";
 import { StorageDerived } from "./storage/types";
-import { FilteringCriteriaTree } from "@topgunbuild/data-processing";
-import { SelectResult } from "@topgunbuild/types";
+import { FilteringCriteriaTree } from "@topgunbuild/collections";
+import { SelectResult, SelectRequest } from "@topgunbuild/models";
 
 /**
  * The configuration for the client

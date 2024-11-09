@@ -1,7 +1,7 @@
 import { createKeyset } from "../keyset/create-keyset"
-import { UnixTimestamp, KeyType, DeviceWithSecrets } from "../../../../models/dist"
+import { UnixTimestamp, KeyType, DeviceWithSecrets } from "@topgunbuild/models"
 import { randomKey } from "@topgunbuild/crypto"
-import { randomId } from "../../../common/dist"
+import { randomId } from "@topgunbuild/common"
 
 export interface CreateDeviceParams {
   userId: string

@@ -1,5 +1,5 @@
-import { Invitation, ValidationError } from "../../../../models/dist"
-import { UnixTimestamp } from "../../../../models/dist"
+import { Invitation, ValidationError } from "@topgunbuild/models"
+import { UnixTimestamp } from "@topgunbuild/models"
 import { normalizeInvitationKey } from "./normalize"
 import { generateInviteeStarterKeys } from "./generate-starter-keys"
 import { generateInvitationId } from "./generate-id"

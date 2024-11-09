@@ -6,7 +6,7 @@ import {
   ServerWithSecrets, 
   User, 
   UserWithSecrets 
-} from "@topgunbuild/types"
+} from "@topgunbuild/models"
 
 /**
  * Utility functions to transform Server objects into other entity types

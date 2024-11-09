@@ -1,10 +1,9 @@
-import { Base58, ProofOfInvitation, ValidationError } from "../../../../models/dist"
-import { signatures } from "@topgunbuild/crypto-utils"
+import { ProofOfInvitation, ValidationError, InvitationPayloadImpl } from "@topgunbuild/models"
+import { signatures } from "@topgunbuild/crypto"
 import { normalizeInvitationKey } from "./normalize"
 import { generateInvitationId } from "./generate-id"
 import { generateInviteeStarterKeys } from "./generate-starter-keys"
 import { CryptoError } from "../errors"
-import { InvitationPayloadImpl } from "@topgunbuild/transport-types"
 
 /**
  * Generates a cryptographic proof that demonstrates knowledge of the invitation secret
@@ -39,7 +38,7 @@ export const generateInvitationProof = (invitationSecret: string): ProofOfInvita
     const signature = signatures.sign(
       payload.encode(), 
       ephemeralKeys.signature.secretKey
-    ) as Base58
+    )
 
     return { 
       $id: invitationId, 

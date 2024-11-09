@@ -1,4 +1,3 @@
-import { type Base58 } from './keyset';
 import { Identifiable, type UnixTimestamp } from './utils';
 
 /**
@@ -9,13 +8,13 @@ import { Identifiable, type UnixTimestamp } from './utils';
  */
 export interface Invitation extends Identifiable {
     /** Unique identifier for the invitation, encoded in Base58 */
-    $id: Base58
+    $id: string
 
     /** 
      * Public signing key derived from the secret invitation key
      * Used to verify the invitation proof during acceptance
      */
-    publicKey: Base58
+    publicKey: string
 
     /** 
      * Timestamp when the invitation expires
@@ -60,11 +59,11 @@ export interface ProofOfInvitation extends Identifiable {
      * Matches the id of the original invitation
      * Used to look up the corresponding invitation record
      */
-    $id: Base58
+    $id: string
 
     /** 
      * Cryptographic signature proving invitation ownership
      * Signs the combination of userId and invitation id using the derived private key
      */
-    signature: Base58
+    signature: string
 }

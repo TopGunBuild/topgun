@@ -1,4 +1,4 @@
-import { UserWithSecrets, User } from "@topgunbuild/types"
+import { UserWithSecrets, User, Member } from "@topgunbuild/models"
 import { convertToPublicKeyset } from "../keyset/convert-keyset"
 
 /**
@@ -19,3 +19,16 @@ export const convertToPublicUser = (user: User | UserWithSecrets): User => {
       keys: convertToPublicKeyset(user.keys),
     }
   }
+
+  /**
+   * Creates a redacted Member object from a UserWithSecrets
+   * Removes sensitive information and returns only public user data with empty roles
+   * 
+   * @param user - The user object containing sensitive information
+   * @returns Member - A public member object with redacted information
+   * @throws Error - If the user object is missing required properties (via convertToPublicUser)
+   */
+  export const convertToPublicMember = (user: UserWithSecrets): Member => ({
+    ...convertToPublicUser(user),
+    roles: [],
+  });

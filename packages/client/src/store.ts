@@ -2,15 +2,13 @@ import { ClientConfig, NetworkListenerAdapter, QueryCb, QueryState } from "./typ
 import { IndexedDBStorage } from "./storage/indexeddb-storage";
 import { ConnectionState, WebSocketManager } from "./websocket";
 import { WindowNetworkListener } from "./utils/window-network-listener";
-import { compareArraysSimple, toHexString, windowOrGlobal } from "@topgunbuild/utils";
+import { compareArraysSimple, toHexString, windowOrGlobal } from "@topgunbuild/common";
 import { MemoryStorage } from "./storage/memory-storage";
 import { StorageManager } from "./storage/storage-manager";
 import { transformSocketUrl } from "./utils/socket-url-transformer";
 import WebSocket from "isomorphic-ws";
 import { deserialize } from "@dao-xyz/borsh";
-import { DataUtil, convertQueryToFilterTree } from '@topgunbuild/data-processing';
 import { bigintTime } from "@topgunbuild/time";
-import { DataChanges, Identifiable, LocalContext, Member, PermissionsMap, Role, SelectResult } from "@topgunbuild/types";
 import { 
     AddMemberRequest, 
     PutMessageRequest, 
@@ -29,8 +27,15 @@ import {
     SelectRequest, 
     CancelSelectRequest, 
     SelectResultRequest, 
-    KeysetImpl
-} from "@topgunbuild/transport";
+    KeysetImpl,
+    DataChanges, 
+    Identifiable, 
+    LocalContext, 
+    Member, 
+    PermissionsMap, 
+    Role, 
+    SelectResult
+} from "@topgunbuild/models";
 
 /** Interface for items that can be stored */
 export interface StoreItem extends Identifiable {

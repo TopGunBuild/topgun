@@ -1,5 +1,5 @@
 import { field } from '@dao-xyz/borsh';
-import { Base58, Lockbox } from '../types';
+import { Lockbox } from '../types';
 import { KeysetImpl } from './keyset';
 import { EncryptionKeyImpl } from './encription-key';
 import { EncodeHelper } from '../utils/encode-helper';
@@ -7,10 +7,10 @@ import { EncodeHelper } from '../utils/encode-helper';
 export class LockboxImpl extends EncodeHelper implements Lockbox
 {
     @field({ type: 'string' })
-    $id: Base58;
+    $id: string;
 
     @field({ type: 'string' })
-    encryptionPublicKey: Base58;
+    encryptionPublicKey: string;
 
     @field({ type: KeysetImpl })
     recipient: KeysetImpl;
@@ -25,8 +25,8 @@ export class LockboxImpl extends EncodeHelper implements Lockbox
     encryptionKey: EncryptionKeyImpl;
 
     constructor(data: { 
-        $id: Base58, 
-        encryptionPublicKey: Base58, 
+        $id: string, 
+        encryptionPublicKey: string, 
         recipient: KeysetImpl, 
         contents: KeysetImpl, 
         encryptedPayload: Uint8Array, 

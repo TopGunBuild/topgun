@@ -1,0 +1,11 @@
+{
+    "extends": "@topgunbuild/typescript-config/base.json",
+    "compilerOptions": {
+        "target": "es2020",
+        "outDir": "./dist",
+        "types": ["jest", "node"],
+        "lib": ["dom", "ES2020"]
+    },
+    "include": ["."],
+    "exclude": ["node_modules", "dist"],
+}

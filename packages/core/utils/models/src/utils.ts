@@ -1,5 +1,5 @@
-import { KeysetWithSecrets, Keyset, KeyManifest, KeyScope } from "../../../models/dist"
-import { assert } from "../../common/dist"
+import { KeysetWithSecrets, Keyset, KeyManifest, KeyScope, Keyring, NewTeamOptions, NewOrExistingTeamOptions } from "@topgunbuild/models"
+import { assert } from "@topgunbuild/common"
 
 /**
  * Type guard to check if an object is a complete keyset with both public and private keys
@@ -36,19 +36,24 @@ export const isKeyManifest = (
 }
 
 /**
- * Type guard to check if an object has the basic required properties of a keyset
- * @param value - The value to check
- * @returns True if the value has the minimum required keyset properties
- * @deprecated Use isCompleteKeyset instead for more thorough validation
+ * Type guard to determine if a value is a Keyring rather than a KeysetWithSecrets or array of KeysetWithSecrets
+ * @param value - The value to check, which could be a Keyring, KeysetWithSecrets, or KeysetWithSecrets[]
+ * @returns True if the value is a Keyring object
  */
-export const isKeyset = (value: unknown): value is KeysetWithSecrets => {
-    if (!value || typeof value !== 'object') {
-        return false
+export const isKeyring = (value: Keyring | KeysetWithSecrets | KeysetWithSecrets[]): value is Keyring => {
+    // First check if it's not an array
+    if (Array.isArray(value)) {
+        return false;
     }
-
-    const requiredProperties = ['secretKey', 'encryption', 'signature']
-    return requiredProperties.every(prop => prop in value)
-}
+    
+    // Then verify it's not a complete keyset
+    if (isCompleteKeyset(value)) {
+        return false;
+    }
+    
+    // At this point, we know it's a non-array object that's not a complete keyset
+    return true;
+};
 
 /**
  * Extracts the scope properties from a KeyScope object
@@ -84,3 +89,19 @@ export const assertScopesMatch = (newScope: KeyScope, existingScope: KeyScope): 
         `Old scope: ${JSON.stringify(getScope(existingScope))}`
     );
 };
+
+/**
+ * Type guard to determine if options represent a new team creation vs existing team
+ * @param options - The options object to check
+ * @returns True if the options are for creating a new team
+ * @throws {TypeError} If options is null or not an object
+ */
+export const isNewTeam = (options: NewOrExistingTeamOptions): options is NewTeamOptions => {
+    // Validate input is a non-null object
+    if (!options || typeof options !== 'object') {
+        throw new TypeError('Options must be a non-null object');
+    }
+    
+    // Check for required teamName property
+    return 'teamName' in options && typeof options.teamName === 'string';
+}

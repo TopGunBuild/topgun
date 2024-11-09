@@ -1,4 +1,4 @@
-import { KeysetWithSecrets, Lockbox, Keyset } from "@topgunbuild/types"
+import { KeysetWithSecrets, Lockbox, Keyset } from "@topgunbuild/models"
 import { assertScopesMatch } from "../utils"
 import { createLockbox } from "./create-lockbox"
 

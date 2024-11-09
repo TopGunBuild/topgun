@@ -20,10 +20,10 @@ export type NewTeamOptions = {
     teamKeyring: Keyring
   }
   
-  type NewOrExisting = NewTeamOptions | ExistingTeamOptions
+  export type NewOrExistingTeamOptions = NewTeamOptions | ExistingTeamOptions
   
   /** Options passed to the `Team` constructor */
-  export type TeamOptions = NewOrExisting & {
+  export type TeamOptions = NewOrExistingTeamOptions & {
     /** A seed for generating keys. This is typically only used for testing, to ensure predictable data. */
     seed?: string
   

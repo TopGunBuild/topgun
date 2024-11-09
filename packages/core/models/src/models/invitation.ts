@@ -1,14 +1,14 @@
 import { field, option } from '@dao-xyz/borsh';
-import { Base58, Invitation, UnixTimestamp } from '../types';
+import { Invitation, UnixTimestamp } from '../types';
 import { EncodeHelper } from '../utils/encode-helper';
 
 export class InvitationImpl extends EncodeHelper implements Invitation
 {
     @field({ type: 'string' })
-    $id: Base58;
+    $id: string;
 
     @field({ type: 'string' })
-    publicKey: Base58;
+    publicKey: string;
 
     @field({ type: 'f64' })
     expiration: UnixTimestamp;
@@ -19,7 +19,7 @@ export class InvitationImpl extends EncodeHelper implements Invitation
     @field({ type: option('string') })
     userId?: string;
 
-    constructor(data: { $id: Base58, publicKey: Base58, expiration: UnixTimestamp, maxUses: number, userId?: string })
+    constructor(data: { $id: string, publicKey: string, expiration: UnixTimestamp, maxUses: number, userId?: string })
     {
         super();
         this.$id        = data.$id;

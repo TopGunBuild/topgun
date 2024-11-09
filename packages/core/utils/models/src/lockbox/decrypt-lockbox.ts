@@ -1,4 +1,4 @@
-import { Lockbox, KeysetWithSecrets, ValidationError } from "@topgunbuild/types"
+import { Lockbox, KeysetWithSecrets, ValidationError } from "@topgunbuild/models"
 import { asymmetric } from "@topgunbuild/crypto"
 import { DecryptionError } from "../errors"
 import { isCompleteKeyset } from "../utils"

@@ -1,7 +1,7 @@
 import { randomKey } from "@topgunbuild/crypto"
-import { UserWithSecrets, KeyType } from "@topgunbuild/types"
+import { UserWithSecrets, KeyType } from "@topgunbuild/models"
 import { createKeyset } from "../keyset/create-keyset"
-import { randomId } from "@topgunbuild/utils"
+import { randomId } from "@topgunbuild/common"
 
 /**
  * Creates a new local user, with randomly-generated keys.

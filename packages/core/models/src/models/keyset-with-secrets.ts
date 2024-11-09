@@ -1,5 +1,5 @@
 import { field } from "@dao-xyz/borsh";
-import { Base58, Base58Keypair, KeysetWithSecrets } from "../types";
+import { Base58Keypair, KeysetWithSecrets } from "../types";
 import { EncodeHelper } from "../utils/encode-helper";
 import { Base58KeypairImpl } from "./base58-keypair";
 
@@ -14,7 +14,7 @@ export class KeysetWithSecretsImpl extends EncodeHelper implements KeysetWithSec
     generation: number;
 
     @field({ type: 'string' })
-    secretKey: Base58;
+    secretKey: string;
 
     @field({ type: Base58KeypairImpl })
     encryption: Base58KeypairImpl;
@@ -26,7 +26,7 @@ export class KeysetWithSecretsImpl extends EncodeHelper implements KeysetWithSec
         type: string,
         name: string,
         generation: number,
-        secretKey: Base58,
+        secretKey: string,
         encryption: Base58Keypair,
         signature: Base58Keypair
     }) {

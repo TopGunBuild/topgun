@@ -1,6 +1,6 @@
 import { field } from '@dao-xyz/borsh';
 import { randomId } from '@topgunbuild/common';
-import { Base58, Keyset } from '../types';
+import { Keyset } from '../types';
 import { EncodeHelper } from '../utils/encode-helper';
 
 export class KeysetImpl extends EncodeHelper implements Keyset
@@ -18,26 +18,26 @@ export class KeysetImpl extends EncodeHelper implements Keyset
     name: string;
 
     @field({ type: 'string' })
-    encryption: Base58;
+    encryption: string;
 
     @field({ type: 'string' })
-    signature: Base58;
+    signature: string;
 
     @field({ type: 'u32' })
     generation: number;
 
     @field({ type: 'string' })
-    publicKey: Base58;
+    publicKey: string;
 
     constructor(data: {
         $id?: string,
         teamId: string,
         type: string,
         name: string,
-        encryption: Base58,
-        signature: Base58,
+        encryption: string,
+        signature: string,
         generation: number,
-        publicKey: Base58
+        publicKey: string
     })
     {
         super();

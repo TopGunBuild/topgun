@@ -1,6 +1,6 @@
 import { normalizeInvitationKey } from "./normalize"
 import { createKeyset } from "../keyset/create-keyset"
-import { EPHEMERAL_SCOPE } from "@topgunbuild/types"
+import { EPHEMERAL_SCOPE } from "@topgunbuild/models"
 
 /**
  * Generates the initial keyset for the invitee.

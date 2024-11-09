@@ -1,13 +1,13 @@
-import { Base58, Base58Keypair } from "../types";
+import { Base58Keypair } from "../types";
 import { field } from "@dao-xyz/borsh";
 import { EncodeHelper } from "../utils/encode-helper";
 
 export class Base58KeypairImpl extends EncodeHelper implements Base58Keypair {
     @field({ type: 'string' })
-    publicKey: Base58;
+    publicKey: string;
 
     @field({ type: 'string' })
-    secretKey: Base58;
+    secretKey: string;
 
     constructor(data: Base58Keypair) {
         super();

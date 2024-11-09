@@ -1,4 +1,4 @@
-import { randomKey } from "@topgunbuild/crypto-utils"
+import { randomKey } from "@topgunbuild/crypto"
 
 /** Length of the invitation key in characters */
 export const INVITATION_KEY_LENGTH = 16

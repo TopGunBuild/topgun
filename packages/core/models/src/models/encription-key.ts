@@ -1,5 +1,4 @@
 import { field } from "@dao-xyz/borsh";
-import { Base58 } from "../types";
 import { EncodeHelper } from "../utils/encode-helper";
 
 export class EncryptionKeyImpl extends EncodeHelper
@@ -8,9 +7,9 @@ export class EncryptionKeyImpl extends EncodeHelper
     type: 'EPHEMERAL';
 
     @field({ type: 'string' })
-    publicKey: Base58;
+    publicKey: string;
 
-    constructor(data: { type: 'EPHEMERAL', publicKey: Base58 })
+    constructor(data: { type: 'EPHEMERAL', publicKey: string })
     {
         super();
         this.type     = data.type;

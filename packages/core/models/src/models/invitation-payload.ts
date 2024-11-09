@@ -1,13 +1,12 @@
 import { field } from "@dao-xyz/borsh"
-import { Hash } from "../types"
 import { EncodeHelper } from "../utils/encode-helper"
 
 export class InvitationPayloadImpl extends EncodeHelper {
 
     @field({ type: 'string' })
-    id: Hash
+    id: string
 
-    constructor(id: Hash) {
+    constructor(id: string) {
         super();
         this.id = id
     }

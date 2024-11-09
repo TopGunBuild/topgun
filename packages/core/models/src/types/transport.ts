@@ -1,4 +1,3 @@
-import { Base58 } from "./keyset"
 import { UnixTimestamp, Identifiable } from "./utils"
 
 export type EncryptedPayload = {
@@ -12,14 +11,14 @@ export type EncryptedPayload = {
      * Public key of the author of the link, at the time of authoring. After decryption, it is up to
      * the application to ensure that this is in fact the public key of the author (`link.body.user`).
      */
-    senderPublicKey: Base58
+    senderPublicKey: string
   
     /**
      * The keys used to decrypt a graph can be rotated at any time. We include the public key of the
      * "recipient" (e.g. the team keys at time of authoring) so that we know which generation of keys
      * to use when decrypting.
      */
-    recipientPublicKey: Base58
+    recipientPublicKey: string
 }
     
 /**
@@ -52,6 +51,6 @@ export interface TransportPayload<T> extends Identifiable {
     /** Typed message content */
     body: T;
     /** Optional message signature */
-    signature?: Base58;
+    signature?: string;
 }
 

@@ -3,13 +3,13 @@ import {
   KeysetWithSecrets, 
   EPHEMERAL_SCOPE, 
   KeyManifest, 
-  Keyset 
-} from "@topgunbuild/types"
+  Keyset,
+  KeysetWithSecretsImpl
+} from "@topgunbuild/models"
 import { asymmetric } from "@topgunbuild/crypto"
 import { convertToPublicKeyset } from "../keyset/convert-keyset"
 import { isKeyManifest } from "../utils"
-import { KeysetWithSecretsImpl } from "@topgunbuild/transport"
-import { randomId } from "@topgunbuild/utils"
+import { randomId } from "@topgunbuild/common"
 import { EncryptionError, ValidationError } from "../errors"
 
 export interface CreateLockboxParams {

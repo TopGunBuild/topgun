@@ -1,6 +1,6 @@
 import { ValidationResult } from "./validator"
 
-import { KeyScope } from "./keyset"
+import { KeyScope, KeyType } from "./keyset"
 
 export const SIGNATURE = 'SIGNATURE'
 export const ENCRYPTION = 'ENCRYPTION'
@@ -20,11 +20,14 @@ export const HashPurpose = {
   SHARED_KEY,
 } as const
 
+export const ADMIN = 'admin'
 export const ROOT = 'ROOT'
 export const MERGE = 'MERGE'
 export const VALID = { isValid: true } as ValidationResult
 
-export const EPHEMERAL_SCOPE: KeyScope = {
-  type: 'EPHEMERAL',
-  name: 'EPHEMERAL',
-}
+export const TEAM_SCOPE = { type: KeyType.TEAM, name: KeyType.TEAM } as KeyScope
+export const ADMIN_SCOPE = { type: KeyType.ROLE, name: ADMIN } as KeyScope
+export const EPHEMERAL_SCOPE = {
+  type: KeyType.EPHEMERAL,
+  name: KeyType.EPHEMERAL,
+} as KeyScope

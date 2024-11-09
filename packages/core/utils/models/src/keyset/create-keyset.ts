@@ -1,6 +1,12 @@
-import { Base58, KeyScope, KeysetWithSecrets, Optional } from "@topgunbuild/types";
+import {
+    KeyScope, 
+    KeysetWithSecrets, 
+    Optional,
+    SIGNATURE,
+    ENCRYPTION,
+    SYMMETRIC
+} from "@topgunbuild/models";
 import { asymmetric, hash, hashPassword, randomKey, signatures } from "@topgunbuild/crypto";
-import { SIGNATURE, ENCRYPTION, SYMMETRIC } from "@topgunbuild/types";
 
 export function createKeyset(
     scope: Optional<KeyScope, 'name'>,
@@ -27,6 +33,6 @@ export function createKeyset(
         generation: 0,
         signature: signatures.keyPair(signatureKey),
         encryption: asymmetric.keyPair(encryptionKey),
-        secretKey: symmetricKey as Base58,
+        secretKey: symmetricKey,
     };
 }

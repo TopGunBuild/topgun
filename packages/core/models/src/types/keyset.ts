@@ -1,15 +1,3 @@
-/** Type alias for UTF-8 encoded strings with a phantom type for type safety */
-export type Utf8 = string & { _utf8: false }
-
-/** Type alias for Base58 encoded strings with a phantom type for type safety */
-export type Base58 = string & { _base58: false }
-
-/** Type alias for hash values encoded in Base58 with a phantom type for type safety */
-export type Hash = Base58 & { _hash: false }
-
-/** Generic payload type for messages and data */
-export type Payload = any;
-
 /** Represents a keypair with raw byte arrays */
 export type ByteKeypair = {
     /** Public key as raw bytes */
@@ -21,9 +9,9 @@ export type ByteKeypair = {
 /** Represents a keypair with Base58 encoded strings */
 export type Base58Keypair = {
     /** Public key encoded in Base58 */
-    publicKey: Base58
+    publicKey: string
     /** Secret/private key encoded in Base58 */
-    secretKey: Base58
+    secretKey: string
 }
 
 /** 
@@ -32,11 +20,11 @@ export type Base58Keypair = {
  */
 export type SignedMessage = {
     /** The original message/payload to be verified */
-    payload: Payload
+    payload: any
     /** Cryptographic signature encoded in Base58 */
-    signature: Base58
+    signature: string
     /** Signer's public key encoded in Base58 for verification */
-    publicKey: Base58
+    publicKey: string
 }
 
 /** 
@@ -99,7 +87,7 @@ export interface KeyMetadata extends KeyScope {
  */
 export interface KeysetWithSecrets extends KeyMetadata {
     /** Secret key for symmetric encryption */
-    secretKey: Base58
+    secretKey: string
     /** Keypair for asymmetric encryption operations */
     encryption: Base58Keypair
     /** Keypair for digital signatures */
@@ -112,9 +100,9 @@ export interface KeysetWithSecrets extends KeyMetadata {
  */
 export interface Keyset extends KeyMetadata {
     /** Public key for asymmetric encryption */
-    encryption: Base58
+    encryption: string
     /** Public key for signature verification */
-    signature: Base58
+    signature: string
 }
 
 /**

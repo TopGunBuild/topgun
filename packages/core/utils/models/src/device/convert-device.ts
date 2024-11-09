@@ -1,4 +1,4 @@
-import { DeviceWithSecrets, Device } from "../../../../models/dist"
+import { DeviceWithSecrets, Device } from "@topgunbuild/models"
 import { convertToPublicKeyset } from "../keyset/convert-keyset"
 
 /**
