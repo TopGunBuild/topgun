@@ -13,8 +13,8 @@ export type NewTeamOptions = {
   
   /** Properties required when rehydrating from an existing graph  */
   export type ExistingTeamOptions = {
-    /** Can be serialized or not. */
-    source: Uint8Array|any
+    /** The team's id */
+    id: string
   
     /** The team keys need to be provided for encryption and decryption. It's up to the application to persist these somewhere.  */
     teamKeyring: Keyring

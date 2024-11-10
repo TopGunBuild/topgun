@@ -1,5 +1,5 @@
 import { Keyset, KeysetWithSecrets } from "./keyset"
-import { UnixTimestamp, Identifiable } from "./utils"
+import { Identifiable } from "./utils"
 
 /**
  * Base type containing common device information
@@ -16,7 +16,7 @@ export interface DeviceInfo extends Identifiable {
     deviceInfo?: any
 
     /** Timestamp when the device was first registered */
-    created?: UnixTimestamp
+    created?: number
 }
 
 /**

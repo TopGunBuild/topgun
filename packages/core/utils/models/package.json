@@ -21,7 +21,8 @@
         "@dao-xyz/borsh": "^5.2.2",
         "@topgunbuild/models": "workspace:*",
         "@topgunbuild/common": "workspace:*",
-        "@topgunbuild/crypto": "workspace:*"
+        "@topgunbuild/crypto": "workspace:*",
+        "@topgunbuild/time": "workspace:*"
     },
     "devDependencies": {
         "@topgunbuild/eslint-config": "workspace:*",

@@ -42,21 +42,4 @@ export class Client
     // {
 
     // }
-
-    createTeam(teamName: string, context: LocalContext, seed?: string): TeamService
-    {
-        const teamKeys = createKeyset(TEAM_SCOPE, seed)
-
-        return new TeamService({ teamName, context, teamKeys }, this.store);
-    }
-
-    loadTeam(
-        teamName: string,
-        context: LocalContext,
-        teamKeys: KeysetWithSecrets | Keyring
-    ): TeamService
-    {
-        const teamKeyring = createKeyring(teamKeys)
-        return new TeamService({ teamName, context, teamKeyring }, this.store);
-    }
 }

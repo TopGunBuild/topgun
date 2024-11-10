@@ -6,16 +6,16 @@ import { randomId, toArray } from "@topgunbuild/common";
 import { DataChanges, DataFrameChangeOperation, Lockbox, SelectOptions, SelectResult } from "../types";
 
 /**
- * Base interface for all requests
+ * Base interface for all actions
  */
-export interface IRequest {
+export interface IAction {
     lockboxes?: Lockbox[];
 }
 
 /**
- * Base class for all requests
+ * Base class for all actions
  */
-export class AbstractRequest implements IRequest {
+export class AbstractAction implements IAction {
     @field({ type: 'string' })
     id: string;
 
@@ -39,7 +39,7 @@ export class AbstractRequest implements IRequest {
  * Create team request
  */
 @variant(0)
-export class CreateTeamRequest extends AbstractRequest {
+export class CreateTeamAction extends AbstractAction {
     @field({ type: 'string' })
     name: string;
 
@@ -66,7 +66,7 @@ export class CreateTeamRequest extends AbstractRequest {
  * Add member request
  */
 @variant(1)
-export class AddMemberRequest extends AbstractRequest {
+export class AddMemberAction extends AbstractAction {
     @field({ type: MemberImpl })
     member: MemberImpl;
 
@@ -88,7 +88,7 @@ export class AddMemberRequest extends AbstractRequest {
  * Remove member request
  */
 @variant(2)
-export class RemoveMemberRequest extends AbstractRequest {
+export class RemoveMemberAction extends AbstractAction {
     @field({ type: 'string' })
     userId: string;
 
@@ -102,7 +102,7 @@ export class RemoveMemberRequest extends AbstractRequest {
  * Add role request
  */
 @variant(3)
-export class AddRoleRequest extends AbstractRequest {
+export class AddRoleAction extends AbstractAction {
     @field({ type: RoleImpl })
     role: RoleImpl;
 
@@ -116,7 +116,7 @@ export class AddRoleRequest extends AbstractRequest {
  * Remove role request
  */
 @variant(4)
-export class RemoveRoleRequest extends AbstractRequest {
+export class RemoveRoleAction extends AbstractAction {
     @field({ type: 'string' })
     roleName: string;
 
@@ -130,7 +130,7 @@ export class RemoveRoleRequest extends AbstractRequest {
  * Assign a role to a member
  */
 @variant(5)
-export class AddMemberRoleRequest extends AbstractRequest {
+export class AddMemberRoleAction extends AbstractAction {
     @field({ type: 'string' })
     userId: string;
 
@@ -148,7 +148,7 @@ export class AddMemberRoleRequest extends AbstractRequest {
  * Remove a role from a member
  */
 @variant(6)
-export class RemoveMemberRoleRequest extends AbstractRequest {
+export class RemoveMemberRoleAction extends AbstractAction {
     @field({ type: 'string' })
     userId: string;
 
@@ -166,7 +166,7 @@ export class RemoveMemberRoleRequest extends AbstractRequest {
  * Add device request
  */
 @variant(7)
-export class AddDeviceRequest extends AbstractRequest {
+export class AddDeviceAction extends AbstractAction {
     @field({ type: DeviceImpl })
     device: DeviceImpl;
 
@@ -180,7 +180,7 @@ export class AddDeviceRequest extends AbstractRequest {
  * Remove device request
  */
 @variant(8)
-export class RemoveDeviceRequest extends AbstractRequest {
+export class RemoveDeviceAction extends AbstractAction {
     @field({ type: 'string' })
     deviceId: string;
 
@@ -194,7 +194,7 @@ export class RemoveDeviceRequest extends AbstractRequest {
  * Invite member request
  */
 @variant(9)
-export class InviteMemberRequest extends AbstractRequest {
+export class InviteMemberAction extends AbstractAction {
     @field({ type: InvitationImpl })
     invitation: InvitationImpl;
 
@@ -208,7 +208,7 @@ export class InviteMemberRequest extends AbstractRequest {
  * Invite device request
  */
 @variant(10)
-export class InviteDeviceRequest extends AbstractRequest {
+export class InviteDeviceAction extends AbstractAction {
     @field({ type: InvitationImpl })
     invitation: InvitationImpl;
 
@@ -222,7 +222,7 @@ export class InviteDeviceRequest extends AbstractRequest {
  * Revoke invitation request
  */
 @variant(11)
-export class RevokeInvitationRequest extends AbstractRequest {
+export class RevokeInvitationAction extends AbstractAction {
     @field({ type: 'string' })
     invitationId: string; // Invitation ID
 
@@ -236,7 +236,7 @@ export class RevokeInvitationRequest extends AbstractRequest {
  * Admit member request
  */
 @variant(12)
-export class AdmitMemberRequest extends AbstractRequest {
+export class AdmitMemberAction extends AbstractAction {
     @field({ type: 'string' })
     invitationId: string; // Invitation ID
 
@@ -263,7 +263,7 @@ export class AdmitMemberRequest extends AbstractRequest {
  * Admit device request
  */
 @variant(13)
-export class AdmitDeviceRequest extends AbstractRequest {
+export class AdmitDeviceAction extends AbstractAction {
     @field({ type: 'string' })
     invitationId: string; // Invitation ID
 
@@ -281,7 +281,7 @@ export class AdmitDeviceRequest extends AbstractRequest {
  * Change member keys request
  */
 @variant(14)
-export class ChangeMemberKeysRequest extends AbstractRequest {
+export class ChangeMemberKeysAction extends AbstractAction {
     @field({ type: KeysetImpl })
     keys: KeysetImpl;
 
@@ -295,7 +295,7 @@ export class ChangeMemberKeysRequest extends AbstractRequest {
  * Rotate keys request
  */
 @variant(15)
-export class RotateKeysRequest extends AbstractRequest {
+export class RotateKeysAction extends AbstractAction {
     @field({ type: 'string' })
     userId: string;
 
@@ -309,7 +309,7 @@ export class RotateKeysRequest extends AbstractRequest {
  * Add server request
  */
 @variant(16)
-export class AddServerRequest extends AbstractRequest {
+export class AddServerAction extends AbstractAction {
     @field({ type: ServerImpl })
     server: ServerImpl;
 
@@ -323,7 +323,7 @@ export class AddServerRequest extends AbstractRequest {
  * Remove server request
  */
 @variant(17)
-export class RemoveServerRequest extends AbstractRequest {
+export class RemoveServerAction extends AbstractAction {
     @field({ type: 'string' })
     host: string;
 
@@ -337,7 +337,7 @@ export class RemoveServerRequest extends AbstractRequest {
  * Change server keys request
  */
 @variant(18)
-export class ChangeServerKeysRequest extends AbstractRequest {
+export class ChangeServerKeysAction extends AbstractAction {
     @field({ type: KeysetImpl })
     keys: KeysetImpl;
 
@@ -351,7 +351,7 @@ export class ChangeServerKeysRequest extends AbstractRequest {
  * Set team name request
  */
 @variant(19)
-export class SetTeamNameRequest extends AbstractRequest {
+export class SetTeamNameAction extends AbstractAction {
     @field({ type: 'string' })
     teamName: string;
 
@@ -365,7 +365,7 @@ export class SetTeamNameRequest extends AbstractRequest {
  * Put message request
  */
 @variant(20)
-export class PutMessageRequest extends AbstractRequest {
+export class PutMessageAction extends AbstractAction {
     @field({ type: 'string' })
     channelId: string;
 
@@ -391,7 +391,7 @@ export class PutMessageRequest extends AbstractRequest {
  * Delete message request
  */
 @variant(21)
-export class DeleteMessageRequest extends AbstractRequest {
+export class DeleteMessageAction extends AbstractAction {
     @field({ type: 'string' })
     channelId: string;
 
@@ -413,7 +413,7 @@ export class DeleteMessageRequest extends AbstractRequest {
 /**
  * DataFrame change operation request
  */
-export class DataFrameChangeOperationRequest implements DataFrameChangeOperation<string> {
+export class DataFrameChangeOperationAction implements DataFrameChangeOperation<string> {
     @field({ type: 'string' })
     element: string;
 
@@ -434,9 +434,9 @@ export class DataFrameChangeOperationRequest implements DataFrameChangeOperation
  * Data changes request
  */
 @variant(22)
-export class DataChangesRequest implements DataChanges<string> {
-    @field({ type: option(vec(DataFrameChangeOperationRequest)) })
-    changes?: DataFrameChangeOperationRequest[];
+export class DataChangesAction implements DataChanges<string> {
+    @field({ type: option(vec(DataFrameChangeOperationAction)) })
+    changes?: DataFrameChangeOperationAction[];
 
     @field({ type: option(vec('string')) })
     collection?: string[];
@@ -447,7 +447,7 @@ export class DataChangesRequest implements DataChanges<string> {
     @field({ type: 'string' })
     queryHash: string;
 
-    constructor(data: { changes?: DataFrameChangeOperationRequest[], collection?: string[], total: number, queryHash: string }) {
+    constructor(data: { changes?: DataFrameChangeOperationAction[], collection?: string[], total: number, queryHash: string }) {
         this.changes = data.changes;
         this.collection = data.collection;
         this.total = data.total;
@@ -459,7 +459,7 @@ export class DataChangesRequest implements DataChanges<string> {
  * Select request
  */
 @variant(23)
-export class SelectRequest extends AbstractRequest implements SelectOptions {
+export class SelectAction extends AbstractAction implements SelectOptions {
     @field({ type: 'string' })
     entity: string;
 
@@ -505,7 +505,7 @@ export class SelectRequest extends AbstractRequest implements SelectOptions {
  * Select result
  */
 @variant(24)
-export class SelectResultRequest extends AbstractRequest implements SelectResult<string> {
+export class SelectResultAction extends AbstractAction implements SelectResult<string> {
     @field({ type: vec('string') })
     rows: string[];
 
@@ -535,7 +535,7 @@ export class SelectResultRequest extends AbstractRequest implements SelectResult
  * Cancel select request
  */
 @variant(25)
-export class CancelSelectRequest extends AbstractRequest {
+export class CancelSelectAction extends AbstractAction {
     @field({ type: 'string' })
     queryHash: string;
 

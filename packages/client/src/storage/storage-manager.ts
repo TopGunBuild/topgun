@@ -1,6 +1,7 @@
 import { Identifiable, IPayload, ISelectResult } from "@topgunbuild/types";
 import { PersistedService } from "./persisted-service";
 import { StorageDerived } from "./types";
+import { EncryptedPayload } from "@topgunbuild/models";
 
 /**
  * The storage manager
@@ -71,8 +72,8 @@ export class StorageManager {
      * Put a pending action into the storage
      * @param action - The action
      */
-    public putPendingAction(action: IPayload) {
-        this.pendingActionsStorage.set(action.body.id, action);
+    public putPendingAction(id: string, action: Uint8Array) {
+        this.pendingActionsStorage.set(id, action);
     }
 
     /**

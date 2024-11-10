@@ -1,6 +1,6 @@
 import { field, option } from '@dao-xyz/borsh';
 import { KeysetImpl } from './keyset';
-import { Device, UnixTimestamp } from '../types';
+import { Device } from '../types';
 import { randomId } from '@topgunbuild/common';
 import { EncodeHelper } from '../utils/encode-helper';
 
@@ -19,7 +19,7 @@ export class DeviceImpl extends EncodeHelper implements Device
     keys: KeysetImpl;
 
     @field({ type: option('f64') })
-    created?: UnixTimestamp;
+    created?: number;
 
     @field({ type: option('string') })
     deviceInfo?: string;
@@ -32,7 +32,7 @@ export class DeviceImpl extends EncodeHelper implements Device
         teamId: string,
         userId: string,
         keys: KeysetImpl,
-        created?: UnixTimestamp,
+        created?: number,
         deviceInfo?: string,
         deviceId?: string,
         deviceName?: string

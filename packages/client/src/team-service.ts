@@ -6,7 +6,7 @@ import {
     LocalUserContext,
     MessageRow,
     SelectOptions,
-    SelectRequest,
+    SelectAction,
     SelectResult,
     TeamOptions
 } from "@topgunbuild/models";
@@ -84,7 +84,7 @@ export class TeamService extends EventEmitter {
     }
 
     subscribeMessages(options: SelectOptions, cb: QueryCb<SelectResult<MessageRow>>): () => void {
-        const query = new SelectRequest({ entity: 'message', ...options });
+        const query = new SelectAction({ entity: 'message', ...options });
         return this.store.subscribeQuery<MessageRow>(query, cb);
     }
 }

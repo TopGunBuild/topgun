@@ -1,5 +1,5 @@
 import { createKeyset } from "../keyset/create-keyset"
-import { UnixTimestamp, KeyType, DeviceWithSecrets } from "@topgunbuild/models"
+import { KeyType, DeviceWithSecrets } from "@topgunbuild/models"
 import { randomKey } from "@topgunbuild/crypto"
 import { randomId } from "@topgunbuild/common"
 
@@ -7,7 +7,7 @@ export interface CreateDeviceParams {
   userId: string
   deviceName: string
   deviceInfo?: Record<string, unknown>
-  created?: UnixTimestamp
+  created?: number
   seed?: string
 }
 
@@ -26,7 +26,7 @@ export const createDevice = ({
   userId,
   deviceName,
   deviceInfo = {},
-  created = Date.now() as UnixTimestamp,
+  created = Date.now(),
   seed = randomKey(),
 }: CreateDeviceParams): DeviceWithSecrets => {
   // Input validation

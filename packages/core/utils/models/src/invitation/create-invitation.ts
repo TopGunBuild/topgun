@@ -1,5 +1,4 @@
 import { Invitation, ValidationError } from "@topgunbuild/models"
-import { UnixTimestamp } from "@topgunbuild/models"
 import { normalizeInvitationKey } from "./normalize"
 import { generateInviteeStarterKeys } from "./generate-starter-keys"
 import { generateInvitationId } from "./generate-id"
@@ -9,7 +8,7 @@ export interface CreateInvitationParams {
   /** A randomly generated secret to be passed to the invitee via a side channel */
   seed: string
   /** Time when the invitation expires. If 0, the invitation does not expire. */
-  expiration?: UnixTimestamp
+  expiration?: number
   /** Number of times the invitation can be used. If 0, unlimited uses. Default: 1 */
   maxUses?: number
   /** (Device invitations only) User ID the device will be associated with */
@@ -28,7 +27,7 @@ export interface CreateInvitationParams {
 export const createInvitation = ({
   seed,
   maxUses = 1,
-  expiration = 0 as UnixTimestamp,
+  expiration = 0,
   userId,
 }: CreateInvitationParams): Invitation => {
   // Validate inputs

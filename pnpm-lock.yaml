@@ -381,6 +381,9 @@ importers:
       '@topgunbuild/models':
         specifier: workspace:*
         version: link:../../models
+      '@topgunbuild/time':
+        specifier: workspace:*
+        version: link:../time
     devDependencies:
       '@topgunbuild/eslint-config':
         specifier: workspace:*

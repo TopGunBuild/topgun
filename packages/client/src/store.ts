@@ -8,25 +8,21 @@ import { StorageManager } from "./storage/storage-manager";
 import { transformSocketUrl } from "./utils/socket-url-transformer";
 import WebSocket from "isomorphic-ws";
 import { deserialize } from "@dao-xyz/borsh";
-import { bigintTime } from "@topgunbuild/time";
 import { 
-    AddMemberRequest, 
-    PutMessageRequest, 
-    RemoveMemberRequest, 
-    AddRoleRequest, 
-    RemoveRoleRequest, 
-    AddMemberRoleRequest, 
-    RemoveMemberRoleRequest, 
+    AddMemberAction, 
+    PutMessageAction, 
+    RemoveMemberAction, 
+    AddRoleAction, 
+    RemoveRoleAction, 
+    AddMemberRoleAction, 
+    RemoveMemberRoleAction, 
     MemberImpl, 
     RoleImpl, 
-    RequestHeader, 
-    AbstractRequest, 
-    TransportPayloadImpl, 
-    TransportMetadataImpl, 
-    DataChangesRequest, 
-    SelectRequest, 
-    CancelSelectRequest, 
-    SelectResultRequest, 
+    TransportPayloadImpl,
+    DataChangesAction,  
+    SelectAction, 
+    CancelSelectAction, 
+    SelectResultAction, 
     KeysetImpl,
     DataChanges, 
     Identifiable, 
@@ -34,8 +30,17 @@ import {
     Member, 
     PermissionsMap, 
     Role, 
-    SelectResult
+    SelectResult,
+    Keyring,
+    KeysetWithSecrets,
+    TEAM_SCOPE,
+    AbstractAction,
+    UserWithSecrets,
+    DeviceWithSecrets
 } from "@topgunbuild/models";
+import { createKeyset, createKeyring, encryptPayload } from "@topgunbuild/model-utils";
+import { TeamService } from "./team-service";
+import { DataUtil } from "@topgunbuild/collections";
 
 /** Interface for items that can be stored */
 export interface StoreItem extends Identifiable {
@@ -67,6 +72,9 @@ export class Store {
     private retryAttempts = 0;
     private readonly MAX_RETRY_ATTEMPTS = 3;
     private isOnline = false;
+    private context: LocalContext;
+    private user: UserWithSecrets;
+    private device: DeviceWithSecrets;
 
     /** The user ID associated with this store instance */
     public readonly userId: string;
@@ -96,11 +104,6 @@ export class Store {
         this.beforeUnloadCbs.push(() => this.disconnect());
     }
 
-    createTeam(teamName: string, context: LocalContext, seed?: string)
-    {
-
-    }
-
     /**
      * Add messages to the store
      * @param channelId The channel ID
@@ -116,7 +119,7 @@ export class Store {
             await this.upsert('message', messages);
 
             for (const message of messages) {
-                const body = new PutMessageRequest({
+                const body = new PutMessageAction({
                     channelId,
                     messageId: message.$id,
                     value: JSON.stringify(message)
@@ -142,7 +145,7 @@ export class Store {
 
             await this.upsert('member', member);
 
-            const body = new AddMemberRequest({
+            const body = new AddMemberAction({
                 member: new MemberImpl({
                     ...member,
                     keys: new KeysetImpl({
@@ -172,7 +175,7 @@ export class Store {
 
             await this.delete('member', [userId]);
 
-            const body = new RemoveMemberRequest({
+            const body = new RemoveMemberAction({
                 userId
             });
             await this.sendRequest(body);
@@ -195,7 +198,7 @@ export class Store {
 
             await this.upsert('role', role);
 
-            const body = new AddRoleRequest({
+            const body = new AddRoleAction({
                 role: new RoleImpl({
                     ...role,
                     permissions: Object.entries(role.permissions || {})
@@ -223,7 +226,7 @@ export class Store {
 
             await this.delete('role', [roleName]);
 
-            const body = new RemoveRoleRequest({ roleName });
+            const body = new RemoveRoleAction({ roleName });
             await this.sendRequest(body);
         } catch (error) {
             console.error('Failed to remove role:', error);
@@ -258,7 +261,7 @@ export class Store {
             }
 
             // Send request regardless of local changes to ensure server consistency
-            await this.sendRequest(new AddMemberRoleRequest({ userId, roleName }));
+            await this.sendRequest(new AddMemberRoleAction({ userId, roleName }));
         } catch (error) {
             console.error('Failed to add member role:', error);
             throw error instanceof StoreError ? error : new StoreError('Failed to add member role', 'ADD_MEMBER_ROLE_ERROR');
@@ -291,7 +294,7 @@ export class Store {
             }
 
             // Send request regardless of local changes to ensure server consistency
-            await this.sendRequest(new RemoveMemberRoleRequest({ userId, roleName }));
+            await this.sendRequest(new RemoveMemberRoleAction({ userId, roleName }));
         } catch (error) {
             console.error('Failed to remove member role:', error);
             throw error instanceof StoreError ? error : new StoreError('Failed to remove member role', 'REMOVE_MEMBER_ROLE_ERROR');
@@ -303,20 +306,24 @@ export class Store {
      * @param body The request body
      * @throws {StoreError} On request failure
      */
-    public async sendRequest(body: AbstractRequest): Promise<void> {
-        const payload = new TransportPayloadImpl({
-            meta: new TransportMetadataImpl({
-                userId: this.userId,
-                teamId: this.teamId,
-                state: bigintTime()
-            }),
-            body
+    public async sendRequest(body: AbstractAction): Promise<void> {
+        // const payload = new TransportPayloadImpl({
+        //    userId: this.userId,
+        //     teamId: this.teamId,
+        //     state: bigintTime(),
+        //     body
+        // });
+        const { id, payload } = encryptPayload({
+            user: this.user,
+            recipientPublicKey: null,
+            teamId: this.teamId,
+            action: body
         });
 
         try {
-            this.storageManager.putPendingAction(payload);
-            await this.websocketManager.send(payload.encode());
-            this.storageManager.deletePendingAction(payload.body.id);
+            this.storageManager.putPendingAction(id, payload);
+            await this.websocketManager.send(payload);
+            this.storageManager.deletePendingAction(id);
         } catch (error) {
             console.error('Failed to send request:', error);
             throw new StoreError('Failed to send request', 'SEND_REQUEST_ERROR');
@@ -472,7 +479,7 @@ export class Store {
      * @throws {StoreError} If query is invalid
      */
     public subscribeQuery<T extends StoreItem>(
-        query: SelectRequest, 
+        query: SelectAction, 
         cb: QueryCb<SelectResult<T>>
     ): () => void {
         if (!query || !cb) {
@@ -499,7 +506,7 @@ export class Store {
      */
     private initializeQueryState(
         queryHash: string, 
-        query: SelectRequest, 
+        query: SelectAction, 
         cb: QueryCb<any>
     ): void {
         const queryState = this.queryCbs[queryHash];
@@ -523,7 +530,7 @@ export class Store {
      */
     private async loadInitialQueryResult(
         queryHash: string, 
-        query: SelectRequest
+        query: SelectAction
     ): Promise<void> {
         try {
             const result = await this.storageManager.getQueryResult<Identifiable>(queryHash, query.entity);
@@ -542,7 +549,7 @@ export class Store {
      * @throws {StoreError} If unsubscribe fails
      */
     public unsubscribeQuery(
-        query: SelectRequest, 
+        query: SelectAction, 
         cb: QueryCb<any>, 
         queryHash?: string
     ): void {
@@ -567,11 +574,11 @@ export class Store {
      * Clean up query resources
      * @private
      */
-    private async cleanupQuery(hash: string, query: SelectRequest): Promise<void> {
+    private async cleanupQuery(hash: string, query: SelectAction): Promise<void> {
         delete this.queryCbs[hash];
         await this.storageManager.deleteQuery(hash, query.entity);
 
-        const cancelRequest = new CancelSelectRequest({ queryHash: hash });
+        const cancelRequest = new CancelSelectAction({ queryHash: hash });
         await this.websocketManager.send(cancelRequest.encode());
     }
 
@@ -585,10 +592,10 @@ export class Store {
             const messageBody = message.body;
 
             switch (true) {
-                case messageBody instanceof SelectResultRequest:
+                case messageBody instanceof SelectResultAction:
                     this.handleSelectResult(messageBody);
                     break;
-                case messageBody instanceof DataChangesRequest:
+                case messageBody instanceof DataChangesAction:
                     this.handleDataChanges<StoreItem>(messageBody as unknown as DataChanges<StoreItem>);
                     break;
                 default:

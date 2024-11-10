@@ -1,10 +1,3 @@
-/** 
- * Type alias for Unix timestamps with phantom type for type safety
- * Represents time in milliseconds since Unix epoch (January 1, 1970)
- * The phantom type '_unixTimestamp' prevents mixing with regular numbers
- */
-export type UnixTimestamp = number & { _unixTimestamp: false }
-
 /**
  * Utility type that makes specified properties optional in a type
  * @template T - The original type

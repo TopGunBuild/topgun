@@ -1,4 +1,4 @@
-import { Identifiable, type UnixTimestamp } from './utils';
+import { Identifiable } from './utils';
 
 /**
  * Represents a public invitation record in the signature chain
@@ -20,7 +20,7 @@ export interface Invitation extends Identifiable {
      * Timestamp when the invitation expires
      * Value of 0 indicates no expiration
      */
-    expiration: UnixTimestamp
+    expiration: number
 
     /** 
      * Maximum number of times this invitation can be used
