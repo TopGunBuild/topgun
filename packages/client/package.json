@@ -32,6 +32,7 @@
         "@topgunbuild/model-utils": "workspace:*",
         "@topgunbuild/common": "workspace:*",
         "@topgunbuild/eventemitter": "workspace:*",
+        "@topgunbuild/textencoder": "workspace:*",
         "isomorphic-ws": "^5.0.0"
     },
     "devDependencies": {

@@ -1,12 +1,14 @@
-import { windowOrGlobal } from '@topgunbuild/utils';
-import { StorageAdapter } from './types';
+import { windowOrGlobal } from '@topgunbuild/common';
+import { symmetric, Password } from '@topgunbuild/crypto';
+import { StorageAdapter, StorageParams } from './types';
 
 /**
  * IndexedDBStorage is a storage adapter that uses IndexedDB to store data.
  * @template T The type of the data to store
  */
-export class IndexedDBStorage<T> implements StorageAdapter<T> {
+export class IndexedDBStorage implements StorageAdapter<Uint8Array> {
     private _dbp: Promise<IDBDatabase> | undefined;
+    private _encryptionKey?: Password;
     readonly _dbName: string;
     readonly _storeName: string;
 
@@ -22,37 +24,53 @@ export class IndexedDBStorage<T> implements StorageAdapter<T> {
      * Create a new IndexedDBStorage
      * @param params 
      */
-    constructor(params: { dbName?: string, storeName?: string }) {
+    constructor(params: StorageParams) {
         this._dbName = params.dbName || 'topgun';
         this._storeName = params.storeName || 'storage';
+        this._encryptionKey = params.encryptionKey;
         this.#init();
     }
 
     /**
-     * Get a value from the storage
+     * Get a value from the storage and decrypt if encryption is enabled
      * @param key 
      * @returns 
      */
-    get(key: IDBValidKey): Promise<T> {
+    async get(key: IDBValidKey): Promise<Uint8Array> {
         let req: IDBRequest;
-        return this.#withIDBStore('readwrite', (store) => {
+        await this.#withIDBStore('readwrite', (store) => {
             req = store.get(key);
-        }).then(() => req.result);
+        });
+
+        if (!req.result) return req.result;
+
+        // Decrypt the value if encryption is enabled
+        if (this._encryptionKey) {
+            return symmetric.decryptBytes(req.result, this._encryptionKey);
+        }
+
+        return req.result;
     }
 
     /**
-     * Put a value into the storage
+     * Encrypt value if encryption is enabled and store it
      * @param key 
      * @param value 
      * @returns 
      */
-    put(key: IDBValidKey, value: any): Promise<void> {
+    async put(key: IDBValidKey, value: Uint8Array): Promise<void> {
         return this.#withIDBStore('readwrite', (store) => {
             if (value === null) {
                 store.delete(key);
-            }
-            else {
-                store.put(value, key);
+            } else {
+                let valueToStore = value;
+                
+                // Encrypt the value if encryption is enabled
+                if (this._encryptionKey) {
+                    valueToStore = symmetric.encryptBytes(value, this._encryptionKey);
+                }
+
+                store.put(valueToStore, key);
             }
         });
     }
@@ -72,29 +90,19 @@ export class IndexedDBStorage<T> implements StorageAdapter<T> {
      * Get all values from the storage
      * @returns 
      */
-    getAll(): Promise<Record<string, T>> {
+    getAll(): Promise<Record<string, Uint8Array>> {
         let req: IDBRequest;
         return this.#withIDBStore('readwrite', (store) => {
             req = store.getAll();
         }).then(() => req.result.reduce((acc, curr) => {
-            acc[curr.key] = curr.value;
+            let value = curr.value;
+            // Decrypt the value if encryption is enabled
+            if (this._encryptionKey) {
+                value = symmetric.decryptBytes(value, this._encryptionKey);
+            }
+            acc[curr.key] = value;
             return acc;
-        }, {} as Record<string, T>));
-    }
-
-    /**
-     * Update a value in the storage
-     * @param key 
-     * @param updater 
-     * @returns 
-     */
-    update(key: IDBValidKey, updater: (val: Partial<T>) => T): Promise<void> {
-        return this.#withIDBStore('readwrite', (store) => {
-            const req = store.get(key);
-            req.onsuccess = () => {
-                store.put(updater(req.result), key);
-            };
-        });
+        }, {} as Record<string, Uint8Array>));
     }
 
     /**

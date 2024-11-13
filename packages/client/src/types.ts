@@ -1,6 +1,6 @@
 import { StorageDerived } from "./storage/types";
 import { FilteringCriteriaTree } from "@topgunbuild/collections";
-import { SelectResult, SelectRequest } from "@topgunbuild/models";
+import { Password, SelectAction, SelectResult } from "@topgunbuild/models";
 
 /**
  * The configuration for the client
@@ -10,6 +10,7 @@ export type ClientConfig = {
     appId?: string;
     windowNetworkListener?: NetworkListenerDerived;
     storage?: StorageDerived<any>;
+    storagePassphrase?: Password;
 };
 
 /**
@@ -30,7 +31,7 @@ export type QueryCb<T> = (value: T) => void;
  * The state of a query
  */
 export interface QueryState<T extends { id: string }> {
-    query: SelectRequest;
+    query: SelectAction;
     filterCriteria: FilteringCriteriaTree;
     cbs: QueryCb<T>[];
     result: SelectResult<T> | null;

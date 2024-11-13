@@ -1,4 +1,4 @@
-import { AsyncQueue } from "@topgunbuild/utils";
+import { AsyncQueue } from "@topgunbuild/common";
 import { MergeFunction, StorageAdapter, StorageParams, StorageDerived } from "./types";
 
 /**

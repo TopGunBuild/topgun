@@ -6,4 +6,4 @@ export * from './signatures';
 export * from './hash-password';
 export * from './symmetric';
 export * from './utils';
-
+export * from './types';

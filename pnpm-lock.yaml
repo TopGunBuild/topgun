@@ -44,6 +44,9 @@ importers:
       '@topgunbuild/models':
         specifier: workspace:*
         version: link:../core/models
+      '@topgunbuild/textencoder':
+        specifier: workspace:*
+        version: link:../core/utils/textencoder
       '@topgunbuild/time':
         specifier: workspace:*
         version: link:../core/utils/time
