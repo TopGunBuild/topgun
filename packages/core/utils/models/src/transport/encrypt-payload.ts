@@ -1,7 +1,5 @@
-import { randomId } from "@topgunbuild/common";
 import { asymmetric } from "@topgunbuild/crypto";
 import { AbstractAction, EncryptedPayloadImpl, TransportPayloadImpl, UserWithSecrets } from "@topgunbuild/models";
-import { bigintTime } from "@topgunbuild/time";
 
 /**
  * Parameters required for payload encryption
@@ -10,7 +8,6 @@ export type EncryptedPayloadParams = {
     action: AbstractAction;
     user: UserWithSecrets;
     recipientPublicKey: string;
-    teamId: string;
 }
 
 /**
@@ -27,38 +24,30 @@ export function encryptPayload({
     action,
     user,
     recipientPublicKey,
-    teamId,
-}: EncryptedPayloadParams): {id: string, payload: Uint8Array} {
+}: EncryptedPayloadParams): Uint8Array {
 
     // Extract sender's encryption keys
     const { publicKey: senderPublicKey, secretKey: senderSecretKey } = user.keys.encryption;
 
-    // Create a transport payload with metadata
-    const transportPayload = new TransportPayloadImpl({
-        $id: randomId(32),
-        userId: user.$id,
-        teamId: teamId,
-        state: bigintTime(),
+     // Create a transport payload with metadata
+     const transportPayload = new TransportPayloadImpl({
         body: action,
         timestamp: Date.now()
     });
 
-    // Create an encrypted payload container with metadata
-    const encryptedPayload = new EncryptedPayloadImpl({
-        encryptedBody: transportPayload.encode(),
-        senderPublicKey: senderPublicKey,
-        recipientPublicKey: recipientPublicKey
-    });
-
     // Perform the actual asymmetric encryption
     const encryptedBody = asymmetric.encryptBytes({
-        payload: encryptedPayload.encode(),
+        payload: transportPayload.encode(),
         recipientPublicKey,
         senderSecretKey,
     });
 
-    return {
-        id: transportPayload.$id,
-        payload: encryptedBody
-    };
+    // Create an encrypted payload container with metadata
+    const encryptedPayload = new EncryptedPayloadImpl({
+        encryptedBody: encryptedBody,
+        senderPublicKey: senderPublicKey,
+        recipientPublicKey: recipientPublicKey
+    });
+
+    return encryptedPayload.encode();
 }

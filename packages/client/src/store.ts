@@ -1,46 +1,33 @@
 import { ClientConfig, NetworkListenerAdapter, QueryCb, QueryState } from "./types";
 import { IndexedDBStorage } from "./storage/indexeddb-storage";
-import { ConnectionState, WebSocketManager } from "./websocket";
 import { WindowNetworkListener } from "./utils/window-network-listener";
-import { compareArraysSimple, toHexString, windowOrGlobal } from "@topgunbuild/common";
+import { compareArraysSimple, randomId, toHexString, windowOrGlobal } from "@topgunbuild/common";
 import { MemoryStorage } from "./storage/memory-storage";
 import { StorageManager } from "./storage/storage-manager";
 import { transformSocketUrl } from "./utils/socket-url-transformer";
-import WebSocket from "isomorphic-ws";
 import { deserialize } from "@dao-xyz/borsh";
-import { 
-    AddMemberAction, 
-    PutMessageAction, 
-    RemoveMemberAction, 
-    AddRoleAction, 
-    RemoveRoleAction, 
-    AddMemberRoleAction, 
-    RemoveMemberRoleAction, 
-    MemberImpl, 
-    RoleImpl, 
+import {
     TransportPayloadImpl,
-    DataChangesAction,  
-    SelectAction, 
-    CancelSelectAction, 
-    SelectResultAction, 
-    KeysetImpl,
-    DataChanges, 
-    Identifiable, 
-    LocalContext, 
-    Member, 
-    PermissionsMap, 
-    Role, 
+    DataChangesAction,
+    SelectAction,
+    CancelSelectAction,
+    SelectResultAction,
+    DataChanges,
+    Identifiable,
+    LocalContext,
     SelectResult,
-    Keyring,
-    KeysetWithSecrets,
-    TEAM_SCOPE,
     AbstractAction,
     UserWithSecrets,
-    DeviceWithSecrets
+    DeviceWithSecrets,
+    EncryptedPayloadImpl
 } from "@topgunbuild/models";
-import { createKeyset, createKeyring, encryptPayload } from "@topgunbuild/model-utils";
-import { TeamService } from "./team-service";
+import { encryptPayload } from "@topgunbuild/model-utils";
 import { DataUtil } from "@topgunbuild/collections";
+import { convertQueryToFilterTree } from "@topgunbuild/frames";
+import { WebSocketConnector } from "./websocket/websocket-connector";
+import { ConnectorState } from "@topgunbuild/control-flow";
+import { asymmetric } from "@topgunbuild/crypto";
+import { ConsoleLogger } from "@topgunbuild/logger";
 
 /** Interface for items that can be stored */
 export interface StoreItem extends Identifiable {
@@ -56,19 +43,25 @@ export class StoreError extends Error {
     }
 }
 
+export enum ChangeType {
+    Added = 'added',
+    Updated = 'updated',
+    Deleted = 'deleted'
+}
+
 /**
  * The Store class is the main entry point for the TopGun client library.
  * It manages the connection to the websocket servers and the storage of data.
  */
 export class Store {
-    private websocketManager: WebSocketManager;
+    private connector: WebSocketConnector;
     private storageManager: StorageManager;
-    private readonly config: ClientConfig;
     private networkListener: NetworkListenerAdapter;
     private beforeUnloadCbs: (() => void)[] = [];
     private queryCbs: Record<string, QueryState<any>> = {};
-    
-    private connectionState: ConnectionState = 'closed';
+
+    private readonly logger = new ConsoleLogger('Store');
+    private connectionState: ConnectorState = 'closed';
     private retryAttempts = 0;
     private readonly MAX_RETRY_ATTEMPTS = 3;
     private isOnline = false;
@@ -76,27 +69,22 @@ export class Store {
     private user: UserWithSecrets;
     private device: DeviceWithSecrets;
 
-    /** The user ID associated with this store instance */
-    public readonly userId: string;
-
-    /** The team ID associated with this store instance */
-    public readonly teamId: string;
-
     /**
      * Create a new Store
      * @param config The configuration for the store
      * @throws {StoreError} If required configuration is missing
      */
-    constructor(config: ClientConfig) {
+    constructor(private readonly config: ClientConfig) {
         if (!config.appId) {
             throw new StoreError('AppId is required', 'INVALID_CONFIG');
         }
+        if (!this.user?.keys?.encryption?.secretKey) {
+            throw new StoreError('User encryption keys are required', 'INVALID_CONFIG');
+        }
 
         this.config = config;
-        this.userId = 'config.userId';
-        this.teamId = 'config.teamId';
 
-        this.initWebSocketManagers();
+        this.initWebSocketConnector();
         this.initStorageManager();
         this.initNetworkListener();
         this.initBeforeUnload();
@@ -105,228 +93,58 @@ export class Store {
     }
 
     /**
-     * Add messages to the store
-     * @param channelId The channel ID
-     * @param messages Array of messages to add
-     * @throws {StoreError} If messages are invalid
+     * Subscribe to a query
+     * @param query The query to execute
+     * @param cb The callback to call with the result
+     * @returns Unsubscribe function
+     * @throws {StoreError} If query is invalid
      */
-    public async addMessages<T extends StoreItem>(channelId: string, messages: T[]): Promise<void> {
+    public subscribeQuery<T extends StoreItem>(
+        query: SelectAction,
+        cb: QueryCb<SelectResult<T>>
+    ): () => void {
+        if (!query || !cb) {
+            throw new StoreError('Query and callback are required', 'INVALID_INPUT');
+        }
+
         try {
-            if (!Array.isArray(messages) || messages.length === 0) {
-                throw new StoreError('Invalid messages array', 'INVALID_INPUT');
-            }
+            const encodedQuery = query.encode();
+            const queryHash = toHexString(encodedQuery);
 
-            await this.upsert('message', messages);
+            this.initializeQueryState(queryHash, query, cb);
+            this.dispatchAction(query);
+            this.loadCachedQueryResultAndNotify(queryHash, query);
 
-            for (const message of messages) {
-                const body = new PutMessageAction({
-                    channelId,
-                    messageId: message.$id,
-                    value: JSON.stringify(message)
-                });
-                await this.sendRequest(body);
-            }
+            return () => this.unsubscribeQuery(query, cb, queryHash);
         } catch (error) {
-            console.error('Failed to add messages:', error);
-            throw error instanceof StoreError ? error : new StoreError('Failed to add messages', 'ADD_MESSAGE_ERROR');
+            this.logger.error('Failed to subscribe to query:', error);
+            throw new StoreError('Failed to subscribe to query', 'SUBSCRIBE_ERROR');
         }
     }
 
     /**
-     * Add a member to the store
-     * @param member Member to add
-     * @throws {StoreError} If member is invalid
+     * Unsubscribe from a query
+     * @throws {StoreError} If unsubscribe fails
      */
-    public async addMember(member: Member, roles?: string[]): Promise<void> {
+    public unsubscribeQuery(
+        query: SelectAction,
+        cb: QueryCb<any>,
+        queryHash?: string
+    ): void {
         try {
-            if (!member.$id) {
-                throw new StoreError('Member must have an $id property', 'INVALID_INPUT');
+            const hash = queryHash || toHexString(query.encode());
+            const queryState = this.queryCbs[hash];
+
+            if (!queryState) return;
+
+            queryState.cbs = queryState.cbs.filter(q => q !== cb);
+
+            if (!this.isQueryActive(hash)) {
+                this.cleanupQuery(hash, query);
             }
-
-            await this.upsert('member', member);
-
-            const body = new AddMemberAction({
-                member: new MemberImpl({
-                    ...member,
-                    keys: new KeysetImpl({
-                        teamId: this.teamId,
-                        publicKey: this.userId
-                    })
-                }),
-                roles
-            });
-            await this.sendRequest(body);
         } catch (error) {
-            console.error('Failed to add member:', error);
-            throw error instanceof StoreError ? error : new StoreError('Failed to add member', 'ADD_MEMBER_ERROR');
-        }
-    }
-
-    /**
-     * Remove a member from the store
-     * @param userId ID of the member to remove
-     * @throws {StoreError} If removal fails
-     */
-    public async removeMember(userId: string): Promise<void> {
-        try {
-            if (!userId) {
-                throw new StoreError('User ID is required', 'INVALID_INPUT');
-            }
-
-            await this.delete('member', [userId]);
-
-            const body = new RemoveMemberAction({
-                userId
-            });
-            await this.sendRequest(body);
-        } catch (error) {
-            console.error('Failed to remove member:', error);
-            throw error instanceof StoreError ? error : new StoreError('Failed to remove member', 'REMOVE_MEMBER_ERROR');
-        }
-    }
-
-    /**
-     * Add a role to the store
-     * @param role Role to add
-     * @throws {StoreError} If role is invalid
-     */
-    public async addRole(role: Role<PermissionsMap>): Promise<void> {
-        try {
-            if (!role.$id) {
-                throw new StoreError('Role must have an $id property', 'INVALID_INPUT');
-            }
-
-            await this.upsert('role', role);
-
-            const body = new AddRoleAction({
-                role: new RoleImpl({
-                    ...role,
-                    permissions: Object.entries(role.permissions || {})
-                        .filter(([_, value]) => value)
-                        .map(([key]) => key)
-                })
-            });
-            await this.sendRequest(body);
-        } catch (error) {
-            console.error('Failed to add role:', error);
-            throw error instanceof StoreError ? error : new StoreError('Failed to add role', 'ADD_ROLE_ERROR');
-        }
-    }
-
-    /**
-     * Remove a role from the store
-     * @param roleName Name of the role to remove
-     * @throws {StoreError} If removal fails
-     */
-    public async removeRole(roleName: string): Promise<void> {
-        try {
-            if (!roleName) {
-                throw new StoreError('Role name is required', 'INVALID_INPUT');
-            }
-
-            await this.delete('role', [roleName]);
-
-            const body = new RemoveRoleAction({ roleName });
-            await this.sendRequest(body);
-        } catch (error) {
-            console.error('Failed to remove role:', error);
-            throw error instanceof StoreError ? error : new StoreError('Failed to remove role', 'REMOVE_ROLE_ERROR');
-        }
-    }
-
-    /**
-     * Add a member with a role to the store
-     * @param userId ID of the member
-     * @param roleName Name of the role to assign to the member
-     * @throws {StoreError} If member or role is invalid
-     */
-    public async addMemberRole(userId: string, roleName: string): Promise<void> {
-        try {
-            // Validate inputs
-            if (!userId || !roleName) {
-                throw new StoreError('User ID and role name are required', 'INVALID_INPUT');
-            }
-
-            // Get existing member or create new one with default roles array
-            const member = await this.storageManager.get<Member>('member', userId) || {
-                $id: userId,
-                roles: []
-            };
-
-            // Ensure roles is an array and add new role if not present
-            member.roles = Array.isArray(member.roles) ? member.roles : [];
-            if (!member.roles.includes(roleName)) {
-                member.roles.push(roleName);
-                await this.upsert('member', member);
-            }
-
-            // Send request regardless of local changes to ensure server consistency
-            await this.sendRequest(new AddMemberRoleAction({ userId, roleName }));
-        } catch (error) {
-            console.error('Failed to add member role:', error);
-            throw error instanceof StoreError ? error : new StoreError('Failed to add member role', 'ADD_MEMBER_ROLE_ERROR');
-        }
-    }
-
-    /**
-     * Remove a member role from the store
-     * @param userId ID of the member
-     * @param roleName Name of the role to remove
-     * @throws {StoreError} If member or role is invalid
-     */
-    public async removeMemberRole(userId: string, roleName: string): Promise<void> {
-        try {
-            // Validate inputs
-            if (!userId || !roleName) {
-                throw new StoreError('User ID and role name are required', 'INVALID_INPUT');
-            }
-
-            // Get existing member
-            const member = await this.storageManager.get<Member>('member', userId);
-            if (member) {
-                // Ensure roles is an array and remove role if present
-                member.roles = Array.isArray(member.roles) ? member.roles : [];
-                const roleIndex = member.roles.indexOf(roleName);
-                if (roleIndex !== -1) {
-                    member.roles.splice(roleIndex, 1);
-                    await this.upsert('member', member);
-                }
-            }
-
-            // Send request regardless of local changes to ensure server consistency
-            await this.sendRequest(new RemoveMemberRoleAction({ userId, roleName }));
-        } catch (error) {
-            console.error('Failed to remove member role:', error);
-            throw error instanceof StoreError ? error : new StoreError('Failed to remove member role', 'REMOVE_MEMBER_ROLE_ERROR');
-        }
-    }
-
-    /**
-     * Send a request to the websocket
-     * @param body The request body
-     * @throws {StoreError} On request failure
-     */
-    public async sendRequest(body: AbstractAction): Promise<void> {
-        // const payload = new TransportPayloadImpl({
-        //    userId: this.userId,
-        //     teamId: this.teamId,
-        //     state: bigintTime(),
-        //     body
-        // });
-        const { id, payload } = encryptPayload({
-            user: this.user,
-            recipientPublicKey: null,
-            teamId: this.teamId,
-            action: body
-        });
-
-        try {
-            this.storageManager.putPendingAction(id, payload);
-            await this.websocketManager.send(payload);
-            this.storageManager.deletePendingAction(id);
-        } catch (error) {
-            console.error('Failed to send request:', error);
-            throw new StoreError('Failed to send request', 'SEND_REQUEST_ERROR');
+            this.logger.error('Failed to unsubscribe from query:', error);
+            throw new StoreError('Failed to unsubscribe from query', 'UNSUBSCRIBE_ERROR');
         }
     }
 
@@ -348,7 +166,7 @@ export class Store {
 
             this.updateQueriesForEntity(entity, items);
         } catch (error) {
-            console.error('Upsert failed:', error);
+            this.logger.error('Upsert failed:', error);
             throw error instanceof StoreError ? error : new StoreError('Failed to upsert data', 'UPSERT_ERROR');
         }
     }
@@ -372,8 +190,75 @@ export class Store {
             this.updateQueriesForEntity(entity, deletedItems);
 
         } catch (error) {
-            console.error('Delete failed:', error);
+            this.logger.error('Delete failed:', error);
             throw error instanceof StoreError ? error : new StoreError('Failed to delete data', 'DELETE_ERROR');
+        }
+    }
+
+    /**
+     * Disconnect from the websocket
+     * @public
+     */
+    public disconnect(): void {
+        this.connectionState = 'closed';
+        this.connector.disconnect();
+        this.retryAttempts = 0;
+    }
+
+    /**
+     * Clean up resources
+     * @public
+     */
+    public destroy(): void {
+        this.disconnect();
+        this.beforeUnloadCbs = [];
+        this.queryCbs = {};
+    }
+
+    /**
+     * Send an action to the websocket
+     * @param body The action body
+     * @throws {StoreError} On action failure
+     */
+    public async dispatchAction(body: AbstractAction): Promise<void> {
+        if (!body) {
+            throw new StoreError('Action body is required', 'INVALID_INPUT');
+        }
+
+        try {
+            const payload = this.createEncryptedPayload(body);
+            this.sendOrQueuePayload(payload, body);
+        } catch (error) {
+            this.logger.error('Failed to send action:', error);
+            throw error instanceof StoreError
+                ? error
+                : new StoreError('Failed to send action', 'SEND_ACTION_ERROR');
+        }
+    }
+
+    /**
+     * Create an encrypted payload
+     * @param action The action to encrypt
+     * @returns The encrypted payload
+     */
+    private createEncryptedPayload(action: AbstractAction): Uint8Array {
+        return encryptPayload({
+            user: this.user,
+            recipientPublicKey: null,
+            action
+        });
+    }
+
+    /**
+     * Send or queue a payload
+     * @param payload The payload to send
+     * @param action The action to send
+     */
+    private sendOrQueuePayload(payload: Uint8Array, action: AbstractAction): void {
+        if (this.connector.isConnected) {
+            this.connector.send(payload);
+        } else if (!(action instanceof SelectAction)) {
+            this.storageManager.putPendingAction(randomId(), payload);
         }
     }
 
@@ -385,7 +270,7 @@ export class Store {
         Object.entries(this.queryCbs).forEach(([queryHash, state]) => {
             if (state.query.entity === entity && state.result) {
                 const changes = DataUtil.processChanges(state.result.rows, items, state.filterCriteria);
-                
+
                 if (changes.length === 0) return;
 
                 const changeRequest: DataChanges<StoreItem> = {
@@ -415,6 +300,145 @@ export class Store {
     }
 
     /**
+     * Initialize query state
+     * @private
+     */
+    private initializeQueryState(
+        queryHash: string,
+        query: SelectAction,
+        cb: QueryCb<any>
+    ): void {
+        const queryState = this.queryCbs[queryHash];
+
+        if (!queryState) {
+            this.queryCbs[queryHash] = {
+                query,
+                cbs: [cb],
+                result: null,
+                filterCriteria: convertQueryToFilterTree(query)
+            };
+        } else {
+            queryState.cbs.push(cb);
+        }
+    }
+
+    /**
+     * Load cached query result and notify subscribers
+     * @private
+     */
+    private async loadCachedQueryResultAndNotify(
+        queryHash: string,
+        query: SelectAction
+    ): Promise<void> {
+        try {
+            const result = await this.storageManager.getQueryResult<Identifiable>(queryHash, query.entity);
+            if (result) {
+                const queryState = this.queryCbs[queryHash];
+                queryState.result = result;
+                queryState.cbs.forEach(cb => cb(result));
+            }
+        } catch (error) {
+            this.logger.error('Failed to load initial query result:', error);
+        }
+    }
+
+    /**
+     * Clean up query resources
+     * @private
+     */
+    private async cleanupQuery(hash: string, query: SelectAction): Promise<void> {
+        delete this.queryCbs[hash];
+        await this.storageManager.deleteQuery(hash, query.entity);
+
+        const cancelRequest = new CancelSelectAction({ queryHash: hash });
+        this.dispatchAction(cancelRequest);
+    }
+
+    /**
+     * Initialize the websocket connector
+     * @private
+     */
+    private initWebSocketConnector(): void {
+        this.connector = new WebSocketConnector({
+            websocketURI: transformSocketUrl(this.config.websocketURI),
+            appId: this.config.appId
+        });
+        this.connector.useInputMiddleware((msg: Uint8Array) => {
+            try {
+                const payload = deserialize(msg, EncryptedPayloadImpl);
+                if (!payload) {
+                    throw new StoreError('Failed to deserialize encrypted payload', 'DESERIALIZE_ERROR');
+                }
+
+                const decryptedPayload = asymmetric.decryptBytes({
+                    cipher: payload.encryptedBody,
+                    recipientSecretKey: this.user?.keys?.encryption?.secretKey,
+                    senderPublicKey: payload.senderPublicKey
+                });
+                if (!decryptedPayload) {
+                    throw new StoreError('Failed to decrypt payload', 'DECRYPT_ERROR');
+                }
+
+                return deserialize(decryptedPayload, TransportPayloadImpl);
+            } catch (error) {
+                this.logger.error('Input middleware error:', error);
+                throw error instanceof StoreError ? error : new StoreError('Input middleware failed', 'MIDDLEWARE_ERROR');
+            }
+        });
+        this.connector.on('receiveMessage', (msg: TransportPayloadImpl) => {
+            this.handleIncomingMessage(msg);
+        });
+        this.connector.on('stateChange', (state: ConnectorState) => {
+            this.handleConnectionStateChange(state);
+        });
+    }
+
+    /**
+     * Handle incoming messages
+     * @private
+     */
+    private handleIncomingMessage(message: TransportPayloadImpl): void {
+        try {
+            if (!message?.body) {
+                throw new StoreError('Invalid message received', 'INVALID_MESSAGE');
+            }
+            const messageBody = message.body;
+
+            switch (true) {
+                case messageBody instanceof SelectResultAction:
+                    this.handleSelectResult(messageBody);
+                    break;
+                case messageBody instanceof DataChangesAction:
+                    this.handleDataChanges<StoreItem>(messageBody as unknown as DataChanges<StoreItem>);
+                    break;
+                default:
+                    throw new StoreError(`Unhandled message type: ${messageBody.constructor.name}`, 'UNKNOWN_MESSAGE_TYPE');
+            }
+        } catch (error) {
+            this.logger.error('Failed to handle websocket message:', error);
+            throw error instanceof StoreError ? error : new StoreError('Message handling failed', 'MESSAGE_HANDLING_ERROR');
+        }
+    }
+
+    /**
+    * Handle a select result
+    * @param action The select result to handle
+    */
+    private handleSelectResult(query: SelectResult<any>): void {
+        const queryHash = query.queryHash;
+        const queryState = this.queryCbs[queryHash];
+
+        if (!queryState) {
+            return;
+        }
+
+        queryState.result = query;
+        queryState.cbs.forEach(cb => cb(query));
+
+        this.storageManager.saveQueryResult(queryHash, query, queryState.query.entity);
+    }
+
+    /**
      * Handle data changes from websocket or local updates
      * @private
      */
@@ -424,7 +448,7 @@ export class Store {
 
         try {
             const updatedRows = this.processDataChanges(queryState.result.rows, messageBody);
-            
+
             const updatedResult = {
                 ...queryState.result,
                 rows: messageBody.changes?.length
@@ -439,7 +463,7 @@ export class Store {
                 queryState.cbs.forEach(cb => cb(updatedResult));
             }
         } catch (error) {
-            console.error('Failed to handle data changes:', error);
+            this.logger.error('Failed to handle data changes:', error);
         }
     }
 
@@ -448,7 +472,7 @@ export class Store {
      * @private
      */
     private processDataChanges<T extends StoreItem>(
-        currentRows: T[], 
+        currentRows: T[],
         messageBody: DataChanges<T>
     ): T[] {
         let updatedRows = [...currentRows];
@@ -463,7 +487,7 @@ export class Store {
                     const parsedElement = this.parseElement(change.element) as T;
                     updatedRows = this.applyChange(updatedRows, parsedElement, change.type);
                 } catch (error) {
-                    console.error('Failed to process change:', error);
+                    this.logger.error('Failed to process change:', error);
                 }
             }
         }
@@ -472,278 +496,12 @@ export class Store {
     }
 
     /**
-     * Subscribe to a query
-     * @param query The query to execute
-     * @param cb The callback to call with the result
-     * @returns Unsubscribe function
-     * @throws {StoreError} If query is invalid
-     */
-    public subscribeQuery<T extends StoreItem>(
-        query: SelectAction, 
-        cb: QueryCb<SelectResult<T>>
-    ): () => void {
-        if (!query || !cb) {
-            throw new StoreError('Query and callback are required', 'INVALID_INPUT');
-        }
-
-        try {
-            const encodedQuery = query.encode();
-            const queryHash = toHexString(encodedQuery);
-            
-            this.initializeQueryState(queryHash, query, cb);
-            this.loadInitialQueryResult(queryHash, query);
-
-            return () => this.unsubscribeQuery(query, cb, queryHash);
-        } catch (error) {
-            console.error('Failed to subscribe to query:', error);
-            throw new StoreError('Failed to subscribe to query', 'SUBSCRIBE_ERROR');
-        }
-    }
-
-    /**
-     * Initialize query state
-     * @private
-     */
-    private initializeQueryState(
-        queryHash: string, 
-        query: SelectAction, 
-        cb: QueryCb<any>
-    ): void {
-        const queryState = this.queryCbs[queryHash];
-        
-        if (!queryState) {
-            this.queryCbs[queryHash] = {
-                query,
-                cbs: [cb],
-                result: null,
-                filterCriteria: convertQueryToFilterTree(query)
-            };
-            this.websocketManager.send(query.encode());
-        } else {
-            queryState.cbs.push(cb);
-        }
-    }
-
-    /**
-     * Load initial query result from storage
-     * @private
-     */
-    private async loadInitialQueryResult(
-        queryHash: string, 
-        query: SelectAction
-    ): Promise<void> {
-        try {
-            const result = await this.storageManager.getQueryResult<Identifiable>(queryHash, query.entity);
-            if (result) {
-                const queryState = this.queryCbs[queryHash];
-                queryState.result = result;
-                queryState.cbs.forEach(cb => cb(result));
-            }
-        } catch (error) {
-            console.error('Failed to load initial query result:', error);
-        }
-    }
-
-    /**
-     * Unsubscribe from a query
-     * @throws {StoreError} If unsubscribe fails
-     */
-    public unsubscribeQuery(
-        query: SelectAction, 
-        cb: QueryCb<any>, 
-        queryHash?: string
-    ): void {
-        try {
-            const hash = queryHash || toHexString(query.encode());
-            const queryState = this.queryCbs[hash];
-            
-            if (!queryState) return;
-
-            queryState.cbs = queryState.cbs.filter(q => q !== cb);
-
-            if (queryState.cbs.length === 0) {
-                this.cleanupQuery(hash, query);
-            }
-        } catch (error) {
-            console.error('Failed to unsubscribe from query:', error);
-            throw new StoreError('Failed to unsubscribe from query', 'UNSUBSCRIBE_ERROR');
-        }
-    }
-
-    /**
-     * Clean up query resources
-     * @private
-     */
-    private async cleanupQuery(hash: string, query: SelectAction): Promise<void> {
-        delete this.queryCbs[hash];
-        await this.storageManager.deleteQuery(hash, query.entity);
-
-        const cancelRequest = new CancelSelectAction({ queryHash: hash });
-        await this.websocketManager.send(cancelRequest.encode());
-    }
-
-    /**
-     * Handle websocket messages
-     * @private
-     */
-    private handleWebSocketMessage(msg: WebSocket.Data): void {
-        try {
-            const message = deserialize(msg as Uint8Array, TransportPayloadImpl);
-            const messageBody = message.body;
-
-            switch (true) {
-                case messageBody instanceof SelectResultAction:
-                    this.handleSelectResult(messageBody);
-                    break;
-                case messageBody instanceof DataChangesAction:
-                    this.handleDataChanges<StoreItem>(messageBody as unknown as DataChanges<StoreItem>);
-                    break;
-                default:
-                    console.warn('Unhandled message type:', messageBody);
-            }
-        } catch (error) {
-            console.error('Failed to handle websocket message:', error);
-        }
-    }
-
-    /**
-     * Initialize websocket connection
-     * @private
-     */
-    private initWebSocketManagers(): void {
-        this.websocketManager = new WebSocketManager({
-            websocketURI: transformSocketUrl(this.config.websocketURI),
-            appId: this.config.appId,
-            onStateChange: this.handleConnectionStateChange.bind(this)
-        });
-        this.websocketManager.addMessageHandler(this.handleWebSocketMessage.bind(this));
-    }
-
-    /**
-     * Handle connection state changes
-     * @private
-     */
-    private handleConnectionStateChange(state: ConnectionState): void {
-        this.connectionState = state;
-        if (state === 'closed' && this.isOnline) {
-            this.retryConnection();
-        }
-    }
-
-    /**
-     * Retry connection with exponential backoff
-     * @private
-     */
-    private async retryConnection(): Promise<void> {
-        if (this.retryAttempts >= this.MAX_RETRY_ATTEMPTS) {
-            console.error('Max retry attempts reached');
-            return;
-        }
-
-        const delay = Math.min(1000 * Math.pow(2, this.retryAttempts), 30000);
-        this.retryAttempts++;
-
-        await new Promise(resolve => setTimeout(resolve, delay));
-        this.websocketManager.connect();
-    }
-
-    /**
-     * Disconnect from the websocket
-     * @public
-     */
-    public disconnect(): void {
-        this.connectionState = 'closed';
-        this.websocketManager.disconnect();
-        this.retryAttempts = 0;
-    }
-
-    /**
-     * Clean up resources
-     * @public
-     */
-    public destroy(): void {
-        this.disconnect();
-        this.beforeUnloadCbs = [];
-        this.queryCbs = {};
-    }
-
-    /**
-     * Initialize the storage manager
-     */
-    private initStorageManager() {
-        const dbName = `topgun-${this.config.appId}`;
-        const storageImpl = this.config.storage ||
-            (IndexedDBStorage.isSupported() ? IndexedDBStorage : MemoryStorage);
-
-        this.storageManager = new StorageManager(dbName, storageImpl);
-    }
-
-    /**
-     * Initialize the network listener
-     */
-    private initNetworkListener() {
-        this.networkListener = this.config.windowNetworkListener
-            ? new this.config.windowNetworkListener()
-            : new WindowNetworkListener();
-        this.isOnline = this.networkListener.isOnline();
-        if (this.isOnline) {
-            this.websocketManager.connect();
-        }
-
-        this.networkListener.listen((isOnline) => {
-            if (isOnline === this.isOnline) {
-                return;
-            }
-            this.isOnline = isOnline;
-            if (isOnline) {
-                this.websocketManager.connect();
-            }
-        });
-    }
-
-    /**
-     * Initialize the before unload event
-     */
-    private initBeforeUnload() {
-        windowOrGlobal?.addEventListener("beforeunload", () => {
-            this.beforeUnloadCbs.forEach(cb => cb());
-        });
-    }
-
-    /**
-     * Parse collection data
-     * @private
-     */
-    private parseCollection<T>(collection: any[]): T[] {
-        try {
-            return collection.map(item =>
-                typeof item === 'string' ? JSON.parse(item) : item
-            );
-        } catch (error) {
-            console.error('Failed to parse collection:', error);
-            throw new StoreError('Invalid collection data', 'PARSE_ERROR');
-        }
-    }
-
-    /**
-     * Parse element data
-     * @private
-     */
-    private parseElement<T extends StoreItem>(element: any): T {
-        const parsed = typeof element === 'string' ? JSON.parse(element) : element;
-        if (!parsed.$id) {
-            throw new StoreError('Invalid element: missing $id', 'PARSE_ERROR');
-        }
-        return parsed;
-    }
-
-    /**
      * Apply a single change to the rows
      * @private
      */
     private applyChange<T extends StoreItem>(
-        rows: T[], 
-        element: T, 
+        rows: T[],
+        element: T,
         changeType: 'added' | 'updated' | 'deleted'
     ): T[] {
         switch (changeType) {
@@ -767,20 +525,164 @@ export class Store {
     }
 
     /**
-     * Handle a select result
-     * @param action The select result to handle
+     * Handle connection state changes
+     * @private
      */
-    private handleSelectResult(query: SelectResult<any>): void {
-        const queryHash = query.queryHash;
-        const queryState = this.queryCbs[queryHash];
+    private handleConnectionStateChange(state: ConnectorState): void {
+        const previousState = this.connectionState;
+        this.connectionState = state;
 
-        if (!queryState) {
+        if (state === 'opened') {
+            this.retryAttempts = 0;
+            // Add delay to ensure connection is stable
+            setTimeout(() => {
+                this.resubscribeQueries().catch(error => {
+                    this.logger.error('Failed to resubscribe after connection:', error);
+                });
+            }, 100);
+        } else if (state === 'closed' && this.isOnline && previousState === 'opened') {
+            this.retryConnection();
+        }
+    }
+
+    /**
+     * Retry connection with exponential backoff
+     * @private
+     */
+    private async retryConnection(): Promise<void> {
+        if (this.retryAttempts >= this.MAX_RETRY_ATTEMPTS) {
+            this.logger.error('Max retry attempts reached');
             return;
         }
 
-        queryState.result = query;
-        queryState.cbs.forEach(cb => cb(query));
+        const delay = Math.min(1000 * Math.pow(2, this.retryAttempts), 30000);
+        this.retryAttempts++;
 
-        this.storageManager.saveQueryResult(queryHash, query, queryState.query.entity);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        this.connector.startSocket();
+    }
+
+    /**
+     * Initialize the storage manager
+     */
+    private initStorageManager() {
+        const dbName = `topgun-${this.config.appId}`;
+        const storageImpl = this.config.storage ||
+            (IndexedDBStorage.isSupported() ? IndexedDBStorage : MemoryStorage);
+
+        this.storageManager = new StorageManager(dbName, storageImpl);
+    }
+
+    /**
+     * Initialize the network listener
+     */
+    private initNetworkListener() {
+        this.networkListener = this.config.windowNetworkListener
+            ? new this.config.windowNetworkListener()
+            : new WindowNetworkListener();
+        this.isOnline = this.networkListener.isOnline();
+        if (this.isOnline) {
+            this.connector.startSocket();
+        }
+
+        this.networkListener.listen((isOnline) => {
+            if (isOnline === this.isOnline) {
+                return;
+            }
+            this.isOnline = isOnline;
+            if (isOnline) {
+                this.connector.startSocket();
+            }
+        });
+    }
+
+    /**
+     * Initialize the before unload event
+     */
+    private initBeforeUnload() {
+        windowOrGlobal?.addEventListener("beforeunload", () => {
+            this.beforeUnloadCbs.forEach(cb => cb());
+        });
+    }
+
+    /**
+     * Parse collection data
+     * @private
+     */
+    private parseCollection<T>(collection: any[]): T[] {
+        try {
+            return collection.map(item =>
+                typeof item === 'string' ? JSON.parse(item) : item
+            );
+        } catch (error) {
+            this.logger.error('Failed to parse collection:', error);
+            throw new StoreError('Invalid collection data', 'PARSE_ERROR');
+        }
+    }
+
+    /**
+     * Parse element data
+     * @private
+     */
+    private parseElement<T extends StoreItem>(element: any): T {
+        const parsed = typeof element === 'string' ? JSON.parse(element) : element;
+        if (!parsed.$id) {
+            throw new StoreError('Invalid element: missing $id', 'PARSE_ERROR');
+        }
+        return parsed;
+    }
+
+    /**
+     * Resubscribe to all active queries after reconnection
+     * @private
+     */
+    private async resubscribeQueries(): Promise<void> {
+        try {
+            // Get pending actions first
+            const pendingActions = await this.storageManager.getAllPendingActions();
+
+            // Process pending actions
+            for (const [id, action] of Object.entries(pendingActions)) {
+                try {
+                    this.connector.send(action);
+                    this.storageManager.deletePendingAction(id);
+                } catch (error) {
+                    this.logger.error(`Failed to process pending action ${id}:`, error);
+                }
+            }
+
+            // Resubscribe to active queries
+            const activeQueries = Object.entries(this.queryCbs);
+            if (activeQueries.length === 0) return;
+
+            this.logger.verbose(`Resubscribing to ${activeQueries.length} queries...`);
+
+            for (const [queryHash, state] of activeQueries) {
+                try {
+                    // Dispatch the resubscription
+                    await this.dispatchAction(state.query);
+
+                    // Notify subscribers with cached data while waiting for fresh data
+                    if (state.result) {
+                        state.cbs.forEach(cb => cb(state.result));
+                    }
+                } catch (error) {
+                    this.logger.error(`Failed to resubscribe to query ${queryHash}:`, error);
+                    // Continue with other queries even if one fails
+                }
+            }
+        } catch (error) {
+            this.logger.error('Failed to resubscribe queries:', error);
+            throw new StoreError('Query resubscription failed', 'RESUBSCRIBE_ERROR');
+        }
+    }
+
+    /**
+     * Check if a query is still active
+     * @private
+     */
+    private isQueryActive(queryHash: string): boolean {
+        const queryState = this.queryCbs[queryHash];
+        return queryState != null && queryState.cbs.length > 0;
     }
 }

@@ -9,7 +9,7 @@ export type ClientConfig = {
     websocketURI?: string;
     appId?: string;
     windowNetworkListener?: NetworkListenerDerived;
-    storage?: StorageDerived<any>;
+    storage?: StorageDerived<any, any>;
     storagePassphrase?: Password;
 };
 

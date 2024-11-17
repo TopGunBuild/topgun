@@ -1,9 +1,10 @@
-import { Identifiable } from "./utils"
-
+/**
+ * Encrypted payload
+ */
 export interface EncryptedPayload {
     encryptedBody: Uint8Array
     senderPublicKey: string
-    recipientPublicKey: string
+    recipientPublicKey?: string
 }
 
 /**
@@ -11,13 +12,7 @@ export interface EncryptedPayload {
  * Combines metadata with typed payload body
  * @template T - The type of the message body
  */
-export interface TransportPayload<T> extends Identifiable {
-    /** Identifier of the user sending the message */
-    userId: string;
-    /** Identifier of the team receiving the message */
-    teamId: string;
-    /** Optional state counter for versioning and conflict resolution */
-    state: bigint;
+export interface TransportPayload<T> {
     /** Timestamp of the message creation */
     timestamp: number;
     /** Typed message content */

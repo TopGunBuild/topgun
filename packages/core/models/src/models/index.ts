@@ -9,3 +9,5 @@ export * from './member';
 export * from './lockbox';
 export * from './base58-keypair';
 export * from './encription-key';
+export * from './team';
+export * from './channel';

@@ -43,6 +43,9 @@ export class CreateTeamAction extends AbstractAction {
     @field({ type: 'string' })
     name: string;
 
+    @field({ type: option('string') })
+    description?: string;
+
     @field({ type: MemberImpl })
     rootMember: MemberImpl;
 
@@ -52,20 +55,44 @@ export class CreateTeamAction extends AbstractAction {
     constructor(data: {
         lockboxes?: Lockbox[],
         name: string,
+        description?: string,
         rootMember: MemberImpl,
         rootDevice: DeviceImpl
     }) {
         super(data);
         this.name = data.name;
+        this.description = data.description;
         this.rootMember = data.rootMember;
         this.rootDevice = data.rootDevice;
     }
 }
 
 /**
- * Add member request
+ * Set team action
  */
 @variant(1)
+export class UpdateTeamAction extends AbstractAction {
+    @field({ type: 'string' })
+    teamId: string;
+
+    @field({ type: option('string') })
+    name?: string;
+
+    @field({ type: option('string') })
+    description?: string;
+
+    constructor(data: { lockboxes?: Lockbox[], teamId: string, name?: string, description?: string }) {
+        super(data);
+        this.teamId = data.teamId;
+        this.name = data.name;
+        this.description = data.description;
+    }
+}
+
+/**
+ * Add member request
+ */
+@variant(2)
 export class AddMemberAction extends AbstractAction {
     @field({ type: MemberImpl })
     member: MemberImpl;
@@ -87,7 +114,7 @@ export class AddMemberAction extends AbstractAction {
 /**
  * Remove member request
  */
-@variant(2)
+@variant(3)
 export class RemoveMemberAction extends AbstractAction {
     @field({ type: 'string' })
     userId: string;
@@ -101,7 +128,7 @@ export class RemoveMemberAction extends AbstractAction {
 /**
  * Add role request
  */
-@variant(3)
+@variant(4)
 export class AddRoleAction extends AbstractAction {
     @field({ type: RoleImpl })
     role: RoleImpl;
@@ -115,7 +142,7 @@ export class AddRoleAction extends AbstractAction {
 /**
  * Remove role request
  */
-@variant(4)
+@variant(5)
 export class RemoveRoleAction extends AbstractAction {
     @field({ type: 'string' })
     roleName: string;
@@ -129,7 +156,7 @@ export class RemoveRoleAction extends AbstractAction {
 /**
  * Assign a role to a member
  */
-@variant(5)
+@variant(6)
 export class AddMemberRoleAction extends AbstractAction {
     @field({ type: 'string' })
     userId: string;
@@ -147,7 +174,7 @@ export class AddMemberRoleAction extends AbstractAction {
 /**
  * Remove a role from a member
  */
-@variant(6)
+@variant(7)
 export class RemoveMemberRoleAction extends AbstractAction {
     @field({ type: 'string' })
     userId: string;
@@ -165,7 +192,7 @@ export class RemoveMemberRoleAction extends AbstractAction {
 /**
  * Add device request
  */
-@variant(7)
+@variant(8)
 export class AddDeviceAction extends AbstractAction {
     @field({ type: DeviceImpl })
     device: DeviceImpl;
@@ -179,7 +206,7 @@ export class AddDeviceAction extends AbstractAction {
 /**
  * Remove device request
  */
-@variant(8)
+@variant(9)
 export class RemoveDeviceAction extends AbstractAction {
     @field({ type: 'string' })
     deviceId: string;
@@ -193,7 +220,7 @@ export class RemoveDeviceAction extends AbstractAction {
 /**
  * Invite member request
  */
-@variant(9)
+@variant(10)
 export class InviteMemberAction extends AbstractAction {
     @field({ type: InvitationImpl })
     invitation: InvitationImpl;
@@ -207,7 +234,7 @@ export class InviteMemberAction extends AbstractAction {
 /**
  * Invite device request
  */
-@variant(10)
+@variant(11)
 export class InviteDeviceAction extends AbstractAction {
     @field({ type: InvitationImpl })
     invitation: InvitationImpl;
@@ -221,7 +248,7 @@ export class InviteDeviceAction extends AbstractAction {
 /**
  * Revoke invitation request
  */
-@variant(11)
+@variant(12)
 export class RevokeInvitationAction extends AbstractAction {
     @field({ type: 'string' })
     invitationId: string; // Invitation ID
@@ -235,7 +262,7 @@ export class RevokeInvitationAction extends AbstractAction {
 /**
  * Admit member request
  */
-@variant(12)
+@variant(13)
 export class AdmitMemberAction extends AbstractAction {
     @field({ type: 'string' })
     invitationId: string; // Invitation ID
@@ -262,7 +289,7 @@ export class AdmitMemberAction extends AbstractAction {
 /**
  * Admit device request
  */
-@variant(13)
+@variant(14)
 export class AdmitDeviceAction extends AbstractAction {
     @field({ type: 'string' })
     invitationId: string; // Invitation ID
@@ -280,7 +307,7 @@ export class AdmitDeviceAction extends AbstractAction {
 /**
  * Change member keys request
  */
-@variant(14)
+@variant(15)
 export class ChangeMemberKeysAction extends AbstractAction {
     @field({ type: KeysetImpl })
     keys: KeysetImpl;
@@ -294,7 +321,7 @@ export class ChangeMemberKeysAction extends AbstractAction {
 /**
  * Rotate keys request
  */
-@variant(15)
+@variant(16)
 export class RotateKeysAction extends AbstractAction {
     @field({ type: 'string' })
     userId: string;
@@ -308,7 +335,7 @@ export class RotateKeysAction extends AbstractAction {
 /**
  * Add server request
  */
-@variant(16)
+@variant(17)
 export class AddServerAction extends AbstractAction {
     @field({ type: ServerImpl })
     server: ServerImpl;
@@ -322,7 +349,7 @@ export class AddServerAction extends AbstractAction {
 /**
  * Remove server request
  */
-@variant(17)
+@variant(18)
 export class RemoveServerAction extends AbstractAction {
     @field({ type: 'string' })
     host: string;
@@ -336,7 +363,7 @@ export class RemoveServerAction extends AbstractAction {
 /**
  * Change server keys request
  */
-@variant(18)
+@variant(19)
 export class ChangeServerKeysAction extends AbstractAction {
     @field({ type: KeysetImpl })
     keys: KeysetImpl;
@@ -344,20 +371,6 @@ export class ChangeServerKeysAction extends AbstractAction {
     constructor(data: { lockboxes?: Lockbox[], keys: KeysetImpl }) {
         super(data);
         this.keys = data.keys;
-    }
-}
-
-/**
- * Set team name request
- */
-@variant(19)
-export class SetTeamNameAction extends AbstractAction {
-    @field({ type: 'string' })
-    teamName: string;
-
-    constructor(data: { lockboxes?: Lockbox[], teamName: string }) {
-        super(data);
-        this.teamName = data.teamName;
     }
 }
 
@@ -375,15 +388,20 @@ export class PutMessageAction extends AbstractAction {
     @field({ type: 'string' })
     value: string;
 
+    @field({ type: 'u64' })
+    state: bigint;
+
     constructor(data: {
         channelId: string,
         messageId: string,
         value: string,
+        state: bigint,
     }) {
         super({});
         this.channelId = data.channelId;
         this.messageId = data.messageId;
         this.value = data.value;
+        this.state = data.state;
     }
 }
 
@@ -542,5 +560,45 @@ export class CancelSelectAction extends AbstractAction {
     constructor(data: { queryHash: string }) {
         super({});
         this.queryHash = data.queryHash;
+    }
+}
+
+/**
+ * Create channel request
+ */
+@variant(26)
+export class CreateChannelAction extends AbstractAction {
+    @field({ type: 'string' })
+    name: string;
+
+    @field({ type: option('string') })
+    description?: string;
+
+    constructor(data: { lockboxes?: Lockbox[], name: string, description?: string }) {
+        super(data);
+        this.name = data.name;
+        this.description = data.description;
+    }
+}
+
+/**
+ * Update channel request
+ */
+@variant(27)
+export class UpdateChannelAction extends AbstractAction {
+    @field({ type: 'string' })
+    channelId: string;
+
+    @field({ type: option('string') })
+    name?: string;
+
+    @field({ type: option('string') })
+    description?: string;
+
+    constructor(data: { lockboxes?: Lockbox[], channelId: string, name?: string, description?: string }) {
+        super(data);
+        this.channelId = data.channelId;
+        this.name = data.name;
+        this.description = data.description;
     }
 }

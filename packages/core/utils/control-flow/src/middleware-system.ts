@@ -1,7 +1,7 @@
-export class MiddlewareSystem<T>
+export class MiddlewareSystem<TInput, TOutput = TInput>
 {
     readonly name: string;
-    private readonly _middlewareFunctions: Array<(a: T) => Promise<T>|T|undefined>;
+    private readonly _middlewareFunctions: Array<(a: TInput) => Promise<TOutput>|TOutput|undefined>;
 
     /**
      * Constructor
@@ -17,7 +17,7 @@ export class MiddlewareSystem<T>
      *
      * @param middleware The middleware function to add
      */
-    use(middleware: (a: T) => Promise<T>|T|undefined,): MiddlewareSystem<T>
+    use(middleware: (a: TInput) => Promise<TOutput>|TOutput|undefined): MiddlewareSystem<TInput, TOutput>
     {
         if (this._middlewareFunctions.indexOf(middleware) !== -1)
         {
@@ -34,8 +34,8 @@ export class MiddlewareSystem<T>
      * @param middleware The middleware function to remove
      */
     unuse(
-        middleware: (a: T) => T|undefined,
-    ): MiddlewareSystem<T>
+        middleware: (a: TInput) => TOutput|undefined,
+    ): MiddlewareSystem<TInput, TOutput>
     {
         const idx = this._middlewareFunctions.indexOf(middleware);
         if (idx !== -1)
@@ -50,9 +50,9 @@ export class MiddlewareSystem<T>
      * Process values through this middleware
      * @param a Required, this is the value modified/passed through each middleware fn
      */
-    async process(a: T): Promise<T|undefined|void>
+    async process(a: TInput): Promise<TOutput|undefined|void>
     {
-        let val: T|undefined = a;
+        let val: TInput|TOutput|undefined = a;
 
         for (const fn of this._middlewareFunctions)
         {
@@ -61,9 +61,9 @@ export class MiddlewareSystem<T>
                 return;
             }
 
-            val = await fn(val);
+            val = await fn(val as TInput);
         }
 
-        return val;
+        return val as TOutput|undefined;
     }
 }

@@ -26,6 +26,7 @@
         "@topgunbuild/crypto": "workspace:*",
         "@topgunbuild/frames": "workspace:*",
         "@topgunbuild/collections": "workspace:*",
+        "@topgunbuild/control-flow": "workspace:*",
         "@topgunbuild/logger": "workspace:*",
         "@topgunbuild/time": "workspace:*",
         "@topgunbuild/models": "workspace:*",

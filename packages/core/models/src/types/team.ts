@@ -5,10 +5,10 @@ import { Identifiable } from "./utils"
 /** Properties required when creating a new team */
 export type NewTeamOptions = {
     /** The team's human-facing name */
-    teamName: string
+    name: string
   
     /** The team keys need to be provided for encryption and decryption. It's up to the application to persist these somewhere.  */
-    teamKeys: KeysetWithSecrets
+    keys: KeysetWithSecrets
   }
   
   /** Properties required when rehydrating from an existing graph  */
@@ -17,7 +17,7 @@ export type NewTeamOptions = {
     id: string
   
     /** The team keys need to be provided for encryption and decryption. It's up to the application to persist these somewhere.  */
-    teamKeyring: Keyring
+    keyring: Keyring
   }
   
   export type NewOrExistingTeamOptions = NewTeamOptions | ExistingTeamOptions
@@ -33,5 +33,6 @@ export type NewTeamOptions = {
 
 export interface Team extends Identifiable {
     /** The team's human-facing name */
-    teamName: string
+    name: string;
+    description?: string;
 }

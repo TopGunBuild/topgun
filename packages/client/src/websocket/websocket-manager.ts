@@ -1,4 +1,4 @@
-import { Deferred } from "@topgunbuild/utils";
+import { Deferred } from "@topgunbuild/common";
 import { ConsoleLogger, LoggerService } from "@topgunbuild/logger";
 import WebSocket from "isomorphic-ws"
 import { QueuedMessage, WebSocketManagerConfig, WebSocketReadyState } from "./types";
@@ -97,10 +97,6 @@ export class WebSocketManager {
         this.ensurePreviousSocketClosed();
         this.ws = new WebSocket(`${this.config.websocketURI}?app_id=${this.config.appId}`);
         this.ws.binaryType = 'arraybuffer';
-        // this.ws.onopen = this.onOpen.bind(this);
-        // this.ws.onmessage = this.onMessage.bind(this);
-        // this.ws.onclose = this.onClose.bind(this);
-        // this.ws.onerror = this.onError.bind(this);
 
         this.ws.addEventListener("open", () => {
             this.onOpen()

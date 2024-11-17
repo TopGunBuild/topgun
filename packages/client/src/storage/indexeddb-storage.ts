@@ -6,11 +6,46 @@ import { StorageAdapter, StorageParams } from './types';
  * IndexedDBStorage is a storage adapter that uses IndexedDB to store data.
  * @template T The type of the data to store
  */
-export class IndexedDBStorage implements StorageAdapter<Uint8Array> {
+export class IndexedDBStorage<T> implements StorageAdapter<T> {
     private _dbp: Promise<IDBDatabase> | undefined;
     private _encryptionKey?: Password;
     readonly _dbName: string;
     readonly _storeName: string;
+    readonly _writeMiddleware?: (value: T) => Uint8Array;
+    readonly _readMiddleware?: (value: Uint8Array) => T;
+
+    /**
+     * Check if a database exists
+     * @param dbName The name of the database to check
+     * @returns Promise that resolves to true if database exists, false otherwise
+     */
+    static async exists(dbName: string): Promise<boolean> {
+        if (!this.isSupported()) {
+            return false;
+        }
+
+        return new Promise((resolve) => {
+            const request = windowOrGlobal.indexedDB.open(dbName);
+            let exists = true;
+
+            request.onupgradeneeded = () => {
+                exists = false;
+                const db = request.result;
+                db.close();
+                windowOrGlobal.indexedDB.deleteDatabase(dbName);
+            };
+
+            request.onsuccess = () => {
+                const db = request.result;
+                db.close();
+                resolve(exists);
+            };
+
+            request.onerror = () => {
+                resolve(false);
+            };
+        });
+    }
 
     /**
      * Check if IndexedDB is supported
@@ -24,11 +59,13 @@ export class IndexedDBStorage implements StorageAdapter<Uint8Array> {
      * Create a new IndexedDBStorage
      * @param params 
      */
-    constructor(params: StorageParams) {
+    constructor(params: StorageParams<T, Uint8Array>) {
         this._dbName = params.dbName || 'topgun';
         this._storeName = params.storeName || 'storage';
         this._encryptionKey = params.encryptionKey;
-        this.#init();
+        this._writeMiddleware = params.writeMiddleware;
+        this._readMiddleware = params.readMiddleware;
+        this.init();
     }
 
     /**
@@ -36,20 +73,24 @@ export class IndexedDBStorage implements StorageAdapter<Uint8Array> {
      * @param key 
      * @returns 
      */
-    async get(key: IDBValidKey): Promise<Uint8Array> {
-        let req: IDBRequest;
-        await this.#withIDBStore('readwrite', (store) => {
-            req = store.get(key);
+    public async get(key: IDBValidKey): Promise<T> {
+        const db = await this._dbp;
+        const transaction = db.transaction(this._storeName, 'readonly');
+        const store = transaction.objectStore(this._storeName);
+        const result = await new Promise<any>((resolve, reject) => {
+            const request = store.get(key);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
         });
 
-        if (!req.result) return req.result;
+        if (!result) return result;
 
-        // Decrypt the value if encryption is enabled
         if (this._encryptionKey) {
-            return symmetric.decryptBytes(req.result, this._encryptionKey);
+            const decrypted = symmetric.decryptBytes(result, this._encryptionKey);
+            return this._readMiddleware ? this._readMiddleware(decrypted) : decrypted as T;
         }
 
-        return req.result;
+        return this._readMiddleware ? this._readMiddleware(result) : result as T;
     }
 
     /**
@@ -58,16 +99,24 @@ export class IndexedDBStorage implements StorageAdapter<Uint8Array> {
      * @param value 
      * @returns 
      */
-    async put(key: IDBValidKey, value: Uint8Array): Promise<void> {
-        return this.#withIDBStore('readwrite', (store) => {
+    public async put(key: IDBValidKey, value: T): Promise<void> {
+        const db = await this._dbp;
+        const transaction = db.transaction(this._storeName, 'readwrite');
+        const store = transaction.objectStore(this._storeName);
+
+        return new Promise((resolve, reject) => {
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = () => reject(transaction.error);
+
             if (value === null) {
                 store.delete(key);
             } else {
-                let valueToStore = value;
+                let valueToStore = this._writeMiddleware
+                    ? this._writeMiddleware(value)
+                    : value;
                 
-                // Encrypt the value if encryption is enabled
                 if (this._encryptionKey) {
-                    valueToStore = symmetric.encryptBytes(value, this._encryptionKey);
+                    valueToStore = symmetric.encryptBytes(valueToStore as Uint8Array, this._encryptionKey);
                 }
 
                 store.put(valueToStore, key);
@@ -80,8 +129,8 @@ export class IndexedDBStorage implements StorageAdapter<Uint8Array> {
      * @param key 
      * @returns 
      */
-    delete(key: IDBValidKey): Promise<void> {
-        return this.#withIDBStore('readwrite', (store) => {
+    public delete(key: IDBValidKey): Promise<void> {
+        return this.withIDBStore('readwrite', (store) => {
             store.delete(key);
         });
     }
@@ -90,25 +139,41 @@ export class IndexedDBStorage implements StorageAdapter<Uint8Array> {
      * Get all values from the storage
      * @returns 
      */
-    getAll(): Promise<Record<string, Uint8Array>> {
-        let req: IDBRequest;
-        return this.#withIDBStore('readwrite', (store) => {
-            req = store.getAll();
-        }).then(() => req.result.reduce((acc, curr) => {
+    public async getAll(): Promise<Record<string, T>> {
+        const db = await this._dbp;
+        const transaction = db.transaction(this._storeName, 'readonly');
+        const store = transaction.objectStore(this._storeName);
+        
+        const results = await new Promise<any[]>((resolve, reject) => {
+            const request = store.getAll();
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+
+        return results.reduce((acc, curr) => {
             let value = curr.value;
-            // Decrypt the value if encryption is enabled
             if (this._encryptionKey) {
                 value = symmetric.decryptBytes(value, this._encryptionKey);
             }
-            acc[curr.key] = value;
+            acc[curr.key] = this._readMiddleware
+                ? this._readMiddleware(value)
+                : value as T;
             return acc;
-        }, {} as Record<string, Uint8Array>));
+        }, {} as Record<string, T>);
+    }
+
+    /**
+     * Close the database
+     */
+    public async close() {
+        const db = await this._dbp;
+        db.close();
     }
 
     /**
      * Initialize the storage
      */
-    #init(): void {
+    private init(): void {
         if (this._dbp) {
             return;
         }
@@ -136,11 +201,11 @@ export class IndexedDBStorage implements StorageAdapter<Uint8Array> {
      * @param callback 
      * @returns 
      */
-    #withIDBStore(
+    private withIDBStore(
         type: IDBTransactionMode,
         callback: (store: IDBObjectStore) => void,
     ): Promise<void> {
-        this.#init();
+        this.init();
         return (this._dbp as Promise<IDBDatabase>).then(
             db =>
                 new Promise<void>((resolve, reject) => {

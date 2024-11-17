@@ -4,7 +4,7 @@ import { MergeFunction, StorageAdapter, StorageParams, StorageDerived } from "./
 /**
  * The persisted service
  */
-export class PersistedService<T> {
+export class PersistedService<T, U> {
     private _persister: StorageAdapter<T>;
     private _loadedCbs: (() => void)[] = [];
     private _queue = new AsyncQueue();
@@ -17,8 +17,8 @@ export class PersistedService<T> {
      * @param params - The parameters
      */
     constructor(params: {
-        params: StorageParams;
-        storage: StorageDerived<T>;
+        params: StorageParams<T, U>;
+        storage: StorageDerived<T, U>;
         defaultValue?: Record<string, T>;
         merge?: MergeFunction<T>;
     }) {
