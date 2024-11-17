@@ -29,7 +29,6 @@ export class DeviceImpl extends EncodeHelper implements Device
 
     constructor(data: {
         $id?: string,
-        teamId: string,
         userId: string,
         keys: KeysetImpl,
         created?: number,
@@ -40,7 +39,6 @@ export class DeviceImpl extends EncodeHelper implements Device
     {
         super();
         this.$id        = data.$id || randomId(32);
-        this.teamId     = data.teamId;
         this.userId     = data.userId;
         this.keys       = data.keys;
         this.created    = data.created;

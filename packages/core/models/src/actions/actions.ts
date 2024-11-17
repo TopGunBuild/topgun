@@ -41,6 +41,9 @@ export class AbstractAction implements IAction {
 @variant(0)
 export class CreateTeamAction extends AbstractAction {
     @field({ type: 'string' })
+    teamId: string;
+    
+    @field({ type: 'string' })
     name: string;
 
     @field({ type: option('string') })
@@ -53,6 +56,7 @@ export class CreateTeamAction extends AbstractAction {
     rootDevice: DeviceImpl;
 
     constructor(data: {
+        teamId: string,
         lockboxes?: Lockbox[],
         name: string,
         description?: string,
@@ -60,6 +64,7 @@ export class CreateTeamAction extends AbstractAction {
         rootDevice: DeviceImpl
     }) {
         super(data);
+        this.teamId = data.teamId;
         this.name = data.name;
         this.description = data.description;
         this.rootMember = data.rootMember;

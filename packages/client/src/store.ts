@@ -5,7 +5,6 @@ import { compareArraysSimple, randomId, toHexString, windowOrGlobal } from "@top
 import { MemoryStorage } from "./storage/memory-storage";
 import { StorageManager } from "./storage/storage-manager";
 import { transformSocketUrl } from "./utils/socket-url-transformer";
-import { deserialize } from "@dao-xyz/borsh";
 import {
     TransportPayloadImpl,
     DataChangesAction,
@@ -19,35 +18,18 @@ import {
     AbstractAction,
     UserWithSecrets,
     DeviceWithSecrets,
-    EncryptedPayloadImpl
+    EncryptedPayloadImpl,
+    StoreItem,
+    deserialize
 } from "@topgunbuild/models";
 import { encryptPayload } from "@topgunbuild/model-utils";
-import { DataUtil } from "@topgunbuild/collections";
+import { ChangeType, DataUtil } from "@topgunbuild/collections";
 import { convertQueryToFilterTree } from "@topgunbuild/frames";
-import { WebSocketConnector } from "./websocket/websocket-connector";
+import { WebSocketConnector } from "./websocket-connector";
 import { ConnectorState } from "@topgunbuild/control-flow";
 import { asymmetric } from "@topgunbuild/crypto";
-import { ConsoleLogger } from "@topgunbuild/logger";
-
-/** Interface for items that can be stored */
-export interface StoreItem extends Identifiable {
-    $id: string;
-    [key: string]: any;
-}
-
-/** Custom error types for better error handling */
-export class StoreError extends Error {
-    constructor(message: string, public readonly code: string) {
-        super(message);
-        this.name = 'StoreError';
-    }
-}
-
-export enum ChangeType {
-    Added = 'added',
-    Updated = 'updated',
-    Deleted = 'deleted'
-}
+import { LoggerService } from "@topgunbuild/logger";
+import { StoreError } from "./errors";
 
 /**
  * The Store class is the main entry point for the TopGun client library.
@@ -58,31 +40,29 @@ export class Store {
     private storageManager: StorageManager;
     private networkListener: NetworkListenerAdapter;
     private beforeUnloadCbs: (() => void)[] = [];
-    private queryCbs: Record<string, QueryState<any>> = {};
+    private querySubscriptions: Record<string, QueryState<any>> = {};
 
-    private readonly logger = new ConsoleLogger('Store');
     private connectionState: ConnectorState = 'closed';
     private retryAttempts = 0;
     private readonly MAX_RETRY_ATTEMPTS = 3;
     private isOnline = false;
-    private context: LocalContext;
-    private user: UserWithSecrets;
-    private device: DeviceWithSecrets;
+    public context: LocalContext;
 
     /**
      * Create a new Store
      * @param config The configuration for the store
      * @throws {StoreError} If required configuration is missing
      */
-    constructor(private readonly config: ClientConfig) {
+    constructor(
+        public readonly config: ClientConfig,
+        private readonly logger: LoggerService,
+    ) {
         if (!config.appId) {
             throw new StoreError('AppId is required', 'INVALID_CONFIG');
         }
-        if (!this.user?.keys?.encryption?.secretKey) {
-            throw new StoreError('User encryption keys are required', 'INVALID_CONFIG');
-        }
-
-        this.config = config;
+        // if (!this.user?.keys?.encryption?.secretKey) {
+        //     throw new StoreError('User encryption keys are required', 'INVALID_CONFIG');
+        // }
 
         this.initWebSocketConnector();
         this.initStorageManager();
@@ -90,6 +70,28 @@ export class Store {
         this.initBeforeUnload();
 
         this.beforeUnloadCbs.push(() => this.disconnect());
+    }
+
+    get isServer(): boolean {
+        return 'server' in this.context
+    }
+
+    /**
+     * Get the user
+     * @returns The user
+     */
+    async getUser(): Promise<UserWithSecrets | null>
+    {
+        return null;
+    }
+
+    /**
+     * Get the device
+     * @returns The device
+     */
+    async getDevice(): Promise<DeviceWithSecrets | null>
+    {
+        return null;
     }
 
     /**
@@ -133,7 +135,7 @@ export class Store {
     ): void {
         try {
             const hash = queryHash || toHexString(query.encode());
-            const queryState = this.queryCbs[hash];
+            const queryState = this.querySubscriptions[hash];
 
             if (!queryState) return;
 
@@ -196,6 +198,27 @@ export class Store {
     }
 
     /**
+     * Send an action to the websocket
+     * @param body The action body
+     * @throws {StoreError} On action failure
+     */
+    public async dispatchAction(body: AbstractAction): Promise<void> {
+        if (!body) {
+            throw new StoreError('Action body is required', 'INVALID_INPUT');
+        }
+
+        try {
+            const payload = await this.createEncryptedPayload(body);
+            this.sendOrQueuePayload(payload, body);
+        } catch (error) {
+            this.logger.error('Failed to send action:', error);
+            throw error instanceof StoreError
+                ? error
+                : new StoreError('Failed to send action', 'SEND_ACTION_ERROR');
+        }
+    }
+
+    /**
      * Disconnect from the websocket
      * @public
      */
@@ -212,28 +235,7 @@ export class Store {
     public destroy(): void {
         this.disconnect();
         this.beforeUnloadCbs = [];
-        this.queryCbs = {};
-    }
-
-    /**
-     * Send an action to the websocket
-     * @param body The action body
-     * @throws {StoreError} On action failure
-     */
-    public async dispatchAction(body: AbstractAction): Promise<void> {
-        if (!body) {
-            throw new StoreError('Action body is required', 'INVALID_INPUT');
-        }
-
-        try {
-            const payload = this.createEncryptedPayload(body);
-            this.sendOrQueuePayload(payload, body);
-        } catch (error) {
-            this.logger.error('Failed to send action:', error);
-            throw error instanceof StoreError
-                ? error
-                : new StoreError('Failed to send action', 'SEND_ACTION_ERROR');
-        }
+        this.querySubscriptions = {};
     }
 
     /**
@@ -241,9 +243,9 @@ export class Store {
      * @param action The action to encrypt
      * @returns The encrypted payload
      */
-    private createEncryptedPayload(action: AbstractAction): Uint8Array {
+    private async createEncryptedPayload(action: AbstractAction): Promise<Uint8Array> {
         return encryptPayload({
-            user: this.user,
+            user: await this.getUser(),
             recipientPublicKey: null,
             action
         });
@@ -267,7 +269,7 @@ export class Store {
      * @private
      */
     private updateQueriesForEntity<T extends StoreItem>(entity: string, items: T[]): void {
-        Object.entries(this.queryCbs).forEach(([queryHash, state]) => {
+        Object.entries(this.querySubscriptions).forEach(([queryHash, state]) => {
             if (state.query.entity === entity && state.result) {
                 const changes = DataUtil.processChanges(state.result.rows, items, state.filterCriteria);
 
@@ -308,10 +310,10 @@ export class Store {
         query: SelectAction,
         cb: QueryCb<any>
     ): void {
-        const queryState = this.queryCbs[queryHash];
+        const queryState = this.querySubscriptions[queryHash];
 
         if (!queryState) {
-            this.queryCbs[queryHash] = {
+            this.querySubscriptions[queryHash] = {
                 query,
                 cbs: [cb],
                 result: null,
@@ -333,7 +335,7 @@ export class Store {
         try {
             const result = await this.storageManager.getQueryResult<Identifiable>(queryHash, query.entity);
             if (result) {
-                const queryState = this.queryCbs[queryHash];
+                const queryState = this.querySubscriptions[queryHash];
                 queryState.result = result;
                 queryState.cbs.forEach(cb => cb(result));
             }
@@ -347,7 +349,7 @@ export class Store {
      * @private
      */
     private async cleanupQuery(hash: string, query: SelectAction): Promise<void> {
-        delete this.queryCbs[hash];
+        delete this.querySubscriptions[hash];
         await this.storageManager.deleteQuery(hash, query.entity);
 
         const cancelRequest = new CancelSelectAction({ queryHash: hash });
@@ -363,7 +365,7 @@ export class Store {
             websocketURI: transformSocketUrl(this.config.websocketURI),
             appId: this.config.appId
         });
-        this.connector.useInputMiddleware((msg: Uint8Array) => {
+        this.connector.useInputMiddleware(async (msg: Uint8Array) => {
             try {
                 const payload = deserialize(msg, EncryptedPayloadImpl);
                 if (!payload) {
@@ -372,7 +374,7 @@ export class Store {
 
                 const decryptedPayload = asymmetric.decryptBytes({
                     cipher: payload.encryptedBody,
-                    recipientSecretKey: this.user?.keys?.encryption?.secretKey,
+                    recipientSecretKey: (await this.getUser())?.keys?.encryption?.secretKey,
                     senderPublicKey: payload.senderPublicKey
                 });
                 if (!decryptedPayload) {
@@ -426,7 +428,7 @@ export class Store {
     */
     private handleSelectResult(query: SelectResult<any>): void {
         const queryHash = query.queryHash;
-        const queryState = this.queryCbs[queryHash];
+        const queryState = this.querySubscriptions[queryHash];
 
         if (!queryState) {
             return;
@@ -443,7 +445,7 @@ export class Store {
      * @private
      */
     private handleDataChanges<T extends StoreItem>(messageBody: DataChanges<T>): void {
-        const queryState = this.queryCbs[messageBody.queryHash];
+        const queryState = this.querySubscriptions[messageBody.queryHash];
         if (!queryState?.result) return;
 
         try {
@@ -485,7 +487,7 @@ export class Store {
             for (const change of messageBody.changes) {
                 try {
                     const parsedElement = this.parseElement(change.element) as T;
-                    updatedRows = this.applyChange(updatedRows, parsedElement, change.type);
+                    updatedRows = this.applyChange(updatedRows, parsedElement, change.type as ChangeType);
                 } catch (error) {
                     this.logger.error('Failed to process change:', error);
                 }
@@ -502,14 +504,14 @@ export class Store {
     private applyChange<T extends StoreItem>(
         rows: T[],
         element: T,
-        changeType: 'added' | 'updated' | 'deleted'
+        changeType: ChangeType
     ): T[] {
         switch (changeType) {
-            case 'deleted':
+            case ChangeType.Deleted:
                 return rows.filter(row => row.$id !== element.$id);
-            case 'added':
+            case ChangeType.Added:
                 return [...rows, element];
-            case 'updated':
+            case ChangeType.Updated:
                 const index = rows.findIndex(row => row.$id === element.$id);
                 if (index !== -1) {
                     return [
@@ -652,7 +654,7 @@ export class Store {
             }
 
             // Resubscribe to active queries
-            const activeQueries = Object.entries(this.queryCbs);
+            const activeQueries = Object.entries(this.querySubscriptions);
             if (activeQueries.length === 0) return;
 
             this.logger.verbose(`Resubscribing to ${activeQueries.length} queries...`);
@@ -682,7 +684,7 @@ export class Store {
      * @private
      */
     private isQueryActive(queryHash: string): boolean {
-        const queryState = this.queryCbs[queryHash];
+        const queryState = this.querySubscriptions[queryHash];
         return queryState != null && queryState.cbs.length > 0;
     }
 }

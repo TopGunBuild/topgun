@@ -11,6 +11,12 @@ export type Optional<T, K extends keyof T> = Omit<T, K> & Partial<Pick<T, K>>;
  */
 export type MessageFieldValue = boolean | string | number | Uint8Array | null;
 
+/** Interface for items that can be stored */
+export interface StoreItem extends Identifiable {
+    $id: string;
+    [key: string]: any;
+}
+
 /**
  * Base interface for entities requiring unique identification
  */

@@ -1,6 +1,6 @@
 import { StorageDerived } from "./storage/types";
 import { FilteringCriteriaTree } from "@topgunbuild/collections";
-import { Password, SelectAction, SelectResult } from "@topgunbuild/models";
+import { MessageRow, Password, SelectAction, SelectOptions, SelectResult, StoreItem } from "@topgunbuild/models";
 
 /**
  * The configuration for the client
@@ -41,3 +41,17 @@ export interface QueryState<T extends { id: string }> {
  * The network status
  */
 export type NetworkStatus = 'online' | 'offline';
+
+export interface IChannelAPI {
+    subscribeMessages(options: SelectOptions, cb: QueryCb<SelectResult<MessageRow>>): () => void;
+    addMessages<T extends StoreItem>(messages: T[]): Promise<void>;
+}
+
+/**
+ * The parameters for creating a team
+ */
+export interface CreateTeamParams {
+    name: string;
+    description?: string;
+    seed?: string;
+}

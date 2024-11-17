@@ -20,9 +20,18 @@ export interface DatasetState {
 }
 
 /**
+ * Enum for change types.
+ */
+export enum ChangeType {
+    Added = 'added',
+    Updated = 'updated',
+    Deleted = 'deleted'
+}
+
+/**
  * Interface for a data change.
  */
 export interface DataChange<T> {
     item: T;
-    type: 'added' | 'updated' | 'deleted';
+    type: ChangeType;
 }

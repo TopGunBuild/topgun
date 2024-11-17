@@ -1,16 +1,11 @@
+import { BooleanCondition, ByteCondition, DateCondition, NumberCondition } from '@topgunbuild/collections';
+import { StringCondition } from '@topgunbuild/collections';
 import {
     And, BooleanConditionQuery,
     ByteConditionQuery, DateConditionQuery,
     NumberConditionQuery, Or, Query,
-    StringConditionQuery,
-} from '@topgunbuild/transport';
-import {
-    BooleanCondition,
-    ByteCondition,
-    DateCondition,
-    NumberCondition,
-    StringCondition,
-} from '@topgunbuild/filtering';
+    StringConditionQuery,       
+} from '@topgunbuild/models';
 
 export const string = (
     key: string,

@@ -1,7 +1,7 @@
 import { DataFilteringEngine, FilteringCriteriaTree, FilteringDefaults, FilteringState } from "./filtering";
 import { PagingState } from "./paging";
 import { SortingDefaults, SortingState } from "./sorting";
-import { DataChange, DatasetState } from "./types";
+import { ChangeType, DataChange, DatasetState } from "./types";
 
 /**
  * Utility class for data processing operations.
@@ -130,10 +130,10 @@ export class DataUtil {
             const newItem = newMap.get(id);
             if (!newItem) {
                 // Item exists in old but not in new = deleted
-                changes.push({ item: oldItem, type: 'deleted' });
+                changes.push({ item: oldItem, type: ChangeType.Deleted });
             } else if (JSON.stringify(oldItem) !== JSON.stringify(newItem)) {
                 // Item exists in both but is different = updated
-                changes.push({ item: newItem, type: 'updated' });
+                changes.push({ item: newItem, type: ChangeType.Updated });
             }
         }
 
@@ -148,7 +148,7 @@ export class DataUtil {
                     true;
                 
                 if (passesFilter) {
-                    changes.push({ item: newItem, type: 'added' });
+                    changes.push({ item: newItem, type: ChangeType.Added });
                 }
             }
         }

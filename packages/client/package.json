@@ -22,7 +22,6 @@
         "preset": "@topgunbuild/jest-presets/node"
     },
     "dependencies": {
-        "@dao-xyz/borsh": "^5.2.2",
         "@topgunbuild/crypto": "workspace:*",
         "@topgunbuild/frames": "workspace:*",
         "@topgunbuild/collections": "workspace:*",

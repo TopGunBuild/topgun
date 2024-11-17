@@ -1,66 +1,33 @@
-import { randomKey } from "@topgunbuild/crypto";
 import { Store } from "./store";
-import { ADMIN_SCOPE, LocalUserContext, TeamOptions } from "@topgunbuild/models";
-import { castServer, convertToPublicDevice, convertToPublicMember, createKeyset, createLockbox, isNewTeam } from "@topgunbuild/model-utils";
-import { ConsoleLogger, LoggerService } from "@topgunbuild/logger";
-import { assert } from "@topgunbuild/common";
+import { 
+    LocalUserContext,
+    MemberImpl,
+    Member,
+    AddMemberAction,
+    PermissionsMap,
+    RemoveMemberAction,
+    Role,
+    AddRoleAction,
+    RoleImpl,
+    RemoveRoleAction,
+    RemoveMemberRoleAction,
+    Team,
+    KeysetImpl
+} from "@topgunbuild/models";
+import { LoggerService } from "@topgunbuild/logger";
 import { EventEmitter } from "@topgunbuild/eventemitter";
-import { ChannelService } from "./channel-service";
+import { StoreError } from "./errors";
+import { ChannelAPI } from "./channel-api";
 
-export class TeamService extends EventEmitter {
-    private readonly options: TeamOptions;
-    private readonly store: Store;
-    private readonly seed: string;
+export class TeamAPI extends EventEmitter {
     private readonly context: LocalUserContext;
     private readonly logger: LoggerService;
 
-    constructor(options: TeamOptions, store: Store) {
+    constructor(
+        private readonly team: Team,
+        private readonly store: Store
+    ) {
         super();
-        this.options = options;
-        this.store = store;
-        this.seed = options.seed ?? randomKey();
-        this.logger = new ConsoleLogger('TeamService');
-
-        if ('user' in options.context) {
-            this.context = options.context
-        } else {
-            // If we're on a server, we'll use the server's hostname for everything
-            // and the server's keys as both user keys and device keys
-            const { server } = options.context
-            this.context = {
-                ...options.context,
-                device: castServer.toDevice(server),
-                user: castServer.toUser(server),
-            }
-        }
-        const { device, user } = this.context;
-
-        if (isNewTeam(options)) {
-            // Create a new team with the current user as founding member
-            assert(!this.isServer, `Servers can't create teams`);
-            this.logger.log(`Creating new team ${options.name}`, this.context);
-
-            // Team & role secrets are never stored in plaintext, only encrypted into individual
-            // lockboxes. Here we generate new keysets for the team and for the admin role, and store
-            // these in new lockboxes for the founding member
-            const lockboxTeamKeysForMember = createLockbox({ contents: options.keys, recipientKeys: user.keys })
-            const adminKeys = createKeyset(ADMIN_SCOPE, this.seed)
-            const lockboxAdminKeysForMember = createLockbox({ contents: adminKeys, recipientKeys: user.keys })
-
-            // We also store the founding user's keys in a lockbox for the user's device
-            const lockboxUserKeysForDevice = createLockbox({ contents: user.keys, recipientKeys: this.context.device.keys })
-
-            // We're creating a new graph; this information is to be recorded in the root link
-            const rootPayload = {
-                name: options.name,
-                rootMember: convertToPublicMember(user),
-                rootDevice: convertToPublicDevice(device),
-                lockboxes: [lockboxTeamKeysForMember, lockboxAdminKeysForMember, lockboxUserKeysForDevice],
-            }
-        } else {
-            // this.logger.log(`Loading team ${options.teamName}`, this.context);
-            // TODO: Load existing team
-        }
     }
 
     public get userName() {
@@ -75,46 +42,8 @@ export class TeamService extends EventEmitter {
         return 'server' in this.context
     }
 
-    
-
-    // public getChannel(channelId: string): ChannelService {
-    //     return new ChannelService(channelId, this.store, this);
-    // }
-
-    // public getChannels(): ChannelService[] {
-    //     return [];
-    // }
-
-    // public createChannel(name: string, description?: string): ChannelService {
-    //     return new ChannelService(name, this.store, this);
-    // }
-
-    /**
-     * Add messages to the store
-     * @param channelId The channel ID
-     * @param messages Array of messages to add
-     * @throws {StoreError} If messages are invalid
-     */
-    public async addMessages<T extends StoreItem>(channelId: string, messages: T[]): Promise<void> {
-        try {
-            if (!Array.isArray(messages) || messages.length === 0) {
-                throw new StoreError('Invalid messages array', 'INVALID_INPUT');
-            }
-
-            await this.upsert('message', messages);
-
-            for (const message of messages) {
-                const body = new PutMessageAction({
-                    channelId,
-                    messageId: message.$id,
-                    value: JSON.stringify(message)
-                });
-                await this.sendRequest(body);
-            }
-        } catch (error) {
-            console.error('Failed to add messages:', error);
-            throw error instanceof StoreError ? error : new StoreError('Failed to add messages', 'ADD_MESSAGE_ERROR');
-        }
+    public channel(channelId: string): ChannelAPI {
+        return new ChannelAPI(channelId, this.store, this.logger);
     }
 
     /**
@@ -128,21 +57,21 @@ export class TeamService extends EventEmitter {
                 throw new StoreError('Member must have an $id property', 'INVALID_INPUT');
             }
 
-            await this.upsert('member', member);
+            await this.store.upsert('member', member);
 
             const body = new AddMemberAction({
                 member: new MemberImpl({
                     ...member,
                     keys: new KeysetImpl({
-                        teamId: this.teamId,
+                        teamId: this.team.$id,
                         publicKey: this.userId
                     })
                 }),
                 roles
             });
-            await this.sendRequest(body);
+            await this.store.dispatchAction(body);
         } catch (error) {
-            console.error('Failed to add member:', error);
+            this.logger.error('Failed to add member:', error);
             throw error instanceof StoreError ? error : new StoreError('Failed to add member', 'ADD_MEMBER_ERROR');
         }
     }
@@ -158,14 +87,14 @@ export class TeamService extends EventEmitter {
                 throw new StoreError('User ID is required', 'INVALID_INPUT');
             }
 
-            await this.delete('member', [userId]);
+            await this.store.delete('member', [userId]);
 
             const body = new RemoveMemberAction({
                 userId
             });
-            await this.sendRequest(body);
+            await this.store.dispatchAction(body);
         } catch (error) {
-            console.error('Failed to remove member:', error);
+            this.logger.error('Failed to remove member:', error);
             throw error instanceof StoreError ? error : new StoreError('Failed to remove member', 'REMOVE_MEMBER_ERROR');
         }
     }
@@ -181,7 +110,7 @@ export class TeamService extends EventEmitter {
                 throw new StoreError('Role must have an $id property', 'INVALID_INPUT');
             }
 
-            await this.upsert('role', role);
+            await this.store.upsert('role', role);
 
             const body = new AddRoleAction({
                 role: new RoleImpl({
@@ -191,9 +120,9 @@ export class TeamService extends EventEmitter {
                         .map(([key]) => key)
                 })
             });
-            await this.sendRequest(body);
+            await this.store.dispatchAction(body);
         } catch (error) {
-            console.error('Failed to add role:', error);
+            this.logger.error('Failed to add role:', error);
             throw error instanceof StoreError ? error : new StoreError('Failed to add role', 'ADD_ROLE_ERROR');
         }
     }
@@ -209,12 +138,12 @@ export class TeamService extends EventEmitter {
                 throw new StoreError('Role name is required', 'INVALID_INPUT');
             }
 
-            await this.delete('role', [roleName]);
+            await this.store.delete('role', [roleName]);
 
             const body = new RemoveRoleAction({ roleName });
-            await this.sendRequest(body);
+            await this.store.dispatchAction(body);
         } catch (error) {
-            console.error('Failed to remove role:', error);
+            this.logger.error('Failed to remove role:', error);
             throw error instanceof StoreError ? error : new StoreError('Failed to remove role', 'REMOVE_ROLE_ERROR');
         }
     }
