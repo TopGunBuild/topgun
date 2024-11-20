@@ -16,6 +16,7 @@ export * from './assert.ts';
 export * from './async-queue.ts';
 export * from './deferred.ts';
 export * from './compare-arrays-simple.ts';
+export * from './mkenum.ts';
 
 export { randomBytes } from '@noble/hashes/utils';
 

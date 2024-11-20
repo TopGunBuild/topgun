@@ -62,4 +62,11 @@ export class MemoryStorage<T> implements StorageAdapter<T>
             this.storage.set(key, updatedValue);
         }
     }
+
+    /**
+     * Close the storage
+     */
+    async close(): Promise<void> {
+        // No-op
+    }
 }

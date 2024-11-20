@@ -1,45 +1,54 @@
-import { BooleanCondition, ByteCondition, DateCondition, NumberCondition } from '@topgunbuild/collections';
-import { StringCondition } from '@topgunbuild/collections';
+import { StringCondition, NumberCondition, DateCondition, BooleanCondition, ByteCondition } from '@topgunbuild/collections';
 import {
-    And, BooleanConditionQuery,
-    ByteConditionQuery, DateConditionQuery,
-    NumberConditionQuery, Or, Query,
-    StringConditionQuery,       
+    BooleanConditionQuery,
+    ByteConditionQuery,
+    DateConditionQuery,
+    NumberConditionQuery,
+    Or,
+    And,
+    Query,
+    StringConditionQuery
 } from '@topgunbuild/models';
 
-export const string = (
+// Generic where functions for each type
+export function whereString(
     key: string,
     condition: StringCondition,
     value?: string,
-    caseInsensitive?: boolean,
-): StringConditionQuery =>
-{
-    return new StringConditionQuery({ key, condition, value, caseInsensitive });
-};
+): StringConditionQuery {
+    return new StringConditionQuery({ key, condition, value });
+}
 
-export const number = (
+export function whereNumber(
     key: string,
     condition: NumberCondition,
-    value?: number,
-): NumberConditionQuery => new NumberConditionQuery({ key, condition, value });
+    value?: number
+): NumberConditionQuery {
+    return new NumberConditionQuery({ key, condition, value });
+}
 
-export const date = (
+export function whereDate(
     key: string,
     condition: DateCondition,
     value?: string
-): DateConditionQuery => new DateConditionQuery({ key, condition, value });
+): DateConditionQuery {
+    return new DateConditionQuery({ key, condition, value });
+}
 
-export const byte = (
+export function whereBoolean(
+    key: string,
+    condition: BooleanCondition
+): BooleanConditionQuery {
+    return new BooleanConditionQuery({ key, condition });
+}
+
+export function whereByte(
     key: string,
     condition: ByteCondition,
     value?: Uint8Array
-): ByteConditionQuery => new ByteConditionQuery({ key, condition, value });
-
-export const boolean = (
-    key: string,
-    condition: BooleanCondition,
-    value?: boolean
-): BooleanConditionQuery => new BooleanConditionQuery({ key, condition, value });
+): ByteConditionQuery {
+    return new ByteConditionQuery({ key, condition, value });
+}
 
 export const or = (value: Query[]): Or => new Or(value);
 export const and = (value: Query[]): And => new And(value);

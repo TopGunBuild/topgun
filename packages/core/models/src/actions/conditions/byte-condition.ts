@@ -7,12 +7,12 @@ export class ByteConditionQuery extends FieldQuery
     @field({ type: option(Uint8Array) })
     value?: Uint8Array;
 
-    @field({ type: 'u8' })
-    condition: number;
+    @field({ type: 'string' })
+    condition: string;
 
     constructor(props: {
         key: string;
-        condition: number;
+        condition: string;
         value?: Uint8Array;
     })
     {

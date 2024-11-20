@@ -1,83 +1,86 @@
-import { equalBytes } from '@topgunbuild/common';
-import { extractDateComponents, applyIgnoreCase } from './utils';
+import { equalBytes, mkenum } from '@topgunbuild/common';
+import { extractDateComponents, applyIgnoreCase, stripWildcards } from './utils';
+
+/**
+ * Base filter conditions shared across all types
+ */
+const BaseCondition = mkenum({
+    Null: 'is null',
+    NotNull: 'is not null',
+    Empty: 'empty',
+    NotEmpty: 'not empty'
+});
+
+/**
+ * Common comparison conditions shared by multiple types
+ */
+const ComparisonCondition = mkenum({
+    Equals: '=',
+    DoesNotEqual: '!='
+});
 
 /**
  * Filter conditions for boolean data.
  */
-export enum BooleanCondition {
-    True,
-    False,
-    Null,
-    NotNull,
-    Empty,
-    NotEmpty
-}
+export const BooleanCondition = mkenum({
+    True: 'true',
+    False: 'false',
+    ...BaseCondition
+});
+export type BooleanCondition = (typeof BooleanCondition)[keyof typeof BooleanCondition];
 
 /**
  * Filter conditions for date data.
  */
-export enum DateCondition {
-    Equals,
-    DoesNotEqual,
-    Before,
-    After,
-    Today,
-    Yesterday,
-    ThisMonth,
-    LastMonth,
-    NextMonth,
-    ThisYear,
-    LastYear,
-    NextYear,
-    Null,
-    NotNull,
-    Empty,
-    NotEmpty
-}
+export const DateCondition = mkenum({
+    ...ComparisonCondition,
+    Before: '<',
+    After: '>',
+    Today: 'today',
+    Yesterday: 'yesterday',
+    ThisMonth: 'this month',
+    LastMonth: 'last month',
+    NextMonth: 'next month',
+    ThisYear: 'this year',
+    LastYear: 'last year',
+    NextYear: 'next year',
+    ...BaseCondition
+});
+export type DateCondition = (typeof DateCondition)[keyof typeof DateCondition];
 
 /**
  * Filter conditions for number data.
  */
-export enum NumberCondition {
-    Equals,
-    DoesNotEqual,
-    GreaterThan,
-    LessThan,
-    GreaterThanOrEqualTo,
-    LessThanOrEqualTo,
-    Null,
-    NotNull,
-    Empty,
-    NotEmpty
-}
+export const NumberCondition = mkenum({
+    ...ComparisonCondition,
+    GreaterThan: '>',
+    LessThan: '<',
+    GreaterThanOrEqualTo: '>=',
+    LessThanOrEqualTo: '<=',
+    ...BaseCondition
+});
+export type NumberCondition = (typeof NumberCondition)[keyof typeof NumberCondition];
 
 /**
  * Filter conditions for string data.
  */
-export enum StringCondition {
-    Contains,
-    StartsWith,
-    EndsWith,
-    DoesNotContain,
-    Equals,
-    DoesNotEqual,
-    Null,
-    NotNull,
-    Empty,
-    NotEmpty
-}
+export const StringCondition = mkenum({
+    Like: 'like',
+    ILike: 'ilike',
+    NotILike: 'not ilike',
+    ...ComparisonCondition,
+    ...BaseCondition
+});
+export type StringCondition = (typeof StringCondition)[keyof typeof StringCondition];
 
 /**
  * Filter conditions for byte data.
  */
-export enum ByteCondition {
-    Equals,
-    DoesNotEqual,
-    Null,
-    NotNull,
-    Empty,
-    NotEmpty
-}
+export const ByteCondition = mkenum({
+    ...ComparisonCondition,
+    ...BaseCondition
+});
+export type ByteCondition = (typeof ByteCondition)[keyof typeof ByteCondition];
 
 /**
  * Filter conditions for byte data.
@@ -190,25 +193,17 @@ export const NUMBER_FILTER_CONDITIONS = {
  * Filter conditions for string data.
  */
 export const STRING_FILTER_CONDITIONS = {
-    [StringCondition.Contains]: (target: string, searchVal: string, ignoreCase?: boolean): boolean => {
-        const search = applyIgnoreCase(searchVal, ignoreCase);
-        target = applyIgnoreCase(target, ignoreCase);
-        return target.indexOf(search) !== -1;
+    [StringCondition.Like]: (target: string, searchVal: string): boolean => {
+        const search = stripWildcards(applyIgnoreCase(searchVal, false));
+        return target.includes(search);
     },
-    [StringCondition.StartsWith]: (target: string, searchVal: string, ignoreCase?: boolean): boolean => {
-        const search = applyIgnoreCase(searchVal, ignoreCase);
-        target = applyIgnoreCase(target, ignoreCase);
-        return target.startsWith(search);
+    [StringCondition.ILike]: (target: string, searchVal: string): boolean => {
+        const search = stripWildcards(applyIgnoreCase(searchVal, true));
+        return target.includes(search);
     },
-    [StringCondition.EndsWith]: (target: string, searchVal: string, ignoreCase?: boolean): boolean => {
-        const search = applyIgnoreCase(searchVal, ignoreCase);
-        target = applyIgnoreCase(target, ignoreCase);
-        return target.endsWith(search);
-    },
-    [StringCondition.DoesNotContain]: (target: string, searchVal: string, ignoreCase?: boolean): boolean => {
-        const search = applyIgnoreCase(searchVal, ignoreCase);
-        target = applyIgnoreCase(target, ignoreCase);
-        return target.indexOf(search) === -1;
+    [StringCondition.NotILike]: (target: string, searchVal: string): boolean => {
+        const search = stripWildcards(applyIgnoreCase(searchVal, true));
+        return !target.includes(search);
     },
     [StringCondition.Equals]: (target: string, searchVal: string, ignoreCase?: boolean): boolean => {
         const search = applyIgnoreCase(searchVal, ignoreCase);

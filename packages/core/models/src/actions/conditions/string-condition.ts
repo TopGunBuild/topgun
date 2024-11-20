@@ -2,27 +2,21 @@ import { field, option, variant } from '@dao-xyz/borsh';
 import { FieldQuery } from '../query';
 
 @variant(4)
-export class StringConditionQuery extends FieldQuery
-{
+export class StringConditionQuery extends FieldQuery {
     @field({ type: option('string') })
     value?: string;
 
-    @field({ type: 'u8' })
-    condition: number;
-
-    @field({ type: 'bool' })
-    caseInsensitive: boolean;
+    @field({ type: 'string' })
+    condition: string;
 
     constructor(props: {
         key: string;
-        condition: number;
+        condition: string;
         value?: string;
         caseInsensitive?: boolean;
-    })
-    {
+    }) {
         super(props);
-        this.value           = props.value;
-        this.condition       = props.condition;
-        this.caseInsensitive = props.caseInsensitive ?? false;
+        this.value = props.value;
+        this.condition = props.condition;
     }
 }

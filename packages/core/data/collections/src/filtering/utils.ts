@@ -13,6 +13,23 @@ export function applyIgnoreCase(input: string, ignoreCase: boolean): string {
 }
 
 /**
+ * Helper function to strip '%' characters from the beginning and end of a string.
+ * These characters are used in SQL LIKE queries but not needed for JavaScript string operations.
+ * @param input - The string to strip '%' characters from.
+ * @returns The string with '%' characters removed from start and end.
+ */
+export function stripWildcards(input: string): string {
+    // Return empty string if input is falsy
+    if (!input) {
+        return '';
+    }
+
+    // Remove leading and trailing '%' characters
+    return input.replace(/^%+|%+$/g, '');
+}
+
+
+/**
  * Interface representing date components
  */
 export interface DateComponents {

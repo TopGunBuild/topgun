@@ -11,6 +11,7 @@ export type ClientConfig = {
     windowNetworkListener?: NetworkListenerDerived;
     storage?: StorageDerived<any, any>;
     storagePassphrase?: Password;
+    remoteQueryTimeout?: number;
 };
 
 /**
@@ -54,4 +55,9 @@ export interface CreateTeamParams {
     name: string;
     description?: string;
     seed?: string;
+}
+
+export interface GetByIdResult<T> {
+    data: T | null;
+    source: 'local' | 'remote';
 }

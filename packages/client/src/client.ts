@@ -33,6 +33,11 @@ export class Client {
         this.#store = new Store(cloneValue(config), this.#logger);
     }
 
+    async loadTeam(teamId: string): Promise<TeamAPI> {
+        const team = await this.#store.getTeam(teamId);
+        return new TeamAPI(team, this.#store);
+    }
+
     /**
      * Create a new team with the current user as the founding member
      * 
@@ -109,7 +114,7 @@ export class Client {
 
         try {
             await this.#store.dispatchAction(action);
-            return new TeamAPI(team, this.#store);
+            return new TeamAPI(team, this.#store, securityAssets.teamKeys);
         } catch (error) {
             this.#logger.error('Failed to create team:', error);
             throw new Error(`Failed to create team: ${error['message']}`);

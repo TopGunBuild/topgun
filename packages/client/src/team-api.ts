@@ -12,7 +12,8 @@ import {
     RemoveRoleAction,
     RemoveMemberRoleAction,
     Team,
-    KeysetImpl
+    KeysetImpl,
+    KeysetWithSecrets
 } from "@topgunbuild/models";
 import { LoggerService } from "@topgunbuild/logger";
 import { EventEmitter } from "@topgunbuild/eventemitter";
@@ -22,12 +23,15 @@ import { ChannelAPI } from "./channel-api";
 export class TeamAPI extends EventEmitter {
     private readonly context: LocalUserContext;
     private readonly logger: LoggerService;
+    #teamKeys: KeysetWithSecrets;
 
     constructor(
         private readonly team: Team,
-        private readonly store: Store
+        private readonly store: Store,
+        teamKeys: KeysetWithSecrets,
     ) {
         super();
+        this.#teamKeys = teamKeys;
     }
 
     public get userName() {

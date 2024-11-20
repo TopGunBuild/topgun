@@ -7,12 +7,12 @@ export class NumberConditionQuery extends FieldQuery
     @field({ type: option('f64') })
     value?: number;
 
-    @field({ type: 'u8' })
-    condition: number;
+    @field({ type: 'string' })
+    condition: string;
 
     constructor(props: {
         key: string;
-        condition: number;
+        condition: string;
         value?: number;
     })
     {

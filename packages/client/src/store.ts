@@ -1,4 +1,4 @@
-import { ClientConfig, NetworkListenerAdapter, QueryCb, QueryState } from "./types";
+import { ClientConfig, GetByIdResult, NetworkListenerAdapter, QueryCb, QueryState } from "./types";
 import { IndexedDBStorage } from "./storage/indexeddb-storage";
 import { WindowNetworkListener } from "./utils/window-network-listener";
 import { compareArraysSimple, randomId, toHexString, windowOrGlobal } from "@topgunbuild/common";
@@ -30,6 +30,7 @@ import { ConnectorState } from "@topgunbuild/control-flow";
 import { asymmetric } from "@topgunbuild/crypto";
 import { LoggerService } from "@topgunbuild/logger";
 import { StoreError } from "./errors";
+import { whereString } from "./query-conditions";
 
 /**
  * The Store class is the main entry point for the TopGun client library.
@@ -47,6 +48,7 @@ export class Store {
     private readonly MAX_RETRY_ATTEMPTS = 3;
     private isOnline = false;
     public context: LocalContext;
+    private readonly remoteQueryTimeout: number;
 
     /**
      * Create a new Store
@@ -63,6 +65,8 @@ export class Store {
         // if (!this.user?.keys?.encryption?.secretKey) {
         //     throw new StoreError('User encryption keys are required', 'INVALID_CONFIG');
         // }
+
+        this.remoteQueryTimeout = config.remoteQueryTimeout || 5000;
 
         this.initWebSocketConnector();
         this.initStorageManager();
@@ -236,6 +240,68 @@ export class Store {
         this.disconnect();
         this.beforeUnloadCbs = [];
         this.querySubscriptions = {};
+    }
+
+    /**
+     * Check if an item exists in storage
+     * @param entity The entity type to check
+     * @param id The item ID to check
+     * @returns Promise<boolean> True if the item exists, false otherwise
+     */
+    public async exists(entity: string, id: string): Promise<boolean> {
+        try {
+            const result = await this.getById(entity, id);
+            return result.data !== null;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    /**
+     * Get an item by ID from local or remote storage
+     * @param entity The entity type to query
+     * @param id The item ID to retrieve
+     * @returns Promise<GetByIdResult<T>> The item and its source if found
+     * @throws {StoreError} If retrieval fails
+     */
+    public async getById<T extends StoreItem>(entity: string, id: string): Promise<GetByIdResult<T>> {
+        if (!entity || !id) {
+            throw new StoreError('Entity and ID are required', 'INVALID_INPUT');
+        }
+
+        try {
+            // Check local storage first
+            const localItem = await this.storageManager.get<T>(entity, id);
+            if (localItem) {
+                return {
+                    data: localItem,
+                    source: 'local',
+                };
+            }
+
+            // If not in local storage, query remote
+            const query = new SelectAction({
+                entity,
+                query: [whereString('$id', '=', id)],
+                pageSize: 1
+            });
+
+            const remoteItem = await this.getRemoteItem<T>(query);
+            
+            // If found remotely, store it locally for future use
+            if (remoteItem) {
+                await this.storageManager.upsert(entity, [remoteItem]);
+            }
+
+            return {
+                data: remoteItem,
+                source: 'remote',
+            };
+
+        } catch (error) {
+            this.logger.error('Failed to get item by ID:', error);
+            throw new StoreError(`Failed to get ${entity} with ID ${id}`, 'GET_BY_ID_ERROR');
+        }
     }
 
     /**
@@ -686,5 +752,21 @@ export class Store {
     private isQueryActive(queryHash: string): boolean {
         const queryState = this.querySubscriptions[queryHash];
         return queryState != null && queryState.cbs.length > 0;
+    }
+
+    /**
+     * Get an item from remote storage
+     * @private
+     */
+    private getRemoteItem<T>(query: SelectAction): Promise<T | null> {
+        return new Promise((resolve) => {
+            const timeout = setTimeout(() => resolve(null), this.remoteQueryTimeout);
+
+            const unsubscribe = this.subscribeQuery(query, (result) => {
+                clearTimeout(timeout);
+                unsubscribe();
+                resolve(result.rows[0] as T || null);
+            });
+        });
     }
 }
