@@ -18,7 +18,7 @@ export const decryptLockbox = (
   recipientKeys: KeysetWithSecrets
 ): KeysetWithSecrets => {
   // Validate inputs
-  if (!lockbox?.encryptionKey?.publicKey || !lockbox?.encryptedPayload) {
+  if (!lockbox?.encryptionKeyPublicKey || !lockbox?.encryptedPayload) {
     throw new ValidationError('Invalid lockbox: missing required properties')
   }
   if (!recipientKeys?.encryption?.secretKey) {
@@ -29,7 +29,7 @@ export const decryptLockbox = (
     // Attempt to decrypt the lockbox payload
     const decryptedBytes = asymmetric.decryptBytes({
       cipher: lockbox.encryptedPayload,
-      senderPublicKey: lockbox.encryptionKey.publicKey,
+      senderPublicKey: lockbox.encryptionKeyPublicKey,
       recipientSecretKey: recipientKeys.encryption.secretKey,
     })
 

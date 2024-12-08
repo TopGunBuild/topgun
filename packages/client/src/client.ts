@@ -14,7 +14,7 @@ import {
     KeysetWithSecrets,
     MemberImpl, 
     Team, 
-    TEAM_SCOPE 
+    TEAM_SCOPE
 } from "@topgunbuild/models";
 import { 
     castServer, 

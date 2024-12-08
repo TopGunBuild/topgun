@@ -1,14 +1,4 @@
-import { KeyMetadata } from "./keyset"
 import { Identifiable } from "./utils"
-
-/**
- * Represents a key manifest containing public key information and metadata
- * Used to identify and verify keys without exposing private information
- */
-export interface KeyManifest extends KeyMetadata {
-    /** Public key encoded in Base58 format */
-    publicKey: string
-}
 
 /**
  * Represents a secure container (lockbox) for transmitting encrypted keys
@@ -16,29 +6,70 @@ export interface KeyManifest extends KeyMetadata {
  */
 export interface Lockbox extends Identifiable {
     /** 
-     * Ephemeral keypair used for one-time encryption of this lockbox
-     * A new keypair is generated for each lockbox to ensure forward secrecy
+     * Type of the ephemeral encryption key scope
+     * Always set to 'EPHEMERAL' for one-time encryption
      */
-    encryptionKey: {
-        type: 'EPHEMERAL'
-        publicKey: string
-    }
+    encryptionKeyScope: string
 
     /** 
-     * Manifest identifying the intended recipient of this lockbox
-     * Contains metadata and public key of the recipient who can decrypt the contents
+     * Public key of the ephemeral keypair encoded in Base58 format
+     * Used for one-time encryption of this lockbox
      */
-    recipient: KeyManifest
+    encryptionKeyPublicKey: string
 
     /** 
-     * Manifest describing the encrypted keys contained within this lockbox
-     * Helps verify the contents without decryption
+     * Type of the recipient's key manifest
      */
-    contents: KeyManifest
+    recipientType: string;
+
+    /** 
+     * Name/identifier of the recipient's key manifest
+     */
+    recipientName: string;
+
+    /** 
+     * Scope/type of the recipient's key
+     */
+    recipientScope: string;
+
+    /** 
+     * Recipient's public key encoded in Base58 format
+     */
+    recipientPublicKey: string;
+
+    /**
+     * Incremental number indicating the recipient key's generation/version
+     */
+    recipientGeneration: number;
+
+    /** 
+     * Type of the contents key manifest
+     */
+    contentsType: string;
+
+    /** 
+     * Name/identifier of the contents key manifest
+     */
+    contentsName: string;
+
+    /** 
+     * Scope/type of the contents
+     */
+    contentsScope: string;
+
+    /** 
+     * Public key of the encrypted contents
+     */
+    contentsPublicKey: string;
+
+    /**
+     * Incremental number indicating the contents key's generation/version
+     */
+    contentsGeneration: number;
 
     /** 
      * The actual encrypted key material
      * Can only be decrypted by the recipient using their private key
      */
-    encryptedPayload: Uint8Array
+    encryptedPayload: Uint8Array;
 }

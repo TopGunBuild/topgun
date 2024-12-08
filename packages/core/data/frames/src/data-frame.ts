@@ -9,9 +9,8 @@ import {
     ThrottledDataFrameChanges,
 } from './types';
 import { DataFrameCollection } from './data-frame-collection';
-import { convertQueryToFilterTree } from './utils';
-import { FilteringCriteriaTree } from '@topgunbuild/collections';
-import { DataFilteringEngine } from '@topgunbuild/collections';
+import { convertQueryToFilterGroup } from './utils';
+import { FilterEngine, FilterGroup, IFilterEngine } from '@topgunbuild/collections';
 import { debounce } from '@topgunbuild/common';
 import { DataFrameChangeOperation } from '@topgunbuild/models';
 
@@ -28,8 +27,8 @@ export class DataFrame<T> {
     readonly databaseQueryFn: DataQueryFn<T>;
     readonly dataFrameChangesCb: DataFrameChangesCb<T>;
     readonly queue: AsyncQueue;
-    readonly filteringCriteriaTree: FilteringCriteriaTree;
-    readonly filteringEngine: DataFilteringEngine;
+    readonly filterGroup: FilterGroup;
+    readonly filterEngine: IFilterEngine;
     readonly databaseChangesOff: () => void;
 
     readonly precedingCollection: DataFrameCollection<T>;
@@ -65,9 +64,9 @@ export class DataFrame<T> {
         this.query = query;
         this.databaseQueryFn = databaseQueryFn;
         this.dataFrameChangesCb = dataFrameChangesCb;
-        this.filteringEngine = new DataFilteringEngine();
+        this.filterEngine = new FilterEngine();
         this.queue = new AsyncQueue();
-        this.filteringCriteriaTree = convertQueryToFilterTree(query);
+        this.filterGroup = convertQueryToFilterGroup(query);
 
         this.throttleTime = throttleTime || 0;
         this.throttledChangesCb = throttledChangesCb;
@@ -154,8 +153,8 @@ export class DataFrame<T> {
     databaseOutput(value: DataChagesEvent<T>): void {
         const { operation, rowData, oldData } = value;
 
-        const isMatch = this.filteringEngine.matchRecord(rowData as object, this.filteringCriteriaTree);
-        const isOldMatch = oldData && this.filteringEngine.matchRecord(oldData as object, this.filteringCriteriaTree);
+        const isMatch = this.filterEngine.matchRecord(rowData as object, this.filterGroup);
+        const isOldMatch = oldData && this.filterEngine.matchRecord(oldData as object, this.filterGroup);
 
         if (!isMatch && !isOldMatch) {
             return;

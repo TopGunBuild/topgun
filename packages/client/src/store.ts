@@ -1,4 +1,4 @@
-import { ClientConfig, GetByIdResult, NetworkListenerAdapter, QueryCb, QueryState } from "./types";
+import { ClientConfig, NetworkListenerAdapter, QueryCb, QueryState } from "./types";
 import { IndexedDBStorage } from "./storage/indexeddb-storage";
 import { WindowNetworkListener } from "./utils/window-network-listener";
 import { compareArraysSimple, randomId, toHexString, windowOrGlobal } from "@topgunbuild/common";
@@ -24,7 +24,7 @@ import {
 } from "@topgunbuild/models";
 import { encryptPayload } from "@topgunbuild/model-utils";
 import { ChangeType, DataUtil } from "@topgunbuild/collections";
-import { convertQueryToFilterTree } from "@topgunbuild/frames";
+import { convertQueryToFilterGroup } from "@topgunbuild/frames";
 import { WebSocketConnector } from "./websocket-connector";
 import { ConnectorState } from "@topgunbuild/control-flow";
 import { asymmetric } from "@topgunbuild/crypto";
@@ -41,7 +41,7 @@ export class Store {
     private storageManager: StorageManager;
     private networkListener: NetworkListenerAdapter;
     private beforeUnloadCbs: (() => void)[] = [];
-    private querySubscriptions: Record<string, QueryState<any>> = {};
+    private activeQueries: Record<string, QueryState<any>> = {};
 
     private connectionState: ConnectorState = 'closed';
     private retryAttempts = 0;
@@ -119,7 +119,7 @@ export class Store {
 
             this.initializeQueryState(queryHash, query, cb);
             this.dispatchAction(query);
-            this.loadCachedQueryResultAndNotify(queryHash, query);
+            this.initializeQueryResult(queryHash, query);
 
             return () => this.unsubscribeQuery(query, cb, queryHash);
         } catch (error) {
@@ -139,7 +139,7 @@ export class Store {
     ): void {
         try {
             const hash = queryHash || toHexString(query.encode());
-            const queryState = this.querySubscriptions[hash];
+            const queryState = this.activeQueries[hash];
 
             if (!queryState) return;
 
@@ -239,7 +239,7 @@ export class Store {
     public destroy(): void {
         this.disconnect();
         this.beforeUnloadCbs = [];
-        this.querySubscriptions = {};
+        this.activeQueries = {};
     }
 
     /**
@@ -261,10 +261,10 @@ export class Store {
      * Get an item by ID from local or remote storage
      * @param entity The entity type to query
      * @param id The item ID to retrieve
-     * @returns Promise<GetByIdResult<T>> The item and its source if found
+     * @returns Promise<T> The item
      * @throws {StoreError} If retrieval fails
      */
-    public async getById<T extends StoreItem>(entity: string, id: string): Promise<GetByIdResult<T>> {
+    public async getById<T extends StoreItem>(entity: string, id: string): Promise<T> {
         if (!entity || !id) {
             throw new StoreError('Entity and ID are required', 'INVALID_INPUT');
         }
@@ -273,10 +273,7 @@ export class Store {
             // Check local storage first
             const localItem = await this.storageManager.get<T>(entity, id);
             if (localItem) {
-                return {
-                    data: localItem,
-                    source: 'local',
-                };
+                return localItem;
             }
 
             // If not in local storage, query remote
@@ -286,21 +283,54 @@ export class Store {
                 pageSize: 1
             });
 
-            const remoteItem = await this.getRemoteItem<T>(query);
+            const remoteItems = await this.getRemoteItems<T>(query);
+            const remoteItem = remoteItems[0] || null;
             
             // If found remotely, store it locally for future use
             if (remoteItem) {
                 await this.storageManager.upsert(entity, [remoteItem]);
             }
 
-            return {
-                data: remoteItem,
-                source: 'remote',
-            };
-
+            return remoteItem;
         } catch (error) {
             this.logger.error('Failed to get item by ID:', error);
             throw new StoreError(`Failed to get ${entity} with ID ${id}`, 'GET_BY_ID_ERROR');
+        }
+    }
+
+    /**
+     * Get multiple items by SelectAction from local or remote storage
+     * @param entity The entity type to query
+     * @param selectAction The SelectAction containing the query criteria
+     * @returns Promise<T[]> The items
+     * @throws {StoreError} If retrieval fails
+     */
+    public async query<T extends StoreItem>(entity: string, selectAction: SelectAction): Promise<T[]> {
+        if (!entity || !selectAction) {
+            throw new StoreError('Entity and SelectAction are required', 'INVALID_INPUT');
+        }
+
+        try {
+            // Check local storage first
+            const localItems = await this.storageManager.query<T>(entity, selectAction);
+            
+            // If all items found locally, return them
+            if (localItems.length === selectAction.pageSize) {
+                return localItems;
+            }
+
+            // Query remote for items
+            const remoteItems = await this.getRemoteItems<T>(selectAction);
+            
+            // Store remote items locally for future use
+            if (remoteItems.length > 0) {
+                await this.storageManager.upsert(entity, remoteItems);
+            }
+
+            return remoteItems;
+        } catch (error) {
+            this.logger.error('Failed to get items by SelectAction:', error);
+            throw new StoreError(`Failed to get ${entity} with provided SelectAction`, 'GET_BY_IDS_ERROR');
         }
     }
 
@@ -335,9 +365,9 @@ export class Store {
      * @private
      */
     private updateQueriesForEntity<T extends StoreItem>(entity: string, items: T[]): void {
-        Object.entries(this.querySubscriptions).forEach(([queryHash, state]) => {
+        Object.entries(this.activeQueries).forEach(([queryHash, state]) => {
             if (state.query.entity === entity && state.result) {
-                const changes = DataUtil.processChanges(state.result.rows, items, state.filterCriteria);
+                const changes = DataUtil.processChanges(state.result.rows, items, state.filterOptions);
 
                 if (changes.length === 0) return;
 
@@ -376,14 +406,14 @@ export class Store {
         query: SelectAction,
         cb: QueryCb<any>
     ): void {
-        const queryState = this.querySubscriptions[queryHash];
+        const queryState = this.activeQueries[queryHash];
 
         if (!queryState) {
-            this.querySubscriptions[queryHash] = {
+            this.activeQueries[queryHash] = {
                 query,
                 cbs: [cb],
                 result: null,
-                filterCriteria: convertQueryToFilterTree(query)
+                filterOptions: convertQueryToFilterGroup(query)
             };
         } else {
             queryState.cbs.push(cb);
@@ -394,19 +424,65 @@ export class Store {
      * Load cached query result and notify subscribers
      * @private
      */
-    private async loadCachedQueryResultAndNotify(
+    private async initializeQueryResult(
         queryHash: string,
         query: SelectAction
     ): Promise<void> {
         try {
-            const result = await this.storageManager.getQueryResult<Identifiable>(queryHash, query.entity);
-            if (result) {
-                const queryState = this.querySubscriptions[queryHash];
-                queryState.result = result;
-                queryState.cbs.forEach(cb => cb(result));
+            const queryState = this.activeQueries[queryHash];
+            if (!queryState) {
+                throw new StoreError('Query state not found', 'INVALID_STATE');
+            }
+
+            // Try to get cached result first
+            const cachedResult = await this.storageManager.getQueryResult<Identifiable>(
+                queryHash,
+                query.entity
+            );
+
+            if (cachedResult) {
+                queryState.result = cachedResult;
+                for (const cb of queryState.cbs) {
+                    try {
+                        cb(cachedResult);
+                    } catch (cbError) {
+                        this.logger.error('Callback error:', cbError);
+                    }
+                }
+                return;
+            }
+
+            // If no cached result, process all items
+            const allItems = await this.storageManager.getAll(query.entity);
+            const processedResult = DataUtil.processDataset(allItems, {
+                filter: { options: queryState.filterOptions },
+                sort: { options: query.sort },
+                page: {
+                    currentPage: query.pageOffset,
+                    itemsPerPage: query.pageSize,
+                },
+            });
+
+            // Always cache the result, even if empty
+            const newResult = {
+                rows: processedResult.rows,
+                total: processedResult.total
+            };
+
+            queryState.result = newResult;
+            this.storageManager.saveQueryResult(queryHash, newResult, query.entity);
+
+            // Notify subscribers
+            for (const cb of queryState.cbs) {
+                try {
+                    cb(newResult);
+                } catch (cbError) {
+                    this.logger.error('Callback error:', cbError);
+                }
             }
         } catch (error) {
             this.logger.error('Failed to load initial query result:', error);
+            throw new StoreError('Failed to load query result', 'QUERY_LOAD_ERROR');
         }
     }
 
@@ -415,7 +491,7 @@ export class Store {
      * @private
      */
     private async cleanupQuery(hash: string, query: SelectAction): Promise<void> {
-        delete this.querySubscriptions[hash];
+        delete this.activeQueries[hash];
         await this.storageManager.deleteQuery(hash, query.entity);
 
         const cancelRequest = new CancelSelectAction({ queryHash: hash });
@@ -494,7 +570,7 @@ export class Store {
     */
     private handleSelectResult(query: SelectResult<any>): void {
         const queryHash = query.queryHash;
-        const queryState = this.querySubscriptions[queryHash];
+        const queryState = this.activeQueries[queryHash];
 
         if (!queryState) {
             return;
@@ -511,7 +587,7 @@ export class Store {
      * @private
      */
     private handleDataChanges<T extends StoreItem>(messageBody: DataChanges<T>): void {
-        const queryState = this.querySubscriptions[messageBody.queryHash];
+        const queryState = this.activeQueries[messageBody.queryHash];
         if (!queryState?.result) return;
 
         try {
@@ -520,7 +596,7 @@ export class Store {
             const updatedResult = {
                 ...queryState.result,
                 rows: messageBody.changes?.length
-                    ? DataUtil.applySorting(updatedRows, { criteria: queryState.query.sort })
+                    ? DataUtil.applySorting(updatedRows, { options: queryState.query.sort })
                     : updatedRows,
                 total: messageBody.total
             };
@@ -720,7 +796,7 @@ export class Store {
             }
 
             // Resubscribe to active queries
-            const activeQueries = Object.entries(this.querySubscriptions);
+            const activeQueries = Object.entries(this.activeQueries);
             if (activeQueries.length === 0) return;
 
             this.logger.verbose(`Resubscribing to ${activeQueries.length} queries...`);
@@ -750,22 +826,22 @@ export class Store {
      * @private
      */
     private isQueryActive(queryHash: string): boolean {
-        const queryState = this.querySubscriptions[queryHash];
+        const queryState = this.activeQueries[queryHash];
         return queryState != null && queryState.cbs.length > 0;
     }
 
     /**
-     * Get an item from remote storage
+     * Get items from remote storage
      * @private
      */
-    private getRemoteItem<T>(query: SelectAction): Promise<T | null> {
+    private getRemoteItems<T>(query: SelectAction): Promise<T[]> {
         return new Promise((resolve) => {
-            const timeout = setTimeout(() => resolve(null), this.remoteQueryTimeout);
+            const timeout = setTimeout(() => resolve([]), this.remoteQueryTimeout);
 
             const unsubscribe = this.subscribeQuery(query, (result) => {
                 clearTimeout(timeout);
                 unsubscribe();
-                resolve(result.rows[0] as T || null);
+                resolve(result.rows as T[]);
             });
         });
     }

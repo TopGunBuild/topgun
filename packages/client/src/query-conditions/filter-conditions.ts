@@ -10,7 +10,13 @@ import {
     StringConditionQuery
 } from '@topgunbuild/models';
 
-// Generic where functions for each type
+/**
+ * Create a string condition query
+ * @param key The key to query
+ * @param condition The condition to apply
+ * @param value The value to compare against
+ * @returns The string condition query
+ */
 export function whereString(
     key: string,
     condition: StringCondition,
@@ -19,6 +25,13 @@ export function whereString(
     return new StringConditionQuery({ key, condition, value });
 }
 
+/**
+ * Create a number condition query
+ * @param key The key to query
+ * @param condition The condition to apply
+ * @param value The value to compare against
+ * @returns The number condition query
+ */
 export function whereNumber(
     key: string,
     condition: NumberCondition,
@@ -27,6 +40,13 @@ export function whereNumber(
     return new NumberConditionQuery({ key, condition, value });
 }
 
+/**
+ * Create a date condition query
+ * @param key The key to query
+ * @param condition The condition to apply
+ * @param value The value to compare against
+ * @returns The date condition query
+ */
 export function whereDate(
     key: string,
     condition: DateCondition,
@@ -35,6 +55,12 @@ export function whereDate(
     return new DateConditionQuery({ key, condition, value });
 }
 
+/**
+ * Create a boolean condition query
+ * @param key The key to query
+ * @param condition The condition to apply
+ * @returns The boolean condition query
+ */
 export function whereBoolean(
     key: string,
     condition: BooleanCondition
@@ -42,6 +68,13 @@ export function whereBoolean(
     return new BooleanConditionQuery({ key, condition });
 }
 
+/**
+ * Create a byte condition query
+ * @param key The key to query
+ * @param condition The condition to apply
+ * @param value The value to compare against
+ * @returns The byte condition query
+ */
 export function whereByte(
     key: string,
     condition: ByteCondition,
@@ -50,5 +83,16 @@ export function whereByte(
     return new ByteConditionQuery({ key, condition, value });
 }
 
+/**
+ * Create an OR query
+ * @param value The queries to combine
+ * @returns The OR query
+ */ 
 export const or = (value: Query[]): Or => new Or(value);
+
+/**
+ * Create an AND query
+ * @param value The queries to combine
+ * @returns The AND query
+ */
 export const and = (value: Query[]): And => new And(value);

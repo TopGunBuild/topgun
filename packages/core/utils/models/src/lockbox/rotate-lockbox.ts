@@ -36,26 +36,36 @@ export const rotateLockbox = ({
     throw new Error('Both oldLockbox and newContents are required for rotation');
   }
 
-  // Validate scope matching between old and new contents
-  assertScopesMatch(newContents, oldLockbox.contents)
+  // Create temporary KeyScope objects to validate scope matching
+  const oldContentsScope = { type: oldLockbox.contentsScope, name: oldLockbox.contentsScope }
+  const newContentsScope = { type: newContents.name, name: newContents.name }
+  assertScopesMatch(newContentsScope, oldContentsScope)
 
   // If new recipient keys provided, validate their scope
   if (updatedRecipientKeys) {
-    assertScopesMatch(oldLockbox.recipient, updatedRecipientKeys)
+    const oldRecipientScope = { type: oldLockbox.recipientScope, name: oldLockbox.recipientScope }
+    const newRecipientScope = { type: updatedRecipientKeys.name, name: updatedRecipientKeys.name }
+    assertScopesMatch(newRecipientScope, oldRecipientScope)
   }
 
   // Increment the generation counter for the new contents
   const rotatedContents: KeysetWithSecrets = {
     ...newContents,
-    generation: oldLockbox.contents.generation + 1
+    generation: (oldLockbox?.contentsGeneration ?? 0) + 1
   }
 
   // Use updated recipient keys if provided, otherwise keep existing ones
-  const recipientManifest = updatedRecipientKeys ?? oldLockbox.recipient
+  const recipientKeys = updatedRecipientKeys ?? {
+    scope: oldLockbox.recipientScope,
+    publicKey: oldLockbox.recipientPublicKey,
+    type: oldLockbox.recipientType,
+    name: oldLockbox.recipientName,
+    generation: oldLockbox.recipientGeneration
+  }
 
   return createLockbox({ 
     contents: rotatedContents, 
-    recipientKeys: recipientManifest 
+    recipientKeys 
   })
 }
   

@@ -27,6 +27,15 @@ export class PersistedService<T, U> {
         this._merge = params.merge || ((fromStorage, currentValue) => currentValue);
         this._load();
     }
+    
+    /**
+     * Gets all values from storage
+     * @returns Promise<T[]> Array of all stored values
+     */
+    public async getAll(): Promise<T[]> {
+        await this.waitForLoaded();
+        return Object.values(this.value);
+    }
 
     /**
      * Checks if the object is still loading

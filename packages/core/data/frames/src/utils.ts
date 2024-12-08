@@ -1,4 +1,4 @@
-import { DatasetState, FilteringCriteria, FilteringCriteriaTree, FilteringOperator } from '@topgunbuild/collections';
+import { DatasetState, FilterExpression, FilterGroup, FilterOperator } from '@topgunbuild/collections';
 import { 
     STRING_FILTER_CONDITIONS, 
     DATE_FILTER_CONDITIONS, 
@@ -22,13 +22,13 @@ export const convertQueryToDatagridState = (query: DataFrameQuery): DatasetState
     }
     
     return {
-        filtering: {
-            tree: convertQueryToFilterTree(query)
+        filter: {
+            options: convertQueryToFilterGroup(query)
         },
-        sorting: {
-            criteria: query.sort || [],
+        sort: {
+            options: query.sort || [],
         },
-        paging: {
+        page: {
             currentPage: query.pageOffset || 0,
             itemsPerPage: query.pageSize || 10
         }
@@ -40,11 +40,11 @@ export const convertQueryToDatagridState = (query: DataFrameQuery): DatasetState
  * @param query - The query to convert.
  * @returns The filtering criteria tree.
  */
-export const convertQueryToFilterTree = (query: DataFrameQuery): FilteringCriteriaTree =>
+export const convertQueryToFilterGroup = (query: DataFrameQuery): FilterGroup =>
 {
     return {
-        conditions: Array.isArray(query.query) ? query.query.map(q => convertQuery(q)) : [],
-        operator: FilteringOperator.And,
+        expressions: Array.isArray(query.query) ? query.query.map(q => convertQuery(q)) : [],
+        operator: FilterOperator.And,
     };
 };
 
@@ -53,7 +53,7 @@ export const convertQueryToFilterTree = (query: DataFrameQuery): FilteringCriter
  * @param query - The query to convert.
  * @returns The filtering criteria tree or criteria.
  */
-const convertQuery = (query: Query): FilteringCriteriaTree|FilteringCriteria =>
+const convertQuery = (query: Query): FilterGroup|FilterExpression =>
 {
     if (query instanceof FieldQuery)
     {
@@ -63,27 +63,27 @@ const convertQuery = (query: Query): FilteringCriteriaTree|FilteringCriteria =>
     {
         if (query instanceof And)
         {
-            const tree: FilteringCriteriaTree = {
-                conditions: query.and.map(q => convertQuery(q)),
-                operator: FilteringOperator.And,
+            const group: FilterGroup = {
+                expressions: query.and.map(q => convertQuery(q)),
+                operator: FilterOperator.And,
             };
 
-            return tree;
+            return group;
         }
         else if (query instanceof Or)
         {
-            const tree: FilteringCriteriaTree = {
-                conditions: query.or.map(q => convertQuery(q)),
-                operator: FilteringOperator.Or,
+            const group: FilterGroup = {
+                expressions: query.or.map(q => convertQuery(q)),
+                operator: FilterOperator.Or,
             };
 
-            return tree;
+            return group;
         }
     }
 
     return {
-        conditions: [],
-        operator: FilteringOperator.And,
+        expressions: [],
+        operator: FilterOperator.And,
     };
 };
 
@@ -92,47 +92,46 @@ const convertQuery = (query: Query): FilteringCriteriaTree|FilteringCriteria =>
  * @param query - The field query to convert.
  * @returns The filtering criteria.
  */
-const convertFieldQuery = (query: FieldQuery): FilteringCriteria =>
+const convertFieldQuery = (query: FieldQuery): FilterExpression =>
 {
     if (query instanceof StringConditionQuery)
     {
         return {
-            evaluator: STRING_FILTER_CONDITIONS[query.condition],
-            key: query.key,
-            comparisonValue: query.value,
-            caseSensitive: query.caseInsensitive,
+            logic: STRING_FILTER_CONDITIONS[query.condition],
+            fieldName: query.key,
+            searchValue: query.value,
+            caseSensitive: false,
         };
     }
     else if (query instanceof ByteConditionQuery)
     {
         return {
-            evaluator: BYTE_FILTER_CONDITIONS[query.condition],
-            key: query.key,
-            comparisonValue: query.value,
+            logic: BYTE_FILTER_CONDITIONS[query.condition],
+            fieldName: query.key,
+            searchValue: query.value,
         };
     }
     else if (query instanceof NumberConditionQuery)
     {
         return {
-            evaluator: NUMBER_FILTER_CONDITIONS[query.condition],
-            key: query.key,
-            comparisonValue: query.value,
+            logic: NUMBER_FILTER_CONDITIONS[query.condition],
+            fieldName: query.key,
+            searchValue: query.value,
         };
     }
     else if (query instanceof DateConditionQuery)
     {
         return {
-            evaluator: DATE_FILTER_CONDITIONS[query.condition],
-            key: query.key,
-            comparisonValue: query.value,
+            logic: DATE_FILTER_CONDITIONS[query.condition],
+            fieldName: query.key,
+            searchValue: query.value,
         };
     }
     else if (query instanceof BooleanConditionQuery)
     {
         return {
-            evaluator: BOOLEAN_FILTER_CONDITIONS[query.condition],
-            key: query.key,
-            comparisonValue: query.value,
+            logic: BOOLEAN_FILTER_CONDITIONS[query.condition],
+            fieldName: query.key,
         };
     }
     else

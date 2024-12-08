@@ -1,18 +1,18 @@
 import { SortDirection, SortOptions } from "@topgunbuild/models";
-import { SortingImplementation, SortingState } from "./types";
+import { ISortEngine, SortState } from "./types";
 
 /**
  * Class for sorting algorithm.
  */
-export class DataSortingEngine implements SortingImplementation {
+export class SortEngine implements ISortEngine {
     /**
-     * Arranges the items based on the criteria.
+     * Arranges the items based on the options.
      * @param items The items to arrange.
-     * @param criteria The criteria to use for arranging.
+     * @param options The options to use for arranging.
      * @returns The arranged items.
      */
-    process(items: any[], criteria: SortOptions[]): any[] {
-        return this.applySortingRecursively(items, criteria);
+    process<T = any>(items: T[], options: SortOptions[]): T[] {
+        return this.applySortingRecursively(items, options);
     }
 
     /**
@@ -21,7 +21,7 @@ export class DataSortingEngine implements SortingImplementation {
      * @param second The second element to compare.
      * @returns The comparison result.
      */
-    compareElements(first: any, second: any): number {
+    compareElements<T = any>(first: T, second: T): number {
         const isFirstNull = (first === null || first === undefined);
         const isSecondNull = (second === null || second === undefined);
 
@@ -73,12 +73,12 @@ export class DataSortingEngine implements SortingImplementation {
      * Gets the items with the same value.
      * @param items The items to get the items with the same value from.
      * @param startIndex The index to start the search from.
-     * @param criteria The criteria to use for getting the items with the same value.
+     * @param options The options to use for getting the items with the same value.
      * @returns The items with the same value.
      */
-    private getItemsWithSameValue<T>(items: T[], startIndex: number, criteria: SortOptions): T[] {
+    private getItemsWithSameValue<T>(items: T[], startIndex: number, options: SortOptions): T[] {
         const result = [];
-        const attribute = criteria.key;
+        const attribute = options.key;
         const referenceValue = items[startIndex][attribute];
 
         for (let i = startIndex; i < items.length; i++) {
@@ -95,13 +95,13 @@ export class DataSortingEngine implements SortingImplementation {
     /**
      * Orders the items by the specified attribute.
      * @param items The items to order.
-     * @param criteria The criteria to use for ordering.
+     * @param options The options to use for ordering.
      * @returns The ordered items.
      */
-    private sortByAttribute<T>(items: T[], criteria: SortOptions): T[] {
-        const attribute = criteria.key;
+    private sortByAttribute<T>(items: T[], options: SortOptions): T[] {
+        const attribute = options.key;
         const caseSensitive = false;
-        const multiplier = (criteria.direction === SortDirection.DESC ? -1 : 1);
+        const multiplier = (options.direction === SortDirection.DESC ? -1 : 1);
 
         const comparator = (item1: any, item2: any): number => {
             return this.compareAttributes(item1, item2, attribute, multiplier, caseSensitive);
@@ -113,31 +113,31 @@ export class DataSortingEngine implements SortingImplementation {
     /**
      * Applies the sorting recursively.
      * @param items The items to sort.
-     * @param criteria The criteria to use for sorting.
-     * @param criteriaIndex The index of the criteria to use for sorting.
+     * @param options The options to use for sorting.
+     * @param optionsIndex The index of the options to use for sorting.
      * @returns The sorted items.
      */
     private applySortingRecursively<T>(
         items: T[],
-        criteria: SortOptions[],
-        criteriaIndex: number = 0
+        options: SortOptions[],
+        optionsIndex: number = 0
     ): T[] {
-        if (criteriaIndex >= criteria.length || items.length <= 1) {
+        if (optionsIndex >= options.length || items.length <= 1) {
             return items;
         }
 
-        const currentCriteria = criteria[criteriaIndex];
-        items = this.sortByAttribute(items, currentCriteria);
+        const currentoptions = options[optionsIndex];
+        items = this.sortByAttribute(items, currentoptions);
 
-        if (criteriaIndex === criteria.length - 1) {
+        if (optionsIndex === options.length - 1) {
             return items;
         }
 
-        // Handle multiple ordering criteria
+        // Handle multiple ordering options
         for (let i = 0; i < items.length; i++) {
-            const sameValueItems = this.getItemsWithSameValue(items, i, currentCriteria);
+            const sameValueItems = this.getItemsWithSameValue(items, i, currentoptions);
             if (sameValueItems.length > 1) {
-                const orderedSubset = this.applySortingRecursively(sameValueItems, criteria, criteriaIndex + 1);
+                const orderedSubset = this.applySortingRecursively(sameValueItems, options, optionsIndex + 1);
                 items.splice(i, sameValueItems.length, ...orderedSubset);
             }
             i += sameValueItems.length - 1;
@@ -150,8 +150,8 @@ export class DataSortingEngine implements SortingImplementation {
 /**
  * Default sorting algorithm.
  */
-export const SortingDefaults: SortingState = {
-    criteria: [],
-    algorithm: new DataSortingEngine()
+export const SortDefaults: SortState = {
+    options: [],
+    engine: new SortEngine()
 };
 

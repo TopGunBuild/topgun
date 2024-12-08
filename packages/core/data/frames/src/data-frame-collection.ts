@@ -1,6 +1,6 @@
 import { isDefined } from '@topgunbuild/common';
 import { RowComparatorFn } from './types';
-import { DataSortingEngine } from '@topgunbuild/collections';
+import { SortEngine } from '@topgunbuild/collections';
 import { SortOptions } from '@topgunbuild/models';
 
 /**
@@ -10,8 +10,8 @@ import { SortOptions } from '@topgunbuild/models';
  */
 export class DataFrameCollection<T> {
     private data: T[];
-    private readonly sortingCriteria: SortOptions[];
-    private readonly sortingEngine: DataSortingEngine;
+    private readonly sortOptions: SortOptions[];
+    private readonly sortEngine: SortEngine;
     private readonly compareRowsCb: RowComparatorFn<T>;
 
     readonly pageSize: number;
@@ -32,10 +32,10 @@ export class DataFrameCollection<T> {
         pageSize?: number
     }) {
         this.data = [];
-        this.sortingEngine = new DataSortingEngine();
+        this.sortEngine = new SortEngine();
         this.pageSize = params.pageSize;
         this.compareRowsCb = params.compareRowsFn;
-        this.sortingCriteria = params.sortingCriteria;
+        this.sortOptions = params.sortingCriteria;
     }
 
     /**
@@ -216,7 +216,7 @@ export class DataFrameCollection<T> {
      */
     private sort(rows: T[]): T[] {
         try {
-            return this.sortingEngine.process(rows, this.sortingCriteria);
+            return this.sortEngine.process(rows, this.sortOptions);
         } catch (error) {
             console.error('Sorting failed:', error);
             return rows; // Return unsorted array as fallback

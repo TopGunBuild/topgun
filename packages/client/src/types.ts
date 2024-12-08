@@ -1,5 +1,5 @@
 import { StorageDerived } from "./storage/types";
-import { FilteringCriteriaTree } from "@topgunbuild/collections";
+import { FilterGroup } from "@topgunbuild/collections";
 import { MessageRow, Password, SelectAction, SelectOptions, SelectResult, StoreItem } from "@topgunbuild/models";
 
 /**
@@ -33,7 +33,7 @@ export type QueryCb<T> = (value: T) => void;
  */
 export interface QueryState<T extends { id: string }> {
     query: SelectAction;
-    filterCriteria: FilteringCriteriaTree;
+    filterOptions: FilterGroup;
     cbs: QueryCb<T>[];
     result: SelectResult<T> | null;
 }
@@ -57,7 +57,7 @@ export interface CreateTeamParams {
     seed?: string;
 }
 
-export interface GetByIdResult<T> {
-    data: T | null;
-    source: 'local' | 'remote';
-}
+// export interface GetByIdResult<T> {
+//     data: T | null;
+//     source: 'local' | 'remote';
+// }

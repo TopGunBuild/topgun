@@ -42,12 +42,12 @@ export const createLockbox = ({
 
   try {
     // Redact any sensitive information from keys
-    const redactedRecipientKeys = sanitizeRecipientKeys(recipientKeys)
-    const redactedContents = convertToPublicKeyset(contents)
+    const sanitizedRecipientKeys = sanitizeRecipientKeys(recipientKeys)
+    const publicContents = convertToPublicKeyset(contents)
 
     // Generate ephemeral encryption keys for this lockbox
     const ephemeralKeys = asymmetric.keyPair()
-    const recipientPublicKey = extractRecipientPublicKey(redactedRecipientKeys)
+    const recipientPublicKey = extractRecipientPublicKey(sanitizedRecipientKeys)
 
     // Prepare and encrypt the payload
     const payload = new KeysetWithSecretsImpl(contents)
@@ -55,20 +55,20 @@ export const createLockbox = ({
 
     return {
       $id: randomId(32),
-      encryptionKey: {
-        ...EPHEMERAL_SCOPE,
-        publicKey: ephemeralKeys.publicKey,
-      },
-      recipient: {
-        ...redactedRecipientKeys,
-        publicKey: recipientPublicKey,
-      },
-      contents: {
-        ...redactedContents,
-        publicKey: contents.encryption.publicKey,
-      },
+      encryptionKeyScope: EPHEMERAL_SCOPE.type,
+      encryptionKeyPublicKey: ephemeralKeys.publicKey,
+      recipientScope: sanitizedRecipientKeys.type,
+      recipientType: sanitizedRecipientKeys.type,
+      recipientName: sanitizedRecipientKeys.name || '',
+      recipientGeneration: sanitizedRecipientKeys.generation || 0,
+      recipientPublicKey: recipientPublicKey,
+      contentsScope: publicContents.type,
+      contentsType: publicContents.type,
+      contentsName: publicContents.name || '',
+      contentsGeneration: publicContents.generation || 0,
+      contentsPublicKey: contents.encryption.publicKey,
       encryptedPayload,
-    } as Lockbox
+    }
   } catch (error) {
     if (error instanceof ValidationError) {
       throw error

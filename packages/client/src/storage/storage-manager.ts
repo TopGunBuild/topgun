@@ -43,35 +43,6 @@ export class StorageManager {
     }
 
     /**
-     * Get the entity storage
-     * @param entity - The entity
-     * @returns The entity storage
-     */
-    private getEntityStorage(entity: string): PersistedService<Identifiable, Uint8Array> {
-        if (!this.entityDataStorages.has(entity)) {
-            this.entityDataStorages.set(
-                entity,
-                new PersistedService<Identifiable, Uint8Array>({
-                    params: { 
-                        dbName: this.dbName, 
-                        storeName: `data_${entity}`,
-                        readMiddleware: (value: Uint8Array) => this.decodeItem(value),
-                        writeMiddleware: (value: Identifiable) => this.encodeItem(value)
-                    },
-                    storage: this.storage,
-                    merge: (fromStorage, currentValue) => {
-                        return {
-                            ...(fromStorage || {}),
-                            ...(currentValue || {})
-                        } as Identifiable;
-                    }
-                })
-            );
-        }
-        return this.entityDataStorages.get(entity)!;
-    }
-
-    /**
      * Get all pending actions from storage
      * @returns An array of pending actions
      */
@@ -146,6 +117,18 @@ export class StorageManager {
     }
 
     /**
+     * Get all items from entity storage
+     * @param entity - The entity type
+     * @returns The items
+     */
+    public async getAll<T extends Identifiable>(entity: string): Promise<T[]> {
+        const entityStorage = this.getEntityStorage(entity);
+        await entityStorage.waitForLoaded();
+        const items = await entityStorage.getAll();
+        return items as unknown as T[];
+    }
+
+    /**
      * Put a query into the storage
      * @param queryHash - The hash of the query
      * @param query - The query result
@@ -216,6 +199,35 @@ export class StorageManager {
 
             this.queryStorage.delete(queryHash);
         }
+    }
+
+    /**
+     * Get the entity storage
+     * @param entity - The entity
+     * @returns The entity storage
+     */
+    private getEntityStorage(entity: string): PersistedService<Identifiable, Uint8Array> {
+        if (!this.entityDataStorages.has(entity)) {
+            this.entityDataStorages.set(
+                entity,
+                new PersistedService<Identifiable, Uint8Array>({
+                    params: { 
+                        dbName: this.dbName, 
+                        storeName: `data_${entity}`,
+                        readMiddleware: (value: Uint8Array) => this.decodeItem(value),
+                        writeMiddleware: (value: Identifiable) => this.encodeItem(value)
+                    },
+                    storage: this.storage,
+                    merge: (fromStorage, currentValue) => {
+                        return {
+                            ...(fromStorage || {}),
+                            ...(currentValue || {})
+                        } as Identifiable;
+                    }
+                })
+            );
+        }
+        return this.entityDataStorages.get(entity)!;
     }
 
     /**

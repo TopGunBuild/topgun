@@ -1,6 +1,7 @@
-import { DataFilteringEngine, FilteringCriteriaTree, FilteringDefaults, FilteringState } from "./filtering";
-import { PagingState } from "./paging";
-import { SortingDefaults, SortingState } from "./sorting";
+import { Identifiable } from "@topgunbuild/models";
+import { FilterEngine, FilterDefaults, FilterState, FilterGroup } from "./filter";
+import { PaginationState } from "./pagination";
+import { SortDefaults, SortState } from "./sort";
 import { ChangeType, DataChange, DatasetState } from "./types";
 
 /**
@@ -38,11 +39,11 @@ export class DataUtil {
      * @param state The sorting state to apply.
      * @returns The sorted dataset.
      */
-    static applySorting<T>(data: T[], state: SortingState): T[] {
+    static applySorting<T>(data: T[], state: SortState): T[] {
         // set defaults
-        DataUtil.applyDefaults(state, SortingDefaults);
+        DataUtil.applyDefaults(state, SortDefaults);
         // apply default settings for each sorting expression(if not set)
-        return state.algorithm.process(data, state.criteria);
+        return state.engine.process(data, state.options);
     }
 
     /**
@@ -51,7 +52,7 @@ export class DataUtil {
      * @param state The pagination state to apply.
      * @returns The paginated dataset.
      */
-    static applyPagination<T>(data: T[], state: PagingState): T[] {
+    static applyPagination<T>(data: T[], state: PaginationState): T[] {
         if (!state) {
             return data;
         }
@@ -75,14 +76,14 @@ export class DataUtil {
      * @param state The filtering state to apply.
      * @returns The filtered dataset.
      */
-    static applyFiltering<T>(data: T[], state: FilteringState): T[] {
+    static applyFiltering<T>(data: T[], state: FilterState): T[] {
         // set defaults
-        DataUtil.applyDefaults(state, FilteringDefaults);
-        if (!state.algorithm) {
+        DataUtil.applyDefaults(state, FilterDefaults);
+        if (!state.engine) {
             return data;
         }
 
-        return state.algorithm.process(data, state.tree);
+        return state.engine.process(data, state.options);
     }
 
     /**
@@ -97,15 +98,15 @@ export class DataUtil {
         if (!state) {
             return {rows, total};
         }
-        if (state.filtering) {
-            rows = DataUtil.applyFiltering(rows, state.filtering);
+        if (state.filter) {
+            rows = DataUtil.applyFiltering(rows, state.filter);
             total = rows.length;
         }
-        if (state.sorting) {
-            rows = DataUtil.applySorting(rows, state.sorting);
+        if (state.sort) {
+            rows = DataUtil.applySorting(rows, state.sort);
         }
-        if (state.paging) {
-            rows = DataUtil.applyPagination(rows, state.paging);
+        if (state.page) {
+            rows = DataUtil.applyPagination(rows, state.page);
         }
         return {rows, total};
     }
@@ -116,10 +117,10 @@ export class DataUtil {
      * @param newData The new dataset to compare against
      * @returns Array of changes with their types
      */
-    static processChanges<T extends { $id: string }>(
+    static processChanges<T extends Identifiable>(
         oldData: T[], 
         newData: T[],
-        filterCriteria: FilteringCriteriaTree
+        filterOptions: FilterGroup
     ): DataChange<T>[] {
         const changes: DataChange<T>[] = [];
         const oldMap = new Map(oldData.map(item => [item.$id, item]));
@@ -137,14 +138,14 @@ export class DataUtil {
             }
         }
 
-        const filterEngine = new DataFilteringEngine();
+        const filterEngine = new FilterEngine();
 
         // Find added items
         for (const [id, newItem] of newMap) {
             if (!oldMap.has(id)) {
                 // Only add if item passes filtering criteria
-                const passesFilter = filterCriteria ? 
-                    filterEngine.process([newItem], filterCriteria).length > 0 :
+                const passesFilter = filterOptions ? 
+                    filterEngine.process([newItem], filterOptions).length > 0 :
                     true;
                 
                 if (passesFilter) {

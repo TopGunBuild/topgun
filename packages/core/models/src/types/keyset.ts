@@ -1,3 +1,5 @@
+import { mkenum } from "@topgunbuild/common"
+
 /** Represents a keypair with raw byte arrays */
 export type ByteKeypair = {
     /** Public key as raw bytes */
@@ -48,14 +50,14 @@ export type Password = string | Uint8Array
  * Defines the available key types in the system
  * Can be extended by applications for custom key types
  */
-export const KeyType = {
+export const KeyType = mkenum({
     TEAM: 'TEAM',
     ROLE: 'ROLE',
     USER: 'USER',
     DEVICE: 'DEVICE',
     SERVER: 'SERVER',
     EPHEMERAL: 'EPHEMERAL'
-} as const;
+});
 export type KeyType = (typeof KeyType)[keyof typeof KeyType];
 
 /**
@@ -79,6 +81,15 @@ export interface KeyScope {
 export interface KeyMetadata extends KeyScope {
     /** Incremental number indicating the key generation/version */
     generation: number
+}
+
+/**
+ * Represents a key manifest containing public key information and metadata
+ * Used to identify and verify keys without exposing private information
+ */
+export interface KeyManifest extends KeyMetadata {
+    /** Public key encoded in Base58 format */
+    publicKey: string
 }
 
 /**

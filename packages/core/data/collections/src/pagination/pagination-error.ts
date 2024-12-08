@@ -1,7 +1,7 @@
 /**
  * Enum for pagination errors.
  */
-export enum PagingError {
+export enum PaginationError {
     None,
     InvalidPageNumber,
     InvalidItemsPerPage

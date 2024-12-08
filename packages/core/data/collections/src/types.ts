@@ -1,6 +1,6 @@
-import { FilteringState } from "./filtering";
-import { PagingState } from "./paging";
-import { SortingState } from "./sorting";
+import { FilterState } from "./filter";
+import { PaginationState } from "./pagination";
+import { SortState } from "./sort";
 
 /**
  * Interface for record metadata.
@@ -14,9 +14,9 @@ export interface RecordMetadata {
  * Interface for dataset state.
  */
 export interface DatasetState {
-    filtering?: FilteringState;
-    sorting?: SortingState;
-    paging?: PagingState;   
+    filter?: FilterState;
+    sort?: SortState;
+    page?: PaginationState;   
 }
 
 /**

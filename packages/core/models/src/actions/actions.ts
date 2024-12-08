@@ -162,7 +162,7 @@ export class RemoveRoleAction extends AbstractAction {
  * Assign a role to a member
  */
 @variant(6)
-export class AddMemberRoleAction extends AbstractAction {
+export class AssignRoleToMemberAction extends AbstractAction {
     @field({ type: 'string' })
     userId: string;
 
@@ -180,7 +180,7 @@ export class AddMemberRoleAction extends AbstractAction {
  * Remove a role from a member
  */
 @variant(7)
-export class RemoveMemberRoleAction extends AbstractAction {
+export class RemoveRoleFromMemberAction extends AbstractAction {
     @field({ type: 'string' })
     userId: string;
 

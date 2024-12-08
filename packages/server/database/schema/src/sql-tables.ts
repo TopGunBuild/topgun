@@ -119,7 +119,7 @@ export const lockboxTable: SqlTable = SqlTable.create('lockbox')
             type   : ColumnType.TEXT,
             target : actionTable,
             actions: {
-                onDelete: UpdateDeleteAction.CASCADE,
+                onDelete: UpdateDeleteAction.SET_NULL,
             },
         },
         {
@@ -141,6 +141,10 @@ export const lockboxTable: SqlTable = SqlTable.create('lockbox')
             actions: {
                 onDelete: UpdateDeleteAction.CASCADE,
             },
+        },
+        {
+            name: 'encrypted_payload', // Encrypted payload of the lockbox
+            type: ColumnType.BLOB,
         },
         SqlColumnGenerator.createdAt(),
         SqlColumnGenerator.teamReference(),
