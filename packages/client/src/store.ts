@@ -84,8 +84,7 @@ export class Store {
      * Get the user
      * @returns The user
      */
-    async getUser(): Promise<UserWithSecrets | null>
-    {
+    async getUser(): Promise<UserWithSecrets | null> {
         return null;
     }
 
@@ -93,9 +92,93 @@ export class Store {
      * Get the device
      * @returns The device
      */
-    async getDevice(): Promise<DeviceWithSecrets | null>
-    {
+    async getDevice(): Promise<DeviceWithSecrets | null> {
         return null;
+    }
+
+    /**
+     * Get an item by ID from local or remote storage
+     * @param entity The entity type to query
+     * @param id The item ID to retrieve
+     * @returns Promise<T> The item
+     * @throws {StoreError} If retrieval fails
+     */
+    public async queryOne<T extends StoreItem>(entity: string, id: string): Promise<T> {
+        if (!entity || !id) {
+            throw new StoreError('Entity and ID are required', 'INVALID_INPUT');
+        }
+
+        try {
+            // Check local storage first
+            const localItem = await this.storageManager.get<T>(entity, id);
+            if (localItem) {
+                return localItem;
+            }
+
+            // If not in local storage, query remote
+            const query = new SelectAction({
+                entity,
+                query: [whereString('$id', '=', id)],
+                limit: 1
+            });
+
+            const remoteItems = await this.getRemoteItems<T>(query);
+            const remoteItem = remoteItems.rows[0] || null;
+
+            // If found remotely, store it locally for future use
+            if (remoteItem) {
+                await this.storageManager.upsert(entity, [remoteItem]);
+            }
+
+            return remoteItem;
+        } catch (error) {
+            this.logger.error('Failed to get item by ID:', error);
+            throw new StoreError(`Failed to get ${entity} with ID ${id}`, 'GET_BY_ID_ERROR');
+        }
+    }
+
+    /**
+     * Query multiple items from local or remote storage
+     * @param selectAction The SelectAction containing query criteria
+     * @returns Promise<SelectResult<T>> The query results
+     * @throws {StoreError} If query fails
+     */
+    public async query<T extends StoreItem>(selectAction: SelectAction): Promise<SelectResult<T>> {
+        if (!selectAction) {
+            throw new StoreError('SelectAction is required', 'INVALID_INPUT');
+        }
+
+        try {
+            // Check local storage first
+            const queryHash = toHexString(selectAction.encode());
+            const cachedResult = await this.storageManager.getQueryResult<T>(queryHash, selectAction.entity);
+
+            if (cachedResult) {
+                return cachedResult;
+            }
+
+            // If query result is not in local storage, process local items
+            const localResult = await this.filterLocalItems<T>(queryHash, selectAction);
+            if (localResult) {
+                return localResult;
+            }
+
+            // If not in local storage, query remote
+            const remoteResult = await this.getRemoteItems<T>(selectAction);
+
+            // Store remote items locally for future use
+            if (remoteResult.rows.length > 0) {
+                await this.storageManager.upsert(selectAction.entity, remoteResult.rows);
+                this.storageManager.saveQueryResult(queryHash, remoteResult, selectAction.entity);
+            }
+
+            return remoteResult;
+        } catch (error) {
+            this.logger.error('Query failed:', error);
+            throw error instanceof StoreError
+                ? error
+                : new StoreError(`Failed to query ${selectAction.entity}`, 'QUERY_ERROR');
+        }
     }
 
     /**
@@ -105,7 +188,7 @@ export class Store {
      * @returns Unsubscribe function
      * @throws {StoreError} If query is invalid
      */
-    public subscribeQuery<T extends StoreItem>(
+    public subscribe<T extends StoreItem>(
         query: SelectAction,
         cb: QueryCb<SelectResult<T>>
     ): () => void {
@@ -121,7 +204,7 @@ export class Store {
             this.dispatchAction(query);
             this.initializeQueryResult(queryHash, query);
 
-            return () => this.unsubscribeQuery(query, cb, queryHash);
+            return () => this.unsubscribe(query, cb, queryHash);
         } catch (error) {
             this.logger.error('Failed to subscribe to query:', error);
             throw new StoreError('Failed to subscribe to query', 'SUBSCRIBE_ERROR');
@@ -129,10 +212,38 @@ export class Store {
     }
 
     /**
+     * Subscribe to a single item by ID
+     * @param entity The entity type to subscribe to
+     * @param id The item ID to subscribe to
+     * @param cb The callback to call with the result
+     * @returns Unsubscribe function
+     * @throws {StoreError} If subscription fails
+     */
+    public subscribeOne<T extends StoreItem>(
+        entity: string,
+        id: string,
+        cb: QueryCb<T>
+    ): () => void {
+        if (!entity || !id || !cb) {
+            throw new StoreError('Entity, ID and callback are required', 'INVALID_INPUT');
+        }
+
+        const query = new SelectAction({
+            entity,
+            query: [whereString('$id', '=', id)],
+            limit: 1
+        });
+
+        return this.subscribe<T>(query, (result) => {
+            cb(result.rows[0] || null);
+        });
+    }
+
+    /**
      * Unsubscribe from a query
      * @throws {StoreError} If unsubscribe fails
      */
-    public unsubscribeQuery(
+    public unsubscribe(
         query: SelectAction,
         cb: QueryCb<any>,
         queryHash?: string
@@ -250,87 +361,10 @@ export class Store {
      */
     public async exists(entity: string, id: string): Promise<boolean> {
         try {
-            const result = await this.getById(entity, id);
+            const result = await this.queryOne(entity, id);
             return result.data !== null;
         } catch (error) {
             return false;
-        }
-    }
-
-    /**
-     * Get an item by ID from local or remote storage
-     * @param entity The entity type to query
-     * @param id The item ID to retrieve
-     * @returns Promise<T> The item
-     * @throws {StoreError} If retrieval fails
-     */
-    public async getById<T extends StoreItem>(entity: string, id: string): Promise<T> {
-        if (!entity || !id) {
-            throw new StoreError('Entity and ID are required', 'INVALID_INPUT');
-        }
-
-        try {
-            // Check local storage first
-            const localItem = await this.storageManager.get<T>(entity, id);
-            if (localItem) {
-                return localItem;
-            }
-
-            // If not in local storage, query remote
-            const query = new SelectAction({
-                entity,
-                query: [whereString('$id', '=', id)],
-                pageSize: 1
-            });
-
-            const remoteItems = await this.getRemoteItems<T>(query);
-            const remoteItem = remoteItems[0] || null;
-            
-            // If found remotely, store it locally for future use
-            if (remoteItem) {
-                await this.storageManager.upsert(entity, [remoteItem]);
-            }
-
-            return remoteItem;
-        } catch (error) {
-            this.logger.error('Failed to get item by ID:', error);
-            throw new StoreError(`Failed to get ${entity} with ID ${id}`, 'GET_BY_ID_ERROR');
-        }
-    }
-
-    /**
-     * Get multiple items by SelectAction from local or remote storage
-     * @param entity The entity type to query
-     * @param selectAction The SelectAction containing the query criteria
-     * @returns Promise<T[]> The items
-     * @throws {StoreError} If retrieval fails
-     */
-    public async query<T extends StoreItem>(entity: string, selectAction: SelectAction): Promise<T[]> {
-        if (!entity || !selectAction) {
-            throw new StoreError('Entity and SelectAction are required', 'INVALID_INPUT');
-        }
-
-        try {
-            // Check local storage first
-            const localItems = await this.storageManager.query<T>(entity, selectAction);
-            
-            // If all items found locally, return them
-            if (localItems.length === selectAction.pageSize) {
-                return localItems;
-            }
-
-            // Query remote for items
-            const remoteItems = await this.getRemoteItems<T>(selectAction);
-            
-            // Store remote items locally for future use
-            if (remoteItems.length > 0) {
-                await this.storageManager.upsert(entity, remoteItems);
-            }
-
-            return remoteItems;
-        } catch (error) {
-            this.logger.error('Failed to get items by SelectAction:', error);
-            throw new StoreError(`Failed to get ${entity} with provided SelectAction`, 'GET_BY_IDS_ERROR');
         }
     }
 
@@ -453,15 +487,7 @@ export class Store {
             }
 
             // If no cached result, process all items
-            const allItems = await this.storageManager.getAll(query.entity);
-            const processedResult = DataUtil.processDataset(allItems, {
-                filter: { options: queryState.filterOptions },
-                sort: { options: query.sort },
-                page: {
-                    currentPage: query.pageOffset,
-                    itemsPerPage: query.pageSize,
-                },
-            });
+            const processedResult = await this.filterLocalItems(queryHash, query);
 
             // Always cache the result, even if empty
             const newResult = {
@@ -484,6 +510,26 @@ export class Store {
             this.logger.error('Failed to load initial query result:', error);
             throw new StoreError('Failed to load query result', 'QUERY_LOAD_ERROR');
         }
+    }
+
+    /**
+     * Query local storage
+     * @private
+     */
+    private async filterLocalItems<T extends StoreItem>(
+        queryHash: string,
+        query: SelectAction
+    ): Promise<SelectResult<T>> {
+        const queryState = this.activeQueries[queryHash];
+        const allItems = await this.storageManager.getAll<T>(query.entity);
+        return DataUtil.processDataset<T>(allItems, {
+            filter: { options: queryState.filterOptions },
+            sort: { options: query.sort },
+            page: {
+                offset: query.offset,
+                limit: query.limit,
+            },
+        });
     }
 
     /**
@@ -831,17 +877,30 @@ export class Store {
     }
 
     /**
-     * Get items from remote storage
+     * Get items from remote storage with timeout protection
      * @private
+     * @param query - The SelectAction query to execute remotely
+     * @returns Promise<SelectResult<T>> - Returns query results or empty result if timeout occurs
      */
-    private getRemoteItems<T>(query: SelectAction): Promise<T[]> {
+    private async getRemoteItems<T>(query: SelectAction): Promise<SelectResult<T>> {
         return new Promise((resolve) => {
-            const timeout = setTimeout(() => resolve([]), this.remoteQueryTimeout);
+            // Create empty result with correct shape
+            const emptyResult: SelectResult<T> = {
+                rows: [],
+                total: 0,
+                queryHash: toHexString(query.encode())
+            };
 
-            const unsubscribe = this.subscribeQuery(query, (result) => {
+            // Set timeout to prevent hanging if remote query fails
+            const timeout = setTimeout(() => {
+                this.logger.warn(`Remote query timed out after ${this.remoteQueryTimeout}ms`);
+                resolve(emptyResult);
+            }, this.remoteQueryTimeout);
+
+            const unsubscribe = this.subscribe(query, (result) => {
                 clearTimeout(timeout);
                 unsubscribe();
-                resolve(result.rows as T[]);
+                resolve(result as SelectResult<T>);
             });
         });
     }

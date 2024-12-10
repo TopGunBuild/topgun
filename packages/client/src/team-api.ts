@@ -192,7 +192,7 @@ export class TeamAPI extends EventEmitter {
             }
 
             // Get existing member or create new one with default roles array
-            const member = await this.store.getById<Member>('member', userId);
+            const member = await this.store.queryOne<Member>('member', userId);
             if (member) {
                 member.roles = Array.isArray(member.roles) ? member.roles : [];
                 if (!member.roles.includes(roleName)) {
@@ -223,7 +223,7 @@ export class TeamAPI extends EventEmitter {
             }
 
             // Get existing member
-            const member = await this.store.getById<Member>('member', userId);
+            const member = await this.store.queryOne<Member>('member', userId);
             if (member) {
                 // Ensure roles is an array and remove role if present
                 member.roles = Array.isArray(member.roles) ? member.roles : [];

@@ -14,7 +14,7 @@ export class DataFrameCollection<T> {
     private readonly sortEngine: SortEngine;
     private readonly compareRowsCb: RowComparatorFn<T>;
 
-    readonly pageSize: number;
+    readonly limit: number;
 
     // Property to indicate whether the last request returned data
     hasLastRequestData: boolean = false;
@@ -24,16 +24,16 @@ export class DataFrameCollection<T> {
      * @param {object} params - The parameters for initializing the DataFrameCollection
      * @param {SortingExpression[]} params.sortingExpressions - The sorting expressions for the data
      * @param {RowComparatorFn<T>} params.compareRowsFn - The function to compare rows
-     * @param {number} [params.pageSize] - The page size for pagination (optional)
+     * @param {number} [params.limit] - The limit for pagination (optional)
      */
     constructor(params: {
         sortingCriteria: SortOptions[],
         compareRowsFn: RowComparatorFn<T>,
-        pageSize?: number
+        limit?: number
     }) {
         this.data = [];
         this.sortEngine = new SortEngine();
-        this.pageSize = params.pageSize;
+        this.limit = params.limit;
         this.compareRowsCb = params.compareRowsFn;
         this.sortOptions = params.sortingCriteria;
     }

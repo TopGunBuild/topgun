@@ -7,7 +7,15 @@ import {
     BYTE_FILTER_CONDITIONS 
 } from '@topgunbuild/collections';
 import { DataFrameQuery } from './types';
-import { And, BooleanConditionQuery, ByteConditionQuery, DateConditionQuery, NumberConditionQuery, Or, StringConditionQuery } from '@topgunbuild/models';
+import { 
+    And,
+    BooleanConditionQuery,
+    ByteConditionQuery, 
+    DateConditionQuery, 
+    NumberConditionQuery, 
+    Or, 
+    StringConditionQuery 
+} from '@topgunbuild/models';
 import { FieldQuery, LogicalQuery, Query } from '@topgunbuild/models';
 
 /**
@@ -29,8 +37,8 @@ export const convertQueryToDatagridState = (query: DataFrameQuery): DatasetState
             options: query.sort || [],
         },
         page: {
-            currentPage: query.pageOffset || 0,
-            itemsPerPage: query.pageSize || 10
+            offset: query.offset || 0,
+            limit: query.limit || 10
         }
     };
 };

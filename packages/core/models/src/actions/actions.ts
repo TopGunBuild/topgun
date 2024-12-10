@@ -502,10 +502,10 @@ export class SelectAction extends AbstractAction implements SelectOptions {
     fields: string[];
 
     @field({ type: 'u16' })
-    pageSize: number;
+    limit: number;
 
     @field({ type: 'u32' })
-    pageOffset: number;
+    offset: number;
 
     constructor(data: {
         entity: string,
@@ -519,8 +519,8 @@ export class SelectAction extends AbstractAction implements SelectOptions {
         this.query = toArray(data.query);
         this.sort = toArray(data.sort);
         this.fields = toArray(data.fields);
-        this.pageSize = data.pageSize || 10;
-        this.pageOffset = data.pageOffset || 0;
+        this.limit = data.limit || 10;
+        this.offset = data.offset || 0;
     }
 }
 

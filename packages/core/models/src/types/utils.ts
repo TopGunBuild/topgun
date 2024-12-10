@@ -63,9 +63,9 @@ export interface SelectOptions {
     /** Fields to include in results */
     fields?: string[];
     /** Maximum items per page */
-    pageSize?: number;
+    limit?: number;
     /** Number of items to skip */
-    pageOffset?: number;
+    offset?: number;
 }
 
 /** Base interface for query options */

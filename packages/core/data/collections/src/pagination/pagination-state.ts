@@ -1,14 +1,10 @@
-import { PaginationError } from "./pagination-error";
-
 /**
  * Interface for pagination configuration.
  */
 export interface PaginationState {
-    currentPage: number;
-    itemsPerPage: number;
+    offset: number;
+    limit: number;
     details?: {
-        totalPages: number;
-        errorType: PaginationError;
-        totalItems: number;
+        total: number;
     };
 }

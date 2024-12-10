@@ -57,12 +57,10 @@ export class DataUtil {
             return data;
         }
         const len = data.length;
-        const index = state.currentPage;
-        const recordsPerPage = state.itemsPerPage;
+        const index = state.offset;
+        const recordsPerPage = state.limit;
         state.details = {
-            totalPages: Math.ceil(len / recordsPerPage),
-            totalItems: data.length,
-            errorType: 0 // Assuming 0 is the value for PagingError.None
+            total: data.length,
         };
         if (!len) {
             return data;

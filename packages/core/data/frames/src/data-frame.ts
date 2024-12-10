@@ -50,7 +50,7 @@ export class DataFrame<T> {
     constructor(params: DataFrameConfig<T>) {
         const {
             query,
-            query: { sort: sortingCriteria, pageOffset, pageSize },
+            query: { sort: sortingCriteria, offset, limit },
             compareRowsFn,
             followingRowsSize,
             precedingRowsSize,
@@ -82,19 +82,19 @@ export class DataFrame<T> {
         this.precedingCollection = new DataFrameCollection({
             sortingCriteria,
             compareRowsFn,
-            pageSize: precedingRowsSize > pageOffset ? pageOffset : precedingRowsSize,
+            limit: precedingRowsSize > offset ? offset : precedingRowsSize,
         });
         // Initialize the row collection after the main set
         this.followingCollection = new DataFrameCollection({
             sortingCriteria,
             compareRowsFn,
-            pageSize: followingRowsSize,
+            limit: followingRowsSize,
         });
         // Initialize the row collection that contains the main set
         this.mainCollection = new DataFrameCollection({
             sortingCriteria,
             compareRowsFn,
-            pageSize,
+            limit,
         });
 
         // Subscribe to database changes
@@ -109,8 +109,8 @@ export class DataFrame<T> {
         const query = { ...this.query };
 
         // Increase the size of the requested data to include the data set before and after the main one.
-        query.pageOffset = this.query.pageOffset - this.precedingCollection.pageSize;
-        query.pageSize = this.query.pageSize + this.precedingCollection.pageSize + this.followingCollection.pageSize;
+        query.offset = this.query.offset - this.precedingCollection.limit;
+        query.limit = this.query.limit + this.precedingCollection.limit + this.followingCollection.limit;
 
         // Fetch the data from the database
         const queryResult = await this.databaseQueryFn(query);
@@ -123,11 +123,11 @@ export class DataFrame<T> {
 
         // Initialize the data set before the main one
         this.precedingCollection.init(
-            this.mainCollection.splice(0, this.precedingCollection.pageSize),
+            this.mainCollection.splice(0, this.precedingCollection.limit),
         );
         // Initialize the data set after the main one
         this.followingCollection.init(
-            this.mainCollection.splice(this.query.pageSize, this.query.pageSize + this.followingCollection.pageSize),
+            this.mainCollection.splice(this.query.limit, this.query.limit + this.followingCollection.limit),
         );
 
         if (emitChanges) {
@@ -226,17 +226,17 @@ export class DataFrame<T> {
             await this.fetchFromDatabase(emitChanges);
         }
         else {
-            const hasPageOffset = this.query.pageOffset > 0;
+            const hasOffset = this.query.offset > 0;
             this.total = this.total + 1;
 
             switch (true) {
                 // If the row is before the preceding collection and there is a preceding collection, shift up
-                case hasPageOffset && this.precedingCollection.isBefore(row):
+                case hasOffset && this.precedingCollection.isBefore(row):
                     await this.#shiftUp();
                     break;
 
                 // If the row is belong to the preceding collection and there is a preceding collection, insert it
-                case hasPageOffset && this.precedingCollection.isBelong(row):
+                case hasOffset && this.precedingCollection.isBelong(row):
                     this.precedingCollection.insert(row);
                     await this.#shiftUp();
                     break;
@@ -400,7 +400,7 @@ export class DataFrame<T> {
      * Shift data collection up (main to after)
      */
     #shiftFromCurrentToAfter(): void {
-        if (this.mainCollection.getDataSize() > this.query.pageSize) {
+        if (this.mainCollection.getDataSize() > this.query.limit) {
             this.lastRowDeleted = this.mainCollection.lastRemove();
             this.followingCollection.setToStart(this.lastRowDeleted);
         }

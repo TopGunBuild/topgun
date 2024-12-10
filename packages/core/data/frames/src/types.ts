@@ -34,8 +34,8 @@ export type RowComparatorFn<T> = (rowA: T, rowB: T) => boolean; // Function that
  * @template T
  */
 export interface DataFrameQuery {
-    pageOffset: number;
-    pageSize: number;
+    offset: number;
+    limit: number;
     query: Query[];
     sort: SortOptions[];
     queryHash?: string;
