@@ -51,7 +51,7 @@ export const rotateLockbox = ({
   // Increment the generation counter for the new contents
   const rotatedContents: KeysetWithSecrets = {
     ...newContents,
-    generation: (oldLockbox?.contentsGeneration ?? 0) + 1
+    generation: (oldLockbox?.generation ?? 0) + 1
   }
 
   // Use updated recipient keys if provided, otherwise keep existing ones
@@ -60,7 +60,7 @@ export const rotateLockbox = ({
     publicKey: oldLockbox.recipientPublicKey,
     type: oldLockbox.recipientType,
     name: oldLockbox.recipientName,
-    generation: oldLockbox.recipientGeneration
+    generation: 0
   }
 
   return createLockbox({ 

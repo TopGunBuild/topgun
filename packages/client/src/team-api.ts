@@ -17,21 +17,23 @@ import {
     AssignRoleToMemberAction,
     KeyType,
     KeyScope,
-    LockboxEntry,
-    KeyMetadata
+    KeyMetadata,
+    SelectAction,
+    Lockbox
 } from "@topgunbuild/models";
 import { LoggerService } from "@topgunbuild/logger";
 import { EventEmitter } from "@topgunbuild/eventemitter";
 import { StoreError } from "./errors";
 import { ChannelAPI } from "./channel-api";
 import { randomId } from "@topgunbuild/common";
-import { createKeyset, createLockbox } from "@topgunbuild/model-utils";
+import { createKeyset, createLockbox, decryptLockbox } from "@topgunbuild/model-utils";
 import { randomKey } from "@topgunbuild/crypto";
+import { whereNumber, whereString } from "./query-conditions";
 
 export class TeamAPI extends EventEmitter {
     private readonly context: LocalUserContext;
     private readonly logger: LoggerService;
-    #teamKeys: KeysetWithSecrets;
+    // #teamKeys: KeysetWithSecrets;
     #seed: string;
 
     constructor(
@@ -41,7 +43,7 @@ export class TeamAPI extends EventEmitter {
         seed: string
     ) {
         super();
-        this.#teamKeys = teamKeys;
+        // this.#teamKeys = teamKeys;
         this.#seed = seed ?? randomKey();
     }
 
@@ -243,60 +245,128 @@ export class TeamAPI extends EventEmitter {
     }
 
     /**
-     * Retrieves secret keys available to the current device for the specified scope.
-     * @param scope The scope of the keys to retrieve (TEAM, ROLE, USER, etc.)
-     * @param options Additional options for key retrieval
-     * @param options.name Name identifier (required for ROLE scope)
-     * @param options.generation Optional key generation number
-     * @returns The keyset containing the secret keys for the specified scope
-     * @throws {StoreError} If keys cannot be retrieved or decrypted
+     * Retrieves the admin role keyset
+     * This is a convenience method that returns the keys for the 'ADMIN' role
+     * @param generation Optional generation number for the keys
+     * @returns The keyset containing the admin secret keys
+     * @throws {StoreError} If admin keys cannot be retrieved or decrypted
+     */
+    public async getAdminKeys(generation?: number): Promise<KeysetWithSecrets> {
+        try {
+            return this.getRoleKeys('ADMIN', generation);
+        } catch (error) {
+            console.error('Failed to get admin keys:', error);
+            throw error instanceof StoreError ? error : new StoreError('Failed to get admin keys', 'GET_ADMIN_KEYS_ERROR');
+        }
+    }
+
+    /**
+     * Retrieves the team keys for the current team or a specific generation
+     * @param generation Optional generation number for the keys
+     * @returns The keyset containing the team secret keys
+     * @throws {StoreError} If:
+     *         - Team keys cannot be retrieved
+     *         - Keys cannot be decrypted
+     */
+    public async getTeamKeys(generation?: number): Promise<KeysetWithSecrets> {
+        try {
+            return this.getKeys({
+                type: KeyType.TEAM,
+                name: this.team.$id,
+                ...(generation !== undefined && { generation })
+            });
+        } catch (error) {
+            console.error('Failed to get team keys:', error);
+            throw error instanceof StoreError ? error : new StoreError('Failed to get team keys', 'GET_TEAM_KEYS_ERROR');
+        }
+    }
+    
+    /**
+     * Retrieves secret keys for a specific role
+     * @param roleName The name of the role to get keys for
+     * @param generation Optional generation number for the keys
+     * @returns The keyset containing the secret keys for the role
+     * @throws {StoreError} If:
+     *         - Role name is invalid/missing
+     *         - Keys cannot be retrieved
+     *         - Keys cannot be decrypted
+     */
+    public async getRoleKeys(roleName: string, generation?: number): Promise<KeysetWithSecrets> {
+        try {
+            if (!roleName) {
+                throw new StoreError('Role name is required', 'INVALID_INPUT');
+            }
+
+            return this.getKeys({
+                type: KeyType.ROLE,
+                name: roleName,
+                ...(generation !== undefined && { generation })
+            });
+        } catch (error) {
+            console.error('Failed to get role keys:', error);
+            throw error instanceof StoreError ? error : new StoreError('Failed to get role keys', 'GET_ROLE_KEYS_ERROR');
+        }
+    }
+
+    /**
+     * Retrieves the secret keys with the highest generation value for the specified scope.
+     * @param scope The scope of the keys to retrieve:
+     *             - KeyScope for basic scope types
+     *             - KeyMetadata for detailed scope with name and generation
+     * @returns The keyset containing the secret keys with the highest generation value
+     * @throws {StoreError} If:
+     *         - Input validation fails
+     *         - Keys cannot be retrieved
+     *         - Keys cannot be decrypted
      */
     public async getKeys(scope: KeyScope | KeyMetadata): Promise<KeysetWithSecrets> {
         try {
-            const { type, name, generation = 0 } = scope as KeyMetadata;
-            const keys = this.context.device.keys;
+            // Validate scope type and extract metadata
+            if (!scope || typeof scope !== 'object') {
+                throw new StoreError('Invalid scope parameter', 'INVALID_INPUT');
+            }
 
-            this.store.subscribeQuery
+            const { type, name, generation } = 'type' in scope 
+                ? scope as KeyMetadata 
+                : { type: scope as KeyScope, name: undefined, generation: undefined };
 
-            // Validate inputs based on scope
-            if (scope.type === KeyType.ROLE && !name) {
+            // Validate required fields
+            if (!type || !(String(type) in KeyType)) {
+                throw new StoreError('Invalid key type', 'INVALID_INPUT');
+            }
+
+            if (type === KeyType.ROLE && !name) {
                 throw new StoreError('Name is required for ROLE scope', 'INVALID_INPUT');
             }
 
+            // Ensure device context is available
+            if (!this.context?.device?.keys?.encryption?.publicKey) {
+                throw new StoreError('Device encryption keys not available', 'INVALID_STATE');
+            }
+
             // Get lockboxes from the store based on scope
-            const lockboxQuery = {
-                type: scope.type,
-                ...(name && { name }),
-                ...(generation && { generation })
-            };
+            const lockboxQuery = new SelectAction({
+                entity: 'lockbox',
+                query: [
+                    whereString('type', '=', String(type)),
+                    whereString('recipientPublicKey', '=', this.context.device.keys.encryption.publicKey),
+                    ...(name ? [whereString('name', '=', name)] : []),
+                    ...(generation !== undefined ? [whereNumber('generation', '=', generation)] : [])
+                ]
+            });
             
-            const lockboxes = await this.store.query<LockboxEntry>('lockbox', lockboxQuery);
+            const lockboxResult = await this.store.query<Lockbox>(lockboxQuery);
             
-            if (!lockboxes || lockboxes.length === 0) {
-                throw new StoreError(`No keys found for scope: ${scope}`, 'KEYS_NOT_FOUND');
+            if (!lockboxResult.rows || lockboxResult.rows.length === 0) {
+                throw new StoreError(`No keys found for scope: ${JSON.stringify(scope)}`, 'KEYS_NOT_FOUND');
             }
 
-            // For team scope, return the team keys we already have
-            if (scope.type === KeyType.TEAM) {
-                return this.#teamKeys;
-            }
+            // Otherwise, find the lockbox with the highest generation
+            const highestGenerationLockbox = lockboxResult.rows.reduce((highest, current) => 
+                !highest || current.generation > highest.generation ? current : highest
+            );
 
-            // Try to decrypt each lockbox until we find one we can open
-            for (const lockbox of lockboxes) {
-                try {
-                    // Attempt to decrypt the lockbox using team keys
-                    const decryptedKeys = lockbox.decrypt(this.#teamKeys);
-                    if (decryptedKeys) {
-                        return decryptedKeys;
-                    }
-                } catch (error) {
-                    // Continue to next lockbox if decryption fails
-                    this.logger.debug(`Failed to decrypt lockbox: ${error['message']}`);
-                    continue;
-                }
-            }
-
-            throw new StoreError(`Unable to decrypt keys for scope: ${scope}`, 'DECRYPTION_FAILED');
+            return decryptLockbox(highestGenerationLockbox, this.context.device.keys);
         } catch (error) {
             this.logger.error('Failed to get keys:', error);
             throw error instanceof StoreError 

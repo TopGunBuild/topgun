@@ -121,4 +121,9 @@ export interface Keyset extends KeyMetadata {
  * Provides a way to manage multiple keysets for different purposes
  */
 export type Keyring = Record<string, KeysetWithSecrets>;
-  
+
+/**
+ * Collection of keysets indexed by their public encryption keys
+ * Provides a way to manage multiple keysets for different purposes
+ */
+export type KeyMap = Record<string, Record<string, KeysetWithSecrets[]>>;

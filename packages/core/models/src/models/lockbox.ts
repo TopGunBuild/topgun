@@ -25,7 +25,7 @@ export class LockboxImpl extends EncodeHelper implements Lockbox {
     recipientName: string;
 
     @field({ type: 'u32' })
-    recipientGeneration: number;
+    generation: number;
 
     @field({ type: 'string' })
     contentsScope: string;
@@ -39,9 +39,6 @@ export class LockboxImpl extends EncodeHelper implements Lockbox {
     @field({ type: 'string' })
     contentsName: string;
 
-    @field({ type: 'u32' })
-    contentsGeneration: number;
-
     @field({ type: 'string' })
     encryptedPayload: Uint8Array;
 
@@ -53,14 +50,13 @@ export class LockboxImpl extends EncodeHelper implements Lockbox {
         recipientPublicKey: string,
         recipientType: string,
         recipientName: string,
-        recipientGeneration: number,
+        generation: number,
         contentsScope: string,
         contentsPublicKey: string,
         contentsType: string,
         contentsName: string,
         encryptedPayload: Uint8Array,
-        contentsGeneration: number
-    }) {
+        }) {
         super();
         this.$id = data.$id;
         this.encryptionKeyScope = data.encryptionKeyScope;
@@ -69,12 +65,11 @@ export class LockboxImpl extends EncodeHelper implements Lockbox {
         this.recipientPublicKey = data.recipientPublicKey;
         this.recipientType = data.recipientType;
         this.recipientName = data.recipientName;
-        this.recipientGeneration = data.recipientGeneration;
+        this.generation = data.generation;
         this.contentsScope = data.contentsScope;
         this.contentsPublicKey = data.contentsPublicKey;
         this.contentsType = data.contentsType;
         this.contentsName = data.contentsName;
-        this.contentsGeneration = data.contentsGeneration;
         this.encryptedPayload = data.encryptedPayload;
     }
 }

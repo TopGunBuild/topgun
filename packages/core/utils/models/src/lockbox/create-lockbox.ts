@@ -60,12 +60,11 @@ export const createLockbox = ({
       recipientScope: sanitizedRecipientKeys.type,
       recipientType: sanitizedRecipientKeys.type,
       recipientName: sanitizedRecipientKeys.name || '',
-      recipientGeneration: sanitizedRecipientKeys.generation || 0,
+      generation: 0,
       recipientPublicKey: recipientPublicKey,
       contentsScope: publicContents.type,
       contentsType: publicContents.type,
       contentsName: publicContents.name || '',
-      contentsGeneration: publicContents.generation || 0,
       contentsPublicKey: contents.encryption.publicKey,
       encryptedPayload,
     }

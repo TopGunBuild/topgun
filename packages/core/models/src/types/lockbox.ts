@@ -5,6 +5,11 @@ import { Identifiable } from "./utils"
  * Used for secure key exchange between parties in the system
  */
 export interface Lockbox extends Identifiable {
+    /**
+     * Incremental number indicating the lockbox's generation/version
+     */
+    generation: number;
+
     /** 
      * Type of the ephemeral encryption key scope
      * Always set to 'EPHEMERAL' for one-time encryption
@@ -37,11 +42,6 @@ export interface Lockbox extends Identifiable {
      */
     recipientPublicKey: string;
 
-    /**
-     * Incremental number indicating the recipient key's generation/version
-     */
-    recipientGeneration: number;
-
     /** 
      * Type of the contents key manifest
      */
@@ -61,11 +61,6 @@ export interface Lockbox extends Identifiable {
      * Public key of the encrypted contents
      */
     contentsPublicKey: string;
-
-    /**
-     * Incremental number indicating the contents key's generation/version
-     */
-    contentsGeneration: number;
 
     /** 
      * The actual encrypted key material
