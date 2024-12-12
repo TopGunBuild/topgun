@@ -19,14 +19,15 @@ import {
     KeyScope,
     KeyMetadata,
     SelectAction,
-    Lockbox
+    Lockbox,
+    RotateKeysAction
 } from "@topgunbuild/models";
 import { LoggerService } from "@topgunbuild/logger";
 import { EventEmitter } from "@topgunbuild/eventemitter";
 import { StoreError } from "./errors";
 import { ChannelAPI } from "./channel-api";
-import { randomId } from "@topgunbuild/common";
-import { createKeyset, createLockbox, decryptLockbox } from "@topgunbuild/model-utils";
+import { randomId, uniqBy } from "@topgunbuild/common";
+import { convertToPublicKeyset, createKeyset, createLockbox, decryptLockbox, getLockboxLatestGeneration, isCompleteKeyset, rotateLockbox, scopesMatch } from "@topgunbuild/model-utils";
 import { randomKey } from "@topgunbuild/crypto";
 import { whereNumber, whereString } from "./query-conditions";
 
@@ -244,6 +245,20 @@ export class TeamAPI extends EventEmitter {
         }
     }
 
+    public async changeKeys(newKeys: KeysetWithSecrets) {
+        const { device, user } = this.context
+        const { type } = newKeys;
+
+        if (type === KeyType.DEVICE) {
+            throw new StoreError('Device keys cannot be changed', 'INVALID_INPUT');
+        }
+        const isForUser = type === KeyType.USER;
+        const isForServer = type === KeyType.SERVER;
+
+        const oldKeys: KeysetWithSecrets = user.keys
+        newKeys.generation = oldKeys.generation + 1
+    }
+
     /**
      * Retrieves the admin role keyset
      * This is a convenience method that returns the keys for the 'ADMIN' role
@@ -361,10 +376,10 @@ export class TeamAPI extends EventEmitter {
                 throw new StoreError(`No keys found for scope: ${JSON.stringify(scope)}`, 'KEYS_NOT_FOUND');
             }
 
-            // Otherwise, find the lockbox with the highest generation
-            const highestGenerationLockbox = lockboxResult.rows.reduce((highest, current) => 
-                !highest || current.generation > highest.generation ? current : highest
-            );
+            const highestGenerationLockbox = getLockboxLatestGeneration(lockboxResult.rows);
+            if (!highestGenerationLockbox) {
+                throw new StoreError(`No valid lockbox found for scope: ${JSON.stringify(scope)}`, 'KEYS_NOT_FOUND');
+            }
 
             return decryptLockbox(highestGenerationLockbox, this.context.device.keys);
         } catch (error) {
@@ -372,6 +387,87 @@ export class TeamAPI extends EventEmitter {
             throw error instanceof StoreError 
                 ? error 
                 : new StoreError('Failed to get keys', 'GET_KEYS_ERROR');
+        }
+    }
+
+    /**
+     * Rotates the keys for the given scope or keyset
+     * @param keys The scope or keyset to rotate
+     * @returns The new lockboxes created by the rotation
+     * @throws {StoreError} If the keyset is invalid or the rotation fails
+     */
+    private async rotateKeys(keys: KeyScope | KeysetWithSecrets): Promise<Lockbox[]> {
+        try {
+            // Create or use provided keyset
+            const newKeyset = isCompleteKeyset(keys) ? keys : createKeyset(keys, this.#seed);
+            const { type, name } = newKeyset;
+
+            if (!type || !name) {
+                throw new StoreError('Invalid keyset: type and name are required', 'INVALID_INPUT');
+            }
+
+            // Find all lockboxes for this type/name
+            const lockboxes = await this.store.query<Lockbox>(new SelectAction({
+                entity: 'lockbox',
+                query: [
+                    whereString('type', '=', String(type)),
+                    whereString('name', '=', name)
+                ]
+            }));
+
+            if (!lockboxes?.rows?.length) {
+                throw new StoreError(`No lockboxes found for type=${type}, name=${name}`, 'NOT_FOUND');
+            }
+
+            // Get unique scopes from existing lockboxes
+            const visibleScopes: KeyScope[] = uniqBy(
+                lockboxes.rows.map(lockbox => ({
+                    type: lockbox.recipientType,
+                    name: lockbox.recipientName,
+                })),
+                scope => `${scope.type}:${scope.name}`
+            );
+
+            // Create new keysets for all affected scopes
+            const newKeysets = [newKeyset, ...visibleScopes.map(scope => createKeyset(scope, this.#seed))];
+
+            // Create new lockboxes for each keyset
+            const newLockboxes = await Promise.all(
+                newKeysets.map(async keyset => {
+                    const keysetLockboxes = await this.store.query<Lockbox>(new SelectAction({
+                        entity: 'lockbox',
+                        query: [
+                            whereString('contentsType', '=', String(keyset.type)),
+                            whereString('contentsName', '=', keyset.name)
+                        ]
+                    }));
+
+                    const oldLockbox = getLockboxLatestGeneration(keysetLockboxes.rows);
+                    if (!oldLockbox) {
+                        this.logger.warn(`No existing lockbox found for type=${keyset.type}, name=${keyset.name}`);
+                        return null;
+                    }
+
+                    const updatedKeyset = newKeysets.find(k => scopesMatch(k, {
+                        type: oldLockbox.recipientType,
+                        name: oldLockbox.recipientName
+                    }));
+
+                    return rotateLockbox({
+                        oldLockbox,
+                        newContents: keyset,
+                        updatedRecipientKeys: updatedKeyset ? convertToPublicKeyset(updatedKeyset) : undefined
+                    });
+                })
+            );
+
+            // Filter out null values and return valid lockboxes
+            return newLockboxes.filter((lockbox): lockbox is Lockbox => lockbox !== null);
+        } catch (error) {
+            this.logger.error('Failed to rotate keys:', error);
+            throw error instanceof StoreError 
+                ? error 
+                : new StoreError('Failed to rotate keys', 'ROTATE_KEYS_ERROR');
         }
     }
 }
