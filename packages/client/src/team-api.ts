@@ -20,7 +20,8 @@ import {
     KeyMetadata,
     SelectAction,
     Lockbox,
-    RotateKeysAction
+    RotateKeysAction,
+    ADMIN
 } from "@topgunbuild/models";
 import { LoggerService } from "@topgunbuild/logger";
 import { EventEmitter } from "@topgunbuild/eventemitter";
@@ -64,11 +65,43 @@ export class TeamAPI extends EventEmitter {
         return new ChannelAPI(channelId, this.store, this.logger);
     }
 
-    
+    /**
+     * Checks if a member exists in the store
+     * @param userId The ID of the member to check
+     * @returns True if the member exists, false otherwise
+     */
+    public async hasMember(userId: string): Promise<boolean> {
+        return !!(await this.store.queryOne('member', userId));
+    }
 
-    /** Returns the keys for the given role. */
-    // public roleKeys = (roleName: string, generation?: number) =>
-    //     this.keys({ type: KeyType.ROLE, name: roleName, generation })
+    /**
+     * Retrieves a member from the store
+     * @param userId The ID of the member to retrieve
+     * @returns The member object if found, null otherwise
+     */
+    public async getMember(userId: string): Promise<Member | null> {
+        return await this.store.queryOne('member', userId);
+    }
+
+    /**
+     * Checks if a member has a specific role
+     * @param userId The ID of the member to check
+     * @param roleName The name of the role to check for
+     * @returns True if the member has the role, false otherwise
+     */
+    public async memberHasRole(userId: string, roleName: string): Promise<boolean> {
+        const member = await this.getMember(userId);
+        return member?.roles?.includes(roleName) ?? false;
+    }
+
+    /**
+     * Checks if a member is an admin
+     * @param userId The ID of the member to check
+     * @returns True if the member is an admin, false otherwise
+     */
+    public async memberIsAdmin(userId: string): Promise<boolean> {
+        return this.memberHasRole(userId, ADMIN);
+    }
 
     /**
      * Add a member to the store
@@ -255,8 +288,9 @@ export class TeamAPI extends EventEmitter {
         const isForUser = type === KeyType.USER;
         const isForServer = type === KeyType.SERVER;
 
-        const oldKeys: KeysetWithSecrets = user.keys
-        newKeys.generation = oldKeys.generation + 1
+        const oldKeys: KeysetWithSecrets = user.keys;
+        newKeys.generation = oldKeys.generation + 1;
+        // TODO: Rotate keys for all members
     }
 
     /**
@@ -387,6 +421,51 @@ export class TeamAPI extends EventEmitter {
             throw error instanceof StoreError 
                 ? error 
                 : new StoreError('Failed to get keys', 'GET_KEYS_ERROR');
+        }
+    }
+
+    /**
+     * Creates lockboxes for a member's keys
+     * @param member The member to create lockboxes for
+     * @returns The lockboxes created for the member
+     * @throws {StoreError} If the keyset is invalid or the rotation fails
+     */
+    private async createMemberLockboxes(member: Member): Promise<Lockbox[]> {
+        try {
+            // Input validation
+            if (!member) {
+                throw new StoreError('Member is required', 'INVALID_INPUT');
+            }
+
+            // Ensure roles is an array
+            const roles = Array.isArray(member.roles) ? member.roles : [];
+            
+            // Validate device keys
+            if (!member?.keys) {
+                throw new StoreError('Member keys not available', 'INVALID_STATE');
+            }
+
+            // Get all required keys
+            const roleKeys = await Promise.all(
+                roles.map(role => 
+                    this.getRoleKeys(role).catch(error => {
+                        this.logger.error(`Failed to get keys for role ${role}:`, error);
+                        throw new StoreError(`Failed to get keys for role ${role}`, 'GET_KEYS_ERROR');
+                    })
+                )
+            );
+            const teamKeys = await this.getTeamKeys();
+
+            // Create lockboxes
+            return [...roleKeys, teamKeys].map(keyset => createLockbox({
+                contents: keyset,
+                recipientKeys: member.keys
+            }));
+        } catch (error) {
+            this.logger.error('Failed to create member lockboxes:', error);
+            throw error instanceof StoreError 
+                ? error 
+                : new StoreError('Failed to create member lockboxes', 'CREATE_LOCKBOX_ERROR');
         }
     }
 
