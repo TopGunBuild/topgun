@@ -3,7 +3,6 @@
 </p>
 <h1 align="center" style="border-bottom: none;">⚡️ TopGun</h1>
 <p align="center">A graph data synchronisation engine for building realtime, offline-first, secure and scalable applications.</p>
-<p align="center">Alternate implementation of <a href="https://github.com/amark/gun" target="blank">GunDB</a> in TypeScript</p>
 
 <p align="center">
   <a href="https://npm.im/@topgunbuild/topgun">
@@ -14,15 +13,4 @@
   </a>
 </p>
 
-## Installation
-
-```bash
-$ npm install @topgunbuild/topgun --save
-```
-
-## Description
-Coming Soon.
-
-## License
-
-TopGun is [MIT licensed](LICENSE).
+> ⚠️ **Warning**: This project is currently in deep development phase. There is no release date set yet, and the project is not ready for production use. We recommend waiting for an official release before implementing it in your applications.
