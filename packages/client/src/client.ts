@@ -34,7 +34,7 @@ export class Client {
     }
 
     async loadTeam(teamId: string): Promise<TeamAPI> {
-        const team = await this.#store.getTeam(teamId);
+        const team = await this.#store.queryOne('team', teamId);
         return new TeamAPI(team, this.#store);
     }
 
@@ -114,7 +114,7 @@ export class Client {
 
         try {
             await this.#store.dispatchAction(action);
-            return new TeamAPI(team, this.#store, securityAssets.teamKeys);
+            return new TeamAPI(team, this.#store, securityAssets.teamKeys, seed);
         } catch (error) {
             this.#logger.error('Failed to create team:', error);
             throw new Error(`Failed to create team: ${error['message']}`);

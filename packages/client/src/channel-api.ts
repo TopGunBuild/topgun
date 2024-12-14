@@ -20,7 +20,7 @@ export class ChannelAPI {
      */
     public subscribeMessages(options: SelectOptions, cb: QueryCb<SelectResult<MessageRow>>): () => void {
         const query = new SelectAction({ entity: 'message', channelId: this.channelId, ...options });
-        return this.store.subscribeQuery<MessageRow>(query, cb);
+        return this.store.subscribe<MessageRow>(query, cb);
     }
 
     /**
