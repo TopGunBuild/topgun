@@ -1,10 +1,10 @@
 import { field } from '@dao-xyz/borsh';
 import { randomId } from '@topgunbuild/common';
-import { Server } from '../types';
-import { KeysetImpl } from './keyset';
+import { KeysetPublicInfo, ServerPublicInfo } from '../types';
+import { KeysetPublic } from './keyset-public';
 import { EncodeHelper } from '../utils/encode-helper';
 
-export class ServerImpl extends EncodeHelper implements Server
+export class Server extends EncodeHelper implements ServerPublicInfo
 {
     @field({ type: 'string' })
     $id: string;
@@ -12,14 +12,17 @@ export class ServerImpl extends EncodeHelper implements Server
     @field({ type: 'string' })
     host: string;
 
-    @field({ type: KeysetImpl })
-    keys: KeysetImpl;
+    @field({ type: KeysetPublic })
+    keys: KeysetPublic;
 
-    constructor(data: { $id?: string, host: string, keys: KeysetImpl })
+    @field({ type: 'f64' })
+    created: number;
+
+    constructor(data: { $id?: string, host: string, keys: KeysetPublicInfo })
     {
         super();
         this.$id  = data.$id || randomId(32);
         this.host = data.host;
-        this.keys = data.keys;
+        this.keys = new KeysetPublic(data.keys);
     }
 }

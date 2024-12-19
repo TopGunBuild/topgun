@@ -1,5 +1,5 @@
 import { randomKey } from "@topgunbuild/crypto"
-import { UserWithSecrets, KeyType } from "@topgunbuild/models"
+import { UserPrivateInfo, KeyType } from "@topgunbuild/models"
 import { createKeyset } from "../keyset/create-keyset"
 import { randomId } from "@topgunbuild/common"
 
@@ -14,7 +14,7 @@ export const createUser = (
     userName: string,
     userId: string = randomId(),
     seed: string = randomKey()
-  ): UserWithSecrets => {
+  ): UserPrivateInfo => {
     // Input validation
     if (!userName?.trim()) {
       throw new Error('Username is required')

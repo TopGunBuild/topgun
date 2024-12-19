@@ -1,8 +1,8 @@
 import { field, option } from '@dao-xyz/borsh';
-import { Invitation } from '../types';
+import { InvitationInfo } from '../types';
 import { EncodeHelper } from '../utils/encode-helper';
 
-export class InvitationImpl extends EncodeHelper implements Invitation
+export class Invitation extends EncodeHelper implements InvitationInfo
 {
     @field({ type: 'string' })
     $id: string;

@@ -1,6 +1,6 @@
-import { Invitation, ValidationError } from "@topgunbuild/models"
+import { InvitationInfo, ValidationError } from "@topgunbuild/models"
 import { normalizeInvitationKey } from "./normalize"
-import { generateInviteeStarterKeys } from "./generate-starter-keys"
+import { createInvitationKeys } from "./generate-starter-keys"
 import { generateInvitationId } from "./generate-id"
 import { CryptoError } from "../errors"
 
@@ -29,7 +29,7 @@ export const createInvitation = ({
   maxUses = 1,
   expiration = 0,
   userId,
-}: CreateInvitationParams): Invitation => {
+}: CreateInvitationParams): InvitationInfo => {
   // Validate inputs
   if (!seed) {
     throw new ValidationError('Seed is required')
@@ -44,7 +44,7 @@ export const createInvitation = ({
   try {
     const normalizedSeed = normalizeInvitationKey(seed)
     const invitationId = generateInvitationId(normalizedSeed)
-    const ephemeralKeys = generateInviteeStarterKeys(normalizedSeed)
+    const ephemeralKeys = createInvitationKeys(normalizedSeed)
 
     return {
       $id: invitationId,

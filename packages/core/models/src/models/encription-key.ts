@@ -1,7 +1,7 @@
 import { field } from "@dao-xyz/borsh";
 import { EncodeHelper } from "../utils/encode-helper";
 
-export class EncryptionKeyImpl extends EncodeHelper
+export class EncryptionKey extends EncodeHelper
 {
     @field({ type: 'string' })
     type: 'EPHEMERAL';

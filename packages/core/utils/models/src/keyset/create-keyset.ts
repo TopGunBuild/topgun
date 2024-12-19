@@ -1,17 +1,17 @@
 import {
-    KeyScope, 
-    KeysetWithSecrets, 
     Optional,
     SIGNATURE,
     ENCRYPTION,
-    SYMMETRIC
+    SYMMETRIC,
+    KeyScopeInfo,
+    KeysetPrivateInfo,
 } from "@topgunbuild/models";
 import { asymmetric, hash, hashPassword, randomKey, signatures } from "@topgunbuild/crypto";
 
 export function createKeyset(
-    scope: Optional<KeyScope, 'name'>,
+    scope: Optional<KeyScopeInfo, 'name'>,
     seed: string = randomKey()
-): KeysetWithSecrets {
+): KeysetPrivateInfo {
     const { type, name = type } = scope;
     
     // Ensure required parameters are present

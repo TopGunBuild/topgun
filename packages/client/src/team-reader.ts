@@ -1,23 +1,23 @@
 import { Store } from "./store";
 import { LoggerService } from "@topgunbuild/logger";
 import { 
-    Member, 
-    Role,
-    Team,
-    KeysetWithSecrets,
+    Member,
+    TeamInfo,
     KeyType,
-    KeyScope,
-    KeyMetadata,
     SelectAction,
     Lockbox,
-    LocalUserContext
+    LocalUserContext,
+    KeysetPrivateInfo,
+    KeyScopeInfo,
+    KeyBaseInfo
 } from "@topgunbuild/models";
+import { decryptLockbox, getLockboxLatestGeneration } from "@topgunbuild/model-utils";
 import { StoreError } from "./errors";
 import { whereString, whereNumber } from "./query-conditions";
 
 export class TeamReader {
     constructor(
-        private readonly team: Team,
+        private readonly team: TeamInfo,
         private readonly store: Store,
         private readonly logger: LoggerService,
         private readonly context: LocalUserContext
@@ -76,7 +76,7 @@ export class TeamReader {
     /**
      * Get team keys
      */
-    public async getTeamKeys(generation?: number): Promise<KeysetWithSecrets> {
+    public async getTeamKeys(generation?: number): Promise<KeysetPrivateInfo> {
         try {
             return this.getKeys({
                 type: KeyType.TEAM,
@@ -92,7 +92,7 @@ export class TeamReader {
     /**
      * Get role keys
      */
-    public async getRoleKeys(roleName: string, generation?: number): Promise<KeysetWithSecrets> {
+    public async getRoleKeys(roleName: string, generation?: number): Promise<KeysetPrivateInfo> {
         try {
             if (!roleName) {
                 throw new StoreError('Role name is required', 'INVALID_INPUT');
@@ -112,7 +112,7 @@ export class TeamReader {
     /**
      * Get admin keys
      */
-    public async getAdminKeys(generation?: number): Promise<KeysetWithSecrets> {
+    public async getAdminKeys(generation?: number): Promise<KeysetPrivateInfo> {
         try {
             return this.getRoleKeys('ADMIN', generation);
         } catch (error) {
@@ -124,15 +124,15 @@ export class TeamReader {
     /**
      * Get keys for a specific scope
      */
-    private async getKeys(scope: KeyScope | KeyMetadata): Promise<KeysetWithSecrets> {
+    private async getKeys(scope: KeyScopeInfo | KeyBaseInfo): Promise<KeysetPrivateInfo> {
         try {
             if (!scope || typeof scope !== 'object') {
                 throw new StoreError('Invalid scope parameter', 'INVALID_INPUT');
             }
 
             const { type, name, generation } = 'type' in scope 
-                ? scope as KeyMetadata 
-                : { type: scope as KeyScope, name: undefined, generation: undefined };
+                ? scope as KeyBaseInfo 
+                : { type: scope as KeyScopeInfo, name: undefined, generation: undefined };
 
             if (!type) {
                 throw new StoreError('Invalid key type', 'INVALID_INPUT');

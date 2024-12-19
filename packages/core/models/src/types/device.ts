@@ -1,50 +1,52 @@
-import { Keyset, KeysetWithSecrets } from "./keyset"
+import { KeysetPublicInfo, KeysetPrivateInfo } from "./keyset"
 import { Identifiable } from "./utils"
 
 /**
- * Base type containing common device information
+ * Base interface containing common device information
  */
 export interface DeviceInfo extends Identifiable {
+    /** ID of the team that owns this device */
+    teamId: string;
 
     /** ID of the user who owns this device */
-    userId: string
+    userId: string;
 
     /** Human-readable name for the device (e.g., "John's Laptop") */
-    deviceName: string
+    deviceName: string;
 
-    /** Optional additional device metadata (e.g., OS, browser version) */
-    deviceInfo?: any
+    /** Timestamp when the device was first registered (Unix timestamp in ms) */
+    created: number;
 
-    /** Timestamp when the device was first registered */
-    created?: number
+    /** Device information */
+    deviceInfo?: string;
 }
 
 /**
- * Represents a device with complete cryptographic information
- * Includes private keys and should only be stored locally
+ * Represents a device with complete cryptographic information.
+ * Includes private keys and should only be stored locally.
  */
-export interface DeviceWithSecrets extends DeviceInfo {
+export interface DevicePrivateInfo extends DeviceInfo {
     /** Complete set of device cryptographic keys (public + private) */
-    keys: KeysetWithSecrets
+    keys: KeysetPrivateInfo;
 }
 
 /**
- * Represents a device's public information
- * Safe to transmit and store on server
+ * Represents a device's public information.
+ * Safe to transmit and store on server.
  */
-export interface Device extends DeviceInfo {
+export interface DevicePublicInfo extends DeviceInfo {
     /** Public cryptographic keys for the device */
-    keys: Keyset
+    keys: KeysetPublicInfo;
 }
 
 /**
- * Device type used during initial device registration
- * Omits userId as it's not yet associated with a user
+ * Device type used during initial device registration.
+ * Omits userId as it's not yet associated with a user.
  */
-export type FirstUseDeviceWithSecrets = Omit<DeviceWithSecrets, 'userId'>
+export type DeviceRegistrationPrivate = Omit<DevicePrivateInfo, 'userId'>;
 
 /**
- * Public device information during initial registration
- * Omits userId as it's not yet associated with a user
+ * Public device information during initial registration.
+ * Omits userId as it's not yet associated with a user.
  */
-export type FirstUseDevice = Omit<Device, 'userId'>
+export type DeviceRegistrationPublic = Omit<DevicePublicInfo, 'userId'>;

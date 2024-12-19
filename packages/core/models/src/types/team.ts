@@ -1,5 +1,5 @@
 import { LocalContext } from "./context"
-import { KeysetWithSecrets, Keyring } from "./keyset"
+import { KeysetPrivateInfo, Keyring } from "./keyset"
 import { Identifiable } from "./utils"
 
 /** Properties required when creating a new team */
@@ -8,7 +8,7 @@ export type NewTeamOptions = {
     name: string
   
     /** The team keys need to be provided for encryption and decryption. It's up to the application to persist these somewhere.  */
-    keys: KeysetWithSecrets
+    keys: KeysetPrivateInfo
   }
   
   /** Properties required when rehydrating from an existing graph  */
@@ -31,7 +31,7 @@ export type NewTeamOptions = {
     context: LocalContext
 }
 
-export interface Team extends Identifiable {
+export interface TeamInfo extends Identifiable {
     /** The team's human-facing name */
     name: string;
     description?: string;

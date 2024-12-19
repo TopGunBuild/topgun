@@ -1,6 +1,6 @@
-import { DeviceWithSecrets } from "./device"
-import { ServerWithSecrets } from "./server"
-import { UserWithSecrets } from "./user"
+import { DevicePrivateInfo } from "./device"
+import { ServerPrivateInfo } from "./server"
+import { UserPrivateInfo } from "./user"
 
 /**
  * Union type representing either a user context or server context
@@ -14,13 +14,13 @@ export type LocalContext = LocalUserContext | LocalServerContext
  */
 export type LocalUserContext = {
     /** Complete user information including private keys */
-    user: UserWithSecrets
+    user: UserPrivateInfo
 
     /** Device information including private keys */
-    device: DeviceWithSecrets
+    device: DevicePrivateInfo
 
     /** Optional client information */
-    client?: Client
+    client?: ClientInfo
 }
 
 /**
@@ -29,17 +29,17 @@ export type LocalUserContext = {
  */
 export type LocalServerContext = {
     /** Server information including private keys */
-    server: ServerWithSecrets
+    server: ServerPrivateInfo
 
     /** Optional client information */
-    client?: Client
+    client?: ClientInfo
 }
 
 /**
  * Represents client application information
  * Used for tracking and versioning purposes
  */
-export type Client = {
+export interface ClientInfo {
     /** Name of the client application */
     name: string
 

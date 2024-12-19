@@ -1,6 +1,6 @@
 import { Identifiable } from "./utils";
 
-export interface Channel extends Identifiable {
+export interface ChannelInfo extends Identifiable {
     name: string;
     description?: string;
 }

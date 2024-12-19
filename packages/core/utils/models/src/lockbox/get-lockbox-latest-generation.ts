@@ -1,4 +1,4 @@
-import { Lockbox } from '@topgunbuild/models';
+import { LockboxInfo } from '@topgunbuild/models';
 
 /**
  * Returns the lockbox with the highest generation from an array of lockboxes.
@@ -7,7 +7,7 @@ import { Lockbox } from '@topgunbuild/models';
  * @param lockboxes Array of lockboxes to search through
  * @returns The lockbox with the highest generation or null
  */
-export function getLockboxLatestGeneration(lockboxes: Lockbox[]): Lockbox | null {
+export function getLockboxLatestGeneration(lockboxes: LockboxInfo[]): LockboxInfo | null {
     if (!lockboxes?.length) {
         return null;
     }

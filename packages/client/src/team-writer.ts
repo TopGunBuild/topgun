@@ -4,11 +4,10 @@ import {
     Member,
     AddMemberAction,
     RemoveMemberAction,
-    Role,
+    RoleInfo,
     AddRoleAction,
     RemoveRoleAction,
-    Team,
-    KeysetWithSecrets,
+    TeamInfo,
     UpdateTeamAction,
     PermissionsMap,
     AssignRoleToMemberAction,
@@ -16,22 +15,161 @@ import {
     RotateKeysAction,
     SelectAction,
     Lockbox,
-    KeyScope
+    KeysetPrivateInfo,
+    LockboxInfo,
+    KeyType,
+    KeyScopeInfo,
+    InvitationResult,
+    InviteMemberAction,
+    InviteDeviceAction
 } from "@topgunbuild/models";
 import { StoreError } from "./errors";
-import { convertToPublicKeyset, createKeyset, createLockbox, getLockboxLatestGeneration, isCompleteKeyset, rotateLockbox, scopesMatch } from "@topgunbuild/model-utils";
+import { 
+    createInvitation,
+    convertToPublicKeyset,
+    createKeyset,
+    createLockbox,
+    getLockboxLatestGeneration,
+    isCompleteKeyset,
+    normalizeInvitationKey,
+    generateInvitationKey,
+    rotateLockbox,
+    scopesMatch,
+    createInvitationKeys
+} from "@topgunbuild/model-utils";
 import { randomId, uniqBy } from "@topgunbuild/common";
 import { TeamReader } from "./team-reader";
 import { whereString } from "./query-conditions";
+import { randomKey} from '@topgunbuild/crypto';
 
 export class TeamWriter {
     constructor(
-        private readonly team: Team,
+        private readonly team: TeamInfo,
         private readonly store: Store,
         private readonly logger: LoggerService,
-        private readonly teamKeys: KeysetWithSecrets,
-        private readonly reader: TeamReader
+        private readonly teamKeys: KeysetPrivateInfo,
+        private readonly reader: TeamReader,
+        private readonly seed: string
     ) {}
+
+    /**
+     * Creates a new team invitation that can be shared with a potential member.
+     * 
+     * The invitation flow works as follows:
+     * 1. Team admin generates an invitation with an optional custom seed
+     * 2. Admin shares the invitation seed securely with the invitee
+     * 3. Invitee uses the seed to generate a proof of invitation
+     * 4. When connecting, invitee presents this proof instead of normal authentication
+     * 5. Once verified, invitee receives team data and can update with their real keys
+     *
+     * @throws {StoreError} If invitation creation or storage fails
+     */
+    public async inviteMember(params: {
+        /** Optional custom seed. If not provided, a random one is generated */
+        seed?: string,
+        /** Optional expiration timestamp in milliseconds */
+        expiration?: number,
+        /** Optional limit on number of times this invitation can be used */
+        maxUses?: number
+    }): Promise<InvitationResult> {
+        try {
+            // Generate or normalize the seed
+            let { seed = generateInvitationKey(), maxUses, expiration } = params;
+            seed = normalizeInvitationKey(seed);
+
+            // Validate expiration if provided
+            if (expiration && expiration <= Date.now()) {
+                throw new StoreError('Expiration must be in the future', 'INVALID_INPUT');
+            }
+
+            // Validate maxUses if provided
+            if (maxUses !== undefined && maxUses <= 0) {
+                throw new StoreError('maxUses must be positive', 'INVALID_INPUT');
+            }
+
+            const invitation = createInvitation({ seed, maxUses, expiration });
+
+            await this.store.upsert('invitation', invitation);
+
+            const body = new InviteMemberAction({ invitation });
+            await this.store.dispatchAction(body);
+
+            return { id: invitation.$id, seed };
+        } catch (error) {
+            this.logger.error('Failed to create invitation:', error);
+            throw error instanceof StoreError 
+                ? error 
+                : new StoreError('Failed to create invitation', 'INVITATION_ERROR');
+        }
+    }
+
+    /**
+     * Creates an invitation for adding a new device to an existing user's account.
+     * 
+     * Flow:
+     * 1. Generate invitation with single-use seed
+     * 2. Create lockbox containing invitation keys, encrypted with user's existing keys
+     * 3. Store invitation and dispatch to other devices
+     * 
+     * @param params.seed - Optional custom invitation seed
+     * @param params.expiration - Optional expiration timestamp in milliseconds
+     * @returns Object containing invitation ID and seed
+     * @throws {StoreError} If called from server or if expiration is invalid
+     * @throws {Error} If user context is missing
+     */
+    public async inviteDevice(params: {
+        seed?: string,
+        expiration?: number,
+    }): Promise<InvitationResult> {
+        // Server-side check
+        if(this.store.isServer) {
+            throw new StoreError('Invite device is not supported on the server', 'INVALID_INPUT');
+        }
+
+        // Ensure we have user context with keys
+        if (!('user' in this.store.context) || !this.store.context.user?.keys) {
+            throw new StoreError('Valid user context with keys required', 'INVALID_STATE');
+        }
+
+        try {
+            // Process and validate parameters
+            let { seed = generateInvitationKey(), expiration } = params;
+            seed = normalizeInvitationKey(seed);
+
+            if (expiration && expiration <= Date.now()) {
+                throw new StoreError('Expiration must be in the future', 'INVALID_INPUT');
+            }
+
+            // Create single-use invitation
+            const invitation = createInvitation({ 
+                seed, 
+                maxUses: 1, // Device invitations are always single-use
+                expiration 
+            });
+
+            const invitationKeys = createInvitationKeys(seed);
+
+            // Create lockbox containing invitation keys that can be decrypted using user's existing keys
+            const lockbox = createLockbox({
+                contents: invitationKeys,
+                recipientKeys: this.store.context.user.keys
+            });
+
+            // Store and broadcast invitation
+            await this.store.upsert('invitation', invitation);
+            await this.store.dispatchAction(new InviteDeviceAction({ 
+                invitation, 
+                lockboxes: [lockbox] 
+            }));
+
+            return { id: invitation.$id, seed };
+        } catch (error) {
+            this.logger.error('Failed to create device invitation:', error);
+            throw error instanceof StoreError 
+                ? error 
+                : new StoreError('Failed to create device invitation', 'INVITATION_ERROR');
+        }
+    }
 
     /**
      * Update team details
@@ -69,12 +207,14 @@ export class TeamWriter {
     /**
      * Add a role
      */
-    public async addRole(roleName: string, permissions?: PermissionsMap): Promise<void> {
+    public async addRole(roleName: string, permissionsMap?: PermissionsMap): Promise<void> {
         try {
-            const role: Role = {
+            const role: RoleInfo = {
                 $id: randomId(),
                 roleName,
-                permissions
+                permissions: permissionsMap
+                 ? Object.keys(permissionsMap).filter(permission => permissionsMap[permission])
+                  : []
             };
 
             const roleKeys = createKeyset({ type: KeyType.ROLE, name: role.roleName });
@@ -179,7 +319,7 @@ export class TeamWriter {
     /**
      * Change team keys
      */
-    public async changeKeys(newKeys: KeysetWithSecrets): Promise<void> {
+    public async changeKeys(newKeys: KeysetPrivateInfo): Promise<void> {
         try {
             const { type } = newKeys;
 
@@ -206,7 +346,7 @@ export class TeamWriter {
     /**
      * Create lockboxes for member keys
      */
-    private async createMemberLockboxes(newKeys: KeysetWithSecrets): Promise<Lockbox[]> {
+    private async createMemberLockboxes(newKeys: KeysetPrivateInfo): Promise<LockboxInfo[]> {
         try {
             const members = await this.store.query<Member>(new SelectAction({ entity: 'member' }));
             
@@ -234,10 +374,10 @@ export class TeamWriter {
      * @returns The new lockboxes created by the rotation
      * @throws {StoreError} If the keyset is invalid or the rotation fails
      */
-    private async rotateKeys(keys: KeyScope | KeysetWithSecrets): Promise<Lockbox[]> {
+    private async rotateKeys(keys: KeyScopeInfo | KeysetPrivateInfo): Promise<LockboxInfo[]> {
         try {
             // Create or use provided keyset
-            const newKeyset = isCompleteKeyset(keys) ? keys : createKeyset(keys, this.#seed);
+            const newKeyset = isCompleteKeyset(keys) ? keys : createKeyset(keys, this.seed);
             const { type, name } = newKeyset;
 
             if (!type || !name) {
@@ -258,7 +398,7 @@ export class TeamWriter {
             }
 
             // Get unique scopes from existing lockboxes
-            const visibleScopes: KeyScope[] = uniqBy(
+            const visibleScopes: KeyScopeInfo[] = uniqBy(
                 lockboxes.rows.map(lockbox => ({
                     type: lockbox.recipientType,
                     name: lockbox.recipientName,
@@ -267,7 +407,7 @@ export class TeamWriter {
             );
 
             // Create new keysets for all affected scopes
-            const newKeysets = [newKeyset, ...visibleScopes.map(scope => createKeyset(scope, this.#seed))];
+            const newKeysets = [newKeyset, ...visibleScopes.map(scope => createKeyset(scope, this.seed))];
 
             // Create new lockboxes for each keyset
             const newLockboxes = await Promise.all(

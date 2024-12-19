@@ -1,4 +1,4 @@
-import { Lockbox, KeysetWithSecrets, ValidationError } from "@topgunbuild/models"
+import { LockboxInfo, KeysetPrivateInfo, ValidationError } from "@topgunbuild/models"
 import { asymmetric } from "@topgunbuild/crypto"
 import { DecryptionError } from "../errors"
 import { isCompleteKeyset } from "../utils"
@@ -14,9 +14,9 @@ import { isCompleteKeyset } from "../utils"
  * @throws DecryptionError if decryption fails
  */
 export const decryptLockbox = (
-  lockbox: Lockbox, 
-  recipientKeys: KeysetWithSecrets
-): KeysetWithSecrets => {
+  lockbox: LockboxInfo, 
+  recipientKeys: KeysetPrivateInfo
+): KeysetPrivateInfo => {
   // Validate inputs
   if (!lockbox?.encryptionKeyPublicKey || !lockbox?.encryptedPayload) {
     throw new ValidationError('Invalid lockbox: missing required properties')
@@ -34,7 +34,7 @@ export const decryptLockbox = (
     })
 
     // Parse the decrypted bytes into a keyset
-    const decryptedKeys = decryptedBytes as unknown as KeysetWithSecrets
+    const decryptedKeys = decryptedBytes as unknown as KeysetPrivateInfo
 
     // Validate the decrypted keyset
     if (!isCompleteKeyset(decryptedKeys)) {

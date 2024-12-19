@@ -4,7 +4,8 @@ import {
     Member,
     PermissionsMap,
     Team,
-    KeysetWithSecrets,
+    KeysetPrivateInfo,
+    TeamInfo,
 } from "@topgunbuild/models";
 import { LoggerService } from "@topgunbuild/logger";
 import { EventEmitter } from "@topgunbuild/eventemitter";
@@ -17,15 +18,16 @@ export class TeamAPI extends EventEmitter {
     private readonly writer: TeamWriter;
 
     constructor(
-        private readonly team: Team,
+        private readonly team: TeamInfo,
         private readonly store: Store,
-        teamKeys: KeysetWithSecrets,
+        teamKeys: KeysetPrivateInfo,
         private readonly logger: LoggerService,
-        private readonly context: LocalUserContext
+        private readonly context: LocalUserContext,
+        private readonly seed: string
     ) {
         super();
         this.reader = new TeamReader(team, store, logger, context);
-        this.writer = new TeamWriter(team, store, logger, teamKeys, this.reader);
+        this.writer = new TeamWriter(team, store, logger, teamKeys, this.reader, seed);
     }
 
     // Delegate read operations to TeamReader
@@ -48,7 +50,12 @@ export class TeamAPI extends EventEmitter {
     public removeRole(roleName: string) { return this.writer.removeRole(roleName); }
     public assignRoleToMember(userId: string, roleName: string) { return this.writer.assignRoleToMember(userId, roleName); }
     public removeRoleFromMember(userId: string, roleName: string) { return this.writer.removeRoleFromMember(userId, roleName); }
-    public changeKeys(newKeys: KeysetWithSecrets) { return this.writer.changeKeys(newKeys); }
+    public changeKeys(newKeys: KeysetPrivateInfo) { return this.writer.changeKeys(newKeys); }
+    public inviteMember(params: {
+        seed?: string,
+        expiration?: number,
+        maxUses?: number
+    }) { return this.writer.inviteMember(params); }
 
     /**
      * Get a channel API for a specific channel

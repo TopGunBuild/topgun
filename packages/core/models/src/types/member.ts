@@ -1,13 +1,17 @@
-import { Device } from "./device"
-import { Keyset } from "./keyset"
+import { DevicePublicInfo } from "./device"
+import { KeysetPublicInfo } from "./keyset"
 import { Identifiable } from "./utils"
 
 /**
  * Represents a member within a team
  * A member is a user with associated roles, devices, and cryptographic keys
  */
-export interface Member extends Identifiable {
-  
+export interface MemberInfo extends Identifiable {
+    /**
+     * The team this member belongs to
+     */
+    teamId: string;
+
     /** 
      * Member's display name or email address
      * Must be unique across the system but not used as primary key
@@ -19,7 +23,7 @@ export interface Member extends Identifiable {
      * Member's public cryptographic keys
      * Used for encryption and signature verification
      */
-    keys?: Keyset
+    keys?: KeysetPublicInfo
   
     /** 
      * Array of role names assigned to this member
@@ -31,5 +35,5 @@ export interface Member extends Identifiable {
      * List of devices registered to this member
      * Each device contains its own public keys and metadata
      */
-    devices?: Device[]
+    devices?: DevicePublicInfo[]
 }

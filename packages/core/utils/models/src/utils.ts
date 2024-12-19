@@ -1,17 +1,23 @@
-import { KeysetWithSecrets, Keyset, KeyManifest, KeyScope, Keyring, NewTeamOptions, NewOrExistingTeamOptions } from "@topgunbuild/models"
-import { assert } from "@topgunbuild/common"
+import { 
+    Keyring,
+    KeysetPrivateInfo,
+    KeysetPublicInfo,
+    KeyManifest,
+    KeyScopeInfo,
+} from "@topgunbuild/models";
+import { assert } from "@topgunbuild/common";
 
 /**
  * Type guard to check if an object is a complete keyset with both public and private keys
  * @param value - The value to check
  * @returns True if the value is a complete KeysetWithSecrets
  */
-export const isCompleteKeyset = (value: unknown): value is KeysetWithSecrets => {
+export const isCompleteKeyset = (value: unknown): value is KeysetPrivateInfo => {
     if (!value || typeof value !== 'object') {
         return false
     }
 
-    const keyset = value as KeysetWithSecrets
+    const keyset = value as KeysetPrivateInfo
     return !!(
         keyset?.encryption?.publicKey &&
         keyset?.encryption?.secretKey &&
@@ -26,7 +32,7 @@ export const isCompleteKeyset = (value: unknown): value is KeysetWithSecrets => 
  * @returns True if the object is a KeyManifest
  */
 export const isKeyManifest = (
-    keys: Keyset | KeysetWithSecrets | KeyManifest
+    keys: KeysetPublicInfo | KeysetPrivateInfo | KeyManifest
 ): keys is KeyManifest => {
     if (!keys || typeof keys !== 'object') {
         return false
@@ -40,7 +46,7 @@ export const isKeyManifest = (
  * @param value - The value to check, which could be a Keyring, KeysetWithSecrets, or KeysetWithSecrets[]
  * @returns True if the value is a Keyring object
  */
-export const isKeyring = (value: Keyring | KeysetWithSecrets | KeysetWithSecrets[]): value is Keyring => {
+export const isKeyring = (value: Keyring | KeysetPrivateInfo | KeysetPrivateInfo[]): value is Keyring => {
     // First check if it's not an array
     if (Array.isArray(value)) {
         return false;
@@ -60,7 +66,7 @@ export const isKeyring = (value: Keyring | KeysetWithSecrets | KeysetWithSecrets
  * @param scope - The KeyScope object to extract from
  * @returns A new KeyScope object with just the type and name properties
  */
-export const getScope = (scope: KeyScope): KeyScope => ({
+export const getScope = (scope: KeyScopeInfo): KeyScopeInfo => ({
     type: scope.type,
     name: scope.name,
 });
@@ -71,7 +77,7 @@ export const getScope = (scope: KeyScope): KeyScope => ({
  * @param scopeB - Second KeyScope to compare
  * @returns True if both scopes match exactly
  */
-export const scopesMatch = (scopeA: KeyScope, scopeB: KeyScope): boolean => {
+export const scopesMatch = (scopeA: KeyScopeInfo, scopeB: KeyScopeInfo): boolean => {
     return scopeA.type === scopeB.type && scopeA.name === scopeB.name;
 };
 
@@ -81,7 +87,7 @@ export const scopesMatch = (scopeA: KeyScope, scopeB: KeyScope): boolean => {
  * @param existingScope - The existing scope to validate against
  * @throws {Error} If the scopes don't match
  */
-export const assertScopesMatch = (newScope: KeyScope, existingScope: KeyScope): void => {
+export const assertScopesMatch = (newScope: KeyScopeInfo, existingScope: KeyScopeInfo): void => {
     assert(
         scopesMatch(newScope, existingScope),
         `The new keys must have the same scope as the old lockbox keys.\n` +
@@ -96,12 +102,12 @@ export const assertScopesMatch = (newScope: KeyScope, existingScope: KeyScope): 
  * @returns True if the options are for creating a new team
  * @throws {TypeError} If options is null or not an object
  */
-export const isNewTeam = (options: NewOrExistingTeamOptions): options is NewTeamOptions => {
-    // Validate input is a non-null object
-    if (!options || typeof options !== 'object') {
-        throw new TypeError('Options must be a non-null object');
-    }
+// export const isNewTeam = (options: NewOrExistingTeamOptions): options is NewTeamOptions => {
+//     // Validate input is a non-null object
+//     if (!options || typeof options !== 'object') {
+//         throw new TypeError('Options must be a non-null object');
+//     }
     
-    // Check for required teamName property
-    return 'teamName' in options && typeof options.teamName === 'string';
-}
+//     // Check for required teamName property
+//     return 'teamName' in options && typeof options.teamName === 'string';
+// }

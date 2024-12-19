@@ -1,8 +1,8 @@
-import { ProofOfInvitation, ValidationError, InvitationPayloadImpl } from "@topgunbuild/models"
+import { ProofOfInvitationInfo, ValidationError, InvitationPayload } from "@topgunbuild/models"
 import { signatures } from "@topgunbuild/crypto"
 import { normalizeInvitationKey } from "./normalize"
 import { generateInvitationId } from "./generate-id"
-import { generateInviteeStarterKeys } from "./generate-starter-keys"
+import { createInvitationKeys } from "./generate-starter-keys"
 import { CryptoError } from "../errors"
 
 /**
@@ -19,7 +19,7 @@ import { CryptoError } from "../errors"
  * @throws ValidationError if the invitation secret is invalid
  * @throws CryptoError if signature generation fails
  */
-export const generateInvitationProof = (invitationSecret: string): ProofOfInvitation => {
+export const generateInvitationProof = (invitationSecret: string): ProofOfInvitationInfo => {
   // Validate input
   if (!invitationSecret?.trim()) {
     throw new ValidationError('Invitation secret is required')
@@ -31,10 +31,10 @@ export const generateInvitationProof = (invitationSecret: string): ProofOfInvita
     
     // Generate the invitation ID and ephemeral keys from the secret
     const invitationId = generateInvitationId(normalizedSecret)
-    const ephemeralKeys = generateInviteeStarterKeys(normalizedSecret)
+    const ephemeralKeys = createInvitationKeys(normalizedSecret)
     
     // Create and sign the proof payload
-    const payload = new InvitationPayloadImpl(invitationId)
+    const payload = new InvitationPayload(invitationId)
     const signature = signatures.sign(
       payload.encode(), 
       ephemeralKeys.signature.secretKey

@@ -1,4 +1,4 @@
-import { Keyset, KeysetWithSecrets } from "@topgunbuild/models";
+import { KeysetPublicInfo, KeysetPrivateInfo } from "@topgunbuild/models";
 import { isCompleteKeyset } from "../utils";
 
 /**
@@ -20,7 +20,7 @@ import { isCompleteKeyset } from "../utils";
  * //   encryption: 'public-key-data',   // Only public key
  * // }
  */
-export const convertToPublicKeyset = (keyset: KeysetWithSecrets | Keyset): Keyset => {
+export const convertToPublicKeyset = (keyset: KeysetPrivateInfo | KeysetPublicInfo): KeysetPublicInfo => {
     // If the keyset doesn't have secrets, it's already public
     if (!isCompleteKeyset(keyset)) {
         return keyset;

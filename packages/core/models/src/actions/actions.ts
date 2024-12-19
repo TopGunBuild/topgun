@@ -1,30 +1,42 @@
 import { field, option, variant, vec, serialize } from "@dao-xyz/borsh";
-import { MemberImpl, DeviceImpl, InvitationImpl, KeysetImpl, RoleImpl, ServerImpl, LockboxImpl } from "../models";
+import { Member, Device, Invitation, KeysetPublic, Role, Server, Lockbox } from "../models";
 import { Query } from "./query";
 import { Sort } from "./sort";
 import { randomId, toArray } from "@topgunbuild/common";
-import { DataChanges, DataFrameChangeOperation, Lockbox, SelectOptions, SelectResult } from "../types";
+import {
+    DataChanges,
+    DataFrameChangeOperation,
+    DevicePublicInfo,
+    InvitationInfo,
+    KeysetPublicInfo,
+    LockboxInfo,
+    MemberInfo,
+    RoleInfo,
+    SelectOptions,
+    SelectResult,
+    ServerPublicInfo
+} from "../types";
 
 /**
  * Base interface for all actions
  */
-export interface IAction {
-    lockboxes?: Lockbox[];
+export interface ActionInfo {
+    lockboxes?: LockboxInfo[];
 }
 
 /**
  * Base class for all actions
  */
-export class AbstractAction implements IAction {
+export class AbstractAction implements ActionInfo {
     @field({ type: 'string' })
     id: string;
 
-    @field({ type: option(vec(LockboxImpl)) })
-    lockboxes?: Lockbox[];
+    @field({ type: option(vec(Lockbox)) })
+    lockboxes?: LockboxInfo[];
 
     constructor(data: {
         id?: string,
-        lockboxes?: Lockbox[],
+        lockboxes?: LockboxInfo[],
     }) {
         this.id = data.id || randomId();
         this.lockboxes = Array.isArray(data.lockboxes) ? data.lockboxes : [];
@@ -42,33 +54,35 @@ export class AbstractAction implements IAction {
 export class CreateTeamAction extends AbstractAction {
     @field({ type: 'string' })
     teamId: string;
-    
+
     @field({ type: 'string' })
     name: string;
 
     @field({ type: option('string') })
     description?: string;
 
-    @field({ type: MemberImpl })
-    rootMember: MemberImpl;
+    @field({ type: Member })
+    rootMember: Member;
 
-    @field({ type: DeviceImpl })
-    rootDevice: DeviceImpl;
+    @field({ type: Device })
+    rootDevice: Device;
 
     constructor(data: {
         teamId: string,
-        lockboxes?: Lockbox[],
+        lockboxes?: LockboxInfo[],
         name: string,
         description?: string,
-        rootMember: MemberImpl,
-        rootDevice: DeviceImpl
+        rootMember: MemberInfo,
+        rootDevice: DevicePublicInfo
     }) {
         super(data);
         this.teamId = data.teamId;
         this.name = data.name;
         this.description = data.description;
-        this.rootMember = data.rootMember;
-        this.rootDevice = data.rootDevice;
+        this.rootMember = new Member(data.rootMember);
+        this.rootMember.teamId = data.teamId;
+        this.rootDevice = new Device(data.rootDevice);
+        this.rootDevice.teamId = data.teamId;
     }
 }
 
@@ -86,7 +100,7 @@ export class UpdateTeamAction extends AbstractAction {
     @field({ type: option('string') })
     description?: string;
 
-    constructor(data: { lockboxes?: Lockbox[], teamId: string, name?: string, description?: string }) {
+    constructor(data: { lockboxes?: LockboxInfo[], teamId: string, name?: string, description?: string }) {
         super(data);
         this.teamId = data.teamId;
         this.name = data.name;
@@ -99,19 +113,19 @@ export class UpdateTeamAction extends AbstractAction {
  */
 @variant(2)
 export class AddMemberAction extends AbstractAction {
-    @field({ type: MemberImpl })
-    member: MemberImpl;
+    @field({ type: Member })
+    member: Member;
 
     @field({ type: vec('string') })
     roles?: string[];
 
     constructor(data: {
-        lockboxes?: Lockbox[],
+        lockboxes?: LockboxInfo[],
         roles?: string[],
-        member: MemberImpl,
+        member: MemberInfo,
     }) {
         super(data);
-        this.member = data.member;
+        this.member = new Member(data.member);
         this.roles = data.roles;
     }
 }
@@ -124,7 +138,7 @@ export class RemoveMemberAction extends AbstractAction {
     @field({ type: 'string' })
     userId: string;
 
-    constructor(data: { lockboxes?: Lockbox[], userId: string }) {
+    constructor(data: { lockboxes?: LockboxInfo[], userId: string }) {
         super(data);
         this.userId = data.userId;
     }
@@ -135,12 +149,12 @@ export class RemoveMemberAction extends AbstractAction {
  */
 @variant(4)
 export class AddRoleAction extends AbstractAction {
-    @field({ type: RoleImpl })
-    role: RoleImpl;
+    @field({ type: Role })
+    role: Role;
 
-    constructor(data: { lockboxes?: Lockbox[], role: RoleImpl }) {
+    constructor(data: { lockboxes?: LockboxInfo[], role: RoleInfo }) {
         super(data);
-        this.role = data.role;
+        this.role = new Role(data.role);
     }
 }
 
@@ -152,7 +166,7 @@ export class RemoveRoleAction extends AbstractAction {
     @field({ type: 'string' })
     roleName: string;
 
-    constructor(data: { lockboxes?: Lockbox[], roleName: string }) {
+    constructor(data: { lockboxes?: LockboxInfo[], roleName: string }) {
         super(data);
         this.roleName = data.roleName;
     }
@@ -169,7 +183,7 @@ export class AssignRoleToMemberAction extends AbstractAction {
     @field({ type: 'string' })
     roleName: string;
 
-    constructor(data: { lockboxes?: Lockbox[], userId: string, roleName: string }) {
+    constructor(data: { lockboxes?: LockboxInfo[], userId: string, roleName: string }) {
         super(data);
         this.userId = data.userId;
         this.roleName = data.roleName;
@@ -187,7 +201,7 @@ export class RemoveRoleFromMemberAction extends AbstractAction {
     @field({ type: 'string' })
     roleName: string;
 
-    constructor(data: { lockboxes?: Lockbox[], userId: string, roleName: string }) {
+    constructor(data: { lockboxes?: LockboxInfo[], userId: string, roleName: string }) {
         super(data);
         this.userId = data.userId;
         this.roleName = data.roleName;
@@ -199,12 +213,12 @@ export class RemoveRoleFromMemberAction extends AbstractAction {
  */
 @variant(8)
 export class AddDeviceAction extends AbstractAction {
-    @field({ type: DeviceImpl })
-    device: DeviceImpl;
+    @field({ type: Device })
+    device: Device;
 
-    constructor(data: { lockboxes?: Lockbox[], device: DeviceImpl }) {
+    constructor(data: { lockboxes?: LockboxInfo[], device: DevicePublicInfo }) {
         super(data);
-        this.device = data.device;
+        this.device = new Device(data.device);
     }
 }
 
@@ -216,7 +230,7 @@ export class RemoveDeviceAction extends AbstractAction {
     @field({ type: 'string' })
     deviceId: string;
 
-    constructor(data: { lockboxes?: Lockbox[], deviceId: string }) {
+    constructor(data: { lockboxes?: LockboxInfo[], deviceId: string }) {
         super(data);
         this.deviceId = data.deviceId;
     }
@@ -227,12 +241,12 @@ export class RemoveDeviceAction extends AbstractAction {
  */
 @variant(10)
 export class InviteMemberAction extends AbstractAction {
-    @field({ type: InvitationImpl })
-    invitation: InvitationImpl;
+    @field({ type: Invitation })
+    invitation: Invitation;
 
-    constructor(data: { lockboxes?: Lockbox[], invitation: InvitationImpl }) {
+    constructor(data: { lockboxes?: LockboxInfo[], invitation: InvitationInfo }) {
         super(data);
-        this.invitation = data.invitation;
+        this.invitation = new Invitation(data.invitation);
     }
 }
 
@@ -241,12 +255,12 @@ export class InviteMemberAction extends AbstractAction {
  */
 @variant(11)
 export class InviteDeviceAction extends AbstractAction {
-    @field({ type: InvitationImpl })
-    invitation: InvitationImpl;
+    @field({ type: Invitation })
+    invitation: Invitation;
 
-    constructor(data: { lockboxes?: Lockbox[], invitation: InvitationImpl }) {
+    constructor(data: { lockboxes?: LockboxInfo[], invitation: InvitationInfo }) {
         super(data);
-        this.invitation = data.invitation;
+        this.invitation = new Invitation(data.invitation);
     }
 }
 
@@ -258,7 +272,7 @@ export class RevokeInvitationAction extends AbstractAction {
     @field({ type: 'string' })
     invitationId: string; // Invitation ID
 
-    constructor(data: { lockboxes?: Lockbox[], invitationId: string }) {
+    constructor(data: { lockboxes?: LockboxInfo[], invitationId: string }) {
         super(data);
         this.invitationId = data.invitationId;
     }
@@ -275,19 +289,19 @@ export class AdmitMemberAction extends AbstractAction {
     @field({ type: 'string' })
     userName: string;
 
-    @field({ type: KeysetImpl })
-    memberKeys: KeysetImpl;
+    @field({ type: KeysetPublic })
+    memberKeys: KeysetPublic;
 
     constructor(data: {
-        lockboxes?: Lockbox[],
+        lockboxes?: LockboxInfo[],
         invitationId: string,
         userName: string,
-        memberKeys: KeysetImpl,
+        memberKeys: KeysetPublicInfo,
     }) {
         super(data);
         this.invitationId = data.invitationId;
         this.userName = data.userName;
-        this.memberKeys = data.memberKeys;
+        this.memberKeys = new KeysetPublic(data.memberKeys);
     }
 }
 
@@ -299,13 +313,13 @@ export class AdmitDeviceAction extends AbstractAction {
     @field({ type: 'string' })
     invitationId: string; // Invitation ID
 
-    @field({ type: DeviceImpl })
-    device: DeviceImpl;
+    @field({ type: Device })
+    device: Device;
 
-    constructor(data: { lockboxes?: Lockbox[], invitationId: string, device: DeviceImpl }) {
+    constructor(data: { lockboxes?: LockboxInfo[], invitationId: string, device: DevicePublicInfo }) {
         super(data);
         this.invitationId = data.invitationId;
-        this.device = data.device;
+        this.device = new Device(data.device);
     }
 }
 
@@ -314,12 +328,12 @@ export class AdmitDeviceAction extends AbstractAction {
  */
 @variant(15)
 export class ChangeMemberKeysAction extends AbstractAction {
-    @field({ type: KeysetImpl })
-    keys: KeysetImpl;
+    @field({ type: KeysetPublic })
+    keys: KeysetPublic;
 
-    constructor(data: { lockboxes?: Lockbox[], keys: KeysetImpl }) {
+    constructor(data: { lockboxes?: LockboxInfo[], keys: KeysetPublicInfo }) {
         super(data);
-        this.keys = data.keys;
+        this.keys = new KeysetPublic(data.keys);
     }
 }
 
@@ -331,7 +345,7 @@ export class RotateKeysAction extends AbstractAction {
     @field({ type: 'string' })
     userId: string;
 
-    constructor(data: { lockboxes?: Lockbox[], userId: string }) {
+    constructor(data: { lockboxes?: LockboxInfo[], userId: string }) {
         super(data);
         this.userId = data.userId;
     }
@@ -342,12 +356,12 @@ export class RotateKeysAction extends AbstractAction {
  */
 @variant(17)
 export class AddServerAction extends AbstractAction {
-    @field({ type: ServerImpl })
-    server: ServerImpl;
+    @field({ type: Server })
+    server: Server;
 
-    constructor(data: { lockboxes?: Lockbox[], server: ServerImpl }) {
+    constructor(data: { lockboxes?: LockboxInfo[], server: ServerPublicInfo }) {
         super(data);
-        this.server = data.server;
+        this.server = new Server(data.server);
     }
 }
 
@@ -359,7 +373,7 @@ export class RemoveServerAction extends AbstractAction {
     @field({ type: 'string' })
     host: string;
 
-    constructor(data: { lockboxes?: Lockbox[], host: string }) {
+    constructor(data: { lockboxes?: LockboxInfo[], host: string }) {
         super(data);
         this.host = data.host;
     }
@@ -370,10 +384,10 @@ export class RemoveServerAction extends AbstractAction {
  */
 @variant(19)
 export class ChangeServerKeysAction extends AbstractAction {
-    @field({ type: KeysetImpl })
-    keys: KeysetImpl;
+    @field({ type: KeysetPublic })
+    keys: KeysetPublic;
 
-    constructor(data: { lockboxes?: Lockbox[], keys: KeysetImpl }) {
+    constructor(data: { lockboxes?: LockboxInfo[], keys: KeysetPublic }) {
         super(data);
         this.keys = data.keys;
     }
@@ -579,7 +593,7 @@ export class CreateChannelAction extends AbstractAction {
     @field({ type: option('string') })
     description?: string;
 
-    constructor(data: { lockboxes?: Lockbox[], name: string, description?: string }) {
+    constructor(data: { lockboxes?: LockboxInfo[], name: string, description?: string }) {
         super(data);
         this.name = data.name;
         this.description = data.description;
@@ -600,7 +614,7 @@ export class UpdateChannelAction extends AbstractAction {
     @field({ type: option('string') })
     description?: string;
 
-    constructor(data: { lockboxes?: Lockbox[], channelId: string, name?: string, description?: string }) {
+    constructor(data: { lockboxes?: LockboxInfo[], channelId: string, name?: string, description?: string }) {
         super(data);
         this.channelId = data.channelId;
         this.name = data.name;

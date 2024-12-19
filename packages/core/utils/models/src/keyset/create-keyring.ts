@@ -1,7 +1,7 @@
-import { KeysetWithSecrets, Keyring } from "@topgunbuild/models"
+import { KeysetPrivateInfo, Keyring } from "@topgunbuild/models"
 import { isKeyring, isCompleteKeyset } from "../utils"
 
-export const createKeyring = (keys: Keyring | KeysetWithSecrets | KeysetWithSecrets[]): Keyring => {
+export const createKeyring = (keys: Keyring | KeysetPrivateInfo | KeysetPrivateInfo[]): Keyring => {
     // Return existing keyring if already in correct format
     if (isKeyring(keys)) return keys
   

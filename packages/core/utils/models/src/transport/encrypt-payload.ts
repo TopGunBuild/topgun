@@ -1,12 +1,12 @@
 import { asymmetric } from "@topgunbuild/crypto";
-import { AbstractAction, EncryptedPayloadImpl, TransportPayloadImpl, UserWithSecrets } from "@topgunbuild/models";
+import { AbstractAction, EncryptedPayloadImpl, TransportPayloadImpl, UserPrivateInfo } from "@topgunbuild/models";
 
 /**
  * Parameters required for payload encryption
  */
 export type EncryptedPayloadParams = {
     action: AbstractAction;
-    user: UserWithSecrets;
+    user: UserPrivateInfo;
     recipientPublicKey: string;
 }
 

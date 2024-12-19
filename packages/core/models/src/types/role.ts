@@ -9,7 +9,7 @@ export type PermissionsMap = Record<string, boolean>
 /**
  * Represents a role in the system with its associated permissions
  */
-export interface Role<T> extends Identifiable {
+export interface RoleInfo extends Identifiable {
     /** 
      * Unique identifier for the role
      * Examples: 'admin', 'user', 'moderator'
@@ -20,5 +20,5 @@ export interface Role<T> extends Identifiable {
      * Optional map of permissions assigned to this role
      * If undefined, role has no explicit permissions
      */
-    permissions?: T
+    permissions?: string[]
 }

@@ -1,5 +1,5 @@
 import { createKeyset } from "../keyset/create-keyset"
-import { KeyType, DeviceWithSecrets } from "@topgunbuild/models"
+import { KeyType, DevicePrivateInfo } from "@topgunbuild/models"
 import { randomKey } from "@topgunbuild/crypto"
 import { randomId } from "@topgunbuild/common"
 
@@ -9,6 +9,7 @@ export interface CreateDeviceParams {
   deviceInfo?: Record<string, unknown>
   created?: number
   seed?: string
+  teamId?: string
 }
 
 /**
@@ -19,7 +20,8 @@ export interface CreateDeviceParams {
  * @param params.deviceInfo - Optional metadata about the device
  * @param params.created - Optional timestamp of device creation
  * @param params.seed - Optional seed for key generation
- * @returns DeviceWithSecrets containing device details and keys
+ * @param params.teamId - Optional team ID to associate with the device
+ * @returns DevicePrivateInfo containing device details and keys
  * @throws Error if required parameters are invalid
  */
 export const createDevice = ({
@@ -28,7 +30,8 @@ export const createDevice = ({
   deviceInfo = {},
   created = Date.now(),
   seed = randomKey(),
-}: CreateDeviceParams): DeviceWithSecrets => {
+  teamId,
+}: CreateDeviceParams): DevicePrivateInfo => {
   // Input validation
   if (!userId?.trim()) {
     throw new Error('User ID is required')
@@ -53,7 +56,8 @@ export const createDevice = ({
       deviceName: deviceName.trim(),
       keys,
       created,
-      deviceInfo
+      deviceInfo: JSON.stringify(deviceInfo),
+      teamId,
     }
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error)

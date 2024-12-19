@@ -1,11 +1,11 @@
-import { KeysetWithSecrets, Lockbox, Keyset } from "@topgunbuild/models"
+import { KeysetPrivateInfo, LockboxInfo, KeysetPublicInfo } from "@topgunbuild/models"
 import { assertScopesMatch } from "../utils"
 import { createLockbox } from "./create-lockbox"
 
 interface RotateParameters {
-  oldLockbox: Lockbox
-  newContents: KeysetWithSecrets
-  updatedRecipientKeys?: Keyset
+  oldLockbox: LockboxInfo
+  newContents: KeysetPrivateInfo
+  updatedRecipientKeys?: KeysetPublicInfo
 }
 
 /**
@@ -31,7 +31,7 @@ export const rotateLockbox = ({
   oldLockbox,
   newContents,
   updatedRecipientKeys,
-}: RotateParameters): Lockbox => {
+}: RotateParameters): LockboxInfo => {
   if (!oldLockbox || !newContents) {
     throw new Error('Both oldLockbox and newContents are required for rotation');
   }
@@ -49,7 +49,7 @@ export const rotateLockbox = ({
   }
 
   // Increment the generation counter for the new contents
-  const rotatedContents: KeysetWithSecrets = {
+  const rotatedContents: KeysetPrivateInfo = {
     ...newContents,
     generation: (oldLockbox?.generation ?? 0) + 1
   }

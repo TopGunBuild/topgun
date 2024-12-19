@@ -1,8 +1,8 @@
 import { field } from '@dao-xyz/borsh';
-import { Lockbox } from '../types';
+import { LockboxInfo } from '../types';
 import { EncodeHelper } from '../utils/encode-helper';
 
-export class LockboxImpl extends EncodeHelper implements Lockbox {
+export class Lockbox extends EncodeHelper implements LockboxInfo {
     @field({ type: 'string' })
     $id: string;
 

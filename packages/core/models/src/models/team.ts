@@ -1,9 +1,9 @@
 import { EncodeHelper } from "../utils/encode-helper";
-import { Team } from "../types";
+import { TeamInfo } from "../types";
 import { field, option } from "@dao-xyz/borsh";
 import { randomId } from "@topgunbuild/common";
 
-export class TeamImpl extends EncodeHelper implements Team {
+export class Team extends EncodeHelper implements TeamInfo {
     @field({ type: 'string' })
     $id: string;
 

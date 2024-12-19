@@ -1,9 +1,9 @@
 import { EncodeHelper } from "../utils/encode-helper";
-import { Channel } from "../types";
+import { ChannelInfo } from "../types";
 import { field, option } from "@dao-xyz/borsh";
 import { randomId } from "@topgunbuild/common";
 
-export class ChannelImpl extends EncodeHelper implements Channel {
+export class Channel extends EncodeHelper implements ChannelInfo {
     @field({ type: 'string' })
     $id: string;
 

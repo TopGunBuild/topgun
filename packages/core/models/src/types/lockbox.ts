@@ -4,7 +4,7 @@ import { Identifiable } from "./utils"
  * Represents a secure container (lockbox) for transmitting encrypted keys
  * Used for secure key exchange between parties in the system
  */
-export interface Lockbox extends Identifiable {
+export interface LockboxInfo extends Identifiable {
     /**
      * Incremental number indicating the lockbox's generation/version
      */
