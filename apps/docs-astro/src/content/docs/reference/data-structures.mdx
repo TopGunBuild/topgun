@@ -1,0 +1,745 @@
+---
+title: Data Structures API
+description: Complete API reference for LWWMap and ORMap - the two primary CRDT-based data structures in TopGun.
+order: 21.5
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Database, Trash2, Eye, RefreshCw, List, Clock, Settings } from 'lucide-react';
+import { ApiParam, ApiConstructor } from '../../../components/docs/ApiMethod';
+
+export const lwwMapGetCode = `const users = client.getMap<string, User>('users');
+
+// Read a single value by key
+const user = users.get('user-123');
+// Returns: User | undefined
+
+// Get the full record with timestamp
+const record = users.getRecord('user-123');
+// Returns: LWWRecord<User> | undefined
+// { value: User, timestamp: { millis, counter, nodeId }, ttlMs? }`;
+
+export const lwwMapSetCode = `const users = client.getMap<string, User>('users');
+
+// Create a new entry - returns the created record
+const id = crypto.randomUUID();
+const record = users.set(id, {
+  id,
+  name: 'Alice',
+  email: 'alice@example.com',
+  createdAt: Date.now()
+});
+// Returns: LWWRecord<User>
+// { value: {...}, timestamp: { millis, counter, nodeId } }
+
+// Set with TTL (auto-expires after 1 hour)
+const tempRecord = users.set('session-123', sessionData, 3600000);`;
+
+export const lwwMapRemoveCode = `const users = client.getMap<string, User>('users');
+
+// Delete by key - returns the tombstone record
+const tombstone = users.remove('user-123');
+// Returns: LWWRecord<User>
+// { value: null, timestamp: { millis, counter, nodeId } }`;
+
+export const lwwMapIterateCode = `const users = client.getMap<string, User>('users');
+
+// Iterate over all non-deleted entries
+for (const [key, value] of users.entries()) {
+  console.log(key, value);
+}
+
+// Get all keys (including tombstones)
+for (const key of users.allKeys()) {
+  const record = users.getRecord(key);
+  if (record?.value !== null) {
+    console.log('Active:', key);
+  }
+}
+
+// Get the size (total entries including tombstones)
+console.log('Total entries:', users.size);`;
+
+export const lwwMapOnChangeCode = `const users = client.getMap<string, User>('users');
+
+// Subscribe to any changes in this map
+const unsubscribe = users.onChange(() => {
+  console.log('Map changed!');
+  // Re-read data as needed
+});
+
+// Later: stop listening
+unsubscribe();`;
+
+export const lwwMapMergeCode = `// For synchronization - merge a remote record
+const remoteRecord: LWWRecord<User> = {
+  value: { id: 'u1', name: 'Bob' },
+  timestamp: { millis: 1678900000, counter: 0, nodeId: 'node-2' }
+};
+
+// Returns true if local state was updated
+const changed = users.merge('u1', remoteRecord);`;
+
+export const orMapAddCode = `const todos = client.getORMap<string, Todo>('todos');
+
+// Add an item to a collection
+// Each add() creates a unique entry, even with same key
+const record = todos.add('active', { title: 'Write docs', priority: 1 });
+// Returns: ORMapRecord
+// { value: {...}, timestamp: {...}, tag: "unique-id" }
+
+// Add with TTL (auto-expires)
+const tempRecord = todos.add('active', { title: 'Temp task' }, 3600000);
+
+// Add another item with same key (both are preserved)
+todos.add('active', { title: 'Fix bugs', priority: 2 });`;
+
+export const orMapGetCode = `const todos = client.getORMap<string, Todo>('todos');
+
+// Get all values for a key (returns array)
+const activeTodos = todos.get('active');
+// Returns: Todo[] (all items added with key 'active')
+
+// Get full records with metadata
+const records = todos.getRecords('active');
+// Returns: ORMapRecord<Todo>[]
+// [{ value: {...}, timestamp: {...}, tag: "..." }, ...]
+
+// Get count of unique keys
+console.log('Keys:', todos.size);
+
+// Get total record count across all keys
+console.log('Total records:', todos.totalRecords);`;
+
+export const orMapRemoveCode = `const todos = client.getORMap<string, Todo>('todos');
+
+// Remove specific value from a key
+// Returns array of removed tags (for sync)
+const removedTags = todos.remove('active', todoToRemove);
+// Returns: string[] - tags that were removed
+
+// Note: Uses strict equality (===) for matching
+// For objects, you need the exact same reference`;
+
+export const orMapOnChangeCode = `const todos = client.getORMap<string, Todo>('todos');
+
+// Subscribe to changes
+const unsubscribe = todos.onChange(() => {
+  console.log('ORMap changed!');
+  // Re-read data as needed
+});
+
+// Later: stop listening
+unsubscribe();`;
+
+export const orMapSyncCode = `// For synchronization - apply a remote record
+const remoteRecord: ORMapRecord<Todo> = {
+  value: { title: 'Remote task' },
+  timestamp: { millis: 1678900000, counter: 0, nodeId: 'node-2' },
+  tag: 'unique-tag-from-remote'
+};
+
+// Apply the record (idempotent - ignores if tag is tombstoned)
+todos.apply('active', remoteRecord);
+
+// Apply a tombstone (deletion from remote)
+todos.applyTombstone('unique-tag-from-remote');
+
+// Get all tombstones (for sync protocol)
+const tombstones = todos.getTombstones();
+// Returns: string[]`;
+
+export const timestampCode = `// Timestamp structure (Hybrid Logical Clock)
+interface Timestamp {
+  millis: number;   // Physical time in milliseconds
+  counter: number;  // Logical counter for same-millisecond ordering
+  nodeId: string;   // Node identifier for tie-breaking
+}
+
+// LWWRecord structure
+interface LWWRecord<V> {
+  value: V | null;        // null indicates tombstone (deleted)
+  timestamp: Timestamp;
+  ttlMs?: number;         // Optional TTL in milliseconds
+}
+
+// ORMapRecord structure
+interface ORMapRecord<V> {
+  value: V;
+  timestamp: Timestamp;
+  tag: string;            // Unique identifier for this entry
+  ttlMs?: number;
+}`;
+
+export const queryBasicCode = `// Query with filters
+const query = client.query<Todo>('todos', {
+  where: { completed: false },
+  sort: { createdAt: 'desc' }
+});
+
+// Subscribe to live results
+const unsubscribe = query.subscribe((results) => {
+  console.log('Matching todos:', results);
+});
+
+// Get current snapshot (one-time read)
+const snapshot = await query.get();`;
+
+export const queryPredicateCode = `import { Predicates } from '@topgunbuild/client';
+
+// Complex filtering with predicates
+const query = client.query<Product>('products', {
+  predicate: Predicates.and(
+    Predicates.gt('price', 100),
+    Predicates.lt('price', 500),
+    Predicates.contains('tags', 'electronics')
+  )
+});`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap not-prose">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/reference" className="hover:text-foreground transition-colors">Reference</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Data Structures API</span>
+</div>
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <Database className="w-10 h-10 text-purple-600 dark:text-purple-400" />
+  <h1 className="text-4xl font-bold text-foreground">Data Structures API</h1>
+</div>
+
+TopGun provides two CRDT-based data structures for storing and syncing data.
+This page documents all available methods for performing CRUD operations.
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>Which one to use?</strong> Use <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">LWWMap</code> for key-value data where each key has one value (profiles, settings).
+    Use <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">ORMap</code> for collections where a key can have multiple values (todo lists, tags, comments).
+    See <a href="/docs/concepts/data-structures" className="underline">Concepts: Data Structures</a> for detailed comparison.
+  </p>
+</div>
+
+---
+
+## Timestamp Structure
+
+All records include a Hybrid Logical Clock (HLC) timestamp for ordering and conflict resolution.
+
+<div className="not-prose mb-6">
+  <CodeBlock title="Timestamp & Record Types" language="typescript" code={timestampCode} />
+</div>
+
+---
+
+## LWWMap (Last-Write-Wins Map)
+
+The `LWWMap` is a key-value store where conflicts are resolved by accepting the update with the latest timestamp.
+Access it via `client.getMap<K, V>(name)`.
+
+### Reading Data
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Eye className="w-5 h-5 text-blue-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Retrieve values by key or iterate over entries.</span>
+</div>
+
+<div className="not-prose mb-6">
+  <ApiConstructor signature="LWWMap<K, V>">
+    <ApiParam
+      name="get(key: K)"
+      type="V | undefined"
+      description="Returns the value for the given key, or undefined if not found, deleted, or expired."
+    />
+    <ApiParam
+      name="getRecord(key: K)"
+      type="LWWRecord<V> | undefined"
+      description="Returns the full record including timestamp and TTL. Useful for sync operations."
+    />
+    <ApiParam
+      name="entries()"
+      type="IterableIterator<[K, V]>"
+      description="Returns an iterator over all non-deleted, non-expired entries as [key, value] pairs."
+    />
+    <ApiParam
+      name="allKeys()"
+      type="IterableIterator<K>"
+      description="Returns an iterator over all keys including tombstones. Use getRecord() to check if deleted."
+    />
+    <ApiParam
+      name="size"
+      type="number"
+      description="The total number of entries in the map (including tombstones)."
+    />
+  </ApiConstructor>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="Reading from LWWMap" language="typescript" code={lwwMapGetCode} />
+</div>
+
+### Creating & Updating Data
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <RefreshCw className="w-5 h-5 text-green-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Use <code className="bg-neutral-100 dark:bg-neutral-800 px-1 rounded">set()</code> for both create and update operations.</span>
+</div>
+
+<div className="not-prose mb-6">
+  <ApiConstructor signature="LWWMap<K, V>">
+    <ApiParam
+      name="set(key: K, value: V, ttlMs?: number)"
+      type="LWWRecord<V>"
+      description="Sets the value for the given key. Returns the created record with timestamp. Optional TTL in milliseconds for auto-expiration."
+    />
+  </ApiConstructor>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="Creating & Updating in LWWMap" language="typescript" code={lwwMapSetCode} />
+</div>
+
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border-l-4 border-yellow-500 p-4 my-6 not-prose">
+  <p className="text-sm text-yellow-800 dark:text-yellow-200">
+    <strong>Note:</strong> LWWMap performs full replacement on <code className="bg-yellow-100 dark:bg-yellow-800/50 px-1 rounded">set()</code>.
+    To update a single field, read the current value first, merge your changes, then set the entire object.
+  </p>
+</div>
+
+### Deleting Data
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Trash2 className="w-5 h-5 text-red-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Remove entries by key. Creates a tombstone for sync.</span>
+</div>
+
+<div className="not-prose mb-6">
+  <ApiConstructor signature="LWWMap<K, V>">
+    <ApiParam
+      name="remove(key: K)"
+      type="LWWRecord<V>"
+      description="Removes the entry for the given key. Returns a tombstone record (value: null) for sync."
+    />
+    <ApiParam
+      name="clear()"
+      type="void"
+      description="Clears all data and tombstones. Resets the internal Merkle tree."
+    />
+  </ApiConstructor>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="Deleting from LWWMap" language="typescript" code={lwwMapRemoveCode} />
+</div>
+
+### Iterating Over Data
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <List className="w-5 h-5 text-purple-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Access entries using iterators.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="Iterating LWWMap" language="typescript" code={lwwMapIterateCode} />
+</div>
+
+### Observing Changes
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <RefreshCw className="w-5 h-5 text-amber-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">React to changes in real-time.</span>
+</div>
+
+<div className="not-prose mb-6">
+  <ApiConstructor signature="LWWMap<K, V>">
+    <ApiParam
+      name="onChange(callback: () => void)"
+      type="() => void"
+      description="Registers a callback that fires whenever the map changes. Returns an unsubscribe function."
+    />
+  </ApiConstructor>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="Observing LWWMap Changes" language="typescript" code={lwwMapOnChangeCode} />
+</div>
+
+### Synchronization Methods
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Settings className="w-5 h-5 text-neutral-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Low-level methods for CRDT synchronization.</span>
+</div>
+
+<div className="not-prose mb-6">
+  <ApiConstructor signature="LWWMap<K, V> - Sync Methods">
+    <ApiParam
+      name="merge(key: K, remoteRecord: LWWRecord<V>)"
+      type="boolean"
+      description="Merges a record from a remote source. Returns true if local state was updated (remote wins)."
+    />
+    <ApiParam
+      name="prune(olderThan: Timestamp)"
+      type="K[]"
+      description="Garbage collection: removes tombstones older than the specified timestamp. Returns array of pruned keys."
+    />
+    <ApiParam
+      name="getMerkleTree()"
+      type="MerkleTree"
+      description="Returns the internal Merkle tree for efficient sync protocol."
+    />
+  </ApiConstructor>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="Synchronization" language="typescript" code={lwwMapMergeCode} />
+</div>
+
+---
+
+## ORMap (Observed-Remove Map)
+
+The `ORMap` is designed for collections where a key can have multiple values.
+Concurrent additions are preserved, and removals only affect observed items.
+Access it via `client.getORMap<K, V>(name)`.
+
+### Adding Data
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <RefreshCw className="w-5 h-5 text-green-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Add items to a collection. Multiple items can share the same key.</span>
+</div>
+
+<div className="not-prose mb-6">
+  <ApiConstructor signature="ORMap<K, V>">
+    <ApiParam
+      name="add(key: K, value: V, ttlMs?: number)"
+      type="ORMapRecord<V>"
+      description="Adds a value under the given key. Returns an ORMapRecord with unique tag and timestamp. Multiple adds with same key create separate entries."
+    />
+  </ApiConstructor>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="Adding to ORMap" language="typescript" code={orMapAddCode} />
+</div>
+
+### Reading Data
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Eye className="w-5 h-5 text-blue-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Retrieve all values for a key.</span>
+</div>
+
+<div className="not-prose mb-6">
+  <ApiConstructor signature="ORMap<K, V>">
+    <ApiParam
+      name="get(key: K)"
+      type="V[]"
+      description="Returns an array of all active (non-tombstoned, non-expired) values for the key."
+    />
+    <ApiParam
+      name="getRecords(key: K)"
+      type="ORMapRecord<V>[]"
+      description="Returns full records with metadata for the key. Useful for sync operations."
+    />
+    <ApiParam
+      name="size"
+      type="number"
+      description="The number of unique keys that have at least one value."
+    />
+    <ApiParam
+      name="totalRecords"
+      type="number"
+      description="The total count of all active records across all keys."
+    />
+  </ApiConstructor>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="Reading from ORMap" language="typescript" code={orMapGetCode} />
+</div>
+
+### Removing Data
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Trash2 className="w-5 h-5 text-red-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Remove specific values from a key.</span>
+</div>
+
+<div className="not-prose mb-6">
+  <ApiConstructor signature="ORMap<K, V>">
+    <ApiParam
+      name="remove(key: K, value: V)"
+      type="string[]"
+      description="Removes a specific value from the key using strict equality (===). Returns array of removed tags for sync."
+    />
+    <ApiParam
+      name="clear()"
+      type="void"
+      description="Clears all data and tombstones."
+    />
+  </ApiConstructor>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="Removing from ORMap" language="typescript" code={orMapRemoveCode} />
+</div>
+
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border-l-4 border-yellow-500 p-4 my-6 not-prose">
+  <p className="text-sm text-yellow-800 dark:text-yellow-200">
+    <strong>Note:</strong> <code className="bg-yellow-100 dark:bg-yellow-800/50 px-1 rounded">remove()</code> uses strict equality (<code>===</code>).
+    For objects, you need the exact same reference that was added. Consider storing a unique ID in your values for easier removal.
+  </p>
+</div>
+
+### Observing Changes
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <RefreshCw className="w-5 h-5 text-amber-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">React to additions and removals in real-time.</span>
+</div>
+
+<div className="not-prose mb-6">
+  <ApiConstructor signature="ORMap<K, V>">
+    <ApiParam
+      name="onChange(callback: () => void)"
+      type="() => void"
+      description="Registers a callback that fires whenever the map changes. Returns an unsubscribe function."
+    />
+  </ApiConstructor>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="Observing ORMap Changes" language="typescript" code={orMapOnChangeCode} />
+</div>
+
+### Synchronization Methods
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Settings className="w-5 h-5 text-neutral-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Low-level methods for CRDT synchronization.</span>
+</div>
+
+<div className="not-prose mb-6">
+  <ApiConstructor signature="ORMap<K, V> - Sync Methods">
+    <ApiParam
+      name="apply(key: K, record: ORMapRecord<V>)"
+      type="void"
+      description="Applies a record from a remote source. Ignored if the tag is already tombstoned."
+    />
+    <ApiParam
+      name="applyTombstone(tag: string)"
+      type="void"
+      description="Applies a tombstone (deletion) from a remote source. Removes the record with matching tag."
+    />
+    <ApiParam
+      name="getTombstones()"
+      type="string[]"
+      description="Returns all tombstone tags. Used for sync protocol."
+    />
+    <ApiParam
+      name="merge(other: ORMap<K, V>)"
+      type="void"
+      description="Merges state from another ORMap instance. Unions items and tombstones."
+    />
+    <ApiParam
+      name="prune(olderThan: Timestamp)"
+      type="string[]"
+      description="Garbage collection: removes tombstones older than the timestamp. Returns pruned tags."
+    />
+  </ApiConstructor>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="Synchronization" language="typescript" code={orMapSyncCode} />
+</div>
+
+---
+
+## Querying Data
+
+For more advanced data retrieval with filtering, sorting, and live updates, use `client.query()`.
+
+<div className="not-prose mb-6">
+  <ApiConstructor signature="client.query<T>(mapName, options?)">
+    <ApiParam
+      name="mapName"
+      type="string"
+      description="The name of the map to query."
+    />
+    <ApiParam
+      name="options.where?"
+      type="Partial<T>"
+      description="Simple equality filter. Returns entries where all specified fields match."
+    />
+    <ApiParam
+      name="options.predicate?"
+      type="Predicate"
+      description="Complex filter using Predicates (and, or, gt, lt, contains, etc.)."
+    />
+    <ApiParam
+      name="options.sort?"
+      type="{ [field]: 'asc' | 'desc' }"
+      description="Sort order for results."
+    />
+  </ApiConstructor>
+</div>
+
+### Basic Query
+
+<div className="not-prose">
+  <CodeBlock title="Basic Query" language="typescript" code={queryBasicCode} />
+</div>
+
+### Complex Predicates
+
+<div className="not-prose">
+  <CodeBlock title="Query with Predicates" language="typescript" code={queryPredicateCode} />
+</div>
+
+### Available Predicates
+
+<div className="overflow-x-auto not-prose">
+  <table className="min-w-full text-left text-sm">
+    <thead className="bg-neutral-100 dark:bg-neutral-800 text-foreground">
+      <tr>
+        <th className="p-4 font-semibold">Predicate</th>
+        <th className="p-4 font-semibold">Description</th>
+        <th className="p-4 font-semibold">Example</th>
+      </tr>
+    </thead>
+    <tbody className="divide-y divide-neutral-200 dark:divide-neutral-800">
+      <tr>
+        <td className="p-4 font-mono text-sm">eq(field, value)</td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300">Equal to</td>
+        <td className="p-4 font-mono text-xs">Predicates.eq('status', 'active')</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-mono text-sm">neq(field, value)</td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300">Not equal to</td>
+        <td className="p-4 font-mono text-xs">Predicates.neq('status', 'deleted')</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-mono text-sm">gt(field, value)</td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300">Greater than</td>
+        <td className="p-4 font-mono text-xs">Predicates.gt('price', 100)</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-mono text-sm">gte(field, value)</td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300">Greater than or equal</td>
+        <td className="p-4 font-mono text-xs">Predicates.gte('age', 18)</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-mono text-sm">lt(field, value)</td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300">Less than</td>
+        <td className="p-4 font-mono text-xs">Predicates.lt('stock', 10)</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-mono text-sm">lte(field, value)</td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300">Less than or equal</td>
+        <td className="p-4 font-mono text-xs">Predicates.lte('priority', 5)</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-mono text-sm">contains(field, value)</td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300">Array contains value</td>
+        <td className="p-4 font-mono text-xs">Predicates.contains('tags', 'featured')</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-mono text-sm">and(...predicates)</td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300">All conditions must match</td>
+        <td className="p-4 font-mono text-xs">Predicates.and(p1, p2, p3)</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-mono text-sm">or(...predicates)</td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300">Any condition must match</td>
+        <td className="p-4 font-mono text-xs">Predicates.or(p1, p2)</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-mono text-sm">not(predicate)</td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300">Negates a condition</td>
+        <td className="p-4 font-mono text-xs">Predicates.not(Predicates.eq('hidden', true))</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+---
+
+## CRUD Summary
+
+<div className="overflow-x-auto not-prose">
+  <table className="min-w-full text-left text-sm">
+    <thead className="bg-neutral-100 dark:bg-neutral-800 text-foreground">
+      <tr>
+        <th className="p-4 font-semibold">Operation</th>
+        <th className="p-4 font-semibold">LWWMap</th>
+        <th className="p-4 font-semibold">ORMap</th>
+      </tr>
+    </thead>
+    <tbody className="divide-y divide-neutral-200 dark:divide-neutral-800">
+      <tr>
+        <td className="p-4 font-medium text-foreground">Create</td>
+        <td className="p-4 font-mono text-sm">map.set(key, value)</td>
+        <td className="p-4 font-mono text-sm">map.add(key, value)</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-medium text-foreground">Read (single)</td>
+        <td className="p-4 font-mono text-sm">map.get(key)</td>
+        <td className="p-4 font-mono text-sm">map.get(key)</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-medium text-foreground">Read (with metadata)</td>
+        <td className="p-4 font-mono text-sm">map.getRecord(key)</td>
+        <td className="p-4 font-mono text-sm">map.getRecords(key)</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-medium text-foreground">Read (all)</td>
+        <td className="p-4 font-mono text-sm">map.entries()</td>
+        <td className="p-4 font-mono text-sm">—</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-medium text-foreground">Read (filtered)</td>
+        <td className="p-4 font-mono text-sm" colSpan="2">client.query(name, {'{ where, predicate }'})</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-medium text-foreground">Update</td>
+        <td className="p-4 font-mono text-sm">map.set(key, newValue)</td>
+        <td className="p-4 font-mono text-sm">map.remove() + map.add()</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-medium text-foreground">Delete</td>
+        <td className="p-4 font-mono text-sm">map.remove(key)</td>
+        <td className="p-4 font-mono text-sm">map.remove(key, value)</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-medium text-foreground">Subscribe</td>
+        <td className="p-4 font-mono text-sm" colSpan="2">map.onChange(callback)</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-medium text-foreground">Sync (merge)</td>
+        <td className="p-4 font-mono text-sm">map.merge(key, record)</td>
+        <td className="p-4 font-mono text-sm">map.apply() / map.merge()</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-medium text-foreground">Garbage collect</td>
+        <td className="p-4 font-mono text-sm" colSpan="2">map.prune(olderThan)</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/reference/client" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Client API
+    </div>
+  </a>
+  <a href="/docs/reference/server" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Server API <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

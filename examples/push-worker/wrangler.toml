@@ -1,0 +1,12 @@
+name = "push-worker"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+account_id = "c08d344baa31d37b404e0b4b724d929c"
+
+[vars]
+VAPID_SUBJECT = "mailto:admin@example.com"
+# ALLOWED_ORIGIN = "https://your-notes-app.com"
+
+# Set VAPID keys as secrets:
+# wrangler secret put VAPID_PUBLIC_KEY
+# wrangler secret put VAPID_PRIVATE_KEY

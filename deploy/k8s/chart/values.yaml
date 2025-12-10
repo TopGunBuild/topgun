@@ -1,0 +1,42 @@
+replicaCount: 3
+
+image:
+  repository: topgun-server
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+service:
+  type: ClusterIP
+  port: 8080
+
+cluster:
+  port: 9080
+
+# Health probes
+probes:
+  liveness:
+    enabled: true
+    path: /
+    initialDelaySeconds: 10
+    periodSeconds: 10
+  readiness:
+    enabled: true
+    path: /
+    initialDelaySeconds: 5
+    periodSeconds: 5
+
+# Metrics (future use)
+metrics:
+  enabled: true
+  port: 9090
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 200m
+    memory: 256Mi
+
+env: {}
+  # DATABASE_URL: "postgres://user:pass@host:5432/db"

@@ -1,0 +1,360 @@
+---
+title: Protocol Specification
+description: TopGun WebSocket-based protocol for real-time synchronization, delta updates, and distributed coordination.
+order: 25
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Globe, Shield, Database, Lock, MessageSquare, RefreshCw } from 'lucide-react';
+
+export const envelopeCode = `{
+  "type": "MESSAGE_TYPE",
+  "payload": { ... },
+  "timestamp": {
+    "millis": 1678900000,
+    "counter": 0,
+    "nodeId": "client-1"
+  },
+  "requestId": "uuid..."
+}`;
+
+export const authCode = `{
+  "type": "AUTH",
+  "token": "eyJh..."
+}`;
+
+export const authAckCode = `{
+  "type": "AUTH_ACK"
+}`;
+
+export const clientOpCode = `{
+  "type": "CLIENT_OP",
+  "payload": {
+    "mapName": "users",
+    "key": "u1",
+    "opType": "PUT", // or REMOVE, OR_ADD, OR_REMOVE
+    "record": {
+      "value": { "name": "Alice" },
+      "timestamp": { ... }
+    }
+  }
+}`;
+
+export const opBatchCode = `{
+  "type": "OP_BATCH",
+  "payload": {
+    "ops": [ ... ] // Array of CLIENT_OP payloads
+  }
+}`;
+
+export const querySubCode = `{
+  "type": "QUERY_SUB",
+  "payload": {
+    "queryId": "q1",
+    "mapName": "users",
+    "query": {
+      "where": { "role": "admin" },
+      "limit": 10
+    }
+  }
+}`;
+
+export const queryUnsubCode = `{
+  "type": "QUERY_UNSUB",
+  "payload": {
+    "queryId": "q1"
+  }
+}`;
+
+export const syncInitCode = `{
+  "type": "SYNC_INIT",
+  "mapName": "users",
+  "lastSyncTimestamp": 1678000000
+}`;
+
+export const syncRespRootCode = `{
+  "type": "SYNC_RESP_ROOT",
+  "payload": {
+    "mapName": "users",
+    "rootHash": 12345678,
+    "timestamp": { ... }
+  }
+}`;
+
+export const merkleReqBucketCode = `{
+  "type": "MERKLE_REQ_BUCKET",
+  "payload": {
+    "mapName": "users",
+    "path": "a1" // Hex path in trie
+  }
+}`;
+
+export const lockRequestCode = `{
+  "type": "LOCK_REQUEST",
+  "payload": {
+    "requestId": "uuid",
+    "name": "resource-A",
+    "ttl": 5000
+  }
+}`;
+
+export const lockGrantedCode = `{
+  "type": "LOCK_GRANTED",
+  "payload": {
+    "requestId": "uuid",
+    "fencingToken": 101
+  }
+}`;
+
+export const lockReleaseCode = `{
+  "type": "LOCK_RELEASE",
+  "payload": {
+    "requestId": "uuid",
+    "name": "resource-A",
+    "fencingToken": 101
+  }
+}`;
+
+export const topicSubCode = `{
+  "type": "TOPIC_SUB",
+  "payload": {
+    "topic": "chat"
+  }
+}`;
+
+export const topicUnsubCode = `{
+  "type": "TOPIC_UNSUB",
+  "payload": {
+    "topic": "chat"
+  }
+}`;
+
+export const topicPubCode = `{
+  "type": "TOPIC_PUB",
+  "payload": {
+    "topic": "chat",
+    "data": { "msg": "hello" }
+  }
+}`;
+
+export const topicMessageCode = `{
+  "type": "TOPIC_MESSAGE",
+  "payload": {
+    "topic": "chat",
+    "data": { "msg": "hello" },
+    "publisherId": "client-2",
+    "timestamp": 1678900000
+  }
+}`;
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <Globe className="w-10 h-10 text-blue-600 dark:text-blue-400" />
+  <h1 className="text-4xl font-bold text-foreground">Protocol Specification</h1>
+</div>
+
+TopGun uses a custom WebSocket-based protocol for real-time synchronization,
+efficient delta updates, and distributed coordination. This document details the
+wire format and synchronization algorithms for developers building compatible clients.
+
+## Overview
+
+<div className="space-y-3 text-neutral-600 dark:text-neutral-300 mb-8 not-prose">
+  <div className="flex items-start gap-2">
+    <span className="font-semibold text-foreground min-w-[120px]">Transport:</span>
+    <span>WebSocket (Binary or JSON). Default is JSON for simplicity, MsgPack supported.</span>
+  </div>
+  <div className="flex items-start gap-2">
+    <span className="font-semibold text-foreground min-w-[120px]">Model:</span>
+    <span>Bidirectional, Event-driven. Client pushes ops, Server pushes updates.</span>
+  </div>
+  <div className="flex items-start gap-2">
+    <span className="font-semibold text-foreground min-w-[120px]">Sync:</span>
+    <span>Hybrid Logical Clocks (HLC) + Merkle Trees for convergence.</span>
+  </div>
+</div>
+
+## Message Format
+
+All messages follow a standard envelope structure.
+
+<div className="not-prose">
+  <CodeBlock title="Message Envelope" language="json" code={envelopeCode} />
+</div>
+
+## Connection Lifecycle
+
+<div className="relative border-l-2 border-neutral-200 dark:border-neutral-800 ml-4 space-y-8 py-2 not-prose">
+  <div className="pl-8 relative">
+    <div className="absolute -left-[9px] top-1 w-4 h-4 rounded-full bg-blue-500 ring-4 ring-background" />
+    <h3 className="font-semibold text-foreground mb-1">1. Handshake</h3>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300">
+      Client connects to WebSocket. Server sends <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">AUTH_REQUIRED</code>.
+    </p>
+  </div>
+  <div className="pl-8 relative">
+    <div className="absolute -left-[9px] top-1 w-4 h-4 rounded-full bg-blue-500 ring-4 ring-background" />
+    <h3 className="font-semibold text-foreground mb-1">2. Authentication</h3>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300">
+      Client sends <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">AUTH</code> with JWT. Server responds with <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">AUTH_ACK</code> or <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">AUTH_FAIL</code>.
+    </p>
+  </div>
+  <div className="pl-8 relative">
+    <div className="absolute -left-[9px] top-1 w-4 h-4 rounded-full bg-blue-500 ring-4 ring-background" />
+    <h3 className="font-semibold text-foreground mb-1">3. Synchronization</h3>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300">
+      Client sends <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">SYNC_INIT</code> with last sync timestamp. Server responds with Merkle Root or Diff.
+    </p>
+  </div>
+  <div className="pl-8 relative">
+    <div className="absolute -left-[9px] top-1 w-4 h-4 rounded-full bg-green-500 ring-4 ring-background" />
+    <h3 className="font-semibold text-foreground mb-1">4. Live Updates</h3>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300">
+      Bidirectional exchange of <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">CLIENT_OP</code> and <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">SERVER_EVENT</code>.
+    </p>
+  </div>
+</div>
+
+## Message Types
+
+### Authentication
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Shield className="w-5 h-5 text-amber-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Client authentication flow with JWT tokens.</span>
+</div>
+
+<div className="grid md:grid-cols-2 gap-4 not-prose">
+  <div className="bg-card border border-card-border rounded-lg p-4">
+    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">AUTH</h4>
+    <pre className="text-xs text-neutral-300 overflow-x-auto">{authCode}</pre>
+  </div>
+  <div className="bg-card border border-card-border rounded-lg p-4">
+    <h4 className="font-mono text-sm text-green-600 dark:text-green-400 mb-2">AUTH_ACK</h4>
+    <pre className="text-xs text-neutral-300 overflow-x-auto">{authAckCode}</pre>
+  </div>
+</div>
+
+### Data Operations
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Database className="w-5 h-5 text-purple-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Operations are idempotent and commute based on HLC timestamps.</span>
+</div>
+
+<div className="space-y-4 not-prose">
+  <div className="bg-card border border-card-border rounded-lg p-4">
+    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">CLIENT_OP</h4>
+    <pre className="text-xs text-neutral-300 overflow-x-auto">{clientOpCode}</pre>
+  </div>
+  <div className="bg-card border border-card-border rounded-lg p-4">
+    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">OP_BATCH</h4>
+    <pre className="text-xs text-neutral-300 overflow-x-auto">{opBatchCode}</pre>
+  </div>
+</div>
+
+### Query Subscriptions
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Database className="w-5 h-5 text-purple-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Subscribe to live query results.</span>
+</div>
+
+<div className="grid md:grid-cols-2 gap-4 not-prose">
+  <div className="bg-card border border-card-border rounded-lg p-4">
+    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">QUERY_SUB</h4>
+    <pre className="text-xs text-neutral-300 overflow-x-auto">{querySubCode}</pre>
+  </div>
+  <div className="bg-card border border-card-border rounded-lg p-4">
+    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">QUERY_UNSUB</h4>
+    <pre className="text-xs text-neutral-300 overflow-x-auto">{queryUnsubCode}</pre>
+  </div>
+</div>
+
+### Synchronization (Merkle)
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <RefreshCw className="w-5 h-5 text-blue-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">TopGun uses a prefix-trie Merkle Tree. The tree depth is fixed (default 3), and buckets are determined by the hex characters of the key's hash.</span>
+</div>
+
+<div className="space-y-4 not-prose">
+  <div className="bg-card border border-card-border rounded-lg p-4">
+    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">SYNC_INIT</h4>
+    <p className="text-xs text-neutral-300 mb-2">Client requests sync state.</p>
+    <pre className="text-xs text-neutral-300 overflow-x-auto">{syncInitCode}</pre>
+  </div>
+  <div className="bg-card border border-card-border rounded-lg p-4">
+    <h4 className="font-mono text-sm text-green-600 dark:text-green-400 mb-2">SYNC_RESP_ROOT</h4>
+    <p className="text-xs text-neutral-300 mb-2">Server returns root hash.</p>
+    <pre className="text-xs text-neutral-300 overflow-x-auto">{syncRespRootCode}</pre>
+  </div>
+  <div className="bg-card border border-card-border rounded-lg p-4">
+    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">MERKLE_REQ_BUCKET</h4>
+    <p className="text-xs text-neutral-300 mb-2">Client requests bucket hashes if root differs.</p>
+    <pre className="text-xs text-neutral-300 overflow-x-auto">{merkleReqBucketCode}</pre>
+  </div>
+</div>
+
+### Distributed Locks
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Lock className="w-5 h-5 text-red-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Distributed locking with fencing tokens.</span>
+</div>
+
+<div className="grid md:grid-cols-2 gap-4 mb-4 not-prose">
+  <div className="bg-card border border-card-border rounded-lg p-4">
+    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">LOCK_REQUEST</h4>
+    <pre className="text-xs text-neutral-300 overflow-x-auto">{lockRequestCode}</pre>
+  </div>
+  <div className="bg-card border border-card-border rounded-lg p-4">
+    <h4 className="font-mono text-sm text-green-600 dark:text-green-400 mb-2">LOCK_GRANTED</h4>
+    <pre className="text-xs text-neutral-300 overflow-x-auto">{lockGrantedCode}</pre>
+  </div>
+</div>
+
+<div className="not-prose">
+  <div className="bg-card border border-card-border rounded-lg p-4">
+    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">LOCK_RELEASE</h4>
+    <pre className="text-xs text-neutral-300 overflow-x-auto">{lockReleaseCode}</pre>
+  </div>
+</div>
+
+### Pub/Sub
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <MessageSquare className="w-5 h-5 text-green-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Real-time messaging with topics.</span>
+</div>
+
+<div className="grid md:grid-cols-2 gap-4 mb-4 not-prose">
+  <div className="bg-card border border-card-border rounded-lg p-4">
+    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">TOPIC_SUB</h4>
+    <pre className="text-xs text-neutral-300 overflow-x-auto">{topicSubCode}</pre>
+  </div>
+  <div className="bg-card border border-card-border rounded-lg p-4">
+    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">TOPIC_UNSUB</h4>
+    <pre className="text-xs text-neutral-300 overflow-x-auto">{topicUnsubCode}</pre>
+  </div>
+</div>
+
+<div className="grid md:grid-cols-2 gap-4 not-prose">
+  <div className="bg-card border border-card-border rounded-lg p-4">
+    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">TOPIC_PUB</h4>
+    <pre className="text-xs text-neutral-300 overflow-x-auto">{topicPubCode}</pre>
+  </div>
+  <div className="bg-card border border-card-border rounded-lg p-4">
+    <h4 className="font-mono text-sm text-green-600 dark:text-green-400 mb-2">TOPIC_MESSAGE</h4>
+    <pre className="text-xs text-neutral-300 overflow-x-auto">{topicMessageCode}</pre>
+  </div>
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/reference/react-hooks" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> React Hooks
+    </div>
+  </a>
+  <div className="invisible" />
+</div>

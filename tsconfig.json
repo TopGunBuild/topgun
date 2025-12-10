@@ -1,0 +1,43 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "lib": [
+      "ES2020",
+      "DOM"
+    ],
+    "declaration": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@topgunbuild/core": [
+        "packages/core/src"
+      ],
+      "@topgunbuild/client": [
+        "packages/client/src"
+      ],
+      "@topgunbuild/server": [
+        "packages/server/src"
+      ],
+      "@topgunbuild/adapters": [
+        "packages/adapters/src"
+      ],
+      "@topgunbuild/react": [
+        "packages/react/src"
+      ],
+      "@topgunbuild/adapter-better-auth": [
+        "packages/adapter-better-auth/src"
+      ]
+    }
+  },
+  "exclude": [
+    "node_modules",
+    "dist",
+    "examples"
+  ]
+}

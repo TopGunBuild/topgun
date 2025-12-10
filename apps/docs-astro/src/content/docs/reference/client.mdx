@@ -1,0 +1,255 @@
+---
+title: Client API
+description: The TopGunClient is the main entry point for interacting with the TopGun cluster.
+order: 21
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Code2, Zap, Database, MessageSquare, Lock } from 'lucide-react';
+import { ApiParam, ApiConstructor } from '../../../components/docs/ApiMethod';
+
+export const startCode = `await client.start();`;
+
+export const getMapCode = `const users = client.getMap<string, User>('users');
+
+// Write data
+users.set('u1', { name: 'Alice' });
+
+// Read data
+const user = users.get('u1');
+
+// Listen for changes
+const unsubscribe = users.onChange(() => {
+  console.log('Users map changed');
+});`;
+
+export const getORMapCode = `const tags = client.getORMap<string, string>('tags');
+
+// Add values (multiple values per key allowed)
+tags.add('post:123', 'javascript');
+tags.add('post:123', 'typescript');
+
+// Read all values for a key
+const postTags = tags.get('post:123');
+// Returns: ['javascript', 'typescript']
+
+// Listen for changes
+const unsubscribe = tags.onChange(() => {
+  console.log('Tags changed');
+});`;
+
+export const topicCode = `const chat = client.topic('chat-room');
+
+// Publish a message
+chat.publish({ text: 'Hello!' });
+
+// Subscribe to messages (returns unsubscribe function)
+const unsubscribe = chat.subscribe((msg) => {
+  console.log(msg);
+});
+
+// Later: stop listening
+unsubscribe();`;
+
+export const getLockCode = `const lock = client.getLock('resource-A');
+if (await lock.lock()) {
+  // Critical section
+  await lock.unlock();
+}`;
+
+export const authCode = `client.setAuthToken('jwt-token-here');`;
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <Code2 className="w-10 h-10 text-blue-600 dark:text-blue-400" />
+  <h1 className="text-4xl font-bold text-foreground">Client API</h1>
+</div>
+
+The `TopGunClient` is the main entry point for interacting with the TopGun cluster.
+It handles connection management, offline synchronization, and provides access to distributed data structures.
+
+## Constructor
+
+<div className="not-prose">
+  <ApiConstructor signature="new TopGunClient(config)">
+    <ApiParam
+      name="serverUrl"
+      type="string"
+      description="WebSocket URL of the TopGun server (e.g., ws://localhost:8765)."
+    />
+    <ApiParam
+      name="storage"
+      type="IStorageAdapter"
+      description="Persistence adapter (e.g., IDBAdapter)."
+    />
+    <ApiParam
+      name="nodeId?"
+      type="string"
+      description="Optional unique ID for this client. Auto-generated if omitted."
+    />
+  </ApiConstructor>
+</div>
+
+## Core Methods
+
+### start()
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Zap className="w-5 h-5 text-amber-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Initializes the storage adapter and starts the synchronization engine.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={startCode} />
+</div>
+
+<div className="bg-green-50 dark:bg-green-900/20 border border-green-100 dark:border-green-800 rounded-xl p-6 my-6 not-prose">
+  <h4 className="font-semibold text-green-800 dark:text-green-300 mb-2">Non-Blocking Initialization</h4>
+  <span className="text-green-700 dark:text-green-400">
+    The <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">IDBAdapter</code> initializes IndexedDB in the background.
+    You can start using the client immediately—write operations are queued in memory and persisted once IndexedDB is ready.
+    This provides true "memory-first" behavior with zero blocking time.
+  </span>
+</div>
+
+### getMap\<K, V\>(name)
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Database className="w-5 h-5 text-purple-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Returns an <strong className="text-foreground">LWWMap</strong> (Last-Writer-Wins Map). Best for simple key-value data where the latest update wins.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={getMapCode} />
+</div>
+
+### getORMap\<K, V\>(name)
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Database className="w-5 h-5 text-purple-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Returns an <strong className="text-foreground">ORMap</strong> (Observed-Remove Map). Best for sets or lists where concurrent additions should be preserved.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={getORMapCode} />
+</div>
+
+### topic(name)
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <MessageSquare className="w-5 h-5 text-green-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Returns a <strong className="text-foreground">TopicHandle</strong> for real-time Pub/Sub messaging. Messages are ephemeral and not stored.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={topicCode} />
+</div>
+
+### getLock(name)
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Lock className="w-5 h-5 text-red-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Returns a <strong className="text-foreground">DistributedLock</strong> handle. Useful for coordinating tasks across multiple clients.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={getLockCode} />
+</div>
+
+### query\<T\>(mapName, filter)
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Database className="w-5 h-5 text-purple-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Creates a live query subscription for a map. Returns a <strong className="text-foreground">QueryHandle</strong> that can be subscribed to for real-time updates.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={`const handle = client.query<Todo>('todos', {
+    where: { completed: false },
+    sort: { createdAt: 'desc' },
+    limit: 10
+  });
+
+  const unsubscribe = handle.subscribe((results) => {
+    console.log('Results:', results);
+  });`} />
+</div>
+
+### close()
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Zap className="w-5 h-5 text-amber-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Closes the client, disconnecting from the server and cleaning up resources.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code="client.close();" />
+</div>
+
+## Authentication
+
+Use `setAuthToken` to authenticate the client. The token is sent to the server on connection and reconnection.
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={authCode} />
+</div>
+
+For dynamic token refresh (e.g., when tokens expire), use `setAuthTokenProvider`:
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={`// Provider is called on each reconnection
+  client.setAuthTokenProvider(async () => {
+    const token = await refreshToken();
+    return token;
+  });`} />
+</div>
+
+## Unsubscribing from Changes
+
+All subscription methods return an unsubscribe function. Call it to stop receiving updates:
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={`// Data structure changes
+  const users = client.getMap<string, User>('users');
+  const unsubscribeMap = users.onChange(() => {
+    console.log('Users changed');
+  });
+
+  // Live query results
+  const query = client.query<Todo>('todos', { where: { done: false } });
+  const unsubscribeQuery = query.subscribe((results) => {
+    console.log('Query results:', results);
+  });
+
+  // Topic messages
+  const chat = client.topic('chat-room');
+  const unsubscribeTopic = chat.subscribe((msg) => {
+    console.log('New message:', msg);
+  });
+
+  // Later: clean up all subscriptions
+  unsubscribeMap();
+  unsubscribeQuery();
+  unsubscribeTopic();`} />
+</div>
+
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border-l-4 border-yellow-500 p-4 my-6 not-prose">
+  <p className="text-sm text-yellow-800 dark:text-yellow-200">
+    <strong>Important:</strong> The <code className="bg-yellow-100 dark:bg-yellow-800/50 px-1 rounded">onChange()</code> callback receives no arguments—it only signals that something changed.
+    To see what changed, re-read the data inside the callback. For filtered results with automatic updates, use <code className="bg-yellow-100 dark:bg-yellow-800/50 px-1 rounded">client.query()</code> instead.
+  </p>
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/reference" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Overview
+    </div>
+  </a>
+  <a href="/docs/reference/data-structures" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Data Structures API <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

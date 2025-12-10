@@ -1,0 +1,125 @@
+---
+title: Comparison
+description: How TopGun compares to other solutions in the ecosystem.
+order: 2
+---
+
+import { ComparisonRow } from '../../components/docs/ComparisonRow';
+import { ChevronRight } from 'lucide-react';
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <span>Get Started</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Comparison</span>
+</div>
+
+# Comparison
+
+How TopGun compares to other solutions in the ecosystem.
+
+<div className="overflow-x-auto mb-12 not-prose">
+  <table className="w-full text-left border-collapse">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="py-4 px-4 text-sm font-mono text-neutral-500 uppercase tracking-wider">Feature</th>
+        <th className="py-4 px-4 text-center bg-blue-500/5 border-t border-x border-blue-500/10 rounded-t-lg">
+          <span className="text-foreground font-bold text-lg">TopGun</span>
+        </th>
+        <th className="py-4 px-4 text-center text-neutral-500 font-medium">ElectricSQL</th>
+        <th className="py-4 px-4 text-center text-neutral-500 font-medium">Firebase</th>
+        <th className="py-4 px-4 text-center text-neutral-500 font-medium">RxDB</th>
+      </tr>
+    </thead>
+    <tbody>
+      <ComparisonRow
+        feature="Primary Model"
+        tg="Local-First IMDG"
+        es="Postgres Sync"
+        fb="Cloud Doc DB"
+        rx="Local-First DB"
+      />
+      <ComparisonRow
+        feature="Offline Support"
+        tg={{ icon: 'check', text: 'First-Class' }}
+        es={{ icon: 'check', text: 'Good' }}
+        fb="Good"
+        rx={{ icon: 'check', text: 'Excellent' }}
+      />
+      <ComparisonRow
+        feature="Latency"
+        tg="~0ms (In-Memory)"
+        es="~5-10ms (SQLite)"
+        fb="Network Dependent"
+        rx="~5-10ms (IndexedDB)"
+      />
+      <ComparisonRow
+        feature="Backend Control"
+        tg="Self-Hosted Cluster"
+        es="Sync Service"
+        fb={{ icon: 'x', text: 'Proprietary', variant: 'error' }}
+        rx="CouchDB / Custom"
+      />
+      <ComparisonRow
+        feature="Consistency"
+        tg="HLC + CRDT"
+        es="Rich CRDTs"
+        fb="LWW (Server)"
+        rx="Revision Trees"
+      />
+      <ComparisonRow
+        feature="Distributed Locks"
+        tg={{ icon: 'check', text: 'Fencing Tokens' }}
+        es={{ icon: 'x', text: 'Not Supported', variant: 'error' }}
+        fb={{ icon: 'x', text: 'Not Supported', variant: 'error' }}
+        rx={{ icon: 'x', text: 'Not Supported', variant: 'error' }}
+      />
+      <ComparisonRow
+        feature="License"
+        tg="Open Source"
+        es="Open Source"
+        fb="Proprietary"
+        rx="Open Source"
+      />
+    </tbody>
+  </table>
+</div>
+
+## Why TopGun?
+
+<ul className="space-y-4 text-neutral-600 dark:text-neutral-300 not-prose">
+  <li className="flex gap-3">
+    <span className="mt-1 text-blue-600">vs ElectricSQL:</span>
+    <p>
+      TopGun operates entirely in-memory for zero-latency reads/writes, whereas ElectricSQL relies on SQLite access (5-10ms).
+    </p>
+  </li>
+  <li className="flex gap-3">
+    <span className="mt-1 text-blue-600">vs Firebase:</span>
+    <p>
+      TopGun gives you ownership of your data. Run it on your own cloud, use your own Postgres DB, and never get locked into a proprietary platform.
+    </p>
+  </li>
+  <li className="flex gap-3">
+    <span className="mt-1 text-blue-600">vs RxDB:</span>
+    <p>
+      TopGun includes a powerful, sharded server cluster for handling massive datasets and complex server-side logic, rather than just replication.
+    </p>
+  </li>
+</ul>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/intro" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Introduction
+    </div>
+  </a>
+  <a href="/docs/installation" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next Section</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Installation <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

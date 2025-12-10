@@ -1,0 +1,63 @@
+---
+title: API Reference
+description: Detailed documentation for TopGun's client libraries, server configurations, and protocol specifications.
+order: 20
+---
+
+import { ChevronRight, BookOpen, Code2, Database, Globe, Server, Zap } from 'lucide-react';
+import { ReferenceCard } from '../../../components/docs/ReferenceCard';
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Reference</span>
+</div>
+
+# API Reference
+
+Detailed documentation for TopGun's client libraries, server configurations, and protocol specifications.
+
+<div className="grid md:grid-cols-2 gap-6 not-prose">
+  <ReferenceCard
+    href="/docs/reference/client"
+    icon={Code2}
+    title="Client API"
+    description="@topgunbuild/client and @topgunbuild/react hooks API documentation."
+    linkText="View Client API"
+  />
+  <ReferenceCard
+    href="/docs/reference/data-structures"
+    icon={Database}
+    title="Data Structures API"
+    description="Complete CRUD reference for LWWMap and ORMap data structures."
+    linkText="View Data Structures"
+  />
+  <ReferenceCard
+    href="/docs/reference/react-hooks"
+    icon={Zap}
+    title="React Hooks"
+    description="Hooks for reactive data fetching and state management."
+    linkText="View React Hooks"
+  />
+  <ReferenceCard
+    href="/docs/reference/server"
+    icon={Server}
+    title="Server API"
+    description="Configuration options and middleware for @topgunbuild/server."
+    linkText="View Server API"
+  />
+  <ReferenceCard
+    href="/docs/reference/adapter"
+    icon={BookOpen}
+    title="Adapters"
+    description="Storage adapters for IndexedDB and encrypted storage."
+    linkText="View Adapter API"
+  />
+  <ReferenceCard
+    href="/docs/reference/protocol"
+    icon={Globe}
+    title="Protocol"
+    description="Wire format and synchronization protocol specification."
+    linkText="View Protocol Spec"
+  />
+</div>

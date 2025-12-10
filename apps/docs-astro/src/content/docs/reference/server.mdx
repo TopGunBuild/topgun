@@ -1,0 +1,172 @@
+---
+title: Server API
+description: The ServerCoordinator is the core of the TopGun backend managing client connections, synchronization, clustering, and security.
+order: 22
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Server, Settings, Shield, Network, Lock } from 'lucide-react';
+import { ApiParam, ApiConstructor } from '../../../components/docs/ApiMethod';
+
+export const readyCode = `const server = new ServerCoordinator(config);
+await server.ready();
+console.log(\`Server running on port \${server.port}\`);`;
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <Server className="w-10 h-10 text-blue-600 dark:text-blue-400" />
+  <h1 className="text-4xl font-bold text-foreground">Server API</h1>
+</div>
+
+The `ServerCoordinator` is the core of the TopGun backend. It manages client connections,
+synchronization logic, clustering, and security enforcement.
+
+## Configuration
+
+<div className="not-prose">
+  <ApiConstructor signature="interface ServerCoordinatorConfig">
+    <ApiParam
+      name="port"
+      type="number"
+      description="Port to listen on for WebSocket connections."
+    />
+    <ApiParam
+      name="storage?"
+      type="IServerStorage"
+      description="Backend storage adapter. Available adapters: PostgresAdapter (production), MemoryServerAdapter (testing). If omitted, runs in-memory."
+    />
+    <ApiParam
+      name="securityPolicies?"
+      type="PermissionPolicy[]"
+      description="List of RBAC policies. See RBAC Guide."
+    />
+    <ApiParam
+      name="clusterPort?"
+      type="number"
+      description="Port for inter-node communication."
+    />
+    <ApiParam
+      name="peers?"
+      type="string[]"
+      description="List of initial peer addresses for clustering (e.g., ['node2:8000'])."
+    />
+    <ApiParam
+      name="tls?"
+      type="TLSConfig"
+      description="TLS configuration for client-facing connections (HTTPS/WSS). See TLS Configuration below."
+    />
+    <ApiParam
+      name="clusterTls?"
+      type="ClusterTLSConfig"
+      description="TLS configuration for inter-node cluster communication. Supports mTLS."
+    />
+  </ApiConstructor>
+</div>
+
+## TLS Configuration
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Lock className="w-6 h-6 text-green-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Enable TLS/SSL encryption for secure client connections (WSS) and cluster communication.</span>
+</div>
+
+<div className="not-prose">
+  <ApiConstructor signature="interface TLSConfig">
+    <ApiParam
+      name="enabled"
+      type="boolean"
+      description="Enable TLS for client-facing server (HTTPS + WSS). Default: false"
+    />
+    <ApiParam
+      name="certPath"
+      type="string"
+      description="Path to the certificate file (PEM format). Supports chain certificates."
+    />
+    <ApiParam
+      name="keyPath"
+      type="string"
+      description="Path to the private key file (PEM format)."
+    />
+    <ApiParam
+      name="caCertPath?"
+      type="string"
+      description="Path to CA certificate for client certificate verification. Required for mTLS."
+    />
+    <ApiParam
+      name="minVersion?"
+      type="'TLSv1.2' | 'TLSv1.3'"
+      description="Minimum TLS version. Default: 'TLSv1.2'"
+    />
+    <ApiParam
+      name="ciphers?"
+      type="string"
+      description="List of allowed cipher suites. Uses Node.js defaults if not specified."
+    />
+    <ApiParam
+      name="passphrase?"
+      type="string"
+      description="Passphrase for encrypted private key."
+    />
+  </ApiConstructor>
+</div>
+
+<div className="not-prose mt-6">
+  <ApiConstructor signature="interface ClusterTLSConfig extends TLSConfig">
+    <ApiParam
+      name="requireClientCert?"
+      type="boolean"
+      description="Require client certificate for mTLS (mutual TLS). Default: false"
+    />
+    <ApiParam
+      name="rejectUnauthorized?"
+      type="boolean"
+      description="Verify peer certificates. Can be disabled for self-signed certs in development. Default: true"
+    />
+  </ApiConstructor>
+</div>
+
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-6 my-6 not-prose">
+  <h3 className="text-lg font-semibold text-yellow-800 dark:text-yellow-300 mb-2">Production Warning</h3>
+  <span className="text-yellow-700 dark:text-yellow-400">When running in production without TLS enabled, the server will log a warning. Always enable TLS in production environments to protect client data in transit.</span>
+</div>
+
+## Methods
+
+### constructor(config)
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Settings className="w-5 h-5 text-neutral-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Creates a new server instance but does not start listening immediately.</span>
+</div>
+
+### ready()
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Network className="w-5 h-5 text-green-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Returns a Promise that resolves when the server is fully started and bound to the port.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={readyCode} />
+</div>
+
+### shutdown()
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Shield className="w-5 h-5 text-red-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Gracefully shuts down the server, closing all client connections, stopping the cluster, and closing storage.</span>
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/reference/data-structures" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Data Structures API
+    </div>
+  </a>
+  <a href="/docs/reference/adapter" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Adapter API <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

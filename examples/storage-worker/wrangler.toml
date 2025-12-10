@@ -1,0 +1,17 @@
+name = "notes-storage-worker"
+main = "src/index.ts"
+compatibility_date = "2023-10-25"
+account_id = "c08d344baa31d37b404e0b4b724d929c"
+
+# Replace these with your values or use `wrangler secret put`
+[vars]
+# PUBLIC_BUCKET_URL = "https://pub-..."
+# ALLOWED_ORIGIN = "http://localhost:5173"
+
+# For R2 Presigned URLs, we need AWS-style credentials.
+# Ideally set these as secrets:
+# wrangler secret put R2_ACCESS_KEY_ID
+# wrangler secret put R2_SECRET_ACCESS_KEY
+# wrangler secret put R2_BUCKET_NAME
+# wrangler secret put R2_ACCOUNT_ID
+

@@ -1,0 +1,303 @@
+{
+  "name": "Notes App - Push Notifications",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Every Minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH current_time_info AS (\n  SELECT \n    TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') as today,\n    TO_CHAR(NOW() AT TIME ZONE 'UTC', 'HH24:MI') as now_time,\n    EXTRACT(DOW FROM CURRENT_DATE)::int as today_dow,\n    EXTRACT(DAY FROM CURRENT_DATE)::int as today_day,\n    EXTRACT(EPOCH FROM NOW())::bigint * 1000 as now_ms\n)\nSELECT \n  m.map_name,\n  m.key as note_id,\n  m.value->>'title' as title,\n  m.value->>'date' as due_date,\n  m.value->>'time' as due_time,\n  COALESCE(m.value->>'recurring', 'none') as recurring,\n  SPLIT_PART(m.map_name, ':', 2) as user_id\nFROM topgun_maps m, current_time_info ct\nWHERE \n  m.map_name LIKE 'notes:%'\n  AND m.is_deleted = false\n  AND m.value->>'time' IS NOT NULL\n  AND m.value->>'time' = ct.now_time\n  -- Not notified in last 60 seconds (prevents duplicates)\n  AND (\n    m.value->>'lastNotifiedAt' IS NULL \n    OR (m.value->>'lastNotifiedAt')::bigint < ct.now_ms - 60000\n  )\n  AND (\n    -- One-time: exact date match\n    (\n      COALESCE(m.value->>'recurring', 'none') = 'none'\n      AND m.value->>'date' = ct.today\n    )\n    OR\n    -- Daily: just time match (any day)\n    COALESCE(m.value->>'recurring', 'none') = 'daily'\n    OR\n    -- Weekly: same day of week\n    (\n      COALESCE(m.value->>'recurring', 'none') = 'weekly'\n      AND m.value->>'date' IS NOT NULL\n      AND EXTRACT(DOW FROM (m.value->>'date')::date)::int = ct.today_dow\n    )\n    OR\n    -- Monthly: same day of month\n    (\n      COALESCE(m.value->>'recurring', 'none') = 'monthly'\n      AND m.value->>'date' IS NOT NULL\n      AND EXTRACT(DAY FROM (m.value->>'date')::date)::int = ct.today_day\n    )\n  )\nLIMIT 100;",
+        "options": {}
+      },
+      "id": "get-due-notes",
+      "name": "Get Due Notes",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [460, 300],
+      "credentials": {
+        "postgres": {
+          "id": "POSTGRES_CREDENTIAL_ID",
+          "name": "TopGun PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-has-results",
+              "leftValue": "={{ $json.note_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "isNotEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "filter-has-notes",
+      "name": "Has Due Notes?",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  m.key as device_id,\n  m.value->>'endpoint' as endpoint,\n  m.value->>'p256dh' as p256dh,\n  m.value->>'auth' as auth,\n  '{{ $json.user_id }}' as user_id,\n  '{{ $json.map_name }}' as map_name,\n  '{{ $json.note_id }}' as note_id,\n  '{{ $json.title }}' as note_title,\n  '{{ $json.recurring }}' as recurring\nFROM topgun_maps m\nWHERE \n  m.map_name = 'pushSubscriptions:{{ $json.user_id }}'\n  AND m.is_deleted = false\n  AND m.value->>'endpoint' IS NOT NULL;",
+        "options": {}
+      },
+      "id": "get-subscriptions",
+      "name": "Get User Subscriptions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [900, 300],
+      "credentials": {
+        "postgres": {
+          "id": "POSTGRES_CREDENTIAL_ID",
+          "name": "TopGun PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-has-subscription",
+              "leftValue": "={{ $json.endpoint }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "isNotEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "filter-has-subscriptions",
+      "name": "Has Subscriptions?",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://push-worker.easysolpro.workers.dev/api/push/send",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"subscription\": {\n    \"endpoint\": \"{{ $json.endpoint }}\",\n    \"keys\": {\n      \"p256dh\": \"{{ $json.p256dh }}\",\n      \"auth\": \"{{ $json.auth }}\"\n    }\n  },\n  \"payload\": {\n    \"title\": \"{{ $json.recurring === 'daily' ? 'Ежедневное напоминание' : $json.recurring === 'weekly' ? 'Еженедельное напоминание' : $json.recurring === 'monthly' ? 'Ежемесячное напоминание' : 'Напоминание' }}\",\n    \"body\": \"{{ $json.note_title }}\",\n    \"icon\": \"/icon-192.svg\",\n    \"tag\": \"note-{{ $json.note_id }}\",\n    \"data\": {\n      \"noteId\": \"{{ $json.note_id }}\",\n      \"url\": \"/?note={{ $json.note_id }}\"\n    }\n  },\n  \"ttl\": 86400\n}",
+        "options": {}
+      },
+      "id": "send-push",
+      "name": "Send Push Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE topgun_maps \nSET value = jsonb_set(\n  value, \n  '{lastNotifiedAt}', \n  to_jsonb(EXTRACT(EPOCH FROM NOW())::bigint * 1000)\n)\nWHERE map_name = '{{ $('Get User Subscriptions').item.json.map_name }}'\n  AND key = '{{ $('Get User Subscriptions').item.json.note_id }}';",
+        "options": {}
+      },
+      "id": "update-last-notified",
+      "name": "Update lastNotifiedAt",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1560, 300],
+      "credentials": {
+        "postgres": {
+          "id": "POSTGRES_CREDENTIAL_ID",
+          "name": "TopGun PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-push-expired",
+              "leftValue": "={{ $('Send Push Notification').item.json.statusCode }}",
+              "rightValue": "410",
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "check-expired",
+      "name": "Subscription Expired?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1340, 500]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE topgun_maps \nSET is_deleted = true\nWHERE map_name LIKE 'pushSubscriptions:%'\n  AND value->>'endpoint' = '{{ $('Get User Subscriptions').item.json.endpoint }}';",
+        "options": {}
+      },
+      "id": "remove-expired-subscription",
+      "name": "Remove Expired Subscription",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1560, 500],
+      "credentials": {
+        "postgres": {
+          "id": "POSTGRES_CREDENTIAL_ID",
+          "name": "TopGun PostgreSQL"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every Minute": {
+      "main": [
+        [
+          {
+            "node": "Get Due Notes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Due Notes": {
+      "main": [
+        [
+          {
+            "node": "Has Due Notes?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Due Notes?": {
+      "main": [
+        [
+          {
+            "node": "Get User Subscriptions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get User Subscriptions": {
+      "main": [
+        [
+          {
+            "node": "Has Subscriptions?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Subscriptions?": {
+      "main": [
+        [
+          {
+            "node": "Send Push Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Push Notification": {
+      "main": [
+        [
+          {
+            "node": "Update lastNotifiedAt",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Subscription Expired?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Subscription Expired?": {
+      "main": [
+        [
+          {
+            "node": "Remove Expired Subscription",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "push-notifications"
+    },
+    {
+      "name": "notes-app"
+    }
+  ],
+  "triggerCount": 1,
+  "pinData": {}
+}

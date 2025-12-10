@@ -1,0 +1,56 @@
+logs/
+node_modules/
+dist/
+.DS_Store
+
+# Environment files (use .env.example as template)
+.env
+.env.local
+.env.*.local
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# TypeScript compiled files
+*.js
+*.d.ts
+*.js.map
+*.d.ts.map
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Keep source TypeScript files in examples (but not compiled .d.ts)
+!examples/**/*.ts
+!examples/**/*.tsx
+
+# Exclude compiled .d.ts files in examples (they match *.ts pattern above)
+examples/**/*.d.ts
+
+# Keep root configuration files only
+!/jest.config.js
+!/webpack.config.js
+!/scripts/*.js
+
+# Keep package-level config files
+!packages/**/jest.config.js
+
+# Keep example config files (source only, not compiled)
+!examples/**/postcss.config.js
+!examples/**/tailwind.config.js
+!examples/**/vite.config.ts
+
+# Keep example app source files (JSX/TSX are source, not compiled)
+!examples/**/src/**/*.jsx
+!examples/**/src/**/*.tsx
+
+# Test coverage reports
+coverage/
+*.lcov
+.nyc_output/
+
+
+# Test Certificates
+*.crt
+*.key
+packages/server/test/fixtures/

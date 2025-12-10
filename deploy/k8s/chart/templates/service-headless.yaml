@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-headless
+  labels:
+    app: {{ .Release.Name }}
+spec:
+  clusterIP: None
+  selector:
+    app: {{ .Release.Name }}
+  ports:
+    - name: cluster
+      port: {{ .Values.cluster.port }}
+      targetPort: {{ .Values.cluster.port }}
+

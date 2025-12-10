@@ -1,0 +1,94 @@
+---
+title: Distributed Locks
+description: Coordinate processes across your cluster using TopGun's distributed locking mechanism with built-in fencing tokens.
+order: 17
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Lock, ShieldCheck } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
+
+export const lockCode = `import { TopGunClient } from '@topgunbuild/client';
+
+// ... initialize client ...
+
+async function processJob() {
+  const lock = client.getLock('process-queue-1');
+
+  // Acquire lock with 5 second TTL (auto-release if client crashes)
+  const acquired = await lock.lock(5000);
+
+  if (acquired) {
+    try {
+      console.log('Lock acquired, processing job...');
+      // Perform critical section work here
+      await doHeavyWork();
+    } finally {
+      // Always release the lock when done
+      await lock.unlock();
+      console.log('Lock released');
+    }
+  } else {
+    console.log('Could not acquire lock, another worker is busy.');
+  }
+}`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Distributed Locks</span>
+</div>
+
+# Distributed Locks
+
+Coordinate processes across your cluster using TopGun's distributed locking mechanism with built-in fencing tokens.
+
+In a distributed system, you often need to ensure that only one client or process performs a specific action at a time (e.g., processing a payment, updating a shared resource).
+TopGun provides a simple API to acquire and release locks, backed by the server cluster.
+
+## Using Locks
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Lock className="w-6 h-6 text-blue-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Use <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded">client.getLock(name)</code> to create a lock handle, then call <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded">lock(ttl)</code> to attempt to acquire it.</span>
+</div>
+
+The `ttl` (Time-To-Live) ensures the lock is automatically released if the client crashes.
+
+<div className="not-prose">
+  <CodeBlock title="src/worker.ts" language="typescript" code={lockCode} />
+</div>
+
+## Fencing Tokens
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <ShieldCheck className="w-6 h-6 text-green-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">TopGun implements <strong className="text-foreground">Fencing Tokens</strong> to prevent "zombie processes" from corrupting data.</span>
+</div>
+
+When a lock is granted, the server returns a monotonically increasing number (the token).
+
+Although the high-level `lock()` API handles this internally for release operations, you should ideally pass this token to any external storage systems you are modifying to verify that you still hold the valid lock.
+
+<AlertBox
+  variant="warning"
+  title="Why is this needed?"
+  text="If a client pauses (e.g., due to a long GC pause) and its lock expires, another client might acquire the lock. When the first client wakes up, it might try to write data, unaware it lost the lock. Fencing tokens allow the storage layer to reject the write from the old client (because its token is smaller than the current one)."
+/>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/observability" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Observability
+    </div>
+  </a>
+  <a href="/docs/guides/rbac" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Security (RBAC) <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

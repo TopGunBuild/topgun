@@ -1,0 +1,230 @@
+---
+title: Quick Start
+description: Build your first Local-First application with TopGun in less than 5 minutes.
+order: 4
+---
+
+import CodeBlock from '../../components/docs/CodeBlock.astro';
+import { ChevronRight } from 'lucide-react';
+
+export const initCode = `import React from 'react';
+import ReactDOM from 'react-dom/client';
+import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+import { TopGunProvider } from '@topgunbuild/react';
+import App from './App';
+
+// 1. Create the adapter and client
+const adapter = new IDBAdapter();
+const client = new TopGunClient({
+  // Use wss:// for production (TLS encrypted)
+  // Use ws:// only for local development
+  serverUrl: 'ws://localhost:3000', // Optional sync server
+  storage: adapter
+});
+
+// 2. Start the client (non-blocking!)
+client.start();
+
+// No loading state needed - writes are queued in memory
+// and persisted once IndexedDB is ready
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <TopGunProvider client={client}>
+      <App />
+    </TopGunProvider>
+  </React.StrictMode>,
+);`;
+
+export const addTodoCode = `import { useClient } from '@topgunbuild/react';
+import { useState } from 'react';
+
+export const AddTodo = () => {
+  const client = useClient();
+  const [text, setText] = useState('');
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+
+    const id = crypto.randomUUID();
+
+    // Access the 'todos' map
+    const todos = client.getMap('todos');
+
+    // Write data
+    todos.set(id, {
+      id,
+      text,
+      done: false,
+      createdAt: Date.now()
+    });
+
+    setText('');
+  };
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input
+        value={text}
+        onChange={e => setText(e.target.value)}
+        placeholder="What needs to be done?"
+      />
+      <button type="submit">Add</button>
+    </form>
+  );
+};`;
+
+export const todoListCode = `import { useClient, useQuery } from '@topgunbuild/react';
+
+interface Todo {
+  id: string;
+  text: string;
+  done: boolean;
+}
+
+export const TodoList = () => {
+  const client = useClient();
+  // Subscribe to the 'todos' map
+  const { data: todos } = useQuery<Todo>('todos');
+
+  const toggleTodo = (todo: Todo) => {
+    const todosMap = client.getMap('todos');
+    // Update partial state by overwriting the object (merging is handled by CRDT if applicable)
+    // or setting the new state fully
+    todosMap.set(todo.id, { ...todo, done: !todo.done });
+  };
+
+  return (
+    <ul>
+      {todos.map(todo => (
+        <li key={todo.id}>
+          <label>
+            <input
+              type="checkbox"
+              checked={todo.done}
+              onChange={() => toggleTodo(todo)}
+            />
+            {todo.text}
+          </label>
+        </li>
+      ))}
+    </ul>
+  );
+};`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <span>Get Started</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Quick Start</span>
+</div>
+
+# Quick Start Guide
+
+Build your first Local-First application with TopGun in less than 5 minutes.
+This guide will walk you through installation, initialization, and basic data operations.
+
+## 1. Installation
+
+<div className="not-prose">
+  <p className="text-neutral-600 dark:text-neutral-300 mb-4">
+    Install the core client, adapters, and the React hooks package.
+  </p>
+  <CodeBlock
+    title="terminal"
+    code="npm install @topgunbuild/client @topgunbuild/adapters @topgunbuild/react"
+  />
+</div>
+
+## 2. Initialization
+
+<div className="not-prose">
+  <p className="text-neutral-600 dark:text-neutral-300 mb-4">
+    Create a TopGun client instance, configure persistence, and wrap your app.
+    The client starts immediately—no loading state needed!
+  </p>
+  <CodeBlock
+    title="src/main.tsx"
+    language="tsx"
+    code={initCode}
+  />
+</div>
+
+## 3. Writing Data
+
+<div className="not-prose">
+  <p className="text-neutral-600 dark:text-neutral-300 mb-4">
+    TopGun organizes data in Maps. Use <code className="px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800 text-sm">getMap()</code> to access a collection and <code className="px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800 text-sm">set()</code> to save data.
+  </p>
+  <CodeBlock
+    title="src/components/AddTodo.tsx"
+    language="tsx"
+    code={addTodoCode}
+  />
+</div>
+
+## 4. Reading (Live Query)
+
+<div className="not-prose">
+  <p className="text-neutral-600 dark:text-neutral-300 mb-4">
+    Use the <code className="px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800 text-sm">useQuery</code> hook to subscribe to a map. The component will automatically re-render when data changes locally or comes in from the server.
+  </p>
+  <CodeBlock
+    title="src/components/TodoList.tsx"
+    language="tsx"
+    code={todoListCode}
+  />
+</div>
+
+<div className="bg-green-50 dark:bg-green-900/20 border border-green-100 dark:border-green-800 rounded-xl p-6 mb-6 not-prose">
+  <h3 className="text-lg font-semibold text-green-800 dark:text-green-300 mb-2 !mt-0">Non-Blocking Initialization</h3>
+  <span className="text-green-700 dark:text-green-400">IndexedDB can take 50-500ms to initialize. TopGun queues write operations in memory and persists them once ready—your UI renders instantly with zero blocking time. If using the simplified <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">TopGun</code> API, use <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">await db.waitForReady()</code> only if you need guaranteed persistence before proceeding.</span>
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 mb-6 not-prose">
+  <h3 className="text-lg font-semibold text-blue-800 dark:text-blue-300 mb-2 !mt-0">Persistence</h3>
+  <span className="text-blue-700 dark:text-blue-400">By using <code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">IDBAdapter</code>, your data is automatically saved to IndexedDB. Even if the user refreshes the page or closes the browser, the state is preserved locally.</span>
+</div>
+
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-6 mb-6 not-prose">
+  <h3 className="text-lg font-semibold text-yellow-800 dark:text-yellow-300 mb-2 !mt-0">Production: Use Secure WebSocket (WSS)</h3>
+  <span className="text-yellow-700 dark:text-yellow-400">In production, always use <code className="px-1.5 py-0.5 rounded bg-yellow-100 dark:bg-yellow-800/50 text-sm">wss://</code> instead of <code className="px-1.5 py-0.5 rounded bg-yellow-100 dark:bg-yellow-800/50 text-sm">ws://</code> to encrypt data in transit. See the <a href="/docs/guides/security" className="underline">Security Guide</a> for TLS configuration.</span>
+</div>
+
+<div className="bg-purple-50 dark:bg-purple-900/20 border border-purple-100 dark:border-purple-800 rounded-xl p-6 mb-16 not-prose">
+  <h3 className="text-lg font-semibold text-purple-800 dark:text-purple-300 mb-2 !mt-0">Optional: Encrypt Local Storage</h3>
+  <span className="text-purple-700 dark:text-purple-400">For sensitive data, wrap your adapter with <code className="px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-800/50 text-sm">EncryptedStorageAdapter</code> to encrypt data at rest. See the <a href="/docs/guides/security#client-side-encryption-data-at-rest" className="underline">Client-Side Encryption section</a> in the Security Guide.</span>
+</div>
+
+## Next Steps
+
+<div className="grid md:grid-cols-2 gap-4 not-prose">
+  <a href="/docs/concepts" className="block p-6 border border-card-border rounded-lg hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <h3 className="font-semibold text-foreground mb-2">Core Concepts</h3>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300">
+      Learn about Local-First, CRDTs, and how TopGun achieves eventual consistency.
+    </p>
+  </a>
+  <a href="/docs/guides" className="block p-6 border border-card-border rounded-lg hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <h3 className="font-semibold text-foreground mb-2">Guides</h3>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300">
+      Deep dive into specific topics like Authentication, Encryption, and patterns.
+    </p>
+  </a>
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/installation" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Installation
+    </div>
+  </a>
+  <a href="/docs/concepts" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next Section</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Concepts <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

@@ -1,0 +1,42 @@
+node_modules
+packages/*/node_modules
+logs
+dist
+packages/*/dist
+coverage
+.git
+.env
+
+# Documentation
+*.md
+README*
+CHANGELOG*
+LICENSE*
+
+# Build artifacts
+*.tgz
+*.tar.gz
+
+# IDE and editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+coverage/
+*.test.ts
+*.spec.ts
+__tests__/
+
+# Project specific
+logs/
+docs/
+
+# Keep deploy/ and examples/ - needed for Dockerfile.client
+# deploy/
+# examples/
+
+# OS files
+.DS_Store
+Thumbs.db

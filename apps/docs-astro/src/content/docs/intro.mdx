@@ -1,0 +1,63 @@
+---
+title: Introduction
+description: TopGun is a next-generation data platform designed for the modern "Local-First" web.
+order: 1
+---
+
+import { FeatureGridCard } from '../../components/docs/FeatureGridCard';
+import { ChevronRight } from 'lucide-react';
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <span>Get Started</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Introduction</span>
+</div>
+
+# Introduction
+
+TopGun is a next-generation data platform designed for the modern "Local-First" web. 
+It bridges the gap between scalable <strong className="text-foreground">In-Memory Data Grids (IMDG)</strong> like Hazelcast 
+and <strong className="text-foreground">Offline-First Client Databases</strong> like RxDB.
+It allows you to build applications that are instant, reliable, and collaborative by default.
+
+## Features
+
+TopGun aims to be the standard for local-first state management. It provides a robust sync engine out of the box.
+
+<div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-2 gap-4 mb-16">
+  <FeatureGridCard 
+    title="Framework Agnostic" 
+    desc="Works with React, Vue, Svelte, Solid, or vanilla JS. Zero dependencies on UI frameworks." 
+  />
+  <FeatureGridCard 
+    title="Local-First Architecture" 
+    desc="The client is the replica. Reads/Writes are instant against local memory." 
+  />
+  <FeatureGridCard 
+    title="Conflict Resolution" 
+    desc="Automatic convergence using Hybrid Logical Clocks (HLC) and CRDTs." 
+  />
+  <FeatureGridCard 
+    title="Offline Capable" 
+    desc="Persists to IndexedDB or SQLite. Queues operations and syncs when online." 
+  />
+  <FeatureGridCard 
+    title="Real-Time Sync" 
+    desc="Push-based architecture via WebSockets. Merkle Trees ensure bandwidth efficiency." 
+  />
+  <FeatureGridCard 
+    title="Scalable Backend" 
+    desc="Server cluster handles partitioning, authority, and writing to Postgres/Mongo." 
+  />
+</div>
+
+<div className="flex justify-end pt-10 mt-10 border-t border-card-border">
+    <a href="/docs/comparison" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next Page</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold whitespace-nowrap">
+        Comparison <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+    </a>
+</div>

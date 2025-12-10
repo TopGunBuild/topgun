@@ -1,0 +1,60 @@
+# Build Stage
+FROM node:18-alpine AS builder
+
+# Build-time arguments for Vite
+ARG VITE_TOPGUN_SERVER_URL
+ARG VITE_CLERK_PUBLISHABLE_KEY
+ARG VITE_STORAGE_WORKER_URL
+ARG VITE_PUSH_WORKER_URL
+ARG VITE_VAPID_PUBLIC_KEY
+
+# Make them available as environment variables during build
+ENV VITE_TOPGUN_SERVER_URL=$VITE_TOPGUN_SERVER_URL
+ENV VITE_CLERK_PUBLISHABLE_KEY=$VITE_CLERK_PUBLISHABLE_KEY
+ENV VITE_STORAGE_WORKER_URL=$VITE_STORAGE_WORKER_URL
+ENV VITE_PUSH_WORKER_URL=$VITE_PUSH_WORKER_URL
+ENV VITE_VAPID_PUBLIC_KEY=$VITE_VAPID_PUBLIC_KEY
+
+# Install pnpm
+RUN corepack enable && corepack prepare pnpm@10.13.1 --activate
+
+WORKDIR /app
+
+# Copy pnpm workspace configuration
+COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
+
+# Copy workspace package definitions
+COPY packages/core/package.json packages/core/package.json
+COPY packages/server/package.json packages/server/package.json
+COPY packages/client/package.json packages/client/package.json
+COPY packages/adapters/package.json packages/adapters/package.json
+COPY packages/react/package.json packages/react/package.json
+COPY packages/adapter-better-auth/package.json packages/adapter-better-auth/package.json
+COPY examples/todo-app/package.json examples/todo-app/package.json
+COPY examples/notes-app/package.json examples/notes-app/package.json
+
+# Install dependencies
+RUN pnpm install --frozen-lockfile
+
+# Copy source code
+COPY packages ./packages
+COPY examples ./examples
+COPY tsconfig.json ./
+
+# Build the specific example app
+# We also need to build dependencies first
+RUN pnpm -r build
+RUN pnpm --filter @topgun/example-notes build
+
+# Production Stage
+FROM nginx:alpine
+
+# Copy built assets from builder stage
+COPY --from=builder /app/examples/notes-app/dist /usr/share/nginx/html
+
+# Copy custom nginx config
+COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]

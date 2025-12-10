@@ -1,0 +1,72 @@
+---
+title: Local-First Architecture
+description: TopGun is designed for the modern "Local-First" web. It fundamentally changes how applications interact with data, inverting the traditional client-server relationship.
+order: 6
+---
+
+import { ChevronRight } from 'lucide-react';
+import { ArchitectureComparison } from '../../../components/docs/ArchitectureComparison';
+import { FeatureList, FeatureItem } from '../../../components/docs/FeatureList';
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <span>Concepts</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Local-First</span>
+</div>
+
+# Local-First Architecture
+
+TopGun is designed for the modern "Local-First" web. It fundamentally changes how applications interact with data, inverting the traditional client-server relationship.
+
+## The Philosophy
+
+In a Local-First app, the primary data source is the **local database** on the user's device. The network is treated as an optional enhancement, rather than a critical dependency.
+
+<div className="not-prose">
+  <ArchitectureComparison />
+</div>
+
+## Why it matters
+
+Traditional architectures degrade user experience by introducing network latency into every interaction.
+TopGun ensures your app feels native and responsive, regardless of network conditions—whether in a tunnel, an elevator, or on a flaky 3G connection.
+
+<div className="not-prose">
+  <FeatureList>
+    <FeatureItem
+      emoji="⚡️"
+      title="Zero-Latency UI"
+      description="Reads and writes happen locally against an in-memory CRDT. The UI updates in less than 16ms (one frame)."
+      color="blue"
+    />
+    <FeatureItem
+      emoji="💾"
+      title="Offline Capability"
+      description="Data is persisted to IndexedDB (Browser) or SQLite (Mobile/Desktop). Your app works without internet."
+      color="purple"
+    />
+    <FeatureItem
+      emoji="🔄"
+      title="Real-Time Sync"
+      description="Automatic background synchronization using efficient Merkle Trees and WebSockets when the network becomes available."
+      color="orange"
+    />
+  </FeatureList>
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/concepts" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Concepts
+    </div>
+  </a>
+  <a href="/docs/concepts/crdt-hlc" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next Concept</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      CRDTs & Time <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

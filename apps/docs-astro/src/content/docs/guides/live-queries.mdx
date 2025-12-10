@@ -1,0 +1,132 @@
+---
+title: Live Queries
+description: TopGun provides a powerful reactive query system that allows you to subscribe to changes in your data in real-time.
+order: 12
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Activity, Zap, Filter } from 'lucide-react';
+import { FeatureCard } from '../../../components/docs/FeatureCard';
+
+export const basicQueryCode = `const query = client.query('todos', {
+  where: { completed: false },
+  sort: { createdAt: 'desc' }
+});
+
+const unsubscribe = query.subscribe((results) => {
+  console.log('Active todos:', results);
+});
+
+// Later, when you're done:
+unsubscribe();`;
+
+export const predicateCode = `import { Predicates } from '@topgunbuild/client';
+
+const query = client.query('products', {
+  predicate: Predicates.and(
+    Predicates.greaterThan('price', 100),
+    Predicates.equal('category', 'electronics')
+  )
+});`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Live Queries</span>
+</div>
+
+# Live Queries
+
+TopGun provides a powerful reactive query system that allows you to subscribe to changes in your data.
+Unlike traditional databases where you have to poll for updates, TopGun pushes updates to your client in real-time.
+
+<div className="grid md:grid-cols-3 gap-6 mb-16 not-prose">
+  <FeatureCard
+    icon={Activity}
+    iconColor="text-blue-500"
+    title="Real-time Updates"
+    description="Changes are pushed to subscribers immediately as they happen, no polling required."
+  />
+  <FeatureCard
+    icon={Filter}
+    iconColor="text-green-500"
+    title="Powerful Filters"
+    description="Use simple equality matching or complex predicates with logical operators."
+  />
+  <FeatureCard
+    icon={Zap}
+    iconColor="text-orange-500"
+    title="React Integration"
+    description="First-class React hooks for seamless integration with your UI components."
+  />
+</div>
+
+## Basic Usage
+
+To create a live query, use the `client.query()` method.
+This returns a `QueryHandle` that you can subscribe to.
+
+<div className="not-prose">
+  <CodeBlock title="src/queries/todos.ts" language="typescript" code={basicQueryCode} />
+</div>
+
+## Query Filters
+
+The `QueryFilter` object supports several options:
+
+- `where`: Simple equality matching
+- `predicate`: Complex conditions using logic operators
+- `sort`: Sort order
+- `limit`: Max number of results (coming soon)
+
+## Complex Predicates
+
+For more complex filtering, use the `predicate` field:
+
+<div className="not-prose">
+  <CodeBlock title="src/queries/products.ts" language="typescript" code={predicateCode} />
+</div>
+
+### Available Predicate Methods
+
+| Method | Description | Example |
+|--------|-------------|---------|
+| `equal(attr, value)` | Exact match | `Predicates.equal('status', 'active')` |
+| `notEqual(attr, value)` | Not equal | `Predicates.notEqual('type', 'draft')` |
+| `greaterThan(attr, value)` | Greater than | `Predicates.greaterThan('price', 100)` |
+| `greaterThanOrEqual(attr, value)` | Greater or equal | `Predicates.greaterThanOrEqual('stock', 0)` |
+| `lessThan(attr, value)` | Less than | `Predicates.lessThan('age', 18)` |
+| `lessThanOrEqual(attr, value)` | Less or equal | `Predicates.lessThanOrEqual('priority', 5)` |
+| `like(attr, pattern)` | SQL-like pattern (`%` = any, `_` = single char) | `Predicates.like('name', '%john%')` |
+| `regex(attr, pattern)` | Regular expression | `Predicates.regex('email', '^.*@gmail\\.com$')` |
+| `between(attr, from, to)` | Range (inclusive) | `Predicates.between('price', 10, 100)` |
+| `and(...predicates)` | Logical AND | `Predicates.and(p1, p2, p3)` |
+| `or(...predicates)` | Logical OR | `Predicates.or(p1, p2)` |
+| `not(predicate)` | Logical NOT | `Predicates.not(p1)` |
+
+## React Integration
+
+If you are using React, we recommend using the `useQuery` hook which handles subscription management automatically.
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-4 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    See the <a href="/docs/reference/react-hooks" className="underline hover:no-underline">React Hooks</a> reference for detailed documentation on <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">useQuery</code>, <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">useMutation</code>, and other hooks.
+  </p>
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/security" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Security (TLS)
+    </div>
+  </a>
+  <a href="/docs/guides/pub-sub" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Pub/Sub <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

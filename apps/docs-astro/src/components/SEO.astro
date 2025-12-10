@@ -1,0 +1,93 @@
+---
+interface Props {
+  title?: string;
+  description?: string;
+  image?: string;
+  type?: 'website' | 'article';
+  publishedTime?: string;
+  author?: string;
+}
+
+const {
+  title = 'TopGun - Offline-First In-Memory Data Grid',
+  description = 'TopGun is a high-performance, offline-first, real-time database. Zero-latency reads/writes, CRDTs, and Merkle Tree sync.',
+  image,
+  type = 'website',
+  publishedTime,
+  author,
+} = Astro.props;
+
+// Normalize pathname: remove trailing slash (except for root)
+const pathname = Astro.url.pathname === '/' ? '/' : Astro.url.pathname.replace(/\/$/, '');
+const canonicalURL = new URL(pathname, Astro.site);
+
+// Generate dynamic OG image URL based on current path
+const ogImagePath = pathname === '/' ? '/og.png' : `/og${pathname}.png`;
+const imageURL = new URL(image || ogImagePath, Astro.site);
+---
+
+<!-- Primary Meta Tags -->
+<meta name="title" content={title} />
+<meta name="description" content={description} />
+<link rel="canonical" href={canonicalURL} />
+<link rel="alternate" type="application/rss+xml" title="TopGun Blog RSS Feed" href={new URL('/rss.xml', Astro.site)} />
+
+<!-- Open Graph / Facebook -->
+<meta property="og:type" content={type} />
+<meta property="og:url" content={canonicalURL} />
+<meta property="og:title" content={title} />
+<meta property="og:description" content={description} />
+<meta property="og:image" content={imageURL} />
+<meta property="og:site_name" content="TopGun" />
+<meta property="og:locale" content="en_US" />
+
+{type === 'article' && publishedTime && (
+  <meta property="article:published_time" content={publishedTime} />
+)}
+{type === 'article' && author && (
+  <meta property="article:author" content={author} />
+)}
+
+<!-- Twitter -->
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:url" content={canonicalURL} />
+<meta name="twitter:title" content={title} />
+<meta name="twitter:description" content={description} />
+<meta name="twitter:image" content={imageURL} />
+
+<!-- JSON-LD Structured Data -->
+{type === 'website' && (
+  <script type="application/ld+json" set:html={JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    "name": "TopGun",
+    "description": description,
+    "url": Astro.site?.toString(),
+    "publisher": {
+      "@type": "Organization",
+      "name": "TopGun",
+      "url": Astro.site?.toString()
+    }
+  })} />
+)}
+
+{type === 'article' && (
+  <script type="application/ld+json" set:html={JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "Article",
+    "headline": title,
+    "description": description,
+    "url": canonicalURL.toString(),
+    "image": imageURL.toString(),
+    "datePublished": publishedTime,
+    "author": {
+      "@type": "Person",
+      "name": author
+    },
+    "publisher": {
+      "@type": "Organization",
+      "name": "TopGun",
+      "url": Astro.site?.toString()
+    }
+  })} />
+)}

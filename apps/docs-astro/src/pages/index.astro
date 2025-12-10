@@ -1,0 +1,16 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Hero from '../components/Hero.astro';
+import { Features } from '../components/Features';
+import { TacticalDemo } from '../components/demo';
+import { Architecture } from '../components/Architecture';
+import { Comparison } from '../components/Comparison';
+---
+
+<Layout>
+	<Hero />
+	<TacticalDemo client:visible />
+	<Features client:visible />
+	<Architecture client:visible />
+	<Comparison client:visible />
+</Layout>

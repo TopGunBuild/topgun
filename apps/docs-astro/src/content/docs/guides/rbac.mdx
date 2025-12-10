@@ -1,0 +1,128 @@
+---
+title: Role-Based Access Control (RBAC)
+description: TopGun provides a flexible security model based on Permission Policies. Define fine-grained access control rules for your data maps.
+order: 18
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Shield, Lock, UserCheck, AlertTriangle } from 'lucide-react';
+import { FeatureCard } from '../../../components/docs/FeatureCard';
+
+export const configCode = `import { ServerCoordinator } from '@topgunbuild/server';
+import { PermissionPolicy } from '@topgunbuild/core';
+
+const policies: PermissionPolicy[] = [
+  // 1. Public Read-Only Access
+  {
+    role: 'ANON',
+    mapNamePattern: 'public:*',
+    actions: ['READ']
+  },
+  // 2. User Private Data (Dynamic Pattern)
+  {
+    role: 'USER',
+    mapNamePattern: 'users:{userId}:*', // {userId} is replaced at runtime
+    actions: ['ALL']
+  },
+  // 3. Admin Full Access
+  {
+    role: 'ADMIN',
+    mapNamePattern: '*',
+    actions: ['ALL']
+  }
+];
+
+const server = new ServerCoordinator({
+  port: 8765,
+  securityPolicies: policies
+});`;
+
+export const fieldLevelCode = `{
+  role: 'USER',
+  mapNamePattern: 'users:*',
+  actions: ['READ'],
+  // Only allow reading public profile fields
+  allowedFields: ['username', 'displayName', 'avatarUrl']
+}`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">RBAC</span>
+</div>
+
+# Role-Based Access Control (RBAC)
+
+TopGun provides a flexible security model based on **Permission Policies**.
+You can define fine-grained access control rules for your data maps, controlling who can read (READ), write (PUT), or delete (REMOVE) data based on user roles.
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-12 flex items-start gap-3 not-prose">
+  <Shield className="w-6 h-6 text-blue-600 dark:text-blue-400 mt-1 shrink-0" />
+  <div>
+    <h3 className="font-semibold text-blue-900 dark:text-blue-100 mb-1">Security by Default</h3>
+    <p className="text-sm text-blue-800 dark:text-blue-200">
+      TopGun Server denies all access by default. You must explicitly define policies to allow access to your maps.
+    </p>
+  </div>
+</div>
+
+## Core Concepts
+
+<div className="grid gap-6 md:grid-cols-2 mb-16 not-prose">
+  <div className="p-6 bg-card border border-card-border rounded-xl">
+    <UserCheck className="w-8 h-8 text-neutral-500 mb-3" />
+    <h3 className="text-lg font-medium mb-2">Principal</h3>
+    <p className="text-neutral-600 dark:text-neutral-300 text-sm">
+      Represents the authenticated user. Contains a <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded">userId</code> and a list of <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded">roles</code> (e.g., 'USER', 'ADMIN').
+    </p>
+  </div>
+  <div className="p-6 bg-card border border-card-border rounded-xl">
+    <Lock className="w-8 h-8 text-neutral-500 mb-3" />
+    <h3 className="text-lg font-medium mb-2">Permission Policy</h3>
+    <p className="text-neutral-600 dark:text-neutral-300 text-sm">
+      A rule that grants specific <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded">actions</code> (READ, PUT, REMOVE) on a set of <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded">maps</code> to a specific <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded">role</code>.
+    </p>
+  </div>
+</div>
+
+## Configuration
+
+Policies are passed to the `ServerCoordinator` constructor.
+
+<div className="not-prose">
+  <CodeBlock title="server.ts" language="typescript" code={configCode} />
+</div>
+
+## Field-Level Security
+
+You can restrict which fields are returned to the client using `allowedFields`.
+This is useful for hiding sensitive data like password hashes or internal metadata.
+
+<div className="not-prose">
+  <CodeBlock title="Example: User Profile" language="typescript" code={fieldLevelCode} />
+</div>
+
+<div className="mt-6 flex items-start gap-3 p-4 bg-amber-50 dark:bg-amber-900/20 text-amber-800 dark:text-amber-200 rounded-lg text-sm not-prose">
+  <AlertTriangle className="w-5 h-5 shrink-0" />
+  <p>
+    Field-level security currently applies only to <strong>READ</strong> operations.
+    Write operations (PUT) validate permission to the map but do not yet validate the schema of the payload.
+  </p>
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/distributed-locks" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Distributed Locks
+    </div>
+  </a>
+  <a href="/docs/reference" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next Section</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      API Reference <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

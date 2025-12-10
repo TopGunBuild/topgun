@@ -1,0 +1,221 @@
+---
+title: "Understanding CRDTs in TopGun"
+excerpt: "Conflict-free Replicated Data Types are the magic behind offline-first sync. Here's how TopGun uses them to merge changes without conflicts."
+date: "Oct 28, 2025"
+readTime: "8 min read"
+author: "Ivan Kalashnik"
+role: "Creator"
+category: "Engineering"
+image: "/images/blog-crdt-merge.png"
+avatar: "/images/ivan-avatar.jpeg"
+---
+
+If you've ever built a collaborative application, you know the pain of merge conflicts. Two users edit the same document offline. They come back online. Now what?
+
+Traditional databases pick a winner. The last write overwrites everything else. That works when everyone is online, but it falls apart when users go offline for hours or days.
+
+TopGun takes a different approach. It uses **CRDTs** (Conflict-free Replicated Data Types) to merge changes automatically. No conflicts. No data loss. No manual resolution dialogs.
+
+## What is a CRDT?
+
+A CRDT is a data structure designed for distributed systems. Its key property: any two replicas can merge their states and arrive at the same result, regardless of the order they received updates.
+
+Here's the mathematical property that makes this work:
+
+<div className="p-4 bg-neutral-100 dark:bg-neutral-900 rounded-lg border border-neutral-200 dark:border-neutral-800 mb-6 font-mono text-sm">
+    State A + State B = State B + State A
+</div>
+
+This is called **commutativity**. It means that the merge operation produces the same result no matter which order you apply changes. No coordination needed between devices.
+
+Let's see a concrete example. Imagine a notes app where two users edit the same note:
+
+```typescript
+// Alice (offline) updates the title
+note.title = "Meeting Notes - Q4 Planning";
+note.updatedAt = "2024-01-15T10:30:00Z";
+
+// Bob (also offline) updates the title differently
+note.title = "Q4 Planning Session";
+note.updatedAt = "2024-01-15T10:31:00Z";
+```
+
+When both devices sync, TopGun compares timestamps. Bob's change happened later, so his title wins. But here's the important part: both Alice and Bob end up with the same result. No conflict dialog. No lost work.
+
+## How TopGun uses CRDTs
+
+TopGun implements two main CRDT types: **LWW-Map** for object properties and **OR-Map** for collections.
+
+### LWW-Map (Last-Write-Wins Map)
+
+This is the workhorse of TopGun's sync system. Every value you store gets wrapped with metadata:
+
+```typescript
+interface CRDTRecord<T> {
+  value: T | null;    // null means "deleted"
+  timestamp: {
+    physical: number; // Wall clock time
+    logical: number;  // Counter for same-millisecond events
+    nodeId: string;   // Which device made this change
+  };
+}
+```
+
+When you call `put()`, TopGun doesn't just store your value. It stores when and where the change happened. This metadata is what makes conflict-free merging possible.
+
+The merge algorithm is straightforward:
+
+```typescript
+function merge<T>(local: CRDTRecord<T>, remote: CRDTRecord<T>): CRDTRecord<T> {
+  // Compare physical time first
+  if (remote.timestamp.physical > local.timestamp.physical) {
+    return remote;
+  }
+  if (remote.timestamp.physical < local.timestamp.physical) {
+    return local;
+  }
+
+  // Same millisecond? Compare logical counter
+  if (remote.timestamp.logical > local.timestamp.logical) {
+    return remote;
+  }
+  if (remote.timestamp.logical < local.timestamp.logical) {
+    return local;
+  }
+
+  // Exact tie? Use node ID as deterministic tie-breaker
+  return remote.timestamp.nodeId > local.timestamp.nodeId
+    ? remote
+    : local;
+}
+```
+
+Three comparison levels ensure we always pick a winner. The node ID tie-breaker handles the rare case where two devices make changes in the exact same millisecond with the same logical counter.
+
+### OR-Map (Observed-Remove Map)
+
+LWW-Map works great for simple properties. But what about collections where you add and remove items?
+
+Consider a task list. Alice deletes "Buy milk" while offline. Bob (also offline) edits the same task. When they sync, should the task exist or not?
+
+**OR-Map** (Observed-Remove Map) solves this. Each add operation gets a unique tag. Removing an item only removes the tags you've seen:
+
+```typescript
+// Alice adds a task
+tasks.add("Buy milk"); // Tagged with "op-123"
+
+// Bob sees and removes it
+tasks.remove("Buy milk"); // Removes tag "op-123"
+
+// Meanwhile, Alice re-adds it (new tag)
+tasks.add("Buy milk"); // Tagged with "op-456"
+
+// After sync: "Buy milk" exists (op-456 wasn't removed)
+```
+
+This "add wins over concurrent remove" behavior is intuitive for users. If someone explicitly added something, it should stay.
+
+## The time problem: Hybrid Logical Clocks
+
+You might have spotted an issue. Device clocks are unreliable. What if Alice's phone is set to 2025 while Bob's is correctly set to 2024?
+
+Regular timestamps would make Alice always win, even for changes made seconds ago. That's not useful.
+
+TopGun uses a **Hybrid Logical Clock** (HLC) to solve this. It combines wall clock time with a logical counter:
+
+```typescript
+interface HLCTimestamp {
+  physical: number;  // Wall clock (but corrected)
+  logical: number;   // Increments within same millisecond
+  nodeId: string;    // Device identifier
+}
+```
+
+The key insight: when receiving a message, update your clock to be at least as large as the incoming timestamp. This creates a causal ordering that respects the "happens-before" relationship.
+
+```typescript
+function updateClock(localClock: HLCTimestamp, remoteClock: HLCTimestamp): HLCTimestamp {
+  const now = Date.now();
+  const maxPhysical = Math.max(localClock.physical, remoteClock.physical, now);
+
+  if (maxPhysical === localClock.physical && maxPhysical === remoteClock.physical) {
+    // Same physical time - increment logical
+    return {
+      physical: maxPhysical,
+      logical: Math.max(localClock.logical, remoteClock.logical) + 1,
+      nodeId: localClock.nodeId
+    };
+  }
+
+  // Physical time advanced - reset logical counter
+  return {
+    physical: maxPhysical,
+    logical: 0,
+    nodeId: localClock.nodeId
+  };
+}
+```
+
+Even if Alice's clock is wrong, when she syncs with Bob, her clock will "catch up" to the correct time. Future changes will have correct timestamps.
+
+## Putting it together: a sync example
+
+Let's trace through a complete sync scenario. Two devices edit a user profile offline:
+
+```typescript
+// Device A (phone) - 10:00:00
+const profileA = {
+  name: { value: "Alice Smith", timestamp: { physical: 1000, logical: 0, nodeId: "phone" } },
+  bio: { value: "Developer", timestamp: { physical: 1000, logical: 0, nodeId: "phone" } }
+};
+
+// Device B (laptop) - 10:00:05
+const profileB = {
+  name: { value: "Alice J. Smith", timestamp: { physical: 1005, logical: 0, nodeId: "laptop" } },
+  bio: { value: "Developer", timestamp: { physical: 900, logical: 0, nodeId: "laptop" } }
+};
+```
+
+When they sync, TopGun merges field by field:
+
+- **name**: Laptop wins (1005 > 1000). Result: "Alice J. Smith"
+- **bio**: Phone wins (1000 > 900). Result: "Developer"
+
+Both devices converge to the same state. The user sees their latest changes preserved, even though they were made on different devices.
+
+## Trade-offs
+
+CRDTs aren't magic. They have trade-offs you should understand.
+
+**LWW can lose data.** If two users edit the same field, one edit wins. The other is gone. For most applications, this is fine. Users understand "last edit wins." But if you need to preserve both edits (like collaborative text editing), you'll need a different CRDT like RGA or Yjs.
+
+**Metadata overhead.** Every value carries a timestamp. For a simple string, that's an extra 50+ bytes. TopGun mitigates this by storing timestamps efficiently, but it's still more than a plain database.
+
+**Tombstones accumulate.** When you delete something, TopGun keeps a "tombstone" record so other devices know about the deletion. These tombstones take up space. TopGun automatically prunes tombstones older than 30 days.
+
+**No transactions.** You can't atomically update multiple fields across multiple documents. Each field merges independently. Design your data model with this in mind.
+
+## When to use TopGun's CRDTs
+
+TopGun's CRDT approach works well when:
+
+- Users need offline access
+- Eventual consistency is acceptable (seconds, not microseconds)
+- Data can be partitioned by user or workspace
+- Conflicts are rare (users don't often edit the same field simultaneously)
+
+It's less suitable when:
+
+- You need strong consistency (banking, inventory)
+- You need complex transactions
+- Real-time character-by-character collaboration is required
+
+## Conclusion
+
+CRDTs let TopGun sync data without conflicts. The combination of LWW-Map for properties, OR-Map for collections, and Hybrid Logical Clocks for ordering creates a system where devices can work independently and merge seamlessly.
+
+The merge algorithm is simple: compare timestamps, pick the winner, apply the result. Do this for every field, and you get automatic conflict resolution.
+
+Is it perfect? No. Last-write-wins means some edits can be lost. But for most offline-first applications, this trade-off is worth it. Users get a seamless experience without merge dialogs interrupting their work.
+
+The best conflict resolution is the one users never see.

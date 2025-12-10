@@ -1,0 +1,221 @@
+---
+title: React Hooks
+description: The @topgunbuild/react package provides hooks for building reactive applications with TopGun.
+order: 24
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Zap, Database, MessageSquare, Settings } from 'lucide-react';
+
+export const setupCode = `import { TopGunClient } from '@topgunbuild/client';
+import { TopGunProvider } from '@topgunbuild/react';
+
+const client = new TopGunClient({ ... });
+
+function App() {
+  return (
+    <TopGunProvider client={client}>
+      <YourComponents />
+    </TopGunProvider>
+  );
+}`;
+
+export const useQueryCode = `import { useQuery } from '@topgunbuild/react';
+
+function TodoList() {
+  // QueryFilter options: where, predicate, sort, limit, offset
+  const { data, loading, error } = useQuery('todos', {
+    where: { completed: false },
+    sort: { createdAt: 'desc' }
+  });
+
+  if (loading) return <div>Loading...</div>;
+  if (error) return <div>Error: {error.message}</div>;
+
+  // Each item in data has a _key property for the map key
+  return (
+    <ul>
+      {data.map(todo => <li key={todo._key}>{todo.title}</li>)}
+    </ul>
+  );
+}`;
+
+export const useMapCode = `import { useMap, useORMap } from '@topgunbuild/react';
+
+// Simple Key-Value Store
+function UserProfile({ userId }) {
+  const map = useMap('users');
+  const user = map.get(userId);
+
+  return (
+    <div>
+      <h1>{user?.name}</h1>
+      <button onClick={() => map.set(userId, { ...user, active: true })}>
+        Activate
+      </button>
+    </div>
+  );
+}
+
+// Multi-Value Set (Tags, Categories)
+function ProductTags({ productId }) {
+  const tagsMap = useORMap('product_tags');
+  const tags = tagsMap.get(productId) || []; // Returns array or empty
+
+  return (
+    <div>
+      {tags.map(tag => (
+        <span key={tag} onClick={() => tagsMap.remove(productId, tag)}>
+          {tag}
+        </span>
+      ))}
+      <button onClick={() => tagsMap.add(productId, 'new-tag')}>
+        Add Tag
+      </button>
+    </div>
+  );
+}`;
+
+export const useMutationCode = `import { useMutation } from '@topgunbuild/react';
+
+function CreateTodo() {
+  // Returns { create, update, remove, map }
+  const { create, update, remove } = useMutation('todos');
+
+  const handleCreate = (text) => {
+    const id = crypto.randomUUID();
+    create(id, { text, completed: false, createdAt: Date.now() });
+  };
+
+  const handleComplete = (id, todo) => {
+    update(id, { ...todo, completed: true });
+  };
+
+  const handleDelete = (id) => {
+    remove(id);
+  };
+
+  return <button onClick={() => handleCreate('New Task')}>Add</button>;
+}`;
+
+export const useTopicCode = `import { useTopic } from '@topgunbuild/react';
+
+function ChatRoom({ roomId }) {
+  const topic = useTopic(\`room:\${roomId}\`, (msg, ctx) => {
+    console.log('New message:', msg);
+  });
+
+  const sendMessage = (text) => {
+    topic.publish({ text, sender: 'me' });
+  };
+
+  return <button onClick={() => sendMessage('Hello!')}>Send</button>;
+}`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap not-prose">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/reference" className="hover:text-foreground transition-colors">Reference</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">React Hooks</span>
+</div>
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <Zap className="w-10 h-10 text-blue-600 dark:text-blue-400" />
+  <h1 className="text-4xl font-bold text-foreground">React Hooks</h1>
+</div>
+
+The `@topgunbuild/react` package provides a set of hooks to make it easy to build
+reactive applications with TopGun.
+
+## Setup
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Settings className="w-6 h-6 text-neutral-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Wrap your application in the <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded">TopGunProvider</code>:</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="src/App.tsx" language="tsx" code={setupCode} />
+</div>
+
+## useQuery
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Database className="w-6 h-6 text-purple-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Subscribes to a live query and returns the results. The component will automatically re-render when the data changes.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="components/TodoList.tsx" language="typescript" code={useQueryCode} />
+</div>
+
+## useMap / useORMap
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Database className="w-6 h-6 text-purple-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Get direct access to a Map CRDT instance. The component will re-render whenever the map changes.</span>
+</div>
+
+Use `useMap` for Last-Write-Wins maps (simple key-value) and `useORMap` for Observed-Remove maps (multi-value/sets).
+
+<div className="not-prose">
+  <CodeBlock title="components/UserProfile.tsx" language="typescript" code={useMapCode} />
+</div>
+
+## useMutation
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Zap className="w-6 h-6 text-amber-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">A helper hook for performing mutations on a map without subscribing to changes.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="components/CreateTodo.tsx" language="typescript" code={useMutationCode} />
+</div>
+
+## useTopic
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <MessageSquare className="w-6 h-6 text-green-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Subscribe to a Pub/Sub topic for ephemeral messaging. Messages are not persisted.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="components/ChatRoom.tsx" language="typescript" code={useTopicCode} />
+</div>
+
+## useClient
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Settings className="w-6 h-6 text-neutral-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Get direct access to the TopGunClient instance from context.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="components/CustomComponent.tsx" language="typescript" code={`import { useClient } from '@topgunbuild/react';
+
+function CustomComponent() {
+  const client = useClient();
+
+  // Direct access to client methods
+  const lock = client.getLock('my-resource');
+
+  return <div>...</div>;
+}`} />
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/reference/adapter" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Adapter API
+    </div>
+  </a>
+  <a href="/docs/reference/protocol" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Protocol <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

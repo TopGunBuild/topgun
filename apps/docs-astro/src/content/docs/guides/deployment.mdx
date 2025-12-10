@@ -1,0 +1,332 @@
+---
+title: Deployment Guide
+description: Learn how to deploy the TopGun server to production using Docker, Docker Compose, or Kubernetes.
+order: 15
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Server, Container, Layers, Lock, Shield } from 'lucide-react';
+
+export const dockerBuildCode = `# From the root of the repository
+docker build -t topgun-server .`;
+
+export const dockerComposeCode = `version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: topgun-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_password
+      POSTGRES_DB: topgun
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # TopGun Server
+  server:
+    build: .
+    container_name: topgun-server
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      NODE_ENV: production
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres_password
+      DB_NAME: topgun
+    restart: unless-stopped
+
+volumes:
+  postgres_data:`;
+
+export const dockerComposeTlsCode = `version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: topgun-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_password
+      POSTGRES_DB: topgun
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build: .
+    container_name: topgun-server
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "443:443"       # HTTPS/WSS
+      - "9443:9443"     # Cluster TLS
+    environment:
+      NODE_ENV: production
+      TOPGUN_PORT: 443
+      TOPGUN_CLUSTER_PORT: 9443
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres_password
+      DB_NAME: topgun
+      # TLS Configuration
+      TOPGUN_TLS_ENABLED: "true"
+      TOPGUN_TLS_CERT_PATH: /etc/topgun/tls/server.crt
+      TOPGUN_TLS_KEY_PATH: /etc/topgun/tls/server.key
+      TOPGUN_TLS_MIN_VERSION: TLSv1.3
+      # Cluster TLS (mTLS)
+      TOPGUN_CLUSTER_TLS_ENABLED: "true"
+      TOPGUN_CLUSTER_TLS_CERT_PATH: /etc/topgun/tls/cluster.crt
+      TOPGUN_CLUSTER_TLS_KEY_PATH: /etc/topgun/tls/cluster.key
+      TOPGUN_CLUSTER_TLS_CA_PATH: /etc/topgun/tls/ca.crt
+      TOPGUN_CLUSTER_MTLS: "true"
+    volumes:
+      - ./certs:/etc/topgun/tls:ro
+    restart: unless-stopped
+
+volumes:
+  postgres_data:`;
+
+export const k8sSecretCode = `apiVersion: v1
+kind: Secret
+metadata:
+  name: topgun-tls
+  namespace: topgun
+type: kubernetes.io/tls
+data:
+  # Base64-encoded certificate and key
+  tls.crt: LS0tLS1CRUdJTi...  # base64 -w0 server.crt
+  tls.key: LS0tLS1CRUdJTi...  # base64 -w0 server.key
+  ca.crt: LS0tLS1CRUdJTi...   # base64 -w0 ca.crt
+---
+# Create secret from files:
+# kubectl create secret generic topgun-tls \\
+#   --from-file=tls.crt=./server.crt \\
+#   --from-file=tls.key=./server.key \\
+#   --from-file=ca.crt=./ca.crt \\
+#   -n topgun`;
+
+export const k8sDeploymentTlsCode = `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: topgun
+  namespace: topgun
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: topgun
+  template:
+    metadata:
+      labels:
+        app: topgun
+    spec:
+      containers:
+      - name: topgun
+        image: topgun:latest
+        ports:
+        - containerPort: 443
+          name: https
+        - containerPort: 9443
+          name: cluster
+        env:
+        - name: TOPGUN_PORT
+          value: "443"
+        - name: TOPGUN_CLUSTER_PORT
+          value: "9443"
+        - name: TOPGUN_TLS_ENABLED
+          value: "true"
+        - name: TOPGUN_TLS_CERT_PATH
+          value: "/etc/topgun/tls/tls.crt"
+        - name: TOPGUN_TLS_KEY_PATH
+          value: "/etc/topgun/tls/tls.key"
+        - name: TOPGUN_TLS_MIN_VERSION
+          value: "TLSv1.3"
+        - name: TOPGUN_CLUSTER_TLS_ENABLED
+          value: "true"
+        - name: TOPGUN_CLUSTER_TLS_CA_PATH
+          value: "/etc/topgun/tls/ca.crt"
+        - name: TOPGUN_CLUSTER_MTLS
+          value: "true"
+        volumeMounts:
+        - name: tls-certs
+          mountPath: /etc/topgun/tls
+          readOnly: true
+      volumes:
+      - name: tls-certs
+        secret:
+          secretName: topgun-tls`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Guides</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Deployment</span>
+</div>
+
+# Deployment Guide
+
+Learn how to deploy the TopGun server to production using Docker, Docker Compose, or Kubernetes.
+
+## Docker
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Container className="w-6 h-6 text-blue-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">TopGun provides a standardized Dockerfile for building the server. It uses a multi-stage build process to ensure a small image size.</span>
+</div>
+
+### Building the Image
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={dockerBuildCode} />
+</div>
+
+The Dockerfile handles:
+
+- Copying workspace package definitions
+- Installing dependencies via `npm ci`
+- Building all packages (core, server, adapters, etc.)
+- Exposing port `8080`
+- Starting the server via `npm run start:server`
+
+## Docker Compose
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Layers className="w-6 h-6 text-green-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">For local development or simple deployments, you can use Docker Compose to run the TopGun Server alongside a PostgreSQL database.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="docker-compose.yml" language="yaml" code={dockerComposeCode} />
+</div>
+
+### Running with Compose
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code="docker-compose up -d" />
+</div>
+
+## Kubernetes (Helm)
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Server className="w-6 h-6 text-purple-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">For production Kubernetes clusters, a Helm chart is provided in <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-sm">deploy/k8s/chart</code>.</span>
+</div>
+
+<div className="bg-neutral-50 dark:bg-neutral-900 border border-card-border rounded-lg p-4 mb-6 not-prose">
+  <h3 className="font-semibold text-foreground mb-2">Chart Structure</h3>
+  <ul className="space-y-2 text-sm text-neutral-600 dark:text-neutral-300">
+    <li className="flex items-start gap-2">
+      <code className="bg-neutral-200 dark:bg-neutral-800 px-1.5 py-0.5 rounded shrink-0">templates/statefulset.yaml</code>
+      <span>- Manages the server pods (StatefulSet is recommended for stable network IDs)</span>
+    </li>
+    <li className="flex items-start gap-2">
+      <code className="bg-neutral-200 dark:bg-neutral-800 px-1.5 py-0.5 rounded shrink-0">templates/service.yaml</code>
+      <span>- Exposes the HTTP/WebSocket API</span>
+    </li>
+    <li className="flex items-start gap-2">
+      <code className="bg-neutral-200 dark:bg-neutral-800 px-1.5 py-0.5 rounded shrink-0">templates/service-headless.yaml</code>
+      <span>- Headless service for internal cluster discovery</span>
+    </li>
+    <li className="flex items-start gap-2">
+      <code className="bg-neutral-200 dark:bg-neutral-800 px-1.5 py-0.5 rounded shrink-0">values.yaml</code>
+      <span>- Default configuration values</span>
+    </li>
+  </ul>
+</div>
+
+Deploying with Helm allows easy scaling of the server replicas. TopGun nodes automatically discover each other when running in the same cluster (configured via `cluster.discovery`).
+
+## TLS Configuration
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Lock className="w-6 h-6 text-green-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">For production deployments, enable TLS to encrypt all client and cluster communications.</span>
+</div>
+
+<div className="bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-800 rounded-xl p-6 mb-6 not-prose">
+  <h3 className="text-lg font-semibold text-red-800 dark:text-red-300 mb-2">Security Requirement</h3>
+  <span className="text-red-700 dark:text-red-400">Always enable TLS in production. Without TLS, all data (including authentication tokens) is transmitted in plaintext and can be intercepted.</span>
+</div>
+
+### Docker Compose with TLS
+
+<div className="not-prose">
+  <CodeBlock title="docker-compose.tls.yml" language="yaml" code={dockerComposeTlsCode} />
+</div>
+
+Before starting, create your certificates in the `./certs` directory:
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={`# Create certs directory
+mkdir -p certs
+
+# Copy your certificates
+cp /path/to/server.crt certs/
+cp /path/to/server.key certs/
+cp /path/to/ca.crt certs/
+
+# For cluster mTLS (separate certs)
+cp /path/to/cluster.crt certs/
+cp /path/to/cluster.key certs/
+
+# Start with TLS
+docker-compose -f docker-compose.tls.yml up -d`} />
+</div>
+
+### Kubernetes TLS Secret
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Shield className="w-6 h-6 text-purple-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Store TLS certificates securely using Kubernetes Secrets.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="k8s/tls-secret.yaml" language="yaml" code={k8sSecretCode} />
+</div>
+
+### Kubernetes Deployment with TLS
+
+<div className="not-prose">
+  <CodeBlock title="k8s/deployment.yaml" language="yaml" code={k8sDeploymentTlsCode} />
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 mb-6 not-prose">
+  <h3 className="text-lg font-semibold text-blue-800 dark:text-blue-300 mb-2">cert-manager Integration</h3>
+  <span className="text-blue-700 dark:text-blue-400">For automatic certificate management, consider using <a href="https://cert-manager.io/" className="underline">cert-manager</a> with Let's Encrypt or your internal CA. See the <a href="/docs/guides/security" className="underline">Security Guide</a> for detailed setup instructions.</span>
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/ttl" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Time-To-Live
+    </div>
+  </a>
+  <a href="/docs/guides/observability" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next Guide</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Observability <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

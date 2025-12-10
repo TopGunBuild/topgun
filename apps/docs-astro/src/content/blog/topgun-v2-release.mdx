@@ -1,0 +1,44 @@
+---
+title: "Introducing TopGun v2.0 Alpha"
+excerpt: "From a Gun.js port to a high-performance in-memory data grid. The story of why we rewrote TopGun from scratch."
+date: "Dec 08, 2025"
+readTime: "6 min read"
+author: "Ivan Kalashnik"
+role: "Creator"
+category: "Release"
+image: "/images/blog-release-v2.png"
+avatar: "/images/ivan-avatar.jpeg"
+---
+
+We are thrilled to announce the alpha release of **TopGun v2**. This isn't just a version bump—it's a completely new data platform built from the ground up.
+
+## The Journey: From v1 to v2
+
+I spent two years developing TopGun v1 as a TypeScript implementation of the [gun.js](https://gun.eco/) protocol. While we achieved a lot, we hit fundamental architectural walls:
+
+- **Query Limitations:** We couldn't easily request subsets of data. Pagination, complex filters, and sorting were nearly impossible to implement efficiently.
+- **Full Replication:** Every connected server node required a full copy of the dataset, which made "smart" horizontal scaling difficult.
+- **Protocol Constraints:** The graph synchronization protocol, while powerful, was hard to optimize for the predictable performance required by modern applications.
+
+## The Search for a Better Way
+
+Before building v2, I explored using **PostgreSQL** with logical replication for real-time updates. The idea was tempting: use a battle-tested SQL database for storage and querying, and just stream changes to clients.
+
+However, reality struck:
+1.  **Latency:** Logical replication introduced unacceptable delays for real-time interaction.
+2.  **Vendor Lock-in:** The architecture became too tightly coupled to Postgres specific features.
+3.  **Schema Rigidity:** Pre-defined schemas (Organizations -> Users -> Roles) limited the flexibility that local-first apps often need.
+4.  **Auth Complexity:** Offline authorization with a traditional SQL backend is a nightmare of edge cases.
+
+## Enter TopGun v2: The In-Memory Data Grid
+
+For v2, we took a radical new approach. TopGun v2 is an **In-Memory Data Grid** that serves as the source of truth for your active application state.
+
+### Key Innovations:
+
+- **Zero-Latency Realtime:** Because data lives in memory, reads and subscription updates are instantaneous.
+- **Agnostic Persistence:** You can use *any* cold storage (Postgres, SQLite, S3). TopGun acts as the high-speed cache and synchronization layer.
+- **Smart Sharding:** Unlike v1, nodes don't need the full dataset. They can dynamically load and unload parts of the graph based on demand.
+- **True Offline Support:** By moving authorization and logic to the protocol level, we support secure offline operations without custom fragile code.
+
+We are currently in **Alpha**. The core is stable, but APIs might change. We invite you to try it out and help shape the future of local-first development.

@@ -1,0 +1,50 @@
+---
+title: Core Concepts
+description: TopGun is built on a foundation of distributed systems theory. Understanding these concepts will help you design better local-first applications.
+order: 5
+---
+
+import { ChevronRight, Database, Clock, RefreshCw, Layers } from 'lucide-react';
+import { ConceptCard } from '../../../components/docs/ConceptCard';
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Concepts</span>
+</div>
+
+# Core Concepts
+
+TopGun is built on a foundation of distributed systems theory.
+Understanding these concepts will help you design better local-first applications.
+
+<div className="grid gap-6 not-prose mt-12">
+  <ConceptCard
+    href="/docs/concepts/local-first"
+    icon={Database}
+    title="Local-First Architecture"
+    description="Learn why inverting the client-server model leads to faster, more reliable apps. The client is the replica."
+    color="blue"
+  />
+  <ConceptCard
+    href="/docs/concepts/crdt-hlc"
+    icon={Clock}
+    title="CRDTs & Hybrid Logical Clocks"
+    description="How we guarantee eventual consistency and order events across devices without a central clock."
+    color="purple"
+  />
+  <ConceptCard
+    href="/docs/concepts/sync-protocol"
+    icon={RefreshCw}
+    title="Sync Protocol"
+    description="A deep dive into Merkle Trees, WebSockets, and how TopGun synchronizes data efficiently."
+    color="orange"
+  />
+  <ConceptCard
+    href="/docs/concepts/data-structures"
+    icon={Layers}
+    title="Data Structures"
+    description="Understanding LWW-Map (Last-Write-Wins) and OR-Map (Observed-Remove) for different use cases."
+    color="indigo"
+  />
+</div>

@@ -1,0 +1,100 @@
+---
+title: Time-To-Live (TTL)
+description: TopGun supports automatic data expiration via TTL for temporary data like sessions, cache entries, or ephemeral state.
+order: 14
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Timer, Database, Trash2 } from 'lucide-react';
+import { FeatureCard } from '../../../components/docs/FeatureCard';
+
+export const lwwMapCode = `const sessions = client.getMap('sessions');
+
+// Create a session that expires in 1 hour (3,600,000 ms)
+sessions.set('user:123', { token: 'abc-123' }, 3600 * 1000);
+
+// After 1 hour, 'user:123' will effectively disappear from the map.`;
+
+export const orMapCode = `const activeGames = client.getORMap('games:active');
+
+// Add a game lobby that expires in 5 minutes if not updated
+activeGames.add('lobby:555', { status: 'waiting' }, 5 * 60 * 1000);`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Time-To-Live</span>
+</div>
+
+# Time-To-Live (TTL)
+
+TopGun supports automatic data expiration via **TTL (Time-To-Live)**. This is useful for temporary data like sessions, cache entries, or ephemeral state that should persist for a short while but not forever.
+
+<div className="grid md:grid-cols-3 gap-6 mb-16 not-prose">
+  <FeatureCard
+    icon={Timer}
+    iconColor="text-blue-500"
+    title="Auto-Expiration"
+    description="Set expiration time in milliseconds, and data will be automatically cleaned up."
+  />
+  <FeatureCard
+    icon={Database}
+    iconColor="text-green-500"
+    title="Works with Maps"
+    description="TTL is supported on both LWW-Map and OR-Map data structures."
+  />
+  <FeatureCard
+    icon={Trash2}
+    iconColor="text-orange-500"
+    title="Background GC"
+    description="Server periodically sweeps expired records to reclaim storage space."
+  />
+</div>
+
+## Overview
+
+You can attach a `ttlMs` (TTL in milliseconds) to individual records in both **LWW-Map** and **OR-Map**. The server performs proactive garbage collection to remove expired records.
+
+## Usage with LWW-Map
+
+Pass the `ttlMs` option as the third argument to `.set()`.
+
+<div className="not-prose">
+  <CodeBlock title="src/sessions/manager.ts" language="typescript" code={lwwMapCode} />
+</div>
+
+## Usage with OR-Map
+
+Similarly, pass `ttlMs` as the third argument to `.add()`.
+
+<div className="not-prose">
+  <CodeBlock title="src/games/lobby.ts" language="typescript" code={orMapCode} />
+</div>
+
+## Garbage Collection
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-4 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>Note:</strong> Expiration is handled by the server's background garbage collector. Clients may locally check TTL when reading, but the authoritative removal happens via the sync protocol when the server prunes the data.
+  </p>
+</div>
+
+- Data is not immediately deleted from disk at the exact millisecond of expiration but is filtered out of query results.
+- Background processes periodically sweep and remove expired records to reclaim space.
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/pub-sub" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Pub/Sub
+    </div>
+  </a>
+  <a href="/docs/guides/deployment" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Deployment <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

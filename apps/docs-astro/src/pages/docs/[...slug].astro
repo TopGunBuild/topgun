@@ -1,0 +1,19 @@
+---
+import { getCollection } from 'astro:content';
+import DocsLayout from '../../layouts/DocsLayout.astro';
+
+export async function getStaticPaths() {
+  const docsEntries = await getCollection('docs');
+  return docsEntries.map(entry => ({
+    params: { slug: entry.slug }, props: { entry },
+  }));
+}
+
+const { entry } = Astro.props;
+const { Content } = await entry.render();
+const editUrl = `https://github.com/TopGunBuild/topgun/edit/main/apps/docs-astro/src/content/docs/${entry.id}`;
+---
+
+<DocsLayout title={`${entry.data.title} | TopGun Docs`} description={entry.data.description} editUrl={editUrl}>
+  <Content />
+</DocsLayout>

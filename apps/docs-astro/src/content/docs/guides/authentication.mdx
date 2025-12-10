@@ -1,0 +1,478 @@
+---
+title: Authentication & Security
+description: Secure your local-first application by integrating authentication providers and managing access control.
+order: 11
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Shield, Lock, Key, Zap, Database } from 'lucide-react';
+import { FeatureCard } from '../../../components/docs/FeatureCard';
+import { StepList, Step } from '../../../components/docs/StepList';
+import { AuthProtocol } from '../../../components/docs/AuthProtocol';
+
+export const setupCode = `import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const adapter = new IDBAdapter();
+
+export const tgClient = new TopGunClient({
+  serverUrl: 'ws://localhost:8090',
+  storage: adapter
+});`;
+
+export const authSyncCode = `import { useEffect } from 'react';
+import { useAuth } from '@clerk/clerk-react';
+import { tgClient } from '../lib/topgun';
+
+export function TopGunAuthSync() {
+  const { getToken, isSignedIn } = useAuth();
+
+  useEffect(() => {
+    if (isSignedIn) {
+      // Set a token provider that refreshes automatically
+      tgClient.setAuthTokenProvider(async () => {
+        try {
+          const token = await getToken();
+          return token;
+        } catch (err) {
+          console.error('Failed to get Clerk token', err);
+          return null;
+        }
+      });
+    }
+  }, [isSignedIn, getToken]);
+
+  return null;
+}`;
+
+export const appCode = `import { ClerkProvider, SignedIn, SignedOut, SignIn } from '@clerk/clerk-react';
+import { TopGunProvider } from '@topgunbuild/react';
+import { TopGunAuthSync } from './components/TopGunAuthSync';
+import { tgClient } from './lib/topgun';
+
+const CLERK_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
+
+export default function App() {
+  return (
+    <ClerkProvider publishableKey={CLERK_KEY}>
+      <TopGunProvider client={tgClient}>
+        <TopGunAuthSync />
+
+        <SignedIn>
+          {/* Your authenticated app */}
+          <Dashboard />
+        </SignedIn>
+
+        <SignedOut>
+          <SignIn />
+        </SignedOut>
+      </TopGunProvider>
+    </ClerkProvider>
+  );
+}`;
+
+export const userNotesCode = `import { useUser } from '@clerk/clerk-react';
+import { useQuery } from '@topgunbuild/react';
+
+export function UserNotes() {
+  const { user } = useUser();
+
+  // Each user gets their own notes collection
+  const mapName = \`notes:\${user?.id}\`;
+  const { data: notes } = useQuery(mapName);
+
+  return (
+    <ul>
+      {notes.map(note => (
+        <li key={note.id}>{note.title}</li>
+      ))}
+    </ul>
+  );
+}`;
+
+export const betterAuthConfigCode = `import { betterAuth } from 'better-auth';
+import { topGunAdapter } from '@topgunbuild/adapter-better-auth';
+import { tgClient } from './topgun';
+
+export const auth = betterAuth({
+  database: topGunAdapter({
+    client: tgClient,
+    // Optional: customize collection names
+    modelMap: {
+      user: 'auth_user',
+      session: 'auth_session',
+      account: 'auth_account',
+      verification: 'auth_verification'
+    }
+  }),
+
+  // Configure your auth methods
+  emailAndPassword: {
+    enabled: true
+  }
+});`;
+
+export const signUpFormCode = `import { auth } from '../lib/auth';
+
+export function SignUpForm() {
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const form = new FormData(e.target as HTMLFormElement);
+
+    await auth.signUp.email({
+      email: form.get('email') as string,
+      password: form.get('password') as string,
+      name: form.get('name') as string
+    });
+  };
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input name="name" placeholder="Name" />
+      <input name="email" type="email" placeholder="Email" />
+      <input name="password" type="password" placeholder="Password" />
+      <button type="submit">Sign Up</button>
+    </form>
+  );
+}`;
+
+export const serverConfigCode = `import { ServerCoordinator } from '@topgunbuild/server';
+
+const server = new ServerCoordinator({
+  port: 8090,
+  nodeId: 'node-1',
+
+  // JWT secret for token verification
+  // Use the same secret your auth provider uses to sign tokens
+  jwtSecret: process.env.JWT_SECRET || 'your-secret-key',
+
+  // Optional: RBAC security policies
+  securityPolicies: [
+    {
+      role: 'USER',
+      mapNamePattern: 'notes:{userId}/*',  // {userId} is replaced with the authenticated user's ID
+      actions: ['READ', 'PUT']
+    },
+    {
+      role: 'ADMIN',
+      mapNamePattern: '*',
+      actions: ['ALL']
+    }
+  ]
+});
+
+server.start();
+console.log('TopGun server running on port 8090');`;
+
+export const jwtPayloadCode = `{
+  "sub": "user_123",       // User ID (or use "userId")
+  "userId": "user_123",    // Alternative to "sub"
+  "roles": ["USER"],       // Array of roles for RBAC
+  "iat": 1699000000,       // Issued at
+  "exp": 1699086400        // Expiration
+}`;
+
+export const customJwtCode = `import jwt from 'jsonwebtoken';
+
+const JWT_SECRET = process.env.JWT_SECRET!;
+
+export function generateToken(user: { id: string; roles: string[] }) {
+  return jwt.sign(
+    {
+      sub: user.id,
+      userId: user.id,
+      roles: user.roles
+    },
+    JWT_SECRET,
+    { expiresIn: '24h' }
+  );
+}
+
+// In your login endpoint
+app.post('/api/login', async (req, res) => {
+  const { email, password } = req.body;
+
+  // Verify credentials...
+  const user = await verifyCredentials(email, password);
+
+  if (user) {
+    const token = generateToken(user);
+    res.json({ token });
+  } else {
+    res.status(401).json({ error: 'Invalid credentials' });
+  }
+});`;
+
+export const clientAuthCode = `import { tgClient } from './topgun';
+
+export async function login(email: string, password: string) {
+  const res = await fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password })
+  });
+
+  const { token } = await res.json();
+
+  // Set the token in TopGun client
+  tgClient.setAuthToken(token);
+
+  // Store for persistence across page reloads
+  localStorage.setItem('topgun_token', token);
+}
+
+// On app init, restore token
+const savedToken = localStorage.getItem('topgun_token');
+if (savedToken) {
+  tgClient.setAuthToken(savedToken);
+}`;
+
+export const clerkProductionCode = `# 1. Get your Clerk Public Key from the JWKS endpoint
+# Visit: https://YOUR_CLERK_DOMAIN.clerk.accounts.dev/.well-known/jwks.json
+# Copy the RSA public key (starts with -----BEGIN PUBLIC KEY-----)
+
+# 2. Set the JWT_SECRET environment variable
+# In Docker/Dokploy, use escaped newlines:
+JWT_SECRET="-----BEGIN PUBLIC KEY-----\\nMIIBIjAN...your-key...AQAB\\n-----END PUBLIC KEY-----"
+
+# Or in a shell script, use real newlines:
+export JWT_SECRET="-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...
+-----END PUBLIC KEY-----"`;
+
+export const clerkJwksCode = `// Fetch JWKS from Clerk
+const response = await fetch('https://YOUR_CLERK_DOMAIN.clerk.accounts.dev/.well-known/jwks.json');
+const jwks = await response.json();
+
+// The response contains the public key in JWK format
+// You'll need to convert it to PEM format for JWT_SECRET
+// Use a tool like https://8gwifi.org/jwkconvertfunctions.jsp
+// or the 'jwk-to-pem' npm package`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Authentication</span>
+</div>
+
+# Authentication & Security
+
+Secure your local-first application by integrating authentication providers and managing access control.
+
+<div className="grid md:grid-cols-3 gap-6 mb-16 not-prose">
+  <FeatureCard
+    icon={Shield}
+    iconColor="text-blue-500"
+    title="Token-Based"
+    description="Standard JWT authentication integrated directly into the sync protocol."
+  />
+  <FeatureCard
+    icon={Lock}
+    iconColor="text-green-500"
+    title="Provider Agnostic"
+    description="Works with Clerk, Better Auth, Auth0, Firebase, or any JWT-based provider."
+  />
+  <FeatureCard
+    icon={Key}
+    iconColor="text-orange-500"
+    title="Access Control"
+    description="Fine-grained RBAC permissions per collection with pattern matching."
+  />
+</div>
+
+## How it Works
+
+In a local-first architecture, authentication serves two main purposes:
+
+- **Gatekeeping Sync:** Only authenticated users can connect to the synchronization server (WebSocket).
+- **Authorization:** Ensuring users can only read or write data they are permitted to access.
+
+TopGun decouples the authentication provider from the sync engine. You can use any provider to generate a JWT token. This token is passed to the TopGun client, which sends it to the server during the WebSocket handshake.
+
+## Integration Flow
+
+<div className="not-prose mb-16">
+  <StepList>
+    <Step
+      number={1}
+      title="Authenticate User"
+      description="Use your preferred provider SDK to log the user in and retrieve a session token (JWT)."
+    />
+    <Step
+      number={2}
+      title="Set Token in Client"
+      description="Pass the token to the TopGun client. The client will automatically authenticate the WebSocket connection."
+    />
+    <Step
+      number={3}
+      title="Server Validation"
+      description="The TopGun server validates the JWT using the configured secret. If valid, the connection is established with the user's principal attached."
+    />
+  </StepList>
+</div>
+
+## Clerk Integration
+
+<div className="flex items-center gap-3 mb-4 not-prose">
+  <Zap className="w-6 h-6 text-purple-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Clerk is a popular authentication provider with excellent React support. Here's how to integrate it with TopGun.</span>
+</div>
+
+### 1. Setup TopGun Client
+
+<div className="not-prose">
+  <CodeBlock title="src/lib/topgun.ts" language="typescript" code={setupCode} />
+</div>
+
+### 2. Create Auth Sync Component
+
+Use `setAuthTokenProvider` to automatically refresh tokens when they expire.
+
+<div className="not-prose">
+  <CodeBlock title="src/components/TopGunAuthSync.tsx" language="tsx" code={authSyncCode} />
+</div>
+
+### 3. Wire Up in App
+
+<div className="not-prose">
+  <CodeBlock title="src/App.tsx" language="tsx" code={appCode} />
+</div>
+
+### 4. User-Scoped Data
+
+Use the user ID from Clerk to scope data per user:
+
+<div className="not-prose">
+  <CodeBlock title="src/components/UserNotes.tsx" language="tsx" code={userNotesCode} />
+</div>
+
+## Better Auth Integration
+
+<div className="flex items-center gap-3 mb-4 not-prose">
+  <Database className="w-6 h-6 text-green-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Better Auth is a framework-agnostic authentication library. TopGun provides a dedicated adapter that uses TopGun as the database backend for Better Auth.</span>
+</div>
+
+<div className="p-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg mb-6 not-prose">
+  <p className="text-amber-800 dark:text-amber-200 text-sm">
+    <strong>Note:</strong> This approach stores auth data (users, sessions) in TopGun itself, allowing authentication data to be distributed and synced like any other application data.
+  </p>
+</div>
+
+### 1. Install the Adapter
+
+<div className="not-prose">
+  <CodeBlock title="Terminal" language="bash" code="npm install @topgunbuild/adapter-better-auth better-auth" />
+</div>
+
+### 2. Configure Better Auth
+
+<div className="not-prose">
+  <CodeBlock title="src/lib/auth.ts" language="typescript" code={betterAuthConfigCode} />
+</div>
+
+### 3. Use in Your App
+
+<div className="not-prose">
+  <CodeBlock title="src/components/AuthForm.tsx" language="tsx" code={signUpFormCode} />
+</div>
+
+## Server Configuration
+
+The TopGun server validates JWT tokens using a shared secret. Configure the secret to match your auth provider.
+
+<div className="not-prose">
+  <CodeBlock title="server/index.ts" language="typescript" code={serverConfigCode} />
+</div>
+
+### JWT Token Structure
+
+TopGun expects the following claims in the JWT payload:
+
+<div className="not-prose">
+  <CodeBlock title="Expected JWT Payload" language="json" code={jwtPayloadCode} />
+</div>
+
+## Custom JWT Provider
+
+If you're using a custom authentication system, you can generate JWT tokens manually.
+
+<div className="not-prose">
+  <CodeBlock title="server/auth.ts" language="typescript" code={customJwtCode} />
+</div>
+
+### Client-Side Usage
+
+<div className="not-prose">
+  <CodeBlock title="src/lib/auth.ts" language="typescript" code={clientAuthCode} />
+</div>
+
+## Production Deployment with Clerk
+
+<div className="p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg mb-6 not-prose">
+  <p className="text-blue-800 dark:text-blue-200 text-sm">
+    <strong>Important:</strong> Clerk uses RS256 (asymmetric RSA) algorithm for JWT signing, not HS256. This means you need to use Clerk's <strong>public key</strong> for token verification on the server.
+  </p>
+</div>
+
+### Getting the Clerk Public Key
+
+Clerk publishes its public keys via the JWKS (JSON Web Key Set) endpoint. You can find your instance's public key at:
+
+```
+https://YOUR_CLERK_DOMAIN.clerk.accounts.dev/.well-known/jwks.json
+```
+
+<div className="not-prose">
+  <CodeBlock title="Fetching JWKS" language="typescript" code={clerkJwksCode} />
+</div>
+
+### Configuring JWT_SECRET for Docker/Dokploy
+
+When deploying to Docker-based platforms (Dokploy, Railway, etc.), you need to handle the PEM key format carefully:
+
+<div className="not-prose">
+  <CodeBlock title="Environment Configuration" language="bash" code={clerkProductionCode} />
+</div>
+
+<div className="p-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg mb-6 not-prose">
+  <p className="text-amber-800 dark:text-amber-200 text-sm">
+    <strong>Note:</strong> The TopGun server automatically detects RSA public keys (by checking for <code>-----BEGIN</code>) and uses the RS256 algorithm. It also handles escaped newlines (<code>\n</code>) from Docker environment variables.
+  </p>
+</div>
+
+### Algorithm Support
+
+TopGun server supports both symmetric and asymmetric JWT algorithms:
+
+| Provider | Algorithm | JWT_SECRET Value |
+|----------|-----------|------------------|
+| Custom/Self-hosted | HS256 | Shared secret string |
+| Clerk | RS256 | RSA Public Key (PEM) |
+| Auth0 | RS256 | RSA Public Key (PEM) |
+| Firebase | RS256 | RSA Public Key (PEM) |
+
+## Authentication Protocol
+
+Here's how the authentication handshake works at the WebSocket level:
+
+<div className="not-prose">
+  <AuthProtocol />
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Back</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> All Guides
+    </div>
+  </a>
+  <a href="/docs/guides/security" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Security (TLS) <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

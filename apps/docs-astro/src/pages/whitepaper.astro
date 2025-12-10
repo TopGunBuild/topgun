@@ -1,0 +1,230 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { ArrowLeft } from 'lucide-react';
+---
+
+<Layout title="Whitepaper | TopGun">
+  <div class="pt-24 pb-20 px-4 sm:px-6 lg:px-8 max-w-4xl mx-auto min-h-screen">
+    <a
+      href="/"
+      class="group flex items-center gap-2 text-sm text-neutral-500 hover:text-foreground transition-colors mb-8"
+    >
+      <ArrowLeft className="w-4 h-4 group-hover:-translate-x-1 transition-transform" />
+      Back to Home
+    </a>
+
+    <div class="mb-12 border-b border-card-border pb-8">
+      <div class="flex items-center gap-2 mb-4">
+        <span class="px-3 py-1 rounded-full bg-neutral-100 dark:bg-neutral-800 text-xs font-mono text-neutral-600 dark:text-neutral-300">
+          Draft v2.0
+        </span>
+        <span class="text-xs text-neutral-500">November 2025</span>
+      </div>
+      <h1 class="text-4xl md:text-5xl font-bold text-foreground mb-4">TopGun v2 Whitepaper</h1>
+      <h2 class="text-xl md:text-2xl text-neutral-500 dark:text-neutral-300 font-light">
+        The Hybrid Offline-First In-Memory Data Grid
+      </h2>
+    </div>
+
+    <article class="prose prose-neutral dark:prose-invert max-w-none prose-headings:font-bold prose-h2:text-2xl prose-h2:mt-12 prose-h2:mb-6 prose-p:text-lg prose-p:leading-relaxed prose-p:text-neutral-600 dark:prose-p:text-neutral-300">
+
+      <h2 class="flex items-center gap-3">
+        <span class="text-blue-600 dark:text-blue-400">1.</span> Executive Summary
+      </h2>
+      <p>
+        <strong>TopGun</strong> is a next-generation data platform designed for the modern "Local-First" web.
+        It bridges the gap between scalable <strong>In-Memory Data Grids (IMDG)</strong> (like Hazelcast) and
+        <strong>Offline-First Client Databases</strong> (like RxDB or PouchDB).
+      </p>
+      <p>
+        In traditional architectures, clients are "dumb" terminals that fetch data via REST/GraphQL.
+        This creates latency, requires constant connectivity, and degrades user experience.
+        TopGun inverts this model: <strong>The Client is a Replica.</strong>
+      </p>
+      <p>TopGun provides:</p>
+      <ul class="list-disc pl-6 space-y-2 text-neutral-600 dark:text-neutral-300">
+        <li><strong>Zero-Latency UI:</strong> Reads and writes happen locally against an in-memory CRDT.</li>
+        <li><strong>Offline Capability:</strong> Data is persisted to IndexedDB (Browser) or SQLite (Mobile/Desktop).</li>
+        <li><strong>Real-Time Sync:</strong> Automatic background synchronization using efficient Merkle Trees and WebSockets.</li>
+        <li><strong>Scalable Backend:</strong> A server-authoritative cluster that partitions data and persists to standard databases like PostgreSQL.</li>
+      </ul>
+
+      <h2 class="flex items-center gap-3">
+        <span class="text-blue-600 dark:text-blue-400">2.</span> Key Concepts
+      </h2>
+
+      <h3>2.1. Local-First Architecture</h3>
+      <p>
+        In a Local-First app, the primary data source is the <strong>local database</strong>.
+        The network is treated as an optional enhancement.
+      </p>
+      <div class="bg-neutral-100 dark:bg-neutral-900 p-4 rounded-lg my-4 font-mono text-sm">
+        <div class="mb-2"><span class="text-red-500">Traditional:</span> Client -&gt; Network -&gt; Server -&gt; DB</div>
+        <div><span class="text-green-500">TopGun:</span> Client &lt;-&gt; Local DB &lt;-&gt; Network &lt;-&gt; Server</div>
+      </div>
+
+      <h3>2.2. Optimistic UI & Consistency</h3>
+      <p>
+        TopGun uses <strong>Optimistic Updates</strong> by default. When a user performs an action, it is applied immediately to the local state.
+        The UI updates in &lt;16ms. Behind the scenes, an <strong>Operation Log (OpLog)</strong> queues the mutation.
+      </p>
+      <p>
+        Consistency is guaranteed via <strong>Hybrid Logical Clocks (HLC)</strong> and <strong>CRDTs</strong>,
+        ensuring all clients eventually converge to the same state without manual conflict resolution.
+      </p>
+
+      <h3>2.3. Sync vs Request</h3>
+      <p>
+        Instead of writing thousands of API endpoints, TopGun synchronizes state.
+        You don't fetch data; you subscribe to a dataset. You don't send requests; you mutate the local object.
+      </p>
+
+      <h2 class="flex items-center gap-3">
+        <span class="text-blue-600 dark:text-blue-400">3.</span> Architecture
+      </h2>
+      <p>
+        TopGun consists of a <strong>Client SDK</strong> (running in browser/mobile) and a <strong>Server Cluster</strong> (running in cloud/on-prem).
+      </p>
+
+      <div class="my-8 p-6 bg-white dark:bg-card border border-card-border rounded-xl">
+        <div class="text-center text-sm font-mono text-neutral-500 mb-4">Architecture Topology</div>
+        <div class="flex flex-col md:flex-row items-center justify-center gap-4 text-sm">
+          <div class="p-4 rounded border border-card-border bg-neutral-50 dark:bg-neutral-900">
+            <strong>Client</strong><br/>
+            UI &lt;-&gt; LWW-Map &lt;-&gt; IndexedDB
+          </div>
+          <div class="h-8 w-[1px] md:h-[1px] md:w-8 bg-neutral-300 dark:bg-neutral-700"></div>
+          <div class="p-2 rounded-full border border-dashed border-neutral-400 text-xs text-neutral-500">
+            Sync
+          </div>
+          <div class="h-8 w-[1px] md:h-[1px] md:w-8 bg-neutral-300 dark:bg-neutral-700"></div>
+          <div class="p-4 rounded border border-card-border bg-neutral-50 dark:bg-neutral-900">
+            <strong>Server</strong><br/>
+            Gateway &lt;-&gt; Partition &lt;-&gt; DB
+          </div>
+        </div>
+      </div>
+
+      <h3>3.2. Data Flow</h3>
+      <ol class="list-decimal pl-6 space-y-2 text-neutral-600 dark:text-neutral-300">
+        <li><strong>Write:</strong> User updates data.</li>
+        <li><strong>Optimistic Apply:</strong> Local CRDT updates, UI refreshes instantly.</li>
+        <li><strong>Queue:</strong> Operation added to persistent OpLog.</li>
+        <li><strong>Sync:</strong> Sync Engine pushes OpLog to Server.</li>
+        <li><strong>Process:</strong> Server coordinates via HLC, updates master state.</li>
+        <li><strong>Broadcast:</strong> Change pushed to other active clients.</li>
+      </ol>
+
+      <h2 class="flex items-center gap-3">
+        <span class="text-blue-600 dark:text-blue-400">4.</span> Data Consistency
+      </h2>
+      <p>
+        TopGun guarantees <strong>Eventual Consistency</strong> using robust distributed systems primitives.
+      </p>
+
+      <h3>4.1. Hybrid Logical Clocks (HLC)</h3>
+      <p>
+        Every event is tagged with an HLC timestamp. This allows ordering events across devices with drifting clocks.
+        "Last-Write-Wins" is determined by comparing HLCs, not unreliable wall clocks.
+      </p>
+
+      <h3>4.2. Merkle Tree Synchronization</h3>
+      <p>
+        To keep bandwidth low, TopGun doesn't re-download the whole dataset.
+        Client and Server exchange Root Hashes of a Merkle Tree. If they differ, they traverse the tree
+        to find exactly which buckets differ, transmitting only modified records.
+      </p>
+
+      <h2 class="flex items-center gap-3">
+        <span class="text-blue-600 dark:text-blue-400">5.</span> Comparison
+      </h2>
+
+      <div class="overflow-x-auto my-8">
+        <table class="w-full text-left border-collapse text-sm">
+          <thead>
+            <tr class="border-b border-card-border">
+              <th class="py-2 px-2 font-mono text-neutral-500 uppercase tracking-wider">Feature</th>
+              <th class="py-2 px-2 bg-blue-500/5 border-t border-x border-blue-500/10 text-foreground font-bold">TopGun</th>
+              <th class="py-2 px-2 text-neutral-500 font-medium">ElectricSQL</th>
+              <th class="py-2 px-2 text-neutral-500 font-medium">Firebase</th>
+              <th class="py-2 px-2 text-neutral-500 font-medium">RxDB</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="border-b border-card-border">
+              <td class="py-2 px-2 font-medium">Primary Model</td>
+              <td class="py-2 px-2 bg-blue-500/5 border-x border-blue-500/10 text-blue-600 dark:text-blue-400">Local-First IMDG</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Postgres Sync</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Cloud Doc DB</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Local-First DB</td>
+            </tr>
+            <tr class="border-b border-card-border">
+              <td class="py-2 px-2 font-medium">Offline Support</td>
+              <td class="py-2 px-2 bg-blue-500/5 border-x border-blue-500/10 text-blue-600 dark:text-blue-400">First-Class</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Good</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Good</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Excellent</td>
+            </tr>
+            <tr class="border-b border-card-border">
+              <td class="py-2 px-2 font-medium">Latency</td>
+              <td class="py-2 px-2 bg-blue-500/5 border-x border-blue-500/10 text-blue-600 dark:text-blue-400">~0ms (In-Memory)</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">~5-10ms (SQLite)</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Network Dependent</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">~5-10ms (IndexedDB)</td>
+            </tr>
+            <tr class="border-b border-card-border">
+              <td class="py-2 px-2 font-medium">Backend Control</td>
+              <td class="py-2 px-2 bg-blue-500/5 border-x border-blue-500/10 text-blue-600 dark:text-blue-400">Self-Hosted Cluster</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Sync Service</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Proprietary</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">CouchDB / Custom</td>
+            </tr>
+            <tr class="border-b border-card-border">
+              <td class="py-2 px-2 font-medium">Consistency</td>
+              <td class="py-2 px-2 bg-blue-500/5 border-x border-blue-500/10 text-blue-600 dark:text-blue-400">HLC + CRDT</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Rich CRDTs</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">LWW (Server)</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Revision Trees</td>
+            </tr>
+            <tr class="border-b border-card-border">
+              <td class="py-2 px-2 font-medium">Distributed Locks</td>
+              <td class="py-2 px-2 bg-blue-500/5 border-x border-blue-500/10 text-blue-600 dark:text-blue-400">Fencing Tokens</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Not Supported</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Not Supported</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Not Supported</td>
+            </tr>
+            <tr class="border-b border-card-border">
+              <td class="py-2 px-2 font-medium">License</td>
+              <td class="py-2 px-2 bg-blue-500/5 border-x border-blue-500/10 text-blue-600 dark:text-blue-400">Open Source</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Open Source</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Proprietary</td>
+              <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Open Source</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Why TopGun?</h3>
+      <ul class="list-disc pl-6 space-y-2 text-neutral-600 dark:text-neutral-300">
+        <li>
+          <strong>vs ElectricSQL:</strong> TopGun operates entirely in-memory for zero-latency reads/writes, whereas ElectricSQL relies on SQLite access (5-10ms).
+        </li>
+        <li>
+          <strong>vs Firebase:</strong> TopGun gives you ownership of your data. Run it on your own cloud, use your own Postgres DB.
+        </li>
+        <li>
+          <strong>vs RxDB:</strong> TopGun includes a powerful, sharded server cluster for handling massive datasets and complex server-side logic, rather than just replication.
+        </li>
+      </ul>
+
+    </article>
+
+    <div class="mt-20 p-8 rounded-2xl bg-gradient-to-br from-blue-600/10 to-purple-600/10 border border-blue-500/20 text-center">
+      <h3 class="text-xl font-bold text-foreground mb-2">Ready to invert your architecture?</h3>
+      <p class="text-neutral-600 dark:text-neutral-300 mb-6">Get started with the open source edition today.</p>
+      <a href="/docs/installation" class="inline-block px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg transition-colors">
+        npm install @topgun/client
+      </a>
+    </div>
+  </div>
+</Layout>

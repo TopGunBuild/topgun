@@ -1,0 +1,407 @@
+---
+title: Adapter API
+description: Storage adapters allow TopGun to persist data to various backends using the IStorageAdapter interface.
+order: 23
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, BookOpen, Database, Settings, Lock, Shield } from 'lucide-react';
+import { ApiParam, ApiConstructor } from '../../../components/docs/ApiMethod';
+
+export const interfaceCode = `interface IStorageAdapter {
+  // Lifecycle
+  initialize(dbName: string): Promise<void>;
+  close(): Promise<void>;
+  waitForReady?(): Promise<void>; // Optional - for async adapters
+
+  // Key-Value Operations
+  get<V>(key: string): Promise<LWWRecord<V> | ORMapRecord<V>[] | any | undefined>;
+  put(key: string, value: any): Promise<void>;
+  remove(key: string): Promise<void>;
+  batchPut(entries: Map<string, any>): Promise<void>;
+
+  // Metadata (for internal system state)
+  getMeta(key: string): Promise<any>;
+  setMeta(key: string, value: any): Promise<void>;
+
+  // Operation Log (for sync)
+  appendOpLog(entry: Omit<OpLogEntry, 'id'>): Promise<number>;
+  getPendingOps(): Promise<OpLogEntry[]>;
+  markOpsSynced(lastId: number): Promise<void>;
+
+  // Iteration
+  getAllKeys(): Promise<string[]>;
+}`;
+
+export const idbAdapterCode = `import { TopGun } from '@topgunbuild/client';
+
+// No loading state needed!
+const db = new TopGun({
+  sync: 'wss://example.com',
+  persist: 'indexeddb'
+});
+
+// Start using immediately - writes are queued in memory
+db.todos.set({ id: '1', text: 'Hello' });
+
+// Optional: wait for IndexedDB if needed
+await db.waitForReady();`;
+
+export const customAdapterCode = `class MyCustomAdapter implements IStorageAdapter {
+  async initialize(dbName: string) {
+    // Open database connection
+  }
+
+  async get(key: string) {
+    // Return value or undefined
+  }
+
+  // ... implement other methods
+}`;
+
+export const postgresBasicCode = `import { PostgresAdapter } from '@topgunbuild/server';
+
+const adapter = new PostgresAdapter({
+  host: 'localhost',
+  port: 5432,
+  database: 'myapp',
+  user: 'postgres',
+  password: 'secret'
+});
+
+await adapter.initialize();`;
+
+export const postgresCustomTableCode = `import { PostgresAdapter } from '@topgunbuild/server';
+import { Pool } from 'pg';
+
+// Using custom table name
+const adapter = new PostgresAdapter(
+  { connectionString: process.env.DATABASE_URL },
+  { tableName: 'my_app_data' }
+);
+
+// Or with an existing Pool instance
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const adapter = new PostgresAdapter(pool, { tableName: 'my_app_data' });`;
+
+export const postgresServerCode = `import { ServerCoordinator } from '@topgunbuild/server';
+import { PostgresAdapter } from '@topgunbuild/server';
+
+const storage = new PostgresAdapter({
+  connectionString: process.env.DATABASE_URL
+});
+
+const server = new ServerCoordinator({
+  port: 8765,
+  storage
+});
+
+await server.ready();`;
+
+export const encryptedAdapterCode = `import { TopGunClient, EncryptedStorageAdapter, IDBAdapter } from '@topgunbuild/client';
+
+// 1. Create the base adapter (IndexedDB)
+const baseAdapter = new IDBAdapter();
+
+// 2. Wrap it with encryption
+const encryptedAdapter = new EncryptedStorageAdapter(baseAdapter, encryptionKey);
+
+// 3. Use in TopGun client
+const client = new TopGunClient({
+  serverUrl: 'wss://example.com',
+  storage: encryptedAdapter
+});`;
+
+export const deriveKeyFromPasswordCode = `// Derive encryption key from user password using PBKDF2
+async function deriveKeyFromPassword(password: string, salt: Uint8Array): Promise<CryptoKey> {
+  const encoder = new TextEncoder();
+
+  // Import password as key material
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(password),
+    'PBKDF2',
+    false,
+    ['deriveKey']
+  );
+
+  // Derive AES-256-GCM key
+  return crypto.subtle.deriveKey(
+    {
+      name: 'PBKDF2',
+      salt: salt,
+      iterations: 100000,
+      hash: 'SHA-256'
+    },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false, // not extractable
+    ['encrypt', 'decrypt']
+  );
+}
+
+// Usage
+const salt = crypto.getRandomValues(new Uint8Array(16));
+// Store salt somewhere (localStorage, alongside encrypted data, etc.)
+localStorage.setItem('encryption_salt', btoa(String.fromCharCode(...salt)));
+
+const key = await deriveKeyFromPassword(userPassword, salt);`;
+
+export const generateRandomKeyCode = `// Generate a random encryption key (device-bound)
+async function generateEncryptionKey(): Promise<CryptoKey> {
+  return crypto.subtle.generateKey(
+    { name: 'AES-GCM', length: 256 },
+    true, // extractable for storage
+    ['encrypt', 'decrypt']
+  );
+}
+
+// Export key for storage
+async function exportKey(key: CryptoKey): Promise<string> {
+  const exported = await crypto.subtle.exportKey('raw', key);
+  return btoa(String.fromCharCode(...new Uint8Array(exported)));
+}
+
+// Import key from storage
+async function importKey(keyString: string): Promise<CryptoKey> {
+  const keyData = Uint8Array.from(atob(keyString), c => c.charCodeAt(0));
+  return crypto.subtle.importKey(
+    'raw',
+    keyData,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+// Usage: Store key in localStorage (protects against disk dumps)
+let key: CryptoKey;
+const storedKey = localStorage.getItem('topgun_encryption_key');
+
+if (storedKey) {
+  key = await importKey(storedKey);
+} else {
+  key = await generateEncryptionKey();
+  localStorage.setItem('topgun_encryption_key', await exportKey(key));
+}`;
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <BookOpen className="w-10 h-10 text-blue-600 dark:text-blue-400" />
+  <h1 className="text-4xl font-bold text-foreground">Adapter API</h1>
+</div>
+
+Storage adapters allow TopGun to persist data to various backends.
+The `IStorageAdapter` interface is used by both the Client (for offline support) and the Server (for durability).
+
+## Interface Definition
+
+<div className="not-prose">
+  <CodeBlock title="interface IStorageAdapter" language="typescript" code={interfaceCode} />
+</div>
+
+## IDBAdapter (IndexedDB)
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Database className="w-5 h-5 text-purple-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Browser storage adapter with non-blocking initialization. The default for browser environments.</span>
+</div>
+
+The `IDBAdapter` is designed for true "memory-first" behavior. It initializes IndexedDB in the background while allowing immediate use of the database.
+
+<div className="bg-green-50 dark:bg-green-900/20 border border-green-100 dark:border-green-800 rounded-xl p-6 my-6 not-prose">
+  <h4 className="font-semibold text-green-800 dark:text-green-300 mb-2">Non-Blocking Initialization</h4>
+  <span className="text-green-700 dark:text-green-400">
+    IndexedDB can take 50-500ms to initialize. The <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">IDBAdapter</code> queues write operations in memory and replays them once IndexedDB is ready. This means zero blocking time for your UI.
+  </span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="Non-Blocking Usage" language="typescript" code={idbAdapterCode} />
+</div>
+
+### Behavior Summary
+
+| Operation | When Not Ready | When Ready |
+|-----------|---------------|------------|
+| `put`, `remove`, `setMeta` | Queued in memory | Executed immediately |
+| `get`, `getMeta`, `getAllKeys` | Waits for ready | Executed immediately |
+| `appendOpLog` | Queued in memory | Executed immediately |
+
+## Implementing a Custom Adapter
+
+To create a custom adapter, implement the interface above. Ensure that:
+
+- **Atomic Writes**: `batchPut` should ideally be atomic.
+- **Ordered OpLog**: `appendOpLog` must return a strictly increasing ID or sequence number.
+- **Persistence**: Data must survive process restarts.
+
+<div className="not-prose">
+  <CodeBlock title="Custom Adapter Example" language="typescript" code={customAdapterCode} />
+</div>
+
+## PostgresAdapter
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-4 mb-4 not-prose">
+  <span className="text-blue-700 dark:text-blue-400"><strong>Note:</strong> PostgresAdapter is a <strong>server-side adapter</strong> from <code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">@topgunbuild/server</code>, not a client adapter. It's documented here for completeness.</span>
+</div>
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Database className="w-5 h-5 text-blue-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Production-ready adapter for PostgreSQL databases. Recommended for server-side deployments.</span>
+</div>
+
+### Constructor
+
+<div className="not-prose">
+  <ApiConstructor signature="new PostgresAdapter(config, options?)">
+    <ApiParam
+      name="config"
+      type="PoolConfig | Pool"
+      description="PostgreSQL connection configuration object or an existing pg Pool instance."
+    />
+    <ApiParam
+      name="options?"
+      type="PostgresAdapterOptions"
+      description="Optional configuration for the adapter."
+    />
+  </ApiConstructor>
+</div>
+
+### Options
+
+<div className="not-prose">
+  <ApiConstructor signature="interface PostgresAdapterOptions">
+    <ApiParam
+      name="tableName?"
+      type="string"
+      description="Custom table name for storing data. Defaults to 'topgun_maps'. Must contain only alphanumeric characters and underscores, and start with a letter or underscore."
+    />
+  </ApiConstructor>
+</div>
+
+### Basic Usage
+
+<div className="not-prose">
+  <CodeBlock title="PostgresAdapter Setup" language="typescript" code={postgresBasicCode} />
+</div>
+
+### Custom Table Name
+
+Use the `tableName` option when you need multiple TopGun instances sharing the same database, or to follow your organization's naming conventions.
+
+<div className="not-prose">
+  <CodeBlock title="Custom Table Name" language="typescript" code={postgresCustomTableCode} />
+</div>
+
+### With ServerCoordinator
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Settings className="w-5 h-5 text-green-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Pass the adapter to ServerCoordinator for persistent server storage.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="Server with PostgreSQL" language="typescript" code={postgresServerCode} />
+</div>
+
+## EncryptedStorageAdapter
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Lock className="w-5 h-5 text-green-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Client-side encryption for data at rest. Wraps any storage adapter with AES-256-GCM encryption.</span>
+</div>
+
+The `EncryptedStorageAdapter` provides transparent encryption for all data stored locally. It uses the Web Crypto API (AES-GCM) to encrypt data before writing to the underlying storage and decrypts it on read.
+
+### What It Protects
+
+<div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
+  <div className="p-4 border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-900/20 rounded-lg">
+    <h4 className="font-semibold text-green-800 dark:text-green-300 mb-2">Protected Against</h4>
+    <ul className="text-sm text-green-700 dark:text-green-400 space-y-1">
+      <li>Browser DevTools inspection</li>
+      <li>Malicious browser extensions</li>
+      <li>Physical device access (disk dumps)</li>
+      <li>IndexedDB data export</li>
+    </ul>
+  </div>
+  <div className="p-4 border border-yellow-200 dark:border-yellow-800 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg">
+    <h4 className="font-semibold text-yellow-800 dark:text-yellow-300 mb-2">Not Protected Against</h4>
+    <ul className="text-sm text-yellow-700 dark:text-yellow-400 space-y-1">
+      <li>XSS attacks (if attacker has JS execution)</li>
+      <li>Compromised application code</li>
+      <li>Key theft from memory</li>
+    </ul>
+  </div>
+</div>
+
+### Constructor
+
+<div className="not-prose">
+  <ApiConstructor signature="new EncryptedStorageAdapter(wrapped, key)">
+    <ApiParam
+      name="wrapped"
+      type="IStorageAdapter"
+      description="The underlying storage adapter to wrap (e.g., IDBAdapter)."
+    />
+    <ApiParam
+      name="key"
+      type="CryptoKey"
+      description="AES-256-GCM encryption key from Web Crypto API."
+    />
+  </ApiConstructor>
+</div>
+
+### Basic Usage
+
+<div className="not-prose">
+  <CodeBlock title="Using EncryptedStorageAdapter" language="typescript" code={encryptedAdapterCode} />
+</div>
+
+### Creating Encryption Keys
+
+The adapter requires a `CryptoKey` for AES-256-GCM encryption. Here are two common approaches:
+
+#### Password-Derived Key (PBKDF2)
+
+Best for user-authenticated encryption where the key is derived from a password:
+
+<div className="not-prose">
+  <CodeBlock title="Password-Derived Key" language="typescript" code={deriveKeyFromPasswordCode} />
+</div>
+
+#### Device-Bound Random Key
+
+Best for protecting data from disk dumps without requiring user password:
+
+<div className="not-prose">
+  <CodeBlock title="Device-Bound Key" language="typescript" code={generateRandomKeyCode} />
+</div>
+
+<div className="bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-800 rounded-xl p-6 my-6 not-prose">
+  <div className="flex items-center gap-2 mb-2">
+    <Shield className="w-5 h-5 text-red-600 dark:text-red-400" />
+    <h3 className="text-lg font-semibold text-red-800 dark:text-red-300">Key Management Warning</h3>
+  </div>
+  <span className="text-red-700 dark:text-red-400">If the encryption key is lost, <strong>all encrypted data becomes irrecoverable</strong>. Consider implementing key backup strategies for password-derived keys, or accept data loss on device change for device-bound keys.</span>
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 mb-6 not-prose">
+  <h3 className="text-lg font-semibold text-blue-800 dark:text-blue-300 mb-2">Learn More</h3>
+  <span className="text-blue-700 dark:text-blue-400">For detailed security considerations and best practices, see the <a href="/docs/guides/security#client-side-encryption" className="underline">Client-Side Encryption section</a> in the Security Guide.</span>
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/reference/server" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Server API
+    </div>
+  </a>
+  <a href="/docs/reference/react-hooks" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      React Hooks <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

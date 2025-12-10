@@ -1,0 +1,167 @@
+---
+title: Data Structures
+description: TopGun provides two primary CRDT-based data structures - LWW-Map (Last-Write-Wins Map) and OR-Map (Observed-Remove Map). Understanding the difference between them is critical for preventing data loss in distributed applications.
+order: 9
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight } from 'lucide-react';
+
+export const lwwMapCode = `// Get an LWW-Map
+const profile = client.getMap('user:123');
+
+// Set a value (overwrites existing)
+profile.set('name', 'Alice');
+profile.set('status', 'online');
+
+// Remove a key
+profile.remove('status');`;
+
+export const orMapCode = `// Get an OR-Map
+const todos = client.getORMap('todos:project-a');
+
+// Add items (treated as a Set/Collection)
+// .add() returns an ORMapRecord with a unique 'tag' and timestamp
+const record1 = todos.add('active', { title: 'Write docs' });
+const record2 = todos.add('active', { title: 'Fix bugs' });
+
+// Removing an item
+// In OR-Map, you remove by key AND exact value
+// This marks all observed instances of this value as removed
+todos.remove('active', { title: 'Write docs' });`;
+
+# Data Structures
+
+TopGun provides two primary CRDT-based data structures: **LWW-Map** (Last-Write-Wins Map) and **OR-Map** (Observed-Remove Map). Understanding the difference between them is critical for preventing data loss in distributed applications.
+
+## LWW-Map (Last-Write-Wins)
+
+The **LWW-Map** is the default map structure in TopGun. As the name suggests, it resolves conflicts by accepting the update with the highest timestamp (Last-Write-Wins).
+
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border-l-4 border-yellow-500 p-4 my-6 not-prose">
+  <p className="text-sm text-yellow-800 dark:text-yellow-200">
+    <strong>Best for:</strong> Key-Value stores where keys represent unique entities or fields that are overwritten (e.g., User Profile, Configuration, Document Fields).
+  </p>
+</div>
+
+### How it works
+
+- Each key holds a single value and a timestamp.
+- When two nodes update the same key, the one with the later timestamp wins.
+- If you use it for a list/collection by generating random keys, you might encounter issues if multiple users try to "add" to the list simultaneously and happen to generate colliding keys (rare) or if you try to manage the list as a single value (overwrites).
+
+### Usage
+
+<div className="not-prose">
+  <CodeBlock
+    title="LWW-Map Usage"
+    language="typescript"
+    code={lwwMapCode}
+  />
+</div>
+
+## OR-Map (Observed-Remove)
+
+The **OR-Map** is designed for Sets and Collections. It allows you to add multiple items to a key without them overwriting each other, even if they have the same value (depending on implementation) or if they are added concurrently. In TopGun, the OR-Map is implemented as a map where values are "observed" and can be removed without race conditions affecting re-additions.
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>Best for:</strong> Collections, Lists, Sets, and scenarios where multiple users might add/remove items concurrently (e.g., Todo Lists, Chat Messages in a channel, Tags).
+  </p>
+</div>
+
+### Why LWW is bad for Sets
+
+Imagine two users adding a "Todo Item" to a list. If you used LWW-Map and stored the list as a JSON array under a single key `todos`, the user who saves last would overwrite the other user's addition.
+
+With **OR-Map**, each addition is treated as a unique operation. Even if two users add the same value, or different values, both are preserved (unless one is explicitly removed).
+
+### Usage
+
+<div className="not-prose">
+  <CodeBlock
+    title="OR-Map Usage"
+    language="typescript"
+    code={orMapCode}
+  />
+</div>
+
+## Tombstones & Deletion
+
+When you delete data in TopGun, the record isn't immediately removed from storage. Instead, a **tombstone** is created. This is essential for proper synchronization with offline clients.
+
+<div className="grid md:grid-cols-2 gap-4 mb-6 not-prose">
+  <div className="p-4 bg-neutral-100 dark:bg-neutral-900 rounded-lg">
+    <h3 className="font-semibold mb-2">LWW-Map Tombstones</h3>
+    <p className="text-sm mb-2">A tombstone is simply a record with <code className="px-1.5 py-0.5 rounded bg-neutral-200 dark:bg-neutral-800 text-xs">value: null</code>:</p>
+    <pre className="text-xs bg-neutral-200 dark:bg-neutral-800 p-2 rounded overflow-x-auto">
+{`{ value: null, timestamp: {...} }`}
+    </pre>
+  </div>
+  <div className="p-4 bg-neutral-100 dark:bg-neutral-900 rounded-lg">
+    <h3 className="font-semibold mb-2">OR-Map Tombstones</h3>
+    <p className="text-sm mb-2">Removed tags are stored in a tombstone set:</p>
+    <pre className="text-xs bg-neutral-200 dark:bg-neutral-800 p-2 rounded overflow-x-auto">
+{`tombstones: Set<tag>`}
+    </pre>
+  </div>
+</div>
+
+<div className="bg-purple-50 dark:bg-purple-900/20 border-l-4 border-purple-500 p-4 my-6 not-prose">
+  <p className="text-sm text-purple-800 dark:text-purple-200">
+    <strong>Garbage Collection:</strong> Tombstones are periodically cleaned up via GC.
+    The server coordinates this process to ensure all replicas have seen the deletion
+    before permanently removing the tombstone. This prevents "resurrection" of deleted data.
+  </p>
+</div>
+
+## Summary
+
+<div className="overflow-x-auto not-prose">
+  <table className="min-w-full text-left text-sm">
+    <thead className="bg-neutral-100 dark:bg-neutral-800 text-foreground">
+      <tr>
+        <th className="p-4 font-semibold">Feature</th>
+        <th className="p-4 font-semibold">LWW-Map</th>
+        <th className="p-4 font-semibold">OR-Map</th>
+      </tr>
+    </thead>
+    <tbody className="divide-y divide-neutral-200 dark:divide-neutral-800">
+      <tr>
+        <td className="p-4 font-medium text-foreground">Primary Use Case</td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300">Key-Value properties (Profile, Config)</td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300">Collections, Sets, Lists (Todos, Comments)</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-medium text-foreground">Conflict Resolution</td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300">Last Write Wins (Overwrites)</td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300">Union of Adds (Merge), Observed Remove</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-medium text-foreground">Deletion</td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300">Tombstone (<code className="px-1.5 py-0.5 rounded bg-neutral-200 dark:bg-neutral-700 text-xs">value: null</code>)</td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300">Tag added to tombstone set</td>
+      </tr>
+      <tr>
+        <td className="p-4 font-medium text-foreground">API Method</td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300"><code className="px-1.5 py-0.5 rounded bg-neutral-200 dark:bg-neutral-700 text-xs">client.getMap()</code></td>
+        <td className="p-4 text-neutral-600 dark:text-neutral-300"><code className="px-1.5 py-0.5 rounded bg-neutral-200 dark:bg-neutral-700 text-xs">client.getORMap()</code></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/concepts/sync-protocol" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Sync Protocol
+    </div>
+  </a>
+  <a href="/docs/guides" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next Section</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Guides <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

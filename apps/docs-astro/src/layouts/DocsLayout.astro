@@ -1,0 +1,130 @@
+---
+import '../styles/global.css';
+import { NavbarWrapper } from '../components/NavbarWrapper';
+import { Footer } from '../components/Footer';
+import { DocsSidebar } from '../components/docs/DocsSidebar';
+import { TableOfContents } from '../components/docs/TableOfContents';
+import SEO from '../components/SEO.astro';
+
+interface Props {
+  title?: string;
+  description?: string;
+  editUrl?: string;
+}
+
+const {
+  title = "TopGun Documentation",
+  description = "Learn how to build offline-first applications with TopGun. Guides, API reference, and examples.",
+  editUrl
+} = Astro.props;
+const currentPath = Astro.url.pathname;
+---
+
+<!doctype html>
+<html lang="en" class="dark">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width" />
+		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+		<meta name="generator" content={Astro.generator} />
+		<SEO title={title} description={description} />
+		<title>{title}</title>
+        <script is:inline>
+            const getThemePreference = () => {
+                if (typeof localStorage !== 'undefined' && localStorage.getItem('theme')) {
+                    return localStorage.getItem('theme');
+                }
+                return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+            };
+            const isDark = getThemePreference() === 'dark';
+            document.documentElement.classList[isDark ? 'add' : 'remove']('dark');
+        </script>
+	</head>
+	<body class="min-h-screen bg-background text-foreground overflow-x-hidden selection:bg-blue-500/30">
+        <div class="fixed inset-0 z-0 pointer-events-none">
+          <div class="absolute inset-0 bg-grid opacity-[0.15]"></div>
+          <div class="absolute inset-0 bg-gradient-to-t from-background via-transparent to-transparent"></div>
+        </div>
+
+        <div class="relative z-10 flex flex-col min-h-screen">
+            <NavbarWrapper client:load />
+
+            <div class="flex w-full pt-16 min-h-screen">
+                <!-- Mobile Menu Toggle -->
+                <button
+                    id="mobile-menu-toggle"
+                    class="fixed bottom-6 right-6 z-50 p-4 bg-blue-600 text-white rounded-full shadow-lg lg:hidden hover:bg-blue-700 transition-colors"
+                    aria-label="Toggle Documentation Menu"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-6 h-6 menu-icon"><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="18" y2="18"/></svg>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-6 h-6 x-icon hidden"><path d="M18 6 6 18"/><path d="m6 6 18 18"/></svg>
+                </button>
+
+                <!-- Mobile Sidebar Overlay -->
+                <div id="mobile-sidebar-overlay" class="fixed inset-0 z-40 lg:hidden hidden">
+                    <div class="absolute inset-0 bg-black/50 backdrop-blur-sm" id="mobile-sidebar-backdrop"></div>
+                    <aside
+                        class="absolute left-0 top-16 bottom-0 w-64 bg-background border-r border-card-border overflow-y-auto"
+                    >
+                        <DocsSidebar client:load currentPath={currentPath} />
+                    </aside>
+                </div>
+
+                <!-- Left Sidebar - Desktop -->
+                <aside class="fixed left-0 top-16 w-64 h-[calc(100vh-4rem)] border-r border-card-border bg-background overflow-y-auto hidden lg:block custom-scrollbar">
+                    <DocsSidebar client:load currentPath={currentPath} />
+                </aside>
+
+                <!-- Right Sidebar - Table of Contents (fixed) -->
+                <aside class="fixed right-0 top-16 w-64 h-[calc(100vh-4rem)] bg-background overflow-y-auto hidden xl:block custom-scrollbar">
+                    <TableOfContents client:idle />
+                </aside>
+
+                <!-- Main Content -->
+                <main class="flex-1 lg:ml-64 xl:mr-64 relative min-w-0">
+                    <div class="px-6 sm:px-12 py-12 max-w-4xl mx-auto prose prose-docs">
+                        <slot />
+                        <footer class="mt-20 pt-8 border-t border-card-border text-sm text-neutral-500 not-prose">
+                            {editUrl && (
+                                <a
+                                    href={editUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    class="flex items-center justify-center gap-2 mb-4 text-neutral-500 hover:text-foreground transition-colors"
+                                >
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>
+                                    Edit this page on GitHub
+                                </a>
+                            )}
+                            <p class="text-center">© 2025 TopGun Inc. Documentation licensed under CC BY 4.0.</p>
+                        </footer>
+                    </div>
+                </main>
+            </div>
+        </div>
+
+        <script>
+            const toggleBtn = document.getElementById('mobile-menu-toggle');
+            const overlay = document.getElementById('mobile-sidebar-overlay');
+            const backdrop = document.getElementById('mobile-sidebar-backdrop');
+            const menuIcon = toggleBtn?.querySelector('.menu-icon');
+            const xIcon = toggleBtn?.querySelector('.x-icon');
+
+            function toggleMenu() {
+                const isHidden = overlay?.classList.contains('hidden');
+                if (isHidden) {
+                    overlay?.classList.remove('hidden');
+                    menuIcon?.classList.add('hidden');
+                    xIcon?.classList.remove('hidden');
+                } else {
+                    overlay?.classList.add('hidden');
+                    menuIcon?.classList.remove('hidden');
+                    xIcon?.classList.add('hidden');
+                }
+            }
+
+            toggleBtn?.addEventListener('click', toggleMenu);
+            backdrop?.addEventListener('click', toggleMenu);
+        </script>
+	</body>
+</html>

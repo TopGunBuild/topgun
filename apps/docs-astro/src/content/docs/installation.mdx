@@ -1,0 +1,105 @@
+---
+title: Installation
+description: Install the TopGun client SDK and necessary adapters to get started.
+order: 3
+---
+
+import CodeBlock from '../../components/docs/CodeBlock.astro';
+import { ChevronRight } from 'lucide-react';
+
+export const coreInitCode = `import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+// 1. Initialize the storage adapter (e.g., IndexedDB)
+const adapter = new IDBAdapter();
+
+// 2. Create the client
+const client = new TopGunClient({
+  // Optional: URL of the sync server
+  serverUrl: 'ws://localhost:3000',
+  // Required: Storage adapter instance
+  storage: adapter
+});
+
+// 3. Start the client (async operation)
+// You typically do this in your app's entry point
+await client.start();
+
+export default client;`;
+
+export const simplifiedCode = `import { TopGun } from '@topgunbuild/client';
+
+const db = new TopGun({
+  sync: 'wss://api.myapp.com/sync',
+  persist: 'indexeddb' // automatically uses IDBAdapter
+});
+
+// Note: You still need to handle the async start in a real app context`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <span>Get Started</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Installation</span>
+</div>
+
+# Installation
+
+<div className="mb-10 not-prose">
+  <h3 className="text-lg font-semibold text-foreground mb-2">Package Manager</h3>
+  <p className="text-neutral-600 dark:text-neutral-300 mb-4">
+    Install the TopGun client SDK and necessary adapters to get started.
+  </p>
+  <CodeBlock
+    title="terminal"
+    code="npm install @topgunbuild/client @topgunbuild/adapters"
+  />
+</div>
+
+<div className="mb-10 not-prose">
+  <h3 className="text-lg font-semibold text-foreground mb-2">Core Initialization</h3>
+  <p className="text-neutral-600 dark:text-neutral-300 mb-4">
+    The most robust way to initialize TopGun is by creating the client and passing your storage adapter explicitly.
+  </p>
+
+  <CodeBlock
+    title="src/store.ts"
+    language="typescript"
+    code={coreInitCode}
+  />
+
+  <div className="p-4 mt-4 rounded-lg bg-blue-500/10 border border-blue-500/20 flex gap-3">
+    <div className="mt-1">
+      <div className="w-4 h-4 rounded-full bg-blue-500 flex items-center justify-center text-white text-[10px] font-bold">i</div>
+    </div>
+    <span className="text-sm text-neutral-700 dark:text-neutral-300"><span className="font-semibold text-blue-600 dark:text-blue-400">Note:</span> TopGunClient provides full control over configuration and lifecycle. Use this for production apps.</span>
+  </div>
+</div>
+
+<div className="mb-10 not-prose">
+  <h3 className="text-lg font-semibold text-foreground mb-2">Simplified API (Experimental)</h3>
+  <p className="text-neutral-600 dark:text-neutral-300 mb-4">
+    For quick prototyping, you can use the <code className="px-1.5 py-0.5 rounded bg-neutral-100 dark:bg-neutral-800 text-sm">TopGun</code> facade which abstracts some boilerplate.
+  </p>
+  <CodeBlock
+    title="src/store.ts"
+    language="typescript"
+    code={simplifiedCode}
+  />
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/comparison" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Comparison
+    </div>
+  </a>
+  <a href="/docs/quick-start" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next Section</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Quick Start <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

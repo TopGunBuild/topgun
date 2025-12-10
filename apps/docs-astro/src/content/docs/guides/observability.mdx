@@ -1,0 +1,113 @@
+---
+title: Observability
+description: Monitor the health and performance of your TopGun cluster using Prometheus metrics and structured logging.
+order: 16
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Gauge, FileText } from 'lucide-react';
+
+export const logExample = `{
+  "level": 30,
+  "time": 1678901234567,
+  "pid": 12345,
+  "hostname": "topgun-server-0",
+  "msg": "Server started on port 8080",
+  "nodeId": "node-xyz-123"
+}`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Observability</span>
+</div>
+
+# Observability
+
+Monitor the health and performance of your TopGun cluster using Prometheus metrics and structured logging.
+
+## Prometheus Metrics
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Gauge className="w-6 h-6 text-blue-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">The TopGun server exposes a <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded">/metrics</code> endpoint that is compatible with Prometheus.</span>
+</div>
+
+By default, this is available on the main server port (or a dedicated metrics port if configured).
+
+### Key Metrics
+
+<div className="overflow-x-auto mb-6 not-prose">
+  <table className="w-full text-left text-sm text-neutral-600 dark:text-neutral-300">
+    <thead className="bg-neutral-100 dark:bg-neutral-800 text-foreground font-semibold">
+      <tr>
+        <th className="p-3 rounded-tl-lg">Metric Name</th>
+        <th className="p-3">Type</th>
+        <th className="p-3 rounded-tr-lg">Description</th>
+      </tr>
+    </thead>
+    <tbody className="divide-y divide-card-border">
+      <tr>
+        <td className="p-3 font-mono">topgun_connected_clients</td>
+        <td className="p-3">Gauge</td>
+        <td className="p-3">Number of currently connected WebSocket clients.</td>
+      </tr>
+      <tr>
+        <td className="p-3 font-mono">topgun_map_size_items</td>
+        <td className="p-3">Gauge</td>
+        <td className="p-3">Number of items in a specific map (labeled by map name).</td>
+      </tr>
+      <tr>
+        <td className="p-3 font-mono">topgun_ops_total</td>
+        <td className="p-3">Counter</td>
+        <td className="p-3">Total number of operations processed. Labels: <code className="bg-neutral-100 dark:bg-neutral-800 px-1 py-0.5 rounded text-xs">type</code> (PUT, GET, DELETE, SUBSCRIBE), <code className="bg-neutral-100 dark:bg-neutral-800 px-1 py-0.5 rounded text-xs">map</code>.</td>
+      </tr>
+      <tr>
+        <td className="p-3 font-mono">topgun_memory_usage_bytes</td>
+        <td className="p-3">Gauge</td>
+        <td className="p-3">Current heap memory usage of the server process.</td>
+      </tr>
+      <tr>
+        <td className="p-3 font-mono">topgun_cluster_members</td>
+        <td className="p-3">Gauge</td>
+        <td className="p-3">Number of active nodes in the cluster.</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+Standard Node.js metrics (CPU, Event Loop, GC) are also exported with the `topgun_` prefix.
+
+## Structured Logging
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <FileText className="w-6 h-6 text-orange-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">TopGun uses <strong className="text-foreground">Pino</strong> for high-performance, structured JSON logging.</span>
+</div>
+
+This makes it easy to ingest logs into systems like ELK, Datadog, or Loki.
+
+### Log Example
+
+<div className="not-prose">
+  <CodeBlock title="server.log" language="json" code={logExample} />
+</div>
+
+Logs include context such as `nodeId`, `clientId`, and `requestId` where applicable, allowing you to trace requests across the distributed system.
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/deployment" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Deployment
+    </div>
+  </a>
+  <a href="/docs/guides/distributed-locks" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next Guide</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Distributed Locks <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

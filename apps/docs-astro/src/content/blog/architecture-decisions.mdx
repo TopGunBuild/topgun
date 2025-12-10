@@ -1,0 +1,43 @@
+---
+title: "Why We Abandoned Realtime Postgres for an In-Memory Grid"
+excerpt: "We tried using PostgreSQL logical replication for TopGun v2. Here is why it failed our realtime requirements and why we pivoted to an in-memory architecture."
+date: "Dec 08, 2025"
+readTime: "8 min read"
+author: "Ivan Kalashnik"
+role: "Creator"
+category: "Engineering"
+image: "/images/blog-architecture-grid.png"
+avatar: "/images/ivan-avatar.jpeg"
+---
+
+When designing TopGun v2, the initial instinct was to stand on the shoulders of giants. Why build a database engine when **PostgreSQL** exists?
+
+Our first prototype was a "Realtime Layer" on top of Postgres. It relied on Logical Replication (WAL) to stream changes to clients, and standard SQL for queries. Ideally, it would have given us the best of both worlds: reliability of SQL + speed of Websockets.
+
+## The Problem with "Bolt-on" Realtime
+
+In practice, the latency was the killer.
+
+1.  **The Round Trip:** A write had to go Client -> API -> Postgres -> Write Ahead Log -> Logical Decoding Plugin -> Realtime Service -> Client.
+2.  **Latency Budget:** For a UI to feel "instant," you have ~100ms. The Postgres replication loop often exceeded this, especially under load. This meant we still needed optimistic UI updates on the client, complex rollback logic, and a lot of glue code.
+
+## The Flexibility Trap
+
+The second issue was the **Schema**. In a Local-First world, clients often have slightly different versions of the application (e.g., a mobile app that hasn't updated yet).
+
+When your source of truth is a strict SQL schema:
+- **Migrations break old clients:** Adding a `NOT NULL` column or changing a relationship can crash an older client that doesn't know about it.
+- **Offline Auth is Hard:** How do you authorize a user to edit a document when they are offline? You can't run a SQL query. You need to replicate the *permissions logic* to the client.
+
+## The Solution: A Distributed In-Memory Grid
+
+We realized that for a true realtime, offline-first experience, the **primary** source of data interaction had to be instant.
+
+TopGun v2 flips the model:
+
+1.  **Memory First:** The active dataset lives in RAM on the TopGun server (or cluster).
+2.  **Instant Reads:** Reads don't hit a disk. They are variable lookups. Latency = 0ms.
+3.  **Async Persistence:** Data is flushed to "Cold Storage" (Postgres, etc.) asynchronously. If the cold storage is slow, the user doesn't feel it.
+4.  **Protocol-based Auth:** Permissions are rules-based and part of the protocol itself, meaning they work exactly the same online and offline.
+
+This shift wasn't easy—it meant rewriting the engine from scratch. But the result is a system that handles 10x the realtime throughput of our Postgres prototype, with zero perceived latency for the end user.

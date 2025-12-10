@@ -1,0 +1,117 @@
+---
+title: Sync Protocol
+description: Understanding how TopGun moves data between clients and servers efficiently using Merkle Trees and WebSockets.
+order: 8
+---
+
+import { ChevronRight } from 'lucide-react';
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <span>Concepts</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Sync Protocol</span>
+</div>
+
+# Synchronization Protocol
+
+Understanding how TopGun moves data between clients and servers efficiently using Merkle Trees and WebSockets.
+
+## Sync vs. Request
+
+Instead of writing thousands of API endpoints (`GET /users`, `POST /todos`), TopGun synchronizes state.
+
+<div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6 not-prose">
+  <div className="p-4 bg-neutral-100 dark:bg-neutral-900 rounded-lg">
+    <h3 className="font-semibold mb-2">Traditional REST/GraphQL</h3>
+    <ul className="text-sm space-y-1 text-neutral-600 dark:text-neutral-300">
+      <li>• Fetch data explicitly</li>
+      <li>• Send requests to mutate</li>
+      <li>• Handle loading/error states</li>
+      <li>• Manual retry logic</li>
+    </ul>
+  </div>
+  <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-100 dark:border-blue-800">
+    <h3 className="font-semibold text-blue-900 dark:text-blue-300 mb-2">TopGun Sync</h3>
+    <ul className="text-sm space-y-1 text-blue-800 dark:text-blue-400">
+      <li>• Subscribe to datasets</li>
+      <li>• Mutate local objects directly</li>
+      <li>• Automatic retries & conflict resolution</li>
+      <li>• Real-time updates pushed to you</li>
+    </ul>
+  </div>
+</div>
+
+## Merkle Tree Synchronization
+
+To keep bandwidth usage extremely low, TopGun doesn't re-download the whole dataset every time you reconnect.
+It uses **Merkle Trees** (hash trees) to efficiently detect differences.
+
+<div className="p-6 border border-card-border rounded-xl mb-6 bg-neutral-50 dark:bg-neutral-900/50 not-prose">
+  <h3 className="font-semibold mb-4">The Exchange Process</h3>
+  <ol className="space-y-4">
+    <li className="flex gap-3">
+      <span className="flex-shrink-0 w-6 h-6 rounded-full bg-neutral-200 dark:bg-neutral-700 flex items-center justify-center text-xs font-bold">1</span>
+      <p className="text-sm text-neutral-600 dark:text-neutral-300">
+        <strong>Handshake:</strong> Client and Server exchange the Root Hash of their respective Merkle Trees.
+      </p>
+    </li>
+    <li className="flex gap-3">
+      <span className="flex-shrink-0 w-6 h-6 rounded-full bg-neutral-200 dark:bg-neutral-700 flex items-center justify-center text-xs font-bold">2</span>
+      <p className="text-sm text-neutral-600 dark:text-neutral-300">
+        <strong>Comparison:</strong> If hashes match, data is identical. Sync complete (0 bytes transferred).
+      </p>
+    </li>
+    <li className="flex gap-3">
+      <span className="flex-shrink-0 w-6 h-6 rounded-full bg-neutral-200 dark:bg-neutral-700 flex items-center justify-center text-xs font-bold">3</span>
+      <p className="text-sm text-neutral-600 dark:text-neutral-300">
+        <strong>Drill Down:</strong> If hashes differ, they request hashes of child nodes (buckets) to pinpoint the exact difference.
+      </p>
+    </li>
+    <li className="flex gap-3">
+      <span className="flex-shrink-0 w-6 h-6 rounded-full bg-neutral-200 dark:bg-neutral-700 flex items-center justify-center text-xs font-bold">4</span>
+      <p className="text-sm text-neutral-600 dark:text-neutral-300">
+        <strong>Patch:</strong> Only the modified records (leaves) are transmitted over the wire.
+      </p>
+    </li>
+  </ol>
+</div>
+
+## Server Architecture
+
+While clients are "Local-First", TopGun is backed by a robust server cluster for persistence and scalability.
+
+<div className="space-y-4 not-prose">
+  <div className="p-4 rounded-lg border border-card-border">
+    <h4 className="font-bold text-foreground">1. Gateway Node</h4>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1">Handles WebSocket connections and routes traffic.</p>
+  </div>
+  <div className="p-4 rounded-lg border border-card-border">
+    <h4 className="font-bold text-foreground">2. Partition Engine</h4>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1">In-memory sharding logic that distributes data across the cluster.</p>
+  </div>
+  <div className="p-4 rounded-lg border border-card-border">
+    <h4 className="font-bold text-foreground">3. Persistence Layer</h4>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1">Async write-behind to PostgreSQL (or in-memory for development).</p>
+  </div>
+  <div className="p-4 rounded-lg border border-card-border">
+    <h4 className="font-bold text-foreground">4. Pub/Sub Bus</h4>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300 mt-1">Broadcasts updates to other connected clients in real-time.</p>
+  </div>
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/concepts/crdt-hlc" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> CRDTs & Time
+    </div>
+  </a>
+  <a href="/docs/concepts/data-structures" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Data Structures <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

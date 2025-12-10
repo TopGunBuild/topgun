@@ -1,0 +1,76 @@
+---
+title: Guides
+description: Practical, step-by-step guides to help you implement common patterns and features with TopGun.
+order: 10
+---
+
+import { ChevronRight, Shield, Database, Server, Radio, Timer, Activity, Lock, KeyRound } from 'lucide-react';
+import { GuideCard } from '../../../components/docs/GuideCard';
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Guides</span>
+</div>
+
+# Guides
+
+Practical, step-by-step guides to help you implement common patterns and features with TopGun.
+
+<div className="grid gap-6 not-prose mt-12">
+  <GuideCard
+    href="/docs/guides/authentication"
+    icon={Shield}
+    title="Authentication"
+    description="How to integrate authentication providers (Clerk, Better Auth) and secure your sync channels."
+  />
+  <GuideCard
+    href="/docs/guides/security"
+    icon={KeyRound}
+    title="Security (TLS/mTLS)"
+    description="Secure your deployment with TLS encryption, mTLS for cluster, and certificate management."
+  />
+  <GuideCard
+    href="/docs/guides/live-queries"
+    icon={Activity}
+    title="Live Queries"
+    description="Building reactive applications with real-time query subscriptions."
+  />
+  <GuideCard
+    href="/docs/guides/pub-sub"
+    icon={Radio}
+    title="Pub/Sub (Topics)"
+    description="Using ephemeral topics for real-time messaging and notifications."
+  />
+  <GuideCard
+    href="/docs/guides/ttl"
+    icon={Timer}
+    title="Time-To-Live (TTL)"
+    description="Managing data expiration and garbage collection."
+  />
+  <GuideCard
+    href="/docs/guides/data-modeling"
+    icon={Database}
+    title="Data Modeling"
+    description="Best practices for structuring your data in a graph/document hybrid model for maximum performance."
+    comingSoon
+  />
+  <GuideCard
+    href="/docs/guides/deployment"
+    icon={Server}
+    title="Deployment"
+    description="How to deploy and scale the TopGun server cluster using Docker and Kubernetes."
+  />
+  <GuideCard
+    href="/docs/guides/observability"
+    icon={Activity}
+    title="Observability"
+    description="Monitoring, metrics (Prometheus), and structured logging."
+  />
+  <GuideCard
+    href="/docs/guides/distributed-locks"
+    icon={Lock}
+    title="Distributed Locks"
+    description="Coordinating processes with locks and fencing tokens."
+  />
+</div>

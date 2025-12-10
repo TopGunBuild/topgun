@@ -1,0 +1,127 @@
+---
+title: CRDTs & Hybrid Logical Clocks
+description: How TopGun manages state consistency and time across distributed, offline-first clients without a central coordinator.
+order: 7
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight } from 'lucide-react';
+
+export const timestampCode = `interface Timestamp {
+  millis: number;   // Physical wall clock (ms since epoch)
+  counter: number;  // Logical counter for same-ms events
+  nodeId: string;   // Unique node identifier (tie-breaker)
+}
+
+// Example: "1701234567890:0:client-abc123"
+// Serialized format: "<millis>:<counter>:<nodeId>"`;
+
+export const mergeCode = `function merge(localState, remoteState) {
+  // Simplified LWW Logic
+  if (remoteState.hlc > localState.hlc) {
+    return remoteState; // Remote is newer, overwrite local
+  } else if (remoteState.hlc < localState.hlc) {
+    return localState;  // Local is newer, ignore remote
+  } else {
+    // Timestamps equal? Compare node IDs deterministically
+    return remoteState.nodeId > localState.nodeId ? remoteState : localState;
+  }
+}`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <span>Concepts</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">CRDTs & Time</span>
+</div>
+
+# CRDTs & Hybrid Logical Clocks
+
+How TopGun manages state consistency and time across distributed, offline-first clients without a central coordinator.
+
+## Optimistic UI & Consistency
+
+TopGun uses **Optimistic Updates** by default. When a user performs an action, it is applied immediately to the local state.
+
+- **Immediate Feedback:** The UI updates instantly (0ms latency).
+- **Background Sync:** Behind the scenes, an Operation Log (OpLog) queues the mutation.
+- **Convergence:** The Sync Engine uploads changes when the network is available.
+
+<div className="p-4 rounded-lg bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 not-prose">
+  <h4 className="font-mono text-sm font-bold mb-2">Data Flow</h4>
+  <ol className="list-decimal pl-5 space-y-1 text-sm font-mono text-neutral-600 dark:text-neutral-300">
+    <li>User clicks "Save"</li>
+    <li><code>map.set(key, val)</code> → Local State Updated</li>
+    <li>UI Refreshes (Frame 1)</li>
+    <li>OpLog entry created</li>
+    <li>Sync Engine pushes to Server (Async)</li>
+  </ol>
+</div>
+
+## Hybrid Logical Clocks (HLC)
+
+In distributed systems, you cannot rely on physical time (wall clock) because device clocks drift or can be manually changed.
+TopGun solves this with **Hybrid Logical Clocks**.
+
+### How it works
+
+Every event in TopGun is tagged with an HLC timestamp. This timestamp combines:
+
+- **Physical Time:** The wall clock time (e.g., from `Date.now()`).
+- **Logical Counter:** A counter that increments if multiple events happen within the same millisecond or if the physical clock regresses.
+- **Node ID:** A unique identifier for the device/client, used as a tie-breaker when timestamps are equal.
+
+<div className="not-prose">
+  <CodeBlock
+    title="Timestamp Structure"
+    language="typescript"
+    code={timestampCode}
+  />
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 p-6 rounded-lg border border-blue-100 dark:border-blue-800 mt-6 not-prose">
+  <h4 className="font-semibold text-blue-800 dark:text-blue-300 mb-2">Why is this important?</h4>
+  <p className="text-sm text-blue-700 dark:text-blue-400">
+    It allows TopGun to correctly order events across devices even if their clocks are slightly off.
+    "Last-Write-Wins" is determined by comparing HLCs, not unreliable system time.
+  </p>
+</div>
+
+<div className="bg-amber-50 dark:bg-amber-900/20 p-6 rounded-lg border border-amber-100 dark:border-amber-800 mt-4 not-prose">
+  <h4 className="font-semibold text-amber-800 dark:text-amber-300 mb-2">Clock Drift Tolerance</h4>
+  <p className="text-sm text-amber-700 dark:text-amber-400">
+    TopGun tolerates clock drift of up to <strong>60 seconds</strong> between devices.
+    If a remote timestamp is more than 60 seconds ahead of local time, the event is still accepted
+    (to maintain availability), but a warning is logged. This ensures the system remains functional
+    even with misconfigured device clocks.
+  </p>
+</div>
+
+## Conflict-Free Replicated Data Types (CRDTs)
+
+TopGun guarantees that all clients eventually converge to the same state without manual conflict resolution code.
+It uses a **Last-Write-Wins (LWW) Map** CRDT structure.
+
+<div className="not-prose">
+  <CodeBlock
+    title="Concept: LWW Register Merge"
+    language="typescript"
+    code={mergeCode}
+  />
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/concepts/local-first" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Local-First
+    </div>
+  </a>
+  <a href="/docs/concepts/sync-protocol" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next Concept</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Sync Protocol <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

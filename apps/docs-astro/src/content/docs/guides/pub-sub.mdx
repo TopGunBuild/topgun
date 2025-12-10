@@ -1,0 +1,100 @@
+---
+title: Pub/Sub (Topics)
+description: TopGun provides a distributed Publish/Subscribe mechanism via Topics for real-time ephemeral messaging.
+order: 13
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Radio, Bell, Zap } from 'lucide-react';
+import { FeatureCard } from '../../../components/docs/FeatureCard';
+
+export const subscribeCode = `const chatTopic = client.topic('chat-room:general');
+
+const unsubscribe = chatTopic.subscribe((data, context) => {
+  console.log('Received:', data);
+  // context.publisherId is optional (undefined if sent from server/system)
+  console.log('From:', context.publisherId);
+  console.log('At:', new Date(context.timestamp));
+});
+
+// Later, to stop listening:
+// unsubscribe();`;
+
+export const publishCode = `// Send a simple string
+chatTopic.publish('Hello World');
+
+// Or an object
+chatTopic.publish({
+  type: 'typing',
+  user: 'Alice'
+});`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Pub/Sub</span>
+</div>
+
+# Pub/Sub (Topics)
+
+TopGun provides a distributed Publish/Subscribe mechanism via **Topics**. Unlike Maps, messages sent over topics are **ephemeral**—they are not stored in the database and are delivered only to currently connected subscribers.
+
+<div className="grid md:grid-cols-3 gap-6 mb-16 not-prose">
+  <FeatureCard
+    icon={Bell}
+    iconColor="text-blue-500"
+    title="Real-time Notifications"
+    description={`"User X is typing...", "New alert!", presence updates, and more.`}
+  />
+  <FeatureCard
+    icon={Radio}
+    iconColor="text-green-500"
+    title="Signaling"
+    description="Perfect for WebRTC offer/answer exchange and coordination."
+  />
+  <FeatureCard
+    icon={Zap}
+    iconColor="text-orange-500"
+    title="Live Events"
+    description="Stock tickers, mouse movements, game state updates."
+  />
+</div>
+
+## Subscribing
+
+Use `client.topic(name)` to get a topic handle, then call `.subscribe()`. The callback receives the data and context (timestamp, publisher).
+
+<div className="not-prose">
+  <CodeBlock title="src/pubsub/chat.ts" language="typescript" code={subscribeCode} />
+</div>
+
+## Publishing
+
+Publishing is "fire-and-forget". The message goes to the server and is relayed to all other nodes subscribed to that topic.
+
+<div className="not-prose">
+  <CodeBlock title="src/pubsub/publish.ts" language="typescript" code={publishCode} />
+</div>
+
+## Key Behaviors
+
+- **No Persistence:** If a user is offline when a message is sent, they will *not* receive it upon reconnecting. Use `getMap()` or `getORMap()` if you need history.
+- **Re-subscription:** The client automatically re-subscribes to topics upon reconnection to the server.
+- **Delivery Guarantee:** Best-effort. Messages are not ACKed for persistence.
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/live-queries" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Live Queries
+    </div>
+  </a>
+  <a href="/docs/guides/ttl" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Time-To-Live <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

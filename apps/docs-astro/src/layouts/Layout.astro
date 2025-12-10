@@ -1,0 +1,60 @@
+---
+import '../styles/global.css';
+import { NavbarWrapper } from '../components/NavbarWrapper';
+import { Footer } from '../components/Footer';
+import SEO from '../components/SEO.astro';
+
+interface Props {
+	title?: string;
+	description?: string;
+	image?: string;
+	type?: 'website' | 'article';
+	publishedTime?: string;
+	author?: string;
+}
+
+const {
+	title = "TopGun - Offline-First In-Memory Data Grid",
+	description = "TopGun is a high-performance, offline-first, real-time database. Zero-latency reads/writes, CRDTs, and Merkle Tree sync.",
+	image,
+	type = 'website',
+	publishedTime,
+	author,
+} = Astro.props;
+---
+
+<!doctype html>
+<html lang="en" class="dark">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width" />
+		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+		<meta name="generator" content={Astro.generator} />
+		<SEO title={title} description={description} image={image} type={type} publishedTime={publishedTime} author={author} />
+		<title>{title}</title>
+        <script is:inline>
+            // Theme toggle logic
+            const getThemePreference = () => {
+                if (typeof localStorage !== 'undefined' && localStorage.getItem('theme')) {
+                    return localStorage.getItem('theme');
+                }
+                return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+            };
+            const isDark = getThemePreference() === 'dark';
+            document.documentElement.classList[isDark ? 'add' : 'remove']('dark');
+        </script>
+	</head>
+	<body class="min-h-screen bg-background text-foreground overflow-x-hidden selection:bg-blue-500/30">
+        <!-- Background Grid Effect -->
+        <div class="fixed inset-0 z-0 pointer-events-none">
+          <div class="absolute inset-0 bg-grid opacity-[0.15]"></div>
+          <div class="absolute inset-0 bg-gradient-to-t from-background via-transparent to-transparent"></div>
+        </div>
+
+        <div class="relative z-10">
+            <NavbarWrapper client:load />
+            <slot />
+            <Footer />
+        </div>
+	</body>
+</html>
