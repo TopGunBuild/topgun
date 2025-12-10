@@ -212,7 +212,7 @@ export async function generateOgImage(options: OgImageOptions): Promise<Buffer> 
                             fontSize: '20px',
                             color: '#737373',
                           },
-                          children: 'topgun.dev',
+                          children: 'topgun.build',
                         },
                       },
                       {

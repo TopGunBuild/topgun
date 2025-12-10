@@ -6,7 +6,7 @@ const HERO_CODE = `import { TopGun } from '@topgunbuild/client';
 
 // 1. Initialize Local-First DB
 const db = new TopGun({
-  sync: 'wss://api.topgun.dev',
+  sync: 'wss://api.topgun.build',
   persist: 'indexeddb'
 });
 

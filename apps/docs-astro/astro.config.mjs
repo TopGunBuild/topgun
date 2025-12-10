@@ -8,7 +8,7 @@ import sitemap from '@astrojs/sitemap';
 
 // https://astro.build/config
 export default defineConfig({
-  site: 'https://topgun.dev',
+  site: 'https://topgun.build',
   trailingSlash: 'never',
   integrations: [react(), mdx(), sitemap()],
 

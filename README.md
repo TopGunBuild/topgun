@@ -87,7 +87,7 @@ function TodoList() {
 
 ## Documentation
 
-Full docs: [topgun.dev/docs](https://topgun.dev/docs) *(coming soon)*
+Full docs: [topgun.build/docs](https://topgun.build/docs)
 
 Specifications in this repo:
 - [System Architecture](specifications/01_SYSTEM_ARCHITECTURE.md)
