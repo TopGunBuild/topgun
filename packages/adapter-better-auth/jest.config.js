@@ -3,8 +3,8 @@ module.exports = {
   testEnvironment: 'node',
   roots: ['<rootDir>/src'],
   moduleNameMapper: {
-    '^@topgun/client$': '<rootDir>/../client/src/index.ts',
-    '^@topgun/core$': '<rootDir>/../core/src/index.ts'
+    '^@topgunbuild/client$': '<rootDir>/../client/src/index.ts',
+    '^@topgunbuild/core$': '<rootDir>/../core/src/index.ts'
   },
   // Coverage configuration
   collectCoverageFrom: [

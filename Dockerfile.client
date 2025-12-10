@@ -44,7 +44,7 @@ COPY tsconfig.json ./
 # Build the specific example app
 # We also need to build dependencies first
 RUN pnpm -r build
-RUN pnpm --filter @topgun/example-notes build
+RUN pnpm --filter @topgunbuild/example-notes build
 
 # Production Stage
 FROM nginx:alpine

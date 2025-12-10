@@ -18,9 +18,9 @@ module.exports = {
     '\\.d\\.ts$'
   ],
   moduleNameMapper: {
-    '^@topgun/core$': '<rootDir>/packages/core/src/index.ts',
-    '^@topgun/client$': '<rootDir>/packages/client/src/index.ts',
-    '^@topgun/server$': '<rootDir>/packages/server/src/index.ts'
+    '^@topgunbuild/core$': '<rootDir>/packages/core/src/index.ts',
+    '^@topgunbuild/client$': '<rootDir>/packages/client/src/index.ts',
+    '^@topgunbuild/server$': '<rootDir>/packages/server/src/index.ts'
   },
   projects: [
     '<rootDir>/packages/core',

@@ -10,8 +10,8 @@ module.exports = {
     '\\.d\\.ts$'
   ],
   moduleNameMapper: {
-    '^@topgun/core$': '<rootDir>/../core/src/index.ts',
-    '^@topgun/client$': '<rootDir>/src/index.ts'
+    '^@topgunbuild/core$': '<rootDir>/../core/src/index.ts',
+    '^@topgunbuild/client$': '<rootDir>/src/index.ts'
   },
   transform: {
     '^.+\\.ts$': ['ts-jest', {

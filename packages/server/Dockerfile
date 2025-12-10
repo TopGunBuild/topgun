@@ -20,10 +20,10 @@ COPY packages packages
 RUN pnpm install --frozen-lockfile
 
 # Build core first (dependency)
-RUN pnpm --filter @topgun/core build
+RUN pnpm --filter @topgunbuild/core build
 
 # Build server
-RUN pnpm --filter @topgun/server build
+RUN pnpm --filter @topgunbuild/server build
 
 # --- Production Stage ---
 FROM node:20-alpine
@@ -40,10 +40,10 @@ COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/pnpm-workspace.yaml ./pnpm-workspace.yaml
 COPY --from=builder /app/node_modules ./node_modules
 
-# Copy @topgun/core package (workspace dependency)
+# Copy @topgunbuild/core package (workspace dependency)
 COPY --from=builder /app/packages/core ./packages/core
 
-# Copy @topgun/server package
+# Copy @topgunbuild/server package
 COPY --from=builder /app/packages/server ./packages/server
 
 # Expose ports

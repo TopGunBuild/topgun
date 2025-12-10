@@ -5,8 +5,7 @@
     "rootDir": "src",
     "noEmit": false,
     "declaration": true,
-    "declarationMap": true,
-    "paths": {}
+    "declarationMap": true
   },
   "include": ["src"],
   "exclude": ["src/__tests__"]
