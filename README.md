@@ -1,6 +1,6 @@
 # TopGun
 
-> **v2.0.0-alpha** — API may change
+> **Alpha** — API may change
 
 Hybrid offline-first in-memory data grid. Zero-latency reads and writes via local CRDTs, real-time sync via WebSockets, durable storage on your own infrastructure.
 

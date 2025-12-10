@@ -60,7 +60,7 @@ export const Navbar = ({
                     <div className="flex items-center gap-2 cursor-pointer" onClick={() => handleNavigate('/')}>
                         <TopGunLogo />
                         <span className="text-xl font-bold tracking-tight text-foreground">TopGun</span>
-                        <span className="ml-2 px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider bg-black/5 dark:bg-white/10 text-neutral-500 dark:text-white/70 rounded-full">v2.0 Alpha</span>
+                        <span className="ml-2 px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider bg-black/5 dark:bg-white/10 text-neutral-500 dark:text-white/70 rounded-full">Alpha</span>
                     </div>
 
                     <div className="hidden md:block">
