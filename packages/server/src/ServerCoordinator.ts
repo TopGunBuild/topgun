@@ -928,6 +928,217 @@ export class ServerCoordinator {
                 break;
             }
 
+            // ============ ORMap Sync Message Handlers ============
+
+            case 'ORMAP_SYNC_INIT': {
+                // Check READ permission
+                if (!this.securityManager.checkPermission(client.principal!, message.mapName, 'READ')) {
+                    client.socket.send(serialize({
+                        type: 'ERROR',
+                        payload: { code: 403, message: `Access Denied for map ${message.mapName}` }
+                    }));
+                    return;
+                }
+
+                const lastSync = message.lastSyncTimestamp || 0;
+                const now = Date.now();
+                if (lastSync > 0 && (now - lastSync) > GC_AGE_MS) {
+                    logger.warn({ clientId: client.id, lastSync, age: now - lastSync }, 'ORMap client too old, sending SYNC_RESET_REQUIRED');
+                    client.socket.send(serialize({
+                        type: 'SYNC_RESET_REQUIRED',
+                        payload: { mapName: message.mapName }
+                    }));
+                    return;
+                }
+
+                logger.info({ clientId: client.id, mapName: message.mapName }, 'Client requested ORMap sync');
+                this.metricsService.incOp('GET', message.mapName);
+
+                try {
+                    const mapForSync = await this.getMapAsync(message.mapName, 'OR');
+                    if (mapForSync instanceof ORMap) {
+                        const tree = mapForSync.getMerkleTree();
+                        const rootHash = tree.getRootHash();
+
+                        client.socket.send(serialize({
+                            type: 'ORMAP_SYNC_RESP_ROOT',
+                            payload: {
+                                mapName: message.mapName,
+                                rootHash,
+                                timestamp: this.hlc.now()
+                            }
+                        }));
+                    } else {
+                        // It's actually an LWWMap, client should use SYNC_INIT
+                        client.socket.send(serialize({
+                            type: 'ERROR',
+                            payload: { code: 400, message: `Map ${message.mapName} is not an ORMap` }
+                        }));
+                    }
+                } catch (err) {
+                    logger.error({ err, mapName: message.mapName }, 'Failed to load map for ORMAP_SYNC_INIT');
+                    client.socket.send(serialize({
+                        type: 'ERROR',
+                        payload: { code: 500, message: `Failed to load map ${message.mapName}` }
+                    }));
+                }
+                break;
+            }
+
+            case 'ORMAP_MERKLE_REQ_BUCKET': {
+                // Check READ permission
+                if (!this.securityManager.checkPermission(client.principal!, message.payload.mapName, 'READ')) {
+                    client.socket.send(serialize({
+                        type: 'ERROR',
+                        payload: { code: 403, message: `Access Denied for map ${message.payload.mapName}` }
+                    }));
+                    return;
+                }
+
+                const { mapName, path } = message.payload;
+
+                try {
+                    const mapForBucket = await this.getMapAsync(mapName, 'OR');
+                    if (mapForBucket instanceof ORMap) {
+                        const tree = mapForBucket.getMerkleTree();
+                        const buckets = tree.getBuckets(path);
+                        const isLeaf = tree.isLeaf(path);
+
+                        if (isLeaf) {
+                            // This is a leaf node - send actual records
+                            const keys = tree.getKeysInBucket(path);
+                            const entries: Array<{ key: string; records: ORMapRecord<any>[]; tombstones: string[] }> = [];
+
+                            for (const key of keys) {
+                                const recordsMap = mapForBucket.getRecordsMap(key);
+                                if (recordsMap && recordsMap.size > 0) {
+                                    entries.push({
+                                        key,
+                                        records: Array.from(recordsMap.values()),
+                                        tombstones: mapForBucket.getTombstones()
+                                    });
+                                }
+                            }
+
+                            client.socket.send(serialize({
+                                type: 'ORMAP_SYNC_RESP_LEAF',
+                                payload: { mapName, path, entries }
+                            }));
+                        } else {
+                            // Not a leaf - send bucket hashes
+                            client.socket.send(serialize({
+                                type: 'ORMAP_SYNC_RESP_BUCKETS',
+                                payload: { mapName, path, buckets }
+                            }));
+                        }
+                    }
+                } catch (err) {
+                    logger.error({ err, mapName }, 'Failed to load map for ORMAP_MERKLE_REQ_BUCKET');
+                }
+                break;
+            }
+
+            case 'ORMAP_DIFF_REQUEST': {
+                // Check READ permission
+                if (!this.securityManager.checkPermission(client.principal!, message.payload.mapName, 'READ')) {
+                    client.socket.send(serialize({
+                        type: 'ERROR',
+                        payload: { code: 403, message: `Access Denied for map ${message.payload.mapName}` }
+                    }));
+                    return;
+                }
+
+                const { mapName: diffMapName, keys } = message.payload;
+
+                try {
+                    const mapForDiff = await this.getMapAsync(diffMapName, 'OR');
+                    if (mapForDiff instanceof ORMap) {
+                        const entries: Array<{ key: string; records: ORMapRecord<any>[]; tombstones: string[] }> = [];
+                        const allTombstones = mapForDiff.getTombstones();
+
+                        for (const key of keys) {
+                            const recordsMap = mapForDiff.getRecordsMap(key);
+                            entries.push({
+                                key,
+                                records: recordsMap ? Array.from(recordsMap.values()) : [],
+                                tombstones: allTombstones
+                            });
+                        }
+
+                        client.socket.send(serialize({
+                            type: 'ORMAP_DIFF_RESPONSE',
+                            payload: { mapName: diffMapName, entries }
+                        }));
+                    }
+                } catch (err) {
+                    logger.error({ err, mapName: diffMapName }, 'Failed to load map for ORMAP_DIFF_REQUEST');
+                }
+                break;
+            }
+
+            case 'ORMAP_PUSH_DIFF': {
+                // Check WRITE permission
+                if (!this.securityManager.checkPermission(client.principal!, message.payload.mapName, 'PUT')) {
+                    client.socket.send(serialize({
+                        type: 'ERROR',
+                        payload: { code: 403, message: `Access Denied for map ${message.payload.mapName}` }
+                    }));
+                    return;
+                }
+
+                const { mapName: pushMapName, entries: pushEntries } = message.payload;
+
+                try {
+                    const mapForPush = await this.getMapAsync(pushMapName, 'OR');
+                    if (mapForPush instanceof ORMap) {
+                        let totalAdded = 0;
+                        let totalUpdated = 0;
+
+                        for (const entry of pushEntries) {
+                            const { key, records, tombstones } = entry;
+                            const result = mapForPush.mergeKey(key, records, tombstones);
+                            totalAdded += result.added;
+                            totalUpdated += result.updated;
+                        }
+
+                        if (totalAdded > 0 || totalUpdated > 0) {
+                            logger.info({ mapName: pushMapName, added: totalAdded, updated: totalUpdated, clientId: client.id }, 'Merged ORMap diff from client');
+
+                            // Broadcast changes to other clients
+                            for (const entry of pushEntries) {
+                                for (const record of entry.records) {
+                                    this.broadcast({
+                                        type: 'SERVER_EVENT',
+                                        payload: {
+                                            mapName: pushMapName,
+                                            eventType: 'OR_ADD',
+                                            key: entry.key,
+                                            orRecord: record
+                                        }
+                                    }, client.id);
+                                }
+                            }
+
+                            // Persist to storage
+                            if (this.storage) {
+                                for (const entry of pushEntries) {
+                                    const recordsMap = mapForPush.getRecordsMap(entry.key);
+                                    if (recordsMap && recordsMap.size > 0) {
+                                        await this.storage.store(pushMapName, entry.key, {
+                                            type: 'OR',
+                                            records: Array.from(recordsMap.values())
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (err) {
+                    logger.error({ err, mapName: pushMapName }, 'Failed to process ORMAP_PUSH_DIFF');
+                }
+                break;
+            }
+
             default:
                 logger.warn({ type: message.type }, 'Unknown message type');
         }
