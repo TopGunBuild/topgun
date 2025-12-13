@@ -5,6 +5,8 @@ import { QueryHandle } from './QueryHandle';
 import type { QueryFilter } from './QueryHandle';
 import { TopicHandle } from './TopicHandle';
 import { logger } from './utils/logger';
+import { SyncStateMachine, StateChangeEvent } from './SyncStateMachine';
+import { SyncState } from './SyncState';
 
 export interface OpLogEntry {
   id: string; // Unique ID for the operation
@@ -24,23 +26,45 @@ export interface HeartbeatConfig {
   enabled: boolean;        // Default: true
 }
 
+export interface BackoffConfig {
+  /** Initial delay in milliseconds (default: 1000) */
+  initialDelayMs: number;
+  /** Maximum delay in milliseconds (default: 30000) */
+  maxDelayMs: number;
+  /** Multiplier for exponential backoff (default: 2) */
+  multiplier: number;
+  /** Whether to add random jitter to delay (default: true) */
+  jitter: boolean;
+  /** Maximum number of retry attempts before entering ERROR state (default: 10) */
+  maxRetries: number;
+}
+
 export interface SyncEngineConfig {
   nodeId: string;
   serverUrl: string;
   storageAdapter: IStorageAdapter;
   reconnectInterval?: number;
   heartbeat?: Partial<HeartbeatConfig>;
+  backoff?: Partial<BackoffConfig>;
 }
+
+const DEFAULT_BACKOFF_CONFIG: BackoffConfig = {
+  initialDelayMs: 1000,
+  maxDelayMs: 30000,
+  multiplier: 2,
+  jitter: true,
+  maxRetries: 10,
+};
 
 export class SyncEngine {
   private readonly nodeId: string;
   private readonly serverUrl: string;
   private readonly storageAdapter: IStorageAdapter;
-  private readonly reconnectInterval: number;
   private readonly hlc: HLC;
+  private readonly stateMachine: SyncStateMachine;
+  private readonly backoffConfig: BackoffConfig;
+
   private websocket: WebSocket | null = null;
-  private isOnline: boolean = false;
-  private isAuthenticated: boolean = false;
   private opLog: OpLogEntry[] = [];
   private maps: Map<string, LWWMap<any, any> | ORMap<any, any>> = new Map();
   private queries: Map<string, QueryHandle<any>> = new Map();
@@ -50,6 +74,7 @@ export class SyncEngine {
   private reconnectTimer: any = null; // NodeJS.Timeout
   private authToken: string | null = null;
   private tokenProvider: (() => Promise<string | null>) | null = null;
+  private backoffAttempt: number = 0;
 
   // Heartbeat state
   private readonly heartbeatConfig: HeartbeatConfig;
@@ -61,8 +86,10 @@ export class SyncEngine {
     this.nodeId = config.nodeId;
     this.serverUrl = config.serverUrl;
     this.storageAdapter = config.storageAdapter;
-    this.reconnectInterval = config.reconnectInterval || 5000;
     this.hlc = new HLC(this.nodeId);
+
+    // Initialize state machine
+    this.stateMachine = new SyncStateMachine();
 
     // Initialize heartbeat config with defaults
     this.heartbeatConfig = {
@@ -71,25 +98,98 @@ export class SyncEngine {
       enabled: config.heartbeat?.enabled ?? true,
     };
 
+    // Merge backoff config with defaults
+    this.backoffConfig = {
+      ...DEFAULT_BACKOFF_CONFIG,
+      ...config.backoff,
+    };
+
     this.initConnection();
     this.loadOpLog();
   }
 
+  // ============================================
+  // State Machine Public API
+  // ============================================
+
+  /**
+   * Get the current connection state
+   */
+  getConnectionState(): SyncState {
+    return this.stateMachine.getState();
+  }
+
+  /**
+   * Subscribe to connection state changes
+   * @returns Unsubscribe function
+   */
+  onConnectionStateChange(listener: (event: StateChangeEvent) => void): () => void {
+    return this.stateMachine.onStateChange(listener);
+  }
+
+  /**
+   * Get state machine history for debugging
+   */
+  getStateHistory(limit?: number): StateChangeEvent[] {
+    return this.stateMachine.getHistory(limit);
+  }
+
+  // ============================================
+  // Internal State Helpers (replace boolean flags)
+  // ============================================
+
+  /**
+   * Check if WebSocket is connected (but may not be authenticated yet)
+   */
+  private isOnline(): boolean {
+    const state = this.stateMachine.getState();
+    return (
+      state === SyncState.CONNECTING ||
+      state === SyncState.AUTHENTICATING ||
+      state === SyncState.SYNCING ||
+      state === SyncState.CONNECTED
+    );
+  }
+
+  /**
+   * Check if fully authenticated and ready for operations
+   */
+  private isAuthenticated(): boolean {
+    const state = this.stateMachine.getState();
+    return state === SyncState.SYNCING || state === SyncState.CONNECTED;
+  }
+
+  /**
+   * Check if fully connected and synced
+   */
+  private isConnected(): boolean {
+    return this.stateMachine.getState() === SyncState.CONNECTED;
+  }
+
+  // ============================================
+  // Connection Management
+  // ============================================
+
   private initConnection(): void {
+    // Transition to CONNECTING state
+    this.stateMachine.transition(SyncState.CONNECTING);
+
     this.websocket = new WebSocket(this.serverUrl);
     this.websocket.binaryType = 'arraybuffer';
 
     this.websocket.onopen = () => {
+      // WebSocket is open, now we need to authenticate
       // [CHANGE] Don't send auth immediately if we don't have a token
       // This prevents the "AUTH_REQUIRED -> Close -> Retry loop" for anonymous initial connects
       if (this.authToken || this.tokenProvider) {
         logger.info('WebSocket connected. Sending auth...');
-        this.isOnline = true;
+        this.stateMachine.transition(SyncState.AUTHENTICATING);
         this.sendAuth();
       } else {
         logger.info('WebSocket connected. Waiting for auth token...');
-        // We stay connected but don't send anything until setAuthToken is called
-        this.isOnline = true;
+        // Stay in CONNECTING state until we have a token
+        // We're online but not authenticated
+        this.stateMachine.transition(SyncState.AUTHENTICATING);
       }
     };
 
@@ -109,23 +209,65 @@ export class SyncEngine {
     };
 
     this.websocket.onclose = () => {
-      logger.info('WebSocket disconnected. Retrying...');
+      logger.info('WebSocket disconnected.');
       this.stopHeartbeat();
-      this.isOnline = false;
-      this.isAuthenticated = false;
+      this.stateMachine.transition(SyncState.DISCONNECTED);
       this.scheduleReconnect();
     };
 
     this.websocket.onerror = (error) => {
       logger.error({ err: error }, 'WebSocket error');
+      // Error will typically be followed by close, so we don't transition here
     };
   }
 
-  private scheduleReconnect() {
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    // Check if we've exceeded max retries
+    if (this.backoffAttempt >= this.backoffConfig.maxRetries) {
+      logger.error(
+        { attempts: this.backoffAttempt },
+        'Max reconnection attempts reached. Entering ERROR state.'
+      );
+      this.stateMachine.transition(SyncState.ERROR);
+      return;
+    }
+
+    // Transition to BACKOFF state
+    this.stateMachine.transition(SyncState.BACKOFF);
+
+    const delay = this.calculateBackoffDelay();
+    logger.info({ delay, attempt: this.backoffAttempt }, `Backing off for ${delay}ms`);
+
     this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.backoffAttempt++;
       this.initConnection();
-    }, this.reconnectInterval);
+    }, delay);
+  }
+
+  private calculateBackoffDelay(): number {
+    const { initialDelayMs, maxDelayMs, multiplier, jitter } = this.backoffConfig;
+    let delay = initialDelayMs * Math.pow(multiplier, this.backoffAttempt);
+    delay = Math.min(delay, maxDelayMs);
+
+    if (jitter) {
+      // Add jitter: 0.5x to 1.5x of calculated delay
+      delay = delay * (0.5 + Math.random());
+    }
+
+    return Math.floor(delay);
+  }
+
+  /**
+   * Reset backoff counter (called on successful connection)
+   */
+  private resetBackoff(): void {
+    this.backoffAttempt = 0;
   }
 
   private async loadOpLog(): Promise<void> {
@@ -177,7 +319,7 @@ export class SyncEngine {
 
     this.opLog.push(opLogEntry as OpLogEntry);
 
-    if (this.isOnline && this.isAuthenticated) {
+    if (this.isAuthenticated()) {
       this.syncPendingOperations();
     }
   }
@@ -215,23 +357,27 @@ export class SyncEngine {
     this.authToken = token;
     this.tokenProvider = null;
 
-    if (this.isOnline) {
+    const state = this.stateMachine.getState();
+    if (state === SyncState.AUTHENTICATING || state === SyncState.CONNECTING) {
       // If we are already connected (e.g. waiting for token), send it now
       this.sendAuth();
-    } else {
+    } else if (state === SyncState.BACKOFF || state === SyncState.DISCONNECTED) {
       // [CHANGE] Force immediate reconnect if we were waiting for retry timer
+      logger.info('Auth token set during backoff/disconnect. Reconnecting immediately.');
       if (this.reconnectTimer) {
-        logger.info('Auth token set during backoff. Reconnecting immediately.');
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = null;
-        this.initConnection();
       }
+      // Reset backoff since user provided new credentials
+      this.resetBackoff();
+      this.initConnection();
     }
   }
 
   public setTokenProvider(provider: () => Promise<string | null>): void {
     this.tokenProvider = provider;
-    if (this.isOnline && !this.isAuthenticated) {
+    const state = this.stateMachine.getState();
+    if (state === SyncState.AUTHENTICATING) {
       this.sendAuth();
     }
   }
@@ -260,21 +406,21 @@ export class SyncEngine {
 
   public subscribeToQuery(query: QueryHandle<any>) {
     this.queries.set(query.id, query);
-    if (this.isOnline && this.isAuthenticated) {
+    if (this.isAuthenticated()) {
       this.sendQuerySubscription(query);
     }
   }
 
   public subscribeToTopic(topic: string, handle: TopicHandle) {
     this.topics.set(topic, handle);
-    if (this.isOnline && this.isAuthenticated) {
+    if (this.isAuthenticated()) {
       this.sendTopicSubscription(topic);
     }
   }
 
   public unsubscribeFromTopic(topic: string) {
     this.topics.delete(topic);
-    if (this.isOnline && this.isAuthenticated) {
+    if (this.isAuthenticated()) {
       this.websocket?.send(serialize({
         type: 'TOPIC_UNSUB',
         payload: { topic }
@@ -283,14 +429,14 @@ export class SyncEngine {
   }
 
   public publishTopic(topic: string, data: any) {
-    if (this.isOnline && this.isAuthenticated) {
+    if (this.isAuthenticated()) {
       this.websocket?.send(serialize({
         type: 'TOPIC_PUB',
         payload: { topic, data }
       }));
     } else {
       // TODO: Queue topic messages or drop?
-      // Spec says Fire-and-Forget, so dropping is acceptable if offline, 
+      // Spec says Fire-and-Forget, so dropping is acceptable if offline,
       // but queueing is better UX.
       // For now, log warning.
       logger.warn({ topic }, 'Dropped topic publish (offline)');
@@ -348,7 +494,7 @@ export class SyncEngine {
 
   public unsubscribeFromQuery(queryId: string) {
     this.queries.delete(queryId);
-    if (this.isOnline && this.isAuthenticated) {
+    if (this.isAuthenticated()) {
       this.websocket?.send(serialize({
         type: 'QUERY_UNSUB',
         payload: { queryId }
@@ -368,13 +514,13 @@ export class SyncEngine {
   }
 
   public requestLock(name: string, requestId: string, ttl: number): Promise<{ fencingToken: number }> {
-    if (!this.isOnline || !this.isAuthenticated) {
+    if (!this.isAuthenticated()) {
       return Promise.reject(new Error('Not connected or authenticated'));
     }
 
     return new Promise((resolve, reject) => {
       // Timeout if no response (server might be down or message lost)
-      // We set a client-side timeout slightly larger than TTL if TTL is short, 
+      // We set a client-side timeout slightly larger than TTL if TTL is short,
       // but usually we want a separate "Wait Timeout".
       // For now, use a fixed 30s timeout for the *response*.
       const timer = setTimeout(() => {
@@ -400,7 +546,7 @@ export class SyncEngine {
   }
 
   public releaseLock(name: string, requestId: string, fencingToken: number): Promise<boolean> {
-    if (!this.isOnline) return Promise.resolve(false);
+    if (!this.isOnline()) return Promise.resolve(false);
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -435,8 +581,14 @@ export class SyncEngine {
 
       case 'AUTH_ACK': {
         logger.info('Authenticated successfully');
-        const wasAuthenticated = this.isAuthenticated;
-        this.isAuthenticated = true;
+        const wasAuthenticated = this.isAuthenticated();
+
+        // Transition to SYNCING state
+        this.stateMachine.transition(SyncState.SYNCING);
+
+        // Reset backoff on successful auth
+        this.resetBackoff();
+
         this.syncPendingOperations();
 
         // Only re-subscribe on first authentication to prevent UI flickering
@@ -450,6 +602,10 @@ export class SyncEngine {
             this.sendTopicSubscription(topic);
           }
         }
+
+        // After initial sync setup, transition to CONNECTED
+        // In a real implementation, you might wait for SYNC_COMPLETE message
+        this.stateMachine.transition(SyncState.CONNECTED);
         break;
       }
 
@@ -460,8 +616,9 @@ export class SyncEngine {
 
       case 'AUTH_FAIL':
         logger.error({ error: message.error }, 'Authentication failed');
-        this.isAuthenticated = false;
         this.authToken = null; // Clear invalid token
+        // Stay in AUTHENTICATING or go to ERROR depending on severity
+        // For now, let the connection close naturally or retry with new token
         break;
 
       case 'OP_ACK': {
@@ -684,9 +841,39 @@ export class SyncEngine {
       this.websocket = null;
     }
 
-    this.isOnline = false;
-    this.isAuthenticated = false;
+    this.stateMachine.transition(SyncState.DISCONNECTED);
     logger.info('SyncEngine closed');
+  }
+
+  /**
+   * Reset the state machine and connection.
+   * Use after fatal errors to start fresh.
+   */
+  public resetConnection(): void {
+    this.close();
+    this.stateMachine.reset();
+    this.resetBackoff();
+    this.initConnection();
+  }
+
+  private async resetMap(mapName: string): Promise<void> {
+    const map = this.maps.get(mapName);
+    if (map) {
+      // Clear memory
+      if (map instanceof LWWMap) {
+        map.clear();
+      } else if (map instanceof ORMap) {
+        map.clear();
+      }
+    }
+
+    // Clear storage
+    const allKeys = await this.storageAdapter.getAllKeys();
+    const mapKeys = allKeys.filter(k => k.startsWith(mapName + ':'));
+    for (const key of mapKeys) {
+      await this.storageAdapter.remove(key);
+    }
+    logger.info({ mapName, removedStorageCount: mapKeys.length }, 'Reset map: Cleared memory and storage');
   }
 
   // ============ Heartbeat Methods ============
@@ -785,7 +972,7 @@ export class SyncEngine {
    * a PONG within the timeout window.
    */
   public isConnectionHealthy(): boolean {
-    if (!this.isOnline || !this.isAuthenticated) {
+    if (!this.isOnline() || !this.isAuthenticated()) {
       return false;
     }
 
@@ -795,25 +982,5 @@ export class SyncEngine {
 
     const timeSinceLastPong = Date.now() - this.lastPongReceived;
     return timeSinceLastPong < this.heartbeatConfig.timeoutMs;
-  }
-
-  private async resetMap(mapName: string): Promise<void> {
-    const map = this.maps.get(mapName);
-    if (map) {
-      // Clear memory
-      if (map instanceof LWWMap) {
-        map.clear();
-      } else if (map instanceof ORMap) {
-        map.clear();
-      }
-    }
-
-    // Clear storage
-    const allKeys = await this.storageAdapter.getAllKeys();
-    const mapKeys = allKeys.filter(k => k.startsWith(mapName + ':'));
-    for (const key of mapKeys) {
-      await this.storageAdapter.remove(key);
-    }
-    logger.info({ mapName, removedStorageCount: mapKeys.length }, 'Reset map: Cleared memory and storage');
   }
 }
