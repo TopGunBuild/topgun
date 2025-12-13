@@ -11,6 +11,8 @@ import { QueryRegistry, Subscription } from './query/QueryRegistry';
 
 const GC_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const GC_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const CLIENT_HEARTBEAT_TIMEOUT_MS = 20000; // 20 seconds - evict clients that haven't pinged
+const CLIENT_HEARTBEAT_CHECK_INTERVAL_MS = 5000; // Check for dead clients every 5 seconds
 import { TopicManager } from './topic/TopicManager';
 import { ClusterManager } from './cluster/ClusterManager';
 import { PartitionService } from './cluster/PartitionService';
@@ -29,6 +31,7 @@ interface ClientConnection {
     isAuthenticated: boolean;
     subscriptions: Set<string>; // Set of Query IDs
     lastActiveHlc: Timestamp;
+    lastPingReceived: number; // Date.now() of last PING received
 }
 
 interface PendingClusterQuery {
@@ -89,6 +92,7 @@ export class ServerCoordinator {
 
     private pendingClusterQueries: Map<string, PendingClusterQuery> = new Map();
     private gcInterval?: NodeJS.Timeout;
+    private heartbeatCheckInterval?: NodeJS.Timeout;
 
     // GC Consensus State
     private gcReports: Map<string, Timestamp> = new Map();
@@ -228,6 +232,7 @@ export class ServerCoordinator {
         }
 
         this.startGarbageCollection();
+        this.startHeartbeatCheck();
     }
 
     /** Wait for server to be fully ready (ports assigned) */
@@ -294,6 +299,11 @@ export class ServerCoordinator {
             this.gcInterval = undefined;
         }
 
+        if (this.heartbeatCheckInterval) {
+            clearInterval(this.heartbeatCheckInterval);
+            this.heartbeatCheckInterval = undefined;
+        }
+
         // Stop LockManager
         if (this.lockManager) {
             this.lockManager.stop();
@@ -317,7 +327,8 @@ export class ServerCoordinator {
             socket: ws,
             isAuthenticated: false,
             subscriptions: new Set(),
-            lastActiveHlc: this.hlc.now() // Initialize with current time
+            lastActiveHlc: this.hlc.now(), // Initialize with current time
+            lastPingReceived: Date.now(), // Initialize heartbeat tracking
         };
         this.clients.set(clientId, connection);
         this.metricsService.setConnectedClients(this.clients.size);
@@ -439,6 +450,12 @@ export class ServerCoordinator {
             return;
         }
         const message = parseResult.data;
+
+        // Handle PING immediately (even before auth check for authenticated clients)
+        if (message.type === 'PING') {
+            this.handlePing(client, message.timestamp);
+            return;
+        }
 
         // Update client's last active HLC
         // Try to extract from payload if present, otherwise assume near current time but logically before next op
@@ -907,6 +924,217 @@ export class ServerCoordinator {
                         type: 'ERROR',
                         payload: { code: 400, message: e.message }
                     }));
+                }
+                break;
+            }
+
+            // ============ ORMap Sync Message Handlers ============
+
+            case 'ORMAP_SYNC_INIT': {
+                // Check READ permission
+                if (!this.securityManager.checkPermission(client.principal!, message.mapName, 'READ')) {
+                    client.socket.send(serialize({
+                        type: 'ERROR',
+                        payload: { code: 403, message: `Access Denied for map ${message.mapName}` }
+                    }));
+                    return;
+                }
+
+                const lastSync = message.lastSyncTimestamp || 0;
+                const now = Date.now();
+                if (lastSync > 0 && (now - lastSync) > GC_AGE_MS) {
+                    logger.warn({ clientId: client.id, lastSync, age: now - lastSync }, 'ORMap client too old, sending SYNC_RESET_REQUIRED');
+                    client.socket.send(serialize({
+                        type: 'SYNC_RESET_REQUIRED',
+                        payload: { mapName: message.mapName }
+                    }));
+                    return;
+                }
+
+                logger.info({ clientId: client.id, mapName: message.mapName }, 'Client requested ORMap sync');
+                this.metricsService.incOp('GET', message.mapName);
+
+                try {
+                    const mapForSync = await this.getMapAsync(message.mapName, 'OR');
+                    if (mapForSync instanceof ORMap) {
+                        const tree = mapForSync.getMerkleTree();
+                        const rootHash = tree.getRootHash();
+
+                        client.socket.send(serialize({
+                            type: 'ORMAP_SYNC_RESP_ROOT',
+                            payload: {
+                                mapName: message.mapName,
+                                rootHash,
+                                timestamp: this.hlc.now()
+                            }
+                        }));
+                    } else {
+                        // It's actually an LWWMap, client should use SYNC_INIT
+                        client.socket.send(serialize({
+                            type: 'ERROR',
+                            payload: { code: 400, message: `Map ${message.mapName} is not an ORMap` }
+                        }));
+                    }
+                } catch (err) {
+                    logger.error({ err, mapName: message.mapName }, 'Failed to load map for ORMAP_SYNC_INIT');
+                    client.socket.send(serialize({
+                        type: 'ERROR',
+                        payload: { code: 500, message: `Failed to load map ${message.mapName}` }
+                    }));
+                }
+                break;
+            }
+
+            case 'ORMAP_MERKLE_REQ_BUCKET': {
+                // Check READ permission
+                if (!this.securityManager.checkPermission(client.principal!, message.payload.mapName, 'READ')) {
+                    client.socket.send(serialize({
+                        type: 'ERROR',
+                        payload: { code: 403, message: `Access Denied for map ${message.payload.mapName}` }
+                    }));
+                    return;
+                }
+
+                const { mapName, path } = message.payload;
+
+                try {
+                    const mapForBucket = await this.getMapAsync(mapName, 'OR');
+                    if (mapForBucket instanceof ORMap) {
+                        const tree = mapForBucket.getMerkleTree();
+                        const buckets = tree.getBuckets(path);
+                        const isLeaf = tree.isLeaf(path);
+
+                        if (isLeaf) {
+                            // This is a leaf node - send actual records
+                            const keys = tree.getKeysInBucket(path);
+                            const entries: Array<{ key: string; records: ORMapRecord<any>[]; tombstones: string[] }> = [];
+
+                            for (const key of keys) {
+                                const recordsMap = mapForBucket.getRecordsMap(key);
+                                if (recordsMap && recordsMap.size > 0) {
+                                    entries.push({
+                                        key,
+                                        records: Array.from(recordsMap.values()),
+                                        tombstones: mapForBucket.getTombstones()
+                                    });
+                                }
+                            }
+
+                            client.socket.send(serialize({
+                                type: 'ORMAP_SYNC_RESP_LEAF',
+                                payload: { mapName, path, entries }
+                            }));
+                        } else {
+                            // Not a leaf - send bucket hashes
+                            client.socket.send(serialize({
+                                type: 'ORMAP_SYNC_RESP_BUCKETS',
+                                payload: { mapName, path, buckets }
+                            }));
+                        }
+                    }
+                } catch (err) {
+                    logger.error({ err, mapName }, 'Failed to load map for ORMAP_MERKLE_REQ_BUCKET');
+                }
+                break;
+            }
+
+            case 'ORMAP_DIFF_REQUEST': {
+                // Check READ permission
+                if (!this.securityManager.checkPermission(client.principal!, message.payload.mapName, 'READ')) {
+                    client.socket.send(serialize({
+                        type: 'ERROR',
+                        payload: { code: 403, message: `Access Denied for map ${message.payload.mapName}` }
+                    }));
+                    return;
+                }
+
+                const { mapName: diffMapName, keys } = message.payload;
+
+                try {
+                    const mapForDiff = await this.getMapAsync(diffMapName, 'OR');
+                    if (mapForDiff instanceof ORMap) {
+                        const entries: Array<{ key: string; records: ORMapRecord<any>[]; tombstones: string[] }> = [];
+                        const allTombstones = mapForDiff.getTombstones();
+
+                        for (const key of keys) {
+                            const recordsMap = mapForDiff.getRecordsMap(key);
+                            entries.push({
+                                key,
+                                records: recordsMap ? Array.from(recordsMap.values()) : [],
+                                tombstones: allTombstones
+                            });
+                        }
+
+                        client.socket.send(serialize({
+                            type: 'ORMAP_DIFF_RESPONSE',
+                            payload: { mapName: diffMapName, entries }
+                        }));
+                    }
+                } catch (err) {
+                    logger.error({ err, mapName: diffMapName }, 'Failed to load map for ORMAP_DIFF_REQUEST');
+                }
+                break;
+            }
+
+            case 'ORMAP_PUSH_DIFF': {
+                // Check WRITE permission
+                if (!this.securityManager.checkPermission(client.principal!, message.payload.mapName, 'PUT')) {
+                    client.socket.send(serialize({
+                        type: 'ERROR',
+                        payload: { code: 403, message: `Access Denied for map ${message.payload.mapName}` }
+                    }));
+                    return;
+                }
+
+                const { mapName: pushMapName, entries: pushEntries } = message.payload;
+
+                try {
+                    const mapForPush = await this.getMapAsync(pushMapName, 'OR');
+                    if (mapForPush instanceof ORMap) {
+                        let totalAdded = 0;
+                        let totalUpdated = 0;
+
+                        for (const entry of pushEntries) {
+                            const { key, records, tombstones } = entry;
+                            const result = mapForPush.mergeKey(key, records, tombstones);
+                            totalAdded += result.added;
+                            totalUpdated += result.updated;
+                        }
+
+                        if (totalAdded > 0 || totalUpdated > 0) {
+                            logger.info({ mapName: pushMapName, added: totalAdded, updated: totalUpdated, clientId: client.id }, 'Merged ORMap diff from client');
+
+                            // Broadcast changes to other clients
+                            for (const entry of pushEntries) {
+                                for (const record of entry.records) {
+                                    this.broadcast({
+                                        type: 'SERVER_EVENT',
+                                        payload: {
+                                            mapName: pushMapName,
+                                            eventType: 'OR_ADD',
+                                            key: entry.key,
+                                            orRecord: record
+                                        }
+                                    }, client.id);
+                                }
+                            }
+
+                            // Persist to storage
+                            if (this.storage) {
+                                for (const entry of pushEntries) {
+                                    const recordsMap = mapForPush.getRecordsMap(entry.key);
+                                    if (recordsMap && recordsMap.size > 0) {
+                                        await this.storage.store(pushMapName, entry.key, {
+                                            type: 'OR',
+                                            records: Array.from(recordsMap.values())
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (err) {
+                    logger.error({ err, mapName: pushMapName }, 'Failed to process ORMAP_PUSH_DIFF');
                 }
                 break;
             }
@@ -1588,6 +1816,90 @@ export class ServerCoordinator {
         this.gcInterval = setInterval(() => {
             this.reportLocalHlc();
         }, GC_INTERVAL_MS);
+    }
+
+    // ============ Heartbeat Methods ============
+
+    /**
+     * Starts the periodic check for dead clients (those that haven't sent PING).
+     */
+    private startHeartbeatCheck() {
+        this.heartbeatCheckInterval = setInterval(() => {
+            this.evictDeadClients();
+        }, CLIENT_HEARTBEAT_CHECK_INTERVAL_MS);
+    }
+
+    /**
+     * Handles incoming PING message from client.
+     * Responds with PONG immediately.
+     */
+    private handlePing(client: ClientConnection, clientTimestamp: number): void {
+        client.lastPingReceived = Date.now();
+
+        const pongMessage = {
+            type: 'PONG',
+            timestamp: clientTimestamp,
+            serverTime: Date.now(),
+        };
+
+        if (client.socket.readyState === WebSocket.OPEN) {
+            client.socket.send(serialize(pongMessage));
+        }
+    }
+
+    /**
+     * Checks if a client is still alive based on heartbeat.
+     */
+    public isClientAlive(clientId: string): boolean {
+        const client = this.clients.get(clientId);
+        if (!client) return false;
+
+        const idleTime = Date.now() - client.lastPingReceived;
+        return idleTime < CLIENT_HEARTBEAT_TIMEOUT_MS;
+    }
+
+    /**
+     * Returns how long the client has been idle (no PING received).
+     */
+    public getClientIdleTime(clientId: string): number {
+        const client = this.clients.get(clientId);
+        if (!client) return Infinity;
+
+        return Date.now() - client.lastPingReceived;
+    }
+
+    /**
+     * Evicts clients that haven't sent a PING within the timeout period.
+     */
+    private evictDeadClients(): void {
+        const now = Date.now();
+        const deadClients: string[] = [];
+
+        for (const [clientId, client] of this.clients) {
+            // Only check authenticated clients (unauthenticated ones will timeout via auth mechanism)
+            if (client.isAuthenticated) {
+                const idleTime = now - client.lastPingReceived;
+                if (idleTime > CLIENT_HEARTBEAT_TIMEOUT_MS) {
+                    deadClients.push(clientId);
+                }
+            }
+        }
+
+        for (const clientId of deadClients) {
+            const client = this.clients.get(clientId);
+            if (client) {
+                logger.warn({
+                    clientId,
+                    idleTime: now - client.lastPingReceived,
+                    timeoutMs: CLIENT_HEARTBEAT_TIMEOUT_MS,
+                }, 'Evicting dead client (heartbeat timeout)');
+
+                // Close the connection
+                if (client.socket.readyState === WebSocket.OPEN) {
+                    client.socket.close(4002, 'Heartbeat timeout');
+                }
+            }
+        }
     }
 
     private reportLocalHlc() {

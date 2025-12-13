@@ -2,11 +2,20 @@ import { LWWMap, ORMap } from '@topgunbuild/core';
 import type { ORMapRecord, LWWRecord } from '@topgunbuild/core';
 import type { IStorageAdapter } from './IStorageAdapter';
 import { SyncEngine } from './SyncEngine';
+import type { BackoffConfig } from './SyncEngine';
 import { QueryHandle } from './QueryHandle';
 import type { QueryFilter } from './QueryHandle';
 import { DistributedLock } from './DistributedLock';
 import { TopicHandle } from './TopicHandle';
 import { logger } from './utils/logger';
+import { SyncState } from './SyncState';
+import type { StateChangeEvent } from './SyncStateMachine';
+import type {
+  BackpressureConfig,
+  BackpressureStatus,
+  BackpressureThresholdEvent,
+  OperationDroppedEvent,
+} from './BackpressureConfig';
 
 export class TopGunClient {
   private readonly nodeId: string;
@@ -15,7 +24,13 @@ export class TopGunClient {
   private readonly storageAdapter: IStorageAdapter;
   private readonly topicHandles: Map<string, TopicHandle> = new Map();
 
-  constructor(config: { nodeId?: string; serverUrl: string; storage: IStorageAdapter }) {
+  constructor(config: {
+    nodeId?: string;
+    serverUrl: string;
+    storage: IStorageAdapter;
+    backoff?: Partial<BackoffConfig>;
+    backpressure?: Partial<BackpressureConfig>;
+  }) {
     this.nodeId = config.nodeId || crypto.randomUUID();
     this.storageAdapter = config.storage;
 
@@ -23,6 +38,8 @@ export class TopGunClient {
       nodeId: this.nodeId,
       serverUrl: config.serverUrl,
       storageAdapter: this.storageAdapter,
+      backoff: config.backoff,
+      backpressure: config.backpressure,
     };
     this.syncEngine = new SyncEngine(syncEngineConfig);
   }
@@ -227,5 +244,102 @@ export class TopGunClient {
    */
   public close(): void {
     this.syncEngine.close();
+  }
+
+  // ============================================
+  // Connection State API
+  // ============================================
+
+  /**
+   * Get the current connection state
+   */
+  public getConnectionState(): SyncState {
+    return this.syncEngine.getConnectionState();
+  }
+
+  /**
+   * Subscribe to connection state changes
+   * @param listener Callback function called on each state change
+   * @returns Unsubscribe function
+   */
+  public onConnectionStateChange(listener: (event: StateChangeEvent) => void): () => void {
+    return this.syncEngine.onConnectionStateChange(listener);
+  }
+
+  /**
+   * Get state machine history for debugging
+   * @param limit Maximum number of entries to return
+   */
+  public getStateHistory(limit?: number): StateChangeEvent[] {
+    return this.syncEngine.getStateHistory(limit);
+  }
+
+  /**
+   * Reset the connection and state machine.
+   * Use after fatal errors to start fresh.
+   */
+  public resetConnection(): void {
+    this.syncEngine.resetConnection();
+  }
+
+  // ============================================
+  // Backpressure API
+  // ============================================
+
+  /**
+   * Get the current number of pending (unacknowledged) operations.
+   */
+  public getPendingOpsCount(): number {
+    return this.syncEngine.getPendingOpsCount();
+  }
+
+  /**
+   * Get the current backpressure status.
+   */
+  public getBackpressureStatus(): BackpressureStatus {
+    return this.syncEngine.getBackpressureStatus();
+  }
+
+  /**
+   * Returns true if writes are currently paused due to backpressure.
+   */
+  public isBackpressurePaused(): boolean {
+    return this.syncEngine.isBackpressurePaused();
+  }
+
+  /**
+   * Subscribe to backpressure events.
+   *
+   * Available events:
+   * - 'backpressure:high': Emitted when pending ops reach high water mark
+   * - 'backpressure:low': Emitted when pending ops drop below low water mark
+   * - 'backpressure:paused': Emitted when writes are paused (pause strategy)
+   * - 'backpressure:resumed': Emitted when writes resume after being paused
+   * - 'operation:dropped': Emitted when an operation is dropped (drop-oldest strategy)
+   *
+   * @param event Event name
+   * @param listener Callback function
+   * @returns Unsubscribe function
+   *
+   * @example
+   * ```typescript
+   * client.onBackpressure('backpressure:high', ({ pending, max }) => {
+   *   console.warn(`Warning: ${pending}/${max} pending ops`);
+   * });
+   *
+   * client.onBackpressure('backpressure:paused', () => {
+   *   showLoadingSpinner();
+   * });
+   *
+   * client.onBackpressure('backpressure:resumed', () => {
+   *   hideLoadingSpinner();
+   * });
+   * ```
+   */
+  public onBackpressure(
+    event: 'backpressure:high' | 'backpressure:low' | 'backpressure:paused' | 'backpressure:resumed' | 'operation:dropped',
+    listener: (data?: BackpressureThresholdEvent | OperationDroppedEvent) => void
+  ): () => void {
+    return this.syncEngine.onBackpressure(event, listener);
   }
 }

@@ -109,6 +109,8 @@ describe('SyncEngine', () => {
       serverUrl: 'ws://localhost:8080',
       storageAdapter: mockStorage,
       reconnectInterval: 1000,
+      // Disable heartbeat for these tests to prevent fake timer conflicts
+      heartbeat: { enabled: false },
     };
   });
 

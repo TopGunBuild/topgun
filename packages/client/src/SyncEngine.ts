@@ -5,6 +5,17 @@ import { QueryHandle } from './QueryHandle';
 import type { QueryFilter } from './QueryHandle';
 import { TopicHandle } from './TopicHandle';
 import { logger } from './utils/logger';
+import { SyncStateMachine, StateChangeEvent } from './SyncStateMachine';
+import { SyncState } from './SyncState';
+import { BackpressureError } from './errors/BackpressureError';
+import type {
+  BackpressureConfig,
+  BackpressureStatus,
+  BackpressureStrategy,
+  BackpressureThresholdEvent,
+  OperationDroppedEvent,
+} from './BackpressureConfig';
+import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 
 export interface OpLogEntry {
   id: string; // Unique ID for the operation
@@ -18,22 +29,52 @@ export interface OpLogEntry {
   synced: boolean; // True if this operation has been successfully pushed to the server
 }
 
+export interface HeartbeatConfig {
+  intervalMs: number;      // Default: 5000 (5 seconds)
+  timeoutMs: number;       // Default: 15000 (15 seconds)
+  enabled: boolean;        // Default: true
+}
+
+export interface BackoffConfig {
+  /** Initial delay in milliseconds (default: 1000) */
+  initialDelayMs: number;
+  /** Maximum delay in milliseconds (default: 30000) */
+  maxDelayMs: number;
+  /** Multiplier for exponential backoff (default: 2) */
+  multiplier: number;
+  /** Whether to add random jitter to delay (default: true) */
+  jitter: boolean;
+  /** Maximum number of retry attempts before entering ERROR state (default: 10) */
+  maxRetries: number;
+}
+
 export interface SyncEngineConfig {
   nodeId: string;
   serverUrl: string;
   storageAdapter: IStorageAdapter;
   reconnectInterval?: number;
+  heartbeat?: Partial<HeartbeatConfig>;
+  backoff?: Partial<BackoffConfig>;
+  backpressure?: Partial<BackpressureConfig>;
 }
+
+const DEFAULT_BACKOFF_CONFIG: BackoffConfig = {
+  initialDelayMs: 1000,
+  maxDelayMs: 30000,
+  multiplier: 2,
+  jitter: true,
+  maxRetries: 10,
+};
 
 export class SyncEngine {
   private readonly nodeId: string;
   private readonly serverUrl: string;
   private readonly storageAdapter: IStorageAdapter;
-  private readonly reconnectInterval: number;
   private readonly hlc: HLC;
+  private readonly stateMachine: SyncStateMachine;
+  private readonly backoffConfig: BackoffConfig;
+
   private websocket: WebSocket | null = null;
-  private isOnline: boolean = false;
-  private isAuthenticated: boolean = false;
   private opLog: OpLogEntry[] = [];
   private maps: Map<string, LWWMap<any, any> | ORMap<any, any>> = new Map();
   private queries: Map<string, QueryHandle<any>> = new Map();
@@ -43,33 +84,135 @@ export class SyncEngine {
   private reconnectTimer: any = null; // NodeJS.Timeout
   private authToken: string | null = null;
   private tokenProvider: (() => Promise<string | null>) | null = null;
+  private backoffAttempt: number = 0;
+
+  // Heartbeat state
+  private readonly heartbeatConfig: HeartbeatConfig;
+  private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  private lastPongReceived: number = Date.now();
+  private lastRoundTripTime: number | null = null;
+
+  // Backpressure state
+  private readonly backpressureConfig: BackpressureConfig;
+  private backpressurePaused: boolean = false;
+  private waitingForCapacity: Array<() => void> = [];
+  private highWaterMarkEmitted: boolean = false;
+  private backpressureListeners: Map<string, Set<(...args: any[]) => void>> = new Map();
 
   constructor(config: SyncEngineConfig) {
     this.nodeId = config.nodeId;
     this.serverUrl = config.serverUrl;
     this.storageAdapter = config.storageAdapter;
-    this.reconnectInterval = config.reconnectInterval || 5000;
     this.hlc = new HLC(this.nodeId);
+
+    // Initialize state machine
+    this.stateMachine = new SyncStateMachine();
+
+    // Initialize heartbeat config with defaults
+    this.heartbeatConfig = {
+      intervalMs: config.heartbeat?.intervalMs ?? 5000,
+      timeoutMs: config.heartbeat?.timeoutMs ?? 15000,
+      enabled: config.heartbeat?.enabled ?? true,
+    };
+
+    // Merge backoff config with defaults
+    this.backoffConfig = {
+      ...DEFAULT_BACKOFF_CONFIG,
+      ...config.backoff,
+    };
+
+    // Merge backpressure config with defaults
+    this.backpressureConfig = {
+      ...DEFAULT_BACKPRESSURE_CONFIG,
+      ...config.backpressure,
+    };
 
     this.initConnection();
     this.loadOpLog();
   }
 
+  // ============================================
+  // State Machine Public API
+  // ============================================
+
+  /**
+   * Get the current connection state
+   */
+  getConnectionState(): SyncState {
+    return this.stateMachine.getState();
+  }
+
+  /**
+   * Subscribe to connection state changes
+   * @returns Unsubscribe function
+   */
+  onConnectionStateChange(listener: (event: StateChangeEvent) => void): () => void {
+    return this.stateMachine.onStateChange(listener);
+  }
+
+  /**
+   * Get state machine history for debugging
+   */
+  getStateHistory(limit?: number): StateChangeEvent[] {
+    return this.stateMachine.getHistory(limit);
+  }
+
+  // ============================================
+  // Internal State Helpers (replace boolean flags)
+  // ============================================
+
+  /**
+   * Check if WebSocket is connected (but may not be authenticated yet)
+   */
+  private isOnline(): boolean {
+    const state = this.stateMachine.getState();
+    return (
+      state === SyncState.CONNECTING ||
+      state === SyncState.AUTHENTICATING ||
+      state === SyncState.SYNCING ||
+      state === SyncState.CONNECTED
+    );
+  }
+
+  /**
+   * Check if fully authenticated and ready for operations
+   */
+  private isAuthenticated(): boolean {
+    const state = this.stateMachine.getState();
+    return state === SyncState.SYNCING || state === SyncState.CONNECTED;
+  }
+
+  /**
+   * Check if fully connected and synced
+   */
+  private isConnected(): boolean {
+    return this.stateMachine.getState() === SyncState.CONNECTED;
+  }
+
+  // ============================================
+  // Connection Management
+  // ============================================
+
   private initConnection(): void {
+    // Transition to CONNECTING state
+    this.stateMachine.transition(SyncState.CONNECTING);
+
     this.websocket = new WebSocket(this.serverUrl);
     this.websocket.binaryType = 'arraybuffer';
 
     this.websocket.onopen = () => {
+      // WebSocket is open, now we need to authenticate
       // [CHANGE] Don't send auth immediately if we don't have a token
       // This prevents the "AUTH_REQUIRED -> Close -> Retry loop" for anonymous initial connects
       if (this.authToken || this.tokenProvider) {
         logger.info('WebSocket connected. Sending auth...');
-        this.isOnline = true;
+        this.stateMachine.transition(SyncState.AUTHENTICATING);
         this.sendAuth();
       } else {
         logger.info('WebSocket connected. Waiting for auth token...');
-        // We stay connected but don't send anything until setAuthToken is called
-        this.isOnline = true;
+        // Stay in CONNECTING state until we have a token
+        // We're online but not authenticated
+        this.stateMachine.transition(SyncState.AUTHENTICATING);
       }
     };
 
@@ -89,22 +232,65 @@ export class SyncEngine {
     };
 
     this.websocket.onclose = () => {
-      logger.info('WebSocket disconnected. Retrying...');
-      this.isOnline = false;
-      this.isAuthenticated = false;
+      logger.info('WebSocket disconnected.');
+      this.stopHeartbeat();
+      this.stateMachine.transition(SyncState.DISCONNECTED);
       this.scheduleReconnect();
     };
 
     this.websocket.onerror = (error) => {
       logger.error({ err: error }, 'WebSocket error');
+      // Error will typically be followed by close, so we don't transition here
     };
   }
 
-  private scheduleReconnect() {
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    // Check if we've exceeded max retries
+    if (this.backoffAttempt >= this.backoffConfig.maxRetries) {
+      logger.error(
+        { attempts: this.backoffAttempt },
+        'Max reconnection attempts reached. Entering ERROR state.'
+      );
+      this.stateMachine.transition(SyncState.ERROR);
+      return;
+    }
+
+    // Transition to BACKOFF state
+    this.stateMachine.transition(SyncState.BACKOFF);
+
+    const delay = this.calculateBackoffDelay();
+    logger.info({ delay, attempt: this.backoffAttempt }, `Backing off for ${delay}ms`);
+
     this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.backoffAttempt++;
       this.initConnection();
-    }, this.reconnectInterval);
+    }, delay);
+  }
+
+  private calculateBackoffDelay(): number {
+    const { initialDelayMs, maxDelayMs, multiplier, jitter } = this.backoffConfig;
+    let delay = initialDelayMs * Math.pow(multiplier, this.backoffAttempt);
+    delay = Math.min(delay, maxDelayMs);
+
+    if (jitter) {
+      // Add jitter: 0.5x to 1.5x of calculated delay
+      delay = delay * (0.5 + Math.random());
+    }
+
+    return Math.floor(delay);
+  }
+
+  /**
+   * Reset backoff counter (called on successful connection)
+   */
+  private resetBackoff(): void {
+    this.backoffAttempt = 0;
   }
 
   private async loadOpLog(): Promise<void> {
@@ -138,7 +324,9 @@ export class SyncEngine {
     opType: 'PUT' | 'REMOVE' | 'OR_ADD' | 'OR_REMOVE',
     key: string,
     data: { record?: LWWRecord<any>; orRecord?: ORMapRecord<any>; orTag?: string; timestamp: Timestamp }
-  ): Promise<void> {
+  ): Promise<string> {
+    // Check backpressure before adding new operation
+    await this.checkBackpressure();
 
     const opLogEntry: Omit<OpLogEntry, 'id'> & { id?: string } = {
       mapName,
@@ -156,9 +344,14 @@ export class SyncEngine {
 
     this.opLog.push(opLogEntry as OpLogEntry);
 
-    if (this.isOnline && this.isAuthenticated) {
+    // Check high water mark after adding operation
+    this.checkHighWaterMark();
+
+    if (this.isAuthenticated()) {
       this.syncPendingOperations();
     }
+
+    return opLogEntry.id;
   }
 
   private syncPendingOperations(): void {
@@ -180,10 +373,25 @@ export class SyncEngine {
   private startMerkleSync(): void {
     for (const [mapName, map] of this.maps) {
       if (map instanceof LWWMap) {
-        logger.info({ mapName }, 'Starting Merkle sync for map');
+        logger.info({ mapName }, 'Starting Merkle sync for LWWMap');
         this.websocket?.send(serialize({
           type: 'SYNC_INIT',
           mapName,
+          lastSyncTimestamp: this.lastSyncTimestamp
+        }));
+      } else if (map instanceof ORMap) {
+        logger.info({ mapName }, 'Starting Merkle sync for ORMap');
+        const tree = map.getMerkleTree();
+        const rootHash = tree.getRootHash();
+
+        // Build bucket hashes for all non-empty buckets at depth 0
+        const bucketHashes: Record<string, number> = tree.getBuckets('');
+
+        this.websocket?.send(serialize({
+          type: 'ORMAP_SYNC_INIT',
+          mapName,
+          rootHash,
+          bucketHashes,
           lastSyncTimestamp: this.lastSyncTimestamp
         }));
       }
@@ -194,23 +402,27 @@ export class SyncEngine {
     this.authToken = token;
     this.tokenProvider = null;
 
-    if (this.isOnline) {
+    const state = this.stateMachine.getState();
+    if (state === SyncState.AUTHENTICATING || state === SyncState.CONNECTING) {
       // If we are already connected (e.g. waiting for token), send it now
       this.sendAuth();
-    } else {
+    } else if (state === SyncState.BACKOFF || state === SyncState.DISCONNECTED) {
       // [CHANGE] Force immediate reconnect if we were waiting for retry timer
+      logger.info('Auth token set during backoff/disconnect. Reconnecting immediately.');
       if (this.reconnectTimer) {
-        logger.info('Auth token set during backoff. Reconnecting immediately.');
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = null;
-        this.initConnection();
       }
+      // Reset backoff since user provided new credentials
+      this.resetBackoff();
+      this.initConnection();
     }
   }
 
   public setTokenProvider(provider: () => Promise<string | null>): void {
     this.tokenProvider = provider;
-    if (this.isOnline && !this.isAuthenticated) {
+    const state = this.stateMachine.getState();
+    if (state === SyncState.AUTHENTICATING) {
       this.sendAuth();
     }
   }
@@ -239,21 +451,21 @@ export class SyncEngine {
 
   public subscribeToQuery(query: QueryHandle<any>) {
     this.queries.set(query.id, query);
-    if (this.isOnline && this.isAuthenticated) {
+    if (this.isAuthenticated()) {
       this.sendQuerySubscription(query);
     }
   }
 
   public subscribeToTopic(topic: string, handle: TopicHandle) {
     this.topics.set(topic, handle);
-    if (this.isOnline && this.isAuthenticated) {
+    if (this.isAuthenticated()) {
       this.sendTopicSubscription(topic);
     }
   }
 
   public unsubscribeFromTopic(topic: string) {
     this.topics.delete(topic);
-    if (this.isOnline && this.isAuthenticated) {
+    if (this.isAuthenticated()) {
       this.websocket?.send(serialize({
         type: 'TOPIC_UNSUB',
         payload: { topic }
@@ -262,14 +474,14 @@ export class SyncEngine {
   }
 
   public publishTopic(topic: string, data: any) {
-    if (this.isOnline && this.isAuthenticated) {
+    if (this.isAuthenticated()) {
       this.websocket?.send(serialize({
         type: 'TOPIC_PUB',
         payload: { topic, data }
       }));
     } else {
       // TODO: Queue topic messages or drop?
-      // Spec says Fire-and-Forget, so dropping is acceptable if offline, 
+      // Spec says Fire-and-Forget, so dropping is acceptable if offline,
       // but queueing is better UX.
       // For now, log warning.
       logger.warn({ topic }, 'Dropped topic publish (offline)');
@@ -327,7 +539,7 @@ export class SyncEngine {
 
   public unsubscribeFromQuery(queryId: string) {
     this.queries.delete(queryId);
-    if (this.isOnline && this.isAuthenticated) {
+    if (this.isAuthenticated()) {
       this.websocket?.send(serialize({
         type: 'QUERY_UNSUB',
         payload: { queryId }
@@ -347,13 +559,13 @@ export class SyncEngine {
   }
 
   public requestLock(name: string, requestId: string, ttl: number): Promise<{ fencingToken: number }> {
-    if (!this.isOnline || !this.isAuthenticated) {
+    if (!this.isAuthenticated()) {
       return Promise.reject(new Error('Not connected or authenticated'));
     }
 
     return new Promise((resolve, reject) => {
       // Timeout if no response (server might be down or message lost)
-      // We set a client-side timeout slightly larger than TTL if TTL is short, 
+      // We set a client-side timeout slightly larger than TTL if TTL is short,
       // but usually we want a separate "Wait Timeout".
       // For now, use a fixed 30s timeout for the *response*.
       const timer = setTimeout(() => {
@@ -379,7 +591,7 @@ export class SyncEngine {
   }
 
   public releaseLock(name: string, requestId: string, fencingToken: number): Promise<boolean> {
-    if (!this.isOnline) return Promise.resolve(false);
+    if (!this.isOnline()) return Promise.resolve(false);
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -414,12 +626,19 @@ export class SyncEngine {
 
       case 'AUTH_ACK': {
         logger.info('Authenticated successfully');
-        const wasAuthenticated = this.isAuthenticated;
-        this.isAuthenticated = true;
+        const wasAuthenticated = this.isAuthenticated();
+
+        // Transition to SYNCING state
+        this.stateMachine.transition(SyncState.SYNCING);
+
+        // Reset backoff on successful auth
+        this.resetBackoff();
+
         this.syncPendingOperations();
 
         // Only re-subscribe on first authentication to prevent UI flickering
         if (!wasAuthenticated) {
+          this.startHeartbeat();
           this.startMerkleSync();
           for (const query of this.queries.values()) {
             this.sendQuerySubscription(query);
@@ -428,21 +647,35 @@ export class SyncEngine {
             this.sendTopicSubscription(topic);
           }
         }
+
+        // After initial sync setup, transition to CONNECTED
+        // In a real implementation, you might wait for SYNC_COMPLETE message
+        this.stateMachine.transition(SyncState.CONNECTED);
+        break;
+      }
+
+      case 'PONG': {
+        this.handlePong(message);
         break;
       }
 
       case 'AUTH_FAIL':
         logger.error({ error: message.error }, 'Authentication failed');
-        this.isAuthenticated = false;
         this.authToken = null; // Clear invalid token
+        // Stay in AUTHENTICATING or go to ERROR depending on severity
+        // For now, let the connection close naturally or retry with new token
         break;
 
       case 'OP_ACK': {
         const { lastId } = message.payload;
         logger.info({ lastId }, 'Received ACK for ops');
         let maxSyncedId = -1;
+        let ackedCount = 0;
         this.opLog.forEach(op => {
           if (op.id && op.id <= lastId) {
+            if (!op.synced) {
+              ackedCount++;
+            }
             op.synced = true;
             const idNum = parseInt(op.id, 10);
             if (!isNaN(idNum) && idNum > maxSyncedId) {
@@ -452,6 +685,10 @@ export class SyncEngine {
         });
         if (maxSyncedId !== -1) {
           this.storageAdapter.markOpsSynced(maxSyncedId).catch(err => logger.error({ err }, 'Failed to mark ops synced'));
+        }
+        // Check low water mark after ACKs reduce pending count
+        if (ackedCount > 0) {
+          this.checkLowWaterMark();
         }
         break;
       }
@@ -627,6 +864,113 @@ export class SyncEngine {
         }
         break;
       }
+
+      // ============ ORMap Sync Message Handlers ============
+
+      case 'ORMAP_SYNC_RESP_ROOT': {
+        const { mapName, rootHash, timestamp } = message.payload;
+        const map = this.maps.get(mapName);
+        if (map instanceof ORMap) {
+          const localTree = map.getMerkleTree();
+          const localRootHash = localTree.getRootHash();
+
+          if (localRootHash !== rootHash) {
+            logger.info({ mapName, localRootHash, remoteRootHash: rootHash }, 'ORMap root hash mismatch, requesting buckets');
+            this.websocket?.send(serialize({
+              type: 'ORMAP_MERKLE_REQ_BUCKET',
+              payload: { mapName, path: '' }
+            }));
+          } else {
+            logger.info({ mapName }, 'ORMap is in sync');
+          }
+        }
+        // Update HLC with server timestamp
+        if (timestamp) {
+          this.hlc.update(timestamp);
+          this.lastSyncTimestamp = timestamp.millis;
+          await this.saveOpLog();
+        }
+        break;
+      }
+
+      case 'ORMAP_SYNC_RESP_BUCKETS': {
+        const { mapName, path, buckets } = message.payload;
+        const map = this.maps.get(mapName);
+        if (map instanceof ORMap) {
+          const tree = map.getMerkleTree();
+          const localBuckets = tree.getBuckets(path);
+
+          for (const [bucketKey, remoteHash] of Object.entries(buckets)) {
+            const localHash = localBuckets[bucketKey] || 0;
+            if (localHash !== remoteHash) {
+              const newPath = path + bucketKey;
+              this.websocket?.send(serialize({
+                type: 'ORMAP_MERKLE_REQ_BUCKET',
+                payload: { mapName, path: newPath }
+              }));
+            }
+          }
+
+          // Also check for buckets that exist locally but not on remote
+          for (const [bucketKey, localHash] of Object.entries(localBuckets)) {
+            if (!(bucketKey in buckets) && localHash !== 0) {
+              // Local has data that remote doesn't - need to push
+              const newPath = path + bucketKey;
+              const keys = tree.getKeysInBucket(newPath);
+              if (keys.length > 0) {
+                this.pushORMapDiff(mapName, keys, map);
+              }
+            }
+          }
+        }
+        break;
+      }
+
+      case 'ORMAP_SYNC_RESP_LEAF': {
+        const { mapName, entries } = message.payload;
+        const map = this.maps.get(mapName);
+        if (map instanceof ORMap) {
+          let totalAdded = 0;
+          let totalUpdated = 0;
+
+          for (const entry of entries) {
+            const { key, records, tombstones } = entry;
+            const result = map.mergeKey(key, records, tombstones);
+            totalAdded += result.added;
+            totalUpdated += result.updated;
+          }
+
+          if (totalAdded > 0 || totalUpdated > 0) {
+            logger.info({ mapName, added: totalAdded, updated: totalUpdated }, 'Synced ORMap records from server');
+          }
+
+          // Now push any local records that server might not have
+          const keysToCheck = entries.map((e: { key: string }) => e.key);
+          await this.pushORMapDiff(mapName, keysToCheck, map);
+        }
+        break;
+      }
+
+      case 'ORMAP_DIFF_RESPONSE': {
+        const { mapName, entries } = message.payload;
+        const map = this.maps.get(mapName);
+        if (map instanceof ORMap) {
+          let totalAdded = 0;
+          let totalUpdated = 0;
+
+          for (const entry of entries) {
+            const { key, records, tombstones } = entry;
+            const result = map.mergeKey(key, records, tombstones);
+            totalAdded += result.added;
+            totalUpdated += result.updated;
+          }
+
+          if (totalAdded > 0 || totalUpdated > 0) {
+            logger.info({ mapName, added: totalAdded, updated: totalUpdated }, 'Merged ORMap diff from server');
+          }
+        }
+        break;
+      }
     }
 
     if (message.timestamp) {
@@ -644,6 +988,8 @@ export class SyncEngine {
    * Closes the WebSocket connection and cleans up resources.
    */
   public close(): void {
+    this.stopHeartbeat();
+
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -655,9 +1001,19 @@ export class SyncEngine {
       this.websocket = null;
     }
 
-    this.isOnline = false;
-    this.isAuthenticated = false;
+    this.stateMachine.transition(SyncState.DISCONNECTED);
     logger.info('SyncEngine closed');
+  }
+
+  /**
+   * Reset the state machine and connection.
+   * Use after fatal errors to start fresh.
+   */
+  public resetConnection(): void {
+    this.close();
+    this.stateMachine.reset();
+    this.resetBackoff();
+    this.initConnection();
   }
 
   private async resetMap(mapName: string): Promise<void> {
@@ -678,5 +1034,365 @@ export class SyncEngine {
       await this.storageAdapter.remove(key);
     }
     logger.info({ mapName, removedStorageCount: mapKeys.length }, 'Reset map: Cleared memory and storage');
+  }
+
+  // ============ Heartbeat Methods ============
+
+  /**
+   * Starts the heartbeat mechanism after successful connection.
+   */
+  private startHeartbeat(): void {
+    if (!this.heartbeatConfig.enabled) {
+      return;
+    }
+
+    this.stopHeartbeat(); // Clear any existing interval
+    this.lastPongReceived = Date.now();
+
+    this.heartbeatInterval = setInterval(() => {
+      this.sendPing();
+      this.checkHeartbeatTimeout();
+    }, this.heartbeatConfig.intervalMs);
+
+    logger.info({ intervalMs: this.heartbeatConfig.intervalMs }, 'Heartbeat started');
+  }
+
+  /**
+   * Stops the heartbeat mechanism.
+   */
+  private stopHeartbeat(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+      logger.info('Heartbeat stopped');
+    }
+  }
+
+  /**
+   * Sends a PING message to the server.
+   */
+  private sendPing(): void {
+    if (this.websocket?.readyState === WebSocket.OPEN) {
+      const pingMessage = {
+        type: 'PING',
+        timestamp: Date.now(),
+      };
+      this.websocket.send(serialize(pingMessage));
+    }
+  }
+
+  /**
+   * Handles incoming PONG message from server.
+   */
+  private handlePong(msg: { timestamp: number; serverTime: number }): void {
+    const now = Date.now();
+    this.lastPongReceived = now;
+    this.lastRoundTripTime = now - msg.timestamp;
+
+    logger.debug({
+      rtt: this.lastRoundTripTime,
+      serverTime: msg.serverTime,
+      clockSkew: msg.serverTime - (msg.timestamp + this.lastRoundTripTime / 2),
+    }, 'Received PONG');
+  }
+
+  /**
+   * Checks if heartbeat has timed out and triggers reconnection if needed.
+   */
+  private checkHeartbeatTimeout(): void {
+    const now = Date.now();
+    const timeSinceLastPong = now - this.lastPongReceived;
+
+    if (timeSinceLastPong > this.heartbeatConfig.timeoutMs) {
+      logger.warn({
+        timeSinceLastPong,
+        timeoutMs: this.heartbeatConfig.timeoutMs,
+      }, 'Heartbeat timeout - triggering reconnection');
+
+      this.stopHeartbeat();
+
+      // Force close and reconnect
+      if (this.websocket) {
+        this.websocket.close();
+      }
+    }
+  }
+
+  /**
+   * Returns the last measured round-trip time in milliseconds.
+   * Returns null if no PONG has been received yet.
+   */
+  public getLastRoundTripTime(): number | null {
+    return this.lastRoundTripTime;
+  }
+
+  /**
+   * Returns true if the connection is considered healthy based on heartbeat.
+   * A connection is healthy if it's online, authenticated, and has received
+   * a PONG within the timeout window.
+   */
+  public isConnectionHealthy(): boolean {
+    if (!this.isOnline() || !this.isAuthenticated()) {
+      return false;
+    }
+
+    if (!this.heartbeatConfig.enabled) {
+      return true; // If heartbeat disabled, consider healthy if online
+    }
+
+    const timeSinceLastPong = Date.now() - this.lastPongReceived;
+    return timeSinceLastPong < this.heartbeatConfig.timeoutMs;
+  }
+
+  // ============ ORMap Sync Methods ============
+
+  /**
+   * Push local ORMap diff to server for the given keys.
+   * Sends local records and tombstones that the server might not have.
+   */
+  private async pushORMapDiff(
+    mapName: string,
+    keys: string[],
+    map: ORMap<any, any>
+  ): Promise<void> {
+    const entries: Array<{
+      key: string;
+      records: ORMapRecord<any>[];
+      tombstones: string[];
+    }> = [];
+
+    const snapshot = map.getSnapshot();
+
+    for (const key of keys) {
+      const recordsMap = map.getRecordsMap(key);
+      if (recordsMap && recordsMap.size > 0) {
+        // Get records as array
+        const records = Array.from(recordsMap.values());
+
+        // Get tombstones relevant to this key's records
+        // (tombstones that match tags that were in this key)
+        const tombstones: string[] = [];
+        for (const tag of snapshot.tombstones) {
+          // Include all tombstones - server will filter
+          tombstones.push(tag);
+        }
+
+        entries.push({
+          key,
+          records,
+          tombstones
+        });
+      }
+    }
+
+    if (entries.length > 0) {
+      this.websocket?.send(serialize({
+        type: 'ORMAP_PUSH_DIFF',
+        payload: {
+          mapName,
+          entries
+        }
+      }));
+      logger.debug({ mapName, keyCount: entries.length }, 'Pushed ORMap diff to server');
+    }
+  }
+
+  // ============ Backpressure Methods ============
+
+  /**
+   * Get the current number of pending (unsynced) operations.
+   */
+  public getPendingOpsCount(): number {
+    return this.opLog.filter(op => !op.synced).length;
+  }
+
+  /**
+   * Get the current backpressure status.
+   */
+  public getBackpressureStatus(): BackpressureStatus {
+    const pending = this.getPendingOpsCount();
+    const max = this.backpressureConfig.maxPendingOps;
+    return {
+      pending,
+      max,
+      percentage: max > 0 ? pending / max : 0,
+      isPaused: this.backpressurePaused,
+      strategy: this.backpressureConfig.strategy,
+    };
+  }
+
+  /**
+   * Returns true if writes are currently paused due to backpressure.
+   */
+  public isBackpressurePaused(): boolean {
+    return this.backpressurePaused;
+  }
+
+  /**
+   * Subscribe to backpressure events.
+   * @param event Event name: 'backpressure:high', 'backpressure:low', 'backpressure:paused', 'backpressure:resumed', 'operation:dropped'
+   * @param listener Callback function
+   * @returns Unsubscribe function
+   */
+  public onBackpressure(
+    event: 'backpressure:high' | 'backpressure:low' | 'backpressure:paused' | 'backpressure:resumed' | 'operation:dropped',
+    listener: (data?: BackpressureThresholdEvent | OperationDroppedEvent) => void
+  ): () => void {
+    if (!this.backpressureListeners.has(event)) {
+      this.backpressureListeners.set(event, new Set());
+    }
+    this.backpressureListeners.get(event)!.add(listener);
+
+    return () => {
+      this.backpressureListeners.get(event)?.delete(listener);
+    };
+  }
+
+  /**
+   * Emit a backpressure event to all listeners.
+   */
+  private emitBackpressureEvent(
+    event: 'backpressure:high' | 'backpressure:low' | 'backpressure:paused' | 'backpressure:resumed' | 'operation:dropped',
+    data?: BackpressureThresholdEvent | OperationDroppedEvent
+  ): void {
+    const listeners = this.backpressureListeners.get(event);
+    if (listeners) {
+      for (const listener of listeners) {
+        try {
+          listener(data);
+        } catch (err) {
+          logger.error({ err, event }, 'Error in backpressure event listener');
+        }
+      }
+    }
+  }
+
+  /**
+   * Check backpressure before adding a new operation.
+   * May pause, throw, or drop depending on strategy.
+   */
+  private async checkBackpressure(): Promise<void> {
+    const pendingCount = this.getPendingOpsCount();
+
+    if (pendingCount < this.backpressureConfig.maxPendingOps) {
+      return; // Capacity available
+    }
+
+    switch (this.backpressureConfig.strategy) {
+      case 'pause':
+        await this.waitForCapacity();
+        break;
+      case 'throw':
+        throw new BackpressureError(
+          pendingCount,
+          this.backpressureConfig.maxPendingOps
+        );
+      case 'drop-oldest':
+        this.dropOldestOp();
+        break;
+    }
+  }
+
+  /**
+   * Check high water mark and emit event if threshold reached.
+   */
+  private checkHighWaterMark(): void {
+    const pendingCount = this.getPendingOpsCount();
+    const threshold = Math.floor(
+      this.backpressureConfig.maxPendingOps * this.backpressureConfig.highWaterMark
+    );
+
+    if (pendingCount >= threshold && !this.highWaterMarkEmitted) {
+      this.highWaterMarkEmitted = true;
+      logger.warn(
+        { pending: pendingCount, max: this.backpressureConfig.maxPendingOps },
+        'Backpressure high water mark reached'
+      );
+      this.emitBackpressureEvent('backpressure:high', {
+        pending: pendingCount,
+        max: this.backpressureConfig.maxPendingOps,
+      });
+    }
+  }
+
+  /**
+   * Check low water mark and resume paused writes if threshold reached.
+   */
+  private checkLowWaterMark(): void {
+    const pendingCount = this.getPendingOpsCount();
+    const lowThreshold = Math.floor(
+      this.backpressureConfig.maxPendingOps * this.backpressureConfig.lowWaterMark
+    );
+    const highThreshold = Math.floor(
+      this.backpressureConfig.maxPendingOps * this.backpressureConfig.highWaterMark
+    );
+
+    // Reset high water mark flag when below high threshold
+    if (pendingCount < highThreshold && this.highWaterMarkEmitted) {
+      this.highWaterMarkEmitted = false;
+    }
+
+    // Emit low water mark event when crossing below threshold
+    if (pendingCount <= lowThreshold) {
+      if (this.backpressurePaused) {
+        this.backpressurePaused = false;
+        logger.info(
+          { pending: pendingCount, max: this.backpressureConfig.maxPendingOps },
+          'Backpressure low water mark reached, resuming writes'
+        );
+        this.emitBackpressureEvent('backpressure:low', {
+          pending: pendingCount,
+          max: this.backpressureConfig.maxPendingOps,
+        });
+        this.emitBackpressureEvent('backpressure:resumed');
+
+        // Resume all waiting writes
+        const waiting = this.waitingForCapacity;
+        this.waitingForCapacity = [];
+        for (const resolve of waiting) {
+          resolve();
+        }
+      }
+    }
+  }
+
+  /**
+   * Wait for capacity to become available (used by 'pause' strategy).
+   */
+  private async waitForCapacity(): Promise<void> {
+    if (!this.backpressurePaused) {
+      this.backpressurePaused = true;
+      logger.warn('Backpressure paused - waiting for capacity');
+      this.emitBackpressureEvent('backpressure:paused');
+    }
+
+    return new Promise<void>((resolve) => {
+      this.waitingForCapacity.push(resolve);
+    });
+  }
+
+  /**
+   * Drop the oldest pending operation (used by 'drop-oldest' strategy).
+   */
+  private dropOldestOp(): void {
+    // Find oldest unsynced operation by array order (oldest first)
+    const oldestIndex = this.opLog.findIndex(op => !op.synced);
+
+    if (oldestIndex !== -1) {
+      const dropped = this.opLog[oldestIndex];
+      this.opLog.splice(oldestIndex, 1);
+
+      logger.warn(
+        { opId: dropped.id, mapName: dropped.mapName, key: dropped.key },
+        'Dropped oldest pending operation due to backpressure'
+      );
+
+      this.emitBackpressureEvent('operation:dropped', {
+        opId: dropped.id,
+        mapName: dropped.mapName,
+        opType: dropped.opType,
+        key: dropped.key,
+      });
+    }
   }
 }

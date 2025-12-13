@@ -190,6 +190,125 @@ export const TopicMessageEventSchema = z.object({
   }),
 });
 
+// --- Heartbeat Messages ---
+
+export const PingMessageSchema = z.object({
+  type: z.literal('PING'),
+  timestamp: z.number(), // Client's Date.now()
+});
+
+export const PongMessageSchema = z.object({
+  type: z.literal('PONG'),
+  timestamp: z.number(),   // Echo back client's timestamp
+  serverTime: z.number(),  // Server's Date.now() (for clock skew detection)
+});
+
+// --- ORMap Sync Messages ---
+
+/**
+ * ORMAP_SYNC_INIT: Client initiates ORMap sync
+ * Sends root hash and bucket hashes to server
+ */
+export const ORMapSyncInitSchema = z.object({
+  type: z.literal('ORMAP_SYNC_INIT'),
+  mapName: z.string(),
+  rootHash: z.number(),
+  bucketHashes: z.record(z.string(), z.number()), // path -> hash
+  lastSyncTimestamp: z.number().optional(),
+});
+
+/**
+ * ORMAP_SYNC_RESP_ROOT: Server responds with its root hash
+ */
+export const ORMapSyncRespRootSchema = z.object({
+  type: z.literal('ORMAP_SYNC_RESP_ROOT'),
+  payload: z.object({
+    mapName: z.string(),
+    rootHash: z.number(),
+    timestamp: TimestampSchema,
+  }),
+});
+
+/**
+ * ORMAP_SYNC_RESP_BUCKETS: Server sends bucket hashes for comparison
+ */
+export const ORMapSyncRespBucketsSchema = z.object({
+  type: z.literal('ORMAP_SYNC_RESP_BUCKETS'),
+  payload: z.object({
+    mapName: z.string(),
+    path: z.string(),
+    buckets: z.record(z.string(), z.number()),
+  }),
+});
+
+/**
+ * ORMAP_MERKLE_REQ_BUCKET: Client requests bucket details
+ */
+export const ORMapMerkleReqBucketSchema = z.object({
+  type: z.literal('ORMAP_MERKLE_REQ_BUCKET'),
+  payload: z.object({
+    mapName: z.string(),
+    path: z.string(),
+  }),
+});
+
+/**
+ * ORMAP_SYNC_RESP_LEAF: Server sends actual records for differing keys
+ */
+export const ORMapSyncRespLeafSchema = z.object({
+  type: z.literal('ORMAP_SYNC_RESP_LEAF'),
+  payload: z.object({
+    mapName: z.string(),
+    path: z.string(),
+    entries: z.array(z.object({
+      key: z.string(),
+      records: z.array(ORMapRecordSchema),
+      tombstones: z.array(z.string()), // Tombstone tags for this key's records
+    })),
+  }),
+});
+
+/**
+ * ORMAP_DIFF_REQUEST: Client requests data for specific keys
+ */
+export const ORMapDiffRequestSchema = z.object({
+  type: z.literal('ORMAP_DIFF_REQUEST'),
+  payload: z.object({
+    mapName: z.string(),
+    keys: z.array(z.string()),
+  }),
+});
+
+/**
+ * ORMAP_DIFF_RESPONSE: Server responds with data for requested keys
+ */
+export const ORMapDiffResponseSchema = z.object({
+  type: z.literal('ORMAP_DIFF_RESPONSE'),
+  payload: z.object({
+    mapName: z.string(),
+    entries: z.array(z.object({
+      key: z.string(),
+      records: z.array(ORMapRecordSchema),
+      tombstones: z.array(z.string()),
+    })),
+  }),
+});
+
+/**
+ * ORMAP_PUSH_DIFF: Client pushes local diffs to server
+ */
+export const ORMapPushDiffSchema = z.object({
+  type: z.literal('ORMAP_PUSH_DIFF'),
+  payload: z.object({
+    mapName: z.string(),
+    entries: z.array(z.object({
+      key: z.string(),
+      records: z.array(ORMapRecordSchema),
+      tombstones: z.array(z.string()),
+    })),
+  }),
+});
+
 // --- Union Schema ---
 
 export const MessageSchema = z.discriminatedUnion('type', [
@@ -208,6 +327,17 @@ export const MessageSchema = z.discriminatedUnion('type', [
   TopicSubSchema,
   TopicUnsubSchema,
   TopicPubSchema,
+  PingMessageSchema,
+  PongMessageSchema,
+  // ORMap Sync Messages
+  ORMapSyncInitSchema,
+  ORMapSyncRespRootSchema,
+  ORMapSyncRespBucketsSchema,
+  ORMapMerkleReqBucketSchema,
+  ORMapSyncRespLeafSchema,
+  ORMapDiffRequestSchema,
+  ORMapDiffResponseSchema,
+  ORMapPushDiffSchema,
 ]);
 
 // --- Type Inference ---
@@ -219,4 +349,6 @@ export type ORMapRecord<V = any> = z.infer<typeof ORMapRecordSchema>; // Generic
 export type Query = z.infer<typeof QuerySchema>;
 export type ClientOp = z.infer<typeof ClientOpSchema>;
 export type Message = z.infer<typeof MessageSchema>;
+export type PingMessage = z.infer<typeof PingMessageSchema>;
+export type PongMessage = z.infer<typeof PongMessageSchema>;
 
