@@ -25,6 +25,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
       send: jest.fn((data: Uint8Array) => {
         responses.push(deserialize(data));
       }),
+      close: jest.fn(), // Mock close() to prevent cleanup errors
       readyState: 1 // OPEN
     };
 
@@ -442,6 +443,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
     test('should deny ORMAP_SYNC_INIT without READ permission', async () => {
       const clientSocket = {
         send: jest.fn(),
+        close: jest.fn(),
         readyState: 1
       };
 
