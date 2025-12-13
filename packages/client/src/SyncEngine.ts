@@ -373,10 +373,25 @@ export class SyncEngine {
   private startMerkleSync(): void {
     for (const [mapName, map] of this.maps) {
       if (map instanceof LWWMap) {
-        logger.info({ mapName }, 'Starting Merkle sync for map');
+        logger.info({ mapName }, 'Starting Merkle sync for LWWMap');
         this.websocket?.send(serialize({
           type: 'SYNC_INIT',
           mapName,
+          lastSyncTimestamp: this.lastSyncTimestamp
+        }));
+      } else if (map instanceof ORMap) {
+        logger.info({ mapName }, 'Starting Merkle sync for ORMap');
+        const tree = map.getMerkleTree();
+        const rootHash = tree.getRootHash();
+
+        // Build bucket hashes for all non-empty buckets at depth 0
+        const bucketHashes: Record<string, number> = tree.getBuckets('');
+
+        this.websocket?.send(serialize({
+          type: 'ORMAP_SYNC_INIT',
+          mapName,
+          rootHash,
+          bucketHashes,
           lastSyncTimestamp: this.lastSyncTimestamp
         }));
       }
@@ -849,6 +864,113 @@ export class SyncEngine {
         }
         break;
       }
+
+      // ============ ORMap Sync Message Handlers ============
+
+      case 'ORMAP_SYNC_RESP_ROOT': {
+        const { mapName, rootHash, timestamp } = message.payload;
+        const map = this.maps.get(mapName);
+        if (map instanceof ORMap) {
+          const localTree = map.getMerkleTree();
+          const localRootHash = localTree.getRootHash();
+
+          if (localRootHash !== rootHash) {
+            logger.info({ mapName, localRootHash, remoteRootHash: rootHash }, 'ORMap root hash mismatch, requesting buckets');
+            this.websocket?.send(serialize({
+              type: 'ORMAP_MERKLE_REQ_BUCKET',
+              payload: { mapName, path: '' }
+            }));
+          } else {
+            logger.info({ mapName }, 'ORMap is in sync');
+          }
+        }
+        // Update HLC with server timestamp
+        if (timestamp) {
+          this.hlc.update(timestamp);
+          this.lastSyncTimestamp = timestamp.millis;
+          await this.saveOpLog();
+        }
+        break;
+      }
+
+      case 'ORMAP_SYNC_RESP_BUCKETS': {
+        const { mapName, path, buckets } = message.payload;
+        const map = this.maps.get(mapName);
+        if (map instanceof ORMap) {
+          const tree = map.getMerkleTree();
+          const localBuckets = tree.getBuckets(path);
+
+          for (const [bucketKey, remoteHash] of Object.entries(buckets)) {
+            const localHash = localBuckets[bucketKey] || 0;
+            if (localHash !== remoteHash) {
+              const newPath = path + bucketKey;
+              this.websocket?.send(serialize({
+                type: 'ORMAP_MERKLE_REQ_BUCKET',
+                payload: { mapName, path: newPath }
+              }));
+            }
+          }
+
+          // Also check for buckets that exist locally but not on remote
+          for (const [bucketKey, localHash] of Object.entries(localBuckets)) {
+            if (!(bucketKey in buckets) && localHash !== 0) {
+              // Local has data that remote doesn't - need to push
+              const newPath = path + bucketKey;
+              const keys = tree.getKeysInBucket(newPath);
+              if (keys.length > 0) {
+                this.pushORMapDiff(mapName, keys, map);
+              }
+            }
+          }
+        }
+        break;
+      }
+
+      case 'ORMAP_SYNC_RESP_LEAF': {
+        const { mapName, entries } = message.payload;
+        const map = this.maps.get(mapName);
+        if (map instanceof ORMap) {
+          let totalAdded = 0;
+          let totalUpdated = 0;
+
+          for (const entry of entries) {
+            const { key, records, tombstones } = entry;
+            const result = map.mergeKey(key, records, tombstones);
+            totalAdded += result.added;
+            totalUpdated += result.updated;
+          }
+
+          if (totalAdded > 0 || totalUpdated > 0) {
+            logger.info({ mapName, added: totalAdded, updated: totalUpdated }, 'Synced ORMap records from server');
+          }
+
+          // Now push any local records that server might not have
+          const keysToCheck = entries.map((e: { key: string }) => e.key);
+          await this.pushORMapDiff(mapName, keysToCheck, map);
+        }
+        break;
+      }
+
+      case 'ORMAP_DIFF_RESPONSE': {
+        const { mapName, entries } = message.payload;
+        const map = this.maps.get(mapName);
+        if (map instanceof ORMap) {
+          let totalAdded = 0;
+          let totalUpdated = 0;
+
+          for (const entry of entries) {
+            const { key, records, tombstones } = entry;
+            const result = map.mergeKey(key, records, tombstones);
+            totalAdded += result.added;
+            totalUpdated += result.updated;
+          }
+
+          if (totalAdded > 0 || totalUpdated > 0) {
+            logger.info({ mapName, added: totalAdded, updated: totalUpdated }, 'Merged ORMap diff from server');
+          }
+        }
+        break;
+      }
     }
 
     if (message.timestamp) {
@@ -1020,6 +1142,59 @@ export class SyncEngine {
 
     const timeSinceLastPong = Date.now() - this.lastPongReceived;
     return timeSinceLastPong < this.heartbeatConfig.timeoutMs;
+  }
+
+  // ============ ORMap Sync Methods ============
+
+  /**
+   * Push local ORMap diff to server for the given keys.
+   * Sends local records and tombstones that the server might not have.
+   */
+  private async pushORMapDiff(
+    mapName: string,
+    keys: string[],
+    map: ORMap<any, any>
+  ): Promise<void> {
+    const entries: Array<{
+      key: string;
+      records: ORMapRecord<any>[];
+      tombstones: string[];
+    }> = [];
+
+    const snapshot = map.getSnapshot();
+
+    for (const key of keys) {
+      const recordsMap = map.getRecordsMap(key);
+      if (recordsMap && recordsMap.size > 0) {
+        // Get records as array
+        const records = Array.from(recordsMap.values());
+
+        // Get tombstones relevant to this key's records
+        // (tombstones that match tags that were in this key)
+        const tombstones: string[] = [];
+        for (const tag of snapshot.tombstones) {
+          // Include all tombstones - server will filter
+          tombstones.push(tag);
+        }
+
+        entries.push({
+          key,
+          records,
+          tombstones
+        });
+      }
+    }
+
+    if (entries.length > 0) {
+      this.websocket?.send(serialize({
+        type: 'ORMAP_PUSH_DIFF',
+        payload: {
+          mapName,
+          entries
+        }
+      }));
+      logger.debug({ mapName, keyCount: entries.length }, 'Pushed ORMap diff to server');
+    }
   }
 
   // ============ Backpressure Methods ============

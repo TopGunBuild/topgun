@@ -1,4 +1,6 @@
 import { HLC, Timestamp } from './HLC';
+import { ORMapMerkleTree } from './ORMapMerkleTree';
+import { compareTimestamps } from './ORMapMerkle';
 
 /**
  * A record in the OR-Map (Observed-Remove Map).
@@ -9,6 +11,22 @@ export interface ORMapRecord<V> {
   timestamp: Timestamp;
   tag: string; // Unique identifier (UUID + Timestamp)
   ttlMs?: number;
+}
+
+/**
+ * Result of merging records for a key.
+ */
+export interface MergeKeyResult {
+  added: number;
+  updated: number;
+}
+
+/**
+ * Snapshot of ORMap internal state for Merkle Tree synchronization.
+ */
+export interface ORMapSnapshot<K, V> {
+  items: Map<K, Map<string, ORMapRecord<V>>>;
+  tombstones: Set<string>;
 }
 
 /**
@@ -31,15 +49,19 @@ export class ORMap<K, V> {
   private tombstones: Set<string>;
 
   // Set of expired tags (Local only cache for fast filtering)
-  // Note: We don't persist this directly, but rely on filtering. 
+  // Note: We don't persist this directly, but rely on filtering.
   // For now, we will just filter on get()
 
   private readonly hlc: HLC;
+
+  // Merkle Tree for efficient sync
+  private merkleTree: ORMapMerkleTree;
 
   constructor(hlc: HLC) {
     this.hlc = hlc;
     this.items = new Map();
     this.tombstones = new Set();
+    this.merkleTree = new ORMapMerkleTree();
   }
 
   private listeners: Array<() => void> = [];
@@ -96,6 +118,7 @@ export class ORMap<K, V> {
     }
 
     keyMap.set(tag, record);
+    this.updateMerkleTree(key);
     this.notify();
     return record;
   }
@@ -128,6 +151,7 @@ export class ORMap<K, V> {
       this.items.delete(key);
     }
 
+    this.updateMerkleTree(key);
     this.notify();
     return tagsToRemove;
   }
@@ -138,6 +162,7 @@ export class ORMap<K, V> {
   public clear(): void {
     this.items.clear();
     this.tombstones.clear();
+    this.merkleTree = new ORMapMerkleTree();
     this.notify();
   }
 
@@ -197,9 +222,10 @@ export class ORMap<K, V> {
 
   /**
    * Applies a record from a remote source (Sync).
+   * Returns true if the record was applied (not tombstoned).
    */
-  public apply(key: K, record: ORMapRecord<V>): void {
-    if (this.tombstones.has(record.tag)) return;
+  public apply(key: K, record: ORMapRecord<V>): boolean {
+    if (this.tombstones.has(record.tag)) return false;
 
     let keyMap = this.items.get(key);
     if (!keyMap) {
@@ -208,7 +234,9 @@ export class ORMap<K, V> {
     }
     keyMap.set(record.tag, record);
     this.hlc.update(record.timestamp);
+    this.updateMerkleTree(key);
     this.notify();
+    return true;
   }
 
   /**
@@ -221,6 +249,7 @@ export class ORMap<K, V> {
       if (keyMap.has(tag)) {
         keyMap.delete(tag);
         if (keyMap.size === 0) this.items.delete(key);
+        this.updateMerkleTree(key);
         // We found it, so we can stop searching (tag is unique globally)
         break;
       }
@@ -235,6 +264,8 @@ export class ORMap<K, V> {
    * - Updates HLC with observed timestamps.
    */
   public merge(other: ORMap<K, V>): void {
+    const changedKeys = new Set<K>();
+
     // 1. Merge tombstones
     for (const tag of other.tombstones) {
       this.tombstones.add(tag);
@@ -253,6 +284,7 @@ export class ORMap<K, V> {
         if (!this.tombstones.has(tag)) {
           if (!localKeyMap.has(tag)) {
             localKeyMap.set(tag, record);
+            changedKeys.add(key);
           }
           // Always update causality
           this.hlc.update(record.timestamp);
@@ -265,12 +297,19 @@ export class ORMap<K, V> {
       for (const tag of localKeyMap.keys()) {
         if (this.tombstones.has(tag)) {
           localKeyMap.delete(tag);
+          changedKeys.add(key);
         }
       }
       if (localKeyMap.size === 0) {
         this.items.delete(key);
       }
     }
+
+    // Update Merkle Tree for changed keys
+    for (const key of changedKeys) {
+      this.updateMerkleTree(key);
+    }
+
     this.notify();
   }
 
@@ -293,5 +332,142 @@ export class ORMap<K, V> {
     }
 
     return removedTags;
+  }
+
+  // ============ Merkle Sync Methods ============
+
+  /**
+   * Get the Merkle Tree for this ORMap.
+   * Used for efficient synchronization.
+   */
+  public getMerkleTree(): ORMapMerkleTree {
+    return this.merkleTree;
+  }
+
+  /**
+   * Get a snapshot of internal state for Merkle Tree synchronization.
+   * Returns references to internal structures - do not modify!
+   */
+  public getSnapshot(): ORMapSnapshot<K, V> {
+    return {
+      items: this.items,
+      tombstones: this.tombstones
+    };
+  }
+
+  /**
+   * Get all keys in this ORMap.
+   */
+  public allKeys(): K[] {
+    return Array.from(this.items.keys());
+  }
+
+  /**
+   * Get the internal records map for a key.
+   * Returns Map<tag, record> or undefined if key doesn't exist.
+   * Used for Merkle sync.
+   */
+  public getRecordsMap(key: K): Map<string, ORMapRecord<V>> | undefined {
+    return this.items.get(key);
+  }
+
+  /**
+   * Merge remote records for a specific key into local state.
+   * Implements Observed-Remove CRDT semantics.
+   * Used during Merkle Tree synchronization.
+   *
+   * @param key The key to merge
+   * @param remoteRecords Array of records from remote
+   * @param remoteTombstones Array of tombstone tags from remote
+   * @returns Result with count of added and updated records
+   */
+  public mergeKey(
+    key: K,
+    remoteRecords: ORMapRecord<V>[],
+    remoteTombstones: string[] = []
+  ): MergeKeyResult {
+    let added = 0;
+    let updated = 0;
+
+    // First apply remote tombstones
+    for (const tag of remoteTombstones) {
+      if (!this.tombstones.has(tag)) {
+        this.tombstones.add(tag);
+      }
+    }
+
+    // Get or create local key map
+    let localKeyMap = this.items.get(key);
+    if (!localKeyMap) {
+      localKeyMap = new Map();
+      this.items.set(key, localKeyMap);
+    }
+
+    // Remove any local records that are now tombstoned
+    for (const tag of localKeyMap.keys()) {
+      if (this.tombstones.has(tag)) {
+        localKeyMap.delete(tag);
+      }
+    }
+
+    // Merge remote records
+    for (const remoteRecord of remoteRecords) {
+      // Skip if tombstoned
+      if (this.tombstones.has(remoteRecord.tag)) {
+        continue;
+      }
+
+      const localRecord = localKeyMap.get(remoteRecord.tag);
+
+      if (!localRecord) {
+        // New record - add it
+        localKeyMap.set(remoteRecord.tag, remoteRecord);
+        added++;
+      } else if (compareTimestamps(remoteRecord.timestamp, localRecord.timestamp) > 0) {
+        // Remote is newer - update
+        localKeyMap.set(remoteRecord.tag, remoteRecord);
+        updated++;
+      }
+      // Else: local is newer or equal, keep local
+
+      // Always update causality
+      this.hlc.update(remoteRecord.timestamp);
+    }
+
+    // Cleanup empty key map
+    if (localKeyMap.size === 0) {
+      this.items.delete(key);
+    }
+
+    // Update Merkle Tree
+    this.updateMerkleTree(key);
+
+    if (added > 0 || updated > 0) {
+      this.notify();
+    }
+
+    return { added, updated };
+  }
+
+  /**
+   * Check if a tag is tombstoned.
+   */
+  public isTombstoned(tag: string): boolean {
+    return this.tombstones.has(tag);
+  }
+
+  /**
+   * Update the Merkle Tree for a specific key.
+   * Called internally after any modification.
+   */
+  private updateMerkleTree(key: K): void {
+    const keyStr = String(key);
+    const keyMap = this.items.get(key);
+
+    if (!keyMap || keyMap.size === 0) {
+      this.merkleTree.remove(keyStr);
+    } else {
+      this.merkleTree.update(keyStr, keyMap);
+    }
   }
 }
