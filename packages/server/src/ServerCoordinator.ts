@@ -11,6 +11,8 @@ import { QueryRegistry, Subscription } from './query/QueryRegistry';
 
 const GC_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const GC_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const CLIENT_HEARTBEAT_TIMEOUT_MS = 20000; // 20 seconds - evict clients that haven't pinged
+const CLIENT_HEARTBEAT_CHECK_INTERVAL_MS = 5000; // Check for dead clients every 5 seconds
 import { TopicManager } from './topic/TopicManager';
 import { ClusterManager } from './cluster/ClusterManager';
 import { PartitionService } from './cluster/PartitionService';
@@ -29,6 +31,7 @@ interface ClientConnection {
     isAuthenticated: boolean;
     subscriptions: Set<string>; // Set of Query IDs
     lastActiveHlc: Timestamp;
+    lastPingReceived: number; // Date.now() of last PING received
 }
 
 interface PendingClusterQuery {
@@ -89,6 +92,7 @@ export class ServerCoordinator {
 
     private pendingClusterQueries: Map<string, PendingClusterQuery> = new Map();
     private gcInterval?: NodeJS.Timeout;
+    private heartbeatCheckInterval?: NodeJS.Timeout;
 
     // GC Consensus State
     private gcReports: Map<string, Timestamp> = new Map();
@@ -228,6 +232,7 @@ export class ServerCoordinator {
         }
 
         this.startGarbageCollection();
+        this.startHeartbeatCheck();
     }
 
     /** Wait for server to be fully ready (ports assigned) */
@@ -294,6 +299,11 @@ export class ServerCoordinator {
             this.gcInterval = undefined;
         }
 
+        if (this.heartbeatCheckInterval) {
+            clearInterval(this.heartbeatCheckInterval);
+            this.heartbeatCheckInterval = undefined;
+        }
+
         // Stop LockManager
         if (this.lockManager) {
             this.lockManager.stop();
@@ -317,7 +327,8 @@ export class ServerCoordinator {
             socket: ws,
             isAuthenticated: false,
             subscriptions: new Set(),
-            lastActiveHlc: this.hlc.now() // Initialize with current time
+            lastActiveHlc: this.hlc.now(), // Initialize with current time
+            lastPingReceived: Date.now(), // Initialize heartbeat tracking
         };
         this.clients.set(clientId, connection);
         this.metricsService.setConnectedClients(this.clients.size);
@@ -439,6 +450,12 @@ export class ServerCoordinator {
             return;
         }
         const message = parseResult.data;
+
+        // Handle PING immediately (even before auth check for authenticated clients)
+        if (message.type === 'PING') {
+            this.handlePing(client, message.timestamp);
+            return;
+        }
 
         // Update client's last active HLC
         // Try to extract from payload if present, otherwise assume near current time but logically before next op
@@ -1588,6 +1605,90 @@ export class ServerCoordinator {
         this.gcInterval = setInterval(() => {
             this.reportLocalHlc();
         }, GC_INTERVAL_MS);
+    }
+
+    // ============ Heartbeat Methods ============
+
+    /**
+     * Starts the periodic check for dead clients (those that haven't sent PING).
+     */
+    private startHeartbeatCheck() {
+        this.heartbeatCheckInterval = setInterval(() => {
+            this.evictDeadClients();
+        }, CLIENT_HEARTBEAT_CHECK_INTERVAL_MS);
+    }
+
+    /**
+     * Handles incoming PING message from client.
+     * Responds with PONG immediately.
+     */
+    private handlePing(client: ClientConnection, clientTimestamp: number): void {
+        client.lastPingReceived = Date.now();
+
+        const pongMessage = {
+            type: 'PONG',
+            timestamp: clientTimestamp,
+            serverTime: Date.now(),
+        };
+
+        if (client.socket.readyState === WebSocket.OPEN) {
+            client.socket.send(serialize(pongMessage));
+        }
+    }
+
+    /**
+     * Checks if a client is still alive based on heartbeat.
+     */
+    public isClientAlive(clientId: string): boolean {
+        const client = this.clients.get(clientId);
+        if (!client) return false;
+
+        const idleTime = Date.now() - client.lastPingReceived;
+        return idleTime < CLIENT_HEARTBEAT_TIMEOUT_MS;
+    }
+
+    /**
+     * Returns how long the client has been idle (no PING received).
+     */
+    public getClientIdleTime(clientId: string): number {
+        const client = this.clients.get(clientId);
+        if (!client) return Infinity;
+
+        return Date.now() - client.lastPingReceived;
+    }
+
+    /**
+     * Evicts clients that haven't sent a PING within the timeout period.
+     */
+    private evictDeadClients(): void {
+        const now = Date.now();
+        const deadClients: string[] = [];
+
+        for (const [clientId, client] of this.clients) {
+            // Only check authenticated clients (unauthenticated ones will timeout via auth mechanism)
+            if (client.isAuthenticated) {
+                const idleTime = now - client.lastPingReceived;
+                if (idleTime > CLIENT_HEARTBEAT_TIMEOUT_MS) {
+                    deadClients.push(clientId);
+                }
+            }
+        }
+
+        for (const clientId of deadClients) {
+            const client = this.clients.get(clientId);
+            if (client) {
+                logger.warn({
+                    clientId,
+                    idleTime: now - client.lastPingReceived,
+                    timeoutMs: CLIENT_HEARTBEAT_TIMEOUT_MS,
+                }, 'Evicting dead client (heartbeat timeout)');
+
+                // Close the connection
+                if (client.socket.readyState === WebSocket.OPEN) {
+                    client.socket.close(4002, 'Heartbeat timeout');
+                }
+            }
+        }
     }
 
     private reportLocalHlc() {

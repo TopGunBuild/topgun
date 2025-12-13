@@ -190,6 +190,19 @@ export const TopicMessageEventSchema = z.object({
   }),
 });
 
+// --- Heartbeat Messages ---
+
+export const PingMessageSchema = z.object({
+  type: z.literal('PING'),
+  timestamp: z.number(), // Client's Date.now()
+});
+
+export const PongMessageSchema = z.object({
+  type: z.literal('PONG'),
+  timestamp: z.number(),   // Echo back client's timestamp
+  serverTime: z.number(),  // Server's Date.now() (for clock skew detection)
+});
+
 // --- Union Schema ---
 
 export const MessageSchema = z.discriminatedUnion('type', [
@@ -208,6 +221,8 @@ export const MessageSchema = z.discriminatedUnion('type', [
   TopicSubSchema,
   TopicUnsubSchema,
   TopicPubSchema,
+  PingMessageSchema,
+  PongMessageSchema,
 ]);
 
 // --- Type Inference ---
@@ -219,4 +234,6 @@ export type ORMapRecord<V = any> = z.infer<typeof ORMapRecordSchema>; // Generic
 export type Query = z.infer<typeof QuerySchema>;
 export type ClientOp = z.infer<typeof ClientOpSchema>;
 export type Message = z.infer<typeof MessageSchema>;
+export type PingMessage = z.infer<typeof PingMessageSchema>;
+export type PongMessage = z.infer<typeof PongMessageSchema>;
 

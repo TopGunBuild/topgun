@@ -10,3 +10,6 @@ export * from './predicate';
 export * from './security';
 export * from './schemas';
 export type { Timestamp, LWWRecord, ORMapRecord };
+
+// Re-export heartbeat types for convenience
+export type { PingMessage, PongMessage } from './schemas';
