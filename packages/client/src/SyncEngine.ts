@@ -7,6 +7,15 @@ import { TopicHandle } from './TopicHandle';
 import { logger } from './utils/logger';
 import { SyncStateMachine, StateChangeEvent } from './SyncStateMachine';
 import { SyncState } from './SyncState';
+import { BackpressureError } from './errors/BackpressureError';
+import type {
+  BackpressureConfig,
+  BackpressureStatus,
+  BackpressureStrategy,
+  BackpressureThresholdEvent,
+  OperationDroppedEvent,
+} from './BackpressureConfig';
+import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 
 export interface OpLogEntry {
   id: string; // Unique ID for the operation
@@ -46,6 +55,7 @@ export interface SyncEngineConfig {
   reconnectInterval?: number;
   heartbeat?: Partial<HeartbeatConfig>;
   backoff?: Partial<BackoffConfig>;
+  backpressure?: Partial<BackpressureConfig>;
 }
 
 const DEFAULT_BACKOFF_CONFIG: BackoffConfig = {
@@ -82,6 +92,13 @@ export class SyncEngine {
   private lastPongReceived: number = Date.now();
   private lastRoundTripTime: number | null = null;
 
+  // Backpressure state
+  private readonly backpressureConfig: BackpressureConfig;
+  private backpressurePaused: boolean = false;
+  private waitingForCapacity: Array<() => void> = [];
+  private highWaterMarkEmitted: boolean = false;
+  private backpressureListeners: Map<string, Set<(...args: any[]) => void>> = new Map();
+
   constructor(config: SyncEngineConfig) {
     this.nodeId = config.nodeId;
     this.serverUrl = config.serverUrl;
@@ -102,6 +119,12 @@ export class SyncEngine {
     this.backoffConfig = {
       ...DEFAULT_BACKOFF_CONFIG,
       ...config.backoff,
+    };
+
+    // Merge backpressure config with defaults
+    this.backpressureConfig = {
+      ...DEFAULT_BACKPRESSURE_CONFIG,
+      ...config.backpressure,
     };
 
     this.initConnection();
@@ -301,7 +324,9 @@ export class SyncEngine {
     opType: 'PUT' | 'REMOVE' | 'OR_ADD' | 'OR_REMOVE',
     key: string,
     data: { record?: LWWRecord<any>; orRecord?: ORMapRecord<any>; orTag?: string; timestamp: Timestamp }
-  ): Promise<void> {
+  ): Promise<string> {
+    // Check backpressure before adding new operation
+    await this.checkBackpressure();
 
     const opLogEntry: Omit<OpLogEntry, 'id'> & { id?: string } = {
       mapName,
@@ -319,9 +344,14 @@ export class SyncEngine {
 
     this.opLog.push(opLogEntry as OpLogEntry);
 
+    // Check high water mark after adding operation
+    this.checkHighWaterMark();
+
     if (this.isAuthenticated()) {
       this.syncPendingOperations();
     }
+
+    return opLogEntry.id;
   }
 
   private syncPendingOperations(): void {
@@ -625,8 +655,12 @@ export class SyncEngine {
         const { lastId } = message.payload;
         logger.info({ lastId }, 'Received ACK for ops');
         let maxSyncedId = -1;
+        let ackedCount = 0;
         this.opLog.forEach(op => {
           if (op.id && op.id <= lastId) {
+            if (!op.synced) {
+              ackedCount++;
+            }
             op.synced = true;
             const idNum = parseInt(op.id, 10);
             if (!isNaN(idNum) && idNum > maxSyncedId) {
@@ -636,6 +670,10 @@ export class SyncEngine {
         });
         if (maxSyncedId !== -1) {
           this.storageAdapter.markOpsSynced(maxSyncedId).catch(err => logger.error({ err }, 'Failed to mark ops synced'));
+        }
+        // Check low water mark after ACKs reduce pending count
+        if (ackedCount > 0) {
+          this.checkLowWaterMark();
         }
         break;
       }
@@ -982,5 +1020,204 @@ export class SyncEngine {
 
     const timeSinceLastPong = Date.now() - this.lastPongReceived;
     return timeSinceLastPong < this.heartbeatConfig.timeoutMs;
+  }
+
+  // ============ Backpressure Methods ============
+
+  /**
+   * Get the current number of pending (unsynced) operations.
+   */
+  public getPendingOpsCount(): number {
+    return this.opLog.filter(op => !op.synced).length;
+  }
+
+  /**
+   * Get the current backpressure status.
+   */
+  public getBackpressureStatus(): BackpressureStatus {
+    const pending = this.getPendingOpsCount();
+    const max = this.backpressureConfig.maxPendingOps;
+    return {
+      pending,
+      max,
+      percentage: max > 0 ? pending / max : 0,
+      isPaused: this.backpressurePaused,
+      strategy: this.backpressureConfig.strategy,
+    };
+  }
+
+  /**
+   * Returns true if writes are currently paused due to backpressure.
+   */
+  public isBackpressurePaused(): boolean {
+    return this.backpressurePaused;
+  }
+
+  /**
+   * Subscribe to backpressure events.
+   * @param event Event name: 'backpressure:high', 'backpressure:low', 'backpressure:paused', 'backpressure:resumed', 'operation:dropped'
+   * @param listener Callback function
+   * @returns Unsubscribe function
+   */
+  public onBackpressure(
+    event: 'backpressure:high' | 'backpressure:low' | 'backpressure:paused' | 'backpressure:resumed' | 'operation:dropped',
+    listener: (data?: BackpressureThresholdEvent | OperationDroppedEvent) => void
+  ): () => void {
+    if (!this.backpressureListeners.has(event)) {
+      this.backpressureListeners.set(event, new Set());
+    }
+    this.backpressureListeners.get(event)!.add(listener);
+
+    return () => {
+      this.backpressureListeners.get(event)?.delete(listener);
+    };
+  }
+
+  /**
+   * Emit a backpressure event to all listeners.
+   */
+  private emitBackpressureEvent(
+    event: 'backpressure:high' | 'backpressure:low' | 'backpressure:paused' | 'backpressure:resumed' | 'operation:dropped',
+    data?: BackpressureThresholdEvent | OperationDroppedEvent
+  ): void {
+    const listeners = this.backpressureListeners.get(event);
+    if (listeners) {
+      for (const listener of listeners) {
+        try {
+          listener(data);
+        } catch (err) {
+          logger.error({ err, event }, 'Error in backpressure event listener');
+        }
+      }
+    }
+  }
+
+  /**
+   * Check backpressure before adding a new operation.
+   * May pause, throw, or drop depending on strategy.
+   */
+  private async checkBackpressure(): Promise<void> {
+    const pendingCount = this.getPendingOpsCount();
+
+    if (pendingCount < this.backpressureConfig.maxPendingOps) {
+      return; // Capacity available
+    }
+
+    switch (this.backpressureConfig.strategy) {
+      case 'pause':
+        await this.waitForCapacity();
+        break;
+      case 'throw':
+        throw new BackpressureError(
+          pendingCount,
+          this.backpressureConfig.maxPendingOps
+        );
+      case 'drop-oldest':
+        this.dropOldestOp();
+        break;
+    }
+  }
+
+  /**
+   * Check high water mark and emit event if threshold reached.
+   */
+  private checkHighWaterMark(): void {
+    const pendingCount = this.getPendingOpsCount();
+    const threshold = Math.floor(
+      this.backpressureConfig.maxPendingOps * this.backpressureConfig.highWaterMark
+    );
+
+    if (pendingCount >= threshold && !this.highWaterMarkEmitted) {
+      this.highWaterMarkEmitted = true;
+      logger.warn(
+        { pending: pendingCount, max: this.backpressureConfig.maxPendingOps },
+        'Backpressure high water mark reached'
+      );
+      this.emitBackpressureEvent('backpressure:high', {
+        pending: pendingCount,
+        max: this.backpressureConfig.maxPendingOps,
+      });
+    }
+  }
+
+  /**
+   * Check low water mark and resume paused writes if threshold reached.
+   */
+  private checkLowWaterMark(): void {
+    const pendingCount = this.getPendingOpsCount();
+    const lowThreshold = Math.floor(
+      this.backpressureConfig.maxPendingOps * this.backpressureConfig.lowWaterMark
+    );
+    const highThreshold = Math.floor(
+      this.backpressureConfig.maxPendingOps * this.backpressureConfig.highWaterMark
+    );
+
+    // Reset high water mark flag when below high threshold
+    if (pendingCount < highThreshold && this.highWaterMarkEmitted) {
+      this.highWaterMarkEmitted = false;
+    }
+
+    // Emit low water mark event when crossing below threshold
+    if (pendingCount <= lowThreshold) {
+      if (this.backpressurePaused) {
+        this.backpressurePaused = false;
+        logger.info(
+          { pending: pendingCount, max: this.backpressureConfig.maxPendingOps },
+          'Backpressure low water mark reached, resuming writes'
+        );
+        this.emitBackpressureEvent('backpressure:low', {
+          pending: pendingCount,
+          max: this.backpressureConfig.maxPendingOps,
+        });
+        this.emitBackpressureEvent('backpressure:resumed');
+
+        // Resume all waiting writes
+        const waiting = this.waitingForCapacity;
+        this.waitingForCapacity = [];
+        for (const resolve of waiting) {
+          resolve();
+        }
+      }
+    }
+  }
+
+  /**
+   * Wait for capacity to become available (used by 'pause' strategy).
+   */
+  private async waitForCapacity(): Promise<void> {
+    if (!this.backpressurePaused) {
+      this.backpressurePaused = true;
+      logger.warn('Backpressure paused - waiting for capacity');
+      this.emitBackpressureEvent('backpressure:paused');
+    }
+
+    return new Promise<void>((resolve) => {
+      this.waitingForCapacity.push(resolve);
+    });
+  }
+
+  /**
+   * Drop the oldest pending operation (used by 'drop-oldest' strategy).
+   */
+  private dropOldestOp(): void {
+    // Find oldest unsynced operation by array order (oldest first)
+    const oldestIndex = this.opLog.findIndex(op => !op.synced);
+
+    if (oldestIndex !== -1) {
+      const dropped = this.opLog[oldestIndex];
+      this.opLog.splice(oldestIndex, 1);
+
+      logger.warn(
+        { opId: dropped.id, mapName: dropped.mapName, key: dropped.key },
+        'Dropped oldest pending operation due to backpressure'
+      );
+
+      this.emitBackpressureEvent('operation:dropped', {
+        opId: dropped.id,
+        mapName: dropped.mapName,
+        opType: dropped.opType,
+        key: dropped.key,
+      });
+    }
   }
 }
