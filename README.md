@@ -9,10 +9,10 @@ TopGun v2 is a complete rewrite. It's not a port — it's a new architecture des
 ## Key features
 
 - **Local-first**: Data lives in memory. Reads and writes never wait for network.
-- **Offline support**: Changes persist to IndexedDB/SQLite and sync when reconnected.
+- **Offline support**: Changes persist to IndexedDB and sync when reconnected.
 - **CRDT conflict resolution**: LWW-Map and OR-Map with Hybrid Logical Clocks.
 - **Merkle tree sync**: Efficient delta synchronization — only changed data moves over the wire.
-- **Pluggable storage**: PostgreSQL, SQLite, S3, or bring your own adapter.
+- **Pluggable storage**: PostgreSQL for server, IndexedDB for client, or bring your own adapter.
 - **Cluster-ready**: Server-side partitioning, distributed locks, pub/sub.
 - **TypeScript-first**: Full type safety from client to server.
 
@@ -102,7 +102,7 @@ Specifications in this repo:
 | `@topgunbuild/client` | Browser/Node.js SDK with IndexedDB persistence |
 | `@topgunbuild/server` | WebSocket server, clustering, storage adapters |
 | `@topgunbuild/react` | React hooks: `useQuery`, `useMap`, `useMutation`, `useTopic` |
-| `@topgunbuild/adapters` | Storage adapters: IndexedDB, SQLite, LevelDB |
+| `@topgunbuild/adapters` | Storage adapters: IndexedDB |
 | `@topgunbuild/adapter-better-auth` | Better Auth integration |
 
 ## Running locally
