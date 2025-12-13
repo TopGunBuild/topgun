@@ -18,11 +18,18 @@ export interface OpLogEntry {
   synced: boolean; // True if this operation has been successfully pushed to the server
 }
 
+export interface HeartbeatConfig {
+  intervalMs: number;      // Default: 5000 (5 seconds)
+  timeoutMs: number;       // Default: 15000 (15 seconds)
+  enabled: boolean;        // Default: true
+}
+
 export interface SyncEngineConfig {
   nodeId: string;
   serverUrl: string;
   storageAdapter: IStorageAdapter;
   reconnectInterval?: number;
+  heartbeat?: Partial<HeartbeatConfig>;
 }
 
 export class SyncEngine {
@@ -44,12 +51,25 @@ export class SyncEngine {
   private authToken: string | null = null;
   private tokenProvider: (() => Promise<string | null>) | null = null;
 
+  // Heartbeat state
+  private readonly heartbeatConfig: HeartbeatConfig;
+  private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  private lastPongReceived: number = Date.now();
+  private lastRoundTripTime: number | null = null;
+
   constructor(config: SyncEngineConfig) {
     this.nodeId = config.nodeId;
     this.serverUrl = config.serverUrl;
     this.storageAdapter = config.storageAdapter;
     this.reconnectInterval = config.reconnectInterval || 5000;
     this.hlc = new HLC(this.nodeId);
+
+    // Initialize heartbeat config with defaults
+    this.heartbeatConfig = {
+      intervalMs: config.heartbeat?.intervalMs ?? 5000,
+      timeoutMs: config.heartbeat?.timeoutMs ?? 15000,
+      enabled: config.heartbeat?.enabled ?? true,
+    };
 
     this.initConnection();
     this.loadOpLog();
@@ -90,6 +110,7 @@ export class SyncEngine {
 
     this.websocket.onclose = () => {
       logger.info('WebSocket disconnected. Retrying...');
+      this.stopHeartbeat();
       this.isOnline = false;
       this.isAuthenticated = false;
       this.scheduleReconnect();
@@ -420,6 +441,7 @@ export class SyncEngine {
 
         // Only re-subscribe on first authentication to prevent UI flickering
         if (!wasAuthenticated) {
+          this.startHeartbeat();
           this.startMerkleSync();
           for (const query of this.queries.values()) {
             this.sendQuerySubscription(query);
@@ -428,6 +450,11 @@ export class SyncEngine {
             this.sendTopicSubscription(topic);
           }
         }
+        break;
+      }
+
+      case 'PONG': {
+        this.handlePong(message);
         break;
       }
 
@@ -644,6 +671,8 @@ export class SyncEngine {
    * Closes the WebSocket connection and cleans up resources.
    */
   public close(): void {
+    this.stopHeartbeat();
+
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -658,6 +687,114 @@ export class SyncEngine {
     this.isOnline = false;
     this.isAuthenticated = false;
     logger.info('SyncEngine closed');
+  }
+
+  // ============ Heartbeat Methods ============
+
+  /**
+   * Starts the heartbeat mechanism after successful connection.
+   */
+  private startHeartbeat(): void {
+    if (!this.heartbeatConfig.enabled) {
+      return;
+    }
+
+    this.stopHeartbeat(); // Clear any existing interval
+    this.lastPongReceived = Date.now();
+
+    this.heartbeatInterval = setInterval(() => {
+      this.sendPing();
+      this.checkHeartbeatTimeout();
+    }, this.heartbeatConfig.intervalMs);
+
+    logger.info({ intervalMs: this.heartbeatConfig.intervalMs }, 'Heartbeat started');
+  }
+
+  /**
+   * Stops the heartbeat mechanism.
+   */
+  private stopHeartbeat(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+      logger.info('Heartbeat stopped');
+    }
+  }
+
+  /**
+   * Sends a PING message to the server.
+   */
+  private sendPing(): void {
+    if (this.websocket?.readyState === WebSocket.OPEN) {
+      const pingMessage = {
+        type: 'PING',
+        timestamp: Date.now(),
+      };
+      this.websocket.send(serialize(pingMessage));
+    }
+  }
+
+  /**
+   * Handles incoming PONG message from server.
+   */
+  private handlePong(msg: { timestamp: number; serverTime: number }): void {
+    const now = Date.now();
+    this.lastPongReceived = now;
+    this.lastRoundTripTime = now - msg.timestamp;
+
+    logger.debug({
+      rtt: this.lastRoundTripTime,
+      serverTime: msg.serverTime,
+      clockSkew: msg.serverTime - (msg.timestamp + this.lastRoundTripTime / 2),
+    }, 'Received PONG');
+  }
+
+  /**
+   * Checks if heartbeat has timed out and triggers reconnection if needed.
+   */
+  private checkHeartbeatTimeout(): void {
+    const now = Date.now();
+    const timeSinceLastPong = now - this.lastPongReceived;
+
+    if (timeSinceLastPong > this.heartbeatConfig.timeoutMs) {
+      logger.warn({
+        timeSinceLastPong,
+        timeoutMs: this.heartbeatConfig.timeoutMs,
+      }, 'Heartbeat timeout - triggering reconnection');
+
+      this.stopHeartbeat();
+
+      // Force close and reconnect
+      if (this.websocket) {
+        this.websocket.close();
+      }
+    }
+  }
+
+  /**
+   * Returns the last measured round-trip time in milliseconds.
+   * Returns null if no PONG has been received yet.
+   */
+  public getLastRoundTripTime(): number | null {
+    return this.lastRoundTripTime;
+  }
+
+  /**
+   * Returns true if the connection is considered healthy based on heartbeat.
+   * A connection is healthy if it's online, authenticated, and has received
+   * a PONG within the timeout window.
+   */
+  public isConnectionHealthy(): boolean {
+    if (!this.isOnline || !this.isAuthenticated) {
+      return false;
+    }
+
+    if (!this.heartbeatConfig.enabled) {
+      return true; // If heartbeat disabled, consider healthy if online
+    }
+
+    const timeSinceLastPong = Date.now() - this.lastPongReceived;
+    return timeSinceLastPong < this.heartbeatConfig.timeoutMs;
   }
 
   private async resetMap(mapName: string): Promise<void> {
