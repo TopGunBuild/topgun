@@ -1,6 +1,6 @@
 {
   "name": "topgun",
-  "version": "0.1.0",
+  "version": "0.2.0-alpha",
   "description": "Offline-First In-Memory Data Grid",
   "private": true,
   "packageManager": "pnpm@10.13.1",
