@@ -222,6 +222,7 @@ export const MessageSchema = z.discriminatedUnion('type', [
   TopicUnsubSchema,
   TopicPubSchema,
   PingMessageSchema,
+  PongMessageSchema,
 ]);
 
 // --- Type Inference ---
