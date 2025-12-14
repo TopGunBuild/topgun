@@ -24,6 +24,7 @@
     "test:coverage": "jest --coverage"
   },
   "devDependencies": {
+    "fast-check": "^4.4.0",
     "typescript": "^5.0.0"
   },
   "dependencies": {
