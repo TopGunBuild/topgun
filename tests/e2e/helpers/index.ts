@@ -41,6 +41,7 @@ export async function createTestServer(
     nodeId: `test-server-${Date.now()}`,
     host: 'localhost',
     clusterPort: 0,
+    metricsPort: 0, // Let OS assign port to avoid EADDRINUSE
     peers: [],
     jwtSecret: JWT_SECRET,
     ...overrides,
