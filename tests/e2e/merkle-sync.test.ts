@@ -1,6 +1,6 @@
 import { ServerCoordinator } from '@topgunbuild/server';
 import { LWWMap } from '@topgunbuild/core';
-import { TopGunClient } from '@topgunbuild/client';
+import { TopGunClient, SyncState } from '@topgunbuild/client';
 import {
     createTestServer,
     createTestToken,
@@ -8,6 +8,38 @@ import {
     MemoryStorageAdapter,
     createLWWRecord
 } from './helpers';
+
+/**
+ * Helper to wait for client to be ready for authentication.
+ * SyncEngine initiates connection in constructor, so we need to wait
+ * for AUTHENTICATING state before calling setAuthToken.
+ */
+async function waitForAuthReady(client: TopGunClient, timeout = 5000): Promise<void> {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            unsubscribe();
+            reject(new Error('Timeout waiting for AUTHENTICATING state'));
+        }, timeout);
+
+        const checkState = () => {
+            const state = client.getConnectionState();
+            if (state === SyncState.AUTHENTICATING ||
+                state === SyncState.SYNCING ||
+                state === SyncState.CONNECTED) {
+                clearTimeout(timer);
+                unsubscribe();
+                resolve();
+            }
+        };
+
+        // Check immediately in case already in correct state
+        checkState();
+
+        const unsubscribe = client.onConnectionStateChange(() => {
+            checkState();
+        });
+    });
+}
 
 describe('E2E: Merkle Sync', () => {
     let server: ServerCoordinator;
@@ -42,7 +74,8 @@ describe('E2E: Merkle Sync', () => {
         });
         await client.start();
 
-        // 3. Authenticate
+        // 3. Wait for connection and authenticate
+        await waitForAuthReady(client);
         const token = createTestToken('test-user', ['ADMIN']);
         client.setAuthToken(token);
 
@@ -75,6 +108,7 @@ describe('E2E: Merkle Sync', () => {
             storage
         });
         await client.start();
+        await waitForAuthReady(client);
         client.setAuthToken(createTestToken('user-1', ['ADMIN']));
 
         const clientMap = client.getMap<string, any>('delta-test');
@@ -93,6 +127,7 @@ describe('E2E: Merkle Sync', () => {
             storage // Reusing storage
         });
         await client2.start();
+        await waitForAuthReady(client2);
         client2.setAuthToken(createTestToken('user-1', ['ADMIN']));
 
         const clientMap2 = client2.getMap<string, any>('delta-test');
