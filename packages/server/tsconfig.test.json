@@ -1,11 +1,7 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "outDir": "dist",
-    "rootDir": "src",
-    "noEmit": false,
-    "declaration": true,
-    "declarationMap": true,
+    "noEmit": true,
     "baseUrl": ".",
     "paths": {
       "@topgunbuild/core": ["../core/src"],
@@ -13,6 +9,5 @@
       "@topgunbuild/server": ["./src"]
     }
   },
-  "include": ["src"],
-  "exclude": ["src/__tests__"]
+  "include": ["src/**/*"]
 }
