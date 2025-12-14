@@ -50,7 +50,7 @@ coverage/
 .nyc_output/
 
 
-# Test Certificates
-*.crt
-*.key
-packages/server/test/fixtures/
+# Test Certificates (allow test fixtures)
+# *.crt
+# *.key
+# packages/server/test/fixtures/
