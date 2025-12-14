@@ -22,6 +22,8 @@ export interface TestClient {
   send: (message: any) => void;
   waitForMessage: (type: string, timeout?: number) => Promise<any>;
   close: () => void;
+  startHeartbeat: () => void;
+  stopHeartbeat: () => void;
 }
 
 let portCounter = 10000;
@@ -65,6 +67,7 @@ export async function createTestClient(
   const messages: any[] = [];
   let isAuthenticated = false;
   let resolvers: Map<string, { resolve: (value: any) => void; timeout: NodeJS.Timeout }> = new Map();
+  let heartbeatInterval: NodeJS.Timeout | null = null;
 
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(serverUrl);
@@ -100,7 +103,28 @@ export async function createTestClient(
         });
       },
 
+      startHeartbeat: () => {
+        if (heartbeatInterval) return;
+        // Send PING every 10 seconds (server timeout is 20 seconds)
+        heartbeatInterval = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(serialize({ type: 'PING', timestamp: Date.now() }));
+          }
+        }, 10000);
+      },
+
+      stopHeartbeat: () => {
+        if (heartbeatInterval) {
+          clearInterval(heartbeatInterval);
+          heartbeatInterval = null;
+        }
+      },
+
       close: () => {
+        if (heartbeatInterval) {
+          clearInterval(heartbeatInterval);
+          heartbeatInterval = null;
+        }
         ws.close();
         for (const { timeout } of resolvers.values()) {
           clearTimeout(timeout);
@@ -138,6 +162,8 @@ export async function createTestClient(
 
         if (message.type === 'AUTH_ACK') {
           client.isAuthenticated = true;
+          // Start heartbeat after successful authentication
+          client.startHeartbeat();
         }
       } catch (err) {
         console.error('Failed to parse message:', err);
@@ -149,7 +175,8 @@ export async function createTestClient(
     });
 
     ws.on('close', () => {
-      // Cleanup
+      // Cleanup - stop heartbeat when connection closes
+      client.stopHeartbeat();
     });
 
     // Wait for connection to be established
