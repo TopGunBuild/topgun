@@ -100,6 +100,9 @@ export class ServerCoordinator {
     // Track map loading state to avoid returning empty results during async load
     private mapLoadingPromises: Map<string, Promise<void>> = new Map();
 
+    // Track pending batch operations for testing purposes
+    private pendingBatchOperations: Set<Promise<void>> = new Set();
+
     private _actualPort: number = 0;
     private _actualClusterPort: number = 0;
     private _readyPromise: Promise<void>;
@@ -238,6 +241,15 @@ export class ServerCoordinator {
     /** Wait for server to be fully ready (ports assigned) */
     public ready(): Promise<void> {
         return this._readyPromise;
+    }
+
+    /**
+     * Wait for all pending batch operations to complete.
+     * Useful for tests that need to verify state after OP_BATCH.
+     */
+    public async waitForPendingBatches(): Promise<void> {
+        if (this.pendingBatchOperations.size === 0) return;
+        await Promise.all(this.pendingBatchOperations);
     }
 
     /** Get the actual port the server is listening on */
@@ -616,76 +628,59 @@ export class ServerCoordinator {
                 const ops = message.payload.ops;
                 logger.info({ clientId: client.id, count: ops.length }, 'Received batch');
 
-                let lastProcessedId: string | null = null;
+                // === OPTIMIZATION 1: Early ACK ===
+                // Fast validation pass - check permissions without processing
+                const validOps: typeof ops = [];
                 let rejectedCount = 0;
+                let lastValidId: string | null = null;
 
                 for (const op of ops) {
-                    // OpLogEntry has { mapName, key, record, ... }
-
-                    // Check Permission for each op
                     const isRemove = op.opType === 'REMOVE' || (op.record && op.record.value === null);
                     const action: PermissionType = isRemove ? 'REMOVE' : 'PUT';
+
                     if (!this.securityManager.checkPermission(client.principal!, op.mapName, action)) {
                         rejectedCount++;
                         logger.warn({ clientId: client.id, action, mapName: op.mapName }, 'Access Denied (Batch)');
                         continue;
                     }
 
-                    // processLocalOp expects { mapName, key, record, orRecord, orTag, opType }
-
-                    if (this.partitionService.isLocalOwner(op.key)) {
-                        try {
-                            await this.processLocalOp({
-                                mapName: op.mapName,
-                                key: op.key,
-                                record: op.record,
-                                orRecord: op.orRecord,
-                                orTag: op.orTag,
-                                opType: op.opType
-                            }, false, client.id);
-
-                            if (op.id) {
-                                lastProcessedId = op.id;
-                            }
-                        } catch (err) {
-                            rejectedCount++;
-                            logger.warn({ clientId: client.id, mapName: op.mapName, err }, 'Op rejected in batch');
-                            // We do NOT update lastProcessedId for failed op
-                        }
-                    } else {
-                        const owner = this.partitionService.getOwner(op.key);
-                        this.cluster.sendToNode(owner, {
-                            type: 'CLIENT_OP',
-                            payload: {
-                                mapName: op.mapName,
-                                key: op.key,
-                                record: op.record,
-                                orRecord: op.orRecord,
-                                orTag: op.orTag,
-                                opType: op.opType
-                            }
-                        });
-                        // For forwarded ops, we optimistically assume success for batch ACK purposes?
-                        // Or we should only ACK what we processed locally?
-                        // Batch ACK usually implies "accepted". Forwarding = accepted for processing.
-                        if (op.id) {
-                            lastProcessedId = op.id;
-                        }
+                    validOps.push(op);
+                    if (op.id) {
+                        lastValidId = op.id;
                     }
                 }
 
-                if (lastProcessedId !== null) {
+                // Send ACK IMMEDIATELY after validation (before processing)
+                if (lastValidId !== null) {
                     client.socket.send(serialize({
                         type: 'OP_ACK',
-                        payload: { lastId: lastProcessedId }
+                        payload: { lastId: lastValidId }
                     }));
                 }
 
+                // Send rejection error if any ops were denied
                 if (rejectedCount > 0) {
                     client.socket.send(serialize({
                         type: 'ERROR',
                         payload: { code: 403, message: `Partial batch failure: ${rejectedCount} ops denied` }
                     }));
+                }
+
+                // Process valid ops asynchronously (non-blocking)
+                if (validOps.length > 0) {
+                    const batchPromise = new Promise<void>((resolve) => {
+                        setImmediate(() => {
+                            this.processBatchAsync(validOps, client.id)
+                                .catch(err => {
+                                    logger.error({ clientId: client.id, err }, 'Batch processing failed');
+                                })
+                                .finally(() => {
+                                    this.pendingBatchOperations.delete(batchPromise);
+                                    resolve();
+                                });
+                        });
+                    });
+                    this.pendingBatchOperations.add(batchPromise);
                 }
                 break;
             }
@@ -1210,6 +1205,91 @@ export class ServerCoordinator {
         }
     }
 
+    /**
+     * === OPTIMIZATION 2 & 3: Batched Broadcast with Serialization Caching ===
+     * Groups clients by their permission roles and serializes once per group.
+     * Also batches multiple events into a single SERVER_BATCH_EVENT message.
+     */
+    private broadcastBatch(events: any[], excludeClientId?: string): void {
+        if (events.length === 0) return;
+
+        // Group clients by their role signature for serialization caching
+        const clientsByRoleSignature = new Map<string, ClientConnection[]>();
+
+        for (const [id, client] of this.clients) {
+            if (id !== excludeClientId && client.socket.readyState === 1 && client.isAuthenticated && client.principal) {
+                // Create a role signature for grouping (sorted roles joined)
+                const roleSignature = (client.principal.roles || ['USER']).sort().join(',');
+
+                if (!clientsByRoleSignature.has(roleSignature)) {
+                    clientsByRoleSignature.set(roleSignature, []);
+                }
+                clientsByRoleSignature.get(roleSignature)!.push(client);
+            }
+        }
+
+        // For each role group, filter events once and serialize once
+        for (const [roleSignature, clients] of clientsByRoleSignature) {
+            if (clients.length === 0) continue;
+
+            // Use first client as representative for filtering (same roles = same permissions)
+            const representativeClient = clients[0];
+
+            // Filter all events for this role group
+            const filteredEvents = events.map(eventPayload => {
+                const mapName = eventPayload.mapName;
+                const newPayload = { ...eventPayload };
+
+                if (newPayload.record) { // LWW
+                    const newVal = this.securityManager.filterObject(
+                        newPayload.record.value,
+                        representativeClient.principal!,
+                        mapName
+                    );
+                    newPayload.record = { ...newPayload.record, value: newVal };
+                }
+
+                if (newPayload.orRecord) { // OR_ADD
+                    const newVal = this.securityManager.filterObject(
+                        newPayload.orRecord.value,
+                        representativeClient.principal!,
+                        mapName
+                    );
+                    newPayload.orRecord = { ...newPayload.orRecord, value: newVal };
+                }
+
+                return newPayload;
+            });
+
+            // Serialize ONCE for this entire group
+            const batchMessage = {
+                type: 'SERVER_BATCH_EVENT',
+                payload: { events: filteredEvents },
+                timestamp: this.hlc.now()
+            };
+            const serializedBatch = serialize(batchMessage);
+
+            // Send to all clients in this role group
+            for (const client of clients) {
+                try {
+                    client.socket.send(serializedBatch);
+                } catch (err) {
+                    logger.error({ clientId: client.id, err }, 'Failed to send batch to client');
+                }
+            }
+        }
+    }
+
+    /**
+     * Helper method to get role signature for a client (for caching key)
+     */
+    private getClientRoleSignature(client: ClientConnection): string {
+        if (!client.principal || !client.principal.roles) {
+            return 'USER';
+        }
+        return client.principal.roles.sort().join(',');
+    }
+
     private setupClusterListeners() {
         this.cluster.on('memberJoined', () => {
             this.metricsService.setClusterMembers(this.cluster.getMembers().length);
@@ -1634,6 +1714,174 @@ export class ServerCoordinator {
         }
 
         // 4. Interceptors: onAfterOp
+        for (const interceptor of this.interceptors) {
+            if (interceptor.onAfterOp) {
+                interceptor.onAfterOp(op, context).catch(err => {
+                    logger.error({ err }, 'Error in onAfterOp');
+                });
+            }
+        }
+    }
+
+    /**
+     * === OPTIMIZATION 1: Async Batch Processing ===
+     * Processes validated operations asynchronously after ACK has been sent.
+     * This prevents blocking the event loop during high-throughput scenarios.
+     */
+    private async processBatchAsync(ops: any[], clientId: string): Promise<void> {
+        // === OPTIMIZATION 3: Batch Broadcast ===
+        // Collect all events for a single batched broadcast at the end
+        const batchedEvents: any[] = [];
+
+        for (const op of ops) {
+            if (this.partitionService.isLocalOwner(op.key)) {
+                try {
+                    // Process without immediate broadcast (we'll batch them)
+                    await this.processLocalOpForBatch(op, clientId, batchedEvents);
+                } catch (err) {
+                    logger.warn({ clientId, mapName: op.mapName, key: op.key, err }, 'Op failed in async batch');
+                }
+            } else {
+                // Forward to owner
+                const owner = this.partitionService.getOwner(op.key);
+                this.cluster.sendToNode(owner, {
+                    type: 'CLIENT_OP',
+                    payload: {
+                        mapName: op.mapName,
+                        key: op.key,
+                        record: op.record,
+                        orRecord: op.orRecord,
+                        orTag: op.orTag,
+                        opType: op.opType
+                    }
+                });
+            }
+        }
+
+        // Send batched broadcast if we have events
+        if (batchedEvents.length > 0) {
+            this.broadcastBatch(batchedEvents, clientId);
+        }
+    }
+
+    /**
+     * Process a single operation for batch processing.
+     * Similar to processLocalOp but collects events instead of broadcasting immediately.
+     */
+    private async processLocalOpForBatch(op: any, clientId: string, batchedEvents: any[]): Promise<void> {
+        // Context for interceptors
+        let context: OpContext = {
+            clientId,
+            isAuthenticated: false,
+            fromCluster: false,
+            originalSenderId: clientId
+        };
+
+        const client = this.clients.get(clientId);
+        if (client) {
+            context = {
+                clientId: client.id,
+                socket: client.socket,
+                isAuthenticated: client.isAuthenticated,
+                principal: client.principal,
+                fromCluster: false,
+                originalSenderId: clientId
+            };
+        }
+
+        // Interceptors: onBeforeOp
+        let currentOp: ServerOp | null = op;
+        try {
+            for (const interceptor of this.interceptors) {
+                if (interceptor.onBeforeOp && currentOp) {
+                    currentOp = await interceptor.onBeforeOp(currentOp, context);
+                    if (!currentOp) return;
+                }
+            }
+        } catch (err) {
+            logger.warn({ err, opId: op.id }, 'Interceptor rejected op in batch');
+            throw err;
+        }
+
+        if (!currentOp) return;
+        op = currentOp;
+
+        // Apply to server state
+        const typeHint = (op.opType === 'OR_ADD' || op.opType === 'OR_REMOVE') ? 'OR' : 'LWW';
+        const map = this.getMap(op.mapName, typeHint);
+
+        // Type compatibility check
+        if (typeHint === 'OR' && map instanceof LWWMap) {
+            throw new Error('Map type mismatch: LWWMap but received OR op');
+        }
+        if (typeHint === 'LWW' && map instanceof ORMap) {
+            throw new Error('Map type mismatch: ORMap but received LWW op');
+        }
+
+        let oldRecord: any;
+        let recordToStore: StorageValue<any> | undefined;
+        let tombstonesToStore: StorageValue<any> | undefined;
+
+        const eventPayload: any = {
+            mapName: op.mapName,
+            key: op.key,
+        };
+
+        if (map instanceof LWWMap) {
+            oldRecord = map.getRecord(op.key);
+            map.merge(op.key, op.record);
+            recordToStore = op.record;
+            eventPayload.eventType = 'UPDATED';
+            eventPayload.record = op.record;
+        } else if (map instanceof ORMap) {
+            oldRecord = map.getRecords(op.key);
+
+            if (op.opType === 'OR_ADD') {
+                map.apply(op.key, op.orRecord);
+                eventPayload.eventType = 'OR_ADD';
+                eventPayload.orRecord = op.orRecord;
+                recordToStore = { type: 'OR', records: map.getRecords(op.key) };
+            } else if (op.opType === 'OR_REMOVE') {
+                map.applyTombstone(op.orTag);
+                eventPayload.eventType = 'OR_REMOVE';
+                eventPayload.orTag = op.orTag;
+                recordToStore = { type: 'OR', records: map.getRecords(op.key) };
+                tombstonesToStore = { type: 'OR_TOMBSTONES', tags: map.getTombstones() };
+            }
+        }
+
+        // Live Query Evaluation
+        this.queryRegistry.processChange(op.mapName, map, op.key, op.record || op.orRecord, oldRecord);
+
+        const mapSize = (map instanceof ORMap) ? map.totalRecords : map.size;
+        this.metricsService.setMapSize(op.mapName, mapSize);
+
+        // Persist to storage (async, don't wait)
+        if (this.storage) {
+            if (recordToStore) {
+                this.storage.store(op.mapName, op.key, recordToStore).catch(err => {
+                    logger.error({ mapName: op.mapName, key: op.key, err }, 'Failed to persist op');
+                });
+            }
+            if (tombstonesToStore) {
+                this.storage.store(op.mapName, '__tombstones__', tombstonesToStore).catch(err => {
+                    logger.error({ mapName: op.mapName, err }, 'Failed to persist tombstones');
+                });
+            }
+        }
+
+        // Collect event for batched broadcast (instead of immediate broadcast)
+        batchedEvents.push(eventPayload);
+
+        // Broadcast to cluster (still per-op for now, could be batched too)
+        const members = this.cluster.getMembers();
+        for (const memberId of members) {
+            if (!this.cluster.isLocal(memberId)) {
+                this.cluster.send(memberId, 'CLUSTER_EVENT', eventPayload);
+            }
+        }
+
+        // Interceptors: onAfterOp
         for (const interceptor of this.interceptors) {
             if (interceptor.onAfterOp) {
                 interceptor.onAfterOp(op, context).catch(err => {

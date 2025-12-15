@@ -64,6 +64,9 @@ describe('Sync Protocol Integration', () => {
       payload: { ops }
     });
 
+    // Wait for async batch processing to complete
+    await server.waitForPendingBatches();
+
     // 1. Check Server State
     const map = server.getMap('todos') as LWWMap<string, any>;
     expect(map.get('todo:1')).toEqual({ title: 'Buy Milk' });
@@ -110,6 +113,9 @@ describe('Sync Protocol Integration', () => {
       type: 'OP_BATCH',
       payload: { ops }
     });
+
+    // Wait for async batch processing to complete
+    await server.waitForPendingBatches();
 
     const map = server.getMap('notes') as LWWMap<string, any>;
     expect(map.get('note:1')).toEqual({ text: 'Original' });
