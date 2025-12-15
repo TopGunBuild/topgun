@@ -1174,28 +1174,51 @@ export class ServerCoordinator {
         const isServerEvent = message.type === 'SERVER_EVENT';
 
         if (isServerEvent) {
-            for (const [id, client] of this.clients) {
-                if (id !== excludeClientId && client.socket.readyState === 1 && client.isAuthenticated && client.principal) {
-                    const payload = message.payload;
-                    const mapName = payload.mapName;
+            const payload = message.payload;
+            const mapName = payload.mapName;
 
-                    // Shallow clone payload
-                    const newPayload = { ...payload };
+            // === SUBSCRIPTION-BASED ROUTING ===
+            // Only send to clients that have active subscriptions for this map
+            const subscribedClientIds = this.queryRegistry.getSubscribedClientIds(mapName);
 
-                    if (newPayload.record) { // LWW
-                        const newVal = this.securityManager.filterObject(newPayload.record.value, client.principal, mapName);
-                        newPayload.record = { ...newPayload.record, value: newVal };
-                    }
+            // Track metrics
+            this.metricsService.incEventsRouted();
 
-                    if (newPayload.orRecord) { // OR_ADD
-                        const newVal = this.securityManager.filterObject(newPayload.orRecord.value, client.principal, mapName);
-                        newPayload.orRecord = { ...newPayload.orRecord, value: newVal };
-                    }
+            if (subscribedClientIds.size === 0) {
+                // Early exit - no subscribers for this map!
+                this.metricsService.incEventsFilteredBySubscription();
+                return;
+            }
 
-                    client.socket.send(serialize({ ...message, payload: newPayload }));
+            // Track average subscribers per event
+            this.metricsService.recordSubscribersPerEvent(subscribedClientIds.size);
+
+            // Send only to subscribed clients with FLS filtering
+            for (const clientId of subscribedClientIds) {
+                if (clientId === excludeClientId) continue;
+
+                const client = this.clients.get(clientId);
+                if (!client || client.socket.readyState !== 1 || !client.isAuthenticated || !client.principal) {
+                    continue;
                 }
+
+                // Shallow clone payload for FLS filtering
+                const newPayload = { ...payload };
+
+                if (newPayload.record) { // LWW
+                    const newVal = this.securityManager.filterObject(newPayload.record.value, client.principal, mapName);
+                    newPayload.record = { ...newPayload.record, value: newVal };
+                }
+
+                if (newPayload.orRecord) { // OR_ADD
+                    const newVal = this.securityManager.filterObject(newPayload.orRecord.value, client.principal, mapName);
+                    newPayload.orRecord = { ...newPayload.orRecord, value: newVal };
+                }
+
+                client.socket.send(serialize({ ...message, payload: newPayload }));
             }
         } else {
+            // Non-event messages (GC_PRUNE, SHUTDOWN_PENDING) still go to all clients
             const msgData = serialize(message);
             for (const [id, client] of this.clients) {
                 if (id !== excludeClientId && client.socket.readyState === 1) { // 1 = OPEN
@@ -1209,27 +1232,63 @@ export class ServerCoordinator {
      * === OPTIMIZATION 2 & 3: Batched Broadcast with Serialization Caching ===
      * Groups clients by their permission roles and serializes once per group.
      * Also batches multiple events into a single SERVER_BATCH_EVENT message.
+     * === OPTIMIZATION 4: Subscription-based Routing ===
+     * Only sends events to clients with active subscriptions for affected maps.
      */
     private broadcastBatch(events: any[], excludeClientId?: string): void {
         if (events.length === 0) return;
 
-        // Group clients by their role signature for serialization caching
-        const clientsByRoleSignature = new Map<string, ClientConnection[]>();
-
-        for (const [id, client] of this.clients) {
-            if (id !== excludeClientId && client.socket.readyState === 1 && client.isAuthenticated && client.principal) {
-                // Create a role signature for grouping (sorted roles joined)
-                const roleSignature = (client.principal.roles || ['USER']).sort().join(',');
-
-                if (!clientsByRoleSignature.has(roleSignature)) {
-                    clientsByRoleSignature.set(roleSignature, []);
-                }
-                clientsByRoleSignature.get(roleSignature)!.push(client);
+        // === SUBSCRIPTION-BASED ROUTING ===
+        // Get unique map names from events
+        const affectedMaps = new Set<string>();
+        for (const event of events) {
+            if (event.mapName) {
+                affectedMaps.add(event.mapName);
             }
         }
 
+        // Get all subscribed client IDs across all affected maps
+        const subscribedClientIds = new Set<string>();
+        for (const mapName of affectedMaps) {
+            const mapSubscribers = this.queryRegistry.getSubscribedClientIds(mapName);
+            for (const clientId of mapSubscribers) {
+                subscribedClientIds.add(clientId);
+            }
+        }
+
+        // Track metrics
+        this.metricsService.incEventsRouted();
+
+        if (subscribedClientIds.size === 0) {
+            // Early exit - no subscribers for any of the affected maps!
+            this.metricsService.incEventsFilteredBySubscription();
+            return;
+        }
+
+        this.metricsService.recordSubscribersPerEvent(subscribedClientIds.size);
+
+        // Group subscribed clients by their role signature for serialization caching
+        const clientsByRoleSignature = new Map<string, ClientConnection[]>();
+
+        for (const clientId of subscribedClientIds) {
+            if (clientId === excludeClientId) continue;
+
+            const client = this.clients.get(clientId);
+            if (!client || client.socket.readyState !== 1 || !client.isAuthenticated || !client.principal) {
+                continue;
+            }
+
+            // Create a role signature for grouping (sorted roles joined)
+            const roleSignature = (client.principal.roles || ['USER']).sort().join(',');
+
+            if (!clientsByRoleSignature.has(roleSignature)) {
+                clientsByRoleSignature.set(roleSignature, []);
+            }
+            clientsByRoleSignature.get(roleSignature)!.push(client);
+        }
+
         // For each role group, filter events once and serialize once
-        for (const [roleSignature, clients] of clientsByRoleSignature) {
+        for (const [, clients] of clientsByRoleSignature) {
             if (clients.length === 0) continue;
 
             // Use first client as representative for filtering (same roles = same permissions)

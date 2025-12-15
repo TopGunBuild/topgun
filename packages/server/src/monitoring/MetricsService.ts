@@ -1,4 +1,4 @@
-import { Registry, Gauge, Counter, collectDefaultMetrics } from 'prom-client';
+import { Registry, Gauge, Counter, Summary, collectDefaultMetrics } from 'prom-client';
 
 export class MetricsService {
   public readonly registry: Registry;
@@ -9,6 +9,11 @@ export class MetricsService {
   private opsTotal: Counter;
   private memoryUsage: Gauge;
   private clusterMembers: Gauge;
+
+  // Subscription-based routing metrics
+  private eventsRoutedTotal: Counter;
+  private eventsFilteredBySubscription: Counter;
+  private subscribersPerEvent: Summary;
 
   constructor() {
     this.registry = new Registry();
@@ -50,6 +55,26 @@ export class MetricsService {
       help: 'Number of active cluster members',
       registers: [this.registry],
     });
+
+    // === Subscription-based routing metrics ===
+    this.eventsRoutedTotal = new Counter({
+      name: 'topgun_events_routed_total',
+      help: 'Total number of events processed for routing',
+      registers: [this.registry],
+    });
+
+    this.eventsFilteredBySubscription = new Counter({
+      name: 'topgun_events_filtered_by_subscription',
+      help: 'Events NOT sent due to no active subscriptions',
+      registers: [this.registry],
+    });
+
+    this.subscribersPerEvent = new Summary({
+      name: 'topgun_subscribers_per_event',
+      help: 'Distribution of subscribers per event',
+      percentiles: [0.5, 0.9, 0.99],
+      registers: [this.registry],
+    });
   }
 
   public destroy() {
@@ -70,6 +95,29 @@ export class MetricsService {
 
   public setClusterMembers(count: number) {
     this.clusterMembers.set(count);
+  }
+
+  // === Subscription-based routing metric methods ===
+
+  /**
+   * Increment counter for total events processed for routing.
+   */
+  public incEventsRouted(): void {
+    this.eventsRoutedTotal.inc();
+  }
+
+  /**
+   * Increment counter for events filtered out due to no subscribers.
+   */
+  public incEventsFilteredBySubscription(): void {
+    this.eventsFilteredBySubscription.inc();
+  }
+
+  /**
+   * Record the number of subscribers for an event (for average calculation).
+   */
+  public recordSubscribersPerEvent(count: number): void {
+    this.subscribersPerEvent.observe(count);
   }
 
   public async getMetrics(): Promise<string> {

@@ -216,6 +216,19 @@ describe('ORMap Merkle Tree Sync Integration', () => {
       injectClient(client1);
       injectClient(client2);
 
+      // Initialize ORMap to ensure it exists before subscription
+      server.getMap('or:broadcast-test', 'OR');
+
+      // IMPORTANT: Client 2 must subscribe to receive SERVER_EVENT (subscription-based routing)
+      await (server as any).handleMessage(client2, {
+        type: 'QUERY_SUB',
+        payload: { queryId: 'sub-or-broadcast', mapName: 'or:broadcast-test', query: {} }
+      });
+
+      // Wait for subscription to be processed
+      await new Promise(r => setTimeout(r, 10));
+      responses2.length = 0; // Clear subscription response
+
       const record: ORMapRecord<string> = {
         value: 'broadcast-value',
         timestamp: { millis: Date.now(), counter: 1, nodeId: 'client-7' },
@@ -234,7 +247,10 @@ describe('ORMap Merkle Tree Sync Integration', () => {
         }
       });
 
-      // Client 2 should receive broadcast
+      // Wait for async broadcast
+      await new Promise(r => setTimeout(r, 10));
+
+      // Client 2 should receive broadcast (now that it's subscribed)
       const broadcastMsg = responses2.find((r: any) => r.type === 'SERVER_EVENT');
       expect(broadcastMsg).toBeDefined();
       expect(broadcastMsg.payload.eventType).toBe('OR_ADD');

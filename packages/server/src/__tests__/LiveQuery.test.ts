@@ -34,6 +34,7 @@ describe('Live Query Sliding Window Integration', () => {
     // 2. Setup Client & Subscribe (Top 2)
     const clientSocket = {
       send: jest.fn(),
+      close: jest.fn(),
       readyState: 1 // OPEN
     };
 
@@ -115,6 +116,7 @@ describe('Live Query Sliding Window Integration', () => {
     // 2. Setup Client
     const clientSocket = {
       send: jest.fn(),
+      close: jest.fn(),
       readyState: 1
     };
     const clientMock = {
