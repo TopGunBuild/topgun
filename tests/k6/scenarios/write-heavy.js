@@ -108,6 +108,8 @@ export default function () {
 
         // Start write loop
         scheduleWrites();
+        // Start heartbeat to prevent server eviction
+        scheduleHeartbeat();
       },
 
       onAuthError: () => {
@@ -117,13 +119,18 @@ export default function () {
 
       onOpAck: (msg) => {
         // Calculate latency for acknowledged operations
+        // Server ACKs with lastId - the last operation ID in the batch
+        // Since we only track the lastId from putBatch(), one ACK = one batch confirmed
         const lastId = msg.payload?.lastId;
         if (lastId && pendingOps.has(lastId)) {
           const sendTime = pendingOps.get(lastId);
           const latency = Date.now() - sendTime;
           writeLatency.add(latency);
           writeOpsAcked.add(BATCH_SIZE);
-          writeErrorRate.add(0);
+          // Mark successful - add 0 for each op in batch to keep rate accurate
+          for (let i = 0; i < BATCH_SIZE; i++) {
+            writeErrorRate.add(0);
+          }
           pendingOps.delete(lastId);
         }
       },
@@ -137,9 +144,12 @@ export default function () {
     });
 
     socket.on('close', () => {
-      // Track any unacked ops as potential errors
+      // Track any unacked batches as potential errors
+      // Each pending entry is a batch of BATCH_SIZE operations
       pendingOps.forEach(() => {
-        writeErrorRate.add(1);
+        for (let i = 0; i < BATCH_SIZE; i++) {
+          writeErrorRate.add(1);
+        }
       });
     });
 
@@ -181,10 +191,14 @@ export default function () {
         opsThisSecond += BATCH_SIZE;
 
         // Clean up old pending ops (timeout after 5s)
+        // Each pending entry represents a full batch of BATCH_SIZE operations
         const timeout = 5000;
         pendingOps.forEach((time, id) => {
           if (now - time > timeout) {
-            writeErrorRate.add(1);
+            // Count all ops in the timed-out batch as errors
+            for (let i = 0; i < BATCH_SIZE; i++) {
+              writeErrorRate.add(1);
+            }
             pendingOps.delete(id);
           }
         });
@@ -195,6 +209,19 @@ export default function () {
 
       // Start writing
       doWrite();
+    }
+
+    /**
+     * Schedule heartbeat to prevent server eviction
+     */
+    function scheduleHeartbeat() {
+      function doPing() {
+        if (authenticated) {
+          client.ping();
+          socket.setTimeout(doPing, 10000); // Every 10 seconds
+        }
+      }
+      socket.setTimeout(doPing, 10000);
     }
 
     // Close socket slightly before sleep ends to ensure clean iteration finish
