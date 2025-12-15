@@ -47,7 +47,11 @@ tests/k6/
 ├── lib/
 │   └── topgun-client.js    # TopGun WebSocket client library
 ├── scenarios/
-│   └── smoke.js            # Basic smoke test
+│   ├── smoke.js            # Basic smoke test
+│   ├── connection-storm.js # Massive concurrent connections
+│   ├── write-heavy.js      # Intensive write operations
+│   ├── read-heavy.js       # Mass subscriptions test
+│   └── mixed-workload.js   # Realistic production load
 ├── results/                # Test results (gitignored)
 └── README.md
 ```
@@ -63,7 +67,7 @@ Basic connectivity and functionality test.
 - **Operations**: Connect → Authenticate → PUT → Disconnect
 
 ```bash
-k6 run tests/k6/scenarios/smoke.js
+k6 run tests/k6/scenarios/smoke.js -e JWT_TOKEN=<token>
 ```
 
 #### Thresholds
@@ -74,6 +78,170 @@ k6 run tests/k6/scenarios/smoke.js
 | `topgun_auth_time` | p(95) < 500ms | Authentication time |
 | `topgun_auth_success` | rate > 99% | Authentication success rate |
 | `topgun_errors` | count < 10 | Total errors |
+
+---
+
+### Connection Storm (`scenarios/connection-storm.js`)
+
+Stress test for massive concurrent connections with ramping VUs.
+
+- **Ramping**: 0 → 100 → 500 → 1000 VUs over 5 minutes
+- **Operations**: Connect → Authenticate → Hold connection → Disconnect
+- **Tests**: Server's ability to handle connection spikes
+
+```bash
+# Full test
+k6 run tests/k6/scenarios/connection-storm.js -e JWT_TOKEN=<token>
+
+# Debug mode (lower load)
+k6 run tests/k6/scenarios/connection-storm.js -e JWT_TOKEN=<token> --vus 10 --duration 30s
+```
+
+#### Thresholds
+
+| Metric | Threshold | Description |
+|--------|-----------|-------------|
+| `connection_error_rate` | rate < 5% | Connection failures |
+| `topgun_connection_time` | p(95) < 500ms | Connection time |
+| `topgun_auth_success` | rate > 95% | Authentication success |
+
+#### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HOLD_TIME` | `5000` | Connection hold time in ms |
+
+#### Success Metrics
+
+- 1000 VUs without critical errors
+- < 5% connection failures
+- p95 connection time < 500ms
+
+---
+
+### Write-Heavy (`scenarios/write-heavy.js`)
+
+Intensive write load test to measure PUT operation throughput.
+
+- **VUs**: 100 virtual users
+- **Duration**: 5 minutes
+- **Operations**: ~10 PUT operations per second per VU
+- **Tests**: Write throughput and latency under load
+
+```bash
+# Full test
+k6 run tests/k6/scenarios/write-heavy.js -e JWT_TOKEN=<token>
+
+# Debug mode
+k6 run tests/k6/scenarios/write-heavy.js -e JWT_TOKEN=<token> --vus 10 --duration 30s
+```
+
+#### Thresholds
+
+| Metric | Threshold | Description |
+|--------|-----------|-------------|
+| `write_latency` | p(99) < 100ms | Write operation latency |
+| `write_error_rate` | rate < 1% | Write failures |
+| `write_ops_total` | count > 300,000 | Total operations |
+
+#### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OPS_PER_SECOND` | `10` | Write ops per second per VU |
+| `BATCH_SIZE` | `5` | Operations per batch |
+
+#### Success Metrics
+
+- > 1000 ops/sec sustained throughput
+- p99 latency < 100ms
+- < 1% error rate
+
+---
+
+### Read-Heavy (`scenarios/read-heavy.js`)
+
+Test for massive subscriptions and update propagation.
+
+- **VUs**: 200 virtual users
+- **Duration**: 3 minutes
+- **Readers**: 90% of VUs subscribe to 5 maps each
+- **Writers**: 10% of VUs generate continuous updates
+- **Tests**: Subscription handling and update propagation
+
+```bash
+# Full test
+k6 run tests/k6/scenarios/read-heavy.js -e JWT_TOKEN=<token>
+
+# Debug mode
+k6 run tests/k6/scenarios/read-heavy.js -e JWT_TOKEN=<token> --vus 20 --duration 30s
+```
+
+#### Thresholds
+
+| Metric | Threshold | Description |
+|--------|-----------|-------------|
+| `subscription_latency` | p(95) < 200ms | Subscription setup time |
+| `update_propagation_time` | p(95) < 50ms | Update delivery time |
+| `topgun_errors` | rate < 2% | Total errors |
+
+#### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MAPS_PER_VU` | `5` | Subscriptions per reader |
+| `WRITER_PERCENTAGE` | `10` | Percentage of writer VUs |
+| `WRITES_PER_SECOND` | `5` | Writes per second per writer |
+
+#### Success Metrics
+
+- 1000 active subscriptions
+- Update propagation < 50ms p95
+- < 2% error rate
+
+---
+
+### Mixed Workload (`scenarios/mixed-workload.js`)
+
+Realistic production-like load with mixed read/write operations.
+
+- **VUs**: 150 (ramping: 0 → 150 → 0)
+- **Duration**: 10 minutes
+- **Readers**: 70% of VUs (subscribe to 3-7 maps)
+- **Writers**: 30% of VUs (10 ops/sec)
+- **Tests**: End-to-end latency and sustained throughput
+
+```bash
+# Full test
+k6 run tests/k6/scenarios/mixed-workload.js -e JWT_TOKEN=<token>
+
+# Debug mode
+k6 run tests/k6/scenarios/mixed-workload.js -e JWT_TOKEN=<token> --vus 15 --duration 1m
+```
+
+#### Thresholds
+
+| Metric | Threshold | Description |
+|--------|-----------|-------------|
+| `e2e_latency` | p(95) < 100ms | End-to-end latency |
+| `write_latency` | p(95) < 50ms | Write operation latency |
+| `error_rate` | rate < 2% | Total error rate |
+| `total_operations` | count > 300,000 | Total operations |
+
+#### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `READER_PERCENTAGE` | `70` | Percentage of reader VUs |
+| `WRITE_RATE` | `10` | Writes per second per writer |
+| `MAPS_COUNT` | `20` | Number of maps to use |
+
+#### Success Metrics
+
+- Stable operation for 10 minutes
+- > 500 ops/sec sustained throughput
+- < 2% error rate
+- p95 e2e latency < 100ms
 
 ## Configuration
 
