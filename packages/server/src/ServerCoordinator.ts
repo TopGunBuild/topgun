@@ -23,7 +23,6 @@ import { logger } from './utils/logger';
 import { MetricsService } from './monitoring/MetricsService';
 import { SystemManager } from './system/SystemManager';
 import { TLSConfig, ClusterTLSConfig } from './types/TLSConfig';
-import { BroadcastService } from './broadcast/BroadcastService';
 
 interface ClientConnection {
     id: string;
@@ -104,9 +103,6 @@ export class ServerCoordinator {
     // Track pending batch operations for testing purposes
     private pendingBatchOperations: Set<Promise<void>> = new Set();
 
-    // Tick-based broadcast buffer for high-throughput scenarios
-    private broadcastService!: BroadcastService;
-
     private _actualPort: number = 0;
     private _actualClusterPort: number = 0;
     private _readyPromise: Promise<void>;
@@ -126,18 +122,6 @@ export class ServerCoordinator {
         this.securityManager = new SecurityManager(config.securityPolicies || []);
         this.interceptors = config.interceptors || [];
         this.metricsService = new MetricsService();
-
-        // Initialize tick-based broadcast service (Nagle's Algorithm for events)
-        // Flushes every 50ms instead of after each batch - 10x reduction in ws.send() overhead
-        this.broadcastService = new BroadcastService(
-            (events, excludeClientId) => this.broadcastBatch(events, excludeClientId),
-            {
-                flushIntervalMs: 50,    // 20 flushes/sec
-                maxBufferSize: 5000,    // Immediate flush if buffer gets too large
-                adaptiveFlush: false    // Disable for high-throughput - always wait for timer
-            }
-        );
-        this.broadcastService.start();
 
         // HTTP Server Setup first (to get actual port if port=0)
         if (config.tls?.enabled) {
@@ -287,7 +271,6 @@ export class ServerCoordinator {
             this.metricsServer.close();
         }
         this.metricsService.destroy();
-        this.broadcastService.stop(); // Flush remaining events and stop timer
         this.wss.close();
 
         // 2. Notify and Close Clients
@@ -1794,11 +1777,9 @@ export class ServerCoordinator {
             }
         }
 
-        // Buffer events for tick-based broadcast (Nagle's Algorithm)
-        // Instead of broadcasting immediately after each batch (200 times/sec),
-        // events are buffered and flushed periodically (20 times/sec at 50ms interval)
+        // Send batched broadcast if we have events
         if (batchedEvents.length > 0) {
-            this.broadcastService.buffer(batchedEvents, clientId);
+            this.broadcastBatch(batchedEvents, clientId);
         }
     }
 
