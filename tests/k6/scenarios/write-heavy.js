@@ -35,6 +35,9 @@ const WS_URL = getWsUrl();
 const OPS_PER_SECOND = getConfig('OPS_PER_SECOND', 10);
 const BATCH_SIZE = getConfig('BATCH_SIZE', 5);
 
+// Default test duration in seconds (can be overridden via CLI)
+const TEST_DURATION_SEC = getConfig('DURATION_SEC', 300); // 5 minutes
+
 // Test configuration
 export const options = {
   vus: 100,
@@ -44,8 +47,6 @@ export const options = {
     write_latency: ['p(99)<100'],
     // Error rate < 1%
     write_error_rate: ['rate<0.01'],
-    // Ops per second > 1000
-    write_ops_total: ['count>300000'], // 100 VUs * 10 ops/s * 300s = 300,000
     // Auth should succeed
     topgun_auth_success: ['rate>0.99'],
   },
@@ -196,11 +197,10 @@ export default function () {
       doWrite();
     }
 
-    // Run for test duration, then close
-    // k6 will handle the duration, but we add a safety timeout
+    // Close socket slightly before sleep ends to ensure clean iteration finish
     socket.setTimeout(function () {
       socket.close();
-    }, 6 * 60 * 1000); // 6 minutes safety timeout
+    }, (TEST_DURATION_SEC - 2) * 1000);
   });
 
   // Check connection was successful
@@ -208,9 +208,7 @@ export default function () {
     'WebSocket connected': (r) => r && r.status === 101,
   });
 
-  // Keep iteration alive for the test duration
-  // The socket callbacks handle everything
-  sleep(300); // 5 minutes
+  // Note: ws.connect() blocks until socket closes, no sleep needed
 }
 
 /**

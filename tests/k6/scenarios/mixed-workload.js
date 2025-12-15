@@ -37,6 +37,9 @@ const READER_PERCENTAGE = getConfig('READER_PERCENTAGE', 70);
 const WRITE_RATE = getConfig('WRITE_RATE', 10);
 const MAPS_COUNT = getConfig('MAPS_COUNT', 20);
 
+// Default test duration in seconds (can be overridden via CLI)
+const TEST_DURATION_SEC = getConfig('DURATION_SEC', 600); // 10 minutes
+
 // Generate map names
 const MAPS = Array.from({ length: MAPS_COUNT }, (_, i) => `k6-mixed-map-${i}`);
 
@@ -338,10 +341,10 @@ export default function () {
       socket.setTimeout(doPing, 10000);
     }
 
-    // Run for test duration with safety margin
+    // Close socket slightly before sleep ends to ensure clean iteration finish
     socket.setTimeout(function () {
       socket.close();
-    }, 12 * 60 * 1000); // 12 minutes safety
+    }, (TEST_DURATION_SEC - 2) * 1000);
   });
 
   // Check connection was successful
@@ -353,8 +356,7 @@ export default function () {
     errorRate.add(1);
   }
 
-  // Keep iteration alive for full test duration
-  sleep(600); // 10 minutes
+  // Note: ws.connect() blocks until socket closes, no sleep needed
 }
 
 /**

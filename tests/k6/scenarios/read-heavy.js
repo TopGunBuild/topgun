@@ -37,6 +37,9 @@ const MAPS_PER_VU = getConfig('MAPS_PER_VU', 5);
 const WRITER_PERCENTAGE = getConfig('WRITER_PERCENTAGE', 10);
 const WRITES_PER_SECOND = getConfig('WRITES_PER_SECOND', 5);
 
+// Default test duration in seconds (can be overridden via CLI)
+const TEST_DURATION_SEC = getConfig('DURATION_SEC', 180); // 3 minutes
+
 // Test configuration
 export const options = {
   vus: 200,
@@ -253,10 +256,10 @@ export default function () {
       socket.setTimeout(doPing, 5000);
     }
 
-    // Run for test duration
+    // Close socket slightly before sleep ends to ensure clean iteration finish
     socket.setTimeout(function () {
       socket.close();
-    }, 4 * 60 * 1000); // 4 minutes safety
+    }, (TEST_DURATION_SEC - 2) * 1000);
   });
 
   // Check connection was successful
@@ -264,8 +267,7 @@ export default function () {
     'WebSocket connected': (r) => r && r.status === 101,
   });
 
-  // Keep iteration alive
-  sleep(180); // 3 minutes
+  // Note: ws.connect() blocks until socket closes, no sleep needed
 }
 
 /**
