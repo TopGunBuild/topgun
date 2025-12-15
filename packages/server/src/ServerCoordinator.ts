@@ -1532,6 +1532,155 @@ export class ServerCoordinator {
         }));
     }
 
+    /**
+     * Core operation application logic shared between processLocalOp and processLocalOpForBatch.
+     * Handles map merge, storage persistence, query evaluation, and event generation.
+     *
+     * @returns Event payload for broadcasting (or null if operation failed)
+     */
+    private applyOpToMap(op: any): { eventPayload: any; oldRecord: any } {
+        // Determine type hint from op
+        const typeHint = (op.opType === 'OR_ADD' || op.opType === 'OR_REMOVE') ? 'OR' : 'LWW';
+        const map = this.getMap(op.mapName, typeHint);
+
+        // Check compatibility
+        if (typeHint === 'OR' && map instanceof LWWMap) {
+            logger.error({ mapName: op.mapName }, 'Map type mismatch: LWWMap but received OR op');
+            throw new Error('Map type mismatch: LWWMap but received OR op');
+        }
+        if (typeHint === 'LWW' && map instanceof ORMap) {
+            logger.error({ mapName: op.mapName }, 'Map type mismatch: ORMap but received LWW op');
+            throw new Error('Map type mismatch: ORMap but received LWW op');
+        }
+
+        let oldRecord: any;
+        let recordToStore: StorageValue<any> | undefined;
+        let tombstonesToStore: StorageValue<any> | undefined;
+
+        const eventPayload: any = {
+            mapName: op.mapName,
+            key: op.key,
+        };
+
+        if (map instanceof LWWMap) {
+            oldRecord = map.getRecord(op.key);
+            map.merge(op.key, op.record);
+            recordToStore = op.record;
+            eventPayload.eventType = 'UPDATED';
+            eventPayload.record = op.record;
+        } else if (map instanceof ORMap) {
+            oldRecord = map.getRecords(op.key);
+
+            if (op.opType === 'OR_ADD') {
+                map.apply(op.key, op.orRecord);
+                eventPayload.eventType = 'OR_ADD';
+                eventPayload.orRecord = op.orRecord;
+                recordToStore = { type: 'OR', records: map.getRecords(op.key) };
+            } else if (op.opType === 'OR_REMOVE') {
+                map.applyTombstone(op.orTag);
+                eventPayload.eventType = 'OR_REMOVE';
+                eventPayload.orTag = op.orTag;
+                recordToStore = { type: 'OR', records: map.getRecords(op.key) };
+                tombstonesToStore = { type: 'OR_TOMBSTONES', tags: map.getTombstones() };
+            }
+        }
+
+        // Live Query Evaluation
+        this.queryRegistry.processChange(op.mapName, map, op.key, op.record || op.orRecord, oldRecord);
+
+        // Update metrics
+        const mapSize = (map instanceof ORMap) ? map.totalRecords : map.size;
+        this.metricsService.setMapSize(op.mapName, mapSize);
+
+        // Persist to storage (async, don't wait)
+        if (this.storage) {
+            if (recordToStore) {
+                this.storage.store(op.mapName, op.key, recordToStore).catch(err => {
+                    logger.error({ mapName: op.mapName, key: op.key, err }, 'Failed to persist op');
+                });
+            }
+            if (tombstonesToStore) {
+                this.storage.store(op.mapName, '__tombstones__', tombstonesToStore).catch(err => {
+                    logger.error({ mapName: op.mapName, err }, 'Failed to persist tombstones');
+                });
+            }
+        }
+
+        return { eventPayload, oldRecord };
+    }
+
+    /**
+     * Broadcast event to cluster members (excluding self).
+     */
+    private broadcastToCluster(eventPayload: any): void {
+        const members = this.cluster.getMembers();
+        for (const memberId of members) {
+            if (!this.cluster.isLocal(memberId)) {
+                this.cluster.send(memberId, 'CLUSTER_EVENT', eventPayload);
+            }
+        }
+    }
+
+    /**
+     * Build OpContext for interceptors.
+     */
+    private buildOpContext(clientId: string, fromCluster: boolean): OpContext {
+        let context: OpContext = {
+            clientId,
+            isAuthenticated: false,
+            fromCluster,
+            originalSenderId: clientId
+        };
+
+        if (!fromCluster) {
+            const client = this.clients.get(clientId);
+            if (client) {
+                context = {
+                    clientId: client.id,
+                    socket: client.socket,
+                    isAuthenticated: client.isAuthenticated,
+                    principal: client.principal,
+                    fromCluster,
+                    originalSenderId: clientId
+                };
+            }
+        }
+
+        return context;
+    }
+
+    /**
+     * Run onBeforeOp interceptors. Returns modified op or null if dropped.
+     */
+    private async runBeforeInterceptors(op: any, context: OpContext): Promise<any | null> {
+        let currentOp: ServerOp | null = op;
+
+        for (const interceptor of this.interceptors) {
+            if (interceptor.onBeforeOp && currentOp) {
+                currentOp = await interceptor.onBeforeOp(currentOp, context);
+                if (!currentOp) {
+                    logger.debug({ interceptor: interceptor.name, opId: op.id }, 'Interceptor silently dropped op');
+                    return null;
+                }
+            }
+        }
+
+        return currentOp;
+    }
+
+    /**
+     * Run onAfterOp interceptors (fire-and-forget).
+     */
+    private runAfterInterceptors(op: any, context: OpContext): void {
+        for (const interceptor of this.interceptors) {
+            if (interceptor.onAfterOp) {
+                interceptor.onAfterOp(op, context).catch(err => {
+                    logger.error({ err }, 'Error in onAfterOp');
+                });
+            }
+        }
+    }
+
     private handleLockGranted({ clientId, requestId, name, fencingToken }: { clientId: string, requestId: string, name: string, fencingToken: number }) {
         // Check if local client
         const client = this.clients.get(clientId);
@@ -1563,164 +1712,34 @@ export class ServerCoordinator {
     }
 
     private async processLocalOp(op: any, fromCluster: boolean, originalSenderId?: string) {
-        // 0. Prepare Context
-        let context: OpContext = {
-            clientId: originalSenderId || 'unknown',
-            isAuthenticated: false, // We might need to fetch this if local
-            fromCluster,
-            originalSenderId
-        };
+        // 1. Build context for interceptors
+        const context = this.buildOpContext(originalSenderId || 'unknown', fromCluster);
 
-        if (!fromCluster && originalSenderId) {
-            const client = this.clients.get(originalSenderId);
-            if (client) {
-                context = {
-                    clientId: client.id,
-                    socket: client.socket,
-                    isAuthenticated: client.isAuthenticated,
-                    principal: client.principal,
-                    fromCluster,
-                    originalSenderId
-                };
-            }
-        }
-
-        // 1. Interceptors: onBeforeOp
-        let currentOp: ServerOp | null = op;
+        // 2. Run onBeforeOp interceptors
         try {
-            for (const interceptor of this.interceptors) {
-                if (interceptor.onBeforeOp) {
-                    if (currentOp) {
-                        currentOp = await interceptor.onBeforeOp(currentOp, context);
-                        if (!currentOp) {
-                            logger.debug({ interceptor: interceptor.name, opId: op.id }, 'Interceptor silently dropped op');
-                            return; // Silent drop
-                        }
-                    }
-                }
-            }
-        } catch (err: any) {
-            // Find which interceptor failed? We don't know easily unless we tracked loop index.
-            // But logging err is good enough.
+            const processedOp = await this.runBeforeInterceptors(op, context);
+            if (!processedOp) return; // Silently dropped by interceptor
+            op = processedOp;
+        } catch (err) {
             logger.warn({ err, opId: op.id }, 'Interceptor rejected op');
-            throw err; // Re-throw to caller
+            throw err;
         }
 
-        if (!currentOp) return; // Should be caught above but safe check
+        // 3. Apply operation to map (shared logic)
+        const { eventPayload } = this.applyOpToMap(op);
 
-        op = currentOp;
-
-        // Apply to server state (Owner or Forwarded)
-        // Determine type hint from op
-        const typeHint = (op.opType === 'OR_ADD' || op.opType === 'OR_REMOVE') ? 'OR' : 'LWW';
-        const map = this.getMap(op.mapName, typeHint);
-
-        // Check compatibility
-        if (typeHint === 'OR' && map instanceof LWWMap) {
-            logger.error({ mapName: op.mapName }, 'Map type mismatch: LWWMap but received OR op');
-            throw new Error('Map type mismatch: LWWMap but received OR op');
-        }
-        if (typeHint === 'LWW' && map instanceof ORMap) {
-            logger.error({ mapName: op.mapName }, 'Map type mismatch: ORMap but received LWW op');
-            throw new Error('Map type mismatch: ORMap but received LWW op');
-        }
-
-        let oldRecord: any;
-        let recordToStore: StorageValue<any> | undefined;
-        let tombstonesToStore: StorageValue<any> | undefined;
-
-        const eventPayload: any = {
-            mapName: op.mapName,
-            key: op.key,
-            // Common fields
-        };
-
-        if (map instanceof LWWMap) {
-            oldRecord = map.getRecord(op.key);
-            map.merge(op.key, op.record);
-            recordToStore = op.record;
-            eventPayload.eventType = 'UPDATED';
-            eventPayload.record = op.record;
-        } else if (map instanceof ORMap) {
-            // ORMap
-            oldRecord = map.getRecords(op.key); // Logic for "old record" in ORMap is complex for query.
-
-            if (op.opType === 'OR_ADD') {
-                map.apply(op.key, op.orRecord);
-                eventPayload.eventType = 'OR_ADD';
-                eventPayload.orRecord = op.orRecord;
-
-                // Prepare storage: full state of key
-                recordToStore = {
-                    type: 'OR',
-                    records: map.getRecords(op.key)
-                };
-            } else if (op.opType === 'OR_REMOVE') {
-                map.applyTombstone(op.orTag);
-                eventPayload.eventType = 'OR_REMOVE';
-                eventPayload.orTag = op.orTag;
-
-                // OR_REMOVE modifies the key's records implicitly (filters them out)
-                // So we should update the key state too?
-                // Yes, if we remove a tag, the getRecords(key) result changes.
-                // But we don't know which key held the tag easily unless we search or client provided it.
-                // Client provided `op.key`.
-                recordToStore = {
-                    type: 'OR',
-                    records: map.getRecords(op.key)
-                };
-
-                // Also persist tombstones
-                tombstonesToStore = {
-                    type: 'OR_TOMBSTONES',
-                    tags: map.getTombstones()
-                };
-            }
-        }
-
-        // Live Query Evaluation (Local)
-        this.queryRegistry.processChange(op.mapName, map, op.key, op.record || op.orRecord, oldRecord);
-
-        const mapSize = (map instanceof ORMap) ? map.totalRecords : map.size;
-        this.metricsService.setMapSize(op.mapName, mapSize);
-
-        // Persist to storage (Only Owner persists)
-        if (this.storage) {
-            if (recordToStore) {
-                this.storage.store(op.mapName, op.key, recordToStore).catch(err => {
-                    logger.error({ mapName: op.mapName, key: op.key, err }, 'Failed to persist op');
-                });
-            }
-            if (tombstonesToStore) {
-                this.storage.store(op.mapName, '__tombstones__', tombstonesToStore).catch(err => {
-                    logger.error({ mapName: op.mapName, err }, 'Failed to persist tombstones');
-                });
-            }
-        }
-
-        // 1. Broadcast EVENT to other clients (Notification)
+        // 4. Broadcast EVENT to other clients
         this.broadcast({
             type: 'SERVER_EVENT',
             payload: eventPayload,
             timestamp: this.hlc.now()
         }, originalSenderId);
 
-        // 2. Broadcast EVENT/REPLICATION to Cluster
-        const members = this.cluster.getMembers();
-        for (const memberId of members) {
-            if (!this.cluster.isLocal(memberId)) {
-                this.cluster.send(memberId, 'CLUSTER_EVENT', eventPayload);
-            }
-        }
+        // 5. Broadcast to cluster
+        this.broadcastToCluster(eventPayload);
 
-        // 4. Interceptors: onAfterOp
-        for (const interceptor of this.interceptors) {
-            if (interceptor.onAfterOp) {
-                interceptor.onAfterOp(op, context).catch(err => {
-                    logger.error({ err }, 'Error in onAfterOp');
-                });
-            }
-        }
+        // 6. Run onAfterOp interceptors
+        this.runAfterInterceptors(op, context);
     }
 
     /**
@@ -1766,129 +1785,33 @@ export class ServerCoordinator {
 
     /**
      * Process a single operation for batch processing.
-     * Similar to processLocalOp but collects events instead of broadcasting immediately.
+     * Uses shared applyOpToMap but collects events instead of broadcasting immediately.
      */
     private async processLocalOpForBatch(op: any, clientId: string, batchedEvents: any[]): Promise<void> {
-        // Context for interceptors
-        let context: OpContext = {
-            clientId,
-            isAuthenticated: false,
-            fromCluster: false,
-            originalSenderId: clientId
-        };
+        // 1. Build context for interceptors
+        const context = this.buildOpContext(clientId, false);
 
-        const client = this.clients.get(clientId);
-        if (client) {
-            context = {
-                clientId: client.id,
-                socket: client.socket,
-                isAuthenticated: client.isAuthenticated,
-                principal: client.principal,
-                fromCluster: false,
-                originalSenderId: clientId
-            };
-        }
-
-        // Interceptors: onBeforeOp
-        let currentOp: ServerOp | null = op;
+        // 2. Run onBeforeOp interceptors
         try {
-            for (const interceptor of this.interceptors) {
-                if (interceptor.onBeforeOp && currentOp) {
-                    currentOp = await interceptor.onBeforeOp(currentOp, context);
-                    if (!currentOp) return;
-                }
-            }
+            const processedOp = await this.runBeforeInterceptors(op, context);
+            if (!processedOp) return; // Silently dropped by interceptor
+            op = processedOp;
         } catch (err) {
             logger.warn({ err, opId: op.id }, 'Interceptor rejected op in batch');
             throw err;
         }
 
-        if (!currentOp) return;
-        op = currentOp;
+        // 3. Apply operation to map (shared logic)
+        const { eventPayload } = this.applyOpToMap(op);
 
-        // Apply to server state
-        const typeHint = (op.opType === 'OR_ADD' || op.opType === 'OR_REMOVE') ? 'OR' : 'LWW';
-        const map = this.getMap(op.mapName, typeHint);
-
-        // Type compatibility check
-        if (typeHint === 'OR' && map instanceof LWWMap) {
-            throw new Error('Map type mismatch: LWWMap but received OR op');
-        }
-        if (typeHint === 'LWW' && map instanceof ORMap) {
-            throw new Error('Map type mismatch: ORMap but received LWW op');
-        }
-
-        let oldRecord: any;
-        let recordToStore: StorageValue<any> | undefined;
-        let tombstonesToStore: StorageValue<any> | undefined;
-
-        const eventPayload: any = {
-            mapName: op.mapName,
-            key: op.key,
-        };
-
-        if (map instanceof LWWMap) {
-            oldRecord = map.getRecord(op.key);
-            map.merge(op.key, op.record);
-            recordToStore = op.record;
-            eventPayload.eventType = 'UPDATED';
-            eventPayload.record = op.record;
-        } else if (map instanceof ORMap) {
-            oldRecord = map.getRecords(op.key);
-
-            if (op.opType === 'OR_ADD') {
-                map.apply(op.key, op.orRecord);
-                eventPayload.eventType = 'OR_ADD';
-                eventPayload.orRecord = op.orRecord;
-                recordToStore = { type: 'OR', records: map.getRecords(op.key) };
-            } else if (op.opType === 'OR_REMOVE') {
-                map.applyTombstone(op.orTag);
-                eventPayload.eventType = 'OR_REMOVE';
-                eventPayload.orTag = op.orTag;
-                recordToStore = { type: 'OR', records: map.getRecords(op.key) };
-                tombstonesToStore = { type: 'OR_TOMBSTONES', tags: map.getTombstones() };
-            }
-        }
-
-        // Live Query Evaluation
-        this.queryRegistry.processChange(op.mapName, map, op.key, op.record || op.orRecord, oldRecord);
-
-        const mapSize = (map instanceof ORMap) ? map.totalRecords : map.size;
-        this.metricsService.setMapSize(op.mapName, mapSize);
-
-        // Persist to storage (async, don't wait)
-        if (this.storage) {
-            if (recordToStore) {
-                this.storage.store(op.mapName, op.key, recordToStore).catch(err => {
-                    logger.error({ mapName: op.mapName, key: op.key, err }, 'Failed to persist op');
-                });
-            }
-            if (tombstonesToStore) {
-                this.storage.store(op.mapName, '__tombstones__', tombstonesToStore).catch(err => {
-                    logger.error({ mapName: op.mapName, err }, 'Failed to persist tombstones');
-                });
-            }
-        }
-
-        // Collect event for batched broadcast (instead of immediate broadcast)
+        // 4. Collect event for batched broadcast (instead of immediate broadcast)
         batchedEvents.push(eventPayload);
 
-        // Broadcast to cluster (still per-op for now, could be batched too)
-        const members = this.cluster.getMembers();
-        for (const memberId of members) {
-            if (!this.cluster.isLocal(memberId)) {
-                this.cluster.send(memberId, 'CLUSTER_EVENT', eventPayload);
-            }
-        }
+        // 5. Broadcast to cluster
+        this.broadcastToCluster(eventPayload);
 
-        // Interceptors: onAfterOp
-        for (const interceptor of this.interceptors) {
-            if (interceptor.onAfterOp) {
-                interceptor.onAfterOp(op, context).catch(err => {
-                    logger.error({ err }, 'Error in onAfterOp');
-                });
-            }
-        }
+        // 6. Run onAfterOp interceptors
+        this.runAfterInterceptors(op, context);
     }
 
     private handleClusterEvent(payload: any) {
