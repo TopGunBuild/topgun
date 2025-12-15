@@ -21,10 +21,24 @@ import {
   TopGunClient,
   createMessageHandler,
   connectionTime,
-  authTime,
-  authSuccess,
   errors,
 } from '../lib/topgun-client.js';
+import {
+  getWsUrl,
+  getAuthToken,
+  getConfig,
+  logTestHeader,
+  getResultsPath,
+} from '../lib/config.js';
+
+// Configuration
+const WS_URL = getWsUrl();
+const READER_PERCENTAGE = getConfig('READER_PERCENTAGE', 70);
+const WRITE_RATE = getConfig('WRITE_RATE', 10);
+const MAPS_COUNT = getConfig('MAPS_COUNT', 20);
+
+// Generate map names
+const MAPS = Array.from({ length: MAPS_COUNT }, (_, i) => `k6-mixed-map-${i}`);
 
 // Test configuration
 export const options = {
@@ -58,55 +72,6 @@ const errorRate = new Rate('error_rate');
 const activeReaders = new Gauge('active_readers');
 const activeWriters = new Gauge('active_writers');
 const throughputPerSecond = new Trend('throughput_per_second', true);
-
-// Configuration from environment
-const WS_URL = __ENV.WS_URL || 'ws://localhost:8080';
-const JWT_TOKEN = __ENV.JWT_TOKEN || null;
-const READER_PERCENTAGE = parseInt(__ENV.READER_PERCENTAGE || '70');
-const WRITE_RATE = parseInt(__ENV.WRITE_RATE || '10'); // Writes per second per writer
-const MAPS_COUNT = parseInt(__ENV.MAPS_COUNT || '20'); // Number of maps to use
-
-// Generate map names
-const MAPS = Array.from({ length: MAPS_COUNT }, (_, i) => `k6-mixed-map-${i}`);
-
-/**
- * Generate auth token for VU
- */
-function getAuthToken(vuId) {
-  if (JWT_TOKEN) {
-    return JWT_TOKEN;
-  }
-
-  const header = JSON.stringify({ alg: 'HS256', typ: 'JWT' });
-  const payload = JSON.stringify({
-    userId: `k6-mixed-${vuId}`,
-    roles: ['USER', 'ADMIN'],
-    sub: `k6-mixed-${vuId}`,
-    iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + 3600,
-  });
-
-  const b64 = (s) => {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-    let result = '';
-    const bytes = [];
-    for (let i = 0; i < s.length; i++) {
-      bytes.push(s.charCodeAt(i));
-    }
-    for (let i = 0; i < bytes.length; i += 3) {
-      const b1 = bytes[i];
-      const b2 = bytes[i + 1] || 0;
-      const b3 = bytes[i + 2] || 0;
-      result += chars[b1 >> 2];
-      result += chars[((b1 & 3) << 4) | (b2 >> 4)];
-      result += i + 1 < bytes.length ? chars[((b2 & 15) << 2) | (b3 >> 6)] : '';
-      result += i + 2 < bytes.length ? chars[b3 & 63] : '';
-    }
-    return result;
-  };
-
-  return `${b64(header)}.${b64(payload)}.mock-signature`;
-}
 
 /**
  * Determine role for this VU
@@ -145,7 +110,7 @@ export default function () {
 
     const handleMessage = createMessageHandler(client, {
       onAuthRequired: () => {
-        const token = getAuthToken(vuId);
+        const token = getAuthToken(vuId, 'k6-mixed', ['USER', 'ADMIN']);
         client.authenticate(token);
       },
 
@@ -218,7 +183,7 @@ export default function () {
 
     socket.on('binaryMessage', handleMessage);
 
-    socket.on('error', (e) => {
+    socket.on('error', () => {
       errors.add(1);
       errorRate.add(1);
     });
@@ -399,23 +364,17 @@ export function setup() {
   const writerCount = Math.floor(150 * (100 - READER_PERCENTAGE) / 100);
   const readerCount = 150 - writerCount;
 
-  console.log('='.repeat(60));
-  console.log('Mixed Workload Test');
-  console.log('='.repeat(60));
-  console.log(`Target: ${WS_URL}`);
-  console.log(`Duration: 10 minutes (1m ramp up, 8m sustained, 1m ramp down)`);
-  console.log(`Peak VUs: 150`);
-  console.log(`Reader/Writer ratio: ${READER_PERCENTAGE}/${100 - READER_PERCENTAGE}`);
-  console.log(`Readers: ~${readerCount}, Writers: ~${writerCount}`);
-  console.log(`Write rate per writer: ${WRITE_RATE} ops/sec`);
-  console.log(`Maps: ${MAPS_COUNT}`);
-  console.log(`Expected throughput: ~${writerCount * WRITE_RATE} writes/sec`);
-  console.log('');
-
-  if (!JWT_TOKEN) {
-    console.warn('WARNING: No JWT_TOKEN provided. Using mock tokens.');
-    console.warn('Run: pnpm test:k6:token');
-  }
+  logTestHeader('Mixed Workload Test', {
+    'Target': WS_URL,
+    'Duration': '10 minutes (1m ramp up, 8m sustained, 1m ramp down)',
+    'Peak VUs': 150,
+    'Reader/Writer ratio': `${READER_PERCENTAGE}/${100 - READER_PERCENTAGE}`,
+    'Readers': `~${readerCount}`,
+    'Writers': `~${writerCount}`,
+    'Write rate per writer': `${WRITE_RATE} ops/sec`,
+    'Maps': MAPS_COUNT,
+    'Expected throughput': `~${writerCount * WRITE_RATE} writes/sec`,
+  });
 
   return { startTime: Date.now() };
 }
@@ -480,7 +439,7 @@ export function handleSummary(data) {
 
   return {
     stdout: textSummary(data, { indent: ' ', enableColors: true }),
-    'tests/k6/results/mixed-workload-summary.json': JSON.stringify(summary, null, 2),
+    [getResultsPath('mixed-workload-summary.json')]: JSON.stringify(summary, null, 2),
   };
 }
 

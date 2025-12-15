@@ -21,10 +21,21 @@ import {
   TopGunClient,
   createMessageHandler,
   connectionTime,
-  authTime,
-  authSuccess,
   errors,
 } from '../lib/topgun-client.js';
+import {
+  getWsUrl,
+  getAuthToken,
+  getConfig,
+  logTestHeader,
+  getResultsPath,
+} from '../lib/config.js';
+
+// Configuration
+const WS_URL = getWsUrl();
+const MAPS_PER_VU = getConfig('MAPS_PER_VU', 5);
+const WRITER_PERCENTAGE = getConfig('WRITER_PERCENTAGE', 10);
+const WRITES_PER_SECOND = getConfig('WRITES_PER_SECOND', 5);
 
 // Test configuration
 export const options = {
@@ -50,13 +61,6 @@ const updatesReceived = new Counter('updates_received');
 const updatesSent = new Counter('updates_sent');
 const subscriptionErrors = new Rate('subscription_errors');
 
-// Configuration from environment
-const WS_URL = __ENV.WS_URL || 'ws://localhost:8080';
-const JWT_TOKEN = __ENV.JWT_TOKEN || null;
-const MAPS_PER_VU = parseInt(__ENV.MAPS_PER_VU || '5');
-const WRITER_PERCENTAGE = parseInt(__ENV.WRITER_PERCENTAGE || '10');
-const WRITES_PER_SECOND = parseInt(__ENV.WRITES_PER_SECOND || '5');
-
 // Shared maps for subscriptions
 const SHARED_MAPS = [
   'k6-shared-map-1',
@@ -70,45 +74,6 @@ const SHARED_MAPS = [
   'k6-shared-map-9',
   'k6-shared-map-10',
 ];
-
-/**
- * Generate auth token for VU
- */
-function getAuthToken(vuId) {
-  if (JWT_TOKEN) {
-    return JWT_TOKEN;
-  }
-
-  const header = JSON.stringify({ alg: 'HS256', typ: 'JWT' });
-  const payload = JSON.stringify({
-    userId: `k6-reader-${vuId}`,
-    roles: ['USER', 'ADMIN'],
-    sub: `k6-reader-${vuId}`,
-    iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + 3600,
-  });
-
-  const b64 = (s) => {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-    let result = '';
-    const bytes = [];
-    for (let i = 0; i < s.length; i++) {
-      bytes.push(s.charCodeAt(i));
-    }
-    for (let i = 0; i < bytes.length; i += 3) {
-      const b1 = bytes[i];
-      const b2 = bytes[i + 1] || 0;
-      const b3 = bytes[i + 2] || 0;
-      result += chars[b1 >> 2];
-      result += chars[((b1 & 3) << 4) | (b2 >> 4)];
-      result += i + 1 < bytes.length ? chars[((b2 & 15) << 2) | (b3 >> 6)] : '';
-      result += i + 2 < bytes.length ? chars[b3 & 63] : '';
-    }
-    return result;
-  };
-
-  return `${b64(header)}.${b64(payload)}.mock-signature`;
-}
 
 /**
  * Determine if this VU should be a writer
@@ -151,7 +116,7 @@ export default function () {
 
     const handleMessage = createMessageHandler(client, {
       onAuthRequired: () => {
-        const token = getAuthToken(vuId);
+        const token = getAuthToken(vuId, 'k6-reader', ['USER', 'ADMIN']);
         client.authenticate(token);
       },
 
@@ -218,7 +183,7 @@ export default function () {
 
     socket.on('binaryMessage', handleMessage);
 
-    socket.on('error', (e) => {
+    socket.on('error', () => {
       errors.add(1);
       subscriptionErrors.add(1);
     });
@@ -307,23 +272,16 @@ export default function () {
  * Setup function
  */
 export function setup() {
-  console.log('='.repeat(60));
-  console.log('Read-Heavy Test');
-  console.log('='.repeat(60));
-  console.log(`Target: ${WS_URL}`);
-  console.log(`VUs: ${options.vus}`);
-  console.log(`Duration: ${options.duration}`);
-  console.log(`Maps per VU: ${MAPS_PER_VU}`);
-  console.log(`Writer percentage: ${WRITER_PERCENTAGE}%`);
-  console.log(`Writes per second per writer: ${WRITES_PER_SECOND}`);
-  console.log(`Total subscriptions: ${options.vus * MAPS_PER_VU}`);
-  console.log(`Writer VUs: ${Math.floor(options.vus * WRITER_PERCENTAGE / 100)}`);
-  console.log('');
-
-  if (!JWT_TOKEN) {
-    console.warn('WARNING: No JWT_TOKEN provided. Using mock tokens.');
-    console.warn('Run: pnpm test:k6:token');
-  }
+  logTestHeader('Read-Heavy Test', {
+    'Target': WS_URL,
+    'VUs': options.vus,
+    'Duration': options.duration,
+    'Maps per VU': MAPS_PER_VU,
+    'Writer percentage': `${WRITER_PERCENTAGE}%`,
+    'Writes per second per writer': WRITES_PER_SECOND,
+    'Total subscriptions': options.vus * MAPS_PER_VU,
+    'Writer VUs': Math.floor(options.vus * WRITER_PERCENTAGE / 100),
+  });
 
   return { startTime: Date.now() };
 }
@@ -377,7 +335,7 @@ export function handleSummary(data) {
 
   return {
     stdout: textSummary(data, { indent: ' ', enableColors: true }),
-    'tests/k6/results/read-heavy-summary.json': JSON.stringify(summary, null, 2),
+    [getResultsPath('read-heavy-summary.json')]: JSON.stringify(summary, null, 2),
   };
 }
 

@@ -20,10 +20,19 @@ import {
   TopGunClient,
   createMessageHandler,
   connectionTime,
-  authTime,
-  authSuccess,
   errors,
 } from '../lib/topgun-client.js';
+import {
+  getWsUrl,
+  getAuthToken,
+  getConfig,
+  logTestHeader,
+  getResultsPath,
+} from '../lib/config.js';
+
+// Configuration
+const WS_URL = getWsUrl();
+const HOLD_TIME_MS = getConfig('HOLD_TIME', 5000);
 
 // Test configuration with ramping stages
 export const options = {
@@ -55,51 +64,6 @@ const connectionAttempts = new Counter('connection_attempts');
 const successfulConnections = new Counter('successful_connections');
 const connectionHoldTime = new Trend('connection_hold_time', true);
 
-// Configuration from environment
-const WS_URL = __ENV.WS_URL || 'ws://localhost:8080';
-const JWT_TOKEN = __ENV.JWT_TOKEN || null;
-const HOLD_TIME_MS = parseInt(__ENV.HOLD_TIME || '5000'); // How long to hold connection
-
-/**
- * Generate auth token for VU
- */
-function getAuthToken(vuId) {
-  if (JWT_TOKEN) {
-    return JWT_TOKEN;
-  }
-
-  // Fallback mock token
-  const header = JSON.stringify({ alg: 'HS256', typ: 'JWT' });
-  const payload = JSON.stringify({
-    userId: `k6-storm-${vuId}`,
-    roles: ['USER'],
-    sub: `k6-storm-${vuId}`,
-    iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + 3600,
-  });
-
-  const b64 = (s) => {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-    let result = '';
-    const bytes = [];
-    for (let i = 0; i < s.length; i++) {
-      bytes.push(s.charCodeAt(i));
-    }
-    for (let i = 0; i < bytes.length; i += 3) {
-      const b1 = bytes[i];
-      const b2 = bytes[i + 1] || 0;
-      const b3 = bytes[i + 2] || 0;
-      result += chars[b1 >> 2];
-      result += chars[((b1 & 3) << 4) | (b2 >> 4)];
-      result += i + 1 < bytes.length ? chars[((b2 & 15) << 2) | (b3 >> 6)] : '';
-      result += i + 2 < bytes.length ? chars[b3 & 63] : '';
-    }
-    return result;
-  };
-
-  return `${b64(header)}.${b64(payload)}.mock-signature`;
-}
-
 /**
  * Main test function - runs for each VU
  */
@@ -112,20 +76,18 @@ export default function () {
   connectionsPerSecond.add(1);
 
   let authenticated = false;
-  let connectionEstablished = false;
   let holdStartTime = null;
   let client = null;
 
   const connectStart = Date.now();
 
   const res = ws.connect(WS_URL, {}, function (socket) {
-    connectionEstablished = true;
     activeConnections.add(1);
     client = new TopGunClient(socket, nodeId);
 
     const handleMessage = createMessageHandler(client, {
       onAuthRequired: () => {
-        const token = getAuthToken(vuId);
+        const token = getAuthToken(vuId, 'k6-storm', ['USER']);
         client.authenticate(token);
       },
 
@@ -149,7 +111,6 @@ export default function () {
       onPong: () => {
         // Keep connection alive with periodic pings
         if (holdStartTime && Date.now() - holdStartTime < HOLD_TIME_MS) {
-          // Schedule next ping after delay
           socket.setTimeout(() => {
             if (socket.readyState === 1) { // OPEN
               client.ping();
@@ -161,7 +122,7 @@ export default function () {
 
     socket.on('binaryMessage', handleMessage);
 
-    socket.on('error', (e) => {
+    socket.on('error', () => {
       connectionErrorRate.add(1);
       errors.add(1);
     });
@@ -197,18 +158,11 @@ export default function () {
  * Setup function
  */
 export function setup() {
-  console.log('='.repeat(60));
-  console.log('Connection Storm Test');
-  console.log('='.repeat(60));
-  console.log(`Target: ${WS_URL}`);
-  console.log(`Ramping: 0 → 100 → 500 → 1000 VUs over 5 minutes`);
-  console.log(`Hold time: ${HOLD_TIME_MS}ms per connection`);
-  console.log('');
-
-  if (!JWT_TOKEN) {
-    console.warn('WARNING: No JWT_TOKEN provided. Using mock tokens.');
-    console.warn('Run: pnpm test:k6:token');
-  }
+  logTestHeader('Connection Storm Test', {
+    'Target': WS_URL,
+    'Ramping': '0 → 100 → 500 → 1000 VUs over 5 minutes',
+    'Hold time': `${HOLD_TIME_MS}ms per connection`,
+  });
 
   return { startTime: Date.now() };
 }
@@ -249,7 +203,7 @@ export function handleSummary(data) {
 
   return {
     stdout: textSummary(data, { indent: ' ', enableColors: true }),
-    'tests/k6/results/connection-storm-summary.json': JSON.stringify(summary, null, 2),
+    [getResultsPath('connection-storm-summary.json')]: JSON.stringify(summary, null, 2),
   };
 }
 
