@@ -17,6 +17,30 @@ const defaultTestPolicies: PermissionPolicy[] = [
   }
 ];
 
+const createRecord = (value: any): LWWRecord<any> => ({
+  value,
+  timestamp: { millis: Date.now(), counter: 0, nodeId: 'test-node' }
+});
+
+const createMockWriter = (socket: any) => ({
+  write: jest.fn((message: any, _urgent?: boolean) => {
+    const data = serialize(message);
+    socket.send(data);
+  }),
+  writeRaw: jest.fn((data: Uint8Array) => {
+    socket.send(data);
+  }),
+  flush: jest.fn(),
+  close: jest.fn(),
+  getMetrics: jest.fn(() => ({
+    messagesSent: 0,
+    batchesSent: 0,
+    bytesSent: 0,
+    avgMessagesPerBatch: 0,
+  })),
+});
+
+
 describe('Subscription-Based Event Routing', () => {
   let server: ServerCoordinator;
 
@@ -37,28 +61,7 @@ describe('Subscription-Based Event Routing', () => {
     await server.shutdown();
   });
 
-  const createRecord = (value: any): LWWRecord<any> => ({
-    value,
-    timestamp: { millis: Date.now(), counter: 0, nodeId: 'test-node' }
-  });
 
-  const createMockWriter = (socket: any) => ({
-    write: jest.fn((message: any, _urgent?: boolean) => {
-      const data = serialize(message);
-      socket.send(data);
-    }),
-    writeRaw: jest.fn((data: Uint8Array) => {
-      socket.send(data);
-    }),
-    flush: jest.fn(),
-    close: jest.fn(),
-    getMetrics: jest.fn(() => ({
-      messagesSent: 0,
-      batchesSent: 0,
-      bytesSent: 0,
-      avgMessagesPerBatch: 0,
-    })),
-  });
 
   const createMockClient = (id: string) => {
     const socket = {
@@ -512,15 +515,23 @@ describe('QueryRegistry.getSubscriptionsForMap', () => {
     const mapName = 'registry-test-map';
     const queryRegistry = (server as any).queryRegistry;
 
-    const createMockClient = (id: string) => ({
-      id,
-      socket: { send: jest.fn(), close: jest.fn(), readyState: 1 } as any,
-      isAuthenticated: true,
-      subscriptions: new Set<string>(),
-      principal: { userId: id, roles: ['USER'] },
-      lastActiveHlc: { millis: Date.now(), counter: 0, nodeId: 'test-node' },
-      lastPingReceived: Date.now()
-    });
+    const createMockClient = (id: string) => {
+      const socket = {
+        send: jest.fn(),
+        close: jest.fn(),
+        readyState: 1 // OPEN
+      };
+      return {
+        id,
+        socket: socket as any,
+        writer: createMockWriter(socket) as any,
+        isAuthenticated: true,
+        subscriptions: new Set<string>(),
+        principal: { userId: id, roles: ['USER'] },
+        lastActiveHlc: { millis: Date.now(), counter: 0, nodeId: 'test-node' },
+        lastPingReceived: Date.now()
+      };
+    };
 
     const client1 = createMockClient('reg-client-1');
     const client2 = createMockClient('reg-client-2');
