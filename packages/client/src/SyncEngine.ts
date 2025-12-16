@@ -620,6 +620,29 @@ export class SyncEngine {
 
   private async handleServerMessage(message: any): Promise<void> {
     switch (message.type) {
+      case 'BATCH': {
+        // Unbatch and process each message
+        // Format: [4 bytes: count][4 bytes: len1][msg1][4 bytes: len2][msg2]...
+        const batchData = message.data as Uint8Array;
+        const view = new DataView(batchData.buffer, batchData.byteOffset, batchData.byteLength);
+        let offset = 0;
+
+        const count = view.getUint32(offset, true);
+        offset += 4;
+
+        for (let i = 0; i < count; i++) {
+          const msgLen = view.getUint32(offset, true);
+          offset += 4;
+
+          const msgData = batchData.slice(offset, offset + msgLen);
+          offset += msgLen;
+
+          const innerMsg = deserialize(msgData);
+          await this.handleServerMessage(innerMsg);
+        }
+        break;
+      }
+
       case 'AUTH_REQUIRED':
         this.sendAuth();
         break;

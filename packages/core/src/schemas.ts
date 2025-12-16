@@ -203,6 +203,19 @@ export const PongMessageSchema = z.object({
   serverTime: z.number(),  // Server's Date.now() (for clock skew detection)
 });
 
+// --- Batched Messages ---
+
+/**
+ * BATCH: Server sends multiple messages batched together.
+ * Uses length-prefixed binary format for efficiency.
+ * Format: [4 bytes: count][4 bytes: len1][msg1][4 bytes: len2][msg2]...
+ */
+export const BatchMessageSchema = z.object({
+  type: z.literal('BATCH'),
+  count: z.number(),
+  data: z.instanceof(Uint8Array),
+});
+
 // --- ORMap Sync Messages ---
 
 /**
@@ -351,4 +364,5 @@ export type ClientOp = z.infer<typeof ClientOpSchema>;
 export type Message = z.infer<typeof MessageSchema>;
 export type PingMessage = z.infer<typeof PingMessageSchema>;
 export type PongMessage = z.infer<typeof PongMessageSchema>;
+export type BatchMessage = z.infer<typeof BatchMessageSchema>;
 

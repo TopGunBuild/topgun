@@ -25,10 +25,12 @@ import { SystemManager } from './system/SystemManager';
 import { TLSConfig, ClusterTLSConfig } from './types/TLSConfig';
 import { StripedEventExecutor } from './utils/StripedEventExecutor';
 import { BackpressureRegulator } from './utils/BackpressureRegulator';
+import { CoalescingWriter, CoalescingWriterOptions } from './utils/CoalescingWriter';
 
 interface ClientConnection {
     id: string;
     socket: WebSocket;
+    writer: CoalescingWriter; // Per-connection write coalescing
     principal?: Principal; // Auth info
     isAuthenticated: boolean;
     subscriptions: Set<string>; // Set of Query IDs
@@ -78,6 +80,14 @@ export interface ServerCoordinatorConfig {
     backpressureMaxPending?: number;
     /** Backoff timeout in ms when at capacity (default: 5000) */
     backpressureBackoffMs?: number;
+    /** Enable/disable write coalescing (default: true) */
+    writeCoalescingEnabled?: boolean;
+    /** Maximum messages to batch before forcing flush (default: 100) */
+    writeCoalescingMaxBatch?: number;
+    /** Maximum delay before flushing in ms (default: 5) */
+    writeCoalescingMaxDelayMs?: number;
+    /** Maximum batch size in bytes (default: 65536) */
+    writeCoalescingMaxBytes?: number;
 }
 
 export class ServerCoordinator {
@@ -123,6 +133,10 @@ export class ServerCoordinator {
     // Backpressure regulator for periodic sync processing
     private backpressure: BackpressureRegulator;
 
+    // Write coalescing options
+    private writeCoalescingEnabled: boolean;
+    private writeCoalescingOptions: Partial<CoalescingWriterOptions>;
+
     private _actualPort: number = 0;
     private _actualClusterPort: number = 0;
     private _readyPromise: Promise<void>;
@@ -161,6 +175,14 @@ export class ServerCoordinator {
             backoffTimeoutMs: config.backpressureBackoffMs ?? 5000,
             enabled: config.backpressureEnabled ?? true
         });
+
+        // Initialize write coalescing options
+        this.writeCoalescingEnabled = config.writeCoalescingEnabled ?? true;
+        this.writeCoalescingOptions = {
+            maxBatchSize: config.writeCoalescingMaxBatch ?? 100,
+            maxDelayMs: config.writeCoalescingMaxDelayMs ?? 5,
+            maxBatchBytes: config.writeCoalescingMaxBytes ?? 65536,
+        };
 
         // HTTP Server Setup first (to get actual port if port=0)
         if (config.tls?.enabled) {
@@ -237,7 +259,7 @@ export class ServerCoordinator {
                 sendToClient: (clientId, message) => {
                     const client = this.clients.get(clientId);
                     if (client && client.socket.readyState === WebSocket.OPEN) {
-                        client.socket.send(serialize(message));
+                        client.writer.write(message);
                     }
                 }
             });
@@ -329,7 +351,7 @@ export class ServerCoordinator {
         for (const client of this.clients.values()) {
             try {
                 if (client.socket.readyState === WebSocket.OPEN) {
-                    client.socket.send(shutdownMsg);
+                    client.writer.writeRaw(shutdownMsg);
                     client.socket.close(1001, 'Server Shutdown');
                 }
             } catch (e) {
@@ -387,9 +409,17 @@ export class ServerCoordinator {
         const clientId = crypto.randomUUID();
         logger.info({ clientId }, 'Client connected (pending auth)');
 
+        // Create CoalescingWriter if enabled, otherwise create a pass-through writer
+        const writer = new CoalescingWriter(ws, this.writeCoalescingEnabled ? this.writeCoalescingOptions : {
+            maxBatchSize: 1, // Disable batching by flushing immediately
+            maxDelayMs: 0,
+            maxBatchBytes: 0,
+        });
+
         const connection: ClientConnection = {
             id: clientId,
             socket: ws,
+            writer,
             isAuthenticated: false,
             subscriptions: new Set(),
             lastActiveHlc: this.hlc.now(), // Initialize with current time
@@ -458,6 +488,9 @@ export class ServerCoordinator {
         ws.on('close', () => {
             logger.info({ clientId }, 'Client disconnected');
 
+            // Close the CoalescingWriter to flush any pending messages
+            connection.writer.close();
+
             // Run onDisconnect interceptors
             const context: ConnectionContext = {
                 clientId: connection.id,
@@ -508,10 +541,10 @@ export class ServerCoordinator {
         const parseResult = MessageSchema.safeParse(rawMessage);
         if (!parseResult.success) {
             logger.error({ clientId: client.id, error: parseResult.error }, 'Invalid message format from client');
-            client.socket.send(serialize({
+            client.writer.write({
                 type: 'ERROR',
                 payload: { code: 400, message: 'Invalid message format', details: (parseResult.error as any).errors }
-            }));
+            }, true); // urgent
             return;
         }
         const message = parseResult.data;
@@ -550,11 +583,11 @@ export class ServerCoordinator {
                     client.isAuthenticated = true;
                     logger.info({ clientId: client.id, user: client.principal!.userId || 'anon' }, 'Client authenticated');
 
-                    client.socket.send(serialize({ type: 'AUTH_ACK' }));
+                    client.writer.write({ type: 'AUTH_ACK' }, true); // urgent: bypass batching
                     return; // Stop processing this message
                 } catch (e) {
                     logger.error({ clientId: client.id, err: e }, 'Auth failed');
-                    client.socket.send(serialize({ type: 'AUTH_FAIL', error: 'Invalid token' }));
+                    client.writer.write({ type: 'AUTH_FAIL', error: 'Invalid token' }, true); // urgent
                     client.socket.close(4001, 'Unauthorized');
                 }
             } else {
@@ -572,10 +605,10 @@ export class ServerCoordinator {
                 // Check READ permission
                 if (!this.securityManager.checkPermission(client.principal!, mapName, 'READ')) {
                     logger.warn({ clientId: client.id, mapName }, 'Access Denied: QUERY_SUB');
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 403, message: `Access Denied for map ${mapName}` }
-                    }));
+                    }, true);
                     return;
                 }
 
@@ -652,10 +685,10 @@ export class ServerCoordinator {
                 // Check Permission
                 if (!this.securityManager.checkPermission(client.principal!, op.mapName, action)) {
                     logger.warn({ clientId: client.id, action, mapName: op.mapName }, 'Access Denied: Client OP');
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'OP_REJECTED',
                         payload: { opId: op.id, reason: 'Access Denied' }
-                    }));
+                    });
                     return;
                 }
 
@@ -664,10 +697,10 @@ export class ServerCoordinator {
                 if (this.partitionService.isLocalOwner(op.key)) {
                     this.processLocalOp(op, false, client.id).catch(err => {
                         logger.error({ clientId: client.id, err }, 'Op failed');
-                        client.socket.send(serialize({
+                        client.writer.write({
                             type: 'OP_REJECTED',
                             payload: { opId: op.id, reason: err.message || 'Internal Error' }
-                        }));
+                        });
                     });
                 } else {
                     const owner = this.partitionService.getOwner(op.key);
@@ -705,18 +738,18 @@ export class ServerCoordinator {
 
                 // Send ACK IMMEDIATELY after validation (before processing)
                 if (lastValidId !== null) {
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'OP_ACK',
                         payload: { lastId: lastValidId }
-                    }));
+                    });
                 }
 
                 // Send rejection error if any ops were denied
                 if (rejectedCount > 0) {
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 403, message: `Partial batch failure: ${rejectedCount} ops denied` }
-                    }));
+                    }, true);
                 }
 
                 // Process valid ops asynchronously (non-blocking)
@@ -742,10 +775,10 @@ export class ServerCoordinator {
                 // Check READ permission
                 if (!this.securityManager.checkPermission(client.principal!, message.mapName, 'READ')) {
                     logger.warn({ clientId: client.id, mapName: message.mapName }, 'Access Denied: SYNC_INIT');
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 403, message: `Access Denied for map ${message.mapName}` }
-                    }));
+                    }, true);
                     return;
                 }
 
@@ -753,10 +786,10 @@ export class ServerCoordinator {
                 const now = Date.now();
                 if (lastSync > 0 && (now - lastSync) > GC_AGE_MS) {
                     logger.warn({ clientId: client.id, lastSync, age: now - lastSync }, 'Client too old, sending SYNC_RESET_REQUIRED');
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'SYNC_RESET_REQUIRED',
                         payload: { mapName: message.mapName }
-                    }));
+                    });
                     return;
                 }
 
@@ -772,28 +805,28 @@ export class ServerCoordinator {
                         const tree = mapForSync.getMerkleTree();
                         const rootHash = tree.getRootHash();
 
-                        client.socket.send(serialize({
+                        client.writer.write({
                             type: 'SYNC_RESP_ROOT',
                             payload: {
                                 mapName: message.mapName,
                                 rootHash,
                                 timestamp: this.hlc.now()
                             }
-                        }));
+                        });
                     } else {
                         // ORMap sync not implemented via Merkle Tree yet
                         logger.warn({ mapName: message.mapName }, 'SYNC_INIT requested for ORMap - Not Implemented');
-                        client.socket.send(serialize({
+                        client.writer.write({
                             type: 'ERROR',
                             payload: { code: 501, message: `Merkle Sync not supported for ORMap ${message.mapName}` }
-                        }));
+                        }, true);
                     }
                 } catch (err) {
                     logger.error({ err, mapName: message.mapName }, 'Failed to load map for SYNC_INIT');
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 500, message: `Failed to load map ${message.mapName}` }
-                    }));
+                    }, true);
                 }
                 break;
             }
@@ -801,10 +834,10 @@ export class ServerCoordinator {
             case 'MERKLE_REQ_BUCKET': {
                 // Check READ permission
                 if (!this.securityManager.checkPermission(client.principal!, message.payload.mapName, 'READ')) {
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 403, message: `Access Denied for map ${message.payload.mapName}` }
-                    }));
+                    }, true);
                     return;
                 }
 
@@ -822,15 +855,15 @@ export class ServerCoordinator {
                             for (const key of node.entries.keys()) {
                                 diffRecords.push({ key, record: mapForBucket.getRecord(key) });
                             }
-                            client.socket.send(serialize({
+                            client.writer.write({
                                 type: 'SYNC_RESP_LEAF',
                                 payload: { mapName, path, records: diffRecords }
-                            }));
+                            });
                         } else {
-                            client.socket.send(serialize({
+                            client.writer.write({
                                 type: 'SYNC_RESP_BUCKETS',
                                 payload: { mapName, path, buckets }
-                            }));
+                            });
                         }
                     }
                 } catch (err) {
@@ -851,33 +884,33 @@ export class ServerCoordinator {
                 // If we use just name, it might conflict with map names if policies are strict.
                 // Assuming for now that lock name represents the resource being protected.
                 if (!this.securityManager.checkPermission(client.principal!, name, 'PUT')) {
-                    client.socket.send(serialize({
+                    client.writer.write({
                         // We don't have LOCK_DENIED type in schema yet?
                         // Using LOCK_RELEASED with success=false as a hack or ERROR.
                         // Ideally ERROR.
                         type: 'ERROR',
                         payload: { code: 403, message: `Access Denied for lock ${name}` }
-                    }));
+                    }, true);
                     return;
                 }
 
                 if (this.partitionService.isLocalOwner(name)) {
                     const result = this.lockManager.acquire(name, client.id, requestId, ttl || 10000);
                     if (result.granted) {
-                        client.socket.send(serialize({
+                        client.writer.write({
                             type: 'LOCK_GRANTED',
                             payload: { requestId, name, fencingToken: result.fencingToken }
-                        }));
+                        });
                     }
                     // If not granted, it is queued. Response sent later via event.
                 } else {
                     const owner = this.partitionService.getOwner(name);
                     // 2. Cluster Reliability Check
                     if (!this.cluster.getMembers().includes(owner)) {
-                        client.socket.send(serialize({
+                        client.writer.write({
                             type: 'ERROR',
                             payload: { code: 503, message: `Lock owner ${owner} is unavailable` }
-                        }));
+                        }, true);
                         return;
                     }
 
@@ -897,10 +930,10 @@ export class ServerCoordinator {
 
                 if (this.partitionService.isLocalOwner(name)) {
                     const success = this.lockManager.release(name, client.id, fencingToken);
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'LOCK_RELEASED',
                         payload: { requestId, name, success }
-                    }));
+                    });
                 } else {
                     const owner = this.partitionService.getOwner(name);
                     this.cluster.send(owner, 'CLUSTER_LOCK_RELEASE', {
@@ -918,24 +951,24 @@ export class ServerCoordinator {
                 const { topic } = message.payload;
 
                 // C1: Access Control
-                // We treat topics as resources. 
+                // We treat topics as resources.
                 // Policy check: action 'READ' on resource `topic:${topic}`
                 if (!this.securityManager.checkPermission(client.principal!, `topic:${topic}`, 'READ')) {
                     logger.warn({ clientId: client.id, topic }, 'Access Denied: TOPIC_SUB');
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 403, message: `Access Denied for topic ${topic}` }
-                    }));
+                    }, true);
                     return;
                 }
 
                 try {
                     this.topicManager.subscribe(client.id, topic);
                 } catch (e: any) {
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 400, message: e.message }
-                    }));
+                    }, true);
                 }
                 break;
             }
@@ -957,10 +990,10 @@ export class ServerCoordinator {
                     // But for security violations, an error is useful during dev.
                     // Spec says fire-and-forget delivery, but security rejection should ideally notify.
                     // Let's send error.
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 403, message: `Access Denied for topic ${topic}` }
-                    }));
+                    }, true);
                     return;
                 }
 
@@ -968,10 +1001,10 @@ export class ServerCoordinator {
                     this.topicManager.publish(topic, data, client.id);
                 } catch (e: any) {
                     // Invalid topic name etc
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 400, message: e.message }
-                    }));
+                    }, true);
                 }
                 break;
             }
@@ -981,10 +1014,10 @@ export class ServerCoordinator {
             case 'ORMAP_SYNC_INIT': {
                 // Check READ permission
                 if (!this.securityManager.checkPermission(client.principal!, message.mapName, 'READ')) {
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 403, message: `Access Denied for map ${message.mapName}` }
-                    }));
+                    }, true);
                     return;
                 }
 
@@ -992,10 +1025,10 @@ export class ServerCoordinator {
                 const now = Date.now();
                 if (lastSync > 0 && (now - lastSync) > GC_AGE_MS) {
                     logger.warn({ clientId: client.id, lastSync, age: now - lastSync }, 'ORMap client too old, sending SYNC_RESET_REQUIRED');
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'SYNC_RESET_REQUIRED',
                         payload: { mapName: message.mapName }
-                    }));
+                    });
                     return;
                 }
 
@@ -1008,27 +1041,27 @@ export class ServerCoordinator {
                         const tree = mapForSync.getMerkleTree();
                         const rootHash = tree.getRootHash();
 
-                        client.socket.send(serialize({
+                        client.writer.write({
                             type: 'ORMAP_SYNC_RESP_ROOT',
                             payload: {
                                 mapName: message.mapName,
                                 rootHash,
                                 timestamp: this.hlc.now()
                             }
-                        }));
+                        });
                     } else {
                         // It's actually an LWWMap, client should use SYNC_INIT
-                        client.socket.send(serialize({
+                        client.writer.write({
                             type: 'ERROR',
                             payload: { code: 400, message: `Map ${message.mapName} is not an ORMap` }
-                        }));
+                        }, true);
                     }
                 } catch (err) {
                     logger.error({ err, mapName: message.mapName }, 'Failed to load map for ORMAP_SYNC_INIT');
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 500, message: `Failed to load map ${message.mapName}` }
-                    }));
+                    }, true);
                 }
                 break;
             }
@@ -1036,10 +1069,10 @@ export class ServerCoordinator {
             case 'ORMAP_MERKLE_REQ_BUCKET': {
                 // Check READ permission
                 if (!this.securityManager.checkPermission(client.principal!, message.payload.mapName, 'READ')) {
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 403, message: `Access Denied for map ${message.payload.mapName}` }
-                    }));
+                    }, true);
                     return;
                 }
 
@@ -1068,16 +1101,16 @@ export class ServerCoordinator {
                                 }
                             }
 
-                            client.socket.send(serialize({
+                            client.writer.write({
                                 type: 'ORMAP_SYNC_RESP_LEAF',
                                 payload: { mapName, path, entries }
-                            }));
+                            });
                         } else {
                             // Not a leaf - send bucket hashes
-                            client.socket.send(serialize({
+                            client.writer.write({
                                 type: 'ORMAP_SYNC_RESP_BUCKETS',
                                 payload: { mapName, path, buckets }
-                            }));
+                            });
                         }
                     }
                 } catch (err) {
@@ -1089,10 +1122,10 @@ export class ServerCoordinator {
             case 'ORMAP_DIFF_REQUEST': {
                 // Check READ permission
                 if (!this.securityManager.checkPermission(client.principal!, message.payload.mapName, 'READ')) {
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 403, message: `Access Denied for map ${message.payload.mapName}` }
-                    }));
+                    }, true);
                     return;
                 }
 
@@ -1113,10 +1146,10 @@ export class ServerCoordinator {
                             });
                         }
 
-                        client.socket.send(serialize({
+                        client.writer.write({
                             type: 'ORMAP_DIFF_RESPONSE',
                             payload: { mapName: diffMapName, entries }
-                        }));
+                        });
                     }
                 } catch (err) {
                     logger.error({ err, mapName: diffMapName }, 'Failed to load map for ORMAP_DIFF_REQUEST');
@@ -1127,10 +1160,10 @@ export class ServerCoordinator {
             case 'ORMAP_PUSH_DIFF': {
                 // Check WRITE permission
                 if (!this.securityManager.checkPermission(client.principal!, message.payload.mapName, 'PUT')) {
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 403, message: `Access Denied for map ${message.payload.mapName}` }
-                    }));
+                    }, true);
                     return;
                 }
 
@@ -1268,14 +1301,14 @@ export class ServerCoordinator {
                     newPayload.orRecord = { ...newPayload.orRecord, value: newVal };
                 }
 
-                client.socket.send(serialize({ ...message, payload: newPayload }));
+                client.writer.write({ ...message, payload: newPayload });
             }
         } else {
             // Non-event messages (GC_PRUNE, SHUTDOWN_PENDING) still go to all clients
             const msgData = serialize(message);
             for (const [id, client] of this.clients) {
                 if (id !== excludeClientId && client.socket.readyState === 1) { // 1 = OPEN
-                    client.socket.send(msgData);
+                    client.writer.writeRaw(msgData);
                 }
             }
         }
@@ -1384,7 +1417,7 @@ export class ServerCoordinator {
             // Send to all clients in this role group
             for (const client of clients) {
                 try {
-                    client.socket.send(serializedBatch);
+                    client.writer.writeRaw(serializedBatch);
                 } catch (err) {
                     logger.error({ clientId: client.id, err }, 'Failed to send batch to client');
                 }
@@ -1609,10 +1642,10 @@ export class ServerCoordinator {
                     const { clientId, requestId, name, success } = msg.payload;
                     const client = this.clients.get(clientId);
                     if (client) {
-                        client.socket.send(serialize({
+                        client.writer.write({
                             type: 'LOCK_RELEASED',
                             payload: { requestId, name, success }
-                        }));
+                        });
                     }
                     break;
                 }
@@ -1621,10 +1654,10 @@ export class ServerCoordinator {
                     const { clientId, requestId, name, fencingToken } = msg.payload;
                     const client = this.clients.get(clientId);
                     if (client) {
-                        client.socket.send(serialize({
+                        client.writer.write({
                             type: 'LOCK_GRANTED',
                             payload: { requestId, name, fencingToken }
-                        }));
+                        });
                     }
                     break;
                 }
@@ -1751,10 +1784,10 @@ export class ServerCoordinator {
             return { ...res, value: filteredValue };
         });
 
-        client.socket.send(serialize({
+        client.writer.write({
             type: 'QUERY_RESP',
             payload: { queryId, results: filteredResults }
-        }));
+        });
     }
 
     /**
@@ -1910,10 +1943,10 @@ export class ServerCoordinator {
         // Check if local client
         const client = this.clients.get(clientId);
         if (client) {
-            client.socket.send(serialize({
+            client.writer.write({
                 type: 'LOCK_GRANTED',
                 payload: { requestId, name, fencingToken }
-            }));
+            });
             return;
         }
 
@@ -2319,9 +2352,8 @@ export class ServerCoordinator {
             serverTime: Date.now(),
         };
 
-        if (client.socket.readyState === WebSocket.OPEN) {
-            client.socket.send(serialize(pongMessage));
-        }
+        // PONG is urgent - bypass batching for accurate RTT measurement
+        client.writer.write(pongMessage, true);
     }
 
     /**
