@@ -1,9 +1,10 @@
 /**
  * WorkerPool Integration Tests
- * Phase 1.05: Integration with ServerCoordinator
+ * Phase 1.05-08: Integration with ServerCoordinator
  */
 
 import { ServerCoordinator } from '../../ServerCoordinator';
+import { MerkleWorker, CRDTMergeWorker, SerializationWorker } from '../../workers';
 
 // Helper to wait
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -110,6 +111,87 @@ describe('WorkerPool Integration with ServerCoordinator', () => {
       await server.ready();
 
       // Shutdown should complete without errors
+      await server.shutdown();
+    });
+  });
+
+  describe('Worker Accessors', () => {
+    it('should return null for workers when pool is disabled', async () => {
+      const server = new ServerCoordinator({
+        port: 0,
+        nodeId: 'test-node-6',
+        workerPoolEnabled: false,
+      });
+
+      await server.ready();
+
+      expect(server.getMerkleWorker()).toBeNull();
+      expect(server.getCRDTMergeWorker()).toBeNull();
+      expect(server.getSerializationWorker()).toBeNull();
+
+      await server.shutdown();
+    });
+
+    it('should return workers when pool is enabled', async () => {
+      const server = new ServerCoordinator({
+        port: 0,
+        nodeId: 'test-node-7',
+        workerPoolEnabled: true,
+        workerPoolConfig: {
+          minWorkers: 1,
+          maxWorkers: 2,
+        },
+      });
+
+      await server.ready();
+      await wait(200);
+
+      const merkleWorker = server.getMerkleWorker();
+      const crdtWorker = server.getCRDTMergeWorker();
+      const serializationWorker = server.getSerializationWorker();
+
+      expect(merkleWorker).not.toBeNull();
+      expect(merkleWorker).toBeInstanceOf(MerkleWorker);
+
+      expect(crdtWorker).not.toBeNull();
+      expect(crdtWorker).toBeInstanceOf(CRDTMergeWorker);
+
+      expect(serializationWorker).not.toBeNull();
+      expect(serializationWorker).toBeInstanceOf(SerializationWorker);
+
+      await server.shutdown();
+    });
+
+    it('should allow using SerializationWorker for batch operations', async () => {
+      const server = new ServerCoordinator({
+        port: 0,
+        nodeId: 'test-node-8',
+        workerPoolEnabled: true,
+        workerPoolConfig: {
+          minWorkers: 1,
+          maxWorkers: 2,
+        },
+      });
+
+      await server.ready();
+      await wait(200);
+
+      const serializer = server.getSerializationWorker();
+      expect(serializer).not.toBeNull();
+
+      // Test batch serialization (inline since < 10 items)
+      const items = [
+        { id: 1, name: 'Item 1' },
+        { id: 2, name: 'Item 2' },
+        { id: 3, name: 'Item 3' },
+      ];
+
+      const serialized = await serializer!.serializeBatch(items);
+      expect(serialized.length).toBe(3);
+
+      const deserialized = await serializer!.deserializeBatch<typeof items[0]>(serialized);
+      expect(deserialized).toEqual(items);
+
       await server.shutdown();
     });
   });

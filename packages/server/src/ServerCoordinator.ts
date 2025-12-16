@@ -28,7 +28,7 @@ import { StripedEventExecutor } from './utils/StripedEventExecutor';
 import { BackpressureRegulator } from './utils/BackpressureRegulator';
 import { CoalescingWriter, CoalescingWriterOptions } from './utils/CoalescingWriter';
 import { ConnectionRateLimiter } from './utils/ConnectionRateLimiter';
-import { WorkerPool, MerkleWorker, CRDTMergeWorker, WorkerPoolConfig } from './workers';
+import { WorkerPool, MerkleWorker, CRDTMergeWorker, SerializationWorker, WorkerPoolConfig } from './workers';
 
 interface ClientConnection {
     id: string;
@@ -178,6 +178,7 @@ export class ServerCoordinator {
     private workerPool?: WorkerPool;
     private merkleWorker?: MerkleWorker;
     private crdtMergeWorker?: CRDTMergeWorker;
+    private serializationWorker?: SerializationWorker;
 
     private _actualPort: number = 0;
     private _actualClusterPort: number = 0;
@@ -245,6 +246,7 @@ export class ServerCoordinator {
             });
             this.merkleWorker = new MerkleWorker(this.workerPool);
             this.crdtMergeWorker = new CRDTMergeWorker(this.workerPool);
+            this.serializationWorker = new SerializationWorker(this.workerPool);
             logger.info({
                 minWorkers: config.workerPoolConfig?.minWorkers ?? 2,
                 maxWorkers: config.workerPoolConfig?.maxWorkers ?? 'auto'
@@ -438,6 +440,21 @@ export class ServerCoordinator {
     /** Check if worker pool is enabled */
     public get workerPoolEnabled(): boolean {
         return !!this.workerPool;
+    }
+
+    /** Get MerkleWorker for external use (null if worker pool disabled) */
+    public getMerkleWorker(): MerkleWorker | null {
+        return this.merkleWorker ?? null;
+    }
+
+    /** Get CRDTMergeWorker for external use (null if worker pool disabled) */
+    public getCRDTMergeWorker(): CRDTMergeWorker | null {
+        return this.crdtMergeWorker ?? null;
+    }
+
+    /** Get SerializationWorker for external use (null if worker pool disabled) */
+    public getSerializationWorker(): SerializationWorker | null {
+        return this.serializationWorker ?? null;
     }
 
     public async shutdown() {
