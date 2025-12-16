@@ -28,16 +28,37 @@ Load testing suite for TopGun server using [k6](https://k6.io/).
 
 ## Quick Start
 
-Run smoke test against local server:
+**Important:** All k6 tests require a valid JWT token. Use the built-in npm scripts:
 
 ```bash
-k6 run tests/k6/scenarios/smoke.js
+# 1. Start the server (in another terminal)
+pnpm start:server
+
+# 2. Run smoke test (auto-generates token)
+pnpm test:k6:smoke
+
+# 3. Run write-heavy test
+pnpm test:k6:write
+
+# 4. Run connection storm test
+pnpm test:k6:connections
+
+# 5. Run all scenarios
+pnpm test:k6:scenarios
 ```
 
-With custom server URL:
+### Custom VUs and Duration
 
 ```bash
-k6 run tests/k6/scenarios/smoke.js -e WS_URL=ws://localhost:3000
+# Write test with 200 VUs for 60 seconds
+k6 run tests/k6/scenarios/write-heavy.js \
+  -e JWT_TOKEN=$(pnpm test:k6:token) \
+  --vus 200 --duration 60s
+
+# Custom server URL
+k6 run tests/k6/scenarios/smoke.js \
+  -e JWT_TOKEN=$(pnpm test:k6:token) \
+  -e WS_URL=ws://localhost:3000
 ```
 
 ## Directory Structure
@@ -254,25 +275,50 @@ k6 run tests/k6/scenarios/mixed-workload.js -e JWT_TOKEN=<token> --vus 15 --dura
 
 ### Using Pre-generated JWT Tokens
 
-For load testing, you **must** provide a valid JWT token. The default server secret is `topgun-secret-dev`:
+For load testing, you **must** provide a valid JWT token. Use the built-in token generator:
 
 ```bash
-# Generate token (example using Node.js)
-node -e "
-const jwt = require('jsonwebtoken');
-const token = jwt.sign(
-  { userId: 'k6-user', roles: ['ADMIN'], sub: 'k6-user' },
-  'topgun-secret-dev',  // Default dev secret
-  { expiresIn: '24h' }
-);
-console.log(token);
-"
+# Quick start (recommended) - generate token and run test in one command
+k6 run tests/k6/scenarios/smoke.js -e JWT_TOKEN=$(pnpm test:k6:token)
 
-# Use the token
-k6 run tests/k6/scenarios/smoke.js -e JWT_TOKEN=<generated-token>
+# Or generate token separately
+pnpm test:k6:token
+# Output: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+
+# Then use it
+k6 run tests/k6/scenarios/smoke.js -e JWT_TOKEN=<paste-token-here>
 ```
 
-For production servers, use the appropriate `JWT_SECRET` environment variable or server configuration.
+#### Token Generator Options
+
+```bash
+# Default: ADMIN role, 24h expiry, topgun-secret-dev
+pnpm test:k6:token
+
+# Custom options
+node scripts/generate-k6-token.js --userId=my-user --roles=USER,ADMIN --expires=1h
+
+# With custom secret (must match server's JWT_SECRET)
+node scripts/generate-k6-token.js --secret=my-production-secret
+
+# Verbose output (shows token info)
+node scripts/generate-k6-token.js --verbose
+```
+
+#### Running Load Tests
+
+```bash
+# Smoke test (10 VUs, 30s)
+k6 run tests/k6/scenarios/smoke.js -e JWT_TOKEN=$(pnpm test:k6:token)
+
+# Write-heavy test (custom VUs and duration)
+k6 run tests/k6/scenarios/write-heavy.js -e JWT_TOKEN=$(pnpm test:k6:token) --vus 100 --duration 60s
+
+# Connection storm
+k6 run tests/k6/scenarios/connection-storm.js -e JWT_TOKEN=$(pnpm test:k6:token) --vus 200 --duration 30s
+```
+
+For production servers, set `JWT_SECRET` environment variable to match your server configuration.
 
 ## Custom Metrics
 
