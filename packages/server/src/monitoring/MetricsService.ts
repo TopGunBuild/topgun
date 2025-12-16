@@ -15,6 +15,12 @@ export class MetricsService {
   private eventsFilteredBySubscription: Counter;
   private subscribersPerEvent: Summary;
 
+  // Bounded event queue metrics
+  private eventQueueSize: Gauge;
+  private eventQueueEnqueued: Counter;
+  private eventQueueDequeued: Counter;
+  private eventQueueRejected: Counter;
+
   constructor() {
     this.registry = new Registry();
 
@@ -75,6 +81,32 @@ export class MetricsService {
       percentiles: [0.5, 0.9, 0.99],
       registers: [this.registry],
     });
+
+    // === Bounded event queue metrics ===
+    this.eventQueueSize = new Gauge({
+      name: 'topgun_event_queue_size',
+      help: 'Current size of the event queue across all stripes',
+      labelNames: ['stripe'],
+      registers: [this.registry],
+    });
+
+    this.eventQueueEnqueued = new Counter({
+      name: 'topgun_event_queue_enqueued_total',
+      help: 'Total number of events enqueued',
+      registers: [this.registry],
+    });
+
+    this.eventQueueDequeued = new Counter({
+      name: 'topgun_event_queue_dequeued_total',
+      help: 'Total number of events dequeued',
+      registers: [this.registry],
+    });
+
+    this.eventQueueRejected = new Counter({
+      name: 'topgun_event_queue_rejected_total',
+      help: 'Total number of events rejected due to queue capacity',
+      registers: [this.registry],
+    });
   }
 
   public destroy() {
@@ -118,6 +150,36 @@ export class MetricsService {
    */
   public recordSubscribersPerEvent(count: number): void {
     this.subscribersPerEvent.observe(count);
+  }
+
+  // === Bounded event queue metric methods ===
+
+  /**
+   * Set the current size of a specific queue stripe.
+   */
+  public setEventQueueSize(stripe: number, size: number): void {
+    this.eventQueueSize.set({ stripe: String(stripe) }, size);
+  }
+
+  /**
+   * Increment counter for events enqueued.
+   */
+  public incEventQueueEnqueued(): void {
+    this.eventQueueEnqueued.inc();
+  }
+
+  /**
+   * Increment counter for events dequeued.
+   */
+  public incEventQueueDequeued(): void {
+    this.eventQueueDequeued.inc();
+  }
+
+  /**
+   * Increment counter for events rejected due to queue capacity.
+   */
+  public incEventQueueRejected(): void {
+    this.eventQueueRejected.inc();
   }
 
   public async getMetrics(): Promise<string> {

@@ -23,6 +23,7 @@ import { logger } from './utils/logger';
 import { MetricsService } from './monitoring/MetricsService';
 import { SystemManager } from './system/SystemManager';
 import { TLSConfig, ClusterTLSConfig } from './types/TLSConfig';
+import { StripedEventExecutor } from './utils/StripedEventExecutor';
 
 interface ClientConnection {
     id: string;
@@ -64,6 +65,10 @@ export interface ServerCoordinatorConfig {
     discoveryInterval?: number;
     tls?: TLSConfig;
     clusterTls?: ClusterTLSConfig;
+    /** Total event queue capacity for bounded queue (default: 10000) */
+    eventQueueCapacity?: number;
+    /** Number of event queue stripes for parallel processing (default: 4) */
+    eventStripeCount?: number;
 }
 
 export class ServerCoordinator {
@@ -103,6 +108,9 @@ export class ServerCoordinator {
     // Track pending batch operations for testing purposes
     private pendingBatchOperations: Set<Promise<void>> = new Set();
 
+    // Bounded event queue executor for backpressure control
+    private eventExecutor: StripedEventExecutor;
+
     private _actualPort: number = 0;
     private _actualClusterPort: number = 0;
     private _readyPromise: Promise<void>;
@@ -122,6 +130,17 @@ export class ServerCoordinator {
         this.securityManager = new SecurityManager(config.securityPolicies || []);
         this.interceptors = config.interceptors || [];
         this.metricsService = new MetricsService();
+
+        // Initialize bounded event queue executor
+        this.eventExecutor = new StripedEventExecutor({
+            stripeCount: config.eventStripeCount ?? 4,
+            queueCapacity: config.eventQueueCapacity ?? 10000,
+            name: `${config.nodeId}-event-executor`,
+            onReject: (task) => {
+                logger.warn({ nodeId: config.nodeId, key: task.key }, 'Event task rejected due to queue capacity');
+                this.metricsService.incEventQueueRejected();
+            }
+        });
 
         // HTTP Server Setup first (to get actual port if port=0)
         if (config.tls?.enabled) {
@@ -262,6 +281,16 @@ export class ServerCoordinator {
         return this._actualClusterPort;
     }
 
+    /** Get event executor metrics for monitoring */
+    public getEventExecutorMetrics() {
+        return this.eventExecutor.getMetrics();
+    }
+
+    /** Get total event executor metrics across all stripes */
+    public getEventExecutorTotalMetrics() {
+        return this.eventExecutor.getTotalMetrics();
+    }
+
     public async shutdown() {
         logger.info('Shutting down Server Coordinator...');
 
@@ -289,12 +318,16 @@ export class ServerCoordinator {
         }
         this.clients.clear();
 
-        // 3. Stop Cluster
+        // 3. Shutdown event executor (wait for pending tasks)
+        logger.info('Shutting down event executor...');
+        await this.eventExecutor.shutdown(true);
+
+        // 4. Stop Cluster
         if (this.cluster) {
             this.cluster.stop();
         }
 
-        // 4. Close Storage
+        // 5. Close Storage
         if (this.storage) {
             logger.info('Closing storage connection...');
             try {
@@ -305,7 +338,7 @@ export class ServerCoordinator {
             }
         }
 
-        // 5. Cleanup
+        // 6. Cleanup
         if (this.gcInterval) {
             clearInterval(this.gcInterval);
             this.gcInterval = undefined;
