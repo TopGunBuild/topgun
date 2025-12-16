@@ -1,5 +1,5 @@
 import { ServerCoordinator } from '../ServerCoordinator';
-import { LWWRecord, deserialize } from '@topgunbuild/core';
+import { LWWRecord, deserialize, serialize } from '@topgunbuild/core';
 
 describe('Offset/Limit Reproduction', () => {
   let server: ServerCoordinator;
@@ -24,6 +24,24 @@ describe('Offset/Limit Reproduction', () => {
     timestamp: { millis: Date.now(), counter: 0, nodeId: 'test-node' }
   });
 
+  const createMockWriter = (socket: any) => ({
+    write: jest.fn((message: any, _urgent?: boolean) => {
+      const data = serialize(message);
+      socket.send(data);
+    }),
+    writeRaw: jest.fn((data: Uint8Array) => {
+      socket.send(data);
+    }),
+    flush: jest.fn(),
+    close: jest.fn(),
+    getMetrics: jest.fn(() => ({
+      messagesSent: 0,
+      batchesSent: 0,
+      bytesSent: 0,
+      avgMessagesPerBatch: 0,
+    })),
+  });
+
   test('Should correctly apply offset and limit only once', async () => {
     // 1. Seed Data: 10 items with scores 0-9
     const map = server.getMap('items') as any;
@@ -34,12 +52,14 @@ describe('Offset/Limit Reproduction', () => {
     // 2. Setup Client
     const clientSocket = {
       send: jest.fn(),
-      readyState: 1 // OPEN
+      readyState: 1, // OPEN
+      close: jest.fn(),
     };
 
     const clientMock = {
       id: 'client-repro',
       socket: clientSocket as any,
+      writer: createMockWriter(clientSocket) as any,
       isAuthenticated: true,
       subscriptions: new Set(),
       principal: { userId: 'test', roles: ['ADMIN'] }

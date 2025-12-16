@@ -27,9 +27,29 @@ describe('Heartbeat', () => {
         close: jest.fn(),
       };
 
+      // Create mock writer that forwards to socket.send
+      const writer = {
+        write: jest.fn((message: any, _urgent?: boolean) => {
+          const data = serialize(message);
+          socket.send(data);
+        }),
+        writeRaw: jest.fn((data: Uint8Array) => {
+          socket.send(data);
+        }),
+        flush: jest.fn(),
+        close: jest.fn(),
+        getMetrics: jest.fn(() => ({
+          messagesSent: 0,
+          batchesSent: 0,
+          bytesSent: 0,
+          avgMessagesPerBatch: 0,
+        })),
+      };
+
       const client = {
         id,
         socket: socket as any,
+        writer: writer as any,
         isAuthenticated: authenticated,
         principal: authenticated ? { roles: ['USER'], userId: id } : undefined,
         subscriptions: new Set<string>(),
@@ -37,7 +57,7 @@ describe('Heartbeat', () => {
         lastPingReceived: Date.now(),
       };
 
-      return { client, socket };
+      return { client, socket, writer };
     };
 
     it('should respond with PONG immediately on PING', async () => {
@@ -342,6 +362,24 @@ describe('Heartbeat', () => {
       await server.shutdown();
     });
 
+    const createMockWriter = (socket: any) => ({
+      write: jest.fn((message: any, _urgent?: boolean) => {
+        const data = serialize(message);
+        socket.send(data);
+      }),
+      writeRaw: jest.fn((data: Uint8Array) => {
+        socket.send(data);
+      }),
+      flush: jest.fn(),
+      close: jest.fn(),
+      getMetrics: jest.fn(() => ({
+        messagesSent: 0,
+        batchesSent: 0,
+        bytesSent: 0,
+        avgMessagesPerBatch: 0,
+      })),
+    });
+
     it('should maintain connection with heartbeats over 30 seconds', async () => {
       const socket = {
         send: jest.fn(),
@@ -352,6 +390,7 @@ describe('Heartbeat', () => {
       const client = {
         id: 'long-lived-client',
         socket: socket as any,
+        writer: createMockWriter(socket) as any,
         isAuthenticated: true,
         principal: { roles: ['USER'], userId: 'long-lived-client' },
         subscriptions: new Set<string>(),
@@ -438,6 +477,7 @@ describe('Heartbeat', () => {
       const client = {
         id: 'rapid-client',
         socket: socket as any,
+        writer: createMockWriter(socket) as any,
         isAuthenticated: true,
         principal: { roles: ['USER'], userId: 'rapid-client' },
         subscriptions: new Set<string>(),

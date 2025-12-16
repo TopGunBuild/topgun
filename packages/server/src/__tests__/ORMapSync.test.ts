@@ -1,6 +1,24 @@
 import { ServerCoordinator } from '../ServerCoordinator';
 import { HLC, ORMap, serialize, deserialize, ORMapRecord } from '@topgunbuild/core';
 
+const createMockWriter = (socket: any) => ({
+  write: jest.fn((message: any, _urgent?: boolean) => {
+    const data = serialize(message);
+    socket.send(data);
+  }),
+  writeRaw: jest.fn((data: Uint8Array) => {
+    socket.send(data);
+  }),
+  flush: jest.fn(),
+  close: jest.fn(),
+  getMetrics: jest.fn(() => ({
+    messagesSent: 0,
+    batchesSent: 0,
+    bytesSent: 0,
+    avgMessagesPerBatch: 0,
+  })),
+});
+
 describe('ORMap Merkle Tree Sync Integration', () => {
   let server: ServerCoordinator;
 
@@ -32,6 +50,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
     const clientMock = {
       id,
       socket: clientSocket as any,
+      writer: createMockWriter(clientSocket) as any,
       isAuthenticated: true,
       subscriptions: new Set<string>(),
       principal: { userId: id, roles: ['ADMIN'] },
@@ -466,6 +485,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
       const clientMock = {
         id: 'no-read-client',
         socket: clientSocket as any,
+        writer: createMockWriter(clientSocket) as any,
         isAuthenticated: true,
         subscriptions: new Set<string>(),
         principal: { userId: 'no-read', roles: ['GUEST'] }, // No ADMIN role

@@ -8,8 +8,10 @@ import { SyncState } from '@topgunbuild/client';
  */
 export async function waitForAuthReady(client: SyncEngine, timeout = 5000): Promise<void> {
     return new Promise((resolve, reject) => {
+        let unsubscribe: (() => void) | undefined;
+
         const timer = setTimeout(() => {
-            unsubscribe();
+            if (unsubscribe) unsubscribe();
             reject(new Error('Timeout waiting for AUTHENTICATING state'));
         }, timeout);
 
@@ -19,16 +21,17 @@ export async function waitForAuthReady(client: SyncEngine, timeout = 5000): Prom
                 state === SyncState.SYNCING ||
                 state === SyncState.CONNECTED) {
                 clearTimeout(timer);
-                unsubscribe();
+                if (unsubscribe) unsubscribe();
                 resolve();
             }
         };
 
-        // Check immediately in case already in correct state
-        checkState();
-
-        const unsubscribe = client.onConnectionStateChange(() => {
+        // Subscribe first so we don't miss state changes
+        unsubscribe = client.onConnectionStateChange(() => {
             checkState();
         });
+
+        // Check immediately in case already in correct state
+        checkState();
     });
 }

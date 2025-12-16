@@ -351,7 +351,12 @@ export class ServerCoordinator {
         for (const client of this.clients.values()) {
             try {
                 if (client.socket.readyState === WebSocket.OPEN) {
-                    client.writer.writeRaw(shutdownMsg);
+                    // Send shutdown message directly to socket (bypass batching)
+                    // This ensures message is sent before socket.close()
+                    client.socket.send(shutdownMsg);
+                    if (client.writer) {
+                        client.writer.close();
+                    }
                     client.socket.close(1001, 'Server Shutdown');
                 }
             } catch (e) {

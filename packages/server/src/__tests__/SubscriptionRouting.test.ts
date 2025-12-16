@@ -1,5 +1,5 @@
 import { ServerCoordinator } from '../ServerCoordinator';
-import { LWWRecord, deserialize, PermissionPolicy } from '@topgunbuild/core';
+import { LWWRecord, deserialize, PermissionPolicy, serialize } from '@topgunbuild/core';
 
 // Default policy that allows all operations for testing
 const defaultTestPolicies: PermissionPolicy[] = [
@@ -42,6 +42,24 @@ describe('Subscription-Based Event Routing', () => {
     timestamp: { millis: Date.now(), counter: 0, nodeId: 'test-node' }
   });
 
+  const createMockWriter = (socket: any) => ({
+    write: jest.fn((message: any, _urgent?: boolean) => {
+      const data = serialize(message);
+      socket.send(data);
+    }),
+    writeRaw: jest.fn((data: Uint8Array) => {
+      socket.send(data);
+    }),
+    flush: jest.fn(),
+    close: jest.fn(),
+    getMetrics: jest.fn(() => ({
+      messagesSent: 0,
+      batchesSent: 0,
+      bytesSent: 0,
+      avgMessagesPerBatch: 0,
+    })),
+  });
+
   const createMockClient = (id: string) => {
     const socket = {
       send: jest.fn(),
@@ -51,6 +69,7 @@ describe('Subscription-Based Event Routing', () => {
     return {
       id,
       socket: socket as any,
+      writer: createMockWriter(socket) as any,
       isAuthenticated: true,
       subscriptions: new Set<string>(),
       principal: { userId: id, roles: ['USER'] },

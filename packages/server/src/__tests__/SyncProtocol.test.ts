@@ -1,5 +1,5 @@
 import { ServerCoordinator } from '../ServerCoordinator';
-import { LWWRecord, deserialize, ORMap, LWWMap } from '@topgunbuild/core';
+import { LWWRecord, deserialize, ORMap, LWWMap, serialize } from '@topgunbuild/core';
 
 describe('Sync Protocol Integration', () => {
   let server: ServerCoordinator;
@@ -24,6 +24,24 @@ describe('Sync Protocol Integration', () => {
     timestamp: { millis: timestampMillis, counter: 0, nodeId: 'client-1' }
   });
 
+  const createMockWriter = (socket: any) => ({
+    write: jest.fn((message: any, _urgent?: boolean) => {
+      const data = serialize(message);
+      socket.send(data);
+    }),
+    writeRaw: jest.fn((data: Uint8Array) => {
+      socket.send(data);
+    }),
+    flush: jest.fn(),
+    close: jest.fn(),
+    getMetrics: jest.fn(() => ({
+      messagesSent: 0,
+      batchesSent: 0,
+      bytesSent: 0,
+      avgMessagesPerBatch: 0,
+    })),
+  });
+
   test('Should handle OP_BATCH and send OP_ACK', async () => {
     const clientSocket = {
       send: jest.fn(),
@@ -33,6 +51,7 @@ describe('Sync Protocol Integration', () => {
     const clientMock = {
       id: 'client-1',
       socket: clientSocket as any,
+      writer: createMockWriter(clientSocket) as any,
       isAuthenticated: true,
       principal: { roles: ['ADMIN'] }, // Add principal with ADMIN role
       subscriptions: new Set()
@@ -90,6 +109,7 @@ describe('Sync Protocol Integration', () => {
     const clientMock = {
       id: 'client-retry',
       socket: clientSocket as any,
+      writer: createMockWriter(clientSocket) as any,
       isAuthenticated: true,
       principal: { roles: ['ADMIN'] }, // Add principal with ADMIN role
       subscriptions: new Set()

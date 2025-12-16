@@ -1,5 +1,5 @@
 import { ServerCoordinator } from '../ServerCoordinator';
-import { LWWRecord, deserialize, PermissionPolicy } from '@topgunbuild/core';
+import { LWWRecord, deserialize, PermissionPolicy, serialize } from '@topgunbuild/core';
 
 // Mock WebSocket
 class MockWebSocket {
@@ -8,6 +8,24 @@ class MockWebSocket {
     close = jest.fn();
     on = jest.fn();
 }
+
+const createMockWriter = (socket: any) => ({
+  write: jest.fn((message: any, _urgent?: boolean) => {
+    const data = serialize(message);
+    socket.send(data);
+  }),
+  writeRaw: jest.fn((data: Uint8Array) => {
+    socket.send(data);
+  }),
+  flush: jest.fn(),
+  close: jest.fn(),
+  getMetrics: jest.fn(() => ({
+    messagesSent: 0,
+    batchesSent: 0,
+    bytesSent: 0,
+    avgMessagesPerBatch: 0,
+  })),
+});
 
 describe('Field-Level Security (RBAC)', () => {
   let server: ServerCoordinator;
@@ -57,6 +75,7 @@ describe('Field-Level Security (RBAC)', () => {
       const clientMock = {
           id: 'client-user',
           socket: clientSocket as any,
+          writer: createMockWriter(clientSocket) as any,
           isAuthenticated: true,
           subscriptions: new Set(),
           principal: { userId: 'u1', roles: ['USER'] }
@@ -94,6 +113,7 @@ describe('Field-Level Security (RBAC)', () => {
       const clientMock = {
           id: 'client-admin',
           socket: clientSocket as any,
+          writer: createMockWriter(clientSocket) as any,
           isAuthenticated: true,
           subscriptions: new Set(),
           principal: { userId: 'a1', roles: ['ADMIN'] }
@@ -130,6 +150,7 @@ describe('Field-Level Security (RBAC)', () => {
       const userClient = {
           id: 'client-user-2',
           socket: userSocket as any,
+          writer: createMockWriter(userSocket) as any,
           isAuthenticated: true,
           subscriptions: new Set(),
           principal: { userId: 'u2', roles: ['USER'] },
@@ -139,6 +160,7 @@ describe('Field-Level Security (RBAC)', () => {
       const adminClient = {
           id: 'client-admin-2',
           socket: adminSocket as any,
+          writer: createMockWriter(adminSocket) as any,
           isAuthenticated: true,
           subscriptions: new Set(),
           principal: { userId: 'a2', roles: ['ADMIN'] },
@@ -148,6 +170,7 @@ describe('Field-Level Security (RBAC)', () => {
       const adminListener = {
           id: 'client-admin-listener',
           socket: adminListenerSocket as any,
+          writer: createMockWriter(adminListenerSocket) as any,
           isAuthenticated: true,
           subscriptions: new Set(),
           principal: { userId: 'a3', roles: ['ADMIN'] },
