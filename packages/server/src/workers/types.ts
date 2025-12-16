@@ -26,7 +26,10 @@ export interface WorkerPoolConfig {
  */
 export type WorkerTaskType =
   | 'merkle-hash'
+  | 'merkle-hash-ormap'
   | 'merkle-diff'
+  | 'merkle-rebuild'
+  | 'merkle-rebuild-ormap'
   | 'crdt-merge'
   | 'serialize'
   | 'deserialize';
