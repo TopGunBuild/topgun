@@ -1,6 +1,7 @@
 import { createServer as createHttpServer, Server as HttpServer } from 'http';
 import { createServer as createHttpsServer, Server as HttpsServer, ServerOptions as HttpsServerOptions } from 'https';
 import { readFileSync } from 'fs';
+import * as net from 'net';
 import { WebSocketServer, WebSocket } from 'ws';
 import { HLC, LWWMap, ORMap, MerkleTree, serialize, deserialize, PermissionPolicy, Principal, PermissionType, Timestamp, LWWRecord, ORMapRecord, MessageSchema } from '@topgunbuild/core';
 import { IServerStorage, StorageValue, ORMapValue, ORMapTombstones } from './storage/IServerStorage';
@@ -26,6 +27,7 @@ import { TLSConfig, ClusterTLSConfig } from './types/TLSConfig';
 import { StripedEventExecutor } from './utils/StripedEventExecutor';
 import { BackpressureRegulator } from './utils/BackpressureRegulator';
 import { CoalescingWriter, CoalescingWriterOptions } from './utils/CoalescingWriter';
+import { ConnectionRateLimiter } from './utils/ConnectionRateLimiter';
 
 interface ClientConnection {
     id: string;
@@ -88,6 +90,30 @@ export interface ServerCoordinatorConfig {
     writeCoalescingMaxDelayMs?: number;
     /** Maximum batch size in bytes (default: 65536) */
     writeCoalescingMaxBytes?: number;
+
+    // === Connection Scaling Options ===
+    /** WebSocket backlog for pending connections (default: 511) */
+    wsBacklog?: number;
+    /** Enable WebSocket per-message compression (default: false for CPU savings) */
+    wsCompression?: boolean;
+    /** Maximum WebSocket payload size in bytes (default: 64MB) */
+    wsMaxPayload?: number;
+    /** Maximum server connections (default: 10000) */
+    maxConnections?: number;
+    /** Server timeout in ms (default: 120000 = 2 min) */
+    serverTimeout?: number;
+    /** Keep-alive timeout in ms (default: 5000) */
+    keepAliveTimeout?: number;
+    /** Headers timeout in ms (default: 60000) */
+    headersTimeout?: number;
+
+    // === Rate Limiting Options ===
+    /** Enable connection rate limiting (default: true) */
+    rateLimitingEnabled?: boolean;
+    /** Maximum new connections per second (default: 100) */
+    maxConnectionsPerSecond?: number;
+    /** Maximum pending connections (default: 1000) */
+    maxPendingConnections?: number;
 }
 
 export class ServerCoordinator {
@@ -137,6 +163,10 @@ export class ServerCoordinator {
     private writeCoalescingEnabled: boolean;
     private writeCoalescingOptions: Partial<CoalescingWriterOptions>;
 
+    // Connection rate limiter
+    private rateLimiter: ConnectionRateLimiter;
+    private rateLimitingEnabled: boolean;
+
     private _actualPort: number = 0;
     private _actualClusterPort: number = 0;
     private _readyPromise: Promise<void>;
@@ -184,6 +214,14 @@ export class ServerCoordinator {
             maxBatchBytes: config.writeCoalescingMaxBytes ?? 65536,
         };
 
+        // Initialize connection rate limiter
+        this.rateLimitingEnabled = config.rateLimitingEnabled ?? true;
+        this.rateLimiter = new ConnectionRateLimiter({
+            maxConnectionsPerSecond: config.maxConnectionsPerSecond ?? 100,
+            maxPendingConnections: config.maxPendingConnections ?? 1000,
+            cooldownMs: 1000,
+        });
+
         // HTTP Server Setup first (to get actual port if port=0)
         if (config.tls?.enabled) {
             const tlsOptions = this.buildTLSOptions(config.tls);
@@ -225,8 +263,33 @@ export class ServerCoordinator {
             logger.error({ err, port: metricsPort }, 'Metrics server failed to start');
         });
 
-        this.wss = new WebSocketServer({ server: this.httpServer });
+        // Configure WebSocketServer with optimal options for connection scaling
+        this.wss = new WebSocketServer({
+            server: this.httpServer,
+            // Increase backlog for pending connections (default Linux is 128)
+            backlog: config.wsBacklog ?? 511,
+            // Disable per-message deflate by default (CPU overhead)
+            perMessageDeflate: config.wsCompression ?? false,
+            // Max payload size (64MB default)
+            maxPayload: config.wsMaxPayload ?? 64 * 1024 * 1024,
+            // Skip UTF-8 validation for binary messages (performance)
+            skipUTF8Validation: true,
+        });
         this.wss.on('connection', (ws) => this.handleConnection(ws));
+
+        // Configure HTTP server limits for connection scaling
+        this.httpServer.maxConnections = config.maxConnections ?? 10000;
+        this.httpServer.timeout = config.serverTimeout ?? 120000; // 2 min
+        this.httpServer.keepAliveTimeout = config.keepAliveTimeout ?? 5000;
+        this.httpServer.headersTimeout = config.headersTimeout ?? 60000;
+
+        // Configure socket options for all incoming connections
+        this.httpServer.on('connection', (socket: net.Socket) => {
+            // Disable Nagle's algorithm for lower latency
+            socket.setNoDelay(true);
+            // Enable keep-alive with 60s interval
+            socket.setKeepAlive(true, 60000);
+        });
 
         // Use port 0 to let OS assign a free port
         this.httpServer.listen(config.port, () => {
@@ -333,6 +396,11 @@ export class ServerCoordinator {
         return this.eventExecutor.getTotalMetrics();
     }
 
+    /** Get connection rate limiter stats for monitoring */
+    public getRateLimiterStats() {
+        return this.rateLimiter.getStats();
+    }
+
     public async shutdown() {
         logger.info('Shutting down Server Coordinator...');
 
@@ -410,6 +478,21 @@ export class ServerCoordinator {
     }
 
     private async handleConnection(ws: WebSocket) {
+        // Check rate limit before accepting connection
+        if (this.rateLimitingEnabled && !this.rateLimiter.shouldAccept()) {
+            logger.warn('Connection rate limit exceeded, rejecting');
+            this.rateLimiter.onConnectionRejected();
+            this.metricsService.incConnectionsRejected();
+            ws.close(1013, 'Server overloaded'); // 1013 = Try Again Later
+            return;
+        }
+
+        // Register connection attempt
+        if (this.rateLimitingEnabled) {
+            this.rateLimiter.onConnectionAttempt();
+        }
+        this.metricsService.incConnectionsAccepted();
+
         // Client ID is temporary until auth
         const clientId = crypto.randomUUID();
         logger.info({ clientId }, 'Client connected (pending auth)');
@@ -492,6 +575,11 @@ export class ServerCoordinator {
 
         ws.on('close', () => {
             logger.info({ clientId }, 'Client disconnected');
+
+            // If connection was still pending (not authenticated), mark as failed
+            if (this.rateLimitingEnabled && !connection.isAuthenticated) {
+                this.rateLimiter.onPendingConnectionFailed();
+            }
 
             // Close the CoalescingWriter to flush any pending messages
             connection.writer.close();
@@ -587,6 +675,11 @@ export class ServerCoordinator {
                     client.principal = decoded;
                     client.isAuthenticated = true;
                     logger.info({ clientId: client.id, user: client.principal!.userId || 'anon' }, 'Client authenticated');
+
+                    // Mark connection as established (handshake complete)
+                    if (this.rateLimitingEnabled) {
+                        this.rateLimiter.onConnectionEstablished();
+                    }
 
                     client.writer.write({ type: 'AUTH_ACK' }, true); // urgent: bypass batching
                     return; // Stop processing this message

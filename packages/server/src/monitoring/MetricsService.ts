@@ -27,6 +27,12 @@ export class MetricsService {
   private backpressureWaitsTotal: Counter;
   private backpressureTimeoutsTotal: Counter;
 
+  // Connection scaling metrics
+  private connectionsAcceptedTotal: Counter;
+  private connectionsRejectedTotal: Counter;
+  private connectionsPending: Gauge;
+  private connectionRatePerSecond: Gauge;
+
   constructor() {
     this.registry = new Registry();
 
@@ -138,6 +144,31 @@ export class MetricsService {
       help: 'Total number of backpressure timeouts',
       registers: [this.registry],
     });
+
+    // === Connection scaling metrics ===
+    this.connectionsAcceptedTotal = new Counter({
+      name: 'topgun_connections_accepted_total',
+      help: 'Total number of connections accepted',
+      registers: [this.registry],
+    });
+
+    this.connectionsRejectedTotal = new Counter({
+      name: 'topgun_connections_rejected_total',
+      help: 'Total number of connections rejected due to rate limiting',
+      registers: [this.registry],
+    });
+
+    this.connectionsPending = new Gauge({
+      name: 'topgun_connections_pending',
+      help: 'Number of connections currently pending (handshake in progress)',
+      registers: [this.registry],
+    });
+
+    this.connectionRatePerSecond = new Gauge({
+      name: 'topgun_connection_rate_per_second',
+      help: 'Current connection rate per second',
+      registers: [this.registry],
+    });
   }
 
   public destroy() {
@@ -241,6 +272,36 @@ export class MetricsService {
    */
   public incBackpressureTimeouts(): void {
     this.backpressureTimeoutsTotal.inc();
+  }
+
+  // === Connection scaling metric methods ===
+
+  /**
+   * Increment counter for accepted connections.
+   */
+  public incConnectionsAccepted(): void {
+    this.connectionsAcceptedTotal.inc();
+  }
+
+  /**
+   * Increment counter for rejected connections.
+   */
+  public incConnectionsRejected(): void {
+    this.connectionsRejectedTotal.inc();
+  }
+
+  /**
+   * Set the current number of pending connections.
+   */
+  public setConnectionsPending(count: number): void {
+    this.connectionsPending.set(count);
+  }
+
+  /**
+   * Set the current connection rate per second.
+   */
+  public setConnectionRatePerSecond(rate: number): void {
+    this.connectionRatePerSecond.set(rate);
   }
 
   public async getMetrics(): Promise<string> {
