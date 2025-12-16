@@ -4,7 +4,7 @@ description: Practical, step-by-step guides to help you implement common pattern
 order: 10
 ---
 
-import { ChevronRight, Shield, Database, Server, Radio, Timer, Activity, Lock, KeyRound } from 'lucide-react';
+import { ChevronRight, Shield, Database, Server, Radio, Timer, Activity, Lock, KeyRound, Zap } from 'lucide-react';
 import { GuideCard } from '../../../components/docs/GuideCard';
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
@@ -66,6 +66,12 @@ Practical, step-by-step guides to help you implement common patterns and feature
     icon={Activity}
     title="Observability"
     description="Monitoring, metrics (Prometheus), and structured logging."
+  />
+  <GuideCard
+    href="/docs/guides/performance"
+    icon={Zap}
+    title="Performance Tuning"
+    description="Optimize for high throughput, low latency, or balanced production workloads."
   />
   <GuideCard
     href="/docs/guides/distributed-locks"

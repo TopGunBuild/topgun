@@ -5,7 +5,7 @@ order: 22
 ---
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
-import { ChevronRight, Server, Settings, Shield, Network, Lock } from 'lucide-react';
+import { ChevronRight, Server, Settings, Shield, Network, Lock, Gauge, Zap, Timer } from 'lucide-react';
 import { ApiParam, ApiConstructor } from '../../../components/docs/ApiMethod';
 
 export const readyCode = `const server = new ServerCoordinator(config);
@@ -58,6 +58,166 @@ synchronization logic, clustering, and security enforcement.
       name="clusterTls?"
       type="ClusterTLSConfig"
       description="TLS configuration for inter-node cluster communication. Supports mTLS."
+    />
+  </ApiConstructor>
+</div>
+
+## Connection Scaling Options
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Gauge className="w-6 h-6 text-blue-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Configure connection limits and WebSocket parameters for high-load scenarios.</span>
+</div>
+
+<div className="not-prose">
+  <ApiConstructor signature="Connection Scaling">
+    <ApiParam
+      name="wsBacklog?"
+      type="number"
+      description="TCP backlog for pending connections. Increase for high connection rates. Default: 511"
+    />
+    <ApiParam
+      name="wsCompression?"
+      type="boolean"
+      description="Enable WebSocket per-message compression. Disabled by default for CPU savings. Default: false"
+    />
+    <ApiParam
+      name="wsMaxPayload?"
+      type="number"
+      description="Maximum WebSocket payload size in bytes. Default: 67108864 (64MB)"
+    />
+    <ApiParam
+      name="maxConnections?"
+      type="number"
+      description="Maximum concurrent client connections. Default: 10000"
+    />
+    <ApiParam
+      name="serverTimeout?"
+      type="number"
+      description="Server timeout in milliseconds. Default: 120000 (2 minutes)"
+    />
+    <ApiParam
+      name="keepAliveTimeout?"
+      type="number"
+      description="Keep-alive timeout in milliseconds. Default: 5000"
+    />
+    <ApiParam
+      name="headersTimeout?"
+      type="number"
+      description="Headers timeout in milliseconds. Default: 60000"
+    />
+  </ApiConstructor>
+</div>
+
+## Event Queue Options
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Zap className="w-6 h-6 text-yellow-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Configure the bounded event queue for backpressure and memory protection.</span>
+</div>
+
+<div className="not-prose">
+  <ApiConstructor signature="Event Queue">
+    <ApiParam
+      name="eventQueueCapacity?"
+      type="number"
+      description="Maximum events in queue. Protects against OOM under load. Default: 10000"
+    />
+    <ApiParam
+      name="eventStripeCount?"
+      type="number"
+      description="Number of striped queues for parallel processing. Default: 4"
+    />
+  </ApiConstructor>
+</div>
+
+## Backpressure Options
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Timer className="w-6 h-6 text-orange-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Control backpressure behavior for async operation management.</span>
+</div>
+
+<div className="not-prose">
+  <ApiConstructor signature="Backpressure">
+    <ApiParam
+      name="backpressureEnabled?"
+      type="boolean"
+      description="Enable backpressure mechanism. Default: true"
+    />
+    <ApiParam
+      name="backpressureSyncFrequency?"
+      type="number"
+      description="Force synchronous processing every N operations. Lower values reduce latency spikes. Default: 100"
+    />
+    <ApiParam
+      name="backpressureMaxPending?"
+      type="number"
+      description="Maximum pending async operations before blocking. Default: 1000"
+    />
+    <ApiParam
+      name="backpressureBackoffMs?"
+      type="number"
+      description="Backoff timeout in milliseconds when at capacity. Default: 5000"
+    />
+  </ApiConstructor>
+</div>
+
+## Write Coalescing Options
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Zap className="w-6 h-6 text-purple-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Batch WebSocket writes to reduce syscalls and improve throughput.</span>
+</div>
+
+<div className="not-prose">
+  <ApiConstructor signature="Write Coalescing">
+    <ApiParam
+      name="writeCoalescingEnabled?"
+      type="boolean"
+      description="Enable write batching. Disable for lowest latency real-time apps. Default: true"
+    />
+    <ApiParam
+      name="writeCoalescingMaxBatch?"
+      type="number"
+      description="Maximum messages per batch before forcing flush. Default: 100"
+    />
+    <ApiParam
+      name="writeCoalescingMaxDelayMs?"
+      type="number"
+      description="Maximum delay in milliseconds before flushing. Lower values reduce latency. Default: 5"
+    />
+    <ApiParam
+      name="writeCoalescingMaxBytes?"
+      type="number"
+      description="Maximum batch size in bytes before flushing. Default: 65536 (64KB)"
+    />
+  </ApiConstructor>
+</div>
+
+## Rate Limiting Options
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Shield className="w-6 h-6 text-red-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Protect against connection floods and DDoS attacks.</span>
+</div>
+
+<div className="not-prose">
+  <ApiConstructor signature="Rate Limiting">
+    <ApiParam
+      name="rateLimitingEnabled?"
+      type="boolean"
+      description="Enable connection rate limiting. Default: true"
+    />
+    <ApiParam
+      name="maxConnectionsPerSecond?"
+      type="number"
+      description="Maximum new connections accepted per second. Default: 100"
+    />
+    <ApiParam
+      name="maxPendingConnections?"
+      type="number"
+      description="Maximum pending connection handshakes. Default: 1000"
     />
   </ApiConstructor>
 </div>

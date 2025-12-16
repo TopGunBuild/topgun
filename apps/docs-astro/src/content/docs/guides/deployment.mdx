@@ -5,7 +5,7 @@ order: 15
 ---
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
-import { ChevronRight, Server, Container, Layers, Lock, Shield } from 'lucide-react';
+import { ChevronRight, Server, Container, Layers, Lock, Shield, Zap } from 'lucide-react';
 
 export const dockerBuildCode = `# From the root of the repository
 docker build -t topgun-server .`;
@@ -105,6 +105,38 @@ services:
 
 volumes:
   postgres_data:`;
+
+export const productionPerfCode = `import { ServerCoordinator } from '@topgunbuild/server';
+import { PostgresAdapter } from '@topgunbuild/server/storage';
+
+const server = new ServerCoordinator({
+  port: 8080,
+  nodeId: process.env.NODE_ID || 'prod-node-1',
+  storage: new PostgresAdapter(process.env.DATABASE_URL),
+
+  // Production performance settings
+  wsBacklog: 511,
+  maxConnections: 10000,
+  eventQueueCapacity: 50000,
+  eventStripeCount: 4,
+
+  // Backpressure tuning
+  backpressureEnabled: true,
+  backpressureSyncFrequency: 100,
+  backpressureMaxPending: 2000,
+
+  // Write coalescing
+  writeCoalescingEnabled: true,
+  writeCoalescingMaxDelayMs: 5,
+
+  // Rate limiting for DDoS protection
+  rateLimitingEnabled: true,
+  maxConnectionsPerSecond: 200,
+  maxPendingConnections: 2000,
+});
+
+await server.ready();
+console.log(\`Server running on port \${server.port}\`);`;
 
 export const k8sSecretCode = `apiVersion: v1
 kind: Secret
@@ -256,6 +288,31 @@ The Dockerfile handles:
 </div>
 
 Deploying with Helm allows easy scaling of the server replicas. TopGun nodes automatically discover each other when running in the same cluster (configured via `cluster.discovery`).
+
+## Production Performance Settings
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Zap className="w-6 h-6 text-yellow-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Recommended configuration for production workloads with high connection counts.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="Production Server Setup" language="typescript" code={productionPerfCode} />
+</div>
+
+### Key Settings Explained
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `eventQueueCapacity` | 50000 | Handle traffic bursts without dropping events |
+| `backpressureSyncFrequency` | 100 | Balance throughput and latency |
+| `writeCoalescingMaxDelayMs` | 5 | Batch writes with 5ms max delay |
+| `maxConnectionsPerSecond` | 200 | DDoS protection |
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 my-6 not-prose">
+  <h3 className="text-lg font-semibold text-blue-800 dark:text-blue-300 mb-2">Performance Tuning Guide</h3>
+  <span className="text-blue-700 dark:text-blue-400">For detailed tuning guidance including high-throughput and low-latency configurations, see the <a href="/docs/guides/performance" className="underline">Performance Tuning Guide</a>.</span>
+</div>
 
 ## TLS Configuration
 
