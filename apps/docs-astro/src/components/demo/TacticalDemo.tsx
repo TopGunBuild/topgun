@@ -198,10 +198,7 @@ export const TacticalDemo: React.FC = () => {
             and watch how conflicts are resolved automatically.
           </p>
           <p className="text-sm text-neutral-500 dark:text-neutral-400 mt-2">
-            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-green-500/10 border border-green-500/20 text-green-600 dark:text-green-400 font-mono text-xs">
-              ~16ms in production
-            </span>
-            <span className="ml-2">Delays slowed for visual clarity</span>
+            Delays slowed for visual clarity
           </p>
         </div>
 

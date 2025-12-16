@@ -38,5 +38,5 @@ export const STATUS_COLORS = {
   [DroneStatus.RTB]: 'text-yellow-400 border-yellow-400 bg-yellow-400/10',
 };
 
-// Slowed down for visual clarity (production: ~16ms)
+// Slowed down for visual clarity
 export const SYNC_LATENCY_MS = 250;

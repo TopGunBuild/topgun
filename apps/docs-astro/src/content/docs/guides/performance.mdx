@@ -129,9 +129,32 @@ topgun_subscribers_per_event{quantile="0.5"}`;
   </p>
 </div>
 
+## Performance Benchmarks
+
+<div className="bg-neutral-50 dark:bg-neutral-900/50 border border-card-border rounded-xl p-6 my-6 not-prose">
+  <h3 className="text-lg font-semibold text-foreground mb-4">Measured Performance (single node)</h3>
+  <div className="grid md:grid-cols-3 gap-6">
+    <div>
+      <div className="text-3xl font-bold text-blue-600 dark:text-blue-400">2,000+</div>
+      <div className="text-sm text-neutral-600 dark:text-neutral-400">ops/sec sustained throughput</div>
+    </div>
+    <div>
+      <div className="text-3xl font-bold text-green-600 dark:text-green-400">200</div>
+      <div className="text-sm text-neutral-600 dark:text-neutral-400">concurrent clients (tested)</div>
+    </div>
+    <div>
+      <div className="text-3xl font-bold text-purple-600 dark:text-purple-400">&lt;100ms</div>
+      <div className="text-sm text-neutral-600 dark:text-neutral-400">p99 write latency</div>
+    </div>
+  </div>
+  <p className="text-xs text-neutral-500 mt-4">
+    Benchmarks run with k6 load testing on a single server node. Results include full E2E delivery: client → server → CRDT merge → persistence → broadcast to subscribers.
+  </p>
+</div>
+
 ## Understanding the Optimizations
 
-TopGun includes several performance optimizations inspired by high-performance distributed systems like Hazelcast:
+TopGun includes several performance optimizations inspired by proven patterns from high-performance distributed systems:
 
 <div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
   <div className="p-4 border border-card-border rounded-lg">
