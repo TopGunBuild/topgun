@@ -1,12 +1,13 @@
 /**
  * WorkerPool Module Exports
- * Phase 1.02-04: Worker Threads Implementation
+ * Phase 1.02-07: Worker Threads Implementation
  */
 
 // Main classes
 export { WorkerPool } from './WorkerPool';
 export { MerkleWorker } from './MerkleWorker';
 export { CRDTMergeWorker } from './CRDTMergeWorker';
+export { SerializationWorker } from './SerializationWorker';
 
 // Types
 export type {
@@ -46,6 +47,18 @@ export type {
   ORMapMergeItem,
   ORMapMergeTombstone,
 } from './crdt-types';
+
+// Serialization Types
+export type {
+  SerializeBatchPayload,
+  SerializeBatchResult,
+  DeserializeBatchPayload,
+  DeserializeBatchResult,
+  SerializePayload,
+  SerializeResult,
+  DeserializePayload,
+  DeserializeResult,
+} from './serialization-types';
 
 // Errors
 export {
