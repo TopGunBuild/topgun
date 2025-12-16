@@ -24,6 +24,7 @@ import { MetricsService } from './monitoring/MetricsService';
 import { SystemManager } from './system/SystemManager';
 import { TLSConfig, ClusterTLSConfig } from './types/TLSConfig';
 import { StripedEventExecutor } from './utils/StripedEventExecutor';
+import { BackpressureRegulator } from './utils/BackpressureRegulator';
 
 interface ClientConnection {
     id: string;
@@ -69,6 +70,14 @@ export interface ServerCoordinatorConfig {
     eventQueueCapacity?: number;
     /** Number of event queue stripes for parallel processing (default: 4) */
     eventStripeCount?: number;
+    /** Enable/disable backpressure (default: true) */
+    backpressureEnabled?: boolean;
+    /** How often to force sync processing (default: 100 operations) */
+    backpressureSyncFrequency?: number;
+    /** Maximum pending async operations before blocking (default: 1000) */
+    backpressureMaxPending?: number;
+    /** Backoff timeout in ms when at capacity (default: 5000) */
+    backpressureBackoffMs?: number;
 }
 
 export class ServerCoordinator {
@@ -111,6 +120,9 @@ export class ServerCoordinator {
     // Bounded event queue executor for backpressure control
     private eventExecutor: StripedEventExecutor;
 
+    // Backpressure regulator for periodic sync processing
+    private backpressure: BackpressureRegulator;
+
     private _actualPort: number = 0;
     private _actualClusterPort: number = 0;
     private _readyPromise: Promise<void>;
@@ -140,6 +152,14 @@ export class ServerCoordinator {
                 logger.warn({ nodeId: config.nodeId, key: task.key }, 'Event task rejected due to queue capacity');
                 this.metricsService.incEventQueueRejected();
             }
+        });
+
+        // Initialize backpressure regulator for periodic sync processing
+        this.backpressure = new BackpressureRegulator({
+            syncFrequency: config.backpressureSyncFrequency ?? 100,
+            maxPendingOps: config.backpressureMaxPending ?? 1000,
+            backoffTimeoutMs: config.backpressureBackoffMs ?? 5000,
+            enabled: config.backpressureEnabled ?? true
         });
 
         // HTTP Server Setup first (to get actual port if port=0)
@@ -1382,6 +1402,119 @@ export class ServerCoordinator {
         return client.principal.roles.sort().join(',');
     }
 
+    /**
+     * === BACKPRESSURE: Synchronous Broadcast ===
+     * Same as broadcastBatch but waits for all sends to complete.
+     * Used when backpressure forces sync processing to drain the pipeline.
+     */
+    private async broadcastBatchSync(events: any[], excludeClientId?: string): Promise<void> {
+        if (events.length === 0) return;
+
+        // Get unique map names from events
+        const affectedMaps = new Set<string>();
+        for (const event of events) {
+            if (event.mapName) {
+                affectedMaps.add(event.mapName);
+            }
+        }
+
+        // Get all subscribed client IDs across all affected maps
+        const subscribedClientIds = new Set<string>();
+        for (const mapName of affectedMaps) {
+            const mapSubscribers = this.queryRegistry.getSubscribedClientIds(mapName);
+            for (const clientId of mapSubscribers) {
+                subscribedClientIds.add(clientId);
+            }
+        }
+
+        if (subscribedClientIds.size === 0) {
+            return;
+        }
+
+        // Group subscribed clients by their role signature
+        const clientsByRoleSignature = new Map<string, ClientConnection[]>();
+
+        for (const clientId of subscribedClientIds) {
+            if (clientId === excludeClientId) continue;
+
+            const client = this.clients.get(clientId);
+            if (!client || client.socket.readyState !== 1 || !client.isAuthenticated || !client.principal) {
+                continue;
+            }
+
+            const roleSignature = (client.principal.roles || ['USER']).sort().join(',');
+
+            if (!clientsByRoleSignature.has(roleSignature)) {
+                clientsByRoleSignature.set(roleSignature, []);
+            }
+            clientsByRoleSignature.get(roleSignature)!.push(client);
+        }
+
+        // Collect all send promises
+        const sendPromises: Promise<void>[] = [];
+
+        for (const [, clients] of clientsByRoleSignature) {
+            if (clients.length === 0) continue;
+
+            const representativeClient = clients[0];
+
+            // Filter all events for this role group
+            const filteredEvents = events.map(eventPayload => {
+                const mapName = eventPayload.mapName;
+                const newPayload = { ...eventPayload };
+
+                if (newPayload.record) {
+                    const newVal = this.securityManager.filterObject(
+                        newPayload.record.value,
+                        representativeClient.principal!,
+                        mapName
+                    );
+                    newPayload.record = { ...newPayload.record, value: newVal };
+                }
+
+                if (newPayload.orRecord) {
+                    const newVal = this.securityManager.filterObject(
+                        newPayload.orRecord.value,
+                        representativeClient.principal!,
+                        mapName
+                    );
+                    newPayload.orRecord = { ...newPayload.orRecord, value: newVal };
+                }
+
+                return newPayload;
+            });
+
+            const batchMessage = {
+                type: 'SERVER_BATCH_EVENT',
+                payload: { events: filteredEvents },
+                timestamp: this.hlc.now()
+            };
+            const serializedBatch = serialize(batchMessage);
+
+            // Send to all clients and collect promises
+            for (const client of clients) {
+                sendPromises.push(new Promise<void>((resolve, reject) => {
+                    try {
+                        client.socket.send(serializedBatch, (err) => {
+                            if (err) {
+                                logger.error({ clientId: client.id, err }, 'Failed to send sync batch to client');
+                                reject(err);
+                            } else {
+                                resolve();
+                            }
+                        });
+                    } catch (err) {
+                        logger.error({ clientId: client.id, err }, 'Exception sending sync batch to client');
+                        reject(err);
+                    }
+                }));
+            }
+        }
+
+        // Wait for all sends to complete (ignore individual failures)
+        await Promise.allSettled(sendPromises);
+    }
+
     private setupClusterListeners() {
         this.cluster.on('memberJoined', () => {
             this.metricsService.setClusterMembers(this.cluster.getMembers().length);
@@ -1835,44 +1968,125 @@ export class ServerCoordinator {
     }
 
     /**
-     * === OPTIMIZATION 1: Async Batch Processing ===
+     * === OPTIMIZATION 1: Async Batch Processing with Backpressure ===
      * Processes validated operations asynchronously after ACK has been sent.
-     * This prevents blocking the event loop during high-throughput scenarios.
+     * Uses BackpressureRegulator to periodically force sync processing and
+     * prevent unbounded accumulation of async work.
      */
     private async processBatchAsync(ops: any[], clientId: string): Promise<void> {
-        // === OPTIMIZATION 3: Batch Broadcast ===
-        // Collect all events for a single batched broadcast at the end
+        // === BACKPRESSURE: Check if we should force sync processing ===
+        if (this.backpressure.shouldForceSync()) {
+            this.metricsService.incBackpressureSyncForced();
+            await this.processBatchSync(ops, clientId);
+            return;
+        }
+
+        // === BACKPRESSURE: Check and wait for capacity ===
+        if (!this.backpressure.registerPending()) {
+            this.metricsService.incBackpressureWaits();
+            try {
+                await this.backpressure.waitForCapacity();
+                this.backpressure.registerPending();
+            } catch (err) {
+                this.metricsService.incBackpressureTimeouts();
+                logger.warn({ clientId, pendingOps: ops.length }, 'Backpressure timeout - rejecting batch');
+                throw new Error('Server overloaded');
+            }
+        }
+
+        // Update pending ops metric
+        this.metricsService.setBackpressurePendingOps(this.backpressure.getPendingOps());
+
+        try {
+            // === OPTIMIZATION 3: Batch Broadcast ===
+            // Collect all events for a single batched broadcast at the end
+            const batchedEvents: any[] = [];
+
+            for (const op of ops) {
+                if (this.partitionService.isLocalOwner(op.key)) {
+                    try {
+                        // Process without immediate broadcast (we'll batch them)
+                        await this.processLocalOpForBatch(op, clientId, batchedEvents);
+                    } catch (err) {
+                        logger.warn({ clientId, mapName: op.mapName, key: op.key, err }, 'Op failed in async batch');
+                    }
+                } else {
+                    // Forward to owner
+                    const owner = this.partitionService.getOwner(op.key);
+                    this.cluster.sendToNode(owner, {
+                        type: 'CLIENT_OP',
+                        payload: {
+                            mapName: op.mapName,
+                            key: op.key,
+                            record: op.record,
+                            orRecord: op.orRecord,
+                            orTag: op.orTag,
+                            opType: op.opType
+                        }
+                    });
+                }
+            }
+
+            // Send batched broadcast if we have events
+            if (batchedEvents.length > 0) {
+                this.broadcastBatch(batchedEvents, clientId);
+            }
+        } finally {
+            this.backpressure.completePending();
+            this.metricsService.setBackpressurePendingOps(this.backpressure.getPendingOps());
+        }
+    }
+
+    /**
+     * === BACKPRESSURE: Synchronous Batch Processing ===
+     * Processes operations synchronously, waiting for broadcast completion.
+     * Used when backpressure forces sync to drain the pipeline.
+     */
+    private async processBatchSync(ops: any[], clientId: string): Promise<void> {
         const batchedEvents: any[] = [];
 
         for (const op of ops) {
             if (this.partitionService.isLocalOwner(op.key)) {
                 try {
-                    // Process without immediate broadcast (we'll batch them)
                     await this.processLocalOpForBatch(op, clientId, batchedEvents);
                 } catch (err) {
-                    logger.warn({ clientId, mapName: op.mapName, key: op.key, err }, 'Op failed in async batch');
+                    logger.warn({ clientId, mapName: op.mapName, key: op.key, err }, 'Op failed in sync batch');
                 }
             } else {
-                // Forward to owner
+                // Forward to owner and wait for acknowledgment
                 const owner = this.partitionService.getOwner(op.key);
-                this.cluster.sendToNode(owner, {
-                    type: 'CLIENT_OP',
-                    payload: {
-                        mapName: op.mapName,
-                        key: op.key,
-                        record: op.record,
-                        orRecord: op.orRecord,
-                        orTag: op.orTag,
-                        opType: op.opType
-                    }
-                });
+                await this.forwardOpAndWait(op, owner);
             }
         }
 
-        // Send batched broadcast if we have events
+        // Send batched broadcast SYNCHRONOUSLY - wait for all sends to complete
         if (batchedEvents.length > 0) {
-            this.broadcastBatch(batchedEvents, clientId);
+            await this.broadcastBatchSync(batchedEvents, clientId);
         }
+    }
+
+    /**
+     * Forward operation to owner node and wait for completion.
+     * Used in sync processing mode.
+     */
+    private async forwardOpAndWait(op: any, owner: string): Promise<void> {
+        return new Promise<void>((resolve) => {
+            // Fire and forget for now - cluster forwarding doesn't have ack mechanism
+            // In a full implementation, this would wait for cluster ACK
+            this.cluster.sendToNode(owner, {
+                type: 'CLIENT_OP',
+                payload: {
+                    mapName: op.mapName,
+                    key: op.key,
+                    record: op.record,
+                    orRecord: op.orRecord,
+                    orTag: op.orTag,
+                    opType: op.opType
+                }
+            });
+            // Resolve immediately since cluster doesn't support sync ACK yet
+            resolve();
+        });
     }
 
     /**

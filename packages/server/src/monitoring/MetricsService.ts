@@ -21,6 +21,12 @@ export class MetricsService {
   private eventQueueDequeued: Counter;
   private eventQueueRejected: Counter;
 
+  // Backpressure metrics
+  private backpressureSyncForcedTotal: Counter;
+  private backpressurePendingOps: Gauge;
+  private backpressureWaitsTotal: Counter;
+  private backpressureTimeoutsTotal: Counter;
+
   constructor() {
     this.registry = new Registry();
 
@@ -107,6 +113,31 @@ export class MetricsService {
       help: 'Total number of events rejected due to queue capacity',
       registers: [this.registry],
     });
+
+    // === Backpressure metrics ===
+    this.backpressureSyncForcedTotal = new Counter({
+      name: 'topgun_backpressure_sync_forced_total',
+      help: 'Total number of times sync processing was forced',
+      registers: [this.registry],
+    });
+
+    this.backpressurePendingOps = new Gauge({
+      name: 'topgun_backpressure_pending_ops',
+      help: 'Current number of pending async operations',
+      registers: [this.registry],
+    });
+
+    this.backpressureWaitsTotal = new Counter({
+      name: 'topgun_backpressure_waits_total',
+      help: 'Total number of times had to wait for capacity',
+      registers: [this.registry],
+    });
+
+    this.backpressureTimeoutsTotal = new Counter({
+      name: 'topgun_backpressure_timeouts_total',
+      help: 'Total number of backpressure timeouts',
+      registers: [this.registry],
+    });
   }
 
   public destroy() {
@@ -180,6 +211,36 @@ export class MetricsService {
    */
   public incEventQueueRejected(): void {
     this.eventQueueRejected.inc();
+  }
+
+  // === Backpressure metric methods ===
+
+  /**
+   * Increment counter for forced sync operations.
+   */
+  public incBackpressureSyncForced(): void {
+    this.backpressureSyncForcedTotal.inc();
+  }
+
+  /**
+   * Set the current number of pending async operations.
+   */
+  public setBackpressurePendingOps(count: number): void {
+    this.backpressurePendingOps.set(count);
+  }
+
+  /**
+   * Increment counter for times had to wait for capacity.
+   */
+  public incBackpressureWaits(): void {
+    this.backpressureWaitsTotal.inc();
+  }
+
+  /**
+   * Increment counter for backpressure timeouts.
+   */
+  public incBackpressureTimeouts(): void {
+    this.backpressureTimeoutsTotal.inc();
   }
 
   public async getMetrics(): Promise<string> {
