@@ -1,11 +1,12 @@
 /**
  * WorkerPool Module Exports
- * Phase 1.02-03: Worker Threads Implementation
+ * Phase 1.02-04: Worker Threads Implementation
  */
 
 // Main classes
 export { WorkerPool } from './WorkerPool';
 export { MerkleWorker } from './MerkleWorker';
+export { CRDTMergeWorker } from './CRDTMergeWorker';
 
 // Types
 export type {
@@ -33,6 +34,18 @@ export type {
   ORMapMerkleRebuildPayload,
   BucketInfo,
 } from './merkle-types';
+
+// CRDT Types
+export type {
+  LWWMergePayload,
+  LWWMergeResult,
+  LWWMergeRecord,
+  LWWExistingRecord,
+  ORMapMergePayload,
+  ORMapMergeResult,
+  ORMapMergeItem,
+  ORMapMergeTombstone,
+} from './crdt-types';
 
 // Errors
 export {

@@ -30,7 +30,8 @@ export type WorkerTaskType =
   | 'merkle-diff'
   | 'merkle-rebuild'
   | 'merkle-rebuild-ormap'
-  | 'crdt-merge'
+  | 'lww-merge'
+  | 'ormap-merge'
   | 'serialize'
   | 'deserialize';
 
