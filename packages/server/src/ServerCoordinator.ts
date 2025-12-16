@@ -28,6 +28,7 @@ import { StripedEventExecutor } from './utils/StripedEventExecutor';
 import { BackpressureRegulator } from './utils/BackpressureRegulator';
 import { CoalescingWriter, CoalescingWriterOptions } from './utils/CoalescingWriter';
 import { ConnectionRateLimiter } from './utils/ConnectionRateLimiter';
+import { WorkerPool, MerkleWorker, CRDTMergeWorker, WorkerPoolConfig } from './workers';
 
 interface ClientConnection {
     id: string;
@@ -114,6 +115,12 @@ export interface ServerCoordinatorConfig {
     maxConnectionsPerSecond?: number;
     /** Maximum pending connections (default: 1000) */
     maxPendingConnections?: number;
+
+    // === Worker Pool Options ===
+    /** Enable worker pool for CPU-bound operations (default: false) */
+    workerPoolEnabled?: boolean;
+    /** Worker pool configuration */
+    workerPoolConfig?: Partial<WorkerPoolConfig>;
 }
 
 export class ServerCoordinator {
@@ -166,6 +173,11 @@ export class ServerCoordinator {
     // Connection rate limiter
     private rateLimiter: ConnectionRateLimiter;
     private rateLimitingEnabled: boolean;
+
+    // Worker pool for CPU-bound operations
+    private workerPool?: WorkerPool;
+    private merkleWorker?: MerkleWorker;
+    private crdtMergeWorker?: CRDTMergeWorker;
 
     private _actualPort: number = 0;
     private _actualClusterPort: number = 0;
@@ -221,6 +233,23 @@ export class ServerCoordinator {
             maxPendingConnections: config.maxPendingConnections ?? 1000,
             cooldownMs: 1000,
         });
+
+        // Initialize worker pool for CPU-bound operations
+        if (config.workerPoolEnabled) {
+            this.workerPool = new WorkerPool({
+                minWorkers: config.workerPoolConfig?.minWorkers ?? 2,
+                maxWorkers: config.workerPoolConfig?.maxWorkers,
+                taskTimeout: config.workerPoolConfig?.taskTimeout ?? 5000,
+                idleTimeout: config.workerPoolConfig?.idleTimeout ?? 30000,
+                autoRestart: config.workerPoolConfig?.autoRestart ?? true,
+            });
+            this.merkleWorker = new MerkleWorker(this.workerPool);
+            this.crdtMergeWorker = new CRDTMergeWorker(this.workerPool);
+            logger.info({
+                minWorkers: config.workerPoolConfig?.minWorkers ?? 2,
+                maxWorkers: config.workerPoolConfig?.maxWorkers ?? 'auto'
+            }, 'Worker pool initialized for CPU-bound operations');
+        }
 
         // HTTP Server Setup first (to get actual port if port=0)
         if (config.tls?.enabled) {
@@ -401,6 +430,16 @@ export class ServerCoordinator {
         return this.rateLimiter.getStats();
     }
 
+    /** Get worker pool stats for monitoring */
+    public getWorkerPoolStats() {
+        return this.workerPool?.getStats() ?? null;
+    }
+
+    /** Check if worker pool is enabled */
+    public get workerPoolEnabled(): boolean {
+        return !!this.workerPool;
+    }
+
     public async shutdown() {
         logger.info('Shutting down Server Coordinator...');
 
@@ -436,6 +475,13 @@ export class ServerCoordinator {
         // 3. Shutdown event executor (wait for pending tasks)
         logger.info('Shutting down event executor...');
         await this.eventExecutor.shutdown(true);
+
+        // 3.5. Shutdown worker pool
+        if (this.workerPool) {
+            logger.info('Shutting down worker pool...');
+            await this.workerPool.shutdown(5000);
+            logger.info('Worker pool shutdown complete.');
+        }
 
         // 4. Stop Cluster
         if (this.cluster) {
