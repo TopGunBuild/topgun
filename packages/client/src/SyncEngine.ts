@@ -620,6 +620,29 @@ export class SyncEngine {
 
   private async handleServerMessage(message: any): Promise<void> {
     switch (message.type) {
+      case 'BATCH': {
+        // Unbatch and process each message
+        // Format: [4 bytes: count][4 bytes: len1][msg1][4 bytes: len2][msg2]...
+        const batchData = message.data as Uint8Array;
+        const view = new DataView(batchData.buffer, batchData.byteOffset, batchData.byteLength);
+        let offset = 0;
+
+        const count = view.getUint32(offset, true);
+        offset += 4;
+
+        for (let i = 0; i < count; i++) {
+          const msgLen = view.getUint32(offset, true);
+          offset += 4;
+
+          const msgData = batchData.slice(offset, offset + msgLen);
+          offset += msgLen;
+
+          const innerMsg = deserialize(msgData);
+          await this.handleServerMessage(innerMsg);
+        }
+        break;
+      }
+
       case 'AUTH_REQUIRED':
         this.sendAuth();
         break;
@@ -736,20 +759,23 @@ export class SyncEngine {
       case 'SERVER_EVENT': {
         // Modified to support ORMap
         const { mapName, eventType, key, record, orRecord, orTag } = message.payload;
-        const localMap = this.maps.get(mapName);
-        if (localMap) {
-          if (localMap instanceof LWWMap && record) {
-            localMap.merge(key, record);
-            await this.storageAdapter.put(`${mapName}:${key}`, record);
-          } else if (localMap instanceof ORMap) {
-            if (eventType === 'OR_ADD' && orRecord) {
-              localMap.apply(key, orRecord);
-              // We need to store ORMap records differently in storageAdapter or use a convention
-              // For now, skipping persistent storage update for ORMap in this example
-            } else if (eventType === 'OR_REMOVE' && orTag) {
-              localMap.applyTombstone(orTag);
-            }
-          }
+        await this.applyServerEvent(mapName, eventType, key, record, orRecord, orTag);
+        break;
+      }
+
+      case 'SERVER_BATCH_EVENT': {
+        // === OPTIMIZATION: Batch event processing ===
+        // Server sends multiple events in a single message for efficiency
+        const { events } = message.payload;
+        for (const event of events) {
+          await this.applyServerEvent(
+            event.mapName,
+            event.eventType,
+            event.key,
+            event.record,
+            event.orRecord,
+            event.orTag
+          );
         }
         break;
       }
@@ -982,6 +1008,35 @@ export class SyncEngine {
 
   public getHLC(): HLC {
     return this.hlc;
+  }
+
+  /**
+   * Helper method to apply a single server event to the local map.
+   * Used by both SERVER_EVENT and SERVER_BATCH_EVENT handlers.
+   */
+  private async applyServerEvent(
+    mapName: string,
+    eventType: string,
+    key: string,
+    record?: any,
+    orRecord?: any,
+    orTag?: string
+  ): Promise<void> {
+    const localMap = this.maps.get(mapName);
+    if (localMap) {
+      if (localMap instanceof LWWMap && record) {
+        localMap.merge(key, record);
+        await this.storageAdapter.put(`${mapName}:${key}`, record);
+      } else if (localMap instanceof ORMap) {
+        if (eventType === 'OR_ADD' && orRecord) {
+          localMap.apply(key, orRecord);
+          // We need to store ORMap records differently in storageAdapter or use a convention
+          // For now, skipping persistent storage update for ORMap in this example
+        } else if (eventType === 'OR_REMOVE' && orTag) {
+          localMap.applyTombstone(orTag);
+        }
+      }
+    }
   }
 
   /**

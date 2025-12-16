@@ -1,5 +1,23 @@
 import { ServerCoordinator } from '../ServerCoordinator';
-import { LWWRecord, deserialize, Predicates } from '@topgunbuild/core';
+import { LWWRecord, deserialize, Predicates, serialize } from '@topgunbuild/core';
+
+const createMockWriter = (socket: any) => ({
+  write: jest.fn((message: any, _urgent?: boolean) => {
+    const data = serialize(message);
+    socket.send(data);
+  }),
+  writeRaw: jest.fn((data: Uint8Array) => {
+    socket.send(data);
+  }),
+  flush: jest.fn(),
+  close: jest.fn(),
+  getMetrics: jest.fn(() => ({
+    messagesSent: 0,
+    batchesSent: 0,
+    bytesSent: 0,
+    avgMessagesPerBatch: 0,
+  })),
+});
 
 describe('Live Query Sliding Window Integration', () => {
   let server: ServerCoordinator;
@@ -34,12 +52,14 @@ describe('Live Query Sliding Window Integration', () => {
     // 2. Setup Client & Subscribe (Top 2)
     const clientSocket = {
       send: jest.fn(),
+      close: jest.fn(),
       readyState: 1 // OPEN
     };
 
     const clientMock = {
       id: 'client-1',
       socket: clientSocket as any,
+      writer: createMockWriter(clientSocket) as any,
       isAuthenticated: true,
       subscriptions: new Set(),
       principal: { userId: 'test', roles: ['ADMIN'] }
@@ -115,11 +135,13 @@ describe('Live Query Sliding Window Integration', () => {
     // 2. Setup Client
     const clientSocket = {
       send: jest.fn(),
+      close: jest.fn(),
       readyState: 1
     };
     const clientMock = {
       id: 'client-2',
       socket: clientSocket as any,
+      writer: createMockWriter(clientSocket) as any,
       isAuthenticated: true,
       subscriptions: new Set(),
       principal: { userId: 'test2', roles: ['ADMIN'] }

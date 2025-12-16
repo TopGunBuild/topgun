@@ -1,6 +1,24 @@
 import { ServerCoordinator } from '../ServerCoordinator';
 import { HLC, ORMap, serialize, deserialize, ORMapRecord } from '@topgunbuild/core';
 
+const createMockWriter = (socket: any) => ({
+  write: jest.fn((message: any, _urgent?: boolean) => {
+    const data = serialize(message);
+    socket.send(data);
+  }),
+  writeRaw: jest.fn((data: Uint8Array) => {
+    socket.send(data);
+  }),
+  flush: jest.fn(),
+  close: jest.fn(),
+  getMetrics: jest.fn(() => ({
+    messagesSent: 0,
+    batchesSent: 0,
+    bytesSent: 0,
+    avgMessagesPerBatch: 0,
+  })),
+});
+
 describe('ORMap Merkle Tree Sync Integration', () => {
   let server: ServerCoordinator;
 
@@ -32,6 +50,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
     const clientMock = {
       id,
       socket: clientSocket as any,
+      writer: createMockWriter(clientSocket) as any,
       isAuthenticated: true,
       subscriptions: new Set<string>(),
       principal: { userId: id, roles: ['ADMIN'] },
@@ -216,6 +235,19 @@ describe('ORMap Merkle Tree Sync Integration', () => {
       injectClient(client1);
       injectClient(client2);
 
+      // Initialize ORMap to ensure it exists before subscription
+      server.getMap('or:broadcast-test', 'OR');
+
+      // IMPORTANT: Client 2 must subscribe to receive SERVER_EVENT (subscription-based routing)
+      await (server as any).handleMessage(client2, {
+        type: 'QUERY_SUB',
+        payload: { queryId: 'sub-or-broadcast', mapName: 'or:broadcast-test', query: {} }
+      });
+
+      // Wait for subscription to be processed
+      await new Promise(r => setTimeout(r, 10));
+      responses2.length = 0; // Clear subscription response
+
       const record: ORMapRecord<string> = {
         value: 'broadcast-value',
         timestamp: { millis: Date.now(), counter: 1, nodeId: 'client-7' },
@@ -234,7 +266,10 @@ describe('ORMap Merkle Tree Sync Integration', () => {
         }
       });
 
-      // Client 2 should receive broadcast
+      // Wait for async broadcast
+      await new Promise(r => setTimeout(r, 10));
+
+      // Client 2 should receive broadcast (now that it's subscribed)
       const broadcastMsg = responses2.find((r: any) => r.type === 'SERVER_EVENT');
       expect(broadcastMsg).toBeDefined();
       expect(broadcastMsg.payload.eventType).toBe('OR_ADD');
@@ -450,6 +485,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
       const clientMock = {
         id: 'no-read-client',
         socket: clientSocket as any,
+        writer: createMockWriter(clientSocket) as any,
         isAuthenticated: true,
         subscriptions: new Set<string>(),
         principal: { userId: 'no-read', roles: ['GUEST'] }, // No ADMIN role
