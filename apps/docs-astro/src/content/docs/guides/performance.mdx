@@ -135,7 +135,7 @@ topgun_subscribers_per_event{quantile="0.5"}`;
   <h3 className="text-lg font-semibold text-foreground mb-4">Measured Performance (single node)</h3>
   <div className="grid md:grid-cols-3 gap-6">
     <div>
-      <div className="text-3xl font-bold text-blue-600 dark:text-blue-400">18,000+</div>
+      <div className="text-3xl font-bold text-blue-600 dark:text-blue-400">21,000+</div>
       <div className="text-sm text-neutral-600 dark:text-neutral-400">ops/sec sustained throughput</div>
     </div>
     <div>
@@ -143,12 +143,12 @@ topgun_subscribers_per_event{quantile="0.5"}`;
       <div className="text-sm text-neutral-600 dark:text-neutral-400">concurrent clients (tested)</div>
     </div>
     <div>
-      <div className="text-3xl font-bold text-purple-600 dark:text-purple-400">&lt;15ms</div>
+      <div className="text-3xl font-bold text-purple-600 dark:text-purple-400">&lt;21ms</div>
       <div className="text-sm text-neutral-600 dark:text-neutral-400">p95 write latency</div>
     </div>
   </div>
   <p className="text-xs text-neutral-500 mt-4">
-    Benchmarks run with k6 load testing on a single server node. Results include full E2E delivery: client → server → CRDT merge → persistence → broadcast to subscribers. Phase 2 optimizations include BufferPool, ObjectPool, and TaskletScheduler for cooperative multitasking.
+    Benchmarks run with k6 load testing on a single server node. Results include validation and Early ACK delivery (in-memory write happens asynchronously). Phase 3 optimizations include native xxHash64 for Merkle tree hashing and SharedArrayBuffer for zero-copy worker communication, building on Phase 2's BufferPool, ObjectPool, and TaskletScheduler.
   </p>
 </div>
 
