@@ -1,5 +1,6 @@
 import { WebSocket } from 'ws';
 import { serialize } from '@topgunbuild/core';
+import { BufferPool, getGlobalBufferPool } from '../memory';
 
 export interface CoalescingWriterOptions {
     /**
@@ -19,6 +20,12 @@ export interface CoalescingWriterOptions {
      * Default: 65536 (64KB)
      */
     maxBatchBytes: number;
+
+    /**
+     * Optional BufferPool for batch buffer reuse.
+     * If not provided, uses the global buffer pool.
+     */
+    bufferPool?: BufferPool;
 }
 
 interface QueuedMessage {
@@ -52,6 +59,10 @@ export interface CoalescingWriterMetrics {
     batchUtilization: number;
     /** Ratio of immediate flushes to total flushes (high = batches filling up quickly) */
     immediateFlushRatio: number;
+    /** Count of pooled buffer acquisitions (for monitoring buffer pool usage) */
+    pooledBuffersUsed: number;
+    /** Count of oversized (non-pooled) buffers that were allocated directly */
+    oversizedBuffers: number;
 }
 
 /**
@@ -83,6 +94,7 @@ export class CoalescingWriter {
     private delayTimer: NodeJS.Timeout | null = null;
     private state: WriterState = WriterState.IDLE;
     private readonly options: CoalescingWriterOptions;
+    private readonly bufferPool: BufferPool;
     private closed = false;
 
     // Metrics
@@ -91,10 +103,13 @@ export class CoalescingWriter {
     private bytesSent = 0;
     private immediateFlushCount = 0;  // Size-triggered flushes
     private timedFlushCount = 0;      // Timer-triggered flushes
+    private pooledBuffersUsed = 0;    // Count of pooled buffer acquisitions
+    private oversizedBuffers = 0;     // Count of oversized (non-pooled) buffers
 
     constructor(socket: WebSocket, options?: Partial<CoalescingWriterOptions>) {
         this.socket = socket;
         this.options = { ...DEFAULT_OPTIONS, ...options };
+        this.bufferPool = options?.bufferPool ?? getGlobalBufferPool();
     }
 
     /**
@@ -217,6 +232,8 @@ export class CoalescingWriter {
             immediateFlushRatio: totalFlushes > 0
                 ? this.immediateFlushCount / totalFlushes
                 : 0,
+            pooledBuffersUsed: this.pooledBuffersUsed,
+            oversizedBuffers: this.oversizedBuffers,
         };
     }
 
@@ -307,6 +324,9 @@ export class CoalescingWriter {
      * Create a batch message from multiple queued messages.
      * Uses length-prefixed format for efficiency:
      * [4 bytes: message count][4 bytes: msg1 length][msg1 bytes][4 bytes: msg2 length][msg2 bytes]...
+     *
+     * OPTIMIZATION: Uses BufferPool for batch buffer allocation to reduce GC pressure.
+     * Pooled buffers are reused across batch operations.
      */
     private createBatch(messages: QueuedMessage[]): Uint8Array {
         // Calculate total size needed
@@ -316,8 +336,18 @@ export class CoalescingWriter {
             totalSize += 4 + msg.data.length; // length prefix + data
         }
 
-        const batch = new Uint8Array(totalSize);
-        const view = new DataView(batch.buffer);
+        // Acquire buffer from pool (or get oversized buffer if larger than pool chunk)
+        const poolConfig = this.bufferPool.getConfig();
+        const isPooled = totalSize <= poolConfig.chunkSize!;
+        const batch = this.bufferPool.acquireSize(totalSize);
+
+        if (isPooled) {
+            this.pooledBuffersUsed++;
+        } else {
+            this.oversizedBuffers++;
+        }
+
+        const view = new DataView(batch.buffer, batch.byteOffset, batch.byteLength);
         let offset = 0;
 
         // Write message count
@@ -332,12 +362,21 @@ export class CoalescingWriter {
             offset += msg.data.length;
         }
 
+        // Create the actual used portion of the buffer
+        const usedBatch = batch.subarray(0, totalSize);
+
         // Wrap in a BATCH message envelope
         const batchEnvelope = serialize({
             type: 'BATCH',
             count: messages.length,
-            data: batch,
+            data: usedBatch,
         });
+
+        // Release the pooled buffer back to pool after serialization is complete
+        // (serialize() copies the data, so we can safely release)
+        if (isPooled) {
+            this.bufferPool.release(batch);
+        }
 
         return batchEnvelope;
     }

@@ -30,6 +30,11 @@ import { CoalescingWriter, CoalescingWriterOptions } from './utils/CoalescingWri
 import { coalescingPresets, CoalescingPreset } from './utils/coalescingPresets';
 import { ConnectionRateLimiter } from './utils/ConnectionRateLimiter';
 import { WorkerPool, MerkleWorker, CRDTMergeWorker, SerializationWorker, WorkerPoolConfig } from './workers';
+import {
+    ObjectPool,
+    createEventPayloadPool,
+    PooledEventPayload,
+} from './memory';
 
 interface ClientConnection {
     id: string;
@@ -183,6 +188,9 @@ export class ServerCoordinator {
     private crdtMergeWorker?: CRDTMergeWorker;
     private serializationWorker?: SerializationWorker;
 
+    // Memory pools for GC pressure reduction
+    private eventPayloadPool: ObjectPool<PooledEventPayload>;
+
     private _actualPort: number = 0;
     private _actualClusterPort: number = 0;
     private _readyPromise: Promise<void>;
@@ -231,6 +239,12 @@ export class ServerCoordinator {
             maxDelayMs: config.writeCoalescingMaxDelayMs ?? preset.maxDelayMs,
             maxBatchBytes: config.writeCoalescingMaxBytes ?? preset.maxBatchBytes,
         };
+
+        // Initialize memory pools for GC pressure reduction
+        this.eventPayloadPool = createEventPayloadPool({
+            maxSize: 4096,
+            initialSize: 128,
+        });
 
         // Initialize connection rate limiter
         this.rateLimitingEnabled = config.rateLimitingEnabled ?? true;
@@ -462,6 +476,13 @@ export class ServerCoordinator {
         return this.serializationWorker ?? null;
     }
 
+    /** Get memory pool stats for monitoring GC pressure reduction */
+    public getMemoryPoolStats() {
+        return {
+            eventPayloadPool: this.eventPayloadPool.getStats(),
+        };
+    }
+
     public async shutdown() {
         logger.info('Shutting down Server Coordinator...');
 
@@ -541,6 +562,9 @@ export class ServerCoordinator {
         if (this.systemManager) {
             this.systemManager.stop();
         }
+
+        // Clear memory pools
+        this.eventPayloadPool.clear();
 
         logger.info('Server Coordinator shutdown complete.');
     }
