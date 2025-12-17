@@ -226,38 +226,37 @@ package.json             # Added test:k6:phase3 script
 
 ### Phase 3 Benchmark Results
 
-**Test Configuration:**
-- Stages: 10 VUs → 30 → 75 → 150 → 200 → 75 VUs
-- Duration: ~110 seconds
-- Batch Size: 10 operations per batch
-- Ops per VU: 25/sec
+**Test Configuration (matching throughput-test.js for fair comparison):**
+- Stages: 10 → 50 → 100 → 150 → 200 → 250 → 300 VUs
+- Duration: ~120 seconds
+- Batch Size: 5 operations per batch
+- Interval: 50ms (100 ops/sec per VU)
 
 | Metric | Value |
 |--------|-------|
-| Total Operations Acked | **337,280** |
-| Average Throughput | **3,066 ops/sec** |
-| Write Ops Acked | **2,409 ops/sec** |
-| p50 Latency | **13ms** |
-| p95 Latency | **23ms** |
-| p99 Latency | **30ms** |
-| Max Latency | **41ms** |
-| Error Rate | **0.000%** |
+| Total Operations Sent | **2,555,125** |
+| Total Operations Acked | **2,552,955** |
+| Average Throughput | **21,275 ops/sec** |
+| Write Ops Acked | **17,019 ops/sec** |
+| p50 Latency | **14ms** |
+| p95 Latency | **21ms** |
+| Max Latency | **69ms** |
+| Error Rate | **0.049%** |
 
-### Phase 2 Baseline Comparison
+### Phase 2 → Phase 3 Comparison
 
 | Metric | Phase 2 | Phase 3 | Improvement |
 |--------|---------|---------|-------------|
-| Total Ops Acked | 149,130 | 337,280 | **+126%** |
-| Avg Throughput | 1,657 ops/sec | 3,066 ops/sec | **+85%** |
-| Write Ops | 1,243 ops/sec | 2,409 ops/sec | **+94%** |
-| p95 Latency | 15ms | 23ms | +53% (higher load) |
-| Error Rate | 0.000% | 0.000% | Same |
+| Average Throughput | 18,000 ops/sec | 21,275 ops/sec | **+18.2%** |
+| p50 Latency | 14ms | 14ms | Same |
+| p95 Latency | 21ms | 21ms | Same |
+| Error Rate | <0.1% | 0.049% | Same |
 
 **Key Insights:**
-- Phase 3 achieves **~2x throughput** compared to Phase 2 baseline
-- Latency increase is proportional to higher sustained load (200 VUs vs 100 VUs)
-- Zero errors maintained even under peak load
-- Native optimizations translate to real-world performance gains
+- Phase 3 achieves **+18% throughput improvement** over Phase 2 baseline
+- Latency remains stable (p95 = 21ms at 300 VUs peak load)
+- Error rate remains negligible (<0.05%)
+- Native xxHash64 and SharedArrayBuffer optimizations contribute to improved throughput
 
 ---
 
@@ -269,6 +268,6 @@ Phase 3 Native Optimizations successfully deliver:
 2. **Memory Efficiency:** Zero-copy worker communication via SharedArrayBuffer
 3. **Graceful Fallback:** Full functionality without native modules
 4. **Production Ready:** 89 tests passing, comprehensive error handling
-5. **Real-World Performance:** **2x throughput** improvement in k6 load tests
+5. **Real-World Performance:** **+18% throughput** improvement in k6 load tests (21,275 vs 18,000 ops/sec)
 
-The native xxHash64 module provides significant performance gains for Merkle tree operations, while SharedArrayBuffer reduces memory pressure during high-throughput scenarios. Real-world testing confirms theoretical improvements translate to actual performance gains under load.
+The native xxHash64 module provides significant performance gains for Merkle tree operations, while SharedArrayBuffer reduces memory pressure during high-throughput scenarios. Real-world testing with identical test parameters confirms theoretical improvements translate to measurable performance gains under load.

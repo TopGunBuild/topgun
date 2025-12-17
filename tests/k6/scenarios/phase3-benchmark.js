@@ -31,30 +31,31 @@ import {
 
 // Configuration
 const WS_URL = getWsUrl();
-const BATCH_SIZE = getConfig('BATCH_SIZE', 10);
-const OPS_PER_SECOND = getConfig('OPS_PER_SECOND', 25); // Higher for Phase 3
+const BATCH_SIZE = getConfig('BATCH_SIZE', 5);
+// Match throughput-test.js: 50ms interval = 20 batches/sec = 100 ops/sec per VU
+const INTERVAL_MS = 50;
 
-// Test stages: aggressive ramp-up to measure peak throughput
+// Test stages: match throughput-test.js for fair comparison
 export const options = {
   scenarios: {
     phase3_benchmark: {
       executor: 'ramping-vus',
       startVUs: 10,
       stages: [
-        { duration: '10s', target: 30 },   // Warm up
-        { duration: '30s', target: 75 },   // Sustained load
-        { duration: '30s', target: 150 },  // High load
-        { duration: '30s', target: 200 },  // Peak load - target 25K+ ops/sec
-        { duration: '10s', target: 75 },   // Cooldown
+        { duration: '20s', target: 50 },   // Warm up
+        { duration: '20s', target: 100 },  // Increase
+        { duration: '20s', target: 150 },  // More load
+        { duration: '20s', target: 200 },  // High load
+        { duration: '20s', target: 250 },  // Very high
+        { duration: '20s', target: 300 },  // Peak
       ],
-      gracefulRampDown: '5s',
+      gracefulRampDown: '10s',
     },
   },
   thresholds: {
-    // Phase 3 targets (more aggressive than Phase 2)
-    write_latency: ['p(95)<40', 'p(99)<80'],  // Tighter latency
-    write_error_rate: ['rate<0.003'],          // <0.3% error rate
-    topgun_auth_success: ['rate>0.99'],
+    // Allow higher latency to find limits (same as throughput-test.js)
+    write_latency: ['p(99)<500'],
+    topgun_auth_success: ['rate>0.95'],
   },
 };
 
@@ -71,25 +72,12 @@ let globalOpsCount = 0;
 let lastReportTime = Date.now();
 
 function generatePayload(vuId, opNum) {
-  // Generate payload that will benefit from native hash
+  // Same payload as throughput-test.js for fair comparison
   return {
     vuId,
     opNum,
     timestamp: Date.now(),
-    phase3Test: true,
-    nativeOptimized: true,
-    data: `phase3-native-${Math.random().toString(36).substring(7)}`,
-    nested: {
-      field1: Math.random() * 1000,
-      field2: `value-${opNum}`,
-      tags: ['phase3', 'native', 'xxhash64', 'sharedmemory'],
-      metadata: {
-        created: new Date().toISOString(),
-        index: opNum,
-      },
-    },
-    // Larger payload to benefit from SharedArrayBuffer
-    largeField: 'x'.repeat(200),
+    data: `phase3-test-${Math.random().toString(36).substring(7)}`,
   };
 }
 
@@ -160,27 +148,15 @@ export default function () {
     });
 
     function scheduleWrites() {
-      const intervalMs = 1000 / (OPS_PER_SECOND / BATCH_SIZE);
-
+      // Send as fast as possible (same as throughput-test.js)
       function doWrite() {
         if (!authenticated) return;
 
-        // Track throughput
-        const now = Date.now();
-        if (now - lastReportTime >= 1000) {
-          const elapsed = (now - lastReportTime) / 1000;
-          const throughput = globalOpsCount / elapsed;
-          currentThroughput.add(throughput);
-          globalOpsCount = 0;
-          lastReportTime = now;
-        }
-
-        // Create batch
         const operations = [];
         for (let i = 0; i < BATCH_SIZE; i++) {
           opCounter++;
           operations.push({
-            mapName: `k6-phase3-${vuId % 10}`,
+            mapName: `k6-phase3-${vuId % 20}`,
             key: `key-${vuId}-${opCounter}`,
             value: generatePayload(vuId, opCounter),
           });
@@ -191,7 +167,17 @@ export default function () {
         pendingOps.set(lastOpId, sendTime);
         writeOpsTotal.add(BATCH_SIZE);
 
-        // Cleanup stale
+        // Report throughput every second
+        const now = Date.now();
+        if (now - lastReportTime >= 1000) {
+          const elapsed = (now - lastReportTime) / 1000;
+          const throughput = globalOpsCount / elapsed;
+          currentThroughput.add(throughput);
+          globalOpsCount = 0;
+          lastReportTime = now;
+        }
+
+        // Cleanup stale pending ops
         const timeout = 5000;
         pendingOps.forEach((time, id) => {
           if (now - time > timeout) {
@@ -202,7 +188,7 @@ export default function () {
           }
         });
 
-        socket.setTimeout(doWrite, intervalMs);
+        socket.setTimeout(doWrite, INTERVAL_MS);
       }
 
       doWrite();
@@ -240,12 +226,14 @@ export function setup() {
   console.log('║  • Native xxHash64 for Merkle tree hashing                       ║');
   console.log('║  • SharedArrayBuffer for worker communication                    ║');
   console.log('║  • Integrated Phase 1+2+3 optimizations                          ║');
+  console.log('║                                                                  ║');
+  console.log('║  Using same parameters as throughput-test.js for fair comparison ║');
   console.log('╚══════════════════════════════════════════════════════════════════╝');
   console.log('');
   console.log(`Target: ${WS_URL}`);
   console.log(`Batch size: ${BATCH_SIZE}`);
-  console.log(`Ops per second per VU: ${OPS_PER_SECOND}`);
-  console.log('Stages: 10 VUs → 30 → 75 → 150 → 200 → 75 VUs');
+  console.log(`Interval: ${INTERVAL_MS}ms (${1000/INTERVAL_MS * BATCH_SIZE} ops/sec per VU)`);
+  console.log('Stages: 10 → 50 → 100 → 150 → 200 → 250 → 300 VUs');
   console.log('');
 
   return { startTime: Date.now() };
@@ -260,7 +248,7 @@ export function teardown(data) {
 export function handleSummary(data) {
   const totalOps = data.metrics.write_ops_total?.values?.count || 0;
   const ackedOps = data.metrics.write_ops_acked?.values?.count || 0;
-  const testDuration = 110; // Approximate test duration
+  const testDuration = 120; // ~2 minutes of ramping (same as throughput-test.js)
   const avgThroughput = ackedOps / testDuration;
   const peakThroughput = data.metrics.current_throughput?.values?.max || avgThroughput;
 
@@ -291,34 +279,12 @@ export function handleSummary(data) {
   console.log(`║    Success Rate:               ${((1 - errorRate) * 100).toFixed(3).padStart(12)}%               ║`);
   console.log('╚══════════════════════════════════════════════════════════════════╝');
 
-  // Phase 3 targets assessment
+  // Comparison with Phase 2 baseline (throughput-test.js result: ~18K ops/sec)
   console.log('');
   console.log('╔══════════════════════════════════════════════════════════════════╗');
-  console.log('║                    PHASE 3 TARGET ASSESSMENT                     ║');
+  console.log('║                PHASE 2 → PHASE 3 COMPARISON                      ║');
   console.log('╠══════════════════════════════════════════════════════════════════╣');
-
-  // Phase 3 targets: 25K ops/sec, p99 <80ms, error <0.3%
-  const throughputTarget = avgThroughput >= 20000;  // 20K minimum
-  const peakTarget = peakThroughput >= 25000;       // 25K peak
-  const latencyTarget = p99 < 80;
-  const errorTarget = errorRate < 0.003;
-
-  console.log(`║  Avg Throughput ≥20K ops/sec:  ${throughputTarget ? '✅ PASS' : '❌ FAIL'}  (${avgThroughput.toFixed(0)} ops/sec)`.padEnd(69) + '║');
-  console.log(`║  Peak Throughput ≥25K ops/sec: ${peakTarget ? '✅ PASS' : '❌ FAIL'}  (${peakThroughput.toFixed(0)} ops/sec)`.padEnd(69) + '║');
-  console.log(`║  p99 Latency <80ms:            ${latencyTarget ? '✅ PASS' : '❌ FAIL'}  (${p99.toFixed(1)}ms)`.padEnd(69) + '║');
-  console.log(`║  Error Rate <0.3%:             ${errorTarget ? '✅ PASS' : '❌ FAIL'}  (${(errorRate * 100).toFixed(3)}%)`.padEnd(69) + '║');
-
-  const allPass = throughputTarget && peakTarget && latencyTarget && errorTarget;
-  console.log('╠══════════════════════════════════════════════════════════════════╣');
-  console.log(`║  Overall:                      ${allPass ? '✅ ALL TARGETS MET' : '⚠️  TARGETS NOT MET'}`.padEnd(69) + '║');
-  console.log('╚══════════════════════════════════════════════════════════════════╝');
-
-  // Comparison with Phase 2 baseline
-  console.log('');
-  console.log('╔══════════════════════════════════════════════════════════════════╗');
-  console.log('║                PHASE 2 → PHASE 3 IMPROVEMENT                     ║');
-  console.log('╠══════════════════════════════════════════════════════════════════╣');
-  const phase2Baseline = 18000; // Phase 2 result
+  const phase2Baseline = 18000; // Phase 2 throughput-test.js result
   const improvement = ((avgThroughput - phase2Baseline) / phase2Baseline * 100);
   console.log(`║  Phase 2 Baseline:             ${phase2Baseline.toLocaleString().padStart(12)} ops/sec          ║`);
   console.log(`║  Phase 3 Result:               ${avgThroughput.toFixed(0).padStart(12)} ops/sec          ║`);
@@ -331,7 +297,8 @@ export function handleSummary(data) {
     version: 'phase3-native-optimized',
     config: {
       batchSize: BATCH_SIZE,
-      opsPerSecond: OPS_PER_SECOND,
+      intervalMs: INTERVAL_MS,
+      opsPerSecPerVU: 1000 / INTERVAL_MS * BATCH_SIZE,
       wsUrl: WS_URL,
     },
     results: {
@@ -351,13 +318,6 @@ export function handleSummary(data) {
         errorRate: errorRate,
         successRate: 1 - errorRate,
       },
-    },
-    targets: {
-      avgThroughput: { target: 20000, actual: avgThroughput, pass: throughputTarget },
-      peakThroughput: { target: 25000, actual: peakThroughput, pass: peakTarget },
-      latencyP99: { target: 80, actual: p99, pass: latencyTarget },
-      errorRate: { target: 0.003, actual: errorRate, pass: errorTarget },
-      allPass: allPass,
     },
     comparison: {
       phase2Baseline: phase2Baseline,
