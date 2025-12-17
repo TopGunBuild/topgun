@@ -6,6 +6,7 @@ export * from './utils/ConnectionRateLimiter';
 export * from './utils/coalescingPresets';
 export { CoalescingWriterOptions, CoalescingWriterMetrics } from './utils/CoalescingWriter';
 export * from './memory';
+export * from './tasklet';
 export * from './interceptor/IInterceptor';
 export { TimestampInterceptor } from './interceptor/TimestampInterceptor';
 export { RateLimitInterceptor } from './interceptor/RateLimitInterceptor';

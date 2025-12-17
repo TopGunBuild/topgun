@@ -35,6 +35,7 @@ import {
     createEventPayloadPool,
     PooledEventPayload,
 } from './memory';
+import { TaskletScheduler } from './tasklet';
 
 interface ClientConnection {
     id: string;
@@ -191,6 +192,9 @@ export class ServerCoordinator {
     // Memory pools for GC pressure reduction
     private eventPayloadPool: ObjectPool<PooledEventPayload>;
 
+    // Tasklet scheduler for cooperative multitasking
+    private taskletScheduler: TaskletScheduler;
+
     private _actualPort: number = 0;
     private _actualClusterPort: number = 0;
     private _readyPromise: Promise<void>;
@@ -244,6 +248,12 @@ export class ServerCoordinator {
         this.eventPayloadPool = createEventPayloadPool({
             maxSize: 4096,
             initialSize: 128,
+        });
+
+        // Initialize tasklet scheduler for cooperative multitasking
+        this.taskletScheduler = new TaskletScheduler({
+            defaultTimeBudgetMs: 5,
+            maxConcurrent: 20,
         });
 
         // Initialize connection rate limiter
@@ -483,6 +493,16 @@ export class ServerCoordinator {
         };
     }
 
+    /** Get tasklet scheduler stats for monitoring cooperative multitasking */
+    public getTaskletSchedulerStats() {
+        return this.taskletScheduler.getStats();
+    }
+
+    /** Get tasklet scheduler for scheduling long-running operations */
+    public getTaskletScheduler(): TaskletScheduler {
+        return this.taskletScheduler;
+    }
+
     public async shutdown() {
         logger.info('Shutting down Server Coordinator...');
 
@@ -565,6 +585,9 @@ export class ServerCoordinator {
 
         // Clear memory pools
         this.eventPayloadPool.clear();
+
+        // Shutdown tasklet scheduler
+        this.taskletScheduler.shutdown();
 
         logger.info('Server Coordinator shutdown complete.');
     }
