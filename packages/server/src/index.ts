@@ -10,3 +10,12 @@ export * from './tasklet';
 export * from './interceptor/IInterceptor';
 export { TimestampInterceptor } from './interceptor/TimestampInterceptor';
 export { RateLimitInterceptor } from './interceptor/RateLimitInterceptor';
+
+// Native module utilities (Phase 3.05)
+export {
+  getNativeStats,
+  getNativeModuleStatus,
+  logNativeStatus,
+  type NativeStats,
+  type NativeModuleStatus,
+} from './utils/nativeStats';

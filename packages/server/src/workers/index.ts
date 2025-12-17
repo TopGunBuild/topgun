@@ -1,6 +1,7 @@
 /**
  * WorkerPool Module Exports
  * Phase 1.02-07: Worker Threads Implementation
+ * Phase 3.04: SharedArrayBuffer Integration
  */
 
 // Main classes
@@ -8,6 +9,17 @@ export { WorkerPool } from './WorkerPool';
 export { MerkleWorker } from './MerkleWorker';
 export { CRDTMergeWorker } from './CRDTMergeWorker';
 export { SerializationWorker } from './SerializationWorker';
+
+// Shared Memory (Phase 3.04)
+export {
+  SharedMemoryManager,
+  SlotStatus,
+  type SharedMemoryConfig,
+  type SharedMemoryStats,
+  type SharedSlot,
+  type SharedWorkerConfig,
+} from './SharedMemoryManager';
+export { SharedMemoryWorkerHelper } from './SharedMemoryWorkerHelper';
 
 // Types
 export type {
