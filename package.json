@@ -22,6 +22,8 @@
     "test:k6:smoke": "k6 run tests/k6/scenarios/smoke.js -e JWT_TOKEN=$(node scripts/generate-k6-token.js)",
     "test:k6:write": "k6 run tests/k6/scenarios/write-heavy.js -e JWT_TOKEN=$(node scripts/generate-k6-token.js)",
     "test:k6:connections": "k6 run tests/k6/scenarios/connection-storm.js -e JWT_TOKEN=$(node scripts/generate-k6-token.js)",
+    "test:k6:phase2": "k6 run tests/k6/scenarios/phase2-benchmark.js -e JWT_TOKEN=$(node scripts/generate-k6-token.js)",
+    "test:k6:throughput": "k6 run tests/k6/scenarios/throughput-test.js -e JWT_TOKEN=$(node scripts/generate-k6-token.js)",
     "test:k6:scenarios": "pnpm test:k6:smoke && pnpm test:k6:write",
     "clean": "rm -rf node_modules packages/*/node_modules examples/*/node_modules apps/*/node_modules packages/*/dist",
     "start:server": "pnpm exec ts-node -r tsconfig-paths/register --project ./examples/tsconfig.json ./examples/simple-server.ts",
