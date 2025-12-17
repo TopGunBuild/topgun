@@ -27,6 +27,34 @@ interface QueuedMessage {
 }
 
 /**
+ * Extended metrics for CoalescingWriter performance analysis.
+ */
+export interface CoalescingWriterMetrics {
+    /** Total messages sent */
+    messagesSent: number;
+    /** Total batches sent */
+    batchesSent: number;
+    /** Total bytes sent */
+    bytesSent: number;
+    /** Average messages per batch */
+    avgMessagesPerBatch: number;
+    /** Average bytes per batch */
+    avgBytesPerBatch: number;
+    /** Messages currently in queue */
+    pendingMessages: number;
+    /** Bytes currently pending */
+    pendingBytes: number;
+    /** Count of flushes triggered by size limits (batch full or bytes exceeded) */
+    immediateFlushes: number;
+    /** Count of flushes triggered by timer expiration */
+    timedFlushes: number;
+    /** Ratio of actual batch size to maxBatchSize (0-1, higher = better utilization) */
+    batchUtilization: number;
+    /** Ratio of immediate flushes to total flushes (high = batches filling up quickly) */
+    immediateFlushRatio: number;
+}
+
+/**
  * State machine for flush scheduling.
  * Similar to Hazelcast's NioOutboundPipeline.State
  */
@@ -61,6 +89,8 @@ export class CoalescingWriter {
     private messagesSent = 0;
     private batchesSent = 0;
     private bytesSent = 0;
+    private immediateFlushCount = 0;  // Size-triggered flushes
+    private timedFlushCount = 0;      // Timer-triggered flushes
 
     constructor(socket: WebSocket, options?: Partial<CoalescingWriterOptions>) {
         this.socket = socket;
@@ -102,6 +132,7 @@ export class CoalescingWriter {
         // Check if we should flush immediately due to size limits
         if (this.queue.length >= this.options.maxBatchSize ||
             this.pendingBytes >= this.options.maxBatchBytes) {
+            this.immediateFlushCount++;
             this.flush();
             return;
         }
@@ -167,22 +198,33 @@ export class CoalescingWriter {
     /**
      * Get writer metrics.
      */
-    getMetrics(): {
-        messagesSent: number;
-        batchesSent: number;
-        bytesSent: number;
-        avgMessagesPerBatch: number;
-        pendingMessages: number;
-        pendingBytes: number;
-    } {
+    getMetrics(): CoalescingWriterMetrics {
+        const totalFlushes = this.immediateFlushCount + this.timedFlushCount;
         return {
             messagesSent: this.messagesSent,
             batchesSent: this.batchesSent,
             bytesSent: this.bytesSent,
             avgMessagesPerBatch: this.batchesSent > 0 ? this.messagesSent / this.batchesSent : 0,
+            avgBytesPerBatch: this.batchesSent > 0 ? this.bytesSent / this.batchesSent : 0,
             pendingMessages: this.queue.length,
             pendingBytes: this.pendingBytes,
+            // Extended metrics for tuning analysis
+            immediateFlushes: this.immediateFlushCount,
+            timedFlushes: this.timedFlushCount,
+            batchUtilization: this.batchesSent > 0
+                ? (this.messagesSent / this.batchesSent) / this.options.maxBatchSize
+                : 0,
+            immediateFlushRatio: totalFlushes > 0
+                ? this.immediateFlushCount / totalFlushes
+                : 0,
         };
+    }
+
+    /**
+     * Get current configuration options.
+     */
+    getOptions(): Readonly<CoalescingWriterOptions> {
+        return { ...this.options };
     }
 
     /**
@@ -241,6 +283,7 @@ export class CoalescingWriter {
             // Use setImmediate to batch with other I/O in the same tick
             this.flushTimer = setImmediate(() => {
                 this.flushTimer = null;
+                this.timedFlushCount++;
                 this.flush();
             });
         }, this.options.maxDelayMs);

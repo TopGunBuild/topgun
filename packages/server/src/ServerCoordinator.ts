@@ -27,6 +27,7 @@ import { TLSConfig, ClusterTLSConfig } from './types/TLSConfig';
 import { StripedEventExecutor } from './utils/StripedEventExecutor';
 import { BackpressureRegulator } from './utils/BackpressureRegulator';
 import { CoalescingWriter, CoalescingWriterOptions } from './utils/CoalescingWriter';
+import { coalescingPresets, CoalescingPreset } from './utils/coalescingPresets';
 import { ConnectionRateLimiter } from './utils/ConnectionRateLimiter';
 import { WorkerPool, MerkleWorker, CRDTMergeWorker, SerializationWorker, WorkerPoolConfig } from './workers';
 
@@ -85,11 +86,13 @@ export interface ServerCoordinatorConfig {
     backpressureBackoffMs?: number;
     /** Enable/disable write coalescing (default: true) */
     writeCoalescingEnabled?: boolean;
-    /** Maximum messages to batch before forcing flush (default: 100) */
+    /** Coalescing preset: 'conservative', 'balanced', 'highThroughput', 'aggressive' (default: 'highThroughput') */
+    writeCoalescingPreset?: CoalescingPreset;
+    /** Maximum messages to batch before forcing flush (default: 500 for highThroughput) */
     writeCoalescingMaxBatch?: number;
-    /** Maximum delay before flushing in ms (default: 5) */
+    /** Maximum delay before flushing in ms (default: 10 for highThroughput) */
     writeCoalescingMaxDelayMs?: number;
-    /** Maximum batch size in bytes (default: 65536) */
+    /** Maximum batch size in bytes (default: 262144/256KB for highThroughput) */
     writeCoalescingMaxBytes?: number;
 
     // === Connection Scaling Options ===
@@ -219,12 +222,14 @@ export class ServerCoordinator {
             enabled: config.backpressureEnabled ?? true
         });
 
-        // Initialize write coalescing options
+        // Initialize write coalescing options with preset support
+        // Default preset changed from 'conservative' to 'highThroughput' for better performance
         this.writeCoalescingEnabled = config.writeCoalescingEnabled ?? true;
+        const preset = coalescingPresets[config.writeCoalescingPreset ?? 'highThroughput'];
         this.writeCoalescingOptions = {
-            maxBatchSize: config.writeCoalescingMaxBatch ?? 100,
-            maxDelayMs: config.writeCoalescingMaxDelayMs ?? 5,
-            maxBatchBytes: config.writeCoalescingMaxBytes ?? 65536,
+            maxBatchSize: config.writeCoalescingMaxBatch ?? preset.maxBatchSize,
+            maxDelayMs: config.writeCoalescingMaxDelayMs ?? preset.maxDelayMs,
+            maxBatchBytes: config.writeCoalescingMaxBytes ?? preset.maxBatchBytes,
         };
 
         // Initialize connection rate limiter
