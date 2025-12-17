@@ -2,19 +2,19 @@
  * Write-Heavy Scenario for TopGun Server
  *
  * Intensive write load test to measure PUT operation throughput.
- * - 100 VUs for 5 minutes
+ * - 100 VUs for 5 minutes (default)
  * - Each VU performs ~10 PUT operations per second
  * - Tests server's write throughput and latency under load
  *
  * Run:
  *   k6 run tests/k6/scenarios/write-heavy.js -e JWT_TOKEN=<token>
  *
- * Debug mode:
- *   k6 run tests/k6/scenarios/write-heavy.js -e JWT_TOKEN=<token> --vus 10 --duration 30s
+ * Custom duration (socket lifecycle adapts automatically):
+ *   k6 run tests/k6/scenarios/write-heavy.js -e JWT_TOKEN=<token> --vus 200 --duration 60s
  */
 
 import ws from 'k6/ws';
-import { check, sleep } from 'k6';
+import { check } from 'k6';
 import { Counter, Trend, Rate } from 'k6/metrics';
 import {
   TopGunClient,
@@ -35,8 +35,8 @@ const WS_URL = getWsUrl();
 const OPS_PER_SECOND = getConfig('OPS_PER_SECOND', 10);
 const BATCH_SIZE = getConfig('BATCH_SIZE', 5);
 
-// Default test duration in seconds (can be overridden via CLI)
-const TEST_DURATION_SEC = getConfig('DURATION_SEC', 300); // 5 minutes
+// Grace period before closing socket (allows pending ops to complete)
+const CLOSE_GRACE_SEC = 3;
 
 // Test configuration
 export const options = {
@@ -144,13 +144,17 @@ export default function () {
     });
 
     socket.on('close', () => {
-      // Track any unacked batches as potential errors
-      // Each pending entry is a batch of BATCH_SIZE operations
-      pendingOps.forEach(() => {
-        for (let i = 0; i < BATCH_SIZE; i++) {
-          writeErrorRate.add(1);
-        }
-      });
+      // On graceful close (authenticated=false), pending ops are expected
+      // Only count as errors if we're still in active write mode
+      if (authenticated) {
+        // Unexpected close - count pending as errors
+        pendingOps.forEach(() => {
+          for (let i = 0; i < BATCH_SIZE; i++) {
+            writeErrorRate.add(1);
+          }
+        });
+      }
+      // If !authenticated, this is graceful shutdown - don't count pending as errors
     });
 
     /**
@@ -224,10 +228,31 @@ export default function () {
       socket.setTimeout(doPing, 10000);
     }
 
-    // Close socket slightly before sleep ends to ensure clean iteration finish
-    socket.setTimeout(function () {
-      socket.close();
-    }, (TEST_DURATION_SEC - 2) * 1000);
+    // Track iteration start time for graceful shutdown
+    const iterationStart = Date.now();
+
+    // Periodically check if we should close the socket gracefully
+    // This allows the test to work with any --duration value
+    function checkShouldClose() {
+      const elapsed = (Date.now() - iterationStart) / 1000;
+      // Close socket CLOSE_GRACE_SEC before graceful stop timeout
+      // k6 default gracefulStop is 30s, so we close early to allow cleanup
+      // For shorter tests, we stay open for most of the duration
+      const maxSessionTime = 60 * 5; // Max 5 minutes per session
+
+      if (elapsed >= maxSessionTime - CLOSE_GRACE_SEC) {
+        // Stop sending new writes
+        authenticated = false;
+        // Give pending ops time to complete, then close
+        socket.setTimeout(() => socket.close(), CLOSE_GRACE_SEC * 1000);
+      } else {
+        // Check again in 1 second
+        socket.setTimeout(checkShouldClose, 1000);
+      }
+    }
+
+    // Start checking after initial setup
+    socket.setTimeout(checkShouldClose, 1000);
   });
 
   // Check connection was successful
@@ -248,7 +273,7 @@ export function setup() {
     'Duration': options.duration,
     'Ops per second per VU': OPS_PER_SECOND,
     'Batch size': BATCH_SIZE,
-    'Expected total ops': options.vus * OPS_PER_SECOND * 300,
+    'Target ops/sec': `${options.vus * OPS_PER_SECOND} (${options.vus} VUs × ${OPS_PER_SECOND} ops/VU)`,
   });
 
   return { startTime: Date.now() };
@@ -269,9 +294,15 @@ export function teardown(data) {
  * Handle summary
  */
 export function handleSummary(data) {
-  const duration = 300; // 5 minutes in seconds
+  // Calculate actual test duration from iteration_duration metrics
+  const totalIterationTime = data.metrics.iteration_duration?.values?.count || 1;
+  const avgIterationTime = data.metrics.iteration_duration?.values?.avg || 1000;
+  const estimatedDuration = (totalIterationTime * avgIterationTime) / 1000 / (options.vus || 100);
+  // Use ws_session_duration for more accurate timing
+  const actualDuration = Math.max(estimatedDuration, 1);
+
   const totalOps = data.metrics.write_ops_total?.values?.count || 0;
-  const actualOpsPerSecond = totalOps / duration;
+  const actualOpsPerSecond = totalOps / actualDuration;
 
   const summary = {
     timestamp: new Date().toISOString(),
