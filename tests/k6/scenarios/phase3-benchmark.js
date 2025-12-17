@@ -14,8 +14,8 @@
  */
 
 import ws from 'k6/ws';
-import { check, sleep } from 'k6';
-import { Counter, Trend, Rate, Gauge } from 'k6/metrics';
+import { check } from 'k6';
+import { Counter, Trend, Rate } from 'k6/metrics';
 import {
   TopGunClient,
   createMessageHandler,
@@ -64,12 +64,7 @@ const writeLatency = new Trend('write_latency', true);
 const writeOpsTotal = new Counter('write_ops_total');
 const writeOpsAcked = new Counter('write_ops_acked');
 const writeErrorRate = new Rate('write_error_rate');
-const currentThroughput = new Gauge('current_throughput');
 const batchLatency = new Trend('batch_latency', true);
-
-// Global tracking
-let globalOpsCount = 0;
-let lastReportTime = Date.now();
 
 function generatePayload(vuId, opNum) {
   // Same payload as throughput-test.js for fair comparison
@@ -125,7 +120,6 @@ export default function () {
             writeErrorRate.add(0);
           }
           pendingOps.delete(lastId);
-          globalOpsCount += BATCH_SIZE;
         }
       },
     });
@@ -167,17 +161,8 @@ export default function () {
         pendingOps.set(lastOpId, sendTime);
         writeOpsTotal.add(BATCH_SIZE);
 
-        // Report throughput every second
-        const now = Date.now();
-        if (now - lastReportTime >= 1000) {
-          const elapsed = (now - lastReportTime) / 1000;
-          const throughput = globalOpsCount / elapsed;
-          currentThroughput.add(throughput);
-          globalOpsCount = 0;
-          lastReportTime = now;
-        }
-
         // Cleanup stale pending ops
+        const now = Date.now();
         const timeout = 5000;
         pendingOps.forEach((time, id) => {
           if (now - time > timeout) {
@@ -250,7 +235,6 @@ export function handleSummary(data) {
   const ackedOps = data.metrics.write_ops_acked?.values?.count || 0;
   const testDuration = 120; // ~2 minutes of ramping (same as throughput-test.js)
   const avgThroughput = ackedOps / testDuration;
-  const peakThroughput = data.metrics.current_throughput?.values?.max || avgThroughput;
 
   const p50 = data.metrics.write_latency?.values?.med || 0;
   const p95 = data.metrics.write_latency?.values['p(95)'] || 0;
@@ -266,9 +250,8 @@ export function handleSummary(data) {
   console.log(`║    Total Operations Sent:      ${totalOps.toLocaleString().padStart(12)}                  ║`);
   console.log(`║    Total Operations Acked:     ${ackedOps.toLocaleString().padStart(12)}                  ║`);
   console.log(`║    Average Throughput:         ${avgThroughput.toFixed(0).padStart(12)} ops/sec          ║`);
-  console.log(`║    Peak Throughput:            ${peakThroughput.toFixed(0).padStart(12)} ops/sec          ║`);
   console.log('╠══════════════════════════════════════════════════════════════════╣');
-  console.log('║  LATENCY                                                         ║');
+  console.log('║  LATENCY (time to Early ACK, before in-memory write)             ║');
   console.log(`║    p50:                        ${p50.toFixed(1).padStart(12)} ms                ║`);
   console.log(`║    p95:                        ${p95.toFixed(1).padStart(12)} ms                ║`);
   console.log(`║    p99:                        ${p99.toFixed(1).padStart(12)} ms                ║`);
@@ -306,7 +289,6 @@ export function handleSummary(data) {
         totalOpsSent: totalOps,
         totalOpsAcked: ackedOps,
         avgOpsPerSec: avgThroughput,
-        peakOpsPerSec: peakThroughput,
       },
       latency: {
         p50: p50,
