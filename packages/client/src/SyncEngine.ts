@@ -99,6 +99,13 @@ export class SyncEngine {
   private highWaterMarkEmitted: boolean = false;
   private backpressureListeners: Map<string, Set<(...args: any[]) => void>> = new Map();
 
+  // Write Concern state (Phase 5.01)
+  private pendingWriteConcernPromises: Map<string, {
+    resolve: (result: any) => void;
+    reject: (error: Error) => void;
+    timeoutHandle?: ReturnType<typeof setTimeout>;
+  }> = new Map();
+
   constructor(config: SyncEngineConfig) {
     this.nodeId = config.nodeId;
     this.serverUrl = config.serverUrl;
@@ -690,8 +697,23 @@ export class SyncEngine {
         break;
 
       case 'OP_ACK': {
-        const { lastId } = message.payload;
-        logger.info({ lastId }, 'Received ACK for ops');
+        const { lastId, achievedLevel, results } = message.payload;
+        logger.info({ lastId, achievedLevel, hasResults: !!results }, 'Received ACK for ops');
+
+        // Handle per-operation results if available (Write Concern Phase 5.01)
+        if (results && Array.isArray(results)) {
+          for (const result of results) {
+            const op = this.opLog.find(o => o.id === result.opId);
+            if (op && !op.synced) {
+              op.synced = true;
+              logger.debug({ opId: result.opId, achievedLevel: result.achievedLevel, success: result.success }, 'Op ACK with Write Concern');
+            }
+            // Resolve pending Write Concern promise if exists
+            this.resolveWriteConcernPromise(result.opId, result);
+          }
+        }
+
+        // Backwards compatible: mark all ops up to lastId as synced
         let maxSyncedId = -1;
         let ackedCount = 0;
         this.opLog.forEach(op => {
@@ -1055,6 +1077,9 @@ export class SyncEngine {
       this.websocket.close();
       this.websocket = null;
     }
+
+    // Cancel pending Write Concern promises (Phase 5.01)
+    this.cancelAllWriteConcernPromises(new Error('SyncEngine closed'));
 
     this.stateMachine.transition(SyncState.DISCONNECTED);
     logger.info('SyncEngine closed');
@@ -1449,5 +1474,62 @@ export class SyncEngine {
         key: dropped.key,
       });
     }
+  }
+
+  // ============================================
+  // Write Concern Methods (Phase 5.01)
+  // ============================================
+
+  /**
+   * Register a pending Write Concern promise for an operation.
+   * The promise will be resolved when the server sends an ACK with the operation result.
+   *
+   * @param opId - Operation ID
+   * @param timeout - Timeout in ms (default: 5000)
+   * @returns Promise that resolves with the Write Concern result
+   */
+  public registerWriteConcernPromise(opId: string, timeout: number = 5000): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const timeoutHandle = setTimeout(() => {
+        this.pendingWriteConcernPromises.delete(opId);
+        reject(new Error(`Write Concern timeout for operation ${opId}`));
+      }, timeout);
+
+      this.pendingWriteConcernPromises.set(opId, {
+        resolve,
+        reject,
+        timeoutHandle,
+      });
+    });
+  }
+
+  /**
+   * Resolve a pending Write Concern promise with the server result.
+   *
+   * @param opId - Operation ID
+   * @param result - Result from server ACK
+   */
+  private resolveWriteConcernPromise(opId: string, result: any): void {
+    const pending = this.pendingWriteConcernPromises.get(opId);
+    if (pending) {
+      if (pending.timeoutHandle) {
+        clearTimeout(pending.timeoutHandle);
+      }
+      pending.resolve(result);
+      this.pendingWriteConcernPromises.delete(opId);
+    }
+  }
+
+  /**
+   * Cancel all pending Write Concern promises (e.g., on disconnect).
+   */
+  private cancelAllWriteConcernPromises(error: Error): void {
+    for (const [opId, pending] of this.pendingWriteConcernPromises.entries()) {
+      if (pending.timeoutHandle) {
+        clearTimeout(pending.timeoutHandle);
+      }
+      pending.reject(error);
+    }
+    this.pendingWriteConcernPromises.clear();
   }
 }
