@@ -1,11 +1,20 @@
 /**
- * Throughput Saturation Test for TopGun Server
+ * TopGun Throughput Benchmark
  *
+ * Primary benchmark for measuring TopGun server performance.
  * Determines maximum sustainable throughput by ramping up load
  * until latency degrades or errors appear.
  *
+ * Measures:
+ * - Maximum throughput (ops/sec)
+ * - Latency distribution (p50, p95, p99)
+ * - Error rate under load
+ *
  * Run:
  *   k6 run tests/k6/scenarios/throughput-test.js -e JWT_TOKEN=<token>
+ *
+ * Or with pnpm:
+ *   pnpm test:k6:throughput
  */
 
 import ws from 'k6/ws';
@@ -183,12 +192,16 @@ export default function () {
 }
 
 export function setup() {
-  console.log('='.repeat(60));
-  console.log('TopGun Throughput Saturation Test');
-  console.log('='.repeat(60));
+  console.log('');
+  console.log('╔══════════════════════════════════════════════════════════════════╗');
+  console.log('║                 TOPGUN THROUGHPUT BENCHMARK                      ║');
+  console.log('╠══════════════════════════════════════════════════════════════════╣');
+  console.log('║  Measuring maximum sustainable throughput under increasing load  ║');
+  console.log('╚══════════════════════════════════════════════════════════════════╝');
+  console.log('');
   console.log(`Target: ${WS_URL}`);
   console.log(`Batch size: ${BATCH_SIZE}`);
-  console.log('Ramping: 10 → 50 → 100 → 150 → 200 → 250 → 300 VUs');
+  console.log('Stages: 10 → 50 → 100 → 150 → 200 → 250 → 300 VUs');
   console.log('');
 
   return { startTime: Date.now() };
@@ -197,9 +210,7 @@ export function setup() {
 export function teardown(data) {
   const duration = (Date.now() - data.startTime) / 1000;
   console.log('');
-  console.log('='.repeat(60));
   console.log(`Test completed in ${duration.toFixed(2)}s`);
-  console.log('='.repeat(60));
 }
 
 export function handleSummary(data) {
@@ -208,41 +219,87 @@ export function handleSummary(data) {
   const testDuration = 120; // ~2 minutes of ramping
   const avgThroughput = ackedOps / testDuration;
 
+  const p50 = data.metrics.write_latency?.values?.med || 0;
+  const p95 = data.metrics.write_latency?.values['p(95)'] || 0;
+  const p99 = data.metrics.write_latency?.values['p(99)'] || 0;
+  const maxLatency = data.metrics.write_latency?.values?.max || 0;
+  const errorRate = data.metrics.write_error_rate?.values?.rate || 0;
+
   console.log('');
-  console.log('╔══════════════════════════════════════════════════════════╗');
-  console.log('║           THROUGHPUT TEST RESULTS                        ║');
-  console.log('╠══════════════════════════════════════════════════════════╣');
-  console.log(`║  Total Operations Sent:    ${totalOps.toLocaleString().padStart(15)}          ║`);
-  console.log(`║  Total Operations Acked:   ${ackedOps.toLocaleString().padStart(15)}          ║`);
-  console.log(`║  Average Throughput:       ${avgThroughput.toFixed(0).padStart(15)} ops/sec   ║`);
-  console.log('╠══════════════════════════════════════════════════════════╣');
-  console.log('║  LATENCY (time to Early ACK, before in-memory write)     ║');
-  console.log(`║  Write Latency p50:        ${(data.metrics.write_latency?.values?.med || 0).toFixed(0).padStart(15)} ms       ║`);
-  console.log(`║  Write Latency p95:        ${(data.metrics.write_latency?.values['p(95)'] || 0).toFixed(0).padStart(15)} ms       ║`);
-  console.log(`║  Write Latency p99:        ${(data.metrics.write_latency?.values['p(99)'] || 0).toFixed(0).padStart(15)} ms       ║`);
-  console.log(`║  Error Rate:               ${((data.metrics.write_error_rate?.values?.rate || 0) * 100).toFixed(2).padStart(15)}%        ║`);
-  console.log('╚══════════════════════════════════════════════════════════╝');
+  console.log('╔══════════════════════════════════════════════════════════════════╗');
+  console.log('║                   THROUGHPUT BENCHMARK RESULTS                   ║');
+  console.log('╠══════════════════════════════════════════════════════════════════╣');
+  console.log('║  THROUGHPUT                                                      ║');
+  console.log(`║    Total Operations Sent:      ${totalOps.toLocaleString().padStart(12)}                  ║`);
+  console.log(`║    Total Operations Acked:     ${ackedOps.toLocaleString().padStart(12)}                  ║`);
+  console.log(`║    Average Throughput:         ${avgThroughput.toFixed(0).padStart(12)} ops/sec          ║`);
+  console.log('╠══════════════════════════════════════════════════════════════════╣');
+  console.log('║  LATENCY (time to Early ACK, before in-memory write)             ║');
+  console.log(`║    p50:                        ${p50.toFixed(1).padStart(12)} ms                ║`);
+  console.log(`║    p95:                        ${p95.toFixed(1).padStart(12)} ms                ║`);
+  console.log(`║    p99:                        ${p99.toFixed(1).padStart(12)} ms                ║`);
+  console.log(`║    max:                        ${maxLatency.toFixed(1).padStart(12)} ms                ║`);
+  console.log('╠══════════════════════════════════════════════════════════════════╣');
+  console.log('║  RELIABILITY                                                     ║');
+  console.log(`║    Error Rate:                 ${(errorRate * 100).toFixed(3).padStart(12)}%               ║`);
+  console.log(`║    Success Rate:               ${((1 - errorRate) * 100).toFixed(3).padStart(12)}%               ║`);
+  console.log('╚══════════════════════════════════════════════════════════════════╝');
+
+  // Performance assessment
+  console.log('');
+  console.log('╔══════════════════════════════════════════════════════════════════╗');
+  console.log('║                    PERFORMANCE ASSESSMENT                        ║');
+  console.log('╠══════════════════════════════════════════════════════════════════╣');
+
+  const throughputTarget = avgThroughput >= 15000;
+  const latencyTarget = p99 < 100;
+  const errorTarget = errorRate < 0.01;
+
+  console.log(`║  Throughput ≥15K ops/sec:      ${throughputTarget ? '✅ PASS' : '❌ FAIL'}  (${avgThroughput.toFixed(0)} ops/sec)`.padEnd(69) + '║');
+  console.log(`║  p99 Latency <100ms:           ${latencyTarget ? '✅ PASS' : '❌ FAIL'}  (${p99.toFixed(1)}ms)`.padEnd(69) + '║');
+  console.log(`║  Error Rate <1%:               ${errorTarget ? '✅ PASS' : '❌ FAIL'}  (${(errorRate * 100).toFixed(3)}%)`.padEnd(69) + '║');
+
+  const allPass = throughputTarget && latencyTarget && errorTarget;
+  console.log('╠══════════════════════════════════════════════════════════════════╣');
+  console.log(`║  Overall:                      ${allPass ? '✅ ALL TARGETS MET' : '⚠️  TARGETS NOT MET'}`.padEnd(69) + '║');
+  console.log('╚══════════════════════════════════════════════════════════════════╝');
 
   const summary = {
     timestamp: new Date().toISOString(),
-    scenario: 'throughput-saturation',
+    scenario: 'throughput-benchmark',
+    version: __ENV.VERSION || 'current',
+    config: {
+      batchSize: BATCH_SIZE,
+      wsUrl: WS_URL,
+    },
     results: {
-      totalOpsSent: totalOps,
-      totalOpsAcked: ackedOps,
-      avgThroughput: avgThroughput,
-      writeLatency: {
-        p50: data.metrics.write_latency?.values?.med || 0,
-        p95: data.metrics.write_latency?.values['p(95)'] || 0,
-        p99: data.metrics.write_latency?.values['p(99)'] || 0,
-        max: data.metrics.write_latency?.values?.max || 0,
+      throughput: {
+        totalOpsSent: totalOps,
+        totalOpsAcked: ackedOps,
+        avgOpsPerSec: avgThroughput,
       },
-      errorRate: data.metrics.write_error_rate?.values?.rate || 0,
+      latency: {
+        p50: p50,
+        p95: p95,
+        p99: p99,
+        max: maxLatency,
+      },
+      reliability: {
+        errorRate: errorRate,
+        successRate: 1 - errorRate,
+      },
+    },
+    targets: {
+      throughput: { target: 15000, actual: avgThroughput, pass: throughputTarget },
+      latencyP99: { target: 100, actual: p99, pass: latencyTarget },
+      errorRate: { target: 0.01, actual: errorRate, pass: errorTarget },
+      allPass: allPass,
     },
   };
 
   return {
     stdout: textSummary(data, { indent: ' ', enableColors: true }),
-    [getResultsPath('throughput-summary.json')]: JSON.stringify(summary, null, 2),
+    [getResultsPath('throughput-benchmark.json')]: JSON.stringify(summary, null, 2),
   };
 }
 
