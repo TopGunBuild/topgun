@@ -1,0 +1,275 @@
+---
+title: Write Concern
+description: Configure acknowledgment levels for write operations to balance performance vs durability guarantees.
+order: 16
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Shield, Zap, Database, Server, HardDrive } from 'lucide-react';
+
+export const basicUsageCode = `import { TopGunClient, WriteConcern } from '@topgunbuild/client';
+
+const client = new TopGunClient({ serverUrl: 'wss://your-server.com' });
+const todos = client.getMap('todos');
+
+// Default behavior (MEMORY) - fast, early acknowledgment
+todos.set('todo-1', { text: 'Buy groceries', done: false });
+
+// With explicit Write Concern for critical data
+todos.set('todo-2', { text: 'Pay bills', done: false }, {
+  writeConcern: WriteConcern.PERSISTED,
+  timeout: 10000  // 10 second timeout
+});`;
+
+export const levelComparisonCode = `// FIRE_AND_FORGET - No acknowledgment, fire and forget
+// Use for: Metrics, analytics, non-critical logging
+await todos.set(id, data, { writeConcern: WriteConcern.FIRE_AND_FORGET });
+
+// MEMORY (default) - Acknowledged when in server memory
+// Use for: Most real-time updates, chat messages, cursor positions
+await todos.set(id, data, { writeConcern: WriteConcern.MEMORY });
+
+// APPLIED - Acknowledged when CRDT merge is complete
+// Use for: Data that needs immediate read-after-write consistency
+await todos.set(id, data, { writeConcern: WriteConcern.APPLIED });
+
+// REPLICATED - Acknowledged when broadcast to cluster peers
+// Use for: Important data that must survive single-node failure
+await todos.set(id, data, { writeConcern: WriteConcern.REPLICATED });
+
+// PERSISTED - Acknowledged when written to storage
+// Use for: Financial transactions, audit logs, critical data
+await todos.set(id, data, { writeConcern: WriteConcern.PERSISTED });`;
+
+export const writeResultCode = `import { WriteConcern, WriteResult } from '@topgunbuild/core';
+
+const result: WriteResult = await todos.setWithAck('payment-123', {
+  amount: 100,
+  currency: 'USD',
+  status: 'pending'
+}, {
+  writeConcern: WriteConcern.PERSISTED,
+  timeout: 5000
+});
+
+if (result.success) {
+  console.log(\`Payment saved at level: \${result.achievedLevel}\`);
+  console.log(\`Latency: \${result.latencyMs}ms\`);
+} else {
+  console.error(\`Write failed: \${result.error}\`);
+  console.log(\`Achieved level: \${result.achievedLevel}\`);
+  // Handle partial success - data might be at APPLIED but not PERSISTED
+}`;
+
+export const batchCode = `// Batch operations with Write Concern
+const ops = [
+  { key: 'user-1', value: { name: 'Alice' } },
+  { key: 'user-2', value: { name: 'Bob' } },
+  { key: 'user-3', value: { name: 'Charlie' } },
+];
+
+// All operations in batch use same Write Concern
+const results = await users.batchSet(ops, {
+  writeConcern: WriteConcern.REPLICATED,
+  timeout: 5000
+});`;
+
+export const timeoutHandlingCode = `// Graceful degradation on timeout
+const result = await todos.setWithAck('critical-data', value, {
+  writeConcern: WriteConcern.PERSISTED,
+  timeout: 3000  // 3 second timeout
+});
+
+if (!result.success && result.achievedLevel !== WriteConcern.FIRE_AND_FORGET) {
+  // Partial success - write was accepted but didn't reach PERSISTED
+  // achievedLevel tells us how far it got
+  if (result.achievedLevel === WriteConcern.REPLICATED) {
+    // Data is replicated but not persisted - will be persisted async
+    console.log('Data replicated, persistence in progress');
+  } else if (result.achievedLevel === WriteConcern.APPLIED) {
+    // Data is in CRDT state but not yet replicated
+    console.log('Data applied locally, replication pending');
+  }
+}`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <span>Guides</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Write Concern</span>
+</div>
+
+# Write Concern
+
+Configure acknowledgment levels for write operations to balance performance vs durability guarantees.
+
+## Overview
+
+Write Concern allows you to specify how much confirmation you need before a write operation is considered successful. This is similar to MongoDB's `writeConcern` or Kafka's `acks` parameter.
+
+<div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6 not-prose">
+  <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-100 dark:border-blue-800">
+    <div className="flex items-center gap-2 mb-2">
+      <Zap className="w-5 h-5 text-blue-500" />
+      <h3 className="font-semibold text-blue-900 dark:text-blue-300">Low Latency</h3>
+    </div>
+    <p className="text-sm text-blue-800 dark:text-blue-400">
+      Use FIRE_AND_FORGET or MEMORY for real-time features where speed matters more than guaranteed persistence.
+    </p>
+  </div>
+  <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-100 dark:border-green-800">
+    <div className="flex items-center gap-2 mb-2">
+      <Shield className="w-5 h-5 text-green-500" />
+      <h3 className="font-semibold text-green-900 dark:text-green-300">High Durability</h3>
+    </div>
+    <p className="text-sm text-green-800 dark:text-green-400">
+      Use PERSISTED for critical data like financial transactions where you need confirmation that data won't be lost.
+    </p>
+  </div>
+</div>
+
+## Write Concern Levels
+
+TopGun provides five Write Concern levels, ordered from lowest to highest durability:
+
+<div className="space-y-4 not-prose mb-8">
+  <div className="p-4 rounded-lg border border-card-border">
+    <div className="flex items-center gap-3 mb-2">
+      <Zap className="w-5 h-5 text-neutral-400" />
+      <h4 className="font-bold text-foreground">FIRE_AND_FORGET</h4>
+      <span className="text-xs px-2 py-0.5 bg-neutral-100 dark:bg-neutral-800 rounded">Latency: ~0ms</span>
+    </div>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300">
+      No acknowledgment. Operation is sent and immediately returns. Use for non-critical data like analytics events or cursor positions.
+    </p>
+  </div>
+
+  <div className="p-4 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-900/10">
+    <div className="flex items-center gap-3 mb-2">
+      <Database className="w-5 h-5 text-blue-500" />
+      <h4 className="font-bold text-foreground">MEMORY</h4>
+      <span className="text-xs px-2 py-0.5 bg-blue-100 dark:bg-blue-800 rounded text-blue-800 dark:text-blue-200">Default</span>
+      <span className="text-xs px-2 py-0.5 bg-neutral-100 dark:bg-neutral-800 rounded">Latency: ~1-5ms</span>
+    </div>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300">
+      Acknowledged when operation is validated and queued in server memory. This is the default behavior and matches the current "early ACK" system.
+    </p>
+  </div>
+
+  <div className="p-4 rounded-lg border border-card-border">
+    <div className="flex items-center gap-3 mb-2">
+      <Database className="w-5 h-5 text-purple-500" />
+      <h4 className="font-bold text-foreground">APPLIED</h4>
+      <span className="text-xs px-2 py-0.5 bg-neutral-100 dark:bg-neutral-800 rounded">Latency: ~5-20ms</span>
+    </div>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300">
+      Acknowledged when CRDT merge is complete. Guarantees that subsequent reads will see this write. Use when you need read-after-write consistency.
+    </p>
+  </div>
+
+  <div className="p-4 rounded-lg border border-card-border">
+    <div className="flex items-center gap-3 mb-2">
+      <Server className="w-5 h-5 text-orange-500" />
+      <h4 className="font-bold text-foreground">REPLICATED</h4>
+      <span className="text-xs px-2 py-0.5 bg-neutral-100 dark:bg-neutral-800 rounded">Latency: ~20-100ms</span>
+    </div>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300">
+      Acknowledged when operation is broadcast to cluster peers. Data survives single-node failure. Use for important data in multi-node deployments.
+    </p>
+  </div>
+
+  <div className="p-4 rounded-lg border border-card-border">
+    <div className="flex items-center gap-3 mb-2">
+      <HardDrive className="w-5 h-5 text-green-500" />
+      <h4 className="font-bold text-foreground">PERSISTED</h4>
+      <span className="text-xs px-2 py-0.5 bg-neutral-100 dark:bg-neutral-800 rounded">Latency: ~50-500ms</span>
+    </div>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300">
+      Acknowledged when written to persistent storage. Highest durability guarantee. Use for financial transactions, audit logs, and critical business data.
+    </p>
+  </div>
+</div>
+
+## Basic Usage
+
+<div className="not-prose">
+  <CodeBlock title="Basic Write Concern Usage" language="typescript" code={basicUsageCode} />
+</div>
+
+## Write Concern Comparison
+
+<div className="not-prose">
+  <CodeBlock title="Choosing the Right Level" language="typescript" code={levelComparisonCode} />
+</div>
+
+## Handling Write Results
+
+When using Write Concern levels above FIRE_AND_FORGET, you can get detailed feedback about the write operation:
+
+<div className="not-prose">
+  <CodeBlock title="WriteResult Handling" language="typescript" code={writeResultCode} />
+</div>
+
+## Timeout and Graceful Degradation
+
+Write Concern operations have a configurable timeout. If the timeout expires before reaching the requested level, the operation returns with partial success information:
+
+<div className="not-prose">
+  <CodeBlock title="Timeout Handling" language="typescript" code={timeoutHandlingCode} />
+</div>
+
+## Batch Operations
+
+Write Concern can be applied to batch operations:
+
+<div className="not-prose">
+  <CodeBlock title="Batch Write Concern" language="typescript" code={batchCode} />
+</div>
+
+## Best Practices
+
+<div className="space-y-4 not-prose mb-8">
+  <div className="p-4 rounded-lg bg-green-50 dark:bg-green-900/20 border border-green-100 dark:border-green-800">
+    <h4 className="font-semibold text-green-800 dark:text-green-300 mb-2">Use the Right Level for Each Use Case</h4>
+    <ul className="text-sm text-green-700 dark:text-green-400 space-y-1">
+      <li>• Real-time collaboration (cursor, presence): FIRE_AND_FORGET or MEMORY</li>
+      <li>• Chat messages, notifications: MEMORY</li>
+      <li>• User profile updates: APPLIED</li>
+      <li>• Order placement, payments: PERSISTED</li>
+    </ul>
+  </div>
+
+  <div className="p-4 rounded-lg bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800">
+    <h4 className="font-semibold text-yellow-800 dark:text-yellow-300 mb-2">Set Appropriate Timeouts</h4>
+    <p className="text-sm text-yellow-700 dark:text-yellow-400">
+      Higher Write Concern levels take longer. Set timeouts based on your latency requirements and acceptable user wait time. The default is 5 seconds.
+    </p>
+  </div>
+
+  <div className="p-4 rounded-lg bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800">
+    <h4 className="font-semibold text-blue-800 dark:text-blue-300 mb-2">Handle Partial Success</h4>
+    <p className="text-sm text-blue-700 dark:text-blue-400">
+      Even if a write doesn't reach the requested level before timeout, it may have been partially processed. Check <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">achievedLevel</code> to understand the actual state.
+    </p>
+  </div>
+</div>
+
+## Backwards Compatibility
+
+Write Concern is fully backwards compatible. Existing code that doesn't specify a Write Concern level will continue to use MEMORY behavior (early acknowledgment), which matches the previous default behavior.
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/distributed-locks" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Distributed Locks
+    </div>
+  </a>
+  <a href="/docs/reference/protocol" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Protocol Spec <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>
