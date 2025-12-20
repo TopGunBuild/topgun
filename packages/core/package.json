@@ -1,6 +1,6 @@
 {
   "name": "@topgunbuild/core",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
@@ -21,14 +21,21 @@
   "scripts": {
     "build": "tsup",
     "test": "jest",
-    "test:coverage": "jest --coverage"
+    "test:coverage": "jest --coverage",
+    "bench": "vitest bench --run",
+    "bench:watch": "vitest bench"
   },
   "devDependencies": {
-    "typescript": "^5.0.0"
+    "fast-check": "^4.4.0",
+    "typescript": "^5.0.0",
+    "vitest": "^4.0.16"
   },
   "dependencies": {
-    "@msgpack/msgpack": "^3.1.2",
+    "msgpackr": "^1.11.8",
     "zod": "^4.1.13"
+  },
+  "optionalDependencies": {
+    "@topgunbuild/native": "workspace:*"
   },
   "engines": {
     "node": ">=18"

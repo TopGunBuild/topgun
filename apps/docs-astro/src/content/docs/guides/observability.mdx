@@ -80,6 +80,157 @@ By default, this is available on the main server port (or a dedicated metrics po
 
 Standard Node.js metrics (CPU, Event Loop, GC) are also exported with the `topgun_` prefix.
 
+### Event Routing Metrics
+
+<div className="overflow-x-auto mb-6 not-prose">
+  <table className="w-full text-left text-sm text-neutral-600 dark:text-neutral-300">
+    <thead className="bg-neutral-100 dark:bg-neutral-800 text-foreground font-semibold">
+      <tr>
+        <th className="p-3 rounded-tl-lg">Metric Name</th>
+        <th className="p-3">Type</th>
+        <th className="p-3 rounded-tr-lg">Description</th>
+      </tr>
+    </thead>
+    <tbody className="divide-y divide-card-border">
+      <tr>
+        <td className="p-3 font-mono">topgun_events_routed_total</td>
+        <td className="p-3">Counter</td>
+        <td className="p-3">Total events processed for routing to subscribers.</td>
+      </tr>
+      <tr>
+        <td className="p-3 font-mono">topgun_events_filtered_by_subscription</td>
+        <td className="p-3">Counter</td>
+        <td className="p-3">Events not sent because no clients were subscribed.</td>
+      </tr>
+      <tr>
+        <td className="p-3 font-mono">topgun_subscribers_per_event</td>
+        <td className="p-3">Summary</td>
+        <td className="p-3">Distribution of subscriber count per event (quantiles).</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+### Event Queue Metrics
+
+<div className="overflow-x-auto mb-6 not-prose">
+  <table className="w-full text-left text-sm text-neutral-600 dark:text-neutral-300">
+    <thead className="bg-neutral-100 dark:bg-neutral-800 text-foreground font-semibold">
+      <tr>
+        <th className="p-3 rounded-tl-lg">Metric Name</th>
+        <th className="p-3">Type</th>
+        <th className="p-3 rounded-tr-lg">Description</th>
+      </tr>
+    </thead>
+    <tbody className="divide-y divide-card-border">
+      <tr>
+        <td className="p-3 font-mono">topgun_event_queue_size</td>
+        <td className="p-3">Gauge</td>
+        <td className="p-3">Current number of events in the bounded queue.</td>
+      </tr>
+      <tr>
+        <td className="p-3 font-mono">topgun_event_queue_enqueued_total</td>
+        <td className="p-3">Counter</td>
+        <td className="p-3">Total events successfully enqueued.</td>
+      </tr>
+      <tr>
+        <td className="p-3 font-mono">topgun_event_queue_dequeued_total</td>
+        <td className="p-3">Counter</td>
+        <td className="p-3">Total events dequeued for processing.</td>
+      </tr>
+      <tr>
+        <td className="p-3 font-mono">topgun_event_queue_rejected_total</td>
+        <td className="p-3">Counter</td>
+        <td className="p-3">Events rejected due to queue being at capacity. <strong>Alert if increasing.</strong></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+### Backpressure Metrics
+
+<div className="overflow-x-auto mb-6 not-prose">
+  <table className="w-full text-left text-sm text-neutral-600 dark:text-neutral-300">
+    <thead className="bg-neutral-100 dark:bg-neutral-800 text-foreground font-semibold">
+      <tr>
+        <th className="p-3 rounded-tl-lg">Metric Name</th>
+        <th className="p-3">Type</th>
+        <th className="p-3 rounded-tr-lg">Description</th>
+      </tr>
+    </thead>
+    <tbody className="divide-y divide-card-border">
+      <tr>
+        <td className="p-3 font-mono">topgun_backpressure_sync_forced_total</td>
+        <td className="p-3">Counter</td>
+        <td className="p-3">Number of times synchronous processing was forced.</td>
+      </tr>
+      <tr>
+        <td className="p-3 font-mono">topgun_backpressure_pending_ops</td>
+        <td className="p-3">Gauge</td>
+        <td className="p-3">Current number of pending async operations.</td>
+      </tr>
+      <tr>
+        <td className="p-3 font-mono">topgun_backpressure_waits_total</td>
+        <td className="p-3">Counter</td>
+        <td className="p-3">Times processing had to wait for capacity.</td>
+      </tr>
+      <tr>
+        <td className="p-3 font-mono">topgun_backpressure_timeouts_total</td>
+        <td className="p-3">Counter</td>
+        <td className="p-3">Backpressure timeouts. <strong>Alert if increasing.</strong></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+### Connection Rate Limiting Metrics
+
+<div className="overflow-x-auto mb-6 not-prose">
+  <table className="w-full text-left text-sm text-neutral-600 dark:text-neutral-300">
+    <thead className="bg-neutral-100 dark:bg-neutral-800 text-foreground font-semibold">
+      <tr>
+        <th className="p-3 rounded-tl-lg">Metric Name</th>
+        <th className="p-3">Type</th>
+        <th className="p-3 rounded-tr-lg">Description</th>
+      </tr>
+    </thead>
+    <tbody className="divide-y divide-card-border">
+      <tr>
+        <td className="p-3 font-mono">topgun_connections_accepted_total</td>
+        <td className="p-3">Counter</td>
+        <td className="p-3">Total connections accepted by the rate limiter.</td>
+      </tr>
+      <tr>
+        <td className="p-3 font-mono">topgun_connections_rejected_total</td>
+        <td className="p-3">Counter</td>
+        <td className="p-3">Connections rejected due to rate limiting.</td>
+      </tr>
+      <tr>
+        <td className="p-3 font-mono">topgun_connections_pending</td>
+        <td className="p-3">Gauge</td>
+        <td className="p-3">Current pending connection handshakes.</td>
+      </tr>
+      <tr>
+        <td className="p-3 font-mono">topgun_connection_rate_per_second</td>
+        <td className="p-3">Gauge</td>
+        <td className="p-3">Current connection rate (connections/second).</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+### Alert Recommendations
+
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-6 my-6 not-prose">
+  <h3 className="text-lg font-semibold text-yellow-800 dark:text-yellow-300 mb-2">Key Metrics to Alert On</h3>
+  <ul className="text-yellow-700 dark:text-yellow-400 space-y-2">
+    <li><code className="bg-yellow-100 dark:bg-yellow-800 px-1.5 py-0.5 rounded">topgun_event_queue_rejected_total</code> — Events are being dropped due to queue capacity</li>
+    <li><code className="bg-yellow-100 dark:bg-yellow-800 px-1.5 py-0.5 rounded">topgun_backpressure_timeouts_total</code> — Operations timing out waiting for capacity</li>
+    <li><code className="bg-yellow-100 dark:bg-yellow-800 px-1.5 py-0.5 rounded">topgun_connections_rejected_total</code> — Clients being rejected (rate limit or DDoS)</li>
+    <li><code className="bg-yellow-100 dark:bg-yellow-800 px-1.5 py-0.5 rounded">topgun_event_queue_size</code> — Monitor queue depth approaching <code>eventQueueCapacity</code></li>
+  </ul>
+</div>
+
 ## Structured Logging
 
 <div className="flex items-center gap-2 mb-4 not-prose">
@@ -104,10 +255,10 @@ Logs include context such as `nodeId`, `clientId`, and `requestId` where applica
       <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Deployment
     </div>
   </a>
-  <a href="/docs/guides/distributed-locks" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+  <a href="/docs/guides/performance" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Next Guide</span>
     <div className="flex items-center gap-2 text-foreground font-semibold">
-      Distributed Locks <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+      Performance Tuning <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
     </div>
   </a>
 </div>

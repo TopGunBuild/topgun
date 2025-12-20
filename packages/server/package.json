@@ -1,6 +1,6 @@
 {
   "name": "@topgunbuild/server",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
@@ -37,6 +37,9 @@
     "@types/pg": "^8.6.6",
     "pino-pretty": "^13.1.2",
     "typescript": "^5.0.0"
+  },
+  "optionalDependencies": {
+    "@topgunbuild/native": "workspace:*"
   },
   "engines": {
     "node": ">=18"

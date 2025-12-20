@@ -1,5 +1,5 @@
 import { ServerCoordinator } from '../ServerCoordinator';
-import { LWWRecord, deserialize, PermissionPolicy } from '@topgunbuild/core';
+import { LWWRecord, deserialize, PermissionPolicy, serialize } from '@topgunbuild/core';
 
 // Mock WebSocket
 class MockWebSocket {
@@ -8,6 +8,24 @@ class MockWebSocket {
     close = jest.fn();
     on = jest.fn();
 }
+
+const createMockWriter = (socket: any) => ({
+  write: jest.fn((message: any, _urgent?: boolean) => {
+    const data = serialize(message);
+    socket.send(data);
+  }),
+  writeRaw: jest.fn((data: Uint8Array) => {
+    socket.send(data);
+  }),
+  flush: jest.fn(),
+  close: jest.fn(),
+  getMetrics: jest.fn(() => ({
+    messagesSent: 0,
+    batchesSent: 0,
+    bytesSent: 0,
+    avgMessagesPerBatch: 0,
+  })),
+});
 
 describe('Field-Level Security (RBAC)', () => {
   let server: ServerCoordinator;
@@ -57,6 +75,7 @@ describe('Field-Level Security (RBAC)', () => {
       const clientMock = {
           id: 'client-user',
           socket: clientSocket as any,
+          writer: createMockWriter(clientSocket) as any,
           isAuthenticated: true,
           subscriptions: new Set(),
           principal: { userId: 'u1', roles: ['USER'] }
@@ -94,6 +113,7 @@ describe('Field-Level Security (RBAC)', () => {
       const clientMock = {
           id: 'client-admin',
           socket: clientSocket as any,
+          writer: createMockWriter(clientSocket) as any,
           isAuthenticated: true,
           subscriptions: new Set(),
           principal: { userId: 'a1', roles: ['ADMIN'] }
@@ -130,28 +150,51 @@ describe('Field-Level Security (RBAC)', () => {
       const userClient = {
           id: 'client-user-2',
           socket: userSocket as any,
+          writer: createMockWriter(userSocket) as any,
           isAuthenticated: true,
           subscriptions: new Set(),
-          principal: { userId: 'u2', roles: ['USER'] }
+          principal: { userId: 'u2', roles: ['USER'] },
+          lastActiveHlc: { millis: Date.now(), counter: 0, nodeId: 'test-node-sec' },
+          lastPingReceived: Date.now()
       };
       const adminClient = {
           id: 'client-admin-2',
           socket: adminSocket as any,
+          writer: createMockWriter(adminSocket) as any,
           isAuthenticated: true,
           subscriptions: new Set(),
-          principal: { userId: 'a2', roles: ['ADMIN'] }
+          principal: { userId: 'a2', roles: ['ADMIN'] },
+          lastActiveHlc: { millis: Date.now(), counter: 0, nodeId: 'test-node-sec' },
+          lastPingReceived: Date.now()
       };
       const adminListener = {
           id: 'client-admin-listener',
           socket: adminListenerSocket as any,
+          writer: createMockWriter(adminListenerSocket) as any,
           isAuthenticated: true,
           subscriptions: new Set(),
-          principal: { userId: 'a3', roles: ['ADMIN'] }
+          principal: { userId: 'a3', roles: ['ADMIN'] },
+          lastActiveHlc: { millis: Date.now(), counter: 0, nodeId: 'test-node-sec' },
+          lastPingReceived: Date.now()
       };
 
       (server as any).clients.set('client-user-2', userClient);
       (server as any).clients.set('client-admin-2', adminClient);
       (server as any).clients.set('client-admin-listener', adminListener);
+
+      // IMPORTANT: Clients must subscribe to receive SERVER_EVENT (subscription-based routing)
+      await (server as any).handleMessage(userClient, {
+          type: 'QUERY_SUB',
+          payload: { queryId: 'user-q', mapName: 'profiles', query: {} }
+      });
+      await (server as any).handleMessage(adminListener, {
+          type: 'QUERY_SUB',
+          payload: { queryId: 'admin-q', mapName: 'profiles', query: {} }
+      });
+
+      // Clear mock calls after subscriptions
+      userSocket.send.mockClear();
+      adminListenerSocket.send.mockClear();
 
       // Trigger update via ADMIN
       // This calls processLocalOp -> broadcast
@@ -165,17 +208,30 @@ describe('Field-Level Security (RBAC)', () => {
           }
       });
 
-      // Verify Broadcast to USER
-      expect(userSocket.send).toHaveBeenCalled();
-      const userMsg = deserialize(userSocket.send.mock.calls[0][0]) as any;
-      expect(userMsg.type).toBe('SERVER_EVENT');
-      expect(userMsg.payload.key).toBe('user2');
-      expect(userMsg.payload.record.value).toEqual({ publicName: 'Bob' });
-      expect(userMsg.payload.record.value.email).toBeUndefined();
+      // Wait for async processing
+      await new Promise(r => setTimeout(r, 50));
 
-      // Verify Broadcast to ADMIN LISTENER
+      // Verify Broadcast to USER (via SERVER_EVENT with FLS filtering)
+      expect(userSocket.send).toHaveBeenCalled();
+      // Find the SERVER_EVENT message (not QUERY_UPDATE)
+      const userMessages = userSocket.send.mock.calls.map((c: any[]) => {
+          try { return deserialize(c[0]) as any; } catch { return null; }
+      }).filter(Boolean);
+      const userServerEvent = userMessages.find((m: any) => m.type === 'SERVER_EVENT');
+
+      expect(userServerEvent).toBeDefined();
+      expect(userServerEvent.payload.key).toBe('user2');
+      expect(userServerEvent.payload.record.value).toEqual({ publicName: 'Bob' });
+      expect(userServerEvent.payload.record.value.email).toBeUndefined();
+
+      // Verify Broadcast to ADMIN LISTENER (full data)
       expect(adminListenerSocket.send).toHaveBeenCalled();
-      const adminMsg = deserialize(adminListenerSocket.send.mock.calls[0][0]) as any;
-      expect(adminMsg.payload.record.value).toEqual({ publicName: 'Bob', email: 'bob@secret.com' });
+      const adminMessages = adminListenerSocket.send.mock.calls.map((c: any[]) => {
+          try { return deserialize(c[0]) as any; } catch { return null; }
+      }).filter(Boolean);
+      const adminServerEvent = adminMessages.find((m: any) => m.type === 'SERVER_EVENT');
+
+      expect(adminServerEvent).toBeDefined();
+      expect(adminServerEvent.payload.record.value).toEqual({ publicName: 'Bob', email: 'bob@secret.com' });
   });
 });

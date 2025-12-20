@@ -1,0 +1,391 @@
+---
+title: Performance Tuning
+description: Optimize TopGun for high throughput, low latency, or balanced performance based on your use case.
+order: 17
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Zap, Gauge, Timer, Server, AlertTriangle, CheckCircle, Activity, Terminal } from 'lucide-react';
+
+export const highThroughputConfig = `import { ServerCoordinator } from '@topgunbuild/server';
+
+const server = new ServerCoordinator({
+  port: 8080,
+  nodeId: 'prod-node-1',
+
+  // High throughput settings
+  eventQueueCapacity: 50000,        // Larger queue for bursts
+  eventStripeCount: 8,              // More parallel processing
+  backpressureSyncFrequency: 200,   // Less frequent sync
+  writeCoalescingMaxDelayMs: 10,    // Batch more writes
+  writeCoalescingMaxBatch: 200,     // Larger batches
+
+  // Connection scaling
+  maxConnections: 50000,
+  wsBacklog: 1024,
+  maxConnectionsPerSecond: 500,
+});`;
+
+export const lowLatencyConfig = `import { ServerCoordinator } from '@topgunbuild/server';
+
+const server = new ServerCoordinator({
+  port: 8080,
+  nodeId: 'realtime-node-1',
+
+  // Low latency settings
+  writeCoalescingEnabled: false,    // Disable batching for instant delivery
+  // OR tune for minimal delay:
+  // writeCoalescingMaxDelayMs: 1,  // 1ms max delay
+  // writeCoalescingMaxBatch: 10,   // Small batches
+
+  backpressureSyncFrequency: 50,    // More frequent sync
+  eventStripeCount: 4,              // Balanced parallelism
+});`;
+
+export const productionConfig = `import { ServerCoordinator } from '@topgunbuild/server';
+
+const server = new ServerCoordinator({
+  port: 8080,
+  nodeId: process.env.NODE_ID || 'prod-node-1',
+
+  // Balanced production settings
+  wsBacklog: 511,
+  maxConnections: 10000,
+  eventQueueCapacity: 50000,
+  eventStripeCount: 4,
+
+  // Backpressure tuning
+  backpressureEnabled: true,
+  backpressureSyncFrequency: 100,
+  backpressureMaxPending: 2000,
+
+  // Write coalescing (balanced)
+  writeCoalescingEnabled: true,
+  writeCoalescingMaxDelayMs: 5,
+  writeCoalescingMaxBatch: 100,
+
+  // Rate limiting for DDoS protection
+  rateLimitingEnabled: true,
+  maxConnectionsPerSecond: 200,
+  maxPendingConnections: 2000,
+});`;
+
+export const osLinuxTuning = `# Increase socket backlog
+sudo sysctl -w net.core.somaxconn=65535
+sudo sysctl -w net.ipv4.tcp_max_syn_backlog=65535
+
+# Increase file descriptor limits
+ulimit -n 65535
+
+# Enable TCP keepalive tuning
+sudo sysctl -w net.ipv4.tcp_keepalive_time=60
+sudo sysctl -w net.ipv4.tcp_keepalive_intvl=10
+sudo sysctl -w net.ipv4.tcp_keepalive_probes=6
+
+# Persist settings in /etc/sysctl.conf
+cat >> /etc/sysctl.conf << EOF
+net.core.somaxconn=65535
+net.ipv4.tcp_max_syn_backlog=65535
+net.ipv4.tcp_keepalive_time=60
+net.ipv4.tcp_keepalive_intvl=10
+net.ipv4.tcp_keepalive_probes=6
+EOF`;
+
+export const osLimitConf = `# /etc/security/limits.conf
+topgun soft nofile 65535
+topgun hard nofile 65535
+topgun soft nproc 65535
+topgun hard nproc 65535`;
+
+export const grafanaQueries = `# Queue utilization (should stay below 80%)
+topgun_event_queue_size / topgun_event_queue_capacity * 100
+
+# Connection rejection rate (should be near 0)
+rate(topgun_connections_rejected_total[5m])
+
+# Backpressure timeout rate (alert if > 0)
+rate(topgun_backpressure_timeouts_total[5m])
+
+# Event throughput
+rate(topgun_events_routed_total[5m])
+
+# Average subscribers per event
+topgun_subscribers_per_event{quantile="0.5"}`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Performance Tuning</span>
+</div>
+
+# Performance Tuning
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <Zap className="w-10 h-10 text-yellow-600 dark:text-yellow-400" />
+  <p className="text-lg text-neutral-600 dark:text-neutral-300">
+    Optimize TopGun for your specific workload: high throughput, low latency, or balanced production use.
+  </p>
+</div>
+
+## Performance Benchmarks
+
+<div className="bg-neutral-50 dark:bg-neutral-900/50 border border-card-border rounded-xl p-6 my-6 not-prose">
+  <h3 className="text-lg font-semibold text-foreground mb-4">Measured Performance (single node)</h3>
+  <div className="grid md:grid-cols-3 gap-6">
+    <div>
+      <div className="text-3xl font-bold text-blue-600 dark:text-blue-400">33,000+</div>
+      <div className="text-sm text-neutral-600 dark:text-neutral-400">ops/sec sustained throughput</div>
+    </div>
+    <div>
+      <div className="text-3xl font-bold text-green-600 dark:text-green-400">100</div>
+      <div className="text-sm text-neutral-600 dark:text-neutral-400">concurrent clients (tested)</div>
+    </div>
+    <div>
+      <div className="text-3xl font-bold text-purple-600 dark:text-purple-400">&lt;15ms</div>
+      <div className="text-sm text-neutral-600 dark:text-neutral-400">p50 write latency</div>
+    </div>
+  </div>
+  <p className="text-xs text-neutral-500 mt-4">
+    Benchmarks run with native MessagePack harness (msgpackr) on a single server node. Results measured under sustained load with 100 concurrent connections. Optimizations include msgpackr for 2x faster serialization, native xxHash64 for Merkle tree hashing, and subscription-based routing.
+  </p>
+</div>
+
+## Understanding the Optimizations
+
+TopGun includes several performance optimizations inspired by proven patterns from high-performance distributed systems:
+
+<div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="flex items-center gap-2 mb-2">
+      <Activity className="w-5 h-5 text-blue-600" />
+      <span className="font-semibold text-foreground">Subscription-Based Routing</span>
+    </div>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300">
+      Events are only sent to clients with active subscriptions, eliminating unnecessary broadcasts and reducing network traffic.
+    </p>
+  </div>
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="flex items-center gap-2 mb-2">
+      <Gauge className="w-5 h-5 text-green-600" />
+      <span className="font-semibold text-foreground">Bounded Event Queue</span>
+    </div>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300">
+      A capacity-limited queue protects against OOM under load spikes. Events are rejected rather than accumulating unbounded.
+    </p>
+  </div>
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="flex items-center gap-2 mb-2">
+      <Timer className="w-5 h-5 text-orange-600" />
+      <span className="font-semibold text-foreground">Backpressure Regulation</span>
+    </div>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300">
+      Periodic synchronous processing prevents async operation buildup and ensures consistent latency under load.
+    </p>
+  </div>
+  <div className="p-4 border border-card-border rounded-lg">
+    <div className="flex items-center gap-2 mb-2">
+      <Zap className="w-5 h-5 text-purple-600" />
+      <span className="font-semibold text-foreground">Write Coalescing</span>
+    </div>
+    <p className="text-sm text-neutral-600 dark:text-neutral-300">
+      Multiple small messages are batched into single syscalls, dramatically reducing kernel overhead at high throughput.
+    </p>
+  </div>
+</div>
+
+## Tuning for High Throughput
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Server className="w-6 h-6 text-blue-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">For 100+ concurrent clients with heavy write loads.</span>
+</div>
+
+Use these settings when your priority is maximizing events per second:
+
+<div className="not-prose">
+  <CodeBlock title="High Throughput Configuration" language="typescript" code={highThroughputConfig} />
+</div>
+
+### When to Adjust
+
+| Setting | Increase When | Decrease When |
+|---------|---------------|---------------|
+| `eventQueueCapacity` | Seeing `queue_rejected` metrics | Memory constrained |
+| `eventStripeCount` | CPU has many cores, queue contention | Few cores, diminishing returns |
+| `backpressureSyncFrequency` | Throughput is priority over latency | Latency spikes are unacceptable |
+| `writeCoalescingMaxDelayMs` | Network is bottleneck | Real-time delivery needed |
+
+## Tuning for Low Latency
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Timer className="w-6 h-6 text-orange-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">For real-time applications where every millisecond matters.</span>
+</div>
+
+Use these settings for gaming, live collaboration, or trading applications:
+
+<div className="not-prose">
+  <CodeBlock title="Low Latency Configuration" language="typescript" code={lowLatencyConfig} />
+</div>
+
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-6 my-6 not-prose">
+  <div className="flex items-center gap-2 mb-2">
+    <AlertTriangle className="w-5 h-5 text-yellow-600 dark:text-yellow-400" />
+    <h3 className="text-lg font-semibold text-yellow-800 dark:text-yellow-300">Trade-off Warning</h3>
+  </div>
+  <span className="text-yellow-700 dark:text-yellow-400">Disabling write coalescing increases syscall overhead significantly. Only disable when sub-millisecond latency is critical and you have sufficient CPU headroom.</span>
+</div>
+
+### Latency vs Throughput Trade-offs
+
+| `writeCoalescingMaxDelayMs` | Latency | Throughput | Use Case |
+|-----------------------------|---------|------------|----------|
+| Disabled (`false`) | ~0ms added | Lower | Live gaming, trading |
+| 1ms | ~1ms added | Medium | Live collaboration |
+| 5ms (default) | ~5ms added | High | General purpose |
+| 10-20ms | ~10-20ms added | Maximum | Batch processing |
+
+## Balanced Production Settings
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <CheckCircle className="w-6 h-6 text-green-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Recommended starting point for most production deployments.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="Production Configuration" language="typescript" code={productionConfig} />
+</div>
+
+## Monitoring Performance
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Activity className="w-6 h-6 text-blue-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Key metrics to monitor for performance tuning.</span>
+</div>
+
+### Critical Metrics
+
+| Metric | Healthy Range | Action if Exceeded |
+|--------|---------------|-------------------|
+| `topgun_event_queue_size` | &lt;80% of capacity | Increase `eventQueueCapacity` or add nodes |
+| `topgun_event_queue_rejected_total` | 0 | Urgent: queue is full, events being dropped |
+| `topgun_backpressure_timeouts_total` | 0 | Increase `backpressureBackoffMs` or reduce load |
+| `topgun_backpressure_pending_ops` | &lt;80% of `maxPending` | Increase `backpressureMaxPending` |
+| `topgun_connections_rejected_total` | Near 0 | Increase rate limits or investigate DDoS |
+
+### Grafana Dashboard Queries
+
+<div className="not-prose">
+  <CodeBlock title="PromQL Queries" language="text" code={grafanaQueries} />
+</div>
+
+### Recommended Alerts
+
+<div className="overflow-x-auto not-prose">
+  <table className="w-full text-left text-sm text-neutral-600 dark:text-neutral-300">
+    <thead className="bg-neutral-100 dark:bg-neutral-800 text-foreground font-semibold">
+      <tr>
+        <th className="p-3 rounded-tl-lg">Alert Name</th>
+        <th className="p-3">Condition</th>
+        <th className="p-3 rounded-tr-lg">Severity</th>
+      </tr>
+    </thead>
+    <tbody className="divide-y divide-card-border">
+      <tr>
+        <td className="p-3 font-medium">EventQueueFull</td>
+        <td className="p-3 font-mono text-xs">rate(topgun_event_queue_rejected_total[5m]) &gt; 0</td>
+        <td className="p-3"><span className="px-2 py-1 bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200 rounded text-xs">Critical</span></td>
+      </tr>
+      <tr>
+        <td className="p-3 font-medium">BackpressureTimeout</td>
+        <td className="p-3 font-mono text-xs">rate(topgun_backpressure_timeouts_total[5m]) &gt; 0</td>
+        <td className="p-3"><span className="px-2 py-1 bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200 rounded text-xs">Critical</span></td>
+      </tr>
+      <tr>
+        <td className="p-3 font-medium">HighQueueUtilization</td>
+        <td className="p-3 font-mono text-xs">topgun_event_queue_size / capacity &gt; 0.8</td>
+        <td className="p-3"><span className="px-2 py-1 bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-200 rounded text-xs">Warning</span></td>
+      </tr>
+      <tr>
+        <td className="p-3 font-medium">ConnectionRateLimitHit</td>
+        <td className="p-3 font-mono text-xs">rate(topgun_connections_rejected_total[5m]) &gt; 10</td>
+        <td className="p-3"><span className="px-2 py-1 bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-200 rounded text-xs">Warning</span></td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+## OS-Level Tuning
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Terminal className="w-6 h-6 text-green-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Linux kernel parameters for high-connection workloads.</span>
+</div>
+
+For production servers handling thousands of connections, tune the operating system:
+
+### Linux Sysctl Settings
+
+<div className="not-prose">
+  <CodeBlock title="Linux Kernel Tuning" language="bash" code={osLinuxTuning} />
+</div>
+
+### File Descriptor Limits
+
+<div className="not-prose">
+  <CodeBlock title="/etc/security/limits.conf" language="text" code={osLimitConf} />
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 my-6 not-prose">
+  <h3 className="text-lg font-semibold text-blue-800 dark:text-blue-300 mb-2">Docker/Kubernetes Note</h3>
+  <span className="text-blue-700 dark:text-blue-400">When running in containers, ensure the host has these settings applied. You may also need to set <code className="bg-blue-100 dark:bg-blue-800 px-1.5 py-0.5 rounded">ulimits</code> in your Docker Compose or Kubernetes pod spec.</span>
+</div>
+
+## Quick Reference
+
+<div className="grid md:grid-cols-3 gap-4 my-6 not-prose">
+  <div className="p-4 border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-900/20 rounded-lg">
+    <h4 className="font-semibold text-green-800 dark:text-green-300 mb-2">High Throughput</h4>
+    <ul className="text-sm text-green-700 dark:text-green-400 space-y-1">
+      <li>eventQueueCapacity: 50000+</li>
+      <li>eventStripeCount: 8</li>
+      <li>writeCoalescingMaxDelayMs: 10-20</li>
+      <li>backpressureSyncFrequency: 200</li>
+    </ul>
+  </div>
+  <div className="p-4 border border-orange-200 dark:border-orange-800 bg-orange-50 dark:bg-orange-900/20 rounded-lg">
+    <h4 className="font-semibold text-orange-800 dark:text-orange-300 mb-2">Low Latency</h4>
+    <ul className="text-sm text-orange-700 dark:text-orange-400 space-y-1">
+      <li>writeCoalescingEnabled: false</li>
+      <li>OR writeCoalescingMaxDelayMs: 1</li>
+      <li>backpressureSyncFrequency: 50</li>
+      <li>eventStripeCount: 4</li>
+    </ul>
+  </div>
+  <div className="p-4 border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+    <h4 className="font-semibold text-blue-800 dark:text-blue-300 mb-2">Balanced</h4>
+    <ul className="text-sm text-blue-700 dark:text-blue-400 space-y-1">
+      <li>Use defaults</li>
+      <li>eventQueueCapacity: 10000-50000</li>
+      <li>writeCoalescingMaxDelayMs: 5</li>
+      <li>backpressureSyncFrequency: 100</li>
+    </ul>
+  </div>
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/observability" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Observability
+    </div>
+  </a>
+  <a href="/docs/guides/distributed-locks" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next Guide</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Distributed Locks <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

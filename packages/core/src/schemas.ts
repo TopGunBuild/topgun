@@ -1,5 +1,20 @@
 import { z } from 'zod';
 
+// --- Write Concern Types ---
+
+/**
+ * Write Concern schema - defines when an operation is considered acknowledged.
+ */
+export const WriteConcernSchema = z.enum([
+  'FIRE_AND_FORGET',
+  'MEMORY',
+  'APPLIED',
+  'REPLICATED',
+  'PERSISTED',
+]);
+
+export type WriteConcernValue = z.infer<typeof WriteConcernSchema>;
+
 // --- Basic Types ---
 
 export const TimestampSchema = z.object({
@@ -53,10 +68,13 @@ export const ClientOpSchema = z.object({
   key: z.string(),
   // Permissive opType to match ServerCoordinator behavior logic
   // It can be 'REMOVE', 'OR_ADD', 'OR_REMOVE' or undefined/other (implies PUT/LWW)
-  opType: z.string().optional(), 
+  opType: z.string().optional(),
   record: LWWRecordSchema.nullable().optional(),
   orRecord: ORMapRecordSchema.nullable().optional(),
   orTag: z.string().nullable().optional(),
+  // Write Concern fields (Phase 5.01)
+  writeConcern: WriteConcernSchema.optional(),
+  timeout: z.number().optional(),
 });
 
 // --- Message Schemas ---
@@ -91,6 +109,9 @@ export const OpBatchMessageSchema = z.object({
   type: z.literal('OP_BATCH'),
   payload: z.object({
     ops: z.array(ClientOpSchema),
+    // Batch-level Write Concern (can be overridden per-op)
+    writeConcern: WriteConcernSchema.optional(),
+    timeout: z.number().optional(),
   }),
 });
 
@@ -203,6 +224,19 @@ export const PongMessageSchema = z.object({
   serverTime: z.number(),  // Server's Date.now() (for clock skew detection)
 });
 
+// --- Batched Messages ---
+
+/**
+ * BATCH: Server sends multiple messages batched together.
+ * Uses length-prefixed binary format for efficiency.
+ * Format: [4 bytes: count][4 bytes: len1][msg1][4 bytes: len2][msg2]...
+ */
+export const BatchMessageSchema = z.object({
+  type: z.literal('BATCH'),
+  count: z.number(),
+  data: z.instanceof(Uint8Array),
+});
+
 // --- ORMap Sync Messages ---
 
 /**
@@ -309,6 +343,49 @@ export const ORMapPushDiffSchema = z.object({
   }),
 });
 
+// --- Write Concern Response Schemas (Phase 5.01) ---
+
+/**
+ * Individual operation result within a batch ACK
+ */
+export const OpResultSchema = z.object({
+  opId: z.string(),
+  success: z.boolean(),
+  achievedLevel: WriteConcernSchema,
+  error: z.string().optional(),
+});
+
+/**
+ * OP_ACK: Server acknowledges write operations
+ * Extended to support Write Concern levels
+ */
+export const OpAckMessageSchema = z.object({
+  type: z.literal('OP_ACK'),
+  payload: z.object({
+    /** ID of the last operation in the batch (for backwards compatibility) */
+    lastId: z.string(),
+    /** Write Concern level achieved (for simple ACKs) */
+    achievedLevel: WriteConcernSchema.optional(),
+    /** Per-operation results (for batch operations with mixed Write Concern) */
+    results: z.array(OpResultSchema).optional(),
+  }),
+});
+
+/**
+ * OP_REJECTED: Server rejects a write operation
+ */
+export const OpRejectedMessageSchema = z.object({
+  type: z.literal('OP_REJECTED'),
+  payload: z.object({
+    /** Operation ID that was rejected */
+    opId: z.string(),
+    /** Reason for rejection */
+    reason: z.string(),
+    /** Error code */
+    code: z.number().optional(),
+  }),
+});
+
 // --- Union Schema ---
 
 export const MessageSchema = z.discriminatedUnion('type', [
@@ -351,4 +428,10 @@ export type ClientOp = z.infer<typeof ClientOpSchema>;
 export type Message = z.infer<typeof MessageSchema>;
 export type PingMessage = z.infer<typeof PingMessageSchema>;
 export type PongMessage = z.infer<typeof PongMessageSchema>;
+export type BatchMessage = z.infer<typeof BatchMessageSchema>;
+
+// Write Concern types (Phase 5.01)
+export type OpAckMessage = z.infer<typeof OpAckMessageSchema>;
+export type OpRejectedMessage = z.infer<typeof OpRejectedMessageSchema>;
+export type OpResult = z.infer<typeof OpResultSchema>;
 

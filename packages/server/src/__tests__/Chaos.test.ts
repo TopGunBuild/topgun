@@ -2,6 +2,7 @@ import { ServerCoordinator } from '../ServerCoordinator';
 import { ChaosProxy } from './utils/ChaosProxy';
 import { SyncEngine } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
+import { waitForAuthReady } from './utils/waitForAuthReady';
 import { LWWMap } from '@topgunbuild/core';
 import * as jwt from 'jsonwebtoken';
 import { WebSocket } from 'ws';
@@ -93,10 +94,11 @@ describe('Chaos Testing', () => {
             serverUrl: `ws://localhost:${nodeA.port}`,
             storageAdapter: new MemoryStorageAdapter()
         });
+        await waitForAuthReady(clientA);
         clientA.setAuthToken(jwt.sign({ sub: 'ca', roles: ['ADMIN'] }, JWT_SECRET));
         const mapA = new LWWMap(clientA.getHLC());
         clientA.registerMap('split-data', mapA);
-        
+
         const recA = mapA.set('key-a', 'val-a');
         await clientA.recordOperation('split-data', 'PUT', 'key-a', { record: recA, timestamp: recA.timestamp });
 
@@ -106,6 +108,7 @@ describe('Chaos Testing', () => {
             serverUrl: `ws://localhost:${nodeB.port}`,
             storageAdapter: new MemoryStorageAdapter()
         });
+        await waitForAuthReady(clientB);
         clientB.setAuthToken(jwt.sign({ sub: 'cb', roles: ['ADMIN'] }, JWT_SECRET));
         const mapB = new LWWMap(clientB.getHLC());
         clientB.registerMap('split-data', mapB);
@@ -128,6 +131,10 @@ describe('Chaos Testing', () => {
         // Ownership logic is broken.
         console.log('C key-a:', mapC.get('key-a'));
         console.log('C key-b:', mapC.get('key-b'));
+
+        // Cleanup clients
+        clientA.close();
+        clientB.close();
     }, 30000);
   });
   
@@ -161,6 +168,13 @@ describe('Chaos Testing', () => {
         await server.shutdown();
     });
 
+    afterEach(() => {
+        // Close client to prevent "Jest did not exit" warnings
+        if (client) {
+            client.close();
+        }
+    });
+
     test('Sync converges despite 10% packet loss', async () => {
         // 10% packet loss
         proxy.updateConfig({ flakeRate: 0.1 });
@@ -172,6 +186,7 @@ describe('Chaos Testing', () => {
             storageAdapter: storage,
             reconnectInterval: 100
         });
+        await waitForAuthReady(client);
         client.setAuthToken(token);
 
         const map = new LWWMap(client.getHLC());
@@ -244,6 +259,7 @@ describe('Chaos Testing', () => {
             serverUrl: `ws://localhost:${port}`,
             storageAdapter: storage
         });
+        await waitForAuthReady(producer);
         producer.setAuthToken(producerToken);
         const map = new LWWMap(producer.getHLC());
         producer.registerMap('stream-data', map);
@@ -308,6 +324,7 @@ describe('Chaos Testing', () => {
             serverUrl: `ws://localhost:${port}`,
             storageAdapter: new MemoryStorageAdapter()
         });
+        await waitForAuthReady(checkClient);
         checkClient.setAuthToken(jwt.sign({ sub: 'check', roles: ['ADMIN'] }, JWT_SECRET));
         
         // Try to do a simple op
@@ -330,6 +347,9 @@ describe('Chaos Testing', () => {
         
         expect(alive).toBe(true);
 
+        // Cleanup
+        producer.close();
+        checkClient.close();
         consumerWs.close();
         consumerWs.terminate();
     }, 30000);

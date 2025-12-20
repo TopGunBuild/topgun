@@ -2,6 +2,7 @@ import { ServerCoordinator } from '../ServerCoordinator';
 import { ChaosProxy } from './utils/ChaosProxy';
 import { SyncEngine } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
+import { waitForAuthReady } from './utils/waitForAuthReady';
 import { LWWMap } from '@topgunbuild/core';
 import * as jwt from 'jsonwebtoken';
 
@@ -60,7 +61,22 @@ describe('Resilience & Chaos Testing', () => {
       });
   });
 
+  afterEach(() => {
+      // Close client connections to prevent "Jest did not exit" warnings
+      if (clientA) {
+          clientA.close();
+      }
+      if (clientB) {
+          clientB.close();
+      }
+  });
+
   test('Split-Brain Recovery: Eventual Consistency after Network Isolation', async () => {
+    // 1. FIRST: Simulate Network Partition BEFORE clients connect
+    // This ensures clients connect but cannot communicate through proxy
+    console.log('--- SIMULATING NETWORK PARTITION ---');
+    proxy.updateConfig({ isSilent: true });
+
     // Setup Clients
     storageA = new MemoryStorageAdapter();
     storageB = new MemoryStorageAdapter();
@@ -71,7 +87,6 @@ describe('Resilience & Chaos Testing', () => {
         storageAdapter: storageA,
         reconnectInterval: 100
     });
-    clientA.setAuthToken(tokenA);
 
     clientB = new SyncEngine({
         nodeId: 'client-B',
@@ -79,6 +94,12 @@ describe('Resilience & Chaos Testing', () => {
         storageAdapter: storageB,
         reconnectInterval: 100
     });
+
+    // Wait for WebSocket to be ready before setting auth token
+    await waitForAuthReady(clientA);
+    clientA.setAuthToken(tokenA);
+
+    await waitForAuthReady(clientB);
     clientB.setAuthToken(tokenB);
 
     // Setup Maps
@@ -88,16 +109,10 @@ describe('Resilience & Chaos Testing', () => {
     clientA.registerMap('shared-data', mapA);
     clientB.registerMap('shared-data', mapB);
 
-    // Wait for initial auth/connection
-    await new Promise(r => setTimeout(r, 500));
+    // Wait a bit for any connection attempts (will be silently dropped)
+    await new Promise(r => setTimeout(r, 200));
 
-    // 1. Simulate Network Partition (Disconnect both)
-    console.log('--- SIMULATING NETWORK PARTITION ---');
-    proxy.disconnectAll();
-    // Enable silent mode so if they reconnect immediately, they get ignored
-    proxy.updateConfig({ isSilent: true });
-
-    // 2. Conflicting Writes while offline
+    // 2. Conflicting Writes while "offline" (silent mode)
     console.log('--- PERFORMING OFFLINE WRITES ---');
 
     // Client A writes Key1 = 'ValueA'
@@ -119,7 +134,7 @@ describe('Resilience & Chaos Testing', () => {
     const recordB2 = mapB.set('keyB', 'OnlyB');
     await clientB.recordOperation('shared-data', 'PUT', 'keyB', { record: recordB2, timestamp: recordB2.timestamp });
 
-    // Verify local state is divergent
+    // Verify local state is divergent (data not synced during silent mode)
     expect(mapA.get('key1')).toBe('ValueA');
     expect(mapB.get('key1')).toBe('ValueB');
     expect(mapA.get('keyB')).toBeUndefined();

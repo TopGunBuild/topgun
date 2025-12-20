@@ -114,18 +114,6 @@ export const Hero = () => {
                <div className="absolute -inset-1 bg-gradient-to-r from-blue-600 to-purple-600 rounded-xl blur opacity-20"></div>
                <CodeSnippet />
                
-               {/* Floating Badge */}
-               <div className="absolute -bottom-6 -right-6 hidden sm:flex items-center gap-3 px-4 py-3 bg-white dark:bg-[#111] border border-black/10 dark:border-white/10 rounded-lg shadow-xl">
-                  <div className="flex flex-col">
-                    <span className="text-[10px] uppercase text-neutral-500 font-semibold tracking-wider">Sync Latency</span>
-                    <span className="text-green-600 dark:text-green-400 font-mono font-bold">~16ms</span>
-                  </div>
-                  <div className="h-8 w-[1px] bg-black/10 dark:bg-white/10"></div>
-                  <div className="flex flex-col">
-                    <span className="text-[10px] uppercase text-neutral-500 font-semibold tracking-wider">Consistency</span>
-                    <span className="text-blue-600 dark:text-blue-400 font-bold">Strong Eventual</span>
-                  </div>
-               </div>
             </div>
          </div>
        </div>

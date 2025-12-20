@@ -1,0 +1,54 @@
+{
+  "name": "@topgunbuild/native",
+  "version": "0.2.1",
+  "description": "Native performance modules for TopGun",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "build",
+    "binding.gyp",
+    "src/*.cc",
+    "deps"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist build",
+    "build:native": "node-gyp rebuild",
+    "build:ts": "tsc",
+    "build": "npm run build:native && npm run build:ts",
+    "rebuild": "npm run clean && npm run build",
+    "test": "jest",
+    "typecheck": "tsc --noEmit",
+    "prepare": "npm run build:native || echo 'Native build failed, using JS fallback'"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.3.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.10.2",
+    "jest": "^29.7.0",
+    "node-gyp": "^10.3.1",
+    "ts-jest": "^29.2.5",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/topgunbuild/topgun.git",
+    "directory": "packages/native"
+  },
+  "license": "MIT",
+  "gypfile": true
+}

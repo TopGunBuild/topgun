@@ -53,18 +53,6 @@ import { HeroCodeSnippet } from './HeroCodeSnippet';
         <div class="absolute -inset-1 bg-gradient-to-r from-blue-600 to-purple-600 rounded-xl blur opacity-20"></div>
         <HeroCodeSnippet client:visible />
 
-        <!-- Floating Badge (SSR) -->
-        <div class="absolute -bottom-6 -right-6 hidden sm:flex items-center gap-3 px-4 py-3 bg-white dark:bg-[#111] border border-black/10 dark:border-white/10 rounded-lg shadow-xl">
-          <div class="flex flex-col">
-            <span class="text-[10px] uppercase text-neutral-500 font-semibold tracking-wider">Sync Latency</span>
-            <span class="text-green-600 dark:text-green-400 font-mono font-bold">~16ms</span>
-          </div>
-          <div class="h-8 w-[1px] bg-black/10 dark:bg-white/10"></div>
-          <div class="flex flex-col">
-            <span class="text-[10px] uppercase text-neutral-500 font-semibold tracking-wider">Consistency</span>
-            <span class="text-blue-600 dark:text-blue-400 font-bold">Strong Eventual</span>
-          </div>
-        </div>
       </div>
     </div>
   </div>

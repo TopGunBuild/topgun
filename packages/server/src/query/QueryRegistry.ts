@@ -222,6 +222,34 @@ export class QueryRegistry {
   }
 
   /**
+   * Returns all active subscriptions for a specific map.
+   * Used for subscription-based event routing to avoid broadcasting to all clients.
+   */
+  public getSubscriptionsForMap(mapName: string): Subscription[] {
+    const subs = this.subscriptions.get(mapName);
+    if (!subs || subs.size === 0) {
+      return [];
+    }
+    return Array.from(subs);
+  }
+
+  /**
+   * Returns unique client IDs that have subscriptions for a specific map.
+   * Useful for efficient routing when a client has multiple queries on the same map.
+   */
+  public getSubscribedClientIds(mapName: string): Set<string> {
+    const subs = this.subscriptions.get(mapName);
+    if (!subs || subs.size === 0) {
+      return new Set();
+    }
+    const clientIds = new Set<string>();
+    for (const sub of subs) {
+      clientIds.add(sub.clientId);
+    }
+    return clientIds;
+  }
+
+  /**
    * Refreshes all subscriptions for a given map.
    * Useful when the map is bulk-loaded from storage.
    */

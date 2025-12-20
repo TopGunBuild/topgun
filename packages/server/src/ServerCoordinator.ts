@@ -1,8 +1,9 @@
 import { createServer as createHttpServer, Server as HttpServer } from 'http';
 import { createServer as createHttpsServer, Server as HttpsServer, ServerOptions as HttpsServerOptions } from 'https';
 import { readFileSync } from 'fs';
+import * as net from 'net';
 import { WebSocketServer, WebSocket } from 'ws';
-import { HLC, LWWMap, ORMap, MerkleTree, serialize, deserialize, PermissionPolicy, Principal, PermissionType, Timestamp, LWWRecord, ORMapRecord, MessageSchema } from '@topgunbuild/core';
+import { HLC, LWWMap, ORMap, MerkleTree, serialize, deserialize, PermissionPolicy, Principal, PermissionType, Timestamp, LWWRecord, ORMapRecord, MessageSchema, WriteConcern, WriteConcernValue } from '@topgunbuild/core';
 import { IServerStorage, StorageValue, ORMapValue, ORMapTombstones } from './storage/IServerStorage';
 import { IInterceptor, ServerOp, OpContext, ConnectionContext } from './interceptor/IInterceptor';
 import * as jwt from 'jsonwebtoken';
@@ -23,10 +24,24 @@ import { logger } from './utils/logger';
 import { MetricsService } from './monitoring/MetricsService';
 import { SystemManager } from './system/SystemManager';
 import { TLSConfig, ClusterTLSConfig } from './types/TLSConfig';
+import { StripedEventExecutor } from './utils/StripedEventExecutor';
+import { BackpressureRegulator } from './utils/BackpressureRegulator';
+import { CoalescingWriter, CoalescingWriterOptions } from './utils/CoalescingWriter';
+import { coalescingPresets, CoalescingPreset } from './utils/coalescingPresets';
+import { ConnectionRateLimiter } from './utils/ConnectionRateLimiter';
+import { WorkerPool, MerkleWorker, CRDTMergeWorker, SerializationWorker, WorkerPoolConfig } from './workers';
+import {
+    ObjectPool,
+    createEventPayloadPool,
+    PooledEventPayload,
+} from './memory';
+import { TaskletScheduler } from './tasklet';
+import { WriteAckManager } from './ack/WriteAckManager';
 
 interface ClientConnection {
     id: string;
     socket: WebSocket;
+    writer: CoalescingWriter; // Per-connection write coalescing
     principal?: Principal; // Auth info
     isAuthenticated: boolean;
     subscriptions: Set<string>; // Set of Query IDs
@@ -64,6 +79,62 @@ export interface ServerCoordinatorConfig {
     discoveryInterval?: number;
     tls?: TLSConfig;
     clusterTls?: ClusterTLSConfig;
+    /** Total event queue capacity for bounded queue (default: 10000) */
+    eventQueueCapacity?: number;
+    /** Number of event queue stripes for parallel processing (default: 4) */
+    eventStripeCount?: number;
+    /** Enable/disable backpressure (default: true) */
+    backpressureEnabled?: boolean;
+    /** How often to force sync processing (default: 100 operations) */
+    backpressureSyncFrequency?: number;
+    /** Maximum pending async operations before blocking (default: 1000) */
+    backpressureMaxPending?: number;
+    /** Backoff timeout in ms when at capacity (default: 5000) */
+    backpressureBackoffMs?: number;
+    /** Enable/disable write coalescing (default: true) */
+    writeCoalescingEnabled?: boolean;
+    /** Coalescing preset: 'conservative', 'balanced', 'highThroughput', 'aggressive' (default: 'highThroughput') */
+    writeCoalescingPreset?: CoalescingPreset;
+    /** Maximum messages to batch before forcing flush (default: 500 for highThroughput) */
+    writeCoalescingMaxBatch?: number;
+    /** Maximum delay before flushing in ms (default: 10 for highThroughput) */
+    writeCoalescingMaxDelayMs?: number;
+    /** Maximum batch size in bytes (default: 262144/256KB for highThroughput) */
+    writeCoalescingMaxBytes?: number;
+
+    // === Connection Scaling Options ===
+    /** WebSocket backlog for pending connections (default: 511) */
+    wsBacklog?: number;
+    /** Enable WebSocket per-message compression (default: false for CPU savings) */
+    wsCompression?: boolean;
+    /** Maximum WebSocket payload size in bytes (default: 64MB) */
+    wsMaxPayload?: number;
+    /** Maximum server connections (default: 10000) */
+    maxConnections?: number;
+    /** Server timeout in ms (default: 120000 = 2 min) */
+    serverTimeout?: number;
+    /** Keep-alive timeout in ms (default: 5000) */
+    keepAliveTimeout?: number;
+    /** Headers timeout in ms (default: 60000) */
+    headersTimeout?: number;
+
+    // === Rate Limiting Options ===
+    /** Enable connection rate limiting (default: true) */
+    rateLimitingEnabled?: boolean;
+    /** Maximum new connections per second (default: 100) */
+    maxConnectionsPerSecond?: number;
+    /** Maximum pending connections (default: 1000) */
+    maxPendingConnections?: number;
+
+    // === Worker Pool Options ===
+    /** Enable worker pool for CPU-bound operations (default: false) */
+    workerPoolEnabled?: boolean;
+    /** Worker pool configuration */
+    workerPoolConfig?: Partial<WorkerPoolConfig>;
+
+    // === Write Concern Options (Phase 5.01) ===
+    /** Default timeout for Write Concern acknowledgments in ms (default: 5000) */
+    writeAckTimeout?: number;
 }
 
 export class ServerCoordinator {
@@ -100,6 +171,38 @@ export class ServerCoordinator {
     // Track map loading state to avoid returning empty results during async load
     private mapLoadingPromises: Map<string, Promise<void>> = new Map();
 
+    // Track pending batch operations for testing purposes
+    private pendingBatchOperations: Set<Promise<void>> = new Set();
+
+    // Bounded event queue executor for backpressure control
+    private eventExecutor: StripedEventExecutor;
+
+    // Backpressure regulator for periodic sync processing
+    private backpressure: BackpressureRegulator;
+
+    // Write coalescing options
+    private writeCoalescingEnabled: boolean;
+    private writeCoalescingOptions: Partial<CoalescingWriterOptions>;
+
+    // Connection rate limiter
+    private rateLimiter: ConnectionRateLimiter;
+    private rateLimitingEnabled: boolean;
+
+    // Worker pool for CPU-bound operations
+    private workerPool?: WorkerPool;
+    private merkleWorker?: MerkleWorker;
+    private crdtMergeWorker?: CRDTMergeWorker;
+    private serializationWorker?: SerializationWorker;
+
+    // Memory pools for GC pressure reduction
+    private eventPayloadPool: ObjectPool<PooledEventPayload>;
+
+    // Tasklet scheduler for cooperative multitasking
+    private taskletScheduler: TaskletScheduler;
+
+    // Write Concern acknowledgment manager (Phase 5.01)
+    private writeAckManager: WriteAckManager;
+
     private _actualPort: number = 0;
     private _actualClusterPort: number = 0;
     private _readyPromise: Promise<void>;
@@ -119,6 +222,78 @@ export class ServerCoordinator {
         this.securityManager = new SecurityManager(config.securityPolicies || []);
         this.interceptors = config.interceptors || [];
         this.metricsService = new MetricsService();
+
+        // Initialize bounded event queue executor
+        this.eventExecutor = new StripedEventExecutor({
+            stripeCount: config.eventStripeCount ?? 4,
+            queueCapacity: config.eventQueueCapacity ?? 10000,
+            name: `${config.nodeId}-event-executor`,
+            onReject: (task) => {
+                logger.warn({ nodeId: config.nodeId, key: task.key }, 'Event task rejected due to queue capacity');
+                this.metricsService.incEventQueueRejected();
+            }
+        });
+
+        // Initialize backpressure regulator for periodic sync processing
+        this.backpressure = new BackpressureRegulator({
+            syncFrequency: config.backpressureSyncFrequency ?? 100,
+            maxPendingOps: config.backpressureMaxPending ?? 1000,
+            backoffTimeoutMs: config.backpressureBackoffMs ?? 5000,
+            enabled: config.backpressureEnabled ?? true
+        });
+
+        // Initialize write coalescing options with preset support
+        // Default preset changed from 'conservative' to 'highThroughput' for better performance
+        this.writeCoalescingEnabled = config.writeCoalescingEnabled ?? true;
+        const preset = coalescingPresets[config.writeCoalescingPreset ?? 'highThroughput'];
+        this.writeCoalescingOptions = {
+            maxBatchSize: config.writeCoalescingMaxBatch ?? preset.maxBatchSize,
+            maxDelayMs: config.writeCoalescingMaxDelayMs ?? preset.maxDelayMs,
+            maxBatchBytes: config.writeCoalescingMaxBytes ?? preset.maxBatchBytes,
+        };
+
+        // Initialize memory pools for GC pressure reduction
+        this.eventPayloadPool = createEventPayloadPool({
+            maxSize: 4096,
+            initialSize: 128,
+        });
+
+        // Initialize tasklet scheduler for cooperative multitasking
+        this.taskletScheduler = new TaskletScheduler({
+            defaultTimeBudgetMs: 5,
+            maxConcurrent: 20,
+        });
+
+        // Initialize Write Concern acknowledgment manager (Phase 5.01)
+        this.writeAckManager = new WriteAckManager({
+            defaultTimeout: config.writeAckTimeout ?? 5000,
+        });
+
+        // Initialize connection rate limiter
+        this.rateLimitingEnabled = config.rateLimitingEnabled ?? true;
+        this.rateLimiter = new ConnectionRateLimiter({
+            maxConnectionsPerSecond: config.maxConnectionsPerSecond ?? 100,
+            maxPendingConnections: config.maxPendingConnections ?? 1000,
+            cooldownMs: 1000,
+        });
+
+        // Initialize worker pool for CPU-bound operations
+        if (config.workerPoolEnabled) {
+            this.workerPool = new WorkerPool({
+                minWorkers: config.workerPoolConfig?.minWorkers ?? 2,
+                maxWorkers: config.workerPoolConfig?.maxWorkers,
+                taskTimeout: config.workerPoolConfig?.taskTimeout ?? 5000,
+                idleTimeout: config.workerPoolConfig?.idleTimeout ?? 30000,
+                autoRestart: config.workerPoolConfig?.autoRestart ?? true,
+            });
+            this.merkleWorker = new MerkleWorker(this.workerPool);
+            this.crdtMergeWorker = new CRDTMergeWorker(this.workerPool);
+            this.serializationWorker = new SerializationWorker(this.workerPool);
+            logger.info({
+                minWorkers: config.workerPoolConfig?.minWorkers ?? 2,
+                maxWorkers: config.workerPoolConfig?.maxWorkers ?? 'auto'
+            }, 'Worker pool initialized for CPU-bound operations');
+        }
 
         // HTTP Server Setup first (to get actual port if port=0)
         if (config.tls?.enabled) {
@@ -161,8 +336,33 @@ export class ServerCoordinator {
             logger.error({ err, port: metricsPort }, 'Metrics server failed to start');
         });
 
-        this.wss = new WebSocketServer({ server: this.httpServer });
+        // Configure WebSocketServer with optimal options for connection scaling
+        this.wss = new WebSocketServer({
+            server: this.httpServer,
+            // Increase backlog for pending connections (default Linux is 128)
+            backlog: config.wsBacklog ?? 511,
+            // Disable per-message deflate by default (CPU overhead)
+            perMessageDeflate: config.wsCompression ?? false,
+            // Max payload size (64MB default)
+            maxPayload: config.wsMaxPayload ?? 64 * 1024 * 1024,
+            // Skip UTF-8 validation for binary messages (performance)
+            skipUTF8Validation: true,
+        });
         this.wss.on('connection', (ws) => this.handleConnection(ws));
+
+        // Configure HTTP server limits for connection scaling
+        this.httpServer.maxConnections = config.maxConnections ?? 10000;
+        this.httpServer.timeout = config.serverTimeout ?? 120000; // 2 min
+        this.httpServer.keepAliveTimeout = config.keepAliveTimeout ?? 5000;
+        this.httpServer.headersTimeout = config.headersTimeout ?? 60000;
+
+        // Configure socket options for all incoming connections
+        this.httpServer.on('connection', (socket: net.Socket) => {
+            // Disable Nagle's algorithm for lower latency
+            socket.setNoDelay(true);
+            // Enable keep-alive with 60s interval
+            socket.setKeepAlive(true, 60000);
+        });
 
         // Use port 0 to let OS assign a free port
         this.httpServer.listen(config.port, () => {
@@ -195,7 +395,7 @@ export class ServerCoordinator {
                 sendToClient: (clientId, message) => {
                     const client = this.clients.get(clientId);
                     if (client && client.socket.readyState === WebSocket.OPEN) {
-                        client.socket.send(serialize(message));
+                        client.writer.write(message);
                     }
                 }
             });
@@ -240,6 +440,15 @@ export class ServerCoordinator {
         return this._readyPromise;
     }
 
+    /**
+     * Wait for all pending batch operations to complete.
+     * Useful for tests that need to verify state after OP_BATCH.
+     */
+    public async waitForPendingBatches(): Promise<void> {
+        if (this.pendingBatchOperations.size === 0) return;
+        await Promise.all(this.pendingBatchOperations);
+    }
+
     /** Get the actual port the server is listening on */
     public get port(): number {
         return this._actualPort;
@@ -248,6 +457,63 @@ export class ServerCoordinator {
     /** Get the actual cluster port */
     public get clusterPort(): number {
         return this._actualClusterPort;
+    }
+
+    /** Get event executor metrics for monitoring */
+    public getEventExecutorMetrics() {
+        return this.eventExecutor.getMetrics();
+    }
+
+    /** Get total event executor metrics across all stripes */
+    public getEventExecutorTotalMetrics() {
+        return this.eventExecutor.getTotalMetrics();
+    }
+
+    /** Get connection rate limiter stats for monitoring */
+    public getRateLimiterStats() {
+        return this.rateLimiter.getStats();
+    }
+
+    /** Get worker pool stats for monitoring */
+    public getWorkerPoolStats() {
+        return this.workerPool?.getStats() ?? null;
+    }
+
+    /** Check if worker pool is enabled */
+    public get workerPoolEnabled(): boolean {
+        return !!this.workerPool;
+    }
+
+    /** Get MerkleWorker for external use (null if worker pool disabled) */
+    public getMerkleWorker(): MerkleWorker | null {
+        return this.merkleWorker ?? null;
+    }
+
+    /** Get CRDTMergeWorker for external use (null if worker pool disabled) */
+    public getCRDTMergeWorker(): CRDTMergeWorker | null {
+        return this.crdtMergeWorker ?? null;
+    }
+
+    /** Get SerializationWorker for external use (null if worker pool disabled) */
+    public getSerializationWorker(): SerializationWorker | null {
+        return this.serializationWorker ?? null;
+    }
+
+    /** Get memory pool stats for monitoring GC pressure reduction */
+    public getMemoryPoolStats() {
+        return {
+            eventPayloadPool: this.eventPayloadPool.getStats(),
+        };
+    }
+
+    /** Get tasklet scheduler stats for monitoring cooperative multitasking */
+    public getTaskletSchedulerStats() {
+        return this.taskletScheduler.getStats();
+    }
+
+    /** Get tasklet scheduler for scheduling long-running operations */
+    public getTaskletScheduler(): TaskletScheduler {
+        return this.taskletScheduler;
     }
 
     public async shutdown() {
@@ -268,7 +534,12 @@ export class ServerCoordinator {
         for (const client of this.clients.values()) {
             try {
                 if (client.socket.readyState === WebSocket.OPEN) {
+                    // Send shutdown message directly to socket (bypass batching)
+                    // This ensures message is sent before socket.close()
                     client.socket.send(shutdownMsg);
+                    if (client.writer) {
+                        client.writer.close();
+                    }
                     client.socket.close(1001, 'Server Shutdown');
                 }
             } catch (e) {
@@ -277,12 +548,23 @@ export class ServerCoordinator {
         }
         this.clients.clear();
 
-        // 3. Stop Cluster
+        // 3. Shutdown event executor (wait for pending tasks)
+        logger.info('Shutting down event executor...');
+        await this.eventExecutor.shutdown(true);
+
+        // 3.5. Shutdown worker pool
+        if (this.workerPool) {
+            logger.info('Shutting down worker pool...');
+            await this.workerPool.shutdown(5000);
+            logger.info('Worker pool shutdown complete.');
+        }
+
+        // 4. Stop Cluster
         if (this.cluster) {
             this.cluster.stop();
         }
 
-        // 4. Close Storage
+        // 5. Close Storage
         if (this.storage) {
             logger.info('Closing storage connection...');
             try {
@@ -293,7 +575,7 @@ export class ServerCoordinator {
             }
         }
 
-        // 5. Cleanup
+        // 6. Cleanup
         if (this.gcInterval) {
             clearInterval(this.gcInterval);
             this.gcInterval = undefined;
@@ -314,17 +596,49 @@ export class ServerCoordinator {
             this.systemManager.stop();
         }
 
+        // Clear memory pools
+        this.eventPayloadPool.clear();
+
+        // Shutdown tasklet scheduler
+        this.taskletScheduler.shutdown();
+
+        // Shutdown Write Concern manager (Phase 5.01)
+        this.writeAckManager.shutdown();
+
         logger.info('Server Coordinator shutdown complete.');
     }
 
     private async handleConnection(ws: WebSocket) {
+        // Check rate limit before accepting connection
+        if (this.rateLimitingEnabled && !this.rateLimiter.shouldAccept()) {
+            logger.warn('Connection rate limit exceeded, rejecting');
+            this.rateLimiter.onConnectionRejected();
+            this.metricsService.incConnectionsRejected();
+            ws.close(1013, 'Server overloaded'); // 1013 = Try Again Later
+            return;
+        }
+
+        // Register connection attempt
+        if (this.rateLimitingEnabled) {
+            this.rateLimiter.onConnectionAttempt();
+        }
+        this.metricsService.incConnectionsAccepted();
+
         // Client ID is temporary until auth
         const clientId = crypto.randomUUID();
         logger.info({ clientId }, 'Client connected (pending auth)');
 
+        // Create CoalescingWriter if enabled, otherwise create a pass-through writer
+        const writer = new CoalescingWriter(ws, this.writeCoalescingEnabled ? this.writeCoalescingOptions : {
+            maxBatchSize: 1, // Disable batching by flushing immediately
+            maxDelayMs: 0,
+            maxBatchBytes: 0,
+        });
+
         const connection: ClientConnection = {
             id: clientId,
             socket: ws,
+            writer,
             isAuthenticated: false,
             subscriptions: new Set(),
             lastActiveHlc: this.hlc.now(), // Initialize with current time
@@ -393,6 +707,14 @@ export class ServerCoordinator {
         ws.on('close', () => {
             logger.info({ clientId }, 'Client disconnected');
 
+            // If connection was still pending (not authenticated), mark as failed
+            if (this.rateLimitingEnabled && !connection.isAuthenticated) {
+                this.rateLimiter.onPendingConnectionFailed();
+            }
+
+            // Close the CoalescingWriter to flush any pending messages
+            connection.writer.close();
+
             // Run onDisconnect interceptors
             const context: ConnectionContext = {
                 clientId: connection.id,
@@ -443,10 +765,10 @@ export class ServerCoordinator {
         const parseResult = MessageSchema.safeParse(rawMessage);
         if (!parseResult.success) {
             logger.error({ clientId: client.id, error: parseResult.error }, 'Invalid message format from client');
-            client.socket.send(serialize({
+            client.writer.write({
                 type: 'ERROR',
                 payload: { code: 400, message: 'Invalid message format', details: (parseResult.error as any).errors }
-            }));
+            }, true); // urgent
             return;
         }
         const message = parseResult.data;
@@ -485,11 +807,16 @@ export class ServerCoordinator {
                     client.isAuthenticated = true;
                     logger.info({ clientId: client.id, user: client.principal!.userId || 'anon' }, 'Client authenticated');
 
-                    client.socket.send(serialize({ type: 'AUTH_ACK' }));
+                    // Mark connection as established (handshake complete)
+                    if (this.rateLimitingEnabled) {
+                        this.rateLimiter.onConnectionEstablished();
+                    }
+
+                    client.writer.write({ type: 'AUTH_ACK' }, true); // urgent: bypass batching
                     return; // Stop processing this message
                 } catch (e) {
                     logger.error({ clientId: client.id, err: e }, 'Auth failed');
-                    client.socket.send(serialize({ type: 'AUTH_FAIL', error: 'Invalid token' }));
+                    client.writer.write({ type: 'AUTH_FAIL', error: 'Invalid token' }, true); // urgent
                     client.socket.close(4001, 'Unauthorized');
                 }
             } else {
@@ -507,10 +834,10 @@ export class ServerCoordinator {
                 // Check READ permission
                 if (!this.securityManager.checkPermission(client.principal!, mapName, 'READ')) {
                     logger.warn({ clientId: client.id, mapName }, 'Access Denied: QUERY_SUB');
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 403, message: `Access Denied for map ${mapName}` }
-                    }));
+                    }, true);
                     return;
                 }
 
@@ -587,10 +914,10 @@ export class ServerCoordinator {
                 // Check Permission
                 if (!this.securityManager.checkPermission(client.principal!, op.mapName, action)) {
                     logger.warn({ clientId: client.id, action, mapName: op.mapName }, 'Access Denied: Client OP');
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'OP_REJECTED',
                         payload: { opId: op.id, reason: 'Access Denied' }
-                    }));
+                    });
                     return;
                 }
 
@@ -599,10 +926,10 @@ export class ServerCoordinator {
                 if (this.partitionService.isLocalOwner(op.key)) {
                     this.processLocalOp(op, false, client.id).catch(err => {
                         logger.error({ clientId: client.id, err }, 'Op failed');
-                        client.socket.send(serialize({
+                        client.writer.write({
                             type: 'OP_REJECTED',
                             payload: { opId: op.id, reason: err.message || 'Internal Error' }
-                        }));
+                        });
                     });
                 } else {
                     const owner = this.partitionService.getOwner(op.key);
@@ -614,78 +941,116 @@ export class ServerCoordinator {
 
             case 'OP_BATCH': {
                 const ops = message.payload.ops;
-                logger.info({ clientId: client.id, count: ops.length }, 'Received batch');
+                // Extract batch-level Write Concern (Phase 5.01)
+                const batchWriteConcern = (message.payload as any).writeConcern as WriteConcernValue | undefined;
+                const batchTimeout = (message.payload as any).timeout as number | undefined;
 
-                let lastProcessedId: string | null = null;
+                logger.info({ clientId: client.id, count: ops.length, writeConcern: batchWriteConcern }, 'Received batch');
+
+                // === OPTIMIZATION 1: Early ACK ===
+                // Fast validation pass - check permissions without processing
+                const validOps: typeof ops = [];
                 let rejectedCount = 0;
+                let lastValidId: string | null = null;
+
+                // Categorize ops by Write Concern for different ACK handling
+                const memoryOps: typeof ops = []; // Ops that need immediate ACK (MEMORY or FIRE_AND_FORGET)
+                const deferredOps: typeof ops = []; // Ops that need deferred ACK (APPLIED, REPLICATED, PERSISTED)
 
                 for (const op of ops) {
-                    // OpLogEntry has { mapName, key, record, ... }
-
-                    // Check Permission for each op
                     const isRemove = op.opType === 'REMOVE' || (op.record && op.record.value === null);
                     const action: PermissionType = isRemove ? 'REMOVE' : 'PUT';
+
                     if (!this.securityManager.checkPermission(client.principal!, op.mapName, action)) {
                         rejectedCount++;
                         logger.warn({ clientId: client.id, action, mapName: op.mapName }, 'Access Denied (Batch)');
                         continue;
                     }
 
-                    // processLocalOp expects { mapName, key, record, orRecord, orTag, opType }
+                    validOps.push(op);
+                    if (op.id) {
+                        lastValidId = op.id;
+                    }
 
-                    if (this.partitionService.isLocalOwner(op.key)) {
-                        try {
-                            await this.processLocalOp({
-                                mapName: op.mapName,
-                                key: op.key,
-                                record: op.record,
-                                orRecord: op.orRecord,
-                                orTag: op.orTag,
-                                opType: op.opType
-                            }, false, client.id);
+                    // Determine effective Write Concern for this operation
+                    const effectiveWriteConcern = this.getEffectiveWriteConcern(op.writeConcern, batchWriteConcern);
 
-                            if (op.id) {
-                                lastProcessedId = op.id;
-                            }
-                        } catch (err) {
-                            rejectedCount++;
-                            logger.warn({ clientId: client.id, mapName: op.mapName, err }, 'Op rejected in batch');
-                            // We do NOT update lastProcessedId for failed op
-                        }
+                    // Categorize by Write Concern level
+                    if (effectiveWriteConcern === 'FIRE_AND_FORGET' || effectiveWriteConcern === 'MEMORY' || !effectiveWriteConcern) {
+                        memoryOps.push(op);
                     } else {
-                        const owner = this.partitionService.getOwner(op.key);
-                        this.cluster.sendToNode(owner, {
-                            type: 'CLIENT_OP',
-                            payload: {
-                                mapName: op.mapName,
-                                key: op.key,
-                                record: op.record,
-                                orRecord: op.orRecord,
-                                orTag: op.orTag,
-                                opType: op.opType
-                            }
-                        });
-                        // For forwarded ops, we optimistically assume success for batch ACK purposes?
-                        // Or we should only ACK what we processed locally?
-                        // Batch ACK usually implies "accepted". Forwarding = accepted for processing.
-                        if (op.id) {
-                            lastProcessedId = op.id;
-                        }
+                        deferredOps.push(op);
                     }
                 }
 
-                if (lastProcessedId !== null) {
-                    client.socket.send(serialize({
-                        type: 'OP_ACK',
-                        payload: { lastId: lastProcessedId }
-                    }));
+                // Send Early ACK for MEMORY/FIRE_AND_FORGET ops (backwards compatible)
+                if (memoryOps.length > 0) {
+                    const lastMemoryId = memoryOps[memoryOps.length - 1].id;
+                    if (lastMemoryId) {
+                        client.writer.write({
+                            type: 'OP_ACK',
+                            payload: {
+                                lastId: lastMemoryId,
+                                achievedLevel: 'MEMORY'
+                            }
+                        });
+                    }
                 }
 
+                // Send rejection error if any ops were denied
                 if (rejectedCount > 0) {
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 403, message: `Partial batch failure: ${rejectedCount} ops denied` }
-                    }));
+                    }, true);
+                }
+
+                // Register deferred ops with WriteAckManager for tracking
+                for (const op of deferredOps) {
+                    if (op.id) {
+                        const effectiveWriteConcern = this.getEffectiveWriteConcern(op.writeConcern, batchWriteConcern);
+                        const effectiveTimeout = op.timeout ?? batchTimeout;
+                        const wcLevel = this.stringToWriteConcern(effectiveWriteConcern);
+
+                        // Register and handle the promise
+                        this.writeAckManager.registerPending(op.id, wcLevel, effectiveTimeout)
+                            .then((result) => {
+                                // Send ACK when Write Concern is achieved
+                                client.writer.write({
+                                    type: 'OP_ACK',
+                                    payload: {
+                                        lastId: op.id!,
+                                        achievedLevel: result.achievedLevel,
+                                        results: [{
+                                            opId: op.id!,
+                                            success: result.success,
+                                            achievedLevel: result.achievedLevel,
+                                            error: result.error
+                                        }]
+                                    }
+                                });
+                            })
+                            .catch((err) => {
+                                logger.error({ opId: op.id, err }, 'Write concern tracking failed');
+                            });
+                    }
+                }
+
+                // Process valid ops asynchronously (non-blocking)
+                if (validOps.length > 0) {
+                    const batchPromise = new Promise<void>((resolve) => {
+                        setImmediate(() => {
+                            this.processBatchAsyncWithWriteConcern(validOps, client.id, batchWriteConcern, batchTimeout)
+                                .catch(err => {
+                                    logger.error({ clientId: client.id, err }, 'Batch processing failed');
+                                })
+                                .finally(() => {
+                                    this.pendingBatchOperations.delete(batchPromise);
+                                    resolve();
+                                });
+                        });
+                    });
+                    this.pendingBatchOperations.add(batchPromise);
                 }
                 break;
             }
@@ -694,10 +1059,10 @@ export class ServerCoordinator {
                 // Check READ permission
                 if (!this.securityManager.checkPermission(client.principal!, message.mapName, 'READ')) {
                     logger.warn({ clientId: client.id, mapName: message.mapName }, 'Access Denied: SYNC_INIT');
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 403, message: `Access Denied for map ${message.mapName}` }
-                    }));
+                    }, true);
                     return;
                 }
 
@@ -705,10 +1070,10 @@ export class ServerCoordinator {
                 const now = Date.now();
                 if (lastSync > 0 && (now - lastSync) > GC_AGE_MS) {
                     logger.warn({ clientId: client.id, lastSync, age: now - lastSync }, 'Client too old, sending SYNC_RESET_REQUIRED');
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'SYNC_RESET_REQUIRED',
                         payload: { mapName: message.mapName }
-                    }));
+                    });
                     return;
                 }
 
@@ -724,28 +1089,28 @@ export class ServerCoordinator {
                         const tree = mapForSync.getMerkleTree();
                         const rootHash = tree.getRootHash();
 
-                        client.socket.send(serialize({
+                        client.writer.write({
                             type: 'SYNC_RESP_ROOT',
                             payload: {
                                 mapName: message.mapName,
                                 rootHash,
                                 timestamp: this.hlc.now()
                             }
-                        }));
+                        });
                     } else {
                         // ORMap sync not implemented via Merkle Tree yet
                         logger.warn({ mapName: message.mapName }, 'SYNC_INIT requested for ORMap - Not Implemented');
-                        client.socket.send(serialize({
+                        client.writer.write({
                             type: 'ERROR',
                             payload: { code: 501, message: `Merkle Sync not supported for ORMap ${message.mapName}` }
-                        }));
+                        }, true);
                     }
                 } catch (err) {
                     logger.error({ err, mapName: message.mapName }, 'Failed to load map for SYNC_INIT');
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 500, message: `Failed to load map ${message.mapName}` }
-                    }));
+                    }, true);
                 }
                 break;
             }
@@ -753,10 +1118,10 @@ export class ServerCoordinator {
             case 'MERKLE_REQ_BUCKET': {
                 // Check READ permission
                 if (!this.securityManager.checkPermission(client.principal!, message.payload.mapName, 'READ')) {
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 403, message: `Access Denied for map ${message.payload.mapName}` }
-                    }));
+                    }, true);
                     return;
                 }
 
@@ -774,15 +1139,15 @@ export class ServerCoordinator {
                             for (const key of node.entries.keys()) {
                                 diffRecords.push({ key, record: mapForBucket.getRecord(key) });
                             }
-                            client.socket.send(serialize({
+                            client.writer.write({
                                 type: 'SYNC_RESP_LEAF',
                                 payload: { mapName, path, records: diffRecords }
-                            }));
+                            });
                         } else {
-                            client.socket.send(serialize({
+                            client.writer.write({
                                 type: 'SYNC_RESP_BUCKETS',
                                 payload: { mapName, path, buckets }
-                            }));
+                            });
                         }
                     }
                 } catch (err) {
@@ -803,33 +1168,33 @@ export class ServerCoordinator {
                 // If we use just name, it might conflict with map names if policies are strict.
                 // Assuming for now that lock name represents the resource being protected.
                 if (!this.securityManager.checkPermission(client.principal!, name, 'PUT')) {
-                    client.socket.send(serialize({
+                    client.writer.write({
                         // We don't have LOCK_DENIED type in schema yet?
                         // Using LOCK_RELEASED with success=false as a hack or ERROR.
                         // Ideally ERROR.
                         type: 'ERROR',
                         payload: { code: 403, message: `Access Denied for lock ${name}` }
-                    }));
+                    }, true);
                     return;
                 }
 
                 if (this.partitionService.isLocalOwner(name)) {
                     const result = this.lockManager.acquire(name, client.id, requestId, ttl || 10000);
                     if (result.granted) {
-                        client.socket.send(serialize({
+                        client.writer.write({
                             type: 'LOCK_GRANTED',
                             payload: { requestId, name, fencingToken: result.fencingToken }
-                        }));
+                        });
                     }
                     // If not granted, it is queued. Response sent later via event.
                 } else {
                     const owner = this.partitionService.getOwner(name);
                     // 2. Cluster Reliability Check
                     if (!this.cluster.getMembers().includes(owner)) {
-                        client.socket.send(serialize({
+                        client.writer.write({
                             type: 'ERROR',
                             payload: { code: 503, message: `Lock owner ${owner} is unavailable` }
-                        }));
+                        }, true);
                         return;
                     }
 
@@ -849,10 +1214,10 @@ export class ServerCoordinator {
 
                 if (this.partitionService.isLocalOwner(name)) {
                     const success = this.lockManager.release(name, client.id, fencingToken);
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'LOCK_RELEASED',
                         payload: { requestId, name, success }
-                    }));
+                    });
                 } else {
                     const owner = this.partitionService.getOwner(name);
                     this.cluster.send(owner, 'CLUSTER_LOCK_RELEASE', {
@@ -870,24 +1235,24 @@ export class ServerCoordinator {
                 const { topic } = message.payload;
 
                 // C1: Access Control
-                // We treat topics as resources. 
+                // We treat topics as resources.
                 // Policy check: action 'READ' on resource `topic:${topic}`
                 if (!this.securityManager.checkPermission(client.principal!, `topic:${topic}`, 'READ')) {
                     logger.warn({ clientId: client.id, topic }, 'Access Denied: TOPIC_SUB');
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 403, message: `Access Denied for topic ${topic}` }
-                    }));
+                    }, true);
                     return;
                 }
 
                 try {
                     this.topicManager.subscribe(client.id, topic);
                 } catch (e: any) {
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 400, message: e.message }
-                    }));
+                    }, true);
                 }
                 break;
             }
@@ -909,10 +1274,10 @@ export class ServerCoordinator {
                     // But for security violations, an error is useful during dev.
                     // Spec says fire-and-forget delivery, but security rejection should ideally notify.
                     // Let's send error.
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 403, message: `Access Denied for topic ${topic}` }
-                    }));
+                    }, true);
                     return;
                 }
 
@@ -920,10 +1285,10 @@ export class ServerCoordinator {
                     this.topicManager.publish(topic, data, client.id);
                 } catch (e: any) {
                     // Invalid topic name etc
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 400, message: e.message }
-                    }));
+                    }, true);
                 }
                 break;
             }
@@ -933,10 +1298,10 @@ export class ServerCoordinator {
             case 'ORMAP_SYNC_INIT': {
                 // Check READ permission
                 if (!this.securityManager.checkPermission(client.principal!, message.mapName, 'READ')) {
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 403, message: `Access Denied for map ${message.mapName}` }
-                    }));
+                    }, true);
                     return;
                 }
 
@@ -944,10 +1309,10 @@ export class ServerCoordinator {
                 const now = Date.now();
                 if (lastSync > 0 && (now - lastSync) > GC_AGE_MS) {
                     logger.warn({ clientId: client.id, lastSync, age: now - lastSync }, 'ORMap client too old, sending SYNC_RESET_REQUIRED');
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'SYNC_RESET_REQUIRED',
                         payload: { mapName: message.mapName }
-                    }));
+                    });
                     return;
                 }
 
@@ -960,27 +1325,27 @@ export class ServerCoordinator {
                         const tree = mapForSync.getMerkleTree();
                         const rootHash = tree.getRootHash();
 
-                        client.socket.send(serialize({
+                        client.writer.write({
                             type: 'ORMAP_SYNC_RESP_ROOT',
                             payload: {
                                 mapName: message.mapName,
                                 rootHash,
                                 timestamp: this.hlc.now()
                             }
-                        }));
+                        });
                     } else {
                         // It's actually an LWWMap, client should use SYNC_INIT
-                        client.socket.send(serialize({
+                        client.writer.write({
                             type: 'ERROR',
                             payload: { code: 400, message: `Map ${message.mapName} is not an ORMap` }
-                        }));
+                        }, true);
                     }
                 } catch (err) {
                     logger.error({ err, mapName: message.mapName }, 'Failed to load map for ORMAP_SYNC_INIT');
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 500, message: `Failed to load map ${message.mapName}` }
-                    }));
+                    }, true);
                 }
                 break;
             }
@@ -988,10 +1353,10 @@ export class ServerCoordinator {
             case 'ORMAP_MERKLE_REQ_BUCKET': {
                 // Check READ permission
                 if (!this.securityManager.checkPermission(client.principal!, message.payload.mapName, 'READ')) {
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 403, message: `Access Denied for map ${message.payload.mapName}` }
-                    }));
+                    }, true);
                     return;
                 }
 
@@ -1020,16 +1385,16 @@ export class ServerCoordinator {
                                 }
                             }
 
-                            client.socket.send(serialize({
+                            client.writer.write({
                                 type: 'ORMAP_SYNC_RESP_LEAF',
                                 payload: { mapName, path, entries }
-                            }));
+                            });
                         } else {
                             // Not a leaf - send bucket hashes
-                            client.socket.send(serialize({
+                            client.writer.write({
                                 type: 'ORMAP_SYNC_RESP_BUCKETS',
                                 payload: { mapName, path, buckets }
-                            }));
+                            });
                         }
                     }
                 } catch (err) {
@@ -1041,10 +1406,10 @@ export class ServerCoordinator {
             case 'ORMAP_DIFF_REQUEST': {
                 // Check READ permission
                 if (!this.securityManager.checkPermission(client.principal!, message.payload.mapName, 'READ')) {
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 403, message: `Access Denied for map ${message.payload.mapName}` }
-                    }));
+                    }, true);
                     return;
                 }
 
@@ -1065,10 +1430,10 @@ export class ServerCoordinator {
                             });
                         }
 
-                        client.socket.send(serialize({
+                        client.writer.write({
                             type: 'ORMAP_DIFF_RESPONSE',
                             payload: { mapName: diffMapName, entries }
-                        }));
+                        });
                     }
                 } catch (err) {
                     logger.error({ err, mapName: diffMapName }, 'Failed to load map for ORMAP_DIFF_REQUEST');
@@ -1079,10 +1444,10 @@ export class ServerCoordinator {
             case 'ORMAP_PUSH_DIFF': {
                 // Check WRITE permission
                 if (!this.securityManager.checkPermission(client.principal!, message.payload.mapName, 'PUT')) {
-                    client.socket.send(serialize({
+                    client.writer.write({
                         type: 'ERROR',
                         payload: { code: 403, message: `Access Denied for map ${message.payload.mapName}` }
-                    }));
+                    }, true);
                     return;
                 }
 
@@ -1179,35 +1544,292 @@ export class ServerCoordinator {
         const isServerEvent = message.type === 'SERVER_EVENT';
 
         if (isServerEvent) {
-            for (const [id, client] of this.clients) {
-                if (id !== excludeClientId && client.socket.readyState === 1 && client.isAuthenticated && client.principal) {
-                    const payload = message.payload;
-                    const mapName = payload.mapName;
+            const payload = message.payload;
+            const mapName = payload.mapName;
 
-                    // Shallow clone payload
-                    const newPayload = { ...payload };
+            // === SUBSCRIPTION-BASED ROUTING ===
+            // Only send to clients that have active subscriptions for this map
+            const subscribedClientIds = this.queryRegistry.getSubscribedClientIds(mapName);
 
-                    if (newPayload.record) { // LWW
-                        const newVal = this.securityManager.filterObject(newPayload.record.value, client.principal, mapName);
-                        newPayload.record = { ...newPayload.record, value: newVal };
-                    }
+            // Track metrics
+            this.metricsService.incEventsRouted();
 
-                    if (newPayload.orRecord) { // OR_ADD
-                        const newVal = this.securityManager.filterObject(newPayload.orRecord.value, client.principal, mapName);
-                        newPayload.orRecord = { ...newPayload.orRecord, value: newVal };
-                    }
+            if (subscribedClientIds.size === 0) {
+                // Early exit - no subscribers for this map!
+                this.metricsService.incEventsFilteredBySubscription();
+                return;
+            }
 
-                    client.socket.send(serialize({ ...message, payload: newPayload }));
+            // Track average subscribers per event
+            this.metricsService.recordSubscribersPerEvent(subscribedClientIds.size);
+
+            // Send only to subscribed clients with FLS filtering
+            for (const clientId of subscribedClientIds) {
+                if (clientId === excludeClientId) continue;
+
+                const client = this.clients.get(clientId);
+                if (!client || client.socket.readyState !== 1 || !client.isAuthenticated || !client.principal) {
+                    continue;
                 }
+
+                // Shallow clone payload for FLS filtering
+                const newPayload = { ...payload };
+
+                if (newPayload.record) { // LWW
+                    const newVal = this.securityManager.filterObject(newPayload.record.value, client.principal, mapName);
+                    newPayload.record = { ...newPayload.record, value: newVal };
+                }
+
+                if (newPayload.orRecord) { // OR_ADD
+                    const newVal = this.securityManager.filterObject(newPayload.orRecord.value, client.principal, mapName);
+                    newPayload.orRecord = { ...newPayload.orRecord, value: newVal };
+                }
+
+                client.writer.write({ ...message, payload: newPayload });
             }
         } else {
+            // Non-event messages (GC_PRUNE, SHUTDOWN_PENDING) still go to all clients
             const msgData = serialize(message);
             for (const [id, client] of this.clients) {
                 if (id !== excludeClientId && client.socket.readyState === 1) { // 1 = OPEN
-                    client.socket.send(msgData);
+                    client.writer.writeRaw(msgData);
                 }
             }
         }
+    }
+
+    /**
+     * === OPTIMIZATION 2 & 3: Batched Broadcast with Serialization Caching ===
+     * Groups clients by their permission roles and serializes once per group.
+     * Also batches multiple events into a single SERVER_BATCH_EVENT message.
+     * === OPTIMIZATION 4: Subscription-based Routing ===
+     * Only sends events to clients with active subscriptions for affected maps.
+     */
+    private broadcastBatch(events: any[], excludeClientId?: string): void {
+        if (events.length === 0) return;
+
+        // === SUBSCRIPTION-BASED ROUTING ===
+        // Get unique map names from events
+        const affectedMaps = new Set<string>();
+        for (const event of events) {
+            if (event.mapName) {
+                affectedMaps.add(event.mapName);
+            }
+        }
+
+        // Get all subscribed client IDs across all affected maps
+        const subscribedClientIds = new Set<string>();
+        for (const mapName of affectedMaps) {
+            const mapSubscribers = this.queryRegistry.getSubscribedClientIds(mapName);
+            for (const clientId of mapSubscribers) {
+                subscribedClientIds.add(clientId);
+            }
+        }
+
+        // Track metrics
+        this.metricsService.incEventsRouted();
+
+        if (subscribedClientIds.size === 0) {
+            // Early exit - no subscribers for any of the affected maps!
+            this.metricsService.incEventsFilteredBySubscription();
+            return;
+        }
+
+        this.metricsService.recordSubscribersPerEvent(subscribedClientIds.size);
+
+        // Group subscribed clients by their role signature for serialization caching
+        const clientsByRoleSignature = new Map<string, ClientConnection[]>();
+
+        for (const clientId of subscribedClientIds) {
+            if (clientId === excludeClientId) continue;
+
+            const client = this.clients.get(clientId);
+            if (!client || client.socket.readyState !== 1 || !client.isAuthenticated || !client.principal) {
+                continue;
+            }
+
+            // Create a role signature for grouping (sorted roles joined)
+            const roleSignature = (client.principal.roles || ['USER']).sort().join(',');
+
+            if (!clientsByRoleSignature.has(roleSignature)) {
+                clientsByRoleSignature.set(roleSignature, []);
+            }
+            clientsByRoleSignature.get(roleSignature)!.push(client);
+        }
+
+        // For each role group, filter events once and serialize once
+        for (const [, clients] of clientsByRoleSignature) {
+            if (clients.length === 0) continue;
+
+            // Use first client as representative for filtering (same roles = same permissions)
+            const representativeClient = clients[0];
+
+            // Filter all events for this role group
+            const filteredEvents = events.map(eventPayload => {
+                const mapName = eventPayload.mapName;
+                const newPayload = { ...eventPayload };
+
+                if (newPayload.record) { // LWW
+                    const newVal = this.securityManager.filterObject(
+                        newPayload.record.value,
+                        representativeClient.principal!,
+                        mapName
+                    );
+                    newPayload.record = { ...newPayload.record, value: newVal };
+                }
+
+                if (newPayload.orRecord) { // OR_ADD
+                    const newVal = this.securityManager.filterObject(
+                        newPayload.orRecord.value,
+                        representativeClient.principal!,
+                        mapName
+                    );
+                    newPayload.orRecord = { ...newPayload.orRecord, value: newVal };
+                }
+
+                return newPayload;
+            });
+
+            // Serialize ONCE for this entire group
+            const batchMessage = {
+                type: 'SERVER_BATCH_EVENT',
+                payload: { events: filteredEvents },
+                timestamp: this.hlc.now()
+            };
+            const serializedBatch = serialize(batchMessage);
+
+            // Send to all clients in this role group
+            for (const client of clients) {
+                try {
+                    client.writer.writeRaw(serializedBatch);
+                } catch (err) {
+                    logger.error({ clientId: client.id, err }, 'Failed to send batch to client');
+                }
+            }
+        }
+    }
+
+    /**
+     * Helper method to get role signature for a client (for caching key)
+     */
+    private getClientRoleSignature(client: ClientConnection): string {
+        if (!client.principal || !client.principal.roles) {
+            return 'USER';
+        }
+        return client.principal.roles.sort().join(',');
+    }
+
+    /**
+     * === BACKPRESSURE: Synchronous Broadcast ===
+     * Same as broadcastBatch but waits for all sends to complete.
+     * Used when backpressure forces sync processing to drain the pipeline.
+     */
+    private async broadcastBatchSync(events: any[], excludeClientId?: string): Promise<void> {
+        if (events.length === 0) return;
+
+        // Get unique map names from events
+        const affectedMaps = new Set<string>();
+        for (const event of events) {
+            if (event.mapName) {
+                affectedMaps.add(event.mapName);
+            }
+        }
+
+        // Get all subscribed client IDs across all affected maps
+        const subscribedClientIds = new Set<string>();
+        for (const mapName of affectedMaps) {
+            const mapSubscribers = this.queryRegistry.getSubscribedClientIds(mapName);
+            for (const clientId of mapSubscribers) {
+                subscribedClientIds.add(clientId);
+            }
+        }
+
+        if (subscribedClientIds.size === 0) {
+            return;
+        }
+
+        // Group subscribed clients by their role signature
+        const clientsByRoleSignature = new Map<string, ClientConnection[]>();
+
+        for (const clientId of subscribedClientIds) {
+            if (clientId === excludeClientId) continue;
+
+            const client = this.clients.get(clientId);
+            if (!client || client.socket.readyState !== 1 || !client.isAuthenticated || !client.principal) {
+                continue;
+            }
+
+            const roleSignature = (client.principal.roles || ['USER']).sort().join(',');
+
+            if (!clientsByRoleSignature.has(roleSignature)) {
+                clientsByRoleSignature.set(roleSignature, []);
+            }
+            clientsByRoleSignature.get(roleSignature)!.push(client);
+        }
+
+        // Collect all send promises
+        const sendPromises: Promise<void>[] = [];
+
+        for (const [, clients] of clientsByRoleSignature) {
+            if (clients.length === 0) continue;
+
+            const representativeClient = clients[0];
+
+            // Filter all events for this role group
+            const filteredEvents = events.map(eventPayload => {
+                const mapName = eventPayload.mapName;
+                const newPayload = { ...eventPayload };
+
+                if (newPayload.record) {
+                    const newVal = this.securityManager.filterObject(
+                        newPayload.record.value,
+                        representativeClient.principal!,
+                        mapName
+                    );
+                    newPayload.record = { ...newPayload.record, value: newVal };
+                }
+
+                if (newPayload.orRecord) {
+                    const newVal = this.securityManager.filterObject(
+                        newPayload.orRecord.value,
+                        representativeClient.principal!,
+                        mapName
+                    );
+                    newPayload.orRecord = { ...newPayload.orRecord, value: newVal };
+                }
+
+                return newPayload;
+            });
+
+            const batchMessage = {
+                type: 'SERVER_BATCH_EVENT',
+                payload: { events: filteredEvents },
+                timestamp: this.hlc.now()
+            };
+            const serializedBatch = serialize(batchMessage);
+
+            // Send to all clients and collect promises
+            for (const client of clients) {
+                sendPromises.push(new Promise<void>((resolve, reject) => {
+                    try {
+                        client.socket.send(serializedBatch, (err) => {
+                            if (err) {
+                                logger.error({ clientId: client.id, err }, 'Failed to send sync batch to client');
+                                reject(err);
+                            } else {
+                                resolve();
+                            }
+                        });
+                    } catch (err) {
+                        logger.error({ clientId: client.id, err }, 'Exception sending sync batch to client');
+                        reject(err);
+                    }
+                }));
+            }
+        }
+
+        // Wait for all sends to complete (ignore individual failures)
+        await Promise.allSettled(sendPromises);
     }
 
     private setupClusterListeners() {
@@ -1304,10 +1926,10 @@ export class ServerCoordinator {
                     const { clientId, requestId, name, success } = msg.payload;
                     const client = this.clients.get(clientId);
                     if (client) {
-                        client.socket.send(serialize({
+                        client.writer.write({
                             type: 'LOCK_RELEASED',
                             payload: { requestId, name, success }
-                        }));
+                        });
                     }
                     break;
                 }
@@ -1316,10 +1938,10 @@ export class ServerCoordinator {
                     const { clientId, requestId, name, fencingToken } = msg.payload;
                     const client = this.clients.get(clientId);
                     if (client) {
-                        client.socket.send(serialize({
+                        client.writer.write({
                             type: 'LOCK_GRANTED',
                             payload: { requestId, name, fencingToken }
-                        }));
+                        });
                     }
                     break;
                 }
@@ -1446,20 +2068,169 @@ export class ServerCoordinator {
             return { ...res, value: filteredValue };
         });
 
-        client.socket.send(serialize({
+        client.writer.write({
             type: 'QUERY_RESP',
             payload: { queryId, results: filteredResults }
-        }));
+        });
+    }
+
+    /**
+     * Core operation application logic shared between processLocalOp and processLocalOpForBatch.
+     * Handles map merge, storage persistence, query evaluation, and event generation.
+     *
+     * @returns Event payload for broadcasting (or null if operation failed)
+     */
+    private applyOpToMap(op: any): { eventPayload: any; oldRecord: any } {
+        // Determine type hint from op
+        const typeHint = (op.opType === 'OR_ADD' || op.opType === 'OR_REMOVE') ? 'OR' : 'LWW';
+        const map = this.getMap(op.mapName, typeHint);
+
+        // Check compatibility
+        if (typeHint === 'OR' && map instanceof LWWMap) {
+            logger.error({ mapName: op.mapName }, 'Map type mismatch: LWWMap but received OR op');
+            throw new Error('Map type mismatch: LWWMap but received OR op');
+        }
+        if (typeHint === 'LWW' && map instanceof ORMap) {
+            logger.error({ mapName: op.mapName }, 'Map type mismatch: ORMap but received LWW op');
+            throw new Error('Map type mismatch: ORMap but received LWW op');
+        }
+
+        let oldRecord: any;
+        let recordToStore: StorageValue<any> | undefined;
+        let tombstonesToStore: StorageValue<any> | undefined;
+
+        const eventPayload: any = {
+            mapName: op.mapName,
+            key: op.key,
+        };
+
+        if (map instanceof LWWMap) {
+            oldRecord = map.getRecord(op.key);
+            map.merge(op.key, op.record);
+            recordToStore = op.record;
+            eventPayload.eventType = 'UPDATED';
+            eventPayload.record = op.record;
+        } else if (map instanceof ORMap) {
+            oldRecord = map.getRecords(op.key);
+
+            if (op.opType === 'OR_ADD') {
+                map.apply(op.key, op.orRecord);
+                eventPayload.eventType = 'OR_ADD';
+                eventPayload.orRecord = op.orRecord;
+                recordToStore = { type: 'OR', records: map.getRecords(op.key) };
+            } else if (op.opType === 'OR_REMOVE') {
+                map.applyTombstone(op.orTag);
+                eventPayload.eventType = 'OR_REMOVE';
+                eventPayload.orTag = op.orTag;
+                recordToStore = { type: 'OR', records: map.getRecords(op.key) };
+                tombstonesToStore = { type: 'OR_TOMBSTONES', tags: map.getTombstones() };
+            }
+        }
+
+        // Live Query Evaluation
+        this.queryRegistry.processChange(op.mapName, map, op.key, op.record || op.orRecord, oldRecord);
+
+        // Update metrics
+        const mapSize = (map instanceof ORMap) ? map.totalRecords : map.size;
+        this.metricsService.setMapSize(op.mapName, mapSize);
+
+        // Persist to storage (async, don't wait)
+        if (this.storage) {
+            if (recordToStore) {
+                this.storage.store(op.mapName, op.key, recordToStore).catch(err => {
+                    logger.error({ mapName: op.mapName, key: op.key, err }, 'Failed to persist op');
+                });
+            }
+            if (tombstonesToStore) {
+                this.storage.store(op.mapName, '__tombstones__', tombstonesToStore).catch(err => {
+                    logger.error({ mapName: op.mapName, err }, 'Failed to persist tombstones');
+                });
+            }
+        }
+
+        return { eventPayload, oldRecord };
+    }
+
+    /**
+     * Broadcast event to cluster members (excluding self).
+     */
+    private broadcastToCluster(eventPayload: any): void {
+        const members = this.cluster.getMembers();
+        for (const memberId of members) {
+            if (!this.cluster.isLocal(memberId)) {
+                this.cluster.send(memberId, 'CLUSTER_EVENT', eventPayload);
+            }
+        }
+    }
+
+    /**
+     * Build OpContext for interceptors.
+     */
+    private buildOpContext(clientId: string, fromCluster: boolean): OpContext {
+        let context: OpContext = {
+            clientId,
+            isAuthenticated: false,
+            fromCluster,
+            originalSenderId: clientId
+        };
+
+        if (!fromCluster) {
+            const client = this.clients.get(clientId);
+            if (client) {
+                context = {
+                    clientId: client.id,
+                    socket: client.socket,
+                    isAuthenticated: client.isAuthenticated,
+                    principal: client.principal,
+                    fromCluster,
+                    originalSenderId: clientId
+                };
+            }
+        }
+
+        return context;
+    }
+
+    /**
+     * Run onBeforeOp interceptors. Returns modified op or null if dropped.
+     */
+    private async runBeforeInterceptors(op: any, context: OpContext): Promise<any | null> {
+        let currentOp: ServerOp | null = op;
+
+        for (const interceptor of this.interceptors) {
+            if (interceptor.onBeforeOp && currentOp) {
+                currentOp = await interceptor.onBeforeOp(currentOp, context);
+                if (!currentOp) {
+                    logger.debug({ interceptor: interceptor.name, opId: op.id }, 'Interceptor silently dropped op');
+                    return null;
+                }
+            }
+        }
+
+        return currentOp;
+    }
+
+    /**
+     * Run onAfterOp interceptors (fire-and-forget).
+     */
+    private runAfterInterceptors(op: any, context: OpContext): void {
+        for (const interceptor of this.interceptors) {
+            if (interceptor.onAfterOp) {
+                interceptor.onAfterOp(op, context).catch(err => {
+                    logger.error({ err }, 'Error in onAfterOp');
+                });
+            }
+        }
     }
 
     private handleLockGranted({ clientId, requestId, name, fencingToken }: { clientId: string, requestId: string, name: string, fencingToken: number }) {
         // Check if local client
         const client = this.clients.get(clientId);
         if (client) {
-            client.socket.send(serialize({
+            client.writer.write({
                 type: 'LOCK_GRANTED',
                 payload: { requestId, name, fencingToken }
-            }));
+            });
             return;
         }
 
@@ -1483,164 +2254,187 @@ export class ServerCoordinator {
     }
 
     private async processLocalOp(op: any, fromCluster: boolean, originalSenderId?: string) {
-        // 0. Prepare Context
-        let context: OpContext = {
-            clientId: originalSenderId || 'unknown',
-            isAuthenticated: false, // We might need to fetch this if local
-            fromCluster,
-            originalSenderId
-        };
+        // 1. Build context for interceptors
+        const context = this.buildOpContext(originalSenderId || 'unknown', fromCluster);
 
-        if (!fromCluster && originalSenderId) {
-            const client = this.clients.get(originalSenderId);
-            if (client) {
-                context = {
-                    clientId: client.id,
-                    socket: client.socket,
-                    isAuthenticated: client.isAuthenticated,
-                    principal: client.principal,
-                    fromCluster,
-                    originalSenderId
-                };
-            }
-        }
-
-        // 1. Interceptors: onBeforeOp
-        let currentOp: ServerOp | null = op;
+        // 2. Run onBeforeOp interceptors
         try {
-            for (const interceptor of this.interceptors) {
-                if (interceptor.onBeforeOp) {
-                    if (currentOp) {
-                        currentOp = await interceptor.onBeforeOp(currentOp, context);
-                        if (!currentOp) {
-                            logger.debug({ interceptor: interceptor.name, opId: op.id }, 'Interceptor silently dropped op');
-                            return; // Silent drop
-                        }
-                    }
-                }
-            }
-        } catch (err: any) {
-            // Find which interceptor failed? We don't know easily unless we tracked loop index.
-            // But logging err is good enough.
+            const processedOp = await this.runBeforeInterceptors(op, context);
+            if (!processedOp) return; // Silently dropped by interceptor
+            op = processedOp;
+        } catch (err) {
             logger.warn({ err, opId: op.id }, 'Interceptor rejected op');
-            throw err; // Re-throw to caller
+            throw err;
         }
 
-        if (!currentOp) return; // Should be caught above but safe check
+        // 3. Apply operation to map (shared logic)
+        const { eventPayload } = this.applyOpToMap(op);
 
-        op = currentOp;
-
-        // Apply to server state (Owner or Forwarded)
-        // Determine type hint from op
-        const typeHint = (op.opType === 'OR_ADD' || op.opType === 'OR_REMOVE') ? 'OR' : 'LWW';
-        const map = this.getMap(op.mapName, typeHint);
-
-        // Check compatibility
-        if (typeHint === 'OR' && map instanceof LWWMap) {
-            logger.error({ mapName: op.mapName }, 'Map type mismatch: LWWMap but received OR op');
-            throw new Error('Map type mismatch: LWWMap but received OR op');
-        }
-        if (typeHint === 'LWW' && map instanceof ORMap) {
-            logger.error({ mapName: op.mapName }, 'Map type mismatch: ORMap but received LWW op');
-            throw new Error('Map type mismatch: ORMap but received LWW op');
-        }
-
-        let oldRecord: any;
-        let recordToStore: StorageValue<any> | undefined;
-        let tombstonesToStore: StorageValue<any> | undefined;
-
-        const eventPayload: any = {
-            mapName: op.mapName,
-            key: op.key,
-            // Common fields
-        };
-
-        if (map instanceof LWWMap) {
-            oldRecord = map.getRecord(op.key);
-            map.merge(op.key, op.record);
-            recordToStore = op.record;
-            eventPayload.eventType = 'UPDATED';
-            eventPayload.record = op.record;
-        } else if (map instanceof ORMap) {
-            // ORMap
-            oldRecord = map.getRecords(op.key); // Logic for "old record" in ORMap is complex for query.
-
-            if (op.opType === 'OR_ADD') {
-                map.apply(op.key, op.orRecord);
-                eventPayload.eventType = 'OR_ADD';
-                eventPayload.orRecord = op.orRecord;
-
-                // Prepare storage: full state of key
-                recordToStore = {
-                    type: 'OR',
-                    records: map.getRecords(op.key)
-                };
-            } else if (op.opType === 'OR_REMOVE') {
-                map.applyTombstone(op.orTag);
-                eventPayload.eventType = 'OR_REMOVE';
-                eventPayload.orTag = op.orTag;
-
-                // OR_REMOVE modifies the key's records implicitly (filters them out)
-                // So we should update the key state too?
-                // Yes, if we remove a tag, the getRecords(key) result changes.
-                // But we don't know which key held the tag easily unless we search or client provided it.
-                // Client provided `op.key`.
-                recordToStore = {
-                    type: 'OR',
-                    records: map.getRecords(op.key)
-                };
-
-                // Also persist tombstones
-                tombstonesToStore = {
-                    type: 'OR_TOMBSTONES',
-                    tags: map.getTombstones()
-                };
-            }
-        }
-
-        // Live Query Evaluation (Local)
-        this.queryRegistry.processChange(op.mapName, map, op.key, op.record || op.orRecord, oldRecord);
-
-        const mapSize = (map instanceof ORMap) ? map.totalRecords : map.size;
-        this.metricsService.setMapSize(op.mapName, mapSize);
-
-        // Persist to storage (Only Owner persists)
-        if (this.storage) {
-            if (recordToStore) {
-                this.storage.store(op.mapName, op.key, recordToStore).catch(err => {
-                    logger.error({ mapName: op.mapName, key: op.key, err }, 'Failed to persist op');
-                });
-            }
-            if (tombstonesToStore) {
-                this.storage.store(op.mapName, '__tombstones__', tombstonesToStore).catch(err => {
-                    logger.error({ mapName: op.mapName, err }, 'Failed to persist tombstones');
-                });
-            }
-        }
-
-        // 1. Broadcast EVENT to other clients (Notification)
+        // 4. Broadcast EVENT to other clients
         this.broadcast({
             type: 'SERVER_EVENT',
             payload: eventPayload,
             timestamp: this.hlc.now()
         }, originalSenderId);
 
-        // 2. Broadcast EVENT/REPLICATION to Cluster
-        const members = this.cluster.getMembers();
-        for (const memberId of members) {
-            if (!this.cluster.isLocal(memberId)) {
-                this.cluster.send(memberId, 'CLUSTER_EVENT', eventPayload);
+        // 5. Broadcast to cluster
+        this.broadcastToCluster(eventPayload);
+
+        // 6. Run onAfterOp interceptors
+        this.runAfterInterceptors(op, context);
+    }
+
+    /**
+     * === OPTIMIZATION 1: Async Batch Processing with Backpressure ===
+     * Processes validated operations asynchronously after ACK has been sent.
+     * Uses BackpressureRegulator to periodically force sync processing and
+     * prevent unbounded accumulation of async work.
+     */
+    private async processBatchAsync(ops: any[], clientId: string): Promise<void> {
+        // === BACKPRESSURE: Check if we should force sync processing ===
+        if (this.backpressure.shouldForceSync()) {
+            this.metricsService.incBackpressureSyncForced();
+            await this.processBatchSync(ops, clientId);
+            return;
+        }
+
+        // === BACKPRESSURE: Check and wait for capacity ===
+        if (!this.backpressure.registerPending()) {
+            this.metricsService.incBackpressureWaits();
+            try {
+                await this.backpressure.waitForCapacity();
+                this.backpressure.registerPending();
+            } catch (err) {
+                this.metricsService.incBackpressureTimeouts();
+                logger.warn({ clientId, pendingOps: ops.length }, 'Backpressure timeout - rejecting batch');
+                throw new Error('Server overloaded');
             }
         }
 
-        // 4. Interceptors: onAfterOp
-        for (const interceptor of this.interceptors) {
-            if (interceptor.onAfterOp) {
-                interceptor.onAfterOp(op, context).catch(err => {
-                    logger.error({ err }, 'Error in onAfterOp');
-                });
+        // Update pending ops metric
+        this.metricsService.setBackpressurePendingOps(this.backpressure.getPendingOps());
+
+        try {
+            // === OPTIMIZATION 3: Batch Broadcast ===
+            // Collect all events for a single batched broadcast at the end
+            const batchedEvents: any[] = [];
+
+            for (const op of ops) {
+                if (this.partitionService.isLocalOwner(op.key)) {
+                    try {
+                        // Process without immediate broadcast (we'll batch them)
+                        await this.processLocalOpForBatch(op, clientId, batchedEvents);
+                    } catch (err) {
+                        logger.warn({ clientId, mapName: op.mapName, key: op.key, err }, 'Op failed in async batch');
+                    }
+                } else {
+                    // Forward to owner
+                    const owner = this.partitionService.getOwner(op.key);
+                    this.cluster.sendToNode(owner, {
+                        type: 'CLIENT_OP',
+                        payload: {
+                            mapName: op.mapName,
+                            key: op.key,
+                            record: op.record,
+                            orRecord: op.orRecord,
+                            orTag: op.orTag,
+                            opType: op.opType
+                        }
+                    });
+                }
+            }
+
+            // Send batched broadcast if we have events
+            if (batchedEvents.length > 0) {
+                this.broadcastBatch(batchedEvents, clientId);
+            }
+        } finally {
+            this.backpressure.completePending();
+            this.metricsService.setBackpressurePendingOps(this.backpressure.getPendingOps());
+        }
+    }
+
+    /**
+     * === BACKPRESSURE: Synchronous Batch Processing ===
+     * Processes operations synchronously, waiting for broadcast completion.
+     * Used when backpressure forces sync to drain the pipeline.
+     */
+    private async processBatchSync(ops: any[], clientId: string): Promise<void> {
+        const batchedEvents: any[] = [];
+
+        for (const op of ops) {
+            if (this.partitionService.isLocalOwner(op.key)) {
+                try {
+                    await this.processLocalOpForBatch(op, clientId, batchedEvents);
+                } catch (err) {
+                    logger.warn({ clientId, mapName: op.mapName, key: op.key, err }, 'Op failed in sync batch');
+                }
+            } else {
+                // Forward to owner and wait for acknowledgment
+                const owner = this.partitionService.getOwner(op.key);
+                await this.forwardOpAndWait(op, owner);
             }
         }
+
+        // Send batched broadcast SYNCHRONOUSLY - wait for all sends to complete
+        if (batchedEvents.length > 0) {
+            await this.broadcastBatchSync(batchedEvents, clientId);
+        }
+    }
+
+    /**
+     * Forward operation to owner node and wait for completion.
+     * Used in sync processing mode.
+     */
+    private async forwardOpAndWait(op: any, owner: string): Promise<void> {
+        return new Promise<void>((resolve) => {
+            // Fire and forget for now - cluster forwarding doesn't have ack mechanism
+            // In a full implementation, this would wait for cluster ACK
+            this.cluster.sendToNode(owner, {
+                type: 'CLIENT_OP',
+                payload: {
+                    mapName: op.mapName,
+                    key: op.key,
+                    record: op.record,
+                    orRecord: op.orRecord,
+                    orTag: op.orTag,
+                    opType: op.opType
+                }
+            });
+            // Resolve immediately since cluster doesn't support sync ACK yet
+            resolve();
+        });
+    }
+
+    /**
+     * Process a single operation for batch processing.
+     * Uses shared applyOpToMap but collects events instead of broadcasting immediately.
+     */
+    private async processLocalOpForBatch(op: any, clientId: string, batchedEvents: any[]): Promise<void> {
+        // 1. Build context for interceptors
+        const context = this.buildOpContext(clientId, false);
+
+        // 2. Run onBeforeOp interceptors
+        try {
+            const processedOp = await this.runBeforeInterceptors(op, context);
+            if (!processedOp) return; // Silently dropped by interceptor
+            op = processedOp;
+        } catch (err) {
+            logger.warn({ err, opId: op.id }, 'Interceptor rejected op in batch');
+            throw err;
+        }
+
+        // 3. Apply operation to map (shared logic)
+        const { eventPayload } = this.applyOpToMap(op);
+
+        // 4. Collect event for batched broadcast (instead of immediate broadcast)
+        batchedEvents.push(eventPayload);
+
+        // 5. Broadcast to cluster
+        this.broadcastToCluster(eventPayload);
+
+        // 6. Run onAfterOp interceptors
+        this.runAfterInterceptors(op, context);
     }
 
     private handleClusterEvent(payload: any) {
@@ -1842,9 +2636,8 @@ export class ServerCoordinator {
             serverTime: Date.now(),
         };
 
-        if (client.socket.readyState === WebSocket.OPEN) {
-            client.socket.send(serialize(pongMessage));
-        }
+        // PONG is urgent - bypass batching for accurate RTT measurement
+        client.writer.write(pongMessage, true);
     }
 
     /**
@@ -2171,5 +2964,302 @@ export class ServerCoordinator {
         }
 
         return options;
+    }
+
+    // ============ Write Concern Methods (Phase 5.01) ============
+
+    /**
+     * Get effective Write Concern level for an operation.
+     * Per-op writeConcern overrides batch-level.
+     */
+    private getEffectiveWriteConcern(
+        opWriteConcern: WriteConcernValue | undefined,
+        batchWriteConcern: WriteConcernValue | undefined
+    ): WriteConcernValue | undefined {
+        return opWriteConcern ?? batchWriteConcern;
+    }
+
+    /**
+     * Convert string WriteConcern value to enum.
+     */
+    private stringToWriteConcern(value: WriteConcernValue | undefined): WriteConcern {
+        switch (value) {
+            case 'FIRE_AND_FORGET':
+                return WriteConcern.FIRE_AND_FORGET;
+            case 'MEMORY':
+                return WriteConcern.MEMORY;
+            case 'APPLIED':
+                return WriteConcern.APPLIED;
+            case 'REPLICATED':
+                return WriteConcern.REPLICATED;
+            case 'PERSISTED':
+                return WriteConcern.PERSISTED;
+            default:
+                return WriteConcern.MEMORY;
+        }
+    }
+
+    /**
+     * Process batch with Write Concern tracking.
+     * Notifies WriteAckManager at each stage of processing.
+     */
+    private async processBatchAsyncWithWriteConcern(
+        ops: any[],
+        clientId: string,
+        batchWriteConcern?: WriteConcernValue,
+        batchTimeout?: number
+    ): Promise<void> {
+        // === BACKPRESSURE: Check if we should force sync processing ===
+        if (this.backpressure.shouldForceSync()) {
+            this.metricsService.incBackpressureSyncForced();
+            await this.processBatchSyncWithWriteConcern(ops, clientId, batchWriteConcern, batchTimeout);
+            return;
+        }
+
+        // === BACKPRESSURE: Check and wait for capacity ===
+        if (!this.backpressure.registerPending()) {
+            this.metricsService.incBackpressureWaits();
+            try {
+                await this.backpressure.waitForCapacity();
+                this.backpressure.registerPending();
+            } catch (err) {
+                this.metricsService.incBackpressureTimeouts();
+                logger.warn({ clientId, pendingOps: ops.length }, 'Backpressure timeout - rejecting batch');
+                // Fail all pending operations
+                for (const op of ops) {
+                    if (op.id) {
+                        this.writeAckManager.failPending(op.id, 'Server overloaded');
+                    }
+                }
+                throw new Error('Server overloaded');
+            }
+        }
+
+        // Update pending ops metric
+        this.metricsService.setBackpressurePendingOps(this.backpressure.getPendingOps());
+
+        try {
+            // === OPTIMIZATION 3: Batch Broadcast ===
+            // Collect all events for a single batched broadcast at the end
+            const batchedEvents: any[] = [];
+
+            for (const op of ops) {
+                if (this.partitionService.isLocalOwner(op.key)) {
+                    try {
+                        // Process operation with Write Concern tracking
+                        await this.processLocalOpWithWriteConcern(op, clientId, batchedEvents, batchWriteConcern);
+                    } catch (err) {
+                        logger.warn({ clientId, mapName: op.mapName, key: op.key, err }, 'Op failed in async batch');
+                        // Fail the pending write
+                        if (op.id) {
+                            this.writeAckManager.failPending(op.id, String(err));
+                        }
+                    }
+                } else {
+                    // Forward to owner
+                    const owner = this.partitionService.getOwner(op.key);
+                    this.cluster.sendToNode(owner, {
+                        type: 'CLIENT_OP',
+                        payload: {
+                            mapName: op.mapName,
+                            key: op.key,
+                            record: op.record,
+                            orRecord: op.orRecord,
+                            orTag: op.orTag,
+                            opType: op.opType,
+                            writeConcern: op.writeConcern ?? batchWriteConcern,
+                        }
+                    });
+                    // For forwarded ops, we mark REPLICATED immediately since it's sent to cluster
+                    if (op.id) {
+                        this.writeAckManager.notifyLevel(op.id, WriteConcern.REPLICATED);
+                    }
+                }
+            }
+
+            // Send batched broadcast if we have events
+            if (batchedEvents.length > 0) {
+                this.broadcastBatch(batchedEvents, clientId);
+                // Notify REPLICATED for all ops that were broadcast
+                for (const op of ops) {
+                    if (op.id && this.partitionService.isLocalOwner(op.key)) {
+                        this.writeAckManager.notifyLevel(op.id, WriteConcern.REPLICATED);
+                    }
+                }
+            }
+        } finally {
+            this.backpressure.completePending();
+            this.metricsService.setBackpressurePendingOps(this.backpressure.getPendingOps());
+        }
+    }
+
+    /**
+     * Synchronous batch processing with Write Concern.
+     */
+    private async processBatchSyncWithWriteConcern(
+        ops: any[],
+        clientId: string,
+        batchWriteConcern?: WriteConcernValue,
+        batchTimeout?: number
+    ): Promise<void> {
+        const batchedEvents: any[] = [];
+
+        for (const op of ops) {
+            if (this.partitionService.isLocalOwner(op.key)) {
+                try {
+                    await this.processLocalOpWithWriteConcern(op, clientId, batchedEvents, batchWriteConcern);
+                } catch (err) {
+                    logger.warn({ clientId, mapName: op.mapName, key: op.key, err }, 'Op failed in sync batch');
+                    if (op.id) {
+                        this.writeAckManager.failPending(op.id, String(err));
+                    }
+                }
+            } else {
+                // Forward to owner and wait for acknowledgment
+                const owner = this.partitionService.getOwner(op.key);
+                await this.forwardOpAndWait(op, owner);
+                // Mark REPLICATED after forwarding
+                if (op.id) {
+                    this.writeAckManager.notifyLevel(op.id, WriteConcern.REPLICATED);
+                }
+            }
+        }
+
+        // Send batched broadcast SYNCHRONOUSLY - wait for all sends to complete
+        if (batchedEvents.length > 0) {
+            await this.broadcastBatchSync(batchedEvents, clientId);
+            // Notify REPLICATED for all local ops
+            for (const op of ops) {
+                if (op.id && this.partitionService.isLocalOwner(op.key)) {
+                    this.writeAckManager.notifyLevel(op.id, WriteConcern.REPLICATED);
+                }
+            }
+        }
+    }
+
+    /**
+     * Process a single operation with Write Concern level notifications.
+     */
+    private async processLocalOpWithWriteConcern(
+        op: any,
+        clientId: string,
+        batchedEvents: any[],
+        batchWriteConcern?: WriteConcernValue
+    ): Promise<void> {
+        // 1. Build context for interceptors
+        const context = this.buildOpContext(clientId, false);
+
+        // 2. Run onBeforeOp interceptors
+        try {
+            const processedOp = await this.runBeforeInterceptors(op, context);
+            if (!processedOp) {
+                // Silently dropped by interceptor - fail the pending write
+                if (op.id) {
+                    this.writeAckManager.failPending(op.id, 'Dropped by interceptor');
+                }
+                return;
+            }
+            op = processedOp;
+        } catch (err) {
+            logger.warn({ opId: op.id, err }, 'Interceptor rejected op');
+            if (op.id) {
+                this.writeAckManager.failPending(op.id, String(err));
+            }
+            return;
+        }
+
+        // 3. Apply operation to map
+        const { eventPayload } = this.applyOpToMap(op);
+
+        // 4. Notify APPLIED level (CRDT merged)
+        if (op.id) {
+            this.writeAckManager.notifyLevel(op.id, WriteConcern.APPLIED);
+        }
+
+        // 5. Collect event for batched broadcast
+        if (eventPayload) {
+            batchedEvents.push({
+                mapName: op.mapName,
+                key: op.key,
+                ...eventPayload
+            });
+        }
+
+        // 6. Handle PERSISTED Write Concern
+        const effectiveWriteConcern = this.getEffectiveWriteConcern(op.writeConcern, batchWriteConcern);
+        if (effectiveWriteConcern === 'PERSISTED' && this.storage) {
+            try {
+                // Wait for storage write to complete
+                await this.persistOpSync(op);
+                if (op.id) {
+                    this.writeAckManager.notifyLevel(op.id, WriteConcern.PERSISTED);
+                }
+            } catch (err) {
+                logger.error({ opId: op.id, err }, 'Persistence failed');
+                if (op.id) {
+                    this.writeAckManager.failPending(op.id, `Persistence failed: ${err}`);
+                }
+            }
+        } else if (this.storage && op.id) {
+            // Fire-and-forget persistence for non-PERSISTED writes
+            this.persistOpAsync(op).catch(err => {
+                logger.error({ opId: op.id, err }, 'Async persistence failed');
+            });
+        }
+
+        // 7. Run onAfterOp interceptors
+        try {
+            const serverOp: ServerOp = {
+                mapName: op.mapName,
+                key: op.key,
+                opType: op.opType || (op.record?.value === null ? 'REMOVE' : 'PUT'),
+                record: op.record,
+                orRecord: op.orRecord,
+                orTag: op.orTag,
+            };
+            await this.runAfterInterceptors(serverOp, context);
+        } catch (err) {
+            logger.warn({ opId: op.id, err }, 'onAfterOp interceptor failed');
+        }
+    }
+
+    /**
+     * Persist operation synchronously (blocking).
+     * Used for PERSISTED Write Concern.
+     */
+    private async persistOpSync(op: any): Promise<void> {
+        if (!this.storage) return;
+
+        const isORMapOp = op.opType === 'OR_ADD' || op.opType === 'OR_REMOVE' || op.orRecord || op.orTag;
+
+        if (isORMapOp) {
+            const orMap = this.getMap(op.mapName, 'OR') as ORMap<string, any>;
+            const records = orMap.getRecords(op.key);
+            const tombstones = orMap.getTombstones();
+
+            if (records.length > 0) {
+                await this.storage.store(op.mapName, op.key, { type: 'OR', records } as ORMapValue<any>);
+            } else {
+                await this.storage.delete(op.mapName, op.key);
+            }
+
+            if (tombstones.length > 0) {
+                await this.storage.store(op.mapName, '__tombstones__', { type: 'OR_TOMBSTONES', tags: tombstones } as ORMapTombstones);
+            }
+        } else {
+            const lwwMap = this.getMap(op.mapName, 'LWW') as LWWMap<string, any>;
+            const record = lwwMap.getRecord(op.key);
+            if (record) {
+                await this.storage.store(op.mapName, op.key, record);
+            }
+        }
+    }
+
+    /**
+     * Persist operation asynchronously (fire-and-forget).
+     * Used for non-PERSISTED Write Concern levels.
+     */
+    private async persistOpAsync(op: any): Promise<void> {
+        return this.persistOpSync(op);
     }
 }

@@ -1,6 +1,7 @@
 import { ServerCoordinator } from '../ServerCoordinator';
 import { SyncEngine } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
+import { waitForAuthReady } from './utils/waitForAuthReady';
 import { LWWMap } from '@topgunbuild/core';
 import * as jwt from 'jsonwebtoken';
 
@@ -45,6 +46,16 @@ describe('Garbage Collection & Zombie Protection', () => {
     Date.now = originalDateNow;
   });
 
+  afterEach(() => {
+    // Close client connections to prevent "Jest did not exit" warnings
+    if (clientA) {
+      clientA.close();
+    }
+    if (clientB) {
+      clientB.close();
+    }
+  });
+
   test('Should reject old client with SYNC_RESET_REQUIRED', async () => {
     // 1. Setup Client A and create data
     storageA = new MemoryStorageAdapter();
@@ -53,6 +64,9 @@ describe('Garbage Collection & Zombie Protection', () => {
         serverUrl: `ws://localhost:${serverPort}`,
         storageAdapter: storageA
     });
+
+    // Wait for WebSocket to be ready before setting auth token
+    await waitForAuthReady(clientA);
     clientA.setAuthToken(tokenA);
     const mapA = new LWWMap(clientA.getHLC());
     clientA.registerMap('gc-test-map', mapA);
@@ -106,6 +120,9 @@ describe('Garbage Collection & Zombie Protection', () => {
         storageAdapter: storageB,
         reconnectInterval: 100
     });
+
+    // Wait for WebSocket to be ready before setting auth token
+    await waitForAuthReady(clientB);
     clientB.setAuthToken(tokenB);
     const mapB = new LWWMap(clientB.getHLC());
     clientB.registerMap('gc-test-map', mapB);

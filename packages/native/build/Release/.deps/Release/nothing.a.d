@@ -1,0 +1,1 @@
+cmd_Release/nothing.a := rm -f Release/nothing.a && ./gyp-mac-tool filter-libtool libtool  -static -o Release/nothing.a Release/obj.target/nothing/../../node_modules/.pnpm/node-addon-api@8.5.0/node_modules/node-addon-api/nothing.o
