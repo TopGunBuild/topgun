@@ -22,6 +22,10 @@
     "benchmark:throughput": "ts-node --project tests/benchmark/tsconfig.json tests/benchmark/index.ts throughput",
     "benchmark:latency": "ts-node --project tests/benchmark/tsconfig.json tests/benchmark/index.ts latency",
     "benchmark:stress": "ts-node --project tests/benchmark/tsconfig.json tests/benchmark/index.ts stress",
+    "profile:flame": "./scripts/profile-server.sh flame",
+    "profile:cpu": "./scripts/profile-server.sh cpu",
+    "profile:doctor": "./scripts/profile-server.sh doctor",
+    "profile:inspect": "./scripts/profile-server.sh inspect",
     "clean": "rm -rf node_modules packages/*/node_modules examples/*/node_modules apps/*/node_modules packages/*/dist",
     "start:server": "pnpm exec ts-node -r tsconfig-paths/register --project ./examples/tsconfig.json ./examples/simple-server.ts",
     "start:docs": "pnpm --filter apps-docs-astro dev"
