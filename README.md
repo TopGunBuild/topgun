@@ -117,6 +117,25 @@ pnpm install
 pnpm dev
 ```
 
+## Performance Testing
+
+### Quick Smoke Test
+```bash
+pnpm benchmark:smoke
+```
+
+### Full Throughput Benchmark
+```bash
+pnpm benchmark:throughput
+```
+
+### Micro-Benchmarks (CRDT operations)
+```bash
+pnpm --filter @topgunbuild/core bench
+```
+
+See [tests/benchmark/README.md](tests/benchmark/README.md) for details.
+
 ## License
 
 **Business Source License 1.1** (BSL)
