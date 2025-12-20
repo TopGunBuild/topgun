@@ -296,7 +296,7 @@ export class BenchmarkHarness {
       // Send batch
       this.sendBatch(state);
 
-      // Yield to allow event loop to process incoming acks
+      // Yield to event loop for ACK processing
       await this.sleep(0);
     }
   }
