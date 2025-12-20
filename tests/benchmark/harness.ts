@@ -2,9 +2,10 @@
  * Native Benchmark Harness
  *
  * Core benchmark engine using native MessagePack protocol.
- * Supports two modes:
+ * Supports three modes:
  * - 'throttled': interval-based sending (for smoke/latency tests)
- * - 'saturate': continuous loop for maximum throughput
+ * - 'saturate': continuous loop with backpressure for maximum throughput
+ * - 'flood': no backpressure, like k6 (for comparison testing)
  */
 
 import WebSocket from 'ws';
@@ -66,6 +67,8 @@ export class BenchmarkHarness {
       // Start sending operations based on mode
       if (this.config.mode === 'saturate') {
         this.startSaturateSending();
+      } else if (this.config.mode === 'flood') {
+        this.startFloodSending();
       } else {
         this.startThrottledSending();
       }
@@ -296,6 +299,25 @@ export class BenchmarkHarness {
       // Yield to allow event loop to process incoming acks
       await this.sleep(0);
     }
+  }
+
+  /**
+   * Start flood sending (no backpressure, like k6)
+   * Uses interval-based sending without waiting for ACKs
+   */
+  private startFloodSending(): void {
+    // Use same interval as k6: 50ms
+    const intervalMs = this.config.intervalMs || 50;
+
+    this.connections.forEach((state) => {
+      const timer = setInterval(() => {
+        if (!this.isRunning) return;
+        // Send without checking pendingOps size (no backpressure)
+        this.sendBatch(state);
+      }, intervalMs);
+
+      this.intervalTimers.push(timer);
+    });
   }
 
   /**

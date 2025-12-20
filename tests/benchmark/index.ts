@@ -17,7 +17,7 @@
 
 import { parseCliArgs, SCENARIOS } from './config';
 import { ensureResultsDir } from './reporter';
-import { runSmoke, runThroughput, runLatency, runStress } from './scenarios';
+import { runSmoke, runThroughput, runLatency, runStress, runFlood } from './scenarios';
 import { EXIT_CODES } from './types';
 
 async function main(): Promise<void> {
@@ -60,6 +60,9 @@ async function main(): Promise<void> {
       break;
     case 'stress':
       exitCode = await runStress(overrides);
+      break;
+    case 'flood':
+      exitCode = await runFlood(overrides);
       break;
     default:
       console.error(`Unknown scenario: ${scenario}`);

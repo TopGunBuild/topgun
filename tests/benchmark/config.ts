@@ -97,12 +97,35 @@ export const STRESS_SCENARIO: ScenarioConfig = {
   },
 };
 
+/** Flood test - no backpressure, like k6 (for comparison) */
+export const FLOOD_SCENARIO: ScenarioConfig = {
+  name: 'throughput', // Same name for comparison
+  description: 'Flood mode benchmark (60 seconds, no backpressure like k6)',
+  config: {
+    connections: 100,
+    batchSize: 5,
+    durationMs: 60_000,
+    intervalMs: 50, // Same as k6: 50ms interval
+    mapCount: 20,
+    warmupMs: 5_000,
+    mode: 'flood',
+    maxPendingOps: 999999, // Effectively unlimited
+  },
+  thresholds: {
+    // Lenient thresholds - we expect higher error rate without backpressure
+    minThroughput: 10_000,
+    maxP99Latency: 500,
+    maxErrorRate: 0.10, // Allow up to 10% errors
+  },
+};
+
 /** All available scenarios */
 export const SCENARIOS: Record<string, ScenarioConfig> = {
   smoke: SMOKE_SCENARIO,
   throughput: THROUGHPUT_SCENARIO,
   latency: LATENCY_SCENARIO,
   stress: STRESS_SCENARIO,
+  flood: FLOOD_SCENARIO,
 };
 
 /**
