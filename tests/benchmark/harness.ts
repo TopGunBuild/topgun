@@ -2,6 +2,9 @@
  * Native Benchmark Harness
  *
  * Core benchmark engine using native MessagePack protocol.
+ * Supports two modes:
+ * - 'throttled': interval-based sending (for smoke/latency tests)
+ * - 'saturate': continuous loop for maximum throughput
  */
 
 import WebSocket from 'ws';
@@ -11,11 +14,9 @@ import type {
   BenchmarkConfig,
   BenchmarkResult,
   ConnectionState,
-  PendingOperation,
 } from './types';
 
 const OPERATION_TIMEOUT_MS = 5000;
-const RECONNECT_DELAY_MS = 1000;
 
 interface BenchmarkCallbacks {
   onProgress?: (sent: number, acked: number) => void;
@@ -32,7 +33,9 @@ export class BenchmarkHarness {
   private intervalTimers: NodeJS.Timeout[] = [];
   private timeoutChecker: NodeJS.Timeout | null = null;
   private startTime = 0;
+  private endTime = 0;
   private callbacks: BenchmarkCallbacks;
+  private saturatePromises: Promise<void>[] = [];
 
   constructor(config: BenchmarkConfig, callbacks: BenchmarkCallbacks = {}) {
     this.config = config;
@@ -44,8 +47,9 @@ export class BenchmarkHarness {
    * Run the benchmark
    */
   async run(scenarioName: string): Promise<BenchmarkResult> {
-    const startTime = new Date().toISOString();
+    const startTimeISO = new Date().toISOString();
     this.startTime = Date.now();
+    this.endTime = this.startTime + this.config.durationMs;
 
     try {
       // Setup signal handlers
@@ -59,8 +63,12 @@ export class BenchmarkHarness {
       this.isWarmup = true;
       this.isRunning = true;
 
-      // Start sending operations
-      this.startSending();
+      // Start sending operations based on mode
+      if (this.config.mode === 'saturate') {
+        this.startSaturateSending();
+      } else {
+        this.startThrottledSending();
+      }
 
       // Start timeout checker
       this.startTimeoutChecker();
@@ -81,7 +89,7 @@ export class BenchmarkHarness {
       this.stop();
 
       // Build result
-      return this.buildResult(scenarioName, startTime);
+      return this.buildResult(scenarioName, startTimeISO);
     } catch (error) {
       this.stop();
       throw error;
@@ -107,7 +115,6 @@ export class BenchmarkHarness {
 
     const connected = this.connections.size;
     if (connected === 0) {
-      // Throw the first connection error to provide useful error message
       const firstError = failures[0]?.reason;
       throw firstError || new Error('No connections established');
     }
@@ -149,7 +156,7 @@ export class BenchmarkHarness {
         try {
           const message = deserialize<any>(new Uint8Array(data));
           this.handleMessage(state, message, resolve, reject, timeout);
-        } catch (err) {
+        } catch {
           this.metrics.recordProtocolError();
         }
       });
@@ -200,7 +207,6 @@ export class BenchmarkHarness {
         break;
 
       case 'PONG':
-        // Heartbeat response, ignore for now
         break;
 
       case 'ERROR':
@@ -246,10 +252,10 @@ export class BenchmarkHarness {
   }
 
   /**
-   * Start sending operations on all connections
+   * Start throttled sending (interval-based) on all connections
    */
-  private startSending(): void {
-    this.connections.forEach((state, id) => {
+  private startThrottledSending(): void {
+    this.connections.forEach((state) => {
       const timer = setInterval(() => {
         if (!this.isRunning) return;
         this.sendBatch(state);
@@ -257,6 +263,39 @@ export class BenchmarkHarness {
 
       this.intervalTimers.push(timer);
     });
+  }
+
+  /**
+   * Start saturate sending (continuous loop) on all connections
+   * Each connection runs its own async loop for maximum throughput
+   */
+  private startSaturateSending(): void {
+    this.connections.forEach((state) => {
+      const promise = this.runSaturateLoop(state);
+      this.saturatePromises.push(promise);
+    });
+  }
+
+  /**
+   * Continuous sending loop for a single connection
+   * Implements backpressure by limiting pending operations
+   */
+  private async runSaturateLoop(state: ConnectionState): Promise<void> {
+    const maxPending = this.config.maxPendingOps || 50;
+
+    while (this.isRunning && Date.now() < this.endTime) {
+      // Backpressure: wait if too many pending operations
+      if (state.pendingOps.size >= maxPending) {
+        await this.sleep(1);
+        continue;
+      }
+
+      // Send batch
+      this.sendBatch(state);
+
+      // Yield to allow event loop to process incoming acks
+      await this.sleep(0);
+    }
   }
 
   /**
@@ -321,7 +360,7 @@ export class BenchmarkHarness {
         this.getTotalSent(),
         this.getTotalAcked()
       );
-    } catch (err) {
+    } catch {
       this.metrics.recordProtocolError();
     }
   }
@@ -398,7 +437,6 @@ export class BenchmarkHarness {
     const reliability = this.metrics.getReliability();
     const durationSec = this.metrics.getElapsedSeconds();
 
-    // Get version from package.json
     let version = 'unknown';
     try {
       const pkg = require('../../package.json');
@@ -414,7 +452,7 @@ export class BenchmarkHarness {
       latency,
       reliability,
       version,
-      passed: true, // Will be updated by threshold check
+      passed: true,
       failureReasons: [],
     };
   }

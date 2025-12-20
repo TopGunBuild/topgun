@@ -16,6 +16,8 @@ export const DEFAULT_CONFIG: BenchmarkConfig = {
   intervalMs: 100,
   mapCount: 10,
   warmupMs: 5_000,
+  mode: 'throttled',
+  maxPendingOps: 100,
 };
 
 /** Smoke test - quick validation for CI */
@@ -41,14 +43,16 @@ export const SMOKE_SCENARIO: ScenarioConfig = {
 /** Throughput test - maximum sustainable load */
 export const THROUGHPUT_SCENARIO: ScenarioConfig = {
   name: 'throughput',
-  description: 'Maximum throughput benchmark (60 seconds)',
+  description: 'Maximum throughput benchmark (60 seconds, saturate mode)',
   config: {
     connections: 100,
-    batchSize: 10,
+    batchSize: 5,
     durationMs: 60_000,
-    intervalMs: 50,
+    intervalMs: 1, // Not used in saturate mode
     mapCount: 20,
     warmupMs: 5_000,
+    mode: 'saturate',
+    maxPendingOps: 5, // Optimal for ~30K ops/sec with good reliability
   },
   thresholds: {
     minThroughput: 15_000,

@@ -4,6 +4,8 @@
  * Core interfaces for the TopGun benchmark system.
  */
 
+export type LoadMode = 'throttled' | 'saturate';
+
 export interface BenchmarkConfig {
   /** WebSocket server URL (e.g., ws://localhost:8080) */
   serverUrl: string;
@@ -15,12 +17,16 @@ export interface BenchmarkConfig {
   batchSize: number;
   /** Total test duration in milliseconds */
   durationMs: number;
-  /** Interval between batches in milliseconds (per connection) */
+  /** Interval between batches in milliseconds (per connection) - only used in 'throttled' mode */
   intervalMs: number;
   /** Number of maps to distribute operations across */
   mapCount: number;
   /** Warmup period before recording metrics (ms) */
   warmupMs: number;
+  /** Load generation mode: 'throttled' (interval-based) or 'saturate' (continuous loop) */
+  mode: LoadMode;
+  /** Max pending operations per connection before backpressure (saturate mode) */
+  maxPendingOps: number;
 }
 
 export interface ThroughputMetrics {
