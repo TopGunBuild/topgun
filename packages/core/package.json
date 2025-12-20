@@ -21,11 +21,14 @@
   "scripts": {
     "build": "tsup",
     "test": "jest",
-    "test:coverage": "jest --coverage"
+    "test:coverage": "jest --coverage",
+    "bench": "vitest bench --run",
+    "bench:watch": "vitest bench"
   },
   "devDependencies": {
     "fast-check": "^4.4.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "vitest": "^4.0.16"
   },
   "dependencies": {
     "@msgpack/msgpack": "^3.1.2",
