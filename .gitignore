@@ -52,6 +52,10 @@ coverage/
 # Benchmark results (machine-specific, regenerate with pnpm benchmark:*)
 tests/benchmark/results/
 
+# V8 profiling output (machine-specific, regenerate with profile scripts)
+profiles/
+isolate-*.log
+.clinic/
 
 # Test Certificates (allow test fixtures)
 # *.crt
