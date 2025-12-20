@@ -52,6 +52,9 @@ coverage/
 *.lcov
 .nyc_output/
 
+# Benchmark results (machine-specific, regenerate with pnpm benchmark:*)
+tests/benchmark/results/
+
 
 # Test Certificates (allow test fixtures)
 # *.crt
