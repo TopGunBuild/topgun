@@ -52,6 +52,9 @@ coverage/
 *.lcov
 .nyc_output/
 
+# Benchmark results (machine-specific)
+tests/k6/results/
+
 
 # Test Certificates (allow test fixtures)
 # *.crt
