@@ -14,14 +14,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v2
-        with:
-          version: 10
-
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'pnpm'
+
+      - name: Setup pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10 --activate
 
       - run: pnpm install
       - run: pnpm build
@@ -39,14 +39,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v2
-        with:
-          version: 10
-
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'pnpm'
+
+      - name: Setup pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10 --activate
 
       - run: pnpm install
       - run: pnpm build
@@ -70,14 +70,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v2
-        with:
-          version: 10
-
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'pnpm'
+
+      - name: Setup pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10 --activate
 
       - run: pnpm install
       - run: pnpm build
