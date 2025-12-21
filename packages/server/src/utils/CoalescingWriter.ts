@@ -63,6 +63,8 @@ export interface CoalescingWriterMetrics {
     pooledBuffersUsed: number;
     /** Count of oversized (non-pooled) buffers that were allocated directly */
     oversizedBuffers: number;
+    /** Count of sends that encountered backpressure (socket buffer full) */
+    backpressureEvents: number;
 }
 
 /**
@@ -105,6 +107,7 @@ export class CoalescingWriter {
     private timedFlushCount = 0;      // Timer-triggered flushes
     private pooledBuffersUsed = 0;    // Count of pooled buffer acquisitions
     private oversizedBuffers = 0;     // Count of oversized (non-pooled) buffers
+    private backpressureCount = 0;    // Count of sends that hit backpressure
 
     constructor(socket: IWebSocketConnection, options?: Partial<CoalescingWriterOptions>) {
         this.socket = socket;
@@ -187,14 +190,20 @@ export class CoalescingWriter {
             if (this.queue.length === 1) {
                 // Single message - send directly without batching overhead
                 const msg = this.queue[0];
-                this.socket.send(msg.data);
+                const sent = this.socket.send(msg.data);
+                if (!sent) {
+                    this.backpressureCount++;
+                }
                 this.messagesSent++;
                 this.batchesSent++;
                 this.bytesSent += msg.data.length;
             } else {
                 // Multiple messages - create a batch
                 const batch = this.createBatch(this.queue);
-                this.socket.send(batch);
+                const sent = this.socket.send(batch);
+                if (!sent) {
+                    this.backpressureCount++;
+                }
                 this.messagesSent += this.queue.length;
                 this.batchesSent++;
                 this.bytesSent += batch.length;
@@ -234,6 +243,7 @@ export class CoalescingWriter {
                 : 0,
             pooledBuffersUsed: this.pooledBuffersUsed,
             oversizedBuffers: this.oversizedBuffers,
+            backpressureEvents: this.backpressureCount,
         };
     }
 
@@ -274,7 +284,10 @@ export class CoalescingWriter {
         }
 
         try {
-            this.socket.send(data);
+            const sent = this.socket.send(data);
+            if (!sent) {
+                this.backpressureCount++;
+            }
             this.messagesSent++;
             this.batchesSent++;
             this.bytesSent += data.length;
