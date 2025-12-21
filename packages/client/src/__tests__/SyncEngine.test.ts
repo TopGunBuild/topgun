@@ -44,8 +44,8 @@ class MockWebSocket {
   simulateMessage(message: any) {
     if (this.onmessage) {
       const data = serialize(message);
-      // Create a copy of the exact bytes to avoid shared buffer issues
-      const exactBuffer = data.slice().buffer as ArrayBuffer;
+      // Create a proper ArrayBuffer copy (msgpackr returns Buffer which shares memory)
+      const exactBuffer = new Uint8Array(data).buffer;
       this.onmessage({ data: exactBuffer });
     }
   }
