@@ -16,3 +16,16 @@ export type { Timestamp, LWWRecord, ORMapRecord, MergeKeyResult, ORMapSnapshot, 
 
 // Re-export heartbeat types for convenience
 export type { PingMessage, PongMessage } from './schemas';
+
+// Write Concern exports (Phase 5.01)
+export {
+  WriteConcern,
+  WriteOptions,
+  WriteResult,
+  PendingWrite,
+  WRITE_CONCERN_ORDER,
+  DEFAULT_WRITE_CONCERN_TIMEOUT,
+  isWriteConcernAchieved,
+  getHighestWriteConcernLevel,
+} from './types/WriteConcern';
+export type { WriteConcernValue } from './schemas';

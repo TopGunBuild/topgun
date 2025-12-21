@@ -3,7 +3,7 @@ import { createServer as createHttpsServer, Server as HttpsServer, ServerOptions
 import { readFileSync } from 'fs';
 import * as net from 'net';
 import { WebSocketServer, WebSocket } from 'ws';
-import { HLC, LWWMap, ORMap, MerkleTree, serialize, deserialize, PermissionPolicy, Principal, PermissionType, Timestamp, LWWRecord, ORMapRecord, MessageSchema } from '@topgunbuild/core';
+import { HLC, LWWMap, ORMap, MerkleTree, serialize, deserialize, PermissionPolicy, Principal, PermissionType, Timestamp, LWWRecord, ORMapRecord, MessageSchema, WriteConcern, WriteConcernValue } from '@topgunbuild/core';
 import { IServerStorage, StorageValue, ORMapValue, ORMapTombstones } from './storage/IServerStorage';
 import { IInterceptor, ServerOp, OpContext, ConnectionContext } from './interceptor/IInterceptor';
 import * as jwt from 'jsonwebtoken';
@@ -36,6 +36,7 @@ import {
     PooledEventPayload,
 } from './memory';
 import { TaskletScheduler } from './tasklet';
+import { WriteAckManager } from './ack/WriteAckManager';
 
 interface ClientConnection {
     id: string;
@@ -130,6 +131,10 @@ export interface ServerCoordinatorConfig {
     workerPoolEnabled?: boolean;
     /** Worker pool configuration */
     workerPoolConfig?: Partial<WorkerPoolConfig>;
+
+    // === Write Concern Options (Phase 5.01) ===
+    /** Default timeout for Write Concern acknowledgments in ms (default: 5000) */
+    writeAckTimeout?: number;
 }
 
 export class ServerCoordinator {
@@ -195,6 +200,9 @@ export class ServerCoordinator {
     // Tasklet scheduler for cooperative multitasking
     private taskletScheduler: TaskletScheduler;
 
+    // Write Concern acknowledgment manager (Phase 5.01)
+    private writeAckManager: WriteAckManager;
+
     private _actualPort: number = 0;
     private _actualClusterPort: number = 0;
     private _readyPromise: Promise<void>;
@@ -254,6 +262,11 @@ export class ServerCoordinator {
         this.taskletScheduler = new TaskletScheduler({
             defaultTimeBudgetMs: 5,
             maxConcurrent: 20,
+        });
+
+        // Initialize Write Concern acknowledgment manager (Phase 5.01)
+        this.writeAckManager = new WriteAckManager({
+            defaultTimeout: config.writeAckTimeout ?? 5000,
         });
 
         // Initialize connection rate limiter
@@ -588,6 +601,9 @@ export class ServerCoordinator {
 
         // Shutdown tasklet scheduler
         this.taskletScheduler.shutdown();
+
+        // Shutdown Write Concern manager (Phase 5.01)
+        this.writeAckManager.shutdown();
 
         logger.info('Server Coordinator shutdown complete.');
     }
@@ -925,13 +941,21 @@ export class ServerCoordinator {
 
             case 'OP_BATCH': {
                 const ops = message.payload.ops;
-                logger.info({ clientId: client.id, count: ops.length }, 'Received batch');
+                // Extract batch-level Write Concern (Phase 5.01)
+                const batchWriteConcern = (message.payload as any).writeConcern as WriteConcernValue | undefined;
+                const batchTimeout = (message.payload as any).timeout as number | undefined;
+
+                logger.info({ clientId: client.id, count: ops.length, writeConcern: batchWriteConcern }, 'Received batch');
 
                 // === OPTIMIZATION 1: Early ACK ===
                 // Fast validation pass - check permissions without processing
                 const validOps: typeof ops = [];
                 let rejectedCount = 0;
                 let lastValidId: string | null = null;
+
+                // Categorize ops by Write Concern for different ACK handling
+                const memoryOps: typeof ops = []; // Ops that need immediate ACK (MEMORY or FIRE_AND_FORGET)
+                const deferredOps: typeof ops = []; // Ops that need deferred ACK (APPLIED, REPLICATED, PERSISTED)
 
                 for (const op of ops) {
                     const isRemove = op.opType === 'REMOVE' || (op.record && op.record.value === null);
@@ -947,14 +971,30 @@ export class ServerCoordinator {
                     if (op.id) {
                         lastValidId = op.id;
                     }
+
+                    // Determine effective Write Concern for this operation
+                    const effectiveWriteConcern = this.getEffectiveWriteConcern(op.writeConcern, batchWriteConcern);
+
+                    // Categorize by Write Concern level
+                    if (effectiveWriteConcern === 'FIRE_AND_FORGET' || effectiveWriteConcern === 'MEMORY' || !effectiveWriteConcern) {
+                        memoryOps.push(op);
+                    } else {
+                        deferredOps.push(op);
+                    }
                 }
 
-                // Send ACK IMMEDIATELY after validation (before processing)
-                if (lastValidId !== null) {
-                    client.writer.write({
-                        type: 'OP_ACK',
-                        payload: { lastId: lastValidId }
-                    });
+                // Send Early ACK for MEMORY/FIRE_AND_FORGET ops (backwards compatible)
+                if (memoryOps.length > 0) {
+                    const lastMemoryId = memoryOps[memoryOps.length - 1].id;
+                    if (lastMemoryId) {
+                        client.writer.write({
+                            type: 'OP_ACK',
+                            payload: {
+                                lastId: lastMemoryId,
+                                achievedLevel: 'MEMORY'
+                            }
+                        });
+                    }
                 }
 
                 // Send rejection error if any ops were denied
@@ -965,11 +1005,42 @@ export class ServerCoordinator {
                     }, true);
                 }
 
+                // Register deferred ops with WriteAckManager for tracking
+                for (const op of deferredOps) {
+                    if (op.id) {
+                        const effectiveWriteConcern = this.getEffectiveWriteConcern(op.writeConcern, batchWriteConcern);
+                        const effectiveTimeout = op.timeout ?? batchTimeout;
+                        const wcLevel = this.stringToWriteConcern(effectiveWriteConcern);
+
+                        // Register and handle the promise
+                        this.writeAckManager.registerPending(op.id, wcLevel, effectiveTimeout)
+                            .then((result) => {
+                                // Send ACK when Write Concern is achieved
+                                client.writer.write({
+                                    type: 'OP_ACK',
+                                    payload: {
+                                        lastId: op.id!,
+                                        achievedLevel: result.achievedLevel,
+                                        results: [{
+                                            opId: op.id!,
+                                            success: result.success,
+                                            achievedLevel: result.achievedLevel,
+                                            error: result.error
+                                        }]
+                                    }
+                                });
+                            })
+                            .catch((err) => {
+                                logger.error({ opId: op.id, err }, 'Write concern tracking failed');
+                            });
+                    }
+                }
+
                 // Process valid ops asynchronously (non-blocking)
                 if (validOps.length > 0) {
                     const batchPromise = new Promise<void>((resolve) => {
                         setImmediate(() => {
-                            this.processBatchAsync(validOps, client.id)
+                            this.processBatchAsyncWithWriteConcern(validOps, client.id, batchWriteConcern, batchTimeout)
                                 .catch(err => {
                                     logger.error({ clientId: client.id, err }, 'Batch processing failed');
                                 })
@@ -2893,5 +2964,302 @@ export class ServerCoordinator {
         }
 
         return options;
+    }
+
+    // ============ Write Concern Methods (Phase 5.01) ============
+
+    /**
+     * Get effective Write Concern level for an operation.
+     * Per-op writeConcern overrides batch-level.
+     */
+    private getEffectiveWriteConcern(
+        opWriteConcern: WriteConcernValue | undefined,
+        batchWriteConcern: WriteConcernValue | undefined
+    ): WriteConcernValue | undefined {
+        return opWriteConcern ?? batchWriteConcern;
+    }
+
+    /**
+     * Convert string WriteConcern value to enum.
+     */
+    private stringToWriteConcern(value: WriteConcernValue | undefined): WriteConcern {
+        switch (value) {
+            case 'FIRE_AND_FORGET':
+                return WriteConcern.FIRE_AND_FORGET;
+            case 'MEMORY':
+                return WriteConcern.MEMORY;
+            case 'APPLIED':
+                return WriteConcern.APPLIED;
+            case 'REPLICATED':
+                return WriteConcern.REPLICATED;
+            case 'PERSISTED':
+                return WriteConcern.PERSISTED;
+            default:
+                return WriteConcern.MEMORY;
+        }
+    }
+
+    /**
+     * Process batch with Write Concern tracking.
+     * Notifies WriteAckManager at each stage of processing.
+     */
+    private async processBatchAsyncWithWriteConcern(
+        ops: any[],
+        clientId: string,
+        batchWriteConcern?: WriteConcernValue,
+        batchTimeout?: number
+    ): Promise<void> {
+        // === BACKPRESSURE: Check if we should force sync processing ===
+        if (this.backpressure.shouldForceSync()) {
+            this.metricsService.incBackpressureSyncForced();
+            await this.processBatchSyncWithWriteConcern(ops, clientId, batchWriteConcern, batchTimeout);
+            return;
+        }
+
+        // === BACKPRESSURE: Check and wait for capacity ===
+        if (!this.backpressure.registerPending()) {
+            this.metricsService.incBackpressureWaits();
+            try {
+                await this.backpressure.waitForCapacity();
+                this.backpressure.registerPending();
+            } catch (err) {
+                this.metricsService.incBackpressureTimeouts();
+                logger.warn({ clientId, pendingOps: ops.length }, 'Backpressure timeout - rejecting batch');
+                // Fail all pending operations
+                for (const op of ops) {
+                    if (op.id) {
+                        this.writeAckManager.failPending(op.id, 'Server overloaded');
+                    }
+                }
+                throw new Error('Server overloaded');
+            }
+        }
+
+        // Update pending ops metric
+        this.metricsService.setBackpressurePendingOps(this.backpressure.getPendingOps());
+
+        try {
+            // === OPTIMIZATION 3: Batch Broadcast ===
+            // Collect all events for a single batched broadcast at the end
+            const batchedEvents: any[] = [];
+
+            for (const op of ops) {
+                if (this.partitionService.isLocalOwner(op.key)) {
+                    try {
+                        // Process operation with Write Concern tracking
+                        await this.processLocalOpWithWriteConcern(op, clientId, batchedEvents, batchWriteConcern);
+                    } catch (err) {
+                        logger.warn({ clientId, mapName: op.mapName, key: op.key, err }, 'Op failed in async batch');
+                        // Fail the pending write
+                        if (op.id) {
+                            this.writeAckManager.failPending(op.id, String(err));
+                        }
+                    }
+                } else {
+                    // Forward to owner
+                    const owner = this.partitionService.getOwner(op.key);
+                    this.cluster.sendToNode(owner, {
+                        type: 'CLIENT_OP',
+                        payload: {
+                            mapName: op.mapName,
+                            key: op.key,
+                            record: op.record,
+                            orRecord: op.orRecord,
+                            orTag: op.orTag,
+                            opType: op.opType,
+                            writeConcern: op.writeConcern ?? batchWriteConcern,
+                        }
+                    });
+                    // For forwarded ops, we mark REPLICATED immediately since it's sent to cluster
+                    if (op.id) {
+                        this.writeAckManager.notifyLevel(op.id, WriteConcern.REPLICATED);
+                    }
+                }
+            }
+
+            // Send batched broadcast if we have events
+            if (batchedEvents.length > 0) {
+                this.broadcastBatch(batchedEvents, clientId);
+                // Notify REPLICATED for all ops that were broadcast
+                for (const op of ops) {
+                    if (op.id && this.partitionService.isLocalOwner(op.key)) {
+                        this.writeAckManager.notifyLevel(op.id, WriteConcern.REPLICATED);
+                    }
+                }
+            }
+        } finally {
+            this.backpressure.completePending();
+            this.metricsService.setBackpressurePendingOps(this.backpressure.getPendingOps());
+        }
+    }
+
+    /**
+     * Synchronous batch processing with Write Concern.
+     */
+    private async processBatchSyncWithWriteConcern(
+        ops: any[],
+        clientId: string,
+        batchWriteConcern?: WriteConcernValue,
+        batchTimeout?: number
+    ): Promise<void> {
+        const batchedEvents: any[] = [];
+
+        for (const op of ops) {
+            if (this.partitionService.isLocalOwner(op.key)) {
+                try {
+                    await this.processLocalOpWithWriteConcern(op, clientId, batchedEvents, batchWriteConcern);
+                } catch (err) {
+                    logger.warn({ clientId, mapName: op.mapName, key: op.key, err }, 'Op failed in sync batch');
+                    if (op.id) {
+                        this.writeAckManager.failPending(op.id, String(err));
+                    }
+                }
+            } else {
+                // Forward to owner and wait for acknowledgment
+                const owner = this.partitionService.getOwner(op.key);
+                await this.forwardOpAndWait(op, owner);
+                // Mark REPLICATED after forwarding
+                if (op.id) {
+                    this.writeAckManager.notifyLevel(op.id, WriteConcern.REPLICATED);
+                }
+            }
+        }
+
+        // Send batched broadcast SYNCHRONOUSLY - wait for all sends to complete
+        if (batchedEvents.length > 0) {
+            await this.broadcastBatchSync(batchedEvents, clientId);
+            // Notify REPLICATED for all local ops
+            for (const op of ops) {
+                if (op.id && this.partitionService.isLocalOwner(op.key)) {
+                    this.writeAckManager.notifyLevel(op.id, WriteConcern.REPLICATED);
+                }
+            }
+        }
+    }
+
+    /**
+     * Process a single operation with Write Concern level notifications.
+     */
+    private async processLocalOpWithWriteConcern(
+        op: any,
+        clientId: string,
+        batchedEvents: any[],
+        batchWriteConcern?: WriteConcernValue
+    ): Promise<void> {
+        // 1. Build context for interceptors
+        const context = this.buildOpContext(clientId, false);
+
+        // 2. Run onBeforeOp interceptors
+        try {
+            const processedOp = await this.runBeforeInterceptors(op, context);
+            if (!processedOp) {
+                // Silently dropped by interceptor - fail the pending write
+                if (op.id) {
+                    this.writeAckManager.failPending(op.id, 'Dropped by interceptor');
+                }
+                return;
+            }
+            op = processedOp;
+        } catch (err) {
+            logger.warn({ opId: op.id, err }, 'Interceptor rejected op');
+            if (op.id) {
+                this.writeAckManager.failPending(op.id, String(err));
+            }
+            return;
+        }
+
+        // 3. Apply operation to map
+        const { eventPayload } = this.applyOpToMap(op);
+
+        // 4. Notify APPLIED level (CRDT merged)
+        if (op.id) {
+            this.writeAckManager.notifyLevel(op.id, WriteConcern.APPLIED);
+        }
+
+        // 5. Collect event for batched broadcast
+        if (eventPayload) {
+            batchedEvents.push({
+                mapName: op.mapName,
+                key: op.key,
+                ...eventPayload
+            });
+        }
+
+        // 6. Handle PERSISTED Write Concern
+        const effectiveWriteConcern = this.getEffectiveWriteConcern(op.writeConcern, batchWriteConcern);
+        if (effectiveWriteConcern === 'PERSISTED' && this.storage) {
+            try {
+                // Wait for storage write to complete
+                await this.persistOpSync(op);
+                if (op.id) {
+                    this.writeAckManager.notifyLevel(op.id, WriteConcern.PERSISTED);
+                }
+            } catch (err) {
+                logger.error({ opId: op.id, err }, 'Persistence failed');
+                if (op.id) {
+                    this.writeAckManager.failPending(op.id, `Persistence failed: ${err}`);
+                }
+            }
+        } else if (this.storage && op.id) {
+            // Fire-and-forget persistence for non-PERSISTED writes
+            this.persistOpAsync(op).catch(err => {
+                logger.error({ opId: op.id, err }, 'Async persistence failed');
+            });
+        }
+
+        // 7. Run onAfterOp interceptors
+        try {
+            const serverOp: ServerOp = {
+                mapName: op.mapName,
+                key: op.key,
+                opType: op.opType || (op.record?.value === null ? 'REMOVE' : 'PUT'),
+                record: op.record,
+                orRecord: op.orRecord,
+                orTag: op.orTag,
+            };
+            await this.runAfterInterceptors(serverOp, context);
+        } catch (err) {
+            logger.warn({ opId: op.id, err }, 'onAfterOp interceptor failed');
+        }
+    }
+
+    /**
+     * Persist operation synchronously (blocking).
+     * Used for PERSISTED Write Concern.
+     */
+    private async persistOpSync(op: any): Promise<void> {
+        if (!this.storage) return;
+
+        const isORMapOp = op.opType === 'OR_ADD' || op.opType === 'OR_REMOVE' || op.orRecord || op.orTag;
+
+        if (isORMapOp) {
+            const orMap = this.getMap(op.mapName, 'OR') as ORMap<string, any>;
+            const records = orMap.getRecords(op.key);
+            const tombstones = orMap.getTombstones();
+
+            if (records.length > 0) {
+                await this.storage.store(op.mapName, op.key, { type: 'OR', records } as ORMapValue<any>);
+            } else {
+                await this.storage.delete(op.mapName, op.key);
+            }
+
+            if (tombstones.length > 0) {
+                await this.storage.store(op.mapName, '__tombstones__', { type: 'OR_TOMBSTONES', tags: tombstones } as ORMapTombstones);
+            }
+        } else {
+            const lwwMap = this.getMap(op.mapName, 'LWW') as LWWMap<string, any>;
+            const record = lwwMap.getRecord(op.key);
+            if (record) {
+                await this.storage.store(op.mapName, op.key, record);
+            }
+        }
+    }
+
+    /**
+     * Persist operation asynchronously (fire-and-forget).
+     * Used for non-PERSISTED Write Concern levels.
+     */
+    private async persistOpAsync(op: any): Promise<void> {
+        return this.persistOpSync(op);
     }
 }
