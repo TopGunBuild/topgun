@@ -87,10 +87,15 @@ export class MetricsCollector {
     this.opsAcked += count;
     this.lastSecondOps += count;
 
-    // Check if a second has passed
+    // Check if a second (or more) has passed
     const now = Date.now();
-    if (now - this.lastSecondTime >= 1000) {
-      this.opsPerSecond.push(this.lastSecondOps);
+    const elapsed = now - this.lastSecondTime;
+
+    if (elapsed >= 1000) {
+      // Normalize to ops per second
+      const rate = this.lastSecondOps / (elapsed / 1000);
+      this.opsPerSecond.push(rate);
+
       this.lastSecondOps = 0;
       this.lastSecondTime = now;
     }

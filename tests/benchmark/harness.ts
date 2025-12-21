@@ -289,7 +289,7 @@ export class BenchmarkHarness {
     while (this.isRunning && Date.now() < this.endTime) {
       // Backpressure: wait if too many pending operations
       if (state.pendingOps.size >= maxPending) {
-        await this.sleep(1);
+        await new Promise(resolve => setImmediate(resolve));
         continue;
       }
 
@@ -297,7 +297,7 @@ export class BenchmarkHarness {
       this.sendBatch(state);
 
       // Yield to event loop for ACK processing
-      await this.sleep(0);
+      await new Promise(resolve => setImmediate(resolve));
     }
   }
 
@@ -346,7 +346,8 @@ export class BenchmarkHarness {
           value: {
             counter: state.opCounter,
             timestamp: sendTime,
-            data: `benchmark-${Math.random().toString(36).substring(7)}`,
+            // Optimization: Remove Math.random() in hot path
+            data: `benchmark-${state.opCounter}`,
           },
           timestamp: {
             millis: sendTime,
@@ -430,7 +431,7 @@ export class BenchmarkHarness {
     this.sockets.forEach((ws) => {
       try {
         ws.close();
-      } catch {}
+      } catch { }
     });
     this.sockets.clear();
     this.connections.clear();
@@ -463,7 +464,7 @@ export class BenchmarkHarness {
     try {
       const pkg = require('../../package.json');
       version = pkg.version;
-    } catch {}
+    } catch { }
 
     return {
       scenario: scenarioName,

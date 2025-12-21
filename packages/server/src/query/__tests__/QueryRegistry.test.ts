@@ -1,13 +1,25 @@
 import { QueryRegistry, Subscription } from '../QueryRegistry';
 import { LWWRecord, LWWMap, deserialize } from '@topgunbuild/core';
-import { WebSocket } from 'ws';
+import { IWebSocketConnection, WebSocketState } from '../../transport';
+import { IncomingMessage } from 'http';
 
-// Mock WebSocket
-const createMockSocket = (): WebSocket => {
-  return {
-    readyState: 1,
-    send: jest.fn(),
-  } as unknown as WebSocket;
+// Mock IWebSocketConnection
+const createMockSocket = (): IWebSocketConnection => {
+  const mock = {
+    id: 'mock-socket-id',
+    readyState: WebSocketState.OPEN,
+    send: jest.fn().mockReturnValue(true),
+    close: jest.fn(),
+    terminate: jest.fn(),
+    getBufferedAmount: jest.fn().mockReturnValue(0),
+    cork: jest.fn((cb: () => void) => cb()),
+    getRemoteAddress: jest.fn().mockReturnValue('127.0.0.1'),
+    getRequest: jest.fn().mockReturnValue(undefined as IncomingMessage | undefined),
+    onMessage: jest.fn(),
+    onClose: jest.fn(),
+    onError: jest.fn(),
+  };
+  return mock as IWebSocketConnection;
 };
 
 const createRecord = (value: any, timestamp: number = Date.now()): LWWRecord<any> => ({

@@ -33,6 +33,9 @@ jobs:
   smoke-test:
     name: Native Smoke Test
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        transport: [ws, uwebsockets]
     steps:
       - uses: actions/checkout@v4
 
@@ -48,12 +51,14 @@ jobs:
       - run: pnpm install
       - run: pnpm build
 
-      - name: Start server
+      - name: Start server (${{ matrix.transport }})
         run: |
           pnpm start:server &
           sleep 5
+        env:
+          WS_TRANSPORT: ${{ matrix.transport }}
 
-      - name: Run smoke test
+      - name: Run smoke test (${{ matrix.transport }})
         run: pnpm benchmark:smoke
         env:
           JWT_TOKEN: ${{ secrets.BENCHMARK_JWT_TOKEN }}

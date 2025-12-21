@@ -9,6 +9,14 @@ import { IInterceptor, ServerOp, OpContext, ConnectionContext } from './intercep
 import * as jwt from 'jsonwebtoken';
 import * as crypto from 'crypto';
 import { QueryRegistry, Subscription } from './query/QueryRegistry';
+import {
+    IWebSocketConnection,
+    IWebSocketTransport,
+    WebSocketState,
+    createTransport,
+    TransportType,
+    IncomingRequest,
+} from './transport';
 
 const GC_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const GC_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -40,7 +48,7 @@ import { WriteAckManager } from './ack/WriteAckManager';
 
 interface ClientConnection {
     id: string;
-    socket: WebSocket;
+    socket: IWebSocketConnection;
     writer: CoalescingWriter; // Per-connection write coalescing
     principal?: Principal; // Auth info
     isAuthenticated: boolean;
@@ -135,14 +143,26 @@ export interface ServerCoordinatorConfig {
     // === Write Concern Options (Phase 5.01) ===
     /** Default timeout for Write Concern acknowledgments in ms (default: 5000) */
     writeAckTimeout?: number;
+
+    // === WebSocket Transport Options ===
+    /**
+     * WebSocket transport implementation to use
+     * - 'ws': Node.js ws library (default, stable)
+     * - 'uwebsockets': uWebSockets.js (high performance, ~25% faster)
+     * @default 'ws'
+     */
+    wsTransport?: 'ws' | 'uwebsockets';
 }
 
 export class ServerCoordinator {
-    private httpServer: HttpServer | HttpsServer;
+    // Transport abstraction - one of these will be set based on wsTransport config
+    private transport?: IWebSocketTransport;
+    private httpServer?: HttpServer | HttpsServer;
     private metricsServer?: HttpServer;
     private metricsService: MetricsService;
-    private wss: WebSocketServer;
+    private wss?: WebSocketServer;
     private clients: Map<string, ClientConnection> = new Map();
+    private readonly wsTransportType: TransportType;
 
     // Interceptors
     private interceptors: IInterceptor[] = [];
@@ -295,133 +315,18 @@ export class ServerCoordinator {
             }, 'Worker pool initialized for CPU-bound operations');
         }
 
-        // HTTP Server Setup first (to get actual port if port=0)
-        if (config.tls?.enabled) {
-            const tlsOptions = this.buildTLSOptions(config.tls);
-            this.httpServer = createHttpsServer(tlsOptions, (_req, res) => {
-                res.writeHead(200);
-                res.end('TopGun Server Running (Secure)');
-            });
-            logger.info('TLS enabled for client connections');
+        // Initialize transport type
+        this.wsTransportType = config.wsTransport ?? 'ws';
+        this.metricsService.setTransportType(this.wsTransportType);
+
+        // Setup transport based on configuration
+        if (this.wsTransportType === 'uwebsockets') {
+            // Use uWebSockets.js transport abstraction
+            this.setupUWebSocketsTransport(config);
         } else {
-            this.httpServer = createHttpServer((_req, res) => {
-                res.writeHead(200);
-                res.end('TopGun Server Running');
-            });
-
-            if (process.env.NODE_ENV === 'production') {
-                logger.warn('⚠️  TLS is disabled! Client connections are NOT encrypted.');
-            }
+            // Use ws transport (legacy approach with direct HTTP server)
+            this.setupWsTransport(config);
         }
-
-        const metricsPort = config.metricsPort !== undefined ? config.metricsPort : 9090;
-        this.metricsServer = createHttpServer(async (req, res) => {
-            if (req.url === '/metrics') {
-                try {
-                    res.setHeader('Content-Type', this.metricsService.getContentType());
-                    res.end(await this.metricsService.getMetrics());
-                } catch (err) {
-                    res.statusCode = 500;
-                    res.end('Internal Server Error');
-                }
-            } else {
-                res.statusCode = 404;
-                res.end();
-            }
-        });
-        this.metricsServer.listen(metricsPort, () => {
-            logger.info({ port: metricsPort }, 'Metrics server listening');
-        });
-        this.metricsServer.on('error', (err) => {
-            logger.error({ err, port: metricsPort }, 'Metrics server failed to start');
-        });
-
-        // Configure WebSocketServer with optimal options for connection scaling
-        this.wss = new WebSocketServer({
-            server: this.httpServer,
-            // Increase backlog for pending connections (default Linux is 128)
-            backlog: config.wsBacklog ?? 511,
-            // Disable per-message deflate by default (CPU overhead)
-            perMessageDeflate: config.wsCompression ?? false,
-            // Max payload size (64MB default)
-            maxPayload: config.wsMaxPayload ?? 64 * 1024 * 1024,
-            // Skip UTF-8 validation for binary messages (performance)
-            skipUTF8Validation: true,
-        });
-        this.wss.on('connection', (ws) => this.handleConnection(ws));
-
-        // Configure HTTP server limits for connection scaling
-        this.httpServer.maxConnections = config.maxConnections ?? 10000;
-        this.httpServer.timeout = config.serverTimeout ?? 120000; // 2 min
-        this.httpServer.keepAliveTimeout = config.keepAliveTimeout ?? 5000;
-        this.httpServer.headersTimeout = config.headersTimeout ?? 60000;
-
-        // Configure socket options for all incoming connections
-        this.httpServer.on('connection', (socket: net.Socket) => {
-            // Disable Nagle's algorithm for lower latency
-            socket.setNoDelay(true);
-            // Enable keep-alive with 60s interval
-            socket.setKeepAlive(true, 60000);
-        });
-
-        // Use port 0 to let OS assign a free port
-        this.httpServer.listen(config.port, () => {
-            const addr = this.httpServer.address();
-            this._actualPort = typeof addr === 'object' && addr ? addr.port : config.port;
-            logger.info({ port: this._actualPort }, 'Server Coordinator listening');
-
-            // Now setup cluster with actual/configured cluster port
-            const clusterPort = config.clusterPort ?? 0;
-
-            // Resolve peers dynamically if callback provided
-            const peers = config.resolvePeers ? config.resolvePeers() : (config.peers || []);
-
-            this.cluster = new ClusterManager({
-                nodeId: config.nodeId,
-                host: config.host || 'localhost',
-                port: clusterPort,
-                peers,
-                discovery: config.discovery,
-                serviceName: config.serviceName,
-                discoveryInterval: config.discoveryInterval,
-                tls: config.clusterTls
-            });
-            this.partitionService = new PartitionService(this.cluster);
-            this.lockManager = new LockManager();
-            this.lockManager.on('lockGranted', (evt) => this.handleLockGranted(evt));
-
-            this.topicManager = new TopicManager({
-                cluster: this.cluster,
-                sendToClient: (clientId, message) => {
-                    const client = this.clients.get(clientId);
-                    if (client && client.socket.readyState === WebSocket.OPEN) {
-                        client.writer.write(message);
-                    }
-                }
-            });
-
-            this.systemManager = new SystemManager(
-                this.cluster,
-                this.metricsService,
-                (name) => this.getMap(name) as LWWMap<string, any>
-            );
-
-            this.setupClusterListeners();
-            this.cluster.start().then((actualClusterPort) => {
-                this._actualClusterPort = actualClusterPort;
-                this.metricsService.setClusterMembers(this.cluster.getMembers().length);
-                logger.info({ clusterPort: this._actualClusterPort }, 'Cluster started');
-                this.systemManager.start();
-                this._readyResolve();
-            }).catch((err) => {
-                // Fallback for ClusterManager that doesn't return port
-                this._actualClusterPort = clusterPort;
-                this.metricsService.setClusterMembers(this.cluster.getMembers().length);
-                logger.info({ clusterPort: this._actualClusterPort }, 'Cluster started (sync)');
-                this.systemManager.start();
-                this._readyResolve();
-            });
-        });
 
         if (this.storage) {
             this.storage.initialize().then(() => {
@@ -520,12 +425,22 @@ export class ServerCoordinator {
         logger.info('Shutting down Server Coordinator...');
 
         // 1. Stop accepting new connections
-        this.httpServer.close();
-        if (this.metricsServer) {
-            this.metricsServer.close();
+        if (this.transport) {
+            // uWebSockets.js transport
+            await this.transport.stop(true);
+        } else {
+            // ws transport (legacy)
+            if (this.httpServer) {
+                this.httpServer.close();
+            }
+            if (this.metricsServer) {
+                this.metricsServer.close();
+            }
+            if (this.wss) {
+                this.wss.close();
+            }
         }
         this.metricsService.destroy();
-        this.wss.close();
 
         // 2. Notify and Close Clients
         logger.info(`Closing ${this.clients.size} client connections...`);
@@ -533,7 +448,7 @@ export class ServerCoordinator {
 
         for (const client of this.clients.values()) {
             try {
-                if (client.socket.readyState === WebSocket.OPEN) {
+                if (client.socket.readyState === WebSocketState.OPEN) {
                     // Send shutdown message directly to socket (bypass batching)
                     // This ensures message is sent before socket.close()
                     client.socket.send(shutdownMsg);
@@ -608,13 +523,13 @@ export class ServerCoordinator {
         logger.info('Server Coordinator shutdown complete.');
     }
 
-    private async handleConnection(ws: WebSocket) {
+    private async handleConnection(socket: IWebSocketConnection, _request: IncomingRequest) {
         // Check rate limit before accepting connection
         if (this.rateLimitingEnabled && !this.rateLimiter.shouldAccept()) {
             logger.warn('Connection rate limit exceeded, rejecting');
             this.rateLimiter.onConnectionRejected();
             this.metricsService.incConnectionsRejected();
-            ws.close(1013, 'Server overloaded'); // 1013 = Try Again Later
+            socket.close(1013, 'Server overloaded'); // 1013 = Try Again Later
             return;
         }
 
@@ -624,12 +539,12 @@ export class ServerCoordinator {
         }
         this.metricsService.incConnectionsAccepted();
 
-        // Client ID is temporary until auth
-        const clientId = crypto.randomUUID();
+        // Use socket's ID or generate new one
+        const clientId = socket.id || crypto.randomUUID();
         logger.info({ clientId }, 'Client connected (pending auth)');
 
         // Create CoalescingWriter if enabled, otherwise create a pass-through writer
-        const writer = new CoalescingWriter(ws, this.writeCoalescingEnabled ? this.writeCoalescingOptions : {
+        const writer = new CoalescingWriter(socket, this.writeCoalescingEnabled ? this.writeCoalescingOptions : {
             maxBatchSize: 1, // Disable batching by flushing immediately
             maxDelayMs: 0,
             maxBatchBytes: 0,
@@ -637,7 +552,7 @@ export class ServerCoordinator {
 
         const connection: ClientConnection = {
             id: clientId,
-            socket: ws,
+            socket,
             writer,
             isAuthenticated: false,
             subscriptions: new Set(),
@@ -662,37 +577,24 @@ export class ServerCoordinator {
             }
         } catch (err) {
             logger.error({ clientId, err }, 'Interceptor rejected connection');
-            ws.close(4000, 'Connection Rejected');
+            socket.close(4000, 'Connection Rejected');
             this.clients.delete(clientId);
             return;
         }
 
-        ws.on('message', (message) => {
+        // Setup message handler using IWebSocketConnection interface
+        socket.onMessage((buf: Uint8Array) => {
             try {
                 let data: any;
-                let buf: Uint8Array;
-
-                if (Buffer.isBuffer(message)) {
-                    buf = message;
-                } else if (message instanceof ArrayBuffer) {
-                    buf = new Uint8Array(message);
-                } else if (Array.isArray(message)) {
-                    buf = Buffer.concat(message);
-                } else {
-                    // Fallback or unexpected type
-                    buf = Buffer.from(message as any);
-                }
 
                 try {
                     data = deserialize(buf);
                 } catch (e) {
                     // If msgpack fails, try JSON (legacy support)
                     try {
-                        // Use Buffer.toString() or TextDecoder
-                        const text = Buffer.isBuffer(buf) ? buf.toString() : new TextDecoder().decode(buf);
+                        const text = new TextDecoder().decode(buf);
                         data = JSON.parse(text);
                     } catch (jsonErr) {
-                        // Original error likely relevant
                         throw e;
                     }
                 }
@@ -700,11 +602,12 @@ export class ServerCoordinator {
                 this.handleMessage(connection, data);
             } catch (err) {
                 logger.error({ err }, 'Invalid message format');
-                ws.close(1002, 'Protocol Error');
+                socket.close(1002, 'Protocol Error');
             }
         });
 
-        ws.on('close', () => {
+        // Setup close handler
+        socket.onClose((_code: number, _reason: string) => {
             logger.info({ clientId }, 'Client disconnected');
 
             // If connection was still pending (not authenticated), mark as failed
@@ -756,8 +659,13 @@ export class ServerCoordinator {
             this.metricsService.setConnectedClients(this.clients.size);
         });
 
+        // Setup error handler
+        socket.onError((err: Error) => {
+            logger.error({ clientId, err }, 'Socket error');
+        });
+
         // Send Auth Challenge immediately
-        ws.send(serialize({ type: 'AUTH_REQUIRED' }));
+        socket.send(serialize({ type: 'AUTH_REQUIRED' }));
     }
 
     private async handleMessage(client: ClientConnection, rawMessage: any) {
@@ -1568,7 +1476,7 @@ export class ServerCoordinator {
                 if (clientId === excludeClientId) continue;
 
                 const client = this.clients.get(clientId);
-                if (!client || client.socket.readyState !== 1 || !client.isAuthenticated || !client.principal) {
+                if (!client || client.socket.readyState !== WebSocketState.OPEN || !client.isAuthenticated || !client.principal) {
                     continue;
                 }
 
@@ -1591,7 +1499,7 @@ export class ServerCoordinator {
             // Non-event messages (GC_PRUNE, SHUTDOWN_PENDING) still go to all clients
             const msgData = serialize(message);
             for (const [id, client] of this.clients) {
-                if (id !== excludeClientId && client.socket.readyState === 1) { // 1 = OPEN
+                if (id !== excludeClientId && client.socket.readyState === WebSocketState.OPEN) {
                     client.writer.writeRaw(msgData);
                 }
             }
@@ -1644,7 +1552,7 @@ export class ServerCoordinator {
             if (clientId === excludeClientId) continue;
 
             const client = this.clients.get(clientId);
-            if (!client || client.socket.readyState !== 1 || !client.isAuthenticated || !client.principal) {
+            if (!client || client.socket.readyState !== WebSocketState.OPEN || !client.isAuthenticated || !client.principal) {
                 continue;
             }
 
@@ -1755,7 +1663,7 @@ export class ServerCoordinator {
             if (clientId === excludeClientId) continue;
 
             const client = this.clients.get(clientId);
-            if (!client || client.socket.readyState !== 1 || !client.isAuthenticated || !client.principal) {
+            if (!client || client.socket.readyState !== WebSocketState.OPEN || !client.isAuthenticated || !client.principal) {
                 continue;
             }
 
@@ -1812,14 +1720,13 @@ export class ServerCoordinator {
             for (const client of clients) {
                 sendPromises.push(new Promise<void>((resolve, reject) => {
                     try {
-                        client.socket.send(serializedBatch, (err) => {
-                            if (err) {
-                                logger.error({ clientId: client.id, err }, 'Failed to send sync batch to client');
-                                reject(err);
-                            } else {
-                                resolve();
-                            }
-                        });
+                        const success = client.socket.send(serializedBatch);
+                        if (success) {
+                            resolve();
+                        } else {
+                            logger.error({ clientId: client.id }, 'Failed to send sync batch to client (dropped)');
+                            reject(new Error('Send failed'));
+                        }
                     } catch (err) {
                         logger.error({ clientId: client.id, err }, 'Exception sending sync batch to client');
                         reject(err);
@@ -2688,7 +2595,7 @@ export class ServerCoordinator {
                 }, 'Evicting dead client (heartbeat timeout)');
 
                 // Close the connection
-                if (client.socket.readyState === WebSocket.OPEN) {
+                if (client.socket.readyState === WebSocketState.OPEN) {
                     client.socket.close(4002, 'Heartbeat timeout');
                 }
             }
@@ -2944,6 +2851,210 @@ export class ServerCoordinator {
             }
         });
     }
+    /**
+     * Setup ws transport (legacy approach with direct HTTP server)
+     */
+    private setupWsTransport(config: ServerCoordinatorConfig): void {
+        logger.debug({ transport: 'ws' }, 'WebSocket transport: ws (default)');
+
+        // HTTP Server Setup first (to get actual port if port=0)
+        if (config.tls?.enabled) {
+            const tlsOptions = this.buildTLSOptions(config.tls);
+            this.httpServer = createHttpsServer(tlsOptions, (_req, res) => {
+                res.writeHead(200);
+                res.end('TopGun Server Running (Secure)');
+            });
+            logger.info('TLS enabled for client connections');
+        } else {
+            this.httpServer = createHttpServer((_req, res) => {
+                res.writeHead(200);
+                res.end('TopGun Server Running');
+            });
+
+            if (process.env.NODE_ENV === 'production') {
+                logger.warn('⚠️  TLS is disabled! Client connections are NOT encrypted.');
+            }
+        }
+
+        // Metrics server (separate from main server)
+        const metricsPort = config.metricsPort !== undefined ? config.metricsPort : 9090;
+        this.metricsServer = createHttpServer(async (req, res) => {
+            if (req.url === '/metrics') {
+                try {
+                    res.setHeader('Content-Type', this.metricsService.getContentType());
+                    res.end(await this.metricsService.getMetrics());
+                } catch (err) {
+                    res.statusCode = 500;
+                    res.end('Internal Server Error');
+                }
+            } else {
+                res.statusCode = 404;
+                res.end();
+            }
+        });
+        this.metricsServer.listen(metricsPort, () => {
+            logger.info({ port: metricsPort }, 'Metrics server listening');
+        });
+        this.metricsServer.on('error', (err) => {
+            logger.error({ err, port: metricsPort }, 'Metrics server failed to start');
+        });
+
+        // Configure WebSocketServer with optimal options for connection scaling
+        this.wss = new WebSocketServer({
+            server: this.httpServer,
+            backlog: config.wsBacklog ?? 511,
+            perMessageDeflate: config.wsCompression ?? false,
+            maxPayload: config.wsMaxPayload ?? 64 * 1024 * 1024,
+            skipUTF8Validation: true,
+        });
+        this.wss.on('connection', (ws, req) => {
+            // Wrap native WebSocket in WsConnection adapter
+            const { WsConnection } = require('./transport/WsConnection');
+            const connection = new WsConnection(ws, req);
+            const incomingRequest: IncomingRequest = {
+                url: req.url || '/',
+                headers: req.headers as Record<string, string | string[] | undefined>,
+                query: req.url?.split('?')[1] || '',
+                remoteAddress: connection.getRemoteAddress(),
+            };
+            this.handleConnection(connection, incomingRequest);
+        });
+
+        // Configure HTTP server limits for connection scaling
+        this.httpServer.maxConnections = config.maxConnections ?? 10000;
+        this.httpServer.timeout = config.serverTimeout ?? 120000;
+        this.httpServer.keepAliveTimeout = config.keepAliveTimeout ?? 5000;
+        this.httpServer.headersTimeout = config.headersTimeout ?? 60000;
+
+        // Configure socket options for all incoming connections
+        this.httpServer.on('connection', (socket: net.Socket) => {
+            socket.setNoDelay(true);
+            socket.setKeepAlive(true, 60000);
+        });
+
+        // Start HTTP server
+        this.httpServer.listen(config.port, () => {
+            const addr = this.httpServer!.address();
+            this._actualPort = typeof addr === 'object' && addr ? addr.port : config.port;
+            logger.info({ port: this._actualPort }, 'Server Coordinator listening');
+            this.setupClusterAfterListen(config);
+        });
+    }
+
+    /**
+     * Setup uWebSockets.js transport
+     */
+    private setupUWebSocketsTransport(config: ServerCoordinatorConfig): void {
+        logger.info({ transport: 'uwebsockets' }, 'WebSocket transport: uWebSockets.js');
+
+        this.transport = createTransport('uwebsockets');
+
+        // Register connection handler
+        this.transport.onConnection((connection, request) => {
+            this.handleConnection(connection, request);
+        });
+
+        // Register error handler
+        this.transport.onError((error) => {
+            logger.error({ err: error }, 'Transport error');
+        });
+
+        // Add metrics endpoint
+        this.transport.addHttpHandler({
+            method: 'GET',
+            path: '/metrics',
+            handler: async (_req, respond) => {
+                try {
+                    const metrics = await this.metricsService.getMetrics();
+                    respond(200, { 'Content-Type': this.metricsService.getContentType() }, metrics);
+                } catch (err) {
+                    respond(500, { 'Content-Type': 'text/plain' }, 'Internal Server Error');
+                }
+            },
+        });
+
+        // Add health endpoint
+        this.transport.addHttpHandler({
+            method: 'GET',
+            path: '/',
+            handler: (_req, respond) => {
+                const status = config.tls?.enabled ? 'TopGun Server Running (Secure)' : 'TopGun Server Running';
+                respond(200, { 'Content-Type': 'text/plain' }, status);
+            },
+        });
+
+        // Start transport
+        this.transport.start({
+            port: config.port,
+            host: config.host || '0.0.0.0',
+            tls: config.tls,
+            backlog: config.wsBacklog ?? 511,
+            maxPayload: config.wsMaxPayload ?? 64 * 1024 * 1024,
+            compression: config.wsCompression ?? false,
+            idleTimeout: Math.floor((config.serverTimeout ?? 120000) / 1000),
+            skipUTF8Validation: true,
+        }).then(() => {
+            this._actualPort = this.transport!.getPort();
+            logger.info({ port: this._actualPort }, 'Server Coordinator listening');
+            this.setupClusterAfterListen(config);
+        }).catch((err) => {
+            logger.error({ err }, 'Failed to start transport');
+        });
+    }
+
+    /**
+     * Common cluster setup after transport is listening
+     */
+    private setupClusterAfterListen(config: ServerCoordinatorConfig): void {
+        const clusterPort = config.clusterPort ?? 0;
+        const peers = config.resolvePeers ? config.resolvePeers() : (config.peers || []);
+
+        this.cluster = new ClusterManager({
+            nodeId: config.nodeId,
+            host: config.host || 'localhost',
+            port: clusterPort,
+            peers,
+            discovery: config.discovery,
+            serviceName: config.serviceName,
+            discoveryInterval: config.discoveryInterval,
+            tls: config.clusterTls
+        });
+        this.partitionService = new PartitionService(this.cluster);
+        this.lockManager = new LockManager();
+        this.lockManager.on('lockGranted', (evt) => this.handleLockGranted(evt));
+
+        this.topicManager = new TopicManager({
+            cluster: this.cluster,
+            sendToClient: (clientId, message) => {
+                const client = this.clients.get(clientId);
+                if (client && client.socket.readyState === WebSocketState.OPEN) {
+                    client.writer.write(message);
+                }
+            }
+        });
+
+        this.systemManager = new SystemManager(
+            this.cluster,
+            this.metricsService,
+            (name) => this.getMap(name) as LWWMap<string, any>
+        );
+
+        this.setupClusterListeners();
+        this.cluster.start().then((actualClusterPort) => {
+            this._actualClusterPort = actualClusterPort;
+            this.metricsService.setClusterMembers(this.cluster.getMembers().length);
+            logger.info({ clusterPort: this._actualClusterPort }, 'Cluster started');
+            this.systemManager.start();
+            this._readyResolve();
+        }).catch((_err) => {
+            this._actualClusterPort = clusterPort;
+            this.metricsService.setClusterMembers(this.cluster.getMembers().length);
+            logger.info({ clusterPort: this._actualClusterPort }, 'Cluster started (sync)');
+            this.systemManager.start();
+            this._readyResolve();
+        });
+    }
+
     private buildTLSOptions(config: TLSConfig): HttpsServerOptions {
         const options: HttpsServerOptions = {
             cert: readFileSync(config.certPath),

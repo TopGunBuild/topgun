@@ -1,5 +1,5 @@
 import { LWWRecord, ORMapRecord, Principal } from '@topgunbuild/core';
-import { WebSocket } from 'ws';
+import type { IWebSocketConnection } from '../transport';
 
 export interface ServerOp {
   mapName: string;
@@ -13,7 +13,7 @@ export interface ServerOp {
 
 export interface ConnectionContext {
   clientId: string;
-  socket?: WebSocket;
+  socket?: IWebSocketConnection;
   principal?: Principal;
   isAuthenticated: boolean;
 }

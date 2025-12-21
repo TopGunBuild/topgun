@@ -1,19 +1,36 @@
-import { WebSocket } from 'ws';
 import { CoalescingWriter, CoalescingWriterOptions } from '../../utils/CoalescingWriter';
 import {
     coalescingPresets,
     getCoalescingPreset,
     CoalescingPreset,
 } from '../../utils/coalescingPresets';
+import { IWebSocketConnection, WebSocketState } from '../../transport';
+import { IncomingMessage } from 'http';
 
-// Mock WebSocket
-class MockWebSocket {
-    readyState = WebSocket.OPEN;
+// Mock IWebSocketConnection
+class MockWebSocket implements IWebSocketConnection {
+    id = 'mock-socket-id';
+    readyState = WebSocketState.OPEN;
     sentData: Uint8Array[] = [];
 
-    send(data: Uint8Array) {
-        this.sentData.push(data);
+    send(data: Uint8Array | ArrayBuffer | string): boolean {
+        if (data instanceof Uint8Array) {
+            this.sentData.push(data);
+        } else if (typeof data === 'string') {
+            this.sentData.push(new TextEncoder().encode(data));
+        }
+        return true;
     }
+
+    close(_code?: number, _reason?: string): void {}
+    terminate(): void {}
+    getBufferedAmount(): number { return 0; }
+    cork(callback: () => void): void { callback(); }
+    getRemoteAddress(): string { return '127.0.0.1'; }
+    getRequest(): IncomingMessage | undefined { return undefined; }
+    onMessage(_handler: (data: Uint8Array) => void): void {}
+    onClose(_handler: (code: number, reason: string) => void): void {}
+    onError(_handler: (error: Error) => void): void {}
 }
 
 describe('CoalescingWriter', () => {
@@ -37,7 +54,7 @@ describe('CoalescingWriter', () => {
         });
 
         it('should use default options when no options provided', () => {
-            const writer = new CoalescingWriter(mockSocket as unknown as WebSocket);
+            const writer = new CoalescingWriter(mockSocket as IWebSocketConnection);
             const options = writer.getOptions();
 
             // Default is now highThroughput values via ServerCoordinator, but CoalescingWriter
@@ -55,7 +72,7 @@ describe('CoalescingWriter', () => {
             };
 
             const writer = new CoalescingWriter(
-                mockSocket as unknown as WebSocket,
+                mockSocket as IWebSocketConnection,
                 customOptions
             );
             const options = writer.getOptions();
@@ -66,7 +83,7 @@ describe('CoalescingWriter', () => {
         });
 
         it('should merge partial options with defaults', () => {
-            const writer = new CoalescingWriter(mockSocket as unknown as WebSocket, {
+            const writer = new CoalescingWriter(mockSocket as IWebSocketConnection, {
                 maxBatchSize: 250,
             });
             const options = writer.getOptions();
@@ -128,7 +145,7 @@ describe('CoalescingWriter', () => {
 
     describe('Metrics', () => {
         it('should track immediate vs timed flushes', () => {
-            const writer = new CoalescingWriter(mockSocket as unknown as WebSocket, {
+            const writer = new CoalescingWriter(mockSocket as IWebSocketConnection, {
                 maxBatchSize: 2,
                 maxDelayMs: 100,
                 maxBatchBytes: 1000000,
@@ -157,7 +174,7 @@ describe('CoalescingWriter', () => {
         });
 
         it('should calculate batch utilization', () => {
-            const writer = new CoalescingWriter(mockSocket as unknown as WebSocket, {
+            const writer = new CoalescingWriter(mockSocket as IWebSocketConnection, {
                 maxBatchSize: 10,
                 maxDelayMs: 5,
                 maxBatchBytes: 1000000,
@@ -179,7 +196,7 @@ describe('CoalescingWriter', () => {
         });
 
         it('should report accurate avgBytesPerBatch', () => {
-            const writer = new CoalescingWriter(mockSocket as unknown as WebSocket, {
+            const writer = new CoalescingWriter(mockSocket as IWebSocketConnection, {
                 maxBatchSize: 100,
                 maxDelayMs: 5,
                 maxBatchBytes: 1000000,
@@ -197,7 +214,7 @@ describe('CoalescingWriter', () => {
         });
 
         it('should track immediateFlushRatio', () => {
-            const writer = new CoalescingWriter(mockSocket as unknown as WebSocket, {
+            const writer = new CoalescingWriter(mockSocket as IWebSocketConnection, {
                 maxBatchSize: 2,
                 maxDelayMs: 100,
                 maxBatchBytes: 1000000,
@@ -222,12 +239,12 @@ describe('CoalescingWriter', () => {
     describe('Batch Size Behavior', () => {
         it('should batch more messages with highThroughput preset', () => {
             const conservativeWriter = new CoalescingWriter(
-                mockSocket as unknown as WebSocket,
+                mockSocket as IWebSocketConnection,
                 coalescingPresets.conservative
             );
             const highThroughputSocket = new MockWebSocket();
             const highThroughputWriter = new CoalescingWriter(
-                highThroughputSocket as unknown as WebSocket,
+                highThroughputSocket as IWebSocketConnection,
                 coalescingPresets.highThroughput
             );
 
@@ -248,7 +265,7 @@ describe('CoalescingWriter', () => {
 
         it('should flush earlier with conservative preset', () => {
             const writer = new CoalescingWriter(
-                mockSocket as unknown as WebSocket,
+                mockSocket as IWebSocketConnection,
                 coalescingPresets.conservative
             );
 
@@ -264,7 +281,7 @@ describe('CoalescingWriter', () => {
         });
 
         it('should respect maxBatchBytes limit', () => {
-            const writer = new CoalescingWriter(mockSocket as unknown as WebSocket, {
+            const writer = new CoalescingWriter(mockSocket as IWebSocketConnection, {
                 maxBatchSize: 1000, // High limit
                 maxDelayMs: 100, // High delay
                 maxBatchBytes: 500, // Low bytes limit
@@ -288,7 +305,7 @@ describe('CoalescingWriter', () => {
 
     describe('Urgent Messages', () => {
         it('should send urgent messages immediately without batching', () => {
-            const writer = new CoalescingWriter(mockSocket as unknown as WebSocket, {
+            const writer = new CoalescingWriter(mockSocket as IWebSocketConnection, {
                 maxBatchSize: 100,
                 maxDelayMs: 100,
                 maxBatchBytes: 1000000,
