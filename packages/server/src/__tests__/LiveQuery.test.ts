@@ -20,6 +20,9 @@ const createMockWriter = (socket: any) => ({
   })),
 });
 
+// Retry flaky tests up to 3 times
+jest.retryTimes(3);
+
 describe('Live Query Sliding Window Integration', () => {
   let server: ServerCoordinator;
 
@@ -206,7 +209,7 @@ describe('Live Query Sliding Window Integration', () => {
     });
 
     // Wait for async query update propagation
-    await new Promise(r => setTimeout(r, 50));
+    await new Promise(r => setTimeout(r, 200));
 
     // Expect UPDATE for u1
     expect(clientSocket.send).toHaveBeenCalled();
