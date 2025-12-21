@@ -135,6 +135,15 @@ export interface ServerCoordinatorConfig {
     // === Write Concern Options (Phase 5.01) ===
     /** Default timeout for Write Concern acknowledgments in ms (default: 5000) */
     writeAckTimeout?: number;
+
+    // === WebSocket Transport Options ===
+    /**
+     * WebSocket transport implementation to use
+     * - 'ws': Node.js ws library (default, stable)
+     * - 'uwebsockets': uWebSockets.js (high performance, ~25% faster)
+     * @default 'ws'
+     */
+    wsTransport?: 'ws' | 'uwebsockets';
 }
 
 export class ServerCoordinator {
@@ -337,6 +346,17 @@ export class ServerCoordinator {
         });
 
         // Configure WebSocketServer with optimal options for connection scaling
+        // Note: wsTransport option is available for future migration to uWebSockets.js
+        // Use createTransport() from './transport' for standalone transport usage
+        const wsTransportType = config.wsTransport ?? 'ws';
+        if (wsTransportType === 'uwebsockets') {
+            logger.info({ transport: 'uwebsockets' }, 'WebSocket transport: uWebSockets.js (experimental)');
+            logger.warn('uWebSockets.js integration with ServerCoordinator is not yet complete. ' +
+                'Use createTransport("uwebsockets") for standalone usage.');
+        } else {
+            logger.debug({ transport: 'ws' }, 'WebSocket transport: ws (default)');
+        }
+
         this.wss = new WebSocketServer({
             server: this.httpServer,
             // Increase backlog for pending connections (default Linux is 128)
