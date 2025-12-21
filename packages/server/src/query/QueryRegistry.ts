@@ -1,6 +1,6 @@
 import { Query, matchesQuery, executeQuery } from './Matcher';
 import { LWWRecord, LWWMap, ORMap, serialize, PredicateNode, ORMapRecord } from '@topgunbuild/core';
-import { WebSocket } from 'ws';
+import { IWebSocketConnection, WebSocketState } from '../transport';
 import { logger } from '../utils/logger';
 
 export interface Subscription {
@@ -8,7 +8,7 @@ export interface Subscription {
   clientId: string;
   mapName: string;
   query: Query;
-  socket: WebSocket;
+  socket: IWebSocketConnection;
   previousResultKeys: Set<string>;
   interestedFields?: Set<string> | 'ALL';
   _cleanup?: () => void; // For Reverse Index cleanup
@@ -398,7 +398,7 @@ export class QueryRegistry {
   }
 
   private sendUpdate(sub: Subscription, key: string, value: any, type: 'UPDATE' | 'REMOVE') {
-    if (sub.socket.readyState === 1) {
+    if (sub.socket.readyState === WebSocketState.OPEN) {
       sub.socket.send(serialize({
         type: 'QUERY_UPDATE',
         payload: {

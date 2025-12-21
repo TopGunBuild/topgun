@@ -1,6 +1,6 @@
-import { WebSocket } from 'ws';
 import { serialize } from '@topgunbuild/core';
 import { BufferPool, getGlobalBufferPool } from '../memory';
+import { IWebSocketConnection, WebSocketState } from '../transport';
 
 export interface CoalescingWriterOptions {
     /**
@@ -86,7 +86,7 @@ const DEFAULT_OPTIONS: CoalescingWriterOptions = {
  * Inspired by Hazelcast's NioOutboundPipeline batching strategy.
  */
 export class CoalescingWriter {
-    private socket: WebSocket;
+    private socket: IWebSocketConnection;
     private queue: QueuedMessage[] = [];
     private urgentQueue: QueuedMessage[] = [];  // Priority queue for urgent messages
     private pendingBytes = 0;
@@ -106,7 +106,7 @@ export class CoalescingWriter {
     private pooledBuffersUsed = 0;    // Count of pooled buffer acquisitions
     private oversizedBuffers = 0;     // Count of oversized (non-pooled) buffers
 
-    constructor(socket: WebSocket, options?: Partial<CoalescingWriterOptions>) {
+    constructor(socket: IWebSocketConnection, options?: Partial<CoalescingWriterOptions>) {
         this.socket = socket;
         this.options = { ...DEFAULT_OPTIONS, ...options };
         this.bufferPool = options?.bufferPool ?? getGlobalBufferPool();
@@ -176,7 +176,7 @@ export class CoalescingWriter {
         this.state = WriterState.FLUSHING;
 
         try {
-            if (this.socket.readyState !== WebSocket.OPEN) {
+            if (this.socket.readyState !== WebSocketState.OPEN) {
                 // Socket not ready, discard messages
                 this.queue = [];
                 this.pendingBytes = 0;
@@ -269,7 +269,7 @@ export class CoalescingWriter {
      * Send a message immediately without batching.
      */
     private sendImmediate(data: Uint8Array): void {
-        if (this.socket.readyState !== WebSocket.OPEN) {
+        if (this.socket.readyState !== WebSocketState.OPEN) {
             return;
         }
 
