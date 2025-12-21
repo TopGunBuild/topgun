@@ -31,6 +31,7 @@
     "pg": "^8.11.0",
     "pino": "^10.1.0",
     "prom-client": "^15.1.0",
+    "uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.48.0",
     "ws": "^8.18.3"
   },
   "devDependencies": {
