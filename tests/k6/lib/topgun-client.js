@@ -2,7 +2,8 @@
  * TopGun WebSocket Client for k6 Load Testing
  *
  * This library provides a WebSocket client for load testing TopGun servers.
- * All messages are sent as JSON (server supports JSON fallback when MessagePack fails).
+ * Messages are sent as MessagePack binary (same format as production clients).
+ * Server responses are also MessagePack encoded.
  *
  * @see tests/e2e/json-fallback.test.ts for protocol examples
  */
@@ -18,6 +19,282 @@ export const messagesReceived = new Counter('topgun_messages_received');
 export const messagesSent = new Counter('topgun_messages_sent');
 export const errors = new Counter('topgun_errors');
 export const authSuccess = new Rate('topgun_auth_success');
+
+/**
+ * Minimal MessagePack encoder for TopGun k6 tests.
+ * Encodes to ArrayBuffer compatible with msgpackr on the server.
+ */
+class MsgPackEncoder {
+  constructor(initialSize = 4096) {
+    this.buffer = new ArrayBuffer(initialSize);
+    this.view = new DataView(this.buffer);
+    this.bytes = new Uint8Array(this.buffer);
+    this.offset = 0;
+  }
+
+  /**
+   * Ensure buffer has enough space for additional bytes
+   * @param {number} needed - Number of additional bytes needed
+   */
+  _ensureCapacity(needed) {
+    const required = this.offset + needed;
+    if (required > this.buffer.byteLength) {
+      // Double the buffer size or use required size, whichever is larger
+      const newSize = Math.max(this.buffer.byteLength * 2, required);
+      const newBuffer = new ArrayBuffer(newSize);
+      const newBytes = new Uint8Array(newBuffer);
+      newBytes.set(this.bytes.subarray(0, this.offset));
+      this.buffer = newBuffer;
+      this.view = new DataView(this.buffer);
+      this.bytes = newBytes;
+    }
+  }
+
+  /**
+   * Encode a value to MessagePack binary format
+   * @param {any} value - Value to encode
+   * @returns {Uint8Array} MessagePack encoded bytes
+   */
+  encode(value) {
+    this.offset = 0;
+    this._encode(value);
+    return this.bytes.slice(0, this.offset);
+  }
+
+  _encode(value) {
+    if (value === null || value === undefined) {
+      this._ensureCapacity(1);
+      this.bytes[this.offset++] = 0xc0; // nil
+    } else if (typeof value === 'boolean') {
+      this._ensureCapacity(1);
+      this.bytes[this.offset++] = value ? 0xc3 : 0xc2;
+    } else if (typeof value === 'number') {
+      this._encodeNumber(value);
+    } else if (typeof value === 'string') {
+      this._encodeString(value);
+    } else if (Array.isArray(value)) {
+      this._encodeArray(value);
+    } else if (value instanceof Uint8Array) {
+      this._encodeBinary(value);
+    } else if (typeof value === 'object') {
+      this._encodeMap(value);
+    }
+  }
+
+  _encodeNumber(n) {
+    if (Number.isInteger(n)) {
+      if (n >= 0 && n <= 127) {
+        // positive fixint (0x00 - 0x7f)
+        this._ensureCapacity(1);
+        this.bytes[this.offset++] = n;
+      } else if (n >= 0 && n <= 255) {
+        // uint8
+        this._ensureCapacity(2);
+        this.bytes[this.offset++] = 0xcc;
+        this.bytes[this.offset++] = n;
+      } else if (n >= 0 && n <= 65535) {
+        // uint16
+        this._ensureCapacity(3);
+        this.bytes[this.offset++] = 0xcd;
+        this.view.setUint16(this.offset, n, false);
+        this.offset += 2;
+      } else if (n >= 0 && n <= 0xffffffff) {
+        // uint32
+        this._ensureCapacity(5);
+        this.bytes[this.offset++] = 0xce;
+        this.view.setUint32(this.offset, n, false);
+        this.offset += 4;
+      } else if (n >= -32 && n < 0) {
+        // negative fixint (0xe0 - 0xff)
+        this._ensureCapacity(1);
+        this.bytes[this.offset++] = 0x100 + n;
+      } else if (n >= -128 && n < 0) {
+        // int8
+        this._ensureCapacity(2);
+        this.bytes[this.offset++] = 0xd0;
+        this.view.setInt8(this.offset, n);
+        this.offset += 1;
+      } else if (n >= -32768 && n < 0) {
+        // int16
+        this._ensureCapacity(3);
+        this.bytes[this.offset++] = 0xd1;
+        this.view.setInt16(this.offset, n, false);
+        this.offset += 2;
+      } else if (n >= -2147483648 && n <= 2147483647) {
+        // int32
+        this._ensureCapacity(5);
+        this.bytes[this.offset++] = 0xd2;
+        this.view.setInt32(this.offset, n, false);
+        this.offset += 4;
+      } else {
+        // Large integers as float64
+        this._ensureCapacity(9);
+        this.bytes[this.offset++] = 0xcb;
+        this.view.setFloat64(this.offset, n, false);
+        this.offset += 8;
+      }
+    } else {
+      // float64
+      this._ensureCapacity(9);
+      this.bytes[this.offset++] = 0xcb;
+      this.view.setFloat64(this.offset, n, false);
+      this.offset += 8;
+    }
+  }
+
+  _encodeString(s) {
+    const encoded = this._utf8Encode(s);
+    const len = encoded.length;
+
+    if (len <= 31) {
+      // fixstr (0xa0 - 0xbf)
+      this._ensureCapacity(1 + len);
+      this.bytes[this.offset++] = 0xa0 | len;
+    } else if (len <= 255) {
+      // str8
+      this._ensureCapacity(2 + len);
+      this.bytes[this.offset++] = 0xd9;
+      this.bytes[this.offset++] = len;
+    } else if (len <= 65535) {
+      // str16
+      this._ensureCapacity(3 + len);
+      this.bytes[this.offset++] = 0xda;
+      this.view.setUint16(this.offset, len, false);
+      this.offset += 2;
+    } else {
+      // str32
+      this._ensureCapacity(5 + len);
+      this.bytes[this.offset++] = 0xdb;
+      this.view.setUint32(this.offset, len, false);
+      this.offset += 4;
+    }
+
+    this.bytes.set(encoded, this.offset);
+    this.offset += len;
+  }
+
+  _encodeBinary(data) {
+    const len = data.length;
+
+    if (len <= 255) {
+      // bin8
+      this._ensureCapacity(2 + len);
+      this.bytes[this.offset++] = 0xc4;
+      this.bytes[this.offset++] = len;
+    } else if (len <= 65535) {
+      // bin16
+      this._ensureCapacity(3 + len);
+      this.bytes[this.offset++] = 0xc5;
+      this.view.setUint16(this.offset, len, false);
+      this.offset += 2;
+    } else {
+      // bin32
+      this._ensureCapacity(5 + len);
+      this.bytes[this.offset++] = 0xc6;
+      this.view.setUint32(this.offset, len, false);
+      this.offset += 4;
+    }
+
+    this.bytes.set(data, this.offset);
+    this.offset += len;
+  }
+
+  _encodeArray(arr) {
+    const len = arr.length;
+
+    if (len <= 15) {
+      // fixarray (0x90 - 0x9f)
+      this._ensureCapacity(1);
+      this.bytes[this.offset++] = 0x90 | len;
+    } else if (len <= 65535) {
+      // array16
+      this._ensureCapacity(3);
+      this.bytes[this.offset++] = 0xdc;
+      this.view.setUint16(this.offset, len, false);
+      this.offset += 2;
+    } else {
+      // array32
+      this._ensureCapacity(5);
+      this.bytes[this.offset++] = 0xdd;
+      this.view.setUint32(this.offset, len, false);
+      this.offset += 4;
+    }
+
+    for (const item of arr) {
+      this._encode(item);
+    }
+  }
+
+  _encodeMap(obj) {
+    const keys = Object.keys(obj);
+    const len = keys.length;
+
+    if (len <= 15) {
+      // fixmap (0x80 - 0x8f)
+      this._ensureCapacity(1);
+      this.bytes[this.offset++] = 0x80 | len;
+    } else if (len <= 65535) {
+      // map16
+      this._ensureCapacity(3);
+      this.bytes[this.offset++] = 0xde;
+      this.view.setUint16(this.offset, len, false);
+      this.offset += 2;
+    } else {
+      // map32
+      this._ensureCapacity(5);
+      this.bytes[this.offset++] = 0xdf;
+      this.view.setUint32(this.offset, len, false);
+      this.offset += 4;
+    }
+
+    for (const key of keys) {
+      this._encodeString(key);
+      this._encode(obj[key]);
+    }
+  }
+
+  /**
+   * Encode string to UTF-8 bytes
+   * @param {string} str - String to encode
+   * @returns {Uint8Array} UTF-8 encoded bytes
+   */
+  _utf8Encode(str) {
+    const bytes = [];
+    for (let i = 0; i < str.length; i++) {
+      let c = str.charCodeAt(i);
+      if (c < 0x80) {
+        bytes.push(c);
+      } else if (c < 0x800) {
+        bytes.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
+      } else if (c >= 0xd800 && c <= 0xdbff) {
+        // Surrogate pair (4-byte UTF-8)
+        const next = str.charCodeAt(++i);
+        const codepoint = 0x10000 + ((c - 0xd800) << 10) + (next - 0xdc00);
+        bytes.push(
+          0xf0 | (codepoint >> 18),
+          0x80 | ((codepoint >> 12) & 0x3f),
+          0x80 | ((codepoint >> 6) & 0x3f),
+          0x80 | (codepoint & 0x3f),
+        );
+      } else {
+        bytes.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+      }
+    }
+    return new Uint8Array(bytes);
+  }
+}
+
+// Singleton encoder instance (reuses buffer across calls)
+const msgPackEncoder = new MsgPackEncoder();
+
+/**
+ * Encode a JavaScript value to MessagePack binary format
+ * @param {any} value - Value to encode
+ * @returns {Uint8Array} MessagePack encoded bytes
+ */
+export function encodeMsgPack(value) {
+  return msgPackEncoder.encode(value);
+}
 
 /**
  * Minimal MessagePack decoder for TopGun server responses.
@@ -345,10 +622,24 @@ export class TopGunClient {
   }
 
   /**
-   * Send a JSON message to the server
+   * Send a MessagePack-encoded binary message to the server
    * @param {Object} message - Message object to send
    */
   send(message) {
+    const binary = encodeMsgPack(message);
+    // k6/ws requires sendBinary() for binary data, not send()
+    // sendBinary accepts ArrayBuffer
+    const buffer = new ArrayBuffer(binary.length);
+    new Uint8Array(buffer).set(binary);
+    this.socket.sendBinary(buffer);
+    messagesSent.add(1);
+  }
+
+  /**
+   * Send a JSON message to the server (fallback mode)
+   * @param {Object} message - Message object to send
+   */
+  sendJson(message) {
     const json = JSON.stringify(message);
     this.socket.send(json);
     messagesSent.add(1);
@@ -668,6 +959,7 @@ export default {
   TopGunClient,
   createMessageHandler,
   generateTestToken,
+  encodeMsgPack,
   decodeMsgPack,
   // Metrics
   connectionTime,
