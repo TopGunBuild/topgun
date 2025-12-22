@@ -4,9 +4,6 @@ import { PoolConfig } from 'pg';
 // Storage mode: 'memory' (default) or 'postgres'
 const STORAGE_MODE = process.env.STORAGE_MODE || 'memory';
 
-// WebSocket transport: 'ws' (default) or 'uwebsockets'
-const WS_TRANSPORT = (process.env.WS_TRANSPORT || 'ws') as 'ws' | 'uwebsockets';
-
 // Configuration priority: DATABASE_URL > Env Vars > Defaults
 const getDbConfig = (): PoolConfig => {
   if (process.env.DATABASE_URL) {
@@ -52,7 +49,6 @@ const server = new ServerCoordinator({
   clusterPort: parseInt(process.env.CLUSTER_PORT || '9080'),
   metricsPort: parseInt(process.env.METRICS_PORT || '9091'),
   nodeId: process.env.NODE_ID || 'server-node-1',
-  wsTransport: WS_TRANSPORT,
   storage: adapter,
   securityPolicies: [
     {
@@ -68,7 +64,7 @@ const server = new ServerCoordinator({
   ]
 });
 
-console.log(`TopGun Server running on ws://localhost:8080 (transport: ${WS_TRANSPORT})`);
+console.log('TopGun Server running on ws://localhost:8080');
 
 // Graceful Shutdown Logic
 const shutdown = async (signal: string) => {

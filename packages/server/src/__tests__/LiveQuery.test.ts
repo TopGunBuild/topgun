@@ -1,6 +1,5 @@
 import { ServerCoordinator } from '../ServerCoordinator';
 import { LWWRecord, deserialize, Predicates, serialize } from '@topgunbuild/core';
-import { WebSocketState } from '../transport';
 
 const createMockWriter = (socket: any) => ({
   write: jest.fn((message: any, _urgent?: boolean) => {
@@ -55,18 +54,9 @@ describe('Live Query Sliding Window Integration', () => {
 
     // 2. Setup Client & Subscribe (Top 2)
     const clientSocket = {
-      id: 'mock-socket-1',
-      send: jest.fn().mockReturnValue(true),
+      send: jest.fn(),
       close: jest.fn(),
-      terminate: jest.fn(),
-      readyState: WebSocketState.OPEN,
-      getBufferedAmount: jest.fn().mockReturnValue(0),
-      cork: jest.fn((cb: () => void) => cb()),
-      getRemoteAddress: jest.fn().mockReturnValue('127.0.0.1'),
-      getRequest: jest.fn(),
-      onMessage: jest.fn(),
-      onClose: jest.fn(),
-      onError: jest.fn(),
+      readyState: 1 // OPEN
     };
 
     const clientMock = {
@@ -147,18 +137,9 @@ describe('Live Query Sliding Window Integration', () => {
 
     // 2. Setup Client
     const clientSocket = {
-      id: 'mock-socket-2',
-      send: jest.fn().mockReturnValue(true),
+      send: jest.fn(),
       close: jest.fn(),
-      terminate: jest.fn(),
-      readyState: WebSocketState.OPEN,
-      getBufferedAmount: jest.fn().mockReturnValue(0),
-      cork: jest.fn((cb: () => void) => cb()),
-      getRemoteAddress: jest.fn().mockReturnValue('127.0.0.1'),
-      getRequest: jest.fn(),
-      onMessage: jest.fn(),
-      onClose: jest.fn(),
-      onError: jest.fn(),
+      readyState: 1
     };
     const clientMock = {
       id: 'client-2',

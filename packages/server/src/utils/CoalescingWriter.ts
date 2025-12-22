@@ -1,6 +1,6 @@
+import { WebSocket } from 'ws';
 import { serialize } from '@topgunbuild/core';
 import { BufferPool, getGlobalBufferPool } from '../memory';
-import { IWebSocketConnection, WebSocketState } from '../transport';
 
 export interface CoalescingWriterOptions {
     /**
@@ -63,8 +63,6 @@ export interface CoalescingWriterMetrics {
     pooledBuffersUsed: number;
     /** Count of oversized (non-pooled) buffers that were allocated directly */
     oversizedBuffers: number;
-    /** Count of sends that encountered backpressure (socket buffer full) */
-    backpressureEvents: number;
 }
 
 /**
@@ -88,7 +86,7 @@ const DEFAULT_OPTIONS: CoalescingWriterOptions = {
  * Inspired by Hazelcast's NioOutboundPipeline batching strategy.
  */
 export class CoalescingWriter {
-    private socket: IWebSocketConnection;
+    private socket: WebSocket;
     private queue: QueuedMessage[] = [];
     private urgentQueue: QueuedMessage[] = [];  // Priority queue for urgent messages
     private pendingBytes = 0;
@@ -107,9 +105,8 @@ export class CoalescingWriter {
     private timedFlushCount = 0;      // Timer-triggered flushes
     private pooledBuffersUsed = 0;    // Count of pooled buffer acquisitions
     private oversizedBuffers = 0;     // Count of oversized (non-pooled) buffers
-    private backpressureCount = 0;    // Count of sends that hit backpressure
 
-    constructor(socket: IWebSocketConnection, options?: Partial<CoalescingWriterOptions>) {
+    constructor(socket: WebSocket, options?: Partial<CoalescingWriterOptions>) {
         this.socket = socket;
         this.options = { ...DEFAULT_OPTIONS, ...options };
         this.bufferPool = options?.bufferPool ?? getGlobalBufferPool();
@@ -179,7 +176,7 @@ export class CoalescingWriter {
         this.state = WriterState.FLUSHING;
 
         try {
-            if (this.socket.readyState !== WebSocketState.OPEN) {
+            if (this.socket.readyState !== WebSocket.OPEN) {
                 // Socket not ready, discard messages
                 this.queue = [];
                 this.pendingBytes = 0;
@@ -190,20 +187,14 @@ export class CoalescingWriter {
             if (this.queue.length === 1) {
                 // Single message - send directly without batching overhead
                 const msg = this.queue[0];
-                const sent = this.socket.send(msg.data);
-                if (!sent) {
-                    this.backpressureCount++;
-                }
+                this.socket.send(msg.data);
                 this.messagesSent++;
                 this.batchesSent++;
                 this.bytesSent += msg.data.length;
             } else {
                 // Multiple messages - create a batch
                 const batch = this.createBatch(this.queue);
-                const sent = this.socket.send(batch);
-                if (!sent) {
-                    this.backpressureCount++;
-                }
+                this.socket.send(batch);
                 this.messagesSent += this.queue.length;
                 this.batchesSent++;
                 this.bytesSent += batch.length;
@@ -243,7 +234,6 @@ export class CoalescingWriter {
                 : 0,
             pooledBuffersUsed: this.pooledBuffersUsed,
             oversizedBuffers: this.oversizedBuffers,
-            backpressureEvents: this.backpressureCount,
         };
     }
 
@@ -279,15 +269,12 @@ export class CoalescingWriter {
      * Send a message immediately without batching.
      */
     private sendImmediate(data: Uint8Array): void {
-        if (this.socket.readyState !== WebSocketState.OPEN) {
+        if (this.socket.readyState !== WebSocket.OPEN) {
             return;
         }
 
         try {
-            const sent = this.socket.send(data);
-            if (!sent) {
-                this.backpressureCount++;
-            }
+            this.socket.send(data);
             this.messagesSent++;
             this.batchesSent++;
             this.bytesSent += data.length;

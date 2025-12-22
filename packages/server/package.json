@@ -1,6 +1,6 @@
 {
   "name": "@topgunbuild/server",
-  "version": "0.2.1",
+  "version": "0.2.0-alpha",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
@@ -31,7 +31,6 @@
     "pg": "^8.11.0",
     "pino": "^10.1.0",
     "prom-client": "^15.1.0",
-    "uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.48.0",
     "ws": "^8.18.3"
   },
   "devDependencies": {

@@ -33,9 +33,6 @@ export class MetricsService {
   private connectionsPending: Gauge;
   private connectionRatePerSecond: Gauge;
 
-  // Transport info
-  private transportInfo: Gauge;
-
   constructor() {
     this.registry = new Registry();
 
@@ -172,14 +169,6 @@ export class MetricsService {
       help: 'Current connection rate per second',
       registers: [this.registry],
     });
-
-    // === Transport info ===
-    this.transportInfo = new Gauge({
-      name: 'topgun_transport_info',
-      help: 'WebSocket transport type (1 = active)',
-      labelNames: ['type'],
-      registers: [this.registry],
-    });
   }
 
   public destroy() {
@@ -313,19 +302,6 @@ export class MetricsService {
    */
   public setConnectionRatePerSecond(rate: number): void {
     this.connectionRatePerSecond.set(rate);
-  }
-
-  // === Transport info methods ===
-
-  /**
-   * Set the active transport type.
-   */
-  public setTransportType(type: 'ws' | 'uwebsockets'): void {
-    // Reset all transport types
-    this.transportInfo.set({ type: 'ws' }, 0);
-    this.transportInfo.set({ type: 'uwebsockets' }, 0);
-    // Set the active one
-    this.transportInfo.set({ type }, 1);
   }
 
   public async getMetrics(): Promise<string> {
