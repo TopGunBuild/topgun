@@ -106,21 +106,24 @@ export function generateMockToken(userId, roles = ['USER']) {
 }
 
 /**
- * Get auth token - uses JWT_TOKEN env var or generates mock token
+ * Get auth token - uses JWT_TOKEN env var
  *
- * @param {number} vuId - Virtual User ID (for unique user IDs)
- * @param {string} prefix - Prefix for user ID (e.g., 'storm', 'writer')
- * @param {string[]} roles - User roles
+ * @param {number} vuId - Virtual User ID (unused, kept for API compatibility)
+ * @param {string} prefix - Prefix (unused, kept for API compatibility)
+ * @param {string[]} roles - User roles (unused, kept for API compatibility)
  * @returns {string} JWT token
+ * @throws {Error} if JWT_TOKEN is not provided
  */
 export function getAuthToken(vuId, prefix = 'k6', roles = ['USER', 'ADMIN']) {
   const token = getJwtToken();
-  if (token) {
-    return token;
+  if (!token) {
+    throw new Error(
+      'JWT_TOKEN environment variable is required.\n' +
+      'Generate token: pnpm test:k6:token\n' +
+      'Or run tests with: pnpm test:k6:smoke (auto-generates token)'
+    );
   }
-
-  // Generate mock token as fallback
-  return generateMockToken(`${prefix}-${vuId}`, roles);
+  return token;
 }
 
 /**
