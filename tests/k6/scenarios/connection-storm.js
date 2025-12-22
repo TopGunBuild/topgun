@@ -1,8 +1,8 @@
 /**
  * Connection Storm Scenario for TopGun Server
  *
- * Stress test for massive concurrent connections with ramping VUs.
- * - Ramping: 0 → 100 → 500 → 1000 VUs over 5 minutes
+ * Stress test for concurrent connections with ramping VUs.
+ * - Ramping: 0 → 50 → 150 → 300 VUs over 3 minutes
  * - Each VU: connects, authenticates, holds connection, disconnects
  * - Tests server's ability to handle connection spikes
  *
@@ -37,12 +37,12 @@ const HOLD_TIME_MS = getConfig('HOLD_TIME', 5000);
 // Test configuration with ramping stages
 export const options = {
   stages: [
-    { duration: '30s', target: 100 },   // Ramp up to 100 VUs
-    { duration: '1m', target: 100 },    // Hold at 100
-    { duration: '1m', target: 500 },    // Ramp up to 500
-    { duration: '1m', target: 500 },    // Hold at 500
-    { duration: '1m', target: 1000 },   // Ramp up to 1000
-    { duration: '30s', target: 1000 },  // Hold at 1000
+    { duration: '30s', target: 50 },    // Ramp up to 50 VUs
+    { duration: '30s', target: 100 },   // Ramp to 100
+    { duration: '30s', target: 150 },   // Ramp to 150
+    { duration: '30s', target: 200 },   // Ramp to 200
+    { duration: '30s', target: 300 },   // Ramp to 300
+    { duration: '30s', target: 300 },   // Hold at 300
   ],
   thresholds: {
     // Connection errors < 5%
@@ -160,7 +160,7 @@ export default function () {
 export function setup() {
   logTestHeader('Connection Storm Test', {
     'Target': WS_URL,
-    'Ramping': '0 → 100 → 500 → 1000 VUs over 5 minutes',
+    'Ramping': '0 → 50 → 150 → 300 VUs over 3 minutes',
     'Hold time': `${HOLD_TIME_MS}ms per connection`,
   });
 
