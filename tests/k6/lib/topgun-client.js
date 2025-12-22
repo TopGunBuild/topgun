@@ -2,13 +2,21 @@
  * TopGun WebSocket Client for k6 Load Testing
  *
  * This library provides a WebSocket client for load testing TopGun servers.
- * All messages are sent as JSON (server supports JSON fallback when MessagePack fails).
+ * Messages are sent as MessagePack binary (same format as production clients).
+ * Server responses are also MessagePack encoded.
+ *
+ * Requires k6 built with xk6-msgpack extension:
+ *   xk6 build --with github.com/tango-tango/xk6-msgpack
+ *
+ * Note: xk6-msgpack encodes all integers as int64, which msgpackr decodes as BigInt.
+ * The server's TimestampSchema uses .transform(Number) to handle this automatically.
  *
  * @see tests/e2e/json-fallback.test.ts for protocol examples
  */
 
 import { check } from 'k6';
 import { Trend, Counter, Rate } from 'k6/metrics';
+import msgpack from 'k6/x/msgpack';
 
 // Custom metrics
 export const connectionTime = new Trend('topgun_connection_time', true);
@@ -20,300 +28,23 @@ export const errors = new Counter('topgun_errors');
 export const authSuccess = new Rate('topgun_auth_success');
 
 /**
- * Minimal MessagePack decoder for TopGun server responses.
- * Supports the subset of MessagePack used by TopGun protocol.
+ * Encode a JavaScript value to MessagePack binary format
+ * Uses native Go implementation via xk6-msgpack for performance
+ * @param {any} value - Value to encode
+ * @returns {ArrayBuffer} MessagePack encoded bytes
  */
-class MsgPackDecoder {
-  constructor(buffer) {
-    // Handle both ArrayBuffer and Uint8Array
-    if (buffer instanceof ArrayBuffer) {
-      this.data = new Uint8Array(buffer);
-    } else if (buffer instanceof Uint8Array) {
-      this.data = buffer;
-    } else if (typeof buffer === 'string') {
-      // k6 may pass binary as string - convert each char to byte
-      const bytes = new Uint8Array(buffer.length);
-      for (let i = 0; i < buffer.length; i++) {
-        bytes[i] = buffer.charCodeAt(i) & 0xff;
-      }
-      this.data = bytes;
-    } else {
-      throw new Error('Unsupported buffer type');
-    }
-    this.offset = 0;
-  }
-
-  decode() {
-    if (this.offset >= this.data.length) {
-      throw new Error('Unexpected end of buffer');
-    }
-
-    const type = this.data[this.offset++];
-
-    // Positive fixint (0x00 - 0x7f)
-    if (type <= 0x7f) {
-      return type;
-    }
-
-    // Fixmap (0x80 - 0x8f)
-    if (type >= 0x80 && type <= 0x8f) {
-      return this.readMap(type - 0x80);
-    }
-
-    // Fixarray (0x90 - 0x9f)
-    if (type >= 0x90 && type <= 0x9f) {
-      return this.readArray(type - 0x90);
-    }
-
-    // Fixstr (0xa0 - 0xbf)
-    if (type >= 0xa0 && type <= 0xbf) {
-      return this.readString(type - 0xa0);
-    }
-
-    // Nil
-    if (type === 0xc0) {
-      return null;
-    }
-
-    // False
-    if (type === 0xc2) {
-      return false;
-    }
-
-    // True
-    if (type === 0xc3) {
-      return true;
-    }
-
-    // bin8
-    if (type === 0xc4) {
-      const len = this.data[this.offset++];
-      return this.readBytes(len);
-    }
-
-    // bin16
-    if (type === 0xc5) {
-      const len = this.readUint16();
-      return this.readBytes(len);
-    }
-
-    // bin32
-    if (type === 0xc6) {
-      const len = this.readUint32();
-      return this.readBytes(len);
-    }
-
-    // float32
-    if (type === 0xca) {
-      const view = new DataView(this.data.buffer, this.data.byteOffset + this.offset, 4);
-      this.offset += 4;
-      return view.getFloat32(0, false);
-    }
-
-    // float64
-    if (type === 0xcb) {
-      const view = new DataView(this.data.buffer, this.data.byteOffset + this.offset, 8);
-      this.offset += 8;
-      return view.getFloat64(0, false);
-    }
-
-    // uint8
-    if (type === 0xcc) {
-      return this.data[this.offset++];
-    }
-
-    // uint16
-    if (type === 0xcd) {
-      return this.readUint16();
-    }
-
-    // uint32
-    if (type === 0xce) {
-      return this.readUint32();
-    }
-
-    // uint64
-    if (type === 0xcf) {
-      return this.readUint64();
-    }
-
-    // int8
-    if (type === 0xd0) {
-      const val = this.data[this.offset++];
-      return val > 127 ? val - 256 : val;
-    }
-
-    // int16
-    if (type === 0xd1) {
-      const view = new DataView(this.data.buffer, this.data.byteOffset + this.offset, 2);
-      this.offset += 2;
-      return view.getInt16(0, false);
-    }
-
-    // int32
-    if (type === 0xd2) {
-      const view = new DataView(this.data.buffer, this.data.byteOffset + this.offset, 4);
-      this.offset += 4;
-      return view.getInt32(0, false);
-    }
-
-    // int64
-    if (type === 0xd3) {
-      return this.readInt64();
-    }
-
-    // str8
-    if (type === 0xd9) {
-      const len = this.data[this.offset++];
-      return this.readString(len);
-    }
-
-    // str16
-    if (type === 0xda) {
-      const len = this.readUint16();
-      return this.readString(len);
-    }
-
-    // str32
-    if (type === 0xdb) {
-      const len = this.readUint32();
-      return this.readString(len);
-    }
-
-    // array16
-    if (type === 0xdc) {
-      const len = this.readUint16();
-      return this.readArray(len);
-    }
-
-    // array32
-    if (type === 0xdd) {
-      const len = this.readUint32();
-      return this.readArray(len);
-    }
-
-    // map16
-    if (type === 0xde) {
-      const len = this.readUint16();
-      return this.readMap(len);
-    }
-
-    // map32
-    if (type === 0xdf) {
-      const len = this.readUint32();
-      return this.readMap(len);
-    }
-
-    // Negative fixint (0xe0 - 0xff)
-    if (type >= 0xe0) {
-      return type - 256;
-    }
-
-    throw new Error(`Unknown MessagePack type: 0x${type.toString(16)}`);
-  }
-
-  readUint16() {
-    const val = (this.data[this.offset] << 8) | this.data[this.offset + 1];
-    this.offset += 2;
-    return val;
-  }
-
-  readUint32() {
-    const val =
-      (this.data[this.offset] << 24) |
-      (this.data[this.offset + 1] << 16) |
-      (this.data[this.offset + 2] << 8) |
-      this.data[this.offset + 3];
-    this.offset += 4;
-    return val >>> 0; // Convert to unsigned
-  }
-
-  readUint64() {
-    // JavaScript can't handle full 64-bit integers, but we can handle timestamps
-    const high = this.readUint32();
-    const low = this.readUint32();
-    // For timestamps that fit in 53 bits (safe integer range)
-    return high * 0x100000000 + low;
-  }
-
-  readInt64() {
-    const high = this.readUint32();
-    const low = this.readUint32();
-    // Check sign bit
-    if (high & 0x80000000) {
-      // Negative number - this is a simplification
-      return -(~high * 0x100000000 + ~low + 1);
-    }
-    return high * 0x100000000 + low;
-  }
-
-  readBytes(len) {
-    const bytes = this.data.slice(this.offset, this.offset + len);
-    this.offset += len;
-    return bytes;
-  }
-
-  readString(len) {
-    const bytes = this.data.slice(this.offset, this.offset + len);
-    this.offset += len;
-
-    // UTF-8 decode
-    let str = '';
-    for (let i = 0; i < bytes.length; ) {
-      const byte = bytes[i];
-      if (byte < 0x80) {
-        str += String.fromCharCode(byte);
-        i++;
-      } else if (byte < 0xe0) {
-        str += String.fromCharCode(((byte & 0x1f) << 6) | (bytes[i + 1] & 0x3f));
-        i += 2;
-      } else if (byte < 0xf0) {
-        str += String.fromCharCode(
-          ((byte & 0x0f) << 12) | ((bytes[i + 1] & 0x3f) << 6) | (bytes[i + 2] & 0x3f),
-        );
-        i += 3;
-      } else {
-        // 4-byte UTF-8 (surrogate pair)
-        const codepoint =
-          ((byte & 0x07) << 18) |
-          ((bytes[i + 1] & 0x3f) << 12) |
-          ((bytes[i + 2] & 0x3f) << 6) |
-          (bytes[i + 3] & 0x3f);
-        const adjusted = codepoint - 0x10000;
-        str += String.fromCharCode(0xd800 + (adjusted >> 10), 0xdc00 + (adjusted & 0x3ff));
-        i += 4;
-      }
-    }
-    return str;
-  }
-
-  readArray(len) {
-    const arr = [];
-    for (let i = 0; i < len; i++) {
-      arr.push(this.decode());
-    }
-    return arr;
-  }
-
-  readMap(len) {
-    const obj = {};
-    for (let i = 0; i < len; i++) {
-      const key = this.decode();
-      const value = this.decode();
-      obj[key] = value;
-    }
-    return obj;
-  }
+export function encodeMsgPack(value) {
+  return msgpack.pack(value);
 }
 
 /**
  * Decode MessagePack binary data
+ * Uses native Go implementation via xk6-msgpack for performance
  * @param {ArrayBuffer|Uint8Array|string} buffer - MessagePack encoded data
  * @returns {any} Decoded value
  */
 export function decodeMsgPack(buffer) {
-  const decoder = new MsgPackDecoder(buffer);
-  return decoder.decode();
+  return msgpack.unpack(buffer);
 }
 
 /**
@@ -345,10 +76,21 @@ export class TopGunClient {
   }
 
   /**
-   * Send a JSON message to the server
+   * Send a MessagePack-encoded binary message to the server
    * @param {Object} message - Message object to send
    */
   send(message) {
+    // msgpack.pack() returns ArrayBuffer directly (native Go encoder)
+    const buffer = encodeMsgPack(message);
+    this.socket.sendBinary(buffer.buffer || buffer);
+    messagesSent.add(1);
+  }
+
+  /**
+   * Send a JSON message to the server (fallback mode)
+   * @param {Object} message - Message object to send
+   */
+  sendJson(message) {
     const json = JSON.stringify(message);
     this.socket.send(json);
     messagesSent.add(1);
@@ -668,6 +410,7 @@ export default {
   TopGunClient,
   createMessageHandler,
   generateTestToken,
+  encodeMsgPack,
   decodeMsgPack,
   // Metrics
   connectionTime,

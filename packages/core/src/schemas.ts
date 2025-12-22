@@ -18,8 +18,8 @@ export type WriteConcernValue = z.infer<typeof WriteConcernSchema>;
 // --- Basic Types ---
 
 export const TimestampSchema = z.object({
-  millis: z.number(),
-  counter: z.number(),
+  millis: z.union([z.number(), z.bigint()]).transform(Number),
+  counter: z.union([z.number(), z.bigint()]).transform(Number),
   nodeId: z.string(),
 });
 
