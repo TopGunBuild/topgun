@@ -35,6 +35,9 @@ examples/**/*.d.ts
 # Keep package-level config files
 !packages/**/jest.config.js
 
+# Keep k6 load testing scripts (plain JS, not TypeScript compiled)
+!tests/k6/**/*.js
+
 # Keep example config files (source only, not compiled)
 !examples/**/postcss.config.js
 !examples/**/tailwind.config.js
@@ -49,8 +52,8 @@ coverage/
 *.lcov
 .nyc_output/
 
-# Benchmark results (machine-specific, regenerate with pnpm benchmark:*)
-tests/benchmark/results/
+# k6 benchmark results (machine-specific)
+tests/k6/results/
 
 # V8 profiling output (machine-specific, regenerate with profile scripts)
 profiles/
