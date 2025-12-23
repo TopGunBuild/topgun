@@ -188,6 +188,259 @@ export interface ClusterEvents {
 }
 
 // ============================================
+// Migration State Machine (Task 03)
+// ============================================
+
+export enum PartitionState {
+  STABLE = 'STABLE', // Normal operation
+  MIGRATING = 'MIGRATING', // Data being transferred
+  SYNC = 'SYNC', // Verifying consistency
+  FAILED = 'FAILED', // Migration failed, needs retry
+}
+
+export interface PartitionMigration {
+  partitionId: number;
+  state: PartitionState;
+  sourceNode: string;
+  targetNode: string;
+  startTime: number;
+  bytesTransferred: number;
+  totalBytes: number;
+  retryCount: number;
+}
+
+export interface MigrationConfig {
+  /** Partitions per batch (default: 10) */
+  batchSize: number;
+  /** Delay between batches in ms (default: 5000) */
+  batchIntervalMs: number;
+  /** Bytes per chunk (default: 64KB) */
+  transferChunkSize: number;
+  /** Retries per partition (default: 3) */
+  maxRetries: number;
+  /** Sync phase timeout in ms (default: 30000) */
+  syncTimeoutMs: number;
+  /** Concurrent transfers (default: 4) */
+  parallelTransfers: number;
+}
+
+export const DEFAULT_MIGRATION_CONFIG: MigrationConfig = {
+  batchSize: 10,
+  batchIntervalMs: 5000,
+  transferChunkSize: 65536, // 64KB
+  maxRetries: 3,
+  syncTimeoutMs: 30000,
+  parallelTransfers: 4,
+};
+
+export interface MigrationStatus {
+  inProgress: boolean;
+  active: PartitionMigration[];
+  queued: number;
+  completed: number;
+  failed: number;
+  estimatedTimeRemainingMs: number;
+}
+
+export interface MigrationMetrics {
+  migrationsStarted: number;
+  migrationsCompleted: number;
+  migrationsFailed: number;
+  chunksTransferred: number;
+  bytesTransferred: number;
+  activeMigrations: number;
+  queuedMigrations: number;
+}
+
+// ============================================
+// Migration Protocol Messages (Task 03)
+// ============================================
+
+export interface MigrationStartMessage {
+  type: 'MIGRATION_START';
+  payload: {
+    partitionId: number;
+    sourceNode: string;
+    estimatedSize: number;
+  };
+}
+
+export interface MigrationChunkMessage {
+  type: 'MIGRATION_CHUNK';
+  payload: {
+    partitionId: number;
+    chunkIndex: number;
+    totalChunks: number;
+    data: Uint8Array;
+    checksum: string;
+  };
+}
+
+export interface MigrationChunkAckMessage {
+  type: 'MIGRATION_CHUNK_ACK';
+  payload: {
+    partitionId: number;
+    chunkIndex: number;
+    success: boolean;
+  };
+}
+
+export interface MigrationCompleteMessage {
+  type: 'MIGRATION_COMPLETE';
+  payload: {
+    partitionId: number;
+    totalRecords: number;
+    checksum: string;
+  };
+}
+
+export interface MigrationVerifyMessage {
+  type: 'MIGRATION_VERIFY';
+  payload: {
+    partitionId: number;
+    success: boolean;
+    checksumMatch: boolean;
+  };
+}
+
+export type MigrationMessage =
+  | MigrationStartMessage
+  | MigrationChunkMessage
+  | MigrationChunkAckMessage
+  | MigrationCompleteMessage
+  | MigrationVerifyMessage;
+
+// ============================================
+// Consistency Levels (Task 04)
+// ============================================
+
+export enum ConsistencyLevel {
+  /** Wait for all replicas (owner + all backups) */
+  STRONG = 'STRONG',
+  /** Wait for majority (owner + N/2 backups) */
+  QUORUM = 'QUORUM',
+  /** Acknowledge after owner write only, background replication */
+  EVENTUAL = 'EVENTUAL',
+}
+
+export interface WriteOptions {
+  consistency?: ConsistencyLevel;
+  /** Replication timeout in ms */
+  timeout?: number;
+}
+
+export interface ReadOptions {
+  consistency?: ConsistencyLevel;
+  /** Read from backup if owner unavailable */
+  allowStale?: boolean;
+  /** Max acceptable lag in ms */
+  maxStaleness?: number;
+}
+
+// ============================================
+// Replication Configuration (Task 04)
+// ============================================
+
+export interface ReplicationConfig {
+  defaultConsistency: ConsistencyLevel;
+  /** Max queued operations (default: 10000) */
+  queueSizeLimit: number;
+  /** Operations per batch (default: 100) */
+  batchSize: number;
+  /** Batch flush interval in ms (default: 50) */
+  batchIntervalMs: number;
+  /** Ack timeout in ms (default: 5000) */
+  ackTimeoutMs: number;
+  /** Retries before marking node unhealthy (default: 3) */
+  maxRetries: number;
+}
+
+export const DEFAULT_REPLICATION_CONFIG: ReplicationConfig = {
+  defaultConsistency: ConsistencyLevel.EVENTUAL,
+  queueSizeLimit: 10000,
+  batchSize: 100,
+  batchIntervalMs: 50,
+  ackTimeoutMs: 5000,
+  maxRetries: 3,
+};
+
+export interface ReplicationTask {
+  opId: string;
+  operation: unknown; // Will be typed more specifically in server
+  consistency: ConsistencyLevel;
+  timestamp: number;
+  retryCount: number;
+}
+
+export interface ReplicationLag {
+  /** Current lag in ms */
+  current: number;
+  /** Average lag */
+  avg: number;
+  /** Maximum observed lag */
+  max: number;
+  /** 99th percentile lag */
+  percentile99: number;
+}
+
+export interface ReplicationHealth {
+  healthy: boolean;
+  unhealthyNodes: string[];
+  laggyNodes: string[];
+  avgLagMs: number;
+}
+
+export interface ReplicationResult {
+  success: boolean;
+  ackedBy: string[];
+}
+
+// ============================================
+// Replication Protocol Messages (Task 04)
+// ============================================
+
+export interface ReplicationMessage {
+  type: 'REPLICATION';
+  payload: {
+    opId: string;
+    operation: unknown;
+    consistency: ConsistencyLevel;
+  };
+}
+
+export interface ReplicationBatchMessage {
+  type: 'REPLICATION_BATCH';
+  payload: {
+    operations: unknown[];
+    opIds: string[];
+  };
+}
+
+export interface ReplicationAckMessage {
+  type: 'REPLICATION_ACK';
+  payload: {
+    opId: string;
+    success: boolean;
+    timestamp: number;
+  };
+}
+
+export interface ReplicationBatchAckMessage {
+  type: 'REPLICATION_BATCH_ACK';
+  payload: {
+    opIds: string[];
+    success: boolean;
+    timestamp: number;
+  };
+}
+
+export type ReplicationProtocolMessage =
+  | ReplicationMessage
+  | ReplicationBatchMessage
+  | ReplicationAckMessage
+  | ReplicationBatchAckMessage;
+
+// ============================================
 // Constants
 // ============================================
 

@@ -1,13 +1,17 @@
 import { EventEmitter } from 'events';
 import { ClusterManager } from './ClusterManager';
+import { MigrationManager } from './MigrationManager';
 import {
   hashString,
   PartitionMap,
   PartitionInfo,
   NodeInfo,
   PartitionChange,
+  MigrationConfig,
+  MigrationStatus,
   PARTITION_COUNT,
   DEFAULT_BACKUP_COUNT,
+  DEFAULT_MIGRATION_CONFIG,
 } from '@topgunbuild/core';
 import { logger } from '../utils/logger';
 
@@ -18,7 +22,20 @@ export interface PartitionDistribution {
 
 export interface PartitionServiceEvents {
   'rebalanced': (map: PartitionMap, changes: PartitionChange[]) => void;
+  'partitionMoved': (info: { partitionId: number; previousOwner: string; newOwner: string; version: number }) => void;
 }
+
+export interface PartitionServiceConfig {
+  /** Enable gradual rebalancing (default: false for backward compatibility) */
+  gradualRebalancing: boolean;
+  /** Migration configuration */
+  migration: Partial<MigrationConfig>;
+}
+
+export const DEFAULT_PARTITION_SERVICE_CONFIG: PartitionServiceConfig = {
+  gradualRebalancing: false,
+  migration: DEFAULT_MIGRATION_CONFIG,
+};
 
 export class PartitionService extends EventEmitter {
   private cluster: ClusterManager;
@@ -31,14 +48,54 @@ export class PartitionService extends EventEmitter {
   private mapVersion: number = 0;
   private lastRebalanceTime: number = 0;
 
-  constructor(cluster: ClusterManager) {
+  // Phase 4 Task 03: Gradual rebalancing
+  private config: PartitionServiceConfig;
+  private migrationManager: MigrationManager | null = null;
+
+  constructor(cluster: ClusterManager, config: Partial<PartitionServiceConfig> = {}) {
     super();
     this.cluster = cluster;
-    this.cluster.on('memberJoined', (nodeId: string) => this.rebalance('JOIN', nodeId));
-    this.cluster.on('memberLeft', (nodeId: string) => this.rebalance('LEAVE', nodeId));
+    this.config = {
+      ...DEFAULT_PARTITION_SERVICE_CONFIG,
+      ...config,
+    };
 
-    // Initial rebalance
+    // Initialize migration manager if gradual rebalancing is enabled
+    if (this.config.gradualRebalancing) {
+      this.migrationManager = new MigrationManager(
+        cluster,
+        this,
+        this.config.migration
+      );
+
+      // Forward migration events
+      this.migrationManager.on('migrationComplete', (partitionId: number) => {
+        logger.info({ partitionId }, 'Migration completed, updating ownership');
+      });
+
+      this.migrationManager.on('migrationFailed', (partitionId: number, error: Error) => {
+        logger.error({ partitionId, error: error.message }, 'Migration failed');
+      });
+    }
+
+    this.cluster.on('memberJoined', (nodeId: string) => this.onMembershipChange('JOIN', nodeId));
+    this.cluster.on('memberLeft', (nodeId: string) => this.onMembershipChange('LEAVE', nodeId));
+
+    // Initial rebalance (always immediate on startup)
     this.rebalance('REBALANCE');
+  }
+
+  /**
+   * Handle membership change
+   */
+  private onMembershipChange(reason: 'JOIN' | 'LEAVE', nodeId: string): void {
+    if (this.config.gradualRebalancing && this.migrationManager) {
+      // Use gradual rebalancing
+      this.rebalanceGradual(reason, nodeId);
+    } else {
+      // Use immediate rebalancing (original behavior)
+      this.rebalance(reason, nodeId);
+    }
   }
 
   public getPartitionId(key: string): number {
@@ -202,6 +259,146 @@ export class PartitionService extends EventEmitter {
 
       // Emit event for ServerCoordinator to broadcast to clients
       this.emit('rebalanced', this.getPartitionMap(), changes);
+    }
+  }
+
+  // ============================================
+  // Phase 4 Task 03: Gradual Rebalancing
+  // ============================================
+
+  /**
+   * Perform gradual rebalancing using MigrationManager
+   */
+  private rebalanceGradual(reason: 'JOIN' | 'LEAVE', triggerNodeId: string): void {
+    if (!this.migrationManager) {
+      // Fall back to immediate rebalancing
+      this.rebalance(reason, triggerNodeId);
+      return;
+    }
+
+    // Store old distribution
+    const oldDistribution = new Map(this.partitions);
+
+    // Calculate new distribution
+    let allMembers = this.cluster.getMembers().sort();
+    if (allMembers.length === 0) {
+      allMembers = [this.cluster.config.nodeId];
+    }
+
+    const newDistribution = new Map<number, PartitionDistribution>();
+
+    for (let i = 0; i < this.PARTITION_COUNT; i++) {
+      const ownerIndex = i % allMembers.length;
+      const owner = allMembers[ownerIndex];
+
+      const backups: string[] = [];
+      if (allMembers.length > 1) {
+        for (let b = 1; b <= this.BACKUP_COUNT; b++) {
+          const backupIndex = (ownerIndex + b) % allMembers.length;
+          backups.push(allMembers[backupIndex]);
+        }
+      }
+
+      newDistribution.set(i, { owner, backups });
+    }
+
+    logger.info({ memberCount: allMembers.length, reason, triggerNodeId }, 'Planning gradual rebalance');
+
+    // Plan migrations (MigrationManager will handle gradual transfer)
+    this.migrationManager.planMigration(oldDistribution, newDistribution);
+
+    // Update partition map immediately for routing purposes
+    // Actual data migration happens in background
+    for (const [partitionId, dist] of newDistribution) {
+      this.partitions.set(partitionId, dist);
+    }
+
+    this.mapVersion++;
+    this.lastRebalanceTime = Date.now();
+
+    // Emit event for clients
+    const changes: PartitionChange[] = [];
+    for (const [partitionId, newDist] of newDistribution) {
+      const oldDist = oldDistribution.get(partitionId);
+      if (oldDist && oldDist.owner !== newDist.owner) {
+        changes.push({
+          partitionId,
+          previousOwner: oldDist.owner,
+          newOwner: newDist.owner,
+          reason,
+        });
+      }
+    }
+
+    this.emit('rebalanced', this.getPartitionMap(), changes);
+  }
+
+  /**
+   * Set partition owner (called after migration completes)
+   */
+  public setOwner(partitionId: number, nodeId: string): void {
+    const partition = this.partitions.get(partitionId);
+    if (!partition) return;
+
+    const previousOwner = partition.owner;
+    if (previousOwner === nodeId) return; // No change
+
+    partition.owner = nodeId;
+    this.mapVersion++;
+
+    logger.info({ partitionId, previousOwner, newOwner: nodeId, version: this.mapVersion }, 'Partition owner updated');
+
+    this.emit('partitionMoved', {
+      partitionId,
+      previousOwner,
+      newOwner: nodeId,
+      version: this.mapVersion,
+    });
+  }
+
+  /**
+   * Get backups for a partition
+   */
+  public getBackups(partitionId: number): string[] {
+    const dist = this.partitions.get(partitionId);
+    return dist?.backups ?? [];
+  }
+
+  /**
+   * Get migration status
+   */
+  public getMigrationStatus(): MigrationStatus | null {
+    return this.migrationManager?.getStatus() ?? null;
+  }
+
+  /**
+   * Check if partition is currently migrating
+   */
+  public isMigrating(partitionId: number): boolean {
+    return this.migrationManager?.isActive(partitionId) ?? false;
+  }
+
+  /**
+   * Check if any partition is currently migrating
+   */
+  public isRebalancing(): boolean {
+    const status = this.getMigrationStatus();
+    return status?.inProgress ?? false;
+  }
+
+  /**
+   * Get MigrationManager for configuration
+   */
+  public getMigrationManager(): MigrationManager | null {
+    return this.migrationManager;
+  }
+
+  /**
+   * Cancel all migrations
+   */
+  public async cancelMigrations(): Promise<void> {
+    if (this.migrationManager) {
+      await this.migrationManager.cancelAll();
     }
   }
 }
