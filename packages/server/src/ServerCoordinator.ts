@@ -387,6 +387,12 @@ export class ServerCoordinator {
                 tls: config.clusterTls
             });
             this.partitionService = new PartitionService(this.cluster);
+
+            // Phase 4: Listen for partition map changes and broadcast to clients
+            this.partitionService.on('rebalanced', (partitionMap, changes) => {
+                this.broadcastPartitionMap(partitionMap);
+            });
+
             this.lockManager = new LockManager();
             this.lockManager.on('lockGranted', (evt) => this.handleLockGranted(evt));
 
@@ -1293,6 +1299,29 @@ export class ServerCoordinator {
                 break;
             }
 
+            // ============ Phase 4: Partition Map Request Handler ============
+
+            case 'PARTITION_MAP_REQUEST': {
+                // Client is requesting the current partition map
+                // This is used for cluster-aware routing
+                const clientVersion = message.payload?.currentVersion ?? 0;
+                const currentMap = this.partitionService.getPartitionMap();
+
+                // Only send if client has stale version or no version
+                if (clientVersion < currentMap.version) {
+                    client.writer.write({
+                        type: 'PARTITION_MAP',
+                        payload: currentMap
+                    });
+                    logger.debug({
+                        clientId: client.id,
+                        clientVersion,
+                        serverVersion: currentMap.version
+                    }, 'Sent partition map to client');
+                }
+                break;
+            }
+
             // ============ ORMap Sync Message Handlers ============
 
             case 'ORMAP_SYNC_INIT': {
@@ -1538,6 +1567,32 @@ export class ServerCoordinator {
             // This assumes client is "alive" at this moment.
             client.lastActiveHlc = this.hlc.now();
         }
+    }
+
+    // ============ Phase 4: Partition Map Broadcast ============
+
+    /**
+     * Broadcast partition map to all connected and authenticated clients.
+     * Called when partition topology changes (node join/leave/failover).
+     */
+    private broadcastPartitionMap(partitionMap: any): void {
+        const message = {
+            type: 'PARTITION_MAP',
+            payload: partitionMap
+        };
+
+        let broadcastCount = 0;
+        for (const client of this.clients.values()) {
+            if (client.isAuthenticated && client.socket.readyState === WebSocket.OPEN) {
+                client.writer.write(message);
+                broadcastCount++;
+            }
+        }
+
+        logger.info({
+            version: partitionMap.version,
+            clientCount: broadcastCount
+        }, 'Broadcast partition map to clients');
     }
 
     private broadcast(message: any, excludeClientId?: string) {

@@ -11,6 +11,9 @@ import { SyncStateMachine } from './SyncStateMachine';
 import { BackpressureError } from './errors/BackpressureError';
 import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 
+// Cluster imports (Phase 4)
+import { ConnectionPool, PartitionRouter, ClusterClient } from './cluster';
+
 // Type imports
 import type { IStorageAdapter, OpLogEntry } from './IStorageAdapter';
 import type { LWWRecord, PredicateNode } from '@topgunbuild/core';
@@ -31,6 +34,16 @@ export { SyncEngine, TopGunClient, TopGun, QueryHandle, LWWMap, Predicates, Topi
 export { SyncState, VALID_TRANSITIONS, isValidTransition, SyncStateMachine };
 export { BackpressureError, DEFAULT_BACKPRESSURE_CONFIG };
 export { logger } from './utils/logger';
+
+// Cluster exports (Phase 4)
+export { ConnectionPool, PartitionRouter, ClusterClient };
+export type {
+  ConnectionPoolEvents,
+  RoutingResult,
+  PartitionRouterEvents,
+  ClusterClientEvents,
+  ClusterRoutingMode,
+} from './cluster';
 
 // Type exports
 export type {
