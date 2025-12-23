@@ -1,25 +1,26 @@
 /**
- * TopGun Throughput Benchmark
+ * TopGun HIGH-LOAD Stress Test
  *
- * Primary benchmark for measuring TopGun server performance.
- * Determines maximum sustainable throughput by ramping up load
- * until latency degrades or errors appear.
+ * Designed to find the actual limits of TopGun server.
+ * Uses aggressive parameters to saturate server capacity.
  *
- * Measures:
- * - Maximum throughput (ops/sec)
- * - Latency distribution (p50, p95, p99)
- * - Error rate under load
+ * Key changes from throughput-test:
+ * - More VUs (up to 500)
+ * - Shorter interval (10ms instead of 50ms = 5x more ops/sec)
+ * - Larger batches (10 instead of 5)
+ * - Theoretical max: 500 VU × 10 batch × 100 batches/sec = 500,000 ops/sec
  *
  * Run:
- *   k6 run tests/k6/scenarios/throughput-test.js -e JWT_TOKEN=<token>
+ *   1. Start server: pnpm start:server
+ *   2. Run test: pnpm test:k6:stress
  *
- * Or with pnpm:
- *   pnpm test:k6:throughput
+ * Or with custom parameters:
+ *   MAX_VUS=1000 BATCH_SIZE=20 INTERVAL_MS=5 pnpm test:k6:stress
  */
 
 import ws from 'k6/ws';
 import { check } from 'k6';
-import { Counter, Trend, Rate } from 'k6/metrics';
+import { Counter, Trend, Rate, Gauge } from 'k6/metrics';
 import {
   TopGunClient,
   createMessageHandler,
@@ -33,54 +34,61 @@ import {
   getResultsPath,
 } from '../lib/config.js';
 
-// Configuration
+// Aggressive configuration for stress testing
 const WS_URL = getWsUrl();
-const BATCH_SIZE = getConfig('BATCH_SIZE', 10);      // 10 ops per batch for efficiency
-const MAX_VUS = getConfig('MAX_VUS', 200);           // 200 VUs max for stable throughput
-const KEY_POOL_SIZE = getConfig('KEY_POOL_SIZE', 100); // Reuse keys to avoid memory growth
+const BATCH_SIZE = getConfig('BATCH_SIZE', 10);        // 10 ops per batch (was 5)
+const INTERVAL_MS = getConfig('INTERVAL_MS', 10);      // 10ms = 100 batches/sec (was 50ms)
+const MAX_VUS = getConfig('MAX_VUS', 500);             // Up to 500 VUs (was 300)
+const PAYLOAD_SIZE = getConfig('PAYLOAD_SIZE', 128);   // Smaller payload for speed
 
-// Ramping stages - optimized for ~20K ops/sec stable throughput
+// Stress test - ramp up to find breaking point
 export const options = {
   scenarios: {
-    throughput_ramp: {
+    stress: {
       executor: 'ramping-vus',
-      startVUs: 10,
+      startVUs: 50,
       stages: [
-        { duration: '20s', target: 50 },              // Warm up
-        { duration: '20s', target: 100 },             // Increase
-        { duration: '20s', target: 150 },             // High load
-        { duration: '30s', target: MAX_VUS },         // Peak - sustain longer
-        { duration: '20s', target: MAX_VUS },         // Sustain peak
-        { duration: '10s', target: 50 },              // Cool down
+        { duration: '10s', target: 100 },   // Warm up
+        { duration: '10s', target: 200 },   // Increase
+        { duration: '10s', target: 300 },   // High load
+        { duration: '10s', target: 400 },   // Very high
+        { duration: '20s', target: MAX_VUS }, // Maximum stress
+        { duration: '10s', target: MAX_VUS }, // Sustain peak
+        { duration: '10s', target: 100 },   // Cool down
       ],
-      gracefulRampDown: '10s',
+      gracefulRampDown: '5s',
     },
   },
   thresholds: {
-    write_latency: ['p(99)<500'],  // Allow higher latency to find limits
-    topgun_auth_success: ['rate>0.95'],
+    // Relaxed thresholds for stress testing - we want to find limits
+    write_latency: ['p(95)<5000'],  // Allow high latency under stress
+    error_rate: ['rate<0.3'],       // Allow up to 30% errors
   },
 };
 
 // Metrics
 const writeLatency = new Trend('write_latency', true);
-const writeOpsTotal = new Counter('write_ops_total');
-const writeOpsAcked = new Counter('write_ops_acked');
-const writeErrorRate = new Rate('write_error_rate');
+const opsSent = new Counter('ops_sent');
+const opsAcked = new Counter('ops_acked');
+const errorRate = new Rate('error_rate');
+const activeVUs = new Gauge('active_vus');
+
+// Pre-generate payload template
+const PAYLOAD_DATA = 'x'.repeat(PAYLOAD_SIZE);
 
 function generatePayload(vuId, opNum) {
   return {
     vuId,
     opNum,
-    timestamp: Date.now(),
-    data: `throughput-test-${Math.random().toString(36).substring(7)}`,
+    ts: Date.now(),
+    d: PAYLOAD_DATA,
   };
 }
 
 export default function () {
   const vuId = __VU;
   const iterationId = __ITER;
-  const nodeId = `k6-throughput-vu${vuId}-iter${iterationId}`;
+  const nodeId = `k6-stress-vu${vuId}-iter${iterationId}`;
 
   let authenticated = false;
   let client = null;
@@ -88,12 +96,14 @@ export default function () {
   let pendingOps = new Map();
   const sessionStart = Date.now();
 
+  activeVUs.add(1);
+
   const res = ws.connect(WS_URL, {}, function (socket) {
     client = new TopGunClient(socket, nodeId);
 
     const handleMessage = createMessageHandler(client, {
       onAuthRequired: () => {
-        const token = getAuthToken(vuId, 'k6-throughput', ['USER', 'ADMIN']);
+        const token = getAuthToken(vuId, 'k6-stress', ['USER', 'ADMIN']);
         client.authenticate(token);
       },
 
@@ -105,6 +115,7 @@ export default function () {
 
       onAuthError: () => {
         errors.add(1);
+        errorRate.add(1);
         socket.close();
       },
 
@@ -114,9 +125,9 @@ export default function () {
           const sendTime = pendingOps.get(lastId);
           const latency = Date.now() - sendTime;
           writeLatency.add(latency);
-          writeOpsAcked.add(BATCH_SIZE);
+          opsAcked.add(BATCH_SIZE);
           for (let i = 0; i < BATCH_SIZE; i++) {
-            writeErrorRate.add(0);
+            errorRate.add(0);
           }
           pendingOps.delete(lastId);
         }
@@ -127,61 +138,62 @@ export default function () {
 
     socket.on('error', () => {
       errors.add(1);
-      writeErrorRate.add(1);
+      errorRate.add(1);
     });
 
     socket.on('close', () => {
+      activeVUs.add(-1);
       if (authenticated) {
         pendingOps.forEach(() => {
           for (let i = 0; i < BATCH_SIZE; i++) {
-            writeErrorRate.add(1);
+            errorRate.add(1);
           }
         });
       }
     });
 
     function scheduleWrites() {
-      // Send as fast as possible to find limits
-      const intervalMs = 50; // 20 batches/sec per VU = 100 ops/sec per VU
-
       function doWrite() {
         if (!authenticated) return;
 
+        const now = Date.now();
+
+        // Send batch of operations
+        // Reuse keys to avoid unbounded memory growth (realistic update scenario)
         const operations = [];
         for (let i = 0; i < BATCH_SIZE; i++) {
           opCounter++;
           operations.push({
-            mapName: `k6-throughput-${vuId % 20}`,
-            key: `key-${vuId}-${opCounter % KEY_POOL_SIZE}`,  // Reuse keys
+            mapName: `k6-stress-${vuId % 50}`,  // Distribute across 50 maps
+            key: `key-${vuId}-${opCounter % 100}`,  // Reuse 100 keys per VU
             value: generatePayload(vuId, opCounter),
           });
         }
 
-        const sendTime = Date.now();
+        const sendTime = now;
         const lastOpId = client.putBatch(operations);
         pendingOps.set(lastOpId, sendTime);
-        writeOpsTotal.add(BATCH_SIZE);
+        opsSent.add(BATCH_SIZE);
 
-        // Cleanup stale pending ops
-        const now = Date.now();
-        const timeout = 5000;
+        // Cleanup stale pending ops (timeout 3s for stress test)
+        const timeout = 3000;
         pendingOps.forEach((time, id) => {
           if (now - time > timeout) {
             for (let i = 0; i < BATCH_SIZE; i++) {
-              writeErrorRate.add(1);
+              errorRate.add(1);
             }
             pendingOps.delete(id);
           }
         });
 
-        socket.setTimeout(doWrite, intervalMs);
+        socket.setTimeout(doWrite, INTERVAL_MS);
       }
 
       doWrite();
     }
 
-    // Keep session alive for test duration
-    const maxSessionTime = 120 * 1000; // 2 minutes max
+    // Session duration matches test (~80s)
+    const maxSessionTime = 80 * 1000;
     socket.setTimeout(() => {
       authenticated = false;
       socket.setTimeout(() => socket.close(), 2000);
@@ -194,23 +206,24 @@ export default function () {
 }
 
 export function setup() {
-  const theoreticalMax = MAX_VUS * BATCH_SIZE * 20; // 20 batches/sec (50ms interval)
+  const theoreticalMax = MAX_VUS * BATCH_SIZE * (1000 / INTERVAL_MS);
 
   console.log('');
   console.log('╔══════════════════════════════════════════════════════════════════╗');
-  console.log('║                 TOPGUN THROUGHPUT BENCHMARK                      ║');
+  console.log('║              TOPGUN HIGH-LOAD STRESS TEST                        ║');
   console.log('╠══════════════════════════════════════════════════════════════════╣');
-  console.log('║  Measuring maximum sustainable throughput under increasing load  ║');
+  console.log('║  Finding the limits of TopGun server                             ║');
+  console.log('║  WARNING: This test will push the server to its breaking point   ║');
   console.log('╚══════════════════════════════════════════════════════════════════╝');
   console.log('');
   console.log(`  URL:            ${WS_URL}`);
   console.log(`  Max VUs:        ${MAX_VUS}`);
   console.log(`  Batch size:     ${BATCH_SIZE}`);
-  console.log(`  Key pool:       ${KEY_POOL_SIZE} keys/VU (reused)`);
-  console.log(`  Interval:       50ms (20 batches/sec/VU)`);
+  console.log(`  Interval:       ${INTERVAL_MS}ms (${1000/INTERVAL_MS} batches/sec/VU)`);
+  console.log(`  Payload:        ${PAYLOAD_SIZE} bytes`);
   console.log(`  Theoretical max: ${(theoreticalMax/1000).toFixed(0)}K ops/sec`);
   console.log('');
-  console.log(`Stages: 10 → 50 → 100 → 150 → ${MAX_VUS} → ${MAX_VUS} → 50 VUs`);
+  console.log('Stages: 50 → 100 → 200 → 300 → 400 → 500 → 500 → 100 VUs');
   console.log('');
 
   return { startTime: Date.now(), theoreticalMax };
@@ -223,69 +236,71 @@ export function teardown(data) {
 }
 
 export function handleSummary(data) {
-  const totalOps = data.metrics.write_ops_total?.values?.count || 0;
-  const ackedOps = data.metrics.write_ops_acked?.values?.count || 0;
-  const testDuration = 120; // ~2 minutes of ramping
-  const avgThroughput = ackedOps / testDuration;
+  const sent = data.metrics.ops_sent?.values?.count || 0;
+  const acked = data.metrics.ops_acked?.values?.count || 0;
+  const testDuration = 80; // ~80 seconds
+  const throughput = acked / testDuration;
 
   const p50 = data.metrics.write_latency?.values?.med || 0;
   const p95 = data.metrics.write_latency?.values['p(95)'] || 0;
   const p99 = data.metrics.write_latency?.values['p(99)'] || 0;
   const maxLatency = data.metrics.write_latency?.values?.max || 0;
-  const errorRate = data.metrics.write_error_rate?.values?.rate || 0;
+  const errRate = data.metrics.error_rate?.values?.rate || 0;
+
+  // Calculate efficiency vs theoretical max
+  const theoreticalMax = MAX_VUS * BATCH_SIZE * (1000 / INTERVAL_MS) * testDuration;
+  const efficiency = (acked / theoreticalMax * 100).toFixed(1);
 
   console.log('');
   console.log('╔══════════════════════════════════════════════════════════════════╗');
-  console.log('║                   THROUGHPUT BENCHMARK RESULTS                   ║');
+  console.log('║                TOPGUN STRESS TEST RESULTS                        ║');
   console.log('╠══════════════════════════════════════════════════════════════════╣');
   console.log('║  THROUGHPUT                                                      ║');
-  console.log(`║    Total Operations Sent:      ${totalOps.toLocaleString().padStart(12)}                  ║`);
-  console.log(`║    Total Operations Acked:     ${ackedOps.toLocaleString().padStart(12)}                  ║`);
-  console.log(`║    Average Throughput:         ${avgThroughput.toFixed(0).padStart(12)} ops/sec          ║`);
+  console.log(`║    Operations Sent:            ${sent.toLocaleString().padStart(12)}                  ║`);
+  console.log(`║    Operations Acked:           ${acked.toLocaleString().padStart(12)}                  ║`);
+  console.log(`║    THROUGHPUT:                 ${throughput.toFixed(0).padStart(12)} ops/sec          ║`);
+  console.log(`║    Efficiency:                 ${efficiency.padStart(12)}%                  ║`);
   console.log('╠══════════════════════════════════════════════════════════════════╣');
-  console.log('║  LATENCY (time to Early ACK, before in-memory write)             ║');
+  console.log('║  LATENCY                                                         ║');
   console.log(`║    p50:                        ${p50.toFixed(1).padStart(12)} ms                ║`);
   console.log(`║    p95:                        ${p95.toFixed(1).padStart(12)} ms                ║`);
   console.log(`║    p99:                        ${p99.toFixed(1).padStart(12)} ms                ║`);
   console.log(`║    max:                        ${maxLatency.toFixed(1).padStart(12)} ms                ║`);
   console.log('╠══════════════════════════════════════════════════════════════════╣');
   console.log('║  RELIABILITY                                                     ║');
-  console.log(`║    Error Rate:                 ${(errorRate * 100).toFixed(3).padStart(12)}%               ║`);
-  console.log(`║    Success Rate:               ${((1 - errorRate) * 100).toFixed(3).padStart(12)}%               ║`);
+  console.log(`║    Error Rate:                 ${(errRate * 100).toFixed(2).padStart(12)}%               ║`);
+  console.log(`║    Loss Rate:                  ${((1 - acked/sent) * 100).toFixed(2).padStart(12)}%               ║`);
   console.log('╚══════════════════════════════════════════════════════════════════╝');
 
-  // Performance assessment
+  // Comparison with Pure WS
   console.log('');
   console.log('╔══════════════════════════════════════════════════════════════════╗');
-  console.log('║                    PERFORMANCE ASSESSMENT                        ║');
+  console.log('║                    COMPARISON GUIDE                              ║');
   console.log('╠══════════════════════════════════════════════════════════════════╣');
-
-  const throughputTarget = avgThroughput >= 15000;
-  const latencyTarget = p99 < 100;
-  const errorTarget = errorRate < 0.01;
-
-  console.log(`║  Throughput ≥15K ops/sec:      ${throughputTarget ? '✅ PASS' : '❌ FAIL'}  (${avgThroughput.toFixed(0)} ops/sec)`.padEnd(69) + '║');
-  console.log(`║  p99 Latency <100ms:           ${latencyTarget ? '✅ PASS' : '❌ FAIL'}  (${p99.toFixed(1)}ms)`.padEnd(69) + '║');
-  console.log(`║  Error Rate <1%:               ${errorTarget ? '✅ PASS' : '❌ FAIL'}  (${(errorRate * 100).toFixed(3)}%)`.padEnd(69) + '║');
-
-  const allPass = throughputTarget && latencyTarget && errorTarget;
-  console.log('╠══════════════════════════════════════════════════════════════════╣');
-  console.log(`║  Overall:                      ${allPass ? '✅ ALL TARGETS MET' : '⚠️  TARGETS NOT MET'}`.padEnd(69) + '║');
+  console.log('║  Compare with pure WebSocket baseline:                           ║');
+  console.log('║    pnpm test:k6:pure-ws:stress      (ws library limit)           ║');
+  console.log('║    pnpm test:k6:pure-uws:stress     (uWebSockets.js limit)       ║');
+  console.log('║                                                                  ║');
+  console.log('║  TopGun overhead = (Pure WS - TopGun) / Pure WS × 100%           ║');
   console.log('╚══════════════════════════════════════════════════════════════════╝');
 
   const summary = {
     timestamp: new Date().toISOString(),
-    scenario: 'throughput-benchmark',
+    scenario: 'topgun-stress-test',
     version: __ENV.VERSION || 'current',
     config: {
+      maxVUs: MAX_VUS,
       batchSize: BATCH_SIZE,
+      intervalMs: INTERVAL_MS,
+      payloadSize: PAYLOAD_SIZE,
       wsUrl: WS_URL,
     },
     results: {
       throughput: {
-        totalOpsSent: totalOps,
-        totalOpsAcked: ackedOps,
-        avgOpsPerSec: avgThroughput,
+        opsSent: sent,
+        opsAcked: acked,
+        avgOpsPerSec: throughput,
+        efficiency: parseFloat(efficiency),
       },
       latency: {
         p50: p50,
@@ -294,21 +309,15 @@ export function handleSummary(data) {
         max: maxLatency,
       },
       reliability: {
-        errorRate: errorRate,
-        successRate: 1 - errorRate,
+        errorRate: errRate,
+        lossRate: 1 - acked/sent,
       },
-    },
-    targets: {
-      throughput: { target: 15000, actual: avgThroughput, pass: throughputTarget },
-      latencyP99: { target: 100, actual: p99, pass: latencyTarget },
-      errorRate: { target: 0.01, actual: errorRate, pass: errorTarget },
-      allPass: allPass,
     },
   };
 
   return {
     stdout: textSummary(data, { indent: ' ', enableColors: true }),
-    [getResultsPath('throughput-benchmark.json')]: JSON.stringify(summary, null, 2),
+    [getResultsPath('topgun-stress-test.json')]: JSON.stringify(summary, null, 2),
   };
 }
 

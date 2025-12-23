@@ -22,6 +22,7 @@
     "test:k6:throughput": "JWT_TOKEN=$(node scripts/generate-k6-token.js) ./bin/k6 run tests/k6/scenarios/throughput-test.js",
     "test:k6:write": "JWT_TOKEN=$(node scripts/generate-k6-token.js) ./bin/k6 run tests/k6/scenarios/write-heavy.js",
     "test:k6:connections": "JWT_TOKEN=$(node scripts/generate-k6-token.js) ./bin/k6 run tests/k6/scenarios/connection-storm.js",
+    "test:k6:stress": "JWT_TOKEN=$(node scripts/generate-k6-token.js) ./bin/k6 run tests/k6/scenarios/stress-test.js",
     "test:k6:ab": "./scripts/perf-ab-test.sh",
     "test:k6:ab:quick": "./scripts/perf-ab-test.sh --quick",
     "start:perf-server": "pnpm exec ts-node -r tsconfig-paths/register --project ./examples/tsconfig.json ./scripts/perf-ab-server.ts",
@@ -43,6 +44,7 @@
     "hdr-histogram-js": "^3.0.1",
     "jest": "^29.7.0",
     "jsonwebtoken": "^9.0.2",
+    "msgpackr": "^1.11.8",
     "pg": "^8.16.3",
     "pg-mem": "^3.0.5",
     "ts-jest": "^29.4.5",
@@ -50,7 +52,8 @@
     "tsconfig-paths": "^4.2.0",
     "tsup": "^8.5.1",
     "typescript": "^5.0.0",
-    "ws": "^8.18.3"
+    "ws": "^8.18.3",
+    "zod": "^4.1.13"
   },
   "author": "",
   "license": "BSL-1.1"
