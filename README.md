@@ -136,22 +136,6 @@ pnpm --filter @topgunbuild/core bench
 
 See [tests/benchmark/README.md](tests/benchmark/README.md) for details.
 
-## License
-
-**Business Source License 1.1** (BSL)
-
-You can use TopGun freely for:
-- Internal applications
-- Your product's backend (when TopGun is not the product you're selling)
-- Consulting and professional services
-
-You cannot:
-- Offer TopGun as a managed database service or DBaaS
-
-After 4 years from each release, the code converts to **Apache 2.0**.
-
-See [LICENSE](LICENSE) for full terms.
-
 ## TopGun v1
 
 Looking for the original gun.js TypeScript port? See the [`legacy-v1`](https://github.com/TopGunBuild/topgun/tree/legacy-v1) branch (unmaintained).
