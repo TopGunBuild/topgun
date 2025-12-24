@@ -3,7 +3,7 @@ import { createServer as createHttpsServer, Server as HttpsServer, ServerOptions
 import { readFileSync } from 'fs';
 import * as net from 'net';
 import { WebSocketServer, WebSocket } from 'ws';
-import { HLC, LWWMap, ORMap, MerkleTree, serialize, deserialize, PermissionPolicy, Principal, PermissionType, Timestamp, LWWRecord, ORMapRecord, MessageSchema, WriteConcern, WriteConcernValue } from '@topgunbuild/core';
+import { HLC, LWWMap, ORMap, MerkleTree, serialize, deserialize, PermissionPolicy, Principal, PermissionType, Timestamp, LWWRecord, ORMapRecord, MessageSchema, WriteConcern, WriteConcernValue, ConsistencyLevel, ReplicationConfig, DEFAULT_REPLICATION_CONFIG } from '@topgunbuild/core';
 import { IServerStorage, StorageValue, ORMapValue, ORMapTombstones } from './storage/IServerStorage';
 import { IInterceptor, ServerOp, OpContext, ConnectionContext } from './interceptor/IInterceptor';
 import * as jwt from 'jsonwebtoken';
@@ -37,6 +37,7 @@ import {
 } from './memory';
 import { TaskletScheduler } from './tasklet';
 import { WriteAckManager } from './ack/WriteAckManager';
+import { ReplicationPipeline } from './cluster/ReplicationPipeline';
 
 interface ClientConnection {
     id: string;
@@ -135,6 +136,14 @@ export interface ServerCoordinatorConfig {
     // === Write Concern Options (Phase 5.01) ===
     /** Default timeout for Write Concern acknowledgments in ms (default: 5000) */
     writeAckTimeout?: number;
+
+    // === Replication Options (Phase 4) ===
+    /** Enable replication to backup nodes (default: true when cluster has peers) */
+    replicationEnabled?: boolean;
+    /** Default consistency level for replication (default: EVENTUAL) */
+    defaultConsistency?: ConsistencyLevel;
+    /** Replication configuration */
+    replicationConfig?: Partial<ReplicationConfig>;
 }
 
 export class ServerCoordinator {
@@ -156,6 +165,7 @@ export class ServerCoordinator {
 
     private cluster!: ClusterManager;
     private partitionService!: PartitionService;
+    private replicationPipeline?: ReplicationPipeline;
     private lockManager!: LockManager;
     private topicManager!: TopicManager;
     private securityManager: SecurityManager;
@@ -388,6 +398,23 @@ export class ServerCoordinator {
             });
             this.partitionService = new PartitionService(this.cluster);
 
+            // Phase 4: Create ReplicationPipeline (Hazelcast pattern: always create, runtime check)
+            // ReplicationPipeline checks cluster size at runtime - no replication for single node
+            if (config.replicationEnabled !== false) {
+                this.replicationPipeline = new ReplicationPipeline(
+                    this.cluster,
+                    this.partitionService,
+                    {
+                        ...DEFAULT_REPLICATION_CONFIG,
+                        defaultConsistency: config.defaultConsistency ?? ConsistencyLevel.EVENTUAL,
+                        ...config.replicationConfig,
+                    }
+                );
+                // Setup operation applier for incoming replications
+                this.replicationPipeline.setOperationApplier(this.applyReplicatedOperation.bind(this));
+                logger.info({ nodeId: config.nodeId }, 'ReplicationPipeline initialized');
+            }
+
             // Phase 4: Listen for partition map changes and broadcast to clients
             this.partitionService.on('rebalanced', (partitionMap, changes) => {
                 this.broadcastPartitionMap(partitionMap);
@@ -565,12 +592,17 @@ export class ServerCoordinator {
             logger.info('Worker pool shutdown complete.');
         }
 
-        // 4. Stop Cluster
+        // 4. Close ReplicationPipeline
+        if (this.replicationPipeline) {
+            this.replicationPipeline.close();
+        }
+
+        // 5. Stop Cluster
         if (this.cluster) {
             this.cluster.stop();
         }
 
-        // 5. Close Storage
+        // 6. Close Storage
         if (this.storage) {
             logger.info('Closing storage connection...');
             try {
@@ -2219,6 +2251,36 @@ export class ServerCoordinator {
     }
 
     /**
+     * Apply replicated operation from another node (callback for ReplicationPipeline)
+     * This is called when we receive a replicated operation as a backup node
+     */
+    private async applyReplicatedOperation(
+        operation: unknown,
+        opId: string,
+        sourceNode: string
+    ): Promise<boolean> {
+        try {
+            const op = operation as any;
+            logger.debug({ sourceNode, opId, mapName: op.mapName, key: op.key }, 'Applying replicated operation');
+
+            // Apply operation to local map (as backup)
+            const { eventPayload } = this.applyOpToMap(op);
+
+            // Broadcast event to local clients subscribed to this data
+            this.broadcast({
+                type: 'SERVER_EVENT',
+                payload: eventPayload,
+                timestamp: this.hlc.now()
+            });
+
+            return true;
+        } catch (error) {
+            logger.error({ sourceNode, opId, error }, 'Failed to apply replicated operation');
+            return false;
+        }
+    }
+
+    /**
      * Build OpContext for interceptors.
      */
     private buildOpContext(clientId: string, fromCluster: boolean): OpContext {
@@ -2325,17 +2387,29 @@ export class ServerCoordinator {
         // 3. Apply operation to map (shared logic)
         const { eventPayload } = this.applyOpToMap(op);
 
-        // 4. Broadcast EVENT to other clients
+        // 4. Replicate to backup nodes (Hazelcast pattern: after local merge)
+        // Note: Only replicate if we are the owner and operation is not from cluster
+        // Incoming cluster ops are already replicated by the owner
+        if (this.replicationPipeline && !fromCluster) {
+            const opId = op.id || `${op.mapName}:${op.key}:${Date.now()}`;
+            // Fire-and-forget for EVENTUAL, or await for STRONG/QUORUM
+            this.replicationPipeline.replicate(op, opId, op.key).catch(err => {
+                logger.warn({ opId, key: op.key, err }, 'Replication failed (non-fatal)');
+            });
+        }
+
+        // 5. Broadcast EVENT to other clients
         this.broadcast({
             type: 'SERVER_EVENT',
             payload: eventPayload,
             timestamp: this.hlc.now()
         }, originalSenderId);
 
-        // 5. Broadcast to cluster
+        // 6. Broadcast to cluster (for subscribers on other nodes)
+        // Note: This is different from replication - this notifies subscribers
         this.broadcastToCluster(eventPayload);
 
-        // 6. Run onAfterOp interceptors
+        // 7. Run onAfterOp interceptors
         this.runAfterInterceptors(op, context);
     }
 
@@ -2482,13 +2556,22 @@ export class ServerCoordinator {
         // 3. Apply operation to map (shared logic)
         const { eventPayload } = this.applyOpToMap(op);
 
-        // 4. Collect event for batched broadcast (instead of immediate broadcast)
+        // 4. Replicate to backup nodes (Hazelcast pattern: after local merge)
+        if (this.replicationPipeline) {
+            const opId = op.id || `${op.mapName}:${op.key}:${Date.now()}`;
+            // Fire-and-forget for batch operations (EVENTUAL by default)
+            this.replicationPipeline.replicate(op, opId, op.key).catch(err => {
+                logger.warn({ opId, key: op.key, err }, 'Batch replication failed (non-fatal)');
+            });
+        }
+
+        // 5. Collect event for batched broadcast (instead of immediate broadcast)
         batchedEvents.push(eventPayload);
 
-        // 5. Broadcast to cluster
+        // 6. Broadcast to cluster (for subscribers)
         this.broadcastToCluster(eventPayload);
 
-        // 6. Run onAfterOp interceptors
+        // 7. Run onAfterOp interceptors
         this.runAfterInterceptors(op, context);
     }
 
