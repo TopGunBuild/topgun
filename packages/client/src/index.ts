@@ -46,6 +46,7 @@ export type {
   PartitionRouterEvents,
   ClusterClientEvents,
   ClusterRoutingMode,
+  RoutingMetrics,
 } from './cluster';
 
 // Connection provider exports (Phase 4.5)

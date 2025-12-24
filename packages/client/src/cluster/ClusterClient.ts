@@ -31,6 +31,20 @@ export interface ClusterClientEvents {
   'error': (error: Error) => void;
 }
 
+/**
+ * Routing metrics for monitoring smart routing effectiveness.
+ */
+export interface RoutingMetrics {
+  /** Operations routed directly to partition owner */
+  directRoutes: number;
+  /** Operations falling back to any node (owner unavailable) */
+  fallbackRoutes: number;
+  /** Operations when partition map is missing/stale */
+  partitionMisses: number;
+  /** Total routing decisions made */
+  totalRoutes: number;
+}
+
 export type ClusterRoutingMode = 'direct' | 'forward';
 
 /**
@@ -44,6 +58,12 @@ export class ClusterClient implements IConnectionProvider {
   private readonly config: ClusterClientConfig;
   private initialized: boolean = false;
   private routingActive: boolean = false;
+  private readonly routingMetrics: RoutingMetrics = {
+    directRoutes: 0,
+    fallbackRoutes: 0,
+    partitionMisses: 0,
+    totalRoutes: 0,
+  };
 
   constructor(config: ClusterClientConfig) {
     this.config = config;
@@ -121,7 +141,7 @@ export class ClusterClient implements IConnectionProvider {
 
   /**
    * Get connection for a specific key (IConnectionProvider interface).
-   * Routes to partition owner based on key hash.
+   * Routes to partition owner based on key hash when smart routing is enabled.
    * @throws Error if not connected
    */
   public getConnection(key: string): WebSocket {
@@ -129,23 +149,67 @@ export class ClusterClient implements IConnectionProvider {
       throw new Error('ClusterClient not connected');
     }
 
-    if (this.config.routingMode === 'direct' && this.routingActive) {
-      // Use partition-aware routing
-      const routing = this.partitionRouter.route(key);
-      if (routing) {
-        const socket = this.connectionPool.getConnection(routing.nodeId);
-        if (socket) {
-          return socket;
-        }
-      }
+    this.routingMetrics.totalRoutes++;
+
+    // If not in direct routing mode or routing not active, use fallback
+    if (this.config.routingMode !== 'direct' || !this.routingActive) {
+      this.routingMetrics.fallbackRoutes++;
+      return this.getFallbackConnection();
     }
 
-    // Fallback to any healthy connection
+    // Try to route to partition owner
+    const routing = this.partitionRouter.route(key);
+
+    // No partition map available
+    if (!routing) {
+      this.routingMetrics.partitionMisses++;
+      logger.debug({ key }, 'No partition map available, using fallback');
+      return this.getFallbackConnection();
+    }
+
+    const owner = routing.nodeId;
+
+    // Check if owner is connected
+    if (!this.connectionPool.isNodeConnected(owner)) {
+      this.routingMetrics.fallbackRoutes++;
+      logger.debug({ key, owner }, 'Partition owner not connected, using fallback');
+      // Request partition map refresh since owner might have changed
+      this.requestPartitionMapRefresh();
+      return this.getFallbackConnection();
+    }
+
+    // Get connection to owner
+    const socket = this.connectionPool.getConnection(owner);
+    if (!socket) {
+      this.routingMetrics.fallbackRoutes++;
+      logger.debug({ key, owner }, 'Could not get connection to owner, using fallback');
+      return this.getFallbackConnection();
+    }
+
+    this.routingMetrics.directRoutes++;
+    return socket;
+  }
+
+  /**
+   * Get fallback connection when owner is unavailable.
+   * @throws Error if no connection available
+   */
+  private getFallbackConnection(): WebSocket {
     const conn = this.connectionPool.getAnyHealthyConnection();
     if (!conn?.socket) {
       throw new Error('No healthy connection available');
     }
     return conn.socket;
+  }
+
+  /**
+   * Request a partition map refresh in the background.
+   * Called when routing to an unknown/disconnected owner.
+   */
+  private requestPartitionMapRefresh(): void {
+    this.partitionRouter.refreshPartitionMap().catch(err => {
+      logger.error({ err }, 'Failed to refresh partition map');
+    });
   }
 
   /**
@@ -313,6 +377,24 @@ export class ClusterClient implements IConnectionProvider {
    */
   public getRouterStats(): ReturnType<PartitionRouter['getStats']> {
     return this.partitionRouter.getStats();
+  }
+
+  /**
+   * Get routing metrics for monitoring smart routing effectiveness.
+   */
+  public getRoutingMetrics(): RoutingMetrics {
+    return { ...this.routingMetrics };
+  }
+
+  /**
+   * Reset routing metrics counters.
+   * Useful for monitoring intervals.
+   */
+  public resetRoutingMetrics(): void {
+    this.routingMetrics.directRoutes = 0;
+    this.routingMetrics.fallbackRoutes = 0;
+    this.routingMetrics.partitionMisses = 0;
+    this.routingMetrics.totalRoutes = 0;
   }
 
   /**

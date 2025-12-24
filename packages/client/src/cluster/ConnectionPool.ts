@@ -296,6 +296,14 @@ export class ConnectionPool {
   }
 
   /**
+   * Check if connected to a specific node.
+   * Alias for isNodeConnected() for IConnectionProvider compatibility.
+   */
+  public isConnected(nodeId: string): boolean {
+    return this.isNodeConnected(nodeId);
+  }
+
+  /**
    * Start health monitoring
    */
   public startHealthCheck(): void {
