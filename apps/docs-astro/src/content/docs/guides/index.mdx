@@ -4,7 +4,7 @@ description: Practical, step-by-step guides to help you implement common pattern
 order: 10
 ---
 
-import { ChevronRight, Shield, Database, Server, Radio, Timer, Activity, Lock, KeyRound, Zap, CheckCircle } from 'lucide-react';
+import { ChevronRight, Shield, Database, Server, Radio, Timer, Activity, Lock, KeyRound, Zap, CheckCircle, Network } from 'lucide-react';
 import { GuideCard } from '../../../components/docs/GuideCard';
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
@@ -60,6 +60,12 @@ Practical, step-by-step guides to help you implement common patterns and feature
     icon={Server}
     title="Deployment"
     description="How to deploy and scale the TopGun server cluster using Docker and Kubernetes."
+  />
+  <GuideCard
+    href="/docs/guides/cluster-client"
+    icon={Network}
+    title="Client Cluster Mode"
+    description="Connect to a multi-node cluster with automatic failover and partition-aware routing."
   />
   <GuideCard
     href="/docs/guides/observability"

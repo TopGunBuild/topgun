@@ -5,7 +5,7 @@ order: 21
 ---
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
-import { ChevronRight, Code2, Zap, Database, MessageSquare, Lock } from 'lucide-react';
+import { ChevronRight, Code2, Zap, Database, MessageSquare, Lock, Network, Shield } from 'lucide-react';
 import { ApiParam, ApiConstructor } from '../../../components/docs/ApiMethod';
 
 export const startCode = `await client.start();`;
@@ -74,7 +74,12 @@ It handles connection management, offline synchronization, and provides access t
     <ApiParam
       name="serverUrl"
       type="string"
-      description="WebSocket URL of the TopGun server (e.g., ws://localhost:8765)."
+      description="WebSocket URL of the TopGun server (e.g., ws://localhost:8765). Required for single-server mode."
+    />
+    <ApiParam
+      name="cluster?"
+      type="ClusterConfig"
+      description="Cluster configuration for multi-node deployments. When provided, serverUrl is ignored."
     />
     <ApiParam
       name="storage"
@@ -85,6 +90,90 @@ It handles connection management, offline synchronization, and provides access t
       name="nodeId?"
       type="string"
       description="Optional unique ID for this client. Auto-generated if omitted."
+    />
+  </ApiConstructor>
+</div>
+
+### Single-Server Mode
+
+For simple deployments with a single TopGun server:
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={`import { TopGunClient, IDBAdapter } from '@topgunbuild/client';
+
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8765',
+  storage: new IDBAdapter(),
+});`} />
+</div>
+
+### Cluster Mode
+
+For production deployments with multiple nodes, use the `cluster` configuration:
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={`import { TopGunClient, IDBAdapter } from '@topgunbuild/client';
+
+const client = new TopGunClient({
+  cluster: {
+    seeds: [
+      'ws://node1.example.com:8765',
+      'ws://node2.example.com:8765',
+      'ws://node3.example.com:8765',
+    ],
+    smartRouting: true,        // Enable partition-aware routing
+    connectionsPerNode: 2,     // Connection pool size per node
+    connectionTimeoutMs: 5000, // Connection timeout
+  },
+  storage: new IDBAdapter(),
+});`} />
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 my-6 not-prose">
+  <div className="flex items-center gap-2 mb-2">
+    <Network className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+    <h4 className="font-semibold text-blue-800 dark:text-blue-300">Smart Routing</h4>
+  </div>
+  <span className="text-blue-700 dark:text-blue-400">
+    When <code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">smartRouting</code> is enabled,
+    the client automatically routes operations to the correct partition owner node. This reduces network hops and improves latency.
+    The client maintains a partition map and updates it automatically when the cluster topology changes.
+  </span>
+</div>
+
+#### ClusterConfig Options
+
+<div className="not-prose">
+  <ApiConstructor signature="interface ClusterConfig">
+    <ApiParam
+      name="seeds"
+      type="string[]"
+      description="List of seed node WebSocket URLs. The client connects to these nodes to discover the cluster."
+    />
+    <ApiParam
+      name="smartRouting?"
+      type="boolean"
+      description="Enable partition-aware routing. Operations are sent directly to partition owners. Default: true."
+    />
+    <ApiParam
+      name="connectionsPerNode?"
+      type="number"
+      description="Number of connections to maintain per node. Default: 1."
+    />
+    <ApiParam
+      name="partitionMapRefreshMs?"
+      type="number"
+      description="Interval for refreshing the partition map. Default: 30000 (30 seconds)."
+    />
+    <ApiParam
+      name="connectionTimeoutMs?"
+      type="number"
+      description="Connection timeout in milliseconds. Default: 10000."
+    />
+    <ApiParam
+      name="retryAttempts?"
+      type="number"
+      description="Number of retry attempts on connection failure. Default: 3."
     />
   </ApiConstructor>
 </div>
@@ -237,6 +326,44 @@ All subscription methods return an unsubscribe function. Call it to stop receivi
     <strong>Important:</strong> The <code className="bg-yellow-100 dark:bg-yellow-800/50 px-1 rounded">onChange()</code> callback receives no arguments—it only signals that something changed.
     To see what changed, re-read the data inside the callback. For filtered results with automatic updates, use <code className="bg-yellow-100 dark:bg-yellow-800/50 px-1 rounded">client.query()</code> instead.
   </p>
+</div>
+
+## Cluster Failover
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Shield className="w-5 h-5 text-green-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">In cluster mode, the client automatically handles node failures with built-in circuit breaker logic.</span>
+</div>
+
+When a node becomes unavailable:
+
+1. **Circuit breaker opens** after consecutive failures (default: 5)
+2. **Traffic reroutes** to healthy nodes automatically
+3. **Circuit resets** after a timeout period (default: 30 seconds)
+4. **Partition map updates** when cluster topology changes
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={`// Monitor connection state
+client.onConnectionChange((state) => {
+  if (state === 'connected') {
+    console.log('Connected to cluster');
+  } else if (state === 'reconnecting') {
+    console.log('Reconnecting to cluster...');
+  }
+});
+
+// Operations continue working during failover
+// The client automatically retries on healthy nodes
+await users.set('key', { data: 'value' });`} />
+</div>
+
+<div className="bg-green-50 dark:bg-green-900/20 border border-green-100 dark:border-green-800 rounded-xl p-6 my-6 not-prose">
+  <h4 className="font-semibold text-green-800 dark:text-green-300 mb-2">Automatic Recovery</h4>
+  <span className="text-green-700 dark:text-green-400">
+    The client maintains connections to multiple cluster nodes. If one node fails,
+    operations are automatically rerouted to other available nodes. When the failed node
+    recovers, the client will start using it again after the circuit breaker resets.
+  </span>
 </div>
 
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
