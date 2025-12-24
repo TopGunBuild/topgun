@@ -1,5 +1,5 @@
 import { SyncEngine } from './SyncEngine';
-import { TopGunClient } from './TopGunClient';
+import { TopGunClient, DEFAULT_CLUSTER_CONFIG } from './TopGunClient';
 import { TopGun } from './TopGun';
 export * from './adapters/IDBAdapter';
 export * from './adapters/EncryptedStorageAdapter';
@@ -32,7 +32,7 @@ import type {
 // Value exports
 export { SyncEngine, TopGunClient, TopGun, QueryHandle, LWWMap, Predicates, TopicHandle };
 export { SyncState, VALID_TRANSITIONS, isValidTransition, SyncStateMachine };
-export { BackpressureError, DEFAULT_BACKPRESSURE_CONFIG };
+export { BackpressureError, DEFAULT_BACKPRESSURE_CONFIG, DEFAULT_CLUSTER_CONFIG };
 export { logger } from './utils/logger';
 
 // Cluster exports (Phase 4)
@@ -44,6 +44,9 @@ export type {
   ClusterClientEvents,
   ClusterRoutingMode,
 } from './cluster';
+
+// TopGunClient cluster config types (Phase 4.5)
+export type { TopGunClusterConfig, TopGunClientConfig } from './TopGunClient';
 
 // Type exports
 export type {
