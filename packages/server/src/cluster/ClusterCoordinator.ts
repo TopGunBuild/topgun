@@ -394,14 +394,14 @@ export class ClusterCoordinator extends EventEmitter {
   /**
    * Send message to a specific node
    */
-  public send(nodeId: string, message: any): void {
+  public send(nodeId: string, message: unknown): void {
     this.clusterManager.sendToNode(nodeId, message);
   }
 
   /**
    * Broadcast message to all nodes
    */
-  public broadcast(message: any): void {
+  public broadcast(message: unknown): void {
     for (const nodeId of this.clusterManager.getMembers()) {
       if (!this.clusterManager.isLocal(nodeId)) {
         this.clusterManager.sendToNode(nodeId, message);
@@ -526,7 +526,7 @@ export class ClusterCoordinator extends EventEmitter {
       this.emit('partition:rebalanced', map, changes);
     });
 
-    this.partitionService.on('partitionMoved', (info: any) => {
+    this.partitionService.on('partitionMoved', (info: { partitionId: number; previousOwner: string; newOwner: string; version: number }) => {
       this.emit('partition:moved', info);
     });
 

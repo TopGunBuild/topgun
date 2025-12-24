@@ -9,6 +9,7 @@
  * - Backpressure handling with queue limits
  * - Retry logic for failed replications
  * - Integration with LagTracker for monitoring
+ * - Pluggable operation applier for storage integration
  */
 
 import { EventEmitter } from 'events';
@@ -25,6 +26,19 @@ import { ClusterManager, ClusterMessage } from './ClusterManager';
 import { PartitionService } from './PartitionService';
 import { LagTracker } from './LagTracker';
 import { logger } from '../utils/logger';
+
+/**
+ * Callback to apply replicated operation to local storage
+ * @param operation - The operation to apply
+ * @param opId - Unique operation ID
+ * @param sourceNode - Node that originated the operation
+ * @returns Promise<boolean> - true if applied successfully
+ */
+export type OperationApplier = (
+  operation: unknown,
+  opId: string,
+  sourceNode: string
+) => Promise<boolean>;
 
 export interface PendingAck {
   opId: string;
@@ -70,6 +84,8 @@ export class ReplicationPipeline extends EventEmitter {
   private pendingAcks: Map<string, PendingAck> = new Map();
   // Queue processor timer
   private queueProcessorTimer: ReturnType<typeof setInterval> | null = null;
+  // Operation applier callback (injected by ServerCoordinator)
+  private operationApplier: OperationApplier | null = null;
 
   constructor(
     clusterManager: ClusterManager,
@@ -88,6 +104,18 @@ export class ReplicationPipeline extends EventEmitter {
 
     this.setupMessageHandlers();
     this.startQueueProcessor();
+  }
+
+  // ============================================
+  // Configuration
+  // ============================================
+
+  /**
+   * Set the operation applier callback
+   * This is called when replicated operations are received from other nodes
+   */
+  public setOperationApplier(applier: OperationApplier): void {
+    this.operationApplier = applier;
   }
 
   // ============================================
@@ -182,19 +210,23 @@ export class ReplicationPipeline extends EventEmitter {
     const quorumSize = Math.floor(targetNodes.length / 2) + 1;
 
     return new Promise((resolve, reject) => {
+      // Create pending ack with resolve that captures snapshot of ackedNodes
+      const ackedNodes = new Set<string>();
       const pending: PendingAck = {
         opId,
         consistency: ConsistencyLevel.QUORUM,
         targetNodes,
-        ackedNodes: new Set(),
+        ackedNodes,
         resolve: () => {
-          const ackedBy = [this.nodeId, ...pending.ackedNodes];
+          // Snapshot ackedNodes at resolve time to avoid race condition
+          const ackedSnapshot = Array.from(ackedNodes);
+          const ackedBy = [this.nodeId, ...ackedSnapshot];
           resolve({ success: true, ackedBy });
         },
         reject: (error) => reject(error),
         timeout: setTimeout(() => {
           this.pendingAcks.delete(opId);
-          const ackedList = Array.from(pending.ackedNodes);
+          const ackedList = Array.from(ackedNodes);
           reject(new ReplicationTimeoutError(opId, targetNodes, ackedList));
         }, timeout ?? this.config.ackTimeoutMs),
         startTime: Date.now(),
@@ -383,15 +415,26 @@ export class ReplicationPipeline extends EventEmitter {
   /**
    * Handle incoming replication request (on backup node)
    */
-  private handleReplication(
+  private async handleReplication(
     sourceNode: string,
     payload: { opId: string; operation: unknown; consistency: ConsistencyLevel }
-  ): void {
+  ): Promise<void> {
     const { opId, operation, consistency } = payload;
 
-    // TODO: Apply operation to local storage
-    // This would be injected as a callback similar to MigrationManager
     logger.debug({ sourceNode, opId, consistency }, 'Received replication');
+
+    // Apply operation to local storage
+    let success = true;
+    if (this.operationApplier) {
+      try {
+        success = await this.operationApplier(operation, opId, sourceNode);
+      } catch (error) {
+        logger.error({ sourceNode, opId, error }, 'Failed to apply replicated operation');
+        success = false;
+      }
+    } else {
+      logger.warn({ sourceNode, opId }, 'No operation applier set, operation not applied');
+    }
 
     // For STRONG/QUORUM, send acknowledgment
     if (consistency === ConsistencyLevel.STRONG || consistency === ConsistencyLevel.QUORUM) {
@@ -400,7 +443,7 @@ export class ReplicationPipeline extends EventEmitter {
           type: 'REPLICATION_ACK',
           payload: {
             opId,
-            success: true,
+            success,
             timestamp: Date.now(),
           },
         },
@@ -411,14 +454,31 @@ export class ReplicationPipeline extends EventEmitter {
   /**
    * Handle incoming batch replication (on backup node)
    */
-  private handleReplicationBatch(
+  private async handleReplicationBatch(
     sourceNode: string,
     payload: { operations: unknown[]; opIds: string[] }
-  ): void {
+  ): Promise<void> {
     const { operations, opIds } = payload;
 
-    // TODO: Apply operations to local storage
     logger.debug({ sourceNode, count: operations.length }, 'Received replication batch');
+
+    // Apply operations to local storage
+    let allSuccess = true;
+    if (this.operationApplier) {
+      for (let i = 0; i < operations.length; i++) {
+        try {
+          const success = await this.operationApplier(operations[i], opIds[i], sourceNode);
+          if (!success) {
+            allSuccess = false;
+          }
+        } catch (error) {
+          logger.error({ sourceNode, opId: opIds[i], error }, 'Failed to apply replicated operation in batch');
+          allSuccess = false;
+        }
+      }
+    } else {
+      logger.warn({ sourceNode, count: operations.length }, 'No operation applier set, batch not applied');
+    }
 
     // Send batch acknowledgment
     this.clusterManager.send(sourceNode, 'OP_FORWARD', {
@@ -426,7 +486,7 @@ export class ReplicationPipeline extends EventEmitter {
         type: 'REPLICATION_BATCH_ACK',
         payload: {
           opIds,
-          success: true,
+          success: allSuccess,
           timestamp: Date.now(),
         },
       },

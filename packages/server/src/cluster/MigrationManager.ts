@@ -21,8 +21,8 @@ import {
   DEFAULT_MIGRATION_CONFIG,
   PartitionChange,
   serialize,
-  hashString,
 } from '@topgunbuild/core';
+import { xxhash64AsNumber, createXxHash64State } from '@topgunbuild/native';
 import { ClusterManager, ClusterMessage } from './ClusterManager';
 import { PartitionService, PartitionDistribution } from './PartitionService';
 import { logger } from '../utils/logger';
@@ -359,20 +359,21 @@ export class MigrationManager extends EventEmitter {
   }
 
   /**
-   * Calculate checksum for a chunk
+   * Calculate checksum for a chunk using native xxhash
    */
   private calculateChecksum(data: Uint8Array): string {
-    // Simple hash using xxhash via hashString
-    const str = Array.from(data).join(',');
-    return String(hashString(str));
+    return String(xxhash64AsNumber(data));
   }
 
   /**
-   * Calculate checksum for all partition records
+   * Calculate checksum for all partition records using streaming xxhash
    */
   private calculatePartitionChecksum(records: Uint8Array[]): string {
-    const combined = records.map(r => Array.from(r).join(',')).join('|');
-    return String(hashString(combined));
+    const state = createXxHash64State();
+    for (const record of records) {
+      state.update(record);
+    }
+    return String(state.digestAsNumber());
   }
 
   /**
@@ -787,9 +788,17 @@ export class MigrationManager extends EventEmitter {
   }
 
   /**
-   * Cleanup resources
+   * Cleanup resources (sync version for backwards compatibility)
    */
   public close(): void {
     this.cancelAll();
+  }
+
+  /**
+   * Async cleanup - waits for cancellation to complete
+   */
+  public async closeAsync(): Promise<void> {
+    await this.cancelAll();
+    this.removeAllListeners();
   }
 }
