@@ -1,0 +1,140 @@
+# Docker Compose for local 3-node TopGun cluster
+# Phase 4: Clustering Improvements
+#
+# Usage:
+#   docker-compose -f deploy/docker-compose.cluster.yml up --build
+#
+# This creates a 3-node cluster with:
+#   - Manual peer discovery
+#   - Gradual rebalancing enabled
+#   - Async replication pipeline
+#   - Prometheus metrics endpoints
+
+version: '3.8'
+
+services:
+  topgun-node-1:
+    build:
+      context: ..
+      dockerfile: packages/server/Dockerfile
+    hostname: topgun-node-1
+    environment:
+      # Node identity
+      - NODE_ID=node-1
+      - TOPGUN_HOST=topgun-node-1
+      # Ports
+      - TOPGUN_PORT=8080
+      - TOPGUN_CLUSTER_PORT=9080
+      - TOPGUN_METRICS_PORT=9090
+      # Cluster discovery (manual mode)
+      - TOPGUN_DISCOVERY=manual
+      - TOPGUN_PEERS=topgun-node-2:9080,topgun-node-3:9080
+      # Phase 4: Clustering configuration
+      - TOPGUN_GRADUAL_REBALANCING=true
+      - TOPGUN_REPLICATION_ENABLED=true
+      - TOPGUN_MIGRATION_BATCH_SIZE=10
+      - TOPGUN_MIGRATION_PARALLEL_TRANSFERS=4
+      - TOPGUN_REPLICATION_CONSISTENCY=EVENTUAL
+      - TOPGUN_REPLICATION_QUEUE_SIZE=10000
+    ports:
+      - "8081:8080"   # Client WebSocket
+      - "9081:9090"   # Metrics
+    networks:
+      - topgun-cluster
+    depends_on:
+      - topgun-node-2
+      - topgun-node-3
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  topgun-node-2:
+    build:
+      context: ..
+      dockerfile: packages/server/Dockerfile
+    hostname: topgun-node-2
+    environment:
+      - NODE_ID=node-2
+      - TOPGUN_HOST=topgun-node-2
+      - TOPGUN_PORT=8080
+      - TOPGUN_CLUSTER_PORT=9080
+      - TOPGUN_METRICS_PORT=9090
+      - TOPGUN_DISCOVERY=manual
+      - TOPGUN_PEERS=topgun-node-1:9080,topgun-node-3:9080
+      - TOPGUN_GRADUAL_REBALANCING=true
+      - TOPGUN_REPLICATION_ENABLED=true
+      - TOPGUN_MIGRATION_BATCH_SIZE=10
+      - TOPGUN_MIGRATION_PARALLEL_TRANSFERS=4
+      - TOPGUN_REPLICATION_CONSISTENCY=EVENTUAL
+      - TOPGUN_REPLICATION_QUEUE_SIZE=10000
+    ports:
+      - "8082:8080"
+      - "9082:9090"
+    networks:
+      - topgun-cluster
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  topgun-node-3:
+    build:
+      context: ..
+      dockerfile: packages/server/Dockerfile
+    hostname: topgun-node-3
+    environment:
+      - NODE_ID=node-3
+      - TOPGUN_HOST=topgun-node-3
+      - TOPGUN_PORT=8080
+      - TOPGUN_CLUSTER_PORT=9080
+      - TOPGUN_METRICS_PORT=9090
+      - TOPGUN_DISCOVERY=manual
+      - TOPGUN_PEERS=topgun-node-1:9080,topgun-node-2:9080
+      - TOPGUN_GRADUAL_REBALANCING=true
+      - TOPGUN_REPLICATION_ENABLED=true
+      - TOPGUN_MIGRATION_BATCH_SIZE=10
+      - TOPGUN_MIGRATION_PARALLEL_TRANSFERS=4
+      - TOPGUN_REPLICATION_CONSISTENCY=EVENTUAL
+      - TOPGUN_REPLICATION_QUEUE_SIZE=10000
+    ports:
+      - "8083:8080"
+      - "9083:9090"
+    networks:
+      - topgun-cluster
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Optional: Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9091:9090"
+    networks:
+      - topgun-cluster
+    profiles:
+      - monitoring
+
+  # Optional: Grafana for visualization
+  grafana:
+    image: grafana/grafana:10.2.2
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - "3000:3000"
+    networks:
+      - topgun-cluster
+    profiles:
+      - monitoring
+
+networks:
+  topgun-cluster:
+    driver: bridge

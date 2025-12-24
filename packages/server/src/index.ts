@@ -19,3 +19,6 @@ export {
   type NativeStats,
   type NativeModuleStatus,
 } from './utils/nativeStats';
+
+// Cluster module (Phase 4)
+export * from './cluster';

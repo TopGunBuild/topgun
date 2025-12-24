@@ -11,21 +11,58 @@ service:
 
 cluster:
   port: 9080
+  # Discovery mode: 'manual' or 'kubernetes'
+  discovery: kubernetes
+  # DNS discovery interval in ms
+  discoveryInterval: 10000
+
+# Phase 4: Cluster Configuration
+clustering:
+  # Enable gradual partition rebalancing (recommended for production)
+  gradualRebalancing: true
+  # Enable async replication pipeline
+  replicationEnabled: true
+
+  # Migration configuration
+  migration:
+    # Partitions per batch during migration
+    batchSize: 10
+    # Delay between migration batches in ms
+    batchIntervalMs: 5000
+    # Bytes per migration chunk
+    transferChunkSize: 65536
+    # Max retries per partition migration
+    maxRetries: 3
+    # Concurrent partition transfers
+    parallelTransfers: 4
+
+  # Replication configuration
+  replication:
+    # Default consistency: EVENTUAL, QUORUM, or STRONG
+    defaultConsistency: EVENTUAL
+    # Max queued replication operations
+    queueSizeLimit: 10000
+    # Operations per replication batch
+    batchSize: 100
+    # Batch flush interval in ms
+    batchIntervalMs: 50
+    # Ack timeout in ms
+    ackTimeoutMs: 5000
 
 # Health probes
 probes:
   liveness:
     enabled: true
-    path: /
+    path: /health
     initialDelaySeconds: 10
     periodSeconds: 10
   readiness:
     enabled: true
-    path: /
+    path: /ready
     initialDelaySeconds: 5
     periodSeconds: 5
 
-# Metrics (future use)
+# Metrics
 metrics:
   enabled: true
   port: 9090
@@ -37,6 +74,18 @@ resources:
   requests:
     cpu: 200m
     memory: 256Mi
+
+# Pod Disruption Budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+# TLS Configuration
+tls:
+  enabled: false
+  # secretName: topgun-tls
+  # certPath: /certs/tls.crt
+  # keyPath: /certs/tls.key
 
 env: {}
   # DATABASE_URL: "postgres://user:pass@host:5432/db"
