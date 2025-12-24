@@ -134,11 +134,10 @@ export class TopGunClient {
         },
       });
 
-      // SyncEngine in cluster mode - ClusterClient integration will be added in Task 02
-      // For now, use the first seed as fallback URL
+      // SyncEngine uses ClusterClient as connectionProvider for partition-aware routing
       this.syncEngine = new SyncEngine({
         nodeId: this.nodeId,
-        serverUrl: this.clusterConfig.seeds[0],
+        connectionProvider: this.clusterClient,
         storageAdapter: this.storageAdapter,
         backoff: config.backoff,
         backpressure: config.backpressure,
