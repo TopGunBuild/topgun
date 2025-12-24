@@ -30,86 +30,20 @@ jobs:
         run: pnpm bench
         working-directory: packages/core
 
-  k6-smoke-test:
-    name: k6 Smoke Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Setup pnpm via corepack
-        run: |
-          corepack enable
-          corepack prepare pnpm@10 --activate
-
-      - name: Install k6
-        run: |
-          sudo gpg -k
-          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
-          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
-          sudo apt-get update
-          sudo apt-get install k6
-
-      - run: pnpm install
-      - run: pnpm build
-
-      - name: Generate JWT token
-        id: token
-        run: echo "JWT_TOKEN=$(node scripts/generate-k6-token.js)" >> $GITHUB_OUTPUT
-
-      - name: Start server
-        run: |
-          pnpm start:server &
-          sleep 5
-
-      - name: Run k6 smoke test
-        run: k6 run tests/k6/scenarios/smoke.js -e JWT_TOKEN=${{ steps.token.outputs.JWT_TOKEN }}
-
-  k6-throughput-benchmark:
-    name: k6 Throughput Benchmark
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Setup pnpm via corepack
-        run: |
-          corepack enable
-          corepack prepare pnpm@10 --activate
-
-      - name: Install k6
-        run: |
-          sudo gpg -k
-          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
-          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
-          sudo apt-get update
-          sudo apt-get install k6
-
-      - run: pnpm install
-      - run: pnpm build
-
-      - name: Generate JWT token
-        id: token
-        run: echo "JWT_TOKEN=$(node scripts/generate-k6-token.js)" >> $GITHUB_OUTPUT
-
-      - name: Start server
-        run: |
-          pnpm start:server &
-          sleep 5
-
-      - name: Run k6 throughput benchmark
-        run: k6 run tests/k6/scenarios/throughput-test.js -e JWT_TOKEN=${{ steps.token.outputs.JWT_TOKEN }}
-
-      - name: Upload results
-        uses: actions/upload-artifact@v4
-        with:
-          name: k6-benchmark-results
-          path: tests/k6/results/*.json
-          retention-days: 90
+  # NOTE: k6 tests are disabled in CI because they require a custom k6 build
+  # with xk6-msgpack extension for MessagePack support.
+  #
+  # To run k6 tests locally:
+  #   1. Build custom k6: pnpm test:k6:build
+  #   2. Start server: pnpm start:server
+  #   3. Run tests: pnpm test:k6:smoke (or other k6 test scripts)
+  #
+  # k6-smoke-test:
+  #   name: k6 Smoke Test
+  #   runs-on: ubuntu-latest
+  #   ...
+  #
+  # k6-throughput-benchmark:
+  #   name: k6 Throughput Benchmark
+  #   runs-on: ubuntu-latest
+  #   ...
