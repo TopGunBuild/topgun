@@ -14,6 +14,9 @@ import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 // Cluster imports (Phase 4)
 import { ConnectionPool, PartitionRouter, ClusterClient } from './cluster';
 
+// Connection provider imports (Phase 4.5)
+import { SingleServerProvider } from './connection';
+
 // Type imports
 import type { IStorageAdapter, OpLogEntry } from './IStorageAdapter';
 import type { LWWRecord, PredicateNode } from '@topgunbuild/core';
@@ -44,6 +47,15 @@ export type {
   ClusterClientEvents,
   ClusterRoutingMode,
 } from './cluster';
+
+// Connection provider exports (Phase 4.5)
+export { SingleServerProvider };
+export type {
+  IConnectionProvider,
+  ConnectionProviderEvent,
+  ConnectionEventHandler,
+  SingleServerProviderConfig,
+} from './types';
 
 // TopGunClient cluster config types (Phase 4.5)
 export type { TopGunClusterConfig, TopGunClientConfig } from './TopGunClient';

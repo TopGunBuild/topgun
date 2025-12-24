@@ -2,6 +2,7 @@
  * ClusterClient - Cluster-aware client wrapper
  *
  * Phase 4: Partition-Aware Client Routing
+ * Phase 4.5: Implements IConnectionProvider for SyncEngine abstraction
  *
  * Wraps the standard TopGunClient with cluster-aware routing capabilities.
  * Coordinates between ConnectionPool and PartitionRouter for optimal
@@ -20,6 +21,7 @@ import {
 import { ConnectionPool } from './ConnectionPool';
 import { PartitionRouter } from './PartitionRouter';
 import { logger } from '../utils/logger';
+import type { IConnectionProvider, ConnectionProviderEvent, ConnectionEventHandler } from '../types';
 
 export interface ClusterClientEvents {
   'connected': () => void;
@@ -31,7 +33,11 @@ export interface ClusterClientEvents {
 
 export type ClusterRoutingMode = 'direct' | 'forward';
 
-export class ClusterClient {
+/**
+ * ClusterClient implements IConnectionProvider for multi-node cluster mode.
+ * It provides partition-aware routing and connection management.
+ */
+export class ClusterClient implements IConnectionProvider {
   private readonly listeners: Map<string, Set<(...args: any[]) => void>> = new Map();
   private readonly connectionPool: ConnectionPool;
   private readonly partitionRouter: PartitionRouter;
@@ -101,6 +107,71 @@ export class ClusterClient {
     return this;
   }
 
+  // ============================================
+  // IConnectionProvider Implementation
+  // ============================================
+
+  /**
+   * Connect to cluster nodes (IConnectionProvider interface).
+   * Alias for start() method.
+   */
+  public async connect(): Promise<void> {
+    return this.start();
+  }
+
+  /**
+   * Get connection for a specific key (IConnectionProvider interface).
+   * Routes to partition owner based on key hash.
+   * @throws Error if not connected
+   */
+  public getConnection(key: string): WebSocket {
+    if (!this.isConnected()) {
+      throw new Error('ClusterClient not connected');
+    }
+
+    if (this.config.routingMode === 'direct' && this.routingActive) {
+      // Use partition-aware routing
+      const routing = this.partitionRouter.route(key);
+      if (routing) {
+        const socket = this.connectionPool.getConnection(routing.nodeId);
+        if (socket) {
+          return socket;
+        }
+      }
+    }
+
+    // Fallback to any healthy connection
+    const conn = this.connectionPool.getAnyHealthyConnection();
+    if (!conn?.socket) {
+      throw new Error('No healthy connection available');
+    }
+    return conn.socket;
+  }
+
+  /**
+   * Check if at least one connection is active (IConnectionProvider interface).
+   */
+  public isConnected(): boolean {
+    return this.connectionPool.getConnectedNodes().length > 0;
+  }
+
+  /**
+   * Send data via the appropriate connection (IConnectionProvider interface).
+   * Routes based on key if provided.
+   */
+  public send(data: ArrayBuffer | Uint8Array, key?: string): void {
+    if (!this.isConnected()) {
+      throw new Error('ClusterClient not connected');
+    }
+
+    const socket = key ? this.getConnection(key) : this.getAnyConnection();
+    socket.send(data);
+  }
+
+  // ============================================
+  // Cluster-Specific Methods
+  // ============================================
+
   /**
    * Initialize cluster connections
    */
@@ -136,9 +207,10 @@ export class ClusterClient {
   }
 
   /**
-   * Send operation with automatic routing
+   * Send operation with automatic routing (legacy API for cluster operations).
+   * @deprecated Use send(data, key) for IConnectionProvider interface
    */
-  public send(key: string, message: any): boolean {
+  public sendMessage(key: string, message: any): boolean {
     if (this.config.routingMode === 'direct' && this.routingActive) {
       return this.sendDirect(key, message);
     }
@@ -272,9 +344,9 @@ export class ClusterClient {
   }
 
   /**
-   * Shutdown cluster client
+   * Shutdown cluster client (IConnectionProvider interface).
    */
-  public close(): void {
+  public async close(): Promise<void> {
     this.partitionRouter.close();
     this.connectionPool.close();
     this.initialized = false;
@@ -301,9 +373,22 @@ export class ClusterClient {
   }
 
   /**
-   * Get any healthy WebSocket connection
+   * Get any healthy WebSocket connection (IConnectionProvider interface).
+   * @throws Error if not connected
    */
-  public getAnyConnection(): WebSocket | null {
+  public getAnyConnection(): WebSocket {
+    const conn = this.connectionPool.getAnyHealthyConnection();
+    if (!conn?.socket) {
+      throw new Error('No healthy connection available');
+    }
+    return conn.socket;
+  }
+
+  /**
+   * Get any healthy WebSocket connection, or null if none available.
+   * Use this for optional connection checks.
+   */
+  public getAnyConnectionOrNull(): WebSocket | null {
     const conn = this.connectionPool.getAnyHealthyConnection();
     return conn?.socket ?? null;
   }
@@ -337,6 +422,11 @@ export class ClusterClient {
       this.emit('error', error);
     });
 
+    // Forward messages from connection pool
+    this.connectionPool.on('message', (nodeId: string, data: any) => {
+      this.emit('message', nodeId, data);
+    });
+
     // Partition router events
     this.partitionRouter.on('partitionMap:updated', (version: number, changesCount: number) => {
       if (!this.routingActive && this.partitionRouter.hasPartitionMap()) {
@@ -345,6 +435,8 @@ export class ClusterClient {
         this.emit('routing:active');
       }
       this.emit('partitionMap:ready', version);
+      // Emit IConnectionProvider compatible event
+      this.emit('partitionMapUpdated');
     });
 
     this.partitionRouter.on('routing:miss', (key: string, expected: string, actual: string) => {
