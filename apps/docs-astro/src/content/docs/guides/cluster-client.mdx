@@ -7,6 +7,125 @@ order: 16
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Network, Shield, Zap, Server, RefreshCw } from 'lucide-react';
 
+export const quickStartCode = `import { TopGunClient, IDBAdapter } from '@topgunbuild/client';
+
+const client = new TopGunClient({
+  cluster: {
+    seeds: [
+      'ws://node1.example.com:8765',
+      'ws://node2.example.com:8765',
+      'ws://node3.example.com:8765',
+    ],
+    smartRouting: true,
+  },
+  storage: new IDBAdapter(),
+});
+
+await client.start();
+
+// Use normally - routing is automatic
+const users = client.getMap('users');
+users.set('alice', { name: 'Alice', role: 'admin' });`;
+
+export const seedNodesCode = `cluster: {
+  seeds: [
+    'ws://node1:8765',  // Primary seed
+    'ws://node2:8765',  // Backup seed
+    'ws://node3:8765',  // Additional backup
+  ],
+}`;
+
+export const smartRoutingCode = `cluster: {
+  seeds: ['ws://node1:8765', 'ws://node2:8765'],
+  smartRouting: true,  // Default: true
+}`;
+
+export const connectionPoolCode = `cluster: {
+  seeds: ['ws://node1:8765'],
+  connectionsPerNode: 2,      // Connections per node (default: 1)
+  connectionTimeoutMs: 5000,  // Connection timeout (default: 10000)
+}`;
+
+export const partitionMapCode = `cluster: {
+  seeds: ['ws://node1:8765'],
+  partitionMapRefreshMs: 30000,  // Refresh every 30 seconds (default)
+}`;
+
+export const circuitBreakerCode = `cluster: {
+  seeds: ['ws://node1:8765'],
+  // Circuit breaker is built-in with sensible defaults:
+  // - Opens after 5 consecutive failures
+  // - Resets after 30 seconds
+  // - Transitions to half-open to test recovery
+}`;
+
+export const failoverCode = `// Your code doesn't need to handle failover explicitly
+const users = client.getMap('users');
+
+// This works even if the primary node is down
+// The client automatically routes to available nodes
+await users.set('key', { data: 'value' });
+
+// Reads also work - served from any replica
+const user = users.get('key');`;
+
+export const connectionStateCode = `// Listen for connection state changes
+client.onConnectionChange((state) => {
+  switch (state) {
+    case 'connected':
+      console.log('Connected to cluster');
+      break;
+    case 'connecting':
+      console.log('Connecting to cluster...');
+      break;
+    case 'reconnecting':
+      console.log('Reconnecting after failure...');
+      break;
+    case 'disconnected':
+      console.log('Disconnected from cluster');
+      break;
+  }
+});`;
+
+export const syncStateCode = `// Monitor synchronization progress
+client.onSyncStateChange((state) => {
+  if (state === 'syncing') {
+    console.log('Syncing pending operations...');
+  } else if (state === 'synced') {
+    console.log('All operations synced');
+  }
+});`;
+
+export const reactClientCode = `// src/lib/topgun.ts
+import { TopGunClient, IDBAdapter } from '@topgunbuild/client';
+
+export const client = new TopGunClient({
+  cluster: {
+    seeds: [
+      process.env.NEXT_PUBLIC_NODE1_URL!,
+      process.env.NEXT_PUBLIC_NODE2_URL!,
+      process.env.NEXT_PUBLIC_NODE3_URL!,
+    ],
+    smartRouting: true,
+  },
+  storage: new IDBAdapter(),
+});
+
+// Initialize on app startup
+client.start();`;
+
+export const reactProviderCode = `// src/app/providers.tsx
+import { TopGunProvider } from '@topgunbuild/react';
+import { client } from '@/lib/topgun';
+
+export function Providers({ children }) {
+  return (
+    <TopGunProvider client={client}>
+      {children}
+    </TopGunProvider>
+  );
+}`;
+
 <div className="flex items-center gap-3 mb-6 not-prose">
   <Network className="w-10 h-10 text-blue-600 dark:text-blue-400" />
   <h1 className="text-4xl font-bold text-foreground">Client Cluster Mode</h1>
@@ -38,25 +157,7 @@ The client automatically handles node discovery, partition-aware routing, and fa
 ## Quick Start
 
 <div className="not-prose">
-  <CodeBlock language="typescript" code={`import { TopGunClient, IDBAdapter } from '@topgunbuild/client';
-
-const client = new TopGunClient({
-  cluster: {
-    seeds: [
-      'ws://node1.example.com:8765',
-      'ws://node2.example.com:8765',
-      'ws://node3.example.com:8765',
-    ],
-    smartRouting: true,
-  },
-  storage: new IDBAdapter(),
-});
-
-await client.start();
-
-// Use normally - routing is automatic
-const users = client.getMap('users');
-users.set('alice', { name: 'Alice', role: 'admin' });`} />
+  <CodeBlock language="typescript" code={quickStartCode} />
 </div>
 
 ## Configuration
@@ -67,13 +168,7 @@ Seed nodes are the initial entry points to the cluster. The client connects to t
 to discover the full cluster topology and receive the partition map.
 
 <div className="not-prose">
-  <CodeBlock language="typescript" code={`cluster: {
-  seeds: [
-    'ws://node1:8765',  // Primary seed
-    'ws://node2:8765',  // Backup seed
-    'ws://node3:8765',  // Additional backup
-  ],
-}`} />
+  <CodeBlock language="typescript" code={seedNodesCode} />
 </div>
 
 <div className="bg-yellow-50 dark:bg-yellow-900/20 border-l-4 border-yellow-500 p-4 my-6 not-prose">
@@ -89,10 +184,7 @@ When enabled, the client maintains a partition map and routes each operation dir
 node that owns the relevant partition.
 
 <div className="not-prose">
-  <CodeBlock language="typescript" code={`cluster: {
-  seeds: ['ws://node1:8765', 'ws://node2:8765'],
-  smartRouting: true,  // Default: true
-}`} />
+  <CodeBlock language="typescript" code={smartRoutingCode} />
 </div>
 
 **How it works:**
@@ -126,11 +218,7 @@ node that owns the relevant partition.
 Configure how many connections to maintain per node:
 
 <div className="not-prose">
-  <CodeBlock language="typescript" code={`cluster: {
-  seeds: ['ws://node1:8765'],
-  connectionsPerNode: 2,      // Connections per node (default: 1)
-  connectionTimeoutMs: 5000,  // Connection timeout (default: 10000)
-}`} />
+  <CodeBlock language="typescript" code={connectionPoolCode} />
 </div>
 
 ### Partition Map Refresh
@@ -138,10 +226,7 @@ Configure how many connections to maintain per node:
 The client periodically refreshes its partition map to stay in sync with cluster topology changes:
 
 <div className="not-prose">
-  <CodeBlock language="typescript" code={`cluster: {
-  seeds: ['ws://node1:8765'],
-  partitionMapRefreshMs: 30000,  // Refresh every 30 seconds (default)
-}`} />
+  <CodeBlock language="typescript" code={partitionMapCode} />
 </div>
 
 The partition map is also updated immediately when:
@@ -166,27 +251,13 @@ The partition map is also updated immediately when:
 ### Configuration
 
 <div className="not-prose">
-  <CodeBlock language="typescript" code={`cluster: {
-  seeds: ['ws://node1:8765'],
-  // Circuit breaker is built-in with sensible defaults:
-  // - Opens after 5 consecutive failures
-  // - Resets after 30 seconds
-  // - Transitions to half-open to test recovery
-}`} />
+  <CodeBlock language="typescript" code={circuitBreakerCode} />
 </div>
 
 ### Behavior During Failover
 
 <div className="not-prose">
-  <CodeBlock language="typescript" code={`// Your code doesn't need to handle failover explicitly
-const users = client.getMap('users');
-
-// This works even if the primary node is down
-// The client automatically routes to available nodes
-await users.set('key', { data: 'value' });
-
-// Reads also work - served from any replica
-const user = users.get('key');`} />
+  <CodeBlock language="typescript" code={failoverCode} />
 </div>
 
 <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 my-6 not-prose">
@@ -203,36 +274,13 @@ const user = users.get('key');`} />
 ### Connection State
 
 <div className="not-prose">
-  <CodeBlock language="typescript" code={`// Listen for connection state changes
-client.onConnectionChange((state) => {
-  switch (state) {
-    case 'connected':
-      console.log('Connected to cluster');
-      break;
-    case 'connecting':
-      console.log('Connecting to cluster...');
-      break;
-    case 'reconnecting':
-      console.log('Reconnecting after failure...');
-      break;
-    case 'disconnected':
-      console.log('Disconnected from cluster');
-      break;
-  }
-});`} />
+  <CodeBlock language="typescript" code={connectionStateCode} />
 </div>
 
 ### Sync State
 
 <div className="not-prose">
-  <CodeBlock language="typescript" code={`// Monitor synchronization progress
-client.onSyncStateChange((state) => {
-  if (state === 'syncing') {
-    console.log('Syncing pending operations...');
-  } else if (state === 'synced') {
-    console.log('All operations synced');
-  }
-});`} />
+  <CodeBlock language="typescript" code={syncStateCode} />
 </div>
 
 ## Best Practices
@@ -283,37 +331,11 @@ client.onSyncStateChange((state) => {
 ## Example: React Integration
 
 <div className="not-prose">
-  <CodeBlock language="typescript" code={`// src/lib/topgun.ts
-import { TopGunClient, IDBAdapter } from '@topgunbuild/client';
-
-export const client = new TopGunClient({
-  cluster: {
-    seeds: [
-      process.env.NEXT_PUBLIC_NODE1_URL!,
-      process.env.NEXT_PUBLIC_NODE2_URL!,
-      process.env.NEXT_PUBLIC_NODE3_URL!,
-    ],
-    smartRouting: true,
-  },
-  storage: new IDBAdapter(),
-});
-
-// Initialize on app startup
-client.start();`} />
+  <CodeBlock language="typescript" code={reactClientCode} />
 </div>
 
 <div className="not-prose">
-  <CodeBlock language="typescript" code={`// src/app/providers.tsx
-import { TopGunProvider } from '@topgunbuild/react';
-import { client } from '@/lib/topgun';
-
-export function Providers({ children }) {
-  return (
-    <TopGunProvider client={client}>
-      {children}
-    </TopGunProvider>
-  );
-}`} />
+  <CodeBlock language="typescript" code={reactProviderCode} />
 </div>
 
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
