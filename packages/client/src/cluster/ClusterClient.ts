@@ -213,6 +213,23 @@ export class ClusterClient implements IConnectionProvider {
   }
 
   /**
+   * Request partition map from a specific node.
+   * Called on first node connection.
+   */
+  private requestPartitionMapFromNode(nodeId: string): void {
+    const socket = this.connectionPool.getConnection(nodeId);
+    if (socket) {
+      logger.debug({ nodeId }, 'Requesting partition map from node');
+      socket.send(serialize({
+        type: 'PARTITION_MAP_REQUEST',
+        payload: {
+          currentVersion: this.partitionRouter.getMapVersion(),
+        },
+      }));
+    }
+  }
+
+  /**
    * Check if at least one connection is active (IConnectionProvider interface).
    */
   public isConnected(): boolean {
@@ -483,6 +500,12 @@ export class ClusterClient implements IConnectionProvider {
     // Connection pool events
     this.connectionPool.on('node:connected', (nodeId: string) => {
       logger.debug({ nodeId }, 'Node connected');
+
+      // Request partition map on first connection if not already received
+      if (this.partitionRouter.getMapVersion() === 0) {
+        this.requestPartitionMapFromNode(nodeId);
+      }
+
       if (this.connectionPool.getConnectedNodes().length === 1) {
         this.emit('connected');
       }

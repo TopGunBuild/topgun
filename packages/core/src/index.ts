@@ -37,6 +37,7 @@ export type {
   PartitionInfo,
   PartitionMap,
   PartitionMapMessage,
+  PartitionMapRequestMessage,
   PartitionChange,
   PartitionMapDeltaMessage,
   NotOwnerError,

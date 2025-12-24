@@ -47,6 +47,13 @@ export interface PartitionMapMessage {
   payload: PartitionMap;
 }
 
+export interface PartitionMapRequestMessage {
+  type: 'PARTITION_MAP_REQUEST';
+  payload?: {
+    currentVersion?: number;
+  };
+}
+
 export interface PartitionChange {
   partitionId: number;
   previousOwner: string;
