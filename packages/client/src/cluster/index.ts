@@ -11,4 +11,4 @@ export { PartitionRouter } from './PartitionRouter';
 export type { RoutingResult, PartitionRouterEvents } from './PartitionRouter';
 
 export { ClusterClient } from './ClusterClient';
-export type { ClusterClientEvents, ClusterRoutingMode, RoutingMetrics } from './ClusterClient';
+export type { ClusterClientEvents, ClusterRoutingMode, RoutingMetrics, CircuitState } from './ClusterClient';

@@ -13,8 +13,10 @@ import {
   ClusterClientConfig,
   ConnectionPoolConfig,
   PartitionRouterConfig,
+  CircuitBreakerConfig,
   DEFAULT_CONNECTION_POOL_CONFIG,
   DEFAULT_PARTITION_ROUTER_CONFIG,
+  DEFAULT_CIRCUIT_BREAKER_CONFIG,
   NodeHealth,
   serialize,
 } from '@topgunbuild/core';
@@ -29,6 +31,21 @@ export interface ClusterClientEvents {
   'partitionMap:ready': (version: number) => void;
   'routing:active': () => void;
   'error': (error: Error) => void;
+  'circuit:open': (nodeId: string) => void;
+  'circuit:closed': (nodeId: string) => void;
+  'circuit:half-open': (nodeId: string) => void;
+}
+
+/**
+ * Circuit breaker state for a node.
+ */
+export interface CircuitState {
+  /** Number of consecutive failures */
+  failures: number;
+  /** Timestamp of last failure */
+  lastFailure: number;
+  /** Current circuit state */
+  state: 'closed' | 'open' | 'half-open';
 }
 
 /**
@@ -65,8 +82,18 @@ export class ClusterClient implements IConnectionProvider {
     totalRoutes: 0,
   };
 
+  // Circuit breaker state per node
+  private readonly circuits: Map<string, CircuitState> = new Map();
+  private readonly circuitBreakerConfig: CircuitBreakerConfig;
+
   constructor(config: ClusterClientConfig) {
     this.config = config;
+
+    // Initialize circuit breaker config
+    this.circuitBreakerConfig = {
+      ...DEFAULT_CIRCUIT_BREAKER_CONFIG,
+      ...config.circuitBreaker,
+    };
 
     // Initialize connection pool
     const poolConfig: ConnectionPoolConfig = {
@@ -247,6 +274,170 @@ export class ClusterClient implements IConnectionProvider {
 
     const socket = key ? this.getConnection(key) : this.getAnyConnection();
     socket.send(data);
+  }
+
+  /**
+   * Send data with automatic retry and rerouting on failure.
+   * @param data - Data to send
+   * @param key - Optional key for routing
+   * @param options - Retry options
+   * @throws Error after max retries exceeded
+   */
+  public async sendWithRetry(
+    data: ArrayBuffer | Uint8Array,
+    key?: string,
+    options: {
+      maxRetries?: number;
+      retryDelayMs?: number;
+      retryOnNotOwner?: boolean;
+    } = {}
+  ): Promise<void> {
+    const {
+      maxRetries = 3,
+      retryDelayMs = 100,
+      retryOnNotOwner = true,
+    } = options;
+
+    let lastError: Error | null = null;
+    let nodeId: string | null = null;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        // Get the target node for circuit breaker tracking
+        if (key && this.routingActive) {
+          const routing = this.partitionRouter.route(key);
+          nodeId = routing?.nodeId ?? null;
+        }
+
+        // Check circuit breaker
+        if (nodeId && !this.canUseNode(nodeId)) {
+          logger.debug({ nodeId, attempt }, 'Circuit open, using fallback');
+          nodeId = null; // Force fallback
+        }
+
+        // Get connection and send
+        const socket = key && nodeId
+          ? this.connectionPool.getConnection(nodeId)
+          : this.getAnyConnection();
+
+        if (!socket) {
+          throw new Error('No connection available');
+        }
+
+        socket.send(data);
+
+        // Record success if using a specific node
+        if (nodeId) {
+          this.recordSuccess(nodeId);
+        }
+
+        return; // Success
+      } catch (error) {
+        lastError = error as Error;
+
+        // Record failure if using a specific node
+        if (nodeId) {
+          this.recordFailure(nodeId);
+        }
+
+        const errorCode = (error as any)?.code;
+
+        // Check if error is retryable
+        if (this.isRetryableError(error)) {
+          logger.debug(
+            { attempt, maxRetries, errorCode, nodeId },
+            'Retryable error, will retry'
+          );
+
+          // Handle specific error types
+          if (errorCode === 'NOT_OWNER' && retryOnNotOwner) {
+            // Wait for partition map update
+            await this.waitForPartitionMapUpdateInternal(2000);
+          } else if (errorCode === 'CONNECTION_CLOSED' || !this.isConnected()) {
+            // Wait for reconnection
+            await this.waitForConnectionInternal(5000);
+          }
+
+          // Small delay before retry
+          await this.delay(retryDelayMs * (attempt + 1)); // Exponential backoff
+          continue;
+        }
+
+        // Non-retryable error, fail immediately
+        throw error;
+      }
+    }
+
+    throw new Error(
+      `Operation failed after ${maxRetries} retries: ${lastError?.message}`
+    );
+  }
+
+  /**
+   * Check if an error is retryable.
+   */
+  private isRetryableError(error: any): boolean {
+    const code = error?.code;
+    const message = error?.message || '';
+
+    return (
+      code === 'NOT_OWNER' ||
+      code === 'CONNECTION_CLOSED' ||
+      code === 'TIMEOUT' ||
+      code === 'ECONNRESET' ||
+      message.includes('No active connections') ||
+      message.includes('No connection available') ||
+      message.includes('No healthy connection')
+    );
+  }
+
+  /**
+   * Wait for partition map update.
+   */
+  private waitForPartitionMapUpdateInternal(timeoutMs: number): Promise<void> {
+    return new Promise((resolve) => {
+      const timeout = setTimeout(resolve, timeoutMs);
+
+      const handler = () => {
+        clearTimeout(timeout);
+        this.off('partitionMapUpdated', handler);
+        resolve();
+      };
+
+      this.on('partitionMapUpdated', handler);
+    });
+  }
+
+  /**
+   * Wait for at least one connection to be available.
+   */
+  private waitForConnectionInternal(timeoutMs: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (this.isConnected()) {
+        resolve();
+        return;
+      }
+
+      const timeout = setTimeout(() => {
+        this.off('connected', handler);
+        reject(new Error('Connection timeout'));
+      }, timeoutMs);
+
+      const handler = () => {
+        clearTimeout(timeout);
+        this.off('connected', handler);
+        resolve();
+      };
+
+      this.on('connected', handler);
+    });
+  }
+
+  /**
+   * Helper delay function.
+   */
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   // ============================================
@@ -490,6 +681,105 @@ export class ClusterClient implements IConnectionProvider {
   public getAnyConnectionOrNull(): WebSocket | null {
     const conn = this.connectionPool.getAnyHealthyConnection();
     return conn?.socket ?? null;
+  }
+
+  // ============================================
+  // Circuit Breaker Methods
+  // ============================================
+
+  /**
+   * Get circuit breaker state for a node.
+   */
+  public getCircuit(nodeId: string): CircuitState {
+    let circuit = this.circuits.get(nodeId);
+    if (!circuit) {
+      circuit = { failures: 0, lastFailure: 0, state: 'closed' };
+      this.circuits.set(nodeId, circuit);
+    }
+    return circuit;
+  }
+
+  /**
+   * Check if a node can be used (circuit not open).
+   */
+  public canUseNode(nodeId: string): boolean {
+    const circuit = this.getCircuit(nodeId);
+
+    if (circuit.state === 'closed') {
+      return true;
+    }
+
+    if (circuit.state === 'open') {
+      // Check if reset timeout elapsed
+      if (Date.now() - circuit.lastFailure > this.circuitBreakerConfig.resetTimeoutMs) {
+        circuit.state = 'half-open';
+        logger.debug({ nodeId }, 'Circuit breaker half-open, allowing test request');
+        this.emit('circuit:half-open', nodeId);
+        return true; // Allow one test request
+      }
+      return false;
+    }
+
+    // half-open: allow requests
+    return true;
+  }
+
+  /**
+   * Record a successful operation to a node.
+   * Resets circuit breaker on success.
+   */
+  public recordSuccess(nodeId: string): void {
+    const circuit = this.getCircuit(nodeId);
+    const wasOpen = circuit.state !== 'closed';
+
+    circuit.failures = 0;
+    circuit.state = 'closed';
+
+    if (wasOpen) {
+      logger.info({ nodeId }, 'Circuit breaker closed after success');
+      this.emit('circuit:closed', nodeId);
+    }
+  }
+
+  /**
+   * Record a failed operation to a node.
+   * Opens circuit breaker after threshold failures.
+   */
+  public recordFailure(nodeId: string): void {
+    const circuit = this.getCircuit(nodeId);
+    circuit.failures++;
+    circuit.lastFailure = Date.now();
+
+    if (circuit.failures >= this.circuitBreakerConfig.failureThreshold) {
+      if (circuit.state !== 'open') {
+        circuit.state = 'open';
+        logger.warn({ nodeId, failures: circuit.failures }, 'Circuit breaker opened');
+        this.emit('circuit:open', nodeId);
+      }
+    }
+  }
+
+  /**
+   * Get all circuit breaker states.
+   */
+  public getCircuitStates(): Map<string, CircuitState> {
+    return new Map(this.circuits);
+  }
+
+  /**
+   * Reset circuit breaker for a specific node.
+   */
+  public resetCircuit(nodeId: string): void {
+    this.circuits.delete(nodeId);
+    logger.debug({ nodeId }, 'Circuit breaker reset');
+  }
+
+  /**
+   * Reset all circuit breakers.
+   */
+  public resetAllCircuits(): void {
+    this.circuits.clear();
+    logger.debug('All circuit breakers reset');
   }
 
   // ============================================

@@ -47,6 +47,7 @@ export type {
   ClusterClientEvents,
   ClusterRoutingMode,
   RoutingMetrics,
+  CircuitState,
 } from './cluster';
 
 // Connection provider exports (Phase 4.5)

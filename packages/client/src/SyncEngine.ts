@@ -1246,6 +1246,110 @@ export class SyncEngine {
     }
   }
 
+  // ============================================
+  // Failover Support Methods (Phase 4.5 Task 05)
+  // ============================================
+
+  /**
+   * Wait for a partition map update from the connection provider.
+   * Used when an operation fails with NOT_OWNER error and needs
+   * to wait for an updated partition map before retrying.
+   *
+   * @param timeoutMs - Maximum time to wait (default: 5000ms)
+   * @returns Promise that resolves when partition map is updated or times out
+   */
+  public waitForPartitionMapUpdate(timeoutMs: number = 5000): Promise<void> {
+    return new Promise((resolve) => {
+      const timeout = setTimeout(resolve, timeoutMs);
+
+      const handler = () => {
+        clearTimeout(timeout);
+        this.connectionProvider.off('partitionMapUpdated', handler);
+        resolve();
+      };
+
+      this.connectionProvider.on('partitionMapUpdated', handler);
+    });
+  }
+
+  /**
+   * Wait for the connection to be available.
+   * Used when an operation fails due to connection issues and needs
+   * to wait for reconnection before retrying.
+   *
+   * @param timeoutMs - Maximum time to wait (default: 10000ms)
+   * @returns Promise that resolves when connected or rejects on timeout
+   */
+  public waitForConnection(timeoutMs: number = 10000): Promise<void> {
+    return new Promise((resolve, reject) => {
+      // If already connected, resolve immediately
+      if (this.connectionProvider.isConnected()) {
+        resolve();
+        return;
+      }
+
+      const timeout = setTimeout(() => {
+        this.connectionProvider.off('connected', handler);
+        reject(new Error('Connection timeout waiting for reconnection'));
+      }, timeoutMs);
+
+      const handler = () => {
+        clearTimeout(timeout);
+        this.connectionProvider.off('connected', handler);
+        resolve();
+      };
+
+      this.connectionProvider.on('connected', handler);
+    });
+  }
+
+  /**
+   * Wait for a specific sync state.
+   * Useful for waiting until fully connected and synced.
+   *
+   * @param targetState - The state to wait for
+   * @param timeoutMs - Maximum time to wait (default: 30000ms)
+   * @returns Promise that resolves when state is reached or rejects on timeout
+   */
+  public waitForState(targetState: SyncState, timeoutMs: number = 30000): Promise<void> {
+    return new Promise((resolve, reject) => {
+      // If already in target state, resolve immediately
+      if (this.stateMachine.getState() === targetState) {
+        resolve();
+        return;
+      }
+
+      const timeout = setTimeout(() => {
+        unsubscribe();
+        reject(new Error(`Timeout waiting for state ${targetState}`));
+      }, timeoutMs);
+
+      const unsubscribe = this.stateMachine.onStateChange((event) => {
+        if (event.to === targetState) {
+          clearTimeout(timeout);
+          unsubscribe();
+          resolve();
+        }
+      });
+    });
+  }
+
+  /**
+   * Check if the connection provider is connected.
+   * Convenience method for failover logic.
+   */
+  public isProviderConnected(): boolean {
+    return this.connectionProvider.isConnected();
+  }
+
+  /**
+   * Get the connection provider for direct access.
+   * Use with caution - prefer using SyncEngine methods.
+   */
+  public getConnectionProvider(): IConnectionProvider {
+    return this.connectionProvider;
+  }
+
   private async resetMap(mapName: string): Promise<void> {
     const map = this.maps.get(mapName);
     if (map) {
