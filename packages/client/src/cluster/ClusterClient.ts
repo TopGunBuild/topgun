@@ -2,6 +2,7 @@
  * ClusterClient - Cluster-aware client wrapper
  *
  * Phase 4: Partition-Aware Client Routing
+ * Phase 4.5: Implements IConnectionProvider for SyncEngine abstraction
  *
  * Wraps the standard TopGunClient with cluster-aware routing capabilities.
  * Coordinates between ConnectionPool and PartitionRouter for optimal
@@ -12,14 +13,17 @@ import {
   ClusterClientConfig,
   ConnectionPoolConfig,
   PartitionRouterConfig,
+  CircuitBreakerConfig,
   DEFAULT_CONNECTION_POOL_CONFIG,
   DEFAULT_PARTITION_ROUTER_CONFIG,
+  DEFAULT_CIRCUIT_BREAKER_CONFIG,
   NodeHealth,
   serialize,
 } from '@topgunbuild/core';
 import { ConnectionPool } from './ConnectionPool';
 import { PartitionRouter } from './PartitionRouter';
 import { logger } from '../utils/logger';
+import type { IConnectionProvider, ConnectionProviderEvent, ConnectionEventHandler } from '../types';
 
 export interface ClusterClientEvents {
   'connected': () => void;
@@ -27,20 +31,69 @@ export interface ClusterClientEvents {
   'partitionMap:ready': (version: number) => void;
   'routing:active': () => void;
   'error': (error: Error) => void;
+  'circuit:open': (nodeId: string) => void;
+  'circuit:closed': (nodeId: string) => void;
+  'circuit:half-open': (nodeId: string) => void;
+}
+
+/**
+ * Circuit breaker state for a node.
+ */
+export interface CircuitState {
+  /** Number of consecutive failures */
+  failures: number;
+  /** Timestamp of last failure */
+  lastFailure: number;
+  /** Current circuit state */
+  state: 'closed' | 'open' | 'half-open';
+}
+
+/**
+ * Routing metrics for monitoring smart routing effectiveness.
+ */
+export interface RoutingMetrics {
+  /** Operations routed directly to partition owner */
+  directRoutes: number;
+  /** Operations falling back to any node (owner unavailable) */
+  fallbackRoutes: number;
+  /** Operations when partition map is missing/stale */
+  partitionMisses: number;
+  /** Total routing decisions made */
+  totalRoutes: number;
 }
 
 export type ClusterRoutingMode = 'direct' | 'forward';
 
-export class ClusterClient {
+/**
+ * ClusterClient implements IConnectionProvider for multi-node cluster mode.
+ * It provides partition-aware routing and connection management.
+ */
+export class ClusterClient implements IConnectionProvider {
   private readonly listeners: Map<string, Set<(...args: any[]) => void>> = new Map();
   private readonly connectionPool: ConnectionPool;
   private readonly partitionRouter: PartitionRouter;
   private readonly config: ClusterClientConfig;
   private initialized: boolean = false;
   private routingActive: boolean = false;
+  private readonly routingMetrics: RoutingMetrics = {
+    directRoutes: 0,
+    fallbackRoutes: 0,
+    partitionMisses: 0,
+    totalRoutes: 0,
+  };
+
+  // Circuit breaker state per node
+  private readonly circuits: Map<string, CircuitState> = new Map();
+  private readonly circuitBreakerConfig: CircuitBreakerConfig;
 
   constructor(config: ClusterClientConfig) {
     this.config = config;
+
+    // Initialize circuit breaker config
+    this.circuitBreakerConfig = {
+      ...DEFAULT_CIRCUIT_BREAKER_CONFIG,
+      ...config.circuitBreaker,
+    };
 
     // Initialize connection pool
     const poolConfig: ConnectionPoolConfig = {
@@ -101,6 +154,296 @@ export class ClusterClient {
     return this;
   }
 
+  // ============================================
+  // IConnectionProvider Implementation
+  // ============================================
+
+  /**
+   * Connect to cluster nodes (IConnectionProvider interface).
+   * Alias for start() method.
+   */
+  public async connect(): Promise<void> {
+    return this.start();
+  }
+
+  /**
+   * Get connection for a specific key (IConnectionProvider interface).
+   * Routes to partition owner based on key hash when smart routing is enabled.
+   * @throws Error if not connected
+   */
+  public getConnection(key: string): WebSocket {
+    if (!this.isConnected()) {
+      throw new Error('ClusterClient not connected');
+    }
+
+    this.routingMetrics.totalRoutes++;
+
+    // If not in direct routing mode or routing not active, use fallback
+    if (this.config.routingMode !== 'direct' || !this.routingActive) {
+      this.routingMetrics.fallbackRoutes++;
+      return this.getFallbackConnection();
+    }
+
+    // Try to route to partition owner
+    const routing = this.partitionRouter.route(key);
+
+    // No partition map available
+    if (!routing) {
+      this.routingMetrics.partitionMisses++;
+      logger.debug({ key }, 'No partition map available, using fallback');
+      return this.getFallbackConnection();
+    }
+
+    const owner = routing.nodeId;
+
+    // Check if owner is connected
+    if (!this.connectionPool.isNodeConnected(owner)) {
+      this.routingMetrics.fallbackRoutes++;
+      logger.debug({ key, owner }, 'Partition owner not connected, using fallback');
+      // Request partition map refresh since owner might have changed
+      this.requestPartitionMapRefresh();
+      return this.getFallbackConnection();
+    }
+
+    // Get connection to owner
+    const socket = this.connectionPool.getConnection(owner);
+    if (!socket) {
+      this.routingMetrics.fallbackRoutes++;
+      logger.debug({ key, owner }, 'Could not get connection to owner, using fallback');
+      return this.getFallbackConnection();
+    }
+
+    this.routingMetrics.directRoutes++;
+    return socket;
+  }
+
+  /**
+   * Get fallback connection when owner is unavailable.
+   * @throws Error if no connection available
+   */
+  private getFallbackConnection(): WebSocket {
+    const conn = this.connectionPool.getAnyHealthyConnection();
+    if (!conn?.socket) {
+      throw new Error('No healthy connection available');
+    }
+    return conn.socket;
+  }
+
+  /**
+   * Request a partition map refresh in the background.
+   * Called when routing to an unknown/disconnected owner.
+   */
+  private requestPartitionMapRefresh(): void {
+    this.partitionRouter.refreshPartitionMap().catch(err => {
+      logger.error({ err }, 'Failed to refresh partition map');
+    });
+  }
+
+  /**
+   * Request partition map from a specific node.
+   * Called on first node connection.
+   */
+  private requestPartitionMapFromNode(nodeId: string): void {
+    const socket = this.connectionPool.getConnection(nodeId);
+    if (socket) {
+      logger.debug({ nodeId }, 'Requesting partition map from node');
+      socket.send(serialize({
+        type: 'PARTITION_MAP_REQUEST',
+        payload: {
+          currentVersion: this.partitionRouter.getMapVersion(),
+        },
+      }));
+    }
+  }
+
+  /**
+   * Check if at least one connection is active (IConnectionProvider interface).
+   */
+  public isConnected(): boolean {
+    return this.connectionPool.getConnectedNodes().length > 0;
+  }
+
+  /**
+   * Send data via the appropriate connection (IConnectionProvider interface).
+   * Routes based on key if provided.
+   */
+  public send(data: ArrayBuffer | Uint8Array, key?: string): void {
+    if (!this.isConnected()) {
+      throw new Error('ClusterClient not connected');
+    }
+
+    const socket = key ? this.getConnection(key) : this.getAnyConnection();
+    socket.send(data);
+  }
+
+  /**
+   * Send data with automatic retry and rerouting on failure.
+   * @param data - Data to send
+   * @param key - Optional key for routing
+   * @param options - Retry options
+   * @throws Error after max retries exceeded
+   */
+  public async sendWithRetry(
+    data: ArrayBuffer | Uint8Array,
+    key?: string,
+    options: {
+      maxRetries?: number;
+      retryDelayMs?: number;
+      retryOnNotOwner?: boolean;
+    } = {}
+  ): Promise<void> {
+    const {
+      maxRetries = 3,
+      retryDelayMs = 100,
+      retryOnNotOwner = true,
+    } = options;
+
+    let lastError: Error | null = null;
+    let nodeId: string | null = null;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        // Get the target node for circuit breaker tracking
+        if (key && this.routingActive) {
+          const routing = this.partitionRouter.route(key);
+          nodeId = routing?.nodeId ?? null;
+        }
+
+        // Check circuit breaker
+        if (nodeId && !this.canUseNode(nodeId)) {
+          logger.debug({ nodeId, attempt }, 'Circuit open, using fallback');
+          nodeId = null; // Force fallback
+        }
+
+        // Get connection and send
+        const socket = key && nodeId
+          ? this.connectionPool.getConnection(nodeId)
+          : this.getAnyConnection();
+
+        if (!socket) {
+          throw new Error('No connection available');
+        }
+
+        socket.send(data);
+
+        // Record success if using a specific node
+        if (nodeId) {
+          this.recordSuccess(nodeId);
+        }
+
+        return; // Success
+      } catch (error) {
+        lastError = error as Error;
+
+        // Record failure if using a specific node
+        if (nodeId) {
+          this.recordFailure(nodeId);
+        }
+
+        const errorCode = (error as any)?.code;
+
+        // Check if error is retryable
+        if (this.isRetryableError(error)) {
+          logger.debug(
+            { attempt, maxRetries, errorCode, nodeId },
+            'Retryable error, will retry'
+          );
+
+          // Handle specific error types
+          if (errorCode === 'NOT_OWNER' && retryOnNotOwner) {
+            // Wait for partition map update
+            await this.waitForPartitionMapUpdateInternal(2000);
+          } else if (errorCode === 'CONNECTION_CLOSED' || !this.isConnected()) {
+            // Wait for reconnection
+            await this.waitForConnectionInternal(5000);
+          }
+
+          // Small delay before retry
+          await this.delay(retryDelayMs * (attempt + 1)); // Exponential backoff
+          continue;
+        }
+
+        // Non-retryable error, fail immediately
+        throw error;
+      }
+    }
+
+    throw new Error(
+      `Operation failed after ${maxRetries} retries: ${lastError?.message}`
+    );
+  }
+
+  /**
+   * Check if an error is retryable.
+   */
+  private isRetryableError(error: any): boolean {
+    const code = error?.code;
+    const message = error?.message || '';
+
+    return (
+      code === 'NOT_OWNER' ||
+      code === 'CONNECTION_CLOSED' ||
+      code === 'TIMEOUT' ||
+      code === 'ECONNRESET' ||
+      message.includes('No active connections') ||
+      message.includes('No connection available') ||
+      message.includes('No healthy connection')
+    );
+  }
+
+  /**
+   * Wait for partition map update.
+   */
+  private waitForPartitionMapUpdateInternal(timeoutMs: number): Promise<void> {
+    return new Promise((resolve) => {
+      const timeout = setTimeout(resolve, timeoutMs);
+
+      const handler = () => {
+        clearTimeout(timeout);
+        this.off('partitionMapUpdated', handler);
+        resolve();
+      };
+
+      this.on('partitionMapUpdated', handler);
+    });
+  }
+
+  /**
+   * Wait for at least one connection to be available.
+   */
+  private waitForConnectionInternal(timeoutMs: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (this.isConnected()) {
+        resolve();
+        return;
+      }
+
+      const timeout = setTimeout(() => {
+        this.off('connected', handler);
+        reject(new Error('Connection timeout'));
+      }, timeoutMs);
+
+      const handler = () => {
+        clearTimeout(timeout);
+        this.off('connected', handler);
+        resolve();
+      };
+
+      this.on('connected', handler);
+    });
+  }
+
+  /**
+   * Helper delay function.
+   */
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  // ============================================
+  // Cluster-Specific Methods
+  // ============================================
+
   /**
    * Initialize cluster connections
    */
@@ -136,9 +479,10 @@ export class ClusterClient {
   }
 
   /**
-   * Send operation with automatic routing
+   * Send operation with automatic routing (legacy API for cluster operations).
+   * @deprecated Use send(data, key) for IConnectionProvider interface
    */
-  public send(key: string, message: any): boolean {
+  public sendMessage(key: string, message: any): boolean {
     if (this.config.routingMode === 'direct' && this.routingActive) {
       return this.sendDirect(key, message);
     }
@@ -244,6 +588,24 @@ export class ClusterClient {
   }
 
   /**
+   * Get routing metrics for monitoring smart routing effectiveness.
+   */
+  public getRoutingMetrics(): RoutingMetrics {
+    return { ...this.routingMetrics };
+  }
+
+  /**
+   * Reset routing metrics counters.
+   * Useful for monitoring intervals.
+   */
+  public resetRoutingMetrics(): void {
+    this.routingMetrics.directRoutes = 0;
+    this.routingMetrics.fallbackRoutes = 0;
+    this.routingMetrics.partitionMisses = 0;
+    this.routingMetrics.totalRoutes = 0;
+  }
+
+  /**
    * Check if cluster routing is active
    */
   public isRoutingActive(): boolean {
@@ -272,9 +634,9 @@ export class ClusterClient {
   }
 
   /**
-   * Shutdown cluster client
+   * Shutdown cluster client (IConnectionProvider interface).
    */
-  public close(): void {
+  public async close(): Promise<void> {
     this.partitionRouter.close();
     this.connectionPool.close();
     this.initialized = false;
@@ -301,11 +663,123 @@ export class ClusterClient {
   }
 
   /**
-   * Get any healthy WebSocket connection
+   * Get any healthy WebSocket connection (IConnectionProvider interface).
+   * @throws Error if not connected
    */
-  public getAnyConnection(): WebSocket | null {
+  public getAnyConnection(): WebSocket {
+    const conn = this.connectionPool.getAnyHealthyConnection();
+    if (!conn?.socket) {
+      throw new Error('No healthy connection available');
+    }
+    return conn.socket;
+  }
+
+  /**
+   * Get any healthy WebSocket connection, or null if none available.
+   * Use this for optional connection checks.
+   */
+  public getAnyConnectionOrNull(): WebSocket | null {
     const conn = this.connectionPool.getAnyHealthyConnection();
     return conn?.socket ?? null;
+  }
+
+  // ============================================
+  // Circuit Breaker Methods
+  // ============================================
+
+  /**
+   * Get circuit breaker state for a node.
+   */
+  public getCircuit(nodeId: string): CircuitState {
+    let circuit = this.circuits.get(nodeId);
+    if (!circuit) {
+      circuit = { failures: 0, lastFailure: 0, state: 'closed' };
+      this.circuits.set(nodeId, circuit);
+    }
+    return circuit;
+  }
+
+  /**
+   * Check if a node can be used (circuit not open).
+   */
+  public canUseNode(nodeId: string): boolean {
+    const circuit = this.getCircuit(nodeId);
+
+    if (circuit.state === 'closed') {
+      return true;
+    }
+
+    if (circuit.state === 'open') {
+      // Check if reset timeout elapsed
+      if (Date.now() - circuit.lastFailure > this.circuitBreakerConfig.resetTimeoutMs) {
+        circuit.state = 'half-open';
+        logger.debug({ nodeId }, 'Circuit breaker half-open, allowing test request');
+        this.emit('circuit:half-open', nodeId);
+        return true; // Allow one test request
+      }
+      return false;
+    }
+
+    // half-open: allow requests
+    return true;
+  }
+
+  /**
+   * Record a successful operation to a node.
+   * Resets circuit breaker on success.
+   */
+  public recordSuccess(nodeId: string): void {
+    const circuit = this.getCircuit(nodeId);
+    const wasOpen = circuit.state !== 'closed';
+
+    circuit.failures = 0;
+    circuit.state = 'closed';
+
+    if (wasOpen) {
+      logger.info({ nodeId }, 'Circuit breaker closed after success');
+      this.emit('circuit:closed', nodeId);
+    }
+  }
+
+  /**
+   * Record a failed operation to a node.
+   * Opens circuit breaker after threshold failures.
+   */
+  public recordFailure(nodeId: string): void {
+    const circuit = this.getCircuit(nodeId);
+    circuit.failures++;
+    circuit.lastFailure = Date.now();
+
+    if (circuit.failures >= this.circuitBreakerConfig.failureThreshold) {
+      if (circuit.state !== 'open') {
+        circuit.state = 'open';
+        logger.warn({ nodeId, failures: circuit.failures }, 'Circuit breaker opened');
+        this.emit('circuit:open', nodeId);
+      }
+    }
+  }
+
+  /**
+   * Get all circuit breaker states.
+   */
+  public getCircuitStates(): Map<string, CircuitState> {
+    return new Map(this.circuits);
+  }
+
+  /**
+   * Reset circuit breaker for a specific node.
+   */
+  public resetCircuit(nodeId: string): void {
+    this.circuits.delete(nodeId);
+    logger.debug({ nodeId }, 'Circuit breaker reset');
+  }
+
+  /**
+   * Reset all circuit breakers.
+   */
+  public resetAllCircuits(): void {
+    this.circuits.clear();
+    logger.debug('All circuit breakers reset');
   }
 
   // ============================================
@@ -316,6 +790,12 @@ export class ClusterClient {
     // Connection pool events
     this.connectionPool.on('node:connected', (nodeId: string) => {
       logger.debug({ nodeId }, 'Node connected');
+
+      // Request partition map on first connection if not already received
+      if (this.partitionRouter.getMapVersion() === 0) {
+        this.requestPartitionMapFromNode(nodeId);
+      }
+
       if (this.connectionPool.getConnectedNodes().length === 1) {
         this.emit('connected');
       }
@@ -337,6 +817,11 @@ export class ClusterClient {
       this.emit('error', error);
     });
 
+    // Forward messages from connection pool
+    this.connectionPool.on('message', (nodeId: string, data: any) => {
+      this.emit('message', nodeId, data);
+    });
+
     // Partition router events
     this.partitionRouter.on('partitionMap:updated', (version: number, changesCount: number) => {
       if (!this.routingActive && this.partitionRouter.hasPartitionMap()) {
@@ -345,6 +830,8 @@ export class ClusterClient {
         this.emit('routing:active');
       }
       this.emit('partitionMap:ready', version);
+      // Emit IConnectionProvider compatible event
+      this.emit('partitionMapUpdated');
     });
 
     this.partitionRouter.on('routing:miss', (key: string, expected: string, actual: string) => {

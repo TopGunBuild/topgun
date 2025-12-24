@@ -238,6 +238,79 @@ export class PartitionRouter {
   }
 
   /**
+   * Get owner node for a key.
+   * Returns null if partition map is not available.
+   */
+  public getOwner(key: string): string | null {
+    if (!this.partitionMap) return null;
+
+    const partitionId = this.getPartitionId(key);
+    const partition = this.partitionMap.partitions.find(p => p.partitionId === partitionId);
+
+    return partition?.ownerNodeId ?? null;
+  }
+
+  /**
+   * Get backup nodes for a key.
+   * Returns empty array if partition map is not available.
+   */
+  public getBackups(key: string): string[] {
+    if (!this.partitionMap) return [];
+
+    const partitionId = this.getPartitionId(key);
+    const partition = this.partitionMap.partitions.find(p => p.partitionId === partitionId);
+
+    return partition?.backupNodeIds ?? [];
+  }
+
+  /**
+   * Get the full partition map.
+   * Returns null if not available.
+   */
+  public getMap(): PartitionMap | null {
+    return this.partitionMap;
+  }
+
+  /**
+   * Update entire partition map.
+   * Only accepts newer versions.
+   */
+  public updateMap(map: PartitionMap): boolean {
+    if (this.partitionMap && map.version <= this.partitionMap.version) {
+      return false;
+    }
+
+    this.partitionMap = map;
+    this.lastRefreshTime = Date.now();
+
+    // Update connection pool with node endpoints
+    this.updateConnectionPool(map);
+
+    const changesCount = map.partitions.length;
+    logger.info({
+      version: map.version,
+      partitions: map.partitionCount,
+      nodes: map.nodes.length
+    }, 'Partition map updated via updateMap');
+
+    this.emit('partitionMap:updated', map.version, changesCount);
+    return true;
+  }
+
+  /**
+   * Update a single partition (for delta updates).
+   */
+  public updatePartition(partitionId: number, owner: string, backups: string[]): void {
+    if (!this.partitionMap) return;
+
+    const partition = this.partitionMap.partitions.find(p => p.partitionId === partitionId);
+    if (partition) {
+      partition.ownerNodeId = owner;
+      partition.backupNodeIds = backups;
+    }
+  }
+
+  /**
    * Check if partition map is stale
    */
   public isMapStale(): boolean {

@@ -47,6 +47,13 @@ export interface PartitionMapMessage {
   payload: PartitionMap;
 }
 
+export interface PartitionMapRequestMessage {
+  type: 'PARTITION_MAP_REQUEST';
+  payload?: {
+    currentVersion?: number;
+  };
+}
+
 export interface PartitionChange {
   partitionId: number;
   previousOwner: string;
@@ -140,6 +147,21 @@ export const DEFAULT_PARTITION_ROUTER_CONFIG: PartitionRouterConfig = {
 // Cluster Client Configuration
 // ============================================
 
+/**
+ * Circuit breaker configuration.
+ */
+export interface CircuitBreakerConfig {
+  /** Number of failures before opening circuit (default: 5) */
+  failureThreshold: number;
+  /** Time in ms before attempting to close circuit (default: 30000) */
+  resetTimeoutMs: number;
+}
+
+export const DEFAULT_CIRCUIT_BREAKER_CONFIG: CircuitBreakerConfig = {
+  failureThreshold: 5,
+  resetTimeoutMs: 30000,
+};
+
 export interface ClusterClientConfig {
   /** Enable cluster mode */
   enabled: boolean;
@@ -151,6 +173,8 @@ export interface ClusterClientConfig {
   connectionPool?: Partial<ConnectionPoolConfig>;
   /** Partition router configuration */
   routing?: Partial<PartitionRouterConfig>;
+  /** Circuit breaker configuration */
+  circuitBreaker?: Partial<CircuitBreakerConfig>;
 }
 
 // ============================================

@@ -1,4 +1,4 @@
-import { TopGunClient } from '../TopGunClient';
+import { TopGunClient, DEFAULT_CLUSTER_CONFIG } from '../TopGunClient';
 import { IStorageAdapter, OpLogEntry } from '../IStorageAdapter';
 import { LWWRecord, ORMapRecord } from '@topgunbuild/core';
 import { QueryHandle } from '../QueryHandle';
@@ -338,6 +338,172 @@ describe('TopGunClient', () => {
       const map2 = client.getORMap<string, string>('tags');
 
       expect(map1).toBe(map2);
+    });
+  });
+
+  // ============================================
+  // Cluster Mode Configuration Tests (Phase 4.5)
+  // ============================================
+
+  describe('Cluster Mode Configuration', () => {
+    test('should reject both serverUrl and cluster config', () => {
+      expect(() => new TopGunClient({
+        serverUrl: 'ws://localhost:8080',
+        cluster: { seeds: ['ws://node1:8080'] },
+        storage
+      })).toThrow('Cannot specify both serverUrl and cluster config');
+    });
+
+    test('should require at least one config (serverUrl or cluster)', () => {
+      expect(() => new TopGunClient({
+        storage
+      } as any)).toThrow('Must specify either serverUrl or cluster config');
+    });
+
+    test('should require at least one seed in cluster config', () => {
+      expect(() => new TopGunClient({
+        cluster: { seeds: [] },
+        storage
+      })).toThrow('Cluster config requires at least one seed node');
+    });
+
+    test('should create client in cluster mode with valid cluster config', () => {
+      const clusterClient = new TopGunClient({
+        cluster: { seeds: ['ws://node1:8080', 'ws://node2:8080'] },
+        storage
+      });
+
+      expect(clusterClient).toBeInstanceOf(TopGunClient);
+      expect(clusterClient.isCluster()).toBe(true);
+    });
+
+    test('should create client in single-server mode with serverUrl', () => {
+      const singleClient = new TopGunClient({
+        serverUrl: 'ws://localhost:8080',
+        storage
+      });
+
+      expect(singleClient).toBeInstanceOf(TopGunClient);
+      expect(singleClient.isCluster()).toBe(false);
+    });
+
+    test('should use default cluster config values', () => {
+      expect(DEFAULT_CLUSTER_CONFIG.connectionsPerNode).toBe(1);
+      expect(DEFAULT_CLUSTER_CONFIG.smartRouting).toBe(true);
+      expect(DEFAULT_CLUSTER_CONFIG.partitionMapRefreshMs).toBe(30000);
+      expect(DEFAULT_CLUSTER_CONFIG.connectionTimeoutMs).toBe(5000);
+      expect(DEFAULT_CLUSTER_CONFIG.retryAttempts).toBe(3);
+    });
+
+    test('should accept custom cluster config values', () => {
+      const clusterClient = new TopGunClient({
+        cluster: {
+          seeds: ['ws://node1:8080'],
+          connectionsPerNode: 3,
+          smartRouting: false,
+          partitionMapRefreshMs: 60000,
+          connectionTimeoutMs: 10000,
+          retryAttempts: 5
+        },
+        storage
+      });
+
+      expect(clusterClient.isCluster()).toBe(true);
+    });
+  });
+
+  describe('Cluster Mode API', () => {
+    let clusterClient: TopGunClient;
+    let singleClient: TopGunClient;
+
+    beforeEach(() => {
+      clusterClient = new TopGunClient({
+        cluster: { seeds: ['ws://node1:8080', 'ws://node2:8080'] },
+        storage
+      });
+
+      singleClient = new TopGunClient({
+        serverUrl: 'ws://localhost:8080',
+        storage
+      });
+    });
+
+    afterEach(() => {
+      clusterClient.close();
+      singleClient.close();
+    });
+
+    test('isCluster() should return true for cluster mode', () => {
+      expect(clusterClient.isCluster()).toBe(true);
+    });
+
+    test('isCluster() should return false for single-server mode', () => {
+      expect(singleClient.isCluster()).toBe(false);
+    });
+
+    test('getConnectedNodes() should return empty array initially (cluster mode)', () => {
+      // Before connections are established
+      expect(clusterClient.getConnectedNodes()).toEqual([]);
+    });
+
+    test('getConnectedNodes() should return empty array in single-server mode', () => {
+      expect(singleClient.getConnectedNodes()).toEqual([]);
+    });
+
+    test('getPartitionMapVersion() should return 0 initially', () => {
+      expect(clusterClient.getPartitionMapVersion()).toBe(0);
+    });
+
+    test('getPartitionMapVersion() should return 0 in single-server mode', () => {
+      expect(singleClient.getPartitionMapVersion()).toBe(0);
+    });
+
+    test('isRoutingActive() should return false initially', () => {
+      expect(clusterClient.isRoutingActive()).toBe(false);
+    });
+
+    test('isRoutingActive() should return false in single-server mode', () => {
+      expect(singleClient.isRoutingActive()).toBe(false);
+    });
+
+    test('getClusterHealth() should return empty map initially', () => {
+      expect(clusterClient.getClusterHealth().size).toBe(0);
+    });
+
+    test('getClusterHealth() should return empty map in single-server mode', () => {
+      expect(singleClient.getClusterHealth().size).toBe(0);
+    });
+
+    test('getClusterStats() should return null in single-server mode', () => {
+      expect(singleClient.getClusterStats()).toBeNull();
+    });
+
+    test('getClusterStats() should return stats object in cluster mode', () => {
+      const stats = clusterClient.getClusterStats();
+      expect(stats).not.toBeNull();
+      expect(stats).toHaveProperty('mapVersion');
+      expect(stats).toHaveProperty('partitionCount');
+      expect(stats).toHaveProperty('nodeCount');
+      expect(stats).toHaveProperty('lastRefresh');
+      expect(stats).toHaveProperty('isStale');
+    });
+
+    test('refreshPartitionMap() should reject when no connections available', async () => {
+      // Without connections established, should reject
+      await expect(clusterClient.refreshPartitionMap()).rejects.toThrow('No connection available');
+    });
+
+    test('refreshPartitionMap() should not throw in single-server mode', async () => {
+      await expect(singleClient.refreshPartitionMap()).resolves.not.toThrow();
+    });
+
+    test('close() should not throw in cluster mode', () => {
+      const tempClient = new TopGunClient({
+        cluster: { seeds: ['ws://node1:8080'] },
+        storage
+      });
+
+      expect(() => tempClient.close()).not.toThrow();
     });
   });
 });

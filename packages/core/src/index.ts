@@ -37,6 +37,7 @@ export type {
   PartitionInfo,
   PartitionMap,
   PartitionMapMessage,
+  PartitionMapRequestMessage,
   PartitionChange,
   PartitionMapDeltaMessage,
   NotOwnerError,
@@ -45,6 +46,7 @@ export type {
   ConnectionPoolConfig,
   PartitionRouterConfig,
   ClusterClientConfig,
+  CircuitBreakerConfig,
   ConnectionState,
   NodeHealth,
   ClusterEvents,
@@ -76,6 +78,7 @@ export type {
 export {
   DEFAULT_CONNECTION_POOL_CONFIG,
   DEFAULT_PARTITION_ROUTER_CONFIG,
+  DEFAULT_CIRCUIT_BREAKER_CONFIG,
   PARTITION_COUNT,
   DEFAULT_BACKUP_COUNT,
   // Migration exports (Task 03)

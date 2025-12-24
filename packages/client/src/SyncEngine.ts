@@ -16,6 +16,8 @@ import type {
   OperationDroppedEvent,
 } from './BackpressureConfig';
 import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
+import type { IConnectionProvider } from './types';
+import { SingleServerProvider } from './connection/SingleServerProvider';
 
 export interface OpLogEntry {
   id: string; // Unique ID for the operation
@@ -50,7 +52,10 @@ export interface BackoffConfig {
 
 export interface SyncEngineConfig {
   nodeId: string;
-  serverUrl: string;
+  /** @deprecated Use connectionProvider instead */
+  serverUrl?: string;
+  /** Connection provider (preferred over serverUrl) */
+  connectionProvider?: IConnectionProvider;
   storageAdapter: IStorageAdapter;
   reconnectInterval?: number;
   heartbeat?: Partial<HeartbeatConfig>;
@@ -73,6 +78,8 @@ export class SyncEngine {
   private readonly hlc: HLC;
   private readonly stateMachine: SyncStateMachine;
   private readonly backoffConfig: BackoffConfig;
+  private readonly connectionProvider: IConnectionProvider;
+  private readonly useConnectionProvider: boolean;
 
   private websocket: WebSocket | null = null;
   private opLog: OpLogEntry[] = [];
@@ -107,8 +114,13 @@ export class SyncEngine {
   }> = new Map();
 
   constructor(config: SyncEngineConfig) {
+    // Validate config: either serverUrl or connectionProvider required
+    if (!config.serverUrl && !config.connectionProvider) {
+      throw new Error('SyncEngine requires either serverUrl or connectionProvider');
+    }
+
     this.nodeId = config.nodeId;
-    this.serverUrl = config.serverUrl;
+    this.serverUrl = config.serverUrl || '';
     this.storageAdapter = config.storageAdapter;
     this.hlc = new HLC(this.nodeId);
 
@@ -134,7 +146,18 @@ export class SyncEngine {
       ...config.backpressure,
     };
 
-    this.initConnection();
+    // Initialize connection provider
+    if (config.connectionProvider) {
+      this.connectionProvider = config.connectionProvider;
+      this.useConnectionProvider = true;
+      this.initConnectionProvider();
+    } else {
+      // Legacy mode: create SingleServerProvider internally
+      this.connectionProvider = new SingleServerProvider({ url: config.serverUrl! });
+      this.useConnectionProvider = false;
+      this.initConnection();
+    }
+
     this.loadOpLog();
   }
 
@@ -200,6 +223,78 @@ export class SyncEngine {
   // Connection Management
   // ============================================
 
+  /**
+   * Initialize connection using IConnectionProvider (Phase 4.5 cluster mode).
+   * Sets up event handlers for the connection provider.
+   */
+  private initConnectionProvider(): void {
+    // Transition to CONNECTING state
+    this.stateMachine.transition(SyncState.CONNECTING);
+
+    // Set up event handlers
+    this.connectionProvider.on('connected', (_nodeId: string) => {
+      if (this.authToken || this.tokenProvider) {
+        logger.info('ConnectionProvider connected. Sending auth...');
+        this.stateMachine.transition(SyncState.AUTHENTICATING);
+        this.sendAuth();
+      } else {
+        logger.info('ConnectionProvider connected. Waiting for auth token...');
+        this.stateMachine.transition(SyncState.AUTHENTICATING);
+      }
+    });
+
+    this.connectionProvider.on('disconnected', (_nodeId: string) => {
+      logger.info('ConnectionProvider disconnected.');
+      this.stopHeartbeat();
+      this.stateMachine.transition(SyncState.DISCONNECTED);
+      // Don't schedule reconnect - provider handles it
+    });
+
+    this.connectionProvider.on('reconnected', (_nodeId: string) => {
+      logger.info('ConnectionProvider reconnected.');
+      this.stateMachine.transition(SyncState.CONNECTING);
+      if (this.authToken || this.tokenProvider) {
+        this.stateMachine.transition(SyncState.AUTHENTICATING);
+        this.sendAuth();
+      }
+    });
+
+    this.connectionProvider.on('message', (_nodeId: string, data: any) => {
+      let message: any;
+      if (data instanceof ArrayBuffer) {
+        message = deserialize(new Uint8Array(data));
+      } else if (data instanceof Uint8Array) {
+        message = deserialize(data);
+      } else {
+        try {
+          message = typeof data === 'string' ? JSON.parse(data) : data;
+        } catch (e) {
+          logger.error({ err: e }, 'Failed to parse message from ConnectionProvider');
+          return;
+        }
+      }
+      this.handleServerMessage(message);
+    });
+
+    this.connectionProvider.on('partitionMapUpdated', () => {
+      logger.debug('Partition map updated');
+      // Could trigger re-subscriptions if needed
+    });
+
+    this.connectionProvider.on('error', (error: Error) => {
+      logger.error({ err: error }, 'ConnectionProvider error');
+    });
+
+    // Start connection
+    this.connectionProvider.connect().catch((err) => {
+      logger.error({ err }, 'Failed to connect via ConnectionProvider');
+      this.stateMachine.transition(SyncState.DISCONNECTED);
+    });
+  }
+
+  /**
+   * Initialize connection using direct WebSocket (legacy single-server mode).
+   */
   private initConnection(): void {
     // Transition to CONNECTING state
     this.stateMachine.transition(SyncState.CONNECTING);
@@ -300,6 +395,43 @@ export class SyncEngine {
     this.backoffAttempt = 0;
   }
 
+  /**
+   * Send a message through the current connection.
+   * Uses connectionProvider if in cluster mode, otherwise uses direct websocket.
+   * @param message Message object to serialize and send
+   * @param key Optional key for routing (cluster mode only)
+   * @returns true if message was sent, false otherwise
+   */
+  private sendMessage(message: any, key?: string): boolean {
+    const data = serialize(message);
+
+    if (this.useConnectionProvider) {
+      try {
+        this.connectionProvider.send(data, key);
+        return true;
+      } catch (err) {
+        logger.warn({ err }, 'Failed to send via ConnectionProvider');
+        return false;
+      }
+    } else {
+      if (this.websocket?.readyState === WebSocket.OPEN) {
+        this.websocket.send(data);
+        return true;
+      }
+      return false;
+    }
+  }
+
+  /**
+   * Check if we can send messages (connection is ready).
+   */
+  private canSend(): boolean {
+    if (this.useConnectionProvider) {
+      return this.connectionProvider.isConnected();
+    }
+    return this.websocket?.readyState === WebSocket.OPEN;
+  }
+
   private async loadOpLog(): Promise<void> {
     const storedTimestamp = await this.storageAdapter.getMeta('lastSyncTimestamp');
     if (storedTimestamp) {
@@ -367,25 +499,23 @@ export class SyncEngine {
 
     logger.info({ count: pending.length }, 'Syncing pending operations');
 
-    if (this.websocket?.readyState === WebSocket.OPEN) {
-      this.websocket.send(serialize({
-        type: 'OP_BATCH',
-        payload: {
-          ops: pending
-        }
-      }));
-    }
+    this.sendMessage({
+      type: 'OP_BATCH',
+      payload: {
+        ops: pending
+      }
+    });
   }
 
   private startMerkleSync(): void {
     for (const [mapName, map] of this.maps) {
       if (map instanceof LWWMap) {
         logger.info({ mapName }, 'Starting Merkle sync for LWWMap');
-        this.websocket?.send(serialize({
+        this.sendMessage({
           type: 'SYNC_INIT',
           mapName,
           lastSyncTimestamp: this.lastSyncTimestamp
-        }));
+        });
       } else if (map instanceof ORMap) {
         logger.info({ mapName }, 'Starting Merkle sync for ORMap');
         const tree = map.getMerkleTree();
@@ -394,13 +524,13 @@ export class SyncEngine {
         // Build bucket hashes for all non-empty buckets at depth 0
         const bucketHashes: Record<string, number> = tree.getBuckets('');
 
-        this.websocket?.send(serialize({
+        this.sendMessage({
           type: 'ORMAP_SYNC_INIT',
           mapName,
           rootHash,
           bucketHashes,
           lastSyncTimestamp: this.lastSyncTimestamp
-        }));
+        });
       }
     }
   }
@@ -450,10 +580,10 @@ export class SyncEngine {
     const token = this.authToken;
     if (!token) return; // Don't send anonymous auth anymore
 
-    this.websocket?.send(serialize({
+    this.sendMessage({
       type: 'AUTH',
       token
-    }));
+    });
   }
 
   public subscribeToQuery(query: QueryHandle<any>) {
@@ -473,19 +603,19 @@ export class SyncEngine {
   public unsubscribeFromTopic(topic: string) {
     this.topics.delete(topic);
     if (this.isAuthenticated()) {
-      this.websocket?.send(serialize({
+      this.sendMessage({
         type: 'TOPIC_UNSUB',
         payload: { topic }
-      }));
+      });
     }
   }
 
   public publishTopic(topic: string, data: any) {
     if (this.isAuthenticated()) {
-      this.websocket?.send(serialize({
+      this.sendMessage({
         type: 'TOPIC_PUB',
         payload: { topic, data }
-      }));
+      });
     } else {
       // TODO: Queue topic messages or drop?
       // Spec says Fire-and-Forget, so dropping is acceptable if offline,
@@ -496,10 +626,10 @@ export class SyncEngine {
   }
 
   private sendTopicSubscription(topic: string) {
-    this.websocket?.send(serialize({
+    this.sendMessage({
       type: 'TOPIC_SUB',
       payload: { topic }
-    }));
+    });
   }
 
   /**
@@ -547,22 +677,22 @@ export class SyncEngine {
   public unsubscribeFromQuery(queryId: string) {
     this.queries.delete(queryId);
     if (this.isAuthenticated()) {
-      this.websocket?.send(serialize({
+      this.sendMessage({
         type: 'QUERY_UNSUB',
         payload: { queryId }
-      }));
+      });
     }
   }
 
   private sendQuerySubscription(query: QueryHandle<any>) {
-    this.websocket?.send(serialize({
+    this.sendMessage({
       type: 'QUERY_SUB',
       payload: {
         queryId: query.id,
         mapName: query.getMapName(),
         query: query.getFilter()
       }
-    }));
+    });
   }
 
   public requestLock(name: string, requestId: string, ttl: number): Promise<{ fencingToken: number }> {
@@ -585,10 +715,15 @@ export class SyncEngine {
       this.pendingLockRequests.set(requestId, { resolve, reject, timer });
 
       try {
-        this.websocket?.send(serialize({
+        const sent = this.sendMessage({
           type: 'LOCK_REQUEST',
           payload: { requestId, name, ttl }
-        }));
+        });
+        if (!sent) {
+          clearTimeout(timer);
+          this.pendingLockRequests.delete(requestId);
+          reject(new Error('Failed to send lock request'));
+        }
       } catch (e) {
         clearTimeout(timer);
         this.pendingLockRequests.delete(requestId);
@@ -613,10 +748,15 @@ export class SyncEngine {
       this.pendingLockRequests.set(requestId, { resolve, reject, timer });
 
       try {
-        this.websocket?.send(serialize({
+        const sent = this.sendMessage({
           type: 'LOCK_RELEASE',
           payload: { requestId, name, fencingToken }
-        }));
+        });
+        if (!sent) {
+          clearTimeout(timer);
+          this.pendingLockRequests.delete(requestId);
+          resolve(false);
+        }
       } catch (e) {
         clearTimeout(timer);
         this.pendingLockRequests.delete(requestId);
@@ -839,11 +979,11 @@ export class SyncEngine {
         logger.warn({ mapName }, 'Sync Reset Required due to GC Age');
         await this.resetMap(mapName);
         // Trigger re-sync as fresh
-        this.websocket?.send(serialize({
+        this.sendMessage({
           type: 'SYNC_INIT',
           mapName,
           lastSyncTimestamp: 0
-        }));
+        });
         break;
       }
 
@@ -854,10 +994,10 @@ export class SyncEngine {
           const localRootHash = map.getMerkleTree().getRootHash();
           if (localRootHash !== rootHash) {
             logger.info({ mapName, localRootHash, remoteRootHash: rootHash }, 'Root hash mismatch, requesting buckets');
-            this.websocket?.send(serialize({
+            this.sendMessage({
               type: 'MERKLE_REQ_BUCKET',
               payload: { mapName, path: '' }
-            }));
+            });
           } else {
             logger.info({ mapName }, 'Map is in sync');
           }
@@ -882,10 +1022,10 @@ export class SyncEngine {
             const localHash = localBuckets[bucketKey] || 0;
             if (localHash !== remoteHash) {
               const newPath = path + bucketKey;
-              this.websocket?.send(serialize({
+              this.sendMessage({
                 type: 'MERKLE_REQ_BUCKET',
                 payload: { mapName, path: newPath }
-              }));
+              });
             }
           }
         }
@@ -924,10 +1064,10 @@ export class SyncEngine {
 
           if (localRootHash !== rootHash) {
             logger.info({ mapName, localRootHash, remoteRootHash: rootHash }, 'ORMap root hash mismatch, requesting buckets');
-            this.websocket?.send(serialize({
+            this.sendMessage({
               type: 'ORMAP_MERKLE_REQ_BUCKET',
               payload: { mapName, path: '' }
-            }));
+            });
           } else {
             logger.info({ mapName }, 'ORMap is in sync');
           }
@@ -952,10 +1092,10 @@ export class SyncEngine {
             const localHash = localBuckets[bucketKey] || 0;
             if (localHash !== remoteHash) {
               const newPath = path + bucketKey;
-              this.websocket?.send(serialize({
+              this.sendMessage({
                 type: 'ORMAP_MERKLE_REQ_BUCKET',
                 payload: { mapName, path: newPath }
-              }));
+              });
             }
           }
 
@@ -1072,7 +1212,13 @@ export class SyncEngine {
       this.reconnectTimer = null;
     }
 
-    if (this.websocket) {
+    if (this.useConnectionProvider) {
+      // Close via connection provider
+      this.connectionProvider.close().catch((err) => {
+        logger.error({ err }, 'Error closing ConnectionProvider');
+      });
+    } else if (this.websocket) {
+      // Legacy: close direct websocket
       this.websocket.onclose = null; // Prevent reconnect on intentional close
       this.websocket.close();
       this.websocket = null;
@@ -1093,7 +1239,115 @@ export class SyncEngine {
     this.close();
     this.stateMachine.reset();
     this.resetBackoff();
-    this.initConnection();
+    if (this.useConnectionProvider) {
+      this.initConnectionProvider();
+    } else {
+      this.initConnection();
+    }
+  }
+
+  // ============================================
+  // Failover Support Methods (Phase 4.5 Task 05)
+  // ============================================
+
+  /**
+   * Wait for a partition map update from the connection provider.
+   * Used when an operation fails with NOT_OWNER error and needs
+   * to wait for an updated partition map before retrying.
+   *
+   * @param timeoutMs - Maximum time to wait (default: 5000ms)
+   * @returns Promise that resolves when partition map is updated or times out
+   */
+  public waitForPartitionMapUpdate(timeoutMs: number = 5000): Promise<void> {
+    return new Promise((resolve) => {
+      const timeout = setTimeout(resolve, timeoutMs);
+
+      const handler = () => {
+        clearTimeout(timeout);
+        this.connectionProvider.off('partitionMapUpdated', handler);
+        resolve();
+      };
+
+      this.connectionProvider.on('partitionMapUpdated', handler);
+    });
+  }
+
+  /**
+   * Wait for the connection to be available.
+   * Used when an operation fails due to connection issues and needs
+   * to wait for reconnection before retrying.
+   *
+   * @param timeoutMs - Maximum time to wait (default: 10000ms)
+   * @returns Promise that resolves when connected or rejects on timeout
+   */
+  public waitForConnection(timeoutMs: number = 10000): Promise<void> {
+    return new Promise((resolve, reject) => {
+      // If already connected, resolve immediately
+      if (this.connectionProvider.isConnected()) {
+        resolve();
+        return;
+      }
+
+      const timeout = setTimeout(() => {
+        this.connectionProvider.off('connected', handler);
+        reject(new Error('Connection timeout waiting for reconnection'));
+      }, timeoutMs);
+
+      const handler = () => {
+        clearTimeout(timeout);
+        this.connectionProvider.off('connected', handler);
+        resolve();
+      };
+
+      this.connectionProvider.on('connected', handler);
+    });
+  }
+
+  /**
+   * Wait for a specific sync state.
+   * Useful for waiting until fully connected and synced.
+   *
+   * @param targetState - The state to wait for
+   * @param timeoutMs - Maximum time to wait (default: 30000ms)
+   * @returns Promise that resolves when state is reached or rejects on timeout
+   */
+  public waitForState(targetState: SyncState, timeoutMs: number = 30000): Promise<void> {
+    return new Promise((resolve, reject) => {
+      // If already in target state, resolve immediately
+      if (this.stateMachine.getState() === targetState) {
+        resolve();
+        return;
+      }
+
+      const timeout = setTimeout(() => {
+        unsubscribe();
+        reject(new Error(`Timeout waiting for state ${targetState}`));
+      }, timeoutMs);
+
+      const unsubscribe = this.stateMachine.onStateChange((event) => {
+        if (event.to === targetState) {
+          clearTimeout(timeout);
+          unsubscribe();
+          resolve();
+        }
+      });
+    });
+  }
+
+  /**
+   * Check if the connection provider is connected.
+   * Convenience method for failover logic.
+   */
+  public isProviderConnected(): boolean {
+    return this.connectionProvider.isConnected();
+  }
+
+  /**
+   * Get the connection provider for direct access.
+   * Use with caution - prefer using SyncEngine methods.
+   */
+  public getConnectionProvider(): IConnectionProvider {
+    return this.connectionProvider;
   }
 
   private async resetMap(mapName: string): Promise<void> {
@@ -1152,12 +1406,12 @@ export class SyncEngine {
    * Sends a PING message to the server.
    */
   private sendPing(): void {
-    if (this.websocket?.readyState === WebSocket.OPEN) {
+    if (this.canSend()) {
       const pingMessage = {
         type: 'PING',
         timestamp: Date.now(),
       };
-      this.websocket.send(serialize(pingMessage));
+      this.sendMessage(pingMessage);
     }
   }
 
@@ -1266,13 +1520,13 @@ export class SyncEngine {
     }
 
     if (entries.length > 0) {
-      this.websocket?.send(serialize({
+      this.sendMessage({
         type: 'ORMAP_PUSH_DIFF',
         payload: {
           mapName,
           entries
         }
-      }));
+      });
       logger.debug({ mapName, keyCount: entries.length }, 'Pushed ORMap diff to server');
     }
   }
