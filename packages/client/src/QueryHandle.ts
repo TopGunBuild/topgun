@@ -1,4 +1,5 @@
 import { SyncEngine } from './SyncEngine';
+import { ChangeTracker, ChangeEvent } from './ChangeTracker';
 import type { PredicateNode } from '@topgunbuild/core';
 
 export interface QueryFilter {
@@ -23,6 +24,11 @@ export class QueryHandle<T> {
   private listeners: Set<(results: QueryResultItem<T>[]) => void> = new Set();
   private currentResults: Map<string, T> = new Map();
 
+  // Change tracking (Phase 5.1)
+  private changeTracker = new ChangeTracker<T>();
+  private pendingChanges: ChangeEvent<T>[] = [];
+  private changeListeners: Set<(changes: ChangeEvent<T>[]) => void> = new Set();
+
   constructor(syncEngine: SyncEngine, mapName: string, filter: QueryFilter = {}) {
     this.id = crypto.randomUUID();
     this.syncEngine = syncEngine;
@@ -32,7 +38,7 @@ export class QueryHandle<T> {
 
   public subscribe(callback: (results: QueryResultItem<T>[]) => void): () => void {
     this.listeners.add(callback);
-    
+
     // If this is the first listener, activate subscription
     if (this.listeners.size === 1) {
       this.syncEngine.subscribeToQuery(this);
@@ -40,7 +46,7 @@ export class QueryHandle<T> {
       // Immediately invoke with cached results
       callback(this.getSortedResults());
     }
-    
+
     // [FIX]: Attempt to load local results immediately if available
     // This ensures that if data is already in storage but sync hasn't happened,
     // we still show something.
@@ -126,6 +132,10 @@ export class QueryHandle<T> {
       this.currentResults.set(item.key, item.value);
     }
     console.log(`[QueryHandle:${this.mapName}] After merge: ${this.currentResults.size} results`);
+
+    // Compute changes for delta tracking (Phase 5.1)
+    this.computeAndNotifyChanges(Date.now());
+
     this.notify();
   }
 
@@ -138,7 +148,93 @@ export class QueryHandle<T> {
     } else {
       this.currentResults.set(key, value);
     }
+
+    // Compute changes for delta tracking (Phase 5.1)
+    this.computeAndNotifyChanges(Date.now());
+
     this.notify();
+  }
+
+  /**
+   * Subscribe to change events (Phase 5.1).
+   * Returns an unsubscribe function.
+   *
+   * @example
+   * ```typescript
+   * const unsubscribe = handle.onChanges((changes) => {
+   *   for (const change of changes) {
+   *     if (change.type === 'add') {
+   *       console.log('Added:', change.key, change.value);
+   *     }
+   *   }
+   * });
+   * ```
+   */
+  public onChanges(listener: (changes: ChangeEvent<T>[]) => void): () => void {
+    this.changeListeners.add(listener);
+    return () => this.changeListeners.delete(listener);
+  }
+
+  /**
+   * Get and clear pending changes (Phase 5.1).
+   * Call this to retrieve all changes since the last consume.
+   */
+  public consumeChanges(): ChangeEvent<T>[] {
+    const changes = [...this.pendingChanges];
+    this.pendingChanges = [];
+    return changes;
+  }
+
+  /**
+   * Get last change without consuming (Phase 5.1).
+   * Returns null if no pending changes.
+   */
+  public getLastChange(): ChangeEvent<T> | null {
+    return this.pendingChanges.length > 0
+      ? this.pendingChanges[this.pendingChanges.length - 1]
+      : null;
+  }
+
+  /**
+   * Get all pending changes without consuming (Phase 5.1).
+   */
+  public getPendingChanges(): ChangeEvent<T>[] {
+    return [...this.pendingChanges];
+  }
+
+  /**
+   * Clear all pending changes (Phase 5.1).
+   */
+  public clearChanges(): void {
+    this.pendingChanges = [];
+  }
+
+  /**
+   * Reset change tracker (Phase 5.1).
+   * Use when query filter changes or on reconnect.
+   */
+  public resetChangeTracker(): void {
+    this.changeTracker.reset();
+    this.pendingChanges = [];
+  }
+
+  private computeAndNotifyChanges(timestamp: number): void {
+    const changes = this.changeTracker.computeChanges(this.currentResults, timestamp);
+
+    if (changes.length > 0) {
+      this.pendingChanges.push(...changes);
+      this.notifyChangeListeners(changes);
+    }
+  }
+
+  private notifyChangeListeners(changes: ChangeEvent<T>[]): void {
+    for (const listener of this.changeListeners) {
+      try {
+        listener(changes);
+      } catch (e) {
+        console.error('[QueryHandle] Change listener error:', e);
+      }
+    }
   }
 
   private notify() {

@@ -6,8 +6,10 @@ import React from 'react';
 
 // Mock TopGunClient
 const mockSubscribe = jest.fn();
+const mockOnChanges = jest.fn();
 const mockQuery = jest.fn().mockReturnValue({
   subscribe: mockSubscribe,
+  onChanges: mockOnChanges,
 });
 const mockClient = {
   query: mockQuery,
@@ -17,6 +19,7 @@ describe('useQuery', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockSubscribe.mockReturnValue(() => {}); // Unsubscribe function
+    mockOnChanges.mockReturnValue(() => {}); // Unsubscribe function for changes
   });
 
   const wrapper = ({ children }: { children: React.ReactNode }) => (
@@ -62,5 +65,12 @@ describe('useQuery', () => {
     expect(result.current.error).toEqual(new Error('Subscription failed'));
     expect(result.current.loading).toBe(false);
   });
-});
 
+  it('should initialize with empty changes and null lastChange', () => {
+    const { result } = renderHook(() => useQuery('testMap', {}), { wrapper });
+
+    expect(result.current.changes).toEqual([]);
+    expect(result.current.lastChange).toBeNull();
+    expect(typeof result.current.clearChanges).toBe('function');
+  });
+});

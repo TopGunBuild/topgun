@@ -5,6 +5,10 @@ module.exports = {
   setupFilesAfterEnv: [],
   testRegex: '(/__tests__/.*|(\\.|/)(test|spec))\\.tsx?$',
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
+  moduleNameMapper: {
+    '^@topgunbuild/client$': '<rootDir>/../client/src/index.ts',
+    '^@topgunbuild/core$': '<rootDir>/../core/src/index.ts'
+  },
   // Coverage configuration
   collectCoverageFrom: [
     'src/**/*.{ts,tsx}',
