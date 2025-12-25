@@ -1,5 +1,6 @@
 import { SyncEngine } from './SyncEngine';
 import { ChangeTracker, ChangeEvent } from './ChangeTracker';
+import { logger } from './utils/logger';
 import type { PredicateNode } from '@topgunbuild/core';
 
 export interface QueryFilter {
@@ -90,12 +91,13 @@ export class QueryHandle<T> {
    * - Works with any async storage adapter (PostgreSQL, SQLite, Redis, etc.)
    */
   public onResult(items: { key: string, value: T }[], source: QueryResultSource = 'server') {
-    console.log(`[QueryHandle:${this.mapName}] onResult called with ${items.length} items`, {
+    logger.debug({
+      mapName: this.mapName,
+      itemCount: items.length,
       source,
       currentResultsCount: this.currentResults.size,
-      newItemKeys: items.map(i => i.key),
       hasReceivedServerData: this.hasReceivedServerData
-    });
+    }, 'QueryHandle onResult');
 
     // [FIX] Race condition protection for any async storage adapter:
     // If server sends empty QUERY_RESP before loading data from storage,
@@ -104,7 +106,7 @@ export class QueryHandle<T> {
     // 1. If server truly has no data, next non-empty response will clear local-only items
     // 2. If server is still loading, we preserve local data until real data arrives
     if (source === 'server' && items.length === 0 && !this.hasReceivedServerData) {
-      console.log(`[QueryHandle:${this.mapName}] Ignoring empty server response - waiting for authoritative data`);
+      logger.debug({ mapName: this.mapName }, 'QueryHandle ignoring empty server response - waiting for authoritative data');
       return;
     }
 
@@ -124,14 +126,21 @@ export class QueryHandle<T> {
       }
     }
     if (removedKeys.length > 0) {
-      console.log(`[QueryHandle:${this.mapName}] Removed ${removedKeys.length} keys:`, removedKeys);
+      logger.debug({
+        mapName: this.mapName,
+        removedCount: removedKeys.length,
+        removedKeys
+      }, 'QueryHandle removed keys');
     }
 
     // Add/update new results
     for (const item of items) {
       this.currentResults.set(item.key, item.value);
     }
-    console.log(`[QueryHandle:${this.mapName}] After merge: ${this.currentResults.size} results`);
+    logger.debug({
+      mapName: this.mapName,
+      resultCount: this.currentResults.size
+    }, 'QueryHandle after merge');
 
     // Compute changes for delta tracking (Phase 5.1)
     this.computeAndNotifyChanges(Date.now());
@@ -232,7 +241,7 @@ export class QueryHandle<T> {
       try {
         listener(changes);
       } catch (e) {
-        console.error('[QueryHandle] Change listener error:', e);
+        logger.error({ err: e }, 'QueryHandle change listener error');
       }
     }
   }
