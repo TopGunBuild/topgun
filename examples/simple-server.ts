@@ -64,7 +64,7 @@ const server = new ServerCoordinator({
   ]
 });
 
-console.log('TopGun Offline Server running on ws://localhost:8080');
+console.log('TopGun Server running on ws://localhost:8080');
 
 // Graceful Shutdown Logic
 const shutdown = async (signal: string) => {

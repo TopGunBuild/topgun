@@ -1,0 +1,193 @@
+# TopGun Cluster Load Testing Environment
+# Phase 4.5 Task 07 - K6 Cluster Tests
+#
+# Usage:
+#   Start cluster:      docker-compose -f tests/k6/docker-compose.cluster.yml up -d
+#   Stop cluster:       docker-compose -f tests/k6/docker-compose.cluster.yml down
+#   View logs:          docker-compose -f tests/k6/docker-compose.cluster.yml logs -f
+#   Scale to 4 nodes:   docker-compose -f tests/k6/docker-compose.cluster.yml up -d --scale node=4
+#
+# Failover testing:
+#   Stop node-2:        docker stop topgun-node-2
+#   Start node-2:       docker start topgun-node-2
+
+version: '3.8'
+
+services:
+  # Node 1 - Primary seed node
+  node-1:
+    image: topgun-server:latest
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: topgun-node-1
+    hostname: node-1
+    ports:
+      - "8081:8080"
+      - "9081:9090"
+    environment:
+      - NODE_ID=node-1
+      - PORT=8080
+      - CLUSTER_PORT=9090
+      - HOST=node-1
+      - PEERS=
+      - REPLICATION_ENABLED=true
+      - DEFAULT_CONSISTENCY=EVENTUAL
+      - LOG_LEVEL=info
+      - JWT_SECRET=${JWT_SECRET:-test-secret-key-for-k6-cluster-tests}
+    networks:
+      - topgun-cluster
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # Node 2 - Joins node-1
+  node-2:
+    image: topgun-server:latest
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: topgun-node-2
+    hostname: node-2
+    ports:
+      - "8082:8080"
+      - "9082:9090"
+    environment:
+      - NODE_ID=node-2
+      - PORT=8080
+      - CLUSTER_PORT=9090
+      - HOST=node-2
+      - PEERS=node-1:9090
+      - REPLICATION_ENABLED=true
+      - DEFAULT_CONSISTENCY=EVENTUAL
+      - LOG_LEVEL=info
+      - JWT_SECRET=${JWT_SECRET:-test-secret-key-for-k6-cluster-tests}
+    depends_on:
+      node-1:
+        condition: service_healthy
+    networks:
+      - topgun-cluster
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # Node 3 - Joins node-1 and node-2
+  node-3:
+    image: topgun-server:latest
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: topgun-node-3
+    hostname: node-3
+    ports:
+      - "8083:8080"
+      - "9083:9090"
+    environment:
+      - NODE_ID=node-3
+      - PORT=8080
+      - CLUSTER_PORT=9090
+      - HOST=node-3
+      - PEERS=node-1:9090,node-2:9090
+      - REPLICATION_ENABLED=true
+      - DEFAULT_CONSISTENCY=EVENTUAL
+      - LOG_LEVEL=info
+      - JWT_SECRET=${JWT_SECRET:-test-secret-key-for-k6-cluster-tests}
+    depends_on:
+      node-1:
+        condition: service_healthy
+      node-2:
+        condition: service_healthy
+    networks:
+      - topgun-cluster
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # Node 4 - Optional, for scaling tests
+  node-4:
+    image: topgun-server:latest
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    container_name: topgun-node-4
+    hostname: node-4
+    ports:
+      - "8084:8080"
+      - "9084:9090"
+    environment:
+      - NODE_ID=node-4
+      - PORT=8080
+      - CLUSTER_PORT=9090
+      - HOST=node-4
+      - PEERS=node-1:9090,node-2:9090,node-3:9090
+      - REPLICATION_ENABLED=true
+      - DEFAULT_CONSISTENCY=EVENTUAL
+      - LOG_LEVEL=info
+      - JWT_SECRET=${JWT_SECRET:-test-secret-key-for-k6-cluster-tests}
+    profiles:
+      - scale  # Only starts with --profile scale or explicit service name
+    depends_on:
+      node-1:
+        condition: service_healthy
+      node-2:
+        condition: service_healthy
+      node-3:
+        condition: service_healthy
+    networks:
+      - topgun-cluster
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # Prometheus for metrics collection (optional)
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: topgun-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    profiles:
+      - monitoring
+    networks:
+      - topgun-cluster
+
+  # Grafana for visualization (optional)
+  grafana:
+    image: grafana/grafana:10.0.0
+    container_name: topgun-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+    profiles:
+      - monitoring
+    depends_on:
+      - prometheus
+    networks:
+      - topgun-cluster
+
+networks:
+  topgun-cluster:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  grafana-data:

@@ -148,6 +148,7 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                         <SubItem to="/docs/guides/pub-sub" currentPath={currentPath}>Pub/Sub (Topics)</SubItem>
                         <SubItem to="/docs/guides/ttl" currentPath={currentPath}>Time-To-Live (TTL)</SubItem>
                         <SubItem to="/docs/guides/deployment" currentPath={currentPath}>Deployment</SubItem>
+                        <SubItem to="/docs/guides/cluster-client" currentPath={currentPath}>Cluster Client</SubItem>
                         <SubItem to="/docs/guides/observability" currentPath={currentPath}>Observability</SubItem>
                         <SubItem to="/docs/guides/distributed-locks" currentPath={currentPath}>Distributed Locks</SubItem>
                         <SubItem to="/docs/guides/rbac" currentPath={currentPath}>Security (RBAC)</SubItem>

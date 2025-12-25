@@ -79,7 +79,7 @@ describe('CoalescingWriter', () => {
         it('should get preset by name', () => {
             const highThroughput = getCoalescingPreset('highThroughput');
             expect(highThroughput.maxBatchSize).toBe(500);
-            expect(highThroughput.maxDelayMs).toBe(10);
+            expect(highThroughput.maxDelayMs).toBe(2);
             expect(highThroughput.maxBatchBytes).toBe(262144);
         });
 
@@ -96,7 +96,7 @@ describe('CoalescingWriter', () => {
         it('conservative preset should have expected values', () => {
             expect(coalescingPresets.conservative).toEqual({
                 maxBatchSize: 100,
-                maxDelayMs: 5,
+                maxDelayMs: 2,
                 maxBatchBytes: 65536,
             });
         });
@@ -104,7 +104,7 @@ describe('CoalescingWriter', () => {
         it('balanced preset should have expected values', () => {
             expect(coalescingPresets.balanced).toEqual({
                 maxBatchSize: 300,
-                maxDelayMs: 8,
+                maxDelayMs: 2,
                 maxBatchBytes: 131072,
             });
         });
@@ -112,7 +112,7 @@ describe('CoalescingWriter', () => {
         it('highThroughput preset should have expected values', () => {
             expect(coalescingPresets.highThroughput).toEqual({
                 maxBatchSize: 500,
-                maxDelayMs: 10,
+                maxDelayMs: 2,
                 maxBatchBytes: 262144,
             });
         });
@@ -120,7 +120,7 @@ describe('CoalescingWriter', () => {
         it('aggressive preset should have expected values', () => {
             expect(coalescingPresets.aggressive).toEqual({
                 maxBatchSize: 1000,
-                maxDelayMs: 15,
+                maxDelayMs: 5,
                 maxBatchBytes: 524288,
             });
         });

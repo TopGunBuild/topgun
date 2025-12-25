@@ -18,8 +18,8 @@ export type WriteConcernValue = z.infer<typeof WriteConcernSchema>;
 // --- Basic Types ---
 
 export const TimestampSchema = z.object({
-  millis: z.number(),
-  counter: z.number(),
+  millis: z.union([z.number(), z.bigint()]).transform(Number),
+  counter: z.union([z.number(), z.bigint()]).transform(Number),
   nodeId: z.string(),
 });
 
@@ -343,6 +343,18 @@ export const ORMapPushDiffSchema = z.object({
   }),
 });
 
+// --- Phase 4: Partition Map Schemas ---
+
+/**
+ * PARTITION_MAP_REQUEST: Client requests current partition map
+ */
+export const PartitionMapRequestSchema = z.object({
+  type: z.literal('PARTITION_MAP_REQUEST'),
+  payload: z.object({
+    currentVersion: z.number().optional(),
+  }).optional(),
+});
+
 // --- Write Concern Response Schemas (Phase 5.01) ---
 
 /**
@@ -415,6 +427,8 @@ export const MessageSchema = z.discriminatedUnion('type', [
   ORMapDiffRequestSchema,
   ORMapDiffResponseSchema,
   ORMapPushDiffSchema,
+  // Phase 4: Partition Map
+  PartitionMapRequestSchema,
 ]);
 
 // --- Type Inference ---

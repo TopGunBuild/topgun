@@ -61,12 +61,33 @@ spec:
               value: "{{ .Values.service.port }}"
             - name: TOPGUN_CLUSTER_PORT
               value: "{{ .Values.cluster.port }}"
+            - name: TOPGUN_DISCOVERY
+              value: "{{ .Values.cluster.discovery }}"
             - name: TOPGUN_DISCOVERY_SERVICE
               value: "{{ .Release.Name }}-headless.{{ .Release.Namespace }}.svc.cluster.local"
+            - name: TOPGUN_DISCOVERY_INTERVAL
+              value: "{{ .Values.cluster.discoveryInterval }}"
             - name: NODE_ID
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            # Phase 4: Clustering configuration
+            - name: TOPGUN_GRADUAL_REBALANCING
+              value: "{{ .Values.clustering.gradualRebalancing }}"
+            - name: TOPGUN_REPLICATION_ENABLED
+              value: "{{ .Values.clustering.replicationEnabled }}"
+            - name: TOPGUN_MIGRATION_BATCH_SIZE
+              value: "{{ .Values.clustering.migration.batchSize }}"
+            - name: TOPGUN_MIGRATION_PARALLEL_TRANSFERS
+              value: "{{ .Values.clustering.migration.parallelTransfers }}"
+            - name: TOPGUN_REPLICATION_CONSISTENCY
+              value: "{{ .Values.clustering.replication.defaultConsistency }}"
+            - name: TOPGUN_REPLICATION_QUEUE_SIZE
+              value: "{{ .Values.clustering.replication.queueSizeLimit }}"
+            {{- if .Values.metrics.enabled }}
+            - name: TOPGUN_METRICS_PORT
+              value: "{{ .Values.metrics.port }}"
+            {{- end }}
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}

@@ -16,6 +16,70 @@ import type {
   BackpressureThresholdEvent,
   OperationDroppedEvent,
 } from './BackpressureConfig';
+import { ClusterClient } from './cluster/ClusterClient';
+import type { NodeHealth } from '@topgunbuild/core';
+
+// ============================================
+// Cluster Configuration Types
+// ============================================
+
+/**
+ * Cluster mode configuration for TopGunClient.
+ * When provided, the client connects to multiple nodes with partition-aware routing.
+ */
+export interface TopGunClusterConfig {
+  /** Initial seed nodes (at least one required) */
+  seeds: string[];
+
+  /** Connection pool size per node (default: 1) */
+  connectionsPerNode?: number;
+
+  /** Enable smart routing to partition owner (default: true) */
+  smartRouting?: boolean;
+
+  /** Partition map refresh interval in ms (default: 30000) */
+  partitionMapRefreshMs?: number;
+
+  /** Connection timeout per node in ms (default: 5000) */
+  connectionTimeoutMs?: number;
+
+  /** Retry attempts for failed operations (default: 3) */
+  retryAttempts?: number;
+}
+
+/**
+ * Default values for cluster configuration
+ */
+export const DEFAULT_CLUSTER_CONFIG: Required<Omit<TopGunClusterConfig, 'seeds'>> = {
+  connectionsPerNode: 1,
+  smartRouting: true,
+  partitionMapRefreshMs: 30000,
+  connectionTimeoutMs: 5000,
+  retryAttempts: 3,
+};
+
+/**
+ * TopGunClient configuration options
+ */
+export interface TopGunClientConfig {
+  /** Unique node identifier (auto-generated if not provided) */
+  nodeId?: string;
+
+  /** Single-server mode: WebSocket URL to connect to */
+  serverUrl?: string;
+
+  /** Cluster mode: Configuration for multi-node routing */
+  cluster?: TopGunClusterConfig;
+
+  /** Storage adapter for local persistence */
+  storage: IStorageAdapter;
+
+  /** Backoff configuration for reconnection */
+  backoff?: Partial<BackoffConfig>;
+
+  /** Backpressure configuration */
+  backpressure?: Partial<BackpressureConfig>;
+}
 
 export class TopGunClient {
   private readonly nodeId: string;
@@ -23,25 +87,75 @@ export class TopGunClient {
   private readonly maps: Map<string, LWWMap<any, any> | ORMap<any, any>> = new Map();
   private readonly storageAdapter: IStorageAdapter;
   private readonly topicHandles: Map<string, TopicHandle> = new Map();
+  private readonly clusterClient?: ClusterClient;
+  private readonly isClusterMode: boolean;
+  private readonly clusterConfig?: Required<Omit<TopGunClusterConfig, 'seeds'>> & { seeds: string[] };
 
-  constructor(config: {
-    nodeId?: string;
-    serverUrl: string;
-    storage: IStorageAdapter;
-    backoff?: Partial<BackoffConfig>;
-    backpressure?: Partial<BackpressureConfig>;
-  }) {
+  constructor(config: TopGunClientConfig) {
+    // Validate: either serverUrl or cluster, not both
+    if (config.serverUrl && config.cluster) {
+      throw new Error('Cannot specify both serverUrl and cluster config');
+    }
+    if (!config.serverUrl && !config.cluster) {
+      throw new Error('Must specify either serverUrl or cluster config');
+    }
+
     this.nodeId = config.nodeId || crypto.randomUUID();
     this.storageAdapter = config.storage;
+    this.isClusterMode = !!config.cluster;
 
-    const syncEngineConfig = {
-      nodeId: this.nodeId,
-      serverUrl: config.serverUrl,
-      storageAdapter: this.storageAdapter,
-      backoff: config.backoff,
-      backpressure: config.backpressure,
-    };
-    this.syncEngine = new SyncEngine(syncEngineConfig);
+    if (config.cluster) {
+      // Validate cluster seeds
+      if (!config.cluster.seeds || config.cluster.seeds.length === 0) {
+        throw new Error('Cluster config requires at least one seed node');
+      }
+
+      // Merge with defaults
+      this.clusterConfig = {
+        seeds: config.cluster.seeds,
+        connectionsPerNode: config.cluster.connectionsPerNode ?? DEFAULT_CLUSTER_CONFIG.connectionsPerNode,
+        smartRouting: config.cluster.smartRouting ?? DEFAULT_CLUSTER_CONFIG.smartRouting,
+        partitionMapRefreshMs: config.cluster.partitionMapRefreshMs ?? DEFAULT_CLUSTER_CONFIG.partitionMapRefreshMs,
+        connectionTimeoutMs: config.cluster.connectionTimeoutMs ?? DEFAULT_CLUSTER_CONFIG.connectionTimeoutMs,
+        retryAttempts: config.cluster.retryAttempts ?? DEFAULT_CLUSTER_CONFIG.retryAttempts,
+      };
+
+      // Initialize cluster mode
+      this.clusterClient = new ClusterClient({
+        enabled: true,
+        seedNodes: this.clusterConfig.seeds,
+        routingMode: this.clusterConfig.smartRouting ? 'direct' : 'forward',
+        connectionPool: {
+          maxConnectionsPerNode: this.clusterConfig.connectionsPerNode,
+          connectionTimeoutMs: this.clusterConfig.connectionTimeoutMs,
+        },
+        routing: {
+          mapRefreshIntervalMs: this.clusterConfig.partitionMapRefreshMs,
+        },
+      });
+
+      // SyncEngine uses ClusterClient as connectionProvider for partition-aware routing
+      this.syncEngine = new SyncEngine({
+        nodeId: this.nodeId,
+        connectionProvider: this.clusterClient,
+        storageAdapter: this.storageAdapter,
+        backoff: config.backoff,
+        backpressure: config.backpressure,
+      });
+
+      logger.info({ seeds: this.clusterConfig.seeds }, 'TopGunClient initialized in cluster mode');
+    } else {
+      // Single-server mode (existing behavior)
+      this.syncEngine = new SyncEngine({
+        nodeId: this.nodeId,
+        serverUrl: config.serverUrl!,
+        storageAdapter: this.storageAdapter,
+        backoff: config.backoff,
+        backpressure: config.backpressure,
+      });
+
+      logger.info({ serverUrl: config.serverUrl }, 'TopGunClient initialized in single-server mode');
+    }
   }
 
   public async start(): Promise<void> {
@@ -243,7 +357,81 @@ export class TopGunClient {
    * Closes the client, disconnecting from the server and cleaning up resources.
    */
   public close(): void {
+    if (this.clusterClient) {
+      this.clusterClient.close();
+    }
     this.syncEngine.close();
+  }
+
+  // ============================================
+  // Cluster Mode API
+  // ============================================
+
+  /**
+   * Check if running in cluster mode
+   */
+  public isCluster(): boolean {
+    return this.isClusterMode;
+  }
+
+  /**
+   * Get list of connected cluster nodes (cluster mode only)
+   * @returns Array of connected node IDs, or empty array in single-server mode
+   */
+  public getConnectedNodes(): string[] {
+    if (!this.clusterClient) return [];
+    return this.clusterClient.getConnectedNodes();
+  }
+
+  /**
+   * Get the current partition map version (cluster mode only)
+   * @returns Partition map version, or 0 in single-server mode
+   */
+  public getPartitionMapVersion(): number {
+    if (!this.clusterClient) return 0;
+    return this.clusterClient.getRouterStats().mapVersion;
+  }
+
+  /**
+   * Check if direct routing is active (cluster mode only)
+   * Direct routing sends operations directly to partition owners.
+   * @returns true if routing is active, false otherwise
+   */
+  public isRoutingActive(): boolean {
+    if (!this.clusterClient) return false;
+    return this.clusterClient.isRoutingActive();
+  }
+
+  /**
+   * Get health status for all cluster nodes (cluster mode only)
+   * @returns Map of node IDs to their health status
+   */
+  public getClusterHealth(): Map<string, NodeHealth> {
+    if (!this.clusterClient) return new Map();
+    return this.clusterClient.getHealthStatus();
+  }
+
+  /**
+   * Force refresh of partition map (cluster mode only)
+   * Use this after detecting routing errors.
+   */
+  public async refreshPartitionMap(): Promise<void> {
+    if (!this.clusterClient) return;
+    await this.clusterClient.refreshPartitionMap();
+  }
+
+  /**
+   * Get cluster router statistics (cluster mode only)
+   */
+  public getClusterStats(): {
+    mapVersion: number;
+    partitionCount: number;
+    nodeCount: number;
+    lastRefresh: number;
+    isStale: boolean;
+  } | null {
+    if (!this.clusterClient) return null;
+    return this.clusterClient.getRouterStats();
   }
 
   // ============================================

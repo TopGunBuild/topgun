@@ -1,0 +1,354 @@
+---
+title: Client Cluster Mode
+description: Connect your application to a TopGun cluster with automatic failover, partition-aware routing, and load distribution.
+order: 16
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Network, Shield, Zap, Server, RefreshCw } from 'lucide-react';
+
+export const quickStartCode = `import { TopGunClient, IDBAdapter } from '@topgunbuild/client';
+
+const client = new TopGunClient({
+  cluster: {
+    seeds: [
+      'ws://node1.example.com:8765',
+      'ws://node2.example.com:8765',
+      'ws://node3.example.com:8765',
+    ],
+    smartRouting: true,
+  },
+  storage: new IDBAdapter(),
+});
+
+await client.start();
+
+// Use normally - routing is automatic
+const users = client.getMap('users');
+users.set('alice', { name: 'Alice', role: 'admin' });`;
+
+export const seedNodesCode = `cluster: {
+  seeds: [
+    'ws://node1:8765',  // Primary seed
+    'ws://node2:8765',  // Backup seed
+    'ws://node3:8765',  // Additional backup
+  ],
+}`;
+
+export const smartRoutingCode = `cluster: {
+  seeds: ['ws://node1:8765', 'ws://node2:8765'],
+  smartRouting: true,  // Default: true
+}`;
+
+export const connectionPoolCode = `cluster: {
+  seeds: ['ws://node1:8765'],
+  connectionsPerNode: 2,      // Connections per node (default: 1)
+  connectionTimeoutMs: 5000,  // Connection timeout (default: 10000)
+}`;
+
+export const partitionMapCode = `cluster: {
+  seeds: ['ws://node1:8765'],
+  partitionMapRefreshMs: 30000,  // Refresh every 30 seconds (default)
+}`;
+
+export const circuitBreakerCode = `cluster: {
+  seeds: ['ws://node1:8765'],
+  // Circuit breaker is built-in with sensible defaults:
+  // - Opens after 5 consecutive failures
+  // - Resets after 30 seconds
+  // - Transitions to half-open to test recovery
+}`;
+
+export const failoverCode = `// Your code doesn't need to handle failover explicitly
+const users = client.getMap('users');
+
+// This works even if the primary node is down
+// The client automatically routes to available nodes
+await users.set('key', { data: 'value' });
+
+// Reads also work - served from any replica
+const user = users.get('key');`;
+
+export const connectionStateCode = `// Listen for connection state changes
+client.onConnectionChange((state) => {
+  switch (state) {
+    case 'connected':
+      console.log('Connected to cluster');
+      break;
+    case 'connecting':
+      console.log('Connecting to cluster...');
+      break;
+    case 'reconnecting':
+      console.log('Reconnecting after failure...');
+      break;
+    case 'disconnected':
+      console.log('Disconnected from cluster');
+      break;
+  }
+});`;
+
+export const syncStateCode = `// Monitor synchronization progress
+client.onSyncStateChange((state) => {
+  if (state === 'syncing') {
+    console.log('Syncing pending operations...');
+  } else if (state === 'synced') {
+    console.log('All operations synced');
+  }
+});`;
+
+export const reactClientCode = `// src/lib/topgun.ts
+import { TopGunClient, IDBAdapter } from '@topgunbuild/client';
+
+export const client = new TopGunClient({
+  cluster: {
+    seeds: [
+      process.env.NEXT_PUBLIC_NODE1_URL!,
+      process.env.NEXT_PUBLIC_NODE2_URL!,
+      process.env.NEXT_PUBLIC_NODE3_URL!,
+    ],
+    smartRouting: true,
+  },
+  storage: new IDBAdapter(),
+});
+
+// Initialize on app startup
+client.start();`;
+
+export const reactProviderCode = `// src/app/providers.tsx
+import { TopGunProvider } from '@topgunbuild/react';
+import { client } from '@/lib/topgun';
+
+export function Providers({ children }) {
+  return (
+    <TopGunProvider client={client}>
+      {children}
+    </TopGunProvider>
+  );
+}`;
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <Network className="w-10 h-10 text-blue-600 dark:text-blue-400" />
+  <h1 className="text-4xl font-bold text-foreground">Client Cluster Mode</h1>
+</div>
+
+TopGun clients can connect to a multi-node cluster for high availability and horizontal scalability.
+The client automatically handles node discovery, partition-aware routing, and failover.
+
+## Overview
+
+<div className="grid grid-cols-1 md:grid-cols-3 gap-4 my-6 not-prose">
+  <div className="p-4 rounded-lg border border-card-border bg-card">
+    <Server className="w-6 h-6 text-purple-500 mb-2" />
+    <h4 className="font-semibold text-foreground mb-1">Multi-Node</h4>
+    <p className="text-sm text-neutral-600 dark:text-neutral-400">Connect to multiple seed nodes for redundancy</p>
+  </div>
+  <div className="p-4 rounded-lg border border-card-border bg-card">
+    <Zap className="w-6 h-6 text-amber-500 mb-2" />
+    <h4 className="font-semibold text-foreground mb-1">Smart Routing</h4>
+    <p className="text-sm text-neutral-600 dark:text-neutral-400">Operations route directly to partition owners</p>
+  </div>
+  <div className="p-4 rounded-lg border border-card-border bg-card">
+    <Shield className="w-6 h-6 text-green-500 mb-2" />
+    <h4 className="font-semibold text-foreground mb-1">Auto Failover</h4>
+    <p className="text-sm text-neutral-600 dark:text-neutral-400">Circuit breaker handles node failures</p>
+  </div>
+</div>
+
+## Quick Start
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={quickStartCode} />
+</div>
+
+## Configuration
+
+### Seed Nodes
+
+Seed nodes are the initial entry points to the cluster. The client connects to these nodes
+to discover the full cluster topology and receive the partition map.
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={seedNodesCode} />
+</div>
+
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border-l-4 border-yellow-500 p-4 my-6 not-prose">
+  <p className="text-sm text-yellow-800 dark:text-yellow-200">
+    <strong>Best Practice:</strong> Provide at least 2-3 seed nodes. If the first seed is unavailable,
+    the client will try the next one. You don't need to list all nodes—the client discovers them automatically.
+  </p>
+</div>
+
+### Smart Routing
+
+When enabled, the client maintains a partition map and routes each operation directly to the
+node that owns the relevant partition.
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={smartRoutingCode} />
+</div>
+
+**How it works:**
+
+1. Client receives partition map from the cluster (271 partitions)
+2. Each key is hashed to a partition ID using xxHash64
+3. Operation is sent directly to the partition owner
+4. If owner is unavailable, falls back to any available node
+
+<div className="grid grid-cols-2 gap-4 my-6 not-prose">
+  <div className="p-4 rounded-lg border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-900/20">
+    <h4 className="font-semibold text-green-800 dark:text-green-300 mb-2">With Smart Routing</h4>
+    <ul className="text-sm text-green-700 dark:text-green-400 space-y-1">
+      <li>Lower latency (direct to owner)</li>
+      <li>Reduced cluster traffic</li>
+      <li>Better load distribution</li>
+    </ul>
+  </div>
+  <div className="p-4 rounded-lg border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800/50">
+    <h4 className="font-semibold text-foreground mb-2">Without Smart Routing</h4>
+    <ul className="text-sm text-neutral-600 dark:text-neutral-400 space-y-1">
+      <li>Simpler setup</li>
+      <li>Server handles forwarding</li>
+      <li>Good for small clusters</li>
+    </ul>
+  </div>
+</div>
+
+### Connection Pool
+
+Configure how many connections to maintain per node:
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={connectionPoolCode} />
+</div>
+
+### Partition Map Refresh
+
+The client periodically refreshes its partition map to stay in sync with cluster topology changes:
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={partitionMapCode} />
+</div>
+
+The partition map is also updated immediately when:
+- A node reports `NOT_OWNER` for an operation
+- A cluster topology change event is received
+
+## Failover Handling
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <RefreshCw className="w-5 h-5 text-blue-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">The client uses a circuit breaker pattern to handle node failures gracefully.</span>
+</div>
+
+### Circuit Breaker States
+
+| State | Behavior |
+|-------|----------|
+| **Closed** | Normal operation, requests flow through |
+| **Open** | Node marked failed, requests reroute to other nodes |
+| **Half-Open** | Testing if node recovered, limited traffic allowed |
+
+### Configuration
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={circuitBreakerCode} />
+</div>
+
+### Behavior During Failover
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={failoverCode} />
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 my-6 not-prose">
+  <h4 className="font-semibold text-blue-800 dark:text-blue-300 mb-2">Offline Support</h4>
+  <span className="text-blue-700 dark:text-blue-400">
+    If all nodes become unavailable, operations are queued locally in IndexedDB.
+    When connectivity is restored, the client automatically syncs pending operations.
+    This provides true offline-first capability even in cluster mode.
+  </span>
+</div>
+
+## Monitoring
+
+### Connection State
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={connectionStateCode} />
+</div>
+
+### Sync State
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={syncStateCode} />
+</div>
+
+## Best Practices
+
+<div className="space-y-4 my-6 not-prose">
+  <div className="flex gap-3 p-4 rounded-lg border border-card-border">
+    <div className="text-2xl">1</div>
+    <div>
+      <h4 className="font-semibold text-foreground">Use Multiple Seeds</h4>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400">
+        Always provide 2-3 seed nodes for redundancy. If one is down during startup, the client
+        can still connect via others.
+      </p>
+    </div>
+  </div>
+  <div className="flex gap-3 p-4 rounded-lg border border-card-border">
+    <div className="text-2xl">2</div>
+    <div>
+      <h4 className="font-semibold text-foreground">Enable Smart Routing</h4>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400">
+        Keep <code className="bg-neutral-100 dark:bg-neutral-800 px-1 rounded">smartRouting: true</code> for
+        best performance. Only disable if you have specific requirements.
+      </p>
+    </div>
+  </div>
+  <div className="flex gap-3 p-4 rounded-lg border border-card-border">
+    <div className="text-2xl">3</div>
+    <div>
+      <h4 className="font-semibold text-foreground">Handle Offline Gracefully</h4>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400">
+        Your app should work offline. Use <code className="bg-neutral-100 dark:bg-neutral-800 px-1 rounded">onSyncStateChange</code> to
+        show sync status to users.
+      </p>
+    </div>
+  </div>
+  <div className="flex gap-3 p-4 rounded-lg border border-card-border">
+    <div className="text-2xl">4</div>
+    <div>
+      <h4 className="font-semibold text-foreground">Use Secure Connections</h4>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400">
+        In production, use <code className="bg-neutral-100 dark:bg-neutral-800 px-1 rounded">wss://</code> URLs
+        for encrypted WebSocket connections.
+      </p>
+    </div>
+  </div>
+</div>
+
+## Example: React Integration
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={reactClientCode} />
+</div>
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={reactProviderCode} />
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/deployment" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Deployment Guide
+    </div>
+  </a>
+  <a href="/docs/guides/security" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Security <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

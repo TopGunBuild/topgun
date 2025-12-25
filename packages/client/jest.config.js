@@ -3,14 +3,20 @@ module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
   rootDir: '.',
-  testMatch: ['<rootDir>/src/**/__tests__/**/*.test.ts'],
+  testMatch: [
+    '<rootDir>/src/**/__tests__/**/*.test.ts',
+    '<rootDir>/src/**/__tests__/**/*.integration.test.ts',
+  ],
   testPathIgnorePatterns: [
     '/node_modules/',
     '/dist/',
     '\\.d\\.ts$'
   ],
+  // Integration tests need longer timeout
+  testTimeout: 30000,
   moduleNameMapper: {
     '^@topgunbuild/core$': '<rootDir>/../core/src/index.ts',
+    '^@topgunbuild/server$': '<rootDir>/../server/src/index.ts',
     '^@topgunbuild/client$': '<rootDir>/src/index.ts'
   },
   transform: {
