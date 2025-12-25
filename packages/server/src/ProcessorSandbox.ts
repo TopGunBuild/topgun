@@ -36,7 +36,16 @@ let ivm: IsolatedVmModule | null = null;
 try {
   ivm = require('isolated-vm');
 } catch {
-  logger.warn('isolated-vm not available, falling back to less secure VM');
+  const isProduction = process.env.NODE_ENV === 'production';
+  if (isProduction) {
+    logger.error(
+      'SECURITY WARNING: isolated-vm not available in production! ' +
+      'Entry processors will run in less secure fallback mode. ' +
+      'Install isolated-vm for production environments: pnpm add isolated-vm'
+    );
+  } else {
+    logger.warn('isolated-vm not available, falling back to less secure VM');
+  }
 }
 
 /**
