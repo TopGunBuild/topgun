@@ -38,6 +38,7 @@ import {
 import { TaskletScheduler } from './tasklet';
 import { WriteAckManager } from './ack/WriteAckManager';
 import { ReplicationPipeline } from './cluster/ReplicationPipeline';
+import { CounterHandler } from './handlers/CounterHandler';
 
 interface ClientConnection {
     id: string;
@@ -213,6 +214,10 @@ export class ServerCoordinator {
     // Write Concern acknowledgment manager (Phase 5.01)
     private writeAckManager: WriteAckManager;
 
+    // PN Counter handler (Phase 5.2)
+    private counterHandler!: CounterHandler;
+    private readonly _nodeId: string;
+
     private _actualPort: number = 0;
     private _actualClusterPort: number = 0;
     private _readyPromise: Promise<void>;
@@ -223,6 +228,7 @@ export class ServerCoordinator {
             this._readyResolve = resolve;
         });
 
+        this._nodeId = config.nodeId;
         this.hlc = new HLC(config.nodeId);
         this.storage = config.storage;
         // Handle JWT_SECRET with escaped newlines (e.g., from Docker/Dokploy env vars)
@@ -432,6 +438,9 @@ export class ServerCoordinator {
                     }
                 }
             });
+
+            // PN Counter handler (Phase 5.2)
+            this.counterHandler = new CounterHandler(this._nodeId);
 
             this.systemManager = new SystemManager(
                 this.cluster,
@@ -778,6 +787,9 @@ export class ServerCoordinator {
 
             // Cleanup Topics (Local)
             this.topicManager.unsubscribeAll(clientId);
+
+            // Cleanup Counters (Local)
+            this.counterHandler.unsubscribeAll(clientId);
 
             // Notify Cluster to Cleanup Locks (Remote)
             const members = this.cluster.getMembers();
@@ -1328,6 +1340,34 @@ export class ServerCoordinator {
                         payload: { code: 400, message: e.message }
                     }, true);
                 }
+                break;
+            }
+
+            // ============ Phase 5.2: PN Counter Handlers ============
+
+            case 'COUNTER_REQUEST': {
+                const { name } = message.payload;
+                const response = this.counterHandler.handleCounterRequest(client.id, name);
+                client.writer.write(response);
+                logger.debug({ clientId: client.id, name }, 'Counter request handled');
+                break;
+            }
+
+            case 'COUNTER_SYNC': {
+                const { name, state } = message.payload;
+                const result = this.counterHandler.handleCounterSync(client.id, name, state);
+
+                // Send response to the syncing client
+                client.writer.write(result.response);
+
+                // Broadcast to other subscribed clients
+                for (const targetClientId of result.broadcastTo) {
+                    const targetClient = this.clients.get(targetClientId);
+                    if (targetClient && targetClient.socket.readyState === WebSocket.OPEN) {
+                        targetClient.writer.write(result.broadcastMessage);
+                    }
+                }
+                logger.debug({ clientId: client.id, name, broadcastCount: result.broadcastTo.length }, 'Counter sync handled');
                 break;
             }
 

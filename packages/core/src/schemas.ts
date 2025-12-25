@@ -211,6 +211,44 @@ export const TopicMessageEventSchema = z.object({
   }),
 });
 
+// --- PN Counter Messages (Phase 5.2) ---
+
+export const PNCounterStateObjectSchema = z.object({
+  p: z.record(z.string(), z.number()), // positive counts per node
+  n: z.record(z.string(), z.number()), // negative counts per node
+});
+
+export const CounterRequestSchema = z.object({
+  type: z.literal('COUNTER_REQUEST'),
+  payload: z.object({
+    name: z.string(),
+  }),
+});
+
+export const CounterSyncSchema = z.object({
+  type: z.literal('COUNTER_SYNC'),
+  payload: z.object({
+    name: z.string(),
+    state: PNCounterStateObjectSchema,
+  }),
+});
+
+export const CounterResponseSchema = z.object({
+  type: z.literal('COUNTER_RESPONSE'),
+  payload: z.object({
+    name: z.string(),
+    state: PNCounterStateObjectSchema,
+  }),
+});
+
+export const CounterUpdateSchema = z.object({
+  type: z.literal('COUNTER_UPDATE'),
+  payload: z.object({
+    name: z.string(),
+    state: PNCounterStateObjectSchema,
+  }),
+});
+
 // --- Heartbeat Messages ---
 
 export const PingMessageSchema = z.object({
@@ -429,6 +467,9 @@ export const MessageSchema = z.discriminatedUnion('type', [
   ORMapPushDiffSchema,
   // Phase 4: Partition Map
   PartitionMapRequestSchema,
+  // Phase 5.2: PN Counter
+  CounterRequestSchema,
+  CounterSyncSchema,
 ]);
 
 // --- Type Inference ---
