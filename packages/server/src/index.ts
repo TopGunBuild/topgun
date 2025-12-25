@@ -22,3 +22,7 @@ export {
 
 // Cluster module (Phase 4)
 export * from './cluster';
+
+// Entry Processor (Phase 5.03)
+export { ProcessorSandbox, ProcessorSandboxConfig, DEFAULT_SANDBOX_CONFIG } from './ProcessorSandbox';
+export { EntryProcessorHandler, EntryProcessorHandlerConfig } from './handlers/EntryProcessorHandler';

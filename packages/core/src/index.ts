@@ -10,6 +10,22 @@ import type { PNCounter, PNCounterState, PNCounterStateObject, PNCounterConfig }
 export { HLC, LWWMap, ORMap, MerkleTree, ORMapMerkleTree, PNCounterImpl };
 export { hashORMapEntry, hashORMapRecord, timestampToString, compareTimestamps };
 export type { PNCounter, PNCounterState, PNCounterStateObject, PNCounterConfig };
+
+// Entry Processor exports (Phase 5.03)
+export {
+  EntryProcessorDefSchema,
+  validateProcessorCode,
+  BuiltInProcessors,
+  FORBIDDEN_PATTERNS,
+  DEFAULT_PROCESSOR_RATE_LIMITS,
+} from './EntryProcessor';
+export type {
+  EntryProcessorFn,
+  EntryProcessorDef,
+  EntryProcessorResult,
+  ProcessorRateLimitConfig,
+} from './EntryProcessor';
+
 export * from './utils/hash';
 export * from './serializer';
 export * from './predicate';

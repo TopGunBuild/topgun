@@ -6,4 +6,5 @@ export * from './hooks/useMap';
 export * from './hooks/useORMap';
 export * from './hooks/useTopic';
 export * from './hooks/usePNCounter';
+export * from './hooks/useEntryProcessor';
 

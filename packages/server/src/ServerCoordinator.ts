@@ -39,6 +39,7 @@ import { TaskletScheduler } from './tasklet';
 import { WriteAckManager } from './ack/WriteAckManager';
 import { ReplicationPipeline } from './cluster/ReplicationPipeline';
 import { CounterHandler } from './handlers/CounterHandler';
+import { EntryProcessorHandler } from './handlers/EntryProcessorHandler';
 
 interface ClientConnection {
     id: string;
@@ -216,6 +217,10 @@ export class ServerCoordinator {
 
     // PN Counter handler (Phase 5.2)
     private counterHandler!: CounterHandler;
+
+    // Entry Processor handler (Phase 5.03)
+    private entryProcessorHandler!: EntryProcessorHandler;
+
     private readonly _nodeId: string;
 
     private _actualPort: number = 0;
@@ -442,6 +447,9 @@ export class ServerCoordinator {
             // PN Counter handler (Phase 5.2)
             this.counterHandler = new CounterHandler(this._nodeId);
 
+            // Entry Processor handler (Phase 5.03)
+            this.entryProcessorHandler = new EntryProcessorHandler({ hlc: this.hlc });
+
             this.systemManager = new SystemManager(
                 this.cluster,
                 this.metricsService,
@@ -651,6 +659,9 @@ export class ServerCoordinator {
 
         // Shutdown Write Concern manager (Phase 5.01)
         this.writeAckManager.shutdown();
+
+        // Dispose Entry Processor handler (Phase 5.03)
+        this.entryProcessorHandler.dispose();
 
         logger.info('Server Coordinator shutdown complete.');
     }
@@ -1368,6 +1379,132 @@ export class ServerCoordinator {
                     }
                 }
                 logger.debug({ clientId: client.id, name, broadcastCount: result.broadcastTo.length }, 'Counter sync handled');
+                break;
+            }
+
+            // ============ Phase 5.03: Entry Processor Handlers ============
+
+            case 'ENTRY_PROCESS': {
+                const { requestId, mapName, key, processor } = message;
+
+                // Check PUT permission (entry processor modifies data)
+                if (!this.securityManager.checkPermission(client.principal!, mapName, 'PUT')) {
+                    client.writer.write({
+                        type: 'ENTRY_PROCESS_RESPONSE',
+                        requestId,
+                        success: false,
+                        error: `Access Denied for map ${mapName}`,
+                    }, true);
+                    break;
+                }
+
+                // Get or create the map
+                const entryMap = this.getMap(mapName) as LWWMap<string, any>;
+
+                // Execute the processor
+                const { result, timestamp } = await this.entryProcessorHandler.executeOnKey(
+                    entryMap,
+                    key,
+                    processor,
+                );
+
+                // Send response to client
+                client.writer.write({
+                    type: 'ENTRY_PROCESS_RESPONSE',
+                    requestId,
+                    success: result.success,
+                    result: result.result,
+                    newValue: result.newValue,
+                    error: result.error,
+                });
+
+                // If successful and value changed, notify query subscribers
+                if (result.success && timestamp) {
+                    const record = entryMap.getRecord(key);
+                    if (record) {
+                        this.queryRegistry.processChange(mapName, entryMap, key, record, undefined);
+                    }
+                }
+
+                logger.debug({
+                    clientId: client.id,
+                    mapName,
+                    key,
+                    processor: processor.name,
+                    success: result.success,
+                }, 'Entry processor executed');
+                break;
+            }
+
+            case 'ENTRY_PROCESS_BATCH': {
+                const { requestId, mapName, keys, processor } = message;
+
+                // Check PUT permission
+                if (!this.securityManager.checkPermission(client.principal!, mapName, 'PUT')) {
+                    const errorResults: Record<string, { success: boolean; error: string }> = {};
+                    for (const key of keys) {
+                        errorResults[key] = {
+                            success: false,
+                            error: `Access Denied for map ${mapName}`,
+                        };
+                    }
+                    client.writer.write({
+                        type: 'ENTRY_PROCESS_BATCH_RESPONSE',
+                        requestId,
+                        results: errorResults,
+                    }, true);
+                    break;
+                }
+
+                // Get or create the map
+                const batchMap = this.getMap(mapName) as LWWMap<string, any>;
+
+                // Execute the processor on all keys
+                const { results, timestamps } = await this.entryProcessorHandler.executeOnKeys(
+                    batchMap,
+                    keys,
+                    processor,
+                );
+
+                // Convert Map to Record for serialization
+                const resultsRecord: Record<string, {
+                    success: boolean;
+                    result?: unknown;
+                    newValue?: unknown;
+                    error?: string;
+                }> = {};
+
+                for (const [key, keyResult] of results) {
+                    resultsRecord[key] = {
+                        success: keyResult.success,
+                        result: keyResult.result,
+                        newValue: keyResult.newValue,
+                        error: keyResult.error,
+                    };
+                }
+
+                // Send batch response to client
+                client.writer.write({
+                    type: 'ENTRY_PROCESS_BATCH_RESPONSE',
+                    requestId,
+                    results: resultsRecord,
+                });
+
+                // Notify query subscribers about changes
+                for (const [key] of timestamps) {
+                    const record = batchMap.getRecord(key);
+                    if (record) {
+                        this.queryRegistry.processChange(mapName, batchMap, key, record, undefined);
+                    }
+                }
+
+                logger.debug({
+                    clientId: client.id,
+                    mapName,
+                    keyCount: keys.length,
+                    processor: processor.name,
+                    successCount: Array.from(results.values()).filter(r => r.success).length,
+                }, 'Entry processor batch executed');
                 break;
             }
 

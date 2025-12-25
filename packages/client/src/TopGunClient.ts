@@ -1,5 +1,5 @@
 import { LWWMap, ORMap } from '@topgunbuild/core';
-import type { ORMapRecord, LWWRecord } from '@topgunbuild/core';
+import type { ORMapRecord, LWWRecord, EntryProcessorDef, EntryProcessorResult } from '@topgunbuild/core';
 import type { IStorageAdapter } from './IStorageAdapter';
 import { SyncEngine } from './SyncEngine';
 import type { BackoffConfig } from './SyncEngine';
@@ -560,5 +560,108 @@ export class TopGunClient {
     listener: (data?: BackpressureThresholdEvent | OperationDroppedEvent) => void
   ): () => void {
     return this.syncEngine.onBackpressure(event, listener);
+  }
+
+  // ============================================
+  // Entry Processor API (Phase 5.03)
+  // ============================================
+
+  /**
+   * Execute an entry processor on a single key atomically.
+   *
+   * Entry processors solve the read-modify-write race condition by executing
+   * user-defined logic atomically on the server where the data lives.
+   *
+   * @param mapName Name of the map
+   * @param key Key to process
+   * @param processor Processor definition with name, code, and optional args
+   * @returns Promise resolving to the processor result
+   *
+   * @example
+   * ```typescript
+   * // Increment a counter atomically
+   * const result = await client.executeOnKey('stats', 'pageViews', {
+   *   name: 'increment',
+   *   code: `
+   *     const current = value ?? 0;
+   *     return { value: current + 1, result: current + 1 };
+   *   `,
+   * });
+   *
+   * // Using built-in processor
+   * import { BuiltInProcessors } from '@topgunbuild/core';
+   * const result = await client.executeOnKey(
+   *   'stats',
+   *   'pageViews',
+   *   BuiltInProcessors.INCREMENT(1)
+   * );
+   * ```
+   */
+  public async executeOnKey<V, R = V>(
+    mapName: string,
+    key: string,
+    processor: EntryProcessorDef<V, R>,
+  ): Promise<EntryProcessorResult<R>> {
+    const result = await this.syncEngine.executeOnKey(mapName, key, processor);
+
+    // Update local map cache if successful and we have the map
+    if (result.success && result.newValue !== undefined) {
+      const map = this.maps.get(mapName);
+      if (map instanceof LWWMap) {
+        // Update local cache - set() generates its own timestamp
+        // The server will broadcast the full update to all subscribers
+        (map as LWWMap<any, any>).set(key, result.newValue);
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Execute an entry processor on multiple keys.
+   *
+   * Each key is processed atomically. The operation returns when all keys
+   * have been processed.
+   *
+   * @param mapName Name of the map
+   * @param keys Keys to process
+   * @param processor Processor definition
+   * @returns Promise resolving to a map of key -> result
+   *
+   * @example
+   * ```typescript
+   * // Reset multiple counters
+   * const results = await client.executeOnKeys(
+   *   'stats',
+   *   ['pageViews', 'uniqueVisitors', 'bounceRate'],
+   *   {
+   *     name: 'reset',
+   *     code: `return { value: 0, result: value };`, // Returns old value
+   *   }
+   * );
+   *
+   * for (const [key, result] of results) {
+   *   console.log(`${key}: was ${result.result}, now 0`);
+   * }
+   * ```
+   */
+  public async executeOnKeys<V, R = V>(
+    mapName: string,
+    keys: string[],
+    processor: EntryProcessorDef<V, R>,
+  ): Promise<Map<string, EntryProcessorResult<R>>> {
+    const results = await this.syncEngine.executeOnKeys(mapName, keys, processor);
+
+    // Update local map cache for successful operations
+    const map = this.maps.get(mapName);
+    if (map instanceof LWWMap) {
+      for (const [key, result] of results) {
+        if (result.success && result.newValue !== undefined) {
+          (map as LWWMap<any, any>).set(key, result.newValue);
+        }
+      }
+    }
+
+    return results;
   }
 }

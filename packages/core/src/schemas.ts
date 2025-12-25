@@ -393,6 +393,70 @@ export const PartitionMapRequestSchema = z.object({
   }).optional(),
 });
 
+// --- Entry Processor Messages (Phase 5.03) ---
+
+/**
+ * Entry processor definition schema.
+ */
+export const EntryProcessorSchema = z.object({
+  name: z.string().min(1).max(100),
+  code: z.string().min(1).max(10000),
+  args: z.unknown().optional(),
+});
+
+/**
+ * ENTRY_PROCESS: Client requests atomic operation on single key.
+ */
+export const EntryProcessRequestSchema = z.object({
+  type: z.literal('ENTRY_PROCESS'),
+  requestId: z.string(),
+  mapName: z.string(),
+  key: z.string(),
+  processor: EntryProcessorSchema,
+});
+
+/**
+ * ENTRY_PROCESS_BATCH: Client requests atomic operation on multiple keys.
+ */
+export const EntryProcessBatchRequestSchema = z.object({
+  type: z.literal('ENTRY_PROCESS_BATCH'),
+  requestId: z.string(),
+  mapName: z.string(),
+  keys: z.array(z.string()),
+  processor: EntryProcessorSchema,
+});
+
+/**
+ * ENTRY_PROCESS_RESPONSE: Server responds to single-key processor request.
+ */
+export const EntryProcessResponseSchema = z.object({
+  type: z.literal('ENTRY_PROCESS_RESPONSE'),
+  requestId: z.string(),
+  success: z.boolean(),
+  result: z.unknown().optional(),
+  newValue: z.unknown().optional(),
+  error: z.string().optional(),
+});
+
+/**
+ * Individual key result in batch response.
+ */
+export const EntryProcessKeyResultSchema = z.object({
+  success: z.boolean(),
+  result: z.unknown().optional(),
+  newValue: z.unknown().optional(),
+  error: z.string().optional(),
+});
+
+/**
+ * ENTRY_PROCESS_BATCH_RESPONSE: Server responds to multi-key processor request.
+ */
+export const EntryProcessBatchResponseSchema = z.object({
+  type: z.literal('ENTRY_PROCESS_BATCH_RESPONSE'),
+  requestId: z.string(),
+  results: z.record(z.string(), EntryProcessKeyResultSchema),
+});
+
 // --- Write Concern Response Schemas (Phase 5.01) ---
 
 /**
@@ -470,6 +534,11 @@ export const MessageSchema = z.discriminatedUnion('type', [
   // Phase 5.2: PN Counter
   CounterRequestSchema,
   CounterSyncSchema,
+  // Phase 5.03: Entry Processor
+  EntryProcessRequestSchema,
+  EntryProcessBatchRequestSchema,
+  EntryProcessResponseSchema,
+  EntryProcessBatchResponseSchema,
 ]);
 
 // --- Type Inference ---
@@ -489,4 +558,11 @@ export type BatchMessage = z.infer<typeof BatchMessageSchema>;
 export type OpAckMessage = z.infer<typeof OpAckMessageSchema>;
 export type OpRejectedMessage = z.infer<typeof OpRejectedMessageSchema>;
 export type OpResult = z.infer<typeof OpResultSchema>;
+
+// Entry Processor types (Phase 5.03)
+export type EntryProcessRequest = z.infer<typeof EntryProcessRequestSchema>;
+export type EntryProcessBatchRequest = z.infer<typeof EntryProcessBatchRequestSchema>;
+export type EntryProcessResponse = z.infer<typeof EntryProcessResponseSchema>;
+export type EntryProcessBatchResponse = z.infer<typeof EntryProcessBatchResponseSchema>;
+export type EntryProcessKeyResult = z.infer<typeof EntryProcessKeyResultSchema>;
 

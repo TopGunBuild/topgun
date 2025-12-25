@@ -39,7 +39,8 @@
     "typescript": "^5.0.0"
   },
   "optionalDependencies": {
-    "@topgunbuild/native": "workspace:*"
+    "@topgunbuild/native": "workspace:*",
+    "isolated-vm": "^4.7.2"
   },
   "engines": {
     "node": ">=18"
