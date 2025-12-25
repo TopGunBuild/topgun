@@ -384,4 +384,67 @@ describe('useQuery with change tracking', () => {
       expect(result.current.lastChange?.key).toBe('item-3');
     });
   });
+
+  describe('maxChanges option', () => {
+    it('should rotate oldest changes when exceeding maxChanges limit', async () => {
+      const { result } = renderHook(
+        () => useQuery('testMap', {}, { maxChanges: 3 }),
+        { wrapper }
+      );
+
+      // Emit 5 changes, exceeding the limit of 3
+      for (let i = 1; i <= 5; i++) {
+        act(() => {
+          mockQueryHandle.emitChanges([
+            { type: 'add', key: `item-${i}`, value: { title: `Item ${i}` }, timestamp: i },
+          ]);
+        });
+      }
+
+      // Should only keep the last 3 changes
+      expect(result.current.changes).toHaveLength(3);
+      expect(result.current.changes[0].key).toBe('item-3');
+      expect(result.current.changes[1].key).toBe('item-4');
+      expect(result.current.changes[2].key).toBe('item-5');
+    });
+
+    it('should use default maxChanges of 1000', async () => {
+      const { result } = renderHook(() => useQuery('testMap'), { wrapper });
+
+      // Emit a batch that doesn't exceed default limit
+      const changes: ChangeEvent<any>[] = [];
+      for (let i = 0; i < 100; i++) {
+        changes.push({ type: 'add', key: `item-${i}`, value: { title: `Item ${i}` }, timestamp: i });
+      }
+
+      act(() => {
+        mockQueryHandle.emitChanges(changes);
+      });
+
+      // All 100 should be kept (under 1000 limit)
+      expect(result.current.changes).toHaveLength(100);
+    });
+
+    it('should handle batch emission exceeding maxChanges', async () => {
+      const { result } = renderHook(
+        () => useQuery('testMap', {}, { maxChanges: 5 }),
+        { wrapper }
+      );
+
+      // Emit 10 changes at once
+      const batchChanges: ChangeEvent<any>[] = [];
+      for (let i = 1; i <= 10; i++) {
+        batchChanges.push({ type: 'add', key: `item-${i}`, value: { title: `Item ${i}` }, timestamp: i });
+      }
+
+      act(() => {
+        mockQueryHandle.emitChanges(batchChanges);
+      });
+
+      // Should only keep the last 5
+      expect(result.current.changes).toHaveLength(5);
+      expect(result.current.changes[0].key).toBe('item-6');
+      expect(result.current.changes[4].key).toBe('item-10');
+    });
+  });
 });

@@ -14,6 +14,12 @@ export interface UseQueryOptions<T> {
   onUpdate?: (key: string, value: T, previous: T) => void;
   /** Called when an item is removed */
   onRemove?: (key: string, previous: T) => void;
+  /**
+   * Maximum number of changes to accumulate before auto-rotating.
+   * When exceeded, oldest changes are removed to prevent memory leaks.
+   * Default: 1000
+   */
+  maxChanges?: number;
 }
 
 /**
@@ -145,8 +151,17 @@ export function useQuery<T = any>(
       const unsubscribeChanges = handle.onChanges((newChanges) => {
         if (!isMounted.current) return;
 
-        // Accumulate changes
-        setChanges((prev) => [...prev, ...newChanges]);
+        const maxChanges = optionsRef.current?.maxChanges ?? 1000;
+
+        // Accumulate changes with rotation to prevent memory leaks
+        setChanges((prev) => {
+          const combined = [...prev, ...newChanges];
+          // Rotate oldest changes if exceeding limit
+          if (combined.length > maxChanges) {
+            return combined.slice(-maxChanges);
+          }
+          return combined;
+        });
 
         // Track last change
         if (newChanges.length > 0) {
