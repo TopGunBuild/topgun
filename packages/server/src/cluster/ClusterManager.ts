@@ -5,6 +5,7 @@ import { logger } from '../utils/logger';
 import { readFileSync } from 'fs';
 import * as https from 'https';
 import { ClusterTLSConfig } from '../types/TLSConfig';
+import { FailureDetector, FailureDetectorConfig, DEFAULT_FAILURE_DETECTOR_CONFIG } from './FailureDetector';
 
 export interface ClusterConfig {
   nodeId: string;
@@ -15,6 +16,10 @@ export interface ClusterConfig {
   serviceName?: string;
   discoveryInterval?: number;
   tls?: ClusterTLSConfig;
+  /** Heartbeat interval in milliseconds. Default: 1000 */
+  heartbeatIntervalMs?: number;
+  /** Failure detection configuration */
+  failureDetection?: Partial<FailureDetectorConfig>;
 }
 
 export interface ClusterMember {
@@ -38,10 +43,44 @@ export class ClusterManager extends EventEmitter {
   private pendingConnections: Set<string> = new Set();
   private reconnectIntervals: Map<string, NodeJS.Timeout> = new Map();
   private discoveryTimer?: NodeJS.Timeout;
+  private heartbeatTimer?: NodeJS.Timeout;
+  private failureDetector: FailureDetector;
 
   constructor(config: ClusterConfig) {
     super();
     this.config = config;
+
+    // Initialize failure detector
+    this.failureDetector = new FailureDetector({
+      ...DEFAULT_FAILURE_DETECTOR_CONFIG,
+      heartbeatIntervalMs: config.heartbeatIntervalMs ?? 1000,
+      ...config.failureDetection,
+    });
+
+    // Forward failure detector events
+    this.failureDetector.on('nodeSuspected', (event) => {
+      logger.warn({ nodeId: event.nodeId, phi: event.phi }, 'Node suspected (failure detector)');
+      this.emit('nodeSuspected', event.nodeId, event.phi);
+    });
+
+    this.failureDetector.on('nodeRecovered', (event) => {
+      logger.info({ nodeId: event.nodeId }, 'Node recovered (failure detector)');
+      this.emit('nodeRecovered', event.nodeId);
+    });
+
+    this.failureDetector.on('nodeConfirmedFailed', (event) => {
+      logger.error({ nodeId: event.nodeId }, 'Node failure confirmed');
+      this.emit('nodeConfirmedFailed', event.nodeId);
+      // Remove failed node from members
+      this.handleNodeFailure(event.nodeId);
+    });
+  }
+
+  /**
+   * Get the failure detector instance.
+   */
+  public getFailureDetector(): FailureDetector {
+    return this.failureDetector;
   }
 
   private _actualPort: number = 0;
@@ -109,6 +148,12 @@ export class ClusterManager extends EventEmitter {
   public stop() {
     logger.info({ port: this.config.port }, 'Stopping Cluster Manager');
 
+    // Stop heartbeat
+    this.stopHeartbeat();
+
+    // Stop failure detector
+    this.failureDetector.stop();
+
     // Clear reconnect intervals
     for (const timeout of this.reconnectIntervals.values()) {
       clearTimeout(timeout);
@@ -132,6 +177,81 @@ export class ClusterManager extends EventEmitter {
     if (this.server) {
       this.server.close();
     }
+  }
+
+  /**
+   * Start sending heartbeats to all peers.
+   */
+  private startHeartbeat(): void {
+    if (this.heartbeatTimer) return;
+
+    const intervalMs = this.config.heartbeatIntervalMs ?? 1000;
+
+    this.heartbeatTimer = setInterval(() => {
+      this.sendHeartbeatToAll();
+    }, intervalMs);
+
+    // Also start failure detector
+    this.failureDetector.start();
+
+    logger.debug({ intervalMs }, 'Heartbeat started');
+  }
+
+  /**
+   * Stop sending heartbeats.
+   */
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
+    }
+  }
+
+  /**
+   * Send heartbeat to all connected peers.
+   */
+  private sendHeartbeatToAll(): void {
+    for (const [nodeId, member] of this.members) {
+      if (member.isSelf) continue;
+      if (member.socket && member.socket.readyState === WebSocket.OPEN) {
+        this.send(nodeId, 'HEARTBEAT', { timestamp: Date.now() });
+      }
+    }
+  }
+
+  /**
+   * Handle incoming heartbeat from a peer.
+   */
+  private handleHeartbeat(senderId: string, _payload: { timestamp: number }): void {
+    this.failureDetector.recordHeartbeat(senderId);
+  }
+
+  /**
+   * Handle confirmed node failure.
+   */
+  private handleNodeFailure(nodeId: string): void {
+    const member = this.members.get(nodeId);
+    if (!member) return;
+
+    logger.warn({ nodeId }, 'Removing failed node from cluster');
+
+    // Close socket if still connected
+    if (member.socket && member.socket.readyState !== WebSocket.CLOSED) {
+      try {
+        member.socket.terminate();
+      } catch (e) {
+        // Ignore close errors
+      }
+    }
+
+    // Remove from members
+    this.members.delete(nodeId);
+
+    // Stop monitoring
+    this.failureDetector.stopMonitoring(nodeId);
+
+    // Emit memberLeft event
+    this.emit('memberLeft', nodeId);
   }
 
   private connectToPeers() {
@@ -330,7 +450,18 @@ export class ClusterManager extends EventEmitter {
             isSelf: false
           });
 
+          // Start monitoring this node for failures
+          this.failureDetector.startMonitoring(remoteNodeId);
+
+          // Start heartbeat if not already started
+          this.startHeartbeat();
+
           this.emit('memberJoined', remoteNodeId);
+        } else if (msg.type === 'HEARTBEAT') {
+          // Handle incoming heartbeat
+          if (remoteNodeId) {
+            this.handleHeartbeat(remoteNodeId, msg.payload);
+          }
         } else {
           this.emit('message', msg);
         }
@@ -347,11 +478,15 @@ export class ClusterManager extends EventEmitter {
         if (current && current.socket === ws) {
           logger.info({ nodeId: remoteNodeId }, 'Peer disconnected');
           this.members.delete(remoteNodeId);
+
+          // Stop monitoring this node
+          this.failureDetector.stopMonitoring(remoteNodeId);
+
           this.emit('memberLeft', remoteNodeId);
 
           // If we initiated, we should try to reconnect
           if (initiated && peerAddress) {
-            // Start with 0 attempt on fresh disconnect? 
+            // Start with 0 attempt on fresh disconnect?
             // Or maybe we should consider this a failure and backoff?
             // Let's restart with 0 for now as it might be a temp network blip
             this.scheduleReconnect(peerAddress, 0);
