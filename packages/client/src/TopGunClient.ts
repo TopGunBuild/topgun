@@ -7,6 +7,7 @@ import { QueryHandle } from './QueryHandle';
 import type { QueryFilter } from './QueryHandle';
 import { DistributedLock } from './DistributedLock';
 import { TopicHandle } from './TopicHandle';
+import { PNCounterHandle } from './PNCounterHandle';
 import { logger } from './utils/logger';
 import { SyncState } from './SyncState';
 import type { StateChangeEvent } from './SyncStateMachine';
@@ -87,6 +88,7 @@ export class TopGunClient {
   private readonly maps: Map<string, LWWMap<any, any> | ORMap<any, any>> = new Map();
   private readonly storageAdapter: IStorageAdapter;
   private readonly topicHandles: Map<string, TopicHandle> = new Map();
+  private readonly counters: Map<string, PNCounterHandle> = new Map();
   private readonly clusterClient?: ClusterClient;
   private readonly isClusterMode: boolean;
   private readonly clusterConfig?: Required<Omit<TopGunClusterConfig, 'seeds'>> & { seeds: string[] };
@@ -195,6 +197,35 @@ export class TopGunClient {
       this.topicHandles.set(name, new TopicHandle(this.syncEngine, name));
     }
     return this.topicHandles.get(name)!;
+  }
+
+  /**
+   * Retrieves a PN Counter instance. If the counter doesn't exist locally, it's created.
+   * PN Counters support increment and decrement operations that work offline
+   * and sync to server when connected.
+   *
+   * @param name The name of the counter (e.g., 'likes:post-123')
+   * @returns A PNCounterHandle instance
+   *
+   * @example
+   * ```typescript
+   * const likes = client.getPNCounter('likes:post-123');
+   * likes.increment(); // +1
+   * likes.decrement(); // -1
+   * likes.addAndGet(10); // +10
+   *
+   * likes.subscribe((value) => {
+   *   console.log('Current likes:', value);
+   * });
+   * ```
+   */
+  public getPNCounter(name: string): PNCounterHandle {
+    let counter = this.counters.get(name);
+    if (!counter) {
+      counter = new PNCounterHandle(name, this.nodeId, this.syncEngine);
+      this.counters.set(name, counter);
+    }
+    return counter;
   }
 
   /**

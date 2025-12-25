@@ -43,6 +43,9 @@ export { logger } from './utils/logger';
 export { ChangeTracker };
 export type { ChangeEvent } from './ChangeTracker';
 
+// PN Counter exports (Phase 5.2)
+export { PNCounterHandle } from './PNCounterHandle';
+
 // Cluster exports (Phase 4)
 export { ConnectionPool, PartitionRouter, ClusterClient };
 export type {

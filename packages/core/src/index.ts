@@ -4,9 +4,12 @@ import { ORMap, ORMapRecord, MergeKeyResult, ORMapSnapshot } from './ORMap';
 import { MerkleTree } from './MerkleTree';
 import { ORMapMerkleTree, ORMapMerkleNode } from './ORMapMerkleTree';
 import { hashORMapEntry, hashORMapRecord, timestampToString, compareTimestamps } from './ORMapMerkle';
+import { PNCounterImpl } from './PNCounter';
+import type { PNCounter, PNCounterState, PNCounterStateObject, PNCounterConfig } from './PNCounter';
 
-export { HLC, LWWMap, ORMap, MerkleTree, ORMapMerkleTree };
+export { HLC, LWWMap, ORMap, MerkleTree, ORMapMerkleTree, PNCounterImpl };
 export { hashORMapEntry, hashORMapRecord, timestampToString, compareTimestamps };
+export type { PNCounter, PNCounterState, PNCounterStateObject, PNCounterConfig };
 export * from './utils/hash';
 export * from './serializer';
 export * from './predicate';

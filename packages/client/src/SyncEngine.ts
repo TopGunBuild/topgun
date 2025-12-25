@@ -1159,6 +1159,23 @@ export class SyncEngine {
         }
         break;
       }
+
+      // ============ PN Counter Message Handlers (Phase 5.2) ============
+
+      case 'COUNTER_UPDATE': {
+        const { name, state } = message.payload;
+        logger.debug({ name }, 'Received COUNTER_UPDATE');
+        this.handleCounterUpdate(name, state);
+        break;
+      }
+
+      case 'COUNTER_RESPONSE': {
+        // Initial counter state response
+        const { name, state } = message.payload;
+        logger.debug({ name }, 'Received COUNTER_RESPONSE');
+        this.handleCounterUpdate(name, state);
+        break;
+      }
     }
 
     if (message.timestamp) {
@@ -1785,5 +1802,91 @@ export class SyncEngine {
       pending.reject(error);
     }
     this.pendingWriteConcernPromises.clear();
+  }
+
+  // ============================================
+  // PN Counter Methods (Phase 5.2)
+  // ============================================
+
+  /** Counter update listeners by name */
+  private counterUpdateListeners: Map<string, Set<(state: any) => void>> = new Map();
+
+  /**
+   * Subscribe to counter updates from server.
+   * @param name Counter name
+   * @param listener Callback when counter state is updated
+   * @returns Unsubscribe function
+   */
+  public onCounterUpdate(name: string, listener: (state: any) => void): () => void {
+    if (!this.counterUpdateListeners.has(name)) {
+      this.counterUpdateListeners.set(name, new Set());
+    }
+    this.counterUpdateListeners.get(name)!.add(listener);
+
+    return () => {
+      this.counterUpdateListeners.get(name)?.delete(listener);
+      if (this.counterUpdateListeners.get(name)?.size === 0) {
+        this.counterUpdateListeners.delete(name);
+      }
+    };
+  }
+
+  /**
+   * Request initial counter state from server.
+   * @param name Counter name
+   */
+  public requestCounter(name: string): void {
+    if (this.isAuthenticated()) {
+      this.sendMessage({
+        type: 'COUNTER_REQUEST',
+        payload: { name }
+      });
+    }
+  }
+
+  /**
+   * Sync local counter state to server.
+   * @param name Counter name
+   * @param state Counter state to sync
+   */
+  public syncCounter(name: string, state: any): void {
+    if (this.isAuthenticated()) {
+      // Convert Maps to objects for serialization
+      const stateObj = {
+        positive: Object.fromEntries(state.positive),
+        negative: Object.fromEntries(state.negative),
+      };
+
+      this.sendMessage({
+        type: 'COUNTER_SYNC',
+        payload: {
+          name,
+          state: stateObj
+        }
+      });
+    }
+  }
+
+  /**
+   * Handle incoming counter update from server.
+   * Called by handleServerMessage for COUNTER_UPDATE messages.
+   */
+  private handleCounterUpdate(name: string, stateObj: { positive: Record<string, number>; negative: Record<string, number> }): void {
+    // Convert objects to Maps
+    const state = {
+      positive: new Map(Object.entries(stateObj.positive)),
+      negative: new Map(Object.entries(stateObj.negative)),
+    };
+
+    const listeners = this.counterUpdateListeners.get(name);
+    if (listeners) {
+      for (const listener of listeners) {
+        try {
+          listener(state);
+        } catch (e) {
+          logger.error({ err: e, counterName: name }, 'Counter update listener error');
+        }
+      }
+    }
   }
 }
