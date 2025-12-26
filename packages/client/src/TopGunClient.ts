@@ -223,7 +223,7 @@ export class TopGunClient {
   public getPNCounter(name: string): PNCounterHandle {
     let counter = this.counters.get(name);
     if (!counter) {
-      counter = new PNCounterHandle(name, this.nodeId, this.syncEngine);
+      counter = new PNCounterHandle(name, this.nodeId, this.syncEngine, this.storageAdapter);
       this.counters.set(name, counter);
     }
     return counter;
