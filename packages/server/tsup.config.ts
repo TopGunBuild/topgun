@@ -6,5 +6,5 @@ export default defineConfig({
   dts: true,
   clean: true,
   sourcemap: true,
-  external: ['@topgunbuild/native'],
+  external: ['@topgunbuild/native', 'isolated-vm'],
 });
