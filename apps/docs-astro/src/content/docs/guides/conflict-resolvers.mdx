@@ -239,6 +239,35 @@ await resolvers.register('data', {
 // post:123 → normal LWW behavior
 // user:456 → uses the resolver above`;
 
+export const clientApiCode = `const resolvers = client.getConflictResolvers();
+
+// Register a resolver
+await resolvers.register(mapName, {
+  name: string;
+  code: string;
+  priority?: number;  // 0-100, default 50
+  keyPattern?: string;
+});
+
+// Unregister a resolver
+await resolvers.unregister(mapName, resolverName);
+
+// List registered resolvers
+const list = await resolvers.list(mapName?);
+
+// Listen for rejections
+const unsubscribe = resolvers.onRejection((rejection) => {
+  console.log(rejection.mapName, rejection.key, rejection.reason);
+});`;
+
+export const reactHooksApiCode = `// Manage resolvers for a map
+const { register, unregister, list, loading, error, registered } =
+  useConflictResolver(mapName, { autoUnregister: true });
+
+// Listen for rejections
+const { rejections, lastRejection, clear } =
+  useMergeRejections({ mapName, maxHistory: 100 });`;
+
 <div className="not-prose mb-8 rounded-lg border border-yellow-500/20 bg-yellow-500/10 p-4">
   <div className="flex items-start gap-3">
     <AlertTriangle className="h-5 w-5 text-yellow-500 mt-0.5" />
@@ -379,40 +408,11 @@ Resolvers execute in priority order (highest first). Use priorities to layer val
 
 ### Client API
 
-```typescript
-const resolvers = client.getConflictResolvers();
-
-// Register a resolver
-await resolvers.register(mapName, {
-  name: string;
-  code: string;
-  priority?: number;  // 0-100, default 50
-  keyPattern?: string;
-});
-
-// Unregister a resolver
-await resolvers.unregister(mapName, resolverName);
-
-// List registered resolvers
-const list = await resolvers.list(mapName?);
-
-// Listen for rejections
-const unsubscribe = resolvers.onRejection((rejection) => {
-  console.log(rejection.mapName, rejection.key, rejection.reason);
-});
-```
+<CodeBlock code={clientApiCode} lang="typescript" title="Client API" />
 
 ### React Hooks
 
-```typescript
-// Manage resolvers for a map
-const { register, unregister, list, loading, error, registered } =
-  useConflictResolver(mapName, { autoUnregister: true });
-
-// Listen for rejections
-const { rejections, lastRejection, clear } =
-  useMergeRejections({ mapName, maxHistory: 100 });
-```
+<CodeBlock code={reactHooksApiCode} lang="typescript" title="React Hooks" />
 
 ## Comparison with Alternatives
 

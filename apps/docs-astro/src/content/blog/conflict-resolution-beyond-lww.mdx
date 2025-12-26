@@ -1,0 +1,168 @@
+---
+title: "How We Built Conflict Resolution Beyond LWW"
+excerpt: "Last-Write-Wins works for most cases, but fails spectacularly for booking systems and inventory. Here's how we designed Custom Conflict Resolvers for TopGun."
+date: "Dec 26, 2025"
+readTime: "5 min read"
+author: "Ivan Kalashnik"
+role: "Creator"
+category: "Engineering"
+image: "/images/blog-conflict-resolution.png"
+avatar: "/images/ivan-avatar.jpeg"
+---
+
+Last-Write-Wins (LWW) is the default conflict resolution strategy in most distributed databases. It's simple, predictable, and works surprisingly well for 90% of use cases.
+
+But for the other 10%, it's a disaster.
+
+## The Booking Problem
+
+Imagine two users trying to book the same seat on a flight:
+
+```
+User A: book(seat: "A1", user: "alice")  → timestamp: 1000
+User B: book(seat: "A1", user: "bob")    → timestamp: 1001
+
+LWW Result: seat A1 → bob
+```
+
+Alice's booking is silently overwritten. No error, no notification, just... gone. She shows up at the airport thinking she has seat A1, only to find Bob sitting there.
+
+This isn't a hypothetical. We've seen this exact bug in production systems that relied on LWW for business-critical operations.
+
+## Why Not Just Use Transactions?
+
+The obvious answer is "use a database transaction with row locking." And yes, that works—if you're always online.
+
+But TopGun is a **local-first** system. Users can work offline, and their changes sync later. There's no central server to coordinate locks in real-time.
+
+We needed a solution that:
+1. Works offline (no real-time coordination required)
+2. Runs on the server (for authority)
+3. Notifies the client when operations are rejected
+4. Supports custom business logic
+
+## The Design: Server-Side Resolvers
+
+Our solution: **Custom Conflict Resolvers**—server-side functions that intercept every write operation and decide what to do.
+
+```typescript
+await resolvers.register('bookings', {
+  name: 'first-write-wins',
+  code: `
+    if (context.localValue !== undefined) {
+      return {
+        action: 'reject',
+        reason: 'Seat already booked by ' + context.localValue.user
+      };
+    }
+    return { action: 'accept', value: context.remoteValue };
+  `,
+  priority: 100,
+});
+```
+
+When Bob tries to book seat A1, the server sees that Alice already has it and **rejects** Bob's write. Bob gets a notification: "Seat already booked by alice."
+
+No silent overwrites. No lost bookings.
+
+## The MergeContext
+
+Every resolver receives a `MergeContext` with everything it needs to make a decision:
+
+- `localValue` — current server value (undefined if key doesn't exist)
+- `remoteValue` — incoming client value (null for deletions)
+- `localTimestamp` / `remoteTimestamp` — HLC timestamps
+- `auth` — user ID, roles, metadata
+- `readEntry(key)` — read other entries for cross-key validation
+
+The `readEntry` function was crucial. It enables patterns like:
+
+```typescript
+// Check if cart total exceeds user's budget
+const budget = context.readEntry('user_budget');
+if (cartTotal > budget.amount) {
+  return { action: 'reject', reason: 'Cart exceeds budget' };
+}
+```
+
+## Four Possible Outcomes
+
+Resolvers return one of four actions:
+
+| Action | What Happens |
+|--------|-------------|
+| `accept` | Accept the incoming value |
+| `reject` | Reject and notify the client |
+| `merge` | Apply a custom merged value |
+| `local` | Keep local value, pass to next resolver |
+
+The `merge` action is interesting—it lets you create hybrid values:
+
+```typescript
+// Merge shopping carts by combining items
+return {
+  action: 'merge',
+  value: {
+    items: [...localValue.items, ...remoteValue.items]
+  }
+};
+```
+
+## The Security Challenge: Sandboxing
+
+Here's where it gets tricky. Resolver code comes from **clients**. We can't let arbitrary JavaScript run on the server with full access.
+
+Our solution: **isolated-vm** for production, **vm module** as fallback.
+
+The sandbox blocks:
+- `eval`, `Function` (no code generation)
+- `fetch`, `require`, `import` (no network/filesystem)
+- `setTimeout`, `setInterval` (no async escape)
+- `process` (no system access)
+
+Resolvers are pure functions: context in, decision out.
+
+## Deletions: The Edge Case We Almost Missed
+
+Early on, deletions bypassed resolvers entirely. A tombstone (null value) went straight to the data layer.
+
+This broke `IMMUTABLE` resolvers. You could mark a record as immutable... and then delete it anyway.
+
+The fix: deletions now pass through resolvers with `remoteValue: null`. Resolvers can check for this and reject unauthorized deletions:
+
+```typescript
+if (context.remoteValue === null) {
+  if (!context.auth?.roles?.includes('admin')) {
+    return { action: 'reject', reason: 'Only admins can delete' };
+  }
+}
+```
+
+## Performance Considerations
+
+Resolvers add latency. Every write now has a JavaScript execution step.
+
+We mitigate this with:
+- **Priority ordering**: High-priority resolvers (security) run first, can short-circuit
+- **Rate limiting**: Max 100 resolvers per map, 50KB code size limit
+- **In-memory storage**: Resolvers live in RAM, no database lookup
+
+In benchmarks, resolver overhead is ~0.1-0.5ms per operation. For most applications, this is negligible compared to network latency.
+
+## What We Learned
+
+Building conflict resolvers taught us a few things:
+
+1. **LWW is not enough** — but it's a great default. Only add custom resolvers when you need them.
+
+2. **Server authority matters** — local-first doesn't mean server-less. The server is the arbiter of truth.
+
+3. **Client notification is essential** — silent failures are the worst UX. Always tell users when their action was rejected.
+
+4. **Edge cases are where bugs hide** — deletions, cross-key validation, auth context. Test every path.
+
+## Try It Yourself
+
+Custom Conflict Resolvers are available in TopGun v2. Check out the [documentation](/docs/guides/conflict-resolvers) for the full API reference and more examples.
+
+If you're building a booking system, inventory manager, or anything where "last write wins" feels wrong—this is the feature you've been waiting for.
