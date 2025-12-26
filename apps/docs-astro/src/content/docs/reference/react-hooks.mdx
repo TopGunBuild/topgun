@@ -298,6 +298,47 @@ Use `useMap` for Last-Write-Wins maps (simple key-value) and `useORMap` for Obse
   <CodeBlock title="components/CreateTodo.tsx" language="typescript" code={useMutationCode} />
 </div>
 
+## usePNCounter
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Zap className="w-6 h-6 text-green-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Subscribe to a distributed counter that supports increment/decrement with offline support.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="components/LikeButton.tsx" language="typescript" code={`import { usePNCounter } from '@topgunbuild/react';
+
+function LikeButton({ postId }) {
+  const { value, increment, decrement, add, loading } = usePNCounter(\`likes:\${postId}\`);
+
+  return (
+    <div className="flex items-center gap-2">
+      <button onClick={decrement} disabled={loading}>-</button>
+      <span>{value}</span>
+      <button onClick={increment} disabled={loading}>+</button>
+    </div>
+  );
+}`} />
+</div>
+
+### Return Values
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `value` | `number` | Current counter value |
+| `loading` | `boolean` | True while initial state is loading |
+| `increment` | `() => void` | Increment by 1 |
+| `decrement` | `() => void` | Decrement by 1 |
+| `add` | `(delta: number) => void` | Add arbitrary amount (positive or negative) |
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>Offline Support:</strong> Counter operations work offline and are persisted to IndexedDB.
+    Changes sync automatically when the connection is restored.
+    See the <a href="/docs/guides/pn-counter" className="underline">PN-Counter Guide</a> for more details.
+  </p>
+</div>
+
 ## useTopic
 
 <div className="flex items-center gap-2 mb-4 not-prose">
