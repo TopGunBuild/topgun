@@ -9,3 +9,6 @@ export * from './hooks/usePNCounter';
 export * from './hooks/useEntryProcessor';
 export * from './hooks/useEventJournal';
 
+// Conflict Resolver hooks (Phase 5.05)
+export * from './hooks/useMergeRejections';
+export * from './hooks/useConflictResolver';

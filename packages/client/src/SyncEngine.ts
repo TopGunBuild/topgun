@@ -19,6 +19,7 @@ import type {
 import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 import type { IConnectionProvider } from './types';
 import { SingleServerProvider } from './connection/SingleServerProvider';
+import { ConflictResolverClient } from './ConflictResolverClient';
 
 export interface OpLogEntry {
   id: string; // Unique ID for the operation
@@ -114,6 +115,9 @@ export class SyncEngine {
     timeoutHandle?: ReturnType<typeof setTimeout>;
   }> = new Map();
 
+  // Conflict Resolver client (Phase 5.05)
+  private readonly conflictResolverClient: ConflictResolverClient;
+
   constructor(config: SyncEngineConfig) {
     // Validate config: either serverUrl or connectionProvider required
     if (!config.serverUrl && !config.connectionProvider) {
@@ -158,6 +162,9 @@ export class SyncEngine {
       this.useConnectionProvider = false;
       this.initConnection();
     }
+
+    // Initialize Conflict Resolver client (Phase 5.05)
+    this.conflictResolverClient = new ConflictResolverClient(this);
 
     this.loadOpLog();
   }
@@ -1194,6 +1201,32 @@ export class SyncEngine {
         this.handleEntryProcessBatchResponse(message);
         break;
       }
+
+      // ============ Conflict Resolver Message Handlers (Phase 5.05) ============
+
+      case 'REGISTER_RESOLVER_RESPONSE': {
+        logger.debug({ requestId: message.requestId, success: message.success }, 'Received REGISTER_RESOLVER_RESPONSE');
+        this.conflictResolverClient.handleRegisterResponse(message);
+        break;
+      }
+
+      case 'UNREGISTER_RESOLVER_RESPONSE': {
+        logger.debug({ requestId: message.requestId, success: message.success }, 'Received UNREGISTER_RESOLVER_RESPONSE');
+        this.conflictResolverClient.handleUnregisterResponse(message);
+        break;
+      }
+
+      case 'LIST_RESOLVERS_RESPONSE': {
+        logger.debug({ requestId: message.requestId }, 'Received LIST_RESOLVERS_RESPONSE');
+        this.conflictResolverClient.handleListResponse(message);
+        break;
+      }
+
+      case 'MERGE_REJECTED': {
+        logger.debug({ mapName: message.mapName, key: message.key, reason: message.reason }, 'Received MERGE_REJECTED');
+        this.conflictResolverClient.handleMergeRejected(message);
+        break;
+      }
     }
 
     if (message.timestamp) {
@@ -2158,5 +2191,17 @@ export class SyncEngine {
         logger.error({ err: e }, 'Message listener error');
       }
     }
+  }
+
+  // ============================================
+  // Conflict Resolver Client (Phase 5.05)
+  // ============================================
+
+  /**
+   * Get the conflict resolver client for registering custom resolvers
+   * and subscribing to merge rejection events.
+   */
+  public getConflictResolverClient(): ConflictResolverClient {
+    return this.conflictResolverClient;
   }
 }

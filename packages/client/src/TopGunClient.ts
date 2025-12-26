@@ -710,4 +710,54 @@ export class TopGunClient {
     }
     return this.journalReader;
   }
+
+  // ============================================
+  // Conflict Resolver API (Phase 5.05)
+  // ============================================
+
+  /**
+   * Get the conflict resolver client for registering custom merge resolvers.
+   *
+   * Conflict resolvers allow you to customize how merge conflicts are handled
+   * on the server. You can implement business logic like:
+   * - First-write-wins for booking systems
+   * - Numeric constraints (non-negative, min/max)
+   * - Owner-only modifications
+   * - Custom merge strategies
+   *
+   * @returns ConflictResolverClient instance
+   *
+   * @example
+   * ```typescript
+   * const resolvers = client.getConflictResolvers();
+   *
+   * // Register a first-write-wins resolver
+   * await resolvers.register('bookings', {
+   *   name: 'first-write-wins',
+   *   code: `
+   *     if (context.localValue !== undefined) {
+   *       return { action: 'reject', reason: 'Slot already booked' };
+   *     }
+   *     return { action: 'accept', value: context.remoteValue };
+   *   `,
+   *   priority: 100,
+   * });
+   *
+   * // Subscribe to merge rejections
+   * resolvers.onRejection((rejection) => {
+   *   console.log(`Merge rejected: ${rejection.reason}`);
+   *   // Optionally refresh local state
+   * });
+   *
+   * // List registered resolvers
+   * const registered = await resolvers.list('bookings');
+   * console.log('Active resolvers:', registered);
+   *
+   * // Unregister when done
+   * await resolvers.unregister('bookings', 'first-write-wins');
+   * ```
+   */
+  public getConflictResolvers() {
+    return this.syncEngine.getConflictResolverClient();
+  }
 }

@@ -34,3 +34,20 @@ export {
   DEFAULT_JOURNAL_SERVICE_CONFIG,
   ExportOptions,
 } from './EventJournalService';
+
+// Conflict Resolver (Phase 5.05)
+export {
+  ConflictResolverService,
+  ConflictResolverServiceConfig,
+  DEFAULT_CONFLICT_RESOLVER_CONFIG,
+} from './ConflictResolverService';
+export {
+  MapWithResolver,
+  MapWithResolverConfig,
+  SetWithResolverResult,
+} from './MapWithResolver';
+export {
+  ConflictResolverHandler,
+  ConflictResolverHandlerConfig,
+  MergeWithResolverResult,
+} from './handlers/ConflictResolverHandler';

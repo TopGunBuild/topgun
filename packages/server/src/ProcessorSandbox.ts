@@ -226,8 +226,9 @@ export class ProcessorSandbox {
     key: string,
   ): Promise<EntryProcessorResult<R>> {
     try {
-      // Get or create cached function
-      let fn = this.fallbackScriptCache.get(processor.name);
+      // Skip caching for resolvers - they embed context in the code string
+      const isResolver = processor.name.startsWith('resolver:');
+      let fn = isResolver ? undefined : this.fallbackScriptCache.get(processor.name);
 
       if (!fn) {
         // Create function from code
@@ -237,7 +238,9 @@ export class ProcessorSandbox {
           })
         `;
         fn = new Function(wrappedCode)() as (value: unknown, key: string, args: unknown) => unknown;
-        this.fallbackScriptCache.set(processor.name, fn);
+        if (!isResolver) {
+          this.fallbackScriptCache.set(processor.name, fn);
+        }
       }
 
       // Execute with timeout using Promise.race

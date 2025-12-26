@@ -527,6 +527,93 @@ export const JournalReadResponseSchema = z.object({
   hasMore: z.boolean(),
 });
 
+// --- Conflict Resolver Messages (Phase 5.05) ---
+
+/**
+ * Conflict resolver definition schema (wire format).
+ */
+export const ConflictResolverSchema = z.object({
+  name: z.string().min(1).max(100),
+  code: z.string().max(50000),
+  priority: z.number().int().min(0).max(100).optional(),
+  keyPattern: z.string().optional(),
+});
+
+/**
+ * REGISTER_RESOLVER: Client registers a conflict resolver on server.
+ */
+export const RegisterResolverRequestSchema = z.object({
+  type: z.literal('REGISTER_RESOLVER'),
+  requestId: z.string(),
+  mapName: z.string(),
+  resolver: ConflictResolverSchema,
+});
+
+/**
+ * REGISTER_RESOLVER_RESPONSE: Server acknowledges resolver registration.
+ */
+export const RegisterResolverResponseSchema = z.object({
+  type: z.literal('REGISTER_RESOLVER_RESPONSE'),
+  requestId: z.string(),
+  success: z.boolean(),
+  error: z.string().optional(),
+});
+
+/**
+ * UNREGISTER_RESOLVER: Client unregisters a conflict resolver.
+ */
+export const UnregisterResolverRequestSchema = z.object({
+  type: z.literal('UNREGISTER_RESOLVER'),
+  requestId: z.string(),
+  mapName: z.string(),
+  resolverName: z.string(),
+});
+
+/**
+ * UNREGISTER_RESOLVER_RESPONSE: Server acknowledges resolver unregistration.
+ */
+export const UnregisterResolverResponseSchema = z.object({
+  type: z.literal('UNREGISTER_RESOLVER_RESPONSE'),
+  requestId: z.string(),
+  success: z.boolean(),
+  error: z.string().optional(),
+});
+
+/**
+ * MERGE_REJECTED: Server notifies client that a merge was rejected.
+ */
+export const MergeRejectedMessageSchema = z.object({
+  type: z.literal('MERGE_REJECTED'),
+  mapName: z.string(),
+  key: z.string(),
+  attemptedValue: z.unknown(),
+  reason: z.string(),
+  timestamp: TimestampSchema,
+});
+
+/**
+ * LIST_RESOLVERS: Client requests list of registered resolvers.
+ */
+export const ListResolversRequestSchema = z.object({
+  type: z.literal('LIST_RESOLVERS'),
+  requestId: z.string(),
+  mapName: z.string().optional(),
+});
+
+/**
+ * LIST_RESOLVERS_RESPONSE: Server responds with registered resolvers.
+ */
+export const ListResolversResponseSchema = z.object({
+  type: z.literal('LIST_RESOLVERS_RESPONSE'),
+  requestId: z.string(),
+  resolvers: z.array(z.object({
+    mapName: z.string(),
+    name: z.string(),
+    priority: z.number().optional(),
+    keyPattern: z.string().optional(),
+  })),
+});
+
 // --- Write Concern Response Schemas (Phase 5.01) ---
 
 /**
@@ -615,6 +702,14 @@ export const MessageSchema = z.discriminatedUnion('type', [
   JournalEventMessageSchema,
   JournalReadRequestSchema,
   JournalReadResponseSchema,
+  // Phase 5.05: Conflict Resolver
+  RegisterResolverRequestSchema,
+  RegisterResolverResponseSchema,
+  UnregisterResolverRequestSchema,
+  UnregisterResolverResponseSchema,
+  MergeRejectedMessageSchema,
+  ListResolversRequestSchema,
+  ListResolversResponseSchema,
 ]);
 
 // --- Type Inference ---
@@ -651,3 +746,12 @@ export type JournalEventMessage = z.infer<typeof JournalEventMessageSchema>;
 export type JournalReadRequest = z.infer<typeof JournalReadRequestSchema>;
 export type JournalReadResponse = z.infer<typeof JournalReadResponseSchema>;
 
+// Conflict Resolver types (Phase 5.05)
+export type ConflictResolver = z.infer<typeof ConflictResolverSchema>;
+export type RegisterResolverRequest = z.infer<typeof RegisterResolverRequestSchema>;
+export type RegisterResolverResponse = z.infer<typeof RegisterResolverResponseSchema>;
+export type UnregisterResolverRequest = z.infer<typeof UnregisterResolverRequestSchema>;
+export type UnregisterResolverResponse = z.infer<typeof UnregisterResolverResponseSchema>;
+export type MergeRejectedMessage = z.infer<typeof MergeRejectedMessageSchema>;
+export type ListResolversRequest = z.infer<typeof ListResolversRequestSchema>;
+export type ListResolversResponse = z.infer<typeof ListResolversResponseSchema>;

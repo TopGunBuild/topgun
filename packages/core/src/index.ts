@@ -47,6 +47,25 @@ export type {
   ProcessorRateLimitConfig,
 } from './EntryProcessor';
 
+// Conflict Resolver exports (Phase 5.05)
+export {
+  ConflictResolverDefSchema,
+  validateResolverCode,
+  BuiltInResolvers,
+  RESOLVER_FORBIDDEN_PATTERNS,
+  DEFAULT_RESOLVER_RATE_LIMITS,
+  compareHLCTimestamps,
+  deepMerge,
+} from './ConflictResolver';
+export type {
+  MergeContext,
+  MergeResult,
+  ConflictResolverFn,
+  ConflictResolverDef,
+  ResolverRateLimitConfig,
+  MergeRejection,
+} from './ConflictResolver';
+
 export * from './utils/hash';
 export * from './serializer';
 export * from './predicate';

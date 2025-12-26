@@ -50,6 +50,10 @@ export { PNCounterHandle } from './PNCounterHandle';
 export { EventJournalReader } from './EventJournalReader';
 export type { JournalEventData, JournalSubscribeOptions } from './EventJournalReader';
 
+// Conflict Resolver exports (Phase 5.05)
+export { ConflictResolverClient } from './ConflictResolverClient';
+export type { ResolverInfo, RegisterResult } from './ConflictResolverClient';
+
 // Cluster exports (Phase 4)
 export { ConnectionPool, PartitionRouter, ClusterClient };
 export type {
