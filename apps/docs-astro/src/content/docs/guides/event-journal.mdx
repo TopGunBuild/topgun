@@ -149,6 +149,47 @@ while (true) {
   console.log(value); // NDJSON line
 }`;
 
+export const mlPipelineCode = `// Server-side: Send events to ML pipeline for real-time processing
+server.eventJournalService.subscribe(async (event) => {
+  // Only process user-generated content
+  if (event.mapName !== 'posts' && event.mapName !== 'comments') return;
+  if (event.type === 'DELETE') return;
+
+  const content = event.value?.content;
+  if (!content) return;
+
+  // Send to ML service for async processing
+  await fetch('https://ml-pipeline.example.com/enqueue', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      eventId: event.sequence.toString(),
+      mapName: event.mapName,
+      key: event.key,
+      content,
+      tasks: ['sentiment', 'toxicity', 'embedding'],
+    }),
+  });
+}, { mapName: 'posts' });
+
+// Alternative: Batch processing with windowing
+const eventBuffer: JournalEvent[] = [];
+
+server.eventJournalService.subscribe((event) => {
+  eventBuffer.push(event);
+}, { types: ['PUT', 'UPDATE'] });
+
+// Flush batch every 5 seconds
+setInterval(async () => {
+  if (eventBuffer.length === 0) return;
+
+  const batch = eventBuffer.splice(0, 100);
+  await fetch('https://ml-pipeline.example.com/batch', {
+    method: 'POST',
+    body: JSON.stringify({ events: batch }),
+  });
+}, 5000);`;
+
 export const auditLogCode = `import { useEventJournal } from '@topgunbuild/react';
 
 function AuditLog({ mapName }) {
@@ -372,6 +413,22 @@ Export changes to external systems like Kafka:
 
 <div className="not-prose">
   <CodeBlock title="CDC to Kafka" language="typescript" code={cdcExportCode} />
+</div>
+
+---
+
+## ML Pipeline Integration
+
+Stream events to ML services for async processing (sentiment analysis, content moderation, embeddings):
+
+<div className="not-prose">
+  <CodeBlock title="ML Pipeline Consumer" language="typescript" code={mlPipelineCode} />
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>Real-time vs Async:</strong> For synchronous ML processing (blocking writes until ML completes), use <a href="/docs/guides/interceptors" className="text-blue-700 dark:text-blue-300 underline hover:no-underline">Interceptors</a> instead. Event Journal is better for async pipelines where you don't need to block the write operation.
+  </p>
 </div>
 
 ---

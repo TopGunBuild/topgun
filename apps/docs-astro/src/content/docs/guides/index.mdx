@@ -4,7 +4,7 @@ description: Practical, step-by-step guides to help you implement common pattern
 order: 10
 ---
 
-import { ChevronRight, Shield, Server, Radio, Timer, Activity, Lock, KeyRound, Zap, CheckCircle, Network, Cpu, Plus, ScrollText, GitMerge } from 'lucide-react';
+import { ChevronRight, Shield, Server, Radio, Timer, Activity, Lock, KeyRound, Zap, CheckCircle, Network, Cpu, Plus, ScrollText, GitMerge, Plug } from 'lucide-react';
 import { GuideCard } from '../../../components/docs/GuideCard';
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
@@ -107,5 +107,11 @@ Practical, step-by-step guides to help you implement common patterns and feature
     icon={GitMerge}
     title="Conflict Resolvers"
     description="Custom server-side conflict resolution beyond LWW for booking systems, inventory, and business rules."
+  />
+  <GuideCard
+    href="/docs/guides/interceptors"
+    icon={Plug}
+    title="Interceptors"
+    description="Extend TopGun with custom server-side logic for ML inference, webhooks, and external service integration."
   />
 </div>
