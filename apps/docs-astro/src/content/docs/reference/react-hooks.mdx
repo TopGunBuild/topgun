@@ -5,7 +5,7 @@ order: 24
 ---
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
-import { ChevronRight, Zap, Database, MessageSquare, Settings } from 'lucide-react';
+import { ChevronRight, Zap, Database, MessageSquare, Settings, ScrollText } from 'lucide-react';
 
 export const setupCode = `import { TopGunClient } from '@topgunbuild/client';
 import { TopGunProvider } from '@topgunbuild/react';
@@ -180,6 +180,77 @@ function ChatRoom({ roomId }) {
   };
 
   return <button onClick={() => sendMessage('Hello!')}>Send</button>;
+}`;
+
+export const useEventJournalCode = `import { useEventJournal } from '@topgunbuild/react';
+
+function ActivityFeed() {
+  const { events, lastEvent, isSubscribed } = useEventJournal({
+    mapName: 'orders',        // Filter by map name (optional)
+    types: ['PUT', 'UPDATE'], // Filter by event types (optional)
+    maxEvents: 50,            // Max events to keep in state (default: 100)
+  });
+
+  return (
+    <div>
+      <h2>Recent Activity {isSubscribed && '🟢'}</h2>
+      <ul>
+        {events.map((event) => (
+          <li key={event.sequence.toString()}>
+            [{event.type}] {event.mapName}:{event.key}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}`;
+
+export const useEventJournalCallbackCode = `import { useEventJournal } from '@topgunbuild/react';
+import { toast } from 'your-toast-library';
+
+function OrderNotifications() {
+  const { events } = useEventJournal({
+    mapName: 'orders',
+    types: ['PUT'],
+    onEvent: (event) => {
+      // Called for each new event
+      toast.success(\`New order: \${event.key}\`);
+    },
+  });
+
+  return <OrderList orders={events} />;
+}`;
+
+export const useEventJournalHistoryCode = `import { useEventJournal } from '@topgunbuild/react';
+import { useState } from 'react';
+
+function AuditLog() {
+  const { events, readFrom, getLatestSequence, clearEvents } = useEventJournal({
+    paused: true, // Don't subscribe, just use readFrom
+  });
+
+  const [history, setHistory] = useState([]);
+
+  const loadHistory = async () => {
+    const latestSeq = await getLatestSequence();
+    const startSeq = latestSeq > 100n ? latestSeq - 100n : 0n;
+    const historicalEvents = await readFrom(startSeq, 100);
+    setHistory(historicalEvents);
+  };
+
+  return (
+    <div>
+      <button onClick={loadHistory}>Load History</button>
+      <button onClick={clearEvents}>Clear</button>
+      <ul>
+        {history.map((e) => (
+          <li key={e.sequence.toString()}>
+            {new Date(e.timestamp.millis).toISOString()} - {e.type} {e.key}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }`;
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap not-prose">
@@ -385,6 +456,74 @@ function LikeButton({ postId }) {
   <p className="text-sm text-blue-800 dark:text-blue-200">
     <strong>Atomic Operations:</strong> Entry processors run on the server, solving race conditions in read-modify-write scenarios.
     See the <a href="/docs/guides/entry-processor" className="underline">Entry Processor Guide</a> for more details.
+  </p>
+</div>
+
+## useEventJournal
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <ScrollText className="w-6 h-6 text-indigo-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Subscribe to the Event Journal to receive real-time notifications of all map changes (PUT, UPDATE, DELETE).</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="components/ActivityFeed.tsx" language="typescript" code={useEventJournalCode} />
+</div>
+
+### Return Values
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `events` | `JournalEvent[]` | Array of recent events (newest last) |
+| `lastEvent` | `JournalEvent \| null` | Most recently received event |
+| `isSubscribed` | `boolean` | Whether subscription is active |
+| `clearEvents` | `() => void` | Clear accumulated events |
+| `readFrom` | `(sequence: bigint, limit?: number) => Promise<JournalEvent[]>` | Read historical events |
+| `getLatestSequence` | `() => Promise<bigint>` | Get the latest sequence number |
+
+### JournalEvent Structure
+
+```typescript
+interface JournalEvent {
+  sequence: bigint;           // Monotonically increasing ID
+  type: 'PUT' | 'UPDATE' | 'DELETE';
+  mapName: string;            // Name of the map that changed
+  key: string;                // Key that was modified
+  value?: unknown;            // New value (undefined for DELETE)
+  previousValue?: unknown;    // Previous value (for UPDATE/DELETE)
+  timestamp: Timestamp;       // HLC timestamp
+  nodeId: string;             // Node that made the change
+  metadata?: Record<string, unknown>;
+}
+```
+
+### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `mapName` | `string` | Filter events by map name |
+| `types` | `('PUT' \| 'UPDATE' \| 'DELETE')[]` | Filter by event types |
+| `fromSequence` | `bigint` | Start receiving from this sequence |
+| `maxEvents` | `number` | Max events to keep in state (default: 100) |
+| `onEvent` | `(event: JournalEvent) => void` | Callback for each new event |
+| `paused` | `boolean` | Pause subscription |
+
+### With Event Callback
+
+<div className="not-prose">
+  <CodeBlock title="components/OrderNotifications.tsx" language="typescript" code={useEventJournalCallbackCode} />
+</div>
+
+### Reading Historical Events
+
+<div className="not-prose">
+  <CodeBlock title="components/AuditLog.tsx" language="typescript" code={useEventJournalHistoryCode} />
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>Server-side Feature:</strong> The Event Journal must be enabled on the server with <code className="bg-blue-100 dark:bg-blue-800 px-1 rounded">eventJournalEnabled: true</code>.
+    Events are persisted to PostgreSQL for durability. See the <a href="/docs/guides/event-journal" className="underline">Event Journal Guide</a> for server configuration.
   </p>
 </div>
 

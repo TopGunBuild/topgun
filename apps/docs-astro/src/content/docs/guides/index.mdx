@@ -4,7 +4,7 @@ description: Practical, step-by-step guides to help you implement common pattern
 order: 10
 ---
 
-import { ChevronRight, Shield, Database, Server, Radio, Timer, Activity, Lock, KeyRound, Zap, CheckCircle, Network, Cpu, Plus, Minus } from 'lucide-react';
+import { ChevronRight, Shield, Database, Server, Radio, Timer, Activity, Lock, KeyRound, Zap, CheckCircle, Network, Cpu, Plus, Minus, ScrollText } from 'lucide-react';
 import { GuideCard } from '../../../components/docs/GuideCard';
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
@@ -102,5 +102,11 @@ Practical, step-by-step guides to help you implement common patterns and feature
     icon={Plus}
     title="PN-Counter"
     description="Distributed counter supporting increment/decrement with automatic conflict resolution."
+  />
+  <GuideCard
+    href="/docs/guides/event-journal"
+    icon={ScrollText}
+    title="Event Journal"
+    description="Capture all map changes for CDC, audit trails, event replay, and real-time activity feeds."
   />
 </div>

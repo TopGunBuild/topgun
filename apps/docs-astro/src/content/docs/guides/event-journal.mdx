@@ -1,0 +1,459 @@
+---
+title: Event Journal
+description: Capture all map changes as an append-only log for CDC, audit trails, event replay, and real-time activity feeds.
+order: 17
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, ScrollText, Database, Clock, Activity, Search } from 'lucide-react';
+
+export const serverConfigCode = `import { ServerCoordinator } from '@topgunbuild/server';
+import { Pool } from 'pg';
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+});
+
+const server = new ServerCoordinator({
+  port: 8080,
+  storage: new PostgresAdapter({ pool }),
+
+  // Enable Event Journal
+  eventJournalEnabled: true,
+  eventJournalConfig: {
+    capacity: 10000,        // Max events in memory
+    ttlMs: 0,               // Time-to-live (0 = infinite)
+    persistent: true,       // Persist to PostgreSQL
+    persistBatchSize: 100,  // Batch size for DB writes
+    persistIntervalMs: 1000, // Flush interval
+    includeMaps: [],        // Filter: only these maps (empty = all)
+    excludeMaps: ['_internal'], // Filter: exclude these maps
+  },
+});
+
+await server.start();`;
+
+export const clientSubscribeCode = `import { TopGunClient } from '@topgunbuild/client';
+
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+});
+
+// Get journal reader
+const journal = client.getEventJournal();
+
+// Subscribe to all events
+const unsubscribe = journal.subscribe((event) => {
+  console.log(\`[\${event.type}] \${event.mapName}:\${event.key}\`);
+  console.log('  Value:', event.value);
+  console.log('  Previous:', event.previousValue);
+  console.log('  Sequence:', event.sequence.toString());
+}, {
+  fromSequence: 0n,  // Start from beginning (optional)
+  mapName: 'orders', // Filter by map (optional)
+  types: ['PUT'],    // Filter by type (optional)
+});
+
+// Later: unsubscribe
+unsubscribe();`;
+
+export const readHistoryCode = `// Read historical events
+const journal = client.getEventJournal();
+
+// Get latest sequence
+const latestSeq = await journal.getLatestSequence();
+console.log('Latest sequence:', latestSeq.toString());
+
+// Read last 100 events
+const events = await journal.readFrom(latestSeq - 100n, 100);
+
+for (const event of events) {
+  console.log(\`#\${event.sequence}: \${event.type} \${event.mapName}:\${event.key}\`);
+}
+
+// Read events for specific map
+const orderEvents = await journal.readMapEvents('orders', 0n, 50);`;
+
+export const reactHookCode = `import { useEventJournal } from '@topgunbuild/react';
+
+function ActivityFeed() {
+  const { events, lastEvent, isSubscribed, clearEvents } = useEventJournal({
+    mapName: 'orders',
+    types: ['PUT', 'UPDATE'],
+    maxEvents: 50,
+    onEvent: (event) => {
+      // Show notification for new orders
+      if (event.type === 'PUT') {
+        showToast(\`New order: \${event.key}\`);
+      }
+    },
+  });
+
+  return (
+    <div>
+      <div className="flex justify-between">
+        <h2>Activity {isSubscribed && '🟢'}</h2>
+        <button onClick={clearEvents}>Clear</button>
+      </div>
+      <ul>
+        {events.map((e) => (
+          <li key={e.sequence.toString()}>
+            <span className="badge">{e.type}</span>
+            <span>{e.mapName}:{e.key}</span>
+            <time>{new Date(e.timestamp.millis).toLocaleTimeString()}</time>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}`;
+
+export const cdcExportCode = `// Server-side: Export to Kafka
+import { Kafka } from 'kafkajs';
+
+const kafka = new Kafka({ brokers: ['localhost:9092'] });
+const producer = kafka.producer();
+await producer.connect();
+
+// Subscribe to journal and forward to Kafka
+server.eventJournalService.subscribe(async (event) => {
+  await producer.send({
+    topic: \`topgun.\${event.mapName}\`,
+    messages: [{
+      key: event.key,
+      value: JSON.stringify({
+        type: event.type,
+        value: event.value,
+        previousValue: event.previousValue,
+        timestamp: event.timestamp,
+      }),
+      headers: {
+        'sequence': event.sequence.toString(),
+        'nodeId': event.nodeId,
+      },
+    }],
+  });
+});
+
+// Or use NDJSON stream export
+const stream = server.eventJournalService.exportStream({
+  fromSequence: 0n,
+  mapName: 'orders',
+  types: ['PUT', 'UPDATE'],
+});
+
+const reader = stream.getReader();
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  console.log(value); // NDJSON line
+}`;
+
+export const auditLogCode = `import { useEventJournal } from '@topgunbuild/react';
+
+function AuditLog({ mapName }) {
+  const { events, readFrom, getLatestSequence } = useEventJournal({
+    mapName,
+    maxEvents: 100,
+  });
+
+  const [history, setHistory] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const loadMore = async () => {
+    setLoading(true);
+    const oldestSeq = history.length > 0
+      ? history[0].sequence - 1n
+      : await getLatestSequence();
+
+    const older = await readFrom(oldestSeq - 50n, 50);
+    setHistory([...older, ...history]);
+    setLoading(false);
+  };
+
+  return (
+    <div>
+      <h2>Audit Log: {mapName}</h2>
+      <button onClick={loadMore} disabled={loading}>
+        {loading ? 'Loading...' : 'Load More'}
+      </button>
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Action</th>
+            <th>Key</th>
+            <th>Changes</th>
+          </tr>
+        </thead>
+        <tbody>
+          {[...history, ...events].map((e) => (
+            <tr key={e.sequence.toString()}>
+              <td>{new Date(e.timestamp.millis).toISOString()}</td>
+              <td>{e.type}</td>
+              <td>{e.key}</td>
+              <td>
+                {e.type === 'DELETE'
+                  ? \`Deleted: \${JSON.stringify(e.previousValue)}\`
+                  : JSON.stringify(e.value)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}`;
+
+export const retentionCode = `// Server-side: Cleanup old events
+// Run this periodically (e.g., daily cron job)
+
+// Clean events older than 30 days
+const deletedCount = await server.eventJournalService.cleanupOldEvents(30);
+console.log(\`Cleaned up \${deletedCount} old journal events\`);
+
+// Or query with date filters
+const recentEvents = await server.eventJournalService.queryFromStorage({
+  mapName: 'orders',
+  fromDate: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000), // Last 7 days
+  limit: 1000,
+});`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap not-prose">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Event Journal</span>
+</div>
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-indigo-100 dark:bg-indigo-900/30">
+    <ScrollText className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+  </div>
+  <h1 className="text-4xl font-bold text-foreground">Event Journal</h1>
+</div>
+
+The **Event Journal** captures all map changes as an append-only log, enabling CDC (Change Data Capture), audit trails, event replay, and real-time activity feeds.
+
+<div className="grid md:grid-cols-3 gap-4 my-6 not-prose">
+  <div className="p-4 bg-indigo-50 dark:bg-indigo-900/20 rounded-lg border border-indigo-200 dark:border-indigo-800">
+    <Database className="w-6 h-6 text-indigo-500 mb-2" />
+    <h3 className="font-semibold text-indigo-900 dark:text-indigo-100">Durable Storage</h3>
+    <p className="text-sm text-indigo-700 dark:text-indigo-300">Events persisted to PostgreSQL with configurable retention</p>
+  </div>
+  <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
+    <Activity className="w-6 h-6 text-blue-500 mb-2" />
+    <h3 className="font-semibold text-blue-900 dark:text-blue-100">Real-time Streaming</h3>
+    <p className="text-sm text-blue-700 dark:text-blue-300">Subscribe to live changes via WebSocket</p>
+  </div>
+  <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800">
+    <Clock className="w-6 h-6 text-green-500 mb-2" />
+    <h3 className="font-semibold text-green-900 dark:text-green-100">Time Travel</h3>
+    <p className="text-sm text-green-700 dark:text-green-300">Query historical state and replay events</p>
+  </div>
+</div>
+
+---
+
+## Use Cases
+
+- **Audit Trail**: Regulatory compliance, who changed what and when
+- **CDC (Change Data Capture)**: Stream changes to Kafka, Elasticsearch, analytics
+- **Event Replay**: Rebuild state from events, debug production issues
+- **Activity Feeds**: Real-time notifications based on data changes
+- **Debugging**: Time-travel to understand data evolution
+
+---
+
+## Server Configuration
+
+Enable the Event Journal on your server:
+
+<div className="not-prose">
+  <CodeBlock title="server.ts" language="typescript" code={serverConfigCode} />
+</div>
+
+### Configuration Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `capacity` | `number` | `10000` | Maximum events to keep in memory |
+| `ttlMs` | `number` | `0` | Time-to-live for in-memory events (0 = infinite) |
+| `persistent` | `boolean` | `true` | Persist events to PostgreSQL |
+| `persistBatchSize` | `number` | `100` | Batch size for database writes |
+| `persistIntervalMs` | `number` | `1000` | Flush interval for pending writes |
+| `includeMaps` | `string[]` | `[]` | Only capture these maps (empty = all) |
+| `excludeMaps` | `string[]` | `[]` | Exclude these maps from capture |
+
+---
+
+## Client Subscription
+
+Subscribe to journal events from the client:
+
+<div className="not-prose">
+  <CodeBlock title="Subscribe to Events" language="typescript" code={clientSubscribeCode} />
+</div>
+
+### JournalEvent Structure
+
+```typescript
+interface JournalEvent {
+  sequence: bigint;           // Monotonically increasing ID
+  type: 'PUT' | 'UPDATE' | 'DELETE';
+  mapName: string;            // Name of the map
+  key: string;                // Key that changed
+  value?: unknown;            // New value (undefined for DELETE)
+  previousValue?: unknown;    // Previous value (for UPDATE/DELETE)
+  timestamp: Timestamp;       // HLC timestamp
+  nodeId: string;             // Node that made the change
+  metadata?: Record<string, unknown>;
+}
+```
+
+---
+
+## Reading History
+
+Read historical events from the journal:
+
+<div className="not-prose">
+  <CodeBlock title="Read Historical Events" language="typescript" code={readHistoryCode} />
+</div>
+
+---
+
+## React Hook
+
+The `useEventJournal` hook provides a reactive interface:
+
+<div className="not-prose">
+  <CodeBlock title="components/ActivityFeed.tsx" language="tsx" code={reactHookCode} />
+</div>
+
+### Hook Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `mapName` | `string` | Filter events by map name |
+| `types` | `('PUT' \| 'UPDATE' \| 'DELETE')[]` | Filter by event types |
+| `fromSequence` | `bigint` | Start receiving from this sequence |
+| `maxEvents` | `number` | Max events to keep in state (default: 100) |
+| `onEvent` | `(event: JournalEvent) => void` | Callback for each new event |
+| `paused` | `boolean` | Pause subscription |
+
+### Hook Return Values
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `events` | `JournalEvent[]` | Array of events (newest last) |
+| `lastEvent` | `JournalEvent \| null` | Most recent event |
+| `isSubscribed` | `boolean` | Whether subscription is active |
+| `clearEvents` | `() => void` | Clear accumulated events |
+| `readFrom` | `(seq, limit?) => Promise<JournalEvent[]>` | Read historical events |
+| `getLatestSequence` | `() => Promise<bigint>` | Get latest sequence number |
+
+---
+
+## Audit Log Example
+
+Build a complete audit log with history pagination:
+
+<div className="not-prose">
+  <CodeBlock title="components/AuditLog.tsx" language="tsx" code={auditLogCode} />
+</div>
+
+---
+
+## CDC Export
+
+Export changes to external systems like Kafka:
+
+<div className="not-prose">
+  <CodeBlock title="CDC to Kafka" language="typescript" code={cdcExportCode} />
+</div>
+
+---
+
+## Retention & Cleanup
+
+Manage storage with retention policies:
+
+<div className="not-prose">
+  <CodeBlock title="Retention Policy" language="typescript" code={retentionCode} />
+</div>
+
+### Server-side Query Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `mapName` | `string` | Filter by map name |
+| `key` | `string` | Filter by specific key |
+| `types` | `string[]` | Filter by event types |
+| `fromSequence` | `bigint` | Start sequence (inclusive) |
+| `toSequence` | `bigint` | End sequence (inclusive) |
+| `fromDate` | `Date` | Start date filter |
+| `toDate` | `Date` | End date filter |
+| `limit` | `number` | Maximum results (default: 100) |
+| `offset` | `number` | Pagination offset |
+
+---
+
+## Database Schema
+
+The Event Journal creates the following PostgreSQL table:
+
+```sql
+CREATE TABLE event_journal (
+  sequence BIGINT PRIMARY KEY,
+  type VARCHAR(10) NOT NULL CHECK (type IN ('PUT', 'UPDATE', 'DELETE')),
+  map_name VARCHAR(255) NOT NULL,
+  key VARCHAR(1024) NOT NULL,
+  value JSONB,
+  previous_value JSONB,
+  timestamp JSONB NOT NULL,
+  node_id VARCHAR(64) NOT NULL,
+  metadata JSONB,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Indexes for common queries
+CREATE INDEX idx_journal_map_name ON event_journal(map_name);
+CREATE INDEX idx_journal_key ON event_journal(map_name, key);
+CREATE INDEX idx_journal_created_at ON event_journal(created_at);
+CREATE INDEX idx_journal_node_id ON event_journal(node_id);
+```
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>Performance Tip:</strong> For high-volume deployments, consider time-based partitioning of the <code className="bg-blue-100 dark:bg-blue-800 px-1 rounded">event_journal</code> table and schedule regular cleanup using <code className="bg-blue-100 dark:bg-blue-800 px-1 rounded">cleanupOldEvents()</code>.
+  </p>
+</div>
+
+---
+
+## Performance Considerations
+
+| Aspect | Recommendation |
+|--------|----------------|
+| **Memory** | Default 10,000 events in memory (~1-10MB depending on value size) |
+| **Batching** | Events are batched before writing to PostgreSQL (default: 100 events) |
+| **Indexing** | Indexes on `map_name`, `key`, `created_at` for efficient queries |
+| **Partitioning** | Consider time-based partitioning for tables with millions of events |
+| **Cleanup** | Schedule periodic cleanup with retention policy |
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/pn-counter" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> PN-Counter
+    </div>
+  </a>
+  <a href="/docs/guides/distributed-locks" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Distributed Locks <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>
