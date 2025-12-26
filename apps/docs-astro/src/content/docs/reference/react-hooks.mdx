@@ -5,7 +5,7 @@ order: 24
 ---
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
-import { ChevronRight, Zap, Database, MessageSquare, Settings, ScrollText } from 'lucide-react';
+import { ChevronRight, Zap, Database, MessageSquare, Settings, ScrollText, Shield, AlertTriangle } from 'lucide-react';
 
 export const setupCode = `import { TopGunClient } from '@topgunbuild/client';
 import { TopGunProvider } from '@topgunbuild/react';
@@ -556,6 +556,137 @@ function CustomComponent() {
 
   return <div>...</div>;
 }`} />
+</div>
+
+## useConflictResolver
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Shield className="w-6 h-6 text-red-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Manage conflict resolvers for a specific map. Auto-unregisters on unmount.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="components/BookingManager.tsx" language="typescript" code={`import { useConflictResolver } from '@topgunbuild/react';
+import { useEffect } from 'react';
+
+function BookingManager() {
+  const { register, unregister, list, loading, error, registered } =
+    useConflictResolver('bookings');
+
+  useEffect(() => {
+    // Register first-write-wins resolver on mount
+    register({
+      name: 'first-write-wins',
+      code: \`
+        if (context.localValue !== undefined) {
+          return { action: 'reject', reason: 'Slot already booked' };
+        }
+        return { action: 'accept', value: context.remoteValue };
+      \`,
+      priority: 100,
+    });
+  }, []);
+
+  return (
+    <div>
+      {loading && <span>Registering...</span>}
+      {error && <span>Error: {error.message}</span>}
+      <p>Registered resolvers: {registered.join(', ')}</p>
+    </div>
+  );
+}`} />
+</div>
+
+### Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `autoUnregister` | `boolean` | `true` | Unregister resolvers on unmount |
+
+### Return Value
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `register` | `(resolver) => Promise<RegisterResult>` | Register a resolver |
+| `unregister` | `(name) => Promise<RegisterResult>` | Unregister by name |
+| `list` | `() => Promise<ResolverInfo[]>` | List registered resolvers |
+| `loading` | `boolean` | Operation in progress |
+| `error` | `Error \| null` | Last error |
+| `registered` | `string[]` | Names of resolvers registered by this hook |
+
+## useMergeRejections
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <AlertTriangle className="w-6 h-6 text-yellow-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Subscribe to merge rejection events from conflict resolvers.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="components/BookingForm.tsx" language="typescript" code={`import { useMergeRejections } from '@topgunbuild/react';
+import { useEffect } from 'react';
+import { toast } from 'your-toast-library';
+
+function BookingForm() {
+  const { rejections, lastRejection, clear } = useMergeRejections({
+    mapName: 'bookings',
+    maxHistory: 50,
+  });
+
+  // Show toast for rejections
+  useEffect(() => {
+    if (lastRejection) {
+      toast.error(\`Booking failed: \${lastRejection.reason}\`);
+      clear();
+    }
+  }, [lastRejection]);
+
+  return (
+    <div>
+      {/* Form UI */}
+      {rejections.length > 0 && (
+        <div className="error-list">
+          {rejections.map((r, i) => (
+            <p key={i}>{r.key}: {r.reason}</p>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}`} />
+</div>
+
+### Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `mapName` | `string` | - | Filter rejections by map name |
+| `maxHistory` | `number` | `100` | Max rejections to keep in history |
+
+### Return Value
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `rejections` | `MergeRejection[]` | List of recent rejections |
+| `lastRejection` | `MergeRejection \| null` | Most recent rejection |
+| `clear` | `() => void` | Clear rejection history |
+
+### MergeRejection Type
+
+```typescript
+interface MergeRejection {
+  mapName: string;
+  key: string;
+  attemptedValue: unknown;  // null for deletions
+  reason: string;
+  timestamp: Timestamp;
+  nodeId: string;
+}
+```
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>See Also:</strong> The <a href="/docs/guides/conflict-resolvers" className="underline">Conflict Resolvers Guide</a> for detailed examples and use cases.
+  </p>
 </div>
 
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">

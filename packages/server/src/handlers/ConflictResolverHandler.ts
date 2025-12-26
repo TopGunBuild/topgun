@@ -3,7 +3,6 @@ import {
   MergeContext,
   MergeResult,
   MergeRejection,
-  Timestamp,
   LWWMap,
   LWWRecord,
 } from '@topgunbuild/core';
@@ -56,7 +55,8 @@ export interface MergeWithResolverResult<V> {
 export class ConflictResolverHandler {
   private sandbox: ProcessorSandbox;
   private resolverService: ConflictResolverService;
-  private nodeId: string;
+  /** Reserved for future use (server-side resolver identification) */
+  private readonly nodeId: string;
   private rejectionListeners: Set<(rejection: MergeRejection) => void> =
     new Set();
 
@@ -144,6 +144,10 @@ export class ConflictResolverHandler {
   /**
    * Apply a merge with conflict resolution.
    *
+   * Deletions (tombstones) are also passed through resolvers to allow
+   * protection via IMMUTABLE, OWNER_ONLY, or similar resolvers.
+   * If no custom resolvers are registered, deletions use standard LWW.
+   *
    * @param map The LWWMap to merge into
    * @param mapName The map name (for resolver lookup)
    * @param key The key being merged
@@ -159,25 +163,16 @@ export class ConflictResolverHandler {
     remoteNodeId: string,
     auth?: MergeContext['auth'],
   ): Promise<MergeWithResolverResult<V>> {
-    // Handle tombstones (deletions) directly without resolver
-    if (record.value === null) {
-      const applied = map.merge(key, record);
-      return {
-        applied,
-        result: applied
-          ? { action: 'accept', value: null as V }
-          : { action: 'local' },
-        record: applied ? record : undefined,
-      };
-    }
-
-    // Build merge context
+    const isDeletion = record.value === null;
     const localRecord = map.getRecord(key);
+
+    // Build merge context (works for both updates and deletions)
     const context: MergeContext<V> = {
       mapName,
       key,
       localValue: localRecord?.value ?? undefined,
-      remoteValue: record.value,
+      // For deletions, remoteValue is null - resolvers can check this
+      remoteValue: record.value as V,
       localTimestamp: localRecord?.timestamp,
       remoteTimestamp: record.timestamp,
       remoteNodeId,
@@ -185,16 +180,18 @@ export class ConflictResolverHandler {
       readEntry: (k: string) => map.get(k) as V | undefined,
     };
 
-    // Resolve conflict
+    // Resolve conflict (applies to both updates and deletions)
     const result = await this.resolverService.resolve(context);
 
     // Apply result
     switch (result.action) {
       case 'accept':
       case 'merge': {
-        // Create record with the resolved value
+        // For deletions, use the original null value regardless of merge result
+        // For updates, use the resolved value
+        const finalValue = isDeletion ? null : result.value;
         const finalRecord: LWWRecord<V> = {
-          value: result.value,
+          value: finalValue as V,
           timestamp: record.timestamp,
           ttlMs: record.ttlMs,
         };

@@ -49,6 +49,27 @@ export const DEFAULT_CONFLICT_RESOLVER_CONFIG: ConflictResolverServiceConfig = {
  * Resolvers are executed in priority order (highest first).
  * The first resolver that returns a non-'local' action wins.
  * If all resolvers return 'local', LWW is used as fallback.
+ *
+ * ## Design Decisions
+ *
+ * ### In-Memory Storage
+ * Resolvers are stored in memory only (not persisted to database).
+ * This is intentional - resolvers represent application logic that should
+ * be registered by clients on connection. Benefits:
+ * - Simpler architecture without resolver schema migrations
+ * - Clients control their own conflict resolution logic
+ * - Natural cleanup when client disconnects
+ *
+ * ### Permission Model
+ * Resolver registration requires PUT permission on the target map.
+ * This aligns with the principle that if you can write to a map,
+ * you can define how your writes are resolved. For stricter control,
+ * implement custom permission checks in ServerCoordinator.
+ *
+ * ### Deletion Handling
+ * Deletions (tombstones with null value) are passed through resolvers
+ * with `remoteValue: null`. This allows resolvers like IMMUTABLE or
+ * OWNER_ONLY to protect against unauthorized deletions.
  */
 export class ConflictResolverService {
   private resolvers: Map<string, ResolverEntry[]> = new Map();

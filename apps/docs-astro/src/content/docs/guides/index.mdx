@@ -4,7 +4,7 @@ description: Practical, step-by-step guides to help you implement common pattern
 order: 10
 ---
 
-import { ChevronRight, Shield, Database, Server, Radio, Timer, Activity, Lock, KeyRound, Zap, CheckCircle, Network, Cpu, Plus, Minus, ScrollText } from 'lucide-react';
+import { ChevronRight, Shield, Database, Server, Radio, Timer, Activity, Lock, KeyRound, Zap, CheckCircle, Network, Cpu, Plus, Minus, ScrollText, GitMerge } from 'lucide-react';
 import { GuideCard } from '../../../components/docs/GuideCard';
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
@@ -108,5 +108,11 @@ Practical, step-by-step guides to help you implement common patterns and feature
     icon={ScrollText}
     title="Event Journal"
     description="Capture all map changes for CDC, audit trails, event replay, and real-time activity feeds."
+  />
+  <GuideCard
+    href="/docs/guides/conflict-resolvers"
+    icon={GitMerge}
+    title="Conflict Resolvers"
+    description="Custom server-side conflict resolution beyond LWW for booking systems, inventory, and business rules."
   />
 </div>

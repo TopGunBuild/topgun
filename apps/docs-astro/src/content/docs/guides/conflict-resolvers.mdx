@@ -1,0 +1,440 @@
+---
+title: Conflict Resolvers
+description: Implement custom server-side conflict resolution beyond Last-Write-Wins for domain-specific business logic.
+order: 17
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Shield, AlertTriangle, Lock, Users } from 'lucide-react';
+
+export const problemCode = `// The LWW Problem: Two users book the same seat concurrently
+
+// User A: book(seat: "A1", user: "alice")  → timestamp: 1000
+// User B: book(seat: "A1", user: "bob")    → timestamp: 1001
+
+// LWW Result: seat A1 → bob (alice's booking silently lost!)
+// Correct Result: Reject bob's booking, seat already taken`;
+
+export const basicUsageCode = `import { TopGunClient } from '@topgunbuild/client';
+
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+});
+
+// Get conflict resolver client
+const resolvers = client.getConflictResolvers();
+
+// Register a first-write-wins resolver for bookings
+await resolvers.register('bookings', {
+  name: 'first-write-wins',
+  code: \`
+    // Reject if seat is already booked
+    if (context.localValue !== undefined) {
+      return {
+        action: 'reject',
+        reason: 'Seat already booked by ' + context.localValue.user
+      };
+    }
+    return { action: 'accept', value: context.remoteValue };
+  \`,
+  priority: 100,
+});
+
+// Handle rejections
+resolvers.onRejection((rejection) => {
+  console.log(\`Booking failed for \${rejection.key}: \${rejection.reason}\`);
+});`;
+
+export const mergeContextCode = `interface MergeContext<V> {
+  /** Map name being modified */
+  mapName: string;
+
+  /** Entry key being modified */
+  key: string;
+
+  /** Current server value (undefined if key doesn't exist) */
+  localValue: V | undefined;
+
+  /** Incoming client value (null for deletions) */
+  remoteValue: V;
+
+  /** Local HLC timestamp */
+  localTimestamp?: Timestamp;
+
+  /** Remote HLC timestamp */
+  remoteTimestamp: Timestamp;
+
+  /** Client/node ID that sent the update */
+  remoteNodeId: string;
+
+  /** Authentication context */
+  auth?: {
+    userId?: string;
+    roles?: string[];
+    metadata?: Record<string, unknown>;
+  };
+
+  /** Read other entries for cross-key validation */
+  readEntry: (key: string) => V | undefined;
+}`;
+
+export const mergeResultCode = `type MergeResult<V> =
+  | { action: 'accept'; value: V }     // Accept remote value
+  | { action: 'reject'; reason: string } // Reject with error message
+  | { action: 'merge'; value: V }      // Use custom merged value
+  | { action: 'local' };               // Keep local value, skip this resolver`;
+
+export const builtInResolversCode = `import { BuiltInResolvers } from '@topgunbuild/core';
+
+// First-Write-Wins - reject if value exists
+// Use case: Booking systems, unique constraints
+server.registerResolver('seats', BuiltInResolvers.FIRST_WRITE_WINS());
+
+// Immutable - reject any modification after initial write
+// Use case: Audit logs, receipts
+server.registerResolver('receipts', BuiltInResolvers.IMMUTABLE());
+
+// Non-Negative - reject if value would be negative
+// Use case: Inventory, balances
+server.registerResolver('inventory', BuiltInResolvers.NON_NEGATIVE());
+
+// Numeric Min/Max - keep lowest/highest value
+// Use case: Auctions, high scores
+server.registerResolver('bids', BuiltInResolvers.NUMERIC_MIN());
+server.registerResolver('scores', BuiltInResolvers.NUMERIC_MAX());
+
+// Array Union - merge arrays by union
+// Use case: Tags, categories
+server.registerResolver('tags', BuiltInResolvers.ARRAY_UNION());
+
+// Deep Merge - recursively merge objects
+// Use case: User profiles with concurrent field updates
+server.registerResolver('profiles', BuiltInResolvers.DEEP_MERGE());
+
+// Owner Only - only creator can modify
+// Use case: User-owned documents
+server.registerResolver('documents', BuiltInResolvers.OWNER_ONLY());
+
+// Server Only - only server can write
+// Use case: System configuration
+server.registerResolver('config', BuiltInResolvers.SERVER_ONLY());
+
+// Version Increment - optimistic locking
+// Use case: Concurrent editing with conflict detection
+server.registerResolver('articles', BuiltInResolvers.VERSION_INCREMENT());`;
+
+export const inventoryCode = `// Inventory system - prevent negative stock
+await resolvers.register('inventory', {
+  name: 'stock-validation',
+  code: \`
+    const newStock = context.remoteValue?.stock;
+
+    // Reject negative stock
+    if (typeof newStock === 'number' && newStock < 0) {
+      return { action: 'reject', reason: 'Stock cannot be negative' };
+    }
+
+    return { action: 'accept', value: context.remoteValue };
+  \`,
+  priority: 90,
+});`;
+
+export const crossKeyValidationCode = `// Budget check - validate cart total doesn't exceed budget
+await resolvers.register('cart', {
+  name: 'budget-check',
+  code: \`
+    // Read user's budget from another key
+    const budget = context.readEntry('user_budget');
+    if (!budget) {
+      return { action: 'accept', value: context.remoteValue };
+    }
+
+    // Calculate cart total
+    const itemPrice = context.remoteValue?.price ?? 0;
+    const currentTotal = context.localValue?.total ?? 0;
+    const newTotal = currentTotal + itemPrice;
+
+    if (newTotal > budget.amount) {
+      return {
+        action: 'reject',
+        reason: 'Cart total exceeds budget'
+      };
+    }
+
+    return { action: 'accept', value: context.remoteValue };
+  \`,
+  priority: 80,
+});`;
+
+export const deletionProtectionCode = `// Protect entries from unauthorized deletion
+await resolvers.register('protected-data', {
+  name: 'delete-protection',
+  code: \`
+    // Check if this is a deletion (remoteValue is null)
+    if (context.remoteValue === null) {
+      // Only admins can delete
+      if (!context.auth?.roles?.includes('admin')) {
+        return { action: 'reject', reason: 'Only admins can delete entries' };
+      }
+    }
+
+    return { action: 'accept', value: context.remoteValue };
+  \`,
+  priority: 100,
+});`;
+
+export const reactHookCode = `import { useConflictResolver, useMergeRejections } from '@topgunbuild/react';
+
+function BookingForm({ eventId }) {
+  const { register, loading, error } = useConflictResolver(\`bookings:\${eventId}\`);
+  const { lastRejection, clear } = useMergeRejections({
+    mapName: \`bookings:\${eventId}\`
+  });
+
+  // Register resolver on mount
+  useEffect(() => {
+    register({
+      name: 'first-write-wins',
+      code: \`
+        if (context.localValue !== undefined) {
+          return { action: 'reject', reason: 'Seat already booked' };
+        }
+        return { action: 'accept', value: context.remoteValue };
+      \`,
+      priority: 100,
+    });
+  }, []);
+
+  // Show rejection notification
+  useEffect(() => {
+    if (lastRejection) {
+      toast.error(\`Booking failed: \${lastRejection.reason}\`);
+      clear();
+    }
+  }, [lastRejection]);
+
+  return (
+    <div>
+      {loading && <span>Registering resolver...</span>}
+      {error && <span>Error: {error.message}</span>}
+      {/* Booking form UI */}
+    </div>
+  );
+}`;
+
+export const keyPatternCode = `// Apply resolver only to specific keys using glob patterns
+await resolvers.register('data', {
+  name: 'user-protection',
+  code: \`
+    if (context.localValue !== undefined) {
+      return { action: 'reject', reason: 'User record exists' };
+    }
+    return { action: 'accept', value: context.remoteValue };
+  \`,
+  keyPattern: 'user:*',  // Only applies to keys like user:123, user:abc
+  priority: 100,
+});
+
+// Other keys in the same map are not affected
+// post:123 → normal LWW behavior
+// user:456 → uses the resolver above`;
+
+<div className="not-prose mb-8 rounded-lg border border-yellow-500/20 bg-yellow-500/10 p-4">
+  <div className="flex items-start gap-3">
+    <AlertTriangle className="h-5 w-5 text-yellow-500 mt-0.5" />
+    <div>
+      <p className="font-medium text-yellow-500">When to Use Conflict Resolvers</p>
+      <p className="text-sm text-slate-300 mt-1">
+        Use conflict resolvers when standard LWW semantics don't fit your business requirements.
+        Common use cases include booking systems, inventory management, and data integrity constraints.
+      </p>
+    </div>
+  </div>
+</div>
+
+## The Problem with LWW
+
+Last-Write-Wins (LWW) works great for many scenarios, but fails for business-critical cases:
+
+<CodeBlock code={problemCode} lang="typescript" title="Race Condition Example" />
+
+## Basic Usage
+
+Register a conflict resolver to implement custom merge logic:
+
+<CodeBlock code={basicUsageCode} lang="typescript" title="First-Write-Wins Resolver" />
+
+## MergeContext API
+
+Your resolver receives a context object with all information needed to make a decision:
+
+<CodeBlock code={mergeContextCode} lang="typescript" title="MergeContext Interface" />
+
+## MergeResult Actions
+
+Your resolver must return one of these actions:
+
+<CodeBlock code={mergeResultCode} lang="typescript" title="MergeResult Type" />
+
+| Action | Description |
+|--------|-------------|
+| `accept` | Accept the remote value as-is |
+| `reject` | Reject the operation and notify the client |
+| `merge` | Apply a custom merged value |
+| `local` | Keep the local value, pass to next resolver |
+
+## Built-in Resolvers
+
+TopGun provides common resolvers out of the box:
+
+<CodeBlock code={builtInResolversCode} lang="typescript" title="Built-in Resolvers" />
+
+## Use Cases
+
+### Inventory Management
+
+Prevent stock from going negative:
+
+<CodeBlock code={inventoryCode} lang="typescript" title="Inventory Validation" />
+
+### Cross-Key Validation
+
+Validate against other entries in the same map:
+
+<CodeBlock code={crossKeyValidationCode} lang="typescript" title="Budget Check" />
+
+### Deletion Protection
+
+Resolvers also receive deletions (when `remoteValue` is `null`), allowing you to protect entries:
+
+<CodeBlock code={deletionProtectionCode} lang="typescript" title="Delete Protection" />
+
+<div className="not-prose mb-8 rounded-lg border border-blue-500/20 bg-blue-500/10 p-4">
+  <div className="flex items-start gap-3">
+    <Shield className="h-5 w-5 text-blue-500 mt-0.5" />
+    <div>
+      <p className="font-medium text-blue-500">Deletion Handling</p>
+      <p className="text-sm text-slate-300 mt-1">
+        Deletions are passed through resolvers with <code>remoteValue: null</code>.
+        This allows IMMUTABLE, OWNER_ONLY, and custom resolvers to protect entries from unauthorized deletion.
+      </p>
+    </div>
+  </div>
+</div>
+
+## Key Patterns
+
+Apply resolvers to specific keys using glob patterns:
+
+<CodeBlock code={keyPatternCode} lang="typescript" title="Key Pattern Matching" />
+
+Supported patterns:
+- `*` - matches any characters
+- `?` - matches single character
+
+## React Integration
+
+Use the `useConflictResolver` and `useMergeRejections` hooks:
+
+<CodeBlock code={reactHookCode} lang="tsx" title="React Hooks" />
+
+## Priority System
+
+Resolvers execute in priority order (highest first). Use priorities to layer validation logic:
+
+| Priority | Use Case |
+|----------|----------|
+| 100 | Security constraints (immutable, owner-only) |
+| 90 | Business rules (non-negative, quotas) |
+| 80 | Validation (format, cross-key checks) |
+| 50 | Merge strategies (deep merge, array union) |
+| 0 | LWW fallback (automatic) |
+
+## Security Considerations
+
+<div className="not-prose mb-8 rounded-lg border border-red-500/20 bg-red-500/10 p-4">
+  <div className="flex items-start gap-3">
+    <Lock className="h-5 w-5 text-red-500 mt-0.5" />
+    <div>
+      <p className="font-medium text-red-500">Sandboxed Execution</p>
+      <p className="text-sm text-slate-300 mt-1">
+        Client-registered resolvers run in a sandboxed environment (isolated-vm when available).
+        The following are forbidden in resolver code: <code>eval</code>, <code>Function</code>,
+        <code>fetch</code>, <code>require</code>, <code>import</code>, <code>process</code>,
+        <code>setTimeout</code>, <code>setInterval</code>.
+      </p>
+    </div>
+  </div>
+</div>
+
+### Design Decisions
+
+**In-Memory Storage**: Resolvers are stored in memory only. Clients re-register resolvers on connection. This simplifies architecture and ensures clients control their own conflict resolution logic.
+
+**Permission Model**: Resolver registration requires PUT permission on the target map. If you can write to a map, you can define how your writes are resolved.
+
+**Rate Limiting**: The server limits resolvers per map (default: 100) and code size (default: 50KB).
+
+## API Reference
+
+### Client API
+
+```typescript
+const resolvers = client.getConflictResolvers();
+
+// Register a resolver
+await resolvers.register(mapName, {
+  name: string;
+  code: string;
+  priority?: number;  // 0-100, default 50
+  keyPattern?: string;
+});
+
+// Unregister a resolver
+await resolvers.unregister(mapName, resolverName);
+
+// List registered resolvers
+const list = await resolvers.list(mapName?);
+
+// Listen for rejections
+const unsubscribe = resolvers.onRejection((rejection) => {
+  console.log(rejection.mapName, rejection.key, rejection.reason);
+});
+```
+
+### React Hooks
+
+```typescript
+// Manage resolvers for a map
+const { register, unregister, list, loading, error, registered } =
+  useConflictResolver(mapName, { autoUnregister: true });
+
+// Listen for rejections
+const { rejections, lastRejection, clear } =
+  useMergeRejections({ mapName, maxHistory: 100 });
+```
+
+## Comparison with Alternatives
+
+| Feature | TopGun | Replicache | Convex |
+|---------|--------|------------|--------|
+| Conflict detection | HLC-based | Server mutation | Transactions |
+| Custom resolution | Server hooks | Mutator logic | ACID only |
+| Client notification | MERGE_REJECTED | Optimistic rollback | Error throw |
+| Cross-key validation | readEntry() | Full DB access | Full DB access |
+| Sandboxed execution | isolated-vm | N/A (server code) | N/A (serverless) |
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/event-journal" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Event Journal
+    </div>
+  </a>
+  <a href="/docs/guides/distributed-locks" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Distributed Locks <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

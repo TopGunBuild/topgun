@@ -425,4 +425,112 @@ describe('ConflictResolverService', () => {
       expect(matched).toBe(false);
     });
   });
+
+  describe('deletion handling', () => {
+    it('should pass deletions through resolvers with null remoteValue', async () => {
+      let receivedContext: MergeContext<any> | null = null;
+
+      service.register('test-map', {
+        name: 'deletion-tracker',
+        fn: (ctx) => {
+          receivedContext = ctx;
+          return { action: 'accept', value: ctx.remoteValue };
+        },
+        priority: 100,
+      });
+
+      // Simulate deletion (remoteValue is null)
+      await service.resolve({
+        mapName: 'test-map',
+        key: 'key1',
+        localValue: { data: 'existing' },
+        remoteValue: null,
+        localTimestamp: { millis: 1000, counter: 0, nodeId: 'local' },
+        remoteTimestamp: { millis: 2000, counter: 0, nodeId: 'remote' },
+        remoteNodeId: 'remote',
+        readEntry: () => undefined,
+      });
+
+      expect(receivedContext).not.toBeNull();
+      expect(receivedContext!.remoteValue).toBeNull();
+      expect(receivedContext!.localValue).toEqual({ data: 'existing' });
+    });
+
+    it('should reject deletion with immutable resolver', async () => {
+      service.register('test-map', {
+        name: 'immutable',
+        fn: (ctx) => {
+          // Reject any operation if local value exists
+          if (ctx.localValue !== undefined) {
+            return { action: 'reject', reason: 'Entry is immutable' };
+          }
+          return { action: 'accept', value: ctx.remoteValue };
+        },
+        priority: 100,
+      });
+
+      // Try to delete existing entry
+      const result = await service.resolve({
+        mapName: 'test-map',
+        key: 'key1',
+        localValue: { data: 'protected' },
+        remoteValue: null, // Deletion
+        localTimestamp: { millis: 1000, counter: 0, nodeId: 'local' },
+        remoteTimestamp: { millis: 2000, counter: 0, nodeId: 'remote' },
+        remoteNodeId: 'remote',
+        readEntry: () => undefined,
+      });
+
+      expect(result.action).toBe('reject');
+      expect((result as any).reason).toContain('immutable');
+    });
+
+    it('should allow deletion when no protective resolver exists', async () => {
+      // No custom resolvers - LWW fallback should accept deletion
+      const result = await service.resolve({
+        mapName: 'unprotected-map',
+        key: 'key1',
+        localValue: { data: 'can be deleted' },
+        remoteValue: null, // Deletion
+        localTimestamp: { millis: 1000, counter: 0, nodeId: 'local' },
+        remoteTimestamp: { millis: 2000, counter: 0, nodeId: 'remote' },
+        remoteNodeId: 'remote',
+        readEntry: () => undefined,
+      });
+
+      expect(result.action).toBe('accept');
+    });
+
+    it('should emit rejection event for blocked deletion', async () => {
+      const rejections: MergeRejection[] = [];
+      service.onRejection((r) => rejections.push(r));
+
+      service.register('test-map', {
+        name: 'no-delete',
+        fn: (ctx) => {
+          if (ctx.remoteValue === null && ctx.localValue !== undefined) {
+            return { action: 'reject', reason: 'Deletion not allowed' };
+          }
+          return { action: 'accept', value: ctx.remoteValue };
+        },
+        priority: 100,
+      });
+
+      await service.resolve({
+        mapName: 'test-map',
+        key: 'protected-key',
+        localValue: 'existing',
+        remoteValue: null,
+        localTimestamp: { millis: 1000, counter: 0, nodeId: 'local' },
+        remoteTimestamp: { millis: 2000, counter: 0, nodeId: 'remote' },
+        remoteNodeId: 'remote-node',
+        readEntry: () => undefined,
+      });
+
+      expect(rejections.length).toBe(1);
+      expect(rejections[0].key).toBe('protected-key');
+      expect(rejections[0].attemptedValue).toBeNull();
+      expect(rejections[0].reason).toBe('Deletion not allowed');
+    });
+  });
 });

@@ -321,6 +321,101 @@ describe('Conflict Resolver Integration', () => {
       expect(rejections[0].reason).toBe('Value is blocked');
     });
   });
+
+  describe('deletion protection', () => {
+    it('should reject deletion with immutable resolver', async () => {
+      // Register immutable resolver that blocks both updates and deletions
+      const resolvers1 = client1.getConflictResolvers();
+      const result = await resolvers1.register('immutable-data', {
+        name: 'immutable',
+        code: `
+          // Reject any modification (update or delete) if value exists
+          if (context.localValue !== undefined) {
+            return { action: 'reject', reason: 'Entry is immutable' };
+          }
+          return { action: 'accept', value: context.remoteValue };
+        `,
+        priority: 100,
+      });
+      expect(result.success).toBe(true);
+
+      const rejections: MergeRejection[] = [];
+      resolvers1.onRejection((r: MergeRejection) => rejections.push(r));
+
+      const map = client1.getMap<string, { data: string }>('immutable-data');
+
+      // First write should succeed
+      map.set('config', { data: 'initial' });
+      await new Promise(r => setTimeout(r, 300));
+
+      expect(rejections.length).toBe(0);
+
+      // Deletion should be rejected
+      map.delete('config');
+      await new Promise(r => setTimeout(r, 500));
+
+      expect(rejections.length).toBe(1);
+      expect(rejections[0].key).toBe('config');
+      expect(rejections[0].reason).toContain('immutable');
+      // attemptedValue should be null for deletions
+      expect(rejections[0].attemptedValue).toBeNull();
+    });
+
+    it('should allow deletion when no protective resolver exists', async () => {
+      // No resolver registered for this map
+      const map1 = client1.getMap<string, { value: number }>('deletable-data');
+
+      // Create entry
+      map1.set('item1', { value: 100 });
+      await new Promise(r => setTimeout(r, 300));
+
+      // Delete should succeed (no resolver to block it)
+      map1.delete('item1');
+      await new Promise(r => setTimeout(r, 300));
+
+      // Verify deletion propagated
+      const value = map1.get('item1');
+      expect(value).toBeUndefined();
+    });
+
+    it('should reject deletion from other client with owner-only pattern', async () => {
+      // Register owner-only resolver that checks auth
+      const resolvers1 = client1.getConflictResolvers();
+      await resolvers1.register('owned-data', {
+        name: 'owner-only',
+        code: `
+          // First write sets owner
+          if (context.localValue === undefined) {
+            return { action: 'accept', value: context.remoteValue };
+          }
+          // Check if current user is owner
+          const ownerId = context.localValue.ownerId;
+          if (ownerId && context.auth?.userId !== ownerId) {
+            return { action: 'reject', reason: 'Only owner can modify or delete' };
+          }
+          return { action: 'accept', value: context.remoteValue };
+        `,
+        priority: 100,
+      });
+
+      const rejections: MergeRejection[] = [];
+      const resolvers2 = client2.getConflictResolvers();
+      resolvers2.onRejection((r: MergeRejection) => rejections.push(r));
+
+      // Client1 creates owned entry
+      const map1 = client1.getMap<string, { ownerId: string; data: string }>('owned-data');
+      map1.set('doc1', { ownerId: 'user-1', data: 'secret' });
+      await new Promise(r => setTimeout(r, 300));
+
+      // Client2 tries to delete - should be rejected
+      const map2 = client2.getMap<string, { ownerId: string; data: string }>('owned-data');
+      map2.delete('doc1');
+      await new Promise(r => setTimeout(r, 500));
+
+      expect(rejections.length).toBe(1);
+      expect(rejections[0].reason).toContain('owner');
+    });
+  });
 });
 
 // Helper functions
