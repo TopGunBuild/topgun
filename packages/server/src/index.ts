@@ -26,3 +26,11 @@ export * from './cluster';
 // Entry Processor (Phase 5.03)
 export { ProcessorSandbox, ProcessorSandboxConfig, DEFAULT_SANDBOX_CONFIG } from './ProcessorSandbox';
 export { EntryProcessorHandler, EntryProcessorHandlerConfig } from './handlers/EntryProcessorHandler';
+
+// Event Journal (Phase 5.04)
+export {
+  EventJournalService,
+  EventJournalServiceConfig,
+  DEFAULT_JOURNAL_SERVICE_CONFIG,
+  ExportOptions,
+} from './EventJournalService';

@@ -457,6 +457,76 @@ export const EntryProcessBatchResponseSchema = z.object({
   results: z.record(z.string(), EntryProcessKeyResultSchema),
 });
 
+// --- Event Journal Messages (Phase 5.04) ---
+
+/**
+ * Journal event type schema.
+ */
+export const JournalEventTypeSchema = z.enum(['PUT', 'UPDATE', 'DELETE']);
+
+/**
+ * Journal event data (serialized for network).
+ */
+export const JournalEventDataSchema = z.object({
+  sequence: z.string(), // bigint as string
+  type: JournalEventTypeSchema,
+  mapName: z.string(),
+  key: z.string(),
+  value: z.unknown().optional(),
+  previousValue: z.unknown().optional(),
+  timestamp: TimestampSchema,
+  nodeId: z.string(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+
+/**
+ * JOURNAL_SUBSCRIBE: Client subscribes to journal events.
+ */
+export const JournalSubscribeRequestSchema = z.object({
+  type: z.literal('JOURNAL_SUBSCRIBE'),
+  requestId: z.string(),
+  fromSequence: z.string().optional(), // bigint as string
+  mapName: z.string().optional(),
+  types: z.array(JournalEventTypeSchema).optional(),
+});
+
+/**
+ * JOURNAL_UNSUBSCRIBE: Client unsubscribes from journal events.
+ */
+export const JournalUnsubscribeRequestSchema = z.object({
+  type: z.literal('JOURNAL_UNSUBSCRIBE'),
+  subscriptionId: z.string(),
+});
+
+/**
+ * JOURNAL_EVENT: Server sends journal event to client.
+ */
+export const JournalEventMessageSchema = z.object({
+  type: z.literal('JOURNAL_EVENT'),
+  event: JournalEventDataSchema,
+});
+
+/**
+ * JOURNAL_READ: Client requests events from journal.
+ */
+export const JournalReadRequestSchema = z.object({
+  type: z.literal('JOURNAL_READ'),
+  requestId: z.string(),
+  fromSequence: z.string(),
+  limit: z.number().optional(),
+  mapName: z.string().optional(),
+});
+
+/**
+ * JOURNAL_READ_RESPONSE: Server responds with journal events.
+ */
+export const JournalReadResponseSchema = z.object({
+  type: z.literal('JOURNAL_READ_RESPONSE'),
+  requestId: z.string(),
+  events: z.array(JournalEventDataSchema),
+  hasMore: z.boolean(),
+});
+
 // --- Write Concern Response Schemas (Phase 5.01) ---
 
 /**
@@ -539,6 +609,12 @@ export const MessageSchema = z.discriminatedUnion('type', [
   EntryProcessBatchRequestSchema,
   EntryProcessResponseSchema,
   EntryProcessBatchResponseSchema,
+  // Phase 5.04: Event Journal
+  JournalSubscribeRequestSchema,
+  JournalUnsubscribeRequestSchema,
+  JournalEventMessageSchema,
+  JournalReadRequestSchema,
+  JournalReadResponseSchema,
 ]);
 
 // --- Type Inference ---
@@ -565,4 +641,13 @@ export type EntryProcessBatchRequest = z.infer<typeof EntryProcessBatchRequestSc
 export type EntryProcessResponse = z.infer<typeof EntryProcessResponseSchema>;
 export type EntryProcessBatchResponse = z.infer<typeof EntryProcessBatchResponseSchema>;
 export type EntryProcessKeyResult = z.infer<typeof EntryProcessKeyResultSchema>;
+
+// Event Journal types (Phase 5.04)
+export type JournalEventType = z.infer<typeof JournalEventTypeSchema>;
+export type JournalEventData = z.infer<typeof JournalEventDataSchema>;
+export type JournalSubscribeRequest = z.infer<typeof JournalSubscribeRequestSchema>;
+export type JournalUnsubscribeRequest = z.infer<typeof JournalUnsubscribeRequestSchema>;
+export type JournalEventMessage = z.infer<typeof JournalEventMessageSchema>;
+export type JournalReadRequest = z.infer<typeof JournalReadRequestSchema>;
+export type JournalReadResponse = z.infer<typeof JournalReadResponseSchema>;
 

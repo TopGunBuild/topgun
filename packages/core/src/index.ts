@@ -6,10 +6,31 @@ import { ORMapMerkleTree, ORMapMerkleNode } from './ORMapMerkleTree';
 import { hashORMapEntry, hashORMapRecord, timestampToString, compareTimestamps } from './ORMapMerkle';
 import { PNCounterImpl } from './PNCounter';
 import type { PNCounter, PNCounterState, PNCounterStateObject, PNCounterConfig } from './PNCounter';
+import { Ringbuffer } from './Ringbuffer';
+import { EventJournalImpl, DEFAULT_EVENT_JOURNAL_CONFIG } from './EventJournal';
+import type {
+  EventJournal,
+  EventJournalConfig,
+  JournalEvent,
+  JournalEventInput,
+  JournalEventType,
+  JournalEventListener,
+} from './EventJournal';
 
 export { HLC, LWWMap, ORMap, MerkleTree, ORMapMerkleTree, PNCounterImpl };
 export { hashORMapEntry, hashORMapRecord, timestampToString, compareTimestamps };
 export type { PNCounter, PNCounterState, PNCounterStateObject, PNCounterConfig };
+
+// Event Journal exports (Phase 5.04)
+export { Ringbuffer, EventJournalImpl, DEFAULT_EVENT_JOURNAL_CONFIG };
+export type {
+  EventJournal,
+  EventJournalConfig,
+  JournalEvent,
+  JournalEventInput,
+  JournalEventType,
+  JournalEventListener,
+};
 
 // Entry Processor exports (Phase 5.03)
 export {

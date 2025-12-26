@@ -40,6 +40,8 @@ import { WriteAckManager } from './ack/WriteAckManager';
 import { ReplicationPipeline } from './cluster/ReplicationPipeline';
 import { CounterHandler } from './handlers/CounterHandler';
 import { EntryProcessorHandler } from './handlers/EntryProcessorHandler';
+import { EventJournalService, EventJournalServiceConfig } from './EventJournalService';
+import type { JournalEvent, JournalEventType } from '@topgunbuild/core';
 
 interface ClientConnection {
     id: string;
@@ -146,6 +148,12 @@ export interface ServerCoordinatorConfig {
     defaultConsistency?: ConsistencyLevel;
     /** Replication configuration */
     replicationConfig?: Partial<ReplicationConfig>;
+
+    // === Event Journal Options (Phase 5.04) ===
+    /** Enable event journal for audit/CDC (default: false) */
+    eventJournalEnabled?: boolean;
+    /** Event journal configuration */
+    eventJournalConfig?: Partial<Omit<EventJournalServiceConfig, 'pool'>>;
 }
 
 export class ServerCoordinator {
@@ -220,6 +228,10 @@ export class ServerCoordinator {
 
     // Entry Processor handler (Phase 5.03)
     private entryProcessorHandler!: EntryProcessorHandler;
+
+    // Event Journal (Phase 5.04)
+    private eventJournalService?: EventJournalService;
+    private journalSubscriptions: Map<string, { clientId: string; mapName?: string; types?: JournalEventType[] }> = new Map();
 
     private readonly _nodeId: string;
 
@@ -450,6 +462,23 @@ export class ServerCoordinator {
             // Entry Processor handler (Phase 5.03)
             this.entryProcessorHandler = new EntryProcessorHandler({ hlc: this.hlc });
 
+            // Event Journal (Phase 5.04) - requires PostgresAdapter with pool
+            if (config.eventJournalEnabled && this.storage && 'pool' in (this.storage as any)) {
+                const pool = (this.storage as any).pool;
+                this.eventJournalService = new EventJournalService({
+                    capacity: 10000,
+                    ttlMs: 0,
+                    persistent: true,
+                    pool,
+                    ...config.eventJournalConfig,
+                });
+                this.eventJournalService.initialize().then(() => {
+                    logger.info('EventJournalService initialized');
+                }).catch(err => {
+                    logger.error({ err }, 'Failed to initialize EventJournalService');
+                });
+            }
+
             this.systemManager = new SystemManager(
                 this.cluster,
                 this.metricsService,
@@ -662,6 +691,11 @@ export class ServerCoordinator {
 
         // Dispose Entry Processor handler (Phase 5.03)
         this.entryProcessorHandler.dispose();
+
+        // Dispose Event Journal (Phase 5.04)
+        if (this.eventJournalService) {
+            this.eventJournalService.dispose();
+        }
 
         logger.info('Server Coordinator shutdown complete.');
     }
@@ -1742,6 +1776,114 @@ export class ServerCoordinator {
                 break;
             }
 
+            // === Event Journal Messages (Phase 5.04) ===
+
+            case 'JOURNAL_SUBSCRIBE': {
+                if (!this.eventJournalService) {
+                    client.writer.write({
+                        type: 'ERROR',
+                        payload: { code: 503, message: 'Event journal not enabled' }
+                    }, true);
+                    break;
+                }
+
+                const { requestId, fromSequence, mapName, types } = message;
+                const subscriptionId = requestId;
+
+                // Store subscription metadata
+                this.journalSubscriptions.set(subscriptionId, {
+                    clientId: client.id,
+                    mapName,
+                    types,
+                });
+
+                // Subscribe to journal events
+                const unsubscribe = this.eventJournalService.subscribe(
+                    (event) => {
+                        // Apply filters
+                        if (mapName && event.mapName !== mapName) return;
+                        if (types && types.length > 0 && !types.includes(event.type)) return;
+
+                        // Check if client still connected
+                        const clientConn = this.clients.get(client.id);
+                        if (!clientConn) {
+                            unsubscribe();
+                            this.journalSubscriptions.delete(subscriptionId);
+                            return;
+                        }
+
+                        // Send event to client
+                        clientConn.writer.write({
+                            type: 'JOURNAL_EVENT',
+                            event: {
+                                sequence: event.sequence.toString(),
+                                type: event.type,
+                                mapName: event.mapName,
+                                key: event.key,
+                                value: event.value,
+                                previousValue: event.previousValue,
+                                timestamp: event.timestamp,
+                                nodeId: event.nodeId,
+                                metadata: event.metadata,
+                            },
+                        });
+                    },
+                    fromSequence ? BigInt(fromSequence) : undefined
+                );
+
+                logger.info({ clientId: client.id, subscriptionId, mapName }, 'Journal subscription created');
+                break;
+            }
+
+            case 'JOURNAL_UNSUBSCRIBE': {
+                const { subscriptionId } = message;
+                this.journalSubscriptions.delete(subscriptionId);
+                logger.info({ clientId: client.id, subscriptionId }, 'Journal subscription removed');
+                break;
+            }
+
+            case 'JOURNAL_READ': {
+                if (!this.eventJournalService) {
+                    client.writer.write({
+                        type: 'ERROR',
+                        payload: { code: 503, message: 'Event journal not enabled' }
+                    }, true);
+                    break;
+                }
+
+                const { requestId: readReqId, fromSequence: readFromSeq, limit, mapName: readMapName } = message;
+                const startSeq = BigInt(readFromSeq);
+                const eventLimit = limit ?? 100;
+
+                let events = this.eventJournalService.readFrom(startSeq, eventLimit);
+
+                // Filter by map name if provided
+                if (readMapName) {
+                    events = events.filter(e => e.mapName === readMapName);
+                }
+
+                // Serialize events
+                const serializedEvents = events.map(e => ({
+                    sequence: e.sequence.toString(),
+                    type: e.type,
+                    mapName: e.mapName,
+                    key: e.key,
+                    value: e.value,
+                    previousValue: e.previousValue,
+                    timestamp: e.timestamp,
+                    nodeId: e.nodeId,
+                    metadata: e.metadata,
+                }));
+
+                client.writer.write({
+                    type: 'JOURNAL_READ_RESPONSE',
+                    requestId: readReqId,
+                    events: serializedEvents,
+                    hasMore: events.length === eventLimit,
+                });
+                break;
+            }
+
             default:
                 logger.warn({ type: message.type }, 'Unknown message type');
         }
@@ -2410,6 +2552,26 @@ export class ServerCoordinator {
                     logger.error({ mapName: op.mapName, err }, 'Failed to persist tombstones');
                 });
             }
+        }
+
+        // Append to Event Journal (Phase 5.04)
+        if (this.eventJournalService) {
+            const isDelete = op.opType === 'REMOVE' || op.opType === 'OR_REMOVE' ||
+                (op.record && op.record.value === null);
+            const isNew = !oldRecord || (Array.isArray(oldRecord) && oldRecord.length === 0);
+            const journalEventType: JournalEventType = isDelete ? 'DELETE' : (isNew ? 'PUT' : 'UPDATE');
+
+            const timestamp = op.record?.timestamp || op.orRecord?.timestamp || this.hlc.now();
+
+            this.eventJournalService.append({
+                type: journalEventType,
+                mapName: op.mapName,
+                key: op.key,
+                value: op.record?.value ?? op.orRecord?.value,
+                previousValue: oldRecord?.value ?? (Array.isArray(oldRecord) ? oldRecord[0]?.value : undefined),
+                timestamp,
+                nodeId: this._nodeId,
+            });
         }
 
         return { eventPayload, oldRecord };

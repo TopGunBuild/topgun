@@ -8,6 +8,7 @@ import type { QueryFilter } from './QueryHandle';
 import { DistributedLock } from './DistributedLock';
 import { TopicHandle } from './TopicHandle';
 import { PNCounterHandle } from './PNCounterHandle';
+import { EventJournalReader } from './EventJournalReader';
 import { logger } from './utils/logger';
 import { SyncState } from './SyncState';
 import type { StateChangeEvent } from './SyncStateMachine';
@@ -663,5 +664,50 @@ export class TopGunClient {
     }
 
     return results;
+  }
+
+  // ============================================
+  // Event Journal API (Phase 5.04)
+  // ============================================
+
+  /** Cached EventJournalReader instance */
+  private journalReader?: EventJournalReader;
+
+  /**
+   * Get the Event Journal reader for subscribing to and reading
+   * map change events.
+   *
+   * The Event Journal provides:
+   * - Append-only log of all map changes (PUT, UPDATE, DELETE)
+   * - Subscription to real-time events
+   * - Historical event replay
+   * - Audit trail for compliance
+   *
+   * @returns EventJournalReader instance
+   *
+   * @example
+   * ```typescript
+   * const journal = client.getEventJournal();
+   *
+   * // Subscribe to all events
+   * const unsubscribe = journal.subscribe((event) => {
+   *   console.log(`${event.type} on ${event.mapName}:${event.key}`);
+   * });
+   *
+   * // Subscribe to specific map
+   * journal.subscribe(
+   *   (event) => console.log('User changed:', event.key),
+   *   { mapName: 'users' }
+   * );
+   *
+   * // Read historical events
+   * const events = await journal.readFrom(0n, 100);
+   * ```
+   */
+  public getEventJournal(): EventJournalReader {
+    if (!this.journalReader) {
+      this.journalReader = new EventJournalReader(this.syncEngine);
+    }
+    return this.journalReader;
   }
 }

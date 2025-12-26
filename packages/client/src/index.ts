@@ -46,6 +46,10 @@ export type { ChangeEvent } from './ChangeTracker';
 // PN Counter exports (Phase 5.2)
 export { PNCounterHandle } from './PNCounterHandle';
 
+// Event Journal exports (Phase 5.04)
+export { EventJournalReader } from './EventJournalReader';
+export type { JournalEventData, JournalSubscribeOptions } from './EventJournalReader';
+
 // Cluster exports (Phase 4)
 export { ConnectionPool, PartitionRouter, ClusterClient };
 export type {

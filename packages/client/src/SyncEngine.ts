@@ -767,6 +767,9 @@ export class SyncEngine {
   }
 
   private async handleServerMessage(message: any): Promise<void> {
+    // Emit to generic listeners (used by EventJournalReader)
+    this.emitMessage(message);
+
     switch (message.type) {
       case 'BATCH': {
         // Unbatch and process each message
@@ -2098,6 +2101,62 @@ export class SyncEngine {
       }
 
       pending.resolve(resultsMap);
+    }
+  }
+
+  // ============================================
+  // Event Journal Methods (Phase 5.04)
+  // ============================================
+
+  /** Message listeners for journal and other generic messages */
+  private messageListeners: Set<(message: any) => void> = new Set();
+
+  /**
+   * Subscribe to all incoming messages.
+   * Used by EventJournalReader to receive journal events.
+   *
+   * @param event Event type (currently only 'message')
+   * @param handler Message handler
+   */
+  public on(event: 'message', handler: (message: any) => void): void {
+    if (event === 'message') {
+      this.messageListeners.add(handler);
+    }
+  }
+
+  /**
+   * Unsubscribe from incoming messages.
+   *
+   * @param event Event type (currently only 'message')
+   * @param handler Message handler to remove
+   */
+  public off(event: 'message', handler: (message: any) => void): void {
+    if (event === 'message') {
+      this.messageListeners.delete(handler);
+    }
+  }
+
+  /**
+   * Send a message to the server.
+   * Public method for EventJournalReader and other components.
+   *
+   * @param message Message object to send
+   */
+  public send(message: any): void {
+    this.sendMessage(message);
+  }
+
+  /**
+   * Emit message to all listeners.
+   * Called internally when a message is received.
+   */
+  private emitMessage(message: any): void {
+    for (const listener of this.messageListeners) {
+      try {
+        listener(message);
+      } catch (e) {
+        logger.error({ err: e }, 'Message listener error');
+      }
     }
   }
 }
