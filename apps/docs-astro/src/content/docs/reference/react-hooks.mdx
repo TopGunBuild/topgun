@@ -40,6 +40,76 @@ function TodoList() {
   );
 }`;
 
+export const useQueryChangesCode = `import { useQuery } from '@topgunbuild/react';
+import { useEffect } from 'react';
+import { toast } from 'your-toast-library';
+
+function TodoListWithNotifications() {
+  const { data, lastChange, changes, clearChanges } = useQuery('todos');
+
+  // Show toast for new items
+  useEffect(() => {
+    if (lastChange?.type === 'add') {
+      toast.success(\`New todo: \${lastChange.value.title}\`);
+    }
+  }, [lastChange]);
+
+  // Process all accumulated changes
+  useEffect(() => {
+    if (changes.length > 0) {
+      console.log('Changes since last render:', changes);
+      clearChanges(); // Clear after processing
+    }
+  }, [changes, clearChanges]);
+
+  return <ul>{data.map(todo => <li key={todo._key}>{todo.title}</li>)}</ul>;
+}`;
+
+export const useQueryCallbacksCode = `import { useQuery } from '@topgunbuild/react';
+
+function TodoListWithCallbacks() {
+  const { data } = useQuery('todos', {}, {
+    onAdd: (key, todo) => {
+      showNotification(\`Added: \${todo.title}\`);
+    },
+    onUpdate: (key, todo, previous) => {
+      console.log(\`Updated \${key}: \${previous.title} → \${todo.title}\`);
+    },
+    onRemove: (key, previous) => {
+      showNotification(\`Removed: \${previous.title}\`);
+    },
+    onChange: (change) => {
+      // Called for all change types
+      analytics.track('data_change', { type: change.type, key: change.key });
+    },
+    maxChanges: 100 // Limit accumulated changes (default: 1000)
+  });
+
+  return <ul>{data.map(todo => <li key={todo._key}>{todo.title}</li>)}</ul>;
+}`;
+
+export const useQueryAnimationCode = `import { useQuery } from '@topgunbuild/react';
+import { AnimatePresence, motion } from 'framer-motion';
+
+function AnimatedTodoList() {
+  const { data } = useQuery('todos');
+
+  return (
+    <AnimatePresence>
+      {data.map(todo => (
+        <motion.li
+          key={todo._key}
+          initial={{ opacity: 0, x: -20 }}
+          animate={{ opacity: 1, x: 0 }}
+          exit={{ opacity: 0, x: 20 }}
+        >
+          {todo.title}
+        </motion.li>
+      ))}
+    </AnimatePresence>
+  );
+}`;
+
 export const useMapCode = `import { useMap, useORMap } from '@topgunbuild/react';
 
 // Simple Key-Value Store
@@ -148,6 +218,60 @@ reactive applications with TopGun.
 
 <div className="not-prose">
   <CodeBlock title="components/TodoList.tsx" language="typescript" code={useQueryCode} />
+</div>
+
+### Change Tracking
+
+The `useQuery` hook provides built-in change tracking to help you understand **what** changed, not just the new state. This enables:
+
+- Efficient React re-renders (only changed items)
+- Add/remove animations (framer-motion, react-spring)
+- Optimistic UI rollback on specific keys
+- "New item added" notifications
+
+#### Return Values
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `data` | `T[]` | Current query results |
+| `loading` | `boolean` | Loading state |
+| `error` | `Error \| null` | Error state |
+| `lastChange` | `ChangeEvent<T> \| null` | Most recent change |
+| `changes` | `ChangeEvent<T>[]` | All changes since last `clearChanges()` |
+| `clearChanges` | `() => void` | Clear accumulated changes |
+
+#### ChangeEvent Structure
+
+```typescript
+interface ChangeEvent<T> {
+  type: 'add' | 'update' | 'remove';
+  key: string;
+  value?: T;           // New value (for add/update)
+  previousValue?: T;   // Previous value (for update/remove)
+  timestamp: number;   // When the change occurred
+}
+```
+
+#### Using lastChange and changes
+
+<div className="not-prose">
+  <CodeBlock title="components/TodoListWithNotifications.tsx" language="typescript" code={useQueryChangesCode} />
+</div>
+
+#### Callback Options
+
+For a more declarative approach, use the callback options:
+
+<div className="not-prose">
+  <CodeBlock title="components/TodoListWithCallbacks.tsx" language="typescript" code={useQueryCallbacksCode} />
+</div>
+
+#### Animation Integration
+
+The change tracking works seamlessly with animation libraries like framer-motion:
+
+<div className="not-prose">
+  <CodeBlock title="components/AnimatedTodoList.tsx" language="typescript" code={useQueryAnimationCode} />
 </div>
 
 ## useMap / useORMap
