@@ -339,6 +339,55 @@ function LikeButton({ postId }) {
   </p>
 </div>
 
+## useEntryProcessor
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Zap className="w-6 h-6 text-purple-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Execute atomic read-modify-write operations on the server with loading and error states.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="components/LikeButton.tsx" language="typescript" code={`import { useEntryProcessor } from '@topgunbuild/react';
+import { BuiltInProcessors } from '@topgunbuild/core';
+import { useMemo } from 'react';
+
+function LikeButton({ postId }) {
+  const processor = useMemo(() => BuiltInProcessors.INCREMENT(1), []);
+  const { execute, executing, lastResult, error } = useEntryProcessor('likes', processor);
+
+  const handleLike = async () => {
+    const result = await execute(postId);
+    if (result.success) {
+      console.log('New count:', result.newValue);
+    }
+  };
+
+  return (
+    <button onClick={handleLike} disabled={executing}>
+      {executing ? '...' : 'Like'}
+    </button>
+  );
+}`} />
+</div>
+
+### Return Values
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `execute` | `(key: string, args?: unknown) => Promise<EntryProcessorResult>` | Execute processor on a key |
+| `executeMany` | `(keys: string[], args?: unknown) => Promise<Map<string, EntryProcessorResult>>` | Execute on multiple keys |
+| `executing` | `boolean` | True while operation is in progress |
+| `lastResult` | `EntryProcessorResult \| null` | Most recent execution result |
+| `error` | `Error \| null` | Last error encountered |
+| `reset` | `() => void` | Clear lastResult and error |
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>Atomic Operations:</strong> Entry processors run on the server, solving race conditions in read-modify-write scenarios.
+    See the <a href="/docs/guides/entry-processor" className="underline">Entry Processor Guide</a> for more details.
+  </p>
+</div>
+
 ## useTopic
 
 <div className="flex items-center gap-2 mb-4 not-prose">

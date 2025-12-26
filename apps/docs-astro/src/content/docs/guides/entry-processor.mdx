@@ -1,0 +1,485 @@
+---
+title: Entry Processor
+description: Execute atomic read-modify-write operations on the server to solve race conditions in distributed systems.
+order: 16
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Cpu, Shield, Zap, Server } from 'lucide-react';
+
+export const basicUsageCode = `import { TopGunClient } from '@topgunbuild/client';
+import { BuiltInProcessors } from '@topgunbuild/core';
+
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+});
+
+// Increment a counter atomically
+const result = await client.executeOnKey(
+  'stats',           // map name
+  'pageViews',       // key
+  BuiltInProcessors.INCREMENT(1)
+);
+
+console.log('New value:', result.newValue); // 1
+console.log('Success:', result.success);     // true`;
+
+export const raceConditionCode = `// WITHOUT Entry Processor - Race condition!
+// Client A                    Client B
+//   read(key) → 10
+//                               read(key) → 10
+//   write(key, 10 + 5)
+//                               write(key, 10 + 3)
+// Result: 13 (expected: 18) - One update lost!
+
+// WITH Entry Processor - Atomic operations
+// Client A                    Client B
+//   executeOnKey(add(5))
+//                               executeOnKey(add(3))
+// Server executes atomically:
+//   value = 10 → 15 → 18
+// Result: 18 (correct!)`;
+
+export const builtInProcessorsCode = `import { BuiltInProcessors } from '@topgunbuild/core';
+
+// INCREMENT - Add to numeric value
+await client.executeOnKey('stats', 'views',
+  BuiltInProcessors.INCREMENT(5)
+);
+
+// DECREMENT_FLOOR - Subtract but never go below 0
+const result = await client.executeOnKey('inventory', 'stock',
+  BuiltInProcessors.DECREMENT_FLOOR(1)
+);
+if (result.result?.wasFloored) {
+  console.log('Stock is now at zero!');
+}
+
+// PUT_IF_ABSENT - Set only if key doesn't exist
+await client.executeOnKey('users', 'user-123',
+  BuiltInProcessors.PUT_IF_ABSENT({ name: 'Alice', role: 'user' })
+);
+
+// DELETE_IF_EQUALS - Delete only if value matches
+await client.executeOnKey('sessions', 'session-abc',
+  BuiltInProcessors.DELETE_IF_EQUALS({ token: 'old-token' })
+);
+
+// ARRAY_PUSH - Append to array
+await client.executeOnKey('posts', 'post-1',
+  BuiltInProcessors.ARRAY_PUSH('new-comment-id')
+);
+
+// SET_PROPERTY - Update nested property
+await client.executeOnKey('users', 'user-123',
+  BuiltInProcessors.SET_PROPERTY('profile.avatar', 'new-url.jpg')
+);`;
+
+export const customProcessorCode = `// Custom processor for complex logic
+const result = await client.executeOnKey('inventory', 'product-abc', {
+  name: 'reserve_item',
+  code: \`
+    if (!value || value.stock <= 0) {
+      return {
+        value,
+        result: { success: false, reason: 'out_of_stock' }
+      };
+    }
+
+    const newValue = {
+      ...value,
+      stock: value.stock - 1,
+      reserved: [...(value.reserved || []), args.userId],
+    };
+
+    return {
+      value: newValue,
+      result: { success: true, remaining: newValue.stock }
+    };
+  \`,
+  args: { userId: 'user-456' }
+});
+
+if (result.result?.success) {
+  console.log(\`Reserved! \${result.result.remaining} left\`);
+} else {
+  console.log('Out of stock');
+}`;
+
+export const batchOperationsCode = `// Execute on multiple keys at once
+const results = await client.executeOnKeys(
+  'counters',
+  ['views', 'clicks', 'shares'],
+  BuiltInProcessors.INCREMENT(1)
+);
+
+for (const [key, result] of results) {
+  if (result.success) {
+    console.log(\`\${key}: \${result.newValue}\`);
+  }
+}`;
+
+export const reactHookCode = `import { useEntryProcessor } from '@topgunbuild/react';
+import { BuiltInProcessors } from '@topgunbuild/core';
+
+function LikeButton({ postId }) {
+  const { execute, executing, lastResult, error } = useEntryProcessor(
+    'likes',
+    { name: 'increment', code: 'return { value: (value ?? 0) + 1, result: (value ?? 0) + 1 };' }
+  );
+
+  const handleLike = async () => {
+    const result = await execute(postId);
+    if (result.success) {
+      console.log('New count:', result.result);
+    }
+  };
+
+  return (
+    <button onClick={handleLike} disabled={executing}>
+      {executing ? '...' : 'Like'}
+    </button>
+  );
+}`;
+
+export const reactBuiltInCode = `import { useEntryProcessor } from '@topgunbuild/react';
+import { BuiltInProcessors } from '@topgunbuild/core';
+import { useMemo } from 'react';
+
+function StockButton({ productId }) {
+  // Memoize processor definition
+  const processor = useMemo(
+    () => BuiltInProcessors.DECREMENT_FLOOR(1),
+    []
+  );
+
+  const { execute, executing, lastResult } = useEntryProcessor(
+    'inventory',
+    processor
+  );
+
+  const handlePurchase = async () => {
+    const result = await execute(productId);
+    if (result.result?.wasFloored) {
+      alert('Out of stock!');
+    }
+  };
+
+  return (
+    <button onClick={handlePurchase} disabled={executing}>
+      {executing ? 'Processing...' : 'Buy Now'}
+    </button>
+  );
+}`;
+
+export const conditionalUpdateCode = `// Optimistic locking with version check
+const result = await client.executeOnKey('documents', 'doc-1', {
+  name: 'conditional_update',
+  code: \`
+    if (!value || value.version !== args.expectedVersion) {
+      return {
+        value,
+        result: { updated: false, conflict: true }
+      };
+    }
+
+    return {
+      value: {
+        ...value,
+        data: args.newData,
+        version: value.version + 1,
+      },
+      result: { updated: true, conflict: false },
+    };
+  \`,
+  args: {
+    expectedVersion: 5,
+    newData: 'Updated content',
+  },
+});
+
+if (result.result?.conflict) {
+  console.log('Conflict detected, please refresh and retry');
+}`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap not-prose">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Entry Processor</span>
+</div>
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-purple-100 dark:bg-purple-900/30">
+    <Cpu className="w-5 h-5 text-purple-600 dark:text-purple-400" />
+  </div>
+  <h1 className="text-4xl font-bold text-foreground">Entry Processor</h1>
+</div>
+
+**Entry Processor** executes user-defined logic atomically on the server, solving the classic read-modify-write race condition. Instead of reading data, modifying it locally, and writing it back (risking conflicts), you send a processor function that runs where the data lives.
+
+<div className="grid md:grid-cols-3 gap-4 my-6 not-prose">
+  <div className="p-4 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-800">
+    <Shield className="w-6 h-6 text-purple-500 mb-2" />
+    <h3 className="font-semibold text-purple-900 dark:text-purple-100">Atomic Operations</h3>
+    <p className="text-sm text-purple-700 dark:text-purple-300">Read-modify-write in a single atomic operation on the server</p>
+  </div>
+  <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
+    <Server className="w-6 h-6 text-blue-500 mb-2" />
+    <h3 className="font-semibold text-blue-900 dark:text-blue-100">Server-Side Execution</h3>
+    <p className="text-sm text-blue-700 dark:text-blue-300">Logic runs in secure sandbox on the server</p>
+  </div>
+  <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800">
+    <Zap className="w-6 h-6 text-green-500 mb-2" />
+    <h3 className="font-semibold text-green-900 dark:text-green-100">Built-in Processors</h3>
+    <p className="text-sm text-green-700 dark:text-green-300">Common operations like INCREMENT, PUT_IF_ABSENT ready to use</p>
+  </div>
+</div>
+
+---
+
+## The Problem
+
+Without atomic operations, concurrent updates can silently lose data:
+
+<div className="not-prose">
+  <CodeBlock title="Race Condition Problem" language="typescript" code={raceConditionCode} />
+</div>
+
+---
+
+## Basic Usage
+
+<div className="not-prose">
+  <CodeBlock title="Atomic Counter Increment" language="typescript" code={basicUsageCode} />
+</div>
+
+---
+
+## Built-in Processors
+
+TopGun provides common processors out of the box:
+
+<div className="not-prose">
+  <CodeBlock title="Built-in Processors" language="typescript" code={builtInProcessorsCode} />
+</div>
+
+### Available Built-in Processors
+
+| Processor | Description |
+|-----------|-------------|
+| `INCREMENT(delta)` | Add to numeric value (default: 1) |
+| `DECREMENT(delta)` | Subtract from numeric value |
+| `DECREMENT_FLOOR(delta)` | Subtract but never go below 0, returns `wasFloored` |
+| `MULTIPLY(factor)` | Multiply numeric value |
+| `PUT_IF_ABSENT(value)` | Set only if key doesn't exist |
+| `REPLACE(newValue)` | Replace existing value |
+| `REPLACE_IF_EQUALS(expected, newValue)` | Replace only if current value matches |
+| `DELETE_IF_EQUALS(expected)` | Delete only if value matches |
+| `ARRAY_PUSH(item)` | Append to array |
+| `ARRAY_POP()` | Remove last array element |
+| `ARRAY_REMOVE(item)` | Remove item from array |
+| `SET_PROPERTY(path, value)` | Update nested property |
+| `DELETE_PROPERTY(path)` | Delete nested property |
+| `GET()` | Read value without modification |
+
+---
+
+## Custom Processors
+
+For complex business logic, write custom processor code:
+
+<div className="not-prose">
+  <CodeBlock title="Custom Processor - Inventory Reservation" language="typescript" code={customProcessorCode} />
+</div>
+
+### Processor Code Structure
+
+Your processor code receives three variables:
+- `value` - Current value at the key (or `undefined` if not exists)
+- `key` - The key being processed
+- `args` - Arguments passed from the client
+
+Must return an object with:
+- `value` - New value to store (or `undefined` to delete)
+- `result` - Custom result to return to client
+
+---
+
+## Batch Operations
+
+Process multiple keys in one request:
+
+<div className="not-prose">
+  <CodeBlock title="Batch Operations" language="typescript" code={batchOperationsCode} />
+</div>
+
+---
+
+## React Hook
+
+The `useEntryProcessor` hook provides a reactive interface for React components.
+
+<div className="not-prose">
+  <CodeBlock title="components/LikeButton.tsx" language="tsx" code={reactHookCode} />
+</div>
+
+### Using Built-in Processors with React
+
+<div className="not-prose">
+  <CodeBlock title="components/StockButton.tsx" language="tsx" code={reactBuiltInCode} />
+</div>
+
+### Hook Return Values
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `execute` | `(key: string, args?: unknown) => Promise<EntryProcessorResult>` | Execute on single key |
+| `executeMany` | `(keys: string[], args?: unknown) => Promise<Map<string, EntryProcessorResult>>` | Execute on multiple keys |
+| `executing` | `boolean` | True while operation is in progress |
+| `lastResult` | `EntryProcessorResult \| null` | Most recent execution result |
+| `error` | `Error \| null` | Last error encountered |
+| `reset` | `() => void` | Clear lastResult and error |
+
+### Hook Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `retries` | `number` | `0` | Number of retry attempts on failure |
+| `retryDelayMs` | `number` | `100` | Delay between retries (doubles with each retry) |
+
+---
+
+## Use Cases
+
+### Inventory Management
+
+```typescript
+// Reserve stock atomically - no overselling
+const result = await client.executeOnKey('products', 'sku-123',
+  BuiltInProcessors.DECREMENT_FLOOR(1)
+);
+
+if (result.result?.wasFloored) {
+  throw new Error('Out of stock');
+}
+```
+
+### Rate Limiting
+
+```typescript
+// Atomic increment with limit check
+const result = await client.executeOnKey('rate-limits', `user:${userId}`, {
+  name: 'rate_check',
+  code: `
+    const count = (value ?? 0) + 1;
+    if (count > 100) {
+      return { value, result: { allowed: false, count } };
+    }
+    return { value: count, result: { allowed: true, count } };
+  `
+});
+
+if (!result.result?.allowed) {
+  throw new Error('Rate limit exceeded');
+}
+```
+
+### Optimistic Locking
+
+<div className="not-prose">
+  <CodeBlock title="Version-based Conditional Update" language="typescript" code={conditionalUpdateCode} />
+</div>
+
+### Game Scores
+
+```typescript
+// Add score with bounds checking
+await client.executeOnKey('leaderboard', 'player-123', {
+  name: 'add_score',
+  code: `
+    const current = value ?? { score: 0, highScore: 0 };
+    const newScore = current.score + args.points;
+    return {
+      value: {
+        score: newScore,
+        highScore: Math.max(current.highScore, newScore)
+      },
+      result: { newScore, isHighScore: newScore > current.highScore }
+    };
+  `,
+  args: { points: 100 }
+});
+```
+
+---
+
+## Security
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>Sandboxed Execution:</strong> Processor code runs in an isolated sandbox using <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">isolated-vm</code>.
+    It has no access to Node.js APIs, filesystem, network, or globals. Only <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">value</code>, <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">key</code>, and <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">args</code> are available.
+  </p>
+</div>
+
+### Security Features
+
+| Feature | Protection |
+|---------|------------|
+| **Memory Limit** | 8MB per isolate prevents memory bombs |
+| **CPU Timeout** | 100ms max execution prevents infinite loops |
+| **No I/O Access** | No `require`, `fs`, `fetch`, `XMLHttpRequest` |
+| **No Globals** | No `eval`, `Function`, `process`, `global` |
+| **Code Validation** | Dangerous patterns are blocked before execution |
+
+---
+
+## API Reference
+
+### client.executeOnKey()
+
+```typescript
+executeOnKey<V, R>(
+  mapName: string,
+  key: string,
+  processor: EntryProcessorDef<V, R>
+): Promise<EntryProcessorResult<R>>
+```
+
+### client.executeOnKeys()
+
+```typescript
+executeOnKeys<V, R>(
+  mapName: string,
+  keys: string[],
+  processor: EntryProcessorDef<V, R>
+): Promise<Map<string, EntryProcessorResult<R>>>
+```
+
+### EntryProcessorResult
+
+```typescript
+interface EntryProcessorResult<R> {
+  success: boolean;      // Whether operation succeeded
+  result?: R;            // Custom result from processor
+  error?: string;        // Error message if failed
+  newValue?: unknown;    // New value after processing
+}
+```
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/write-concern" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Write Concern
+    </div>
+  </a>
+  <a href="/docs/guides/pn-counter" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      PN-Counter <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

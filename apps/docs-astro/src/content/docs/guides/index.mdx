@@ -4,7 +4,7 @@ description: Practical, step-by-step guides to help you implement common pattern
 order: 10
 ---
 
-import { ChevronRight, Shield, Database, Server, Radio, Timer, Activity, Lock, KeyRound, Zap, CheckCircle, Network } from 'lucide-react';
+import { ChevronRight, Shield, Database, Server, Radio, Timer, Activity, Lock, KeyRound, Zap, CheckCircle, Network, Cpu, Plus, Minus } from 'lucide-react';
 import { GuideCard } from '../../../components/docs/GuideCard';
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
@@ -90,5 +90,17 @@ Practical, step-by-step guides to help you implement common patterns and feature
     icon={CheckCircle}
     title="Write Concern"
     description="Configure acknowledgment levels for write operations to balance performance vs durability."
+  />
+  <GuideCard
+    href="/docs/guides/entry-processor"
+    icon={Cpu}
+    title="Entry Processor"
+    description="Execute atomic read-modify-write operations on the server to solve race conditions."
+  />
+  <GuideCard
+    href="/docs/guides/pn-counter"
+    icon={Plus}
+    title="PN-Counter"
+    description="Distributed counter supporting increment/decrement with automatic conflict resolution."
   />
 </div>
