@@ -19,10 +19,10 @@ But for the other 10%, it's a disaster.
 Imagine two users trying to book the same seat on a flight:
 
 ```
-User A: book(seat: "A1", user: "alice")  → timestamp: 1000
-User B: book(seat: "A1", user: "bob")    → timestamp: 1001
+User A: set("A1", { user: "alice" })  → timestamp: 1000
+User B: set("A1", { user: "bob" })    → timestamp: 1001
 
-LWW Result: seat A1 → bob
+LWW Result: seat A1 → { user: "bob" }
 ```
 
 Alice's booking is silently overwritten. No error, no notification, just... gone. She shows up at the airport thinking she has seat A1, only to find Bob sitting there.
@@ -46,6 +46,8 @@ We needed a solution that:
 Our solution: **Custom Conflict Resolvers**—server-side functions that intercept every write operation and decide what to do.
 
 ```typescript
+const resolvers = client.getConflictResolvers();
+
 await resolvers.register('bookings', {
   name: 'first-write-wins',
   code: `
