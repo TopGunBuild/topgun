@@ -4,6 +4,7 @@
 
 import { QueryOptimizer } from '../../query/QueryOptimizer';
 import { IndexRegistry } from '../../query/IndexRegistry';
+import { StandingQueryRegistry } from '../../query/StandingQueryRegistry';
 import { HashIndex } from '../../query/indexes/HashIndex';
 import { NavigableIndex } from '../../query/indexes/NavigableIndex';
 import { simpleAttribute } from '../../query/Attribute';
@@ -453,6 +454,111 @@ describe('QueryOptimizer', () => {
       expect(plan.sort).toEqual({ field: 'age', direction: 'desc' });
       expect(plan.limit).toBe(10);
       expect(plan.offset).toBe(0);
+    });
+  });
+
+  describe('StandingQueryRegistry integration', () => {
+    let records: Map<string, TestRecord>;
+    let standingRegistry: StandingQueryRegistry<string, TestRecord>;
+    let optimizerWithStanding: QueryOptimizer<string, TestRecord>;
+
+    beforeEach(() => {
+      records = new Map();
+      records.set('1', { id: '1', name: 'Alice', age: 30, status: 'active', category: 'premium' });
+      records.set('2', { id: '2', name: 'Bob', age: 25, status: 'inactive', category: 'basic' });
+      records.set('3', { id: '3', name: 'Charlie', age: 35, status: 'active', category: 'premium' });
+
+      standingRegistry = new StandingQueryRegistry({
+        getRecord: (key) => records.get(key),
+        getAllEntries: () => records.entries(),
+      });
+
+      optimizerWithStanding = new QueryOptimizer({
+        indexRegistry: registry,
+        standingQueryRegistry: standingRegistry,
+      });
+    });
+
+    it('should use StandingQueryIndex when registered', () => {
+      const query: SimpleQueryNode = { type: 'eq', attribute: 'status', value: 'active' };
+
+      // Register the standing query
+      standingRegistry.register(query);
+
+      const plan = optimizerWithStanding.optimize(query);
+
+      expect(plan.usesIndexes).toBe(true);
+      expect(plan.estimatedCost).toBe(10); // StandingQueryIndex cost
+      expect(plan.root.type).toBe('index-scan');
+    });
+
+    it('should prefer StandingQueryIndex over HashIndex', () => {
+      const statusAttr = simpleAttribute<TestRecord, string>('status', (r) => r.status);
+      const hashIndex = new HashIndex<string, TestRecord, string>(statusAttr);
+      registry.addIndex(hashIndex);
+
+      const query: SimpleQueryNode = { type: 'eq', attribute: 'status', value: 'active' };
+
+      // Register the standing query
+      standingRegistry.register(query);
+
+      const plan = optimizerWithStanding.optimize(query);
+
+      // Should use StandingQueryIndex (cost 10) over HashIndex (cost 30)
+      expect(plan.estimatedCost).toBe(10);
+    });
+
+    it('should fall back to regular index when no standing query registered', () => {
+      const statusAttr = simpleAttribute<TestRecord, string>('status', (r) => r.status);
+      const hashIndex = new HashIndex<string, TestRecord, string>(statusAttr);
+      registry.addIndex(hashIndex);
+
+      const query: SimpleQueryNode = { type: 'eq', attribute: 'status', value: 'active' };
+      // NOT registering standing query
+
+      const plan = optimizerWithStanding.optimize(query);
+
+      // Should use HashIndex (cost 30)
+      expect(plan.estimatedCost).toBe(30);
+      expect(plan.root.type).toBe('index-scan');
+    });
+
+    it('should work with legacy constructor signature', () => {
+      const legacyOptimizer = new QueryOptimizer(registry, standingRegistry);
+
+      const query: SimpleQueryNode = { type: 'eq', attribute: 'status', value: 'active' };
+      standingRegistry.register(query);
+
+      const plan = legacyOptimizer.optimize(query);
+
+      expect(plan.estimatedCost).toBe(10);
+    });
+
+    it('should work without StandingQueryRegistry', () => {
+      const simpleOptimizer = new QueryOptimizer(registry);
+
+      const query: SimpleQueryNode = { type: 'eq', attribute: 'name', value: 'Alice' };
+      const plan = simpleOptimizer.optimize(query);
+
+      expect(plan.root.type).toBe('full-scan');
+    });
+
+    it('should handle complex queries with StandingQueryIndex', () => {
+      const complexQuery: LogicalQueryNode = {
+        type: 'and',
+        children: [
+          { type: 'eq', attribute: 'status', value: 'active' } as SimpleQueryNode,
+          { type: 'eq', attribute: 'category', value: 'premium' } as SimpleQueryNode,
+        ],
+      };
+
+      // Register the complex query
+      standingRegistry.register(complexQuery);
+
+      const plan = optimizerWithStanding.optimize(complexQuery);
+
+      expect(plan.usesIndexes).toBe(true);
+      expect(plan.estimatedCost).toBe(10);
     });
   });
 });

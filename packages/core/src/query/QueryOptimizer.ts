@@ -5,6 +5,7 @@
  * Selects optimal index and execution strategy for queries.
  *
  * Algorithm based on CQEngine CollectionQueryEngine:
+ * - StandingQueryIndex: Check first (lowest cost = 10)
  * - AND queries: "smallest first" strategy - sort by merge cost, iterate smallest
  * - OR queries: Union all results with deduplication
  * - NOT queries: Get all keys, subtract matching keys
@@ -13,6 +14,7 @@
  */
 
 import { IndexRegistry } from './IndexRegistry';
+import { StandingQueryRegistry } from './StandingQueryRegistry';
 import type {
   Query,
   SimpleQueryNode,
@@ -25,21 +27,74 @@ import { isLogicalQuery, isSimpleQuery } from './QueryTypes';
 import type { IndexQuery } from './indexes/types';
 
 /**
+ * Options for creating a QueryOptimizer.
+ */
+export interface QueryOptimizerOptions<K, V> {
+  /** Index registry for attribute-based indexes */
+  indexRegistry: IndexRegistry<K, V>;
+  /** Standing query registry for pre-computed queries (optional) */
+  standingQueryRegistry?: StandingQueryRegistry<K, V>;
+}
+
+/**
  * Cost-based query optimizer.
  * Selects optimal index and execution strategy for queries.
  *
  * K = record key type, V = record value type
  */
 export class QueryOptimizer<K, V> {
-  constructor(private readonly indexRegistry: IndexRegistry<K, V>) {}
+  private readonly indexRegistry: IndexRegistry<K, V>;
+  private readonly standingQueryRegistry?: StandingQueryRegistry<K, V>;
+
+  /**
+   * Create a QueryOptimizer.
+   *
+   * @param indexRegistryOrOptions - IndexRegistry or options object
+   * @param standingQueryRegistry - Optional StandingQueryRegistry (deprecated, use options)
+   */
+  constructor(
+    indexRegistryOrOptions: IndexRegistry<K, V> | QueryOptimizerOptions<K, V>,
+    standingQueryRegistry?: StandingQueryRegistry<K, V>
+  ) {
+    if ('indexRegistry' in indexRegistryOrOptions) {
+      // Options object
+      this.indexRegistry = indexRegistryOrOptions.indexRegistry;
+      this.standingQueryRegistry = indexRegistryOrOptions.standingQueryRegistry;
+    } else {
+      // Legacy: direct IndexRegistry
+      this.indexRegistry = indexRegistryOrOptions;
+      this.standingQueryRegistry = standingQueryRegistry;
+    }
+  }
 
   /**
    * Optimize a query and return an execution plan.
+   *
+   * Optimization order (by cost):
+   * 1. StandingQueryIndex (cost: 10) - pre-computed results
+   * 2. Other indexes via optimizeNode
    *
    * @param query - Query to optimize
    * @returns Query execution plan
    */
   optimize(query: Query): QueryPlan {
+    // Check for standing query index first (lowest cost)
+    if (this.standingQueryRegistry) {
+      const standingIndex = this.standingQueryRegistry.getIndex(query);
+      if (standingIndex) {
+        return {
+          root: {
+            type: 'index-scan',
+            index: standingIndex,
+            query: { type: 'equal', value: null }, // Dummy query, index returns pre-computed results
+          },
+          estimatedCost: standingIndex.getRetrievalCost(),
+          usesIndexes: true,
+        };
+      }
+    }
+
+    // Fall back to regular optimization
     const step = this.optimizeNode(query);
     return {
       root: step,

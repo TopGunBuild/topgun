@@ -11,3 +11,8 @@ export {
   type Quantizer,
 } from './QuantizedNavigableIndex';
 export { FallbackIndex, createPredicateMatcher } from './FallbackIndex';
+export {
+  StandingQueryIndex,
+  type StandingQueryIndexOptions,
+  type StandingQueryChange,
+} from './StandingQueryIndex';

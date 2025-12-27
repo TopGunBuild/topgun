@@ -50,4 +50,22 @@ export {
 export { IndexRegistry, type IndexRegistryStats } from './IndexRegistry';
 
 // Query Optimizer
-export { QueryOptimizer } from './QueryOptimizer';
+export { QueryOptimizer, type QueryOptimizerOptions } from './QueryOptimizer';
+
+// Standing Query Registry
+export {
+  StandingQueryRegistry,
+  type StandingQueryRegistryOptions,
+  type StandingQueryRegistryStats,
+} from './StandingQueryRegistry';
+
+// Live Query Manager
+export {
+  LiveQueryManager,
+  type LiveQueryManagerOptions,
+  type LiveQueryManagerStats,
+  type LiveQueryCallback,
+  type LiveQueryEvent,
+  type LiveQueryInitialEvent,
+  type LiveQueryDeltaEvent,
+} from './LiveQueryManager';
