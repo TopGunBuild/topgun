@@ -11,3 +11,18 @@
 
 // Data structures
 export * from './ds';
+
+// Attribute system
+export {
+  type Attribute,
+  SimpleAttribute,
+  MultiValueAttribute,
+  simpleAttribute,
+  multiAttribute,
+} from './Attribute';
+
+// Indexes
+export * from './indexes';
+
+// ResultSet
+export * from './resultset';
