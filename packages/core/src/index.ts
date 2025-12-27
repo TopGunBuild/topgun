@@ -149,4 +149,90 @@ export {
 } from './types/cluster';
 
 // Query Engine exports (Phase 7)
-export * from './query';
+// Note: Query from schemas conflicts with Query from query/QueryTypes
+// We rename query engine Query to QueryExpression to avoid conflict
+export {
+  // Data structures
+  SortedMap,
+  // Attribute system
+  SimpleAttribute,
+  MultiValueAttribute,
+  simpleAttribute,
+  multiAttribute,
+  // Indexes
+  HashIndex,
+  NavigableIndex,
+  StandingQueryIndex,
+  FallbackIndex,
+  createPredicateMatcher,
+  // ResultSet
+  SetResultSet,
+  LazyResultSet,
+  IntersectionResultSet,
+  UnionResultSet,
+  FilteringResultSet,
+  SortedResultSet,
+  createFieldComparator,
+  LimitResultSet,
+  // Type Guards
+  isSimpleQuery,
+  isLogicalQuery,
+  // Index Registry
+  IndexRegistry,
+  // Query Optimizer
+  QueryOptimizer,
+  // Standing Query Registry
+  StandingQueryRegistry,
+  // Live Query Manager
+  LiveQueryManager,
+} from './query';
+
+export type {
+  // Attribute system
+  Attribute,
+  // Indexes
+  StandingQueryChange,
+  StandingQueryIndexOptions,
+  Index,
+  IndexQuery,
+  IndexStats,
+  // ResultSet
+  ResultSet,
+  IteratorFactory,
+  PredicateFn,
+  CompareFn,
+  // Query Types (renamed to avoid conflict with schemas.Query)
+  QueryNode,
+  SimpleQueryNode,
+  LogicalQueryNode,
+  QueryOptions,
+  PlanStep,
+  IndexScanStep,
+  FullScanStep,
+  IntersectionStep,
+  UnionStep,
+  FilterStep,
+  NotStep,
+  QueryPlan,
+  // Index Registry
+  IndexRegistryStats,
+  // Query Optimizer
+  QueryOptimizerOptions,
+  // Standing Query Registry
+  StandingQueryRegistryOptions,
+  StandingQueryRegistryStats,
+  // Live Query Manager
+  LiveQueryManagerOptions,
+  LiveQueryManagerStats,
+  LiveQueryCallback,
+  LiveQueryEvent,
+  LiveQueryInitialEvent,
+  LiveQueryDeltaEvent,
+} from './query';
+
+// Re-export Query from query module as QueryExpression to avoid conflict
+export type { Query as QueryExpression } from './query';
+
+// Indexed CRDT exports (Phase 7.07)
+export { IndexedLWWMap } from './IndexedLWWMap';
+export { IndexedORMap, type ORMapQueryResult } from './IndexedORMap';
