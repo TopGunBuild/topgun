@@ -10,3 +10,4 @@ export {
   Quantizers,
   type Quantizer,
 } from './QuantizedNavigableIndex';
+export { FallbackIndex, createPredicateMatcher } from './FallbackIndex';

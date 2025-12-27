@@ -26,3 +26,28 @@ export * from './indexes';
 
 // ResultSet
 export * from './resultset';
+
+// Query Types
+export {
+  type QueryNode,
+  type SimpleQueryNode,
+  type LogicalQueryNode,
+  type Query,
+  type QueryOptions,
+  type PlanStep,
+  type IndexScanStep,
+  type FullScanStep,
+  type IntersectionStep,
+  type UnionStep,
+  type FilterStep,
+  type NotStep,
+  type QueryPlan,
+  isSimpleQuery,
+  isLogicalQuery,
+} from './QueryTypes';
+
+// Index Registry
+export { IndexRegistry, type IndexRegistryStats } from './IndexRegistry';
+
+// Query Optimizer
+export { QueryOptimizer } from './QueryOptimizer';
