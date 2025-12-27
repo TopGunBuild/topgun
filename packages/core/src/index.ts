@@ -147,3 +147,6 @@ export {
   ConsistencyLevel,
   DEFAULT_REPLICATION_CONFIG,
 } from './types/cluster';
+
+// Query Engine exports (Phase 7)
+export * from './query';
