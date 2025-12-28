@@ -23,10 +23,18 @@ export interface QueryNode {
  * Simple query node for attribute-based conditions.
  */
 export interface SimpleQueryNode extends QueryNode {
-  type: 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'like' | 'regex' | 'in' | 'has';
+  type: 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'between' | 'like' | 'regex' | 'in' | 'has';
   attribute: string;
   value?: unknown;
   values?: unknown[];
+  /** For 'between' queries: lower bound */
+  from?: unknown;
+  /** For 'between' queries: upper bound */
+  to?: unknown;
+  /** For 'between' queries: include lower bound (default: true) */
+  fromInclusive?: boolean;
+  /** For 'between' queries: include upper bound (default: false) */
+  toInclusive?: boolean;
 }
 
 /**
@@ -153,7 +161,7 @@ export interface QueryPlan {
  * Check if a query is a simple query node.
  */
 export function isSimpleQuery(query: Query): query is SimpleQueryNode {
-  return ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'like', 'regex', 'in', 'has'].includes(
+  return ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'between', 'like', 'regex', 'in', 'has'].includes(
     query.type
   );
 }

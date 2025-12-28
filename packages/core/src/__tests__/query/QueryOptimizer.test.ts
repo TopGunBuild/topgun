@@ -101,6 +101,33 @@ describe('QueryOptimizer', () => {
         expect(plan.root.query.type).toBe('has');
       }
     });
+
+    it('should use NavigableIndex for between query', () => {
+      const ageAttr = simpleAttribute<TestRecord, number>('age', (r) => r.age);
+      const ageIndex = new NavigableIndex<string, TestRecord, number>(ageAttr);
+      registry.addIndex(ageIndex);
+
+      const query: SimpleQueryNode = {
+        type: 'between',
+        attribute: 'age',
+        from: 18,
+        to: 65,
+        fromInclusive: true,
+        toInclusive: false,
+      };
+      const plan = optimizer.optimize(query);
+
+      expect(plan.usesIndexes).toBe(true);
+      expect(plan.root.type).toBe('index-scan');
+      if (plan.root.type === 'index-scan') {
+        expect(plan.root.index).toBe(ageIndex);
+        expect(plan.root.query.type).toBe('between');
+        expect(plan.root.query.from).toBe(18);
+        expect(plan.root.query.to).toBe(65);
+        expect(plan.root.query.fromInclusive).toBe(true);
+        expect(plan.root.query.toInclusive).toBe(false);
+      }
+    });
   });
 
   describe('AND queries', () => {

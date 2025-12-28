@@ -350,6 +350,14 @@ export class QueryOptimizer<K, V> {
         return { type: 'in', values: query.values };
       case 'has':
         return { type: 'has' };
+      case 'between':
+        return {
+          type: 'between',
+          from: query.from,
+          to: query.to,
+          fromInclusive: query.fromInclusive,
+          toInclusive: query.toInclusive,
+        };
       default:
         throw new Error(`Cannot build index query for type: ${query.type}`);
     }
