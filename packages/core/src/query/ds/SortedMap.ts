@@ -147,26 +147,31 @@ export class SortedMap<K, V> {
    * Iterate over entries where key < value (or <= if inclusive).
    * Time complexity: O(log N + K) where K is the number of results
    *
+   * Note: This method iterates from the beginning of the tree.
+   * The O(log N) component is for finding the upper bound,
+   * and O(K) is for yielding K results.
+   *
    * @param key - Upper bound
    * @param inclusive - Include the bound in results (default: false)
    */
   *lessThan(key: K, inclusive: boolean = false): IterableIterator<[K, V]> {
-    // Iterate from the beginning up to key
-    for (const [k, v] of this.tree.entries()) {
-      const cmp = this.comparator(k, key);
+    // Find the upper bound key
+    const upperKey = inclusive ? this.floorKey(key) : this.lowerKey(key);
 
-      if (cmp > 0) {
-        break;
-      }
+    if (upperKey === undefined) {
+      return; // No keys less than the given key
+    }
 
-      if (cmp === 0) {
-        if (inclusive) {
-          yield [k, v];
-        }
-        break;
-      }
+    // Use getRange from minKey to upperKey (inclusive)
+    const minKey = this.tree.minKey();
+    if (minKey === undefined) {
+      return;
+    }
 
-      yield [k, v];
+    // getRange(lo, hi, includeHi) - returns entries in [lo, hi] or [lo, hi)
+    const entries = this.tree.getRange(minKey, upperKey, true);
+    for (const entry of entries) {
+      yield entry;
     }
   }
 
@@ -269,7 +274,8 @@ export class SortedMap<K, V> {
 
   /**
    * Get the entry at a specific index (0-based).
-   * Time complexity: O(log N)
+   * Time complexity: O(N) - requires linear scan from the beginning.
+   * Note: B+ trees do not support O(log N) index-based access.
    */
   at(index: number): [K, V] | undefined {
     if (index < 0 || index >= this.tree.size) {
@@ -291,14 +297,7 @@ export class SortedMap<K, V> {
    * Time complexity: O(log N)
    */
   lowerKey(key: K): K | undefined {
-    let result: K | undefined;
-    for (const [k] of this.tree.entries()) {
-      if (this.comparator(k, key) >= 0) {
-        break;
-      }
-      result = k;
-    }
-    return result;
+    return this.tree.nextLowerKey(key);
   }
 
   /**
@@ -306,14 +305,12 @@ export class SortedMap<K, V> {
    * Time complexity: O(log N)
    */
   floorKey(key: K): K | undefined {
-    let result: K | undefined;
-    for (const [k] of this.tree.entries()) {
-      if (this.comparator(k, key) > 0) {
-        break;
-      }
-      result = k;
+    // Check if exact key exists first
+    if (this.tree.has(key)) {
+      return key;
     }
-    return result;
+    // Otherwise find the next lower key
+    return this.tree.nextLowerKey(key);
   }
 
   /**

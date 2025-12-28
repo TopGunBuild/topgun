@@ -478,6 +478,81 @@ describe('SortedMap', () => {
       // Range query should be fast (< 50ms)
       expect(elapsed).toBeLessThan(50);
     });
+
+    it('should maintain O(log N) for lowerKey (worst case)', () => {
+      const map = new SortedMap<number, string>();
+
+      // Insert 100k entries
+      for (let i = 0; i < 100000; i++) {
+        map.set(i, `value-${i}`);
+      }
+
+      // Perform 10k lowerKey lookups at the end of the tree (worst case for O(N))
+      const start = performance.now();
+      for (let i = 0; i < 10000; i++) {
+        map.lowerKey(99999);
+      }
+      const elapsed = performance.now() - start;
+
+      // 10k lookups should be very fast (< 100ms) if O(log N)
+      // Would be > 1000ms if O(N)
+      expect(elapsed).toBeLessThan(100);
+    });
+
+    it('should maintain O(log N) for floorKey (worst case)', () => {
+      const map = new SortedMap<number, string>();
+
+      // Insert 100k entries
+      for (let i = 0; i < 100000; i++) {
+        map.set(i, `value-${i}`);
+      }
+
+      // Perform 10k floorKey lookups at the end of the tree
+      const start = performance.now();
+      for (let i = 0; i < 10000; i++) {
+        map.floorKey(99999);
+      }
+      const elapsed = performance.now() - start;
+
+      // 10k lookups should be very fast (< 100ms) if O(log N)
+      expect(elapsed).toBeLessThan(100);
+    });
+
+    it('should maintain O(log N) for higherKey', () => {
+      const map = new SortedMap<number, string>();
+
+      // Insert 100k entries
+      for (let i = 0; i < 100000; i++) {
+        map.set(i, `value-${i}`);
+      }
+
+      // Perform 10k higherKey lookups
+      const start = performance.now();
+      for (let i = 0; i < 10000; i++) {
+        map.higherKey(50000);
+      }
+      const elapsed = performance.now() - start;
+
+      expect(elapsed).toBeLessThan(100);
+    });
+
+    it('should maintain O(log N) for ceilingKey', () => {
+      const map = new SortedMap<number, string>();
+
+      // Insert 100k entries
+      for (let i = 0; i < 100000; i++) {
+        map.set(i, `value-${i}`);
+      }
+
+      // Perform 10k ceilingKey lookups
+      const start = performance.now();
+      for (let i = 0; i < 10000; i++) {
+        map.ceilingKey(50000);
+      }
+      const elapsed = performance.now() - start;
+
+      expect(elapsed).toBeLessThan(100);
+    });
   });
 
   describe('edge cases', () => {
