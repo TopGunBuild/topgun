@@ -106,13 +106,41 @@ For more complex filtering, use the `predicate` field:
 | `or(...predicates)` | Logical OR | `Predicates.or(p1, p2)` |
 | `not(predicate)` | Logical NOT | `Predicates.not(p1)` |
 
+## Change Tracking
+
+TopGun tracks not just the current state, but **what changed**. This enables:
+
+- Efficient UI updates (only re-render changed items)
+- Add/remove animations (framer-motion, react-spring)
+- Notifications ("New item added")
+- Optimistic UI rollback on specific keys
+
+```typescript
+const query = client.query('todos');
+
+// Subscribe to changes
+const unsubscribe = query.onChanges((changes) => {
+  for (const change of changes) {
+    console.log(`${change.type}: ${change.key}`, change.value);
+    // change.type: 'add' | 'update' | 'remove'
+    // change.previousValue: available for update/remove
+  }
+});
+
+// Get pending changes without subscribing
+const pending = query.getPendingChanges();
+
+// Consume and clear changes
+const consumed = query.consumeChanges();
+```
+
 ## React Integration
 
 If you are using React, we recommend using the `useQuery` hook which handles subscription management automatically.
 
 <div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-4 not-prose">
   <p className="text-sm text-blue-800 dark:text-blue-200">
-    See the <a href="/docs/reference/react-hooks" className="underline hover:no-underline">React Hooks</a> reference for detailed documentation on <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">useQuery</code>, <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">useMutation</code>, and other hooks.
+    See the <a href="/docs/reference/react-hooks" className="underline hover:no-underline">React Hooks</a> reference for detailed documentation on <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">useQuery</code> (including change tracking), <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">useMutation</code>, and other hooks.
   </p>
 </div>
 

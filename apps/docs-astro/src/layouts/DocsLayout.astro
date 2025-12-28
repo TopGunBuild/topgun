@@ -1,7 +1,6 @@
 ---
 import '../styles/global.css';
 import { NavbarWrapper } from '../components/NavbarWrapper';
-import { Footer } from '../components/Footer';
 import { DocsSidebar } from '../components/docs/DocsSidebar';
 import { TableOfContents } from '../components/docs/TableOfContents';
 import SEO from '../components/SEO.astro';
@@ -34,7 +33,7 @@ const currentPath = Astro.url.pathname;
                 if (typeof localStorage !== 'undefined' && localStorage.getItem('theme')) {
                     return localStorage.getItem('theme');
                 }
-                return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+                return 'dark';
             };
             const isDark = getThemePreference() === 'dark';
             document.documentElement.classList[isDark ? 'add' : 'remove']('dark');

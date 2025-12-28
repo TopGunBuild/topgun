@@ -22,3 +22,32 @@ export {
 
 // Cluster module (Phase 4)
 export * from './cluster';
+
+// Entry Processor (Phase 5.03)
+export { ProcessorSandbox, ProcessorSandboxConfig, DEFAULT_SANDBOX_CONFIG } from './ProcessorSandbox';
+export { EntryProcessorHandler, EntryProcessorHandlerConfig } from './handlers/EntryProcessorHandler';
+
+// Event Journal (Phase 5.04)
+export {
+  EventJournalService,
+  EventJournalServiceConfig,
+  DEFAULT_JOURNAL_SERVICE_CONFIG,
+  ExportOptions,
+} from './EventJournalService';
+
+// Conflict Resolver (Phase 5.05)
+export {
+  ConflictResolverService,
+  ConflictResolverServiceConfig,
+  DEFAULT_CONFLICT_RESOLVER_CONFIG,
+} from './ConflictResolverService';
+export {
+  MapWithResolver,
+  MapWithResolverConfig,
+  SetWithResolverResult,
+} from './MapWithResolver';
+export {
+  ConflictResolverHandler,
+  ConflictResolverHandlerConfig,
+  MergeWithResolverResult,
+} from './handlers/ConflictResolverHandler';

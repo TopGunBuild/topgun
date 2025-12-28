@@ -1,4 +1,5 @@
 import { HLC, LWWMap, ORMap, serialize, deserialize, evaluatePredicate } from '@topgunbuild/core';
+import type { EntryProcessorDef, EntryProcessorResult, EntryProcessKeyResult } from '@topgunbuild/core';
 import type { LWWRecord, ORMapRecord, Timestamp } from '@topgunbuild/core';
 import type { IStorageAdapter } from './IStorageAdapter';
 import { QueryHandle } from './QueryHandle';
@@ -18,6 +19,7 @@ import type {
 import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 import type { IConnectionProvider } from './types';
 import { SingleServerProvider } from './connection/SingleServerProvider';
+import { ConflictResolverClient } from './ConflictResolverClient';
 
 export interface OpLogEntry {
   id: string; // Unique ID for the operation
@@ -113,6 +115,9 @@ export class SyncEngine {
     timeoutHandle?: ReturnType<typeof setTimeout>;
   }> = new Map();
 
+  // Conflict Resolver client (Phase 5.05)
+  private readonly conflictResolverClient: ConflictResolverClient;
+
   constructor(config: SyncEngineConfig) {
     // Validate config: either serverUrl or connectionProvider required
     if (!config.serverUrl && !config.connectionProvider) {
@@ -157,6 +162,9 @@ export class SyncEngine {
       this.useConnectionProvider = false;
       this.initConnection();
     }
+
+    // Initialize Conflict Resolver client (Phase 5.05)
+    this.conflictResolverClient = new ConflictResolverClient(this);
 
     this.loadOpLog();
   }
@@ -766,6 +774,9 @@ export class SyncEngine {
   }
 
   private async handleServerMessage(message: any): Promise<void> {
+    // Emit to generic listeners (used by EventJournalReader)
+    this.emitMessage(message);
+
     switch (message.type) {
       case 'BATCH': {
         // Unbatch and process each message
@@ -1157,6 +1168,63 @@ export class SyncEngine {
             logger.info({ mapName, added: totalAdded, updated: totalUpdated }, 'Merged ORMap diff from server');
           }
         }
+        break;
+      }
+
+      // ============ PN Counter Message Handlers (Phase 5.2) ============
+
+      case 'COUNTER_UPDATE': {
+        const { name, state } = message.payload;
+        logger.debug({ name }, 'Received COUNTER_UPDATE');
+        this.handleCounterUpdate(name, state);
+        break;
+      }
+
+      case 'COUNTER_RESPONSE': {
+        // Initial counter state response
+        const { name, state } = message.payload;
+        logger.debug({ name }, 'Received COUNTER_RESPONSE');
+        this.handleCounterUpdate(name, state);
+        break;
+      }
+
+      // ============ Entry Processor Message Handlers (Phase 5.03) ============
+
+      case 'ENTRY_PROCESS_RESPONSE': {
+        logger.debug({ requestId: message.requestId, success: message.success }, 'Received ENTRY_PROCESS_RESPONSE');
+        this.handleEntryProcessResponse(message);
+        break;
+      }
+
+      case 'ENTRY_PROCESS_BATCH_RESPONSE': {
+        logger.debug({ requestId: message.requestId }, 'Received ENTRY_PROCESS_BATCH_RESPONSE');
+        this.handleEntryProcessBatchResponse(message);
+        break;
+      }
+
+      // ============ Conflict Resolver Message Handlers (Phase 5.05) ============
+
+      case 'REGISTER_RESOLVER_RESPONSE': {
+        logger.debug({ requestId: message.requestId, success: message.success }, 'Received REGISTER_RESOLVER_RESPONSE');
+        this.conflictResolverClient.handleRegisterResponse(message);
+        break;
+      }
+
+      case 'UNREGISTER_RESOLVER_RESPONSE': {
+        logger.debug({ requestId: message.requestId, success: message.success }, 'Received UNREGISTER_RESOLVER_RESPONSE');
+        this.conflictResolverClient.handleUnregisterResponse(message);
+        break;
+      }
+
+      case 'LIST_RESOLVERS_RESPONSE': {
+        logger.debug({ requestId: message.requestId }, 'Received LIST_RESOLVERS_RESPONSE');
+        this.conflictResolverClient.handleListResponse(message);
+        break;
+      }
+
+      case 'MERGE_REJECTED': {
+        logger.debug({ mapName: message.mapName, key: message.key, reason: message.reason }, 'Received MERGE_REJECTED');
+        this.conflictResolverClient.handleMergeRejected(message);
         break;
       }
     }
@@ -1785,5 +1853,355 @@ export class SyncEngine {
       pending.reject(error);
     }
     this.pendingWriteConcernPromises.clear();
+  }
+
+  // ============================================
+  // PN Counter Methods (Phase 5.2)
+  // ============================================
+
+  /** Counter update listeners by name */
+  private counterUpdateListeners: Map<string, Set<(state: any) => void>> = new Map();
+
+  /**
+   * Subscribe to counter updates from server.
+   * @param name Counter name
+   * @param listener Callback when counter state is updated
+   * @returns Unsubscribe function
+   */
+  public onCounterUpdate(name: string, listener: (state: any) => void): () => void {
+    if (!this.counterUpdateListeners.has(name)) {
+      this.counterUpdateListeners.set(name, new Set());
+    }
+    this.counterUpdateListeners.get(name)!.add(listener);
+
+    return () => {
+      this.counterUpdateListeners.get(name)?.delete(listener);
+      if (this.counterUpdateListeners.get(name)?.size === 0) {
+        this.counterUpdateListeners.delete(name);
+      }
+    };
+  }
+
+  /**
+   * Request initial counter state from server.
+   * @param name Counter name
+   */
+  public requestCounter(name: string): void {
+    if (this.isAuthenticated()) {
+      this.sendMessage({
+        type: 'COUNTER_REQUEST',
+        payload: { name }
+      });
+    }
+  }
+
+  /**
+   * Sync local counter state to server.
+   * @param name Counter name
+   * @param state Counter state to sync
+   */
+  public syncCounter(name: string, state: any): void {
+    if (this.isAuthenticated()) {
+      // Convert Maps to objects for serialization
+      const stateObj = {
+        positive: Object.fromEntries(state.positive),
+        negative: Object.fromEntries(state.negative),
+      };
+
+      this.sendMessage({
+        type: 'COUNTER_SYNC',
+        payload: {
+          name,
+          state: stateObj
+        }
+      });
+    }
+  }
+
+  /**
+   * Handle incoming counter update from server.
+   * Called by handleServerMessage for COUNTER_UPDATE messages.
+   */
+  private handleCounterUpdate(name: string, stateObj: { positive: Record<string, number>; negative: Record<string, number> }): void {
+    // Convert objects to Maps
+    const state = {
+      positive: new Map(Object.entries(stateObj.positive)),
+      negative: new Map(Object.entries(stateObj.negative)),
+    };
+
+    const listeners = this.counterUpdateListeners.get(name);
+    if (listeners) {
+      for (const listener of listeners) {
+        try {
+          listener(state);
+        } catch (e) {
+          logger.error({ err: e, counterName: name }, 'Counter update listener error');
+        }
+      }
+    }
+  }
+
+  // ============================================
+  // Entry Processor Methods (Phase 5.03)
+  // ============================================
+
+  /** Pending entry processor requests by requestId */
+  private pendingProcessorRequests: Map<string, {
+    resolve: (result: EntryProcessorResult<any>) => void;
+    reject: (error: Error) => void;
+    timeout: ReturnType<typeof setTimeout>;
+  }> = new Map();
+
+  /** Pending batch entry processor requests by requestId */
+  private pendingBatchProcessorRequests: Map<string, {
+    resolve: (results: Map<string, EntryProcessorResult<any>>) => void;
+    reject: (error: Error) => void;
+    timeout: ReturnType<typeof setTimeout>;
+  }> = new Map();
+
+  /** Default timeout for entry processor requests (ms) */
+  private static readonly PROCESSOR_TIMEOUT = 30000;
+
+  /**
+   * Execute an entry processor on a single key atomically.
+   *
+   * @param mapName Name of the map
+   * @param key Key to process
+   * @param processor Processor definition
+   * @returns Promise resolving to the processor result
+   */
+  public async executeOnKey<V, R = V>(
+    mapName: string,
+    key: string,
+    processor: EntryProcessorDef<V, R>,
+  ): Promise<EntryProcessorResult<R>> {
+    if (!this.isAuthenticated()) {
+      return {
+        success: false,
+        error: 'Not connected to server',
+      };
+    }
+
+    const requestId = crypto.randomUUID();
+
+    return new Promise((resolve, reject) => {
+      // Set timeout
+      const timeout = setTimeout(() => {
+        this.pendingProcessorRequests.delete(requestId);
+        reject(new Error('Entry processor request timed out'));
+      }, SyncEngine.PROCESSOR_TIMEOUT);
+
+      // Store pending request
+      this.pendingProcessorRequests.set(requestId, {
+        resolve: (result) => {
+          clearTimeout(timeout);
+          resolve(result);
+        },
+        reject,
+        timeout,
+      });
+
+      // Send request
+      const sent = this.sendMessage({
+        type: 'ENTRY_PROCESS',
+        requestId,
+        mapName,
+        key,
+        processor: {
+          name: processor.name,
+          code: processor.code,
+          args: processor.args,
+        },
+      }, key);
+
+      if (!sent) {
+        this.pendingProcessorRequests.delete(requestId);
+        clearTimeout(timeout);
+        reject(new Error('Failed to send entry processor request'));
+      }
+    });
+  }
+
+  /**
+   * Execute an entry processor on multiple keys.
+   *
+   * @param mapName Name of the map
+   * @param keys Keys to process
+   * @param processor Processor definition
+   * @returns Promise resolving to a map of key -> result
+   */
+  public async executeOnKeys<V, R = V>(
+    mapName: string,
+    keys: string[],
+    processor: EntryProcessorDef<V, R>,
+  ): Promise<Map<string, EntryProcessorResult<R>>> {
+    if (!this.isAuthenticated()) {
+      const results = new Map<string, EntryProcessorResult<R>>();
+      const error: EntryProcessorResult<R> = {
+        success: false,
+        error: 'Not connected to server',
+      };
+      for (const key of keys) {
+        results.set(key, error);
+      }
+      return results;
+    }
+
+    const requestId = crypto.randomUUID();
+
+    return new Promise((resolve, reject) => {
+      // Set timeout
+      const timeout = setTimeout(() => {
+        this.pendingBatchProcessorRequests.delete(requestId);
+        reject(new Error('Entry processor batch request timed out'));
+      }, SyncEngine.PROCESSOR_TIMEOUT);
+
+      // Store pending request
+      this.pendingBatchProcessorRequests.set(requestId, {
+        resolve: (results) => {
+          clearTimeout(timeout);
+          resolve(results);
+        },
+        reject,
+        timeout,
+      });
+
+      // Send request
+      const sent = this.sendMessage({
+        type: 'ENTRY_PROCESS_BATCH',
+        requestId,
+        mapName,
+        keys,
+        processor: {
+          name: processor.name,
+          code: processor.code,
+          args: processor.args,
+        },
+      });
+
+      if (!sent) {
+        this.pendingBatchProcessorRequests.delete(requestId);
+        clearTimeout(timeout);
+        reject(new Error('Failed to send entry processor batch request'));
+      }
+    });
+  }
+
+  /**
+   * Handle entry processor response from server.
+   * Called by handleServerMessage for ENTRY_PROCESS_RESPONSE messages.
+   */
+  private handleEntryProcessResponse(message: {
+    requestId: string;
+    success: boolean;
+    result?: unknown;
+    newValue?: unknown;
+    error?: string;
+  }): void {
+    const pending = this.pendingProcessorRequests.get(message.requestId);
+    if (pending) {
+      this.pendingProcessorRequests.delete(message.requestId);
+      pending.resolve({
+        success: message.success,
+        result: message.result,
+        newValue: message.newValue,
+        error: message.error,
+      });
+    }
+  }
+
+  /**
+   * Handle entry processor batch response from server.
+   * Called by handleServerMessage for ENTRY_PROCESS_BATCH_RESPONSE messages.
+   */
+  private handleEntryProcessBatchResponse(message: {
+    requestId: string;
+    results: Record<string, EntryProcessKeyResult>;
+  }): void {
+    const pending = this.pendingBatchProcessorRequests.get(message.requestId);
+    if (pending) {
+      this.pendingBatchProcessorRequests.delete(message.requestId);
+
+      // Convert Record to Map
+      const resultsMap = new Map<string, EntryProcessorResult<any>>();
+      for (const [key, result] of Object.entries(message.results)) {
+        resultsMap.set(key, {
+          success: result.success,
+          result: result.result,
+          newValue: result.newValue,
+          error: result.error,
+        });
+      }
+
+      pending.resolve(resultsMap);
+    }
+  }
+
+  // ============================================
+  // Event Journal Methods (Phase 5.04)
+  // ============================================
+
+  /** Message listeners for journal and other generic messages */
+  private messageListeners: Set<(message: any) => void> = new Set();
+
+  /**
+   * Subscribe to all incoming messages.
+   * Used by EventJournalReader to receive journal events.
+   *
+   * @param event Event type (currently only 'message')
+   * @param handler Message handler
+   */
+  public on(event: 'message', handler: (message: any) => void): void {
+    if (event === 'message') {
+      this.messageListeners.add(handler);
+    }
+  }
+
+  /**
+   * Unsubscribe from incoming messages.
+   *
+   * @param event Event type (currently only 'message')
+   * @param handler Message handler to remove
+   */
+  public off(event: 'message', handler: (message: any) => void): void {
+    if (event === 'message') {
+      this.messageListeners.delete(handler);
+    }
+  }
+
+  /**
+   * Send a message to the server.
+   * Public method for EventJournalReader and other components.
+   *
+   * @param message Message object to send
+   */
+  public send(message: any): void {
+    this.sendMessage(message);
+  }
+
+  /**
+   * Emit message to all listeners.
+   * Called internally when a message is received.
+   */
+  private emitMessage(message: any): void {
+    for (const listener of this.messageListeners) {
+      try {
+        listener(message);
+      } catch (e) {
+        logger.error({ err: e }, 'Message listener error');
+      }
+    }
+  }
+
+  // ============================================
+  // Conflict Resolver Client (Phase 5.05)
+  // ============================================
+
+  /**
+   * Get the conflict resolver client for registering custom resolvers
+   * and subscribing to merge rejection events.
+   */
+  public getConflictResolverClient(): ConflictResolverClient {
+    return this.conflictResolverClient;
   }
 }

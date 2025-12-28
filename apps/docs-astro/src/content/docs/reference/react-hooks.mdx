@@ -5,7 +5,7 @@ order: 24
 ---
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
-import { ChevronRight, Zap, Database, MessageSquare, Settings } from 'lucide-react';
+import { ChevronRight, Zap, Database, MessageSquare, Settings, ScrollText, Shield, AlertTriangle } from 'lucide-react';
 
 export const setupCode = `import { TopGunClient } from '@topgunbuild/client';
 import { TopGunProvider } from '@topgunbuild/react';
@@ -37,6 +37,76 @@ function TodoList() {
     <ul>
       {data.map(todo => <li key={todo._key}>{todo.title}</li>)}
     </ul>
+  );
+}`;
+
+export const useQueryChangesCode = `import { useQuery } from '@topgunbuild/react';
+import { useEffect } from 'react';
+import { toast } from 'your-toast-library';
+
+function TodoListWithNotifications() {
+  const { data, lastChange, changes, clearChanges } = useQuery('todos');
+
+  // Show toast for new items
+  useEffect(() => {
+    if (lastChange?.type === 'add') {
+      toast.success(\`New todo: \${lastChange.value.title}\`);
+    }
+  }, [lastChange]);
+
+  // Process all accumulated changes
+  useEffect(() => {
+    if (changes.length > 0) {
+      console.log('Changes since last render:', changes);
+      clearChanges(); // Clear after processing
+    }
+  }, [changes, clearChanges]);
+
+  return <ul>{data.map(todo => <li key={todo._key}>{todo.title}</li>)}</ul>;
+}`;
+
+export const useQueryCallbacksCode = `import { useQuery } from '@topgunbuild/react';
+
+function TodoListWithCallbacks() {
+  const { data } = useQuery('todos', {}, {
+    onAdd: (key, todo) => {
+      showNotification(\`Added: \${todo.title}\`);
+    },
+    onUpdate: (key, todo, previous) => {
+      console.log(\`Updated \${key}: \${previous.title} → \${todo.title}\`);
+    },
+    onRemove: (key, previous) => {
+      showNotification(\`Removed: \${previous.title}\`);
+    },
+    onChange: (change) => {
+      // Called for all change types
+      analytics.track('data_change', { type: change.type, key: change.key });
+    },
+    maxChanges: 100 // Limit accumulated changes (default: 1000)
+  });
+
+  return <ul>{data.map(todo => <li key={todo._key}>{todo.title}</li>)}</ul>;
+}`;
+
+export const useQueryAnimationCode = `import { useQuery } from '@topgunbuild/react';
+import { AnimatePresence, motion } from 'framer-motion';
+
+function AnimatedTodoList() {
+  const { data } = useQuery('todos');
+
+  return (
+    <AnimatePresence>
+      {data.map(todo => (
+        <motion.li
+          key={todo._key}
+          initial={{ opacity: 0, x: -20 }}
+          animate={{ opacity: 1, x: 0 }}
+          exit={{ opacity: 0, x: 20 }}
+        >
+          {todo.title}
+        </motion.li>
+      ))}
+    </AnimatePresence>
   );
 }`;
 
@@ -112,6 +182,77 @@ function ChatRoom({ roomId }) {
   return <button onClick={() => sendMessage('Hello!')}>Send</button>;
 }`;
 
+export const useEventJournalCode = `import { useEventJournal } from '@topgunbuild/react';
+
+function ActivityFeed() {
+  const { events, lastEvent, isSubscribed } = useEventJournal({
+    mapName: 'orders',        // Filter by map name (optional)
+    types: ['PUT', 'UPDATE'], // Filter by event types (optional)
+    maxEvents: 50,            // Max events to keep in state (default: 100)
+  });
+
+  return (
+    <div>
+      <h2>Recent Activity {isSubscribed && '🟢'}</h2>
+      <ul>
+        {events.map((event) => (
+          <li key={event.sequence.toString()}>
+            [{event.type}] {event.mapName}:{event.key}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}`;
+
+export const useEventJournalCallbackCode = `import { useEventJournal } from '@topgunbuild/react';
+import { toast } from 'your-toast-library';
+
+function OrderNotifications() {
+  const { events } = useEventJournal({
+    mapName: 'orders',
+    types: ['PUT'],
+    onEvent: (event) => {
+      // Called for each new event
+      toast.success(\`New order: \${event.key}\`);
+    },
+  });
+
+  return <OrderList orders={events} />;
+}`;
+
+export const useEventJournalHistoryCode = `import { useEventJournal } from '@topgunbuild/react';
+import { useState } from 'react';
+
+function AuditLog() {
+  const { events, readFrom, getLatestSequence, clearEvents } = useEventJournal({
+    paused: true, // Don't subscribe, just use readFrom
+  });
+
+  const [history, setHistory] = useState([]);
+
+  const loadHistory = async () => {
+    const latestSeq = await getLatestSequence();
+    const startSeq = latestSeq > 100n ? latestSeq - 100n : 0n;
+    const historicalEvents = await readFrom(startSeq, 100);
+    setHistory(historicalEvents);
+  };
+
+  return (
+    <div>
+      <button onClick={loadHistory}>Load History</button>
+      <button onClick={clearEvents}>Clear</button>
+      <ul>
+        {history.map((e) => (
+          <li key={e.sequence.toString()}>
+            {new Date(e.timestamp.millis).toISOString()} - {e.type} {e.key}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}`;
+
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap not-prose">
   <span className="text-foreground font-medium">Docs</span>
   <ChevronRight className="w-4 h-4" />
@@ -150,6 +291,60 @@ reactive applications with TopGun.
   <CodeBlock title="components/TodoList.tsx" language="typescript" code={useQueryCode} />
 </div>
 
+### Change Tracking
+
+The `useQuery` hook provides built-in change tracking to help you understand **what** changed, not just the new state. This enables:
+
+- Efficient React re-renders (only changed items)
+- Add/remove animations (framer-motion, react-spring)
+- Optimistic UI rollback on specific keys
+- "New item added" notifications
+
+#### Return Values
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `data` | `T[]` | Current query results |
+| `loading` | `boolean` | Loading state |
+| `error` | `Error \| null` | Error state |
+| `lastChange` | `ChangeEvent<T> \| null` | Most recent change |
+| `changes` | `ChangeEvent<T>[]` | All changes since last `clearChanges()` |
+| `clearChanges` | `() => void` | Clear accumulated changes |
+
+#### ChangeEvent Structure
+
+```typescript
+interface ChangeEvent<T> {
+  type: 'add' | 'update' | 'remove';
+  key: string;
+  value?: T;           // New value (for add/update)
+  previousValue?: T;   // Previous value (for update/remove)
+  timestamp: number;   // When the change occurred
+}
+```
+
+#### Using lastChange and changes
+
+<div className="not-prose">
+  <CodeBlock title="components/TodoListWithNotifications.tsx" language="typescript" code={useQueryChangesCode} />
+</div>
+
+#### Callback Options
+
+For a more declarative approach, use the callback options:
+
+<div className="not-prose">
+  <CodeBlock title="components/TodoListWithCallbacks.tsx" language="typescript" code={useQueryCallbacksCode} />
+</div>
+
+#### Animation Integration
+
+The change tracking works seamlessly with animation libraries like framer-motion:
+
+<div className="not-prose">
+  <CodeBlock title="components/AnimatedTodoList.tsx" language="typescript" code={useQueryAnimationCode} />
+</div>
+
 ## useMap / useORMap
 
 <div className="flex items-center gap-2 mb-4 not-prose">
@@ -172,6 +367,164 @@ Use `useMap` for Last-Write-Wins maps (simple key-value) and `useORMap` for Obse
 
 <div className="not-prose">
   <CodeBlock title="components/CreateTodo.tsx" language="typescript" code={useMutationCode} />
+</div>
+
+## usePNCounter
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Zap className="w-6 h-6 text-green-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Subscribe to a distributed counter that supports increment/decrement with offline support.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="components/LikeButton.tsx" language="typescript" code={`import { usePNCounter } from '@topgunbuild/react';
+
+function LikeButton({ postId }) {
+  const { value, increment, decrement, add, loading } = usePNCounter(\`likes:\${postId}\`);
+
+  return (
+    <div className="flex items-center gap-2">
+      <button onClick={decrement} disabled={loading}>-</button>
+      <span>{value}</span>
+      <button onClick={increment} disabled={loading}>+</button>
+    </div>
+  );
+}`} />
+</div>
+
+### Return Values
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `value` | `number` | Current counter value |
+| `loading` | `boolean` | True while initial state is loading |
+| `increment` | `() => void` | Increment by 1 |
+| `decrement` | `() => void` | Decrement by 1 |
+| `add` | `(delta: number) => void` | Add arbitrary amount (positive or negative) |
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>Offline Support:</strong> Counter operations work offline and are persisted to IndexedDB.
+    Changes sync automatically when the connection is restored.
+    See the <a href="/docs/guides/pn-counter" className="underline">PN-Counter Guide</a> for more details.
+  </p>
+</div>
+
+## useEntryProcessor
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Zap className="w-6 h-6 text-purple-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Execute atomic read-modify-write operations on the server with loading and error states.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="components/LikeButton.tsx" language="typescript" code={`import { useEntryProcessor } from '@topgunbuild/react';
+import { BuiltInProcessors } from '@topgunbuild/core';
+import { useMemo } from 'react';
+
+function LikeButton({ postId }) {
+  const processor = useMemo(() => BuiltInProcessors.INCREMENT(1), []);
+  const { execute, executing, lastResult, error } = useEntryProcessor('likes', processor);
+
+  const handleLike = async () => {
+    const result = await execute(postId);
+    if (result.success) {
+      console.log('New count:', result.newValue);
+    }
+  };
+
+  return (
+    <button onClick={handleLike} disabled={executing}>
+      {executing ? '...' : 'Like'}
+    </button>
+  );
+}`} />
+</div>
+
+### Return Values
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `execute` | `(key: string, args?: unknown) => Promise<EntryProcessorResult>` | Execute processor on a key |
+| `executeMany` | `(keys: string[], args?: unknown) => Promise<Map<string, EntryProcessorResult>>` | Execute on multiple keys |
+| `executing` | `boolean` | True while operation is in progress |
+| `lastResult` | `EntryProcessorResult \| null` | Most recent execution result |
+| `error` | `Error \| null` | Last error encountered |
+| `reset` | `() => void` | Clear lastResult and error |
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>Atomic Operations:</strong> Entry processors run on the server, solving race conditions in read-modify-write scenarios.
+    See the <a href="/docs/guides/entry-processor" className="underline">Entry Processor Guide</a> for more details.
+  </p>
+</div>
+
+## useEventJournal
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <ScrollText className="w-6 h-6 text-indigo-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Subscribe to the Event Journal to receive real-time notifications of all map changes (PUT, UPDATE, DELETE).</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="components/ActivityFeed.tsx" language="typescript" code={useEventJournalCode} />
+</div>
+
+### Return Values
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `events` | `JournalEvent[]` | Array of recent events (newest last) |
+| `lastEvent` | `JournalEvent \| null` | Most recently received event |
+| `isSubscribed` | `boolean` | Whether subscription is active |
+| `clearEvents` | `() => void` | Clear accumulated events |
+| `readFrom` | `(sequence: bigint, limit?: number) => Promise<JournalEvent[]>` | Read historical events |
+| `getLatestSequence` | `() => Promise<bigint>` | Get the latest sequence number |
+
+### JournalEvent Structure
+
+```typescript
+interface JournalEvent {
+  sequence: bigint;           // Monotonically increasing ID
+  type: 'PUT' | 'UPDATE' | 'DELETE';
+  mapName: string;            // Name of the map that changed
+  key: string;                // Key that was modified
+  value?: unknown;            // New value (undefined for DELETE)
+  previousValue?: unknown;    // Previous value (for UPDATE/DELETE)
+  timestamp: Timestamp;       // HLC timestamp
+  nodeId: string;             // Node that made the change
+  metadata?: Record<string, unknown>;
+}
+```
+
+### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `mapName` | `string` | Filter events by map name |
+| `types` | `('PUT' \| 'UPDATE' \| 'DELETE')[]` | Filter by event types |
+| `fromSequence` | `bigint` | Start receiving from this sequence |
+| `maxEvents` | `number` | Max events to keep in state (default: 100) |
+| `onEvent` | `(event: JournalEvent) => void` | Callback for each new event |
+| `paused` | `boolean` | Pause subscription |
+
+### With Event Callback
+
+<div className="not-prose">
+  <CodeBlock title="components/OrderNotifications.tsx" language="typescript" code={useEventJournalCallbackCode} />
+</div>
+
+### Reading Historical Events
+
+<div className="not-prose">
+  <CodeBlock title="components/AuditLog.tsx" language="typescript" code={useEventJournalHistoryCode} />
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>Server-side Feature:</strong> The Event Journal must be enabled on the server with <code className="bg-blue-100 dark:bg-blue-800 px-1 rounded">eventJournalEnabled: true</code>.
+    Events are persisted to PostgreSQL for durability. See the <a href="/docs/guides/event-journal" className="underline">Event Journal Guide</a> for server configuration.
+  </p>
 </div>
 
 ## useTopic
@@ -203,6 +556,137 @@ function CustomComponent() {
 
   return <div>...</div>;
 }`} />
+</div>
+
+## useConflictResolver
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Shield className="w-6 h-6 text-red-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Manage conflict resolvers for a specific map. Auto-unregisters on unmount.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="components/BookingManager.tsx" language="typescript" code={`import { useConflictResolver } from '@topgunbuild/react';
+import { useEffect } from 'react';
+
+function BookingManager() {
+  const { register, unregister, list, loading, error, registered } =
+    useConflictResolver('bookings');
+
+  useEffect(() => {
+    // Register first-write-wins resolver on mount
+    register({
+      name: 'first-write-wins',
+      code: \`
+        if (context.localValue !== undefined) {
+          return { action: 'reject', reason: 'Slot already booked' };
+        }
+        return { action: 'accept', value: context.remoteValue };
+      \`,
+      priority: 100,
+    });
+  }, []);
+
+  return (
+    <div>
+      {loading && <span>Registering...</span>}
+      {error && <span>Error: {error.message}</span>}
+      <p>Registered resolvers: {registered.join(', ')}</p>
+    </div>
+  );
+}`} />
+</div>
+
+### Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `autoUnregister` | `boolean` | `true` | Unregister resolvers on unmount |
+
+### Return Value
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `register` | `(resolver) => Promise<RegisterResult>` | Register a resolver |
+| `unregister` | `(name) => Promise<RegisterResult>` | Unregister by name |
+| `list` | `() => Promise<ResolverInfo[]>` | List registered resolvers |
+| `loading` | `boolean` | Operation in progress |
+| `error` | `Error \| null` | Last error |
+| `registered` | `string[]` | Names of resolvers registered by this hook |
+
+## useMergeRejections
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <AlertTriangle className="w-6 h-6 text-yellow-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Subscribe to merge rejection events from conflict resolvers.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="components/BookingForm.tsx" language="typescript" code={`import { useMergeRejections } from '@topgunbuild/react';
+import { useEffect } from 'react';
+import { toast } from 'your-toast-library';
+
+function BookingForm() {
+  const { rejections, lastRejection, clear } = useMergeRejections({
+    mapName: 'bookings',
+    maxHistory: 50,
+  });
+
+  // Show toast for rejections
+  useEffect(() => {
+    if (lastRejection) {
+      toast.error(\`Booking failed: \${lastRejection.reason}\`);
+      clear();
+    }
+  }, [lastRejection]);
+
+  return (
+    <div>
+      {/* Form UI */}
+      {rejections.length > 0 && (
+        <div className="error-list">
+          {rejections.map((r, i) => (
+            <p key={i}>{r.key}: {r.reason}</p>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}`} />
+</div>
+
+### Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `mapName` | `string` | - | Filter rejections by map name |
+| `maxHistory` | `number` | `100` | Max rejections to keep in history |
+
+### Return Value
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `rejections` | `MergeRejection[]` | List of recent rejections |
+| `lastRejection` | `MergeRejection \| null` | Most recent rejection |
+| `clear` | `() => void` | Clear rejection history |
+
+### MergeRejection Type
+
+```typescript
+interface MergeRejection {
+  mapName: string;
+  key: string;
+  attemptedValue: unknown;  // null for deletions
+  reason: string;
+  timestamp: Timestamp;
+  nodeId: string;
+}
+```
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>See Also:</strong> The <a href="/docs/guides/conflict-resolvers" className="underline">Conflict Resolvers Guide</a> for detailed examples and use cases.
+  </p>
 </div>
 
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">

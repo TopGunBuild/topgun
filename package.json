@@ -64,5 +64,8 @@
     "zod": "^4.1.13"
   },
   "author": "",
-  "license": "BSL-1.1"
+  "license": "BSL-1.1",
+  "pnpm": {
+    "onlyBuiltDependencies": ["isolated-vm"]
+  }
 }

@@ -1,0 +1,299 @@
+---
+title: PN-Counter
+description: Distributed counter that supports both increment and decrement operations with automatic conflict resolution.
+order: 16
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Plus, Minus, RefreshCw, Cloud, HardDrive } from 'lucide-react';
+
+export const basicUsageCode = `import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter(),
+});
+
+// Get a counter instance
+const likes = client.getPNCounter('likes:post-123');
+
+// Increment (+1)
+likes.increment();
+
+// Decrement (-1)
+likes.decrement();
+
+// Add arbitrary amount (positive or negative)
+likes.addAndGet(10);  // +10
+likes.addAndGet(-5);  // -5
+
+// Get current value
+console.log('Likes:', likes.get());`;
+
+export const subscribeCode = `const likes = client.getPNCounter('likes:post-123');
+
+// Subscribe to value changes
+const unsubscribe = likes.subscribe((value) => {
+  console.log('Current likes:', value);
+  updateUI(value);
+});
+
+// Later: stop listening
+unsubscribe();`;
+
+export const reactHookCode = `import { usePNCounter } from '@topgunbuild/react';
+
+function LikeButton({ postId }) {
+  const { value, increment, decrement, loading } = usePNCounter(\`likes:\${postId}\`);
+
+  return (
+    <div>
+      <button onClick={decrement} disabled={loading}>-</button>
+      <span>{value}</span>
+      <button onClick={increment} disabled={loading}>+</button>
+    </div>
+  );
+}`;
+
+export const offlineCode = `// Counter works offline - operations are queued
+const likes = client.getPNCounter('likes:post-123');
+
+// These work even without network connection
+likes.increment();
+likes.increment();
+likes.decrement();
+
+// Value is updated immediately in memory
+console.log(likes.get()); // 1
+
+// State is persisted to IndexedDB automatically
+// When connection is restored, changes sync to server`;
+
+export const multiClientCode = `// Client A increments
+const likesA = clientA.getPNCounter('likes:post-123');
+likesA.increment(); // +1
+likesA.increment(); // +1
+
+// Client B decrements (concurrently, maybe offline)
+const likesB = clientB.getPNCounter('likes:post-123');
+likesB.decrement(); // -1
+
+// After sync, both clients converge to same value
+// Final value: 2 + (-1) = 1
+
+// CRDT guarantees:
+// - Commutativity: order of operations doesn't matter
+// - Convergence: all replicas reach same final state
+// - No conflicts: concurrent operations merge cleanly`;
+
+export const inventoryCode = `// Track inventory across multiple warehouses
+const stock = client.getPNCounter('inventory:sku-abc');
+
+// Warehouse A receives shipment
+stock.addAndGet(100);
+
+// Warehouse B sells items
+stock.addAndGet(-5);
+
+// Warehouse C returns
+stock.addAndGet(2);
+
+// All warehouses see consistent total
+console.log('Total stock:', stock.get()); // 97`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap not-prose">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">PN-Counter</span>
+</div>
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-green-100 dark:bg-green-900/30">
+    <Plus className="w-5 h-5 text-green-600 dark:text-green-400" />
+    <Minus className="w-5 h-5 text-green-600 dark:text-green-400 -ml-2" />
+  </div>
+  <h1 className="text-4xl font-bold text-foreground">PN-Counter</h1>
+</div>
+
+The **PN-Counter** (Positive-Negative Counter) is a CRDT that supports both increment and decrement operations. Unlike a simple counter, it works correctly in distributed systems where multiple clients may update the counter concurrently, even while offline.
+
+<div className="grid md:grid-cols-3 gap-4 my-6 not-prose">
+  <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
+    <Cloud className="w-6 h-6 text-blue-500 mb-2" />
+    <h3 className="font-semibold text-blue-900 dark:text-blue-100">Real-time Sync</h3>
+    <p className="text-sm text-blue-700 dark:text-blue-300">Changes sync automatically between all connected clients</p>
+  </div>
+  <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800">
+    <HardDrive className="w-6 h-6 text-green-500 mb-2" />
+    <h3 className="font-semibold text-green-900 dark:text-green-100">Offline-First</h3>
+    <p className="text-sm text-green-700 dark:text-green-300">Works offline with automatic persistence to IndexedDB</p>
+  </div>
+  <div className="p-4 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-800">
+    <RefreshCw className="w-6 h-6 text-purple-500 mb-2" />
+    <h3 className="font-semibold text-purple-900 dark:text-purple-100">Conflict-Free</h3>
+    <p className="text-sm text-purple-700 dark:text-purple-300">Concurrent updates merge automatically without conflicts</p>
+  </div>
+</div>
+
+---
+
+## Basic Usage
+
+<div className="not-prose">
+  <CodeBlock title="Counter Operations" language="typescript" code={basicUsageCode} />
+</div>
+
+---
+
+## Subscribing to Changes
+
+The counter emits events when its value changes, either from local operations or remote updates.
+
+<div className="not-prose">
+  <CodeBlock title="Subscribe to Updates" language="typescript" code={subscribeCode} />
+</div>
+
+---
+
+## React Hook
+
+The `usePNCounter` hook provides a reactive interface for React components.
+
+<div className="not-prose">
+  <CodeBlock title="components/LikeButton.tsx" language="tsx" code={reactHookCode} />
+</div>
+
+### Hook Return Values
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `value` | `number` | Current counter value |
+| `loading` | `boolean` | True while initial state is loading |
+| `increment` | `() => void` | Increment by 1 |
+| `decrement` | `() => void` | Decrement by 1 |
+| `add` | `(delta: number) => void` | Add arbitrary amount |
+
+---
+
+## Offline Support
+
+PN-Counter operations work offline. Changes are persisted to local storage (IndexedDB) and synced when the connection is restored.
+
+<div className="not-prose">
+  <CodeBlock title="Offline Operations" language="typescript" code={offlineCode} />
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>Persistence:</strong> Counter state is automatically saved to IndexedDB using the storage adapter.
+    When the app restarts, the counter restores its previous value before syncing with the server.
+  </p>
+</div>
+
+---
+
+## How It Works
+
+The PN-Counter maintains two internal maps:
+
+- **P (Positive)**: Tracks increments per node
+- **N (Negative)**: Tracks decrements per node
+
+The counter value is calculated as: `sum(P) - sum(N)`
+
+<div className="not-prose">
+  <CodeBlock title="Multi-Client Convergence" language="typescript" code={multiClientCode} />
+</div>
+
+### CRDT Properties
+
+| Property | Guarantee |
+|----------|-----------|
+| **Commutativity** | Operations can be applied in any order |
+| **Associativity** | Grouping of operations doesn't matter |
+| **Idempotency** | Duplicate messages are safely ignored |
+| **Convergence** | All replicas eventually reach the same state |
+
+---
+
+## Use Cases
+
+### Like/Upvote Counters
+
+```typescript
+const likes = client.getPNCounter('likes:post-123');
+likes.increment(); // User liked
+
+// User can unlike
+likes.decrement();
+```
+
+### Inventory Tracking
+
+<div className="not-prose">
+  <CodeBlock title="Distributed Inventory" language="typescript" code={inventoryCode} />
+</div>
+
+### Game Scores
+
+```typescript
+const score = client.getPNCounter('score:player-abc');
+score.addAndGet(100);  // Points earned
+score.addAndGet(-20);  // Penalty
+```
+
+### View Counters
+
+```typescript
+const views = client.getPNCounter('views:article-xyz');
+views.increment(); // Page view recorded
+// Note: For analytics, consider debouncing increments
+```
+
+---
+
+## API Reference
+
+### PNCounterHandle
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `get()` | `number` | Get current counter value |
+| `increment()` | `number` | Increment by 1, returns new value |
+| `decrement()` | `number` | Decrement by 1, returns new value |
+| `addAndGet(delta)` | `number` | Add delta, returns new value |
+| `subscribe(fn)` | `() => void` | Subscribe to changes, returns unsubscribe |
+| `getState()` | `PNCounterState` | Get internal CRDT state (for sync) |
+| `merge(state)` | `void` | Merge remote state (automatic) |
+
+### Counter Naming
+
+Use descriptive, namespaced names for counters:
+
+```typescript
+// Good: Clear entity type and ID
+client.getPNCounter('likes:post-123');
+client.getPNCounter('inventory:warehouse-a:sku-xyz');
+client.getPNCounter('votes:poll-456:option-1');
+
+// Avoid: Ambiguous names
+client.getPNCounter('counter1');
+```
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/entry-processor" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Entry Processor
+    </div>
+  </a>
+  <a href="/docs/guides/event-journal" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Event Journal <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

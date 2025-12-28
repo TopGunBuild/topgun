@@ -311,6 +311,60 @@ For production deployments with multiple nodes, use the `cluster` configuration:
   <CodeBlock language="typescript" code={queryCode} />
 </div>
 
+### executeOnKey\<V, R\>(mapName, key, processor)
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Zap className="w-5 h-5 text-purple-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Executes an <strong className="text-foreground">Entry Processor</strong> atomically on a single key. Solves read-modify-write race conditions.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={`import { BuiltInProcessors } from '@topgunbuild/core';
+
+// Atomic increment
+const result = await client.executeOnKey(
+  'stats',     // map name
+  'pageViews', // key
+  BuiltInProcessors.INCREMENT(1)
+);
+
+console.log(result.newValue); // New value after increment
+console.log(result.success);  // true`} />
+</div>
+
+### executeOnKeys\<V, R\>(mapName, keys, processor)
+
+<div className="flex items-center gap-2 mb-3 not-prose">
+  <Zap className="w-5 h-5 text-purple-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Executes an <strong className="text-foreground">Entry Processor</strong> on multiple keys. Returns a Map of results.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={`import { BuiltInProcessors } from '@topgunbuild/core';
+
+// Increment multiple counters
+const results = await client.executeOnKeys(
+  'counters',
+  ['views', 'clicks', 'shares'],
+  BuiltInProcessors.INCREMENT(1)
+);
+
+for (const [key, result] of results) {
+  console.log(\`\${key}: \${result.newValue}\`);
+}`} />
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 my-6 not-prose">
+  <div className="flex items-center gap-2 mb-2">
+    <Zap className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+    <h4 className="font-semibold text-blue-800 dark:text-blue-300">Entry Processor</h4>
+  </div>
+  <span className="text-blue-700 dark:text-blue-400">
+    Entry processors execute user-defined logic atomically on the server. This solves race conditions where multiple clients
+    might read, modify, and write the same data concurrently. See the <a href="/docs/guides/entry-processor" className="underline">Entry Processor Guide</a> for detailed usage.
+  </span>
+</div>
+
 ### close()
 
 <div className="flex items-center gap-2 mb-3 not-prose">

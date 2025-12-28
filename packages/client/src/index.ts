@@ -4,6 +4,7 @@ import { TopGun } from './TopGun';
 export * from './adapters/IDBAdapter';
 export * from './adapters/EncryptedStorageAdapter';
 import { QueryHandle } from './QueryHandle';
+import { ChangeTracker } from './ChangeTracker';
 import { LWWMap, Predicates } from '@topgunbuild/core';
 import { TopicHandle } from './TopicHandle';
 import { SyncState, VALID_TRANSITIONS, isValidTransition } from './SyncState';
@@ -37,6 +38,21 @@ export { SyncEngine, TopGunClient, TopGun, QueryHandle, LWWMap, Predicates, Topi
 export { SyncState, VALID_TRANSITIONS, isValidTransition, SyncStateMachine };
 export { BackpressureError, DEFAULT_BACKPRESSURE_CONFIG, DEFAULT_CLUSTER_CONFIG };
 export { logger } from './utils/logger';
+
+// Change tracking exports (Phase 5.1)
+export { ChangeTracker };
+export type { ChangeEvent } from './ChangeTracker';
+
+// PN Counter exports (Phase 5.2)
+export { PNCounterHandle } from './PNCounterHandle';
+
+// Event Journal exports (Phase 5.04)
+export { EventJournalReader } from './EventJournalReader';
+export type { JournalEventData, JournalSubscribeOptions } from './EventJournalReader';
+
+// Conflict Resolver exports (Phase 5.05)
+export { ConflictResolverClient } from './ConflictResolverClient';
+export type { ResolverInfo, RegisterResult } from './ConflictResolverClient';
 
 // Cluster exports (Phase 4)
 export { ConnectionPool, PartitionRouter, ClusterClient };

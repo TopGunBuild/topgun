@@ -211,6 +211,44 @@ export const TopicMessageEventSchema = z.object({
   }),
 });
 
+// --- PN Counter Messages (Phase 5.2) ---
+
+export const PNCounterStateObjectSchema = z.object({
+  p: z.record(z.string(), z.number()), // positive counts per node
+  n: z.record(z.string(), z.number()), // negative counts per node
+});
+
+export const CounterRequestSchema = z.object({
+  type: z.literal('COUNTER_REQUEST'),
+  payload: z.object({
+    name: z.string(),
+  }),
+});
+
+export const CounterSyncSchema = z.object({
+  type: z.literal('COUNTER_SYNC'),
+  payload: z.object({
+    name: z.string(),
+    state: PNCounterStateObjectSchema,
+  }),
+});
+
+export const CounterResponseSchema = z.object({
+  type: z.literal('COUNTER_RESPONSE'),
+  payload: z.object({
+    name: z.string(),
+    state: PNCounterStateObjectSchema,
+  }),
+});
+
+export const CounterUpdateSchema = z.object({
+  type: z.literal('COUNTER_UPDATE'),
+  payload: z.object({
+    name: z.string(),
+    state: PNCounterStateObjectSchema,
+  }),
+});
+
 // --- Heartbeat Messages ---
 
 export const PingMessageSchema = z.object({
@@ -355,6 +393,227 @@ export const PartitionMapRequestSchema = z.object({
   }).optional(),
 });
 
+// --- Entry Processor Messages (Phase 5.03) ---
+
+/**
+ * Entry processor definition schema.
+ */
+export const EntryProcessorSchema = z.object({
+  name: z.string().min(1).max(100),
+  code: z.string().min(1).max(10000),
+  args: z.unknown().optional(),
+});
+
+/**
+ * ENTRY_PROCESS: Client requests atomic operation on single key.
+ */
+export const EntryProcessRequestSchema = z.object({
+  type: z.literal('ENTRY_PROCESS'),
+  requestId: z.string(),
+  mapName: z.string(),
+  key: z.string(),
+  processor: EntryProcessorSchema,
+});
+
+/**
+ * ENTRY_PROCESS_BATCH: Client requests atomic operation on multiple keys.
+ */
+export const EntryProcessBatchRequestSchema = z.object({
+  type: z.literal('ENTRY_PROCESS_BATCH'),
+  requestId: z.string(),
+  mapName: z.string(),
+  keys: z.array(z.string()),
+  processor: EntryProcessorSchema,
+});
+
+/**
+ * ENTRY_PROCESS_RESPONSE: Server responds to single-key processor request.
+ */
+export const EntryProcessResponseSchema = z.object({
+  type: z.literal('ENTRY_PROCESS_RESPONSE'),
+  requestId: z.string(),
+  success: z.boolean(),
+  result: z.unknown().optional(),
+  newValue: z.unknown().optional(),
+  error: z.string().optional(),
+});
+
+/**
+ * Individual key result in batch response.
+ */
+export const EntryProcessKeyResultSchema = z.object({
+  success: z.boolean(),
+  result: z.unknown().optional(),
+  newValue: z.unknown().optional(),
+  error: z.string().optional(),
+});
+
+/**
+ * ENTRY_PROCESS_BATCH_RESPONSE: Server responds to multi-key processor request.
+ */
+export const EntryProcessBatchResponseSchema = z.object({
+  type: z.literal('ENTRY_PROCESS_BATCH_RESPONSE'),
+  requestId: z.string(),
+  results: z.record(z.string(), EntryProcessKeyResultSchema),
+});
+
+// --- Event Journal Messages (Phase 5.04) ---
+
+/**
+ * Journal event type schema.
+ */
+export const JournalEventTypeSchema = z.enum(['PUT', 'UPDATE', 'DELETE']);
+
+/**
+ * Journal event data (serialized for network).
+ */
+export const JournalEventDataSchema = z.object({
+  sequence: z.string(), // bigint as string
+  type: JournalEventTypeSchema,
+  mapName: z.string(),
+  key: z.string(),
+  value: z.unknown().optional(),
+  previousValue: z.unknown().optional(),
+  timestamp: TimestampSchema,
+  nodeId: z.string(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+
+/**
+ * JOURNAL_SUBSCRIBE: Client subscribes to journal events.
+ */
+export const JournalSubscribeRequestSchema = z.object({
+  type: z.literal('JOURNAL_SUBSCRIBE'),
+  requestId: z.string(),
+  fromSequence: z.string().optional(), // bigint as string
+  mapName: z.string().optional(),
+  types: z.array(JournalEventTypeSchema).optional(),
+});
+
+/**
+ * JOURNAL_UNSUBSCRIBE: Client unsubscribes from journal events.
+ */
+export const JournalUnsubscribeRequestSchema = z.object({
+  type: z.literal('JOURNAL_UNSUBSCRIBE'),
+  subscriptionId: z.string(),
+});
+
+/**
+ * JOURNAL_EVENT: Server sends journal event to client.
+ */
+export const JournalEventMessageSchema = z.object({
+  type: z.literal('JOURNAL_EVENT'),
+  event: JournalEventDataSchema,
+});
+
+/**
+ * JOURNAL_READ: Client requests events from journal.
+ */
+export const JournalReadRequestSchema = z.object({
+  type: z.literal('JOURNAL_READ'),
+  requestId: z.string(),
+  fromSequence: z.string(),
+  limit: z.number().optional(),
+  mapName: z.string().optional(),
+});
+
+/**
+ * JOURNAL_READ_RESPONSE: Server responds with journal events.
+ */
+export const JournalReadResponseSchema = z.object({
+  type: z.literal('JOURNAL_READ_RESPONSE'),
+  requestId: z.string(),
+  events: z.array(JournalEventDataSchema),
+  hasMore: z.boolean(),
+});
+
+// --- Conflict Resolver Messages (Phase 5.05) ---
+
+/**
+ * Conflict resolver definition schema (wire format).
+ */
+export const ConflictResolverSchema = z.object({
+  name: z.string().min(1).max(100),
+  code: z.string().max(50000),
+  priority: z.number().int().min(0).max(100).optional(),
+  keyPattern: z.string().optional(),
+});
+
+/**
+ * REGISTER_RESOLVER: Client registers a conflict resolver on server.
+ */
+export const RegisterResolverRequestSchema = z.object({
+  type: z.literal('REGISTER_RESOLVER'),
+  requestId: z.string(),
+  mapName: z.string(),
+  resolver: ConflictResolverSchema,
+});
+
+/**
+ * REGISTER_RESOLVER_RESPONSE: Server acknowledges resolver registration.
+ */
+export const RegisterResolverResponseSchema = z.object({
+  type: z.literal('REGISTER_RESOLVER_RESPONSE'),
+  requestId: z.string(),
+  success: z.boolean(),
+  error: z.string().optional(),
+});
+
+/**
+ * UNREGISTER_RESOLVER: Client unregisters a conflict resolver.
+ */
+export const UnregisterResolverRequestSchema = z.object({
+  type: z.literal('UNREGISTER_RESOLVER'),
+  requestId: z.string(),
+  mapName: z.string(),
+  resolverName: z.string(),
+});
+
+/**
+ * UNREGISTER_RESOLVER_RESPONSE: Server acknowledges resolver unregistration.
+ */
+export const UnregisterResolverResponseSchema = z.object({
+  type: z.literal('UNREGISTER_RESOLVER_RESPONSE'),
+  requestId: z.string(),
+  success: z.boolean(),
+  error: z.string().optional(),
+});
+
+/**
+ * MERGE_REJECTED: Server notifies client that a merge was rejected.
+ */
+export const MergeRejectedMessageSchema = z.object({
+  type: z.literal('MERGE_REJECTED'),
+  mapName: z.string(),
+  key: z.string(),
+  attemptedValue: z.unknown(),
+  reason: z.string(),
+  timestamp: TimestampSchema,
+});
+
+/**
+ * LIST_RESOLVERS: Client requests list of registered resolvers.
+ */
+export const ListResolversRequestSchema = z.object({
+  type: z.literal('LIST_RESOLVERS'),
+  requestId: z.string(),
+  mapName: z.string().optional(),
+});
+
+/**
+ * LIST_RESOLVERS_RESPONSE: Server responds with registered resolvers.
+ */
+export const ListResolversResponseSchema = z.object({
+  type: z.literal('LIST_RESOLVERS_RESPONSE'),
+  requestId: z.string(),
+  resolvers: z.array(z.object({
+    mapName: z.string(),
+    name: z.string(),
+    priority: z.number().optional(),
+    keyPattern: z.string().optional(),
+  })),
+});
+
 // --- Write Concern Response Schemas (Phase 5.01) ---
 
 /**
@@ -429,6 +688,28 @@ export const MessageSchema = z.discriminatedUnion('type', [
   ORMapPushDiffSchema,
   // Phase 4: Partition Map
   PartitionMapRequestSchema,
+  // Phase 5.2: PN Counter
+  CounterRequestSchema,
+  CounterSyncSchema,
+  // Phase 5.03: Entry Processor
+  EntryProcessRequestSchema,
+  EntryProcessBatchRequestSchema,
+  EntryProcessResponseSchema,
+  EntryProcessBatchResponseSchema,
+  // Phase 5.04: Event Journal
+  JournalSubscribeRequestSchema,
+  JournalUnsubscribeRequestSchema,
+  JournalEventMessageSchema,
+  JournalReadRequestSchema,
+  JournalReadResponseSchema,
+  // Phase 5.05: Conflict Resolver
+  RegisterResolverRequestSchema,
+  RegisterResolverResponseSchema,
+  UnregisterResolverRequestSchema,
+  UnregisterResolverResponseSchema,
+  MergeRejectedMessageSchema,
+  ListResolversRequestSchema,
+  ListResolversResponseSchema,
 ]);
 
 // --- Type Inference ---
@@ -449,3 +730,28 @@ export type OpAckMessage = z.infer<typeof OpAckMessageSchema>;
 export type OpRejectedMessage = z.infer<typeof OpRejectedMessageSchema>;
 export type OpResult = z.infer<typeof OpResultSchema>;
 
+// Entry Processor types (Phase 5.03)
+export type EntryProcessRequest = z.infer<typeof EntryProcessRequestSchema>;
+export type EntryProcessBatchRequest = z.infer<typeof EntryProcessBatchRequestSchema>;
+export type EntryProcessResponse = z.infer<typeof EntryProcessResponseSchema>;
+export type EntryProcessBatchResponse = z.infer<typeof EntryProcessBatchResponseSchema>;
+export type EntryProcessKeyResult = z.infer<typeof EntryProcessKeyResultSchema>;
+
+// Event Journal types (Phase 5.04)
+export type JournalEventType = z.infer<typeof JournalEventTypeSchema>;
+export type JournalEventData = z.infer<typeof JournalEventDataSchema>;
+export type JournalSubscribeRequest = z.infer<typeof JournalSubscribeRequestSchema>;
+export type JournalUnsubscribeRequest = z.infer<typeof JournalUnsubscribeRequestSchema>;
+export type JournalEventMessage = z.infer<typeof JournalEventMessageSchema>;
+export type JournalReadRequest = z.infer<typeof JournalReadRequestSchema>;
+export type JournalReadResponse = z.infer<typeof JournalReadResponseSchema>;
+
+// Conflict Resolver types (Phase 5.05)
+export type ConflictResolver = z.infer<typeof ConflictResolverSchema>;
+export type RegisterResolverRequest = z.infer<typeof RegisterResolverRequestSchema>;
+export type RegisterResolverResponse = z.infer<typeof RegisterResolverResponseSchema>;
+export type UnregisterResolverRequest = z.infer<typeof UnregisterResolverRequestSchema>;
+export type UnregisterResolverResponse = z.infer<typeof UnregisterResolverResponseSchema>;
+export type MergeRejectedMessage = z.infer<typeof MergeRejectedMessageSchema>;
+export type ListResolversRequest = z.infer<typeof ListResolversRequestSchema>;
+export type ListResolversResponse = z.infer<typeof ListResolversResponseSchema>;

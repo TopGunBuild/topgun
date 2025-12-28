@@ -38,6 +38,11 @@ import {
 import { TaskletScheduler } from './tasklet';
 import { WriteAckManager } from './ack/WriteAckManager';
 import { ReplicationPipeline } from './cluster/ReplicationPipeline';
+import { CounterHandler } from './handlers/CounterHandler';
+import { EntryProcessorHandler } from './handlers/EntryProcessorHandler';
+import { ConflictResolverHandler } from './handlers/ConflictResolverHandler';
+import { EventJournalService, EventJournalServiceConfig } from './EventJournalService';
+import type { JournalEvent, JournalEventType, MergeRejection, MergeContext } from '@topgunbuild/core';
 
 interface ClientConnection {
     id: string;
@@ -144,6 +149,12 @@ export interface ServerCoordinatorConfig {
     defaultConsistency?: ConsistencyLevel;
     /** Replication configuration */
     replicationConfig?: Partial<ReplicationConfig>;
+
+    // === Event Journal Options (Phase 5.04) ===
+    /** Enable event journal for audit/CDC (default: false) */
+    eventJournalEnabled?: boolean;
+    /** Event journal configuration */
+    eventJournalConfig?: Partial<Omit<EventJournalServiceConfig, 'pool'>>;
 }
 
 export class ServerCoordinator {
@@ -213,6 +224,21 @@ export class ServerCoordinator {
     // Write Concern acknowledgment manager (Phase 5.01)
     private writeAckManager: WriteAckManager;
 
+    // PN Counter handler (Phase 5.2)
+    private counterHandler!: CounterHandler;
+
+    // Entry Processor handler (Phase 5.03)
+    private entryProcessorHandler!: EntryProcessorHandler;
+
+    // Conflict Resolver handler (Phase 5.05)
+    private conflictResolverHandler!: ConflictResolverHandler;
+
+    // Event Journal (Phase 5.04)
+    private eventJournalService?: EventJournalService;
+    private journalSubscriptions: Map<string, { clientId: string; mapName?: string; types?: JournalEventType[] }> = new Map();
+
+    private readonly _nodeId: string;
+
     private _actualPort: number = 0;
     private _actualClusterPort: number = 0;
     private _readyPromise: Promise<void>;
@@ -223,6 +249,7 @@ export class ServerCoordinator {
             this._readyResolve = resolve;
         });
 
+        this._nodeId = config.nodeId;
         this.hlc = new HLC(config.nodeId);
         this.storage = config.storage;
         // Handle JWT_SECRET with escaped newlines (e.g., from Docker/Dokploy env vars)
@@ -432,6 +459,36 @@ export class ServerCoordinator {
                     }
                 }
             });
+
+            // PN Counter handler (Phase 5.2)
+            this.counterHandler = new CounterHandler(this._nodeId);
+
+            // Entry Processor handler (Phase 5.03)
+            this.entryProcessorHandler = new EntryProcessorHandler({ hlc: this.hlc });
+
+            // Conflict Resolver handler (Phase 5.05)
+            this.conflictResolverHandler = new ConflictResolverHandler({ nodeId: this._nodeId });
+            // Wire up rejection notifications to clients
+            this.conflictResolverHandler.onRejection((rejection: MergeRejection) => {
+                this.notifyMergeRejection(rejection);
+            });
+
+            // Event Journal (Phase 5.04) - requires PostgresAdapter with pool
+            if (config.eventJournalEnabled && this.storage && 'pool' in (this.storage as any)) {
+                const pool = (this.storage as any).pool;
+                this.eventJournalService = new EventJournalService({
+                    capacity: 10000,
+                    ttlMs: 0,
+                    persistent: true,
+                    pool,
+                    ...config.eventJournalConfig,
+                });
+                this.eventJournalService.initialize().then(() => {
+                    logger.info('EventJournalService initialized');
+                }).catch(err => {
+                    logger.error({ err }, 'Failed to initialize EventJournalService');
+                });
+            }
 
             this.systemManager = new SystemManager(
                 this.cluster,
@@ -643,6 +700,14 @@ export class ServerCoordinator {
         // Shutdown Write Concern manager (Phase 5.01)
         this.writeAckManager.shutdown();
 
+        // Dispose Entry Processor handler (Phase 5.03)
+        this.entryProcessorHandler.dispose();
+
+        // Dispose Event Journal (Phase 5.04)
+        if (this.eventJournalService) {
+            this.eventJournalService.dispose();
+        }
+
         logger.info('Server Coordinator shutdown complete.');
     }
 
@@ -778,6 +843,9 @@ export class ServerCoordinator {
 
             // Cleanup Topics (Local)
             this.topicManager.unsubscribeAll(clientId);
+
+            // Cleanup Counters (Local)
+            this.counterHandler.unsubscribeAll(clientId);
 
             // Notify Cluster to Cleanup Locks (Remote)
             const members = this.cluster.getMembers();
@@ -1331,6 +1399,277 @@ export class ServerCoordinator {
                 break;
             }
 
+            // ============ Phase 5.2: PN Counter Handlers ============
+
+            case 'COUNTER_REQUEST': {
+                const { name } = message.payload;
+                const response = this.counterHandler.handleCounterRequest(client.id, name);
+                client.writer.write(response);
+                logger.debug({ clientId: client.id, name }, 'Counter request handled');
+                break;
+            }
+
+            case 'COUNTER_SYNC': {
+                const { name, state } = message.payload;
+                const result = this.counterHandler.handleCounterSync(client.id, name, state);
+
+                // Send response to the syncing client
+                client.writer.write(result.response);
+
+                // Broadcast to other subscribed clients
+                for (const targetClientId of result.broadcastTo) {
+                    const targetClient = this.clients.get(targetClientId);
+                    if (targetClient && targetClient.socket.readyState === WebSocket.OPEN) {
+                        targetClient.writer.write(result.broadcastMessage);
+                    }
+                }
+                logger.debug({ clientId: client.id, name, broadcastCount: result.broadcastTo.length }, 'Counter sync handled');
+                break;
+            }
+
+            // ============ Phase 5.03: Entry Processor Handlers ============
+
+            case 'ENTRY_PROCESS': {
+                const { requestId, mapName, key, processor } = message;
+
+                // Check PUT permission (entry processor modifies data)
+                if (!this.securityManager.checkPermission(client.principal!, mapName, 'PUT')) {
+                    client.writer.write({
+                        type: 'ENTRY_PROCESS_RESPONSE',
+                        requestId,
+                        success: false,
+                        error: `Access Denied for map ${mapName}`,
+                    }, true);
+                    break;
+                }
+
+                // Get or create the map
+                const entryMap = this.getMap(mapName) as LWWMap<string, any>;
+
+                // Execute the processor
+                const { result, timestamp } = await this.entryProcessorHandler.executeOnKey(
+                    entryMap,
+                    key,
+                    processor,
+                );
+
+                // Send response to client
+                client.writer.write({
+                    type: 'ENTRY_PROCESS_RESPONSE',
+                    requestId,
+                    success: result.success,
+                    result: result.result,
+                    newValue: result.newValue,
+                    error: result.error,
+                });
+
+                // If successful and value changed, notify query subscribers
+                if (result.success && timestamp) {
+                    const record = entryMap.getRecord(key);
+                    if (record) {
+                        this.queryRegistry.processChange(mapName, entryMap, key, record, undefined);
+                    }
+                }
+
+                logger.debug({
+                    clientId: client.id,
+                    mapName,
+                    key,
+                    processor: processor.name,
+                    success: result.success,
+                }, 'Entry processor executed');
+                break;
+            }
+
+            case 'ENTRY_PROCESS_BATCH': {
+                const { requestId, mapName, keys, processor } = message;
+
+                // Check PUT permission
+                if (!this.securityManager.checkPermission(client.principal!, mapName, 'PUT')) {
+                    const errorResults: Record<string, { success: boolean; error: string }> = {};
+                    for (const key of keys) {
+                        errorResults[key] = {
+                            success: false,
+                            error: `Access Denied for map ${mapName}`,
+                        };
+                    }
+                    client.writer.write({
+                        type: 'ENTRY_PROCESS_BATCH_RESPONSE',
+                        requestId,
+                        results: errorResults,
+                    }, true);
+                    break;
+                }
+
+                // Get or create the map
+                const batchMap = this.getMap(mapName) as LWWMap<string, any>;
+
+                // Execute the processor on all keys
+                const { results, timestamps } = await this.entryProcessorHandler.executeOnKeys(
+                    batchMap,
+                    keys,
+                    processor,
+                );
+
+                // Convert Map to Record for serialization
+                const resultsRecord: Record<string, {
+                    success: boolean;
+                    result?: unknown;
+                    newValue?: unknown;
+                    error?: string;
+                }> = {};
+
+                for (const [key, keyResult] of results) {
+                    resultsRecord[key] = {
+                        success: keyResult.success,
+                        result: keyResult.result,
+                        newValue: keyResult.newValue,
+                        error: keyResult.error,
+                    };
+                }
+
+                // Send batch response to client
+                client.writer.write({
+                    type: 'ENTRY_PROCESS_BATCH_RESPONSE',
+                    requestId,
+                    results: resultsRecord,
+                });
+
+                // Notify query subscribers about changes
+                for (const [key] of timestamps) {
+                    const record = batchMap.getRecord(key);
+                    if (record) {
+                        this.queryRegistry.processChange(mapName, batchMap, key, record, undefined);
+                    }
+                }
+
+                logger.debug({
+                    clientId: client.id,
+                    mapName,
+                    keyCount: keys.length,
+                    processor: processor.name,
+                    successCount: Array.from(results.values()).filter(r => r.success).length,
+                }, 'Entry processor batch executed');
+                break;
+            }
+
+            // ============ Phase 5.05: Conflict Resolver Handlers ============
+
+            case 'REGISTER_RESOLVER': {
+                const { requestId, mapName, resolver } = message;
+
+                // Check PUT permission (resolver registration is a privileged operation)
+                if (!this.securityManager.checkPermission(client.principal!, mapName, 'PUT')) {
+                    client.writer.write({
+                        type: 'REGISTER_RESOLVER_RESPONSE',
+                        requestId,
+                        success: false,
+                        error: `Access Denied for map ${mapName}`,
+                    }, true);
+                    break;
+                }
+
+                try {
+                    this.conflictResolverHandler.registerResolver(
+                        mapName,
+                        {
+                            name: resolver.name,
+                            code: resolver.code,
+                            priority: resolver.priority,
+                            keyPattern: resolver.keyPattern,
+                        },
+                        client.id,
+                    );
+
+                    client.writer.write({
+                        type: 'REGISTER_RESOLVER_RESPONSE',
+                        requestId,
+                        success: true,
+                    });
+
+                    logger.info({
+                        clientId: client.id,
+                        mapName,
+                        resolverName: resolver.name,
+                        priority: resolver.priority,
+                    }, 'Conflict resolver registered');
+                } catch (err) {
+                    const errorMessage = err instanceof Error ? err.message : String(err);
+                    client.writer.write({
+                        type: 'REGISTER_RESOLVER_RESPONSE',
+                        requestId,
+                        success: false,
+                        error: errorMessage,
+                    }, true);
+                    logger.warn({
+                        clientId: client.id,
+                        mapName,
+                        error: errorMessage,
+                    }, 'Failed to register conflict resolver');
+                }
+                break;
+            }
+
+            case 'UNREGISTER_RESOLVER': {
+                const { requestId, mapName, resolverName } = message;
+
+                // Check PUT permission
+                if (!this.securityManager.checkPermission(client.principal!, mapName, 'PUT')) {
+                    client.writer.write({
+                        type: 'UNREGISTER_RESOLVER_RESPONSE',
+                        requestId,
+                        success: false,
+                        error: `Access Denied for map ${mapName}`,
+                    }, true);
+                    break;
+                }
+
+                const removed = this.conflictResolverHandler.unregisterResolver(
+                    mapName,
+                    resolverName,
+                    client.id,
+                );
+
+                client.writer.write({
+                    type: 'UNREGISTER_RESOLVER_RESPONSE',
+                    requestId,
+                    success: removed,
+                    error: removed ? undefined : 'Resolver not found or not owned by this client',
+                });
+
+                if (removed) {
+                    logger.info({
+                        clientId: client.id,
+                        mapName,
+                        resolverName,
+                    }, 'Conflict resolver unregistered');
+                }
+                break;
+            }
+
+            case 'LIST_RESOLVERS': {
+                const { requestId, mapName } = message;
+
+                // Check READ permission if mapName specified
+                if (mapName && !this.securityManager.checkPermission(client.principal!, mapName, 'READ')) {
+                    client.writer.write({
+                        type: 'LIST_RESOLVERS_RESPONSE',
+                        requestId,
+                        resolvers: [],
+                    });
+                    break;
+                }
+
+                const resolvers = this.conflictResolverHandler.listResolvers(mapName);
+
+                client.writer.write({
+                    type: 'LIST_RESOLVERS_RESPONSE',
+                    requestId,
+                    resolvers,
+                });
+                break;
+            }
+
             // ============ Phase 4: Partition Map Request Handler ============
 
             case 'PARTITION_MAP_REQUEST': {
@@ -1565,6 +1904,114 @@ export class ServerCoordinator {
                 break;
             }
 
+            // === Event Journal Messages (Phase 5.04) ===
+
+            case 'JOURNAL_SUBSCRIBE': {
+                if (!this.eventJournalService) {
+                    client.writer.write({
+                        type: 'ERROR',
+                        payload: { code: 503, message: 'Event journal not enabled' }
+                    }, true);
+                    break;
+                }
+
+                const { requestId, fromSequence, mapName, types } = message;
+                const subscriptionId = requestId;
+
+                // Store subscription metadata
+                this.journalSubscriptions.set(subscriptionId, {
+                    clientId: client.id,
+                    mapName,
+                    types,
+                });
+
+                // Subscribe to journal events
+                const unsubscribe = this.eventJournalService.subscribe(
+                    (event) => {
+                        // Apply filters
+                        if (mapName && event.mapName !== mapName) return;
+                        if (types && types.length > 0 && !types.includes(event.type)) return;
+
+                        // Check if client still connected
+                        const clientConn = this.clients.get(client.id);
+                        if (!clientConn) {
+                            unsubscribe();
+                            this.journalSubscriptions.delete(subscriptionId);
+                            return;
+                        }
+
+                        // Send event to client
+                        clientConn.writer.write({
+                            type: 'JOURNAL_EVENT',
+                            event: {
+                                sequence: event.sequence.toString(),
+                                type: event.type,
+                                mapName: event.mapName,
+                                key: event.key,
+                                value: event.value,
+                                previousValue: event.previousValue,
+                                timestamp: event.timestamp,
+                                nodeId: event.nodeId,
+                                metadata: event.metadata,
+                            },
+                        });
+                    },
+                    fromSequence ? BigInt(fromSequence) : undefined
+                );
+
+                logger.info({ clientId: client.id, subscriptionId, mapName }, 'Journal subscription created');
+                break;
+            }
+
+            case 'JOURNAL_UNSUBSCRIBE': {
+                const { subscriptionId } = message;
+                this.journalSubscriptions.delete(subscriptionId);
+                logger.info({ clientId: client.id, subscriptionId }, 'Journal subscription removed');
+                break;
+            }
+
+            case 'JOURNAL_READ': {
+                if (!this.eventJournalService) {
+                    client.writer.write({
+                        type: 'ERROR',
+                        payload: { code: 503, message: 'Event journal not enabled' }
+                    }, true);
+                    break;
+                }
+
+                const { requestId: readReqId, fromSequence: readFromSeq, limit, mapName: readMapName } = message;
+                const startSeq = BigInt(readFromSeq);
+                const eventLimit = limit ?? 100;
+
+                let events = this.eventJournalService.readFrom(startSeq, eventLimit);
+
+                // Filter by map name if provided
+                if (readMapName) {
+                    events = events.filter(e => e.mapName === readMapName);
+                }
+
+                // Serialize events
+                const serializedEvents = events.map(e => ({
+                    sequence: e.sequence.toString(),
+                    type: e.type,
+                    mapName: e.mapName,
+                    key: e.key,
+                    value: e.value,
+                    previousValue: e.previousValue,
+                    timestamp: e.timestamp,
+                    nodeId: e.nodeId,
+                    metadata: e.metadata,
+                }));
+
+                client.writer.write({
+                    type: 'JOURNAL_READ_RESPONSE',
+                    requestId: readReqId,
+                    events: serializedEvents,
+                    hasMore: events.length === eventLimit,
+                });
+                break;
+            }
+
             default:
                 logger.warn({ type: message.type }, 'Unknown message type');
         }
@@ -1625,6 +2072,46 @@ export class ServerCoordinator {
             version: partitionMap.version,
             clientCount: broadcastCount
         }, 'Broadcast partition map to clients');
+    }
+
+    /**
+     * Notify a client about a merge rejection (Phase 5.05).
+     * Finds the client by node ID and sends MERGE_REJECTED message.
+     */
+    private notifyMergeRejection(rejection: MergeRejection): void {
+        // Find client by node ID
+        // Node ID format: "client-{uuid}" - we need to find matching client
+        for (const [clientId, client] of this.clients) {
+            // Check if this client sent the rejected operation
+            // The nodeId in rejection matches the remoteNodeId from the operation
+            if (clientId === rejection.nodeId || rejection.nodeId.includes(clientId)) {
+                client.writer.write({
+                    type: 'MERGE_REJECTED',
+                    mapName: rejection.mapName,
+                    key: rejection.key,
+                    attemptedValue: rejection.attemptedValue,
+                    reason: rejection.reason,
+                    timestamp: rejection.timestamp,
+                }, true); // urgent - bypass batching
+                return;
+            }
+        }
+
+        // If no matching client found, broadcast to all clients subscribed to this map
+        const subscribedClientIds = this.queryRegistry.getSubscribedClientIds(rejection.mapName);
+        for (const clientId of subscribedClientIds) {
+            const client = this.clients.get(clientId);
+            if (client) {
+                client.writer.write({
+                    type: 'MERGE_REJECTED',
+                    mapName: rejection.mapName,
+                    key: rejection.key,
+                    attemptedValue: rejection.attemptedValue,
+                    reason: rejection.reason,
+                    timestamp: rejection.timestamp,
+                });
+            }
+        }
     }
 
     private broadcast(message: any, excludeClientId?: string) {
@@ -2167,7 +2654,7 @@ export class ServerCoordinator {
      *
      * @returns Event payload for broadcasting (or null if operation failed)
      */
-    private applyOpToMap(op: any): { eventPayload: any; oldRecord: any } {
+    private async applyOpToMap(op: any, remoteNodeId?: string): Promise<{ eventPayload: any; oldRecord: any; rejected?: boolean }> {
         // Determine type hint from op
         const typeHint = (op.opType === 'OR_ADD' || op.opType === 'OR_REMOVE') ? 'OR' : 'LWW';
         const map = this.getMap(op.mapName, typeHint);
@@ -2193,10 +2680,39 @@ export class ServerCoordinator {
 
         if (map instanceof LWWMap) {
             oldRecord = map.getRecord(op.key);
-            map.merge(op.key, op.record);
-            recordToStore = op.record;
-            eventPayload.eventType = 'UPDATED';
-            eventPayload.record = op.record;
+
+            // Use conflict resolver if registered (Phase 5.05)
+            if (this.conflictResolverHandler.hasResolvers(op.mapName)) {
+                const mergeResult = await this.conflictResolverHandler.mergeWithResolver(
+                    map,
+                    op.mapName,
+                    op.key,
+                    op.record,
+                    remoteNodeId || this._nodeId,
+                );
+
+                if (!mergeResult.applied) {
+                    // Operation was rejected or local value kept
+                    if (mergeResult.rejection) {
+                        logger.debug(
+                            { mapName: op.mapName, key: op.key, reason: mergeResult.rejection.reason },
+                            'Merge rejected by resolver'
+                        );
+                    }
+                    return { eventPayload: null, oldRecord, rejected: true };
+                }
+
+                // Use the resolved record
+                recordToStore = mergeResult.record;
+                eventPayload.eventType = 'UPDATED';
+                eventPayload.record = mergeResult.record;
+            } else {
+                // Standard merge without resolver
+                map.merge(op.key, op.record);
+                recordToStore = op.record;
+                eventPayload.eventType = 'UPDATED';
+                eventPayload.record = op.record;
+            }
         } else if (map instanceof ORMap) {
             oldRecord = map.getRecords(op.key);
 
@@ -2235,6 +2751,26 @@ export class ServerCoordinator {
             }
         }
 
+        // Append to Event Journal (Phase 5.04)
+        if (this.eventJournalService) {
+            const isDelete = op.opType === 'REMOVE' || op.opType === 'OR_REMOVE' ||
+                (op.record && op.record.value === null);
+            const isNew = !oldRecord || (Array.isArray(oldRecord) && oldRecord.length === 0);
+            const journalEventType: JournalEventType = isDelete ? 'DELETE' : (isNew ? 'PUT' : 'UPDATE');
+
+            const timestamp = op.record?.timestamp || op.orRecord?.timestamp || this.hlc.now();
+
+            this.eventJournalService.append({
+                type: journalEventType,
+                mapName: op.mapName,
+                key: op.key,
+                value: op.record?.value ?? op.orRecord?.value,
+                previousValue: oldRecord?.value ?? (Array.isArray(oldRecord) ? oldRecord[0]?.value : undefined),
+                timestamp,
+                nodeId: this._nodeId,
+            });
+        }
+
         return { eventPayload, oldRecord };
     }
 
@@ -2264,7 +2800,12 @@ export class ServerCoordinator {
             logger.debug({ sourceNode, opId, mapName: op.mapName, key: op.key }, 'Applying replicated operation');
 
             // Apply operation to local map (as backup)
-            const { eventPayload } = this.applyOpToMap(op);
+            const { eventPayload, rejected } = await this.applyOpToMap(op, sourceNode);
+
+            // Skip broadcast if operation was rejected by resolver
+            if (rejected || !eventPayload) {
+                return true; // Still return true - rejection is not an error
+            }
 
             // Broadcast event to local clients subscribed to this data
             this.broadcast({
@@ -2385,7 +2926,12 @@ export class ServerCoordinator {
         }
 
         // 3. Apply operation to map (shared logic)
-        const { eventPayload } = this.applyOpToMap(op);
+        const { eventPayload, rejected } = await this.applyOpToMap(op, originalSenderId);
+
+        // Skip further processing if operation was rejected by conflict resolver
+        if (rejected || !eventPayload) {
+            return;
+        }
 
         // 4. Replicate to backup nodes (Hazelcast pattern: after local merge)
         // Note: Only replicate if we are the owner and operation is not from cluster
@@ -2554,7 +3100,12 @@ export class ServerCoordinator {
         }
 
         // 3. Apply operation to map (shared logic)
-        const { eventPayload } = this.applyOpToMap(op);
+        const { eventPayload, rejected } = await this.applyOpToMap(op, clientId);
+
+        // Skip further processing if operation was rejected by conflict resolver
+        if (rejected || !eventPayload) {
+            return;
+        }
 
         // 4. Replicate to backup nodes (Hazelcast pattern: after local merge)
         if (this.replicationPipeline) {
@@ -3307,7 +3858,15 @@ export class ServerCoordinator {
         }
 
         // 3. Apply operation to map
-        const { eventPayload } = this.applyOpToMap(op);
+        const { eventPayload, rejected } = await this.applyOpToMap(op, clientId);
+
+        // If rejected by conflict resolver, fail the pending write
+        if (rejected) {
+            if (op.id) {
+                this.writeAckManager.failPending(op.id, 'Rejected by conflict resolver');
+            }
+            return;
+        }
 
         // 4. Notify APPLIED level (CRDT merged)
         if (op.id) {

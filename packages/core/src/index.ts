@@ -4,9 +4,68 @@ import { ORMap, ORMapRecord, MergeKeyResult, ORMapSnapshot } from './ORMap';
 import { MerkleTree } from './MerkleTree';
 import { ORMapMerkleTree, ORMapMerkleNode } from './ORMapMerkleTree';
 import { hashORMapEntry, hashORMapRecord, timestampToString, compareTimestamps } from './ORMapMerkle';
+import { PNCounterImpl } from './PNCounter';
+import type { PNCounter, PNCounterState, PNCounterStateObject, PNCounterConfig } from './PNCounter';
+import { Ringbuffer } from './Ringbuffer';
+import { EventJournalImpl, DEFAULT_EVENT_JOURNAL_CONFIG } from './EventJournal';
+import type {
+  EventJournal,
+  EventJournalConfig,
+  JournalEvent,
+  JournalEventInput,
+  JournalEventType,
+  JournalEventListener,
+} from './EventJournal';
 
-export { HLC, LWWMap, ORMap, MerkleTree, ORMapMerkleTree };
+export { HLC, LWWMap, ORMap, MerkleTree, ORMapMerkleTree, PNCounterImpl };
 export { hashORMapEntry, hashORMapRecord, timestampToString, compareTimestamps };
+export type { PNCounter, PNCounterState, PNCounterStateObject, PNCounterConfig };
+
+// Event Journal exports (Phase 5.04)
+export { Ringbuffer, EventJournalImpl, DEFAULT_EVENT_JOURNAL_CONFIG };
+export type {
+  EventJournal,
+  EventJournalConfig,
+  JournalEvent,
+  JournalEventInput,
+  JournalEventType,
+  JournalEventListener,
+};
+
+// Entry Processor exports (Phase 5.03)
+export {
+  EntryProcessorDefSchema,
+  validateProcessorCode,
+  BuiltInProcessors,
+  FORBIDDEN_PATTERNS,
+  DEFAULT_PROCESSOR_RATE_LIMITS,
+} from './EntryProcessor';
+export type {
+  EntryProcessorFn,
+  EntryProcessorDef,
+  EntryProcessorResult,
+  ProcessorRateLimitConfig,
+} from './EntryProcessor';
+
+// Conflict Resolver exports (Phase 5.05)
+export {
+  ConflictResolverDefSchema,
+  validateResolverCode,
+  BuiltInResolvers,
+  RESOLVER_FORBIDDEN_PATTERNS,
+  DEFAULT_RESOLVER_RATE_LIMITS,
+  compareHLCTimestamps,
+  deepMerge,
+} from './ConflictResolver';
+export type {
+  MergeContext,
+  MergeResult,
+  ConflictResolverFn,
+  ConflictResolverDef,
+  ResolverRateLimitConfig,
+  MergeRejection,
+} from './ConflictResolver';
+
 export * from './utils/hash';
 export * from './serializer';
 export * from './predicate';

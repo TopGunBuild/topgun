@@ -1,5 +1,5 @@
 import { LWWMap, ORMap } from '@topgunbuild/core';
-import type { ORMapRecord, LWWRecord } from '@topgunbuild/core';
+import type { ORMapRecord, LWWRecord, EntryProcessorDef, EntryProcessorResult } from '@topgunbuild/core';
 import type { IStorageAdapter } from './IStorageAdapter';
 import { SyncEngine } from './SyncEngine';
 import type { BackoffConfig } from './SyncEngine';
@@ -7,6 +7,8 @@ import { QueryHandle } from './QueryHandle';
 import type { QueryFilter } from './QueryHandle';
 import { DistributedLock } from './DistributedLock';
 import { TopicHandle } from './TopicHandle';
+import { PNCounterHandle } from './PNCounterHandle';
+import { EventJournalReader } from './EventJournalReader';
 import { logger } from './utils/logger';
 import { SyncState } from './SyncState';
 import type { StateChangeEvent } from './SyncStateMachine';
@@ -87,6 +89,7 @@ export class TopGunClient {
   private readonly maps: Map<string, LWWMap<any, any> | ORMap<any, any>> = new Map();
   private readonly storageAdapter: IStorageAdapter;
   private readonly topicHandles: Map<string, TopicHandle> = new Map();
+  private readonly counters: Map<string, PNCounterHandle> = new Map();
   private readonly clusterClient?: ClusterClient;
   private readonly isClusterMode: boolean;
   private readonly clusterConfig?: Required<Omit<TopGunClusterConfig, 'seeds'>> & { seeds: string[] };
@@ -195,6 +198,35 @@ export class TopGunClient {
       this.topicHandles.set(name, new TopicHandle(this.syncEngine, name));
     }
     return this.topicHandles.get(name)!;
+  }
+
+  /**
+   * Retrieves a PN Counter instance. If the counter doesn't exist locally, it's created.
+   * PN Counters support increment and decrement operations that work offline
+   * and sync to server when connected.
+   *
+   * @param name The name of the counter (e.g., 'likes:post-123')
+   * @returns A PNCounterHandle instance
+   *
+   * @example
+   * ```typescript
+   * const likes = client.getPNCounter('likes:post-123');
+   * likes.increment(); // +1
+   * likes.decrement(); // -1
+   * likes.addAndGet(10); // +10
+   *
+   * likes.subscribe((value) => {
+   *   console.log('Current likes:', value);
+   * });
+   * ```
+   */
+  public getPNCounter(name: string): PNCounterHandle {
+    let counter = this.counters.get(name);
+    if (!counter) {
+      counter = new PNCounterHandle(name, this.nodeId, this.syncEngine, this.storageAdapter);
+      this.counters.set(name, counter);
+    }
+    return counter;
   }
 
   /**
@@ -529,5 +561,203 @@ export class TopGunClient {
     listener: (data?: BackpressureThresholdEvent | OperationDroppedEvent) => void
   ): () => void {
     return this.syncEngine.onBackpressure(event, listener);
+  }
+
+  // ============================================
+  // Entry Processor API (Phase 5.03)
+  // ============================================
+
+  /**
+   * Execute an entry processor on a single key atomically.
+   *
+   * Entry processors solve the read-modify-write race condition by executing
+   * user-defined logic atomically on the server where the data lives.
+   *
+   * @param mapName Name of the map
+   * @param key Key to process
+   * @param processor Processor definition with name, code, and optional args
+   * @returns Promise resolving to the processor result
+   *
+   * @example
+   * ```typescript
+   * // Increment a counter atomically
+   * const result = await client.executeOnKey('stats', 'pageViews', {
+   *   name: 'increment',
+   *   code: `
+   *     const current = value ?? 0;
+   *     return { value: current + 1, result: current + 1 };
+   *   `,
+   * });
+   *
+   * // Using built-in processor
+   * import { BuiltInProcessors } from '@topgunbuild/core';
+   * const result = await client.executeOnKey(
+   *   'stats',
+   *   'pageViews',
+   *   BuiltInProcessors.INCREMENT(1)
+   * );
+   * ```
+   */
+  public async executeOnKey<V, R = V>(
+    mapName: string,
+    key: string,
+    processor: EntryProcessorDef<V, R>,
+  ): Promise<EntryProcessorResult<R>> {
+    const result = await this.syncEngine.executeOnKey(mapName, key, processor);
+
+    // Update local map cache if successful and we have the map
+    if (result.success && result.newValue !== undefined) {
+      const map = this.maps.get(mapName);
+      if (map instanceof LWWMap) {
+        // Update local cache - set() generates its own timestamp
+        // The server will broadcast the full update to all subscribers
+        (map as LWWMap<any, any>).set(key, result.newValue);
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Execute an entry processor on multiple keys.
+   *
+   * Each key is processed atomically. The operation returns when all keys
+   * have been processed.
+   *
+   * @param mapName Name of the map
+   * @param keys Keys to process
+   * @param processor Processor definition
+   * @returns Promise resolving to a map of key -> result
+   *
+   * @example
+   * ```typescript
+   * // Reset multiple counters
+   * const results = await client.executeOnKeys(
+   *   'stats',
+   *   ['pageViews', 'uniqueVisitors', 'bounceRate'],
+   *   {
+   *     name: 'reset',
+   *     code: `return { value: 0, result: value };`, // Returns old value
+   *   }
+   * );
+   *
+   * for (const [key, result] of results) {
+   *   console.log(`${key}: was ${result.result}, now 0`);
+   * }
+   * ```
+   */
+  public async executeOnKeys<V, R = V>(
+    mapName: string,
+    keys: string[],
+    processor: EntryProcessorDef<V, R>,
+  ): Promise<Map<string, EntryProcessorResult<R>>> {
+    const results = await this.syncEngine.executeOnKeys(mapName, keys, processor);
+
+    // Update local map cache for successful operations
+    const map = this.maps.get(mapName);
+    if (map instanceof LWWMap) {
+      for (const [key, result] of results) {
+        if (result.success && result.newValue !== undefined) {
+          (map as LWWMap<any, any>).set(key, result.newValue);
+        }
+      }
+    }
+
+    return results;
+  }
+
+  // ============================================
+  // Event Journal API (Phase 5.04)
+  // ============================================
+
+  /** Cached EventJournalReader instance */
+  private journalReader?: EventJournalReader;
+
+  /**
+   * Get the Event Journal reader for subscribing to and reading
+   * map change events.
+   *
+   * The Event Journal provides:
+   * - Append-only log of all map changes (PUT, UPDATE, DELETE)
+   * - Subscription to real-time events
+   * - Historical event replay
+   * - Audit trail for compliance
+   *
+   * @returns EventJournalReader instance
+   *
+   * @example
+   * ```typescript
+   * const journal = client.getEventJournal();
+   *
+   * // Subscribe to all events
+   * const unsubscribe = journal.subscribe((event) => {
+   *   console.log(`${event.type} on ${event.mapName}:${event.key}`);
+   * });
+   *
+   * // Subscribe to specific map
+   * journal.subscribe(
+   *   (event) => console.log('User changed:', event.key),
+   *   { mapName: 'users' }
+   * );
+   *
+   * // Read historical events
+   * const events = await journal.readFrom(0n, 100);
+   * ```
+   */
+  public getEventJournal(): EventJournalReader {
+    if (!this.journalReader) {
+      this.journalReader = new EventJournalReader(this.syncEngine);
+    }
+    return this.journalReader;
+  }
+
+  // ============================================
+  // Conflict Resolver API (Phase 5.05)
+  // ============================================
+
+  /**
+   * Get the conflict resolver client for registering custom merge resolvers.
+   *
+   * Conflict resolvers allow you to customize how merge conflicts are handled
+   * on the server. You can implement business logic like:
+   * - First-write-wins for booking systems
+   * - Numeric constraints (non-negative, min/max)
+   * - Owner-only modifications
+   * - Custom merge strategies
+   *
+   * @returns ConflictResolverClient instance
+   *
+   * @example
+   * ```typescript
+   * const resolvers = client.getConflictResolvers();
+   *
+   * // Register a first-write-wins resolver
+   * await resolvers.register('bookings', {
+   *   name: 'first-write-wins',
+   *   code: `
+   *     if (context.localValue !== undefined) {
+   *       return { action: 'reject', reason: 'Slot already booked' };
+   *     }
+   *     return { action: 'accept', value: context.remoteValue };
+   *   `,
+   *   priority: 100,
+   * });
+   *
+   * // Subscribe to merge rejections
+   * resolvers.onRejection((rejection) => {
+   *   console.log(`Merge rejected: ${rejection.reason}`);
+   *   // Optionally refresh local state
+   * });
+   *
+   * // List registered resolvers
+   * const registered = await resolvers.list('bookings');
+   * console.log('Active resolvers:', registered);
+   *
+   * // Unregister when done
+   * await resolvers.unregister('bookings', 'first-write-wins');
+   * ```
+   */
+  public getConflictResolvers() {
+    return this.syncEngine.getConflictResolverClient();
   }
 }
