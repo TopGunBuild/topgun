@@ -1,5 +1,5 @@
 import { Query, matchesQuery, executeQuery } from './Matcher';
-import { LWWRecord, LWWMap, ORMap, serialize, PredicateNode, ORMapRecord } from '@topgunbuild/core';
+import { LWWRecord, LWWMap, ORMap, serialize, PredicateNode, ORMapRecord, IndexedLWWMap, IndexedORMap, StandingQueryRegistry as CoreStandingQueryRegistry, type QueryExpression as CoreQuery, type StandingQueryChange } from '@topgunbuild/core';
 import { WebSocket } from 'ws';
 import { logger } from '../utils/logger';
 
@@ -312,6 +312,9 @@ export class QueryRegistry {
   /**
    * Processes a record change for all relevant subscriptions.
    * Calculates diffs and sends updates.
+   *
+   * For IndexedLWWMap: Uses StandingQueryRegistry for O(1) affected query detection.
+   * For regular maps: Falls back to ReverseQueryIndex.
    */
   public processChange(
     mapName: string,
@@ -327,15 +330,102 @@ export class QueryRegistry {
     const newVal = this.extractValue(changeRecord);
     const oldVal = this.extractValue(oldRecord);
 
+    // Use StandingQueryRegistry for IndexedLWWMap (O(1) query matching)
+    if (map instanceof IndexedLWWMap) {
+      this.processChangeWithStandingQuery(mapName, map, changeKey, newVal, oldVal);
+      return;
+    }
+
+    // Fallback to ReverseQueryIndex for regular maps
+    this.processChangeWithReverseIndex(mapName, map, changeKey, newVal, oldVal, index);
+  }
+
+  /**
+   * Process change using IndexedLWWMap's StandingQueryRegistry.
+   * O(1) detection of affected queries.
+   */
+  private processChangeWithStandingQuery(
+    mapName: string,
+    map: IndexedLWWMap<string, any>,
+    changeKey: string,
+    newVal: any,
+    oldVal: any
+  ) {
+    const subs = this.subscriptions.get(mapName);
+    if (!subs || subs.size === 0) return;
+
+    // Build a map of queryId -> subscription for quick lookup
+    const subsByQueryId = new Map<string, Subscription>();
+    for (const sub of subs) {
+      subsByQueryId.set(sub.id, sub);
+    }
+
+    // Get standing query registry from the map
+    const standingRegistry = map.getStandingQueryRegistry();
+
+    // Determine changes via StandingQueryRegistry
+    let changes: Map<string, StandingQueryChange>;
+    if (oldVal === null || oldVal === undefined) {
+      // New record added
+      if (newVal !== null && newVal !== undefined) {
+        changes = standingRegistry.onRecordAdded(changeKey, newVal);
+      } else {
+        return; // No actual change
+      }
+    } else if (newVal === null || newVal === undefined) {
+      // Record removed
+      changes = standingRegistry.onRecordRemoved(changeKey, oldVal);
+    } else {
+      // Record updated
+      changes = standingRegistry.onRecordUpdated(changeKey, oldVal, newVal);
+    }
+
+    // Process affected subscriptions
+    for (const sub of subs) {
+      // Check if this subscription's query was affected
+      const coreQuery = this.convertToCoreQuery(sub.query);
+      if (!coreQuery) {
+        // Can't convert query, use fallback
+        this.processSubscriptionFallback(sub, map, changeKey, newVal);
+        continue;
+      }
+
+      const queryHash = this.hashCoreQuery(coreQuery);
+      const change = changes.get(queryHash);
+
+      if (change === 'added') {
+        sub.previousResultKeys.add(changeKey);
+        this.sendUpdate(sub, changeKey, newVal, 'UPDATE');
+      } else if (change === 'removed') {
+        sub.previousResultKeys.delete(changeKey);
+        this.sendUpdate(sub, changeKey, null, 'REMOVE');
+      } else if (change === 'updated') {
+        this.sendUpdate(sub, changeKey, newVal, 'UPDATE');
+      }
+      // 'unchanged' - no action needed
+    }
+  }
+
+  /**
+   * Process change using legacy ReverseQueryIndex.
+   */
+  private processChangeWithReverseIndex(
+    mapName: string,
+    map: LWWMap<string, any> | ORMap<string, any>,
+    changeKey: string,
+    newVal: any,
+    oldVal: any,
+    index: ReverseQueryIndex
+  ) {
     // 0. Calculate Changed Fields
     const changedFields = this.getChangedFields(oldVal, newVal);
 
-    if (changedFields !== 'ALL' && changedFields.size === 0 && oldRecord && changeRecord) {
+    if (changedFields !== 'ALL' && changedFields.size === 0 && oldVal && newVal) {
          return;
     }
-    
+
     const candidates = index.getCandidates(changedFields, oldVal, newVal);
-    
+
     if (candidates.size === 0) return;
 
     // Helper to get all records as a Map for executeQuery
@@ -347,7 +437,7 @@ export class QueryRegistry {
     };
 
     for (const sub of candidates) {
-      const dummyRecord: LWWRecord<any> = { 
+      const dummyRecord: LWWRecord<any> = {
           value: newVal,
           timestamp: { millis: 0, counter: 0, nodeId: '' } // Dummy timestamp for matchesQuery
       };
@@ -375,7 +465,7 @@ export class QueryRegistry {
       for (const res of newResults) {
         const key = res.key;
         const isNew = !sub.previousResultKeys.has(key);
-        
+
         if (key === changeKey) {
           this.sendUpdate(sub, key, res.value, 'UPDATE');
         } else if (isNew) {
@@ -385,6 +475,122 @@ export class QueryRegistry {
 
       sub.previousResultKeys = newResultKeys;
     }
+  }
+
+  /**
+   * Fallback processing for subscriptions that can't use StandingQueryRegistry.
+   */
+  private processSubscriptionFallback(
+    sub: Subscription,
+    map: IndexedLWWMap<string, any>,
+    changeKey: string,
+    newVal: any
+  ) {
+    const dummyRecord: LWWRecord<any> = {
+      value: newVal,
+      timestamp: { millis: 0, counter: 0, nodeId: '' }
+    };
+    const isMatch = newVal !== null && matchesQuery(dummyRecord, sub.query);
+    const wasInResult = sub.previousResultKeys.has(changeKey);
+
+    if (isMatch && !wasInResult) {
+      sub.previousResultKeys.add(changeKey);
+      this.sendUpdate(sub, changeKey, newVal, 'UPDATE');
+    } else if (!isMatch && wasInResult) {
+      sub.previousResultKeys.delete(changeKey);
+      this.sendUpdate(sub, changeKey, null, 'REMOVE');
+    } else if (isMatch && wasInResult) {
+      this.sendUpdate(sub, changeKey, newVal, 'UPDATE');
+    }
+  }
+
+  /**
+   * Convert server Query format to core Query format.
+   */
+  private convertToCoreQuery(query: Query): CoreQuery | null {
+    if (query.predicate) {
+      return this.predicateToCoreQuery(query.predicate);
+    }
+
+    if (query.where) {
+      const conditions: CoreQuery[] = [];
+      for (const [attribute, condition] of Object.entries(query.where)) {
+        if (typeof condition !== 'object' || condition === null) {
+          conditions.push({ type: 'eq', attribute, value: condition });
+        } else {
+          for (const [op, value] of Object.entries(condition)) {
+            const coreOp = this.convertOperator(op);
+            if (coreOp) {
+              conditions.push({ type: coreOp, attribute, value } as CoreQuery);
+            }
+          }
+        }
+      }
+      if (conditions.length === 0) return null;
+      if (conditions.length === 1) return conditions[0];
+      return { type: 'and', children: conditions };
+    }
+
+    return null;
+  }
+
+  private predicateToCoreQuery(predicate: any): CoreQuery | null {
+    if (!predicate || !predicate.op) return null;
+
+    switch (predicate.op) {
+      case 'eq':
+      case 'neq':
+      case 'gt':
+      case 'gte':
+      case 'lt':
+      case 'lte':
+        return {
+          type: predicate.op,
+          attribute: predicate.attribute,
+          value: predicate.value,
+        } as CoreQuery;
+
+      case 'and':
+      case 'or':
+        if (predicate.children && Array.isArray(predicate.children)) {
+          const children = predicate.children
+            .map((c: any) => this.predicateToCoreQuery(c))
+            .filter((c: any): c is CoreQuery => c !== null);
+          if (children.length === 0) return null;
+          if (children.length === 1) return children[0];
+          return { type: predicate.op, children };
+        }
+        return null;
+
+      case 'not':
+        if (predicate.children && predicate.children[0]) {
+          const child = this.predicateToCoreQuery(predicate.children[0]);
+          if (child) {
+            return { type: 'not', child } as CoreQuery;
+          }
+        }
+        return null;
+
+      default:
+        return null;
+    }
+  }
+
+  private convertOperator(op: string): 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | null {
+    const mapping: Record<string, 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte'> = {
+      '$eq': 'eq',
+      '$ne': 'neq',
+      '$neq': 'neq',
+      '$gt': 'gt',
+      '$gte': 'gte',
+      '$lt': 'lt',
+      '$lte': 'lte',
+    };
+    return mapping[op] || null;
+  }
+
+  private hashCoreQuery(query: CoreQuery): string {
+    return JSON.stringify(query);
   }
 
   private extractValue(record: any): any {

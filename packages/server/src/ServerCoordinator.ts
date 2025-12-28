@@ -3,7 +3,7 @@ import { createServer as createHttpsServer, Server as HttpsServer, ServerOptions
 import { readFileSync } from 'fs';
 import * as net from 'net';
 import { WebSocketServer, WebSocket } from 'ws';
-import { HLC, LWWMap, ORMap, MerkleTree, serialize, deserialize, PermissionPolicy, Principal, PermissionType, Timestamp, LWWRecord, ORMapRecord, MessageSchema, WriteConcern, WriteConcernValue, ConsistencyLevel, ReplicationConfig, DEFAULT_REPLICATION_CONFIG } from '@topgunbuild/core';
+import { HLC, LWWMap, ORMap, MerkleTree, serialize, deserialize, PermissionPolicy, Principal, PermissionType, Timestamp, LWWRecord, ORMapRecord, MessageSchema, WriteConcern, WriteConcernValue, ConsistencyLevel, ReplicationConfig, DEFAULT_REPLICATION_CONFIG, IndexedLWWMap, IndexedORMap, type QueryExpression as CoreQuery } from '@topgunbuild/core';
 import { IServerStorage, StorageValue, ORMapValue, ORMapTombstones } from './storage/IServerStorage';
 import { IInterceptor, ServerOp, OpContext, ConnectionContext } from './interceptor/IInterceptor';
 import * as jwt from 'jsonwebtoken';
@@ -2539,6 +2539,35 @@ export class ServerCoordinator {
     private async executeLocalQuery(mapName: string, query: Query) {
         // Wait for map to be fully loaded from storage before querying
         const map = await this.getMapAsync(mapName);
+
+        // Fix: Do not apply offset/limit locally for cluster queries.
+        // They will be applied in finalizeClusterQuery after aggregation.
+        const localQuery = { ...query };
+        delete localQuery.offset;
+        delete localQuery.limit;
+
+        // Use indexed query execution if available (O(1) to O(log N))
+        if (map instanceof IndexedLWWMap) {
+            // Convert Query to core query format for indexed execution
+            const coreQuery = this.convertToCoreQuery(localQuery);
+            if (coreQuery) {
+                const entries = map.queryEntries(coreQuery);
+                return entries.map(([key, value]) => {
+                    const record = map.getRecord(key);
+                    return { key, value, timestamp: record?.timestamp };
+                });
+            }
+        }
+
+        if (map instanceof IndexedORMap) {
+            const coreQuery = this.convertToCoreQuery(localQuery);
+            if (coreQuery) {
+                const results = map.query(coreQuery);
+                return results.map(({ key, value }) => ({ key, value }));
+            }
+        }
+
+        // Fallback to full scan for non-indexed maps
         const records = new Map<string, any>();
 
         if (map instanceof LWWMap) {
@@ -2552,34 +2581,114 @@ export class ServerCoordinator {
             // For ORMap, we flatten values. A key matches if ANY of its values match?
             // Or we expose the array of values?
             // For now, we expose { key, value: [v1, v2, ...] }
-            // Accessing properties on array might fail depending on query.
-            // Assuming user knows what they are querying.
-            // Since ORMap doesn't have allKeys, we iterate internal structure?
-            // ORMap doesn't expose keys iterator publicly in the class I read?
-            // Wait, checking ORMap.ts...
-            // It doesn't export keys()! It exports items: Map.
-            // But items is private.
-            // I need to add keys() to ORMap or use 'any' cast.
-            // I will cast to any for now.
             const items = (map as any).items as Map<string, any>;
             for (const key of items.keys()) {
                 const values = map.get(key);
                 if (values.length > 0) {
-                    // We wrap in object matching LWWRecord structure roughly?
-                    // { value: values, timestamp: ... }
-                    // But timestamp differs per record.
                     records.set(key, { value: values });
                 }
             }
         }
 
-        // Fix: Do not apply offset/limit locally for cluster queries.
-        // They will be applied in finalizeClusterQuery after aggregation.
-        const localQuery = { ...query };
-        delete localQuery.offset;
-        delete localQuery.limit;
-
         return executeQuery(records, localQuery);
+    }
+
+    /**
+     * Convert server Query format to core Query format for indexed execution.
+     * Returns null if conversion is not possible (complex queries).
+     */
+    private convertToCoreQuery(query: Query): CoreQuery | null {
+        // Handle predicate-based queries (core format)
+        if (query.predicate) {
+            return this.predicateToCoreQuery(query.predicate);
+        }
+
+        // Handle where-based queries (server format)
+        if (query.where) {
+            const conditions: CoreQuery[] = [];
+
+            for (const [attribute, condition] of Object.entries(query.where)) {
+                if (typeof condition !== 'object' || condition === null) {
+                    // Simple equality: { status: 'active' }
+                    conditions.push({ type: 'eq', attribute, value: condition });
+                } else {
+                    // Operator-based: { age: { $gte: 18 } }
+                    for (const [op, value] of Object.entries(condition)) {
+                        const coreOp = this.convertOperator(op);
+                        if (coreOp) {
+                            conditions.push({ type: coreOp, attribute, value } as CoreQuery);
+                        }
+                    }
+                }
+            }
+
+            if (conditions.length === 0) return null;
+            if (conditions.length === 1) return conditions[0];
+            return { type: 'and', children: conditions };
+        }
+
+        return null;
+    }
+
+    /**
+     * Convert predicate node to core Query format.
+     */
+    private predicateToCoreQuery(predicate: any): CoreQuery | null {
+        if (!predicate || !predicate.op) return null;
+
+        switch (predicate.op) {
+            case 'eq':
+            case 'neq':
+            case 'gt':
+            case 'gte':
+            case 'lt':
+            case 'lte':
+                return {
+                    type: predicate.op,
+                    attribute: predicate.attribute,
+                    value: predicate.value,
+                } as CoreQuery;
+
+            case 'and':
+            case 'or':
+                if (predicate.children && Array.isArray(predicate.children)) {
+                    const children = predicate.children
+                        .map((c: any) => this.predicateToCoreQuery(c))
+                        .filter((c: any): c is CoreQuery => c !== null);
+                    if (children.length === 0) return null;
+                    if (children.length === 1) return children[0];
+                    return { type: predicate.op, children };
+                }
+                return null;
+
+            case 'not':
+                if (predicate.children && predicate.children[0]) {
+                    const child = this.predicateToCoreQuery(predicate.children[0]);
+                    if (child) {
+                        return { type: 'not', child } as CoreQuery;
+                    }
+                }
+                return null;
+
+            default:
+                return null;
+        }
+    }
+
+    /**
+     * Convert server operator to core query type.
+     */
+    private convertOperator(op: string): 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | null {
+        const mapping: Record<string, 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte'> = {
+            '$eq': 'eq',
+            '$ne': 'neq',
+            '$neq': 'neq',
+            '$gt': 'gt',
+            '$gte': 'gte',
+            '$lt': 'lt',
+            '$lte': 'lte',
+        };
+        return mapping[op] || null;
     }
 
     private finalizeClusterQuery(requestId: string, timeout = false) {
