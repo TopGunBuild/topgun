@@ -396,6 +396,23 @@ describe('StandingQueryIndex', () => {
       expect(index.contains('3')).toBe(false);
     });
 
+    it('should evaluate like query with underscore wildcard', () => {
+      const query: SimpleQueryNode = { type: 'like', attribute: 'name', value: 'Al_ce' };
+      const index = new StandingQueryIndex<string, User>({ query });
+
+      const alice: User = { id: '1', name: 'Alice', age: 30, status: 'active', role: 'admin', tags: [] };
+      const alyce: User = { id: '2', name: 'Alyce', age: 25, status: 'active', role: 'user', tags: [] };
+      const alccccce: User = { id: '3', name: 'Alccccce', age: 35, status: 'active', role: 'user', tags: [] };
+
+      index.add('1', alice);
+      index.add('2', alyce);
+      index.add('3', alccccce);
+
+      expect(index.contains('1')).toBe(true);
+      expect(index.contains('2')).toBe(true);
+      expect(index.contains('3')).toBe(false);
+    });
+
     it('should evaluate regex query', () => {
       const query: SimpleQueryNode = { type: 'regex', attribute: 'name', value: '^[A-C].*' };
       const index = new StandingQueryIndex<string, User>({ query });
@@ -414,6 +431,36 @@ describe('StandingQueryIndex', () => {
       expect(index.contains('2')).toBe(true);
       expect(index.contains('3')).toBe(true);
       expect(index.contains('4')).toBe(false);
+    });
+
+    it('should evaluate between query', () => {
+      const query: SimpleQueryNode = { 
+        type: 'between', 
+        attribute: 'age', 
+        from: 25, 
+        to: 35,
+        fromInclusive: true,
+        toInclusive: false 
+      };
+      const index = new StandingQueryIndex<string, User>({ query });
+
+      const tooYoung: User = { id: '1', name: 'Alice', age: 20, status: 'active', role: 'user', tags: [] };
+      const lowerBound: User = { id: '2', name: 'Bob', age: 25, status: 'active', role: 'user', tags: [] };
+      const middle: User = { id: '3', name: 'Charlie', age: 30, status: 'active', role: 'user', tags: [] };
+      const upperBound: User = { id: '4', name: 'David', age: 35, status: 'active', role: 'user', tags: [] };
+      const tooOld: User = { id: '5', name: 'Eve', age: 40, status: 'active', role: 'user', tags: [] };
+
+      index.add('1', tooYoung);
+      index.add('2', lowerBound);
+      index.add('3', middle);
+      index.add('4', upperBound);
+      index.add('5', tooOld);
+
+      expect(index.contains('1')).toBe(false);
+      expect(index.contains('2')).toBe(true);  // inclusive start
+      expect(index.contains('3')).toBe(true);
+      expect(index.contains('4')).toBe(false); // exclusive end
+      expect(index.contains('5')).toBe(false);
     });
   });
 

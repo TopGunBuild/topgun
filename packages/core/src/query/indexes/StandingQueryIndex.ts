@@ -292,6 +292,17 @@ export class StandingQueryIndex<K, V> implements Index<K, V, unknown> {
           return false;
         }
 
+      case 'between':
+        if (value === undefined || value === null) {
+          return false;
+        }
+        const val = value as number | string;
+        const from = query.from as number | string;
+        const to = query.to as number | string;
+        const fromOk = query.fromInclusive !== false ? val >= from : val > from;
+        const toOk = query.toInclusive !== false ? val <= to : val < to;
+        return fromOk && toOk;
+
       default:
         return false;
     }
@@ -356,7 +367,7 @@ export class StandingQueryIndex<K, V> implements Index<K, V, unknown> {
   private matchLike(value: string, pattern: string): boolean {
     // Convert LIKE pattern to regex
     const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&');
-    const regex = escaped.replace(/%/g, '.*');
+    const regex = escaped.replace(/%/g, '.*').replace(/_/g, '.');
     return new RegExp(`^${regex}$`, 'i').test(value);
   }
 
