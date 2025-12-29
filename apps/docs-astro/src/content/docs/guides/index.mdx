@@ -4,7 +4,7 @@ description: Practical, step-by-step guides to help you implement common pattern
 order: 10
 ---
 
-import { ChevronRight, Shield, Server, Radio, Timer, Activity, Lock, KeyRound, Zap, CheckCircle, Network, Cpu, Plus, ScrollText, GitMerge, Plug } from 'lucide-react';
+import { ChevronRight, Shield, Server, Radio, Timer, Activity, Lock, KeyRound, Zap, CheckCircle, Network, Cpu, Plus, ScrollText, GitMerge, Plug, Database, Search, Lightbulb } from 'lucide-react';
 import { GuideCard } from '../../../components/docs/GuideCard';
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
@@ -35,6 +35,24 @@ Practical, step-by-step guides to help you implement common patterns and feature
     icon={Activity}
     title="Live Queries"
     description="Building reactive applications with real-time query subscriptions."
+  />
+  <GuideCard
+    href="/docs/guides/indexing"
+    icon={Database}
+    title="Indexing"
+    description="Accelerate queries with HashIndex, NavigableIndex, and InvertedIndex for O(1) to O(log N) lookups."
+  />
+  <GuideCard
+    href="/docs/guides/full-text-search"
+    icon={Search}
+    title="Full-Text Search"
+    description="Add fast text search with InvertedIndex and configurable tokenization pipelines."
+  />
+  <GuideCard
+    href="/docs/guides/adaptive-indexing"
+    icon={Lightbulb}
+    title="Adaptive Indexing"
+    description="Auto-suggest or auto-create indexes based on query patterns with the Index Advisor."
   />
   <GuideCard
     href="/docs/guides/pub-sub"
