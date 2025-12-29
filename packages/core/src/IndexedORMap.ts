@@ -12,6 +12,7 @@
  * - Composite key indexing (key:tag)
  * - Automatic index updates on CRDT operations
  * - Lazy filtering for tombstones
+ * - Adaptive indexing with query pattern tracking (Phase 8.02)
  *
  * @module IndexedORMap
  */
@@ -27,13 +28,31 @@ import { FallbackIndex } from './query/indexes/FallbackIndex';
 import { InvertedIndex } from './query/indexes/InvertedIndex';
 import { TokenizationPipeline } from './query/tokenization';
 import { Attribute, simpleAttribute } from './query/Attribute';
-import type { Query, QueryPlan, PlanStep } from './query/QueryTypes';
+import type { Query, QueryPlan, PlanStep, SimpleQueryNode } from './query/QueryTypes';
+import { isSimpleQuery } from './query/QueryTypes';
 import type { ResultSet } from './query/resultset/ResultSet';
 import { SetResultSet } from './query/resultset/SetResultSet';
 import { IntersectionResultSet } from './query/resultset/IntersectionResultSet';
 import { UnionResultSet } from './query/resultset/UnionResultSet';
 import { FilteringResultSet } from './query/resultset/FilteringResultSet';
 import { evaluatePredicate, PredicateNode } from './predicate';
+
+// Adaptive indexing imports (Phase 8.02)
+import {
+  QueryPatternTracker,
+  IndexAdvisor,
+  AutoIndexManager,
+  DefaultIndexingStrategy,
+} from './query/adaptive';
+import type {
+  IndexedMapOptions,
+  IndexSuggestion,
+  IndexSuggestionOptions,
+  QueryStatistics,
+  TrackedQueryType,
+  RecommendedIndexType,
+} from './query/adaptive/types';
+import { ADAPTIVE_INDEXING_DEFAULTS } from './query/adaptive/types';
 
 /**
  * Result of a query on IndexedORMap.
@@ -58,8 +77,16 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
   private indexRegistry: IndexRegistry<string, V>;
   private queryOptimizer: QueryOptimizer<string, V>;
 
-  constructor(hlc: HLC) {
+  // Adaptive indexing (Phase 8.02)
+  private readonly queryTracker: QueryPatternTracker;
+  private readonly indexAdvisor: IndexAdvisor;
+  private readonly autoIndexManager: AutoIndexManager<string, V> | null;
+  private readonly defaultIndexingStrategy: DefaultIndexingStrategy<V> | null;
+  private readonly options: IndexedMapOptions;
+
+  constructor(hlc: HLC, options: IndexedMapOptions = {}) {
     super(hlc);
+    this.options = options;
 
     this.indexRegistry = new IndexRegistry();
     this.queryOptimizer = new QueryOptimizer({
@@ -74,6 +101,29 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
         (record, query) => this.matchesIndexQuery(record, query)
       )
     );
+
+    // Initialize adaptive indexing (Phase 8.02)
+    this.queryTracker = new QueryPatternTracker();
+    this.indexAdvisor = new IndexAdvisor(this.queryTracker);
+
+    // Initialize auto-index manager if enabled
+    if (options.adaptiveIndexing?.autoIndex?.enabled) {
+      this.autoIndexManager = new AutoIndexManager(
+        this.queryTracker,
+        this.indexAdvisor,
+        options.adaptiveIndexing.autoIndex
+      );
+      this.autoIndexManager.setMap(this);
+    } else {
+      this.autoIndexManager = null;
+    }
+
+    // Initialize default indexing strategy
+    if (options.defaultIndexing && options.defaultIndexing !== 'none') {
+      this.defaultIndexingStrategy = new DefaultIndexingStrategy<V>(options.defaultIndexing);
+    } else {
+      this.defaultIndexingStrategy = null;
+    }
   }
 
   // ==================== Index Management ====================
@@ -187,10 +237,13 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
    * Execute a query across all records.
    * Returns array of matching results with key, tag, and value.
    *
+   * Also tracks query patterns for adaptive indexing (Phase 8.02).
+   *
    * @param query - Query to execute
    * @returns Array of query results
    */
   query(query: Query): ORMapQueryResult<K, V>[] {
+    const start = performance.now();
     const plan = this.queryOptimizer.optimize(query);
     const resultSet = this.executePlan(plan.root);
 
@@ -203,6 +256,10 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
         results.push({ key: key as K, tag, value: record.value });
       }
     }
+
+    // Track query pattern for adaptive indexing (Phase 8.02)
+    const duration = performance.now() - start;
+    this.trackQueryPattern(query, duration, results.length, plan.usesIndexes);
 
     return results;
   }
@@ -577,5 +634,197 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
    */
   explainQuery(query: Query): QueryPlan {
     return this.queryOptimizer.optimize(query);
+  }
+
+  // ==================== Adaptive Indexing (Phase 8.02) ====================
+
+  /**
+   * Register an attribute for auto-indexing.
+   * Required before auto-index can create indexes on this attribute.
+   *
+   * @param attribute - The attribute to register
+   * @param allowedIndexTypes - Optional list of allowed index types
+   */
+  registerAttribute<A>(
+    attribute: Attribute<V, A>,
+    allowedIndexTypes?: RecommendedIndexType[]
+  ): void {
+    if (this.autoIndexManager) {
+      this.autoIndexManager.registerAttribute(attribute, allowedIndexTypes);
+    }
+  }
+
+  /**
+   * Unregister an attribute from auto-indexing.
+   *
+   * @param attributeName - Name of attribute to unregister
+   */
+  unregisterAttribute(attributeName: string): void {
+    if (this.autoIndexManager) {
+      this.autoIndexManager.unregisterAttribute(attributeName);
+    }
+  }
+
+  /**
+   * Get index suggestions based on query patterns.
+   * Use this in production to get recommendations for manual index creation.
+   *
+   * @param options - Suggestion options
+   * @returns Array of index suggestions sorted by priority
+   */
+  getIndexSuggestions(options?: IndexSuggestionOptions): IndexSuggestion[] {
+    return this.indexAdvisor.getSuggestions(options);
+  }
+
+  /**
+   * Get query pattern statistics.
+   * Useful for debugging and understanding query patterns.
+   *
+   * @returns Array of query statistics
+   */
+  getQueryStatistics(): QueryStatistics[] {
+    return this.queryTracker.getStatistics();
+  }
+
+  /**
+   * Reset query statistics.
+   * Call this to clear accumulated query patterns.
+   */
+  resetQueryStatistics(): void {
+    this.queryTracker.clear();
+    if (this.autoIndexManager) {
+      this.autoIndexManager.resetCounts();
+    }
+  }
+
+  /**
+   * Get query pattern tracker for advanced usage.
+   */
+  getQueryTracker(): QueryPatternTracker {
+    return this.queryTracker;
+  }
+
+  /**
+   * Get index advisor for advanced usage.
+   */
+  getIndexAdvisor(): IndexAdvisor {
+    return this.indexAdvisor;
+  }
+
+  /**
+   * Get auto-index manager (if enabled).
+   */
+  getAutoIndexManager(): AutoIndexManager<string, V> | null {
+    return this.autoIndexManager;
+  }
+
+  /**
+   * Check if auto-indexing is enabled.
+   */
+  isAutoIndexingEnabled(): boolean {
+    return this.autoIndexManager !== null;
+  }
+
+  /**
+   * Track query pattern for adaptive indexing.
+   */
+  private trackQueryPattern(
+    query: Query,
+    duration: number,
+    resultSize: number,
+    usedIndex: boolean
+  ): void {
+    // Only track if advisor is enabled (default: true)
+    const advisorEnabled = this.options.adaptiveIndexing?.advisor?.enabled ??
+      ADAPTIVE_INDEXING_DEFAULTS.advisor.enabled;
+
+    if (!advisorEnabled && !this.autoIndexManager) {
+      return;
+    }
+
+    // Extract attribute from query
+    const attribute = this.extractAttribute(query);
+    if (!attribute) return;
+
+    // Extract query type
+    const queryType = this.extractQueryType(query);
+    if (!queryType) return;
+
+    // Check if this attribute has an index
+    const hasIndex = this.indexRegistry.hasIndex(attribute);
+
+    // Record query in tracker
+    this.queryTracker.recordQuery(
+      attribute,
+      queryType,
+      duration,
+      resultSize,
+      hasIndex
+    );
+
+    // Notify auto-index manager if enabled
+    if (this.autoIndexManager) {
+      this.autoIndexManager.onQueryExecuted(attribute, queryType);
+    }
+  }
+
+  /**
+   * Extract attribute name from query.
+   */
+  private extractAttribute(query: Query): string | null {
+    if (isSimpleQuery(query)) {
+      return (query as SimpleQueryNode).attribute;
+    }
+
+    // For compound queries, extract from first child
+    if (query.type === 'and' || query.type === 'or') {
+      const children = (query as { children?: Query[] }).children;
+      if (children && children.length > 0) {
+        return this.extractAttribute(children[0]);
+      }
+    }
+
+    if (query.type === 'not') {
+      const child = (query as { child?: Query }).child;
+      if (child) {
+        return this.extractAttribute(child);
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Extract query type from query.
+   */
+  private extractQueryType(query: Query): TrackedQueryType | null {
+    if (isSimpleQuery(query)) {
+      const type = query.type;
+      // Only track types that can be indexed
+      const indexableTypes: TrackedQueryType[] = [
+        'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'between', 'in', 'has',
+        'contains', 'containsAll', 'containsAny',
+      ];
+      if (indexableTypes.includes(type as TrackedQueryType)) {
+        return type as TrackedQueryType;
+      }
+    }
+
+    // For compound queries, extract from first child
+    if (query.type === 'and' || query.type === 'or') {
+      const children = (query as { children?: Query[] }).children;
+      if (children && children.length > 0) {
+        return this.extractQueryType(children[0]);
+      }
+    }
+
+    if (query.type === 'not') {
+      const child = (query as { child?: Query }).child;
+      if (child) {
+        return this.extractQueryType(child);
+      }
+    }
+
+    return null;
   }
 }

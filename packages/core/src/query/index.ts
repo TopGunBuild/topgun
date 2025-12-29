@@ -1,5 +1,5 @@
 /**
- * Query Engine - Phase 7 + Phase 8.01
+ * Query Engine - Phase 7 + Phase 8.01 + Phase 8.02
  *
  * CQEngine-inspired query engine for TopGun providing:
  * - O(1) to O(log N) query execution via indexes
@@ -8,6 +8,7 @@
  * - Lazy ResultSet with merge cost optimization
  * - Full CRDT integration (tombstone-aware, TTL-aware)
  * - Full-text search via InvertedIndex (Phase 8.01)
+ * - Adaptive indexing with query pattern tracking (Phase 8.02)
  */
 
 // Data structures
@@ -73,3 +74,6 @@ export {
 
 // Tokenization (Phase 8.01)
 export * from './tokenization';
+
+// Adaptive Indexing (Phase 8.02)
+export * from './adaptive';
