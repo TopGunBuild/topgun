@@ -303,6 +303,28 @@ export class StandingQueryIndex<K, V> implements Index<K, V, unknown> {
         const toOk = query.toInclusive !== false ? val <= to : val < to;
         return fromOk && toOk;
 
+      case 'contains':
+        if (typeof value !== 'string' || typeof query.value !== 'string') {
+          return false;
+        }
+        return value.toLowerCase().includes((query.value as string).toLowerCase());
+
+      case 'containsAll':
+        if (typeof value !== 'string' || !query.values) {
+          return false;
+        }
+        return query.values.every(
+          (v) => typeof v === 'string' && value.toLowerCase().includes(v.toLowerCase())
+        );
+
+      case 'containsAny':
+        if (typeof value !== 'string' || !query.values) {
+          return false;
+        }
+        return query.values.some(
+          (v) => typeof v === 'string' && value.toLowerCase().includes(v.toLowerCase())
+        );
+
       default:
         return false;
     }

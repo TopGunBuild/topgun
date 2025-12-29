@@ -19,7 +19,7 @@ export interface Index<K, V, A = unknown> {
   readonly attribute: Attribute<V, A>;
 
   /** Index type identifier */
-  readonly type: 'hash' | 'navigable' | 'compound' | 'standing';
+  readonly type: 'hash' | 'navigable' | 'compound' | 'standing' | 'inverted';
 
   /**
    * Cost of retrieving results from this index.
@@ -69,7 +69,7 @@ export interface Index<K, V, A = unknown> {
  */
 export interface IndexQuery<A> {
   /** Query type */
-  type: 'equal' | 'in' | 'has' | 'gt' | 'gte' | 'lt' | 'lte' | 'between';
+  type: 'equal' | 'in' | 'has' | 'gt' | 'gte' | 'lt' | 'lte' | 'between' | 'contains' | 'containsAll' | 'containsAny';
   /** Value for equality queries */
   value?: A;
   /** Values for 'in' queries */

@@ -27,6 +27,8 @@ import type { Index, IndexStats, IndexQuery } from './query/indexes/types';
 import { HashIndex } from './query/indexes/HashIndex';
 import { NavigableIndex } from './query/indexes/NavigableIndex';
 import { FallbackIndex } from './query/indexes/FallbackIndex';
+import { InvertedIndex } from './query/indexes/InvertedIndex';
+import { TokenizationPipeline } from './query/tokenization';
 import { Attribute, simpleAttribute } from './query/Attribute';
 import type { Query, QueryPlan, PlanStep } from './query/QueryTypes';
 import type { ResultSet } from './query/resultset/ResultSet';
@@ -103,6 +105,33 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
     comparator?: (a: A, b: A) => number
   ): NavigableIndex<K, V, A> {
     const index = new NavigableIndex<K, V, A>(attribute, comparator);
+    this.indexRegistry.addIndex(index);
+    this.buildIndex(index);
+    return index;
+  }
+
+  /**
+   * Add an inverted index for full-text search on an attribute.
+   * Inverted indexes support text search queries (contains, containsAll, containsAny).
+   *
+   * @param attribute - Text attribute to index
+   * @param pipeline - Optional custom tokenization pipeline
+   * @returns Created InvertedIndex
+   *
+   * @example
+   * ```typescript
+   * const nameAttr = simpleAttribute<Product, string>('name', p => p.name);
+   * products.addInvertedIndex(nameAttr);
+   *
+   * // Search for products containing "wireless"
+   * products.query({ type: 'contains', attribute: 'name', value: 'wireless' });
+   * ```
+   */
+  addInvertedIndex<A extends string = string>(
+    attribute: Attribute<V, A>,
+    pipeline?: TokenizationPipeline
+  ): InvertedIndex<K, V, A> {
+    const index = new InvertedIndex<K, V, A>(attribute, pipeline);
     this.indexRegistry.addIndex(index);
     this.buildIndex(index);
     return index;
@@ -375,6 +404,24 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
             children: [
               this.queryToPredicate((query as { child: Query }).child),
             ],
+          };
+        case 'contains':
+          return {
+            op: 'contains',
+            attribute: (query as { attribute: string }).attribute,
+            value: (query as { value: unknown }).value,
+          };
+        case 'containsAll':
+          return {
+            op: 'containsAll',
+            attribute: (query as { attribute: string }).attribute,
+            value: (query as { values: unknown[] }).values,
+          };
+        case 'containsAny':
+          return {
+            op: 'containsAny',
+            attribute: (query as { attribute: string }).attribute,
+            value: (query as { values: unknown[] }).values,
           };
         default:
           return { op: 'eq', value: null };

@@ -16,3 +16,4 @@ export {
   type StandingQueryIndexOptions,
   type StandingQueryChange,
 } from './StandingQueryIndex';
+export { InvertedIndex, type InvertedIndexStats } from './InvertedIndex';

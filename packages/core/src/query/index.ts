@@ -1,12 +1,13 @@
 /**
- * Query Engine - Phase 7
+ * Query Engine - Phase 7 + Phase 8.01
  *
  * CQEngine-inspired query engine for TopGun providing:
  * - O(1) to O(log N) query execution via indexes
- * - Index types: Hash, Navigable, Compound, StandingQuery
+ * - Index types: Hash, Navigable, Compound, StandingQuery, Inverted
  * - Cost-based query optimizer
  * - Lazy ResultSet with merge cost optimization
  * - Full CRDT integration (tombstone-aware, TTL-aware)
+ * - Full-text search via InvertedIndex (Phase 8.01)
  */
 
 // Data structures
@@ -69,3 +70,6 @@ export {
   type LiveQueryInitialEvent,
   type LiveQueryDeltaEvent,
 } from './LiveQueryManager';
+
+// Tokenization (Phase 8.01)
+export * from './tokenization';

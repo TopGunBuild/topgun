@@ -148,7 +148,7 @@ export {
   DEFAULT_REPLICATION_CONFIG,
 } from './types/cluster';
 
-// Query Engine exports (Phase 7)
+// Query Engine exports (Phase 7 + Phase 8.01)
 // Note: Query from schemas conflicts with Query from query/QueryTypes
 // We rename query engine Query to QueryExpression to avoid conflict
 export {
@@ -165,6 +165,19 @@ export {
   StandingQueryIndex,
   FallbackIndex,
   createPredicateMatcher,
+  InvertedIndex,
+  // Tokenization (Phase 8.01)
+  TokenizationPipeline,
+  WhitespaceTokenizer,
+  WordBoundaryTokenizer,
+  NGramTokenizer,
+  LowercaseFilter,
+  StopWordFilter,
+  MinLengthFilter,
+  MaxLengthFilter,
+  TrimFilter,
+  UniqueFilter,
+  DEFAULT_STOP_WORDS,
   // ResultSet
   SetResultSet,
   LazyResultSet,
@@ -196,6 +209,11 @@ export type {
   Index,
   IndexQuery,
   IndexStats,
+  InvertedIndexStats,
+  // Tokenization (Phase 8.01)
+  Tokenizer,
+  TokenFilter,
+  TokenizationPipelineOptions,
   // ResultSet
   ResultSet,
   IteratorFactory,

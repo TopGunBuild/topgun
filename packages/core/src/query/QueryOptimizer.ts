@@ -326,6 +326,9 @@ export class QueryOptimizer<K, V> {
       like: 'like',
       regex: 'regex',
       between: 'between',
+      contains: 'contains',
+      containsAll: 'containsAll',
+      containsAny: 'containsAny',
     };
     return mapping[type] ?? type;
   }
@@ -358,6 +361,12 @@ export class QueryOptimizer<K, V> {
           fromInclusive: query.fromInclusive,
           toInclusive: query.toInclusive,
         };
+      case 'contains':
+        return { type: 'contains', value: query.value };
+      case 'containsAll':
+        return { type: 'containsAll', values: query.values };
+      case 'containsAny':
+        return { type: 'containsAny', values: query.values };
       default:
         throw new Error(`Cannot build index query for type: ${query.type}`);
     }
