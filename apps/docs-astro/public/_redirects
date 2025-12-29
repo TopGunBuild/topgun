@@ -1,0 +1,42 @@
+# Remove trailing slashes - redirect to canonical URLs without trailing slash
+# This prevents duplicate content issues in search engines
+
+/docs/intro/ /docs/intro 301
+/docs/installation/ /docs/installation 301
+/docs/quick-start/ /docs/quick-start 301
+/docs/comparison/ /docs/comparison 301
+/docs/concepts/ /docs/concepts 301
+/docs/concepts/crdt-hlc/ /docs/concepts/crdt-hlc 301
+/docs/concepts/data-structures/ /docs/concepts/data-structures 301
+/docs/concepts/local-first/ /docs/concepts/local-first 301
+/docs/concepts/sync-protocol/ /docs/concepts/sync-protocol 301
+/docs/guides/ /docs/guides 301
+/docs/guides/authentication/ /docs/guides/authentication 301
+/docs/guides/cluster-client/ /docs/guides/cluster-client 301
+/docs/guides/conflict-resolvers/ /docs/guides/conflict-resolvers 301
+/docs/guides/deployment/ /docs/guides/deployment 301
+/docs/guides/distributed-locks/ /docs/guides/distributed-locks 301
+/docs/guides/entry-processor/ /docs/guides/entry-processor 301
+/docs/guides/event-journal/ /docs/guides/event-journal 301
+/docs/guides/live-queries/ /docs/guides/live-queries 301
+/docs/guides/observability/ /docs/guides/observability 301
+/docs/guides/performance/ /docs/guides/performance 301
+/docs/guides/pn-counter/ /docs/guides/pn-counter 301
+/docs/guides/pub-sub/ /docs/guides/pub-sub 301
+/docs/guides/rbac/ /docs/guides/rbac 301
+/docs/guides/security/ /docs/guides/security 301
+/docs/guides/ttl/ /docs/guides/ttl 301
+/docs/guides/write-concern/ /docs/guides/write-concern 301
+/docs/reference/ /docs/reference 301
+/docs/reference/adapter/ /docs/reference/adapter 301
+/docs/reference/client/ /docs/reference/client 301
+/docs/reference/data-structures/ /docs/reference/data-structures 301
+/docs/reference/protocol/ /docs/reference/protocol 301
+/docs/reference/react-hooks/ /docs/reference/react-hooks 301
+/docs/reference/server/ /docs/reference/server 301
+/blog/ /blog 301
+/blog/architecture-decisions/ /blog/architecture-decisions 301
+/blog/conflict-resolution-beyond-lww/ /blog/conflict-resolution-beyond-lww 301
+/blog/topgun-v2-release/ /blog/topgun-v2-release 301
+/blog/understanding-crdts/ /blog/understanding-crdts 301
+/whitepaper/ /whitepaper 301
