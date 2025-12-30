@@ -23,6 +23,18 @@ export {
   multiAttribute,
 } from './Attribute';
 
+// Attribute Factory (Phase 9.02)
+export {
+  generateAttributes,
+  attr,
+  multiAttr,
+  createSchema,
+  type AttributeType,
+  type AttributeSchema,
+  type GeneratedAttributes,
+  type GenerateAttributesOptions,
+} from './AttributeFactory';
+
 // Indexes
 export * from './indexes';
 

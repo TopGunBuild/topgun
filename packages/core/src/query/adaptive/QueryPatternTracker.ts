@@ -13,7 +13,7 @@
  * @module query/adaptive/QueryPatternTracker
  */
 
-import type { QueryStatistics, TrackedQueryType } from './types';
+import type { QueryStatistics, TrackedQueryType, CompoundQueryStatistics } from './types';
 import { TRACKING_SAMPLE_RATE } from './types';
 
 /**
@@ -76,6 +76,9 @@ function parseStatsKey(key: StatsKey): { attribute: string; queryType: TrackedQu
  * tracker.recordQuery('category', 'eq', 5.2, 100, false);
  * tracker.recordQuery('category', 'eq', 4.8, 100, false);
  *
+ * // Record compound AND queries (Phase 9.03)
+ * tracker.recordCompoundQuery(['status', 'category'], 10.5, 50, false);
+ *
  * // Get statistics
  * const stats = tracker.getStatistics();
  * // [{ attribute: 'category', queryType: 'eq', queryCount: 2, averageCost: 5.0, ... }]
@@ -83,6 +86,7 @@ function parseStatsKey(key: StatsKey): { attribute: string; queryType: TrackedQu
  */
 export class QueryPatternTracker {
   private stats = new Map<StatsKey, QueryStatistics>();
+  private compoundStats = new Map<string, CompoundQueryStatistics>();
   private queryCounter = 0;
   private readonly samplingRate: number;
   private readonly maxTrackedPatterns: number;
@@ -145,6 +149,113 @@ export class QueryPatternTracker {
         estimatedCardinality: resultSize,
         hasIndex,
       });
+    }
+  }
+
+  /**
+   * Record a compound (AND) query execution for pattern tracking (Phase 9.03).
+   *
+   * @param attributes - Array of attribute names being queried together
+   * @param executionTime - Query execution time in milliseconds
+   * @param resultSize - Number of results returned
+   * @param hasCompoundIndex - Whether a compound index was used
+   */
+  recordCompoundQuery(
+    attributes: string[],
+    executionTime: number,
+    resultSize: number,
+    hasCompoundIndex: boolean
+  ): void {
+    // Need at least 2 attributes for a compound query
+    if (attributes.length < 2) return;
+
+    // Sampling: skip if not selected
+    this.queryCounter++;
+    if (this.samplingRate > 1 && this.queryCounter % this.samplingRate !== 0) {
+      return;
+    }
+
+    // Sort attributes for consistent key generation
+    const sortedAttrs = [...attributes].sort();
+    const compoundKey = sortedAttrs.join('+');
+    const existing = this.compoundStats.get(compoundKey);
+    const now = Date.now();
+
+    if (existing) {
+      // Update existing statistics
+      existing.queryCount++;
+      existing.totalCost += executionTime;
+      existing.averageCost = existing.totalCost / existing.queryCount;
+      existing.lastQueried = now;
+      existing.hasCompoundIndex = hasCompoundIndex;
+    } else {
+      // Check capacity before adding new entry
+      if (this.compoundStats.size >= this.maxTrackedPatterns) {
+        this.evictOldestCompound();
+      }
+
+      // Create new statistics entry
+      this.compoundStats.set(compoundKey, {
+        attributes: sortedAttrs,
+        compoundKey,
+        queryCount: this.samplingRate, // Adjust for sampling
+        totalCost: executionTime * this.samplingRate,
+        averageCost: executionTime,
+        lastQueried: now,
+        hasCompoundIndex,
+      });
+    }
+  }
+
+  /**
+   * Get all compound query statistics (Phase 9.03).
+   *
+   * @returns Array of compound query statistics, sorted by query count descending
+   */
+  getCompoundStatistics(): CompoundQueryStatistics[] {
+    this.pruneStaleCompound();
+    return Array.from(this.compoundStats.values()).sort((a, b) => b.queryCount - a.queryCount);
+  }
+
+  /**
+   * Get compound statistics for a specific attribute combination.
+   *
+   * @param attributes - Array of attribute names
+   * @returns Compound query statistics or undefined
+   */
+  getCompoundStats(attributes: string[]): CompoundQueryStatistics | undefined {
+    const sortedAttrs = [...attributes].sort();
+    const compoundKey = sortedAttrs.join('+');
+    return this.compoundStats.get(compoundKey);
+  }
+
+  /**
+   * Check if attributes appear in any tracked compound queries.
+   *
+   * @param attribute - The attribute name to check
+   * @returns True if attribute is part of any compound query pattern
+   */
+  isInCompoundPattern(attribute: string): boolean {
+    for (const stat of this.compoundStats.values()) {
+      if (stat.attributes.includes(attribute)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Update compound index status.
+   *
+   * @param attributes - Array of attribute names
+   * @param hasCompoundIndex - Whether a compound index exists
+   */
+  updateCompoundIndexStatus(attributes: string[], hasCompoundIndex: boolean): void {
+    const sortedAttrs = [...attributes].sort();
+    const compoundKey = sortedAttrs.join('+');
+    const stat = this.compoundStats.get(compoundKey);
+    if (stat) {
+      stat.hasCompoundIndex = hasCompoundIndex;
     }
   }
 
@@ -253,6 +364,7 @@ export class QueryPatternTracker {
    */
   clear(): void {
     this.stats.clear();
+    this.compoundStats.clear();
     this.queryCounter = 0;
   }
 
@@ -263,15 +375,17 @@ export class QueryPatternTracker {
    */
   getTrackingInfo(): {
     patternsTracked: number;
+    compoundPatternsTracked: number;
     totalQueries: number;
     samplingRate: number;
     memoryEstimate: number;
   } {
-    // Rough memory estimate: ~200 bytes per stats entry
-    const memoryEstimate = this.stats.size * 200;
+    // Rough memory estimate: ~200 bytes per stats entry, ~300 for compound (larger attribute arrays)
+    const memoryEstimate = this.stats.size * 200 + this.compoundStats.size * 300;
 
     return {
       patternsTracked: this.stats.size,
+      compoundPatternsTracked: this.compoundStats.size,
       totalQueries: this.queryCounter,
       samplingRate: this.samplingRate,
       memoryEstimate,
@@ -306,6 +420,38 @@ export class QueryPatternTracker {
     for (const [key, stat] of this.stats.entries()) {
       if (stat.lastQueried < cutoff) {
         this.stats.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Evict the oldest compound query entry (Phase 9.03).
+   */
+  private evictOldestCompound(): void {
+    let oldestKey: string | null = null;
+    let oldestTime = Infinity;
+
+    for (const [key, stat] of this.compoundStats.entries()) {
+      if (stat.lastQueried < oldestTime) {
+        oldestTime = stat.lastQueried;
+        oldestKey = key;
+      }
+    }
+
+    if (oldestKey) {
+      this.compoundStats.delete(oldestKey);
+    }
+  }
+
+  /**
+   * Prune stale compound statistics (Phase 9.03).
+   */
+  private pruneStaleCompound(): void {
+    const cutoff = Date.now() - this.statsTtl;
+
+    for (const [key, stat] of this.compoundStats.entries()) {
+      if (stat.lastQueried < cutoff) {
+        this.compoundStats.delete(key);
       }
     }
   }

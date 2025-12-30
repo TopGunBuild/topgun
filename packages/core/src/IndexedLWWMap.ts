@@ -30,6 +30,11 @@ import { NavigableIndex } from './query/indexes/NavigableIndex';
 import { FallbackIndex } from './query/indexes/FallbackIndex';
 import { InvertedIndex } from './query/indexes/InvertedIndex';
 import { TokenizationPipeline } from './query/tokenization';
+import {
+  LazyHashIndex,
+  LazyNavigableIndex,
+  LazyInvertedIndex,
+} from './query/indexes/lazy';
 import { Attribute, simpleAttribute } from './query/Attribute';
 import type { Query, QueryPlan, PlanStep, SimpleQueryNode } from './query/QueryTypes';
 import { isSimpleQuery } from './query/QueryTypes';
@@ -54,8 +59,10 @@ import type {
   QueryStatistics,
   TrackedQueryType,
   RecommendedIndexType,
+  IndexBuildProgressCallback,
 } from './query/adaptive/types';
 import { ADAPTIVE_INDEXING_DEFAULTS } from './query/adaptive/types';
+import type { LazyIndex } from './query/indexes/lazy';
 
 /**
  * LWWMap with index support for O(1) to O(log N) queries.
@@ -131,11 +138,21 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
 
   /**
    * Add a hash index on an attribute.
+   * If lazyIndexBuilding is enabled, creates a LazyHashIndex instead.
    *
    * @param attribute - Attribute to index
-   * @returns Created HashIndex
+   * @returns Created HashIndex (or LazyHashIndex)
    */
-  addHashIndex<A>(attribute: Attribute<V, A>): HashIndex<K, V, A> {
+  addHashIndex<A>(attribute: Attribute<V, A>): HashIndex<K, V, A> | LazyHashIndex<K, V, A> {
+    if (this.options.lazyIndexBuilding) {
+      const index = new LazyHashIndex<K, V, A>(attribute, {
+        onProgress: this.options.onIndexBuilding,
+      });
+      this.indexRegistry.addIndex(index);
+      this.buildIndex(index);
+      return index;
+    }
+
     const index = new HashIndex<K, V, A>(attribute);
     this.indexRegistry.addIndex(index);
     this.buildIndex(index);
@@ -145,15 +162,25 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
   /**
    * Add a navigable index on an attribute.
    * Navigable indexes support range queries (gt, gte, lt, lte, between).
+   * If lazyIndexBuilding is enabled, creates a LazyNavigableIndex instead.
    *
    * @param attribute - Attribute to index
    * @param comparator - Optional custom comparator
-   * @returns Created NavigableIndex
+   * @returns Created NavigableIndex (or LazyNavigableIndex)
    */
   addNavigableIndex<A extends string | number>(
     attribute: Attribute<V, A>,
     comparator?: (a: A, b: A) => number
-  ): NavigableIndex<K, V, A> {
+  ): NavigableIndex<K, V, A> | LazyNavigableIndex<K, V, A> {
+    if (this.options.lazyIndexBuilding) {
+      const index = new LazyNavigableIndex<K, V, A>(attribute, comparator, {
+        onProgress: this.options.onIndexBuilding,
+      });
+      this.indexRegistry.addIndex(index);
+      this.buildIndex(index);
+      return index;
+    }
+
     const index = new NavigableIndex<K, V, A>(attribute, comparator);
     this.indexRegistry.addIndex(index);
     this.buildIndex(index);
@@ -163,10 +190,11 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
   /**
    * Add an inverted index for full-text search on an attribute.
    * Inverted indexes support text search queries (contains, containsAll, containsAny).
+   * If lazyIndexBuilding is enabled, creates a LazyInvertedIndex instead.
    *
    * @param attribute - Text attribute to index
    * @param pipeline - Optional custom tokenization pipeline
-   * @returns Created InvertedIndex
+   * @returns Created InvertedIndex (or LazyInvertedIndex)
    *
    * @example
    * ```typescript
@@ -180,7 +208,16 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
   addInvertedIndex<A extends string = string>(
     attribute: Attribute<V, A>,
     pipeline?: TokenizationPipeline
-  ): InvertedIndex<K, V, A> {
+  ): InvertedIndex<K, V, A> | LazyInvertedIndex<K, V, A> {
+    if (this.options.lazyIndexBuilding) {
+      const index = new LazyInvertedIndex<K, V, A>(attribute, pipeline, {
+        onProgress: this.options.onIndexBuilding,
+      });
+      this.indexRegistry.addIndex(index);
+      this.buildIndex(index);
+      return index;
+    }
+
     const index = new InvertedIndex<K, V, A>(attribute, pipeline);
     this.indexRegistry.addIndex(index);
     this.buildIndex(index);
@@ -767,6 +804,64 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
    */
   isAutoIndexingEnabled(): boolean {
     return this.autoIndexManager !== null;
+  }
+
+  // ==================== Lazy Indexing (Phase 9.01) ====================
+
+  /**
+   * Check if lazy index building is enabled.
+   */
+  isLazyIndexingEnabled(): boolean {
+    return this.options.lazyIndexBuilding === true;
+  }
+
+  /**
+   * Force materialization of all lazy indexes.
+   * Useful to pre-warm indexes before critical operations.
+   *
+   * @param progressCallback - Optional progress callback
+   */
+  materializeAllIndexes(progressCallback?: IndexBuildProgressCallback): void {
+    const callback = progressCallback ?? this.options.onIndexBuilding;
+
+    for (const index of this.indexRegistry.getAllIndexes()) {
+      if ('isLazy' in index && (index as LazyIndex<K, V, unknown>).isLazy) {
+        const lazyIndex = index as LazyIndex<K, V, unknown>;
+        if (!lazyIndex.isBuilt) {
+          lazyIndex.materialize(callback);
+        }
+      }
+    }
+  }
+
+  /**
+   * Get count of pending records across all lazy indexes.
+   * Returns 0 if no lazy indexes or all are materialized.
+   */
+  getPendingIndexCount(): number {
+    let total = 0;
+    for (const index of this.indexRegistry.getAllIndexes()) {
+      if ('isLazy' in index && (index as LazyIndex<K, V, unknown>).isLazy) {
+        const lazyIndex = index as LazyIndex<K, V, unknown>;
+        total += lazyIndex.pendingCount;
+      }
+    }
+    return total;
+  }
+
+  /**
+   * Check if any lazy indexes are still pending (not built).
+   */
+  hasUnbuiltIndexes(): boolean {
+    for (const index of this.indexRegistry.getAllIndexes()) {
+      if ('isLazy' in index && (index as LazyIndex<K, V, unknown>).isLazy) {
+        const lazyIndex = index as LazyIndex<K, V, unknown>;
+        if (!lazyIndex.isBuilt) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   /**

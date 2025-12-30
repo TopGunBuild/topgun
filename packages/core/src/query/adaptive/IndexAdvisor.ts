@@ -15,6 +15,7 @@
 
 import type { QueryPatternTracker } from './QueryPatternTracker';
 import type {
+  CompoundQueryStatistics,
   IndexSuggestion,
   IndexSuggestionOptions,
   QueryStatistics,
@@ -82,6 +83,14 @@ export class IndexAdvisor {
         suggestions.push(suggestion);
       }
     }
+
+    // Phase 9.03: Add compound index suggestions
+    const compoundSuggestions = this.getCompoundSuggestions({
+      minQueryCount,
+      minAverageCost,
+      excludeExistingIndexes,
+    });
+    suggestions.push(...compoundSuggestions);
 
     // Sort by priority and benefit
     suggestions.sort((a, b) => {
@@ -352,6 +361,182 @@ export class IndexAdvisor {
     if (benefitingPatterns > 1) {
       reason += ` Would benefit ${benefitingPatterns} query patterns.`;
     }
+
+    return reason;
+  }
+
+  // ========================================
+  // Phase 9.03: Compound Index Suggestions
+  // ========================================
+
+  /**
+   * Get compound index suggestions based on AND query patterns.
+   *
+   * @param options - Suggestion options
+   * @returns Array of compound index suggestions
+   */
+  getCompoundSuggestions(options: IndexSuggestionOptions = {}): IndexSuggestion[] {
+    const {
+      minQueryCount = ADAPTIVE_INDEXING_DEFAULTS.advisor.minQueryCount,
+      minAverageCost = ADAPTIVE_INDEXING_DEFAULTS.advisor.minAverageCost,
+      excludeExistingIndexes = true,
+    } = options;
+
+    const compoundStats = this.tracker.getCompoundStatistics();
+    const suggestions: IndexSuggestion[] = [];
+
+    for (const stat of compoundStats) {
+      // Skip if already has compound index
+      if (excludeExistingIndexes && stat.hasCompoundIndex) continue;
+
+      // Skip if below thresholds
+      if (stat.queryCount < minQueryCount) continue;
+      if (stat.averageCost < minAverageCost) continue;
+
+      const suggestion = this.generateCompoundSuggestion(stat);
+      if (suggestion) {
+        suggestions.push(suggestion);
+      }
+    }
+
+    return suggestions;
+  }
+
+  /**
+   * Get a suggestion for a specific compound attribute combination.
+   *
+   * @param attributes - Array of attribute names
+   * @returns Compound index suggestion or null if not recommended
+   */
+  getCompoundSuggestionFor(attributes: string[]): IndexSuggestion | null {
+    const stat = this.tracker.getCompoundStats(attributes);
+    if (!stat) return null;
+
+    return this.generateCompoundSuggestion(stat);
+  }
+
+  /**
+   * Check if a compound index should be created for the given attributes.
+   *
+   * @param attributes - Array of attribute names
+   * @param threshold - Minimum query count threshold
+   * @returns True if compound index should be created
+   */
+  shouldCreateCompoundIndex(
+    attributes: string[],
+    threshold: number = ADAPTIVE_INDEXING_DEFAULTS.autoIndex.threshold!
+  ): boolean {
+    const stat = this.tracker.getCompoundStats(attributes);
+    if (!stat) return false;
+
+    return !stat.hasCompoundIndex && stat.queryCount >= threshold;
+  }
+
+  /**
+   * Generate a suggestion for a compound query pattern.
+   */
+  private generateCompoundSuggestion(stat: CompoundQueryStatistics): IndexSuggestion | null {
+    const estimatedBenefit = this.estimateCompoundBenefit(stat);
+    const estimatedCost = this.estimateCompoundMemoryCost(stat);
+    const priority = this.calculateCompoundPriority(stat, estimatedBenefit);
+
+    return {
+      attribute: stat.compoundKey,
+      indexType: 'compound',
+      reason: this.generateCompoundReason(stat, estimatedBenefit),
+      estimatedBenefit,
+      estimatedCost,
+      priority,
+      queryCount: stat.queryCount,
+      averageCost: stat.averageCost,
+      compoundAttributes: stat.attributes,
+    };
+  }
+
+  /**
+   * Estimate performance benefit of adding a compound index.
+   *
+   * Compound indexes provide significant speedup for AND queries:
+   * - Eliminates intersection operations (100-1000× for each attribute)
+   * - Single O(1) lookup instead of multiple index scans
+   */
+  private estimateCompoundBenefit(stat: CompoundQueryStatistics): number {
+    // Base benefit: compound indexes are more powerful than individual indexes combined
+    // Each additional attribute in the compound key roughly doubles the benefit
+    const attributeMultiplier = Math.pow(2, stat.attributes.length - 1);
+
+    // Cost-based benefit (higher cost = more benefit from indexing)
+    let baseBenefit: number;
+    if (stat.averageCost > 20) {
+      baseBenefit = 1000; // Very expensive AND queries benefit most
+    } else if (stat.averageCost > 5) {
+      baseBenefit = 500;
+    } else if (stat.averageCost > 1) {
+      baseBenefit = 100;
+    } else {
+      baseBenefit = 50;
+    }
+
+    // Scale by query frequency
+    const frequencyMultiplier = Math.min(stat.queryCount / 10, 100);
+
+    return Math.floor(baseBenefit * attributeMultiplier * frequencyMultiplier);
+  }
+
+  /**
+   * Estimate memory cost of adding a compound index.
+   */
+  private estimateCompoundMemoryCost(stat: CompoundQueryStatistics): number {
+    const bytesPerRecord = MEMORY_OVERHEAD_ESTIMATES.compound;
+
+    // Compound indexes have slightly higher overhead per attribute
+    const attributeOverhead = stat.attributes.length * 8; // ~8 bytes per attr in composite key
+
+    // Assume ~1000 records as baseline estimate
+    const estimatedRecords = 1000;
+
+    return Math.floor(estimatedRecords * (bytesPerRecord + attributeOverhead) * 1.5);
+  }
+
+  /**
+   * Calculate priority for compound index suggestion.
+   */
+  private calculateCompoundPriority(
+    stat: CompoundQueryStatistics,
+    estimatedBenefit: number
+  ): SuggestionPriority {
+    // High priority: frequently queried compound patterns with high cost
+    if (stat.queryCount > 100 && stat.averageCost > 10) {
+      return 'high';
+    }
+
+    // High priority: very frequently queried
+    if (stat.queryCount > 500) {
+      return 'high';
+    }
+
+    // Medium priority: moderate frequency or cost
+    if (stat.queryCount > 50 || stat.averageCost > 5) {
+      return 'medium';
+    }
+
+    // Medium priority: high estimated benefit
+    if (estimatedBenefit > 2000) {
+      return 'medium';
+    }
+
+    return 'low';
+  }
+
+  /**
+   * Generate human-readable reason for compound index suggestion.
+   */
+  private generateCompoundReason(stat: CompoundQueryStatistics, benefit: number): string {
+    const costStr = stat.averageCost.toFixed(2);
+    const attrList = stat.attributes.join(', ');
+    let reason = `Compound AND query on [${attrList}] executed ${stat.queryCount}× with average cost ${costStr}ms. `;
+    reason += `Expected ~${benefit}× cumulative speedup with compound index. `;
+    reason += `Eliminates ${stat.attributes.length - 1} ResultSet intersection(s).`;
 
     return reason;
   }

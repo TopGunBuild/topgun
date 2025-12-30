@@ -69,10 +69,22 @@ export interface Index<K, V, A = unknown> {
  */
 export interface IndexQuery<A> {
   /** Query type */
-  type: 'equal' | 'in' | 'has' | 'gt' | 'gte' | 'lt' | 'lte' | 'between' | 'contains' | 'containsAll' | 'containsAny';
+  type:
+    | 'equal'
+    | 'in'
+    | 'has'
+    | 'gt'
+    | 'gte'
+    | 'lt'
+    | 'lte'
+    | 'between'
+    | 'contains'
+    | 'containsAll'
+    | 'containsAny'
+    | 'compound'; // Phase 9.03: Compound query type
   /** Value for equality queries */
   value?: A;
-  /** Values for 'in' queries */
+  /** Values for 'in' queries or compound queries */
   values?: A[];
   /** Lower bound for range queries */
   from?: A;
