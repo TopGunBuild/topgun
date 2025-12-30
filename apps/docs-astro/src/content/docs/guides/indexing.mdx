@@ -1,0 +1,308 @@
+---
+title: Indexing
+description: Accelerate queries from O(N) to O(1) with HashIndex, NavigableIndex, and InvertedIndex. Learn how to add indexes to your CRDT maps for sub-millisecond queries on millions of records.
+order: 13
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Zap, Search, TrendingUp, Settings, Lightbulb } from 'lucide-react';
+import { FeatureCard } from '../../../components/docs/FeatureCard';
+
+export const basicIndexCode = `import { IndexedLWWMap, simpleAttribute, HLC } from '@topgunbuild/core';
+
+// Create an indexed map
+const hlc = new HLC('node-1');
+const products = new IndexedLWWMap<string, Product>(hlc);
+
+// Define attributes for indexing
+const categoryAttr = simpleAttribute<Product, string>('category', p => p.category);
+const priceAttr = simpleAttribute<Product, number>('price', p => p.price);
+
+// Add indexes
+products.addHashIndex(categoryAttr);      // O(1) equality queries
+products.addNavigableIndex(priceAttr);    // O(log N) range queries
+
+// Insert data (indexes update automatically)
+products.set('p1', { id: 'p1', name: 'Laptop', category: 'electronics', price: 999 });
+products.set('p2', { id: 'p2', name: 'Book', category: 'books', price: 29 });
+products.set('p3', { id: 'p3', name: 'Mouse', category: 'electronics', price: 49 });`;
+
+export const queryWithIndexCode = `// Equality query - uses HashIndex (O(1))
+const electronics = products.queryValues({
+  type: 'eq',
+  attribute: 'category',
+  value: 'electronics'
+});
+// Returns: [{ id: 'p1', ... }, { id: 'p3', ... }]
+
+// Range query - uses NavigableIndex (O(log N))
+const affordable = products.queryValues({
+  type: 'and',
+  children: [
+    { type: 'gte', attribute: 'price', value: 20 },
+    { type: 'lte', attribute: 'price', value: 100 }
+  ]
+});
+// Returns: [{ id: 'p2', ... }, { id: 'p3', ... }]`;
+
+export const indexTypesCode = `// 1. HashIndex - O(1) equality lookups
+//    Use for: status, category, userId, type
+products.addHashIndex(simpleAttribute('status', p => p.status));
+
+// 2. NavigableIndex - O(log N) range queries
+//    Use for: price, date, age, score
+products.addNavigableIndex(simpleAttribute('createdAt', p => p.createdAt));
+
+// 3. InvertedIndex - O(K) text search
+//    Use for: name, description, tags
+products.addInvertedIndex(simpleAttribute('name', p => p.name));`;
+
+export const explainQueryCode = `// Inspect query execution plan
+const plan = products.explainQuery({
+  type: 'and',
+  children: [
+    { type: 'eq', attribute: 'category', value: 'electronics' },
+    { type: 'between', attribute: 'price', from: 100, to: 500 }
+  ]
+});
+
+console.log(plan);
+// {
+//   root: {
+//     type: 'intersection',
+//     steps: [
+//       { type: 'index-scan', index: HashIndex, query: {...} },
+//       { type: 'index-scan', index: NavigableIndex, query: {...} }
+//     ]
+//   },
+//   estimatedCost: 32,
+//   usesIndexes: true
+// }`;
+
+export const multiAttributeCode = `import { multiAttribute } from '@topgunbuild/core';
+
+// For arrays (tags, categories, etc.)
+const tagsAttr = multiAttribute<Product, string>('tags', p => p.tags);
+products.addHashIndex(tagsAttr);
+
+// Now queries can match any tag
+const wireless = products.queryValues({
+  type: 'eq',
+  attribute: 'tags',
+  value: 'wireless'
+});`;
+
+export const statsCode = `// Get index statistics
+const stats = products.getIndexStats();
+
+for (const [attrName, stat] of stats) {
+  console.log(\`\${attrName}: \${stat.size} entries, type: \${stat.type}\`);
+}
+// category: 3 entries, type: hash
+// price: 3 entries, type: navigable
+
+// Get registry stats
+const registryStats = products.getIndexRegistryStats();
+console.log(\`Total indexes: \${registryStats.totalIndexes}\`);
+console.log(\`Indexed attributes: \${registryStats.indexedAttributes.join(', ')}\`);`;
+
+export const crdtIntegrationCode = `// All CRDT operations automatically update indexes
+products.set('p4', { id: 'p4', category: 'electronics', price: 299 });
+// → HashIndex and NavigableIndex both updated
+
+products.remove('p4');
+// → Removed from all indexes
+
+// Remote merge also updates indexes
+products.merge('p5', remoteRecord);
+// → Indexes updated if merge succeeds`;
+
+export const liveQueryCode = `// Subscribe to a live query (uses indexes internally)
+const unsubscribe = products.subscribeLiveQuery(
+  { type: 'eq', attribute: 'category', value: 'electronics' },
+  (event) => {
+    if (event.type === 'initial') {
+      console.log('Initial results:', event.results);
+    } else {
+      console.log('Delta:', event.added, event.removed, event.updated);
+    }
+  }
+);
+
+// Updates trigger delta notifications
+products.set('p5', { id: 'p5', category: 'electronics', price: 199 });
+// → Callback receives: { type: 'delta', added: [['p5', {...}]], ... }`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Indexing</span>
+</div>
+
+# Indexing
+
+TopGun's Query Engine provides **CQEngine-inspired indexing** that accelerates queries from O(N) full scans to O(1) or O(log N) indexed lookups. On a dataset of 1 million records, this means going from ~500ms to **less than 1ms** per query.
+
+<div className="grid md:grid-cols-3 gap-6 mb-16 not-prose">
+  <FeatureCard
+    icon={Zap}
+    iconColor="text-yellow-500"
+    title="O(1) Equality"
+    description="HashIndex provides constant-time lookups for equality and IN queries."
+  />
+  <FeatureCard
+    icon={TrendingUp}
+    iconColor="text-blue-500"
+    title="O(log N) Ranges"
+    description="NavigableIndex enables efficient range queries with skip-list based indexing."
+  />
+  <FeatureCard
+    icon={Search}
+    iconColor="text-green-500"
+    title="Full-Text Search"
+    description="InvertedIndex supports text search with configurable tokenization."
+  />
+</div>
+
+## Quick Start
+
+To use indexes, wrap your LWWMap or ORMap with `IndexedLWWMap` or `IndexedORMap`:
+
+<div className="not-prose">
+  <CodeBlock title="Creating an Indexed Map" language="typescript" code={basicIndexCode} />
+</div>
+
+Now queries automatically use the appropriate index:
+
+<div className="not-prose">
+  <CodeBlock title="Querying with Indexes" language="typescript" code={queryWithIndexCode} />
+</div>
+
+## Index Types
+
+TopGun provides three index types, each optimized for different query patterns:
+
+<div className="not-prose">
+  <CodeBlock title="Index Types" language="typescript" code={indexTypesCode} />
+</div>
+
+| Index Type | Time Complexity | Best For |
+|-----------|----------------|----------|
+| **HashIndex** | O(1) | Equality (`eq`, `neq`, `in`, `has`) |
+| **NavigableIndex** | O(log N) | Range queries (`gt`, `gte`, `lt`, `lte`, `between`) |
+| **InvertedIndex** | O(K) | Text search (`contains`, `containsAll`, `containsAny`) |
+
+Where N = total records, K = matching tokens.
+
+## Query Optimization
+
+The Query Optimizer automatically selects the best index for each query:
+
+<div className="not-prose">
+  <CodeBlock title="Query Plan Inspection" language="typescript" code={explainQueryCode} />
+</div>
+
+### Cost Model
+
+The optimizer uses a cost model to choose execution strategies:
+
+| Index Type | Retrieval Cost | Merge Cost |
+|-----------|----------------|------------|
+| StandingQueryIndex | 10 | 10 |
+| HashIndex | 30 | 30 |
+| NavigableIndex | 40 | 40 |
+| InvertedIndex | 35 | 35 |
+| Full Scan | ∞ | ∞ |
+
+For compound queries (AND/OR), the optimizer:
+1. Identifies which sub-queries can use indexes
+2. Estimates cardinality for merge cost calculation
+3. Chooses intersection/union strategy based on total cost
+
+## Multi-Value Attributes
+
+For array fields (tags, categories), use `multiAttribute`:
+
+<div className="not-prose">
+  <CodeBlock title="Multi-Value Attributes" language="typescript" code={multiAttributeCode} />
+</div>
+
+## Index Statistics
+
+Monitor index usage and performance:
+
+<div className="not-prose">
+  <CodeBlock title="Index Statistics" language="typescript" code={statsCode} />
+</div>
+
+## Best Practices
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <div className="flex items-center gap-2 mb-2">
+    <Lightbulb className="w-5 h-5 text-blue-500" />
+    <strong className="text-blue-800 dark:text-blue-200">When to Add Indexes</strong>
+  </div>
+  <ul className="text-sm text-blue-800 dark:text-blue-200 space-y-1">
+    <li>• Add indexes on attributes you query frequently</li>
+    <li>• Use HashIndex for equality checks (status, type, userId)</li>
+    <li>• Use NavigableIndex for sortable/range fields (price, date, score)</li>
+    <li>• Use InvertedIndex for text search (name, description)</li>
+    <li>• Don't over-index: each index adds ~20-30% memory overhead</li>
+  </ul>
+</div>
+
+### Memory Considerations
+
+Indexes trade memory for query speed:
+
+| Scenario | Memory Overhead |
+|----------|-----------------|
+| 1 HashIndex | ~10-15% |
+| 1 NavigableIndex | ~15-20% |
+| 1 InvertedIndex | ~30-50% |
+| All 3 indexes | ~50-80% |
+
+For browser environments with limited heap (2-4 GB), index selectively based on query patterns.
+
+## CRDT Integration
+
+Indexes are fully integrated with TopGun's CRDT operations:
+
+- **Automatic updates**: Indexes update on `set()`, `remove()`, and `merge()`
+- **Tombstone-aware**: Deleted records are removed from indexes
+- **TTL-aware**: Expired records are filtered at query time
+
+<div className="not-prose">
+  <CodeBlock title="CRDT Operations with Indexes" language="typescript" code={crdtIntegrationCode} />
+</div>
+
+## Live Queries with Indexes
+
+Combine indexes with live queries for reactive, high-performance subscriptions:
+
+<div className="not-prose">
+  <CodeBlock title="Live Query Subscription" language="typescript" code={liveQueryCode} />
+</div>
+
+## Next Steps
+
+- [Full-Text Search](/docs/guides/full-text-search) - Deep dive into InvertedIndex and tokenization
+- [Adaptive Indexing](/docs/guides/adaptive-indexing) - Auto-suggest and auto-create indexes
+- [Performance Tuning](/docs/guides/performance) - Optimize for your workload
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/live-queries" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Live Queries
+    </div>
+  </a>
+  <a href="/docs/guides/full-text-search" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Full-Text Search <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

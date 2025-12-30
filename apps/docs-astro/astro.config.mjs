@@ -10,7 +10,22 @@ import sitemap from '@astrojs/sitemap';
 export default defineConfig({
   site: 'https://topgun.build',
   trailingSlash: 'never',
-  integrations: [react(), mdx(), sitemap()],
+  build: {
+    format: 'file',
+  },
+  integrations: [
+    react(),
+    mdx(),
+    sitemap({
+      filter: (page) => {
+        // Exclude redirect pages from sitemap
+        const excludedPages = [
+          'https://topgun.build/docs',
+        ];
+        return !excludedPages.includes(page.replace(/\/$/, ''));
+      },
+    }),
+  ],
 
   vite: {
     plugins: [tailwindcss()]

@@ -1,0 +1,449 @@
+---
+title: Interceptors
+description: Extend TopGun with custom server-side logic for validation, enrichment, ML inference, and integration with external services.
+order: 19
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Plug, Shield, Zap, Brain, Filter, Bell } from 'lucide-react';
+
+export const basicInterceptorCode = `import { ServerCoordinator, IInterceptor, ServerOp, OpContext } from '@topgunbuild/server';
+
+// Custom interceptor for logging all operations
+const loggingInterceptor: IInterceptor = {
+  name: 'logging',
+
+  async onBeforeOp(op: ServerOp, context: OpContext) {
+    console.log(\`[\${context.clientId}] \${op.opType} \${op.mapName}:\${op.key}\`);
+    return op; // Pass through unchanged
+  },
+
+  async onAfterOp(op: ServerOp, context: OpContext) {
+    console.log(\`[\${context.clientId}] Completed: \${op.mapName}:\${op.key}\`);
+  },
+};
+
+const server = new ServerCoordinator({
+  port: 8080,
+  interceptors: [loggingInterceptor],
+});`;
+
+export const validationInterceptorCode = `// Validate and enrich data before it's stored
+const validationInterceptor: IInterceptor = {
+  name: 'validation',
+
+  async onBeforeOp(op: ServerOp, context: OpContext) {
+    // Only process PUT operations on 'users' map
+    if (op.opType !== 'PUT' || op.mapName !== 'users') {
+      return op;
+    }
+
+    const value = op.record?.value;
+
+    // Validate email format
+    if (value?.email && !isValidEmail(value.email)) {
+      throw new Error('Invalid email format');
+    }
+
+    // Enrich with server timestamp
+    if (op.record) {
+      op.record.value = {
+        ...value,
+        updatedAt: Date.now(),
+        updatedBy: context.principal?.userId,
+      };
+    }
+
+    return op;
+  },
+};`;
+
+export const mlInferenceCode = `// ML-powered content moderation
+const moderationInterceptor: IInterceptor = {
+  name: 'content-moderation',
+
+  async onBeforeOp(op: ServerOp, context: OpContext) {
+    // Only moderate posts and comments
+    if (!['posts', 'comments'].includes(op.mapName)) {
+      return op;
+    }
+
+    if (op.opType !== 'PUT' || !op.record?.value?.content) {
+      return op;
+    }
+
+    // Call external ML service for toxicity detection
+    const response = await fetch('https://ml-api.example.com/moderate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: op.record.value.content }),
+    });
+
+    const { toxicityScore, categories } = await response.json();
+
+    // Reject highly toxic content
+    if (toxicityScore > 0.9) {
+      throw new Error('Content violates community guidelines');
+    }
+
+    // Enrich with moderation metadata
+    op.record.value = {
+      ...op.record.value,
+      moderation: {
+        score: toxicityScore,
+        categories,
+        reviewedAt: Date.now(),
+      },
+    };
+
+    // Flag borderline content for human review
+    if (toxicityScore > 0.7) {
+      op.record.value.moderation.flaggedForReview = true;
+    }
+
+    return op;
+  },
+};`;
+
+export const fraudDetectionCode = `// Real-time fraud detection for transactions
+const fraudInterceptor: IInterceptor = {
+  name: 'fraud-detection',
+
+  async onBeforeOp(op: ServerOp, context: OpContext) {
+    if (op.mapName !== 'transactions' || op.opType !== 'PUT') {
+      return op;
+    }
+
+    const transaction = op.record?.value;
+
+    // Call fraud detection ML service
+    const riskAssessment = await fetch('https://fraud-api.example.com/assess', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': \`Bearer \${process.env.FRAUD_API_KEY}\`,
+      },
+      body: JSON.stringify({
+        amount: transaction.amount,
+        userId: context.principal?.userId,
+        merchantId: transaction.merchantId,
+        timestamp: Date.now(),
+      }),
+    }).then(r => r.json());
+
+    // Block high-risk transactions
+    if (riskAssessment.riskScore > 0.95) {
+      throw new Error('Transaction blocked: suspicious activity detected');
+    }
+
+    // Enrich transaction with risk data
+    if (op.record) {
+      op.record.value = {
+        ...transaction,
+        riskScore: riskAssessment.riskScore,
+        riskFactors: riskAssessment.factors,
+      };
+    }
+
+    return op;
+  },
+
+  async onAfterOp(op: ServerOp, context: OpContext) {
+    // Send to analytics pipeline after successful write
+    if (op.mapName === 'transactions') {
+      await fetch('https://analytics.example.com/events', {
+        method: 'POST',
+        body: JSON.stringify({
+          event: 'transaction_completed',
+          data: op.record?.value,
+          userId: context.principal?.userId,
+        }),
+      });
+    }
+  },
+};`;
+
+export const webhookInterceptorCode = `// Send webhooks on data changes
+const webhookInterceptor: IInterceptor = {
+  name: 'webhooks',
+
+  async onAfterOp(op: ServerOp, context: OpContext) {
+    // Get registered webhooks for this map
+    const webhooks = await getWebhooksForMap(op.mapName);
+
+    // Fire webhooks in parallel (don't block the response)
+    Promise.allSettled(
+      webhooks.map(webhook =>
+        fetch(webhook.url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-TopGun-Signature': signPayload(webhook.secret, op),
+          },
+          body: JSON.stringify({
+            event: op.opType,
+            mapName: op.mapName,
+            key: op.key,
+            value: op.record?.value,
+            timestamp: Date.now(),
+          }),
+        })
+      )
+    ).then(results => {
+      // Log failed webhooks
+      results.forEach((result, i) => {
+        if (result.status === 'rejected') {
+          console.error(\`Webhook failed: \${webhooks[i].url}\`, result.reason);
+        }
+      });
+    });
+  },
+};`;
+
+export const rateLimitCode = `import { RateLimitInterceptor } from '@topgunbuild/server';
+
+// Built-in rate limiting interceptor
+const rateLimiter = new RateLimitInterceptor({
+  maxRequestsPerMinute: 100,
+  maxRequestsPerSecond: 10,
+});
+
+const server = new ServerCoordinator({
+  port: 8080,
+  interceptors: [rateLimiter],
+});`;
+
+export const chainingCode = `// Interceptors execute in order - chain them for complex pipelines
+const server = new ServerCoordinator({
+  port: 8080,
+  interceptors: [
+    rateLimiter,          // 1. Rate limiting first
+    authEnricher,         // 2. Add auth context
+    validationInterceptor, // 3. Validate data
+    moderationInterceptor, // 4. ML moderation
+    loggingInterceptor,   // 5. Log everything
+    webhookInterceptor,   // 6. Fire webhooks (onAfterOp)
+  ],
+});`;
+
+export const interfaceCode = `interface IInterceptor {
+  /** Name for logging and debugging */
+  name: string;
+
+  /** Called when a client connects. Throw to reject connection. */
+  onConnection?(context: ConnectionContext): Promise<void>;
+
+  /** Called when a client disconnects. */
+  onDisconnect?(context: ConnectionContext): Promise<void>;
+
+  /**
+   * Called before an operation is applied.
+   * - Return op (modified or not) to continue
+   * - Return null to silently drop the operation
+   * - Throw an error to reject and notify the client
+   */
+  onBeforeOp?(op: ServerOp, context: OpContext): Promise<ServerOp | null>;
+
+  /** Called after an operation is successfully applied. */
+  onAfterOp?(op: ServerOp, context: OpContext): Promise<void>;
+}
+
+interface ServerOp {
+  mapName: string;
+  key: string;
+  opType: 'PUT' | 'REMOVE' | 'OR_ADD' | 'OR_REMOVE';
+  record?: LWWRecord<any>;
+  orRecord?: ORMapRecord<any>;
+}
+
+interface OpContext {
+  clientId: string;
+  principal?: Principal;  // Auth info (userId, roles)
+  isAuthenticated: boolean;
+  fromCluster: boolean;   // True if op came from another node
+}`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap not-prose">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Interceptors</span>
+</div>
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-purple-100 dark:bg-purple-900/30">
+    <Plug className="w-5 h-5 text-purple-600 dark:text-purple-400" />
+  </div>
+  <h1 className="text-4xl font-bold text-foreground">Interceptors</h1>
+</div>
+
+**Interceptors** provide server-side hooks to intercept, validate, enrich, or reject operations before and after they're applied. Unlike [Entry Processors](/docs/guides/entry-processor) which run in a sandbox, interceptors have full access to Node.js APIs, enabling integration with external services, ML models, and third-party APIs.
+
+<div className="grid md:grid-cols-3 gap-4 my-6 not-prose">
+  <div className="p-4 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-800">
+    <Brain className="w-6 h-6 text-purple-500 mb-2" />
+    <h3 className="font-semibold text-purple-900 dark:text-purple-100">ML Integration</h3>
+    <p className="text-sm text-purple-700 dark:text-purple-300">Call external ML APIs for moderation, fraud detection, recommendations</p>
+  </div>
+  <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
+    <Filter className="w-6 h-6 text-blue-500 mb-2" />
+    <h3 className="font-semibold text-blue-900 dark:text-blue-100">Validation & Enrichment</h3>
+    <p className="text-sm text-blue-700 dark:text-blue-300">Validate data, add server timestamps, enrich with external data</p>
+  </div>
+  <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800">
+    <Bell className="w-6 h-6 text-green-500 mb-2" />
+    <h3 className="font-semibold text-green-900 dark:text-green-100">Webhooks & Events</h3>
+    <p className="text-sm text-green-700 dark:text-green-300">Trigger webhooks, send to analytics, notify external systems</p>
+  </div>
+</div>
+
+---
+
+## Basic Usage
+
+<div className="not-prose">
+  <CodeBlock title="server.ts" language="typescript" code={basicInterceptorCode} />
+</div>
+
+---
+
+## Validation & Enrichment
+
+Validate incoming data and enrich it with server-side information:
+
+<div className="not-prose">
+  <CodeBlock title="Validation Interceptor" language="typescript" code={validationInterceptorCode} />
+</div>
+
+---
+
+## ML/AI Integration
+
+### Content Moderation
+
+Call external ML services to moderate user-generated content:
+
+<div className="not-prose">
+  <CodeBlock title="ML Content Moderation" language="typescript" code={mlInferenceCode} />
+</div>
+
+### Fraud Detection
+
+Real-time fraud scoring for financial transactions:
+
+<div className="not-prose">
+  <CodeBlock title="Fraud Detection" language="typescript" code={fraudDetectionCode} />
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>Performance Tip:</strong> For high-throughput scenarios, consider caching ML responses, using connection pooling for external APIs, or offloading non-critical enrichment to <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">onAfterOp</code> to avoid blocking writes.
+  </p>
+</div>
+
+---
+
+## Webhooks
+
+Fire webhooks to external systems when data changes:
+
+<div className="not-prose">
+  <CodeBlock title="Webhook Interceptor" language="typescript" code={webhookInterceptorCode} />
+</div>
+
+---
+
+## Built-in Interceptors
+
+TopGun includes ready-to-use interceptors:
+
+<div className="not-prose">
+  <CodeBlock title="Rate Limiting" language="typescript" code={rateLimitCode} />
+</div>
+
+| Interceptor | Purpose |
+|-------------|---------|
+| `RateLimitInterceptor` | Limit requests per client per time window |
+| `TimestampInterceptor` | Add server timestamps to all records |
+
+---
+
+## Interceptor Chain
+
+Interceptors execute in order. Use this for building processing pipelines:
+
+<div className="not-prose">
+  <CodeBlock title="Interceptor Chain" language="typescript" code={chainingCode} />
+</div>
+
+### Execution Order
+
+1. **onBeforeOp** runs for each interceptor in array order
+2. If any interceptor throws or returns `null`, the chain stops
+3. Operation is applied to storage
+4. **onAfterOp** runs for each interceptor in array order
+
+---
+
+## API Reference
+
+<div className="not-prose">
+  <CodeBlock title="IInterceptor Interface" language="typescript" code={interfaceCode} />
+</div>
+
+### Return Values for onBeforeOp
+
+| Return | Behavior |
+|--------|----------|
+| `op` (original or modified) | Continue to next interceptor |
+| `null` | Silently drop operation (no error, no storage) |
+| `throw Error` | Reject operation, send error to client |
+
+---
+
+## Use Cases
+
+| Scenario | Interceptor Hook | Example |
+|----------|------------------|---------|
+| **Content moderation** | `onBeforeOp` | Call ML API, reject toxic content |
+| **Fraud detection** | `onBeforeOp` | Score transactions, block high-risk |
+| **Data enrichment** | `onBeforeOp` | Add geolocation, currency conversion |
+| **Webhooks** | `onAfterOp` | Notify external systems of changes |
+| **Analytics** | `onAfterOp` | Send events to analytics pipeline |
+| **Audit logging** | `onAfterOp` | Log all changes to external system |
+| **Rate limiting** | `onBeforeOp` | Throttle requests per client |
+| **Connection tracking** | `onConnection/onDisconnect` | Track active users |
+
+---
+
+## Interceptors vs Entry Processors
+
+| Aspect | Interceptors | Entry Processors |
+|--------|--------------|------------------|
+| **Execution** | Server-side, full Node.js access | Sandboxed isolate |
+| **Network access** | Yes - call external APIs | No - isolated |
+| **Use case** | Validation, ML, webhooks | Atomic read-modify-write |
+| **Latency impact** | Can add latency if calling external APIs | Fast, in-process |
+| **Security** | Full trust (server code) | Untrusted client code |
+
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border-l-4 border-yellow-500 p-4 my-6 not-prose">
+  <p className="text-sm text-yellow-800 dark:text-yellow-200">
+    <strong>When to use which:</strong> Use <strong>Entry Processors</strong> for atomic counters, conditional updates, and logic that doesn't need external data. Use <strong>Interceptors</strong> when you need to call external services, validate against external data sources, or trigger side effects.
+  </p>
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/conflict-resolvers" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Conflict Resolvers
+    </div>
+  </a>
+  <a href="/docs/guides/distributed-locks" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Distributed Locks <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

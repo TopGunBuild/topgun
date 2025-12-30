@@ -51,3 +51,6 @@ export {
   ConflictResolverHandlerConfig,
   MergeWithResolverResult,
 } from './handlers/ConflictResolverHandler';
+
+// Index Configuration (Phase 7.07)
+export * from './config';

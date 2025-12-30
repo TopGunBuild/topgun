@@ -144,17 +144,24 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                         <SubItem to="/docs/guides" currentPath={currentPath}>All Guides</SubItem>
                         <SubItem to="/docs/guides/authentication" currentPath={currentPath}>Authentication</SubItem>
                         <SubItem to="/docs/guides/security" currentPath={currentPath}>Security (TLS)</SubItem>
+                        <SubItem to="/docs/guides/rbac" currentPath={currentPath}>RBAC</SubItem>
                         <SubItem to="/docs/guides/live-queries" currentPath={currentPath}>Live Queries</SubItem>
+                        <SubItem to="/docs/guides/indexing" currentPath={currentPath}>Indexing</SubItem>
+                        <SubItem to="/docs/guides/full-text-search" currentPath={currentPath}>Full-Text Search</SubItem>
+                        <SubItem to="/docs/guides/adaptive-indexing" currentPath={currentPath}>Adaptive Indexing</SubItem>
                         <SubItem to="/docs/guides/pub-sub" currentPath={currentPath}>Pub/Sub (Topics)</SubItem>
                         <SubItem to="/docs/guides/ttl" currentPath={currentPath}>Time-To-Live (TTL)</SubItem>
-                        <SubItem to="/docs/guides/deployment" currentPath={currentPath}>Deployment</SubItem>
-                        <SubItem to="/docs/guides/cluster-client" currentPath={currentPath}>Cluster Client</SubItem>
-                        <SubItem to="/docs/guides/observability" currentPath={currentPath}>Observability</SubItem>
+                        <SubItem to="/docs/guides/write-concern" currentPath={currentPath}>Write Concern</SubItem>
+                        <SubItem to="/docs/guides/entry-processor" currentPath={currentPath}>Entry Processor</SubItem>
                         <SubItem to="/docs/guides/pn-counter" currentPath={currentPath}>PN-Counter</SubItem>
                         <SubItem to="/docs/guides/event-journal" currentPath={currentPath}>Event Journal</SubItem>
                         <SubItem to="/docs/guides/conflict-resolvers" currentPath={currentPath}>Conflict Resolvers</SubItem>
+                        <SubItem to="/docs/guides/interceptors" currentPath={currentPath}>Interceptors</SubItem>
                         <SubItem to="/docs/guides/distributed-locks" currentPath={currentPath}>Distributed Locks</SubItem>
-                        <SubItem to="/docs/guides/rbac" currentPath={currentPath}>Security (RBAC)</SubItem>
+                        <SubItem to="/docs/guides/deployment" currentPath={currentPath}>Deployment</SubItem>
+                        <SubItem to="/docs/guides/cluster-client" currentPath={currentPath}>Cluster Client</SubItem>
+                        <SubItem to="/docs/guides/observability" currentPath={currentPath}>Observability</SubItem>
+                        <SubItem to="/docs/guides/performance" currentPath={currentPath}>Performance</SubItem>
                     </div>
                 )}
             </div>

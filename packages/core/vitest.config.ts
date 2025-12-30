@@ -5,7 +5,7 @@ export default defineConfig({
     include: ['src/**/*.test.ts'],
     exclude: ['node_modules', 'dist'],
     benchmark: {
-      include: ['src/__benchmarks__/*.bench.ts'],
+      include: ['src/__benchmarks__/**/*.bench.ts'],
     },
   },
 });

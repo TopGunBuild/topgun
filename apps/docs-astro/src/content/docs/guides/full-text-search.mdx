@@ -1,0 +1,365 @@
+---
+title: Full-Text Search
+description: Add fast text search to your data with InvertedIndex. Configure tokenization, filters, and search strategies for product catalogs, document search, and more.
+order: 14
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Search, Filter, Settings, Zap } from 'lucide-react';
+import { FeatureCard } from '../../../components/docs/FeatureCard';
+
+export const basicSearchCode = `import {
+  IndexedLWWMap,
+  simpleAttribute,
+  HLC
+} from '@topgunbuild/core';
+
+interface Product {
+  id: string;
+  name: string;
+  description: string;
+  tags: string[];
+}
+
+const hlc = new HLC('node-1');
+const products = new IndexedLWWMap<string, Product>(hlc);
+
+// Add inverted index on text fields
+const nameAttr = simpleAttribute<Product, string>('name', p => p.name);
+products.addInvertedIndex(nameAttr);
+
+// Add some products
+products.set('p1', {
+  id: 'p1',
+  name: 'Wireless Bluetooth Mouse',
+  description: 'Ergonomic design with 6 buttons',
+  tags: ['electronics', 'wireless', 'mouse']
+});
+
+products.set('p2', {
+  id: 'p2',
+  name: 'USB-C Wireless Keyboard',
+  description: 'Mechanical switches with RGB',
+  tags: ['electronics', 'wireless', 'keyboard']
+});
+
+// Search for products containing "wireless"
+const results = products.queryValues({
+  type: 'contains',
+  attribute: 'name',
+  value: 'wireless'
+});
+// Returns both products (both names contain "wireless")`;
+
+export const queryTypesCode = `// 1. contains - All tokens must match (AND semantics)
+const wireless = products.queryValues({
+  type: 'contains',
+  attribute: 'name',
+  value: 'wireless mouse'  // Matches: "wireless" AND "mouse"
+});
+// Returns: [{ name: 'Wireless Bluetooth Mouse', ... }]
+
+// 2. containsAll - All specified values must match
+const withTags = products.queryValues({
+  type: 'containsAll',
+  attribute: 'name',
+  values: ['wireless', 'bluetooth']
+});
+// Returns: [{ name: 'Wireless Bluetooth Mouse', ... }]
+
+// 3. containsAny - Any token matches (OR semantics)
+const anyMatch = products.queryValues({
+  type: 'containsAny',
+  attribute: 'name',
+  values: ['keyboard', 'mouse']
+});
+// Returns both products`;
+
+export const tokenizationCode = `import {
+  TokenizationPipeline,
+  WordBoundaryTokenizer,
+  LowercaseFilter,
+  MinLengthFilter,
+  StopWordFilter
+} from '@topgunbuild/core';
+
+// Simple pipeline (default)
+const simple = TokenizationPipeline.simple();
+simple.process("Hello World!");
+// → ["hello", "world"]
+
+// Search pipeline (with stop words removed)
+const search = TokenizationPipeline.search();
+search.process("The quick brown fox");
+// → ["quick", "brown", "fox"]  ("the" removed as stop word)
+
+// Custom pipeline
+const custom = TokenizationPipeline.custom(
+  new WordBoundaryTokenizer(),
+  [
+    new LowercaseFilter(),
+    new MinLengthFilter(3),     // Min 3 characters
+    new StopWordFilter()        // Remove common words
+  ]
+);
+custom.process("I have a wireless mouse");
+// → ["wireless", "mouse"]  ("i", "have", "a" removed)`;
+
+export const pipelinesCode = `// Available tokenizers:
+// - WhitespaceTokenizer: splits on whitespace
+// - WordBoundaryTokenizer: splits on word boundaries (default)
+// - NGramTokenizer: generates n-grams for substring matching
+
+// Available filters:
+// - LowercaseFilter: converts to lowercase
+// - MinLengthFilter(n): removes tokens shorter than n
+// - MaxLengthFilter(n): removes tokens longer than n
+// - StopWordFilter: removes common words (the, a, is, etc.)
+// - TrimFilter: trims whitespace
+// - UniqueFilter: removes duplicate tokens`;
+
+export const customPipelineCode = `import {
+  IndexedLWWMap,
+  simpleAttribute,
+  TokenizationPipeline,
+  NGramTokenizer,
+  LowercaseFilter,
+  HLC
+} from '@topgunbuild/core';
+
+// N-gram pipeline for substring matching
+const ngramPipeline = TokenizationPipeline.custom(
+  new NGramTokenizer(3),  // 3-character n-grams
+  [new LowercaseFilter()]
+);
+
+const products = new IndexedLWWMap<string, Product>(hlc);
+
+// Use custom pipeline for description field
+const descAttr = simpleAttribute<Product, string>('description', p => p.description);
+products.addInvertedIndex(descAttr, ngramPipeline);
+
+// Now substring matches work
+products.set('p1', { id: 'p1', description: 'Ergonomic mouse' });
+const results = products.queryValues({
+  type: 'contains',
+  attribute: 'description',
+  value: 'rgo'  // Matches "Ergonomic" via n-gram
+});`;
+
+export const multiFieldCode = `import { multiAttribute } from '@topgunbuild/core';
+
+// Index an array field (tags)
+const tagsAttr = multiAttribute<Product, string>('tags', p => p.tags);
+products.addInvertedIndex(tagsAttr);
+
+// Each tag becomes searchable
+const wirelessProducts = products.queryValues({
+  type: 'contains',
+  attribute: 'tags',
+  value: 'wireless'
+});`;
+
+export const combinedQueryCode = `// Combine text search with other predicates
+const results = products.queryValues({
+  type: 'and',
+  children: [
+    { type: 'contains', attribute: 'name', value: 'wireless' },
+    { type: 'eq', attribute: 'status', value: 'active' },
+    { type: 'between', attribute: 'price', from: 10, to: 100 }
+  ]
+});
+
+// Query optimizer will use:
+// - InvertedIndex for "contains"
+// - HashIndex for "eq" (if indexed)
+// - NavigableIndex for "between" (if indexed)`;
+
+export const statsCode = `// Get extended statistics for inverted index
+const index = products.getIndexes().find(i => i.type === 'inverted');
+if (index) {
+  const stats = index.getExtendedStats();
+  console.log(\`Unique tokens: \${stats.totalTokens}\`);
+  console.log(\`Documents indexed: \${stats.totalEntries}\`);
+  console.log(\`Avg tokens/doc: \${stats.avgTokensPerDocument.toFixed(1)}\`);
+  console.log(\`Max docs/token: \${stats.maxDocumentsPerToken}\`);
+}`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Full-Text Search</span>
+</div>
+
+# Full-Text Search
+
+TopGun's **InvertedIndex** provides fast full-text search with O(K) performance, where K is the number of matching tokens. On 100K documents, text search drops from 50-100ms (full scan) to **under 1ms**.
+
+<div className="grid md:grid-cols-3 gap-6 mb-16 not-prose">
+  <FeatureCard
+    icon={Search}
+    iconColor="text-blue-500"
+    title="Token-Based Search"
+    description="Inverted index maps tokens to documents for instant lookups."
+  />
+  <FeatureCard
+    icon={Filter}
+    iconColor="text-green-500"
+    title="Flexible Tokenization"
+    description="Configure tokenizers and filters for your use case."
+  />
+  <FeatureCard
+    icon={Zap}
+    iconColor="text-yellow-500"
+    title="CRDT Integration"
+    description="Indexes update automatically on set, remove, and merge operations."
+  />
+</div>
+
+## Basic Usage
+
+Add an `InvertedIndex` to enable text search on a field:
+
+<div className="not-prose">
+  <CodeBlock title="Basic Text Search" language="typescript" code={basicSearchCode} />
+</div>
+
+## Query Types
+
+InvertedIndex supports three query types with different matching semantics:
+
+<div className="not-prose">
+  <CodeBlock title="Query Types" language="typescript" code={queryTypesCode} />
+</div>
+
+| Query Type | Semantics | Use Case |
+|-----------|-----------|----------|
+| `contains` | All tokens must match (AND) | Search box with multiple words |
+| `containsAll` | All values must be present | Filter by required tags |
+| `containsAny` | Any token matches (OR) | Search with alternatives |
+
+## Tokenization Pipeline
+
+Text is processed through a **tokenization pipeline** before indexing and searching:
+
+<div className="not-prose">
+  <CodeBlock title="Tokenization Pipeline" language="typescript" code={tokenizationCode} />
+</div>
+
+### Pre-built Pipelines
+
+| Pipeline | Tokenizer | Filters | Best For |
+|----------|-----------|---------|----------|
+| `simple()` | WordBoundary | Lowercase, MinLength(2) | General use |
+| `search()` | WordBoundary | Lowercase, MinLength(2), StopWords | Search engines |
+| `minimal()` | WordBoundary | Lowercase only | Preserve all tokens |
+
+### Available Components
+
+<div className="not-prose">
+  <CodeBlock title="Tokenizers & Filters" language="typescript" code={pipelinesCode} />
+</div>
+
+## Custom Pipelines
+
+Create custom pipelines for specialized use cases:
+
+<div className="not-prose">
+  <CodeBlock title="N-Gram Pipeline for Substring Matching" language="typescript" code={customPipelineCode} />
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>N-gram tip:</strong> N-grams enable substring matching but increase memory usage significantly.
+    Use only when needed (e.g., autocomplete, partial name matching).
+  </p>
+</div>
+
+## Multi-Value Fields
+
+Index array fields like tags using `multiAttribute`:
+
+<div className="not-prose">
+  <CodeBlock title="Indexing Array Fields" language="typescript" code={multiFieldCode} />
+</div>
+
+## Combined Queries
+
+Combine text search with other index types for powerful filtering:
+
+<div className="not-prose">
+  <CodeBlock title="Combining with Other Indexes" language="typescript" code={combinedQueryCode} />
+</div>
+
+The Query Optimizer automatically selects the best index for each part of the query.
+
+## Index Statistics
+
+Monitor your inverted index with extended statistics:
+
+<div className="not-prose">
+  <CodeBlock title="Index Statistics" language="typescript" code={statsCode} />
+</div>
+
+## Performance Characteristics
+
+| Metric | Value |
+|--------|-------|
+| **Query complexity** | O(K) where K = matching tokens |
+| **Index memory overhead** | 30-50% of text data |
+| **Index update time** | < 10μs per document |
+| **Supported operations** | contains, containsAll, containsAny, has |
+
+### Memory Usage
+
+Inverted indexes store:
+- **Token index**: `Map<Token, Set<Key>>` - tokens to document keys
+- **Reverse index**: `Map<Key, Set<Token>>` - document keys to tokens (for updates)
+
+For text-heavy documents, expect 30-50% memory overhead. Monitor with `getExtendedStats()`.
+
+## Best Practices
+
+1. **Choose the right pipeline**
+   - `simple()` for general use
+   - `search()` for search boxes (removes noise words)
+   - Custom N-gram for autocomplete/substring matching
+
+2. **Index selectively**
+   - Only index fields users actually search
+   - Long text fields increase memory usage
+
+3. **Combine with other indexes**
+   - Use HashIndex for category filtering
+   - Use NavigableIndex for date/price ranges
+   - Let the optimizer combine them efficiently
+
+4. **Test your tokenization**
+   ```typescript
+   const pipeline = TokenizationPipeline.search();
+   console.log(pipeline.process("your sample text"));
+   // Verify tokens match your expectations
+   ```
+
+## Next Steps
+
+- [Indexing](/docs/guides/indexing) - Overview of all index types
+- [Adaptive Indexing](/docs/guides/adaptive-indexing) - Auto-suggest and auto-create indexes
+- [Live Queries](/docs/guides/live-queries) - Combine search with real-time updates
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/indexing" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Indexing
+    </div>
+  </a>
+  <a href="/docs/guides/adaptive-indexing" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Adaptive Indexing <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>
