@@ -33,12 +33,13 @@ const {
 		<SEO title={title} description={description} image={image} type={type} publishedTime={publishedTime} author={author} />
 		<title>{title}</title>
         <script is:inline>
-            // Theme toggle logic
+            // Theme toggle logic - default to dark if no preference saved
             const getThemePreference = () => {
                 if (typeof localStorage !== 'undefined' && localStorage.getItem('theme')) {
                     return localStorage.getItem('theme');
                 }
-                return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+                // Default to dark theme when no preference is saved
+                return 'dark';
             };
             const isDark = getThemePreference() === 'dark';
             document.documentElement.classList[isDark ? 'add' : 'remove']('dark');

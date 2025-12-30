@@ -69,7 +69,7 @@ export const Navbar = ({
                             <button onClick={() => handleLinkClick('#architecture')} className="text-sm font-medium text-neutral-600 dark:text-neutral-300 hover:text-black dark:hover:text-white transition-colors cursor-pointer">Architecture</button>
                             <button onClick={() => handleLinkClick('#comparison')} className="text-sm font-medium text-neutral-600 dark:text-neutral-300 hover:text-black dark:hover:text-white transition-colors cursor-pointer">Comparison</button>
                             <button
-                                onClick={() => handleNavigate('/docs')}
+                                onClick={() => handleNavigate('/docs/intro')}
                                 className={`text-sm font-medium transition-colors cursor-pointer ${isDocs ? 'text-blue-600 dark:text-blue-400' : 'text-neutral-600 dark:text-neutral-300 hover:text-black dark:hover:text-white'}`}
                             >
                                 Docs
@@ -123,7 +123,7 @@ export const Navbar = ({
                         <button onClick={() => handleLinkClick('#features')} className="block w-full text-left px-3 py-2 rounded-md text-base font-medium text-neutral-600 dark:text-neutral-300 hover:text-black dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer">Features</button>
                         <button onClick={() => handleLinkClick('#architecture')} className="block w-full text-left px-3 py-2 rounded-md text-base font-medium text-neutral-600 dark:text-neutral-300 hover:text-black dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer">Architecture</button>
                         <button onClick={() => handleLinkClick('#comparison')} className="block w-full text-left px-3 py-2 rounded-md text-base font-medium text-neutral-600 dark:text-neutral-300 hover:text-black dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer">Comparison</button>
-                        <button onClick={() => handleNavigate('/docs')} className="block w-full text-left px-3 py-2 rounded-md text-base font-medium text-neutral-600 dark:text-neutral-300 hover:text-black dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer">Docs</button>
+                        <button onClick={() => handleNavigate('/docs/intro')} className="block w-full text-left px-3 py-2 rounded-md text-base font-medium text-neutral-600 dark:text-neutral-300 hover:text-black dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer">Docs</button>
                         <button onClick={() => handleNavigate('/blog')} className="block w-full text-left px-3 py-2 rounded-md text-base font-medium text-neutral-600 dark:text-neutral-300 hover:text-black dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer">Blog</button>
                         <div className="mt-4 px-3">
                             <button className="w-full bg-foreground text-background px-4 py-2 rounded-md text-sm font-semibold hover:opacity-90 transition-opacity cursor-pointer">
