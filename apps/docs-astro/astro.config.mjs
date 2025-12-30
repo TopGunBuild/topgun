@@ -10,6 +10,9 @@ import sitemap from '@astrojs/sitemap';
 export default defineConfig({
   site: 'https://topgun.build',
   trailingSlash: 'never',
+  build: {
+    format: 'file',
+  },
   integrations: [
     react(),
     mdx(),
