@@ -1,0 +1,314 @@
+---
+title: "Hybrid Logical Clocks: The Heart of Distributed Sync"
+excerpt: "Physical clocks lie. Network time drifts. Yet distributed systems need ordering. Here's how Hybrid Logical Clocks solve causality tracking in TopGun."
+date: "Dec 30, 2025"
+readTime: "8 min read"
+author: "Ivan Kalashnik"
+role: "Creator"
+category: "Engineering"
+image: "/images/blog-hlc-sync.png"
+avatar: "/images/ivan-avatar.jpeg"
+---
+
+Every distributed system faces the same fundamental question: **when did this happen?**
+
+It sounds simple. Check the clock. But in a world where devices span time zones, clocks drift, and network latency varies by hundreds of milliseconds—physical time becomes unreliable.
+
+TopGun is a local-first database. Users make changes offline. Those changes sync later. To merge them correctly, we need to know which change came first. But whose clock do we trust?
+
+The answer: **nobody's**. Instead, we use a Hybrid Logical Clock.
+
+## The Problem with Physical Clocks
+
+Let's start with why we can't just use `Date.now()`.
+
+### Clock Skew
+
+Every device has slightly different time. Even with NTP synchronization, clocks can drift by tens or hundreds of milliseconds. In extreme cases (airplane mode, misconfigured servers), the drift can be minutes or hours.
+
+```typescript
+// Alice's phone (correct time)
+Date.now() // → 1704067200000 (Jan 1, 2024 00:00:00)
+
+// Bob's laptop (2 minutes ahead)
+Date.now() // → 1704067320000 (Jan 1, 2024 00:02:00)
+```
+
+If both users edit the same document at the "same" real-world moment, Bob's changes will always win—even if Alice pressed save first. That's not just unfair; it's wrong.
+
+### Clock Adjustments
+
+Clocks don't just drift—they jump. NTP corrections, daylight saving changes, and manual adjustments can move time backwards or forwards suddenly.
+
+```typescript
+// Before NTP correction
+Date.now() // → 1704067200000
+
+// NTP daemon corrects clock
+Date.now() // → 1704067190000 (10 seconds back!)
+```
+
+If your system uses physical timestamps for ordering, time going backwards creates impossible states. A record appears to be modified before it was created.
+
+### Network Latency
+
+Even if all clocks were perfectly synchronized, network latency varies. A message sent at T=100ms might arrive before a message sent at T=50ms, depending on network conditions.
+
+Physical timestamps can't capture this. They only know when something happened locally—not its causal relationship to other events.
+
+## Lamport Clocks: A Logical Alternative
+
+In 1978, Leslie Lamport proposed a solution: forget physical time entirely. Use a **logical clock** that only tracks the order of events.
+
+The algorithm is elegant:
+
+1. Each node maintains a counter
+2. Before any event, increment the counter
+3. When sending a message, include your counter
+4. When receiving a message, set your counter to `max(local, received) + 1`
+
+```typescript
+// Node A: counter = 0
+A.send()  // counter → 1, message includes "1"
+
+// Node B receives: counter = 0, message = 1
+B.receive() // counter → max(0, 1) + 1 = 2
+
+// Node B sends
+B.send()  // counter → 3, message includes "3"
+```
+
+This creates a **partial ordering**: if event A causally precedes event B, then `clock(A) < clock(B)`. The "happens-before" relationship is preserved.
+
+But Lamport clocks have a critical limitation: they lose all connection to real time. A counter value of "42" tells you nothing about when something actually happened. For debugging, auditing, or time-based queries, this is a problem.
+
+## Hybrid Logical Clocks: The Best of Both Worlds
+
+In 2014, Kulkarni et al. introduced **Hybrid Logical Clocks** (HLC). The insight: combine physical time with a logical counter, getting causality ordering *and* approximate real-world time.
+
+An HLC timestamp has three components:
+
+```typescript
+interface Timestamp {
+  millis: number;   // Physical time (wall clock)
+  counter: number;  // Logical counter for same-millisecond events
+  nodeId: string;   // Tie-breaker for concurrent events
+}
+```
+
+The `millis` component tracks physical time—but with a twist. It never goes backwards. If the physical clock regresses, the HLC maintains monotonicity through the counter.
+
+The `counter` handles multiple events within the same millisecond. When physical time doesn't advance, the counter increments.
+
+The `nodeId` provides a deterministic tie-breaker. When two events have identical `millis` and `counter`, the node ID decides.
+
+## How TopGun Implements HLC
+
+Here's the core of TopGun's HLC implementation:
+
+```typescript
+export class HLC {
+  private lastMillis: number = 0;
+  private lastCounter: number = 0;
+  private readonly nodeId: string;
+
+  // Max allowable drift (1 minute)
+  private static readonly MAX_DRIFT = 60000;
+
+  constructor(nodeId: string) {
+    this.nodeId = nodeId;
+  }
+}
+```
+
+### Generating Timestamps
+
+When a local event occurs (user edits data), we generate a new timestamp:
+
+```typescript
+public now(): Timestamp {
+  const systemTime = Date.now();
+
+  if (systemTime > this.lastMillis) {
+    // Physical time advanced — reset counter
+    this.lastMillis = systemTime;
+    this.lastCounter = 0;
+  } else {
+    // Same millisecond — increment counter
+    this.lastCounter++;
+  }
+
+  return {
+    millis: this.lastMillis,
+    counter: this.lastCounter,
+    nodeId: this.nodeId
+  };
+}
+```
+
+Notice what happens when physical time doesn't advance: instead of creating duplicate timestamps, we increment the counter. This guarantees monotonicity even when `Date.now()` returns the same value multiple times.
+
+### Receiving Remote Timestamps
+
+When we receive a message from another node, we update our clock:
+
+```typescript
+public update(remote: Timestamp): void {
+  const systemTime = Date.now();
+  const maxMillis = Math.max(this.lastMillis, systemTime, remote.millis);
+
+  if (maxMillis === this.lastMillis && maxMillis === remote.millis) {
+    // All three are the same — take max counter + 1
+    this.lastCounter = Math.max(this.lastCounter, remote.counter) + 1;
+  } else if (maxMillis === this.lastMillis) {
+    // Local is ahead — just increment
+    this.lastCounter++;
+  } else if (maxMillis === remote.millis) {
+    // Remote is ahead — fast-forward
+    this.lastCounter = remote.counter + 1;
+  } else {
+    // System time is ahead of both — reset counter
+    this.lastCounter = 0;
+  }
+
+  this.lastMillis = maxMillis;
+}
+```
+
+This is where the magic happens. The clock "fast-forwards" when it receives a timestamp from the future. But it never goes backwards. If a remote node has a misconfigured clock set to next year, we'll accept it—but our subsequent events will be properly ordered after it.
+
+### Comparing Timestamps
+
+Total ordering is straightforward:
+
+```typescript
+public static compare(a: Timestamp, b: Timestamp): number {
+  // Compare physical time first
+  if (a.millis !== b.millis) {
+    return a.millis - b.millis;
+  }
+  // Same millisecond — compare counter
+  if (a.counter !== b.counter) {
+    return a.counter - b.counter;
+  }
+  // Exact tie — use node ID as deterministic tie-breaker
+  return a.nodeId.localeCompare(b.nodeId);
+}
+```
+
+The three-level comparison ensures we always get a deterministic result. Even if two devices somehow generate events at the exact same millisecond with the same counter, the node ID breaks the tie.
+
+## Why This Matters for Sync
+
+Let's trace through a real sync scenario in TopGun:
+
+```
+Alice (phone):     Bob (laptop):
+─────────────      ─────────────
+10:00:00.000       10:00:00.050
+ts={1000,0,A}      ts={1050,0,B}
+edit: "Hello"      edit: "Hi there"
+
+     ↓ Both offline for 2 hours ↓
+
+12:00:00.000 — Both come online and sync
+```
+
+When Alice and Bob sync:
+
+1. Alice sends her edit with timestamp `{1000, 0, A}`
+2. Bob sends his edit with timestamp `{1050, 0, B}`
+3. Both clients compare: Bob's timestamp is higher (1050 > 1000)
+4. Result: Bob's "Hi there" wins
+
+But here's what makes HLC special. When Alice receives Bob's timestamp, her clock updates:
+
+```typescript
+// Alice's clock before: lastMillis=1000, lastCounter=0
+alice.update({ millis: 1050, counter: 0, nodeId: 'B' });
+// Alice's clock after: lastMillis=1050, lastCounter=1
+```
+
+Alice's next edit will have timestamp `{1050, 2, A}` or later—properly ordered after Bob's change. Even though Alice's physical clock might still be behind, her HLC has caught up.
+
+## Handling Clock Drift
+
+What happens when a node has a wildly incorrect clock?
+
+```typescript
+// Charlie's computer is set to year 2030
+const remote: Timestamp = {
+  millis: 1893456000000, // Jan 1, 2030
+  counter: 0,
+  nodeId: 'charlie'
+};
+```
+
+TopGun detects this with a drift threshold:
+
+```typescript
+if (remote.millis > systemTime + HLC.MAX_DRIFT) {
+  console.warn(`Clock drift detected: Remote ${remote.millis} ahead of local ${systemTime}`);
+}
+```
+
+We warn but still accept the timestamp. In an AP (Available, Partition-tolerant) system like TopGun, rejecting data leads to worse outcomes than accepting skewed timestamps. The system self-heals: once Charlie fixes his clock, his new timestamps will be reasonable.
+
+## Serialization
+
+For storage and network transmission, we serialize timestamps as strings:
+
+```typescript
+// Serialize
+HLC.toString({ millis: 1704067200000, counter: 42, nodeId: 'phone-abc' })
+// → "1704067200000:42:phone-abc"
+
+// Parse
+HLC.parse("1704067200000:42:phone-abc")
+// → { millis: 1704067200000, counter: 42, nodeId: 'phone-abc' }
+```
+
+This compact format is human-readable for debugging while remaining efficient for storage.
+
+## HLC in the Bigger Picture
+
+The Hybrid Logical Clock is just one piece of TopGun's sync infrastructure:
+
+<div className="p-4 bg-neutral-100 dark:bg-neutral-900 rounded-lg border border-neutral-200 dark:border-neutral-800 mb-6">
+
+**Data Flow:**
+
+1. User makes a change → HLC generates timestamp
+2. Change stored locally with timestamp → LWW-Map
+3. Client syncs with server → Timestamps compared
+4. Conflicts resolved by HLC ordering → Merge complete
+5. Result propagated to all subscribers
+
+</div>
+
+Every CRDT operation in TopGun—whether LWW-Map or OR-Map—uses HLC timestamps for ordering. This creates a consistent causality model across all data types.
+
+## Practical Implications
+
+Understanding HLC helps you design better local-first applications:
+
+**Last write wins is deterministic.** When two users edit the same field, the result is always consistent across all devices. No merge conflicts, no user intervention needed.
+
+**Timestamps approximate real time.** Unlike pure Lamport clocks, you can still query "changes from the last hour" and get meaningful results. The physical component stays close to wall clock time.
+
+**Offline duration doesn't matter.** A device can be offline for days. When it reconnects, its clock synchronizes through the update mechanism. No "your clock is too far behind" errors.
+
+**Node ID prevents ties.** Even in the pathological case of identical millisecond and counter, the node ID ensures deterministic ordering. Randomness is eliminated.
+
+## Conclusion
+
+Physical clocks are unreliable. Logical clocks lose real-world time. Hybrid Logical Clocks combine both approaches, giving us:
+
+- Monotonic timestamps that never go backwards
+- Causality tracking that respects "happens-before" relationships
+- Approximate physical time for human-readable ordering
+- Deterministic conflict resolution without coordination
+
+For TopGun, HLC is foundational. Every sync operation, every CRDT merge, every conflict resolution depends on this timestamp comparison. It's the invisible infrastructure that makes offline-first feel seamless.
+
+The next time you edit a document offline and it "just works" when you reconnect—there's a Hybrid Logical Clock quietly making it happen.
