@@ -1,9 +1,10 @@
 
-export type PredicateOp = 
-  | 'eq' | 'neq' 
-  | 'gt' | 'gte' 
-  | 'lt' | 'lte' 
-  | 'like' | 'regex' 
+export type PredicateOp =
+  | 'eq' | 'neq'
+  | 'gt' | 'gte'
+  | 'lt' | 'lte'
+  | 'like' | 'regex'
+  | 'contains' | 'containsAll' | 'containsAny'
   | 'and' | 'or' | 'not';
 
 export interface PredicateNode {
@@ -64,8 +65,41 @@ export class Predicates {
     return { op: 'or', children: predicates }; 
   }
   
-  static not(predicate: PredicateNode): PredicateNode { 
-    return { op: 'not', children: [predicate] }; 
+  static not(predicate: PredicateNode): PredicateNode {
+    return { op: 'not', children: [predicate] };
+  }
+
+  /**
+   * Create a 'contains' predicate for text search.
+   * Matches if attribute value contains the search text.
+   *
+   * @param attribute - Attribute name
+   * @param value - Text to search for
+   */
+  static contains(attribute: string, value: string): PredicateNode {
+    return { op: 'contains', attribute, value };
+  }
+
+  /**
+   * Create a 'containsAll' predicate for text search.
+   * Matches if attribute value contains ALL search values.
+   *
+   * @param attribute - Attribute name
+   * @param values - Text values that must all be present
+   */
+  static containsAll(attribute: string, values: string[]): PredicateNode {
+    return { op: 'containsAll', attribute, value: values };
+  }
+
+  /**
+   * Create a 'containsAny' predicate for text search.
+   * Matches if attribute value contains ANY search value.
+   *
+   * @param attribute - Attribute name
+   * @param values - Text values, any of which can match
+   */
+  static containsAny(attribute: string, values: string[]): PredicateNode {
+    return { op: 'containsAny', attribute, value: values };
   }
 }
 
@@ -113,6 +147,19 @@ export function evaluatePredicate(predicate: PredicateNode, data: any): boolean 
     case 'regex':
       if (typeof value !== 'string' || typeof target !== 'string') return false;
       return new RegExp(target).test(value);
+    case 'contains':
+      if (typeof value !== 'string' || typeof target !== 'string') return false;
+      return value.toLowerCase().includes(target.toLowerCase());
+    case 'containsAll':
+      if (typeof value !== 'string' || !Array.isArray(target)) return false;
+      return target.every(
+        (t) => typeof t === 'string' && value.toLowerCase().includes(t.toLowerCase())
+      );
+    case 'containsAny':
+      if (typeof value !== 'string' || !Array.isArray(target)) return false;
+      return target.some(
+        (t) => typeof t === 'string' && value.toLowerCase().includes(t.toLowerCase())
+      );
     default:
       return false;
   }

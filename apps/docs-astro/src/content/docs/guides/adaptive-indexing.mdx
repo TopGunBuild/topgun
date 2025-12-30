@@ -1,0 +1,399 @@
+---
+title: Adaptive Indexing
+description: Let TopGun suggest or automatically create indexes based on your query patterns. Get production-ready index recommendations or enable zero-config development mode.
+order: 15
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Lightbulb, Zap, Shield, Settings } from 'lucide-react';
+import { FeatureCard } from '../../../components/docs/FeatureCard';
+
+export const advisorCode = `import { IndexedLWWMap, simpleAttribute, HLC } from '@topgunbuild/core';
+
+const hlc = new HLC('node-1');
+const products = new IndexedLWWMap<string, Product>(hlc, {
+  adaptiveIndexing: {
+    advisor: {
+      enabled: true,
+      minQueryCount: 10,    // Suggest after 10 queries
+      minAverageCost: 1     // Suggest if avg cost > 1ms
+    }
+  }
+});
+
+// Application runs... queries accumulate
+for (let i = 0; i < 100; i++) {
+  products.queryValues({ type: 'eq', attribute: 'category', value: 'electronics' });
+  products.queryValues({ type: 'between', attribute: 'price', from: 10, to: 100 });
+}
+
+// Get suggestions
+const suggestions = products.getIndexSuggestions();
+console.log(suggestions);
+// [
+//   {
+//     attribute: 'category',
+//     indexType: 'hash',
+//     reason: 'Queried 100× with 2.5ms average cost. Expected 50× speedup.',
+//     priority: 'high',
+//     estimatedBenefit: 50,
+//     queryCount: 100
+//   },
+//   {
+//     attribute: 'price',
+//     indexType: 'navigable',
+//     reason: 'Queried 100× with 3.1ms average cost. Expected 30× speedup.',
+//     priority: 'high',
+//     estimatedBenefit: 30,
+//     queryCount: 100
+//   }
+// ]`;
+
+export const applySuggestionsCode = `// Review suggestions
+const suggestions = products.getIndexSuggestions();
+
+for (const suggestion of suggestions) {
+  console.log(\`Suggestion: Add \${suggestion.indexType} index on '\${suggestion.attribute}'\`);
+  console.log(\`  Reason: \${suggestion.reason}\`);
+  console.log(\`  Priority: \${suggestion.priority}\`);
+}
+
+// Apply high-priority suggestions manually
+const categoryAttr = simpleAttribute<Product, string>('category', p => p.category);
+const priceAttr = simpleAttribute<Product, number>('price', p => p.price);
+
+products.addHashIndex(categoryAttr);
+products.addNavigableIndex(priceAttr);
+
+// Reset statistics after applying
+products.resetQueryStatistics();`;
+
+export const autoIndexCode = `const products = new IndexedLWWMap<string, Product>(hlc, {
+  adaptiveIndexing: {
+    autoIndex: {
+      enabled: true,
+      threshold: 10,          // Auto-create after 10 queries
+      maxIndexes: 20,         // Safety limit
+      onIndexCreated: (attr, type) => {
+        console.log(\`✅ Auto-created \${type} index on '\${attr}'\`);
+      }
+    }
+  }
+});
+
+// IMPORTANT: Register attributes before querying
+// Auto-index needs to know how to extract values
+products.registerAttribute(
+  simpleAttribute<Product, string>('category', p => p.category),
+  ['hash']  // Allow only hash index for this attribute
+);
+
+products.registerAttribute(
+  simpleAttribute<Product, number>('price', p => p.price),
+  ['hash', 'navigable']  // Allow hash or navigable
+);
+
+// Queries 1-9: Full scan (slow)
+// Query 10+: Auto-creates index, becomes fast
+for (let i = 0; i < 20; i++) {
+  products.queryValues({ type: 'eq', attribute: 'category', value: 'electronics' });
+}
+// Console: ✅ Auto-created hash index on 'category'`;
+
+export const productionSetupCode = `// Production: Advisor only (safe, no automatic changes)
+const products = new IndexedLWWMap<string, Product>(hlc, {
+  adaptiveIndexing: {
+    advisor: { enabled: true }
+    // autoIndex not enabled - production safe
+  }
+});
+
+// Check suggestions periodically (e.g., in admin dashboard)
+function getIndexRecommendations() {
+  const suggestions = products.getIndexSuggestions({
+    minQueryCount: 100,      // Higher threshold for production
+    minAverageCost: 5,       // Only slow queries
+    maxSuggestions: 10       // Top 10 recommendations
+  });
+
+  return suggestions.filter(s => s.priority === 'high');
+}`;
+
+export const developmentSetupCode = `// Development: Auto-index for fast iteration
+const products = new IndexedLWWMap<string, Product>(hlc, {
+  adaptiveIndexing: {
+    advisor: { enabled: true },
+    autoIndex: {
+      enabled: process.env.NODE_ENV === 'development',
+      threshold: 5,           // Lower threshold for quick feedback
+      maxIndexes: 30,
+      onIndexCreated: (attr, type) => {
+        console.log(\`[DEV] Auto-indexed '\${attr}' with \${type}\`);
+      }
+    }
+  }
+});
+
+// Register all attributes you might query
+const attrs = [
+  simpleAttribute<Product, string>('category', p => p.category),
+  simpleAttribute<Product, string>('status', p => p.status),
+  simpleAttribute<Product, number>('price', p => p.price),
+  simpleAttribute<Product, string>('name', p => p.name)
+];
+
+attrs.forEach(attr => products.registerAttribute(attr));`;
+
+export const statisticsCode = `// Get detailed query statistics
+const stats = products.getQueryStatistics();
+
+console.table(stats.map(s => ({
+  attribute: s.attribute,
+  queryType: s.queryType,
+  count: s.queryCount,
+  avgCost: \`\${s.averageCost.toFixed(2)}ms\`,
+  hasIndex: s.hasIndex ? 'Yes' : 'No'
+})));
+
+// Example output:
+// ┌───────────┬───────────┬───────┬─────────┬──────────┐
+// │ attribute │ queryType │ count │ avgCost │ hasIndex │
+// ├───────────┼───────────┼───────┼─────────┼──────────┤
+// │ category  │ eq        │ 150   │ 0.02ms  │ Yes      │
+// │ price     │ between   │ 75    │ 2.50ms  │ No       │
+// │ status    │ eq        │ 45    │ 1.80ms  │ No       │
+// └───────────┴───────────┴───────┴─────────┴──────────┘`;
+
+export const defaultIndexingCode = `// 'scalar' mode: Auto-index all top-level primitive fields
+const products = new IndexedLWWMap<string, Product>(hlc, {
+  defaultIndexing: 'scalar'
+});
+
+// First record triggers automatic hash indexes on:
+// - category (string)
+// - status (string)
+// - price (number)
+// - inStock (boolean)
+// NOT indexed: nested objects, arrays, functions
+
+products.set('p1', {
+  id: 'p1',
+  category: 'electronics',  // → HashIndex
+  status: 'active',         // → HashIndex
+  price: 99,                // → HashIndex (not NavigableIndex)
+  inStock: true,            // → HashIndex
+  metadata: { weight: 500 } // NOT indexed (nested object)
+});`;
+
+export const indexTypeSelectionCode = `// Query type → Recommended index type
+//
+// eq, neq, in, has        → HashIndex
+// gt, gte, lt, lte, between → NavigableIndex
+// contains, containsAll, containsAny → InvertedIndex
+
+// The advisor detects patterns and suggests accordingly:
+products.queryValues({ type: 'eq', attribute: 'status', value: 'active' });
+// → Suggests HashIndex
+
+products.queryValues({ type: 'between', attribute: 'price', from: 10, to: 100 });
+// → Suggests NavigableIndex
+
+products.queryValues({ type: 'contains', attribute: 'name', value: 'wireless' });
+// → Suggests InvertedIndex`;
+
+export const migrationCode = `// Before: Manual index setup
+const products = new IndexedLWWMap<string, Product>(hlc);
+products.addHashIndex(categoryAttr);  // Guessed this was needed
+
+// After: Data-driven indexing
+const products = new IndexedLWWMap<string, Product>(hlc, {
+  adaptiveIndexing: { advisor: { enabled: true } }
+});
+
+// Run for a week, then check
+const suggestions = products.getIndexSuggestions();
+// Apply only what's actually needed based on real usage`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Adaptive Indexing</span>
+</div>
+
+# Adaptive Indexing
+
+TopGun's **Adaptive Indexing** system tracks your query patterns and either suggests indexes (production mode) or automatically creates them (development mode). This eliminates guesswork and ensures optimal performance.
+
+<div className="grid md:grid-cols-3 gap-6 mb-16 not-prose">
+  <FeatureCard
+    icon={Lightbulb}
+    iconColor="text-yellow-500"
+    title="Index Advisor"
+    description="Get smart suggestions based on actual query patterns in production."
+  />
+  <FeatureCard
+    icon={Zap}
+    iconColor="text-blue-500"
+    title="Auto-Indexing"
+    description="Zero-config development mode that creates indexes on demand."
+  />
+  <FeatureCard
+    icon={Shield}
+    iconColor="text-green-500"
+    title="Production Safe"
+    description="Advisor mode suggests but never modifies - you stay in control."
+  />
+</div>
+
+## Index Advisor (Production Mode)
+
+The **Index Advisor** tracks query patterns and generates recommendations. It never modifies your indexes - you review and apply suggestions manually.
+
+<div className="not-prose">
+  <CodeBlock title="Index Advisor Setup" language="typescript" code={advisorCode} />
+</div>
+
+### Applying Suggestions
+
+Review suggestions and apply them to your codebase:
+
+<div className="not-prose">
+  <CodeBlock title="Reviewing and Applying Suggestions" language="typescript" code={applySuggestionsCode} />
+</div>
+
+### Suggestion Properties
+
+| Property | Description |
+|----------|-------------|
+| `attribute` | Field name to index |
+| `indexType` | Recommended type: `hash`, `navigable`, or `inverted` |
+| `reason` | Human-readable explanation |
+| `priority` | `high`, `medium`, or `low` |
+| `estimatedBenefit` | Expected speedup multiplier |
+| `queryCount` | Number of queries that triggered suggestion |
+| `averageCost` | Average query time before indexing |
+
+## Auto-Indexing (Development Mode)
+
+**Auto-Indexing** creates indexes automatically after a threshold number of queries. Great for development and prototyping.
+
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border-l-4 border-yellow-500 p-4 my-6 not-prose">
+  <p className="text-sm text-yellow-800 dark:text-yellow-200">
+    <strong>Important:</strong> Auto-indexing requires pre-registered attributes. Register attributes before running queries, or the system won't know how to extract values.
+  </p>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="Auto-Indexing Setup" language="typescript" code={autoIndexCode} />
+</div>
+
+### Configuration Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `threshold` | 10 | Queries before auto-creating index |
+| `maxIndexes` | 20 | Safety limit on total indexes |
+| `onIndexCreated` | - | Callback when index is created |
+
+## Recommended Setup
+
+### Production
+
+<div className="not-prose">
+  <CodeBlock title="Production Configuration" language="typescript" code={productionSetupCode} />
+</div>
+
+### Development
+
+<div className="not-prose">
+  <CodeBlock title="Development Configuration" language="typescript" code={developmentSetupCode} />
+</div>
+
+## Query Statistics
+
+Monitor query patterns with detailed statistics:
+
+<div className="not-prose">
+  <CodeBlock title="Query Statistics" language="typescript" code={statisticsCode} />
+</div>
+
+## Default Indexing Strategy
+
+For simple use cases, enable automatic indexing of all scalar fields:
+
+<div className="not-prose">
+  <CodeBlock title="Default Indexing" language="typescript" code={defaultIndexingCode} />
+</div>
+
+| Strategy | Behavior |
+|----------|----------|
+| `'none'` | No automatic indexing (default) |
+| `'scalar'` | Hash index on all primitive fields |
+| `'all'` | Index nested fields too (not recommended) |
+
+## How Index Type is Selected
+
+The advisor maps query types to optimal index types:
+
+<div className="not-prose">
+  <CodeBlock title="Index Type Selection" language="typescript" code={indexTypeSelectionCode} />
+</div>
+
+## Performance Impact
+
+| Metric | Value |
+|--------|-------|
+| **Tracking overhead** | < 1% of query time |
+| **Memory for statistics** | ~100 bytes per attribute |
+| **Suggestion generation** | < 1ms |
+
+## Best Practices
+
+1. **Start with Advisor in production**
+   - Safe, no automatic changes
+   - Review suggestions weekly
+
+2. **Use Auto-Index in development**
+   - Fast iteration
+   - Export suggestions for production
+
+3. **Register attributes explicitly**
+   - Required for auto-indexing
+   - Allows type-safe index creation
+
+4. **Set reasonable thresholds**
+   - Production: 100+ queries, 5ms+ cost
+   - Development: 5-10 queries
+
+5. **Monitor and reset**
+   - Check statistics periodically
+   - Reset after applying indexes
+
+## Migration from Manual Indexing
+
+<div className="not-prose">
+  <CodeBlock title="Before vs After" language="typescript" code={migrationCode} />
+</div>
+
+## Next Steps
+
+- [Indexing](/docs/guides/indexing) - Manual index configuration
+- [Full-Text Search](/docs/guides/full-text-search) - Text search with InvertedIndex
+- [Performance Tuning](/docs/guides/performance) - Optimize for your workload
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/full-text-search" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Full-Text Search
+    </div>
+  </a>
+  <a href="/docs/guides/pub-sub" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Pub/Sub <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>

@@ -32,6 +32,7 @@
   },
   "dependencies": {
     "msgpackr": "^1.11.8",
+    "sorted-btree": "^2.1.0",
     "zod": "^4.1.13"
   },
   "optionalDependencies": {

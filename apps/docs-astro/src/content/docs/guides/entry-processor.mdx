@@ -434,6 +434,13 @@ await client.executeOnKey('leaderboard', 'player-123', {
 | **No Globals** | No `eval`, `Function`, `process`, `global` |
 | **Code Validation** | Dangerous patterns are blocked before execution |
 
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border-l-4 border-yellow-500 p-4 my-6 not-prose">
+  <p className="text-sm text-yellow-800 dark:text-yellow-200">
+    <strong>Need network access?</strong> Entry Processors are sandboxed and cannot call external APIs.
+    For ML inference, webhooks, or external service integration, use <a href="/docs/guides/interceptors" className="text-yellow-700 dark:text-yellow-300 underline hover:no-underline">Interceptors</a> instead.
+  </p>
+</div>
+
 ---
 
 ## API Reference
