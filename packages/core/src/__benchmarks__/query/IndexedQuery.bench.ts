@@ -18,7 +18,7 @@ interface User {
 }
 
 describe('IndexedLWWMap Query Performance', () => {
-  const sizes = [10_000, 100_000, 1_000_000];
+  const sizes = [10_000, 100_000];
 
   for (const size of sizes) {
     describe(`${size.toLocaleString()} records`, () => {
@@ -216,7 +216,7 @@ describe('IndexedLWWMap Query Performance', () => {
   }
 
   // Selective query benchmarks (different selectivity levels)
-  describe('Selectivity impact (1M records)', () => {
+  describe('Selectivity impact (100K records)', () => {
     const hlc = new HLC('bench-node');
     const map = new IndexedLWWMap<string, User>(hlc);
 
@@ -224,10 +224,10 @@ describe('IndexedLWWMap Query Performance', () => {
     map.addHashIndex(statusAttr);
 
     // Setup: 90% active, 9% inactive, 1% pending
-    for (let i = 0; i < 1_000_000; i++) {
+    for (let i = 0; i < 100_000; i++) {
       let status: 'active' | 'inactive' | 'pending';
-      if (i < 900_000) status = 'active';
-      else if (i < 990_000) status = 'inactive';
+      if (i < 90_000) status = 'active';
+      else if (i < 99_000) status = 'inactive';
       else status = 'pending';
 
       map.set(`${i}`, {
