@@ -9,6 +9,7 @@
 
 import type { Index, IndexQuery } from './indexes/types';
 import type { Attribute } from './Attribute';
+import { isCompoundIndex, type CompoundIndex } from './indexes/CompoundIndex';
 
 /**
  * Registry for managing indexes on a collection.
@@ -20,6 +21,9 @@ export class IndexRegistry<K, V> {
   /** Indexes grouped by attribute name */
   private attributeIndexes: Map<string, Index<K, V, unknown>[]> = new Map();
 
+  /** Compound indexes (Phase 9.03) - keyed by sorted attribute names */
+  private compoundIndexes: Map<string, CompoundIndex<K, V>> = new Map();
+
   /** Fallback index for full scan (optional) */
   private fallbackIndex: Index<K, V, unknown> | null = null;
 
@@ -30,6 +34,12 @@ export class IndexRegistry<K, V> {
    * @param index - Index to register
    */
   addIndex<A>(index: Index<K, V, A>): void {
+    // Handle compound indexes specially (Phase 9.03)
+    if (isCompoundIndex(index)) {
+      this.addCompoundIndex(index as unknown as CompoundIndex<K, V>);
+      return;
+    }
+
     const attrName = index.attribute.name;
     let indexes = this.attributeIndexes.get(attrName);
 
@@ -45,12 +55,27 @@ export class IndexRegistry<K, V> {
   }
 
   /**
+   * Register a compound index (Phase 9.03).
+   *
+   * @param index - Compound index to register
+   */
+  addCompoundIndex(index: CompoundIndex<K, V>): void {
+    const key = this.makeCompoundKey(index.attributes.map((a) => a.name));
+    this.compoundIndexes.set(key, index);
+  }
+
+  /**
    * Remove an index from the registry.
    *
    * @param index - Index to remove
    * @returns true if index was found and removed
    */
   removeIndex<A>(index: Index<K, V, A>): boolean {
+    // Handle compound indexes specially (Phase 9.03)
+    if (isCompoundIndex(index)) {
+      return this.removeCompoundIndex(index as unknown as CompoundIndex<K, V>);
+    }
+
     const attrName = index.attribute.name;
     const indexes = this.attributeIndexes.get(attrName);
 
@@ -71,6 +96,17 @@ export class IndexRegistry<K, V> {
     }
 
     return true;
+  }
+
+  /**
+   * Remove a compound index (Phase 9.03).
+   *
+   * @param index - Compound index to remove
+   * @returns true if index was found and removed
+   */
+  removeCompoundIndex(index: CompoundIndex<K, V>): boolean {
+    const key = this.makeCompoundKey(index.attributes.map((a) => a.name));
+    return this.compoundIndexes.delete(key);
   }
 
   /**
@@ -159,6 +195,60 @@ export class IndexRegistry<K, V> {
       .sort((a, b) => a.getRetrievalCost() - b.getRetrievalCost());
   }
 
+  // ========================================
+  // Phase 9.03: Compound Index Methods
+  // ========================================
+
+  /**
+   * Find a compound index that covers the given attribute names (Phase 9.03).
+   * The compound index must cover ALL the attributes (exact match or superset).
+   *
+   * @param attributeNames - Array of attribute names to search for
+   * @returns Matching compound index or null
+   */
+  findCompoundIndex(attributeNames: string[]): CompoundIndex<K, V> | null {
+    if (attributeNames.length < 2) {
+      return null;
+    }
+
+    // Try exact match first (most efficient)
+    const key = this.makeCompoundKey(attributeNames);
+    const exactMatch = this.compoundIndexes.get(key);
+    if (exactMatch) {
+      return exactMatch;
+    }
+
+    // No exact match - compound indexes require exact attribute match
+    // (unlike SQL where prefix matching is possible)
+    return null;
+  }
+
+  /**
+   * Check if a compound index exists for the given attributes (Phase 9.03).
+   *
+   * @param attributeNames - Array of attribute names
+   * @returns true if a compound index exists
+   */
+  hasCompoundIndex(attributeNames: string[]): boolean {
+    return this.findCompoundIndex(attributeNames) !== null;
+  }
+
+  /**
+   * Get all compound indexes (Phase 9.03).
+   *
+   * @returns Array of all compound indexes
+   */
+  getCompoundIndexes(): CompoundIndex<K, V>[] {
+    return Array.from(this.compoundIndexes.values());
+  }
+
+  /**
+   * Create a compound key from attribute names (sorted for consistency).
+   */
+  private makeCompoundKey(attributeNames: string[]): string {
+    return [...attributeNames].sort().join('+');
+  }
+
   /**
    * Set a fallback index for queries without a suitable index.
    * Typically a FallbackIndex that performs full scan.
@@ -191,6 +281,10 @@ export class IndexRegistry<K, V> {
         index.add(key, record);
       }
     }
+    // Also update compound indexes (Phase 9.03)
+    for (const compoundIndex of this.compoundIndexes.values()) {
+      compoundIndex.add(key, record);
+    }
   }
 
   /**
@@ -207,6 +301,10 @@ export class IndexRegistry<K, V> {
         index.update(key, oldRecord, newRecord);
       }
     }
+    // Also update compound indexes (Phase 9.03)
+    for (const compoundIndex of this.compoundIndexes.values()) {
+      compoundIndex.update(key, oldRecord, newRecord);
+    }
   }
 
   /**
@@ -222,6 +320,10 @@ export class IndexRegistry<K, V> {
         index.remove(key, record);
       }
     }
+    // Also update compound indexes (Phase 9.03)
+    for (const compoundIndex of this.compoundIndexes.values()) {
+      compoundIndex.remove(key, record);
+    }
   }
 
   /**
@@ -234,6 +336,10 @@ export class IndexRegistry<K, V> {
         index.clear();
       }
     }
+    // Also clear compound indexes (Phase 9.03)
+    for (const compoundIndex of this.compoundIndexes.values()) {
+      compoundIndex.clear();
+    }
   }
 
   /**
@@ -244,6 +350,8 @@ export class IndexRegistry<K, V> {
     for (const indexes of this.attributeIndexes.values()) {
       count += indexes.length;
     }
+    // Include compound indexes (Phase 9.03)
+    count += this.compoundIndexes.size;
     return count;
   }
 
@@ -258,9 +366,19 @@ export class IndexRegistry<K, V> {
       stats: index.getStats(),
     }));
 
+    // Add compound index stats (Phase 9.03)
+    for (const compoundIndex of this.compoundIndexes.values()) {
+      indexStats.push({
+        attribute: compoundIndex.compoundName,
+        type: 'compound',
+        stats: compoundIndex.getStats(),
+      });
+    }
+
     return {
-      totalIndexes: indexes.length,
+      totalIndexes: indexes.length + this.compoundIndexes.size,
       indexedAttributes: this.getIndexedAttributes().length,
+      compoundIndexes: this.compoundIndexes.size,
       indexes: indexStats,
     };
   }
@@ -274,6 +392,8 @@ export interface IndexRegistryStats {
   totalIndexes: number;
   /** Number of indexed attributes */
   indexedAttributes: number;
+  /** Number of compound indexes (Phase 9.03) */
+  compoundIndexes?: number;
   /** Stats for each index */
   indexes: Array<{
     attribute: string;

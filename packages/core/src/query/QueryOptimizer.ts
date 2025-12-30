@@ -25,6 +25,7 @@ import type {
 } from './QueryTypes';
 import { isLogicalQuery, isSimpleQuery } from './QueryTypes';
 import type { IndexQuery } from './indexes/types';
+import type { CompoundIndex } from './indexes/CompoundIndex';
 
 /**
  * Options for creating a QueryOptimizer.
@@ -204,9 +205,10 @@ export class QueryOptimizer<K, V> {
    * Strategy: Find child with lowest cost, use as base, filter with rest.
    *
    * CQEngine "smallest first" strategy:
-   * 1. Sort children by merge cost
-   * 2. Use intersection if multiple indexes available
-   * 3. Apply remaining predicates as filters
+   * 1. Check for CompoundIndex covering all eq children (Phase 9.03)
+   * 2. Sort children by merge cost
+   * 3. Use intersection if multiple indexes available
+   * 4. Apply remaining predicates as filters
    */
   private optimizeAnd(query: LogicalQueryNode): PlanStep {
     if (!query.children || query.children.length === 0) {
@@ -216,6 +218,12 @@ export class QueryOptimizer<K, V> {
     // Single child - just optimize it directly
     if (query.children.length === 1) {
       return this.optimizeNode(query.children[0]);
+    }
+
+    // Phase 9.03: Check if a CompoundIndex can handle this AND query
+    const compoundStep = this.tryCompoundIndex(query.children);
+    if (compoundStep) {
+      return compoundStep;
     }
 
     // Optimize all children
@@ -264,6 +272,100 @@ export class QueryOptimizer<K, V> {
     // Multiple indexes available - use intersection
     // CQEngine strategy: iterate smallest, check membership in others
     return { type: 'intersection', steps: indexedSteps };
+  }
+
+  /**
+   * Try to use a CompoundIndex for an AND query (Phase 9.03).
+   *
+   * Returns a compound index scan step if:
+   * 1. All children are simple 'eq' queries
+   * 2. A CompoundIndex exists covering all queried attributes
+   *
+   * @param children - Children of the AND query
+   * @returns IndexScanStep using CompoundIndex, or null if not applicable
+   */
+  private tryCompoundIndex(children: Query[]): PlanStep | null {
+    // Check if all children are simple 'eq' queries
+    const eqQueries: SimpleQueryNode[] = [];
+    const otherQueries: Query[] = [];
+
+    for (const child of children) {
+      if (isSimpleQuery(child) && child.type === 'eq') {
+        eqQueries.push(child);
+      } else {
+        otherQueries.push(child);
+      }
+    }
+
+    // Need at least 2 'eq' queries to use compound index
+    if (eqQueries.length < 2) {
+      return null;
+    }
+
+    // Extract attribute names from eq queries
+    const attributeNames = eqQueries.map((q) => q.attribute);
+
+    // Find a compound index covering these attributes
+    const compoundIndex = this.indexRegistry.findCompoundIndex(attributeNames);
+    if (!compoundIndex) {
+      return null;
+    }
+
+    // Build values array in the order expected by the compound index
+    const values = this.buildCompoundValues(compoundIndex, eqQueries);
+    if (!values) {
+      return null; // Attribute order mismatch
+    }
+
+    // Create compound index scan step
+    const compoundStep: PlanStep = {
+      type: 'index-scan',
+      index: compoundIndex as unknown as import('./indexes/types').Index<unknown, unknown, unknown>,
+      query: { type: 'compound', values },
+    };
+
+    // If there are other (non-eq) queries, apply them as filters
+    if (otherQueries.length > 0) {
+      const filterPredicate: Query =
+        otherQueries.length === 1
+          ? otherQueries[0]
+          : { type: 'and', children: otherQueries };
+
+      return { type: 'filter', source: compoundStep, predicate: filterPredicate };
+    }
+
+    return compoundStep;
+  }
+
+  /**
+   * Build values array for compound index query in correct attribute order.
+   *
+   * @param compoundIndex - The compound index to use
+   * @param eqQueries - Array of 'eq' queries
+   * @returns Values array in compound index order, or null if mismatch
+   */
+  private buildCompoundValues(
+    compoundIndex: CompoundIndex<K, V>,
+    eqQueries: SimpleQueryNode[]
+  ): unknown[] | null {
+    const attributeNames = compoundIndex.attributes.map((a) => a.name);
+    const values: unknown[] = [];
+
+    // Build a map of attribute -> value from eq queries
+    const queryMap = new Map<string, unknown>();
+    for (const q of eqQueries) {
+      queryMap.set(q.attribute, q.value);
+    }
+
+    // Build values array in compound index order
+    for (const attrName of attributeNames) {
+      if (!queryMap.has(attrName)) {
+        return null; // Missing attribute value
+      }
+      values.push(queryMap.get(attrName));
+    }
+
+    return values;
   }
 
   /**
