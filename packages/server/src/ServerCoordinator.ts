@@ -2235,7 +2235,7 @@ export class ServerCoordinator {
 
         let broadcastCount = 0;
         for (const client of this.clients.values()) {
-            if (client.isAuthenticated && client.socket.readyState === WebSocket.OPEN) {
+            if (client.isAuthenticated && client.socket.readyState === WebSocket.OPEN && client.writer) {
                 client.writer.write(message);
                 broadcastCount++;
             }
