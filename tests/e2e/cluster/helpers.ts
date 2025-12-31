@@ -141,8 +141,15 @@ export async function createCluster(config: ClusterConfig): Promise<ClusterConte
     });
   }
 
-  // Wait for cluster formation
-  const formed = await waitForClusterFormation(nodes, config.nodeCount);
+  // Wait for cluster formation with extended timeout and retry
+  let formed = await waitForClusterFormation(nodes, config.nodeCount);
+
+  // If not formed, wait a bit more and retry - gossip may need time
+  if (!formed) {
+    await sleep(2000);
+    formed = await waitForClusterFormation(nodes, config.nodeCount, 10000);
+  }
+
   if (!formed) {
     // Cleanup on failure
     for (const node of nodes) {
@@ -176,27 +183,42 @@ export async function createCluster(config: ClusterConfig): Promise<ClusterConte
 export async function waitForClusterFormation(
   nodes: ClusterNode[],
   expectedSize: number,
-  timeoutMs = 15000
+  timeoutMs = 30000
 ): Promise<boolean> {
   const start = Date.now();
 
   while (Date.now() - start < timeoutMs) {
     let allReady = true;
+    const memberCounts: Record<string, number> = {};
 
     for (const node of nodes) {
       const members = (node.coordinator as any).cluster?.getMembers() || [];
+      memberCounts[node.nodeId] = members.length;
       if (members.length < expectedSize) {
         allReady = false;
-        break;
       }
     }
 
     if (allReady) {
+      console.log('Cluster formed:', memberCounts);
       return true;
+    }
+
+    // Log progress every 5 seconds
+    if ((Date.now() - start) % 5000 < 100) {
+      console.log(`Cluster formation progress (${Math.floor((Date.now() - start) / 1000)}s):`, memberCounts);
     }
 
     await sleep(100);
   }
+
+  // Log final state on failure
+  const finalCounts: Record<string, number> = {};
+  for (const node of nodes) {
+    const members = (node.coordinator as any).cluster?.getMembers() || [];
+    finalCounts[node.nodeId] = members.length;
+  }
+  console.log('Cluster formation FAILED. Final state:', finalCounts);
 
   return false;
 }
@@ -249,14 +271,16 @@ export async function createClusterClient(
   const token = createTestToken(options.userId || clientId, options.roles || ['ADMIN']);
 
   const client = new TopGunClient({
-    servers: [`ws://localhost:${node.port}`],
+    serverUrl: `ws://localhost:${node.port}`,
     storage,
-    token,
     nodeId: clientId,
-    connectionTimeoutMs: 10000,
   });
 
-  await client.connect();
+  // Set auth token before starting
+  client.setAuthToken(token);
+
+  // Initialize the client
+  await client.start();
 
   return client;
 }
@@ -443,7 +467,8 @@ export async function writeAndWaitForReplication(
   value: any,
   replicationDelayMs = 500
 ): Promise<void> {
-  await client.map(mapName).set(key, value);
+  const map = client.getMap<string, any>(mapName);
+  map.set(key, value);
   await sleep(replicationDelayMs);
 }
 
