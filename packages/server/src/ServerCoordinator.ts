@@ -38,6 +38,10 @@ import {
 import { TaskletScheduler } from './tasklet';
 import { WriteAckManager } from './ack/WriteAckManager';
 import { ReplicationPipeline } from './cluster/ReplicationPipeline';
+import { PartitionReassigner } from './cluster/PartitionReassigner';
+import { ReadReplicaHandler } from './cluster/ReadReplicaHandler';
+import { MerkleTreeManager } from './cluster/MerkleTreeManager';
+import { RepairScheduler } from './cluster/RepairScheduler';
 import { CounterHandler } from './handlers/CounterHandler';
 import { EntryProcessorHandler } from './handlers/EntryProcessorHandler';
 import { ConflictResolverHandler } from './handlers/ConflictResolverHandler';
@@ -236,6 +240,12 @@ export class ServerCoordinator {
     // Event Journal (Phase 5.04)
     private eventJournalService?: EventJournalService;
     private journalSubscriptions: Map<string, { clientId: string; mapName?: string; types?: JournalEventType[] }> = new Map();
+
+    // Phase 10 - Cluster Enhancements
+    private partitionReassigner?: PartitionReassigner;
+    private readReplicaHandler?: ReadReplicaHandler;
+    private merkleTreeManager?: MerkleTreeManager;
+    private repairScheduler?: RepairScheduler;
 
     private readonly _nodeId: string;
 
@@ -489,6 +499,58 @@ export class ServerCoordinator {
                     logger.error({ err }, 'Failed to initialize EventJournalService');
                 });
             }
+
+            // Phase 10.02: Automatic partition failover
+            this.partitionReassigner = new PartitionReassigner(
+                this.cluster,
+                this.partitionService,
+                { reassignmentDelayMs: 1000 }
+            );
+            this.partitionReassigner.on('failoverComplete', (event) => {
+                logger.info({
+                    failedNodeId: event.failedNodeId,
+                    partitionsReassigned: event.partitionsReassigned,
+                    durationMs: event.durationMs
+                }, 'Partition failover completed');
+                // Broadcast updated partition map to clients
+                this.broadcastPartitionMap(this.partitionService.getPartitionMap());
+            });
+            logger.info('PartitionReassigner initialized');
+
+            // Phase 10.03: Read replica handler for read scaling
+            this.readReplicaHandler = new ReadReplicaHandler(
+                this.partitionService,
+                this.cluster,
+                this._nodeId,
+                undefined, // LagTracker - can be added later
+                {
+                    defaultConsistency: config.defaultConsistency ?? ConsistencyLevel.STRONG,
+                    preferLocalReplica: true,
+                    loadBalancing: 'latency-based'
+                }
+            );
+            logger.info('ReadReplicaHandler initialized');
+
+            // Phase 10.04: Anti-entropy repair
+            this.merkleTreeManager = new MerkleTreeManager(this._nodeId);
+            this.repairScheduler = new RepairScheduler(
+                this.merkleTreeManager,
+                this.cluster,
+                this.partitionService,
+                this._nodeId,
+                {
+                    enabled: true,
+                    scanIntervalMs: 300000, // 5 minutes
+                    maxConcurrentRepairs: 2
+                }
+            );
+            // Wire up data accessors for repair
+            this.repairScheduler.setDataAccessors(
+                (key: string) => this.getLocalRecord(key) ?? undefined,
+                (key: string, record: any) => this.applyRepairRecord(key, record)
+            );
+            this.repairScheduler.start();
+            logger.info('MerkleTreeManager and RepairScheduler initialized');
 
             this.systemManager = new SystemManager(
                 this.cluster,
@@ -753,6 +815,16 @@ export class ServerCoordinator {
         // 4. Close ReplicationPipeline
         if (this.replicationPipeline) {
             this.replicationPipeline.close();
+        }
+
+        // 4.5. Stop Phase 10 components
+        if (this.repairScheduler) {
+            this.repairScheduler.stop();
+            logger.info('RepairScheduler stopped');
+        }
+        if (this.partitionReassigner) {
+            this.partitionReassigner.stop();
+            logger.info('PartitionReassigner stopped');
         }
 
         // 5. Stop Cluster
@@ -2633,6 +2705,59 @@ export class ServerCoordinator {
                     this.topicManager.publish(topic, data, originalSenderId, true);
                     break;
                 }
+
+                // Phase 10.04: Anti-entropy repair messages
+                case 'CLUSTER_MERKLE_ROOT_REQ': {
+                    const { partitionId, requestId } = msg.payload;
+                    const rootHash = this.merkleTreeManager?.getRootHash(partitionId) ?? 0;
+                    this.cluster.send(msg.senderId, 'CLUSTER_MERKLE_ROOT_RESP', {
+                        requestId,
+                        partitionId,
+                        rootHash
+                    });
+                    break;
+                }
+
+                case 'CLUSTER_MERKLE_ROOT_RESP': {
+                    // Response handled by RepairScheduler via event or callback
+                    // For now, emit as an event that RepairScheduler can listen to
+                    if (this.repairScheduler) {
+                        this.repairScheduler.emit('merkleRootResponse', {
+                            nodeId: msg.senderId,
+                            ...msg.payload
+                        });
+                    }
+                    break;
+                }
+
+                case 'CLUSTER_REPAIR_DATA_REQ': {
+                    // Request for data records from a specific partition
+                    const { partitionId, keys, requestId } = msg.payload;
+                    const records: Record<string, any> = {};
+                    for (const key of keys) {
+                        const record = this.getLocalRecord(key);
+                        if (record) {
+                            records[key] = record;
+                        }
+                    }
+                    this.cluster.send(msg.senderId, 'CLUSTER_REPAIR_DATA_RESP', {
+                        requestId,
+                        partitionId,
+                        records
+                    });
+                    break;
+                }
+
+                case 'CLUSTER_REPAIR_DATA_RESP': {
+                    // Response with data records for repair
+                    if (this.repairScheduler) {
+                        this.repairScheduler.emit('repairDataResponse', {
+                            nodeId: msg.senderId,
+                            ...msg.payload
+                        });
+                    }
+                    break;
+                }
             }
         });
     }
@@ -2979,6 +3104,12 @@ export class ServerCoordinator {
                 timestamp,
                 nodeId: this._nodeId,
             });
+        }
+
+        // Phase 10.04: Update Merkle tree for anti-entropy
+        if (this.merkleTreeManager && recordToStore && op.key) {
+            const partitionId = this.partitionService.getPartitionId(op.key);
+            this.merkleTreeManager.updateRecord(partitionId, op.key, recordToStore as LWWRecord<any>);
         }
 
         return { eventPayload, oldRecord };
@@ -3424,6 +3555,66 @@ export class ServerCoordinator {
         }
 
         return this.maps.get(name)!;
+    }
+
+    /**
+     * Phase 10.04: Get local record for anti-entropy repair
+     * Returns the LWWRecord for a key, used by RepairScheduler
+     */
+    private getLocalRecord(key: string): LWWRecord<any> | null {
+        // Parse key format: "mapName:key"
+        const separatorIndex = key.indexOf(':');
+        if (separatorIndex === -1) {
+            return null;
+        }
+        const mapName = key.substring(0, separatorIndex);
+        const actualKey = key.substring(separatorIndex + 1);
+
+        const map = this.maps.get(mapName);
+        if (!map || !(map instanceof LWWMap)) {
+            return null;
+        }
+
+        return map.getRecord(actualKey) ?? null;
+    }
+
+    /**
+     * Phase 10.04: Apply repaired record from anti-entropy repair
+     * Used by RepairScheduler to apply resolved conflicts
+     */
+    private applyRepairRecord(key: string, record: LWWRecord<any>): void {
+        // Parse key format: "mapName:key"
+        const separatorIndex = key.indexOf(':');
+        if (separatorIndex === -1) {
+            logger.warn({ key }, 'Invalid key format for repair');
+            return;
+        }
+        const mapName = key.substring(0, separatorIndex);
+        const actualKey = key.substring(separatorIndex + 1);
+
+        const map = this.getMap(mapName, 'LWW') as LWWMap<string, any>;
+        const existingRecord = map.getRecord(actualKey);
+
+        // Only apply if the repaired record is newer (LWW semantics)
+        if (!existingRecord || record.timestamp.millis > existingRecord.timestamp.millis ||
+            (record.timestamp.millis === existingRecord.timestamp.millis &&
+             record.timestamp.counter > existingRecord.timestamp.counter)) {
+            map.merge(actualKey, record);
+            logger.debug({ mapName, key: actualKey }, 'Applied repair record');
+
+            // Persist to storage
+            if (this.storage) {
+                this.storage.store(mapName, actualKey, record).catch((err: Error) => {
+                    logger.error({ err, mapName, key: actualKey }, 'Failed to persist repair record');
+                });
+            }
+
+            // Update Merkle tree
+            if (this.merkleTreeManager) {
+                const partitionId = this.partitionService.getPartitionId(actualKey);
+                this.merkleTreeManager.updateRecord(partitionId, actualKey, record);
+            }
+        }
     }
 
     private async loadMapFromStorage(name: string, typeHint: 'LWW' | 'OR'): Promise<void> {
