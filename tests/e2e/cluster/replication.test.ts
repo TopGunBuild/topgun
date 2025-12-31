@@ -432,9 +432,12 @@ describe('Cluster Replication E2E', () => {
 
       await sleep(1000);
 
-      // Check health includes queue info
+      // Check health includes proper fields
       const health = pipeline.getHealth();
-      expect(typeof health.queueSize).toBe('number');
+      expect(health).toHaveProperty('healthy');
+      expect(health).toHaveProperty('unhealthyNodes');
+      expect(health).toHaveProperty('laggyNodes');
+      expect(health).toHaveProperty('avgLagMs');
     });
   });
 });

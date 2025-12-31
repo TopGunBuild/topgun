@@ -31,9 +31,15 @@ export interface ClusterMember {
 }
 
 export interface ClusterMessage {
-  type: 'HELLO' | 'OP_FORWARD' | 'PARTITION_UPDATE' | 'HEARTBEAT' | 'CLUSTER_EVENT' | 'CLUSTER_QUERY_EXEC' | 'CLUSTER_QUERY_RESP' | 'CLUSTER_GC_REPORT' | 'CLUSTER_GC_COMMIT' | 'CLUSTER_LOCK_REQ' | 'CLUSTER_LOCK_RELEASE' | 'CLUSTER_LOCK_GRANTED' | 'CLUSTER_LOCK_RELEASED' | 'CLUSTER_CLIENT_DISCONNECTED' | 'CLUSTER_TOPIC_PUB' | 'CLUSTER_MERKLE_ROOT_REQ' | 'CLUSTER_MERKLE_ROOT_RESP' | 'CLUSTER_MERKLE_BUCKETS_REQ' | 'CLUSTER_MERKLE_BUCKETS_RESP' | 'CLUSTER_MERKLE_KEYS_REQ' | 'CLUSTER_MERKLE_KEYS_RESP' | 'CLUSTER_REPAIR_DATA_REQ' | 'CLUSTER_REPAIR_DATA_RESP';
+  type: 'HELLO' | 'MEMBER_LIST' | 'OP_FORWARD' | 'PARTITION_UPDATE' | 'HEARTBEAT' | 'CLUSTER_EVENT' | 'CLUSTER_QUERY_EXEC' | 'CLUSTER_QUERY_RESP' | 'CLUSTER_GC_REPORT' | 'CLUSTER_GC_COMMIT' | 'CLUSTER_LOCK_REQ' | 'CLUSTER_LOCK_RELEASE' | 'CLUSTER_LOCK_GRANTED' | 'CLUSTER_LOCK_RELEASED' | 'CLUSTER_CLIENT_DISCONNECTED' | 'CLUSTER_TOPIC_PUB' | 'CLUSTER_MERKLE_ROOT_REQ' | 'CLUSTER_MERKLE_ROOT_RESP' | 'CLUSTER_MERKLE_BUCKETS_REQ' | 'CLUSTER_MERKLE_BUCKETS_RESP' | 'CLUSTER_MERKLE_KEYS_REQ' | 'CLUSTER_MERKLE_KEYS_RESP' | 'CLUSTER_REPAIR_DATA_REQ' | 'CLUSTER_REPAIR_DATA_RESP';
   senderId: string;
   payload: any;
+}
+
+export interface MemberInfo {
+  nodeId: string;
+  host: string;
+  port: number;
 }
 
 export class ClusterManager extends EventEmitter {
@@ -224,6 +230,55 @@ export class ClusterManager extends EventEmitter {
    */
   private handleHeartbeat(senderId: string, _payload: { timestamp: number }): void {
     this.failureDetector.recordHeartbeat(senderId);
+  }
+
+  /**
+   * Send current member list to a specific node (gossip protocol).
+   * Called when a new node joins to propagate cluster topology.
+   */
+  private sendMemberList(targetNodeId: string): void {
+    const members: MemberInfo[] = [];
+    for (const [nodeId, member] of this.members) {
+      members.push({
+        nodeId,
+        host: member.host,
+        port: member.port,
+      });
+    }
+    this.send(targetNodeId, 'MEMBER_LIST', { members });
+    logger.debug({ targetNodeId, memberCount: members.length }, 'Sent member list');
+  }
+
+  /**
+   * Broadcast member list to all connected nodes.
+   * Called when cluster membership changes.
+   */
+  private broadcastMemberList(): void {
+    for (const [nodeId, member] of this.members) {
+      if (member.isSelf) continue;
+      if (member.socket && member.socket.readyState === WebSocket.OPEN) {
+        this.sendMemberList(nodeId);
+      }
+    }
+  }
+
+  /**
+   * Handle incoming member list from a peer (gossip protocol).
+   * Attempts to connect to unknown members.
+   */
+  private handleMemberList(payload: { members: MemberInfo[] }): void {
+    for (const memberInfo of payload.members) {
+      // Skip self
+      if (memberInfo.nodeId === this.config.nodeId) continue;
+
+      // Skip already known members
+      if (this.members.has(memberInfo.nodeId)) continue;
+
+      // Try to connect to this unknown member
+      const peerAddress = `${memberInfo.host}:${memberInfo.port}`;
+      logger.info({ nodeId: memberInfo.nodeId, peerAddress }, 'Discovered new member via gossip');
+      this.connectToPeer(peerAddress);
+    }
   }
 
   /**
@@ -457,6 +512,13 @@ export class ClusterManager extends EventEmitter {
           this.startHeartbeat();
 
           this.emit('memberJoined', remoteNodeId);
+
+          // Gossip: Broadcast updated member list to all connected nodes
+          // This ensures all nodes learn about the new member
+          this.broadcastMemberList();
+        } else if (msg.type === 'MEMBER_LIST') {
+          // Handle incoming member list (gossip protocol)
+          this.handleMemberList(msg.payload);
         } else if (msg.type === 'HEARTBEAT') {
           // Handle incoming heartbeat
           if (remoteNodeId) {
