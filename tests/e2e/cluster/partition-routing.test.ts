@@ -98,12 +98,13 @@ describe('Partition Routing E2E', () => {
       expect(isPartitionBalanced(distribution, 20)).toBe(true);
     });
 
-    test('each partition should have 2 backups', () => {
+    test('each partition should have 1 backup (DEFAULT_BACKUP_COUNT=1)', () => {
       const ps = (cluster.nodes[0].coordinator as any).partitionService;
 
       for (let i = 0; i < PARTITION_COUNT; i++) {
         const backups = ps.getBackups(i);
-        expect(backups).toHaveLength(2);
+        // With DEFAULT_BACKUP_COUNT=1 and 3 nodes, each partition has 1 backup
+        expect(backups).toHaveLength(1);
       }
     });
 
@@ -147,8 +148,8 @@ describe('Partition Routing E2E', () => {
         }
       }
 
-      // Owner + 2 backups = 3 nodes should be related
-      expect(relatedCount).toBe(3);
+      // Owner + 1 backup (DEFAULT_BACKUP_COUNT=1) = 2 nodes should be related
+      expect(relatedCount).toBe(2);
     });
   });
 

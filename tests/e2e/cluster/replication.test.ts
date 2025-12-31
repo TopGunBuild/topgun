@@ -206,12 +206,20 @@ describe('Cluster Replication E2E', () => {
       // Wait for replication
       await sleep(1500);
 
-      // All nodes should converge to the value with higher timestamp
+      // Related nodes (owner + backups) should converge to the value with higher timestamp
+      // In a partitioned data grid, only owner and backup nodes store the data
+      let checkedCount = 0;
       for (const node of cluster.nodes) {
-        const map = node.coordinator.getMap('concurrent-map');
-        const value = (map as any)?.get(key);
-        expect(value?.writer).toBe('second');
+        const ps = (node.coordinator as any).partitionService;
+        if (ps.isRelated(key)) {
+          const map = node.coordinator.getMap('concurrent-map');
+          const value = (map as any)?.get(key);
+          expect(value?.writer).toBe('second');
+          checkedCount++;
+        }
       }
+      // With 3 nodes and BACKUP_COUNT=1, at least 2 nodes should have the data
+      expect(checkedCount).toBeGreaterThanOrEqual(2);
     });
 
     test('should maintain consistency after rapid writes', async () => {

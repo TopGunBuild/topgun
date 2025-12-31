@@ -588,12 +588,17 @@ export function generateTestData(
  * Mock client connection for direct server testing
  */
 export function createMockClient(id: string): any {
+  const mockWrite = jest.fn();
   return {
     id,
     socket: {
       send: jest.fn(),
       readyState: WebSocket.OPEN,
       close: jest.fn()
+    },
+    writer: {
+      write: mockWrite,
+      close: jest.fn(),
     },
     isAuthenticated: true,
     subscriptions: new Set(),
@@ -603,7 +608,9 @@ export function createMockClient(id: string): any {
 }
 
 /**
- * Assert all nodes have consistent data
+ * Assert related nodes (owner + backups) have consistent data
+ * In a partitioned data grid, only owner and backup nodes store the data.
+ * This function checks that nodes which HAVE the data are consistent.
  */
 export async function assertClusterConsistency(
   nodes: ClusterNode[],
@@ -615,15 +622,28 @@ export async function assertClusterConsistency(
 
   for (const key of expectedKeys) {
     const values = new Map<string, any>();
+    const relatedNodes: string[] = [];
 
     for (const node of nodes) {
-      const map = node.coordinator.getMap(mapName) as LWWMap<string, any>;
-      const value = map?.get(key);
-      values.set(node.nodeId, value);
+      // Only check nodes that are owner or backup for this key
+      const ps = (node.coordinator as any).partitionService;
+      if (ps.isRelated(key)) {
+        relatedNodes.push(node.nodeId);
+        const map = node.coordinator.getMap(mapName) as LWWMap<string, any>;
+        const value = map?.get(key);
+        values.set(node.nodeId, value);
+      }
     }
 
-    // Check all values are equal
+    // Check all related nodes have equal values
     const valuesArray = Array.from(values.values());
+    if (valuesArray.length === 0) {
+      // No related nodes found - this shouldn't happen
+      details.push(`Key ${key}: no related nodes found`);
+      consistent = false;
+      continue;
+    }
+
     const firstValue = JSON.stringify(valuesArray[0]);
 
     for (const [nodeId, value] of values) {

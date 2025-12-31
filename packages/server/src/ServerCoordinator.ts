@@ -2623,7 +2623,23 @@ export class ServerCoordinator {
         this.cluster.on('message', (msg) => {
             switch (msg.type) {
                 case 'OP_FORWARD':
+                    // OP_FORWARD is used for multiple purposes:
+                    // 1. Actual operation forwards (has key field) - route to partition owner
+                    // 2. Replication messages (has _replication field) - handled by ReplicationPipeline
+                    // 3. Migration messages (has _migration field) - handled by MigrationManager
+                    // Only validate key for actual operation forwards
+                    if (msg.payload._replication || msg.payload._migration) {
+                        // These are handled by ReplicationPipeline and MigrationManager listeners
+                        // No routing check needed
+                        break;
+                    }
+
+                    // Actual operation forward - validate key and route
                     logger.info({ senderId: msg.senderId }, 'Received forwarded op');
+                    if (!msg.payload.key) {
+                        logger.warn({ senderId: msg.senderId }, 'OP_FORWARD missing key, dropping');
+                        break;
+                    }
                     if (this.partitionService.isLocalOwner(msg.payload.key)) {
                         this.processLocalOp(msg.payload, true, msg.senderId).catch(err => {
                             logger.error({ err, senderId: msg.senderId }, 'Forwarded op failed');
@@ -3308,9 +3324,12 @@ export class ServerCoordinator {
         }
 
         // 4. Replicate to backup nodes (Hazelcast pattern: after local merge)
-        // Note: Only replicate if we are the owner and operation is not from cluster
-        // Incoming cluster ops are already replicated by the owner
-        if (this.replicationPipeline && !fromCluster) {
+        // Note: Replicate if we are the owner. This includes:
+        // - Direct client operations (fromCluster=false)
+        // - Operations forwarded from other nodes (fromCluster=true) where we are the owner
+        // The key insight: the owner is responsible for replicating to backups,
+        // regardless of whether the op originated locally or was forwarded.
+        if (this.replicationPipeline) {
             const opId = op.id || `${op.mapName}:${op.key}:${Date.now()}`;
             // Fire-and-forget for EVENTUAL, or await for STRONG/QUORUM
             this.replicationPipeline.replicate(op, opId, op.key).catch(err => {
@@ -3503,6 +3522,13 @@ export class ServerCoordinator {
     private handleClusterEvent(payload: any) {
         // 1. Replication Logic: Am I a Backup?
         const { mapName, key, eventType } = payload;
+
+        // Guard against undefined key (can happen with malformed cluster messages)
+        if (!key) {
+            logger.warn({ mapName, eventType }, 'Received cluster event with undefined key, ignoring');
+            return;
+        }
+
         const map = this.getMap(mapName, (eventType === 'OR_ADD' || eventType === 'OR_REMOVE') ? 'OR' : 'LWW');
         const oldRecord = (map instanceof LWWMap) ? map.getRecord(key) : null;
 
