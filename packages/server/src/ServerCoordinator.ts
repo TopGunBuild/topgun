@@ -606,8 +606,109 @@ export class ServerCoordinator {
         return this.taskletScheduler;
     }
 
+    /**
+     * Phase 10.02: Graceful cluster departure
+     *
+     * Notifies the cluster that this node is leaving and allows time for:
+     * 1. Pending replication to complete
+     * 2. Other nodes to detect departure
+     * 3. Partition reassignment to begin
+     */
+    private async gracefulClusterDeparture(): Promise<void> {
+        if (!this.cluster || this.cluster.getMembers().length <= 1) {
+            // Single node or no cluster - nothing to coordinate
+            return;
+        }
+
+        const nodeId = this._nodeId;
+        const ownedPartitions = this.partitionService
+            ? this.getOwnedPartitions()
+            : [];
+
+        logger.info({
+            nodeId,
+            ownedPartitions: ownedPartitions.length,
+            clusterMembers: this.cluster.getMembers().length
+        }, 'Initiating graceful cluster departure');
+
+        // Notify cluster peers that we're leaving
+        const departureMessage = {
+            type: 'NODE_LEAVING',
+            nodeId,
+            partitions: ownedPartitions,
+            timestamp: Date.now()
+        };
+
+        // Broadcast to all cluster members
+        for (const memberId of this.cluster.getMembers()) {
+            if (memberId !== nodeId) {
+                try {
+                    this.cluster.send(memberId, 'CLUSTER_EVENT', departureMessage);
+                } catch (e) {
+                    logger.warn({ memberId, err: e }, 'Failed to notify peer of departure');
+                }
+            }
+        }
+
+        // Wait for pending replication to flush
+        if (this.replicationPipeline) {
+            logger.info('Waiting for pending replication to complete...');
+            try {
+                await this.waitForReplicationFlush(3000);
+                logger.info('Replication flush complete');
+            } catch (e) {
+                logger.warn({ err: e }, 'Replication flush timeout - some data may not be replicated');
+            }
+        }
+
+        // Brief delay to allow cluster to process departure
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        logger.info({ nodeId }, 'Graceful cluster departure complete');
+    }
+
+    /**
+     * Get list of partition IDs owned by this node
+     */
+    private getOwnedPartitions(): number[] {
+        if (!this.partitionService) return [];
+
+        const partitionMap = this.partitionService.getPartitionMap();
+        const owned: number[] = [];
+
+        for (const partition of partitionMap.partitions) {
+            if (partition.ownerNodeId === this._nodeId) {
+                owned.push(partition.partitionId);
+            }
+        }
+
+        return owned;
+    }
+
+    /**
+     * Wait for replication pipeline to flush pending operations
+     */
+    private async waitForReplicationFlush(timeoutMs: number): Promise<void> {
+        if (!this.replicationPipeline) return;
+
+        const startTime = Date.now();
+
+        while (Date.now() - startTime < timeoutMs) {
+            const pendingOps = this.replicationPipeline.getTotalPending();
+            if (pendingOps === 0) {
+                return;
+            }
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        throw new Error('Replication flush timeout');
+    }
+
     public async shutdown() {
         logger.info('Shutting down Server Coordinator...');
+
+        // Phase 10.02: Graceful cluster departure with partition notification
+        await this.gracefulClusterDeparture();
 
         // 1. Stop accepting new connections
         this.httpServer.close();
