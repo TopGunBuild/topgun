@@ -13,7 +13,7 @@
 import { EventEmitter } from 'events';
 import { LWWRecord, Timestamp, PARTITION_COUNT } from '@topgunbuild/core';
 import { MerkleTreeManager } from './MerkleTreeManager';
-import { ClusterManager } from './ClusterManager';
+import { ClusterManager, ClusterMessage } from './ClusterManager';
 import { PartitionService } from './PartitionService';
 import { logger } from '../utils/logger';
 
@@ -30,6 +30,8 @@ export interface RepairConfig {
   throttleMs: number;
   /** Prioritize recently modified partitions. Default: true */
   prioritizeRecent: boolean;
+  /** Timeout for network requests in ms. Default: 5000 */
+  requestTimeoutMs: number;
 }
 
 export const DEFAULT_REPAIR_CONFIG: RepairConfig = {
@@ -39,6 +41,7 @@ export const DEFAULT_REPAIR_CONFIG: RepairConfig = {
   maxConcurrentRepairs: 2,
   throttleMs: 100,
   prioritizeRecent: true,
+  requestTimeoutMs: 5000
 };
 
 export interface RepairTask {
@@ -70,6 +73,12 @@ export interface RepairMetrics {
 type RecordGetter = (key: string) => LWWRecord<any> | undefined;
 type RecordSetter = (key: string, record: LWWRecord<any>) => void;
 
+interface PendingRequest {
+  resolve: (value: any) => void;
+  reject: (reason?: any) => void;
+  timer: NodeJS.Timeout;
+}
+
 export class RepairScheduler extends EventEmitter {
   private config: RepairConfig;
   private merkleManager: MerkleTreeManager;
@@ -82,6 +91,9 @@ export class RepairScheduler extends EventEmitter {
   private scanTimer?: NodeJS.Timeout;
   private processTimer?: NodeJS.Timeout;
   private started = false;
+
+  // Pending network requests
+  private pendingRequests: Map<string, PendingRequest> = new Map();
 
   // Metrics
   private metrics: RepairMetrics = {
@@ -109,6 +121,8 @@ export class RepairScheduler extends EventEmitter {
     this.partitionService = partitionService;
     this.nodeId = nodeId;
     this.config = { ...DEFAULT_REPAIR_CONFIG, ...config };
+
+    this.setupNetworkHandlers();
   }
 
   /**
@@ -121,6 +135,107 @@ export class RepairScheduler extends EventEmitter {
     this.getRecord = getRecord;
     this.setRecord = setRecord;
   }
+
+  /**
+   * Setup network message handlers
+   */
+  private setupNetworkHandlers(): void {
+    this.clusterManager.on('message', (msg: ClusterMessage) => {
+      this.handleClusterMessage(msg);
+    });
+  }
+
+  /**
+   * Handle incoming cluster messages
+   */
+  private handleClusterMessage(msg: ClusterMessage): void {
+    switch (msg.type) {
+      case 'CLUSTER_MERKLE_ROOT_REQ':
+        this.handleMerkleRootReq(msg);
+        break;
+      case 'CLUSTER_MERKLE_ROOT_RESP':
+        this.handleResponse(msg);
+        break;
+      case 'CLUSTER_MERKLE_BUCKETS_REQ':
+        this.handleMerkleBucketsReq(msg);
+        break;
+      case 'CLUSTER_MERKLE_BUCKETS_RESP':
+        this.handleResponse(msg);
+        break;
+      case 'CLUSTER_MERKLE_KEYS_REQ':
+        this.handleMerkleKeysReq(msg);
+        break;
+      case 'CLUSTER_MERKLE_KEYS_RESP':
+        this.handleResponse(msg);
+        break;
+      case 'CLUSTER_REPAIR_DATA_REQ':
+        this.handleRepairDataReq(msg);
+        break;
+      case 'CLUSTER_REPAIR_DATA_RESP':
+        this.handleResponse(msg);
+        break;
+    }
+  }
+
+  // === Request Handlers (Passive) ===
+
+  private handleMerkleRootReq(msg: ClusterMessage): void {
+    const { requestId, partitionId } = msg.payload;
+    const rootHash = this.merkleManager.getRootHash(partitionId);
+    
+    this.clusterManager.send(msg.senderId, 'CLUSTER_MERKLE_ROOT_RESP', {
+      requestId,
+      partitionId,
+      rootHash
+    });
+  }
+
+  private handleMerkleBucketsReq(msg: ClusterMessage): void {
+    const { requestId, partitionId } = msg.payload;
+    const tree = this.merkleManager.serializeTree(partitionId);
+    
+    this.clusterManager.send(msg.senderId, 'CLUSTER_MERKLE_BUCKETS_RESP', {
+      requestId,
+      partitionId,
+      buckets: tree?.buckets || {}
+    });
+  }
+
+  private handleMerkleKeysReq(msg: ClusterMessage): void {
+    const { requestId, partitionId, path } = msg.payload;
+    const keys = this.merkleManager.getKeysInBucket(partitionId, path);
+    
+    this.clusterManager.send(msg.senderId, 'CLUSTER_MERKLE_KEYS_RESP', {
+      requestId,
+      partitionId,
+      path,
+      keys
+    });
+  }
+
+  private handleRepairDataReq(msg: ClusterMessage): void {
+    const { requestId, key } = msg.payload;
+    if (!this.getRecord) return;
+
+    const record = this.getRecord(key);
+    this.clusterManager.send(msg.senderId, 'CLUSTER_REPAIR_DATA_RESP', {
+      requestId,
+      key,
+      record
+    });
+  }
+
+  private handleResponse(msg: ClusterMessage): void {
+    const { requestId } = msg.payload;
+    const pending = this.pendingRequests.get(requestId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pendingRequests.delete(requestId);
+      pending.resolve(msg.payload);
+    }
+  }
+
+  // === Lifecycle Methods ===
 
   /**
    * Start the repair scheduler
@@ -166,6 +281,13 @@ export class RepairScheduler extends EventEmitter {
 
     this.repairQueue = [];
     this.activeRepairs.clear();
+    
+    // Clear pending requests
+    for (const [id, req] of this.pendingRequests) {
+      clearTimeout(req.timer);
+      req.reject(new Error('Scheduler stopped'));
+    }
+    this.pendingRequests.clear();
 
     logger.info('RepairScheduler stopped');
   }
@@ -301,9 +423,7 @@ export class RepairScheduler extends EventEmitter {
       // 1. Get local Merkle root
       const localRoot = this.merkleManager.getRootHash(task.partitionId);
 
-      // 2. Request remote Merkle root
-      // In full implementation, this would be a network request
-      // For now, we'll simulate by checking if roots differ
+      // 2. Request remote Merkle root via network
       const remoteRoot = await this.requestRemoteMerkleRoot(task.replicaNodeId, task.partitionId);
 
       // 3. If roots match, no repair needed
@@ -323,7 +443,7 @@ export class RepairScheduler extends EventEmitter {
         };
       }
 
-      // 4. Find differences via tree traversal
+      // 4. Find differences via bucket exchange
       const differences = await this.findDifferences(task.partitionId, task.replicaNodeId);
       keysScanned = differences.length;
 
@@ -371,21 +491,93 @@ export class RepairScheduler extends EventEmitter {
   }
 
   /**
-   * Request Merkle root from remote node
-   * Note: In full implementation, this would be a network request
+   * Send a request and wait for response
    */
-  private async requestRemoteMerkleRoot(nodeId: string, partitionId: number): Promise<number> {
-    // Placeholder - in full implementation, send MERKLE_REQ_ROOT message
-    // and wait for response
-    return 0;
+  private sendRequest<T>(nodeId: string, type: ClusterMessage['type'], payload: any): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const requestId = Math.random().toString(36).substring(7);
+      
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(requestId);
+        reject(new Error(`Request timeout: ${type} to ${nodeId}`));
+      }, this.config.requestTimeoutMs);
+
+      this.pendingRequests.set(requestId, { resolve, reject, timer });
+
+      this.clusterManager.send(nodeId, type, { ...payload, requestId });
+    });
   }
 
   /**
-   * Find keys that differ between local and remote
+   * Request Merkle root from remote node
+   */
+  private async requestRemoteMerkleRoot(nodeId: string, partitionId: number): Promise<number> {
+    const response = await this.sendRequest<{ rootHash: number }>(
+      nodeId,
+      'CLUSTER_MERKLE_ROOT_REQ',
+      { partitionId }
+    );
+    return response.rootHash;
+  }
+
+  /**
+   * Find keys that differ between local and remote using bucket exchange
    */
   private async findDifferences(partitionId: number, replicaNodeId: string): Promise<string[]> {
-    // Get all keys in this partition on local node
-    return this.merkleManager.getAllKeys(partitionId);
+    // 1. Request remote buckets
+    const response = await this.sendRequest<{ buckets: Record<string, Record<string, number>> }>(
+      replicaNodeId,
+      'CLUSTER_MERKLE_BUCKETS_REQ',
+      { partitionId }
+    );
+    const remoteBuckets = response.buckets;
+    const localTree = this.merkleManager.getTree(partitionId);
+    if (!localTree) return [];
+    
+    // 2. Traverse and compare
+    const differingKeys: Set<string> = new Set();
+    const queue: string[] = ['']; // Start at root
+    const maxDepth = 3; // Should match config
+
+    while(queue.length > 0) {
+      const path = queue.shift()!;
+      
+      // Get local buckets at this path
+      const localChildren = localTree.getBuckets(path);
+      // Get remote buckets at this path
+      const remoteChildren = remoteBuckets[path] || {};
+      
+      const allChars = new Set([...Object.keys(localChildren), ...Object.keys(remoteChildren)]);
+      
+      for (const char of allChars) {
+        const localHash = localChildren[char] || 0;
+        const remoteHash = remoteChildren[char] || 0;
+        
+        if (localHash !== remoteHash) {
+           const nextPath = path + char;
+           if (nextPath.length >= maxDepth) {
+              // Leaf bucket differs - we need to reconcile keys
+              // Request keys for this bucket from remote
+              const bucketKeysResp = await this.sendRequest<{ keys: string[] }>(
+                 replicaNodeId,
+                 'CLUSTER_MERKLE_KEYS_REQ',
+                 { partitionId, path: nextPath }
+              );
+              
+              const localBucketKeys = localTree.getKeysInBucket(nextPath);
+              const remoteBucketKeys = bucketKeysResp.keys;
+              
+              for(const k of localBucketKeys) differingKeys.add(k);
+              for(const k of remoteBucketKeys) differingKeys.add(k);
+           } else {
+              // Intermediate differs - recurse
+              queue.push(nextPath);
+           }
+        }
+      }
+    }
+    
+    return Array.from(differingKeys);
   }
 
   /**
@@ -396,13 +588,44 @@ export class RepairScheduler extends EventEmitter {
       return false;
     }
 
-    // Get local record
+    // 1. Get local record
     const localRecord = this.getRecord(key);
 
-    // In full implementation, would also fetch remote record
-    // and use LWW to resolve conflict
-    // For now, just verify local record exists
-    return localRecord !== undefined;
+    // 2. Request remote record
+    let remoteRecord: LWWRecord<any> | undefined;
+    try {
+      const response = await this.sendRequest<{ record: LWWRecord<any> }>(
+        replicaNodeId,
+        'CLUSTER_REPAIR_DATA_REQ',
+        { key }
+      );
+      remoteRecord = response.record;
+    } catch (e) {
+      logger.warn({ key, replicaNodeId, err: e }, 'Failed to fetch remote record for repair');
+      return false;
+    }
+
+    // 3. Resolve conflict
+    const resolved = this.resolveConflict(localRecord, remoteRecord);
+
+    if (!resolved) return false;
+
+    // 4. Update if needed
+    // If resolved is different from local, update local
+    if (JSON.stringify(resolved) !== JSON.stringify(localRecord)) {
+      this.setRecord(key, resolved);
+      
+      // If resolved is different from remote, send repair to remote (read repair)
+      if (JSON.stringify(resolved) !== JSON.stringify(remoteRecord)) {
+        this.clusterManager.send(replicaNodeId, 'CLUSTER_REPAIR_DATA_RESP', { 
+           // In future: Use dedicated WRITE/REPAIR message
+           // For now we rely on the fact that repair will eventually run on other node too
+        });
+      }
+      return true;
+    }
+
+    return false;
   }
 
   /**

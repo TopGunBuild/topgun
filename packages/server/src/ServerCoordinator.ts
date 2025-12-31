@@ -1125,7 +1125,40 @@ export class ServerCoordinator {
 
                 // Identify all relevant nodes
                 const allMembers = this.cluster.getMembers();
-                const remoteMembers = allMembers.filter(id => !this.cluster.isLocal(id));
+                let remoteMembers = allMembers.filter(id => !this.cluster.isLocal(id));
+
+                // Phase 10.03: Read-from-Replica Optimization
+                // If query targets a specific key, we can optimize by routing to a specific replica
+                // instead of broadcasting to the entire cluster.
+                const queryKey = (query as any)._id || (query as any).where?._id;
+                
+                if (queryKey && typeof queryKey === 'string' && this.readReplicaHandler) {
+                    try {
+                        const targetNode = this.readReplicaHandler.selectReadNode({
+                            mapName,
+                            key: queryKey,
+                            options: { 
+                                // Default to EVENTUAL for read scaling unless specified otherwise
+                                // In future, we could extract consistency from query options if available
+                                consistency: ConsistencyLevel.EVENTUAL 
+                            }
+                        });
+
+                        if (targetNode) {
+                            if (this.cluster.isLocal(targetNode)) {
+                                // Serve locally only
+                                remoteMembers = [];
+                                logger.debug({ clientId: client.id, mapName, key: queryKey }, 'Read optimization: Serving locally');
+                            } else if (remoteMembers.includes(targetNode)) {
+                                // Serve from specific remote replica
+                                remoteMembers = [targetNode];
+                                logger.debug({ clientId: client.id, mapName, key: queryKey, targetNode }, 'Read optimization: Routing to replica');
+                            }
+                        }
+                    } catch (e) {
+                        logger.warn({ err: e }, 'Error in ReadReplicaHandler selection');
+                    }
+                }
 
                 const requestId = crypto.randomUUID();
 
