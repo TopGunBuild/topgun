@@ -1,0 +1,461 @@
+---
+title: Cluster Replication
+description: Configure server-side replication for high availability and fault tolerance in TopGun clusters.
+order: 17
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Database, RefreshCw, Shield, Zap, Server, Copy } from 'lucide-react';
+
+export const clusterSetupCode = `import { ServerCoordinator } from '@topgunbuild/server';
+
+// Node 1 (seed node)
+const node1 = new ServerCoordinator({
+  port: 8080,
+  nodeId: 'node-1',
+  host: 'localhost',
+  clusterPort: 9000,
+  peers: [],  // First node has no peers
+  jwtSecret: process.env.JWT_SECRET,
+  replicationEnabled: true,
+  defaultConsistency: 'EVENTUAL',
+});
+
+await node1.ready();
+
+// Node 2 (joins via seed)
+const node2 = new ServerCoordinator({
+  port: 8081,
+  nodeId: 'node-2',
+  host: 'localhost',
+  clusterPort: 9001,
+  peers: ['localhost:9000'],  // Connect to node-1
+  jwtSecret: process.env.JWT_SECRET,
+  replicationEnabled: true,
+  defaultConsistency: 'EVENTUAL',
+});
+
+await node2.ready();`;
+
+export const consistencyLevelsCode = `// EVENTUAL - Fire-and-forget replication (default)
+// Best for: High throughput, tolerance for brief inconsistency
+const eventualServer = new ServerCoordinator({
+  defaultConsistency: 'EVENTUAL',
+  replicationConfig: {
+    batchIntervalMs: 50,   // Batch replication every 50ms
+    batchSize: 100,        // Max operations per batch
+    queueSizeLimit: 10000, // Max queued operations
+  },
+});
+
+// QUORUM - Wait for majority of replicas
+// Best for: Balance of consistency and availability
+const quorumServer = new ServerCoordinator({
+  defaultConsistency: 'QUORUM',
+  replicationConfig: {
+    ackTimeoutMs: 5000,  // Wait up to 5s for acks
+  },
+});
+
+// STRONG - Wait for all replicas
+// Best for: Critical data requiring full consistency
+const strongServer = new ServerCoordinator({
+  defaultConsistency: 'STRONG',
+  replicationConfig: {
+    ackTimeoutMs: 10000, // Longer timeout for all replicas
+  },
+});`;
+
+export const partitioningCode = `// TopGun uses consistent hashing with 271 partitions
+// Each partition has an owner and backup nodes
+
+// Data is automatically distributed:
+// - Key is hashed to partition ID (0-270)
+// - Partition owner stores the primary copy
+// - Backup nodes store replica copies
+
+// Example: With 3 nodes and BACKUP_COUNT=1
+// - Node A owns ~90 partitions, backs up ~90 others
+// - Node B owns ~90 partitions, backs up ~90 others
+// - Node C owns ~90 partitions, backs up ~90 others
+
+// Total: Each piece of data exists on 2 nodes (owner + 1 backup)`;
+
+export const antiEntropyCode = `// Anti-entropy repair runs automatically
+const server = new ServerCoordinator({
+  replicationEnabled: true,
+  // RepairScheduler configuration (defaults shown)
+  repairConfig: {
+    enabled: true,
+    scanIntervalMs: 300000,    // Full scan every 5 minutes
+    repairBatchSize: 1000,     // Keys per repair batch
+    maxConcurrentRepairs: 2,   // Parallel repair streams
+    throttleMs: 100,           // Delay between batches
+    prioritizeRecent: true,    // Repair recent data first
+  },
+});
+
+// Repair process:
+// 1. MerkleTreeManager builds hash tree of partition data
+// 2. RepairScheduler compares Merkle roots with backup nodes
+// 3. Differences trigger targeted data sync
+// 4. Uses efficient bucket-level comparison before key-level`;
+
+export const gossipProtocolCode = `// Cluster membership uses gossip protocol
+// Nodes automatically discover each other
+
+const server = new ServerCoordinator({
+  clusterPort: 9000,
+  peers: ['node1:9000'],  // Just one seed is enough
+});
+
+// When node2 joins:
+// 1. Connects to seed node (node1)
+// 2. Sends HELLO message with its info
+// 3. Receives MEMBER_LIST with all known members
+// 4. Connects to discovered members
+// 5. Broadcasts updated member list
+
+// Result: All nodes learn about all others automatically`;
+
+export const failoverCode = `// Automatic failover on node failure
+// FailureDetector uses Phi Accrual algorithm
+
+const server = new ServerCoordinator({
+  // FailureDetector config (defaults shown)
+  failureDetector: {
+    heartbeatIntervalMs: 1000,
+    suspicionTimeoutMs: 5000,
+    confirmationTimeoutMs: 10000,
+    phiThreshold: 8,
+  },
+});
+
+// Failover process:
+// 1. Heartbeats stop arriving from failed node
+// 2. Phi value exceeds threshold -> node marked SUSPECT
+// 3. After confirmationTimeout -> node marked FAILED
+// 4. PartitionService rebalances:
+//    - Backup nodes become new owners
+//    - Remaining nodes become new backups
+// 5. Clients receive updated partition map`;
+
+export const readReplicaCode = `// Read from replicas for lower latency
+const server = new ServerCoordinator({
+  replicationEnabled: true,
+  // ReadReplicaHandler is automatically enabled
+});
+
+// Read routing options:
+// - Primary: Always read from partition owner
+// - Replica: Read from nearest replica (lower latency)
+// - Any: Read from any node that has the data
+
+// Clients can specify read preference per query`;
+
+export const dockerComposeClusterCode = `version: '3.8'
+
+services:
+  node1:
+    image: topgun:latest
+    ports:
+      - "8080:8080"
+      - "9000:9000"
+    environment:
+      TOPGUN_NODE_ID: node-1
+      TOPGUN_PORT: 8080
+      TOPGUN_CLUSTER_PORT: 9000
+      TOPGUN_PEERS: ""
+      TOPGUN_REPLICATION: "true"
+      TOPGUN_CONSISTENCY: EVENTUAL
+
+  node2:
+    image: topgun:latest
+    ports:
+      - "8081:8080"
+      - "9001:9000"
+    environment:
+      TOPGUN_NODE_ID: node-2
+      TOPGUN_PORT: 8080
+      TOPGUN_CLUSTER_PORT: 9000
+      TOPGUN_PEERS: node1:9000
+      TOPGUN_REPLICATION: "true"
+      TOPGUN_CONSISTENCY: EVENTUAL
+    depends_on:
+      - node1
+
+  node3:
+    image: topgun:latest
+    ports:
+      - "8082:8080"
+      - "9002:9000"
+    environment:
+      TOPGUN_NODE_ID: node-3
+      TOPGUN_PORT: 8080
+      TOPGUN_CLUSTER_PORT: 9000
+      TOPGUN_PEERS: node1:9000
+      TOPGUN_REPLICATION: "true"
+      TOPGUN_CONSISTENCY: EVENTUAL
+    depends_on:
+      - node1`;
+
+export const metricsCode = `// Replication metrics available via Prometheus
+// GET /metrics on metricsPort
+
+# Replication queue size per node
+topgun_replication_queue_size{node="node-2"} 15
+
+# Pending synchronous acknowledgments
+topgun_replication_pending_acks 3
+
+# Replication lag in milliseconds
+topgun_replication_lag_ms{node="node-2"} 42
+
+# Health status
+topgun_replication_healthy 1
+topgun_replication_unhealthy_nodes 0`;
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <Copy className="w-10 h-10 text-purple-600 dark:text-purple-400" />
+  <h1 className="text-4xl font-bold text-foreground">Cluster Replication</h1>
+</div>
+
+TopGun clusters automatically replicate data across nodes for high availability and fault tolerance.
+This guide covers server-side replication configuration, consistency levels, and anti-entropy repair.
+
+## Overview
+
+<div className="grid grid-cols-1 md:grid-cols-3 gap-4 my-6 not-prose">
+  <div className="p-4 rounded-lg border border-card-border bg-card">
+    <Database className="w-6 h-6 text-blue-500 mb-2" />
+    <h4 className="font-semibold text-foreground mb-1">Partitioned Data</h4>
+    <p className="text-sm text-neutral-600 dark:text-neutral-400">271 partitions with consistent hashing</p>
+  </div>
+  <div className="p-4 rounded-lg border border-card-border bg-card">
+    <Copy className="w-6 h-6 text-purple-500 mb-2" />
+    <h4 className="font-semibold text-foreground mb-1">Backup Replicas</h4>
+    <p className="text-sm text-neutral-600 dark:text-neutral-400">Each partition replicated to backup nodes</p>
+  </div>
+  <div className="p-4 rounded-lg border border-card-border bg-card">
+    <RefreshCw className="w-6 h-6 text-green-500 mb-2" />
+    <h4 className="font-semibold text-foreground mb-1">Anti-Entropy Repair</h4>
+    <p className="text-sm text-neutral-600 dark:text-neutral-400">Merkle tree-based consistency verification</p>
+  </div>
+</div>
+
+## Cluster Setup
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={clusterSetupCode} />
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>Gossip Protocol:</strong> You only need to provide one seed node. Nodes automatically discover
+    each other via gossip protocol - when node2 connects to node1, it learns about all other members.
+  </p>
+</div>
+
+### Gossip-Based Discovery
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={gossipProtocolCode} />
+</div>
+
+## Consistency Levels
+
+TopGun supports three consistency levels for replication:
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={consistencyLevelsCode} />
+</div>
+
+### Comparison
+
+| Level | Latency | Consistency | Availability | Use Case |
+|-------|---------|-------------|--------------|----------|
+| **EVENTUAL** | Lowest | Eventually consistent | Highest | Real-time updates, gaming, social feeds |
+| **QUORUM** | Medium | Majority agree | High | Most applications, shopping carts |
+| **STRONG** | Highest | All replicas agree | Lower | Financial data, inventory counts |
+
+## Partitioning
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={partitioningCode} />
+</div>
+
+### Data Flow
+
+1. **Write arrives** at any node
+2. **Routing**: If not owner, forward to partition owner
+3. **Owner stores** data locally using CRDT merge
+4. **Replication**: Owner sends to backup nodes
+5. **Acknowledgment**: Based on consistency level
+
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border-l-4 border-yellow-500 p-4 my-6 not-prose">
+  <p className="text-sm text-yellow-800 dark:text-yellow-200">
+    <strong>Important:</strong> Only the partition owner and its backups store the data. Other nodes
+    route requests but don't keep copies. This is the partitioned data grid model, not full replication.
+  </p>
+</div>
+
+## Anti-Entropy Repair
+
+TopGun uses Merkle trees for efficient anti-entropy repair:
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={antiEntropyCode} />
+</div>
+
+### How It Works
+
+<div className="space-y-4 my-6 not-prose">
+  <div className="flex gap-3 p-4 rounded-lg border border-card-border">
+    <div className="text-2xl">1</div>
+    <div>
+      <h4 className="font-semibold text-foreground">Build Merkle Trees</h4>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400">
+        Each node builds a Merkle tree of its partition data, hashing keys into buckets.
+      </p>
+    </div>
+  </div>
+  <div className="flex gap-3 p-4 rounded-lg border border-card-border">
+    <div className="text-2xl">2</div>
+    <div>
+      <h4 className="font-semibold text-foreground">Compare Roots</h4>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400">
+        RepairScheduler periodically compares Merkle roots between owner and backup.
+      </p>
+    </div>
+  </div>
+  <div className="flex gap-3 p-4 rounded-lg border border-card-border">
+    <div className="text-2xl">3</div>
+    <div>
+      <h4 className="font-semibold text-foreground">Drill Down</h4>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400">
+        If roots differ, compare bucket hashes to find divergent buckets.
+      </p>
+    </div>
+  </div>
+  <div className="flex gap-3 p-4 rounded-lg border border-card-border">
+    <div className="text-2xl">4</div>
+    <div>
+      <h4 className="font-semibold text-foreground">Repair Keys</h4>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400">
+        Fetch and sync only the specific keys that differ, minimizing network traffic.
+      </p>
+    </div>
+  </div>
+</div>
+
+## Failover Handling
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={failoverCode} />
+</div>
+
+### Phi Accrual Failure Detector
+
+TopGun uses the Phi Accrual failure detector algorithm, which:
+- Tracks heartbeat arrival times
+- Calculates probability of node failure
+- Adapts to network conditions automatically
+- Avoids false positives from temporary network issues
+
+## Read Replicas
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={readReplicaCode} />
+</div>
+
+## Docker Compose Example
+
+Deploy a 3-node cluster with Docker Compose:
+
+<div className="not-prose">
+  <CodeBlock language="yaml" code={dockerComposeClusterCode} />
+</div>
+
+Run with:
+
+<div className="not-prose">
+  <CodeBlock language="bash" code="docker-compose up -d" />
+</div>
+
+## Monitoring
+
+### Prometheus Metrics
+
+<div className="not-prose">
+  <CodeBlock language="promql" code={metricsCode} />
+</div>
+
+### Health Checks
+
+The `ReplicationPipeline.getHealth()` method returns:
+
+```typescript
+interface ReplicationHealth {
+  healthy: boolean;          // Overall health status
+  unhealthyNodes: string[];  // Nodes with issues
+  laggyNodes: string[];      // Nodes with high lag
+  avgLagMs: number;          // Average replication lag
+}
+```
+
+## Best Practices
+
+<div className="space-y-4 my-6 not-prose">
+  <div className="flex gap-3 p-4 rounded-lg border border-card-border">
+    <div className="text-2xl">1</div>
+    <div>
+      <h4 className="font-semibold text-foreground">Use Odd Node Counts</h4>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400">
+        For QUORUM consistency, use 3, 5, or 7 nodes. This ensures clear majority without split-brain.
+      </p>
+    </div>
+  </div>
+  <div className="flex gap-3 p-4 rounded-lg border border-card-border">
+    <div className="text-2xl">2</div>
+    <div>
+      <h4 className="font-semibold text-foreground">Match Consistency to Use Case</h4>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400">
+        Use EVENTUAL for real-time features, QUORUM for most data, STRONG only for critical operations.
+      </p>
+    </div>
+  </div>
+  <div className="flex gap-3 p-4 rounded-lg border border-card-border">
+    <div className="text-2xl">3</div>
+    <div>
+      <h4 className="font-semibold text-foreground">Monitor Replication Lag</h4>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400">
+        Set up alerts on <code className="bg-neutral-100 dark:bg-neutral-800 px-1 rounded">topgun_replication_lag_ms</code>.
+        High lag may indicate network issues or overloaded nodes.
+      </p>
+    </div>
+  </div>
+  <div className="flex gap-3 p-4 rounded-lg border border-card-border">
+    <div className="text-2xl">4</div>
+    <div>
+      <h4 className="font-semibold text-foreground">Enable Cluster TLS</h4>
+      <p className="text-sm text-neutral-600 dark:text-neutral-400">
+        In production, always use TLS for inter-node communication with <code className="bg-neutral-100 dark:bg-neutral-800 px-1 rounded">clusterTls</code> config.
+      </p>
+    </div>
+  </div>
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/cluster-client" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Client Cluster Mode
+    </div>
+  </a>
+  <a href="/docs/guides/observability" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Observability <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>
