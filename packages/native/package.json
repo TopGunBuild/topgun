@@ -1,6 +1,6 @@
 {
   "name": "@topgunbuild/native",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Native performance modules for TopGun",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
