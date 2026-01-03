@@ -1,4 +1,4 @@
-import { renderHook, act, waitFor } from '@testing-library/react';
+import { renderHook, act } from '@testing-library/react';
 import { useSearch } from '../hooks/useSearch';
 import { TopGunProvider } from '../TopGunProvider';
 import { TopGunClient } from '@topgunbuild/client';
@@ -8,11 +8,13 @@ import React from 'react';
 const mockSubscribe = jest.fn();
 const mockDispose = jest.fn();
 const mockSetQuery = jest.fn();
+const mockSetOptions = jest.fn();
 
 const mockSearchHandle = {
   subscribe: mockSubscribe,
   dispose: mockDispose,
   setQuery: mockSetQuery,
+  setOptions: mockSetOptions,
   getResults: jest.fn().mockReturnValue([]),
   mapName: 'testMap',
   query: 'test query',
@@ -119,7 +121,7 @@ describe('useSearch', () => {
     expect(mockSearchSubscribe).not.toHaveBeenCalled();
   });
 
-  it('should re-subscribe when query changes', () => {
+  it('should use setQuery() when query changes (optimization)', () => {
     const { rerender } = renderHook(
       ({ query }) => useSearch('articles', query),
       {
@@ -128,14 +130,57 @@ describe('useSearch', () => {
       }
     );
 
+    // Initial subscription created
     expect(mockSearchSubscribe).toHaveBeenCalledTimes(1);
     expect(mockSearchSubscribe).toHaveBeenLastCalledWith('articles', 'first query', {});
 
+    // Change query - should use setQuery() instead of creating new handle
     rerender({ query: 'second query' });
 
-    expect(mockSearchSubscribe).toHaveBeenCalledTimes(2);
-    expect(mockSearchSubscribe).toHaveBeenLastCalledWith('articles', 'second query', {});
+    // searchSubscribe should NOT be called again - setQuery() should be used instead
+    expect(mockSearchSubscribe).toHaveBeenCalledTimes(1);
+    expect(mockSetQuery).toHaveBeenCalledWith('second query');
+  });
+
+  it('should use setOptions() when options change (optimization)', () => {
+    const { rerender } = renderHook(
+      ({ limit }) => useSearch('articles', 'test', { limit }),
+      {
+        wrapper,
+        initialProps: { limit: 10 },
+      }
+    );
+
+    // Initial subscription created
+    expect(mockSearchSubscribe).toHaveBeenCalledTimes(1);
+    expect(mockSearchSubscribe).toHaveBeenCalledWith('articles', 'test', { limit: 10 });
+
+    // Change options - should use setOptions() instead of creating new handle
+    rerender({ limit: 20 });
+
+    // searchSubscribe should NOT be called again - setOptions() should be used instead
+    expect(mockSearchSubscribe).toHaveBeenCalledTimes(1);
+    expect(mockSetOptions).toHaveBeenCalledWith({ limit: 20 });
+  });
+
+  it('should recreate handle when mapName changes', () => {
+    const { rerender } = renderHook(
+      ({ mapName }) => useSearch(mapName, 'test'),
+      {
+        wrapper,
+        initialProps: { mapName: 'articles' },
+      }
+    );
+
+    expect(mockSearchSubscribe).toHaveBeenCalledTimes(1);
+    expect(mockSearchSubscribe).toHaveBeenLastCalledWith('articles', 'test', {});
+
+    // Change mapName - should recreate handle
+    rerender({ mapName: 'products' });
+
     expect(mockDispose).toHaveBeenCalled();
+    expect(mockSearchSubscribe).toHaveBeenCalledTimes(2);
+    expect(mockSearchSubscribe).toHaveBeenLastCalledWith('products', 'test', {});
   });
 
   describe('debounce', () => {
@@ -158,17 +203,16 @@ describe('useSearch', () => {
       rerender({ query: 'inpu' });
       rerender({ query: 'input' });
 
-      // Should not have called searchSubscribe more times yet (debouncing)
-      expect(mockSearchSubscribe).toHaveBeenCalledTimes(1);
+      // Should not have called setQuery yet (debouncing)
+      expect(mockSetQuery).not.toHaveBeenCalled();
 
       // Fast-forward past debounce
       act(() => {
         jest.advanceTimersByTime(300);
       });
 
-      // Now it should have been called with the final value
-      expect(mockSearchSubscribe).toHaveBeenCalledTimes(2);
-      expect(mockSearchSubscribe).toHaveBeenLastCalledWith('articles', 'input', {});
+      // Now setQuery should have been called with the final value
+      expect(mockSetQuery).toHaveBeenCalledWith('input');
     });
 
     it('should not debounce when debounceMs is not set', () => {
@@ -184,7 +228,8 @@ describe('useSearch', () => {
 
       rerender({ query: 'second' });
 
-      expect(mockSearchSubscribe).toHaveBeenLastCalledWith('articles', 'second', {});
+      // Should immediately call setQuery (no debounce)
+      expect(mockSetQuery).toHaveBeenCalledWith('second');
     });
 
     it('should not debounce when debounceMs is 0', () => {
@@ -200,7 +245,8 @@ describe('useSearch', () => {
 
       rerender({ query: 'second' });
 
-      expect(mockSearchSubscribe).toHaveBeenLastCalledWith('articles', 'second', {});
+      // Should immediately call setQuery (no debounce)
+      expect(mockSetQuery).toHaveBeenCalledWith('second');
     });
   });
 
@@ -232,11 +278,6 @@ describe('useSearch', () => {
       { wrapper }
     );
 
-    // Fast-forward to trigger the debounced subscription
-    act(() => {
-      jest.advanceTimersByTime(300);
-    });
-
     // debounceMs should not be passed to searchSubscribe
     expect(mockSearchSubscribe).toHaveBeenCalledWith('products', 'laptop', {
       limit: 10,
@@ -263,9 +304,8 @@ describe('useSearch', () => {
       jest.advanceTimersByTime(300);
     });
 
-    // searchSubscribe should still only have been called once (from initial mount)
-    // The debounced "new query" should NOT have triggered another call
-    expect(mockSearchSubscribe).toHaveBeenCalledTimes(1);
+    // setQuery should not have been called after unmount
+    expect(mockSetQuery).not.toHaveBeenCalled();
   });
 
   it('should maintain result order (by score)', () => {

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import type { SearchHandle, SearchResult } from '@topgunbuild/client';
 import type { SearchOptions } from '@topgunbuild/core';
 import { useClient } from './useClient';
@@ -103,20 +103,30 @@ export function useSearch<T = unknown>(
   // Track if component is mounted
   const isMounted = useRef(true);
 
-  // Store handle ref for cleanup
+  // Store handle ref for reuse
   const handleRef = useRef<SearchHandle<T> | null>(null);
+
+  // Store unsubscribe function
+  const unsubscribeRef = useRef<(() => void) | null>(null);
 
   // Store timeout ref for debounce
   const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Extract debounceMs from options, keeping SearchOptions separate
-  const { debounceMs, ...searchOptions } = options ?? {};
+  // Extract debounceMs from options
+  const debounceMs = options?.debounceMs;
 
-  // Serialize options for stable dependency
-  const optionsJson = JSON.stringify(searchOptions);
+  // Memoize search options (without debounceMs) to avoid unnecessary re-renders
+  const searchOptions = useMemo<SearchOptions>(() => {
+    if (!options) return {};
+    const { debounceMs: _, ...opts } = options;
+    return opts;
+  }, [options?.limit, options?.minScore, options?.boost]);
 
-  // Track the debounced query for subscription
+  // Track the debounced query
   const [debouncedQuery, setDebouncedQuery] = useState(query);
+
+  // Track if this is the first query (for initial handle creation)
+  const isFirstQuery = useRef(true);
 
   // Debounce the query if debounceMs is set
   useEffect(() => {
@@ -143,57 +153,88 @@ export function useSearch<T = unknown>(
     }
   }, [query, debounceMs]);
 
-  // Main subscription effect
+  // Effect for creating/disposing handle when mapName changes
   useEffect(() => {
     isMounted.current = true;
-    setLoading(true);
-    setError(null);
+    isFirstQuery.current = true;
 
+    // Cleanup on mapName change or unmount
+    return () => {
+      isMounted.current = false;
+      if (unsubscribeRef.current) {
+        unsubscribeRef.current();
+        unsubscribeRef.current = null;
+      }
+      if (handleRef.current) {
+        handleRef.current.dispose();
+        handleRef.current = null;
+      }
+    };
+  }, [client, mapName]);
+
+  // Effect for handling query changes
+  useEffect(() => {
     // Don't subscribe for empty queries
     if (!debouncedQuery.trim()) {
       setResults([]);
       setLoading(false);
-      return () => {
-        isMounted.current = false;
-      };
+      setError(null);
+      return;
     }
 
+    setLoading(true);
+    setError(null);
+
     try {
-      const parsedOptions: SearchOptions = JSON.parse(optionsJson);
-      const handle = client.searchSubscribe<T>(mapName, debouncedQuery, parsedOptions);
-      handleRef.current = handle;
-
-      // Flag to track if we've received initial results
-      let hasReceivedResults = false;
-
-      // Subscribe to result updates
-      const unsubscribe = handle.subscribe((newResults) => {
-        if (isMounted.current) {
-          setResults(newResults);
-          if (!hasReceivedResults) {
-            hasReceivedResults = true;
-            setLoading(false);
+      // If we have an existing handle, use setQuery() for efficiency
+      if (handleRef.current && !isFirstQuery.current) {
+        handleRef.current.setQuery(debouncedQuery);
+      } else {
+        // First query or no handle - create new subscription
+        if (handleRef.current) {
+          // Cleanup old handle if exists
+          if (unsubscribeRef.current) {
+            unsubscribeRef.current();
           }
+          handleRef.current.dispose();
         }
-      });
 
-      return () => {
-        isMounted.current = false;
-        unsubscribe();
-        handle.dispose();
-        handleRef.current = null;
-      };
+        const handle = client.searchSubscribe<T>(mapName, debouncedQuery, searchOptions);
+        handleRef.current = handle;
+        isFirstQuery.current = false;
+
+        // Flag to track if we've received initial results
+        let hasReceivedResults = false;
+
+        // Subscribe to result updates
+        unsubscribeRef.current = handle.subscribe((newResults) => {
+          if (isMounted.current) {
+            setResults(newResults);
+            if (!hasReceivedResults) {
+              hasReceivedResults = true;
+              setLoading(false);
+            }
+          }
+        });
+      }
     } catch (err) {
       if (isMounted.current) {
         setError(err instanceof Error ? err : new Error(String(err)));
         setLoading(false);
       }
-      return () => {
-        isMounted.current = false;
-        handleRef.current = null;
-      };
     }
-  }, [client, mapName, debouncedQuery, optionsJson]);
+  }, [client, mapName, debouncedQuery, searchOptions]);
+
+  // Effect for handling options changes (use setOptions)
+  useEffect(() => {
+    // Skip if no handle or if this is the initial render
+    if (!handleRef.current || isFirstQuery.current) {
+      return;
+    }
+
+    // Use setOptions() for efficient options update
+    handleRef.current.setOptions(searchOptions);
+  }, [searchOptions]);
 
   return useMemo(
     () => ({ results, loading, error }),
