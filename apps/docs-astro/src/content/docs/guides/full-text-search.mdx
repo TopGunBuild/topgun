@@ -1,11 +1,11 @@
 ---
 title: Full-Text Search
-description: Add fast text search to your data with InvertedIndex. Configure tokenization, filters, and search strategies for product catalogs, document search, and more.
+description: Add fast text search to your data with InvertedIndex and BM25 relevance ranking. Configure tokenization, filters, and search strategies for product catalogs, document search, and more.
 order: 14
 ---
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
-import { ChevronRight, Search, Filter, Settings, Zap } from 'lucide-react';
+import { ChevronRight, Search, Filter, Settings, Zap, Star } from 'lucide-react';
 import { FeatureCard } from '../../../components/docs/FeatureCard';
 
 export const basicSearchCode = `import {
@@ -185,6 +185,120 @@ if (index) {
   console.log(\`Max docs/token: \${stats.maxDocumentsPerToken}\`);
 }`;
 
+export const bm25BasicCode = `import { IndexedORMap, HLC } from '@topgunbuild/core';
+
+interface Article {
+  title: string;
+  body: string;
+  author: string;
+}
+
+const hlc = new HLC('node-1');
+const articles = new IndexedORMap<string, Article>(hlc);
+
+// Enable BM25 full-text search on title and body fields
+articles.enableFullTextSearch({
+  fields: ['title', 'body']
+});
+
+// Add some articles
+articles.add('a1', {
+  title: 'Introduction to Machine Learning',
+  body: 'Machine learning is a subset of artificial intelligence...',
+  author: 'Alice'
+});
+
+articles.add('a2', {
+  title: 'Deep Learning Tutorial',
+  body: 'Deep learning uses neural networks with many layers...',
+  author: 'Bob'
+});
+
+articles.add('a3', {
+  title: 'Getting Started with AI',
+  body: 'Artificial intelligence is transforming industries...',
+  author: 'Charlie'
+});
+
+// Search with BM25 relevance ranking
+const results = articles.search('machine learning');
+// Results sorted by relevance score:
+// [
+//   { key: 'a1', score: 2.34, matchedTerms: ['machin', 'learn'], value: {...} },
+//   { key: 'a2', score: 0.89, matchedTerms: ['learn'], value: {...} }
+// ]`;
+
+export const bm25OptionsCode = `// Search with options
+const results = articles.search('artificial intelligence', {
+  limit: 10,           // Maximum results to return
+  minScore: 0.5,       // Minimum relevance score threshold
+  boost: {             // Field boosting weights
+    title: 2.0,        // Title matches worth 2x
+    body: 1.0          // Body matches worth 1x (default)
+  }
+});
+
+// Results are ranked by weighted BM25 scores
+for (const result of results) {
+  console.log(\`[\${result.score.toFixed(2)}] \${result.value.title}\`);
+  console.log(\`  Matched terms: \${result.matchedTerms.join(', ')}\`);
+}`;
+
+export const bm25ConfigCode = `// Configure tokenizer and BM25 parameters
+articles.enableFullTextSearch({
+  fields: ['title', 'body', 'tags'],
+
+  // Tokenizer options
+  tokenizer: {
+    minLength: 2,        // Minimum token length (default: 2)
+    maxLength: 50,       // Maximum token length (default: 50)
+    lowercase: true,     // Convert to lowercase (default: true)
+    // Uses Porter stemmer and 174 English stopwords by default
+  },
+
+  // BM25 scoring parameters
+  bm25: {
+    k1: 1.2,  // Term frequency saturation (default: 1.2)
+              // Higher = more weight to term frequency
+    b: 0.75   // Document length normalization (default: 0.75)
+              // 0 = no normalization, 1 = full normalization
+  }
+});`;
+
+export const bm25VsInvertedCode = `// Two approaches to full-text search:
+
+// 1. InvertedIndex - Boolean matching (fast, no ranking)
+const nameAttr = simpleAttribute<Product, string>('name', p => p.name);
+products.addInvertedIndex(nameAttr);
+const matches = products.queryValues({
+  type: 'contains',
+  attribute: 'name',
+  value: 'wireless mouse'
+});
+// Returns all products containing both "wireless" AND "mouse"
+// No relevance score, order is arbitrary
+
+// 2. BM25 Search - Relevance ranking (search engine style)
+products.enableFullTextSearch({ fields: ['name', 'description'] });
+const ranked = products.search('wireless mouse');
+// Returns products sorted by relevance
+// "Wireless Bluetooth Mouse" ranks higher than "Mouse pad for wireless setup"
+// Each result includes: score, matchedTerms`;
+
+export const bm25SerializationCode = `// Serialize index for persistence
+const ftsIndex = articles.getFullTextIndex();
+const serialized = ftsIndex.serialize();
+
+// Save to storage (IndexedDB, localStorage, file, etc.)
+localStorage.setItem('fts-index', JSON.stringify(serialized));
+
+// Later: restore from storage
+const saved = JSON.parse(localStorage.getItem('fts-index'));
+ftsIndex.load(saved);
+
+// Index is ready to use immediately
+const results = articles.search('machine learning');`;
+
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
   <span className="text-foreground font-medium">Docs</span>
   <ChevronRight className="w-4 h-4" />
@@ -294,6 +408,80 @@ Combine text search with other index types for powerful filtering:
 </div>
 
 The Query Optimizer automatically selects the best index for each part of the query.
+
+## BM25 Ranked Search
+
+For search-engine-style relevance ranking, TopGun provides **BM25 full-text search**. Unlike InvertedIndex (boolean matching), BM25 scores documents by relevance and returns results sorted by score.
+
+<div className="grid md:grid-cols-2 gap-6 mb-8 not-prose">
+  <FeatureCard
+    icon={Star}
+    iconColor="text-purple-500"
+    title="Relevance Ranking"
+    description="BM25 algorithm scores documents based on term frequency and document length."
+  />
+  <FeatureCard
+    icon={Search}
+    iconColor="text-blue-500"
+    title="Porter Stemming"
+    description="Words are stemmed (running→run) for better matching with 174 English stopwords."
+  />
+</div>
+
+### Basic Usage
+
+Enable BM25 search on an `IndexedORMap`:
+
+<div className="not-prose">
+  <CodeBlock title="BM25 Ranked Search" language="typescript" code={bm25BasicCode} />
+</div>
+
+### Search Options
+
+Control search behavior with options:
+
+<div className="not-prose">
+  <CodeBlock title="Search Options" language="typescript" code={bm25OptionsCode} />
+</div>
+
+### Configuration
+
+Customize tokenization and BM25 parameters:
+
+<div className="not-prose">
+  <CodeBlock title="BM25 Configuration" language="typescript" code={bm25ConfigCode} />
+</div>
+
+### BM25 vs InvertedIndex
+
+Choose the right approach for your use case:
+
+<div className="not-prose">
+  <CodeBlock title="Comparison" language="typescript" code={bm25VsInvertedCode} />
+</div>
+
+| Feature | InvertedIndex | BM25 Search |
+|---------|---------------|-------------|
+| **Query method** | `queryValues({ type: 'contains' })` | `search('query')` |
+| **Ranking** | No ranking (boolean match) | Relevance-sorted by score |
+| **Stemming** | Optional (via pipeline) | Built-in Porter stemmer |
+| **Stopwords** | Optional (via pipeline) | 174 English stopwords |
+| **Best for** | Filtering, exact matches | Search boxes, content discovery |
+| **Works with** | IndexedLWWMap, IndexedORMap | IndexedORMap |
+
+### Index Persistence
+
+Serialize and restore the BM25 index:
+
+<div className="not-prose">
+  <CodeBlock title="Index Serialization" language="typescript" code={bm25SerializationCode} />
+</div>
+
+<div className="bg-purple-50 dark:bg-purple-900/20 border-l-4 border-purple-500 p-4 my-6 not-prose">
+  <p className="text-sm text-purple-800 dark:text-purple-200">
+    <strong>Performance tip:</strong> BM25 index builds in &lt;100ms for 1K documents. Search queries complete in &lt;10ms. For large datasets, consider serializing the index to avoid rebuilding on page load.
+  </p>
+</div>
 
 ## Index Statistics
 
