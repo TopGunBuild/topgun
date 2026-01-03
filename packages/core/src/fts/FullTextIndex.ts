@@ -15,8 +15,8 @@ import type {
   TokenizerOptions,
   BM25Options,
 } from './types';
-import { Tokenizer } from './Tokenizer';
-import { InvertedIndex } from './InvertedIndex';
+import { BM25Tokenizer } from './Tokenizer';
+import { BM25InvertedIndex } from './BM25InvertedIndex';
 import { BM25Scorer } from './BM25Scorer';
 
 /**
@@ -43,16 +43,16 @@ export class FullTextIndex {
   private readonly fields: string[];
 
   /** Tokenizer for text processing */
-  private readonly tokenizer: Tokenizer;
+  private readonly tokenizer: BM25Tokenizer;
 
   /** BM25 scorer for relevance ranking */
   private readonly scorer: BM25Scorer;
 
   /** Per-field inverted indexes for field boosting */
-  private readonly fieldIndexes: Map<string, InvertedIndex>;
+  private readonly fieldIndexes: Map<string, BM25InvertedIndex>;
 
   /** Combined index for all fields */
-  private readonly combinedIndex: InvertedIndex;
+  private readonly combinedIndex: BM25InvertedIndex;
 
   /** Track indexed documents */
   private readonly indexedDocs: Set<string>;
@@ -64,15 +64,15 @@ export class FullTextIndex {
    */
   constructor(config: FullTextIndexConfig) {
     this.fields = config.fields;
-    this.tokenizer = new Tokenizer(config.tokenizer);
+    this.tokenizer = new BM25Tokenizer(config.tokenizer);
     this.scorer = new BM25Scorer(config.bm25);
     this.fieldIndexes = new Map();
-    this.combinedIndex = new InvertedIndex();
+    this.combinedIndex = new BM25InvertedIndex();
     this.indexedDocs = new Set();
 
     // Create per-field indexes
     for (const field of this.fields) {
-      this.fieldIndexes.set(field, new InvertedIndex());
+      this.fieldIndexes.set(field, new BM25InvertedIndex());
     }
   }
 

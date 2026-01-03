@@ -5,68 +5,68 @@
  * Tests cover: tokenization, lowercase, stopwords, stemming, length filters.
  */
 
-import { Tokenizer, ENGLISH_STOPWORDS, porterStem } from '../Tokenizer';
+import { BM25Tokenizer, ENGLISH_STOPWORDS, porterStem } from '../Tokenizer';
 
-describe('Tokenizer', () => {
+describe('BM25Tokenizer', () => {
   describe('Basic tokenization', () => {
     test('should tokenize simple text', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('hello world');
       expect(tokens).toEqual(['hello', 'world']);
     });
 
     test('should split on whitespace', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       // Note: "one" stems to "on" which is a stopword, so it's filtered
       const tokens = tokenizer.tokenize('alpha beta  gamma   delta');
       expect(tokens).toEqual(['alpha', 'beta', 'gamma', 'delta']);
     });
 
     test('should split on punctuation', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('hello, world! How are you?');
       // Stopwords "how", "are", "you" should be filtered
       expect(tokens).toEqual(['hello', 'world']);
     });
 
     test('should handle tabs and newlines', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('hello\tworld\ntest');
       expect(tokens).toEqual(['hello', 'world', 'test']);
     });
 
     test('should return empty array for empty string', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       expect(tokenizer.tokenize('')).toEqual([]);
     });
 
     test('should return empty array for null/undefined', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       expect(tokenizer.tokenize(null as unknown as string)).toEqual([]);
       expect(tokenizer.tokenize(undefined as unknown as string)).toEqual([]);
     });
 
     test('should return empty array for whitespace only', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       expect(tokenizer.tokenize('   \t\n  ')).toEqual([]);
     });
   });
 
   describe('Lowercase normalization', () => {
     test('should convert to lowercase by default', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('Hello WORLD Test');
       expect(tokens).toEqual(['hello', 'world', 'test']);
     });
 
     test('should preserve case when lowercase is disabled', () => {
-      const tokenizer = new Tokenizer({ lowercase: false });
+      const tokenizer = new BM25Tokenizer({ lowercase: false });
       const tokens = tokenizer.tokenize('Hello WORLD');
       expect(tokens).toEqual(['Hello', 'WORLD']);
     });
 
     test('should handle mixed case with Unicode', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('HELLO Wörld Привет');
       expect(tokens).toEqual(['hello', 'wörld', 'привет']);
     });
@@ -74,7 +74,7 @@ describe('Tokenizer', () => {
 
   describe('Stopwords filtering', () => {
     test('should filter English stopwords by default', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('the quick brown fox jumps over the lazy dog');
       // "the", "over" are stopwords
       expect(tokens).toContain('quick');
@@ -89,20 +89,20 @@ describe('Tokenizer', () => {
 
     test('should handle custom stopwords', () => {
       const customStopwords = new Set(['hello', 'world']);
-      const tokenizer = new Tokenizer({ stopwords: customStopwords });
+      const tokenizer = new BM25Tokenizer({ stopwords: customStopwords });
       const tokens = tokenizer.tokenize('hello beautiful world');
       expect(tokens).toEqual(['beauti']); // stemmed from "beautiful"
     });
 
     test('should disable stopwords when empty set provided', () => {
-      const tokenizer = new Tokenizer({ stopwords: new Set() });
+      const tokenizer = new BM25Tokenizer({ stopwords: new Set() });
       const tokens = tokenizer.tokenize('the fox');
       expect(tokens).toContain('the');
       expect(tokens).toContain('fox');
     });
 
     test('should filter stopwords before stemming', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('I am running');
       // "I" and "am" are stopwords
       expect(tokens).toEqual(['run']); // stemmed from "running"
@@ -111,7 +111,7 @@ describe('Tokenizer', () => {
 
   describe('Porter stemming', () => {
     test('should stem words by default', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
 
       // -ing suffix
       expect(tokenizer.tokenize('running')).toEqual(['run']);
@@ -133,7 +133,7 @@ describe('Tokenizer', () => {
     });
 
     test('should handle irregular stems', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
 
       // These should normalize to same stem
       expect(tokenizer.tokenize('connect')).toEqual(['connect']);
@@ -144,14 +144,14 @@ describe('Tokenizer', () => {
     });
 
     test('should disable stemming when custom stemmer returns word unchanged', () => {
-      const tokenizer = new Tokenizer({ stemmer: (word) => word });
+      const tokenizer = new BM25Tokenizer({ stemmer: (word) => word });
       const tokens = tokenizer.tokenize('running jumping');
       expect(tokens).toEqual(['running', 'jumping']);
     });
 
     test('should work with custom stemmer', () => {
       const customStemmer = (word: string) => word.replace(/ing$/, '');
-      const tokenizer = new Tokenizer({ stemmer: customStemmer });
+      const tokenizer = new BM25Tokenizer({ stemmer: customStemmer });
       const tokens = tokenizer.tokenize('running walking');
       expect(tokens).toEqual(['runn', 'walk']);
     });
@@ -159,7 +159,7 @@ describe('Tokenizer', () => {
 
   describe('Length filtering', () => {
     test('should filter tokens shorter than minLength', () => {
-      const tokenizer = new Tokenizer({ minLength: 3 });
+      const tokenizer = new BM25Tokenizer({ minLength: 3 });
       const tokens = tokenizer.tokenize('a to be or not');
       // "a", "to", "be", "or" are < 3 chars or stopwords
       // "not" is a stopword
@@ -167,7 +167,7 @@ describe('Tokenizer', () => {
     });
 
     test('should use minLength 2 by default', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       // "a" < 2 chars, "I", "be", "it" are stopwords
       // "go" is NOT a stopword and length >= 2
       const tokens = tokenizer.tokenize('a I be it');
@@ -175,7 +175,7 @@ describe('Tokenizer', () => {
     });
 
     test('should filter tokens longer than maxLength', () => {
-      const tokenizer = new Tokenizer({ maxLength: 5 });
+      const tokenizer = new BM25Tokenizer({ maxLength: 5 });
       const tokens = tokenizer.tokenize('hi hello beautiful');
       // "beautiful" stems to "beauti" which is > 5
       expect(tokens).toContain('hi');
@@ -184,14 +184,14 @@ describe('Tokenizer', () => {
     });
 
     test('should use maxLength 40 by default', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const longWord = 'a'.repeat(50);
       const tokens = tokenizer.tokenize(longWord);
       expect(tokens).toEqual([]);
     });
 
     test('should allow custom min/max length', () => {
-      const tokenizer = new Tokenizer({ minLength: 4, maxLength: 6 });
+      const tokenizer = new BM25Tokenizer({ minLength: 4, maxLength: 6 });
       const tokens = tokenizer.tokenize('a cat hello beautiful');
       // "a" < 4, "cat" < 4, "hello" ok, "beautiful" stems to "beauti" (6 chars)
       expect(tokens).toEqual(['hello', 'beauti']);
@@ -200,7 +200,7 @@ describe('Tokenizer', () => {
 
   describe('Unicode handling', () => {
     test('should handle accented characters', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('café résumé naïve');
       expect(tokens).toContain('café');
       expect(tokens).toContain('résumé');
@@ -209,28 +209,28 @@ describe('Tokenizer', () => {
     });
 
     test('should handle Cyrillic text', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('привет мир');
       expect(tokens).toContain('привет');
       expect(tokens).toContain('мир');
     });
 
     test('should handle Chinese characters', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('你好 世界');
       expect(tokens).toContain('你好');
       expect(tokens).toContain('世界');
     });
 
     test('should handle emoji', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('hello 👋 world 🌍');
       expect(tokens).toContain('hello');
       expect(tokens).toContain('world');
     });
 
     test('should handle mixed scripts', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('hello мир 世界');
       expect(tokens).toContain('hello');
       expect(tokens).toContain('мир');
@@ -240,7 +240,7 @@ describe('Tokenizer', () => {
 
   describe('Edge cases', () => {
     test('should handle numbers', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('test123 456test test456test');
       expect(tokens).toContain('test123');
       expect(tokens).toContain('456test');
@@ -248,7 +248,7 @@ describe('Tokenizer', () => {
     });
 
     test('should handle hyphenated words', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('real-time state-of-the-art');
       // Hyphen splits words, each part is processed separately
       expect(tokens).toContain('real');
@@ -258,7 +258,7 @@ describe('Tokenizer', () => {
     });
 
     test('should handle contractions', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize("don't won't can't");
       // Apostrophe splits contractions
       // "t" is filtered (< minLength), "can" is a stopword
@@ -268,7 +268,7 @@ describe('Tokenizer', () => {
     });
 
     test('should handle URLs (split on punctuation)', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('visit https://example.com/page');
       expect(tokens).toContain('visit');
       expect(tokens).toContain('http');
@@ -278,7 +278,7 @@ describe('Tokenizer', () => {
     });
 
     test('should handle email addresses (split on punctuation)', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('contact user@example.com');
       expect(tokens).toContain('contact');
       expect(tokens).toContain('user');
@@ -287,13 +287,13 @@ describe('Tokenizer', () => {
     });
 
     test('should handle repeated punctuation', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('hello!!! world??? test...');
       expect(tokens).toEqual(['hello', 'world', 'test']);
     });
 
     test('should handle code-like text', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('function calculateTotal() { return sum; }');
       expect(tokens).toContain('function');
       expect(tokens).toContain('calculatetot'); // stemmed
@@ -582,14 +582,14 @@ describe('porterStem', () => {
 describe('Tokenizer - Additional edge cases (from test report)', () => {
   describe('Very long text handling', () => {
     test('should handle very long text without throwing', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const longText = 'word '.repeat(100000);
 
       expect(() => tokenizer.tokenize(longText)).not.toThrow();
     });
 
     test('should handle text with many unique words', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const words = Array(1000)
         .fill(null)
         .map((_, i) => `word${i}`)
@@ -602,7 +602,7 @@ describe('Tokenizer - Additional edge cases (from test report)', () => {
 
   describe('Special characters in text', () => {
     test('should handle text with HTML-like content', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('Test <script>alert("xss")</script>');
 
       expect(tokens).toContain('test');
@@ -612,7 +612,7 @@ describe('Tokenizer - Additional edge cases (from test report)', () => {
     });
 
     test('should handle text with markdown', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('# Hello **world** _test_');
 
       expect(tokens).toContain('hello');
@@ -621,7 +621,7 @@ describe('Tokenizer - Additional edge cases (from test report)', () => {
     });
 
     test('should handle text with JSON-like content', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('{"key": "value", "number": 42}');
 
       // "key" stems to "kei" (terminal y → i rule)
@@ -634,7 +634,7 @@ describe('Tokenizer - Additional edge cases (from test report)', () => {
 
   describe('Query-like patterns', () => {
     test('should handle text with Lucene special chars', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const specialChars = ['\\', '+', '-', '&&', '||', '!', '(', ')', '{', '}', '[', ']', '^', '"', '~', '*', '?', ':', '/'];
 
       specialChars.forEach((char) => {
@@ -644,7 +644,7 @@ describe('Tokenizer - Additional edge cases (from test report)', () => {
     });
 
     test('should handle multiple special characters', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('hello && world || test!');
 
       expect(tokens).toContain('hello');
@@ -655,7 +655,7 @@ describe('Tokenizer - Additional edge cases (from test report)', () => {
 
   describe('Number handling', () => {
     test('should handle standalone numbers', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('version 123 build 456');
 
       expect(tokens).toContain('version');
@@ -665,7 +665,7 @@ describe('Tokenizer - Additional edge cases (from test report)', () => {
     });
 
     test('should handle decimal numbers', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       // Decimal point splits the number
       const tokens = tokenizer.tokenize('price 19.99 total');
 
@@ -676,7 +676,7 @@ describe('Tokenizer - Additional edge cases (from test report)', () => {
     });
 
     test('should handle negative numbers', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       // Minus sign splits
       const tokens = tokenizer.tokenize('temperature -5 degrees');
 
@@ -687,14 +687,14 @@ describe('Tokenizer - Additional edge cases (from test report)', () => {
 
   describe('Empty and whitespace variations', () => {
     test('should handle only stopwords', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('the a an is are was were');
 
       expect(tokens).toEqual([]);
     });
 
     test('should handle mixed whitespace types', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const tokens = tokenizer.tokenize('hello\t\t\nworld\r\ntest');
 
       expect(tokens).toContain('hello');
@@ -703,7 +703,7 @@ describe('Tokenizer - Additional edge cases (from test report)', () => {
     });
 
     test('should handle unicode whitespace', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       // Non-breaking space (U+00A0) and other unicode spaces
       const tokens = tokenizer.tokenize('hello\u00A0world\u2003test');
 
@@ -715,7 +715,7 @@ describe('Tokenizer - Additional edge cases (from test report)', () => {
 
   describe('Performance characteristics', () => {
     test('should tokenize efficiently (1000 words under 50ms)', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const text = Array(1000)
         .fill(null)
         .map((_, i) => `word${i % 100}`)
@@ -729,7 +729,7 @@ describe('Tokenizer - Additional edge cases (from test report)', () => {
     });
 
     test('should handle repeated tokenization efficiently', () => {
-      const tokenizer = new Tokenizer();
+      const tokenizer = new BM25Tokenizer();
       const text = 'the quick brown fox jumps over the lazy dog';
 
       const start = performance.now();

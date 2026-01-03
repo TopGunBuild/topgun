@@ -1,16 +1,16 @@
 /**
- * FTS InvertedIndex Tests
+ * FTS BM25InvertedIndex Tests
  *
  * TDD approach: tests written before implementation.
  * Tests cover: document operations, term frequency, IDF, document length stats.
  */
 
-import { InvertedIndex } from '../InvertedIndex';
+import { BM25InvertedIndex } from '../BM25InvertedIndex';
 
-describe('InvertedIndex', () => {
+describe('BM25InvertedIndex', () => {
   describe('Document operations', () => {
     test('should add document correctly', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello', 'world']);
 
       expect(index.getDocumentsForTerm('hello')).toHaveLength(1);
@@ -19,7 +19,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should add multiple documents', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello', 'world']);
       index.addDocument('doc2', ['hello', 'there']);
       index.addDocument('doc3', ['goodbye', 'world']);
@@ -31,7 +31,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should remove document correctly', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello', 'world']);
       index.removeDocument('doc1');
 
@@ -40,7 +40,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should handle removing non-existent document', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello']);
 
       // Should not throw
@@ -49,7 +49,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should update document (remove + add)', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello', 'world']);
       index.removeDocument('doc1');
       index.addDocument('doc1', ['goodbye', 'world']);
@@ -60,7 +60,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should handle empty tokens array', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', []);
 
       expect(index.getTotalDocs()).toBe(1);
@@ -68,7 +68,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should handle document with single token', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello']);
 
       expect(index.getTotalDocs()).toBe(1);
@@ -78,7 +78,7 @@ describe('InvertedIndex', () => {
 
   describe('Term frequency', () => {
     test('should count term occurrences', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello', 'hello', 'world']);
 
       const termInfo = index.getDocumentsForTerm('hello')[0];
@@ -86,7 +86,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should track different frequencies per document', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello', 'hello', 'hello']);
       index.addDocument('doc2', ['hello', 'world']);
 
@@ -96,7 +96,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should handle many occurrences of same term', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       const tokens = Array(100).fill('repeat');
       index.addDocument('doc1', tokens);
 
@@ -105,7 +105,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should correctly count after document removal', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello', 'hello']);
       index.addDocument('doc2', ['hello']);
       index.removeDocument('doc1');
@@ -119,7 +119,7 @@ describe('InvertedIndex', () => {
 
   describe('IDF calculation', () => {
     test('should calculate IDF correctly', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['common', 'rare']);
       index.addDocument('doc2', ['common']);
       index.addDocument('doc3', ['common']);
@@ -133,14 +133,14 @@ describe('InvertedIndex', () => {
     });
 
     test('should return 0 for non-existent term', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello']);
 
       expect(index.getIDF('nonexistent')).toBe(0);
     });
 
     test('should invalidate IDF cache on add', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello']);
       const idf1 = index.getIDF('hello');
 
@@ -153,7 +153,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should invalidate IDF cache on remove', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello']);
       index.addDocument('doc2', ['hello']);
       const idf1 = index.getIDF('hello');
@@ -166,7 +166,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should use BM25 IDF formula', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       // Add 10 documents, term appears in 2
       for (let i = 0; i < 10; i++) {
         if (i < 2) {
@@ -187,19 +187,19 @@ describe('InvertedIndex', () => {
 
   describe('Document length statistics', () => {
     test('should track document length', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['a', 'b', 'c']);
 
       expect(index.getDocLength('doc1')).toBe(3);
     });
 
     test('should return 0 for non-existent document', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       expect(index.getDocLength('nonexistent')).toBe(0);
     });
 
     test('should calculate average document length', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['a', 'b']); // length 2
       index.addDocument('doc2', ['a', 'b', 'c', 'd']); // length 4
 
@@ -207,7 +207,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should update avgDocLength on remove', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['a', 'b']); // length 2
       index.addDocument('doc2', ['a', 'b', 'c', 'd']); // length 4
       index.removeDocument('doc2');
@@ -216,12 +216,12 @@ describe('InvertedIndex', () => {
     });
 
     test('should handle empty index', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       expect(index.getAvgDocLength()).toBe(0);
     });
 
     test('should handle removal of all documents', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['a', 'b']);
       index.removeDocument('doc1');
 
@@ -232,14 +232,14 @@ describe('InvertedIndex', () => {
 
   describe('Term lookup', () => {
     test('should return empty array for non-existent term', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello']);
 
       expect(index.getDocumentsForTerm('world')).toEqual([]);
     });
 
     test('should return all documents containing term', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello', 'world']);
       index.addDocument('doc2', ['hello', 'there']);
       index.addDocument('doc3', ['goodbye']);
@@ -250,7 +250,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should preserve insertion order', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['term']);
       index.addDocument('doc2', ['term']);
       index.addDocument('doc3', ['term']);
@@ -262,7 +262,7 @@ describe('InvertedIndex', () => {
 
   describe('Clear and size', () => {
     test('should clear all data', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello', 'world']);
       index.addDocument('doc2', ['hello', 'there']);
       index.clear();
@@ -273,7 +273,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should report correct size', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       expect(index.getSize()).toBe(0);
 
       index.addDocument('doc1', ['hello']);
@@ -289,7 +289,7 @@ describe('InvertedIndex', () => {
 
   describe('Edge cases', () => {
     test('should handle document with duplicate tokens', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['a', 'a', 'a', 'b', 'b', 'c']);
 
       expect(index.getDocLength('doc1')).toBe(6);
@@ -299,7 +299,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should handle very long document', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       const tokens = Array(10000)
         .fill(null)
         .map((_, i) => `word${i % 100}`);
@@ -310,7 +310,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should handle many documents', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       for (let i = 0; i < 1000; i++) {
         index.addDocument(`doc${i}`, ['common', `unique${i}`]);
       }
@@ -321,7 +321,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should handle special characters in tokens', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello-world', 'test_case', 'foo.bar']);
 
       expect(index.getDocumentsForTerm('hello-world')).toHaveLength(1);
@@ -330,7 +330,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should handle unicode tokens', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['привет', '世界', 'café']);
 
       expect(index.getDocumentsForTerm('привет')).toHaveLength(1);
@@ -339,7 +339,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should handle empty string token', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['', 'hello', '']);
 
       // Empty strings should be counted in length but may not be searchable
@@ -349,7 +349,7 @@ describe('InvertedIndex', () => {
 
   describe('Concurrent-like operations', () => {
     test('should handle rapid add/remove cycles', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
 
       for (let i = 0; i < 100; i++) {
         index.addDocument('doc1', ['term']);
@@ -361,7 +361,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should handle interleaved operations on different docs', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
 
       index.addDocument('doc1', ['a', 'b']);
       index.addDocument('doc2', ['b', 'c']);
@@ -378,7 +378,7 @@ describe('InvertedIndex', () => {
 
   describe('Performance characteristics', () => {
     test('should add documents efficiently (1000 docs under 100ms)', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
 
       const start = performance.now();
       for (let i = 0; i < 1000; i++) {
@@ -391,7 +391,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should lookup terms efficiently', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       for (let i = 0; i < 10000; i++) {
         index.addDocument(`doc${i}`, ['common', `unique${i}`]);
       }
@@ -407,7 +407,7 @@ describe('InvertedIndex', () => {
     });
 
     test('should calculate IDF efficiently with caching', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       for (let i = 0; i < 1000; i++) {
         index.addDocument(`doc${i}`, ['term']);
       }

@@ -10,7 +10,7 @@
  */
 
 import type { BM25Options, ScoredDocument } from './types';
-import type { InvertedIndex } from './InvertedIndex';
+import type { BM25InvertedIndex } from './BM25InvertedIndex';
 
 /**
  * BM25 Scorer for relevance ranking
@@ -30,7 +30,7 @@ import type { InvertedIndex } from './InvertedIndex';
  *
  * @example
  * ```typescript
- * const index = new InvertedIndex();
+ * const index = new BM25InvertedIndex();
  * index.addDocument('doc1', ['hello', 'world']);
  * index.addDocument('doc2', ['hello', 'there']);
  *
@@ -72,7 +72,7 @@ export class BM25Scorer {
    * @param index - The inverted index to search
    * @returns Array of scored documents, sorted by relevance (descending)
    */
-  score(queryTerms: string[], index: InvertedIndex): ScoredDocument[] {
+  score(queryTerms: string[], index: BM25InvertedIndex): ScoredDocument[] {
     if (queryTerms.length === 0 || index.getTotalDocs() === 0) {
       return [];
     }

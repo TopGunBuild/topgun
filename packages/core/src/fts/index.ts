@@ -24,10 +24,10 @@ export type {
 } from './types';
 
 // Tokenizer
-export { Tokenizer, ENGLISH_STOPWORDS, porterStem } from './Tokenizer';
+export { BM25Tokenizer as Tokenizer, ENGLISH_STOPWORDS, porterStem } from './Tokenizer';
 
 // Inverted Index
-export { InvertedIndex } from './InvertedIndex';
+export { BM25InvertedIndex as InvertedIndex } from './BM25InvertedIndex';
 
 // BM25 Scorer
 export { BM25Scorer } from './BM25Scorer';

@@ -6,12 +6,12 @@
  */
 
 import { BM25Scorer } from '../BM25Scorer';
-import { InvertedIndex } from '../InvertedIndex';
+import { BM25InvertedIndex } from '../BM25InvertedIndex';
 
 describe('BM25Scorer', () => {
   describe('Basic scoring', () => {
     test('should score documents by relevance', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['quick', 'brown', 'fox']);
       index.addDocument('doc2', ['quick', 'blue', 'fox']);
       index.addDocument('doc3', ['slow', 'brown', 'dog']);
@@ -27,7 +27,7 @@ describe('BM25Scorer', () => {
     });
 
     test('should rank documents with more matching terms higher', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['quick', 'brown', 'fox', 'jumps']);
       index.addDocument('doc2', ['quick', 'fox']);
 
@@ -40,7 +40,7 @@ describe('BM25Scorer', () => {
     });
 
     test('should handle empty queries', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello']);
 
       const scorer = new BM25Scorer();
@@ -48,14 +48,14 @@ describe('BM25Scorer', () => {
     });
 
     test('should handle empty index', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       const scorer = new BM25Scorer();
 
       expect(scorer.score(['hello'], index)).toEqual([]);
     });
 
     test('should return empty results when no documents match', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello', 'world']);
 
       const scorer = new BM25Scorer();
@@ -63,7 +63,7 @@ describe('BM25Scorer', () => {
     });
 
     test('should sort results by score descending', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['term']);
       index.addDocument('doc2', ['term', 'term', 'term']); // Higher TF
       index.addDocument('doc3', ['term', 'term']);
@@ -81,7 +81,7 @@ describe('BM25Scorer', () => {
   describe('BM25 formula correctness', () => {
     test('should calculate correct BM25 score', () => {
       // Create a simple test case with known values
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello', 'world']);
       index.addDocument('doc2', ['hello', 'there', 'world']);
 
@@ -98,7 +98,7 @@ describe('BM25Scorer', () => {
     });
 
     test('should give higher score to shorter documents (same TF)', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('short', ['term']); // length 1
       index.addDocument('long', ['term', 'other', 'words', 'here']); // length 4
 
@@ -113,7 +113,7 @@ describe('BM25Scorer', () => {
     });
 
     test('should give higher score to documents with higher term frequency', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       // Same length, different TF
       index.addDocument('low', ['term', 'other', 'words']);
       index.addDocument('high', ['term', 'term', 'term']);
@@ -128,7 +128,7 @@ describe('BM25Scorer', () => {
     });
 
     test('should give higher IDF to rare terms', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       // 'rare' in 1 doc, 'common' in 3 docs
       index.addDocument('doc1', ['rare', 'common']);
       index.addDocument('doc2', ['common']);
@@ -174,7 +174,7 @@ describe('BM25Scorer', () => {
     });
 
     test('k1 affects term frequency saturation', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello', 'hello', 'hello', 'hello', 'hello']);
       index.addDocument('doc2', ['hello', 'world']);
 
@@ -192,7 +192,7 @@ describe('BM25Scorer', () => {
     });
 
     test('b affects length normalization', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       // Same term density but different lengths
       index.addDocument('doc1', ['hello']);
       index.addDocument('doc2', ['hello', 'world', 'foo', 'bar']);
@@ -216,7 +216,7 @@ describe('BM25Scorer', () => {
     });
 
     test('b=0 disables length normalization', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('short', ['term']);
       index.addDocument('long', ['term', 'other', 'words', 'here', 'more']);
 
@@ -230,7 +230,7 @@ describe('BM25Scorer', () => {
 
   describe('Matched terms tracking', () => {
     test('should track which query terms matched', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['quick', 'brown', 'fox']);
 
       const scorer = new BM25Scorer();
@@ -242,7 +242,7 @@ describe('BM25Scorer', () => {
     });
 
     test('should track all matched terms per document', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['a', 'b', 'c']);
       index.addDocument('doc2', ['a', 'b']);
       index.addDocument('doc3', ['a']);
@@ -260,7 +260,7 @@ describe('BM25Scorer', () => {
     });
 
     test('should not include duplicate matched terms', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['term', 'term', 'term']);
 
       const scorer = new BM25Scorer();
@@ -273,7 +273,7 @@ describe('BM25Scorer', () => {
 
   describe('Multi-term queries', () => {
     test('should sum scores for multiple query terms', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['apple', 'banana', 'cherry']);
 
       const scorer = new BM25Scorer();
@@ -286,7 +286,7 @@ describe('BM25Scorer', () => {
     });
 
     test('should handle duplicate query terms', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello', 'world']);
 
       const scorer = new BM25Scorer();
@@ -299,7 +299,7 @@ describe('BM25Scorer', () => {
     });
 
     test('should handle query terms not in any document', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['hello', 'world']);
 
       const scorer = new BM25Scorer();
@@ -313,7 +313,7 @@ describe('BM25Scorer', () => {
 
   describe('Edge cases', () => {
     test('should handle single document index', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['only', 'document']);
 
       const scorer = new BM25Scorer();
@@ -325,7 +325,7 @@ describe('BM25Scorer', () => {
     });
 
     test('should handle document with single term', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['single']);
 
       const scorer = new BM25Scorer();
@@ -335,7 +335,7 @@ describe('BM25Scorer', () => {
     });
 
     test('should handle very long query', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       index.addDocument('doc1', ['term1', 'term2', 'term3']);
 
       const scorer = new BM25Scorer();
@@ -350,7 +350,7 @@ describe('BM25Scorer', () => {
     });
 
     test('should handle documents with very high term frequency', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       const tokens = Array(1000).fill('frequent');
       index.addDocument('doc1', tokens);
       index.addDocument('doc2', ['frequent']);
@@ -363,7 +363,7 @@ describe('BM25Scorer', () => {
     });
 
     test('should handle all documents matching', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       for (let i = 0; i < 100; i++) {
         index.addDocument(`doc${i}`, ['common', `unique${i}`]);
       }
@@ -377,7 +377,7 @@ describe('BM25Scorer', () => {
 
   describe('Performance', () => {
     test('should score efficiently (10K docs, <50ms)', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       for (let i = 0; i < 10000; i++) {
         index.addDocument(`doc${i}`, ['common', `unique${i}`, 'another']);
       }
@@ -392,7 +392,7 @@ describe('BM25Scorer', () => {
     });
 
     test('should handle repeated scoring efficiently', () => {
-      const index = new InvertedIndex();
+      const index = new BM25InvertedIndex();
       for (let i = 0; i < 1000; i++) {
         index.addDocument(`doc${i}`, ['term', `word${i}`]);
       }

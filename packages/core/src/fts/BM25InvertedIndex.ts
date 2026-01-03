@@ -5,20 +5,20 @@
  * Supports efficient term lookup, document frequency calculation,
  * and IDF (Inverse Document Frequency) for BM25 scoring.
  *
- * @module fts/InvertedIndex
+ * @module fts/BM25InvertedIndex
  */
 
 import type { TermInfo } from './types';
 
 /**
- * Inverted Index for Full-Text Search
+ * Inverted Index for Full-Text Search (BM25)
  *
  * Maps terms to the documents containing them, along with term frequency
  * information needed for BM25 scoring.
  *
  * @example
  * ```typescript
- * const index = new InvertedIndex();
+ * const index = new BM25InvertedIndex();
  * index.addDocument('doc1', ['hello', 'world']);
  * index.addDocument('doc2', ['hello', 'there']);
  *
@@ -26,7 +26,7 @@ import type { TermInfo } from './types';
  * // [{ docId: 'doc1', termFrequency: 1 }, { docId: 'doc2', termFrequency: 1 }]
  * ```
  */
-export class InvertedIndex {
+export class BM25InvertedIndex {
   /** term → list of documents containing term */
   private index: Map<string, TermInfo[]>;
 
