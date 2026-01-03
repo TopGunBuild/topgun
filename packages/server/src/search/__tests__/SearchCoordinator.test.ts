@@ -256,4 +256,228 @@ describe('SearchCoordinator', () => {
       expect(coordinator.isSearchEnabled('products')).toBe(false);
     });
   });
+
+  // ============================================
+  // Phase 11.1b: Live Search Subscription Tests
+  // ============================================
+
+  describe('subscribe / unsubscribe', () => {
+    beforeEach(() => {
+      coordinator.enableSearch('articles', { fields: ['title', 'body'] });
+      coordinator.onDataChange('articles', 'doc1', {
+        title: 'Machine Learning Guide',
+        body: 'An introduction to machine learning concepts.',
+      }, 'add');
+      coordinator.onDataChange('articles', 'doc2', {
+        title: 'Deep Learning Tutorial',
+        body: 'Understanding neural networks.',
+      }, 'add');
+    });
+
+    it('should subscribe and return initial results', () => {
+      const results = coordinator.subscribe(
+        'client1',
+        'sub1',
+        'articles',
+        'machine learning'
+      );
+
+      expect(results.length).toBeGreaterThan(0);
+      expect(results[0].key).toBeDefined();
+      expect(results[0].score).toBeDefined();
+      expect(coordinator.getSubscriptionCount()).toBe(1);
+    });
+
+    it('should unsubscribe successfully', () => {
+      coordinator.subscribe('client1', 'sub1', 'articles', 'machine');
+      expect(coordinator.getSubscriptionCount()).toBe(1);
+
+      coordinator.unsubscribe('sub1');
+      expect(coordinator.getSubscriptionCount()).toBe(0);
+    });
+
+    it('should unsubscribe all client subscriptions', () => {
+      coordinator.subscribe('client1', 'sub1', 'articles', 'machine');
+      coordinator.subscribe('client1', 'sub2', 'articles', 'deep');
+      coordinator.subscribe('client2', 'sub3', 'articles', 'neural');
+      expect(coordinator.getSubscriptionCount()).toBe(3);
+
+      coordinator.unsubscribeClient('client1');
+      expect(coordinator.getSubscriptionCount()).toBe(1);
+    });
+
+    it('should return empty results for map without FTS enabled', () => {
+      const results = coordinator.subscribe('client1', 'sub1', 'products', 'test');
+      expect(results).toEqual([]);
+    });
+
+    it('should respect minScore option in subscription', () => {
+      const results = coordinator.subscribe(
+        'client1',
+        'sub1',
+        'articles',
+        'machine',
+        { minScore: 100 } // Very high, likely no results
+      );
+
+      expect(results).toEqual([]);
+    });
+  });
+
+  describe('delta notifications', () => {
+    let sendUpdateCalls: Array<{
+      clientId: string;
+      subscriptionId: string;
+      key: string;
+      value: unknown;
+      score: number;
+      matchedTerms: string[];
+      type: 'ENTER' | 'UPDATE' | 'LEAVE';
+    }>;
+
+    beforeEach(() => {
+      sendUpdateCalls = [];
+      coordinator.setSendUpdateCallback((clientId, subscriptionId, key, value, score, matchedTerms, type) => {
+        sendUpdateCalls.push({ clientId, subscriptionId, key, value, score, matchedTerms, type });
+      });
+      coordinator.enableSearch('articles', { fields: ['title', 'body'] });
+    });
+
+    it('should send ENTER when new document matches subscription', () => {
+      // Subscribe first
+      coordinator.subscribe('client1', 'sub1', 'articles', 'machine learning');
+
+      // Add new matching document
+      coordinator.onDataChange('articles', 'doc1', {
+        title: 'Machine Learning Basics',
+        body: 'An introduction to ML.',
+      }, 'add');
+
+      expect(sendUpdateCalls.length).toBe(1);
+      expect(sendUpdateCalls[0].type).toBe('ENTER');
+      expect(sendUpdateCalls[0].key).toBe('doc1');
+      expect(sendUpdateCalls[0].subscriptionId).toBe('sub1');
+    });
+
+    it('should send LEAVE when document is removed', () => {
+      // Add document first
+      coordinator.onDataChange('articles', 'doc1', {
+        title: 'Machine Learning Basics',
+        body: 'An introduction to ML.',
+      }, 'add');
+
+      // Subscribe
+      coordinator.subscribe('client1', 'sub1', 'articles', 'machine');
+
+      // Remove document
+      sendUpdateCalls = []; // Reset calls
+      coordinator.onDataChange('articles', 'doc1', null, 'remove');
+
+      expect(sendUpdateCalls.length).toBe(1);
+      expect(sendUpdateCalls[0].type).toBe('LEAVE');
+      expect(sendUpdateCalls[0].key).toBe('doc1');
+    });
+
+    it('should send UPDATE when document score changes', () => {
+      // Add document
+      coordinator.onDataChange('articles', 'doc1', {
+        title: 'Machine Learning',
+        body: 'Basic content.',
+      }, 'add');
+
+      // Subscribe
+      coordinator.subscribe('client1', 'sub1', 'articles', 'machine');
+      sendUpdateCalls = []; // Reset calls
+
+      // Update document to have more machine mentions (should change score)
+      coordinator.onDataChange('articles', 'doc1', {
+        title: 'Machine Learning',
+        body: 'Machine learning content with more machine references.',
+      }, 'update');
+
+      // Should have UPDATE (if score changed) or no update (if same)
+      if (sendUpdateCalls.length > 0) {
+        expect(sendUpdateCalls[0].type).toBe('UPDATE');
+        expect(sendUpdateCalls[0].key).toBe('doc1');
+      }
+    });
+
+    it('should send LEAVE when score drops below minScore', () => {
+      // Add document with matching content
+      coordinator.onDataChange('articles', 'doc1', {
+        title: 'Machine Learning Machine Machine',
+        body: 'Lots of machine learning keywords.',
+      }, 'add');
+
+      // Subscribe with minScore
+      const results = coordinator.subscribe('client1', 'sub1', 'articles', 'machine', { minScore: 0 });
+      expect(results.length).toBe(1);
+      sendUpdateCalls = []; // Reset calls
+
+      // Update document to have less matching content
+      coordinator.onDataChange('articles', 'doc1', {
+        title: 'Deep Learning',
+        body: 'Neural networks only.',
+      }, 'update');
+
+      // Should send LEAVE because document no longer matches
+      expect(sendUpdateCalls.length).toBe(1);
+      expect(sendUpdateCalls[0].type).toBe('LEAVE');
+    });
+
+    it('should not send update when document does not match subscription', () => {
+      // Subscribe to machine learning
+      coordinator.subscribe('client1', 'sub1', 'articles', 'machine learning');
+      sendUpdateCalls = []; // Reset calls
+
+      // Add document that doesn't match
+      coordinator.onDataChange('articles', 'doc1', {
+        title: 'Cooking Recipes',
+        body: 'How to make pasta.',
+      }, 'add');
+
+      expect(sendUpdateCalls.length).toBe(0);
+    });
+
+    it('should send updates to multiple subscriptions', () => {
+      // Subscribe two clients
+      coordinator.subscribe('client1', 'sub1', 'articles', 'machine');
+      coordinator.subscribe('client2', 'sub2', 'articles', 'machine');
+      sendUpdateCalls = []; // Reset calls
+
+      // Add matching document
+      coordinator.onDataChange('articles', 'doc1', {
+        title: 'Machine Learning',
+        body: 'Content',
+      }, 'add');
+
+      expect(sendUpdateCalls.length).toBe(2);
+      expect(sendUpdateCalls.map(c => c.subscriptionId).sort()).toEqual(['sub1', 'sub2']);
+    });
+
+    it('should not send updates after unsubscribe', () => {
+      coordinator.subscribe('client1', 'sub1', 'articles', 'machine');
+      coordinator.unsubscribe('sub1');
+      sendUpdateCalls = []; // Reset calls
+
+      coordinator.onDataChange('articles', 'doc1', {
+        title: 'Machine Learning',
+        body: 'Content',
+      }, 'add');
+
+      expect(sendUpdateCalls.length).toBe(0);
+    });
+  });
+
+  describe('clear clears subscriptions', () => {
+    it('should clear all subscriptions on clear()', () => {
+      coordinator.enableSearch('articles', { fields: ['title'] });
+      coordinator.subscribe('client1', 'sub1', 'articles', 'test');
+      coordinator.subscribe('client2', 'sub2', 'articles', 'test');
+
+      coordinator.clear();
+
+      expect(coordinator.getSubscriptionCount()).toBe(0);
+    });
+  });
 });

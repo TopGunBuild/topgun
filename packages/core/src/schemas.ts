@@ -573,6 +573,60 @@ export const SearchRespMessageSchema = z.object({
   payload: SearchRespPayloadSchema,
 });
 
+// --- Live Search Subscription Messages (Phase 11.1b) ---
+
+/**
+ * Search delta update type.
+ * - ENTER: Document entered the result set (new or score exceeded minScore)
+ * - UPDATE: Document score changed while remaining in result set
+ * - LEAVE: Document left the result set (removed or score dropped below minScore)
+ */
+export const SearchUpdateTypeSchema = z.enum(['ENTER', 'UPDATE', 'LEAVE']);
+
+/**
+ * SEARCH_SUB: Client subscribes to live search results.
+ */
+export const SearchSubPayloadSchema = z.object({
+  subscriptionId: z.string(),
+  mapName: z.string(),
+  query: z.string(),
+  options: SearchOptionsSchema.optional(),
+});
+
+export const SearchSubMessageSchema = z.object({
+  type: z.literal('SEARCH_SUB'),
+  payload: SearchSubPayloadSchema,
+});
+
+/**
+ * SEARCH_UPDATE: Server sends delta update for a subscribed search.
+ */
+export const SearchUpdatePayloadSchema = z.object({
+  subscriptionId: z.string(),
+  key: z.string(),
+  value: z.unknown(),
+  score: z.number(),
+  matchedTerms: z.array(z.string()),
+  type: SearchUpdateTypeSchema,
+});
+
+export const SearchUpdateMessageSchema = z.object({
+  type: z.literal('SEARCH_UPDATE'),
+  payload: SearchUpdatePayloadSchema,
+});
+
+/**
+ * SEARCH_UNSUB: Client unsubscribes from live search.
+ */
+export const SearchUnsubPayloadSchema = z.object({
+  subscriptionId: z.string(),
+});
+
+export const SearchUnsubMessageSchema = z.object({
+  type: z.literal('SEARCH_UNSUB'),
+  payload: SearchUnsubPayloadSchema,
+});
+
 // --- Conflict Resolver Messages (Phase 5.05) ---
 
 /**
@@ -759,6 +813,10 @@ export const MessageSchema = z.discriminatedUnion('type', [
   // Phase 11.1: Full-Text Search
   SearchMessageSchema,
   SearchRespMessageSchema,
+  // Phase 11.1b: Live Search Subscriptions
+  SearchSubMessageSchema,
+  SearchUpdateMessageSchema,
+  SearchUnsubMessageSchema,
 ]);
 
 // --- Type Inference ---
@@ -811,3 +869,12 @@ export type SearchPayload = z.infer<typeof SearchPayloadSchema>;
 export type SearchMessage = z.infer<typeof SearchMessageSchema>;
 export type SearchRespPayload = z.infer<typeof SearchRespPayloadSchema>;
 export type SearchRespMessage = z.infer<typeof SearchRespMessageSchema>;
+
+// Live Search Subscription types (Phase 11.1b)
+export type SearchUpdateType = z.infer<typeof SearchUpdateTypeSchema>;
+export type SearchSubPayload = z.infer<typeof SearchSubPayloadSchema>;
+export type SearchSubMessage = z.infer<typeof SearchSubMessageSchema>;
+export type SearchUpdatePayload = z.infer<typeof SearchUpdatePayloadSchema>;
+export type SearchUpdateMessage = z.infer<typeof SearchUpdateMessageSchema>;
+export type SearchUnsubPayload = z.infer<typeof SearchUnsubPayloadSchema>;
+export type SearchUnsubMessage = z.infer<typeof SearchUnsubMessageSchema>;

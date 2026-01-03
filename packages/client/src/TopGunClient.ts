@@ -1,5 +1,5 @@
 import { LWWMap, ORMap } from '@topgunbuild/core';
-import type { ORMapRecord, LWWRecord, EntryProcessorDef, EntryProcessorResult } from '@topgunbuild/core';
+import type { ORMapRecord, LWWRecord, EntryProcessorDef, EntryProcessorResult, SearchOptions } from '@topgunbuild/core';
 import type { IStorageAdapter } from './IStorageAdapter';
 import { SyncEngine } from './SyncEngine';
 import type { BackoffConfig } from './SyncEngine';
@@ -9,6 +9,7 @@ import { DistributedLock } from './DistributedLock';
 import { TopicHandle } from './TopicHandle';
 import { PNCounterHandle } from './PNCounterHandle';
 import { EventJournalReader } from './EventJournalReader';
+import { SearchHandle } from './SearchHandle';
 import { logger } from './utils/logger';
 import { SyncState } from './SyncState';
 import type { StateChangeEvent } from './SyncStateMachine';
@@ -606,6 +607,52 @@ export class TopGunClient {
     matchedTerms: string[];
   }>> {
     return this.syncEngine.search<T>(mapName, query, options);
+  }
+
+  // ============================================
+  // Live Search API (Phase 11.1b)
+  // ============================================
+
+  /**
+   * Subscribe to live search results with real-time updates.
+   *
+   * Unlike the one-shot `search()` method, `searchSubscribe()` returns a handle
+   * that receives delta updates (ENTER/UPDATE/LEAVE) when documents change.
+   * This is ideal for live search UIs that need to reflect data changes.
+   *
+   * @param mapName Name of the map to search
+   * @param query Search query text
+   * @param options Search options (limit, minScore, boost)
+   * @returns SearchHandle for managing the subscription
+   *
+   * @example
+   * ```typescript
+   * const handle = client.searchSubscribe<Article>('articles', 'machine learning', {
+   *   limit: 20,
+   *   minScore: 0.5
+   * });
+   *
+   * // Subscribe to result changes
+   * const unsubscribe = handle.subscribe((results) => {
+   *   setSearchResults(results);
+   * });
+   *
+   * // Update query dynamically
+   * handle.setQuery('deep learning');
+   *
+   * // Get current snapshot
+   * const snapshot = handle.getResults();
+   *
+   * // Cleanup when done
+   * handle.dispose();
+   * ```
+   */
+  public searchSubscribe<T>(
+    mapName: string,
+    query: string,
+    options?: SearchOptions
+  ): SearchHandle<T> {
+    return new SearchHandle<T>(this.syncEngine, mapName, query, options);
   }
 
   // ============================================

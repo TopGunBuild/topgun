@@ -568,6 +568,23 @@ export class ServerCoordinator {
                 if (!map) return undefined;
                 return map.get(key);
             });
+            // Phase 11.1b: Set up search update callback for live subscriptions
+            this.searchCoordinator.setSendUpdateCallback((clientId, subscriptionId, key, value, score, matchedTerms, type) => {
+                const client = this.clients.get(clientId);
+                if (client) {
+                    client.writer.write({
+                        type: 'SEARCH_UPDATE',
+                        payload: {
+                            subscriptionId,
+                            key,
+                            value,
+                            score,
+                            matchedTerms,
+                            type,
+                        }
+                    });
+                }
+            });
             // Enable FTS for configured maps
             if (config.fullTextSearch) {
                 for (const [mapName, ftsConfig] of Object.entries(config.fullTextSearch)) {
@@ -1141,6 +1158,9 @@ export class ServerCoordinator {
 
             // Cleanup Counters (Local)
             this.counterHandler.unsubscribeAll(clientId);
+
+            // Phase 11.1b: Cleanup Search Subscriptions
+            this.searchCoordinator.unsubscribeClient(clientId);
 
             // Notify Cluster to Cleanup Locks (Remote)
             const members = this.cluster.getMembers();
@@ -2388,6 +2408,75 @@ export class ServerCoordinator {
                     type: 'SEARCH_RESP',
                     payload: searchResult,
                 });
+                break;
+            }
+
+            // Phase 11.1b: Live Search Subscriptions
+            case 'SEARCH_SUB': {
+                const { subscriptionId, mapName: subMapName, query: subQuery, options: subOptions } = message.payload;
+
+                // Check READ permission
+                if (!this.securityManager.checkPermission(client.principal!, subMapName, 'READ')) {
+                    logger.warn({ clientId: client.id, mapName: subMapName }, 'Access Denied: SEARCH_SUB');
+                    client.writer.write({
+                        type: 'SEARCH_RESP',
+                        payload: {
+                            requestId: subscriptionId,
+                            results: [],
+                            totalCount: 0,
+                            error: `Access denied for map: ${subMapName}`,
+                        }
+                    });
+                    break;
+                }
+
+                // Check if FTS is enabled for this map
+                if (!this.searchCoordinator.isSearchEnabled(subMapName)) {
+                    client.writer.write({
+                        type: 'SEARCH_RESP',
+                        payload: {
+                            requestId: subscriptionId,
+                            results: [],
+                            totalCount: 0,
+                            error: `Full-text search not enabled for map: ${subMapName}`,
+                        }
+                    });
+                    break;
+                }
+
+                // Subscribe and get initial results
+                const initialResults = this.searchCoordinator.subscribe(
+                    client.id,
+                    subscriptionId,
+                    subMapName,
+                    subQuery,
+                    subOptions
+                );
+
+                logger.debug({
+                    clientId: client.id,
+                    subscriptionId,
+                    mapName: subMapName,
+                    query: subQuery,
+                    resultCount: initialResults.length
+                }, 'Search subscription created');
+
+                // Send initial snapshot as SEARCH_RESP
+                client.writer.write({
+                    type: 'SEARCH_RESP',
+                    payload: {
+                        requestId: subscriptionId,
+                        results: initialResults,
+                        totalCount: initialResults.length,
+                    },
+                });
+                break;
+            }
+
+            case 'SEARCH_UNSUB': {
+                const { subscriptionId: unsubId } = message.payload;
+                this.searchCoordinator.unsubscribe(unsubId);
+                logger.debug({ clientId: client.id, subscriptionId: unsubId }, 'Search unsubscription');
                 break;
             }
 

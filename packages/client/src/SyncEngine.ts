@@ -1245,6 +1245,19 @@ export class SyncEngine {
         this.handleSearchResponse(message.payload);
         break;
       }
+
+      // ============ Live Search Message Handlers (Phase 11.1b) ============
+
+      case 'SEARCH_UPDATE': {
+        logger.debug({
+          subscriptionId: message.payload?.subscriptionId,
+          key: message.payload?.key,
+          type: message.payload?.type
+        }, 'Received SEARCH_UPDATE');
+        // SEARCH_UPDATE is handled by SearchHandle via emitMessage
+        // No additional processing needed here
+        break;
+      }
     }
 
     if (message.timestamp) {

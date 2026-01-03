@@ -57,6 +57,10 @@ export type { ResolverInfo, RegisterResult } from './ConflictResolverClient';
 // Full-Text Search exports (Phase 11.1a)
 export type { SearchResult } from './SyncEngine';
 
+// Live Search exports (Phase 11.1b)
+export { SearchHandle } from './SearchHandle';
+export type { SearchResultsCallback } from './SearchHandle';
+
 // Cluster exports (Phase 4)
 export { ConnectionPool, PartitionRouter, ClusterClient };
 export type {

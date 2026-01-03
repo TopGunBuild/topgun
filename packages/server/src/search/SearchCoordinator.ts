@@ -3,6 +3,7 @@
  *
  * Manages FullTextIndex instances per map and handles search requests.
  * Part of Phase 11.1a: Server-side BM25 Search.
+ * Phase 11.1b: Live Search Subscriptions with delta updates.
  *
  * @module search/SearchCoordinator
  */
@@ -13,6 +14,8 @@ import {
   type FTSSearchOptions as SearchOptions,
   type FTSSearchResult as SearchResult,
   type SearchRespPayload,
+  type SearchUpdateType,
+  type SearchOptions as SchemaSearchOptions,
 } from '@topgunbuild/core';
 import { logger } from '../utils/logger';
 
@@ -32,6 +35,47 @@ export interface ServerSearchResult {
 export interface SearchConfig extends FullTextIndexConfig {
   // Additional server-specific options can be added here in the future
 }
+
+/**
+ * Cached result for a document in a subscription.
+ */
+interface CachedResult {
+  score: number;
+  matchedTerms: string[];
+}
+
+/**
+ * Represents a live search subscription.
+ */
+interface SearchSubscription {
+  /** Unique subscription ID */
+  id: string;
+  /** ID of the subscribed client */
+  clientId: string;
+  /** Name of the map being searched */
+  mapName: string;
+  /** Original query string */
+  query: string;
+  /** Tokenized query terms for fast comparison */
+  queryTerms: string[];
+  /** Search options (limit, minScore, boost) */
+  options: SchemaSearchOptions;
+  /** Cache of current results for delta computation */
+  currentResults: Map<string, CachedResult>;
+}
+
+/**
+ * Callback type for sending updates to clients.
+ */
+export type SendUpdateCallback = (
+  clientId: string,
+  subscriptionId: string,
+  key: string,
+  value: unknown,
+  score: number,
+  matchedTerms: string[],
+  type: SearchUpdateType
+) => void;
 
 /**
  * SearchCoordinator manages full-text search indexes for the server.
@@ -69,8 +113,32 @@ export class SearchCoordinator {
   /** Callback to get document value by key (injected by ServerCoordinator) */
   private getDocumentValue?: (mapName: string, key: string) => unknown | undefined;
 
+  // ============================================
+  // Phase 11.1b: Live Search Subscription tracking
+  // ============================================
+
+  /** Subscription ID → SearchSubscription */
+  private readonly subscriptions: Map<string, SearchSubscription> = new Map();
+
+  /** Map name → Set of subscription IDs */
+  private readonly subscriptionsByMap: Map<string, Set<string>> = new Map();
+
+  /** Client ID → Set of subscription IDs */
+  private readonly subscriptionsByClient: Map<string, Set<string>> = new Map();
+
+  /** Callback for sending updates to clients */
+  private sendUpdate?: SendUpdateCallback;
+
   constructor() {
     logger.debug('SearchCoordinator initialized');
+  }
+
+  /**
+   * Set the callback for sending updates to clients.
+   * Called by ServerCoordinator during initialization.
+   */
+  setSendUpdateCallback(callback: SendUpdateCallback): void {
+    this.sendUpdate = callback;
   }
 
   /**
@@ -220,6 +288,9 @@ export class SearchCoordinator {
     } else {
       index.onSet(key, value);
     }
+
+    // Phase 11.1b: Notify subscribers of potential changes
+    this.notifySubscribers(mapName, key, value ?? null, changeType);
   }
 
   /**
@@ -276,6 +347,280 @@ export class SearchCoordinator {
     }
     this.indexes.clear();
     this.configs.clear();
+    // Phase 11.1b: Clear subscriptions
+    this.subscriptions.clear();
+    this.subscriptionsByMap.clear();
+    this.subscriptionsByClient.clear();
     logger.debug('SearchCoordinator cleared');
+  }
+
+  // ============================================
+  // Phase 11.1b: Live Search Subscription Methods
+  // ============================================
+
+  /**
+   * Subscribe to live search results.
+   * Returns initial results and tracks the subscription for delta updates.
+   *
+   * @param clientId - ID of the subscribing client
+   * @param subscriptionId - Unique subscription identifier
+   * @param mapName - Name of the map to search
+   * @param query - Search query text
+   * @param options - Search options (limit, minScore, boost)
+   * @returns Initial search results
+   */
+  subscribe(
+    clientId: string,
+    subscriptionId: string,
+    mapName: string,
+    query: string,
+    options?: SchemaSearchOptions
+  ): ServerSearchResult[] {
+    const index = this.indexes.get(mapName);
+
+    if (!index) {
+      logger.warn({ mapName }, 'Subscribe requested for map without FTS enabled');
+      return [];
+    }
+
+    // Tokenize query for later delta computation
+    // We need to access the tokenizer, but FullTextIndex doesn't expose it directly
+    // For now, store the query string - we'll re-execute search on changes
+    const queryTerms = query.toLowerCase().split(/\s+/).filter(t => t.length > 0);
+
+    // Execute initial search
+    const searchResults = index.search(query, options);
+
+    // Build initial results and cache
+    const currentResults = new Map<string, CachedResult>();
+    const results: ServerSearchResult[] = [];
+
+    for (const result of searchResults) {
+      const value = this.getDocumentValue
+        ? this.getDocumentValue(mapName, result.docId)
+        : undefined;
+
+      currentResults.set(result.docId, {
+        score: result.score,
+        matchedTerms: result.matchedTerms || [],
+      });
+
+      results.push({
+        key: result.docId,
+        value,
+        score: result.score,
+        matchedTerms: result.matchedTerms || [],
+      });
+    }
+
+    // Create subscription
+    const subscription: SearchSubscription = {
+      id: subscriptionId,
+      clientId,
+      mapName,
+      query,
+      queryTerms,
+      options: options || {},
+      currentResults,
+    };
+
+    // Track subscription
+    this.subscriptions.set(subscriptionId, subscription);
+
+    // Track by map
+    if (!this.subscriptionsByMap.has(mapName)) {
+      this.subscriptionsByMap.set(mapName, new Set());
+    }
+    this.subscriptionsByMap.get(mapName)!.add(subscriptionId);
+
+    // Track by client
+    if (!this.subscriptionsByClient.has(clientId)) {
+      this.subscriptionsByClient.set(clientId, new Set());
+    }
+    this.subscriptionsByClient.get(clientId)!.add(subscriptionId);
+
+    logger.debug(
+      { subscriptionId, clientId, mapName, query, resultCount: results.length },
+      'Search subscription created'
+    );
+
+    return results;
+  }
+
+  /**
+   * Unsubscribe from a live search.
+   *
+   * @param subscriptionId - Subscription to remove
+   */
+  unsubscribe(subscriptionId: string): void {
+    const subscription = this.subscriptions.get(subscriptionId);
+    if (!subscription) {
+      return;
+    }
+
+    // Remove from subscriptions
+    this.subscriptions.delete(subscriptionId);
+
+    // Remove from map tracking
+    const mapSubs = this.subscriptionsByMap.get(subscription.mapName);
+    if (mapSubs) {
+      mapSubs.delete(subscriptionId);
+      if (mapSubs.size === 0) {
+        this.subscriptionsByMap.delete(subscription.mapName);
+      }
+    }
+
+    // Remove from client tracking
+    const clientSubs = this.subscriptionsByClient.get(subscription.clientId);
+    if (clientSubs) {
+      clientSubs.delete(subscriptionId);
+      if (clientSubs.size === 0) {
+        this.subscriptionsByClient.delete(subscription.clientId);
+      }
+    }
+
+    logger.debug({ subscriptionId }, 'Search subscription removed');
+  }
+
+  /**
+   * Unsubscribe all subscriptions for a client.
+   * Called when a client disconnects.
+   *
+   * @param clientId - ID of the disconnected client
+   */
+  unsubscribeClient(clientId: string): void {
+    const clientSubs = this.subscriptionsByClient.get(clientId);
+    if (!clientSubs) {
+      return;
+    }
+
+    // Copy set since we're modifying during iteration
+    const subscriptionIds = Array.from(clientSubs);
+    for (const subscriptionId of subscriptionIds) {
+      this.unsubscribe(subscriptionId);
+    }
+
+    logger.debug({ clientId, count: subscriptionIds.length }, 'Client subscriptions cleared');
+  }
+
+  /**
+   * Get the number of active subscriptions.
+   */
+  getSubscriptionCount(): number {
+    return this.subscriptions.size;
+  }
+
+  /**
+   * Notify subscribers about a document change.
+   * Computes delta (ENTER/UPDATE/LEAVE) for each affected subscription.
+   *
+   * @param mapName - Name of the map that changed
+   * @param key - Document key that changed
+   * @param value - New document value (null if removed)
+   * @param changeType - Type of change
+   */
+  private notifySubscribers(
+    mapName: string,
+    key: string,
+    value: Record<string, unknown> | null,
+    changeType: 'add' | 'update' | 'remove'
+  ): void {
+    if (!this.sendUpdate) {
+      return; // No callback registered
+    }
+
+    const subscriptionIds = this.subscriptionsByMap.get(mapName);
+    if (!subscriptionIds || subscriptionIds.size === 0) {
+      return; // No subscriptions for this map
+    }
+
+    const index = this.indexes.get(mapName);
+    if (!index) {
+      return; // No index (shouldn't happen)
+    }
+
+    for (const subId of subscriptionIds) {
+      const sub = this.subscriptions.get(subId);
+      if (!sub) continue;
+
+      const wasInResults = sub.currentResults.has(key);
+      let isInResults = false;
+      let newScore = 0;
+      let matchedTerms: string[] = [];
+
+      if (changeType !== 'remove' && value !== null) {
+        // Re-score document against subscription query
+        const result = this.scoreDocument(sub, key, value, index);
+        if (result && result.score >= (sub.options.minScore ?? 0)) {
+          isInResults = true;
+          newScore = result.score;
+          matchedTerms = result.matchedTerms;
+        }
+      }
+
+      // Determine update type
+      let updateType: SearchUpdateType | null = null;
+
+      if (!wasInResults && isInResults) {
+        updateType = 'ENTER';
+        sub.currentResults.set(key, { score: newScore, matchedTerms });
+      } else if (wasInResults && !isInResults) {
+        updateType = 'LEAVE';
+        sub.currentResults.delete(key);
+      } else if (wasInResults && isInResults) {
+        const old = sub.currentResults.get(key)!;
+        // Only send UPDATE if score changed meaningfully
+        if (Math.abs(old.score - newScore) > 0.0001) {
+          updateType = 'UPDATE';
+          sub.currentResults.set(key, { score: newScore, matchedTerms });
+        }
+      }
+
+      if (updateType) {
+        this.sendUpdate(
+          sub.clientId,
+          subId,
+          key,
+          value,
+          newScore,
+          matchedTerms,
+          updateType
+        );
+      }
+    }
+  }
+
+  /**
+   * Score a single document against a subscription's query.
+   *
+   * @param subscription - The subscription containing query and options
+   * @param key - Document key
+   * @param value - Document value
+   * @param index - The FullTextIndex for this map
+   * @returns Scored result or null if document doesn't match
+   */
+  private scoreDocument(
+    subscription: SearchSubscription,
+    key: string,
+    value: Record<string, unknown>,
+    index: FullTextIndex
+  ): { score: number; matchedTerms: string[] } | null {
+    // Use the index to search for just this document
+    // This is a simplification - ideally we'd have a method to score a single doc
+    // For now, we search and filter to the specific key
+    const results = index.search(subscription.query, {
+      ...subscription.options,
+      limit: undefined, // Don't limit to find our doc
+    });
+
+    const match = results.find(r => r.docId === key);
+    if (match) {
+      return {
+        score: match.score,
+        matchedTerms: match.matchedTerms || [],
+      };
+    }
+
+    return null;
   }
 }
