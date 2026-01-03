@@ -564,6 +564,51 @@ export class TopGunClient {
   }
 
   // ============================================
+  // Full-Text Search API (Phase 11.1a)
+  // ============================================
+
+  /**
+   * Perform a one-shot BM25 search on the server.
+   *
+   * Searches the specified map using BM25 ranking algorithm.
+   * Requires FTS to be enabled for the map on the server.
+   *
+   * @param mapName Name of the map to search
+   * @param query Search query text
+   * @param options Search options
+   * @returns Promise resolving to search results sorted by relevance
+   *
+   * @example
+   * ```typescript
+   * const results = await client.search<Article>('articles', 'machine learning', {
+   *   limit: 20,
+   *   minScore: 0.5,
+   *   boost: { title: 2.0, body: 1.0 }
+   * });
+   *
+   * for (const result of results) {
+   *   console.log(`${result.key}: ${result.value.title} (score: ${result.score})`);
+   * }
+   * ```
+   */
+  public async search<T>(
+    mapName: string,
+    query: string,
+    options?: {
+      limit?: number;
+      minScore?: number;
+      boost?: Record<string, number>;
+    }
+  ): Promise<Array<{
+    key: string;
+    value: T;
+    score: number;
+    matchedTerms: string[];
+  }>> {
+    return this.syncEngine.search<T>(mapName, query, options);
+  }
+
+  // ============================================
   // Entry Processor API (Phase 5.03)
   // ============================================
 

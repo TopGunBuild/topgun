@@ -54,6 +54,9 @@ export type { JournalEventData, JournalSubscribeOptions } from './EventJournalRe
 export { ConflictResolverClient } from './ConflictResolverClient';
 export type { ResolverInfo, RegisterResult } from './ConflictResolverClient';
 
+// Full-Text Search exports (Phase 11.1a)
+export type { SearchResult } from './SyncEngine';
+
 // Cluster exports (Phase 4)
 export { ConnectionPool, PartitionRouter, ClusterClient };
 export type {
