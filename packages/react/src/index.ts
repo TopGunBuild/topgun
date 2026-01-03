@@ -12,3 +12,6 @@ export * from './hooks/useEventJournal';
 // Conflict Resolver hooks (Phase 5.05)
 export * from './hooks/useMergeRejections';
 export * from './hooks/useConflictResolver';
+
+// Full-Text Search hooks (Phase 11.1c)
+export * from './hooks/useSearch';

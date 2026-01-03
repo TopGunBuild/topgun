@@ -358,6 +358,112 @@ const result: SearchResult<Article> = {
   matchedTerms: ['machin', 'learn']  // Stemmed
 };`;
 
+export const liveSearchCode = `import { TopGunClient } from '@topgunbuild/client';
+
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080'
+});
+
+// Create a live search subscription
+const handle = client.searchSubscribe<Article>('articles', 'machine learning', {
+  limit: 20,
+  minScore: 0.5,
+  boost: { title: 2.0, body: 1.0 }
+});
+
+// Subscribe to result changes (includes initial results + delta updates)
+const unsubscribe = handle.subscribe((results) => {
+  console.log('Search results updated:', results.length);
+  for (const result of results) {
+    console.log(\`[\${result.score.toFixed(2)}] \${result.key}: \${result.value.title}\`);
+  }
+});
+
+// Get current results snapshot at any time
+const snapshot = handle.getResults();
+
+// Update query dynamically (re-subscribes automatically)
+handle.setQuery('deep learning');
+
+// Cleanup when done
+handle.dispose();`;
+
+export const liveSearchDeltaCode = `// Delta update types:
+// - ENTER: Document now matches the query (was added or score increased above minScore)
+// - UPDATE: Document still matches but score/value changed
+// - LEAVE: Document no longer matches (was removed or score dropped below minScore)
+
+// The SearchHandle maintains a sorted result set internally.
+// Your subscribe callback receives the full sorted array on each change.
+
+// Example: Building a real-time search UI
+const handle = client.searchSubscribe<Product>('products', 'wireless');
+
+handle.subscribe((results) => {
+  // Results are always sorted by score (highest first)
+  renderSearchResults(results);
+});
+
+// When a product matching "wireless" is added to the 'products' map,
+// or an existing product's text is updated to include "wireless",
+// your callback fires with the updated results array.`;
+
+export const reactSearchCode = `import { useSearch } from '@topgunbuild/react';
+
+function SearchResults() {
+  const [searchTerm, setSearchTerm] = useState('');
+
+  const { results, loading, error } = useSearch<Article>('articles', searchTerm, {
+    limit: 20,
+    boost: { title: 2.0 }
+  });
+
+  if (loading) return <Spinner />;
+  if (error) return <div>Error: {error.message}</div>;
+
+  return (
+    <ul>
+      {results.map(r => (
+        <li key={r.key}>
+          [{r.score.toFixed(2)}] {r.value.title}
+          <small>Matched: {r.matchedTerms.join(', ')}</small>
+        </li>
+      ))}
+    </ul>
+  );
+}`;
+
+export const reactSearchDebounceCode = `import { useSearch } from '@topgunbuild/react';
+import { useState } from 'react';
+
+function SearchInput() {
+  const [input, setInput] = useState('');
+
+  // Debounce search queries by 300ms to avoid excessive server requests
+  const { results, loading, error } = useSearch<Product>('products', input, {
+    debounceMs: 300,  // Wait 300ms after user stops typing
+    limit: 10,
+    minScore: 0.5
+  });
+
+  return (
+    <div>
+      <input
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        placeholder="Search products..."
+      />
+      {loading && <span>Searching...</span>}
+      {error && <span className="error">{error.message}</span>}
+      <ul>
+        {results.map(r => (
+          <li key={r.key}>{r.value.name} - \${r.value.price}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}`;
+
 export const serverSearchPermissionsCode = `// Server security configuration
 const server = new ServerCoordinator({
   port: 8080,
@@ -625,6 +731,88 @@ Server-side search respects the security model - users must have READ permission
 <div className="bg-green-50 dark:bg-green-900/20 border-l-4 border-green-500 p-4 my-6 not-prose">
   <p className="text-sm text-green-800 dark:text-green-200">
     <strong>When to use server-side search:</strong> Use server-side search when you have multiple clients, need centralized index management, or want to offload search computation from clients. Use local BM25 (IndexedORMap) for offline-first apps where clients need to search without server connectivity.
+  </p>
+</div>
+
+## Live Search Subscriptions
+
+For real-time search UIs, TopGun provides **Live Search subscriptions** that automatically update when matching documents change. Unlike the one-shot `search()` method, `searchSubscribe()` pushes delta updates to your callback.
+
+<div className="grid md:grid-cols-2 gap-6 mb-8 not-prose">
+  <FeatureCard
+    icon={Zap}
+    iconColor="text-yellow-500"
+    title="Real-Time Updates"
+    description="Results update automatically when documents are added, modified, or removed."
+  />
+  <FeatureCard
+    icon={Filter}
+    iconColor="text-green-500"
+    title="Delta Updates"
+    description="Server sends ENTER/UPDATE/LEAVE events instead of full result sets."
+  />
+</div>
+
+### Client API
+
+Create a live search subscription with `searchSubscribe()`:
+
+<div className="not-prose">
+  <CodeBlock title="Live Search Subscription" language="typescript" code={liveSearchCode} />
+</div>
+
+### Delta Update Types
+
+The server sends incremental updates instead of full result sets:
+
+<div className="not-prose">
+  <CodeBlock title="Delta Updates" language="typescript" code={liveSearchDeltaCode} />
+</div>
+
+| Update Type | When Sent |
+|-------------|-----------|
+| `ENTER` | Document now matches query (added or score increased above threshold) |
+| `UPDATE` | Document still matches but score or value changed |
+| `LEAVE` | Document no longer matches (removed or score dropped below threshold) |
+
+## React Integration
+
+The `@topgunbuild/react` package provides the `useSearch` hook for easy integration with React applications:
+
+### Basic Usage
+
+<div className="not-prose">
+  <CodeBlock title="useSearch Hook" language="typescript" code={reactSearchCode} />
+</div>
+
+### With Debounce
+
+For search-as-you-type interfaces, use the `debounceMs` option to avoid excessive server requests:
+
+<div className="not-prose">
+  <CodeBlock title="Debounced Search" language="typescript" code={reactSearchDebounceCode} />
+</div>
+
+### useSearch Return Values
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `results` | `SearchResult<T>[]` | Current search results sorted by score |
+| `loading` | `boolean` | True while waiting for initial results |
+| `error` | `Error \| null` | Error if search failed |
+
+### useSearch Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `limit` | `number` | Maximum results to return |
+| `minScore` | `number` | Minimum BM25 score threshold |
+| `boost` | `Record<string, number>` | Field boost weights |
+| `debounceMs` | `number` | Debounce delay for query changes |
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>See Also:</strong> The <a href="/docs/reference/react-hooks" className="underline">React Hooks Reference</a> for all available hooks.
   </p>
 </div>
 
