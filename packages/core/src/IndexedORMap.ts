@@ -301,7 +301,7 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
           tag,
           value: record.value,
           score,
-          matchedTerms,
+          matchedTerms: matchedTerms ?? [],
         });
       }
     }

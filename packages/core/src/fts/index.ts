@@ -34,3 +34,6 @@ export { BM25Scorer } from './BM25Scorer';
 
 // Full-Text Index (high-level integration)
 export { FullTextIndex } from './FullTextIndex';
+
+// Index Serializer (for persistence)
+export { IndexSerializer } from './IndexSerializer';

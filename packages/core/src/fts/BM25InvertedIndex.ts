@@ -203,6 +203,15 @@ export class BM25InvertedIndex {
   }
 
   /**
+   * Get iterator for document lengths (useful for serialization).
+   *
+   * @returns Iterator of [docId, length] pairs
+   */
+  getDocLengths(): IterableIterator<[string, number]> {
+    return this.docLengths.entries();
+  }
+
+  /**
    * Get the number of documents in the index (alias for getTotalDocs).
    *
    * @returns Number of indexed documents

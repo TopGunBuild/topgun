@@ -14,10 +14,13 @@ import type {
   ScoredDocument,
   TokenizerOptions,
   BM25Options,
+  SearchResult,
+  SerializedIndex,
 } from './types';
 import { BM25Tokenizer } from './Tokenizer';
 import { BM25InvertedIndex } from './BM25InvertedIndex';
 import { BM25Scorer } from './BM25Scorer';
+import { IndexSerializer } from './IndexSerializer';
 
 /**
  * Full-Text Index for TopGun
@@ -52,10 +55,13 @@ export class FullTextIndex {
   private readonly fieldIndexes: Map<string, BM25InvertedIndex>;
 
   /** Combined index for all fields */
-  private readonly combinedIndex: BM25InvertedIndex;
+  private combinedIndex: BM25InvertedIndex;
 
   /** Track indexed documents */
   private readonly indexedDocs: Set<string>;
+
+  /** Serializer for persistence */
+  private readonly serializer: IndexSerializer;
 
   /**
    * Create a new FullTextIndex.
@@ -69,6 +75,7 @@ export class FullTextIndex {
     this.fieldIndexes = new Map();
     this.combinedIndex = new BM25InvertedIndex();
     this.indexedDocs = new Set();
+    this.serializer = new IndexSerializer();
 
     // Create per-field indexes
     for (const field of this.fields) {
@@ -145,9 +152,9 @@ export class FullTextIndex {
    *
    * @param query - Search query text
    * @param options - Search options (limit, minScore, boost)
-   * @returns Array of scored documents, sorted by relevance
+   * @returns Array of search results, sorted by relevance
    */
-  search(query: string, options?: SearchOptions): ScoredDocument[] {
+  search(query: string, options?: SearchOptions): SearchResult[] {
     // Tokenize query
     const queryTerms = this.tokenizer.tokenize(query);
 
@@ -178,7 +185,50 @@ export class FullTextIndex {
       results = results.slice(0, options.limit);
     }
 
-    return results;
+    // Map to SearchResult
+    return results.map((r) => ({
+      docId: r.docId,
+      score: r.score,
+      matchedTerms: r.matchedTerms,
+      source: 'fulltext' as const,
+    }));
+  }
+
+  /**
+   * Serialize the index state.
+   *
+   * @returns Serialized index data
+   */
+  serialize(): SerializedIndex {
+    // We only serialize the combined index for now as it's the primary one.
+    // If field boosting is required after restore, we'd need to serialize field indexes too.
+    // For MVP/Phase 11, combined index serialization covers the main use case.
+    return this.serializer.serialize(this.combinedIndex);
+  }
+
+  /**
+   * Load index from serialized state.
+   *
+   * @param data - Serialized index data
+   */
+  load(data: SerializedIndex): void {
+    this.combinedIndex = this.serializer.deserialize(data);
+    
+    // Rebuild indexedDocs set
+    this.indexedDocs.clear();
+    // Use private docLengths to rebuild indexedDocs set efficiently
+    // This assumes we added getDocLengths to BM25InvertedIndex
+    for (const [docId] of this.combinedIndex.getDocLengths()) {
+      this.indexedDocs.add(docId);
+    }
+    
+    // Note: Field indexes are NOT restored from combined index.
+    // They would need to be rebuilt from source documents or serialized separately.
+    // This is a tradeoff: fast load vs field boosting availability immediately without source docs.
+    this.fieldIndexes.clear();
+    for (const field of this.fields) {
+      this.fieldIndexes.set(field, new BM25InvertedIndex());
+    }
   }
 
   /**

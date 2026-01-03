@@ -145,7 +145,7 @@ export interface SearchResult {
   score: number;
 
   /** Source of the match (for hybrid search) */
-  source: 'exact' | 'fulltext' | 'vector' | 'bfs';
+  source?: 'exact' | 'fulltext' | 'vector' | 'bfs';
 
   /** Original document data (if requested) */
   data?: unknown;
@@ -155,6 +155,12 @@ export interface SearchResult {
 
   /** Terms that matched */
   matchedTerms?: string[];
+
+  /** Document embedding (if available) */
+  embedding?: number[];
+
+  /** Cosine similarity to query (0-1) */
+  embeddingSimilarity?: number;
 
   /** Debug information */
   debug?: {
