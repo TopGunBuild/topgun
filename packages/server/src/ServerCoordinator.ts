@@ -46,7 +46,8 @@ import { CounterHandler } from './handlers/CounterHandler';
 import { EntryProcessorHandler } from './handlers/EntryProcessorHandler';
 import { ConflictResolverHandler } from './handlers/ConflictResolverHandler';
 import { EventJournalService, EventJournalServiceConfig } from './EventJournalService';
-import type { JournalEvent, JournalEventType, MergeRejection, MergeContext } from '@topgunbuild/core';
+import { SearchCoordinator, SearchConfig } from './search';
+import type { JournalEvent, JournalEventType, MergeRejection, MergeContext, FullTextIndexConfig } from '@topgunbuild/core';
 
 interface ClientConnection {
     id: string;
@@ -159,6 +160,10 @@ export interface ServerCoordinatorConfig {
     eventJournalEnabled?: boolean;
     /** Event journal configuration */
     eventJournalConfig?: Partial<Omit<EventJournalServiceConfig, 'pool'>>;
+
+    // === Full-Text Search Options (Phase 11.1) ===
+    /** Enable full-text search for specific maps */
+    fullTextSearch?: Record<string, FullTextIndexConfig>;
 }
 
 export class ServerCoordinator {
@@ -246,6 +251,9 @@ export class ServerCoordinator {
     private readReplicaHandler?: ReadReplicaHandler;
     private merkleTreeManager?: MerkleTreeManager;
     private repairScheduler?: RepairScheduler;
+
+    // Phase 11.1 - Full-Text Search
+    private searchCoordinator!: SearchCoordinator;
 
     private readonly _nodeId: string;
 
@@ -552,6 +560,22 @@ export class ServerCoordinator {
             this.repairScheduler.start();
             logger.info('MerkleTreeManager and RepairScheduler initialized');
 
+            // Phase 11.1: Full-Text Search
+            this.searchCoordinator = new SearchCoordinator();
+            // Set up document value getter
+            this.searchCoordinator.setDocumentValueGetter((mapName, key) => {
+                const map = this.maps.get(mapName);
+                if (!map) return undefined;
+                return map.get(key);
+            });
+            // Enable FTS for configured maps
+            if (config.fullTextSearch) {
+                for (const [mapName, ftsConfig] of Object.entries(config.fullTextSearch)) {
+                    this.searchCoordinator.enableSearch(mapName, ftsConfig);
+                    logger.info({ mapName, fields: ftsConfig.fields }, 'FTS enabled for map');
+                }
+            }
+
             this.systemManager = new SystemManager(
                 this.cluster,
                 this.metricsService,
@@ -666,6 +690,67 @@ export class ServerCoordinator {
     /** Get tasklet scheduler for scheduling long-running operations */
     public getTaskletScheduler(): TaskletScheduler {
         return this.taskletScheduler;
+    }
+
+    // === Phase 11.1: Full-Text Search Public API ===
+
+    /**
+     * Enable full-text search for a map.
+     * Can be called at runtime to enable FTS dynamically.
+     *
+     * @param mapName - Name of the map to enable FTS for
+     * @param config - FTS configuration (fields, tokenizer, bm25 options)
+     */
+    public enableFullTextSearch(mapName: string, config: FullTextIndexConfig): void {
+        this.searchCoordinator.enableSearch(mapName, config);
+
+        // Build index from existing data
+        const map = this.maps.get(mapName);
+        if (map) {
+            const entries: Array<[string, Record<string, unknown> | null]> = [];
+            if (map instanceof LWWMap) {
+                for (const [key, value] of map.entries()) {
+                    entries.push([key, value as Record<string, unknown> | null]);
+                }
+            } else if (map instanceof ORMap) {
+                for (const key of map.allKeys()) {
+                    const values = map.get(key);
+                    // ORMap can have multiple values per key, take first one for FTS
+                    const value = values.length > 0 ? values[0] : null;
+                    entries.push([key, value as Record<string, unknown> | null]);
+                }
+            }
+            this.searchCoordinator.buildIndexFromEntries(mapName, entries);
+        }
+    }
+
+    /**
+     * Disable full-text search for a map.
+     *
+     * @param mapName - Name of the map to disable FTS for
+     */
+    public disableFullTextSearch(mapName: string): void {
+        this.searchCoordinator.disableSearch(mapName);
+    }
+
+    /**
+     * Check if full-text search is enabled for a map.
+     *
+     * @param mapName - Name of the map to check
+     * @returns True if FTS is enabled
+     */
+    public isFullTextSearchEnabled(mapName: string): boolean {
+        return this.searchCoordinator.isSearchEnabled(mapName);
+    }
+
+    /**
+     * Get FTS index statistics for a map.
+     *
+     * @param mapName - Name of the map
+     * @returns Index stats or null if FTS not enabled
+     */
+    public getFullTextSearchStats(mapName: string): { documentCount: number; fields: string[] } | null {
+        return this.searchCoordinator.getIndexStats(mapName);
     }
 
     /**
@@ -2218,6 +2303,57 @@ export class ServerCoordinator {
                 break;
             }
 
+            // Phase 11.1: Full-Text Search
+            case 'SEARCH': {
+                const { requestId: searchReqId, mapName: searchMapName, query: searchQuery, options: searchOptions } = message.payload;
+
+                // Check READ permission
+                if (!this.securityManager.checkPermission(client.principal!, searchMapName, 'READ')) {
+                    logger.warn({ clientId: client.id, mapName: searchMapName }, 'Access Denied: SEARCH');
+                    client.writer.write({
+                        type: 'SEARCH_RESP',
+                        payload: {
+                            requestId: searchReqId,
+                            results: [],
+                            totalCount: 0,
+                            error: `Access denied for map: ${searchMapName}`,
+                        }
+                    });
+                    break;
+                }
+
+                // Check if FTS is enabled for this map
+                if (!this.searchCoordinator.isSearchEnabled(searchMapName)) {
+                    client.writer.write({
+                        type: 'SEARCH_RESP',
+                        payload: {
+                            requestId: searchReqId,
+                            results: [],
+                            totalCount: 0,
+                            error: `Full-text search not enabled for map: ${searchMapName}`,
+                        }
+                    });
+                    break;
+                }
+
+                // Execute search
+                const searchResult = this.searchCoordinator.search(searchMapName, searchQuery, searchOptions);
+                searchResult.requestId = searchReqId;
+
+                logger.debug({
+                    clientId: client.id,
+                    mapName: searchMapName,
+                    query: searchQuery,
+                    resultCount: searchResult.results.length
+                }, 'Search executed');
+
+                client.writer.write({
+                    type: 'SEARCH_RESP',
+                    payload: searchResult,
+                });
+                break;
+            }
+
             default:
                 logger.warn({ type: message.type }, 'Unknown message type');
         }
@@ -3159,6 +3295,14 @@ export class ServerCoordinator {
         if (this.merkleTreeManager && recordToStore && op.key) {
             const partitionId = this.partitionService.getPartitionId(op.key);
             this.merkleTreeManager.updateRecord(partitionId, op.key, recordToStore as LWWRecord<any>);
+        }
+
+        // Phase 11.1: Update FTS index
+        if (this.searchCoordinator.isSearchEnabled(op.mapName)) {
+            const isRemove = op.opType === 'REMOVE' || (op.record && op.record.value === null);
+            const value = isRemove ? null : (op.record?.value ?? op.orRecord?.value);
+            const changeType = isRemove ? 'remove' : (oldRecord ? 'update' : 'add');
+            this.searchCoordinator.onDataChange(op.mapName, op.key, value, changeType);
         }
 
         return { eventPayload, oldRecord };

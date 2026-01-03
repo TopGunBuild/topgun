@@ -527,6 +527,52 @@ export const JournalReadResponseSchema = z.object({
   hasMore: z.boolean(),
 });
 
+// --- Full-Text Search Messages (Phase 11.1) ---
+
+/**
+ * Search options schema for FTS queries.
+ */
+export const SearchOptionsSchema = z.object({
+  limit: z.number().optional(),
+  minScore: z.number().optional(),
+  boost: z.record(z.string(), z.number()).optional(),
+});
+
+/**
+ * SEARCH: Client requests one-shot BM25 search.
+ */
+export const SearchPayloadSchema = z.object({
+  requestId: z.string(),
+  mapName: z.string(),
+  query: z.string(),
+  options: SearchOptionsSchema.optional(),
+});
+
+export const SearchMessageSchema = z.object({
+  type: z.literal('SEARCH'),
+  payload: SearchPayloadSchema,
+});
+
+/**
+ * SEARCH_RESP: Server responds with search results.
+ */
+export const SearchRespPayloadSchema = z.object({
+  requestId: z.string(),
+  results: z.array(z.object({
+    key: z.string(),
+    value: z.unknown(),
+    score: z.number(),
+    matchedTerms: z.array(z.string()),
+  })),
+  totalCount: z.number(),
+  error: z.string().optional(),
+});
+
+export const SearchRespMessageSchema = z.object({
+  type: z.literal('SEARCH_RESP'),
+  payload: SearchRespPayloadSchema,
+});
+
 // --- Conflict Resolver Messages (Phase 5.05) ---
 
 /**
@@ -710,6 +756,9 @@ export const MessageSchema = z.discriminatedUnion('type', [
   MergeRejectedMessageSchema,
   ListResolversRequestSchema,
   ListResolversResponseSchema,
+  // Phase 11.1: Full-Text Search
+  SearchMessageSchema,
+  SearchRespMessageSchema,
 ]);
 
 // --- Type Inference ---
@@ -755,3 +804,10 @@ export type UnregisterResolverResponse = z.infer<typeof UnregisterResolverRespon
 export type MergeRejectedMessage = z.infer<typeof MergeRejectedMessageSchema>;
 export type ListResolversRequest = z.infer<typeof ListResolversRequestSchema>;
 export type ListResolversResponse = z.infer<typeof ListResolversResponseSchema>;
+
+// Full-Text Search types (Phase 11.1)
+export type SearchOptions = z.infer<typeof SearchOptionsSchema>;
+export type SearchPayload = z.infer<typeof SearchPayloadSchema>;
+export type SearchMessage = z.infer<typeof SearchMessageSchema>;
+export type SearchRespPayload = z.infer<typeof SearchRespPayloadSchema>;
+export type SearchRespMessage = z.infer<typeof SearchRespMessageSchema>;
