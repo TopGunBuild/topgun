@@ -602,6 +602,7 @@ export class ServerCoordinator {
         if (this.storage) {
             this.storage.initialize().then(() => {
                 logger.info('Storage adapter initialized');
+                this.backfillSearchIndexes();
             }).catch(err => {
                 logger.error({ err }, 'Failed to initialize storage');
             });
@@ -609,6 +610,42 @@ export class ServerCoordinator {
 
         this.startGarbageCollection();
         this.startHeartbeatCheck();
+    }
+
+    /**
+     * Populate FTS indexes from existing map data.
+     * Called after storage initialization.
+     */
+    private async backfillSearchIndexes(): Promise<void> {
+        const enabledMaps = this.searchCoordinator.getEnabledMaps();
+        
+        const promises = enabledMaps.map(async (mapName) => {
+            try {
+                // Ensure map is loaded from storage
+                await this.getMapAsync(mapName);
+                
+                const map = this.maps.get(mapName);
+                if (!map) return;
+
+                if (map instanceof LWWMap) {
+                    const entries = Array.from(map.entries());
+                    if (entries.length > 0) {
+                        logger.info({ mapName, count: entries.length }, 'Backfilling FTS index');
+                        this.searchCoordinator.buildIndexFromEntries(
+                            mapName,
+                            map.entries() as Iterable<[string, Record<string, unknown> | null]>
+                        );
+                    }
+                } else {
+                    logger.warn({ mapName }, 'FTS backfill skipped: Map type not supported (only LWWMap)');
+                }
+            } catch (err) {
+                logger.error({ mapName, err }, 'Failed to backfill FTS index');
+            }
+        });
+
+        await Promise.all(promises);
+        logger.info('FTS backfill completed');
     }
 
     /** Wait for server to be fully ready (ports assigned) */
