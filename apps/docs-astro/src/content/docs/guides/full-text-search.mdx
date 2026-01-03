@@ -5,7 +5,7 @@ order: 14
 ---
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
-import { ChevronRight, Search, Filter, Settings, Zap, Star } from 'lucide-react';
+import { ChevronRight, Search, Filter, Settings, Zap, Star, Server, Shield } from 'lucide-react';
 import { FeatureCard } from '../../../components/docs/FeatureCard';
 
 export const basicSearchCode = `import {
@@ -299,6 +299,89 @@ ftsIndex.load(saved);
 // Index is ready to use immediately
 const results = articles.search('machine learning');`;
 
+export const serverSearchSetupCode = `import { ServerCoordinator } from '@topgunbuild/server';
+
+const server = new ServerCoordinator({
+  port: 8080,
+  // Enable full-text search for specific maps
+  fullTextSearch: {
+    articles: {
+      fields: ['title', 'body'],
+      tokenizer: { minLength: 2 },
+      bm25: { k1: 1.2, b: 0.75 }
+    },
+    products: {
+      fields: ['name', 'description', 'tags']
+    }
+  }
+});
+
+await server.start();
+// Server now maintains FTS indexes for 'articles' and 'products' maps
+// Indexes are automatically updated when data changes
+// Indexes are backfilled from storage on startup`;
+
+export const clientSearchCode = `import { TopGunClient } from '@topgunbuild/client';
+
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080'
+});
+
+await client.authenticate({ token: 'user-token' });
+
+// Search articles on the server
+const results = await client.search<Article>('articles', 'machine learning', {
+  limit: 20,
+  minScore: 0.5,
+  boost: { title: 2.0, body: 1.0 }
+});
+
+// Results are sorted by relevance
+for (const result of results) {
+  console.log(\`[\${result.score.toFixed(2)}] \${result.key}: \${result.value.title}\`);
+  console.log(\`  Matched: \${result.matchedTerms.join(', ')}\`);
+}`;
+
+export const clientSearchResultCode = `// SearchResult<T> interface
+interface SearchResult<T> {
+  key: string;        // Document key
+  value: T;           // Full document value
+  score: number;      // BM25 relevance score
+  matchedTerms: string[];  // Stemmed terms that matched
+}
+
+// Example result
+const result: SearchResult<Article> = {
+  key: 'a1',
+  value: { title: 'Introduction to ML', body: '...' },
+  score: 2.34,
+  matchedTerms: ['machin', 'learn']  // Stemmed
+};`;
+
+export const serverSearchPermissionsCode = `// Server security configuration
+const server = new ServerCoordinator({
+  port: 8080,
+  fullTextSearch: {
+    articles: { fields: ['title', 'body'] }
+  },
+  security: {
+    permissions: {
+      // Users need READ permission to search a map
+      articles: {
+        read: ['user', 'admin'],
+        write: ['admin']
+      }
+    }
+  }
+});
+
+// Client-side: search requires READ permission
+try {
+  const results = await client.search('articles', 'query');
+} catch (error) {
+  // Error: Permission denied for map: articles
+}`;
+
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
   <span className="text-foreground font-medium">Docs</span>
   <ChevronRight className="w-4 h-4" />
@@ -480,6 +563,68 @@ Serialize and restore the BM25 index:
 <div className="bg-purple-50 dark:bg-purple-900/20 border-l-4 border-purple-500 p-4 my-6 not-prose">
   <p className="text-sm text-purple-800 dark:text-purple-200">
     <strong>Performance tip:</strong> BM25 index builds in &lt;100ms for 1K documents. Search queries complete in &lt;10ms. For large datasets, consider serializing the index to avoid rebuilding on page load.
+  </p>
+</div>
+
+## Server-Side Search
+
+For multi-client applications, TopGun supports **server-side BM25 search**. The server maintains indexes centrally, eliminating the need for each client to build and store indexes locally.
+
+<div className="grid md:grid-cols-2 gap-6 mb-8 not-prose">
+  <FeatureCard
+    icon={Server}
+    iconColor="text-green-500"
+    title="Centralized Indexes"
+    description="Server maintains FTS indexes, clients query via WebSocket."
+  />
+  <FeatureCard
+    icon={Shield}
+    iconColor="text-red-500"
+    title="Permission-Based"
+    description="Search respects RBAC - users need READ permission to search a map."
+  />
+</div>
+
+### Server Configuration
+
+Enable FTS on the server for specific maps:
+
+<div className="not-prose">
+  <CodeBlock title="Server Setup" language="typescript" code={serverSearchSetupCode} />
+</div>
+
+The server will:
+- Create and maintain BM25 indexes for configured maps
+- Automatically update indexes when data changes (add/update/remove)
+- Backfill indexes from persistent storage on startup
+
+### Client API
+
+Search from the client using `client.search()`:
+
+<div className="not-prose">
+  <CodeBlock title="Client Search" language="typescript" code={clientSearchCode} />
+</div>
+
+### Search Result Structure
+
+Each result includes the document key, value, relevance score, and matched terms:
+
+<div className="not-prose">
+  <CodeBlock title="SearchResult Interface" language="typescript" code={clientSearchResultCode} />
+</div>
+
+### Permissions
+
+Server-side search respects the security model - users must have READ permission on a map to search it:
+
+<div className="not-prose">
+  <CodeBlock title="Permissions" language="typescript" code={serverSearchPermissionsCode} />
+</div>
+
+<div className="bg-green-50 dark:bg-green-900/20 border-l-4 border-green-500 p-4 my-6 not-prose">
+  <p className="text-sm text-green-800 dark:text-green-200">
+    <strong>When to use server-side search:</strong> Use server-side search when you have multiple clients, need centralized index management, or want to offload search computation from clients. Use local BM25 (IndexedORMap) for offline-first apps where clients need to search without server connectivity.
   </p>
 </div>
 
