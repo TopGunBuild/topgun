@@ -383,10 +383,9 @@ export class SearchCoordinator {
       return [];
     }
 
-    // Tokenize query for later delta computation
-    // We need to access the tokenizer, but FullTextIndex doesn't expose it directly
-    // For now, store the query string - we'll re-execute search on changes
-    const queryTerms = query.toLowerCase().split(/\s+/).filter(t => t.length > 0);
+    // Tokenize query ONCE using the index's tokenizer for consistency
+    // This ensures the same tokenization is used for initial search and delta updates
+    const queryTerms = index.tokenizeQuery(query);
 
     // Execute initial search
     const searchResults = index.search(query, options);
@@ -598,7 +597,10 @@ export class SearchCoordinator {
   /**
    * Score a single document against a subscription's query.
    *
-   * @param subscription - The subscription containing query and options
+   * OPTIMIZED: O(Q × D) complexity instead of O(N) full index scan.
+   * Uses pre-tokenized queryTerms and FullTextIndex.scoreSingleDocument().
+   *
+   * @param subscription - The subscription containing query and cached queryTerms
    * @param key - Document key
    * @param value - Document value
    * @param index - The FullTextIndex for this map
@@ -610,22 +612,16 @@ export class SearchCoordinator {
     value: Record<string, unknown>,
     index: FullTextIndex
   ): { score: number; matchedTerms: string[] } | null {
-    // Use the index to search for just this document
-    // This is a simplification - ideally we'd have a method to score a single doc
-    // For now, we search and filter to the specific key
-    const results = index.search(subscription.query, {
-      ...subscription.options,
-      limit: undefined, // Don't limit to find our doc
-    });
+    // Use O(1) single-document scoring with cached queryTerms
+    const result = index.scoreSingleDocument(key, subscription.queryTerms, value);
 
-    const match = results.find(r => r.docId === key);
-    if (match) {
-      return {
-        score: match.score,
-        matchedTerms: match.matchedTerms || [],
-      };
+    if (!result) {
+      return null;
     }
 
-    return null;
+    return {
+      score: result.score,
+      matchedTerms: result.matchedTerms || [],
+    };
   }
 }
