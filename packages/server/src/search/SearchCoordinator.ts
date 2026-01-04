@@ -78,6 +78,35 @@ export type SendUpdateCallback = (
 ) => void;
 
 /**
+ * Batched update for a single document change.
+ */
+export interface BatchedUpdate {
+  key: string;
+  value: unknown;
+  score: number;
+  matchedTerms: string[];
+  type: SearchUpdateType;
+}
+
+/**
+ * Callback type for sending batched updates to clients.
+ */
+export type SendBatchUpdateCallback = (
+  clientId: string,
+  subscriptionId: string,
+  updates: BatchedUpdate[]
+) => void;
+
+/**
+ * Pending notification waiting to be processed.
+ */
+interface PendingNotification {
+  key: string;
+  value: Record<string, unknown> | null;
+  changeType: 'add' | 'update' | 'remove';
+}
+
+/**
  * SearchCoordinator manages full-text search indexes for the server.
  *
  * Responsibilities:
@@ -129,6 +158,22 @@ export class SearchCoordinator {
   /** Callback for sending updates to clients */
   private sendUpdate?: SendUpdateCallback;
 
+  /** Callback for sending batched updates to clients */
+  private sendBatchUpdate?: SendBatchUpdateCallback;
+
+  // ============================================
+  // Phase 11.2: Notification Batching
+  // ============================================
+
+  /** Queue of pending notifications per map */
+  private readonly pendingNotifications: Map<string, PendingNotification[]> = new Map();
+
+  /** Timer for batching notifications */
+  private notificationTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Batch interval in milliseconds (~1 frame at 60fps) */
+  private readonly BATCH_INTERVAL = 16;
+
   constructor() {
     logger.debug('SearchCoordinator initialized');
   }
@@ -139,6 +184,17 @@ export class SearchCoordinator {
    */
   setSendUpdateCallback(callback: SendUpdateCallback): void {
     this.sendUpdate = callback;
+  }
+
+  /**
+   * Set the callback for sending batched updates to clients.
+   * When set, notifications are batched within BATCH_INTERVAL (16ms) window.
+   * Called by ServerCoordinator during initialization.
+   *
+   * @param callback - Function to call with batched updates
+   */
+  setSendBatchUpdateCallback(callback: SendBatchUpdateCallback): void {
+    this.sendBatchUpdate = callback;
   }
 
   /**
@@ -351,6 +407,12 @@ export class SearchCoordinator {
     this.subscriptions.clear();
     this.subscriptionsByMap.clear();
     this.subscriptionsByClient.clear();
+    // Phase 11.2: Clear batching state
+    this.pendingNotifications.clear();
+    if (this.notificationTimer) {
+      clearTimeout(this.notificationTimer);
+      this.notificationTimer = null;
+    }
     logger.debug('SearchCoordinator cleared');
   }
 
@@ -622,6 +684,172 @@ export class SearchCoordinator {
     return {
       score: result.score,
       matchedTerms: result.matchedTerms || [],
+    };
+  }
+
+  // ============================================
+  // Phase 11.2: Notification Batching Methods
+  // ============================================
+
+  /**
+   * Queue a notification for batched processing.
+   * Notifications are collected and processed together after BATCH_INTERVAL.
+   *
+   * @param mapName - Name of the map that changed
+   * @param key - Document key that changed
+   * @param value - New document value (null if removed)
+   * @param changeType - Type of change
+   */
+  queueNotification(
+    mapName: string,
+    key: string,
+    value: Record<string, unknown> | null,
+    changeType: 'add' | 'update' | 'remove'
+  ): void {
+    if (!this.sendBatchUpdate) {
+      // No batch callback, fall back to immediate notification
+      this.notifySubscribers(mapName, key, value, changeType);
+      return;
+    }
+
+    const notification: PendingNotification = { key, value, changeType };
+
+    if (!this.pendingNotifications.has(mapName)) {
+      this.pendingNotifications.set(mapName, []);
+    }
+    this.pendingNotifications.get(mapName)!.push(notification);
+
+    this.scheduleNotificationFlush();
+  }
+
+  /**
+   * Schedule a flush of pending notifications.
+   * Uses setTimeout to batch notifications within BATCH_INTERVAL window.
+   */
+  private scheduleNotificationFlush(): void {
+    if (this.notificationTimer) {
+      return; // Already scheduled
+    }
+
+    this.notificationTimer = setTimeout(() => {
+      this.flushNotifications();
+      this.notificationTimer = null;
+    }, this.BATCH_INTERVAL);
+  }
+
+  /**
+   * Flush all pending notifications.
+   * Processes each map's notifications and sends batched updates.
+   */
+  flushNotifications(): void {
+    if (this.pendingNotifications.size === 0) {
+      return;
+    }
+
+    for (const [mapName, notifications] of this.pendingNotifications) {
+      this.processBatchedNotifications(mapName, notifications);
+    }
+    this.pendingNotifications.clear();
+  }
+
+  /**
+   * Process batched notifications for a single map.
+   * Computes updates for each subscription and sends as a batch.
+   *
+   * @param mapName - Name of the map
+   * @param notifications - Array of pending notifications
+   */
+  private processBatchedNotifications(
+    mapName: string,
+    notifications: PendingNotification[]
+  ): void {
+    const subscriptionIds = this.subscriptionsByMap.get(mapName);
+    if (!subscriptionIds || subscriptionIds.size === 0) {
+      return;
+    }
+
+    const index = this.indexes.get(mapName);
+    if (!index) {
+      return;
+    }
+
+    for (const subId of subscriptionIds) {
+      const sub = this.subscriptions.get(subId);
+      if (!sub) continue;
+
+      const updates: BatchedUpdate[] = [];
+
+      for (const { key, value, changeType } of notifications) {
+        const update = this.computeSubscriptionUpdate(sub, key, value, changeType, index);
+        if (update) {
+          updates.push(update);
+        }
+      }
+
+      if (updates.length > 0 && this.sendBatchUpdate) {
+        this.sendBatchUpdate(sub.clientId, subId, updates);
+      }
+    }
+  }
+
+  /**
+   * Compute the update for a single document change against a subscription.
+   * Returns null if no update is needed.
+   *
+   * @param subscription - The subscription to check
+   * @param key - Document key
+   * @param value - Document value (null if removed)
+   * @param changeType - Type of change
+   * @param index - The FullTextIndex for this map
+   * @returns BatchedUpdate or null
+   */
+  private computeSubscriptionUpdate(
+    subscription: SearchSubscription,
+    key: string,
+    value: Record<string, unknown> | null,
+    changeType: 'add' | 'update' | 'remove',
+    index: FullTextIndex
+  ): BatchedUpdate | null {
+    const wasInResults = subscription.currentResults.has(key);
+    let isInResults = false;
+    let newScore = 0;
+    let matchedTerms: string[] = [];
+
+    if (changeType !== 'remove' && value !== null) {
+      const result = this.scoreDocument(subscription, key, value, index);
+      if (result && result.score >= (subscription.options.minScore ?? 0)) {
+        isInResults = true;
+        newScore = result.score;
+        matchedTerms = result.matchedTerms;
+      }
+    }
+
+    let updateType: SearchUpdateType | null = null;
+
+    if (!wasInResults && isInResults) {
+      updateType = 'ENTER';
+      subscription.currentResults.set(key, { score: newScore, matchedTerms });
+    } else if (wasInResults && !isInResults) {
+      updateType = 'LEAVE';
+      subscription.currentResults.delete(key);
+    } else if (wasInResults && isInResults) {
+      const old = subscription.currentResults.get(key)!;
+      if (Math.abs(old.score - newScore) > 0.0001 || changeType === 'update') {
+        updateType = 'UPDATE';
+        subscription.currentResults.set(key, { score: newScore, matchedTerms });
+      }
+    }
+
+    if (!updateType) {
+      return null;
+    }
+
+    return {
+      key,
+      value,
+      score: newScore,
+      matchedTerms,
+      type: updateType,
     };
   }
 }
