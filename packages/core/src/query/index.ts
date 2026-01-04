@@ -56,8 +56,19 @@ export {
   type FilterStep,
   type NotStep,
   type QueryPlan,
+  // FTS Query Types (Phase 12)
+  type MatchQueryOptions,
+  type MatchQueryNode,
+  type MatchPhraseQueryNode,
+  type MatchPrefixQueryNode,
+  type FTSQueryNode,
+  // Type guards
   isSimpleQuery,
   isLogicalQuery,
+  isFTSQuery,
+  isMatchQuery,
+  isMatchPhraseQuery,
+  isMatchPrefixQuery,
 } from './QueryTypes';
 
 // Index Registry
