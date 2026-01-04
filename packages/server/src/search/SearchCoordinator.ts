@@ -548,6 +548,8 @@ export class SearchCoordinator {
       let newScore = 0;
       let matchedTerms: string[] = [];
 
+      logger.debug({ subId, key, wasInResults, changeType }, 'Processing subscription update');
+
       if (changeType !== 'remove' && value !== null) {
         // Re-score document against subscription query
         const result = this.scoreDocument(sub, key, value, index);
@@ -569,12 +571,15 @@ export class SearchCoordinator {
         sub.currentResults.delete(key);
       } else if (wasInResults && isInResults) {
         const old = sub.currentResults.get(key)!;
-        // Only send UPDATE if score changed meaningfully
-        if (Math.abs(old.score - newScore) > 0.0001) {
+        // Send UPDATE if score changed OR if this is an update change type
+        // (client should know document content changed even if score is same)
+        if (Math.abs(old.score - newScore) > 0.0001 || changeType === 'update') {
           updateType = 'UPDATE';
           sub.currentResults.set(key, { score: newScore, matchedTerms });
         }
       }
+
+      logger.debug({ subId, key, wasInResults, isInResults, updateType, newScore }, 'Update decision');
 
       if (updateType) {
         this.sendUpdate(
