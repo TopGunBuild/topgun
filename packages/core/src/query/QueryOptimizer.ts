@@ -22,8 +22,16 @@ import type {
   QueryPlan,
   PlanStep,
   QueryOptions,
+  FTSQueryNode,
+  FTSScanStep,
+  FusionStep,
+  FusionStrategy,
+  MatchQueryNode,
+  MatchPhraseQueryNode,
+  MatchPrefixQueryNode,
 } from './QueryTypes';
-import { isLogicalQuery, isSimpleQuery } from './QueryTypes';
+import { isLogicalQuery, isSimpleQuery, isFTSQuery } from './QueryTypes';
+import type { FullTextIndex } from '../fts';
 import type { IndexQuery } from './indexes/types';
 import type { CompoundIndex } from './indexes/CompoundIndex';
 
@@ -35,6 +43,22 @@ export interface QueryOptimizerOptions<K, V> {
   indexRegistry: IndexRegistry<K, V>;
   /** Standing query registry for pre-computed queries (optional) */
   standingQueryRegistry?: StandingQueryRegistry<K, V>;
+  /** Full-text index registry for FTS queries (Phase 12) */
+  fullTextIndexes?: Map<string, FullTextIndex>;
+}
+
+/**
+ * Classified predicates by type for hybrid query planning.
+ */
+export interface ClassifiedPredicates {
+  /** Exact match predicates (eq, neq, in) */
+  exactPredicates: Query[];
+  /** Range predicates (gt, gte, lt, lte, between) */
+  rangePredicates: Query[];
+  /** Full-text search predicates (match, matchPhrase, matchPrefix) */
+  ftsPredicates: FTSQueryNode[];
+  /** Other predicates (like, regex, contains, etc.) */
+  otherPredicates: Query[];
 }
 
 /**
@@ -46,6 +70,7 @@ export interface QueryOptimizerOptions<K, V> {
 export class QueryOptimizer<K, V> {
   private readonly indexRegistry: IndexRegistry<K, V>;
   private readonly standingQueryRegistry?: StandingQueryRegistry<K, V>;
+  private readonly fullTextIndexes: Map<string, FullTextIndex>;
 
   /**
    * Create a QueryOptimizer.
@@ -61,11 +86,52 @@ export class QueryOptimizer<K, V> {
       // Options object
       this.indexRegistry = indexRegistryOrOptions.indexRegistry;
       this.standingQueryRegistry = indexRegistryOrOptions.standingQueryRegistry;
+      this.fullTextIndexes = indexRegistryOrOptions.fullTextIndexes ?? new Map();
     } else {
       // Legacy: direct IndexRegistry
       this.indexRegistry = indexRegistryOrOptions;
       this.standingQueryRegistry = standingQueryRegistry;
+      this.fullTextIndexes = new Map();
     }
+  }
+
+  /**
+   * Register a full-text index for a field (Phase 12).
+   *
+   * @param field - Field name
+   * @param index - FullTextIndex instance
+   */
+  registerFullTextIndex(field: string, index: FullTextIndex): void {
+    this.fullTextIndexes.set(field, index);
+  }
+
+  /**
+   * Unregister a full-text index (Phase 12).
+   *
+   * @param field - Field name
+   */
+  unregisterFullTextIndex(field: string): void {
+    this.fullTextIndexes.delete(field);
+  }
+
+  /**
+   * Get registered full-text index for a field (Phase 12).
+   *
+   * @param field - Field name
+   * @returns FullTextIndex or undefined
+   */
+  getFullTextIndex(field: string): FullTextIndex | undefined {
+    return this.fullTextIndexes.get(field);
+  }
+
+  /**
+   * Check if a full-text index exists for a field (Phase 12).
+   *
+   * @param field - Field name
+   * @returns True if FTS index exists
+   */
+  hasFullTextIndex(field: string): boolean {
+    return this.fullTextIndexes.has(field);
   }
 
   /**
@@ -156,11 +222,177 @@ export class QueryOptimizer<K, V> {
   private optimizeNode(query: Query): PlanStep {
     if (isLogicalQuery(query)) {
       return this.optimizeLogical(query);
+    } else if (isFTSQuery(query)) {
+      return this.optimizeFTS(query);
     } else if (isSimpleQuery(query)) {
       return this.optimizeSimple(query);
     } else {
       // Unknown query type - fall back to full scan
       return { type: 'full-scan', predicate: query };
+    }
+  }
+
+  /**
+   * Optimize a full-text search query (Phase 12).
+   */
+  private optimizeFTS(query: FTSQueryNode): PlanStep {
+    const field = query.attribute;
+
+    // Check if we have a FTS index for this field
+    if (!this.hasFullTextIndex(field)) {
+      // No FTS index - fall back to full scan
+      return { type: 'full-scan', predicate: query };
+    }
+
+    // Create FTS scan step
+    return this.buildFTSScanStep(query);
+  }
+
+  /**
+   * Build an FTS scan step from a query node (Phase 12).
+   */
+  private buildFTSScanStep(query: FTSQueryNode): FTSScanStep {
+    const field = query.attribute;
+
+    switch (query.type) {
+      case 'match':
+        return {
+          type: 'fts-scan',
+          field,
+          query: query.query,
+          ftsType: 'match',
+          options: query.options,
+          returnsScored: true,
+          estimatedCost: this.estimateFTSCost(field),
+        };
+
+      case 'matchPhrase':
+        return {
+          type: 'fts-scan',
+          field,
+          query: query.query,
+          ftsType: 'matchPhrase',
+          options: query.slop !== undefined ? { fuzziness: query.slop } : undefined,
+          returnsScored: true,
+          estimatedCost: this.estimateFTSCost(field),
+        };
+
+      case 'matchPrefix':
+        return {
+          type: 'fts-scan',
+          field,
+          query: query.prefix,
+          ftsType: 'matchPrefix',
+          options: query.maxExpansions !== undefined ? { fuzziness: query.maxExpansions } : undefined,
+          returnsScored: true,
+          estimatedCost: this.estimateFTSCost(field),
+        };
+
+      default:
+        throw new Error(`Unknown FTS query type: ${(query as FTSQueryNode).type}`);
+    }
+  }
+
+  /**
+   * Estimate cost of FTS query based on index size (Phase 12).
+   */
+  private estimateFTSCost(field: string): number {
+    const index = this.fullTextIndexes.get(field);
+    if (!index) {
+      return Number.MAX_SAFE_INTEGER;
+    }
+
+    // FTS cost is based on document count
+    // Roughly O(log N) for term lookup + O(M) for scoring M matching docs
+    const docCount = index.getSize();
+
+    // Base cost + log scale factor
+    return 50 + Math.log2(docCount + 1) * 10;
+  }
+
+  /**
+   * Classify predicates by type for hybrid query planning (Phase 12).
+   *
+   * @param predicates - Array of predicates to classify
+   * @returns Classified predicates
+   */
+  classifyPredicates(predicates: Query[]): ClassifiedPredicates {
+    const result: ClassifiedPredicates = {
+      exactPredicates: [],
+      rangePredicates: [],
+      ftsPredicates: [],
+      otherPredicates: [],
+    };
+
+    for (const pred of predicates) {
+      if (isFTSQuery(pred)) {
+        result.ftsPredicates.push(pred);
+      } else if (isSimpleQuery(pred)) {
+        switch (pred.type) {
+          case 'eq':
+          case 'neq':
+          case 'in':
+            result.exactPredicates.push(pred);
+            break;
+          case 'gt':
+          case 'gte':
+          case 'lt':
+          case 'lte':
+          case 'between':
+            result.rangePredicates.push(pred);
+            break;
+          default:
+            result.otherPredicates.push(pred);
+        }
+      } else if (isLogicalQuery(pred)) {
+        // Logical predicates go to other
+        result.otherPredicates.push(pred);
+      } else {
+        result.otherPredicates.push(pred);
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Determine fusion strategy based on step types (Phase 12).
+   *
+   * Strategy selection:
+   * - All binary (exact/range with no scores) → 'intersection'
+   * - All scored (FTS) → 'score-filter' (filter by score, sort by score)
+   * - Mixed (binary + scored) → 'rrf' (Reciprocal Rank Fusion)
+   *
+   * @param steps - Plan steps to fuse
+   * @returns Fusion strategy
+   */
+  determineFusionStrategy(steps: PlanStep[]): FusionStrategy {
+    const hasScored = steps.some((s) => this.stepReturnsScored(s));
+    const hasBinary = steps.some((s) => !this.stepReturnsScored(s));
+
+    if (hasScored && hasBinary) {
+      // Mixed: use RRF to combine ranked and unranked results
+      return 'rrf';
+    } else if (hasScored) {
+      // All scored: filter by score, combine scores
+      return 'score-filter';
+    } else {
+      // All binary: simple intersection
+      return 'intersection';
+    }
+  }
+
+  /**
+   * Check if a plan step returns scored results (Phase 12).
+   */
+  private stepReturnsScored(step: PlanStep): boolean {
+    switch (step.type) {
+      case 'fts-scan':
+        return true;
+      case 'fusion':
+        return step.returnsScored;
+      default:
+        return false;
     }
   }
 
@@ -508,6 +740,20 @@ export class QueryOptimizer<K, V> {
         // NOT is expensive (needs all keys)
         return this.estimateCost(step.source) + 100;
 
+      // Phase 12: FTS step types
+      case 'fts-scan':
+        return step.estimatedCost;
+
+      case 'fusion':
+        // Fusion cost is sum of all child costs + fusion overhead
+        return step.steps.reduce((sum, s) => {
+          const cost = this.estimateCost(s);
+          if (cost === Number.MAX_SAFE_INTEGER) {
+            return Number.MAX_SAFE_INTEGER;
+          }
+          return Math.min(sum + cost, Number.MAX_SAFE_INTEGER);
+        }, 0) + 20; // Fusion overhead
+
       default:
         return Number.MAX_SAFE_INTEGER;
     }
@@ -533,6 +779,13 @@ export class QueryOptimizer<K, V> {
 
       case 'not':
         return this.usesIndexes(step.source);
+
+      // Phase 12: FTS step types
+      case 'fts-scan':
+        return true; // FTS uses FullTextIndex
+
+      case 'fusion':
+        return step.steps.some((s) => this.usesIndexes(s));
 
       default:
         return false;

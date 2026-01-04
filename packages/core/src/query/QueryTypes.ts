@@ -130,7 +130,9 @@ export type PlanStep =
   | IntersectionStep
   | UnionStep
   | FilterStep
-  | NotStep;
+  | NotStep
+  | FTSScanStep
+  | FusionStep;
 
 /**
  * Index scan step - retrieves from an index.
@@ -181,6 +183,46 @@ export interface NotStep {
   type: 'not';
   source: PlanStep;
   allKeys: () => Set<unknown>;
+}
+
+// ============== Full-Text Search Plan Types (Phase 12) ==============
+
+/**
+ * Fusion strategy for combining results from different search methods.
+ */
+export type FusionStrategy = 'intersection' | 'rrf' | 'score-filter';
+
+/**
+ * FTS scan step - full-text search using FullTextIndex.
+ * Returns scored results (documents with BM25 scores).
+ */
+export interface FTSScanStep {
+  type: 'fts-scan';
+  /** Field to search */
+  field: string;
+  /** Search query or phrase */
+  query: string;
+  /** Type of FTS query */
+  ftsType: 'match' | 'matchPhrase' | 'matchPrefix';
+  /** Query options (minScore, boost, etc.) */
+  options?: MatchQueryOptions;
+  /** This step returns scored results */
+  returnsScored: true;
+  /** Estimated cost */
+  estimatedCost: number;
+}
+
+/**
+ * Fusion step - combines results from multiple steps using RRF or other strategy.
+ */
+export interface FusionStep {
+  type: 'fusion';
+  /** Steps to combine */
+  steps: PlanStep[];
+  /** Fusion strategy */
+  strategy: FusionStrategy;
+  /** Whether result is scored (true if any child is scored) */
+  returnsScored: boolean;
 }
 
 // ============== Query Plan ==============

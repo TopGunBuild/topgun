@@ -62,6 +62,10 @@ export {
   type MatchPhraseQueryNode,
   type MatchPrefixQueryNode,
   type FTSQueryNode,
+  // FTS Plan Types (Phase 12)
+  type FTSScanStep,
+  type FusionStep,
+  type FusionStrategy,
   // Type guards
   isSimpleQuery,
   isLogicalQuery,
@@ -75,7 +79,11 @@ export {
 export { IndexRegistry, type IndexRegistryStats } from './IndexRegistry';
 
 // Query Optimizer
-export { QueryOptimizer, type QueryOptimizerOptions } from './QueryOptimizer';
+export {
+  QueryOptimizer,
+  type QueryOptimizerOptions,
+  type ClassifiedPredicates,
+} from './QueryOptimizer';
 
 // Standing Query Registry
 export {
