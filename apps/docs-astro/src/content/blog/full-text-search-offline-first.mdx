@@ -1,0 +1,214 @@
+---
+title: "Full-Text Search Goes Offline-First"
+excerpt: "Most search engines require a server. TopGun v0.8.0 brings BM25 relevance ranking to local-first apps with live subscriptions that update in real-time."
+date: "Jan 04, 2026"
+readTime: "6 min read"
+author: "Ivan Kalashnik"
+role: "Creator"
+category: "Release"
+image: "/images/blog-fts-release.png"
+avatar: "/images/ivan-avatar.jpeg"
+---
+
+Search is one of those features that seems simple until you try to build it. Type a query, get relevant results. Easy, right?
+
+Not when your users go offline.
+
+Traditional search solutions like Elasticsearch, Algolia, or Meilisearch are phenomenal products. But they share a fundamental assumption: the server is always available. In a local-first world, that assumption breaks down.
+
+Today we're releasing **TopGun v0.8.0** with full-text search that works everywhere—online, offline, and everything in between.
+
+## The Problem with Server-Dependent Search
+
+Consider a notes app. A user searches for "meeting notes" while commuting through a tunnel. With a traditional architecture:
+
+1. Client sends query to server
+2. Server searches index
+3. Server returns results
+4. Client displays results
+
+If step 1 fails (no network), the entire flow fails. The user stares at a spinner.
+
+You could cache previous results, but what about new notes created offline? What about notes edited since the last sync? The cache becomes stale instantly.
+
+## Our Approach: BM25 in the Browser
+
+TopGun v0.8.0 implements **BM25**, the same ranking algorithm used by Elasticsearch and Lucene. But instead of running on a server, it runs wherever your app runs—browser, Node.js, React Native.
+
+BM25 (Best Match 25) scores documents based on:
+
+- **Term Frequency (TF):** How often does the search term appear in this document?
+- **Inverse Document Frequency (IDF):** How rare is this term across all documents?
+- **Document Length:** Shorter documents with the term are often more relevant
+
+The formula looks intimidating, but the intuition is simple: a document mentioning "authentication" once in 10 words is more relevant than one mentioning it once in 10,000 words.
+
+```typescript
+// Enable BM25 search on any map
+const articles = new IndexedORMap<string, Article>(hlc);
+
+articles.enableFullTextSearch({
+  fields: ['title', 'body'],
+  tokenizer: {
+    minLength: 2,
+    // Porter stemmer + 174 stopwords included
+  }
+});
+
+// Search returns relevance-ranked results
+const results = articles.search('authentication bug');
+// [
+//   { key: 'a1', score: 2.34, matchedTerms: ['authent', 'bug'], value: {...} },
+//   { key: 'a5', score: 1.12, matchedTerms: ['bug'], value: {...} }
+// ]
+```
+
+## Server-Side Search with Live Updates
+
+Local search is powerful, but sometimes you need centralized indexes. Multi-user apps benefit from server-maintained indexes that stay in sync across all clients.
+
+TopGun v0.8.0 introduces **server-side FTS** with a feature we're particularly proud of: **live search subscriptions**.
+
+```typescript
+// Server configuration
+const server = new ServerCoordinator({
+  fullTextSearch: {
+    articles: {
+      fields: ['title', 'body'],
+      bm25: { k1: 1.2, b: 0.75 }
+    }
+  }
+});
+
+// Client subscribes to search results
+const handle = client.searchSubscribe('articles', 'machine learning');
+
+handle.subscribe((results) => {
+  // Called immediately with initial results
+  // Called again whenever matching documents change
+  renderResults(results);
+});
+```
+
+When a document is added, updated, or removed, the server evaluates all active search subscriptions and pushes **delta updates**:
+
+- **ENTER:** A document now matches your query
+- **UPDATE:** A matching document changed (new score or content)
+- **LEAVE:** A document no longer matches
+
+Your UI stays perfectly synchronized without polling.
+
+## The O(N) Problem We Had to Solve
+
+Our initial implementation had a critical flaw. When a document changed, we re-ran the entire search to determine if it affected any subscription. For 10,000 documents, that meant scanning 10,000 documents on every update.
+
+The math was brutal:
+
+| Documents | Time per Update |
+|-----------|-----------------|
+| 100 | ~1ms |
+| 1,000 | ~10ms |
+| 10,000 | ~100ms |
+
+At 10,000 documents, a burst of 100 updates would freeze the server for 10 seconds.
+
+## The Solution: O(1) Single-Document Scoring
+
+We realized we don't need to re-search the entire index. We only need to score the one document that changed.
+
+The insight: BM25 scoring for a single document requires only:
+- The document's tokens (cached)
+- The query's tokens (cached per subscription)
+- Global statistics (IDF, average document length)
+
+We added a **forward index** (document → tokens cache) alongside the existing **inverted index** (term → documents). Now `scoreSingleDocument()` runs in constant time regardless of index size.
+
+```typescript
+// Before: O(N) - search entire index
+const allResults = index.search(query);
+const docResult = allResults.find(r => r.key === changedDoc);
+
+// After: O(1) - score single document
+const result = index.scoreSingleDocument(docId, queryTerms, document);
+```
+
+The results speak for themselves:
+
+| Documents | Before | After | Improvement |
+|-----------|--------|-------|-------------|
+| 100 | ~1ms | ~0.01ms | 100x |
+| 1,000 | ~10ms | ~0.01ms | 1,000x |
+| 10,000 | ~100ms | ~0.01ms | 10,000x |
+
+## Notification Batching
+
+Even with O(1) scoring, rapid updates could flood clients with notifications. If 100 documents update in quick succession, we don't want to send 100 separate messages.
+
+TopGun v0.8.0 batches notifications within a 16ms window (one frame at 60fps). Multiple updates to the same document collapse into a single notification. The result: smooth UI updates even during bulk operations.
+
+## React Integration
+
+For React developers, we've added the `useSearch` hook:
+
+```tsx
+import { useSearch } from '@topgunbuild/react';
+
+function SearchResults() {
+  const [query, setQuery] = useState('');
+
+  const { results, loading, error } = useSearch('articles', query, {
+    debounceMs: 300,
+    limit: 20,
+    boost: { title: 2.0 }  // Title matches worth 2x
+  });
+
+  return (
+    <div>
+      <input
+        value={query}
+        onChange={e => setQuery(e.target.value)}
+        placeholder="Search articles..."
+      />
+
+      {loading && <Spinner />}
+
+      {results.map(r => (
+        <article key={r.key}>
+          <h2>{r.value.title}</h2>
+          <p>Score: {r.score.toFixed(2)}</p>
+          <small>Matched: {r.matchedTerms.join(', ')}</small>
+        </article>
+      ))}
+    </div>
+  );
+}
+```
+
+The hook handles debouncing, subscription management, and cleanup automatically. Results update in real-time as documents change.
+
+## What's Next
+
+Version 0.8.0 delivers standalone full-text search. Our next milestone, **Phase 12**, will unify FTS with our existing query engine:
+
+```typescript
+// Coming soon: Hybrid queries
+const results = await collection.query([
+  where('status', '==', 'active'),
+  match('description', 'wireless mouse'),  // FTS as a predicate
+  orderBy('_score', 'desc')
+]);
+```
+
+This will enable powerful hybrid queries that combine exact filters, range conditions, and full-text search with automatic result fusion.
+
+## Try It Today
+
+TopGun v0.8.0 is available now on npm:
+
+```bash
+npm install @topgunbuild/core @topgunbuild/client @topgunbuild/server
+```
+
+Check out the [Full-Text Search Guide](/docs/guides/full-text-search) for detailed documentation, or dive into the [GitHub release](https://github.com/TopGunBuild/topgun/releases/tag/v0.8.0) for the complete changelog.
+
+Search should work everywhere your app works. Now it does.
