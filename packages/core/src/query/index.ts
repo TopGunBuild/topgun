@@ -108,3 +108,12 @@ export * from './tokenization';
 
 // Adaptive Indexing (Phase 8.02)
 export * from './adaptive';
+
+// Query Executor (Phase 12)
+export {
+  QueryExecutor,
+  type StepResult,
+  type QueryResult,
+  type OrderBy,
+  type ExecuteOptions,
+} from './QueryExecutor';
