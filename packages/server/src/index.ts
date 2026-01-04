@@ -54,3 +54,6 @@ export {
 
 // Index Configuration (Phase 7.07)
 export * from './config';
+
+// Full-Text Search (Phase 11.1)
+export { SearchCoordinator, SearchConfig, ServerSearchResult } from './search';

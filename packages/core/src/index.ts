@@ -253,4 +253,30 @@ export type { Query as QueryExpression } from './query';
 
 // Indexed CRDT exports (Phase 7.07)
 export { IndexedLWWMap } from './IndexedLWWMap';
-export { IndexedORMap, type ORMapQueryResult } from './IndexedORMap';
+export { IndexedORMap, type ORMapQueryResult, type ORMapSearchResult } from './IndexedORMap';
+
+// Full-Text Search exports (Phase 11)
+export {
+  // Tokenizer
+  Tokenizer as FTSTokenizer,
+  ENGLISH_STOPWORDS,
+  porterStem,
+  // Inverted Index
+  InvertedIndex as FTSInvertedIndex,
+  // BM25 Scorer
+  BM25Scorer,
+  // Full-Text Index (high-level integration)
+  FullTextIndex,
+} from './fts';
+export type {
+  // Types
+  TokenizerOptions as FTSTokenizerOptions,
+  TermInfo,
+  Posting,
+  BM25Options,
+  ScoredDocument,
+  FullTextIndexConfig,
+  SearchOptions as FTSSearchOptions,
+  SearchResult as FTSSearchResult,
+  SerializedIndex,
+} from './fts';

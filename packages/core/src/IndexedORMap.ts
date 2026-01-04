@@ -37,6 +37,10 @@ import { UnionResultSet } from './query/resultset/UnionResultSet';
 import { FilteringResultSet } from './query/resultset/FilteringResultSet';
 import { evaluatePredicate, PredicateNode } from './predicate';
 
+// Full-Text Search imports (Phase 11)
+import { FullTextIndex } from './fts/FullTextIndex';
+import type { FullTextIndexConfig, SearchOptions as FTSSearchOptions, ScoredDocument } from './fts/types';
+
 // Adaptive indexing imports (Phase 8.02)
 import {
   QueryPatternTracker,
@@ -64,6 +68,17 @@ export interface ORMapQueryResult<K, V> {
 }
 
 /**
+ * Result of a full-text search on IndexedORMap.
+ * Includes BM25 relevance score for ranking.
+ */
+export interface ORMapSearchResult<K, V> extends ORMapQueryResult<K, V> {
+  /** BM25 relevance score */
+  score: number;
+  /** Terms from the query that matched */
+  matchedTerms: string[];
+}
+
+/**
  * ORMap with index support.
  *
  * Note: ORMap stores multiple values per key (with tags).
@@ -83,6 +98,9 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
   private readonly autoIndexManager: AutoIndexManager<string, V> | null;
   private readonly defaultIndexingStrategy: DefaultIndexingStrategy<V> | null;
   private readonly options: IndexedMapOptions;
+
+  // Full-Text Search (Phase 11)
+  private fullTextIndex: FullTextIndex | null = null;
 
   constructor(hlc: HLC, options: IndexedMapOptions = {}) {
     super(hlc);
@@ -185,6 +203,120 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
   addIndex<A>(index: Index<string, V, A>): void {
     this.indexRegistry.addIndex(index);
     this.buildIndexFromExisting(index);
+  }
+
+  // ==================== Full-Text Search (Phase 11) ====================
+
+  /**
+   * Enable BM25-based full-text search on specified fields.
+   * This creates a FullTextIndex for relevance-ranked search.
+   *
+   * Note: This is different from addInvertedIndex which provides
+   * boolean matching (contains/containsAll/containsAny). This method
+   * provides BM25 relevance scoring for true full-text search.
+   *
+   * @param config - Full-text index configuration
+   * @returns The created FullTextIndex
+   *
+   * @example
+   * ```typescript
+   * const map = new IndexedORMap(hlc);
+   * map.enableFullTextSearch({
+   *   fields: ['title', 'body'],
+   *   tokenizer: { minLength: 2 },
+   *   bm25: { k1: 1.2, b: 0.75 }
+   * });
+   *
+   * map.add('doc1', { title: 'Hello World', body: 'Test content' });
+   * const results = map.search('hello');
+   * // [{ key: 'doc1', tag: '...', value: {...}, score: 0.5, matchedTerms: ['hello'] }]
+   * ```
+   */
+  enableFullTextSearch(config: FullTextIndexConfig): FullTextIndex {
+    // Create the full-text index
+    this.fullTextIndex = new FullTextIndex(config);
+
+    // Build from existing data
+    const snapshot = this.getSnapshot();
+    const entries: Array<[string, Record<string, unknown>]> = [];
+
+    for (const [key, tagMap] of snapshot.items) {
+      for (const [tag, record] of tagMap) {
+        if (!snapshot.tombstones.has(tag)) {
+          const compositeKey = this.createCompositeKey(key, tag);
+          entries.push([compositeKey, record.value as Record<string, unknown>]);
+        }
+      }
+    }
+
+    this.fullTextIndex.buildFromEntries(entries);
+
+    return this.fullTextIndex;
+  }
+
+  /**
+   * Check if full-text search is enabled.
+   *
+   * @returns true if full-text search is enabled
+   */
+  isFullTextSearchEnabled(): boolean {
+    return this.fullTextIndex !== null;
+  }
+
+  /**
+   * Get the full-text index (if enabled).
+   *
+   * @returns The FullTextIndex or null
+   */
+  getFullTextIndex(): FullTextIndex | null {
+    return this.fullTextIndex;
+  }
+
+  /**
+   * Perform a BM25-ranked full-text search.
+   * Results are sorted by relevance score (highest first).
+   *
+   * @param query - Search query text
+   * @param options - Search options (limit, minScore, boost)
+   * @returns Array of search results with scores, sorted by relevance
+   *
+   * @throws Error if full-text search is not enabled
+   */
+  search(query: string, options?: FTSSearchOptions): ORMapSearchResult<K, V>[] {
+    if (!this.fullTextIndex) {
+      throw new Error('Full-text search is not enabled. Call enableFullTextSearch() first.');
+    }
+
+    const scoredDocs = this.fullTextIndex.search(query, options);
+    const results: ORMapSearchResult<K, V>[] = [];
+
+    for (const { docId: compositeKey, score, matchedTerms } of scoredDocs) {
+      const [key, tag] = this.parseCompositeKey(compositeKey);
+      const records = this.getRecords(key as K);
+      const record = records.find((r) => r.tag === tag);
+
+      if (record) {
+        results.push({
+          key: key as K,
+          tag,
+          value: record.value,
+          score,
+          matchedTerms: matchedTerms ?? [],
+        });
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * Disable full-text search and release the index.
+   */
+  disableFullTextSearch(): void {
+    if (this.fullTextIndex) {
+      this.fullTextIndex.clear();
+      this.fullTextIndex = null;
+    }
   }
 
   /**
@@ -364,6 +496,12 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
     const record = super.add(key, value, ttlMs);
     const compositeKey = this.createCompositeKey(key, record.tag);
     this.indexRegistry.onRecordAdded(compositeKey, value);
+
+    // Update full-text index (Phase 11)
+    if (this.fullTextIndex) {
+      this.fullTextIndex.onSet(compositeKey, value as Record<string, unknown>);
+    }
+
     return record;
   }
 
@@ -378,6 +516,11 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
     for (const record of matchingRecords) {
       const compositeKey = this.createCompositeKey(key, record.tag);
       this.indexRegistry.onRecordRemoved(compositeKey, record.value);
+
+      // Update full-text index (Phase 11)
+      if (this.fullTextIndex) {
+        this.fullTextIndex.onRemove(compositeKey);
+      }
     }
 
     return result;
@@ -391,6 +534,11 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
     if (applied) {
       const compositeKey = this.createCompositeKey(key, record.tag);
       this.indexRegistry.onRecordAdded(compositeKey, record.value);
+
+      // Update full-text index (Phase 11)
+      if (this.fullTextIndex) {
+        this.fullTextIndex.onSet(compositeKey, record.value as Record<string, unknown>);
+      }
     }
     return applied;
   }
@@ -418,6 +566,11 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
     if (removedValue !== undefined && removedKey !== undefined) {
       const compositeKey = this.createCompositeKey(removedKey, tag);
       this.indexRegistry.onRecordRemoved(compositeKey, removedValue);
+
+      // Update full-text index (Phase 11)
+      if (this.fullTextIndex) {
+        this.fullTextIndex.onRemove(compositeKey);
+      }
     }
   }
 
@@ -427,6 +580,11 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
   public clear(): void {
     super.clear();
     this.indexRegistry.clear();
+
+    // Clear full-text index (Phase 11)
+    if (this.fullTextIndex) {
+      this.fullTextIndex.clear();
+    }
   }
 
   // ==================== Helper Methods ====================

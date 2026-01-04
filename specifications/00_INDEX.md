@@ -39,3 +39,9 @@ This directory contains the definitive technical specifications for the TypeScri
    - **Filtering**: Smart Server-side event filtering.
    - **Sorting/Pagination**: Client-side implementation strategy.
    - **Infinite Scroll**: Windowed replication pattern.
+
+8. **[08_FULLTEXT_SEARCH.md](./08_FULLTEXT_SEARCH.md)**
+   - **BM25 Search**: Server-side full-text search with relevance ranking.
+   - **Live Search**: Subscription-based search with delta updates.
+   - **Protocol**: SEARCH, SEARCH_SUB, SEARCH_UPDATE messages.
+   - **Cluster Support**: Scatter-gather distributed search.

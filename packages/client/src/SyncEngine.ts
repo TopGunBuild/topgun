@@ -1,5 +1,5 @@
 import { HLC, LWWMap, ORMap, serialize, deserialize, evaluatePredicate } from '@topgunbuild/core';
-import type { EntryProcessorDef, EntryProcessorResult, EntryProcessKeyResult } from '@topgunbuild/core';
+import type { EntryProcessorDef, EntryProcessorResult, EntryProcessKeyResult, SearchOptions, SearchRespPayload } from '@topgunbuild/core';
 import type { LWWRecord, ORMapRecord, Timestamp } from '@topgunbuild/core';
 import type { IStorageAdapter } from './IStorageAdapter';
 import { QueryHandle } from './QueryHandle';
@@ -20,6 +20,16 @@ import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 import type { IConnectionProvider } from './types';
 import { SingleServerProvider } from './connection/SingleServerProvider';
 import { ConflictResolverClient } from './ConflictResolverClient';
+
+/**
+ * Search result item from server.
+ */
+export interface SearchResult<T> {
+  key: string;
+  value: T;
+  score: number;
+  matchedTerms: string[];
+}
 
 export interface OpLogEntry {
   id: string; // Unique ID for the operation
@@ -1227,6 +1237,27 @@ export class SyncEngine {
         this.conflictResolverClient.handleMergeRejected(message);
         break;
       }
+
+      // ============ Full-Text Search Message Handlers (Phase 11.1a) ============
+
+      case 'SEARCH_RESP': {
+        logger.debug({ requestId: message.payload?.requestId, resultCount: message.payload?.results?.length }, 'Received SEARCH_RESP');
+        this.handleSearchResponse(message.payload);
+        break;
+      }
+
+      // ============ Live Search Message Handlers (Phase 11.1b) ============
+
+      case 'SEARCH_UPDATE': {
+        logger.debug({
+          subscriptionId: message.payload?.subscriptionId,
+          key: message.payload?.key,
+          type: message.payload?.type
+        }, 'Received SEARCH_UPDATE');
+        // SEARCH_UPDATE is handled by SearchHandle via emitMessage
+        // No additional processing needed here
+        break;
+      }
     }
 
     if (message.timestamp) {
@@ -2189,6 +2220,99 @@ export class SyncEngine {
         listener(message);
       } catch (e) {
         logger.error({ err: e }, 'Message listener error');
+      }
+    }
+  }
+
+  // ============================================
+  // Full-Text Search Methods (Phase 11.1a)
+  // ============================================
+
+  /** Pending search requests by requestId */
+  private pendingSearchRequests: Map<string, {
+    resolve: (result: SearchResult<unknown>[]) => void;
+    reject: (error: Error) => void;
+    timeout: ReturnType<typeof setTimeout>;
+  }> = new Map();
+
+  /** Default timeout for search requests (ms) */
+  private static readonly SEARCH_TIMEOUT = 30000;
+
+  /**
+   * Perform a one-shot BM25 search on the server.
+   *
+   * @param mapName Name of the map to search
+   * @param query Search query text
+   * @param options Search options (limit, minScore, boost)
+   * @returns Promise resolving to search results
+   */
+  public async search<T>(
+    mapName: string,
+    query: string,
+    options?: SearchOptions
+  ): Promise<SearchResult<T>[]> {
+    if (!this.isAuthenticated()) {
+      throw new Error('Not connected to server');
+    }
+
+    const requestId = crypto.randomUUID();
+
+    return new Promise((resolve, reject) => {
+      // Set timeout
+      const timeout = setTimeout(() => {
+        this.pendingSearchRequests.delete(requestId);
+        reject(new Error('Search request timed out'));
+      }, SyncEngine.SEARCH_TIMEOUT);
+
+      // Store pending request
+      this.pendingSearchRequests.set(requestId, {
+        resolve: (results) => {
+          clearTimeout(timeout);
+          resolve(results as SearchResult<T>[]);
+        },
+        reject: (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        },
+        timeout,
+      });
+
+      // Send search request
+      const sent = this.sendMessage({
+        type: 'SEARCH',
+        payload: {
+          requestId,
+          mapName,
+          query,
+          options,
+        },
+      });
+
+      if (!sent) {
+        this.pendingSearchRequests.delete(requestId);
+        clearTimeout(timeout);
+        reject(new Error('Failed to send search request'));
+      }
+    });
+  }
+
+  /**
+   * Handle search response from server.
+   */
+  private handleSearchResponse(payload: {
+    requestId: string;
+    results: SearchResult<unknown>[];
+    totalCount: number;
+    error?: string;
+  }): void {
+    const pending = this.pendingSearchRequests.get(payload.requestId);
+    if (pending) {
+      this.pendingSearchRequests.delete(payload.requestId);
+
+      if (payload.error) {
+        pending.reject(new Error(payload.error));
+      } else {
+        pending.resolve(payload.results);
       }
     }
   }

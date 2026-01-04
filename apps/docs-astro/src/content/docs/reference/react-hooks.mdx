@@ -5,7 +5,7 @@ order: 24
 ---
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
-import { ChevronRight, Zap, Database, MessageSquare, Settings, ScrollText, Shield, AlertTriangle } from 'lucide-react';
+import { ChevronRight, Zap, Database, MessageSquare, Settings, ScrollText, Shield, AlertTriangle, Search } from 'lucide-react';
 
 export const setupCode = `import { TopGunClient } from '@topgunbuild/client';
 import { TopGunProvider } from '@topgunbuild/react';
@@ -247,6 +247,69 @@ function AuditLog() {
           <li key={e.sequence.toString()}>
             {new Date(e.timestamp.millis).toISOString()} - {e.type} {e.key}
           </li>
+        ))}
+      </ul>
+    </div>
+  );
+}`;
+
+export const useSearchCode = `import { useSearch } from '@topgunbuild/react';
+import { useState } from 'react';
+
+function SearchResults() {
+  const [searchTerm, setSearchTerm] = useState('');
+
+  const { results, loading, error } = useSearch<Article>('articles', searchTerm, {
+    limit: 20,
+    boost: { title: 2.0 }
+  });
+
+  if (loading) return <div>Searching...</div>;
+  if (error) return <div>Error: {error.message}</div>;
+
+  return (
+    <div>
+      <input
+        value={searchTerm}
+        onChange={(e) => setSearchTerm(e.target.value)}
+        placeholder="Search articles..."
+      />
+      <ul>
+        {results.map(r => (
+          <li key={r.key}>
+            [{r.score.toFixed(2)}] {r.value.title}
+            <small>Matched: {r.matchedTerms.join(', ')}</small>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}`;
+
+export const useSearchDebounceCode = `import { useSearch } from '@topgunbuild/react';
+import { useState } from 'react';
+
+function ProductSearch() {
+  const [input, setInput] = useState('');
+
+  // Debounce by 300ms for search-as-you-type
+  const { results, loading } = useSearch<Product>('products', input, {
+    debounceMs: 300,
+    limit: 10,
+    minScore: 0.5
+  });
+
+  return (
+    <div>
+      <input
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        placeholder="Search products..."
+      />
+      {loading && <span>Searching...</span>}
+      <ul>
+        {results.map(r => (
+          <li key={r.key}>{r.value.name} - \${r.value.price}</li>
         ))}
       </ul>
     </div>
@@ -524,6 +587,60 @@ interface JournalEvent {
   <p className="text-sm text-blue-800 dark:text-blue-200">
     <strong>Server-side Feature:</strong> The Event Journal must be enabled on the server with <code className="bg-blue-100 dark:bg-blue-800 px-1 rounded">eventJournalEnabled: true</code>.
     Events are persisted to PostgreSQL for durability. See the <a href="/docs/guides/event-journal" className="underline">Event Journal Guide</a> for server configuration.
+  </p>
+</div>
+
+## useSearch
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Search className="w-6 h-6 text-blue-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Subscribe to live full-text search results with BM25 relevance ranking. Results update automatically when matching documents change.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="components/SearchResults.tsx" language="typescript" code={useSearchCode} />
+</div>
+
+### Return Values
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `results` | `SearchResult<T>[]` | Current search results sorted by relevance score |
+| `loading` | `boolean` | True while waiting for initial results |
+| `error` | `Error \| null` | Error if search subscription failed |
+
+### SearchResult Structure
+
+```typescript
+interface SearchResult<T> {
+  key: string;        // Document key
+  value: T;           // Full document value
+  score: number;      // BM25 relevance score
+  matchedTerms: string[];  // Stemmed terms that matched
+}
+```
+
+### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `limit` | `number` | Maximum results to return |
+| `minScore` | `number` | Minimum BM25 score threshold |
+| `boost` | `Record<string, number>` | Field boost weights (e.g., `{ title: 2.0 }`) |
+| `debounceMs` | `number` | Debounce delay for query changes |
+
+### With Debounce
+
+For search-as-you-type interfaces, use `debounceMs` to avoid excessive server requests:
+
+<div className="not-prose">
+  <CodeBlock title="components/ProductSearch.tsx" language="typescript" code={useSearchDebounceCode} />
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>Server-side Feature:</strong> Full-text search must be enabled on the server for the target map with <code className="bg-blue-100 dark:bg-blue-800 px-1 rounded">fullTextSearch</code> configuration.
+    See the <a href="/docs/guides/full-text-search" className="underline">Full-Text Search Guide</a> for server setup.
   </p>
 </div>
 
