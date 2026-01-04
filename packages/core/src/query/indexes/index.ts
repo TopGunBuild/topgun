@@ -37,3 +37,12 @@ export {
   type LazyIndex,
   type LazyIndexOptions,
 } from './lazy';
+
+// Live Query Indexes (Phase 12)
+export {
+  type ILiveQueryIndex,
+  type LiveQueryDelta,
+  type RankedResult,
+  type LiveFTSIndexOptions,
+} from './ILiveQueryIndex';
+export { LiveFTSIndex } from './LiveFTSIndex';
