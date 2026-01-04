@@ -64,6 +64,12 @@ export class FullTextIndex {
   private readonly serializer: IndexSerializer;
 
   /**
+   * Cache of document tokens for fast single-document scoring.
+   * Maps docId → tokenized terms from all indexed fields.
+   */
+  private readonly documentTokensCache: Map<string, string[]>;
+
+  /**
    * Create a new FullTextIndex.
    *
    * @param config - Index configuration
@@ -76,6 +82,7 @@ export class FullTextIndex {
     this.combinedIndex = new BM25InvertedIndex();
     this.indexedDocs = new Set();
     this.serializer = new IndexSerializer();
+    this.documentTokensCache = new Map();
 
     // Create per-field indexes
     for (const field of this.fields) {
@@ -93,6 +100,8 @@ export class FullTextIndex {
   onSet(docId: string, document: Record<string, unknown> | null | undefined): void {
     // Handle null/undefined documents
     if (!document || typeof document !== 'object') {
+      // Clear cache for null/undefined document
+      this.documentTokensCache.delete(docId);
       return;
     }
 
@@ -129,6 +138,11 @@ export class FullTextIndex {
     if (allTokens.length > 0) {
       this.combinedIndex.addDocument(docId, allTokens);
       this.indexedDocs.add(docId);
+      // Cache tokens for scoreSingleDocument
+      this.documentTokensCache.set(docId, allTokens);
+    } else {
+      // No tokens - clear cache entry
+      this.documentTokensCache.delete(docId);
     }
   }
 
@@ -145,6 +159,8 @@ export class FullTextIndex {
 
     this.removeFromIndexes(docId);
     this.indexedDocs.delete(docId);
+    // Clear cache entry
+    this.documentTokensCache.delete(docId);
   }
 
   /**
@@ -213,7 +229,7 @@ export class FullTextIndex {
    */
   load(data: SerializedIndex): void {
     this.combinedIndex = this.serializer.deserialize(data);
-    
+
     // Rebuild indexedDocs set
     this.indexedDocs.clear();
     // Use private docLengths to rebuild indexedDocs set efficiently
@@ -221,7 +237,7 @@ export class FullTextIndex {
     for (const [docId] of this.combinedIndex.getDocLengths()) {
       this.indexedDocs.add(docId);
     }
-    
+
     // Note: Field indexes are NOT restored from combined index.
     // They would need to be rebuilt from source documents or serialized separately.
     // This is a tradeoff: fast load vs field boosting availability immediately without source docs.
@@ -229,6 +245,10 @@ export class FullTextIndex {
     for (const field of this.fields) {
       this.fieldIndexes.set(field, new BM25InvertedIndex());
     }
+
+    // Clear document tokens cache - tokens must be rebuilt from source documents
+    // This is intentional: serialized index doesn't include raw tokens
+    this.documentTokensCache.clear();
   }
 
   /**
@@ -252,6 +272,7 @@ export class FullTextIndex {
       fieldIndex.clear();
     }
     this.indexedDocs.clear();
+    this.documentTokensCache.clear();
   }
 
   /**
@@ -261,6 +282,98 @@ export class FullTextIndex {
    */
   getSize(): number {
     return this.indexedDocs.size;
+  }
+
+  /**
+   * Tokenize a query string using the index's tokenizer.
+   * Public method for external use (e.g., SearchCoordinator).
+   *
+   * @param query - Query text to tokenize
+   * @returns Array of tokenized terms
+   */
+  tokenizeQuery(query: string): string[] {
+    return this.tokenizer.tokenize(query);
+  }
+
+  /**
+   * Score a single document against query terms.
+   * O(Q × D) complexity where Q = query terms, D = document tokens.
+   *
+   * This method is optimized for checking if a single document
+   * matches a query, avoiding full index scan.
+   *
+   * @param docId - Document ID to score
+   * @param queryTerms - Pre-tokenized query terms
+   * @param document - Optional document data (used if not in cache)
+   * @returns SearchResult with score and matched terms, or null if no match
+   */
+  scoreSingleDocument(
+    docId: string,
+    queryTerms: string[],
+    document?: Record<string, unknown>
+  ): SearchResult | null {
+    if (queryTerms.length === 0) {
+      return null;
+    }
+
+    // Get tokens from cache or compute from document
+    let docTokens = this.documentTokensCache.get(docId);
+
+    if (!docTokens && document) {
+      // Document not in cache - tokenize on the fly
+      docTokens = this.tokenizeDocument(document);
+    }
+
+    if (!docTokens || docTokens.length === 0) {
+      return null;
+    }
+
+    // Quick check: any query term matches document?
+    const docTokenSet = new Set(docTokens);
+    const matchedTerms = queryTerms.filter(term => docTokenSet.has(term));
+
+    if (matchedTerms.length === 0) {
+      return null;
+    }
+
+    // Calculate BM25 score
+    const score = this.scorer.scoreSingleDocument(
+      queryTerms,
+      docTokens,
+      this.combinedIndex
+    );
+
+    if (score <= 0) {
+      return null;
+    }
+
+    return {
+      docId,
+      score,
+      matchedTerms,
+      source: 'fulltext' as const,
+    };
+  }
+
+  /**
+   * Tokenize all indexed fields of a document.
+   * Internal helper for scoreSingleDocument when document not in cache.
+   *
+   * @param document - Document data
+   * @returns Array of all tokens from indexed fields
+   */
+  private tokenizeDocument(document: Record<string, unknown>): string[] {
+    const allTokens: string[] = [];
+
+    for (const field of this.fields) {
+      const value = document[field];
+      if (typeof value === 'string') {
+        const tokens = this.tokenizer.tokenize(value);
+        allTokens.push(...tokens);
+      }
+    }
+
+    return allTokens;
   }
 
   /**

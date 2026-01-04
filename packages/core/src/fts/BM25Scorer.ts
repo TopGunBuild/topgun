@@ -123,6 +123,64 @@ export class BM25Scorer {
   }
 
   /**
+   * Score a single document against query terms.
+   * Uses pre-computed IDF from index but calculates TF locally.
+   *
+   * Complexity: O(Q × D) where Q = query terms, D = document tokens
+   *
+   * @param queryTerms - Tokenized query terms
+   * @param docTokens - Tokenized document terms
+   * @param index - Inverted index for IDF and avgDocLength
+   * @returns BM25 score (0 if no matching terms)
+   */
+  scoreSingleDocument(
+    queryTerms: string[],
+    docTokens: string[],
+    index: BM25InvertedIndex
+  ): number {
+    if (queryTerms.length === 0 || docTokens.length === 0) {
+      return 0;
+    }
+
+    const avgDocLength = index.getAvgDocLength();
+    const docLength = docTokens.length;
+
+    if (avgDocLength === 0) {
+      return 0;
+    }
+
+    // Build term frequency map for document
+    const termFreqs = new Map<string, number>();
+    for (const token of docTokens) {
+      termFreqs.set(token, (termFreqs.get(token) || 0) + 1);
+    }
+
+    let score = 0;
+
+    for (const term of queryTerms) {
+      const tf = termFreqs.get(term) || 0;
+      if (tf === 0) {
+        continue;
+      }
+
+      // Get IDF from index (uses cached value)
+      const idf = index.getIDF(term);
+      if (idf <= 0) {
+        continue;
+      }
+
+      // BM25 term score calculation
+      const numerator = tf * (this.k1 + 1);
+      const denominator = tf + this.k1 * (1 - this.b + this.b * (docLength / avgDocLength));
+      const termScore = idf * (numerator / denominator);
+
+      score += termScore;
+    }
+
+    return score;
+  }
+
+  /**
    * Get the k1 parameter value.
    */
   getK1(): number {
