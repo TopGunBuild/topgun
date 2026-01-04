@@ -117,3 +117,11 @@ export {
   type OrderBy,
   type ExecuteOptions,
 } from './QueryExecutor';
+
+// Unified Live Query Registry (Phase 12)
+export {
+  UnifiedLiveQueryRegistry,
+  type UnifiedLiveQueryRegistryOptions,
+  type UnifiedLiveQueryRegistryStats,
+  type UnifiedDelta,
+} from './UnifiedLiveQueryRegistry';
