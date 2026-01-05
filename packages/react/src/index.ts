@@ -15,3 +15,6 @@ export * from './hooks/useConflictResolver';
 
 // Full-Text Search hooks (Phase 11.1c)
 export * from './hooks/useSearch';
+
+// Hybrid Query hooks (Phase 12)
+export * from './hooks/useHybridQuery';

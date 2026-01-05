@@ -4,6 +4,7 @@ import type { LWWRecord, ORMapRecord, Timestamp } from '@topgunbuild/core';
 import type { IStorageAdapter } from './IStorageAdapter';
 import { QueryHandle } from './QueryHandle';
 import type { QueryFilter } from './QueryHandle';
+import type { HybridQueryHandle, HybridQueryFilter } from './HybridQueryHandle';
 import { TopicHandle } from './TopicHandle';
 import { logger } from './utils/logger';
 import { SyncStateMachine, StateChangeEvent } from './SyncStateMachine';
@@ -2327,5 +2328,205 @@ export class SyncEngine {
    */
   public getConflictResolverClient(): ConflictResolverClient {
     return this.conflictResolverClient;
+  }
+
+  // ============================================
+  // Hybrid Query Support (Phase 12)
+  // ============================================
+
+  /** Active hybrid query subscriptions */
+  private hybridQueries: Map<string, HybridQueryHandle<any>> = new Map();
+
+  /**
+   * Subscribe to a hybrid query (FTS + filter combination).
+   */
+  public subscribeToHybridQuery<T>(query: HybridQueryHandle<T>): void {
+    this.hybridQueries.set(query.id, query);
+
+    const filter = query.getFilter();
+    const mapName = query.getMapName();
+
+    // If query has FTS predicate, we need server support
+    if (query.hasFTSPredicate() && this.stateMachine.getState() === SyncState.CONNECTED) {
+      // Send hybrid query subscription to server
+      this.sendHybridQuerySubscription(query.id, mapName, filter);
+    }
+
+    // Load initial local data
+    this.runLocalHybridQuery<T>(mapName, filter).then((results) => {
+      query.onResult(results, 'local');
+    });
+  }
+
+  /**
+   * Unsubscribe from a hybrid query.
+   */
+  public unsubscribeFromHybridQuery(queryId: string): void {
+    const query = this.hybridQueries.get(queryId);
+    if (query) {
+      this.hybridQueries.delete(queryId);
+
+      // Notify server to unsubscribe
+      if (this.stateMachine.getState() === SyncState.CONNECTED && query.hasFTSPredicate()) {
+        this.sendMessage({
+          type: 'HYBRID_QUERY_UNSUBSCRIBE',
+          payload: { subscriptionId: queryId },
+        });
+      }
+    }
+  }
+
+  /**
+   * Send hybrid query subscription to server.
+   */
+  private sendHybridQuerySubscription(
+    queryId: string,
+    mapName: string,
+    filter: HybridQueryFilter
+  ): void {
+    this.sendMessage({
+      type: 'HYBRID_QUERY_SUBSCRIBE',
+      payload: {
+        subscriptionId: queryId,
+        mapName,
+        predicate: filter.predicate,
+        where: filter.where,
+        sort: filter.sort,
+        limit: filter.limit,
+        offset: filter.offset,
+      },
+    });
+  }
+
+  /**
+   * Run a local hybrid query (FTS + filter combination).
+   * For FTS predicates, returns results with score = 0 (local-only mode).
+   * Server provides actual FTS scoring.
+   */
+  public async runLocalHybridQuery<T>(
+    mapName: string,
+    filter: HybridQueryFilter
+  ): Promise<Array<{ key: string; value: T; score?: number; matchedTerms?: string[] }>> {
+    if (!this.storageAdapter) {
+      return [];
+    }
+
+    const results: Array<{ key: string; value: T; score?: number; matchedTerms?: string[] }> = [];
+
+    // Get all entries from the map using storage adapter
+    const allKeys = await this.storageAdapter.getAllKeys();
+    const mapPrefix = `${mapName}:`;
+    const entries: Array<[string, any]> = [];
+
+    for (const fullKey of allKeys) {
+      if (fullKey.startsWith(mapPrefix)) {
+        const key = fullKey.substring(mapPrefix.length);
+        const record = await this.storageAdapter.get(fullKey);
+        if (record) {
+          entries.push([key, record]);
+        }
+      }
+    }
+
+    for (const [key, record] of entries) {
+      if (record === null || record.value === null) continue;
+
+      const value = record.value as T;
+
+      // Evaluate predicate (including FTS predicates - basic local evaluation)
+      if (filter.predicate) {
+        const matches = evaluatePredicate(filter.predicate, value as Record<string, unknown>);
+        if (!matches) continue;
+      }
+
+      // Evaluate where clause
+      if (filter.where) {
+        let whereMatches = true;
+        for (const [field, expected] of Object.entries(filter.where)) {
+          if ((value as any)[field] !== expected) {
+            whereMatches = false;
+            break;
+          }
+        }
+        if (!whereMatches) continue;
+      }
+
+      results.push({
+        key,
+        value,
+        score: 0, // Local doesn't have FTS scoring
+        matchedTerms: [],
+      });
+    }
+
+    // Sort results
+    if (filter.sort) {
+      results.sort((a, b) => {
+        for (const [field, direction] of Object.entries(filter.sort!)) {
+          let valA: any;
+          let valB: any;
+
+          if (field === '_score') {
+            valA = a.score ?? 0;
+            valB = b.score ?? 0;
+          } else if (field === '_key') {
+            valA = a.key;
+            valB = b.key;
+          } else {
+            valA = (a.value as any)[field];
+            valB = (b.value as any)[field];
+          }
+
+          if (valA < valB) return direction === 'asc' ? -1 : 1;
+          if (valA > valB) return direction === 'asc' ? 1 : -1;
+        }
+        return 0;
+      });
+    }
+
+    // Apply offset and limit
+    let sliced = results;
+    if (filter.offset) {
+      sliced = sliced.slice(filter.offset);
+    }
+    if (filter.limit) {
+      sliced = sliced.slice(0, filter.limit);
+    }
+
+    return sliced;
+  }
+
+  /**
+   * Handle hybrid query response from server.
+   */
+  public handleHybridQueryResponse(payload: {
+    subscriptionId: string;
+    results: Array<{ key: string; value: unknown; score: number; matchedTerms: string[] }>;
+  }): void {
+    const query = this.hybridQueries.get(payload.subscriptionId);
+    if (query) {
+      query.onResult(payload.results as any, 'server');
+    }
+  }
+
+  /**
+   * Handle hybrid query delta update from server.
+   */
+  public handleHybridQueryDelta(payload: {
+    subscriptionId: string;
+    key: string;
+    value: unknown | null;
+    score?: number;
+    matchedTerms?: string[];
+    type: 'ENTER' | 'UPDATE' | 'LEAVE';
+  }): void {
+    const query = this.hybridQueries.get(payload.subscriptionId);
+    if (query) {
+      if (payload.type === 'LEAVE') {
+        query.onUpdate(payload.key, null);
+      } else {
+        query.onUpdate(payload.key, payload.value, payload.score, payload.matchedTerms);
+      }
+    }
   }
 }
