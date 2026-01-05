@@ -5,13 +5,39 @@ export type PredicateOp =
   | 'lt' | 'lte'
   | 'like' | 'regex'
   | 'contains' | 'containsAll' | 'containsAny'
-  | 'and' | 'or' | 'not';
+  | 'and' | 'or' | 'not'
+  // Full-Text Search predicates (Phase 12)
+  | 'match' | 'matchPhrase' | 'matchPrefix';
+
+/**
+ * Options for full-text search match predicate.
+ */
+export interface MatchOptions {
+  /** Minimum BM25 score threshold */
+  minScore?: number;
+  /** Boost factor for this field */
+  boost?: number;
+  /** Operator for multi-term queries: 'and' requires all terms, 'or' requires any */
+  operator?: 'and' | 'or';
+  /** Fuzziness level for typo tolerance (0 = exact, 1 = 1 edit, 2 = 2 edits) */
+  fuzziness?: number;
+}
 
 export interface PredicateNode {
   op: PredicateOp;
   attribute?: string;
   value?: any;
   children?: PredicateNode[];
+  /** FTS-specific: search query string */
+  query?: string;
+  /** FTS-specific: match options */
+  matchOptions?: MatchOptions;
+  /** FTS-specific: phrase slop (word distance tolerance) */
+  slop?: number;
+  /** FTS-specific: prefix for matchPrefix */
+  prefix?: string;
+  /** FTS-specific: max prefix expansions */
+  maxExpansions?: number;
 }
 
 export class Predicates {
@@ -100,6 +126,104 @@ export class Predicates {
    */
   static containsAny(attribute: string, values: string[]): PredicateNode {
     return { op: 'containsAny', attribute, value: values };
+  }
+
+  // ============== Full-Text Search Predicates (Phase 12) ==============
+
+  /**
+   * Create a 'match' predicate for full-text search.
+   * Uses BM25 scoring to find relevant documents.
+   *
+   * @param attribute - Field to search in
+   * @param query - Search query string
+   * @param options - Match options (minScore, boost, operator, fuzziness)
+   *
+   * @example
+   * ```typescript
+   * // Simple match
+   * Predicates.match('title', 'machine learning')
+   *
+   * // With options
+   * Predicates.match('body', 'neural networks', { minScore: 1.0, boost: 2.0 })
+   * ```
+   */
+  static match(attribute: string, query: string, options?: MatchOptions): PredicateNode {
+    return { op: 'match', attribute, query, matchOptions: options };
+  }
+
+  /**
+   * Create a 'matchPhrase' predicate for exact phrase matching.
+   * Matches documents containing the exact phrase (words in order).
+   *
+   * @param attribute - Field to search in
+   * @param query - Phrase to match
+   * @param slop - Word distance tolerance (0 = exact, 1 = allow 1 word between)
+   *
+   * @example
+   * ```typescript
+   * // Exact phrase
+   * Predicates.matchPhrase('body', 'machine learning')
+   *
+   * // With slop (allows "machine deep learning")
+   * Predicates.matchPhrase('body', 'machine learning', 1)
+   * ```
+   */
+  static matchPhrase(attribute: string, query: string, slop?: number): PredicateNode {
+    return { op: 'matchPhrase', attribute, query, slop };
+  }
+
+  /**
+   * Create a 'matchPrefix' predicate for prefix matching.
+   * Matches documents where field starts with the given prefix.
+   *
+   * @param attribute - Field to search in
+   * @param prefix - Prefix to match
+   * @param maxExpansions - Maximum number of term expansions
+   *
+   * @example
+   * ```typescript
+   * // Match titles starting with "mach"
+   * Predicates.matchPrefix('title', 'mach')
+   *
+   * // Limit expansions for performance
+   * Predicates.matchPrefix('title', 'mach', 50)
+   * ```
+   */
+  static matchPrefix(attribute: string, prefix: string, maxExpansions?: number): PredicateNode {
+    return { op: 'matchPrefix', attribute, prefix, maxExpansions };
+  }
+
+  /**
+   * Create a multi-field match predicate.
+   * Searches across multiple fields with optional per-field boosting.
+   *
+   * @param attributes - Fields to search in
+   * @param query - Search query string
+   * @param options - Options including per-field boost factors
+   *
+   * @example
+   * ```typescript
+   * // Search title and body
+   * Predicates.multiMatch(['title', 'body'], 'machine learning')
+   *
+   * // With boosting (title 2x more important)
+   * Predicates.multiMatch(['title', 'body'], 'machine learning', {
+   *   boost: { title: 2.0, body: 1.0 }
+   * })
+   * ```
+   */
+  static multiMatch(
+    attributes: string[],
+    query: string,
+    options?: { boost?: Record<string, number> }
+  ): PredicateNode {
+    const children = attributes.map((attr) => ({
+      op: 'match' as const,
+      attribute: attr,
+      query,
+      matchOptions: options?.boost?.[attr] ? { boost: options.boost[attr] } : undefined,
+    }));
+    return { op: 'or', children };
   }
 }
 

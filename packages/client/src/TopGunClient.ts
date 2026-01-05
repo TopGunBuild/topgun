@@ -10,6 +10,8 @@ import { TopicHandle } from './TopicHandle';
 import { PNCounterHandle } from './PNCounterHandle';
 import { EventJournalReader } from './EventJournalReader';
 import { SearchHandle } from './SearchHandle';
+import { HybridQueryHandle } from './HybridQueryHandle';
+import type { HybridQueryFilter } from './HybridQueryHandle';
 import { logger } from './utils/logger';
 import { SyncState } from './SyncState';
 import type { StateChangeEvent } from './SyncStateMachine';
@@ -653,6 +655,45 @@ export class TopGunClient {
     options?: SearchOptions
   ): SearchHandle<T> {
     return new SearchHandle<T>(this.syncEngine, mapName, query, options);
+  }
+
+  // ============================================
+  // Hybrid Query API (Phase 12)
+  // ============================================
+
+  /**
+   * Create a hybrid query combining FTS with traditional filters.
+   *
+   * Hybrid queries allow combining full-text search predicates (match, matchPhrase, matchPrefix)
+   * with traditional filter predicates (eq, gt, lt, contains, etc.) in a single query.
+   * Results include relevance scores for FTS ranking.
+   *
+   * @param mapName Name of the map to query
+   * @param filter Hybrid query filter with predicate, where, sort, limit, offset
+   * @returns HybridQueryHandle for managing the subscription
+   *
+   * @example
+   * ```typescript
+   * import { Predicates } from '@topgunbuild/core';
+   *
+   * // Hybrid query: FTS + filter
+   * const handle = client.hybridQuery<Article>('articles', {
+   *   predicate: Predicates.and(
+   *     Predicates.match('body', 'machine learning'),
+   *     Predicates.equal('category', 'tech')
+   *   ),
+   *   sort: { _score: 'desc' },
+   *   limit: 20
+   * });
+   *
+   * // Subscribe to results
+   * handle.subscribe((results) => {
+   *   results.forEach(r => console.log(`${r._key}: score=${r._score}`));
+   * });
+   * ```
+   */
+  public hybridQuery<T>(mapName: string, filter: HybridQueryFilter = {}): HybridQueryHandle<T> {
+    return new HybridQueryHandle<T>(this.syncEngine, mapName, filter);
   }
 
   // ============================================

@@ -37,6 +37,59 @@ export interface SimpleQueryNode extends QueryNode {
   toInclusive?: boolean;
 }
 
+// ============== Full-Text Search Query Types (Phase 12) ==============
+
+/**
+ * Options for full-text search match queries.
+ */
+export interface MatchQueryOptions {
+  /** Minimum BM25 score threshold */
+  minScore?: number;
+  /** Boost factor for this field */
+  boost?: number;
+  /** Operator for multi-term queries: 'and' requires all terms, 'or' requires any */
+  operator?: 'and' | 'or';
+  /** Fuzziness level for typo tolerance (0 = exact, 1 = 1 edit, 2 = 2 edits) */
+  fuzziness?: number;
+}
+
+/**
+ * Match query node for BM25 full-text search.
+ */
+export interface MatchQueryNode extends QueryNode {
+  type: 'match';
+  attribute: string;
+  query: string;
+  options?: MatchQueryOptions;
+}
+
+/**
+ * Match phrase query node for exact phrase matching.
+ */
+export interface MatchPhraseQueryNode extends QueryNode {
+  type: 'matchPhrase';
+  attribute: string;
+  query: string;
+  /** Word distance tolerance (0 = exact phrase) */
+  slop?: number;
+}
+
+/**
+ * Match prefix query node for prefix matching.
+ */
+export interface MatchPrefixQueryNode extends QueryNode {
+  type: 'matchPrefix';
+  attribute: string;
+  prefix: string;
+  /** Maximum number of term expansions */
+  maxExpansions?: number;
+}
+
+/**
+ * Union type for FTS query nodes.
+ */
+export type FTSQueryNode = MatchQueryNode | MatchPhraseQueryNode | MatchPrefixQueryNode;
+
 /**
  * Logical query node for combining conditions.
  */
@@ -49,7 +102,7 @@ export interface LogicalQueryNode {
 /**
  * Union type for all query types.
  */
-export type Query = SimpleQueryNode | LogicalQueryNode;
+export type Query = SimpleQueryNode | LogicalQueryNode | FTSQueryNode;
 
 // ============== Query Options ==============
 
@@ -77,7 +130,9 @@ export type PlanStep =
   | IntersectionStep
   | UnionStep
   | FilterStep
-  | NotStep;
+  | NotStep
+  | FTSScanStep
+  | FusionStep;
 
 /**
  * Index scan step - retrieves from an index.
@@ -128,6 +183,46 @@ export interface NotStep {
   type: 'not';
   source: PlanStep;
   allKeys: () => Set<unknown>;
+}
+
+// ============== Full-Text Search Plan Types (Phase 12) ==============
+
+/**
+ * Fusion strategy for combining results from different search methods.
+ */
+export type FusionStrategy = 'intersection' | 'rrf' | 'score-filter';
+
+/**
+ * FTS scan step - full-text search using FullTextIndex.
+ * Returns scored results (documents with BM25 scores).
+ */
+export interface FTSScanStep {
+  type: 'fts-scan';
+  /** Field to search */
+  field: string;
+  /** Search query or phrase */
+  query: string;
+  /** Type of FTS query */
+  ftsType: 'match' | 'matchPhrase' | 'matchPrefix';
+  /** Query options (minScore, boost, etc.) */
+  options?: MatchQueryOptions;
+  /** This step returns scored results */
+  returnsScored: true;
+  /** Estimated cost */
+  estimatedCost: number;
+}
+
+/**
+ * Fusion step - combines results from multiple steps using RRF or other strategy.
+ */
+export interface FusionStep {
+  type: 'fusion';
+  /** Steps to combine */
+  steps: PlanStep[];
+  /** Fusion strategy */
+  strategy: FusionStrategy;
+  /** Whether result is scored (true if any child is scored) */
+  returnsScored: boolean;
 }
 
 // ============== Query Plan ==============
@@ -184,4 +279,32 @@ export function isSimpleQuery(query: Query): query is SimpleQueryNode {
  */
 export function isLogicalQuery(query: Query): query is LogicalQueryNode {
   return query.type === 'and' || query.type === 'or' || query.type === 'not';
+}
+
+/**
+ * Check if a query is a full-text search query node.
+ */
+export function isFTSQuery(query: Query): query is FTSQueryNode {
+  return query.type === 'match' || query.type === 'matchPhrase' || query.type === 'matchPrefix';
+}
+
+/**
+ * Check if a query is a match query node.
+ */
+export function isMatchQuery(query: Query): query is MatchQueryNode {
+  return query.type === 'match';
+}
+
+/**
+ * Check if a query is a match phrase query node.
+ */
+export function isMatchPhraseQuery(query: Query): query is MatchPhraseQueryNode {
+  return query.type === 'matchPhrase';
+}
+
+/**
+ * Check if a query is a match prefix query node.
+ */
+export function isMatchPrefixQuery(query: Query): query is MatchPrefixQueryNode {
+  return query.type === 'matchPrefix';
 }

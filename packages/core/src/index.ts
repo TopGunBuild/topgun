@@ -280,3 +280,13 @@ export type {
   SearchResult as FTSSearchResult,
   SerializedIndex,
 } from './fts';
+
+// Search utilities exports (Phase 12)
+export {
+  ReciprocalRankFusion,
+} from './search';
+export type {
+  RankedResult,
+  RRFConfig,
+  MergedResult,
+} from './search';

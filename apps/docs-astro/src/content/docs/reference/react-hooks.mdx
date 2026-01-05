@@ -5,7 +5,7 @@ order: 24
 ---
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
-import { ChevronRight, Zap, Database, MessageSquare, Settings, ScrollText, Shield, AlertTriangle, Search } from 'lucide-react';
+import { ChevronRight, Zap, Database, MessageSquare, Settings, ScrollText, Shield, AlertTriangle, Search, Filter } from 'lucide-react';
 
 export const setupCode = `import { TopGunClient } from '@topgunbuild/client';
 import { TopGunProvider } from '@topgunbuild/react';
@@ -310,6 +310,84 @@ function ProductSearch() {
       <ul>
         {results.map(r => (
           <li key={r.key}>{r.value.name} - \${r.value.price}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}`;
+
+export const useHybridQueryCode = `import { useHybridQuery } from '@topgunbuild/react';
+import { Predicates } from '@topgunbuild/core';
+
+function TechArticles() {
+  // Combine FTS with traditional filters
+  const { results, loading, error } = useHybridQuery<Article>('articles', {
+    predicate: Predicates.and(
+      Predicates.match('body', 'machine learning'),  // FTS predicate
+      Predicates.equal('category', 'tech')           // Filter predicate
+    ),
+    sort: { _score: 'desc' },  // Sort by relevance
+    limit: 20
+  });
+
+  if (loading) return <div>Loading...</div>;
+  if (error) return <div>Error: {error.message}</div>;
+
+  return (
+    <ul>
+      {results.map(r => (
+        <li key={r._key}>
+          [{r._score?.toFixed(2)}] {r.value.title}
+          <small>Matched: {r._matchedTerms?.join(', ')}</small>
+        </li>
+      ))}
+    </ul>
+  );
+}`;
+
+export const useHybridQueryDynamicCode = `import { useHybridQuery } from '@topgunbuild/react';
+import { Predicates } from '@topgunbuild/core';
+import { useState, useMemo } from 'react';
+
+function FacetedSearch() {
+  const [searchTerm, setSearchTerm] = useState('');
+  const [category, setCategory] = useState('all');
+
+  const filter = useMemo(() => {
+    const conditions = [];
+
+    if (searchTerm.trim()) {
+      conditions.push(Predicates.match('description', searchTerm));
+    }
+    if (category !== 'all') {
+      conditions.push(Predicates.equal('category', category));
+    }
+
+    return {
+      predicate: conditions.length > 1
+        ? Predicates.and(...conditions)
+        : conditions[0],
+      sort: searchTerm ? { _score: 'desc' } : { createdAt: 'desc' },
+      limit: 20
+    };
+  }, [searchTerm, category]);
+
+  const { results, loading } = useHybridQuery<Product>('products', filter);
+
+  return (
+    <div>
+      <input value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+      <select value={category} onChange={(e) => setCategory(e.target.value)}>
+        <option value="all">All</option>
+        <option value="electronics">Electronics</option>
+      </select>
+      {loading && <span>Loading...</span>}
+      <ul>
+        {results.map(r => (
+          <li key={r._key}>
+            {r.value.name}
+            {r._score && <span> (score: {r._score.toFixed(2)})</span>}
+          </li>
         ))}
       </ul>
     </div>
@@ -641,6 +719,67 @@ For search-as-you-type interfaces, use `debounceMs` to avoid excessive server re
   <p className="text-sm text-blue-800 dark:text-blue-200">
     <strong>Server-side Feature:</strong> Full-text search must be enabled on the server for the target map with <code className="bg-blue-100 dark:bg-blue-800 px-1 rounded">fullTextSearch</code> configuration.
     See the <a href="/docs/guides/full-text-search" className="underline">Full-Text Search Guide</a> for server setup.
+  </p>
+</div>
+
+## useHybridQuery
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Filter className="w-6 h-6 text-green-500" />
+  <span className="text-neutral-600 dark:text-neutral-300">Combine full-text search with traditional filter predicates in a single query. Ideal for faceted search UIs.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="components/TechArticles.tsx" language="typescript" code={useHybridQueryCode} />
+</div>
+
+### Return Values
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `results` | `HybridResultItem<T>[]` | Current query results with scores |
+| `loading` | `boolean` | True while waiting for initial results |
+| `error` | `Error \| null` | Error if query failed |
+
+### HybridResultItem Structure
+
+```typescript
+interface HybridResultItem<T> {
+  value: T;                     // Document value
+  _key: string;                 // Document key
+  _score?: number;              // BM25 relevance score (for FTS queries)
+  _matchedTerms?: string[];     // Stemmed terms that matched
+}
+```
+
+### Filter Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `predicate` | `PredicateNode` | Predicate tree (FTS + filters) |
+| `where` | `Record<string, any>` | Simple equality filters |
+| `sort` | `Record<string, 'asc' \| 'desc'>` | Sort fields (use `_score` for relevance) |
+| `limit` | `number` | Maximum results |
+| `offset` | `number` | Skip N results |
+
+### Hook Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `skip` | `boolean` | Skip query execution (for conditional queries) |
+
+### Dynamic Filters
+
+Build complex faceted search UIs with dynamic predicates:
+
+<div className="not-prose">
+  <CodeBlock title="components/FacetedSearch.tsx" language="typescript" code={useHybridQueryDynamicCode} />
+</div>
+
+<div className="bg-purple-50 dark:bg-purple-900/20 border-l-4 border-purple-500 p-4 my-6 not-prose">
+  <p className="text-sm text-purple-800 dark:text-purple-200">
+    <strong>When to use Hybrid vs Search:</strong> Use <code>useSearch</code> for pure text search (search box). Use <code>useHybridQuery</code> when you need to combine text search with filters (faceted search, filtered listings).
+    See the <a href="/docs/guides/full-text-search#hybrid-queries" className="underline">Hybrid Queries Guide</a> for more examples.
   </p>
 </div>
 

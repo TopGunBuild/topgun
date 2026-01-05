@@ -61,6 +61,10 @@ export type { SearchResult } from './SyncEngine';
 export { SearchHandle } from './SearchHandle';
 export type { SearchResultsCallback } from './SearchHandle';
 
+// Hybrid Query exports (Phase 12)
+export { HybridQueryHandle } from './HybridQueryHandle';
+export type { HybridQueryFilter, HybridResultItem, HybridResultSource } from './HybridQueryHandle';
+
 // Cluster exports (Phase 4)
 export { ConnectionPool, PartitionRouter, ClusterClient };
 export type {

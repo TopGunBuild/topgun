@@ -56,15 +56,34 @@ export {
   type FilterStep,
   type NotStep,
   type QueryPlan,
+  // FTS Query Types (Phase 12)
+  type MatchQueryOptions,
+  type MatchQueryNode,
+  type MatchPhraseQueryNode,
+  type MatchPrefixQueryNode,
+  type FTSQueryNode,
+  // FTS Plan Types (Phase 12)
+  type FTSScanStep,
+  type FusionStep,
+  type FusionStrategy,
+  // Type guards
   isSimpleQuery,
   isLogicalQuery,
+  isFTSQuery,
+  isMatchQuery,
+  isMatchPhraseQuery,
+  isMatchPrefixQuery,
 } from './QueryTypes';
 
 // Index Registry
 export { IndexRegistry, type IndexRegistryStats } from './IndexRegistry';
 
 // Query Optimizer
-export { QueryOptimizer, type QueryOptimizerOptions } from './QueryOptimizer';
+export {
+  QueryOptimizer,
+  type QueryOptimizerOptions,
+  type ClassifiedPredicates,
+} from './QueryOptimizer';
 
 // Standing Query Registry
 export {
@@ -89,3 +108,20 @@ export * from './tokenization';
 
 // Adaptive Indexing (Phase 8.02)
 export * from './adaptive';
+
+// Query Executor (Phase 12)
+export {
+  QueryExecutor,
+  type StepResult,
+  type QueryResult,
+  type OrderBy,
+  type ExecuteOptions,
+} from './QueryExecutor';
+
+// Unified Live Query Registry (Phase 12)
+export {
+  UnifiedLiveQueryRegistry,
+  type UnifiedLiveQueryRegistryOptions,
+  type UnifiedLiveQueryRegistryStats,
+  type UnifiedDelta,
+} from './UnifiedLiveQueryRegistry';
