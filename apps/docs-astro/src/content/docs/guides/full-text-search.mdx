@@ -464,6 +464,132 @@ function SearchInput() {
   );
 }`;
 
+export const hybridQueryBasicCode = `import { useHybridQuery } from '@topgunbuild/react';
+import { Predicates } from '@topgunbuild/core';
+
+function TechArticles() {
+  // Combine FTS with traditional filters
+  const { results, loading, error } = useHybridQuery<Article>('articles', {
+    predicate: Predicates.and(
+      Predicates.match('body', 'machine learning'),  // FTS predicate
+      Predicates.equal('category', 'tech')           // Filter predicate
+    ),
+    sort: { _score: 'desc' },  // Sort by relevance
+    limit: 20
+  });
+
+  if (loading) return <Spinner />;
+  if (error) return <div>Error: {error.message}</div>;
+
+  return (
+    <ul>
+      {results.map(r => (
+        <li key={r._key}>
+          [{r._score?.toFixed(2)}] {r.value.title}
+          <small>Matched: {r._matchedTerms?.join(', ')}</small>
+        </li>
+      ))}
+    </ul>
+  );
+}`;
+
+export const hybridQueryDynamicCode = `import { useHybridQuery } from '@topgunbuild/react';
+import { Predicates } from '@topgunbuild/core';
+import { useState, useMemo } from 'react';
+
+function SearchWithFilters() {
+  const [searchTerm, setSearchTerm] = useState('');
+  const [category, setCategory] = useState('all');
+  const [priceMax, setPriceMax] = useState(1000);
+
+  // Build predicate dynamically
+  const filter = useMemo(() => {
+    const conditions = [];
+
+    // Add FTS if search term exists
+    if (searchTerm.trim()) {
+      conditions.push(Predicates.match('description', searchTerm));
+    }
+
+    // Add category filter
+    if (category !== 'all') {
+      conditions.push(Predicates.equal('category', category));
+    }
+
+    // Add price filter
+    conditions.push(Predicates.lessThanOrEqual('price', priceMax));
+
+    return {
+      predicate: conditions.length > 1
+        ? Predicates.and(...conditions)
+        : conditions[0],
+      sort: searchTerm ? { _score: 'desc' } : { createdAt: 'desc' },
+      limit: 20
+    };
+  }, [searchTerm, category, priceMax]);
+
+  const { results, loading } = useHybridQuery<Product>('products', filter);
+
+  return (
+    <div>
+      <input
+        value={searchTerm}
+        onChange={(e) => setSearchTerm(e.target.value)}
+        placeholder="Search products..."
+      />
+      <select value={category} onChange={(e) => setCategory(e.target.value)}>
+        <option value="all">All Categories</option>
+        <option value="electronics">Electronics</option>
+        <option value="clothing">Clothing</option>
+      </select>
+      <input
+        type="range"
+        value={priceMax}
+        onChange={(e) => setPriceMax(Number(e.target.value))}
+        min={0}
+        max={1000}
+      />
+      {loading && <span>Loading...</span>}
+      <ul>
+        {results.map(r => (
+          <li key={r._key}>
+            {r.value.name} - \${r.value.price}
+            {r._score && <span> (score: {r._score.toFixed(2)})</span>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}`;
+
+export const hybridQueryClientCode = `import { TopGunClient } from '@topgunbuild/client';
+import { Predicates } from '@topgunbuild/core';
+
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080'
+});
+
+// Create a hybrid query handle
+const handle = client.hybridQuery<Article>('articles', {
+  predicate: Predicates.and(
+    Predicates.match('body', 'artificial intelligence'),
+    Predicates.equal('status', 'published'),
+    Predicates.greaterThan('views', 100)
+  ),
+  sort: { _score: 'desc' },
+  limit: 50
+});
+
+// Subscribe to results
+const unsubscribe = handle.subscribe((results) => {
+  for (const r of results) {
+    console.log(\`[\${r._score?.toFixed(2)}] \${r._key}: \${r.value.title}\`);
+  }
+});
+
+// Cleanup
+unsubscribe();`;
+
 export const serverSearchPermissionsCode = `// Server security configuration
 const server = new ServerCoordinator({
   port: 8080,
@@ -813,6 +939,82 @@ For search-as-you-type interfaces, use the `debounceMs` option to avoid excessiv
 <div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
   <p className="text-sm text-blue-800 dark:text-blue-200">
     <strong>See Also:</strong> The <a href="/docs/reference/react-hooks" className="underline">React Hooks Reference</a> for all available hooks.
+  </p>
+</div>
+
+## Hybrid Queries
+
+**Hybrid queries** combine full-text search with traditional filter predicates in a single query. This is powerful for building faceted search UIs where users can search by text while also filtering by category, price range, date, etc.
+
+<div className="grid md:grid-cols-2 gap-6 mb-8 not-prose">
+  <FeatureCard
+    icon={Filter}
+    iconColor="text-green-500"
+    title="FTS + Filters"
+    description="Combine match() with equal(), greaterThan(), between() in one query."
+  />
+  <FeatureCard
+    icon={Star}
+    iconColor="text-purple-500"
+    title="_score Sorting"
+    description="Sort results by BM25 relevance score alongside other sort fields."
+  />
+</div>
+
+### useHybridQuery Hook
+
+The `useHybridQuery` hook provides a React-friendly way to create hybrid queries:
+
+<div className="not-prose">
+  <CodeBlock title="Basic Hybrid Query" language="typescript" code={hybridQueryBasicCode} />
+</div>
+
+### Dynamic Filters
+
+Build complex filter UIs with dynamic predicates:
+
+<div className="not-prose">
+  <CodeBlock title="Dynamic Filters" language="typescript" code={hybridQueryDynamicCode} />
+</div>
+
+### Client API
+
+For non-React environments, use `client.hybridQuery()` directly:
+
+<div className="not-prose">
+  <CodeBlock title="Client API" language="typescript" code={hybridQueryClientCode} />
+</div>
+
+### HybridResultItem Interface
+
+Each result includes relevance score and matched terms:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `value` | `T` | The document value |
+| `_key` | `string` | Document key |
+| `_score` | `number \| undefined` | BM25 relevance score (only for FTS queries) |
+| `_matchedTerms` | `string[] \| undefined` | Stemmed terms that matched |
+
+### Available Predicates
+
+Hybrid queries support all predicate types:
+
+| Predicate | Example | Description |
+|-----------|---------|-------------|
+| `match(field, query)` | `match('body', 'machine learning')` | FTS with BM25 scoring |
+| `matchPhrase(field, phrase)` | `matchPhrase('title', 'getting started')` | Exact phrase matching |
+| `matchPrefix(field, prefix)` | `matchPrefix('name', 'prod')` | Prefix autocomplete |
+| `equal(field, value)` | `equal('status', 'active')` | Exact equality |
+| `greaterThan(field, value)` | `greaterThan('price', 100)` | Range comparison |
+| `lessThanOrEqual(field, value)` | `lessThanOrEqual('stock', 10)` | Range comparison |
+| `contains(field, value)` | `contains('tags', 'featured')` | Array contains |
+| `and(...predicates)` | `and(match(...), equal(...))` | All must match |
+| `or(...predicates)` | `or(match(...), match(...))` | Any can match |
+
+<div className="bg-purple-50 dark:bg-purple-900/20 border-l-4 border-purple-500 p-4 my-6 not-prose">
+  <p className="text-sm text-purple-800 dark:text-purple-200">
+    <strong>When to use Hybrid vs useSearch:</strong> Use <code>useSearch</code> for pure text search (search box). Use <code>useHybridQuery</code> when you need to combine text search with filters (faceted search, filtered listings).
   </p>
 </div>
 
