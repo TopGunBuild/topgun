@@ -2,7 +2,8 @@
  * topgun_query - Query data from a TopGun map with filters
  */
 
-import type { MCPTool, MCPToolResult, QueryToolArgs, ToolContext } from '../types';
+import type { MCPTool, MCPToolResult, ToolContext } from '../types';
+import { QueryArgsSchema, toolSchemas, type QueryArgs } from '../schemas';
 
 export const queryTool: MCPTool = {
   name: 'topgun_query',
@@ -10,52 +11,21 @@ export const queryTool: MCPTool = {
     'Query data from a TopGun map with filters and sorting. ' +
     'Use this to read data from the database. ' +
     'Supports filtering by field values and sorting by any field.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      map: {
-        type: 'string',
-        description: "Name of the map to query (e.g., 'tasks', 'users', 'products')",
-      },
-      filter: {
-        type: 'object',
-        description:
-          'Filter criteria as key-value pairs. ' +
-          'Example: { "status": "active", "priority": "high" }',
-        additionalProperties: true,
-      },
-      sort: {
-        type: 'object',
-        description: 'Sort configuration',
-        properties: {
-          field: {
-            type: 'string',
-            description: 'Field name to sort by',
-          },
-          order: {
-            type: 'string',
-            enum: ['asc', 'desc'],
-            description: 'Sort order: ascending or descending',
-          },
-        },
-      },
-      limit: {
-        type: 'number',
-        description: 'Maximum number of results to return',
-        default: 10,
-      },
-      offset: {
-        type: 'number',
-        description: 'Number of results to skip (for pagination)',
-        default: 0,
-      },
-    },
-    required: ['map'],
-  },
+  inputSchema: toolSchemas.query as MCPTool['inputSchema'],
 };
 
-export async function handleQuery(args: QueryToolArgs, ctx: ToolContext): Promise<MCPToolResult> {
-  const { map, filter, sort, limit, offset } = args;
+export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<MCPToolResult> {
+  // Validate and parse args with Zod
+  const parseResult = QueryArgsSchema.safeParse(rawArgs);
+  if (!parseResult.success) {
+    const errors = parseResult.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`).join(', ');
+    return {
+      content: [{ type: 'text', text: `Invalid arguments: ${errors}` }],
+      isError: true,
+    };
+  }
+
+  const { map, filter, sort, limit, offset } = parseResult.data;
 
   // Validate map access
   if (ctx.config.allowedMaps && !ctx.config.allowedMaps.includes(map)) {

@@ -2,7 +2,8 @@
  * topgun_explain - Explain how a query would be executed
  */
 
-import type { MCPTool, MCPToolResult, ExplainToolArgs, ToolContext } from '../types';
+import type { MCPTool, MCPToolResult, ToolContext } from '../types';
+import { ExplainArgsSchema, toolSchemas, type ExplainArgs } from '../schemas';
 
 export const explainTool: MCPTool = {
   name: 'topgun_explain',
@@ -10,24 +11,21 @@ export const explainTool: MCPTool = {
     'Explain how a query would be executed against a TopGun map. ' +
     'Returns the query plan, estimated result count, and execution strategy. ' +
     'Use this to understand and optimize queries.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      map: {
-        type: 'string',
-        description: 'Name of the map to query',
-      },
-      filter: {
-        type: 'object',
-        description: 'Filter criteria to analyze',
-        additionalProperties: true,
-      },
-    },
-    required: ['map'],
-  },
+  inputSchema: toolSchemas.explain as MCPTool['inputSchema'],
 };
 
-export async function handleExplain(args: ExplainToolArgs, ctx: ToolContext): Promise<MCPToolResult> {
+export async function handleExplain(rawArgs: unknown, ctx: ToolContext): Promise<MCPToolResult> {
+  // Validate arguments with Zod
+  const parseResult = ExplainArgsSchema.safeParse(rawArgs);
+  if (!parseResult.success) {
+    const errors = parseResult.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`).join(', ');
+    return {
+      content: [{ type: 'text', text: `Invalid arguments: ${errors}` }],
+      isError: true,
+    };
+  }
+
+  const args: ExplainArgs = parseResult.data;
   const { map, filter } = args;
 
   // Validate map access

@@ -22,6 +22,7 @@
 import { TopGunMCPServer } from './TopGunMCPServer';
 import { HTTPTransport } from './transport/http';
 import type { MCPServerConfig } from './types';
+import { createLogger } from './logger';
 
 interface CLIOptions {
   url: string;
@@ -222,18 +223,17 @@ async function main(): Promise<void> {
     debug: options.debug,
   };
 
-  if (options.debug) {
-    console.error('[TopGunMCP] Starting with config:', JSON.stringify(config, null, 2));
-  }
+  // Create logger
+  const logger = createLogger({ debug: options.debug, name: 'topgun-mcp-cli' });
+
+  logger.debug({ config }, 'Starting with config');
 
   // Create server
   const server = new TopGunMCPServer(config);
 
   // Handle graceful shutdown
   const shutdown = async () => {
-    if (options.debug) {
-      console.error('[TopGunMCP] Shutting down...');
-    }
+    logger.info('Shutting down...');
     await server.stop();
     process.exit(0);
   };
@@ -251,24 +251,25 @@ async function main(): Promise<void> {
 
       await httpTransport.start(server);
 
-      console.error(`TopGun MCP Server (HTTP) listening on port ${options.port}`);
-      console.error(`Health: http://localhost:${options.port}/health`);
-      console.error(`MCP: http://localhost:${options.port}/mcp`);
+      logger.info({ port: options.port }, 'TopGun MCP Server (HTTP) listening');
+      logger.info({ health: `http://localhost:${options.port}/health`, mcp: `http://localhost:${options.port}/mcp` }, 'Endpoints');
     } else {
       // Start stdio transport (default)
       await server.start();
 
       // Log to stderr so it doesn't interfere with MCP protocol on stdout
-      console.error('TopGun MCP Server started on stdio');
+      logger.info('TopGun MCP Server started on stdio');
     }
   } catch (error) {
-    console.error('Failed to start TopGun MCP Server:', error);
+    logger.fatal({ error }, 'Failed to start TopGun MCP Server');
     process.exit(1);
   }
 }
 
 // Run if this is the main module
 main().catch((error) => {
-  console.error('Fatal error:', error);
+  // Create a simple logger for fatal errors (no debug mode here)
+  const logger = createLogger({ name: 'topgun-mcp-cli' });
+  logger.fatal({ error }, 'Fatal error');
   process.exit(1);
 });

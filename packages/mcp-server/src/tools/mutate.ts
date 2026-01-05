@@ -2,7 +2,8 @@
  * topgun_mutate - Create, update, or delete data in a TopGun map
  */
 
-import type { MCPTool, MCPToolResult, MutateToolArgs, ToolContext } from '../types';
+import type { MCPTool, MCPToolResult, ToolContext } from '../types';
+import { MutateArgsSchema, toolSchemas } from '../schemas';
 
 export const mutateTool: MCPTool = {
   name: 'topgun_mutate',
@@ -10,34 +11,21 @@ export const mutateTool: MCPTool = {
     'Create, update, or delete data in a TopGun map. ' +
     'Use "set" operation to create or update a record. ' +
     'Use "remove" operation to delete a record.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      map: {
-        type: 'string',
-        description: "Name of the map to modify (e.g., 'tasks', 'users')",
-      },
-      operation: {
-        type: 'string',
-        enum: ['set', 'remove'],
-        description: '"set" creates or updates a record, "remove" deletes it',
-      },
-      key: {
-        type: 'string',
-        description: 'Unique key for the record',
-      },
-      data: {
-        type: 'object',
-        description: 'Data to write (required for "set" operation)',
-        additionalProperties: true,
-      },
-    },
-    required: ['map', 'operation', 'key'],
-  },
+  inputSchema: toolSchemas.mutate as MCPTool['inputSchema'],
 };
 
-export async function handleMutate(args: MutateToolArgs, ctx: ToolContext): Promise<MCPToolResult> {
-  const { map, operation, key, data } = args;
+export async function handleMutate(rawArgs: unknown, ctx: ToolContext): Promise<MCPToolResult> {
+  // Validate and parse args with Zod
+  const parseResult = MutateArgsSchema.safeParse(rawArgs);
+  if (!parseResult.success) {
+    const errors = parseResult.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`).join(', ');
+    return {
+      content: [{ type: 'text', text: `Invalid arguments: ${errors}` }],
+      isError: true,
+    };
+  }
+
+  const { map, operation, key, data } = parseResult.data;
 
   // Check if mutations are enabled
   if (!ctx.config.enableMutations) {

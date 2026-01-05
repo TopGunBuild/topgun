@@ -31,9 +31,12 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@topgunbuild/client": "workspace:*",
-    "@topgunbuild/core": "workspace:*"
+    "@topgunbuild/core": "workspace:*",
+    "pino": "^10.1.0",
+    "zod": "^4.1.13"
   },
   "devDependencies": {
+    "pino-pretty": "^13.1.2",
     "typescript": "^5.0.0"
   },
   "engines": {

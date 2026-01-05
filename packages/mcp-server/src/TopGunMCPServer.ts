@@ -15,6 +15,7 @@ import { TopGunClient } from '@topgunbuild/client';
 import type { IStorageAdapter, OpLogEntry } from '@topgunbuild/client';
 import type { MCPServerConfig, ResolvedMCPServerConfig, ToolContext } from './types';
 import { allTools, toolHandlers } from './tools';
+import { createLogger, type Logger } from './logger';
 
 /**
  * Default configuration values
@@ -52,6 +53,7 @@ export class TopGunMCPServer {
   private readonly client: TopGunClient;
   private readonly config: ResolvedMCPServerConfig;
   private readonly toolContext: ToolContext;
+  private readonly logger: Logger;
   private isStarted = false;
   private externalClient = false;
 
@@ -95,6 +97,12 @@ export class TopGunMCPServer {
       config: this.config,
     };
 
+    // Initialize logger
+    this.logger = createLogger({
+      debug: this.config.debug,
+      name: this.config.name,
+    });
+
     // Initialize MCP server
     this.server = new Server(
       {
@@ -111,11 +119,11 @@ export class TopGunMCPServer {
     // Register handlers
     this.registerHandlers();
 
-    this.log('TopGunMCPServer initialized', {
+    this.logger.info({
       topgunUrl: this.config.topgunUrl,
       allowedMaps: this.config.allowedMaps,
       enableMutations: this.config.enableMutations,
-    });
+    }, 'TopGunMCPServer initialized');
   }
 
   /**
@@ -135,7 +143,7 @@ export class TopGunMCPServer {
         availableTools = availableTools.filter((t) => t.name !== 'topgun_subscribe');
       }
 
-      this.log('tools/list called', { count: availableTools.length });
+      this.logger.debug({ count: availableTools.length }, 'tools/list called');
 
       return {
         tools: availableTools.map((tool) => ({
@@ -153,7 +161,7 @@ export class TopGunMCPServer {
     }> => {
       const { name, arguments: args } = request.params;
 
-      this.log('tools/call', { name, args });
+      this.logger.debug({ name, args }, 'tools/call');
 
       const handler = toolHandlers[name];
       if (!handler) {
@@ -170,7 +178,7 @@ export class TopGunMCPServer {
 
       try {
         const result = await handler(args ?? {}, this.toolContext);
-        this.log('Tool result', { name, isError: result.isError });
+        this.logger.debug({ name, isError: result.isError }, 'Tool result');
         return {
           content: result.content.map((c) => ({
             type: 'text' as const,
@@ -180,7 +188,7 @@ export class TopGunMCPServer {
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        this.log('Tool error', { name, error: message });
+        this.logger.error({ name, error: message }, 'Tool error');
         return {
           content: [
             {
@@ -210,7 +218,7 @@ export class TopGunMCPServer {
     await this.server.connect(transport);
 
     this.isStarted = true;
-    this.log('TopGun MCP Server started on stdio');
+    this.logger.info('TopGun MCP Server started on stdio');
   }
 
   /**
@@ -228,7 +236,7 @@ export class TopGunMCPServer {
     await this.server.connect(transport as any);
 
     this.isStarted = true;
-    this.log('TopGun MCP Server started with custom transport');
+    this.logger.info('TopGun MCP Server started with custom transport');
   }
 
   /**
@@ -244,7 +252,7 @@ export class TopGunMCPServer {
     }
 
     this.isStarted = false;
-    this.log('TopGun MCP Server stopped');
+    this.logger.info('TopGun MCP Server stopped');
   }
 
   /**
@@ -278,15 +286,6 @@ export class TopGunMCPServer {
    */
   getConfig(): ResolvedMCPServerConfig {
     return { ...this.config };
-  }
-
-  /**
-   * Debug logging
-   */
-  private log(message: string, data?: Record<string, unknown>): void {
-    if (this.config.debug) {
-      console.error(`[TopGunMCP] ${message}`, data ? JSON.stringify(data) : '');
-    }
   }
 }
 

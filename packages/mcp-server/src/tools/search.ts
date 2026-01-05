@@ -2,7 +2,8 @@
  * topgun_search - Perform hybrid search (exact + full-text) across a map
  */
 
-import type { MCPTool, MCPToolResult, SearchToolArgs, ToolContext } from '../types';
+import type { MCPTool, MCPToolResult, ToolContext } from '../types';
+import { SearchArgsSchema, toolSchemas, type SearchArgs } from '../schemas';
 
 export const searchTool: MCPTool = {
   name: 'topgun_search',
@@ -10,42 +11,21 @@ export const searchTool: MCPTool = {
     'Perform hybrid search across a TopGun map using BM25 full-text search. ' +
     'Returns results ranked by relevance score. ' +
     'Use this when searching for text content or when the exact field values are unknown.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      map: {
-        type: 'string',
-        description: "Name of the map to search (e.g., 'articles', 'documents', 'tasks')",
-      },
-      query: {
-        type: 'string',
-        description: 'Search query (keywords or phrases to find)',
-      },
-      methods: {
-        type: 'array',
-        items: {
-          type: 'string',
-          enum: ['exact', 'fulltext', 'range'],
-        },
-        description: 'Search methods to use. Default: ["exact", "fulltext"]',
-        default: ['exact', 'fulltext'],
-      },
-      limit: {
-        type: 'number',
-        description: 'Maximum number of results to return',
-        default: 10,
-      },
-      minScore: {
-        type: 'number',
-        description: 'Minimum relevance score (0-1) for results',
-        default: 0,
-      },
-    },
-    required: ['map', 'query'],
-  },
+  inputSchema: toolSchemas.search as MCPTool['inputSchema'],
 };
 
-export async function handleSearch(args: SearchToolArgs, ctx: ToolContext): Promise<MCPToolResult> {
+export async function handleSearch(rawArgs: unknown, ctx: ToolContext): Promise<MCPToolResult> {
+  // Validate arguments with Zod
+  const parseResult = SearchArgsSchema.safeParse(rawArgs);
+  if (!parseResult.success) {
+    const errors = parseResult.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`).join(', ');
+    return {
+      content: [{ type: 'text', text: `Invalid arguments: ${errors}` }],
+      isError: true,
+    };
+  }
+
+  const args: SearchArgs = parseResult.data;
   const { map, query, limit, minScore } = args;
 
   // Validate map access

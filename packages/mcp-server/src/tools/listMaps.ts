@@ -2,7 +2,8 @@
  * topgun_list_maps - List all available maps
  */
 
-import type { MCPTool, MCPToolResult, ListMapsToolArgs, ToolContext } from '../types';
+import type { MCPTool, MCPToolResult, ToolContext } from '../types';
+import { ListMapsArgsSchema, toolSchemas } from '../schemas';
 
 export const listMapsTool: MCPTool = {
   name: 'topgun_list_maps',
@@ -10,17 +11,22 @@ export const listMapsTool: MCPTool = {
     'List all available TopGun maps that can be queried. ' +
     'Returns the names of maps you have access to. ' +
     'Use this first to discover what data is available.',
-  inputSchema: {
-    type: 'object',
-    properties: {},
-    required: [],
-  },
+  inputSchema: toolSchemas.listMaps as MCPTool['inputSchema'],
 };
 
 export async function handleListMaps(
-  _args: ListMapsToolArgs,
+  rawArgs: unknown,
   ctx: ToolContext
 ): Promise<MCPToolResult> {
+  // Validate arguments with Zod (no required fields, but validates structure)
+  const parseResult = ListMapsArgsSchema.safeParse(rawArgs);
+  if (!parseResult.success) {
+    const errors = parseResult.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`).join(', ');
+    return {
+      content: [{ type: 'text', text: `Invalid arguments: ${errors}` }],
+      isError: true,
+    };
+  }
   try {
     // If allowedMaps is configured, return those
     if (ctx.config.allowedMaps && ctx.config.allowedMaps.length > 0) {

@@ -2,7 +2,8 @@
  * topgun_stats - Get statistics about TopGun maps
  */
 
-import type { MCPTool, MCPToolResult, StatsToolArgs, ToolContext } from '../types';
+import type { MCPTool, MCPToolResult, ToolContext } from '../types';
+import { StatsArgsSchema, toolSchemas, type StatsArgs } from '../schemas';
 
 export const statsTool: MCPTool = {
   name: 'topgun_stats',
@@ -10,19 +11,21 @@ export const statsTool: MCPTool = {
     'Get statistics about TopGun maps. ' +
     'Returns record counts, connection status, and sync state. ' +
     'Use this to understand the health and size of your data.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      map: {
-        type: 'string',
-        description: 'Specific map to get stats for (optional, returns all maps if not specified)',
-      },
-    },
-    required: [],
-  },
+  inputSchema: toolSchemas.stats as MCPTool['inputSchema'],
 };
 
-export async function handleStats(args: StatsToolArgs, ctx: ToolContext): Promise<MCPToolResult> {
+export async function handleStats(rawArgs: unknown, ctx: ToolContext): Promise<MCPToolResult> {
+  // Validate arguments with Zod
+  const parseResult = StatsArgsSchema.safeParse(rawArgs);
+  if (!parseResult.success) {
+    const errors = parseResult.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`).join(', ');
+    return {
+      content: [{ type: 'text', text: `Invalid arguments: ${errors}` }],
+      isError: true,
+    };
+  }
+
+  const args: StatsArgs = parseResult.data;
   const { map } = args;
 
   // Validate map access if specific map requested

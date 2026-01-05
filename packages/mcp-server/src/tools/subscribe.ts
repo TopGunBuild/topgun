@@ -2,7 +2,8 @@
  * topgun_subscribe - Watch a map for real-time changes
  */
 
-import type { MCPTool, MCPToolResult, SubscribeToolArgs, ToolContext } from '../types';
+import type { MCPTool, MCPToolResult, ToolContext } from '../types';
+import { SubscribeArgsSchema, toolSchemas, type SubscribeArgs } from '../schemas';
 
 export const subscribeTool: MCPTool = {
   name: 'topgun_subscribe',
@@ -10,32 +11,24 @@ export const subscribeTool: MCPTool = {
     'Subscribe to real-time changes in a TopGun map. ' +
     'Returns changes that occur within the timeout period. ' +
     'Use this to watch for new or updated data.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      map: {
-        type: 'string',
-        description: "Name of the map to watch (e.g., 'tasks', 'notifications')",
-      },
-      filter: {
-        type: 'object',
-        description: 'Filter criteria - only report changes matching these conditions',
-        additionalProperties: true,
-      },
-      timeout: {
-        type: 'number',
-        description: 'How long to watch for changes (in seconds)',
-        default: 60,
-      },
-    },
-    required: ['map'],
-  },
+  inputSchema: toolSchemas.subscribe as MCPTool['inputSchema'],
 };
 
 export async function handleSubscribe(
-  args: SubscribeToolArgs,
+  rawArgs: unknown,
   ctx: ToolContext
 ): Promise<MCPToolResult> {
+  // Validate arguments with Zod
+  const parseResult = SubscribeArgsSchema.safeParse(rawArgs);
+  if (!parseResult.success) {
+    const errors = parseResult.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`).join(', ');
+    return {
+      content: [{ type: 'text', text: `Invalid arguments: ${errors}` }],
+      isError: true,
+    };
+  }
+
+  const args: SubscribeArgs = parseResult.data;
   const { map, filter, timeout } = args;
 
   // Check if subscriptions are enabled

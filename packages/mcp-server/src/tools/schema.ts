@@ -2,7 +2,8 @@
  * topgun_schema - Get schema information about a map
  */
 
-import type { MCPTool, MCPToolResult, SchemaToolArgs, ToolContext } from '../types';
+import type { MCPTool, MCPToolResult, ToolContext } from '../types';
+import { SchemaArgsSchema, toolSchemas, type SchemaArgs } from '../schemas';
 
 export const schemaTool: MCPTool = {
   name: 'topgun_schema',
@@ -10,16 +11,7 @@ export const schemaTool: MCPTool = {
     'Get schema information about a TopGun map. ' +
     'Returns inferred field types and indexes. ' +
     'Use this to understand the structure of data in a map.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      map: {
-        type: 'string',
-        description: 'Name of the map to get schema for',
-      },
-    },
-    required: ['map'],
-  },
+  inputSchema: toolSchemas.schema as MCPTool['inputSchema'],
 };
 
 /**
@@ -67,7 +59,18 @@ function inferEnum(values: unknown[]): string[] | null {
   return null;
 }
 
-export async function handleSchema(args: SchemaToolArgs, ctx: ToolContext): Promise<MCPToolResult> {
+export async function handleSchema(rawArgs: unknown, ctx: ToolContext): Promise<MCPToolResult> {
+  // Validate arguments with Zod
+  const parseResult = SchemaArgsSchema.safeParse(rawArgs);
+  if (!parseResult.success) {
+    const errors = parseResult.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`).join(', ');
+    return {
+      content: [{ type: 'text', text: `Invalid arguments: ${errors}` }],
+      isError: true,
+    };
+  }
+
+  const args: SchemaArgs = parseResult.data;
   const { map } = args;
 
   // Validate map access
