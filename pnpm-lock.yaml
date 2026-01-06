@@ -443,9 +443,6 @@ importers:
       zod:
         specifier: ^4.1.13
         version: 4.1.13
-      zod-to-json-schema:
-        specifier: ^3.25.1
-        version: 3.25.1(zod@4.1.13)
     devDependencies:
       pino-pretty:
         specifier: ^13.1.2
