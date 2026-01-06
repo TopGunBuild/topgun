@@ -1,0 +1,263 @@
+---
+title: MCP Server
+description: Connect AI assistants like Claude Desktop and Cursor to your TopGun database using the Model Context Protocol.
+order: 50
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Bot, MessageSquare, Search, Database, Shield, Terminal } from 'lucide-react';
+import { FeatureCard } from '../../../components/docs/FeatureCard';
+
+export const claudeConfigCode = `{
+  "mcpServers": {
+    "topgun": {
+      "command": "npx",
+      "args": ["@topgunbuild/mcp-server"],
+      "env": {
+        "TOPGUN_URL": "ws://localhost:8080"
+      }
+    }
+  }
+}`;
+
+export const cursorConfigCode = `{
+  "mcp": {
+    "servers": {
+      "topgun": {
+        "command": "npx",
+        "args": ["@topgunbuild/mcp-server"],
+        "env": {
+          "TOPGUN_URL": "ws://localhost:8080"
+        }
+      }
+    }
+  }
+}`;
+
+export const programmaticCode = `import { TopGunMCPServer } from '@topgunbuild/mcp-server';
+
+const server = new TopGunMCPServer({
+  topgunUrl: 'ws://localhost:8080',
+  authToken: process.env.TOPGUN_TOKEN,
+  allowedMaps: ['tasks', 'users', 'projects'],
+  enableMutations: true,
+  enableSubscriptions: true,
+  defaultLimit: 10,
+  maxLimit: 100,
+  debug: false,
+});
+
+await server.start();`;
+
+export const httpTransportCode = `# Start MCP server with HTTP transport
+topgun-mcp --http --port 3000
+
+# With authentication and restricted maps
+topgun-mcp --http --port 3000 \\
+  --url ws://production.example.com:8080 \\
+  --token $TOPGUN_TOKEN \\
+  --maps tasks,users \\
+  --no-mutations`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">MCP Server</span>
+</div>
+
+# MCP Server
+
+The MCP (Model Context Protocol) Server enables AI assistants like **Claude Desktop** and **Cursor** to interact with your TopGun database through natural language. Query, mutate, and search your data without writing code.
+
+<div className="grid md:grid-cols-3 gap-6 mb-16 not-prose">
+  <FeatureCard
+    icon={Bot}
+    iconColor="text-purple-500"
+    title="AI Integration"
+    description="Connect Claude, Cursor, and other MCP-compatible AI tools to your data."
+  />
+  <FeatureCard
+    icon={MessageSquare}
+    iconColor="text-blue-500"
+    title="Natural Language"
+    description="Query and modify data using plain English instead of writing code."
+  />
+  <FeatureCard
+    icon={Shield}
+    iconColor="text-green-500"
+    title="Secure by Default"
+    description="Restrict maps, disable mutations, and use auth tokens for production."
+  />
+</div>
+
+## What is MCP?
+
+[MCP (Model Context Protocol)](https://modelcontextprotocol.io/) is Anthropic's open protocol for connecting AI assistants to external data sources. It provides a standardized way for AI tools to:
+
+- **Query** data from your TopGun maps
+- **Mutate** data (create, update, delete)
+- **Search** using hybrid BM25 + exact matching
+- **Subscribe** to real-time changes
+- **Inspect** schema and statistics
+
+## Installation
+
+```bash
+npm install @topgunbuild/mcp-server
+# or
+pnpm add @topgunbuild/mcp-server
+```
+
+## Claude Desktop Setup
+
+1. Install the MCP server globally:
+
+```bash
+npm install -g @topgunbuild/mcp-server
+```
+
+2. Configure Claude Desktop by editing `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+<div className="not-prose">
+  <CodeBlock title="claude_desktop_config.json" language="json" code={claudeConfigCode} />
+</div>
+
+3. Restart Claude Desktop
+
+4. Try asking: *"Show me all tasks in my TopGun database"*
+
+## Cursor Setup
+
+Add the following to `.cursor/config.json` in your workspace:
+
+<div className="not-prose">
+  <CodeBlock title=".cursor/config.json" language="json" code={cursorConfigCode} />
+</div>
+
+## Available Tools
+
+The MCP server exposes these tools to AI assistants:
+
+| Tool | Description |
+|------|-------------|
+| `topgun_list_maps` | List all available maps |
+| `topgun_query` | Query data with filters and sorting |
+| `topgun_mutate` | Create, update, or delete records |
+| `topgun_search` | Hybrid search (BM25 full-text + exact) |
+| `topgun_subscribe` | Watch for real-time changes |
+| `topgun_schema` | Get schema information about a map |
+| `topgun_stats` | Connection and map statistics |
+| `topgun_explain` | Explain query execution plan |
+
+### Example Prompts
+
+Once configured, you can use natural language:
+
+- *"Show me all tasks with status 'done'"*
+- *"Create a new task called 'Review PR #123' with high priority"*
+- *"Find tasks mentioning authentication"*
+- *"What fields does the users map have?"*
+- *"Watch for new high-priority tasks"*
+
+## Programmatic Usage
+
+For custom integrations, you can use the server programmatically:
+
+<div className="not-prose">
+  <CodeBlock title="src/mcp/server.ts" language="typescript" code={programmaticCode} />
+</div>
+
+## CLI Options
+
+```bash
+topgun-mcp [options]
+
+Options:
+  --url, -u <url>         TopGun server URL (default: ws://localhost:8080)
+  --token, -t <token>     Authentication token
+  --maps, -m <maps>       Comma-separated list of allowed maps
+  --no-mutations          Disable mutation operations
+  --no-subscriptions      Disable subscription operations
+  --http                  Start HTTP transport instead of stdio
+  --port, -p <port>       HTTP port (default: 3000)
+  --debug, -d             Enable debug logging
+  --help, -h              Show help
+  --version, -v           Show version
+```
+
+## HTTP Transport
+
+For web-based MCP clients or custom integrations, start the server with HTTP transport:
+
+<div className="not-prose">
+  <CodeBlock title="Terminal" language="bash" code={httpTransportCode} />
+</div>
+
+### HTTP Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check |
+| `/mcp` | GET | Server info |
+| `/mcp/events` | GET | SSE connection for streaming |
+| `/mcp` | POST | Stateless tool calls |
+
+## Configuration Reference
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `topgunUrl` | string | `ws://localhost:8080` | TopGun server WebSocket URL |
+| `authToken` | string | - | Authentication token |
+| `allowedMaps` | string[] | all | Restrict access to specific maps |
+| `enableMutations` | boolean | `true` | Allow write operations |
+| `enableSubscriptions` | boolean | `true` | Allow real-time subscriptions |
+| `defaultLimit` | number | `10` | Default query result limit |
+| `maxLimit` | number | `100` | Maximum query result limit |
+| `subscriptionTimeoutSeconds` | number | `60` | Subscription timeout |
+| `debug` | boolean | `false` | Enable debug logging |
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `TOPGUN_URL` | TopGun server URL |
+| `TOPGUN_TOKEN` | Authentication token |
+| `TOPGUN_MAPS` | Comma-separated allowed maps |
+| `TOPGUN_MCP_PORT` | HTTP port (with --http) |
+| `TOPGUN_DEBUG` | Enable debug (true/false) |
+
+## Security Best Practices
+
+1. **Restrict Maps**: Use `allowedMaps` to limit which data the AI can access
+2. **Read-Only Mode**: Set `enableMutations: false` for read-only access
+3. **Authentication**: Always use auth tokens in production
+4. **Local Execution**: The MCP server runs locally—data never leaves your machine
+
+```typescript
+// Production-safe configuration
+const server = new TopGunMCPServer({
+  topgunUrl: 'wss://production.example.com',
+  authToken: process.env.TOPGUN_TOKEN,
+  allowedMaps: ['public-tasks', 'public-users'], // Restrict access
+  enableMutations: false, // Read-only
+  enableSubscriptions: false,
+  maxLimit: 50,
+});
+```
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/performance" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Performance Tuning
+    </div>
+  </a>
+  <a href="/docs/reference" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      API Reference <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>
