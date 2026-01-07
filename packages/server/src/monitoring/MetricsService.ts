@@ -33,6 +33,12 @@ export class MetricsService {
   private connectionsPending: Gauge;
   private connectionRatePerSecond: Gauge;
 
+  // Distributed search metrics (Phase 14)
+  private distributedSearchTotal: Counter;
+  private distributedSearchDuration: Summary;
+  private distributedSearchFailedNodes: Counter;
+  private distributedSearchPartialResults: Counter;
+
   constructor() {
     this.registry = new Registry();
 
@@ -169,6 +175,34 @@ export class MetricsService {
       help: 'Current connection rate per second',
       registers: [this.registry],
     });
+
+    // === Distributed search metrics (Phase 14) ===
+    this.distributedSearchTotal = new Counter({
+      name: 'topgun_distributed_search_total',
+      help: 'Total number of distributed search requests',
+      labelNames: ['map', 'status'],
+      registers: [this.registry],
+    });
+
+    this.distributedSearchDuration = new Summary({
+      name: 'topgun_distributed_search_duration_ms',
+      help: 'Distribution of distributed search execution times in milliseconds',
+      labelNames: ['map'],
+      percentiles: [0.5, 0.9, 0.95, 0.99],
+      registers: [this.registry],
+    });
+
+    this.distributedSearchFailedNodes = new Counter({
+      name: 'topgun_distributed_search_failed_nodes_total',
+      help: 'Total number of node failures during distributed search',
+      registers: [this.registry],
+    });
+
+    this.distributedSearchPartialResults = new Counter({
+      name: 'topgun_distributed_search_partial_results_total',
+      help: 'Total number of searches that returned partial results due to node failures',
+      registers: [this.registry],
+    });
   }
 
   public destroy() {
@@ -302,6 +336,41 @@ export class MetricsService {
    */
   public setConnectionRatePerSecond(rate: number): void {
     this.connectionRatePerSecond.set(rate);
+  }
+
+  // === Distributed search metric methods (Phase 14) ===
+
+  /**
+   * Record a distributed search request.
+   * @param mapName - Name of the map being searched
+   * @param status - 'success', 'partial', or 'error'
+   */
+  public incDistributedSearch(mapName: string, status: 'success' | 'partial' | 'error'): void {
+    this.distributedSearchTotal.inc({ map: mapName, status });
+  }
+
+  /**
+   * Record the duration of a distributed search.
+   * @param mapName - Name of the map being searched
+   * @param durationMs - Duration in milliseconds
+   */
+  public recordDistributedSearchDuration(mapName: string, durationMs: number): void {
+    this.distributedSearchDuration.observe({ map: mapName }, durationMs);
+  }
+
+  /**
+   * Increment counter for failed nodes during distributed search.
+   * @param count - Number of nodes that failed (default 1)
+   */
+  public incDistributedSearchFailedNodes(count: number = 1): void {
+    this.distributedSearchFailedNodes.inc(count);
+  }
+
+  /**
+   * Increment counter for searches returning partial results.
+   */
+  public incDistributedSearchPartialResults(): void {
+    this.distributedSearchPartialResults.inc();
   }
 
   public async getMetrics(): Promise<string> {

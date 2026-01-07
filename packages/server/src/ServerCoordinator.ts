@@ -605,7 +605,8 @@ export class ServerCoordinator {
                 this.cluster,
                 this.partitionService,
                 this.searchCoordinator,
-                config.distributedSearch
+                config.distributedSearch,
+                this.metricsService
             );
             logger.info('ClusterSearchCoordinator initialized for distributed search');
 

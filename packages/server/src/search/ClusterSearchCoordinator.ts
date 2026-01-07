@@ -19,15 +19,17 @@ import { EventEmitter } from 'events';
 import {
   ReciprocalRankFusion,
   SearchCursor,
+  ClusterSearchReqPayloadSchema,
+  ClusterSearchRespPayloadSchema,
   type RankedResult,
   type SearchCursorData,
   type ClusterSearchReqPayload,
   type ClusterSearchRespPayload,
-  type SearchOptions,
 } from '@topgunbuild/core';
 import { ClusterManager } from '../cluster/ClusterManager';
 import { PartitionService } from '../cluster/PartitionService';
 import { SearchCoordinator, type ServerSearchResult } from './SearchCoordinator';
+import { MetricsService } from '../monitoring/MetricsService';
 import { logger } from '../utils/logger';
 
 /**
@@ -127,6 +129,7 @@ export class ClusterSearchCoordinator extends EventEmitter {
   private readonly localSearchCoordinator: SearchCoordinator;
   private readonly rrf: ReciprocalRankFusion;
   private readonly config: Required<ClusterSearchConfig>;
+  private readonly metricsService?: MetricsService;
 
   /** Pending requests awaiting responses */
   private readonly pendingRequests: Map<string, PendingRequest> = new Map();
@@ -135,7 +138,8 @@ export class ClusterSearchCoordinator extends EventEmitter {
     clusterManager: ClusterManager,
     partitionService: PartitionService,
     localSearchCoordinator: SearchCoordinator,
-    config?: ClusterSearchConfig
+    config?: ClusterSearchConfig,
+    metricsService?: MetricsService
   ) {
     super();
     this.clusterManager = clusterManager;
@@ -143,6 +147,7 @@ export class ClusterSearchCoordinator extends EventEmitter {
     this.localSearchCoordinator = localSearchCoordinator;
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.rrf = new ReciprocalRankFusion({ k: this.config.rrfK });
+    this.metricsService = metricsService;
 
     // Register handler for incoming cluster messages
     this.clusterManager.on('message', this.handleClusterMessage.bind(this));
@@ -258,10 +263,31 @@ export class ClusterSearchCoordinator extends EventEmitter {
    */
   private async handleSearchRequest(
     senderId: string,
-    payload: ClusterSearchReqPayload
+    rawPayload: unknown
   ): Promise<void> {
     const startTime = performance.now();
     const myNodeId = this.clusterManager.config.nodeId;
+
+    // Validate incoming payload with Zod
+    const parsed = ClusterSearchReqPayloadSchema.safeParse(rawPayload);
+    if (!parsed.success) {
+      logger.warn(
+        { senderId, error: parsed.error.message },
+        'Invalid cluster search request payload'
+      );
+      // Send error response back
+      this.clusterManager.send(senderId, 'CLUSTER_SEARCH_RESP' as any, {
+        requestId: (rawPayload as any)?.requestId ?? 'unknown',
+        nodeId: myNodeId,
+        results: [],
+        totalHits: 0,
+        executionTimeMs: performance.now() - startTime,
+        error: 'Invalid request payload',
+      });
+      return;
+    }
+
+    const payload = parsed.data;
 
     try {
       // Execute local search
@@ -322,8 +348,20 @@ export class ClusterSearchCoordinator extends EventEmitter {
    */
   private handleSearchResponse(
     _senderId: string,
-    payload: ClusterSearchRespPayload
+    rawPayload: unknown
   ): void {
+    // Validate incoming payload with Zod
+    const parsed = ClusterSearchRespPayloadSchema.safeParse(rawPayload);
+    if (!parsed.success) {
+      logger.warn(
+        { error: parsed.error.message },
+        'Invalid cluster search response payload'
+      );
+      return;
+    }
+
+    const payload = parsed.data;
+
     const pending = this.pendingRequests.get(payload.requestId);
     if (!pending) {
       logger.warn({ requestId: payload.requestId }, 'Received response for unknown request');
@@ -427,6 +465,22 @@ export class ClusterSearchCoordinator extends EventEmitter {
     }
 
     const executionTimeMs = performance.now() - pending.startTime;
+
+    // Record metrics
+    if (this.metricsService) {
+      const status = failedNodes.length === 0 ? 'success'
+        : respondedNodes.length === 0 ? 'error'
+        : 'partial';
+      this.metricsService.incDistributedSearch(pending.mapName, status);
+      this.metricsService.recordDistributedSearchDuration(pending.mapName, executionTimeMs);
+
+      if (failedNodes.length > 0) {
+        this.metricsService.incDistributedSearchFailedNodes(failedNodes.length);
+        if (respondedNodes.length > 0) {
+          this.metricsService.incDistributedSearchPartialResults();
+        }
+      }
+    }
 
     pending.resolve({
       results,
@@ -589,13 +643,21 @@ export class ClusterSearchCoordinator extends EventEmitter {
       );
     }
 
+    const executionTimeMs = performance.now() - startTime;
+
+    // Record metrics for single-node search
+    if (this.metricsService) {
+      this.metricsService.incDistributedSearch(mapName, 'success');
+      this.metricsService.recordDistributedSearchDuration(mapName, executionTimeMs);
+    }
+
     return {
       results,
       totalHits: localResult.totalCount ?? results.length,
       nextCursor,
       respondedNodes: [myNodeId],
       failedNodes: [],
-      executionTimeMs: performance.now() - startTime,
+      executionTimeMs,
     };
   }
 
