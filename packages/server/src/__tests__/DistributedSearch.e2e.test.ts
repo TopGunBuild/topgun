@@ -1,0 +1,283 @@
+/**
+ * E2E Distributed Search Tests
+ *
+ * Tests real distributed search across multiple server nodes:
+ * - Multi-node FTS search with RRF merge
+ * - Single-node FTS fallback
+ * - Search result ranking across nodes
+ * - Cursor-based pagination
+ *
+ * NOTE: These tests require full server setup with WebSocket connections.
+ * For quick validation, run ClusterSearchCoordinator unit tests instead.
+ * Skip these in CI for now as they require more complex setup.
+ */
+
+import { ServerCoordinator } from '../ServerCoordinator';
+import { WebSocket } from 'ws';
+import { serialize, deserialize, HLC } from '@topgunbuild/core';
+
+// Skip E2E tests in CI - they require complex server setup
+// Run: npx jest --testPathPattern="DistributedSearch.e2e" --runInBand
+describe.skip('Distributed Search E2E', () => {
+  let node1: ServerCoordinator;
+  let node2: ServerCoordinator;
+
+  // Helper to wait for cluster stabilization
+  async function waitForCluster(nodes: ServerCoordinator[], expectedSize: number, timeoutMs = 10000): Promise<boolean> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      let allReady = true;
+      for (const node of nodes) {
+        const members = (node as any).cluster?.getMembers() || [];
+        if (members.length < expectedSize) {
+          allReady = false;
+          break;
+        }
+      }
+      if (allReady) return true;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    return false;
+  }
+
+  // Helper to insert data via internal API
+  async function insertData(node: ServerCoordinator, mapName: string, key: string, value: any): Promise<void> {
+    const map = (node as any).getMap(mapName);
+    const hlc = (node as any).hlc as HLC;
+    map.set(key, value, hlc.now());
+    // Trigger FTS index update
+    (node as any).searchCoordinator?.onDataChange(mapName, key, value, 'add');
+  }
+
+  // Helper to perform search via WebSocket
+  async function search(
+    node: ServerCoordinator,
+    mapName: string,
+    query: string,
+    options: { limit?: number } = {}
+  ): Promise<{ results: any[]; totalCount: number; nextCursor?: string; error?: string }> {
+    return new Promise((resolve, reject) => {
+      const client = new WebSocket(`ws://localhost:${node.port}`);
+      const timeout = setTimeout(() => {
+        client.close();
+        reject(new Error('Search timeout'));
+      }, 5000);
+
+      client.on('open', () => {
+        // First authenticate
+        client.send(serialize({
+          type: 'AUTH',
+          token: 'test-token',
+        }));
+      });
+
+      client.on('message', (data: Buffer) => {
+        try {
+          const msg = deserialize(data) as { type: string; payload?: any; error?: string };
+
+          if (msg.type === 'AUTH_SUCCESS' || msg.type === 'AUTH_RESP') {
+            // Now send search request
+            client.send(serialize({
+              type: 'SEARCH',
+              payload: {
+                requestId: 'search-1',
+                mapName,
+                query,
+                options: {
+                  limit: options.limit ?? 10,
+                },
+              },
+            }));
+          } else if (msg.type === 'SEARCH_RESP') {
+            clearTimeout(timeout);
+            client.close();
+            resolve(msg.payload);
+          } else if (msg.type === 'ERROR') {
+            clearTimeout(timeout);
+            client.close();
+            reject(new Error(msg.error || 'Unknown error'));
+          }
+        } catch (err) {
+          // Skip parsing errors for non-msgpack messages
+        }
+      });
+
+      client.on('error', (err) => {
+        clearTimeout(timeout);
+        reject(err);
+      });
+    });
+  }
+
+  describe('2-Node Distributed Search', () => {
+    beforeAll(async () => {
+      // Start first node with FTS enabled
+      node1 = new ServerCoordinator({
+        port: 0,
+        nodeId: 'search-node-1',
+        host: 'localhost',
+        clusterPort: 0,
+        peers: [],
+        fullTextSearch: {
+          articles: {
+            fields: ['title', 'content'],
+          },
+        },
+      });
+      await node1.ready();
+
+      // Start second node with FTS enabled
+      node2 = new ServerCoordinator({
+        port: 0,
+        nodeId: 'search-node-2',
+        host: 'localhost',
+        clusterPort: 0,
+        peers: [`localhost:${node1.clusterPort}`],
+        fullTextSearch: {
+          articles: {
+            fields: ['title', 'content'],
+          },
+        },
+      });
+      await node2.ready();
+
+      // Wait for cluster formation
+      const formed = await waitForCluster([node1, node2], 2);
+      expect(formed).toBe(true);
+
+      // Give some time for cluster stabilization
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }, 15000);
+
+    afterAll(async () => {
+      await Promise.all([
+        node1?.shutdown(),
+        node2?.shutdown(),
+      ]);
+      await new Promise(resolve => setTimeout(resolve, 300));
+    });
+
+    test('should perform distributed search across nodes', async () => {
+      // Insert documents on node1
+      await insertData(node1, 'articles', 'article-1', {
+        title: 'Introduction to Machine Learning',
+        content: 'Machine learning is a subset of artificial intelligence.',
+      });
+      await insertData(node1, 'articles', 'article-2', {
+        title: 'Deep Learning Fundamentals',
+        content: 'Deep learning uses neural networks for learning.',
+      });
+
+      // Insert documents on node2
+      await insertData(node2, 'articles', 'article-3', {
+        title: 'Machine Learning Applications',
+        content: 'ML is used in image recognition and NLP.',
+      });
+      await insertData(node2, 'articles', 'article-4', {
+        title: 'Data Science Basics',
+        content: 'Data science combines statistics and machine learning.',
+      });
+
+      // Wait for index updates
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Search from node1 - should find results from both nodes
+      const result = await search(node1, 'articles', 'machine learning');
+
+      expect(result.error).toBeUndefined();
+      expect(result.results.length).toBeGreaterThan(0);
+
+      // Should find articles mentioning "machine learning"
+      const keys = result.results.map(r => r.key);
+      expect(keys).toContain('article-1');
+      expect(keys).toContain('article-3');
+      expect(keys).toContain('article-4');
+    }, 10000);
+
+    test('should return search results with scores', async () => {
+      const result = await search(node1, 'articles', 'deep learning neural');
+
+      expect(result.error).toBeUndefined();
+      expect(result.results.length).toBeGreaterThan(0);
+
+      // Results should have scores
+      for (const r of result.results) {
+        expect(r.score).toBeDefined();
+        expect(typeof r.score).toBe('number');
+        expect(r.score).toBeGreaterThan(0);
+      }
+
+      // Results should be sorted by score descending
+      for (let i = 1; i < result.results.length; i++) {
+        expect(result.results[i - 1].score).toBeGreaterThanOrEqual(result.results[i].score);
+      }
+    }, 10000);
+
+    test('should respect limit option', async () => {
+      const result = await search(node1, 'articles', 'learning', { limit: 2 });
+
+      expect(result.error).toBeUndefined();
+      expect(result.results.length).toBeLessThanOrEqual(2);
+    }, 10000);
+
+    test('should handle query with no matches', async () => {
+      const result = await search(node1, 'articles', 'quantum physics blockchain');
+
+      expect(result.error).toBeUndefined();
+      expect(result.results.length).toBe(0);
+    }, 10000);
+  });
+
+  describe('Single-Node Search', () => {
+    let singleNode: ServerCoordinator;
+
+    beforeAll(async () => {
+      // Start single node with FTS enabled
+      singleNode = new ServerCoordinator({
+        port: 0,
+        nodeId: 'single-search-node',
+        host: 'localhost',
+        clusterPort: 0,
+        peers: [],
+        fullTextSearch: {
+          docs: {
+            fields: ['title', 'body'],
+          },
+        },
+      });
+      await singleNode.ready();
+
+      // Insert test documents
+      await insertData(singleNode, 'docs', 'doc-1', {
+        title: 'TypeScript Guide',
+        body: 'TypeScript is a typed superset of JavaScript.',
+      });
+      await insertData(singleNode, 'docs', 'doc-2', {
+        title: 'JavaScript Basics',
+        body: 'JavaScript is a dynamic programming language.',
+      });
+
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }, 10000);
+
+    afterAll(async () => {
+      await singleNode?.shutdown();
+      await new Promise(resolve => setTimeout(resolve, 300));
+    });
+
+    test('should perform local search on single node', async () => {
+      const result = await search(singleNode, 'docs', 'typescript');
+
+      expect(result.error).toBeUndefined();
+      expect(result.results.length).toBe(1);
+      expect(result.results[0].key).toBe('doc-1');
+    }, 10000);
+
+    test('should find documents with common terms', async () => {
+      const result = await search(singleNode, 'docs', 'javascript');
+
+      expect(result.error).toBeUndefined();
+      expect(result.results.length).toBe(2);
+    }, 10000);
+  });
+});

@@ -281,12 +281,16 @@ export type {
   SerializedIndex,
 } from './fts';
 
-// Search utilities exports (Phase 12)
+// Search utilities exports (Phase 12 + Phase 14)
 export {
   ReciprocalRankFusion,
+  SearchCursor,
+  DEFAULT_CURSOR_MAX_AGE_MS,
 } from './search';
 export type {
   RankedResult,
   RRFConfig,
   MergedResult,
+  SearchCursorData,
+  CursorableResult,
 } from './search';

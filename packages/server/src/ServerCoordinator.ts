@@ -46,7 +46,7 @@ import { CounterHandler } from './handlers/CounterHandler';
 import { EntryProcessorHandler } from './handlers/EntryProcessorHandler';
 import { ConflictResolverHandler } from './handlers/ConflictResolverHandler';
 import { EventJournalService, EventJournalServiceConfig } from './EventJournalService';
-import { SearchCoordinator, SearchConfig } from './search';
+import { SearchCoordinator, SearchConfig, ClusterSearchCoordinator, type ClusterSearchConfig } from './search';
 import type { JournalEvent, JournalEventType, MergeRejection, MergeContext, FullTextIndexConfig } from '@topgunbuild/core';
 
 interface ClientConnection {
@@ -164,6 +164,10 @@ export interface ServerCoordinatorConfig {
     // === Full-Text Search Options (Phase 11.1) ===
     /** Enable full-text search for specific maps */
     fullTextSearch?: Record<string, FullTextIndexConfig>;
+
+    // === Distributed Search Options (Phase 14) ===
+    /** Configuration for distributed search across cluster nodes */
+    distributedSearch?: ClusterSearchConfig;
 }
 
 export class ServerCoordinator {
@@ -254,6 +258,9 @@ export class ServerCoordinator {
 
     // Phase 11.1 - Full-Text Search
     private searchCoordinator!: SearchCoordinator;
+
+    // Phase 14 - Distributed Search
+    private clusterSearchCoordinator?: ClusterSearchCoordinator;
 
     private readonly _nodeId: string;
 
@@ -592,6 +599,15 @@ export class ServerCoordinator {
                     logger.info({ mapName, fields: ftsConfig.fields }, 'FTS enabled for map');
                 }
             }
+
+            // Phase 14: Initialize ClusterSearchCoordinator for distributed search
+            this.clusterSearchCoordinator = new ClusterSearchCoordinator(
+                this.cluster,
+                this.partitionService,
+                this.searchCoordinator,
+                config.distributedSearch
+            );
+            logger.info('ClusterSearchCoordinator initialized for distributed search');
 
             this.systemManager = new SystemManager(
                 this.cluster,
@@ -1018,6 +1034,11 @@ export class ServerCoordinator {
         // Dispose Event Journal (Phase 5.04)
         if (this.eventJournalService) {
             this.eventJournalService.dispose();
+        }
+
+        // Destroy ClusterSearchCoordinator (Phase 14)
+        if (this.clusterSearchCoordinator) {
+            this.clusterSearchCoordinator.destroy();
         }
 
         logger.info('Server Coordinator shutdown complete.');
@@ -2360,7 +2381,7 @@ export class ServerCoordinator {
                 break;
             }
 
-            // Phase 11.1: Full-Text Search
+            // Phase 11.1: Full-Text Search (Phase 14: Distributed Search)
             case 'SEARCH': {
                 const { requestId: searchReqId, mapName: searchMapName, query: searchQuery, options: searchOptions } = message.payload;
 
@@ -2393,21 +2414,65 @@ export class ServerCoordinator {
                     break;
                 }
 
-                // Execute search
-                const searchResult = this.searchCoordinator.search(searchMapName, searchQuery, searchOptions);
-                searchResult.requestId = searchReqId;
+                // Phase 14: Use distributed search if ClusterSearchCoordinator is available
+                // and we have more than one node in the cluster
+                if (this.clusterSearchCoordinator && this.cluster.getMembers().length > 1) {
+                    // Execute distributed search across cluster
+                    this.clusterSearchCoordinator.search(searchMapName, searchQuery, {
+                        limit: searchOptions?.limit ?? 10,
+                        minScore: searchOptions?.minScore,
+                        boost: searchOptions?.boost,
+                    }).then(distributedResult => {
+                        logger.debug({
+                            clientId: client.id,
+                            mapName: searchMapName,
+                            query: searchQuery,
+                            resultCount: distributedResult.results.length,
+                            totalHits: distributedResult.totalHits,
+                            respondedNodes: distributedResult.respondedNodes.length,
+                            failedNodes: distributedResult.failedNodes.length,
+                            executionTimeMs: distributedResult.executionTimeMs,
+                        }, 'Distributed search executed');
 
-                logger.debug({
-                    clientId: client.id,
-                    mapName: searchMapName,
-                    query: searchQuery,
-                    resultCount: searchResult.results.length
-                }, 'Search executed');
+                        client.writer.write({
+                            type: 'SEARCH_RESP',
+                            payload: {
+                                requestId: searchReqId,
+                                results: distributedResult.results,
+                                totalCount: distributedResult.totalHits,
+                                // Include cursor for pagination if available
+                                nextCursor: distributedResult.nextCursor,
+                            },
+                        });
+                    }).catch(err => {
+                        logger.error({ err, mapName: searchMapName, query: searchQuery }, 'Distributed search failed');
+                        client.writer.write({
+                            type: 'SEARCH_RESP',
+                            payload: {
+                                requestId: searchReqId,
+                                results: [],
+                                totalCount: 0,
+                                error: `Distributed search failed: ${err.message}`,
+                            },
+                        });
+                    });
+                } else {
+                    // Execute local search (single node or no cluster)
+                    const searchResult = this.searchCoordinator.search(searchMapName, searchQuery, searchOptions);
+                    searchResult.requestId = searchReqId;
 
-                client.writer.write({
-                    type: 'SEARCH_RESP',
-                    payload: searchResult,
-                });
+                    logger.debug({
+                        clientId: client.id,
+                        mapName: searchMapName,
+                        query: searchQuery,
+                        resultCount: searchResult.results.length
+                    }, 'Local search executed');
+
+                    client.writer.write({
+                        type: 'SEARCH_RESP',
+                        payload: searchResult,
+                    });
+                }
                 break;
             }
 

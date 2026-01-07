@@ -878,3 +878,125 @@ export type SearchUpdatePayload = z.infer<typeof SearchUpdatePayloadSchema>;
 export type SearchUpdateMessage = z.infer<typeof SearchUpdateMessageSchema>;
 export type SearchUnsubPayload = z.infer<typeof SearchUnsubPayloadSchema>;
 export type SearchUnsubMessage = z.infer<typeof SearchUnsubMessageSchema>;
+
+// --- Distributed Search Messages (Phase 14) ---
+
+/**
+ * CLUSTER_SEARCH_REQ: Broadcast search request to cluster nodes.
+ * Sent from coordinator to data-owning nodes.
+ */
+export const ClusterSearchReqPayloadSchema = z.object({
+  /** Unique request ID for correlation */
+  requestId: z.string(),
+  /** Map name to search */
+  mapName: z.string(),
+  /** Search query text */
+  query: z.string(),
+  /** Search options */
+  options: z.object({
+    /** Maximum results per node (for Top-K) */
+    limit: z.number().int().positive().max(1000),
+    /** Minimum score threshold */
+    minScore: z.number().optional(),
+    /** Fields to boost */
+    boost: z.record(z.string(), z.number()).optional(),
+    /** Include matched terms in response */
+    includeMatchedTerms: z.boolean().optional(),
+    /** For cursor-based pagination: return results after this score */
+    afterScore: z.number().optional(),
+    /** For cursor-based pagination: return results after this key (tie-breaking) */
+    afterKey: z.string().optional(),
+  }),
+  /** Timeout in milliseconds */
+  timeoutMs: z.number().int().positive().optional(),
+});
+
+export const ClusterSearchReqMessageSchema = z.object({
+  type: z.literal('CLUSTER_SEARCH_REQ'),
+  payload: ClusterSearchReqPayloadSchema,
+});
+
+/**
+ * CLUSTER_SEARCH_RESP: Response from a node with local search results.
+ */
+export const ClusterSearchRespPayloadSchema = z.object({
+  /** Correlates to requestId */
+  requestId: z.string(),
+  /** Node that produced these results */
+  nodeId: z.string(),
+  /** Search results with scores */
+  results: z.array(z.object({
+    key: z.string(),
+    value: z.unknown(),
+    score: z.number(),
+    matchedTerms: z.array(z.string()).optional(),
+  })),
+  /** Total matching documents on this node (for pagination) */
+  totalHits: z.number().int().nonnegative(),
+  /** Execution time on this node in ms (for monitoring) */
+  executionTimeMs: z.number().nonnegative(),
+  /** Error if search failed on this node */
+  error: z.string().optional(),
+});
+
+export const ClusterSearchRespMessageSchema = z.object({
+  type: z.literal('CLUSTER_SEARCH_RESP'),
+  payload: ClusterSearchRespPayloadSchema,
+});
+
+/**
+ * CLUSTER_SEARCH_SUBSCRIBE: Live distributed search subscription.
+ */
+export const ClusterSearchSubscribePayloadSchema = z.object({
+  subscriptionId: z.string(),
+  mapName: z.string(),
+  query: z.string(),
+  options: SearchOptionsSchema.optional(),
+});
+
+export const ClusterSearchSubscribeMessageSchema = z.object({
+  type: z.literal('CLUSTER_SEARCH_SUBSCRIBE'),
+  payload: ClusterSearchSubscribePayloadSchema,
+});
+
+/**
+ * CLUSTER_SEARCH_UNSUBSCRIBE: Unsubscribe from distributed search.
+ */
+export const ClusterSearchUnsubscribePayloadSchema = z.object({
+  subscriptionId: z.string(),
+});
+
+export const ClusterSearchUnsubscribeMessageSchema = z.object({
+  type: z.literal('CLUSTER_SEARCH_UNSUBSCRIBE'),
+  payload: ClusterSearchUnsubscribePayloadSchema,
+});
+
+/**
+ * CLUSTER_SEARCH_UPDATE: Delta update for live distributed search.
+ */
+export const ClusterSearchUpdatePayloadSchema = z.object({
+  subscriptionId: z.string(),
+  nodeId: z.string(),
+  key: z.string(),
+  value: z.unknown(),
+  score: z.number(),
+  matchedTerms: z.array(z.string()).optional(),
+  type: SearchUpdateTypeSchema,
+});
+
+export const ClusterSearchUpdateMessageSchema = z.object({
+  type: z.literal('CLUSTER_SEARCH_UPDATE'),
+  payload: ClusterSearchUpdatePayloadSchema,
+});
+
+// Distributed Search types (Phase 14)
+export type ClusterSearchReqPayload = z.infer<typeof ClusterSearchReqPayloadSchema>;
+export type ClusterSearchReqMessage = z.infer<typeof ClusterSearchReqMessageSchema>;
+export type ClusterSearchRespPayload = z.infer<typeof ClusterSearchRespPayloadSchema>;
+export type ClusterSearchRespMessage = z.infer<typeof ClusterSearchRespMessageSchema>;
+export type ClusterSearchSubscribePayload = z.infer<typeof ClusterSearchSubscribePayloadSchema>;
+export type ClusterSearchSubscribeMessage = z.infer<typeof ClusterSearchSubscribeMessageSchema>;
+export type ClusterSearchUnsubscribePayload = z.infer<typeof ClusterSearchUnsubscribePayloadSchema>;
+export type ClusterSearchUnsubscribeMessage = z.infer<typeof ClusterSearchUnsubscribeMessageSchema>;
+export type ClusterSearchUpdatePayload = z.infer<typeof ClusterSearchUpdatePayloadSchema>;
+export type ClusterSearchUpdateMessage = z.infer<typeof ClusterSearchUpdateMessageSchema>;
