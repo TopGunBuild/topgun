@@ -116,6 +116,7 @@ export {
   type QueryResult,
   type OrderBy,
   type ExecuteOptions,
+  type QueryResultWithCursor,
 } from './QueryExecutor';
 
 // Unified Live Query Registry (Phase 12)
@@ -125,3 +126,12 @@ export {
   type UnifiedLiveQueryRegistryStats,
   type UnifiedDelta,
 } from './UnifiedLiveQueryRegistry';
+
+// Query Cursor (Phase 14.1)
+export {
+  QueryCursor,
+  type QueryCursorData,
+  type CursorableQueryResult,
+  type QueryCursorOptions,
+  DEFAULT_QUERY_CURSOR_MAX_AGE_MS,
+} from './QueryCursor';

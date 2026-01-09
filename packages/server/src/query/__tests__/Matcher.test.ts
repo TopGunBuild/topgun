@@ -147,31 +147,37 @@ describe('executeQuery', () => {
     expect(results.map(r => r.value.name)).toEqual(['A', 'B']);
   });
 
-  test('should offset results', () => {
-    const query: Query = { sort: { age: 'asc' }, offset: 2 };
-    const results = executeQuery(records, query);
-    expect(results.length).toBe(3);
-    expect(results.map(r => r.value.name)).toEqual(['C', 'D', 'E']);
+  test('should apply cursor-based pagination (Phase 14.1)', () => {
+    const { executeQueryWithCursor } = require('../Matcher');
+
+    // First page
+    const query1: Query = { sort: { age: 'asc' }, limit: 2 };
+    const page1 = executeQueryWithCursor(records, query1);
+    expect(page1.results.length).toBe(2);
+    expect(page1.results.map((r: any) => r.value.name)).toEqual(['A', 'B']);
+    expect(page1.hasMore).toBe(true);
+    expect(page1.nextCursor).toBeDefined();
+
+    // Second page using cursor
+    const query2: Query = { sort: { age: 'asc' }, limit: 2, cursor: page1.nextCursor };
+    const page2 = executeQueryWithCursor(records, query2);
+    expect(page2.results.length).toBe(2);
+    expect(page2.results.map((r: any) => r.value.name)).toEqual(['C', 'D']);
   });
 
-  test('should offset and limit', () => {
-    const query: Query = { sort: { age: 'asc' }, offset: 1, limit: 2 };
-    const results = executeQuery(records, query);
-    expect(results.length).toBe(2);
-    expect(results.map(r => r.value.name)).toEqual(['B', 'C']);
-  });
+  test('should combine filter, sort, limit with cursor', () => {
+    const { executeQueryWithCursor } = require('../Matcher');
 
-  test('should combine filter, sort, limit', () => {
-    // Filter > 15 (B, C, D, E) -> Sort Desc (E, D, C, B) -> Skip 1 (D, C, B) -> Limit 2 (D, C)
-    const query: Query = { 
+    // Filter > 15 (B, C, D, E) -> Sort Desc (E, D, C, B) -> Limit 2 (E, D)
+    const query: Query = {
       where: { age: { $gt: 15 } },
       sort: { age: 'desc' },
-      offset: 1,
       limit: 2
     };
-    const results = executeQuery(records, query);
-    expect(results.length).toBe(2);
-    expect(results[0].value.name).toBe('D');
-    expect(results[1].value.name).toBe('C');
+    const result = executeQueryWithCursor(records, query);
+    expect(result.results.length).toBe(2);
+    expect(result.results[0].value.name).toBe('E');
+    expect(result.results[1].value.name).toBe('D');
+    expect(result.hasMore).toBe(true);
   });
 });

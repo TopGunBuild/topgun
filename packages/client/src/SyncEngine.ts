@@ -2393,7 +2393,7 @@ export class SyncEngine {
         where: filter.where,
         sort: filter.sort,
         limit: filter.limit,
-        offset: filter.offset,
+        cursor: filter.cursor, // Phase 14.1: replaces offset
       },
     });
   }
@@ -2484,11 +2484,8 @@ export class SyncEngine {
       });
     }
 
-    // Apply offset and limit
+    // Apply limit (cursor filtering is done server-side)
     let sliced = results;
-    if (filter.offset) {
-      sliced = sliced.slice(filter.offset);
-    }
     if (filter.limit) {
       sliced = sliced.slice(0, filter.limit);
     }

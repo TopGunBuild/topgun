@@ -423,7 +423,7 @@ describe('QueryOptimizer', () => {
 
       expect(plan.sort).toBeUndefined();
       expect(plan.limit).toBeUndefined();
-      expect(plan.offset).toBeUndefined();
+      expect(plan.cursor).toBeUndefined();
     });
 
     it('should detect indexedSort when NavigableIndex exists', () => {
@@ -454,18 +454,18 @@ describe('QueryOptimizer', () => {
       expect(plan.sort).toEqual({ field: 'name', direction: 'asc' });
     });
 
-    it('should include limit and offset in plan', () => {
+    it('should include limit and cursor in plan', () => {
       const query: SimpleQueryNode = { type: 'eq', attribute: 'name', value: 'Alice' };
       const plan = optimizer.optimizeWithOptions(query, {
         limit: 10,
-        offset: 5,
+        cursor: 'test-cursor',
       });
 
       expect(plan.limit).toBe(10);
-      expect(plan.offset).toBe(5);
+      expect(plan.cursor).toBe('test-cursor');
     });
 
-    it('should handle sort + limit + offset together', () => {
+    it('should handle sort + limit together', () => {
       const ageAttr = simpleAttribute<TestRecord, number>('age', (r) => r.age);
       const ageIndex = new NavigableIndex<string, TestRecord, number>(ageAttr);
       registry.addIndex(ageIndex);
@@ -474,13 +474,11 @@ describe('QueryOptimizer', () => {
       const plan = optimizer.optimizeWithOptions(query, {
         sort: { age: 'desc' },
         limit: 10,
-        offset: 0,
       });
 
       expect(plan.indexedSort).toBe(true);
       expect(plan.sort).toEqual({ field: 'age', direction: 'desc' });
       expect(plan.limit).toBe(10);
-      expect(plan.offset).toBe(0);
     });
   });
 

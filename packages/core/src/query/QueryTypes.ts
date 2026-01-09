@@ -107,15 +107,15 @@ export type Query = SimpleQueryNode | LogicalQueryNode | FTSQueryNode;
 // ============== Query Options ==============
 
 /**
- * Query execution options for sort/limit/offset.
+ * Query execution options for sort/limit/cursor.
  */
 export interface QueryOptions {
   /** Sort by field(s): field name -> direction */
   sort?: Record<string, 'asc' | 'desc'>;
   /** Maximum number of results to return */
   limit?: number;
-  /** Number of results to skip */
-  offset?: number;
+  /** Cursor for pagination (Phase 14.1: replaces offset) */
+  cursor?: string;
 }
 
 // ============== Execution Plan Types ==============
@@ -246,8 +246,8 @@ export interface QueryPlan {
   };
   /** Limit configuration */
   limit?: number;
-  /** Offset configuration */
-  offset?: number;
+  /** Cursor for pagination (Phase 14.1: replaces offset) */
+  cursor?: string;
 }
 
 // ============== Type Guards ==============

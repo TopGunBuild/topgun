@@ -29,6 +29,7 @@ import { ReciprocalRankFusion, type RankedResult, type MergedResult } from '../s
 import type { FullTextIndex } from '../fts';
 import { SetResultSet } from './resultset/SetResultSet';
 import type { ResultSet } from './resultset/ResultSet';
+import { QueryCursor, type QueryCursorData } from './QueryCursor';
 
 /**
  * Result of executing a query step.
@@ -77,8 +78,22 @@ export interface ExecuteOptions {
   orderBy?: OrderBy[];
   /** Maximum results to return */
   limit?: number;
-  /** Results to skip */
-  offset?: number;
+  /** Cursor for pagination (Phase 14.1: replaces offset) */
+  cursor?: string;
+  /** Query predicate (for cursor validation) */
+  predicate?: Query;
+}
+
+/**
+ * Extended query result with cursor info (Phase 14.1).
+ */
+export interface QueryResultWithCursor<K, V> {
+  /** Query results */
+  results: QueryResult<K, V>[];
+  /** Cursor for next page (undefined if no more results) */
+  nextCursor?: string;
+  /** Whether more results are available */
+  hasMore: boolean;
 }
 
 /**
@@ -118,7 +133,7 @@ export class QueryExecutor<K extends string, V> {
    *
    * @param query - Query to execute
    * @param data - Data map to query
-   * @param options - Execution options (orderBy, limit, offset)
+   * @param options - Execution options (orderBy, limit, cursor)
    * @returns Query results
    */
   execute(
@@ -126,6 +141,24 @@ export class QueryExecutor<K extends string, V> {
     data: Map<K, V>,
     options?: ExecuteOptions
   ): QueryResult<K, V>[] {
+    const result = this.executeWithCursor(query, data, options);
+    return result.results;
+  }
+
+  /**
+   * Execute a query and return results with cursor information.
+   * Use this method for paginated queries.
+   *
+   * @param query - Query to execute
+   * @param data - Data map to query
+   * @param options - Execution options (orderBy, limit, cursor)
+   * @returns Query results with cursor info
+   */
+  executeWithCursor(
+    query: Query,
+    data: Map<K, V>,
+    options?: ExecuteOptions
+  ): QueryResultWithCursor<K, V> {
     // Get execution plan from optimizer
     const plan = this.optimizer.optimize(query);
 
@@ -135,25 +168,75 @@ export class QueryExecutor<K extends string, V> {
     // Convert to QueryResult array
     let results = this.stepResultToQueryResults(stepResult, data);
 
-    // Apply ordering
+    // Determine sort configuration
+    let sortField = '_score';
+    let sortDirection: 'asc' | 'desc' = 'desc';
+
     if (options?.orderBy && options.orderBy.length > 0) {
+      sortField = options.orderBy[0].field;
+      sortDirection = options.orderBy[0].direction;
       results = this.applyOrdering(results, options.orderBy, data);
     } else if (stepResult.scores && stepResult.scores.size > 0) {
       // Default: sort by score descending if we have scores
       results = this.applyOrdering(results, [{ field: '_score', direction: 'desc' }], data);
     }
 
-    // Apply offset
-    if (options?.offset !== undefined && options.offset > 0) {
-      results = results.slice(options.offset);
+    // Create sort config for cursor
+    const sort: Record<string, 'asc' | 'desc'> = { [sortField]: sortDirection };
+
+    // Apply cursor filtering
+    if (options?.cursor) {
+      const cursorData = QueryCursor.decode(options.cursor);
+      if (cursorData && QueryCursor.isValid(cursorData, options.predicate, sort)) {
+        results = results.filter((result) => {
+          const sortValue = this.extractSortValue(result, sortField);
+          return QueryCursor.isAfterCursor(
+            { key: result.key, sortValue },
+            cursorData
+          );
+        });
+      }
+      // Invalid cursor: silently ignore and return results from beginning
     }
 
+    // Determine if there are more results
+    const hasLimit = options?.limit !== undefined && options.limit > 0;
+    const totalBeforeLimit = results.length;
+
     // Apply limit
-    if (options?.limit !== undefined && options.limit > 0) {
+    if (hasLimit) {
       results = results.slice(0, options.limit);
     }
 
-    return results;
+    // Generate next cursor if there are more results
+    let nextCursor: string | undefined;
+    const hasMore = hasLimit && totalBeforeLimit > options.limit!;
+
+    if (hasMore && results.length > 0) {
+      const lastResult = results[results.length - 1];
+      const sortValue = this.extractSortValue(lastResult, sortField);
+      nextCursor = QueryCursor.fromLastResult(
+        { key: lastResult.key, sortValue },
+        sort,
+        options?.predicate
+      );
+    }
+
+    return {
+      results,
+      nextCursor,
+      hasMore,
+    };
+  }
+
+  /**
+   * Extract sort value from a query result.
+   */
+  private extractSortValue(result: QueryResult<K, V>, sortField: string): unknown {
+    if (sortField === '_score') {
+      return result.score ?? 0;
+    }
+    return (result.value as Record<string, unknown>)[sortField];
   }
 
   /**

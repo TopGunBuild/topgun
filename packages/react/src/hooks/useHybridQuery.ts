@@ -23,6 +23,10 @@ export interface UseHybridQueryResult<T> {
   loading: boolean;
   /** Error if query failed */
   error: Error | null;
+  /** Cursor for fetching next page (Phase 14.1) */
+  nextCursor?: string;
+  /** Whether more results are available (Phase 14.1) */
+  hasMore: boolean;
 }
 
 /**
@@ -136,7 +140,7 @@ export function useHybridQuery<T = unknown>(
     JSON.stringify(filter.where),
     JSON.stringify(filter.sort),
     filter.limit,
-    filter.offset,
+    filter.cursor, // Phase 14.1: replaces offset
   ]);
 
   // Skip option
@@ -201,8 +205,15 @@ export function useHybridQuery<T = unknown>(
     };
   }, [client, mapName, memoizedFilter, skip]);
 
+  // Phase 14.1: Note - nextCursor and hasMore would come from server response
   return useMemo(
-    () => ({ results, loading, error }),
+    () => ({
+      results,
+      loading,
+      error,
+      nextCursor: undefined, // TODO: Populate from HybridQueryHandle when server sends cursor
+      hasMore: false, // TODO: Populate from HybridQueryHandle when server sends hasMore
+    }),
     [results, loading, error]
   );
 }

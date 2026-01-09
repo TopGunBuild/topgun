@@ -57,7 +57,24 @@ export const QuerySchema = z.object({
   predicate: PredicateNodeSchema.optional(),
   sort: z.record(z.string(), z.enum(['asc', 'desc'])).optional(),
   limit: z.number().optional(),
-  offset: z.number().optional(),
+  cursor: z.string().optional(), // Phase 14.1: replaces offset
+});
+
+// --- Query Response Types (Phase 14.1) ---
+
+export const QueryRespPayloadSchema = z.object({
+  queryId: z.string(),
+  results: z.array(z.object({
+    key: z.string(),
+    value: z.unknown(),
+  })),
+  nextCursor: z.string().optional(),
+  hasMore: z.boolean().optional(),
+});
+
+export const QueryRespMessageSchema = z.object({
+  type: z.literal('QUERY_RESP'),
+  payload: QueryRespPayloadSchema,
 });
 
 // --- Client Operation Types ---
@@ -1000,3 +1017,7 @@ export type ClusterSearchUnsubscribePayload = z.infer<typeof ClusterSearchUnsubs
 export type ClusterSearchUnsubscribeMessage = z.infer<typeof ClusterSearchUnsubscribeMessageSchema>;
 export type ClusterSearchUpdatePayload = z.infer<typeof ClusterSearchUpdatePayloadSchema>;
 export type ClusterSearchUpdateMessage = z.infer<typeof ClusterSearchUpdateMessageSchema>;
+
+// Query Response types (Phase 14.1)
+export type QueryRespPayload = z.infer<typeof QueryRespPayloadSchema>;
+export type QueryRespMessage = z.infer<typeof QueryRespMessageSchema>;

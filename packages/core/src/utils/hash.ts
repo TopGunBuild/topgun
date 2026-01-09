@@ -103,3 +103,27 @@ export function resetNativeHash(): void {
   nativeHash = null;
   nativeLoadAttempted = false;
 }
+
+/**
+ * Hash an object to a 32-bit unsigned integer.
+ * Uses deterministic JSON serialization + hashString.
+ *
+ * @param obj - Object to hash (must be JSON-serializable)
+ * @returns 32-bit unsigned integer hash
+ */
+export function hashObject(obj: unknown): number {
+  // Deterministic serialization: sort object keys recursively
+  const json = JSON.stringify(obj, (_, value) => {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return Object.keys(value)
+        .sort()
+        .reduce((sorted: Record<string, unknown>, key) => {
+          sorted[key] = value[key];
+          return sorted;
+        }, {});
+    }
+    return value;
+  });
+
+  return hashString(json);
+}

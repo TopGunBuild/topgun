@@ -198,6 +198,9 @@ export {
   StandingQueryRegistry,
   // Live Query Manager
   LiveQueryManager,
+  // Query Cursor (Phase 14.1)
+  QueryCursor,
+  DEFAULT_QUERY_CURSOR_MAX_AGE_MS,
 } from './query';
 
 export type {
@@ -246,6 +249,11 @@ export type {
   LiveQueryEvent,
   LiveQueryInitialEvent,
   LiveQueryDeltaEvent,
+  // Query Cursor (Phase 14.1)
+  QueryCursorData,
+  CursorableQueryResult,
+  QueryCursorOptions,
+  QueryResultWithCursor,
 } from './query';
 
 // Re-export Query from query module as QueryExpression to avoid conflict

@@ -38,6 +38,10 @@ export interface UseQueryResult<T> {
   changes: ChangeEvent<T>[];
   /** Clear accumulated changes (Phase 5.1) */
   clearChanges: () => void;
+  /** Cursor for fetching next page (Phase 14.1) */
+  nextCursor?: string;
+  /** Whether more results are available (Phase 14.1) */
+  hasMore: boolean;
 }
 
 /**
@@ -213,8 +217,20 @@ export function useQuery<T = any>(
     }
   }, [client, mapName, queryJson]);
 
+  // Phase 14.1: Note - nextCursor and hasMore would come from server response
+  // For now, we return placeholders. Full implementation requires updating
+  // QueryHandle to track these values from QUERY_RESP messages.
   return useMemo(
-    () => ({ data, loading, error, lastChange, changes, clearChanges }),
+    () => ({
+      data,
+      loading,
+      error,
+      lastChange,
+      changes,
+      clearChanges,
+      nextCursor: undefined, // TODO: Populate from QueryHandle when server sends cursor
+      hasMore: false, // TODO: Populate from QueryHandle when server sends hasMore
+    }),
     [data, loading, error, lastChange, changes, clearChanges]
   );
 }

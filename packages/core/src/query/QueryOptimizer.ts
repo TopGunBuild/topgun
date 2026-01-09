@@ -181,7 +181,7 @@ export class QueryOptimizer<K, V> {
     const basePlan = this.optimize(query);
 
     // If no options specified, return base plan
-    if (!options.sort && options.limit === undefined && options.offset === undefined) {
+    if (!options.sort && options.limit === undefined && options.cursor === undefined) {
       return basePlan;
     }
 
@@ -212,7 +212,7 @@ export class QueryOptimizer<K, V> {
           ? { field: sortField, direction: sortDirection }
           : undefined,
       limit: options.limit,
-      offset: options.offset,
+      cursor: options.cursor, // Phase 14.1: replaces offset
     };
   }
 

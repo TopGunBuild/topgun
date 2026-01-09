@@ -3143,10 +3143,10 @@ export class ServerCoordinator {
         // Wait for map to be fully loaded from storage before querying
         const map = await this.getMapAsync(mapName);
 
-        // Fix: Do not apply offset/limit locally for cluster queries.
+        // Fix: Do not apply cursor/limit locally for cluster queries.
         // They will be applied in finalizeClusterQuery after aggregation.
         const localQuery = { ...query };
-        delete localQuery.offset;
+        delete localQuery.cursor; // Phase 14.1: replaces offset
         delete localQuery.limit;
 
         // Use indexed query execution if available (O(1) to O(log N))
@@ -3294,7 +3294,7 @@ export class ServerCoordinator {
         return mapping[op] || null;
     }
 
-    private finalizeClusterQuery(requestId: string, timeout = false) {
+    private async finalizeClusterQuery(requestId: string, timeout = false) {
         const pending = this.pendingClusterQueries.get(requestId);
         if (!pending) return;
 
@@ -3329,12 +3329,50 @@ export class ServerCoordinator {
             });
         }
 
-        const slicedResults = (query.offset || query.limit)
-            ? finalResults.slice(query.offset || 0, (query.offset || 0) + (query.limit || finalResults.length))
-            : finalResults;
+        // Phase 14.1: Apply cursor-based pagination
+        let slicedResults = finalResults;
+        let nextCursor: string | undefined;
+        let hasMore = false;
+
+        if (query.cursor || query.limit) {
+            const { QueryCursor } = await import('@topgunbuild/core');
+            const sort = query.sort || {};
+            const sortEntries = Object.entries(sort);
+            const sortField = sortEntries.length > 0 ? sortEntries[0][0] : '_key';
+
+            // Apply cursor filtering
+            if (query.cursor) {
+                const cursorData = QueryCursor.decode(query.cursor);
+                if (cursorData && QueryCursor.isValid(cursorData, query.predicate ?? query.where, sort)) {
+                    slicedResults = finalResults.filter((r: any) => {
+                        const sortValue = r.value[sortField];
+                        return QueryCursor.isAfterCursor(
+                            { key: r.key, sortValue },
+                            cursorData
+                        );
+                    });
+                }
+            }
+
+            // Apply limit and generate next cursor
+            if (query.limit) {
+                hasMore = slicedResults.length > query.limit;
+                slicedResults = slicedResults.slice(0, query.limit);
+
+                if (hasMore && slicedResults.length > 0) {
+                    const lastResult = slicedResults[slicedResults.length - 1];
+                    const sortValue = lastResult.value[sortField];
+                    nextCursor = QueryCursor.fromLastResult(
+                        { key: lastResult.key, sortValue },
+                        sort,
+                        query.predicate ?? query.where
+                    );
+                }
+            }
+        }
 
         // Register Subscription
-        const resultKeys = new Set(slicedResults.map(r => r.key));
+        const resultKeys = new Set(slicedResults.map((r: any) => r.key));
         const sub: Subscription = {
             id: queryId,
             clientId: client.id,
@@ -3349,14 +3387,14 @@ export class ServerCoordinator {
         client.subscriptions.add(queryId);
 
         // Apply Field Level Security
-        const filteredResults = slicedResults.map(res => {
+        const filteredResults = slicedResults.map((res: any) => {
             const filteredValue = this.securityManager.filterObject(res.value, client.principal!, mapName);
             return { ...res, value: filteredValue };
         });
 
         client.writer.write({
             type: 'QUERY_RESP',
-            payload: { queryId, results: filteredResults }
+            payload: { queryId, results: filteredResults, nextCursor, hasMore }
         });
     }
 

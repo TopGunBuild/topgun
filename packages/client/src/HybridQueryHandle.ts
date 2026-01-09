@@ -28,8 +28,8 @@ export interface HybridQueryFilter {
   sort?: Record<string, 'asc' | 'desc'>;
   /** Maximum results */
   limit?: number;
-  /** Skip N results */
-  offset?: number;
+  /** Cursor for pagination (Phase 14.1: replaces offset) */
+  cursor?: string;
 }
 
 /**
@@ -323,11 +323,8 @@ export class HybridQueryHandle<T> {
       });
     }
 
-    // Apply offset and limit
+    // Apply limit (cursor filtering is done server-side)
     let sliced = results;
-    if (this.filter.offset) {
-      sliced = sliced.slice(this.filter.offset);
-    }
     if (this.filter.limit) {
       sliced = sliced.slice(0, this.filter.limit);
     }

@@ -1,11 +1,18 @@
-import { LWWRecord, PredicateNode, evaluatePredicate } from '@topgunbuild/core';
+import { LWWRecord, PredicateNode, evaluatePredicate, QueryCursor, type QueryCursorData } from '@topgunbuild/core';
 
 export interface Query {
   where?: Record<string, any>;
   predicate?: PredicateNode;
   sort?: Record<string, 'asc' | 'desc'>;
   limit?: number;
-  offset?: number;
+  /** Cursor for pagination (Phase 14.1: replaces offset) */
+  cursor?: string;
+}
+
+export interface QueryResultWithCursor {
+  results: { key: string; value: any }[];
+  nextCursor?: string;
+  hasMore: boolean;
 }
 
 /**
@@ -75,6 +82,15 @@ export function matchesQuery(record: LWWRecord<any>, query: Query): boolean {
 }
 
 export function executeQuery(records: Map<string, LWWRecord<any>> | LWWRecord<any>[], query: Query): { key: string; value: any }[] {
+  const result = executeQueryWithCursor(records, query);
+  return result.results;
+}
+
+/**
+ * Execute a query with cursor-based pagination support.
+ * Returns results along with cursor information for next page.
+ */
+export function executeQueryWithCursor(records: Map<string, LWWRecord<any>> | LWWRecord<any>[], query: Query): QueryResultWithCursor {
   // Handle null/undefined query
   if (!query) {
     query = {};
@@ -90,28 +106,25 @@ export function executeQuery(records: Map<string, LWWRecord<any>> | LWWRecord<an
       }
     }
   } else {
-     // If array, we might not have keys easily unless they are in the record or we iterate
-     // For now assume Map input primarily for ServerCoordinator
-     // But if input is array of records?
      for (const record of records) {
-         // Assuming key is not readily available if just array of records, 
-         // but usually we pass Map from ServerCoordinator.
-         // If we really need key, we need it in the input.
-         // Let's stick to Map input for now as that's what ServerCoordinator has.
-         // But wait, the signature I defined allows array.
          if (matchesQuery(record, query)) {
-             results.push({ key: '?', record }); 
+             results.push({ key: '?', record });
          }
      }
   }
 
   // 2. Sort
-  if (query.sort) {
+  const sort = query.sort || {};
+  const sortEntries = Object.entries(sort);
+  const sortField = sortEntries.length > 0 ? sortEntries[0][0] : '_key';
+  const sortDirection = sortEntries.length > 0 ? sortEntries[0][1] : 'asc';
+
+  if (sortEntries.length > 0) {
     results.sort((a, b) => {
-      for (const [field, direction] of Object.entries(query.sort!)) {
+      for (const [field, direction] of sortEntries) {
         const valA = a.record.value[field];
         const valB = b.record.value[field];
-        
+
         if (valA < valB) return direction === 'asc' ? -1 : 1;
         if (valA > valB) return direction === 'asc' ? 1 : -1;
       }
@@ -119,12 +132,47 @@ export function executeQuery(records: Map<string, LWWRecord<any>> | LWWRecord<an
     });
   }
 
-  // 3. Limit & Offset
-  if (query.offset || query.limit) {
-    const offset = query.offset || 0;
-    const limit = query.limit || results.length;
-    results = results.slice(offset, offset + limit);
+  // 3. Apply cursor filtering (Phase 14.1)
+  if (query.cursor) {
+    const cursorData = QueryCursor.decode(query.cursor);
+    if (cursorData && QueryCursor.isValid(cursorData, query.predicate ?? query.where, sort)) {
+      results = results.filter((r) => {
+        const sortValue = r.record.value[sortField];
+        return QueryCursor.isAfterCursor(
+          { key: r.key, sortValue },
+          cursorData
+        );
+      });
+    }
+    // Invalid cursor: silently ignore and return results from beginning
   }
 
-  return results.map(r => ({ key: r.key, value: r.record.value }));
+  // 4. Check if there are more results before applying limit
+  const hasLimit = query.limit !== undefined && query.limit > 0;
+  const totalBeforeLimit = results.length;
+
+  // 5. Apply limit
+  if (hasLimit) {
+    results = results.slice(0, query.limit);
+  }
+
+  const hasMore = hasLimit && totalBeforeLimit > query.limit!;
+
+  // 6. Generate next cursor
+  let nextCursor: string | undefined;
+  if (hasMore && results.length > 0) {
+    const lastResult = results[results.length - 1];
+    const sortValue = lastResult.record.value[sortField];
+    nextCursor = QueryCursor.fromLastResult(
+      { key: lastResult.key, sortValue },
+      sort,
+      query.predicate ?? query.where
+    );
+  }
+
+  return {
+    results: results.map(r => ({ key: r.key, value: r.record.value })),
+    nextCursor,
+    hasMore,
+  };
 }
