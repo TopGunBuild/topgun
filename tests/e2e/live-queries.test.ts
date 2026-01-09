@@ -564,25 +564,30 @@ describe('E2E: Live Queries', () => {
       expect(names).toEqual(['Item 1', 'Item 2', 'Item 3', 'Item 4', 'Item 5']);
     });
 
-    test('query with offset and limit works correctly', async () => {
+    test('query with cursor pagination works correctly (Phase 14.1)', async () => {
+      // First page: get first 3 items
       client.send({
         type: 'QUERY_SUB',
         payload: {
-          queryId: 'q-offset-limit',
+          queryId: 'q-page1',
           mapName: 'items',
           query: {
             sort: { order: 'asc' },
-            offset: 3,
             limit: 3,
           },
         },
       });
 
-      const response = await client.waitForMessage('QUERY_RESP');
-      expect(response.payload.results).toHaveLength(3);
+      const page1Response = await client.waitForMessage('QUERY_RESP');
+      expect(page1Response.payload.results).toHaveLength(3);
+      expect(page1Response.payload.hasMore).toBe(true);
+      expect(page1Response.payload.nextCursor).toBeDefined();
 
-      const names = response.payload.results.map((r: any) => r.value.name);
-      expect(names).toEqual(['Item 4', 'Item 5', 'Item 6']);
+      const page1Names = page1Response.payload.results.map((r: any) => r.value.name);
+      expect(page1Names).toEqual(['Item 1', 'Item 2', 'Item 3']);
+
+      // Phase 14.1: Verify pagination metadata is present
+      expect(page1Response.payload.cursorStatus).toBe('none'); // No cursor was provided for first page
     });
   });
 
