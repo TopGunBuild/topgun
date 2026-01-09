@@ -4,7 +4,7 @@
  * Tests for cursor-based pagination in server-side query execution.
  */
 
-import { executeQueryWithCursor, Query, QueryResultWithCursor } from '../Matcher';
+import { executeQueryWithCursor, Query, QueryResultWithCursor } from '../../query/Matcher';
 import { LWWRecord, Timestamp } from '@topgunbuild/core';
 
 describe('executeQueryWithCursor', () => {

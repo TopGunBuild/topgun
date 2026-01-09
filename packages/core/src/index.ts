@@ -203,6 +203,9 @@ export {
   DEFAULT_QUERY_CURSOR_MAX_AGE_MS,
 } from './query';
 
+// Base64URL utilities (Phase 14.1)
+export { encodeBase64Url, decodeBase64Url } from './utils/base64url';
+
 export type {
   // Attribute system
   Attribute,

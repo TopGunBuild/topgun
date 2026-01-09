@@ -3,7 +3,7 @@ import { createServer as createHttpsServer, Server as HttpsServer, ServerOptions
 import { readFileSync } from 'fs';
 import * as net from 'net';
 import { WebSocketServer, WebSocket } from 'ws';
-import { HLC, LWWMap, ORMap, MerkleTree, serialize, deserialize, PermissionPolicy, Principal, PermissionType, Timestamp, LWWRecord, ORMapRecord, MessageSchema, WriteConcern, WriteConcernValue, ConsistencyLevel, ReplicationConfig, DEFAULT_REPLICATION_CONFIG, IndexedLWWMap, IndexedORMap, type QueryExpression as CoreQuery } from '@topgunbuild/core';
+import { HLC, LWWMap, ORMap, MerkleTree, serialize, deserialize, PermissionPolicy, Principal, PermissionType, Timestamp, LWWRecord, ORMapRecord, MessageSchema, WriteConcern, WriteConcernValue, ConsistencyLevel, ReplicationConfig, DEFAULT_REPLICATION_CONFIG, IndexedLWWMap, IndexedORMap, QueryCursor, type QueryExpression as CoreQuery } from '@topgunbuild/core';
 import { IServerStorage, StorageValue, ORMapValue, ORMapTombstones } from './storage/IServerStorage';
 import { IInterceptor, ServerOp, OpContext, ConnectionContext } from './interceptor/IInterceptor';
 import * as jwt from 'jsonwebtoken';
@@ -3335,7 +3335,6 @@ export class ServerCoordinator {
         let hasMore = false;
 
         if (query.cursor || query.limit) {
-            const { QueryCursor } = await import('@topgunbuild/core');
             const sort = query.sort || {};
             const sortEntries = Object.entries(sort);
             const sortField = sortEntries.length > 0 ? sortEntries[0][0] : '_key';

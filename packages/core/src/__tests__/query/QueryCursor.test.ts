@@ -4,7 +4,7 @@
  * Tests for cursor-based pagination in distributed queries.
  */
 
-import { QueryCursor, type QueryCursorData, DEFAULT_QUERY_CURSOR_MAX_AGE_MS } from '../QueryCursor';
+import { QueryCursor, type QueryCursorData, DEFAULT_QUERY_CURSOR_MAX_AGE_MS } from '../../query/QueryCursor';
 import { encodeBase64Url, decodeBase64Url } from '../../utils/base64url';
 
 describe('QueryCursor', () => {

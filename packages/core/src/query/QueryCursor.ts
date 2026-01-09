@@ -328,23 +328,21 @@ export class QueryCursor {
       return a - b;
     }
 
-    // Strings
-    if (typeof a === 'string' && typeof b === 'string') {
-      return a.localeCompare(b);
-    }
-
     // Dates (as Date objects)
     if (a instanceof Date && b instanceof Date) {
       return a.getTime() - b.getTime();
     }
 
-    // ISO date strings
+    // Strings - try ISO date parsing first, then regular comparison
     if (typeof a === 'string' && typeof b === 'string') {
       const dateA = Date.parse(a);
       const dateB = Date.parse(b);
+      // Only use date comparison if BOTH are valid ISO dates
       if (!isNaN(dateA) && !isNaN(dateB)) {
         return dateA - dateB;
       }
+      // Regular string comparison
+      return a.localeCompare(b);
     }
 
     // Booleans
