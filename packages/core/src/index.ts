@@ -206,6 +206,9 @@ export {
 // Base64URL utilities (Phase 14.1)
 export { encodeBase64Url, decodeBase64Url } from './utils/base64url';
 
+// Compare utilities (Phase 14.1)
+export { compareValues } from './utils/compare';
+
 export type {
   // Attribute system
   Attribute,

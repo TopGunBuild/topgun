@@ -21,7 +21,7 @@ import { SingleServerProvider } from './connection';
 // Type imports
 import type { IStorageAdapter, OpLogEntry } from './IStorageAdapter';
 import type { LWWRecord, PredicateNode } from '@topgunbuild/core';
-import type { QueryFilter, QueryResultItem, QueryResultSource } from './QueryHandle';
+import type { QueryFilter, QueryResultItem, QueryResultSource, CursorStatus, PaginationInfo } from './QueryHandle';
 import type { TopicCallback } from './TopicHandle';
 import type { BackoffConfig, HeartbeatConfig, SyncEngineConfig } from './SyncEngine';
 import type { StateChangeEvent, StateChangeListener, SyncStateMachineConfig } from './SyncStateMachine';
@@ -98,6 +98,9 @@ export type {
   QueryFilter,
   QueryResultItem,
   QueryResultSource,
+  // Pagination types (Phase 14.1)
+  CursorStatus,
+  PaginationInfo,
   TopicCallback,
   BackoffConfig,
   HeartbeatConfig,

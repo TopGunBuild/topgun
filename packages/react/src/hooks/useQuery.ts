@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { QueryFilter, QueryResultItem, ChangeEvent, QueryHandle } from '@topgunbuild/client';
+import { QueryFilter, QueryResultItem, ChangeEvent, QueryHandle, CursorStatus, PaginationInfo } from '@topgunbuild/client';
 import { useClient } from './useClient';
 
 /**
@@ -42,6 +42,8 @@ export interface UseQueryResult<T> {
   nextCursor?: string;
   /** Whether more results are available (Phase 14.1) */
   hasMore: boolean;
+  /** Debug info: status of input cursor processing (Phase 14.1) */
+  cursorStatus: CursorStatus;
 }
 
 /**
@@ -111,6 +113,12 @@ export function useQuery<T = any>(
   // Phase 5.1: Change tracking state
   const [changes, setChanges] = useState<ChangeEvent<T>[]>([]);
   const [lastChange, setLastChange] = useState<ChangeEvent<T> | null>(null);
+
+  // Phase 14.1: Pagination state
+  const [paginationInfo, setPaginationInfo] = useState<PaginationInfo>({
+    hasMore: false,
+    cursorStatus: 'none',
+  });
 
   // Use a ref to track if the component is mounted to avoid state updates on unmounted components
   const isMounted = useRef(true);
@@ -199,10 +207,18 @@ export function useQuery<T = any>(
         }
       });
 
+      // Phase 14.1: Subscribe to pagination info changes
+      const unsubscribePagination = handle.onPaginationChange((info) => {
+        if (isMounted.current) {
+          setPaginationInfo(info);
+        }
+      });
+
       return () => {
         isMounted.current = false;
         unsubscribeData();
         unsubscribeChanges();
+        unsubscribePagination();
         handleRef.current = null;
       };
     } catch (err) {
@@ -217,9 +233,7 @@ export function useQuery<T = any>(
     }
   }, [client, mapName, queryJson]);
 
-  // Phase 14.1: Note - nextCursor and hasMore would come from server response
-  // For now, we return placeholders. Full implementation requires updating
-  // QueryHandle to track these values from QUERY_RESP messages.
+  // Phase 14.1: Return pagination info from server
   return useMemo(
     () => ({
       data,
@@ -228,9 +242,10 @@ export function useQuery<T = any>(
       lastChange,
       changes,
       clearChanges,
-      nextCursor: undefined, // TODO: Populate from QueryHandle when server sends cursor
-      hasMore: false, // TODO: Populate from QueryHandle when server sends hasMore
+      nextCursor: paginationInfo.nextCursor,
+      hasMore: paginationInfo.hasMore,
+      cursorStatus: paginationInfo.cursorStatus,
     }),
-    [data, loading, error, lastChange, changes, clearChanges]
+    [data, loading, error, lastChange, changes, clearChanges, paginationInfo]
   );
 }

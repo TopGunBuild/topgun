@@ -923,10 +923,12 @@ export class SyncEngine {
       }
 
       case 'QUERY_RESP': {
-        const { queryId, results } = message.payload;
+        const { queryId, results, nextCursor, hasMore, cursorStatus } = message.payload;
         const query = this.queries.get(queryId);
         if (query) {
           query.onResult(results, 'server');
+          // Phase 14.1: Update pagination info
+          query.updatePaginationInfo({ nextCursor, hasMore, cursorStatus });
         }
         break;
       }
@@ -2499,10 +2501,19 @@ export class SyncEngine {
   public handleHybridQueryResponse(payload: {
     subscriptionId: string;
     results: Array<{ key: string; value: unknown; score: number; matchedTerms: string[] }>;
+    nextCursor?: string;
+    hasMore?: boolean;
+    cursorStatus?: 'valid' | 'expired' | 'invalid' | 'none';
   }): void {
     const query = this.hybridQueries.get(payload.subscriptionId);
     if (query) {
       query.onResult(payload.results as any, 'server');
+      // Phase 14.1: Update pagination info
+      query.updatePaginationInfo({
+        nextCursor: payload.nextCursor,
+        hasMore: payload.hasMore,
+        cursorStatus: payload.cursorStatus,
+      });
     }
   }
 

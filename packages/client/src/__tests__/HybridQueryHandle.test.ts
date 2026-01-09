@@ -147,25 +147,47 @@ describe('HybridQueryHandle', () => {
       expect(results).toHaveLength(2);
     });
 
-    it('should apply offset', () => {
+    it('should store cursor in filter (Phase 14.1)', () => {
       const handle = new HybridQueryHandle<{ title: string }>(
         mockSyncEngine,
         'articles',
-        { offset: 1 }
+        { cursor: 'someCursorValue' }
       );
-      const callback = jest.fn();
 
-      handle.subscribe(callback);
+      expect(handle.getFilter().cursor).toBe('someCursorValue');
+    });
 
-      handle.onResult([
-        { key: 'doc1', value: { title: 'First' }, score: 1.0, matchedTerms: [] },
-        { key: 'doc2', value: { title: 'Second' }, score: 2.0, matchedTerms: [] },
-        { key: 'doc3', value: { title: 'Third' }, score: 3.0, matchedTerms: [] },
-      ], 'server');
+    it('should track pagination info (Phase 14.1)', () => {
+      const handle = new HybridQueryHandle<{ title: string }>(mockSyncEngine, 'articles');
+      const paginationCallback = jest.fn();
 
-      const results = callback.mock.calls[callback.mock.calls.length - 1][0];
-      expect(results).toHaveLength(2);
-      expect(results[0]._key).toBe('doc2');
+      handle.onPaginationChange(paginationCallback);
+
+      // Initial call with default values
+      expect(paginationCallback).toHaveBeenCalledWith({
+        hasMore: false,
+        cursorStatus: 'none',
+        nextCursor: undefined,
+      });
+
+      // Update pagination info
+      handle.updatePaginationInfo({
+        nextCursor: 'nextPage123',
+        hasMore: true,
+        cursorStatus: 'valid',
+      });
+
+      expect(paginationCallback).toHaveBeenCalledWith({
+        nextCursor: 'nextPage123',
+        hasMore: true,
+        cursorStatus: 'valid',
+      });
+
+      expect(handle.getPaginationInfo()).toEqual({
+        nextCursor: 'nextPage123',
+        hasMore: true,
+        cursorStatus: 'valid',
+      });
     });
 
     it('should ignore empty server response before receiving data', () => {

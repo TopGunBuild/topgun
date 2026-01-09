@@ -14,6 +14,7 @@
 
 import { encodeBase64Url, decodeBase64Url } from '../utils/base64url';
 import { hashObject } from '../utils/hash';
+import { compareValues } from '../utils/compare';
 
 /**
  * Internal cursor data structure for query pagination.
@@ -312,46 +313,14 @@ export class QueryCursor {
 
   /**
    * Compare two values with type-aware comparison.
+   * Delegates to shared compareValues utility.
    *
    * @param a - First value
    * @param b - Second value
    * @returns Negative if a < b, 0 if equal, positive if a > b
    */
   static compareValues(a: unknown, b: unknown): number {
-    // Handle null/undefined
-    if (a == null && b == null) return 0;
-    if (a == null) return -1;
-    if (b == null) return 1;
-
-    // Numbers
-    if (typeof a === 'number' && typeof b === 'number') {
-      return a - b;
-    }
-
-    // Dates (as Date objects)
-    if (a instanceof Date && b instanceof Date) {
-      return a.getTime() - b.getTime();
-    }
-
-    // Strings - try ISO date parsing first, then regular comparison
-    if (typeof a === 'string' && typeof b === 'string') {
-      const dateA = Date.parse(a);
-      const dateB = Date.parse(b);
-      // Only use date comparison if BOTH are valid ISO dates
-      if (!isNaN(dateA) && !isNaN(dateB)) {
-        return dateA - dateB;
-      }
-      // Regular string comparison
-      return a.localeCompare(b);
-    }
-
-    // Booleans
-    if (typeof a === 'boolean' && typeof b === 'boolean') {
-      return a === b ? 0 : a ? 1 : -1;
-    }
-
-    // Fallback: string comparison
-    return String(a).localeCompare(String(b));
+    return compareValues(a, b);
   }
 
   /**

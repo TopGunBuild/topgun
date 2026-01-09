@@ -30,6 +30,7 @@ import type { FullTextIndex } from '../fts';
 import { SetResultSet } from './resultset/SetResultSet';
 import type { ResultSet } from './resultset/ResultSet';
 import { QueryCursor, type QueryCursorData } from './QueryCursor';
+import { compareValues } from '../utils/compare';
 
 /**
  * Result of executing a query step.
@@ -85,6 +86,11 @@ export interface ExecuteOptions {
 }
 
 /**
+ * Cursor status for debugging.
+ */
+export type CursorStatus = 'valid' | 'expired' | 'invalid' | 'none';
+
+/**
  * Extended query result with cursor info (Phase 14.1).
  */
 export interface QueryResultWithCursor<K, V> {
@@ -94,6 +100,8 @@ export interface QueryResultWithCursor<K, V> {
   nextCursor?: string;
   /** Whether more results are available */
   hasMore: boolean;
+  /** Debug info: status of input cursor processing */
+  cursorStatus: CursorStatus;
 }
 
 /**
@@ -184,10 +192,22 @@ export class QueryExecutor<K extends string, V> {
     // Create sort config for cursor
     const sort: Record<string, 'asc' | 'desc'> = { [sortField]: sortDirection };
 
-    // Apply cursor filtering
+    // Apply cursor filtering and track status
+    let cursorStatus: CursorStatus = 'none';
     if (options?.cursor) {
       const cursorData = QueryCursor.decode(options.cursor);
-      if (cursorData && QueryCursor.isValid(cursorData, options.predicate, sort)) {
+      if (!cursorData) {
+        cursorStatus = 'invalid';
+      } else if (!QueryCursor.isValid(cursorData, options.predicate, sort)) {
+        // Check if it's specifically expired vs hash mismatch
+        const maxAge = 10 * 60 * 1000; // DEFAULT_QUERY_CURSOR_MAX_AGE_MS
+        if (Date.now() - cursorData.timestamp > maxAge) {
+          cursorStatus = 'expired';
+        } else {
+          cursorStatus = 'invalid';
+        }
+      } else {
+        cursorStatus = 'valid';
         results = results.filter((result) => {
           const sortValue = this.extractSortValue(result, sortField);
           return QueryCursor.isAfterCursor(
@@ -196,7 +216,6 @@ export class QueryExecutor<K extends string, V> {
           );
         });
       }
-      // Invalid cursor: silently ignore and return results from beginning
     }
 
     // Determine if there are more results
@@ -226,6 +245,7 @@ export class QueryExecutor<K extends string, V> {
       results,
       nextCursor,
       hasMore,
+      cursorStatus,
     };
   }
 
@@ -671,26 +691,10 @@ export class QueryExecutor<K extends string, V> {
 
   /**
    * Compare two values for sorting.
+   * Delegates to shared compareValues utility.
    */
   private compareValues(a: unknown, b: unknown): number {
-    if (a === b) return 0;
-    if (a === null || a === undefined) return -1;
-    if (b === null || b === undefined) return 1;
-
-    if (typeof a === 'string' && typeof b === 'string') {
-      return a.localeCompare(b);
-    }
-
-    if (typeof a === 'number' && typeof b === 'number') {
-      return a - b;
-    }
-
-    if (a instanceof Date && b instanceof Date) {
-      return a.getTime() - b.getTime();
-    }
-
-    // Fallback to string comparison
-    return String(a).localeCompare(String(b));
+    return compareValues(a, b);
   }
 
   /**

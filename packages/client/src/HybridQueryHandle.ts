@@ -15,6 +15,7 @@ import { SyncEngine } from './SyncEngine';
 import { ChangeTracker, ChangeEvent } from './ChangeTracker';
 import { logger } from './utils/logger';
 import type { PredicateNode } from '@topgunbuild/core';
+import type { CursorStatus, PaginationInfo } from './QueryHandle';
 
 /**
  * Filter options for hybrid queries.
@@ -88,6 +89,10 @@ export class HybridQueryHandle<T> {
 
   // Track server data reception
   private hasReceivedServerData: boolean = false;
+
+  // Pagination info (Phase 14.1)
+  private _paginationInfo: PaginationInfo = { hasMore: false, cursorStatus: 'none' };
+  private paginationListeners: Set<(info: PaginationInfo) => void> = new Set();
 
   constructor(syncEngine: SyncEngine, mapName: string, filter: HybridQueryFilter = {}) {
     this.id = crypto.randomUUID();
@@ -361,5 +366,54 @@ export class HybridQueryHandle<T> {
       return predicate.children.some((child) => this.containsFTS(child));
     }
     return false;
+  }
+
+  // ============== Pagination Methods (Phase 14.1) ==============
+
+  /**
+   * Get current pagination info.
+   * Returns nextCursor, hasMore, and cursorStatus.
+   */
+  public getPaginationInfo(): PaginationInfo {
+    return { ...this._paginationInfo };
+  }
+
+  /**
+   * Subscribe to pagination info changes.
+   * Called when server sends HYBRID_QUERY_RESP with new cursor info.
+   *
+   * @returns Unsubscribe function
+   */
+  public onPaginationChange(listener: (info: PaginationInfo) => void): () => void {
+    this.paginationListeners.add(listener);
+    // Immediately invoke with current value
+    listener(this.getPaginationInfo());
+    return () => this.paginationListeners.delete(listener);
+  }
+
+  /**
+   * Update pagination info from server response.
+   * Called by SyncEngine when processing HYBRID_QUERY_RESP.
+   *
+   * @internal
+   */
+  public updatePaginationInfo(info: Partial<PaginationInfo>): void {
+    this._paginationInfo = {
+      nextCursor: info.nextCursor,
+      hasMore: info.hasMore ?? false,
+      cursorStatus: info.cursorStatus ?? 'none',
+    };
+    this.notifyPaginationListeners();
+  }
+
+  private notifyPaginationListeners(): void {
+    const info = this.getPaginationInfo();
+    for (const listener of this.paginationListeners) {
+      try {
+        listener(info);
+      } catch (e) {
+        logger.error({ err: e }, 'HybridQueryHandle pagination listener error');
+      }
+    }
   }
 }

@@ -117,6 +117,7 @@ export {
   type OrderBy,
   type ExecuteOptions,
   type QueryResultWithCursor,
+  type CursorStatus,
 } from './QueryExecutor';
 
 // Unified Live Query Registry (Phase 12)

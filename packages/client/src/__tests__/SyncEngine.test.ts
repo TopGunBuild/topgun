@@ -377,6 +377,7 @@ describe('SyncEngine', () => {
         getFilter: () => ({}),
         onResult: jest.fn(),
         onUpdate: jest.fn(),
+        updatePaginationInfo: jest.fn(), // Phase 14.1
       };
 
       syncEngine.subscribeToQuery(mockQuery as any);
@@ -387,6 +388,9 @@ describe('SyncEngine', () => {
         payload: {
           queryId: 'query-1',
           results: [{ key: 'user1', value: { name: 'Alice' } }],
+          nextCursor: 'cursor123',
+          hasMore: true,
+          cursorStatus: 'none',
         },
       });
       await jest.runAllTimersAsync();
@@ -396,6 +400,13 @@ describe('SyncEngine', () => {
         [{ key: 'user1', value: { name: 'Alice' } }],
         'server'
       );
+
+      // Phase 14.1: Verify pagination info is updated
+      expect(mockQuery.updatePaginationInfo).toHaveBeenCalledWith({
+        nextCursor: 'cursor123',
+        hasMore: true,
+        cursorStatus: 'none',
+      });
     });
 
     test('should handle QUERY_UPDATE message', async () => {

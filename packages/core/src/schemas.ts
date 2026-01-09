@@ -62,6 +62,15 @@ export const QuerySchema = z.object({
 
 // --- Query Response Types (Phase 14.1) ---
 
+/**
+ * Cursor status for debugging.
+ * - valid: Cursor was valid and applied
+ * - expired: Cursor was expired (fell back to first page)
+ * - invalid: Cursor was malformed or hash mismatch (fell back to first page)
+ * - none: No cursor was provided
+ */
+export const CursorStatusSchema = z.enum(['valid', 'expired', 'invalid', 'none']);
+
 export const QueryRespPayloadSchema = z.object({
   queryId: z.string(),
   results: z.array(z.object({
@@ -70,6 +79,8 @@ export const QueryRespPayloadSchema = z.object({
   })),
   nextCursor: z.string().optional(),
   hasMore: z.boolean().optional(),
+  /** Debug info: status of input cursor processing */
+  cursorStatus: CursorStatusSchema.optional(),
 });
 
 export const QueryRespMessageSchema = z.object({
@@ -1019,5 +1030,6 @@ export type ClusterSearchUpdatePayload = z.infer<typeof ClusterSearchUpdatePaylo
 export type ClusterSearchUpdateMessage = z.infer<typeof ClusterSearchUpdateMessageSchema>;
 
 // Query Response types (Phase 14.1)
+export type CursorStatus = z.infer<typeof CursorStatusSchema>;
 export type QueryRespPayload = z.infer<typeof QueryRespPayloadSchema>;
 export type QueryRespMessage = z.infer<typeof QueryRespMessageSchema>;

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import type { HybridQueryHandle, HybridResultItem, HybridQueryFilter } from '@topgunbuild/client';
+import type { HybridQueryHandle, HybridResultItem, HybridQueryFilter, CursorStatus, PaginationInfo } from '@topgunbuild/client';
 import { useClient } from './useClient';
 
 /**
@@ -27,6 +27,8 @@ export interface UseHybridQueryResult<T> {
   nextCursor?: string;
   /** Whether more results are available (Phase 14.1) */
   hasMore: boolean;
+  /** Debug info: status of input cursor processing (Phase 14.1) */
+  cursorStatus: CursorStatus;
 }
 
 /**
@@ -125,6 +127,12 @@ export function useHybridQuery<T = unknown>(
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
 
+  // Phase 14.1: Pagination state
+  const [paginationInfo, setPaginationInfo] = useState<PaginationInfo>({
+    hasMore: false,
+    cursorStatus: 'none',
+  });
+
   // Track if component is mounted
   const isMounted = useRef(true);
 
@@ -187,6 +195,20 @@ export function useHybridQuery<T = unknown>(
           }
         }
       });
+
+      // Phase 14.1: Subscribe to pagination info changes
+      const unsubscribePagination = handle.onPaginationChange((info) => {
+        if (isMounted.current) {
+          setPaginationInfo(info);
+        }
+      });
+
+      // Store combined unsubscribe function
+      const originalUnsubscribe = unsubscribeRef.current;
+      unsubscribeRef.current = () => {
+        originalUnsubscribe?.();
+        unsubscribePagination();
+      };
     } catch (err) {
       if (isMounted.current) {
         setError(err instanceof Error ? err : new Error(String(err)));
@@ -205,15 +227,16 @@ export function useHybridQuery<T = unknown>(
     };
   }, [client, mapName, memoizedFilter, skip]);
 
-  // Phase 14.1: Note - nextCursor and hasMore would come from server response
+  // Phase 14.1: Return pagination info from server
   return useMemo(
     () => ({
       results,
       loading,
       error,
-      nextCursor: undefined, // TODO: Populate from HybridQueryHandle when server sends cursor
-      hasMore: false, // TODO: Populate from HybridQueryHandle when server sends hasMore
+      nextCursor: paginationInfo.nextCursor,
+      hasMore: paginationInfo.hasMore,
+      cursorStatus: paginationInfo.cursorStatus,
     }),
-    [results, loading, error]
+    [results, loading, error, paginationInfo]
   );
 }

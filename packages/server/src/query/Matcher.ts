@@ -1,4 +1,4 @@
-import { LWWRecord, PredicateNode, evaluatePredicate, QueryCursor, type QueryCursorData } from '@topgunbuild/core';
+import { LWWRecord, PredicateNode, evaluatePredicate, QueryCursor, type QueryCursorData, DEFAULT_QUERY_CURSOR_MAX_AGE_MS } from '@topgunbuild/core';
 
 export interface Query {
   where?: Record<string, any>;
@@ -9,10 +9,15 @@ export interface Query {
   cursor?: string;
 }
 
+/** Cursor status for debugging */
+export type CursorStatus = 'valid' | 'expired' | 'invalid' | 'none';
+
 export interface QueryResultWithCursor {
   results: { key: string; value: any }[];
   nextCursor?: string;
   hasMore: boolean;
+  /** Debug info: status of input cursor processing */
+  cursorStatus: CursorStatus;
 }
 
 /**
@@ -132,10 +137,21 @@ export function executeQueryWithCursor(records: Map<string, LWWRecord<any>> | LW
     });
   }
 
-  // 3. Apply cursor filtering (Phase 14.1)
+  // 3. Apply cursor filtering (Phase 14.1) and track status
+  let cursorStatus: CursorStatus = 'none';
   if (query.cursor) {
     const cursorData = QueryCursor.decode(query.cursor);
-    if (cursorData && QueryCursor.isValid(cursorData, query.predicate ?? query.where, sort)) {
+    if (!cursorData) {
+      cursorStatus = 'invalid';
+    } else if (!QueryCursor.isValid(cursorData, query.predicate ?? query.where, sort)) {
+      // Check if it's specifically expired vs hash mismatch
+      if (Date.now() - cursorData.timestamp > DEFAULT_QUERY_CURSOR_MAX_AGE_MS) {
+        cursorStatus = 'expired';
+      } else {
+        cursorStatus = 'invalid';
+      }
+    } else {
+      cursorStatus = 'valid';
       results = results.filter((r) => {
         const sortValue = r.record.value[sortField];
         return QueryCursor.isAfterCursor(
@@ -144,7 +160,6 @@ export function executeQueryWithCursor(records: Map<string, LWWRecord<any>> | LW
         );
       });
     }
-    // Invalid cursor: silently ignore and return results from beginning
   }
 
   // 4. Check if there are more results before applying limit
@@ -174,5 +189,6 @@ export function executeQueryWithCursor(records: Map<string, LWWRecord<any>> | LW
     results: results.map(r => ({ key: r.key, value: r.record.value })),
     nextCursor,
     hasMore,
+    cursorStatus,
   };
 }

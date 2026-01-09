@@ -12,6 +12,19 @@ export interface QueryFilter {
   cursor?: string;
 }
 
+/** Cursor status for debugging (Phase 14.1) */
+export type CursorStatus = 'valid' | 'expired' | 'invalid' | 'none';
+
+/** Pagination info from server (Phase 14.1) */
+export interface PaginationInfo {
+  /** Cursor for fetching next page */
+  nextCursor?: string;
+  /** Whether more results are available */
+  hasMore: boolean;
+  /** Debug info: status of input cursor processing */
+  cursorStatus: CursorStatus;
+}
+
 /** Source of query results for proper handling of race conditions */
 export type QueryResultSource = 'local' | 'server';
 
@@ -30,6 +43,10 @@ export class QueryHandle<T> {
   private changeTracker = new ChangeTracker<T>();
   private pendingChanges: ChangeEvent<T>[] = [];
   private changeListeners: Set<(changes: ChangeEvent<T>[]) => void> = new Set();
+
+  // Pagination info (Phase 14.1)
+  private _paginationInfo: PaginationInfo = { hasMore: false, cursorStatus: 'none' };
+  private paginationListeners: Set<(info: PaginationInfo) => void> = new Set();
 
   constructor(syncEngine: SyncEngine, mapName: string, filter: QueryFilter = {}) {
     this.id = crypto.randomUUID();
@@ -282,5 +299,54 @@ export class QueryHandle<T> {
 
   public getMapName(): string {
     return this.mapName;
+  }
+
+  // ============== Pagination Methods (Phase 14.1) ==============
+
+  /**
+   * Get current pagination info.
+   * Returns nextCursor, hasMore, and cursorStatus.
+   */
+  public getPaginationInfo(): PaginationInfo {
+    return { ...this._paginationInfo };
+  }
+
+  /**
+   * Subscribe to pagination info changes.
+   * Called when server sends QUERY_RESP with new cursor info.
+   *
+   * @returns Unsubscribe function
+   */
+  public onPaginationChange(listener: (info: PaginationInfo) => void): () => void {
+    this.paginationListeners.add(listener);
+    // Immediately invoke with current value
+    listener(this.getPaginationInfo());
+    return () => this.paginationListeners.delete(listener);
+  }
+
+  /**
+   * Update pagination info from server response.
+   * Called by SyncEngine when processing QUERY_RESP.
+   *
+   * @internal
+   */
+  public updatePaginationInfo(info: Partial<PaginationInfo>): void {
+    this._paginationInfo = {
+      nextCursor: info.nextCursor,
+      hasMore: info.hasMore ?? false,
+      cursorStatus: info.cursorStatus ?? 'none',
+    };
+    this.notifyPaginationListeners();
+  }
+
+  private notifyPaginationListeners(): void {
+    const info = this.getPaginationInfo();
+    for (const listener of this.paginationListeners) {
+      try {
+        listener(info);
+      } catch (e) {
+        logger.error({ err: e }, 'QueryHandle pagination listener error');
+      }
+    }
   }
 }
