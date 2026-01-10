@@ -21,22 +21,33 @@ function App() {
 }`;
 
 export const useQueryCode = `import { useQuery } from '@topgunbuild/react';
+import { useState } from 'react';
 
 function TodoList() {
-  // QueryFilter options: where, predicate, sort, limit, offset
-  const { data, loading, error } = useQuery('todos', {
+  const [cursor, setCursor] = useState<string | undefined>();
+
+  // QueryFilter options: where, predicate, sort, limit, cursor
+  const { data, loading, error, nextCursor, hasMore } = useQuery('todos', {
     where: { completed: false },
-    sort: { createdAt: 'desc' }
+    sort: { createdAt: 'desc' },
+    limit: 10,
+    cursor  // Pass cursor for pagination
   });
 
   if (loading) return <div>Loading...</div>;
   if (error) return <div>Error: {error.message}</div>;
 
-  // Each item in data has a _key property for the map key
   return (
-    <ul>
-      {data.map(todo => <li key={todo._key}>{todo.title}</li>)}
-    </ul>
+    <div>
+      <ul>
+        {data.map(todo => <li key={todo._key}>{todo.title}</li>)}
+      </ul>
+      {hasMore && (
+        <button onClick={() => setCursor(nextCursor)}>
+          Load More
+        </button>
+      )}
+    </div>
   );
 }`;
 
@@ -451,6 +462,9 @@ The `useQuery` hook provides built-in change tracking to help you understand **w
 | `lastChange` | `ChangeEvent<T> \| null` | Most recent change |
 | `changes` | `ChangeEvent<T>[]` | All changes since last `clearChanges()` |
 | `clearChanges` | `() => void` | Clear accumulated changes |
+| `nextCursor` | `string \| undefined` | Cursor for fetching the next page |
+| `hasMore` | `boolean` | Whether more results are available |
+| `cursorStatus` | `'valid' \| 'expired' \| 'invalid' \| 'none'` | Status of cursor processing (for debugging) |
 
 #### ChangeEvent Structure
 
@@ -759,8 +773,8 @@ interface HybridResultItem<T> {
 | `predicate` | `PredicateNode` | Predicate tree (FTS + filters) |
 | `where` | `Record<string, any>` | Simple equality filters |
 | `sort` | `Record<string, 'asc' \| 'desc'>` | Sort fields (use `_score` for relevance) |
-| `limit` | `number` | Maximum results |
-| `offset` | `number` | Skip N results |
+| `limit` | `number` | Maximum results per page |
+| `cursor` | `string` | Opaque cursor for pagination (from `nextCursor`) |
 
 ### Hook Options
 

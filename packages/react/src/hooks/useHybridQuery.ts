@@ -38,7 +38,7 @@ export interface UseHybridQueryResult<T> {
  * matching the query change. Results include relevance scores for FTS predicates.
  *
  * @param mapName - Name of the map to query
- * @param filter - Hybrid query filter with predicate, where, sort, limit, offset
+ * @param filter - Hybrid query filter with predicate, where, sort, limit, cursor
  * @param options - Hook options (skip)
  * @returns Object containing results, loading state, and error
  *

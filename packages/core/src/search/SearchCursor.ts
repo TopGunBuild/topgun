@@ -9,10 +9,18 @@
  * must return offset+limit results, causing O(N*offset) network overhead.
  * Cursor-based pagination reduces this to O(N*limit).
  *
+ * Related: QueryCursor (query/QueryCursor.ts) provides similar functionality for
+ * predicate-based queries. Both use shared base64url encoding utilities.
+ *
+ * Future consideration: A shared base class could extract common encode/decode
+ * and timestamp validation logic, but the semantic differences (score vs sortValue,
+ * fixed DESC vs configurable direction) make this a low-priority refactor.
+ *
  * @module search/SearchCursor
  */
 
 import { hashString } from '../utils/hash';
+import { encodeBase64Url, decodeBase64Url } from '../utils/base64url';
 
 /**
  * Internal cursor data structure.
@@ -68,8 +76,8 @@ export class SearchCursor {
    */
   static encode(data: SearchCursorData): string {
     const json = JSON.stringify(data);
-    // Use base64url encoding (URL-safe, no padding)
-    return Buffer.from(json, 'utf8').toString('base64url');
+    // Use shared base64url utility (works in both Node.js and browsers)
+    return encodeBase64Url(json);
   }
 
   /**
@@ -80,7 +88,8 @@ export class SearchCursor {
    */
   static decode(cursor: string): SearchCursorData | null {
     try {
-      const json = Buffer.from(cursor, 'base64url').toString('utf8');
+      // Use shared base64url utility (works in both Node.js and browsers)
+      const json = decodeBase64Url(cursor);
       const data = JSON.parse(json);
 
       // Validate structure

@@ -1,16 +1,18 @@
 /**
  * topgun_query - Query data from a TopGun map with filters
+ *
+ * Phase 14.1: Updated to use cursor-based pagination via QueryHandle.
  */
 
 import type { MCPTool, MCPToolResult, ToolContext } from '../types';
-import { QueryArgsSchema, toolSchemas, type QueryArgs } from '../schemas';
+import { QueryArgsSchema, toolSchemas } from '../schemas';
 
 export const queryTool: MCPTool = {
   name: 'topgun_query',
   description:
     'Query data from a TopGun map with filters and sorting. ' +
     'Use this to read data from the database. ' +
-    'Supports filtering by field values and sorting by any field.',
+    'Supports filtering by field values, sorting, and cursor-based pagination.',
   inputSchema: toolSchemas.query as MCPTool['inputSchema'],
 };
 
@@ -25,7 +27,7 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
     };
   }
 
-  const { map, filter, sort, limit, offset } = parseResult.data;
+  const { map, filter, sort, limit, cursor } = parseResult.data;
 
   // Validate map access
   if (ctx.config.allowedMaps && !ctx.config.allowedMaps.includes(map)) {
@@ -42,56 +44,40 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
 
   // Apply limits
   const effectiveLimit = Math.min(limit ?? ctx.config.defaultLimit, ctx.config.maxLimit);
-  const effectiveOffset = offset ?? 0;
 
   try {
-    // Get the map and query
-    const lwwMap = ctx.client.getMap<string, Record<string, unknown>>(map);
+    // Build query filter for QueryHandle
+    const queryFilter: Record<string, unknown> = {
+      where: filter,
+      limit: effectiveLimit,
+    };
 
-    // Get all entries and apply filter/sort/pagination client-side
-    // Note: In production, this should use server-side indexing
-    const allEntries: Array<{ key: string; value: Record<string, unknown> }> = [];
-
-    // For now, we iterate over the map's entries
-    // This is a simplified implementation - real implementation would use QueryHandle
-    for (const [key, value] of lwwMap.entries()) {
-      if (value !== null && typeof value === 'object') {
-        // Apply filter
-        let matches = true;
-        if (filter) {
-          for (const [filterKey, filterValue] of Object.entries(filter)) {
-            if ((value as Record<string, unknown>)[filterKey] !== filterValue) {
-              matches = false;
-              break;
-            }
-          }
-        }
-        if (matches) {
-          allEntries.push({ key: String(key), value: value as Record<string, unknown> });
-        }
-      }
-    }
-
-    // Apply sort
+    // Add sort if provided
     if (sort?.field) {
-      allEntries.sort((a, b) => {
-        const aVal = a.value[sort.field];
-        const bVal = b.value[sort.field];
-
-        if (aVal === bVal) return 0;
-        if (aVal === undefined || aVal === null) return 1;
-        if (bVal === undefined || bVal === null) return -1;
-
-        const comparison = aVal < bVal ? -1 : 1;
-        return sort.order === 'desc' ? -comparison : comparison;
-      });
+      queryFilter.sort = { [sort.field]: sort.order };
     }
 
-    // Apply pagination
-    const paginatedEntries = allEntries.slice(effectiveOffset, effectiveOffset + effectiveLimit);
+    // Add cursor for pagination (Phase 14.1)
+    if (cursor) {
+      queryFilter.cursor = cursor;
+    }
+
+    // Use QueryHandle for proper server-side query execution
+    const handle = ctx.client.query<Record<string, unknown>>(map, queryFilter);
+
+    // Get results via one-shot subscription
+    const results = await new Promise<Array<Record<string, unknown> & { _key: string }>>((resolve) => {
+      const unsubscribe = handle.subscribe((data) => {
+        unsubscribe();
+        resolve(data);
+      });
+    });
+
+    // Get pagination info
+    const paginationInfo = handle.getPaginationInfo();
 
     // Format results
-    if (paginatedEntries.length === 0) {
+    if (results.length === 0) {
       return {
         content: [
           {
@@ -102,20 +88,24 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
       };
     }
 
-    const formatted = paginatedEntries
-      .map((entry, idx) => `${idx + 1 + effectiveOffset}. [${entry.key}]: ${JSON.stringify(entry.value, null, 2)}`)
+    const formatted = results
+      .map((entry, idx) => {
+        const { _key, ...value } = entry;
+        return `${idx + 1}. [${_key}]: ${JSON.stringify(value, null, 2)}`;
+      })
       .join('\n\n');
 
-    const totalInfo =
-      allEntries.length > effectiveLimit
-        ? `\n\n(Showing ${effectiveOffset + 1}-${effectiveOffset + paginatedEntries.length} of ${allEntries.length} total)`
-        : '';
+    // Build pagination info for response
+    let paginationText = '';
+    if (paginationInfo.hasMore && paginationInfo.nextCursor) {
+      paginationText = `\n\n---\nMore results available. Use cursor: "${paginationInfo.nextCursor}" to fetch next page.`;
+    }
 
     return {
       content: [
         {
           type: 'text',
-          text: `Found ${paginatedEntries.length} result(s) in map '${map}':\n\n${formatted}${totalInfo}`,
+          text: `Found ${results.length} result(s) in map '${map}':\n\n${formatted}${paginationText}`,
         },
       ],
     };

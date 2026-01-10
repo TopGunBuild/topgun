@@ -60,27 +60,40 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
       return Predicates.and(...predicates);
     };
 
+    /**
+     * Run a query against TopGun.
+     *
+     * Note: BetterAuth uses offset-based pagination, but TopGun uses cursor-based pagination.
+     * For BetterAuth compatibility, we fetch limit+offset results and slice client-side.
+     * This is acceptable for auth queries which typically have small result sets.
+     */
     const runQuery = async <T>(model: string, where?: Where[], sort?: any, limit?: number, offset?: number): Promise<T[]> => {
       const mapName = getMapName(model);
       const predicate = where ? whereToPredicate(where) : undefined;
-      
+
+      // For BetterAuth offset compatibility, we request more results and slice
+      const effectiveLimit = limit && offset ? limit + offset : limit;
+
       const filter = {
         predicate,
         sort,
-        limit,
-        offset
+        limit: effectiveLimit,
+        // Note: TopGun uses cursor-based pagination (Phase 14.1)
+        // offset is handled client-side for BetterAuth compatibility
       };
 
       // We use client.query which subscribes. We wait for the first result.
       // TopGun QueryHandle is reactive. We need a one-shot fetch.
-      
+
       return new Promise((resolve) => {
         const handle = client.query<T>(mapName, filter);
-        
+
         // Subscribe returns an unsubscribe function
         const unsubscribe = handle.subscribe((results: T[]) => {
            unsubscribe();
-           resolve(results);
+           // Apply offset client-side for BetterAuth compatibility
+           const sliced = offset ? results.slice(offset, offset + (limit || results.length)) : results;
+           resolve(sliced);
         });
       });
     };

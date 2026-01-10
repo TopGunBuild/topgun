@@ -1,5 +1,5 @@
 /**
- * QueryCursor - Cursor-based pagination for distributed queries
+ * QueryCursor - Cursor-based pagination for distributed queries (Phase 14.1)
  *
  * Implements opaque cursor encoding for efficient deep pagination in distributed
  * predicate-based queries. Cursors encode the last seen position per node, enabling
@@ -8,6 +8,13 @@
  * Problem solved: With offset-based pagination in a distributed system, each node
  * must return offset+limit results, causing O(N*offset) network overhead.
  * Cursor-based pagination reduces this to O(N*limit).
+ *
+ * Related: SearchCursor (search/SearchCursor.ts) provides similar functionality for
+ * FTS queries using BM25 scores. Both use shared base64url encoding utilities.
+ *
+ * Future consideration: A shared base class could extract common encode/decode
+ * and timestamp validation logic, but the semantic differences (sortValue vs score,
+ * configurable direction vs fixed DESC) make this a low-priority refactor.
  *
  * @module query/QueryCursor
  */

@@ -90,7 +90,20 @@ export const queryCode = `const handle = client.query<Todo>('todos', {
 
 const unsubscribe = handle.subscribe((results) => {
   console.log('Results:', results);
-});`;
+});
+
+// Cursor-based pagination (Phase 14.1)
+const { nextCursor, hasMore } = handle.getPaginationInfo();
+if (hasMore && nextCursor) {
+  // Fetch next page
+  const nextPage = client.query<Todo>('todos', {
+    where: { completed: false },
+    sort: { createdAt: 'desc' },
+    limit: 10,
+    cursor: nextCursor  // Opaque cursor from previous page
+  });
+}`;
+
 
 export const authProviderCode = `// Provider is called on each reconnection
 client.setAuthTokenProvider(async () => {

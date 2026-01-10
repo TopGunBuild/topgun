@@ -25,7 +25,7 @@ export const QueryArgsSchema = z.object({
     .optional()
     .describe('Sort configuration'),
   limit: z.number().optional().default(10).describe('Maximum number of results to return'),
-  offset: z.number().optional().default(0).describe('Number of results to skip (for pagination)'),
+  cursor: z.string().optional().describe('Opaque cursor for pagination (from previous response nextCursor)'),
 });
 
 export type QueryArgs = z.infer<typeof QueryArgsSchema>;
@@ -157,7 +157,7 @@ export const toolSchemas = {
         description: 'Sort configuration',
       },
       limit: { type: 'number', description: 'Maximum number of results to return', default: 10 },
-      offset: { type: 'number', description: 'Number of results to skip (for pagination)', default: 0 },
+      cursor: { type: 'string', description: 'Opaque cursor for pagination (from previous response nextCursor)' },
     },
     required: ['map'],
   },

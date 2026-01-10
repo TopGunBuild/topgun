@@ -4,6 +4,15 @@
  * Applies offset/limit to source ResultSet.
  * Implements early termination for efficiency.
  *
+ * NOTE: The offset parameter is intentionally retained in this internal component
+ * even though Phase 14.1 replaced offset with cursor-based pagination in the query API.
+ * This class is used internally by:
+ * - EventJournalService (SQL queries require numeric offset)
+ * - Index result set operations where offset is computed internally
+ * - Unit tests for result set behavior
+ *
+ * The query API (QueryOptions, QueryHandle) uses cursor-based pagination via QueryCursor.
+ *
  * @module query/resultset/LimitResultSet
  */
 

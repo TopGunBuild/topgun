@@ -669,7 +669,7 @@ export class TopGunClient {
    * Results include relevance scores for FTS ranking.
    *
    * @param mapName Name of the map to query
-   * @param filter Hybrid query filter with predicate, where, sort, limit, offset
+   * @param filter Hybrid query filter with predicate, where, sort, limit, cursor
    * @returns HybridQueryHandle for managing the subscription
    *
    * @example

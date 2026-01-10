@@ -192,7 +192,7 @@ describe('TopGunClient', () => {
         where: { status: 'active' },
         sort: { createdAt: 'desc' as const },
         limit: 10,
-        offset: 0
+        // Phase 14.1: cursor-based pagination (no offset)
       };
 
       const handle = client.query<{ name: string; status: string }>('users', filter);
