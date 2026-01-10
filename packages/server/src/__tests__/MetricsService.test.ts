@@ -119,6 +119,14 @@ describe('MetricsService', () => {
       expect(output).toContain('topgun_distributed_sub_ack_total{status="timeout"} 1');
     });
 
+    test('should track ACK responses with count parameter', async () => {
+      metrics.incDistributedSubAck('success', 5);
+      metrics.incDistributedSubAck('timeout', 2);
+      const output = await metrics.getMetrics();
+      expect(output).toContain('topgun_distributed_sub_ack_total{status="success"} 5');
+      expect(output).toContain('topgun_distributed_sub_ack_total{status="timeout"} 2');
+    });
+
     test('should record registration duration histogram', async () => {
       metrics.recordDistributedSubRegistration('SEARCH', 150);
       metrics.recordDistributedSubRegistration('SEARCH', 250);

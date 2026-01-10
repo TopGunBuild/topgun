@@ -750,16 +750,9 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
     this.metricsService?.recordDistributedSubInitialResultsCount(subscription.type, result.results.length);
     this.metricsService?.setDistributedSubPendingAcks(this.pendingAcks.size);
 
-    // Record ACK metrics - use size to avoid unused variable warnings
-    const successfulAcks = subscription.registeredNodes.size;
-    const failedAcks = result.failedNodes.length;
-
-    for (let i = 0; i < successfulAcks; i++) {
-      this.metricsService?.incDistributedSubAck('success');
-    }
-    for (let i = 0; i < failedAcks; i++) {
-      this.metricsService?.incDistributedSubAck('timeout');
-    }
+    // Record ACK metrics
+    this.metricsService?.incDistributedSubAck('success', subscription.registeredNodes.size);
+    this.metricsService?.incDistributedSubAck('timeout', result.failedNodes.length);
   }
 
   /**

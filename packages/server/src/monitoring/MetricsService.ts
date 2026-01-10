@@ -498,11 +498,12 @@ export class MetricsService {
   }
 
   /**
-   * Record a node ACK response.
+   * Record node ACK responses.
    * @param status - ACK status (success, failed, timeout)
+   * @param count - Number of ACKs to record (default 1)
    */
-  public incDistributedSubAck(status: 'success' | 'failed' | 'timeout'): void {
-    this.distributedSubAckTotal.inc({ status });
+  public incDistributedSubAck(status: 'success' | 'failed' | 'timeout', count: number = 1): void {
+    this.distributedSubAckTotal.inc({ status }, count);
   }
 
   /**
