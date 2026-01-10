@@ -54,5 +54,94 @@ describe('MetricsService', () => {
   test('should return correct content type', () => {
     expect(metrics.getContentType()).toBe('text/plain; version=0.0.4; charset=utf-8');
   });
+
+  // === Distributed Subscription Metrics (Phase 14.2) ===
+
+  describe('Distributed Subscription Metrics', () => {
+    test('should increment subscription counter on success', async () => {
+      metrics.incDistributedSub('SEARCH', 'success');
+      const output = await metrics.getMetrics();
+      expect(output).toContain('topgun_distributed_sub_total{type="SEARCH",status="success"} 1');
+    });
+
+    test('should track active subscriptions gauge on success', async () => {
+      metrics.incDistributedSub('SEARCH', 'success');
+      metrics.incDistributedSub('SEARCH', 'success');
+      const output = await metrics.getMetrics();
+      expect(output).toContain('topgun_distributed_sub_active{type="SEARCH"} 2');
+    });
+
+    test('should not increment active gauge on failed subscription', async () => {
+      metrics.incDistributedSub('QUERY', 'failed');
+      const output = await metrics.getMetrics();
+      expect(output).toContain('topgun_distributed_sub_total{type="QUERY",status="failed"} 1');
+      // Active gauge should not be incremented for failed
+      expect(output).not.toContain('topgun_distributed_sub_active{type="QUERY"} 1');
+    });
+
+    test('should decrement active subscriptions gauge', async () => {
+      metrics.incDistributedSub('SEARCH', 'success');
+      metrics.incDistributedSub('SEARCH', 'success');
+      metrics.decDistributedSubActive('SEARCH');
+      const output = await metrics.getMetrics();
+      expect(output).toContain('topgun_distributed_sub_active{type="SEARCH"} 1');
+    });
+
+    test('should track unsubscriptions', async () => {
+      metrics.incDistributedSubUnsubscribe('QUERY');
+      metrics.incDistributedSubUnsubscribe('QUERY');
+      const output = await metrics.getMetrics();
+      expect(output).toContain('topgun_distributed_sub_unsubscribe_total{type="QUERY"} 2');
+    });
+
+    test('should track pending ACKs gauge', async () => {
+      metrics.setDistributedSubPendingAcks(5);
+      const output = await metrics.getMetrics();
+      expect(output).toContain('topgun_distributed_sub_pending_acks 5');
+    });
+
+    test('should track delta updates', async () => {
+      metrics.incDistributedSubUpdates('sent', 'ENTER');
+      metrics.incDistributedSubUpdates('received', 'UPDATE');
+      metrics.incDistributedSubUpdates('received', 'LEAVE');
+      const output = await metrics.getMetrics();
+      expect(output).toContain('topgun_distributed_sub_updates_total{direction="sent",change_type="ENTER"} 1');
+      expect(output).toContain('topgun_distributed_sub_updates_total{direction="received",change_type="UPDATE"} 1');
+      expect(output).toContain('topgun_distributed_sub_updates_total{direction="received",change_type="LEAVE"} 1');
+    });
+
+    test('should track ACK responses', async () => {
+      metrics.incDistributedSubAck('success');
+      metrics.incDistributedSubAck('success');
+      metrics.incDistributedSubAck('timeout');
+      const output = await metrics.getMetrics();
+      expect(output).toContain('topgun_distributed_sub_ack_total{status="success"} 2');
+      expect(output).toContain('topgun_distributed_sub_ack_total{status="timeout"} 1');
+    });
+
+    test('should record registration duration histogram', async () => {
+      metrics.recordDistributedSubRegistration('SEARCH', 150);
+      metrics.recordDistributedSubRegistration('SEARCH', 250);
+      const output = await metrics.getMetrics();
+      expect(output).toContain('topgun_distributed_sub_registration_duration_ms_bucket');
+      expect(output).toContain('topgun_distributed_sub_registration_duration_ms_count{type="SEARCH"} 2');
+    });
+
+    test('should record update latency histogram', async () => {
+      metrics.recordDistributedSubUpdateLatency('QUERY', 15);
+      metrics.recordDistributedSubUpdateLatency('QUERY', 5);
+      const output = await metrics.getMetrics();
+      expect(output).toContain('topgun_distributed_sub_update_latency_ms_bucket');
+      expect(output).toContain('topgun_distributed_sub_update_latency_ms_count{type="QUERY"} 2');
+    });
+
+    test('should record initial results count histogram', async () => {
+      metrics.recordDistributedSubInitialResultsCount('SEARCH', 25);
+      metrics.recordDistributedSubInitialResultsCount('SEARCH', 5);
+      const output = await metrics.getMetrics();
+      expect(output).toContain('topgun_distributed_sub_initial_results_count_bucket');
+      expect(output).toContain('topgun_distributed_sub_initial_results_count_count{type="SEARCH"} 2');
+    });
+  });
 });
 

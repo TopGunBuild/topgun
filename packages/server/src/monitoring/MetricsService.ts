@@ -1,4 +1,4 @@
-import { Registry, Gauge, Counter, Summary, collectDefaultMetrics } from 'prom-client';
+import { Registry, Gauge, Counter, Summary, Histogram, collectDefaultMetrics } from 'prom-client';
 
 export class MetricsService {
   public readonly registry: Registry;
@@ -38,6 +38,17 @@ export class MetricsService {
   private distributedSearchDuration: Summary;
   private distributedSearchFailedNodes: Counter;
   private distributedSearchPartialResults: Counter;
+
+  // Distributed subscription metrics (Phase 14.2)
+  private distributedSubTotal: Counter;
+  private distributedSubUnsubscribeTotal: Counter;
+  private distributedSubActive: Gauge;
+  private distributedSubPendingAcks: Gauge;
+  private distributedSubUpdates: Counter;
+  private distributedSubAckTotal: Counter;
+  private distributedSubRegistrationDuration: Histogram;
+  private distributedSubUpdateLatency: Histogram;
+  private distributedSubInitialResultsCount: Histogram;
 
   constructor() {
     this.registry = new Registry();
@@ -201,6 +212,72 @@ export class MetricsService {
     this.distributedSearchPartialResults = new Counter({
       name: 'topgun_distributed_search_partial_results_total',
       help: 'Total number of searches that returned partial results due to node failures',
+      registers: [this.registry],
+    });
+
+    // === Distributed subscription metrics (Phase 14.2) ===
+    this.distributedSubTotal = new Counter({
+      name: 'topgun_distributed_sub_total',
+      help: 'Total distributed subscriptions created',
+      labelNames: ['type', 'status'],
+      registers: [this.registry],
+    });
+
+    this.distributedSubUnsubscribeTotal = new Counter({
+      name: 'topgun_distributed_sub_unsubscribe_total',
+      help: 'Total unsubscriptions from distributed subscriptions',
+      labelNames: ['type'],
+      registers: [this.registry],
+    });
+
+    this.distributedSubActive = new Gauge({
+      name: 'topgun_distributed_sub_active',
+      help: 'Currently active distributed subscriptions',
+      labelNames: ['type'],
+      registers: [this.registry],
+    });
+
+    this.distributedSubPendingAcks = new Gauge({
+      name: 'topgun_distributed_sub_pending_acks',
+      help: 'Subscriptions waiting for ACKs from cluster nodes',
+      registers: [this.registry],
+    });
+
+    this.distributedSubUpdates = new Counter({
+      name: 'topgun_distributed_sub_updates_total',
+      help: 'Delta updates processed for distributed subscriptions',
+      labelNames: ['direction', 'change_type'],
+      registers: [this.registry],
+    });
+
+    this.distributedSubAckTotal = new Counter({
+      name: 'topgun_distributed_sub_ack_total',
+      help: 'Node ACK responses for distributed subscriptions',
+      labelNames: ['status'],
+      registers: [this.registry],
+    });
+
+    this.distributedSubRegistrationDuration = new Histogram({
+      name: 'topgun_distributed_sub_registration_duration_ms',
+      help: 'Time to register subscription on all nodes',
+      labelNames: ['type'],
+      buckets: [10, 50, 100, 250, 500, 1000, 2500],
+      registers: [this.registry],
+    });
+
+    this.distributedSubUpdateLatency = new Histogram({
+      name: 'topgun_distributed_sub_update_latency_ms',
+      help: 'Latency from data change to client notification',
+      labelNames: ['type'],
+      buckets: [1, 5, 10, 25, 50, 100, 250],
+      registers: [this.registry],
+    });
+
+    this.distributedSubInitialResultsCount = new Histogram({
+      name: 'topgun_distributed_sub_initial_results_count',
+      help: 'Initial result set size for distributed subscriptions',
+      labelNames: ['type'],
+      buckets: [0, 1, 5, 10, 25, 50, 100],
       registers: [this.registry],
     });
   }
@@ -371,6 +448,88 @@ export class MetricsService {
    */
   public incDistributedSearchPartialResults(): void {
     this.distributedSearchPartialResults.inc();
+  }
+
+  // === Distributed subscription metric methods (Phase 14.2) ===
+
+  /**
+   * Record a distributed subscription creation.
+   * @param type - Subscription type (SEARCH or QUERY)
+   * @param status - Result status (success, failed, timeout)
+   */
+  public incDistributedSub(type: 'SEARCH' | 'QUERY', status: 'success' | 'failed' | 'timeout'): void {
+    this.distributedSubTotal.inc({ type, status });
+    if (status === 'success') {
+      this.distributedSubActive.inc({ type });
+    }
+  }
+
+  /**
+   * Record a distributed subscription unsubscription.
+   * @param type - Subscription type (SEARCH or QUERY)
+   */
+  public incDistributedSubUnsubscribe(type: 'SEARCH' | 'QUERY'): void {
+    this.distributedSubUnsubscribeTotal.inc({ type });
+  }
+
+  /**
+   * Decrement the active distributed subscriptions gauge.
+   * @param type - Subscription type (SEARCH or QUERY)
+   */
+  public decDistributedSubActive(type: 'SEARCH' | 'QUERY'): void {
+    this.distributedSubActive.dec({ type });
+  }
+
+  /**
+   * Set the number of subscriptions waiting for ACKs.
+   * @param count - Number of pending ACKs
+   */
+  public setDistributedSubPendingAcks(count: number): void {
+    this.distributedSubPendingAcks.set(count);
+  }
+
+  /**
+   * Record a delta update for distributed subscriptions.
+   * @param direction - Direction of update (sent or received)
+   * @param changeType - Type of change (ENTER, UPDATE, LEAVE)
+   */
+  public incDistributedSubUpdates(direction: 'sent' | 'received', changeType: 'ENTER' | 'UPDATE' | 'LEAVE'): void {
+    this.distributedSubUpdates.inc({ direction, change_type: changeType });
+  }
+
+  /**
+   * Record a node ACK response.
+   * @param status - ACK status (success, failed, timeout)
+   */
+  public incDistributedSubAck(status: 'success' | 'failed' | 'timeout'): void {
+    this.distributedSubAckTotal.inc({ status });
+  }
+
+  /**
+   * Record the time to register a subscription on all nodes.
+   * @param type - Subscription type (SEARCH or QUERY)
+   * @param durationMs - Duration in milliseconds
+   */
+  public recordDistributedSubRegistration(type: 'SEARCH' | 'QUERY', durationMs: number): void {
+    this.distributedSubRegistrationDuration.observe({ type }, durationMs);
+  }
+
+  /**
+   * Record the latency from data change to client notification.
+   * @param type - Subscription type (SEARCH or QUERY)
+   * @param latencyMs - Latency in milliseconds
+   */
+  public recordDistributedSubUpdateLatency(type: 'SEARCH' | 'QUERY', latencyMs: number): void {
+    this.distributedSubUpdateLatency.observe({ type }, latencyMs);
+  }
+
+  /**
+   * Record the initial result set size for a subscription.
+   * @param type - Subscription type (SEARCH or QUERY)
+   * @param count - Number of initial results
+   */
+  public recordDistributedSubInitialResultsCount(type: 'SEARCH' | 'QUERY', count: number): void {
+    this.distributedSubInitialResultsCount.observe({ type }, count);
   }
 
   public async getMetrics(): Promise<string> {

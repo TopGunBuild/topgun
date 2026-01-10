@@ -142,12 +142,13 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
 
   /**
    * Pending ACK promises for subscription registration.
-   * subscriptionId → { resolve, reject, timeout }
+   * subscriptionId → { resolve, reject, timeout, startTime }
    */
   private readonly pendingAcks = new Map<string, {
     resolve: (result: DistributedSubscriptionResult) => void;
     reject: (error: Error) => void;
     timeoutHandle: NodeJS.Timeout;
+    startTime: number;
   }>();
 
   constructor(
@@ -349,7 +350,10 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
       this.pendingAcks.delete(subscriptionId);
     }
 
-    // TODO: Add metrics for distributed subscriptions when MetricsService is extended
+    // Record metrics
+    this.metricsService?.incDistributedSubUnsubscribe(subscription.type);
+    this.metricsService?.decDistributedSubActive(subscription.type);
+    this.metricsService?.setDistributedSubPendingAcks(this.pendingAcks.size);
   }
 
   /**
@@ -534,7 +538,14 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
     // Forward to client
     this.forwardUpdateToClient(subscription, payload);
 
-    // TODO: Add distributed sub update metrics
+    // Record metrics
+    this.metricsService?.incDistributedSubUpdates('received', payload.changeType);
+
+    // Calculate and record latency if timestamp is available
+    if (payload.timestamp) {
+      const latencyMs = Date.now() - payload.timestamp;
+      this.metricsService?.recordDistributedSubUpdateLatency(subscription.type, latencyMs);
+    }
   }
 
   /**
@@ -572,7 +583,8 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
       this.clusterManager.send(coordinatorNodeId, 'CLUSTER_SUB_UPDATE', payload);
     }
 
-    // TODO: Add distributed sub update metrics
+    // Record metrics for sent updates
+    this.metricsService?.incDistributedSubUpdates('sent', payload.changeType);
   }
 
   /**
@@ -655,11 +667,15 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
     expectedNodes: Set<string>
   ): Promise<DistributedSubscriptionResult> {
     return new Promise((resolve, reject) => {
+      const startTime = performance.now();
       const timeoutHandle = setTimeout(() => {
         this.resolveWithPartialAcks(subscriptionId);
       }, this.config.ackTimeoutMs);
 
-      this.pendingAcks.set(subscriptionId, { resolve, reject, timeoutHandle });
+      this.pendingAcks.set(subscriptionId, { resolve, reject, timeoutHandle, startTime });
+
+      // Update pending ACKs metric
+      this.metricsService?.setDistributedSubPendingAcks(this.pendingAcks.size);
 
       // Check if already complete (e.g., single-node cluster)
       this.checkAcksComplete(subscriptionId);
@@ -681,7 +697,27 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
       clearTimeout(pendingAck.timeoutHandle);
       this.pendingAcks.delete(subscriptionId);
 
+      // Record metrics
+      const duration = performance.now() - pendingAck.startTime;
       const result = this.mergeInitialResults(subscription);
+      const hasFailures = result.failedNodes.length > 0;
+
+      this.metricsService?.incDistributedSub(
+        subscription.type,
+        hasFailures ? 'timeout' : 'success'
+      );
+      this.metricsService?.recordDistributedSubRegistration(subscription.type, duration);
+      this.metricsService?.recordDistributedSubInitialResultsCount(subscription.type, result.results.length);
+      this.metricsService?.setDistributedSubPendingAcks(this.pendingAcks.size);
+
+      // Record ACK metrics for successful nodes
+      for (const nodeId of subscription.registeredNodes) {
+        this.metricsService?.incDistributedSubAck('success');
+      }
+      for (const nodeId of result.failedNodes) {
+        this.metricsService?.incDistributedSubAck('timeout');
+      }
+
       pendingAck.resolve(result);
     }
   }
@@ -702,7 +738,23 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
       'Subscription ACK timeout, resolving with partial results'
     );
 
+    // Record metrics
+    const duration = performance.now() - pendingAck.startTime;
     const result = this.mergeInitialResults(subscription);
+
+    this.metricsService?.incDistributedSub(subscription.type, 'timeout');
+    this.metricsService?.recordDistributedSubRegistration(subscription.type, duration);
+    this.metricsService?.recordDistributedSubInitialResultsCount(subscription.type, result.results.length);
+    this.metricsService?.setDistributedSubPendingAcks(this.pendingAcks.size);
+
+    // Record ACK metrics
+    for (const nodeId of subscription.registeredNodes) {
+      this.metricsService?.incDistributedSubAck('success');
+    }
+    for (const nodeId of result.failedNodes) {
+      this.metricsService?.incDistributedSubAck('timeout');
+    }
+
     pendingAck.resolve(result);
   }
 

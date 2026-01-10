@@ -380,4 +380,253 @@ describe('DistributedSubscriptionCoordinator', () => {
       expect(coordinator.getActiveSubscriptionCount()).toBe(0);
     });
   });
+
+  describe('metrics integration', () => {
+    it('should record metrics on successful subscription', async () => {
+      // Create a mock metrics service
+      const mockMetrics = {
+        incDistributedSub: jest.fn(),
+        recordDistributedSubRegistration: jest.fn(),
+        recordDistributedSubInitialResultsCount: jest.fn(),
+        setDistributedSubPendingAcks: jest.fn(),
+        incDistributedSubAck: jest.fn(),
+        incDistributedSubUnsubscribe: jest.fn(),
+        decDistributedSubActive: jest.fn(),
+        incDistributedSubUpdates: jest.fn(),
+        recordDistributedSubUpdateLatency: jest.fn(),
+      };
+
+      const coordinatorWithMetrics = new DistributedSubscriptionCoordinator(
+        clusterManager as any,
+        queryRegistry,
+        searchCoordinator,
+        undefined,
+        mockMetrics as any
+      );
+
+      const socket = createMockSocket('client-1');
+
+      // Start subscription
+      const subscribePromise = coordinatorWithMetrics.subscribeSearch(
+        'sub-metrics-1',
+        socket,
+        'articles',
+        'test',
+        {}
+      );
+
+      // Simulate ACKs
+      clusterManager.receiveMessage('node-2', 'CLUSTER_SUB_ACK', {
+        subscriptionId: 'sub-metrics-1',
+        nodeId: 'node-2',
+        success: true,
+        initialResults: [{ key: 'doc1', value: { title: 'Test' }, score: 0.9 }],
+        totalHits: 1,
+      });
+      clusterManager.receiveMessage('node-3', 'CLUSTER_SUB_ACK', {
+        subscriptionId: 'sub-metrics-1',
+        nodeId: 'node-3',
+        success: true,
+        initialResults: [],
+        totalHits: 0,
+      });
+
+      await subscribePromise;
+
+      // Verify metrics were recorded
+      expect(mockMetrics.incDistributedSub).toHaveBeenCalledWith('SEARCH', 'success');
+      expect(mockMetrics.recordDistributedSubRegistration).toHaveBeenCalledWith('SEARCH', expect.any(Number));
+      expect(mockMetrics.recordDistributedSubInitialResultsCount).toHaveBeenCalledWith('SEARCH', expect.any(Number));
+      expect(mockMetrics.setDistributedSubPendingAcks).toHaveBeenCalled();
+      expect(mockMetrics.incDistributedSubAck).toHaveBeenCalledWith('success');
+
+      coordinatorWithMetrics.destroy();
+    });
+
+    it('should record metrics on unsubscribe', async () => {
+      const mockMetrics = {
+        incDistributedSub: jest.fn(),
+        recordDistributedSubRegistration: jest.fn(),
+        recordDistributedSubInitialResultsCount: jest.fn(),
+        setDistributedSubPendingAcks: jest.fn(),
+        incDistributedSubAck: jest.fn(),
+        incDistributedSubUnsubscribe: jest.fn(),
+        decDistributedSubActive: jest.fn(),
+        incDistributedSubUpdates: jest.fn(),
+        recordDistributedSubUpdateLatency: jest.fn(),
+      };
+
+      const coordinatorWithMetrics = new DistributedSubscriptionCoordinator(
+        clusterManager as any,
+        queryRegistry,
+        searchCoordinator,
+        undefined,
+        mockMetrics as any
+      );
+
+      const socket = createMockSocket('client-1');
+
+      // First subscribe
+      const subscribePromise = coordinatorWithMetrics.subscribeSearch(
+        'sub-metrics-2',
+        socket,
+        'articles',
+        'test',
+        {}
+      );
+
+      // Simulate ACKs
+      clusterManager.receiveMessage('node-2', 'CLUSTER_SUB_ACK', {
+        subscriptionId: 'sub-metrics-2',
+        nodeId: 'node-2',
+        success: true,
+        initialResults: [],
+        totalHits: 0,
+      });
+      clusterManager.receiveMessage('node-3', 'CLUSTER_SUB_ACK', {
+        subscriptionId: 'sub-metrics-2',
+        nodeId: 'node-3',
+        success: true,
+        initialResults: [],
+        totalHits: 0,
+      });
+
+      await subscribePromise;
+
+      // Clear mocks to verify unsubscribe metrics
+      mockMetrics.incDistributedSubUnsubscribe.mockClear();
+      mockMetrics.decDistributedSubActive.mockClear();
+
+      // Unsubscribe
+      await coordinatorWithMetrics.unsubscribe('sub-metrics-2');
+
+      expect(mockMetrics.incDistributedSubUnsubscribe).toHaveBeenCalledWith('SEARCH');
+      expect(mockMetrics.decDistributedSubActive).toHaveBeenCalledWith('SEARCH');
+
+      coordinatorWithMetrics.destroy();
+    });
+
+    it('should record update metrics when receiving updates', async () => {
+      const mockMetrics = {
+        incDistributedSub: jest.fn(),
+        recordDistributedSubRegistration: jest.fn(),
+        recordDistributedSubInitialResultsCount: jest.fn(),
+        setDistributedSubPendingAcks: jest.fn(),
+        incDistributedSubAck: jest.fn(),
+        incDistributedSubUnsubscribe: jest.fn(),
+        decDistributedSubActive: jest.fn(),
+        incDistributedSubUpdates: jest.fn(),
+        recordDistributedSubUpdateLatency: jest.fn(),
+      };
+
+      const coordinatorWithMetrics = new DistributedSubscriptionCoordinator(
+        clusterManager as any,
+        queryRegistry,
+        searchCoordinator,
+        undefined,
+        mockMetrics as any
+      );
+
+      const socket = createMockSocket('client-1');
+
+      // Subscribe first
+      const subscribePromise = coordinatorWithMetrics.subscribeSearch(
+        'sub-metrics-3',
+        socket,
+        'articles',
+        'test',
+        {}
+      );
+
+      clusterManager.receiveMessage('node-2', 'CLUSTER_SUB_ACK', {
+        subscriptionId: 'sub-metrics-3',
+        nodeId: 'node-2',
+        success: true,
+        initialResults: [],
+        totalHits: 0,
+      });
+      clusterManager.receiveMessage('node-3', 'CLUSTER_SUB_ACK', {
+        subscriptionId: 'sub-metrics-3',
+        nodeId: 'node-3',
+        success: true,
+        initialResults: [],
+        totalHits: 0,
+      });
+
+      await subscribePromise;
+
+      // Clear mocks
+      mockMetrics.incDistributedSubUpdates.mockClear();
+      mockMetrics.recordDistributedSubUpdateLatency.mockClear();
+
+      // Simulate update from remote node
+      const timestamp = Date.now() - 10; // 10ms ago
+      clusterManager.receiveMessage('node-2', 'CLUSTER_SUB_UPDATE', {
+        subscriptionId: 'sub-metrics-3',
+        sourceNodeId: 'node-2',
+        key: 'new-doc',
+        value: { title: 'New Doc' },
+        score: 0.95,
+        changeType: 'ENTER',
+        timestamp,
+      });
+
+      expect(mockMetrics.incDistributedSubUpdates).toHaveBeenCalledWith('received', 'ENTER');
+      expect(mockMetrics.recordDistributedSubUpdateLatency).toHaveBeenCalledWith('SEARCH', expect.any(Number));
+
+      coordinatorWithMetrics.destroy();
+    });
+
+    it('should record timeout metrics when ACKs timeout', async () => {
+      const mockMetrics = {
+        incDistributedSub: jest.fn(),
+        recordDistributedSubRegistration: jest.fn(),
+        recordDistributedSubInitialResultsCount: jest.fn(),
+        setDistributedSubPendingAcks: jest.fn(),
+        incDistributedSubAck: jest.fn(),
+        incDistributedSubUnsubscribe: jest.fn(),
+        decDistributedSubActive: jest.fn(),
+        incDistributedSubUpdates: jest.fn(),
+        recordDistributedSubUpdateLatency: jest.fn(),
+      };
+
+      const fastCoordinator = new DistributedSubscriptionCoordinator(
+        clusterManager as any,
+        queryRegistry,
+        searchCoordinator,
+        { ackTimeoutMs: 100 },
+        mockMetrics as any
+      );
+
+      const socket = createMockSocket('client-1');
+
+      // Start subscription - only one node responds
+      const subscribePromise = fastCoordinator.subscribeSearch(
+        'sub-timeout',
+        socket,
+        'articles',
+        'test',
+        {}
+      );
+
+      // Only node-2 responds
+      clusterManager.receiveMessage('node-2', 'CLUSTER_SUB_ACK', {
+        subscriptionId: 'sub-timeout',
+        nodeId: 'node-2',
+        success: true,
+        initialResults: [],
+        totalHits: 0,
+      });
+
+      // Wait for timeout
+      await subscribePromise;
+
+      // Should record timeout status
+      expect(mockMetrics.incDistributedSub).toHaveBeenCalledWith('SEARCH', 'timeout');
+      // Should record timeout ACKs for failed nodes
+      expect(mockMetrics.incDistributedSubAck).toHaveBeenCalledWith('timeout');
+
+      fastCoordinator.destroy();
+    });
+  });
 });
