@@ -47,6 +47,7 @@ import { EntryProcessorHandler } from './handlers/EntryProcessorHandler';
 import { ConflictResolverHandler } from './handlers/ConflictResolverHandler';
 import { EventJournalService, EventJournalServiceConfig } from './EventJournalService';
 import { SearchCoordinator, SearchConfig, ClusterSearchCoordinator, type ClusterSearchConfig } from './search';
+import { DistributedSubscriptionCoordinator } from './subscriptions/DistributedSubscriptionCoordinator';
 import type { JournalEvent, JournalEventType, MergeRejection, MergeContext, FullTextIndexConfig } from '@topgunbuild/core';
 
 interface ClientConnection {
@@ -261,6 +262,9 @@ export class ServerCoordinator {
 
     // Phase 14 - Distributed Search
     private clusterSearchCoordinator?: ClusterSearchCoordinator;
+
+    // Phase 14.2 - Distributed Live Subscriptions
+    private distributedSubCoordinator?: DistributedSubscriptionCoordinator;
 
     private readonly _nodeId: string;
 
@@ -609,6 +613,22 @@ export class ServerCoordinator {
                 this.metricsService
             );
             logger.info('ClusterSearchCoordinator initialized for distributed search');
+
+            // Phase 14.2: Initialize DistributedSubscriptionCoordinator for live subscriptions
+            this.distributedSubCoordinator = new DistributedSubscriptionCoordinator(
+                this.cluster,
+                this.queryRegistry,
+                this.searchCoordinator,
+                undefined, // Use default config
+                this.metricsService
+            );
+            logger.info('DistributedSubscriptionCoordinator initialized for distributed live subscriptions');
+
+            // Set node ID for SearchCoordinator (needed for distributed update routing)
+            this.searchCoordinator.setNodeId(config.nodeId);
+
+            // Set ClusterManager on QueryRegistry for distributed updates
+            this.queryRegistry.setClusterManager(this.cluster, config.nodeId);
 
             this.systemManager = new SystemManager(
                 this.cluster,
@@ -1042,6 +1062,11 @@ export class ServerCoordinator {
             this.clusterSearchCoordinator.destroy();
         }
 
+        // Phase 14.2: Cleanup distributed subscription coordinator
+        if (this.distributedSubCoordinator) {
+            this.distributedSubCoordinator.destroy();
+        }
+
         logger.info('Server Coordinator shutdown complete.');
     }
 
@@ -1183,6 +1208,11 @@ export class ServerCoordinator {
 
             // Phase 11.1b: Cleanup Search Subscriptions
             this.searchCoordinator.unsubscribeClient(clientId);
+
+            // Phase 14.2: Cleanup distributed subscriptions for this client
+            if (this.distributedSubCoordinator && connection) {
+                this.distributedSubCoordinator.unsubscribeClient(connection.socket);
+            }
 
             // Notify Cluster to Cleanup Locks (Remote)
             const members = this.cluster.getMembers();
@@ -2510,38 +2540,84 @@ export class ServerCoordinator {
                     break;
                 }
 
-                // Subscribe and get initial results
-                const initialResults = this.searchCoordinator.subscribe(
-                    client.id,
-                    subscriptionId,
-                    subMapName,
-                    subQuery,
-                    subOptions
-                );
+                // Phase 14.2: Use distributed subscription if cluster mode with multiple nodes
+                if (this.distributedSubCoordinator && this.cluster && this.cluster.getMembers().length > 1) {
+                    // Distributed search subscription
+                    this.distributedSubCoordinator.subscribeSearch(
+                        subscriptionId,
+                        client.socket,
+                        subMapName,
+                        subQuery,
+                        subOptions || {}
+                    ).then((result) => {
+                        client.writer.write({
+                            type: 'SEARCH_RESP',
+                            payload: {
+                                requestId: subscriptionId,
+                                results: result.results,
+                                totalCount: result.totalHits,
+                            },
+                        });
 
-                logger.debug({
-                    clientId: client.id,
-                    subscriptionId,
-                    mapName: subMapName,
-                    query: subQuery,
-                    resultCount: initialResults.length
-                }, 'Search subscription created');
+                        logger.debug({
+                            clientId: client.id,
+                            subscriptionId,
+                            mapName: subMapName,
+                            query: subQuery,
+                            resultCount: result.results.length,
+                            totalHits: result.totalHits,
+                            nodes: result.registeredNodes,
+                        }, 'Distributed search subscription created');
+                    }).catch((err) => {
+                        logger.error({ err, subscriptionId }, 'Distributed search subscription failed');
+                        client.writer.write({
+                            type: 'SEARCH_RESP',
+                            payload: {
+                                requestId: subscriptionId,
+                                results: [],
+                                totalCount: 0,
+                                error: 'Failed to create distributed subscription',
+                            },
+                        });
+                    });
+                } else {
+                    // Single-node fallback: use local SearchCoordinator
+                    const initialResults = this.searchCoordinator.subscribe(
+                        client.id,
+                        subscriptionId,
+                        subMapName,
+                        subQuery,
+                        subOptions
+                    );
 
-                // Send initial snapshot as SEARCH_RESP
-                client.writer.write({
-                    type: 'SEARCH_RESP',
-                    payload: {
-                        requestId: subscriptionId,
-                        results: initialResults,
-                        totalCount: initialResults.length,
-                    },
-                });
+                    logger.debug({
+                        clientId: client.id,
+                        subscriptionId,
+                        mapName: subMapName,
+                        query: subQuery,
+                        resultCount: initialResults.length
+                    }, 'Search subscription created (local)');
+
+                    // Send initial snapshot as SEARCH_RESP
+                    client.writer.write({
+                        type: 'SEARCH_RESP',
+                        payload: {
+                            requestId: subscriptionId,
+                            results: initialResults,
+                            totalCount: initialResults.length,
+                        },
+                    });
+                }
                 break;
             }
 
             case 'SEARCH_UNSUB': {
                 const { subscriptionId: unsubId } = message.payload;
+                // Unsubscribe from both local and distributed
                 this.searchCoordinator.unsubscribe(unsubId);
+                if (this.distributedSubCoordinator) {
+                    this.distributedSubCoordinator.unsubscribe(unsubId);
+                }
                 logger.debug({ clientId: client.id, subscriptionId: unsubId }, 'Search unsubscription');
                 break;
             }

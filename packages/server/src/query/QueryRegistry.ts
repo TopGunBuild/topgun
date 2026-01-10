@@ -1,7 +1,8 @@
 import { Query, matchesQuery, executeQuery } from './Matcher';
-import { LWWRecord, LWWMap, ORMap, serialize, PredicateNode, ORMapRecord, IndexedLWWMap, IndexedORMap, StandingQueryRegistry as CoreStandingQueryRegistry, type QueryExpression as CoreQuery, type StandingQueryChange } from '@topgunbuild/core';
+import { LWWRecord, LWWMap, ORMap, serialize, PredicateNode, ORMapRecord, IndexedLWWMap, IndexedORMap, StandingQueryRegistry as CoreStandingQueryRegistry, type QueryExpression as CoreQuery, type StandingQueryChange, type ClusterSubUpdatePayload } from '@topgunbuild/core';
 import { WebSocket } from 'ws';
 import { logger } from '../utils/logger';
+import type { ClusterManager } from '../cluster/ClusterManager';
 
 export interface Subscription {
   id: string; // queryId
@@ -12,6 +13,11 @@ export interface Subscription {
   previousResultKeys: Set<string>;
   interestedFields?: Set<string> | 'ALL';
   _cleanup?: () => void; // For Reverse Index cleanup
+  // Phase 14.2: Distributed subscription fields
+  /** If set, send updates to this coordinator node instead of local client */
+  coordinatorNodeId?: string;
+  /** True if registered via CLUSTER_SUB_REGISTER */
+  isDistributed?: boolean;
 }
 
 class ReverseQueryIndex {
@@ -219,6 +225,85 @@ export class QueryRegistry {
         }
       }
     }
+  }
+
+  // ============================================
+  // Phase 14.2: Distributed Subscription Methods
+  // ============================================
+
+  /** ClusterManager for sending distributed updates */
+  private clusterManager?: ClusterManager;
+
+  /** Node ID for this server */
+  private nodeId?: string;
+
+  /**
+   * Set the ClusterManager for distributed subscriptions.
+   */
+  public setClusterManager(clusterManager: ClusterManager, nodeId: string): void {
+    this.clusterManager = clusterManager;
+    this.nodeId = nodeId;
+  }
+
+  /**
+   * Register a distributed subscription from a remote coordinator.
+   * Called when receiving CLUSTER_SUB_REGISTER message.
+   *
+   * @param subscriptionId - Unique subscription ID
+   * @param mapName - Map name to query
+   * @param query - Query predicate
+   * @param coordinatorNodeId - Node ID of the coordinator (receives updates)
+   * @returns Initial query results from this node
+   */
+  public registerDistributed(
+    subscriptionId: string,
+    mapName: string,
+    query: Query,
+    coordinatorNodeId: string
+  ): Array<{ key: string; value: unknown }> {
+    // Create a dummy socket for distributed subscriptions
+    const dummySocket = {
+      readyState: 1,
+      send: () => {}, // Updates go via cluster messages, not socket
+    } as unknown as WebSocket;
+
+    const sub: Subscription = {
+      id: subscriptionId,
+      clientId: `cluster:${coordinatorNodeId}`,
+      mapName,
+      query,
+      socket: dummySocket,
+      previousResultKeys: new Set(),
+      coordinatorNodeId,
+      isDistributed: true,
+    };
+
+    // Register using standard register() which sets up indexes
+    this.register(sub);
+
+    logger.debug(
+      { subscriptionId, mapName, coordinatorNodeId },
+      'Distributed query subscription registered'
+    );
+
+    // Return empty results for now - initial results should come from actual query execution
+    // The coordinator should call processChange or similar to get initial data
+    return [];
+  }
+
+  /**
+   * Get a distributed subscription by ID.
+   * Returns undefined if not found or not distributed.
+   */
+  public getDistributedSubscription(subscriptionId: string): Subscription | undefined {
+    for (const subs of this.subscriptions.values()) {
+      for (const sub of subs) {
+        if (sub.id === subscriptionId && sub.isDistributed) {
+          return sub;
+        }
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -604,7 +689,12 @@ export class QueryRegistry {
   }
 
   private sendUpdate(sub: Subscription, key: string, value: any, type: 'UPDATE' | 'REMOVE') {
-    if (sub.socket.readyState === 1) {
+    // Phase 14.2: Route based on subscription type
+    if (sub.isDistributed && sub.coordinatorNodeId && this.clusterManager) {
+      // Distributed subscription: send to coordinator via cluster
+      this.sendDistributedUpdate(sub, key, value, type);
+    } else if (sub.socket.readyState === 1) {
+      // Local subscription: send to client via socket
       sub.socket.send(serialize({
         type: 'QUERY_UPDATE',
         payload: {
@@ -615,6 +705,38 @@ export class QueryRegistry {
         }
       }));
     }
+  }
+
+  /**
+   * Send update to remote coordinator node for a distributed subscription.
+   */
+  private sendDistributedUpdate(
+    sub: Subscription,
+    key: string,
+    value: any,
+    type: 'UPDATE' | 'REMOVE'
+  ): void {
+    if (!this.clusterManager || !sub.coordinatorNodeId) return;
+
+    const changeType = type === 'UPDATE'
+      ? (sub.previousResultKeys.has(key) ? 'UPDATE' : 'ENTER')
+      : 'LEAVE';
+
+    const payload: ClusterSubUpdatePayload = {
+      subscriptionId: sub.id,
+      sourceNodeId: this.nodeId || 'unknown',
+      key,
+      value,
+      changeType,
+      timestamp: Date.now(),
+    };
+
+    this.clusterManager.send(sub.coordinatorNodeId, 'CLUSTER_SUB_UPDATE' as any, payload);
+
+    logger.debug(
+      { subscriptionId: sub.id, key, changeType, coordinator: sub.coordinatorNodeId },
+      'Sent distributed query update'
+    );
   }
 
   private analyzeQueryFields(query: Query): Set<string> | 'ALL' {

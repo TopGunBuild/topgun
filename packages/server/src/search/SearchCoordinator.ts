@@ -4,10 +4,12 @@
  * Manages FullTextIndex instances per map and handles search requests.
  * Part of Phase 11.1a: Server-side BM25 Search.
  * Phase 11.1b: Live Search Subscriptions with delta updates.
+ * Phase 14.2: Distributed Live Subscriptions support.
  *
  * @module search/SearchCoordinator
  */
 
+import { EventEmitter } from 'events';
 import {
   FullTextIndex,
   type FullTextIndexConfig,
@@ -16,6 +18,7 @@ import {
   type SearchRespPayload,
   type SearchUpdateType,
   type SearchOptions as SchemaSearchOptions,
+  type ClusterSubUpdatePayload,
 } from '@topgunbuild/core';
 import { logger } from '../utils/logger';
 
@@ -62,6 +65,11 @@ interface SearchSubscription {
   options: SchemaSearchOptions;
   /** Cache of current results for delta computation */
   currentResults: Map<string, CachedResult>;
+  // Phase 14.2: Distributed subscription fields
+  /** If set, send updates to this coordinator node instead of local client */
+  coordinatorNodeId?: string;
+  /** True if registered via CLUSTER_SUB_REGISTER */
+  isDistributed?: boolean;
 }
 
 /**
@@ -132,7 +140,7 @@ interface PendingNotification {
  * });
  * ```
  */
-export class SearchCoordinator {
+export class SearchCoordinator extends EventEmitter {
   /** Map name → FullTextIndex */
   private readonly indexes: Map<string, FullTextIndex> = new Map();
 
@@ -174,8 +182,24 @@ export class SearchCoordinator {
   /** Batch interval in milliseconds (~1 frame at 60fps) */
   private readonly BATCH_INTERVAL = 16;
 
+  // ============================================
+  // Phase 14.2: Distributed Subscription support
+  // ============================================
+
+  /** Node ID for this server (set during init) */
+  private nodeId?: string;
+
   constructor() {
+    super();
     logger.debug('SearchCoordinator initialized');
+  }
+
+  /**
+   * Set the node ID for this server.
+   * Required for distributed subscriptions.
+   */
+  setNodeId(nodeId: string): void {
+    this.nodeId = nodeId;
   }
 
   /**
@@ -571,9 +595,119 @@ export class SearchCoordinator {
     return this.subscriptions.size;
   }
 
+  // ============================================
+  // Phase 14.2: Distributed Subscription Methods
+  // ============================================
+
+  /**
+   * Register a distributed subscription from a remote coordinator.
+   * Called when receiving CLUSTER_SUB_REGISTER message.
+   *
+   * @param subscriptionId - Unique subscription ID
+   * @param mapName - Map name to search
+   * @param query - Search query string
+   * @param options - Search options
+   * @param coordinatorNodeId - Node ID of the coordinator (receives updates)
+   * @returns Initial search results from this node
+   */
+  registerDistributedSubscription(
+    subscriptionId: string,
+    mapName: string,
+    query: string,
+    options: SchemaSearchOptions,
+    coordinatorNodeId: string
+  ): { results: ServerSearchResult[]; totalHits: number } {
+    const index = this.indexes.get(mapName);
+
+    if (!index) {
+      logger.warn({ mapName }, 'Distributed subscription for map without FTS enabled');
+      return { results: [], totalHits: 0 };
+    }
+
+    // Tokenize query ONCE using the index's tokenizer
+    const queryTerms = index.tokenizeQuery(query);
+
+    // Execute initial search
+    const searchResults = index.search(query, options);
+
+    // Build initial results and cache
+    const currentResults = new Map<string, CachedResult>();
+    const results: ServerSearchResult[] = [];
+
+    for (const result of searchResults) {
+      const value = this.getDocumentValue
+        ? this.getDocumentValue(mapName, result.docId)
+        : undefined;
+
+      currentResults.set(result.docId, {
+        score: result.score,
+        matchedTerms: result.matchedTerms || [],
+      });
+
+      results.push({
+        key: result.docId,
+        value,
+        score: result.score,
+        matchedTerms: result.matchedTerms || [],
+      });
+    }
+
+    // Create distributed subscription
+    const subscription: SearchSubscription = {
+      id: subscriptionId,
+      clientId: `cluster:${coordinatorNodeId}`, // Virtual client ID
+      mapName,
+      query,
+      queryTerms,
+      options: options || {},
+      currentResults,
+      // Distributed fields
+      coordinatorNodeId,
+      isDistributed: true,
+    };
+
+    // Track subscription
+    this.subscriptions.set(subscriptionId, subscription);
+
+    // Track by map
+    if (!this.subscriptionsByMap.has(mapName)) {
+      this.subscriptionsByMap.set(mapName, new Set());
+    }
+    this.subscriptionsByMap.get(mapName)!.add(subscriptionId);
+
+    // Track by virtual client
+    if (!this.subscriptionsByClient.has(subscription.clientId)) {
+      this.subscriptionsByClient.set(subscription.clientId, new Set());
+    }
+    this.subscriptionsByClient.get(subscription.clientId)!.add(subscriptionId);
+
+    logger.debug(
+      { subscriptionId, mapName, query, coordinatorNodeId, resultCount: results.length },
+      'Distributed search subscription registered'
+    );
+
+    return {
+      results,
+      totalHits: results.length,
+    };
+  }
+
+  /**
+   * Get a distributed subscription by ID.
+   * Returns undefined if not found or not distributed.
+   */
+  getDistributedSubscription(subscriptionId: string): SearchSubscription | undefined {
+    const sub = this.subscriptions.get(subscriptionId);
+    if (sub?.isDistributed) {
+      return sub;
+    }
+    return undefined;
+  }
+
   /**
    * Notify subscribers about a document change.
    * Computes delta (ENTER/UPDATE/LEAVE) for each affected subscription.
+   * For distributed subscriptions, emits 'distributedUpdate' event instead of sending to client.
    *
    * @param mapName - Name of the map that changed
    * @param key - Document key that changed
@@ -586,10 +720,6 @@ export class SearchCoordinator {
     value: Record<string, unknown> | null,
     changeType: 'add' | 'update' | 'remove'
   ): void {
-    if (!this.sendUpdate) {
-      return; // No callback registered
-    }
-
     const subscriptionIds = this.subscriptionsByMap.get(mapName);
     if (!subscriptionIds || subscriptionIds.size === 0) {
       return; // No subscriptions for this map
@@ -643,17 +773,63 @@ export class SearchCoordinator {
       logger.debug({ subId, key, wasInResults, isInResults, updateType, newScore }, 'Update decision');
 
       if (updateType) {
-        this.sendUpdate(
-          sub.clientId,
-          subId,
-          key,
-          value,
-          newScore,
-          matchedTerms,
-          updateType
-        );
+        // Phase 14.2: Route based on subscription type
+        if (sub.isDistributed && sub.coordinatorNodeId) {
+          // Distributed subscription: emit event for ClusterSearchCoordinator/DistributedSubscriptionCoordinator
+          this.sendDistributedUpdate(sub, key, value, newScore, matchedTerms, updateType);
+        } else if (this.sendUpdate) {
+          // Local subscription: send to client via callback
+          this.sendUpdate(
+            sub.clientId,
+            subId,
+            key,
+            value,
+            newScore,
+            matchedTerms,
+            updateType
+          );
+        }
       }
     }
+  }
+
+  /**
+   * Send update to remote coordinator node for a distributed subscription.
+   * Emits 'distributedUpdate' event with ClusterSubUpdatePayload.
+   *
+   * @param sub - The distributed subscription
+   * @param key - Document key
+   * @param value - Document value
+   * @param score - Search score
+   * @param matchedTerms - Matched search terms
+   * @param changeType - Change type (ENTER/UPDATE/LEAVE)
+   */
+  private sendDistributedUpdate(
+    sub: SearchSubscription,
+    key: string,
+    value: unknown,
+    score: number,
+    matchedTerms: string[],
+    changeType: SearchUpdateType
+  ): void {
+    const payload: ClusterSubUpdatePayload = {
+      subscriptionId: sub.id,
+      sourceNodeId: this.nodeId || 'unknown',
+      key,
+      value,
+      score,
+      matchedTerms,
+      changeType,
+      timestamp: Date.now(),
+    };
+
+    // Emit event for DistributedSubscriptionCoordinator to handle
+    this.emit('distributedUpdate', payload);
+
+    logger.debug(
+      { subscriptionId: sub.id, key, changeType, coordinator: sub.coordinatorNodeId },
+      'Emitted distributed update'
+    );
   }
 
   /**

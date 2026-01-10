@@ -785,6 +785,115 @@ export const OpRejectedMessageSchema = z.object({
   }),
 });
 
+// --- Distributed Live Subscriptions Messages (Phase 14.2) ---
+
+/**
+ * CLUSTER_SUB_REGISTER - Register a distributed subscription on a node.
+ * Sent from coordinator to data-owning nodes for both FTS and Query subscriptions.
+ */
+export const ClusterSubRegisterPayloadSchema = z.object({
+  /** Unique subscription ID */
+  subscriptionId: z.string(),
+  /** Node ID of the coordinator (receives updates) */
+  coordinatorNodeId: z.string(),
+  /** Map name to subscribe to */
+  mapName: z.string(),
+  /** Subscription type */
+  type: z.enum(['SEARCH', 'QUERY']),
+
+  // For FTS subscriptions
+  /** Search query string (for SEARCH type) */
+  searchQuery: z.string().optional(),
+  /** Search options (for SEARCH type) */
+  searchOptions: z.object({
+    limit: z.number().int().positive().optional(),
+    minScore: z.number().optional(),
+    boost: z.record(z.string(), z.number()).optional(),
+  }).optional(),
+
+  // For Query subscriptions
+  /** Query predicate (for QUERY type) */
+  queryPredicate: z.any().optional(),
+  /** Query sort order (for QUERY type) */
+  querySort: z.record(z.string(), z.enum(['asc', 'desc'])).optional(),
+});
+
+export const ClusterSubRegisterMessageSchema = z.object({
+  type: z.literal('CLUSTER_SUB_REGISTER'),
+  payload: ClusterSubRegisterPayloadSchema,
+});
+
+/**
+ * CLUSTER_SUB_ACK - Acknowledgment of subscription registration with initial results.
+ * Sent from data node back to coordinator.
+ */
+export const ClusterSubAckPayloadSchema = z.object({
+  /** Correlates to subscriptionId */
+  subscriptionId: z.string(),
+  /** Node that registered this subscription */
+  nodeId: z.string(),
+  /** Registration success status */
+  success: z.boolean(),
+  /** Error message if failed */
+  error: z.string().optional(),
+  /** Initial results from this node */
+  initialResults: z.array(z.object({
+    key: z.string(),
+    value: z.unknown(),
+    score: z.number().optional(),
+    matchedTerms: z.array(z.string()).optional(),
+  })).optional(),
+  /** Total matching documents on this node */
+  totalHits: z.number().int().nonnegative().optional(),
+});
+
+export const ClusterSubAckMessageSchema = z.object({
+  type: z.literal('CLUSTER_SUB_ACK'),
+  payload: ClusterSubAckPayloadSchema,
+});
+
+/**
+ * CLUSTER_SUB_UPDATE - Delta update from a data node to coordinator.
+ * Sent when a document enters/updates/leaves the subscription result set.
+ */
+export const ClusterSubUpdatePayloadSchema = z.object({
+  /** Subscription ID this update belongs to */
+  subscriptionId: z.string(),
+  /** Node that produced this update */
+  sourceNodeId: z.string(),
+  /** Document key */
+  key: z.string(),
+  /** Document value (null for LEAVE) */
+  value: z.unknown(),
+  /** Search score (for SEARCH type) */
+  score: z.number().optional(),
+  /** Matched terms (for SEARCH type) */
+  matchedTerms: z.array(z.string()).optional(),
+  /** Change type: ENTER (new match), UPDATE (still matches), LEAVE (no longer matches) */
+  changeType: z.enum(['ENTER', 'UPDATE', 'LEAVE']),
+  /** Timestamp for ordering */
+  timestamp: z.number(),
+});
+
+export const ClusterSubUpdateMessageSchema = z.object({
+  type: z.literal('CLUSTER_SUB_UPDATE'),
+  payload: ClusterSubUpdatePayloadSchema,
+});
+
+/**
+ * CLUSTER_SUB_UNREGISTER - Remove a subscription from a node.
+ * Sent from coordinator to data-owning nodes when client unsubscribes.
+ */
+export const ClusterSubUnregisterPayloadSchema = z.object({
+  /** Subscription ID to remove */
+  subscriptionId: z.string(),
+});
+
+export const ClusterSubUnregisterMessageSchema = z.object({
+  type: z.literal('CLUSTER_SUB_UNREGISTER'),
+  payload: ClusterSubUnregisterPayloadSchema,
+});
+
 // --- Union Schema ---
 
 export const MessageSchema = z.discriminatedUnion('type', [
@@ -845,6 +954,11 @@ export const MessageSchema = z.discriminatedUnion('type', [
   SearchSubMessageSchema,
   SearchUpdateMessageSchema,
   SearchUnsubMessageSchema,
+  // Phase 14.2: Distributed Live Subscriptions (cluster-internal)
+  ClusterSubRegisterMessageSchema,
+  ClusterSubAckMessageSchema,
+  ClusterSubUpdateMessageSchema,
+  ClusterSubUnregisterMessageSchema,
 ]);
 
 // --- Type Inference ---
@@ -1028,6 +1142,16 @@ export type ClusterSearchUnsubscribePayload = z.infer<typeof ClusterSearchUnsubs
 export type ClusterSearchUnsubscribeMessage = z.infer<typeof ClusterSearchUnsubscribeMessageSchema>;
 export type ClusterSearchUpdatePayload = z.infer<typeof ClusterSearchUpdatePayloadSchema>;
 export type ClusterSearchUpdateMessage = z.infer<typeof ClusterSearchUpdateMessageSchema>;
+
+// Distributed Live Subscriptions types (Phase 14.2)
+export type ClusterSubRegisterPayload = z.infer<typeof ClusterSubRegisterPayloadSchema>;
+export type ClusterSubRegisterMessage = z.infer<typeof ClusterSubRegisterMessageSchema>;
+export type ClusterSubAckPayload = z.infer<typeof ClusterSubAckPayloadSchema>;
+export type ClusterSubAckMessage = z.infer<typeof ClusterSubAckMessageSchema>;
+export type ClusterSubUpdatePayload = z.infer<typeof ClusterSubUpdatePayloadSchema>;
+export type ClusterSubUpdateMessage = z.infer<typeof ClusterSubUpdateMessageSchema>;
+export type ClusterSubUnregisterPayload = z.infer<typeof ClusterSubUnregisterPayloadSchema>;
+export type ClusterSubUnregisterMessage = z.infer<typeof ClusterSubUnregisterMessageSchema>;
 
 // Query Response types (Phase 14.1)
 export type CursorStatus = z.infer<typeof CursorStatusSchema>;
