@@ -697,26 +697,16 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
       clearTimeout(pendingAck.timeoutHandle);
       this.pendingAcks.delete(subscriptionId);
 
-      // Record metrics
       const duration = performance.now() - pendingAck.startTime;
       const result = this.mergeInitialResults(subscription);
       const hasFailures = result.failedNodes.length > 0;
 
-      this.metricsService?.incDistributedSub(
-        subscription.type,
+      this.recordCompletionMetrics(
+        subscription,
+        result,
+        duration,
         hasFailures ? 'timeout' : 'success'
       );
-      this.metricsService?.recordDistributedSubRegistration(subscription.type, duration);
-      this.metricsService?.recordDistributedSubInitialResultsCount(subscription.type, result.results.length);
-      this.metricsService?.setDistributedSubPendingAcks(this.pendingAcks.size);
-
-      // Record ACK metrics for successful nodes
-      for (const nodeId of subscription.registeredNodes) {
-        this.metricsService?.incDistributedSubAck('success');
-      }
-      for (const nodeId of result.failedNodes) {
-        this.metricsService?.incDistributedSubAck('timeout');
-      }
 
       pendingAck.resolve(result);
     }
@@ -738,24 +728,38 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
       'Subscription ACK timeout, resolving with partial results'
     );
 
-    // Record metrics
     const duration = performance.now() - pendingAck.startTime;
     const result = this.mergeInitialResults(subscription);
 
-    this.metricsService?.incDistributedSub(subscription.type, 'timeout');
-    this.metricsService?.recordDistributedSubRegistration(subscription.type, duration);
+    this.recordCompletionMetrics(subscription, result, duration, 'timeout');
+
+    pendingAck.resolve(result);
+  }
+
+  /**
+   * Record metrics when subscription registration completes.
+   */
+  private recordCompletionMetrics(
+    subscription: DistributedSubscription,
+    result: DistributedSubscriptionResult,
+    durationMs: number,
+    status: 'success' | 'timeout'
+  ): void {
+    this.metricsService?.incDistributedSub(subscription.type, status);
+    this.metricsService?.recordDistributedSubRegistration(subscription.type, durationMs);
     this.metricsService?.recordDistributedSubInitialResultsCount(subscription.type, result.results.length);
     this.metricsService?.setDistributedSubPendingAcks(this.pendingAcks.size);
 
-    // Record ACK metrics
-    for (const nodeId of subscription.registeredNodes) {
+    // Record ACK metrics - use size to avoid unused variable warnings
+    const successfulAcks = subscription.registeredNodes.size;
+    const failedAcks = result.failedNodes.length;
+
+    for (let i = 0; i < successfulAcks; i++) {
       this.metricsService?.incDistributedSubAck('success');
     }
-    for (const nodeId of result.failedNodes) {
+    for (let i = 0; i < failedAcks; i++) {
       this.metricsService?.incDistributedSubAck('timeout');
     }
-
-    pendingAck.resolve(result);
   }
 
   /**
