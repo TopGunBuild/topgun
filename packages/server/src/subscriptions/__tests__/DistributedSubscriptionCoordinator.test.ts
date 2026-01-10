@@ -5,43 +5,11 @@
  * Phase 14.2 implementation.
  */
 
-import { EventEmitter } from 'events';
 import { DistributedSubscriptionCoordinator } from '../DistributedSubscriptionCoordinator';
 import { SearchCoordinator } from '../../search/SearchCoordinator';
 import { QueryRegistry } from '../../query/QueryRegistry';
+import { MockClusterManager } from '../../__tests__/utils/MockClusterManager';
 import type { WebSocket } from 'ws';
-
-// Mock ClusterManager
-class MockClusterManager extends EventEmitter {
-  config = { nodeId: 'node-1' };
-  private members: string[] = ['node-1', 'node-2', 'node-3'];
-  private sentMessages: Array<{ nodeId: string; type: string; payload: any }> = [];
-
-  getMembers(): string[] {
-    return this.members;
-  }
-
-  setMembers(members: string[]): void {
-    this.members = members;
-  }
-
-  send(nodeId: string, type: string, payload: any): void {
-    this.sentMessages.push({ nodeId, type, payload });
-  }
-
-  getSentMessages(): Array<{ nodeId: string; type: string; payload: any }> {
-    return this.sentMessages;
-  }
-
-  clearSentMessages(): void {
-    this.sentMessages = [];
-  }
-
-  // Simulate receiving a message from another node
-  receiveMessage(senderId: string, type: string, payload: any): void {
-    this.emit('message', { type, senderId, payload });
-  }
-}
 
 // Mock WebSocket
 function createMockSocket(id: string): WebSocket {
@@ -691,7 +659,7 @@ describe('DistributedSubscriptionCoordinator', () => {
         { where: { inStock: true }, sort: { price: 'asc' } }
       );
 
-      // Node-2 results
+      // Node-2 results (already sorted by price on this node)
       clusterManager.receiveMessage('node-2', 'CLUSTER_SUB_ACK', {
         subscriptionId: 'query-sub-2',
         nodeId: 'node-2',
@@ -719,6 +687,15 @@ describe('DistributedSubscriptionCoordinator', () => {
       // Results should be merged (all 3 products)
       expect(result.results.length).toBe(3);
       expect(result.totalHits).toBe(3);
+
+      // Note: Query results are merged by simple deduplication (first node wins).
+      // Sorting is applied locally on each node before sending results.
+      // Global re-sorting would require client-side merge for Query subscriptions.
+      // This differs from Search subscriptions which use RRF for global ranking.
+      const keys = result.results.map(r => r.key);
+      expect(keys).toContain('prod-a');
+      expect(keys).toContain('prod-b');
+      expect(keys).toContain('prod-c');
     });
 
     it('should handle query with complex predicates', async () => {
@@ -931,6 +908,102 @@ describe('DistributedSubscriptionCoordinator', () => {
       expect(ackMessages[0].nodeId).toBe('node-2');
       expect(ackMessages[0].payload.subscriptionId).toBe('remote-query-sub-1');
       expect(ackMessages[0].payload.success).toBe(true);
+    });
+
+    it('should return initial results in ACK when data matches query predicate', () => {
+      // First, set up QueryRegistry with map getter that returns matching data
+      const mockMapData = new Map<string, any>();
+      mockMapData.set('item-1', {
+        value: { name: 'Active Item', status: 'active' },
+        timestamp: { millis: Date.now(), counter: 0, nodeId: 'node-1' }
+      });
+      mockMapData.set('item-2', {
+        value: { name: 'Inactive Item', status: 'inactive' },
+        timestamp: { millis: Date.now(), counter: 0, nodeId: 'node-1' }
+      });
+      mockMapData.set('item-3', {
+        value: { name: 'Another Active', status: 'active' },
+        timestamp: { millis: Date.now(), counter: 0, nodeId: 'node-1' }
+      });
+
+      const mockMap = {
+        allKeys: () => mockMapData.keys(),
+        getRecord: (key: string) => mockMapData.get(key),
+      };
+
+      queryRegistry.setMapGetter(() => mockMap as any);
+
+      clusterManager.clearSentMessages();
+
+      // Simulate receiving registration request
+      clusterManager.receiveMessage('node-2', 'CLUSTER_SUB_REGISTER', {
+        subscriptionId: 'remote-query-sub-2',
+        coordinatorNodeId: 'node-2',
+        mapName: 'items',
+        type: 'QUERY',
+        queryPredicate: { where: { status: 'active' } },
+      });
+
+      // Verify ACK contains initial results
+      const ackMessages = clusterManager.getSentMessages().filter(
+        m => m.type === 'CLUSTER_SUB_ACK'
+      );
+      expect(ackMessages.length).toBe(1);
+      expect(ackMessages[0].payload.success).toBe(true);
+      expect(ackMessages[0].payload.initialResults).toBeDefined();
+      expect(ackMessages[0].payload.initialResults.length).toBe(2);
+
+      // Verify correct items returned (only active ones)
+      const resultKeys = ackMessages[0].payload.initialResults.map((r: any) => r.key);
+      expect(resultKeys).toContain('item-1');
+      expect(resultKeys).toContain('item-3');
+      expect(resultKeys).not.toContain('item-2');
+    });
+
+    it('should correctly deserialize and apply complex queryPredicate', () => {
+      const mockMapData = new Map<string, any>();
+      mockMapData.set('task-1', {
+        value: { title: 'High Priority Active', status: 'active', priority: 'high' },
+        timestamp: { millis: Date.now(), counter: 0, nodeId: 'node-1' }
+      });
+      mockMapData.set('task-2', {
+        value: { title: 'Low Priority Active', status: 'active', priority: 'low' },
+        timestamp: { millis: Date.now(), counter: 0, nodeId: 'node-1' }
+      });
+      mockMapData.set('task-3', {
+        value: { title: 'High Priority Completed', status: 'completed', priority: 'high' },
+        timestamp: { millis: Date.now(), counter: 0, nodeId: 'node-1' }
+      });
+
+      const mockMap = {
+        allKeys: () => mockMapData.keys(),
+        getRecord: (key: string) => mockMapData.get(key),
+      };
+
+      queryRegistry.setMapGetter(() => mockMap as any);
+
+      clusterManager.clearSentMessages();
+
+      // Complex query: status = 'active' AND priority = 'high'
+      clusterManager.receiveMessage('node-2', 'CLUSTER_SUB_REGISTER', {
+        subscriptionId: 'remote-query-complex',
+        coordinatorNodeId: 'node-2',
+        mapName: 'tasks',
+        type: 'QUERY',
+        queryPredicate: {
+          where: {
+            status: 'active',
+            priority: 'high',
+          }
+        },
+      });
+
+      const ackMessages = clusterManager.getSentMessages().filter(
+        m => m.type === 'CLUSTER_SUB_ACK'
+      );
+      expect(ackMessages.length).toBe(1);
+      expect(ackMessages[0].payload.initialResults.length).toBe(1);
+      expect(ackMessages[0].payload.initialResults[0].key).toBe('task-1');
     });
   });
 

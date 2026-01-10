@@ -131,25 +131,7 @@ describe('QueryRegistry', () => {
 // Phase 14.2.6: QueryRegistry Distributed Subscription Tests
 // ===========================================
 
-import { EventEmitter } from 'events';
-
-// Mock ClusterManager for distributed tests
-class MockClusterManager extends EventEmitter {
-  config = { nodeId: 'node-1' };
-  private sentMessages: Array<{ nodeId: string; type: string; payload: any }> = [];
-
-  send(nodeId: string, type: string, payload: any): void {
-    this.sentMessages.push({ nodeId, type, payload });
-  }
-
-  getSentMessages(): Array<{ nodeId: string; type: string; payload: any }> {
-    return this.sentMessages;
-  }
-
-  clearSentMessages(): void {
-    this.sentMessages = [];
-  }
-}
+import { MockClusterManager } from '../../__tests__/utils/MockClusterManager';
 
 describe('QueryRegistry - Distributed Subscriptions', () => {
   let registry: QueryRegistry;
