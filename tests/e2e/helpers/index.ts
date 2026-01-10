@@ -141,29 +141,56 @@ export async function createTestClient(
       try {
         const buf = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
         const message = deserialize(buf as Uint8Array) as { type: string; [key: string]: any };
-        messages.push(message);
 
-        // Check if someone is waiting for this message type
-        const resolver = resolvers.get(message.type);
-        if (resolver) {
-          clearTimeout(resolver.timeout);
-          resolvers.delete(message.type);
-          resolver.resolve(message);
-        }
+        // Process a single message (handles resolvers and special messages)
+        const processMessage = (msg: { type: string; [key: string]: any }) => {
+          messages.push(msg);
 
-        // Auto-auth handling
-        if (message.type === 'AUTH_REQUIRED' && options.autoAuth !== false) {
-          const token = createTestToken(
-            options.userId || nodeId,
-            options.roles || ['USER']
-          );
-          client.send({ type: 'AUTH', token });
-        }
+          // Check if someone is waiting for this message type
+          const resolver = resolvers.get(msg.type);
+          if (resolver) {
+            clearTimeout(resolver.timeout);
+            resolvers.delete(msg.type);
+            resolver.resolve(msg);
+          }
 
-        if (message.type === 'AUTH_ACK') {
-          client.isAuthenticated = true;
-          // Start heartbeat after successful authentication
-          client.startHeartbeat();
+          // Auto-auth handling
+          if (msg.type === 'AUTH_REQUIRED' && options.autoAuth !== false) {
+            const token = createTestToken(
+              options.userId || nodeId,
+              options.roles || ['USER']
+            );
+            client.send({ type: 'AUTH', token });
+          }
+
+          if (msg.type === 'AUTH_ACK') {
+            client.isAuthenticated = true;
+            // Start heartbeat after successful authentication
+            client.startHeartbeat();
+          }
+        };
+
+        // Handle BATCH messages from CoalescingWriter
+        if (message.type === 'BATCH') {
+          const batchData = message.data as Uint8Array;
+          const view = new DataView(batchData.buffer, batchData.byteOffset, batchData.byteLength);
+          let offset = 0;
+
+          const count = view.getUint32(offset, true); // little-endian
+          offset += 4;
+
+          for (let i = 0; i < count; i++) {
+            const msgLen = view.getUint32(offset, true);
+            offset += 4;
+
+            const msgData = batchData.slice(offset, offset + msgLen);
+            offset += msgLen;
+
+            const innerMsg = deserialize(msgData) as { type: string; [key: string]: any };
+            processMessage(innerMsg);
+          }
+        } else {
+          processMessage(message);
         }
       } catch (err) {
         console.error('Failed to parse message:', err);
