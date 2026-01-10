@@ -26,7 +26,7 @@ import { SearchCoordinator, type ServerSearchResult } from '../search/SearchCoor
 import { QueryRegistry } from '../query/QueryRegistry';
 import { MetricsService } from '../monitoring/MetricsService';
 import { logger } from '../utils/logger';
-import type { WebSocket } from 'ws';
+import { WebSocket } from 'ws';
 
 /**
  * State for a distributed subscription where this node is the coordinator.
@@ -238,7 +238,7 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
     // Register on remote nodes
     for (const nodeId of allNodes) {
       if (nodeId !== myNodeId) {
-        this.clusterManager.send(nodeId, 'CLUSTER_SUB_REGISTER' as any, registerPayload);
+        this.clusterManager.send(nodeId, 'CLUSTER_SUB_REGISTER', registerPayload);
       }
     }
 
@@ -302,7 +302,7 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
     // Register on remote nodes
     for (const nodeId of allNodes) {
       if (nodeId !== myNodeId) {
-        this.clusterManager.send(nodeId, 'CLUSTER_SUB_REGISTER' as any, registerPayload);
+        this.clusterManager.send(nodeId, 'CLUSTER_SUB_REGISTER', registerPayload);
       }
     }
 
@@ -331,7 +331,7 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
 
     for (const nodeId of subscription.registeredNodes) {
       if (nodeId !== myNodeId) {
-        this.clusterManager.send(nodeId, 'CLUSTER_SUB_UNREGISTER' as any, payload);
+        this.clusterManager.send(nodeId, 'CLUSTER_SUB_UNREGISTER', payload);
       }
     }
 
@@ -467,7 +467,7 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
     }
 
     // Send ACK back to coordinator
-    this.clusterManager.send(payload.coordinatorNodeId, 'CLUSTER_SUB_ACK' as any, ackPayload);
+    this.clusterManager.send(payload.coordinatorNodeId, 'CLUSTER_SUB_ACK', ackPayload);
   }
 
   /**
@@ -569,7 +569,7 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
       this.handleSubUpdate(myNodeId, payload);
     } else {
       // Send to remote coordinator
-      this.clusterManager.send(coordinatorNodeId, 'CLUSTER_SUB_UPDATE' as any, payload);
+      this.clusterManager.send(coordinatorNodeId, 'CLUSTER_SUB_UPDATE', payload);
     }
 
     // TODO: Add distributed sub update metrics
@@ -840,7 +840,7 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
     subscription: DistributedSubscription,
     payload: ClusterSubUpdatePayload
   ): void {
-    if (subscription.clientSocket.readyState !== 1) { // WebSocket.OPEN
+    if (subscription.clientSocket.readyState !== WebSocket.OPEN) {
       logger.warn(
         { subscriptionId: subscription.id },
         'Cannot forward update, client socket not open'

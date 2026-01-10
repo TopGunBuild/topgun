@@ -237,12 +237,23 @@ export class QueryRegistry {
   /** Node ID for this server */
   private nodeId?: string;
 
+  /** Callback to get map by name (injected by ServerCoordinator) */
+  private getMap?: (mapName: string) => LWWMap<string, any> | ORMap<string, any> | undefined;
+
   /**
    * Set the ClusterManager for distributed subscriptions.
    */
   public setClusterManager(clusterManager: ClusterManager, nodeId: string): void {
     this.clusterManager = clusterManager;
     this.nodeId = nodeId;
+  }
+
+  /**
+   * Set the callback for getting maps by name.
+   * Required for distributed subscriptions to return initial results.
+   */
+  public setMapGetter(getter: (mapName: string) => LWWMap<string, any> | ORMap<string, any> | undefined): void {
+    this.getMap = getter;
   }
 
   /**
@@ -267,13 +278,29 @@ export class QueryRegistry {
       send: () => {}, // Updates go via cluster messages, not socket
     } as unknown as WebSocket;
 
+    // Execute query to get initial results
+    let initialResults: Array<{ key: string; value: unknown }> = [];
+    const previousResultKeys = new Set<string>();
+
+    if (this.getMap) {
+      const map = this.getMap(mapName);
+      if (map) {
+        const records = this.getMapRecords(map);
+        const queryResults = executeQuery(records, query);
+        initialResults = queryResults.map(r => {
+          previousResultKeys.add(r.key);
+          return { key: r.key, value: r.value };
+        });
+      }
+    }
+
     const sub: Subscription = {
       id: subscriptionId,
       clientId: `cluster:${coordinatorNodeId}`,
       mapName,
       query,
       socket: dummySocket,
-      previousResultKeys: new Set(),
+      previousResultKeys,
       coordinatorNodeId,
       isDistributed: true,
     };
@@ -282,13 +309,11 @@ export class QueryRegistry {
     this.register(sub);
 
     logger.debug(
-      { subscriptionId, mapName, coordinatorNodeId },
+      { subscriptionId, mapName, coordinatorNodeId, resultCount: initialResults.length },
       'Distributed query subscription registered'
     );
 
-    // Return empty results for now - initial results should come from actual query execution
-    // The coordinator should call processChange or similar to get initial data
-    return [];
+    return initialResults;
   }
 
   /**
@@ -693,7 +718,7 @@ export class QueryRegistry {
     if (sub.isDistributed && sub.coordinatorNodeId && this.clusterManager) {
       // Distributed subscription: send to coordinator via cluster
       this.sendDistributedUpdate(sub, key, value, type);
-    } else if (sub.socket.readyState === 1) {
+    } else if (sub.socket.readyState === WebSocket.OPEN) {
       // Local subscription: send to client via socket
       sub.socket.send(serialize({
         type: 'QUERY_UPDATE',
@@ -731,7 +756,7 @@ export class QueryRegistry {
       timestamp: Date.now(),
     };
 
-    this.clusterManager.send(sub.coordinatorNodeId, 'CLUSTER_SUB_UPDATE' as any, payload);
+    this.clusterManager.send(sub.coordinatorNodeId, 'CLUSTER_SUB_UPDATE', payload);
 
     logger.debug(
       { subscriptionId: sub.id, key, changeType, coordinator: sub.coordinatorNodeId },

@@ -630,6 +630,9 @@ export class ServerCoordinator {
             // Set ClusterManager on QueryRegistry for distributed updates
             this.queryRegistry.setClusterManager(this.cluster, config.nodeId);
 
+            // Set map getter for QueryRegistry (needed for distributed query initial results)
+            this.queryRegistry.setMapGetter((name) => this.getMap(name));
+
             this.systemManager = new SystemManager(
                 this.cluster,
                 this.metricsService,
