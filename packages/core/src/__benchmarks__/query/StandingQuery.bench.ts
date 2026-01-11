@@ -9,6 +9,8 @@ import { IndexedLWWMap } from '../../IndexedLWWMap';
 import { HLC } from '../../HLC';
 import { simpleAttribute } from '../../query/Attribute';
 
+const isQuickMode = process.env.BENCH_QUICK === 'true';
+
 interface Task {
   id: string;
   status: 'active' | 'inactive' | 'pending';
@@ -17,7 +19,7 @@ interface Task {
 }
 
 describe('StandingQueryIndex Performance', () => {
-  const size = 100_000;
+  const size = isQuickMode ? 10_000 : 100_000;
 
   describe('Live query with standing index', () => {
     const hlc = new HLC('bench-node');
@@ -259,7 +261,7 @@ describe('StandingQueryIndex Performance', () => {
   });
 
   describe('Standing query vs regular query comparison', () => {
-    const sizes = [1_000, 10_000, 100_000];
+    const sizes = isQuickMode ? [1_000, 10_000] : [1_000, 10_000, 100_000];
 
     for (const size of sizes) {
       describe(`${size.toLocaleString()} records`, () => {

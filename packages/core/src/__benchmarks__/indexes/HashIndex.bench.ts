@@ -14,10 +14,13 @@ interface User {
   status: string;
 }
 
+// BENCH_QUICK=true runs only smaller datasets for faster CI
+const isQuickMode = process.env.BENCH_QUICK === 'true';
+
 describe('HashIndex Performance', () => {
   const emailAttr = simpleAttribute<User, string>('email', (u) => u.email);
 
-  const sizes = [1_000, 10_000, 100_000, 1_000_000];
+  const sizes = isQuickMode ? [1_000, 10_000] : [1_000, 10_000, 100_000, 1_000_000];
 
   for (const size of sizes) {
     describe(`${size.toLocaleString()} records`, () => {

@@ -39,8 +39,10 @@ jobs:
       - run: pnpm build
 
       - name: Run quick micro-benchmarks (up to 10K records)
-        run: pnpm bench -- --testNamePattern="1,000|10,000"
+        run: pnpm bench
         working-directory: packages/core
+        env:
+          BENCH_QUICK: 'true'
 
   full-benchmarks:
     name: Full Micro-Benchmarks (100K records)

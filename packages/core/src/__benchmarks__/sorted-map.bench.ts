@@ -12,15 +12,17 @@
 import { bench, describe } from 'vitest';
 import { SortedMap, numericComparator } from '../query/ds';
 
+const isQuickMode = process.env.BENCH_QUICK === 'true';
+
 // Dataset sizes
 const SMALL = 1_000;
 const MEDIUM = 10_000;
-const LARGE = 100_000;
+const LARGE = isQuickMode ? 10_000 : 100_000;
 
 // Pre-populate maps outside of benchmark
 const smallMap = new SortedMap<number, string>(numericComparator);
 const mediumMap = new SortedMap<number, string>(numericComparator);
-const largeMap = new SortedMap<number, string>(numericComparator);
+const largeMap = isQuickMode ? mediumMap : new SortedMap<number, string>(numericComparator);
 
 for (let i = 0; i < SMALL; i++) {
   smallMap.set(i, `value-${i}`);
@@ -28,8 +30,10 @@ for (let i = 0; i < SMALL; i++) {
 for (let i = 0; i < MEDIUM; i++) {
   mediumMap.set(i, `value-${i}`);
 }
-for (let i = 0; i < LARGE; i++) {
-  largeMap.set(i, `value-${i}`);
+if (!isQuickMode) {
+  for (let i = 0; i < LARGE; i++) {
+    largeMap.set(i, `value-${i}`);
+  }
 }
 
 describe('SortedMap - get() O(log N)', () => {
@@ -43,14 +47,16 @@ describe('SortedMap - get() O(log N)', () => {
     mediumMap.get(key);
   });
 
-  bench(`get() - 100K entries`, () => {
-    const key = Math.floor(Math.random() * LARGE);
-    largeMap.get(key);
-  });
+  if (!isQuickMode) {
+    bench(`get() - 100K entries`, () => {
+      const key = Math.floor(Math.random() * LARGE);
+      largeMap.get(key);
+    });
+  }
 });
 
 describe('SortedMap - set() O(log N)', () => {
-  bench('set() - update existing key (100K)', () => {
+  bench(`set() - update existing key (${isQuickMode ? '10K' : '100K'})`, () => {
     const key = Math.floor(Math.random() * LARGE);
     largeMap.set(key, `updated-${Date.now()}`);
   });
@@ -64,43 +70,50 @@ describe('SortedMap - set() O(log N)', () => {
 });
 
 describe('SortedMap - range() O(log N + K)', () => {
-  bench('range() - 10 results from 100K', () => {
+  const largeLabel = isQuickMode ? '10K' : '100K';
+
+  bench(`range() - 10 results from ${largeLabel}`, () => {
     const start = Math.floor(Math.random() * (LARGE - 10));
     const results = [...largeMap.range(start, start + 10)];
     void results.length;
   });
 
-  bench('range() - 100 results from 100K', () => {
+  bench(`range() - 100 results from ${largeLabel}`, () => {
     const start = Math.floor(Math.random() * (LARGE - 100));
     const results = [...largeMap.range(start, start + 100)];
     void results.length;
   });
 
-  bench('range() - 1000 results from 100K', () => {
+  bench(`range() - 1000 results from ${largeLabel}`, () => {
     const start = Math.floor(Math.random() * (LARGE - 1000));
     const results = [...largeMap.range(start, start + 1000)];
     void results.length;
   });
 
-  bench('range() - 10000 results from 100K', () => {
-    const start = Math.floor(Math.random() * (LARGE - 10000));
-    const results = [...largeMap.range(start, start + 10000)];
-    void results.length;
-  });
+  if (!isQuickMode) {
+    bench('range() - 10000 results from 100K', () => {
+      const start = Math.floor(Math.random() * (LARGE - 10000));
+      const results = [...largeMap.range(start, start + 10000)];
+      void results.length;
+    });
+  }
 });
 
 describe('SortedMap - greaterThan/lessThan', () => {
-  bench('greaterThan() - first 100 from 100K', () => {
+  const midpoint = isQuickMode ? 5000 : 50000;
+  const largeLabel = isQuickMode ? '10K' : '100K';
+
+  bench(`greaterThan() - first 100 from ${largeLabel}`, () => {
     let count = 0;
-    for (const entry of largeMap.greaterThan(50000)) {
+    for (const entry of largeMap.greaterThan(midpoint)) {
       count++;
       if (count >= 100) break;
     }
   });
 
-  bench('lessThan() - first 100 from 100K', () => {
+  bench(`lessThan() - first 100 from ${largeLabel}`, () => {
     let count = 0;
-    for (const entry of largeMap.lessThan(50000)) {
+    for (const entry of largeMap.lessThan(midpoint)) {
       count++;
       if (count >= 100) break;
     }
@@ -131,47 +144,51 @@ describe('SortedMap - iteration', () => {
 });
 
 describe('SortedMap - utility operations', () => {
-  bench('minKey() - 100K entries', () => {
+  const largeLabel = isQuickMode ? '10K' : '100K';
+
+  bench(`minKey() - ${largeLabel} entries`, () => {
     largeMap.minKey();
   });
 
-  bench('maxKey() - 100K entries', () => {
+  bench(`maxKey() - ${largeLabel} entries`, () => {
     largeMap.maxKey();
   });
 
-  bench('has() - existing key (100K)', () => {
+  bench(`has() - existing key (${largeLabel})`, () => {
     const key = Math.floor(Math.random() * LARGE);
     largeMap.has(key);
   });
 
-  bench('has() - missing key (100K)', () => {
+  bench(`has() - missing key (${largeLabel})`, () => {
     largeMap.has(LARGE + 1000);
   });
 
-  bench('floorKey() - 100K entries', () => {
+  bench(`floorKey() - ${largeLabel} entries`, () => {
     const key = Math.floor(Math.random() * LARGE);
     largeMap.floorKey(key);
   });
 
-  bench('ceilingKey() - 100K entries', () => {
+  bench(`ceilingKey() - ${largeLabel} entries`, () => {
     const key = Math.floor(Math.random() * LARGE);
     largeMap.ceilingKey(key);
   });
 });
 
 describe('SortedMap vs Map - comparison', () => {
+  const largeLabel = isQuickMode ? '10K' : '100K';
+
   // Create equivalent native Map for comparison
   const nativeMap = new Map<number, string>();
   for (let i = 0; i < LARGE; i++) {
     nativeMap.set(i, `value-${i}`);
   }
 
-  bench('Native Map.get() - 100K entries', () => {
+  bench(`Native Map.get() - ${largeLabel} entries`, () => {
     const key = Math.floor(Math.random() * LARGE);
     nativeMap.get(key);
   });
 
-  bench('SortedMap.get() - 100K entries', () => {
+  bench(`SortedMap.get() - ${largeLabel} entries`, () => {
     const key = Math.floor(Math.random() * LARGE);
     largeMap.get(key);
   });

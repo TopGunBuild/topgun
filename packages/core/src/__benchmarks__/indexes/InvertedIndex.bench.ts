@@ -12,6 +12,8 @@ import { InvertedIndex } from '../../query/indexes/InvertedIndex';
 import { simpleAttribute } from '../../query/Attribute';
 import { TokenizationPipeline } from '../../query/tokenization';
 
+const isQuickMode = process.env.BENCH_QUICK === 'true';
+
 interface Product {
   id: string;
   name: string;
@@ -46,7 +48,7 @@ function generateProduct(id: number): Product {
 }
 
 // Pre-generate datasets
-const sizes = [1_000, 10_000, 100_000];
+const sizes = isQuickMode ? [1_000, 10_000] : [1_000, 10_000, 100_000];
 const datasets: Map<number, Product[]> = new Map();
 const indexes: Map<number, InvertedIndex<string, Product, string>> = new Map();
 
@@ -164,7 +166,7 @@ describe('InvertedIndex Benchmarks', () => {
   });
 
   describe('Selectivity Impact', () => {
-    const size = 100_000;
+    const size = isQuickMode ? 10_000 : 100_000;
 
     bench(`high selectivity - unique token (1 match)`, () => {
       const index = indexes.get(size)!;

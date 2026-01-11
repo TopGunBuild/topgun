@@ -8,6 +8,8 @@ import { bench, describe } from 'vitest';
 import { NavigableIndex } from '../../query/indexes/NavigableIndex';
 import { simpleAttribute } from '../../query/Attribute';
 
+const isQuickMode = process.env.BENCH_QUICK === 'true';
+
 interface Product {
   id: string;
   price: number;
@@ -20,7 +22,7 @@ describe('NavigableIndex Performance', () => {
     (p) => p.price
   );
 
-  const sizes = [1_000, 10_000, 100_000, 1_000_000];
+  const sizes = isQuickMode ? [1_000, 10_000] : [1_000, 10_000, 100_000, 1_000_000];
 
   for (const size of sizes) {
     describe(`${size.toLocaleString()} records`, () => {
@@ -181,15 +183,16 @@ describe('NavigableIndex Performance', () => {
   });
 
   // String attribute benchmark
-  describe('String attribute (100,000 records)', () => {
+  describe(`String attribute (${isQuickMode ? '10,000' : '100,000'} records)`, () => {
     const nameAttr = simpleAttribute<{ name: string }, string>(
       'name',
       (r) => r.name
     );
     const index = new NavigableIndex(nameAttr);
+    const stringSize = isQuickMode ? 10_000 : 100_000;
 
     // Setup: alphabetically sorted names
-    for (let i = 0; i < 100_000; i++) {
+    for (let i = 0; i < stringSize; i++) {
       const name = `user-${String(i).padStart(6, '0')}`;
       index.add(`${i}`, { name });
     }

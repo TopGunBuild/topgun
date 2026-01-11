@@ -11,6 +11,8 @@ import { LWWMap } from '../../LWWMap';
 import { HLC } from '../../HLC';
 import { simpleAttribute } from '../../query/Attribute';
 
+const isQuickMode = process.env.BENCH_QUICK === 'true';
+
 interface Record {
   id: number;
   email: string;
@@ -19,7 +21,7 @@ interface Record {
 }
 
 describe('Index Memory Overhead', () => {
-  const sizes = [1_000, 10_000, 100_000];
+  const sizes = isQuickMode ? [1_000, 10_000] : [1_000, 10_000, 100_000];
 
   for (const size of sizes) {
     describe(`${size.toLocaleString()} records`, () => {

@@ -17,8 +17,11 @@ interface User {
   score: number;
 }
 
+// BENCH_QUICK=true runs only smaller datasets for faster CI
+const isQuickMode = process.env.BENCH_QUICK === 'true';
+
 describe('IndexedLWWMap Query Performance', () => {
-  const sizes = [10_000, 100_000];
+  const sizes = isQuickMode ? [10_000] : [10_000, 100_000];
 
   for (const size of sizes) {
     describe(`${size.toLocaleString()} records`, () => {
@@ -216,7 +219,8 @@ describe('IndexedLWWMap Query Performance', () => {
   }
 
   // Selective query benchmarks (different selectivity levels)
-  describe('Selectivity impact (100K records)', () => {
+  // Skip in quick mode as it uses 100K records
+  describe.skipIf(isQuickMode)('Selectivity impact (100K records)', () => {
     const hlc = new HLC('bench-node');
     const map = new IndexedLWWMap<string, User>(hlc);
 
