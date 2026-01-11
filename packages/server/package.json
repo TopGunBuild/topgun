@@ -22,8 +22,8 @@
     "build": "tsup",
     "test": "jest",
     "test:coverage": "jest --coverage",
-    "test:e2e": "jest --config jest.e2e.config.js --runInBand",
-    "test:e2e:distributed": "jest --config jest.e2e.config.js --testPathPattern=distributed-subscriptions --runInBand"
+    "test:integration": "jest --config jest.integration.config.js --runInBand",
+    "test:integration:distributed": "jest --config jest.integration.config.js --testPathPattern=distributed-subscriptions --runInBand"
   },
   "dependencies": {
     "@topgunbuild/core": "workspace:*",

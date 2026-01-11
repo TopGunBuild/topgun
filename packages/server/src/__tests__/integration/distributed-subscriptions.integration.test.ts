@@ -1,5 +1,5 @@
 /**
- * E2E Distributed Subscriptions Tests (Phase 14.2.7)
+ * Integration Tests: Distributed Subscriptions (Phase 14.2.7)
  *
  * Tests distributed live subscriptions across a real 3-node cluster:
  * - Search subscriptions with initial results from all nodes
@@ -9,7 +9,7 @@
  * - Cluster resilience during node failures
  * - Performance and latency tests
  *
- * Run: pnpm --filter @topgunbuild/server test -- --testPathPattern="distributed-subscriptions.e2e" --runInBand
+ * Run: pnpm --filter @topgunbuild/server test:integration:distributed
  */
 
 import { WebSocket } from 'ws';
