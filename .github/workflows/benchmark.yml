@@ -5,13 +5,24 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+  schedule:
+    # Run full benchmarks every night at 3 AM UTC
+    - cron: '0 3 * * *'
   workflow_dispatch:
+    inputs:
+      full_benchmark:
+        description: 'Run full benchmarks (including 100K records)'
+        required: false
+        default: 'false'
+        type: boolean
 
 jobs:
   micro-benchmarks:
     name: Vitest Micro-Benchmarks
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
+    # Skip full benchmarks on push/PR, run quick version
+    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || github.event.inputs.full_benchmark != 'true')
     steps:
       - uses: actions/checkout@v4
 
@@ -27,7 +38,32 @@ jobs:
       - run: pnpm install
       - run: pnpm build
 
-      - name: Run micro-benchmarks
+      - name: Run quick micro-benchmarks (up to 10K records)
+        run: pnpm bench -- --testNamePattern="1,000|10,000"
+        working-directory: packages/core
+
+  full-benchmarks:
+    name: Full Micro-Benchmarks (100K records)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Run full benchmarks on schedule or manual trigger with full_benchmark=true
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.full_benchmark == 'true')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10 --activate
+
+      - run: pnpm install
+      - run: pnpm build
+
+      - name: Run full micro-benchmarks
         run: pnpm bench
         working-directory: packages/core
 
