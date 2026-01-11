@@ -90,6 +90,7 @@ export class RepairScheduler extends EventEmitter {
   private activeRepairs: Set<number> = new Set();
   private scanTimer?: NodeJS.Timeout;
   private processTimer?: NodeJS.Timeout;
+  private initialScanTimer?: NodeJS.Timeout;
   private started = false;
 
   // Pending network requests
@@ -257,7 +258,7 @@ export class RepairScheduler extends EventEmitter {
     }, 1000);
 
     // Initial scan after startup delay
-    setTimeout(() => {
+    this.initialScanTimer = setTimeout(() => {
       this.scheduleFullScan();
     }, 60000); // 1 minute delay
   }
@@ -279,11 +280,16 @@ export class RepairScheduler extends EventEmitter {
       this.processTimer = undefined;
     }
 
+    if (this.initialScanTimer) {
+      clearTimeout(this.initialScanTimer);
+      this.initialScanTimer = undefined;
+    }
+
     this.repairQueue = [];
     this.activeRepairs.clear();
     
     // Clear pending requests
-    for (const [id, req] of this.pendingRequests) {
+    for (const [, req] of this.pendingRequests) {
       clearTimeout(req.timer);
       req.reject(new Error('Scheduler stopped'));
     }
