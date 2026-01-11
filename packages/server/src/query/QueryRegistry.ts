@@ -332,6 +332,35 @@ export class QueryRegistry {
   }
 
   /**
+   * Unregister all distributed subscriptions where the given node was the coordinator.
+   * Called when a cluster node disconnects.
+   *
+   * @param coordinatorNodeId - Node ID of the disconnected coordinator
+   */
+  public unregisterByCoordinator(coordinatorNodeId: string): void {
+    const subscriptionsToRemove: string[] = [];
+
+    for (const subs of this.subscriptions.values()) {
+      for (const sub of subs) {
+        if (sub.isDistributed && sub.coordinatorNodeId === coordinatorNodeId) {
+          subscriptionsToRemove.push(sub.id);
+        }
+      }
+    }
+
+    for (const subId of subscriptionsToRemove) {
+      this.unregister(subId);
+    }
+
+    if (subscriptionsToRemove.length > 0) {
+      logger.debug(
+        { coordinatorNodeId, count: subscriptionsToRemove.length },
+        'Cleaned up distributed query subscriptions for disconnected coordinator'
+      );
+    }
+  }
+
+  /**
    * Returns all active subscriptions for a specific map.
    * Used for subscription-based event routing to avoid broadcasting to all clients.
    */

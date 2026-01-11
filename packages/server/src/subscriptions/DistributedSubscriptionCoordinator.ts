@@ -14,6 +14,10 @@
 import { EventEmitter } from 'events';
 import {
   ReciprocalRankFusion,
+  ClusterSubRegisterPayloadSchema,
+  ClusterSubAckPayloadSchema,
+  ClusterSubUpdatePayloadSchema,
+  ClusterSubUnregisterPayloadSchema,
   type ClusterSubRegisterPayload,
   type ClusterSubAckPayload,
   type ClusterSubUpdatePayload,
@@ -171,6 +175,9 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
 
     // Listen for local search updates (emitted by SearchCoordinator)
     this.localSearchCoordinator.on('distributedUpdate', this.handleLocalSearchUpdate.bind(this));
+
+    // Listen for cluster node disconnect to cleanup subscriptions
+    this.clusterManager.on('memberLeft', this.handleMemberLeft.bind(this));
 
     logger.debug('DistributedSubscriptionCoordinator initialized');
   }
@@ -381,23 +388,106 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
   }
 
   /**
-   * Handle incoming cluster messages.
+   * Handle incoming cluster messages with Zod validation.
    */
-  private handleClusterMessage(msg: { type: string; senderId: string; payload: any }): void {
+  private handleClusterMessage(msg: { type: string; senderId: string; payload: unknown }): void {
     switch (msg.type) {
-      case 'CLUSTER_SUB_REGISTER':
-        this.handleSubRegister(msg.senderId, msg.payload);
+      case 'CLUSTER_SUB_REGISTER': {
+        const parsed = ClusterSubRegisterPayloadSchema.safeParse(msg.payload);
+        if (!parsed.success) {
+          logger.warn(
+            { senderId: msg.senderId, error: parsed.error.message },
+            'Invalid CLUSTER_SUB_REGISTER payload'
+          );
+          return;
+        }
+        this.handleSubRegister(msg.senderId, parsed.data);
         break;
-      case 'CLUSTER_SUB_ACK':
-        this.handleSubAck(msg.senderId, msg.payload);
+      }
+      case 'CLUSTER_SUB_ACK': {
+        const parsed = ClusterSubAckPayloadSchema.safeParse(msg.payload);
+        if (!parsed.success) {
+          logger.warn(
+            { senderId: msg.senderId, error: parsed.error.message },
+            'Invalid CLUSTER_SUB_ACK payload'
+          );
+          return;
+        }
+        this.handleSubAck(msg.senderId, parsed.data);
         break;
-      case 'CLUSTER_SUB_UPDATE':
-        this.handleSubUpdate(msg.senderId, msg.payload);
+      }
+      case 'CLUSTER_SUB_UPDATE': {
+        const parsed = ClusterSubUpdatePayloadSchema.safeParse(msg.payload);
+        if (!parsed.success) {
+          logger.warn(
+            { senderId: msg.senderId, error: parsed.error.message },
+            'Invalid CLUSTER_SUB_UPDATE payload'
+          );
+          return;
+        }
+        this.handleSubUpdate(msg.senderId, parsed.data);
         break;
-      case 'CLUSTER_SUB_UNREGISTER':
-        this.handleSubUnregister(msg.senderId, msg.payload);
+      }
+      case 'CLUSTER_SUB_UNREGISTER': {
+        const parsed = ClusterSubUnregisterPayloadSchema.safeParse(msg.payload);
+        if (!parsed.success) {
+          logger.warn(
+            { senderId: msg.senderId, error: parsed.error.message },
+            'Invalid CLUSTER_SUB_UNREGISTER payload'
+          );
+          return;
+        }
+        this.handleSubUnregister(msg.senderId, parsed.data);
         break;
+      }
     }
+  }
+
+  /**
+   * Handle cluster node disconnect - cleanup subscriptions involving this node.
+   */
+  private handleMemberLeft(nodeId: string): void {
+    logger.debug({ nodeId }, 'Handling member left for distributed subscriptions');
+
+    const subscriptionsToRemove: string[] = [];
+    const myNodeId = this.clusterManager.config.nodeId;
+
+    for (const [subId, subscription] of this.subscriptions) {
+      // If we are the coordinator and this node was registered
+      if (subscription.registeredNodes.has(nodeId)) {
+        subscription.registeredNodes.delete(nodeId);
+
+        // Remove any results from this node
+        for (const [key, result] of subscription.currentResults) {
+          if (result.sourceNode === nodeId) {
+            subscription.currentResults.delete(key);
+          }
+        }
+
+        logger.debug(
+          { subscriptionId: subId, nodeId, remainingNodes: subscription.registeredNodes.size },
+          'Removed disconnected node from subscription'
+        );
+      }
+    }
+
+    // Check for any pending ACKs that were waiting for this node
+    for (const [subId, pending] of this.pendingAcks) {
+      const acks = this.nodeAcks.get(subId);
+      if (acks && !acks.has(nodeId)) {
+        // This node hasn't ACK'd yet, treat as failed
+        acks.add(nodeId); // Mark as "received" to complete the wait
+        this.checkAcksComplete(subId);
+      }
+    }
+
+    // Cleanup local subscriptions where the disconnected node was the coordinator
+    // (SearchCoordinator and QueryRegistry handle their own cleanup)
+    this.localSearchCoordinator.unsubscribeByCoordinator(nodeId);
+    this.localQueryRegistry.unregisterByCoordinator(nodeId);
+
+    // Record metrics
+    this.metricsService?.incDistributedSubNodeDisconnect();
   }
 
   /**

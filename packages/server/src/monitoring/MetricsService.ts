@@ -46,6 +46,7 @@ export class MetricsService {
   private distributedSubPendingAcks: Gauge;
   private distributedSubUpdates: Counter;
   private distributedSubAckTotal: Counter;
+  private distributedSubNodeDisconnect: Counter;
   private distributedSubRegistrationDuration: Histogram;
   private distributedSubUpdateLatency: Histogram;
   private distributedSubInitialResultsCount: Histogram;
@@ -254,6 +255,12 @@ export class MetricsService {
       name: 'topgun_distributed_sub_ack_total',
       help: 'Node ACK responses for distributed subscriptions',
       labelNames: ['status'],
+      registers: [this.registry],
+    });
+
+    this.distributedSubNodeDisconnect = new Counter({
+      name: 'topgun_distributed_sub_node_disconnect_total',
+      help: 'Node disconnects affecting distributed subscriptions',
       registers: [this.registry],
     });
 
@@ -504,6 +511,13 @@ export class MetricsService {
    */
   public incDistributedSubAck(status: 'success' | 'failed' | 'timeout', count: number = 1): void {
     this.distributedSubAckTotal.inc({ status }, count);
+  }
+
+  /**
+   * Record a node disconnect affecting distributed subscriptions.
+   */
+  public incDistributedSubNodeDisconnect(): void {
+    this.distributedSubNodeDisconnect.inc();
   }
 
   /**

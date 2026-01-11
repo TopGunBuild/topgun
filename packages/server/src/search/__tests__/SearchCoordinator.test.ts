@@ -480,4 +480,50 @@ describe('SearchCoordinator', () => {
       expect(coordinator.getSubscriptionCount()).toBe(0);
     });
   });
+
+  describe('unsubscribeByCoordinator', () => {
+    beforeEach(() => {
+      coordinator.enableSearch('articles', { fields: ['title', 'body'] });
+    });
+
+    it('should unsubscribe all distributed subscriptions for a coordinator', () => {
+      // Register distributed subscriptions from different coordinators
+      coordinator.registerDistributedSubscription('sub1', 'articles', 'test', {}, 'node-2');
+      coordinator.registerDistributedSubscription('sub2', 'articles', 'query', {}, 'node-2');
+      coordinator.registerDistributedSubscription('sub3', 'articles', 'other', {}, 'node-3');
+
+      expect(coordinator.getSubscriptionCount()).toBe(3);
+
+      // Unsubscribe all from node-2
+      coordinator.unsubscribeByCoordinator('node-2');
+
+      expect(coordinator.getSubscriptionCount()).toBe(1);
+      expect(coordinator.getDistributedSubscription('sub1')).toBeUndefined();
+      expect(coordinator.getDistributedSubscription('sub2')).toBeUndefined();
+      expect(coordinator.getDistributedSubscription('sub3')).toBeDefined();
+    });
+
+    it('should do nothing if no subscriptions for coordinator', () => {
+      coordinator.registerDistributedSubscription('sub1', 'articles', 'test', {}, 'node-2');
+
+      coordinator.unsubscribeByCoordinator('node-unknown');
+
+      expect(coordinator.getSubscriptionCount()).toBe(1);
+    });
+
+    it('should not affect local (non-distributed) subscriptions', () => {
+      // Local subscription
+      coordinator.subscribe('client1', 'local-sub', 'articles', 'test');
+      // Distributed subscription
+      coordinator.registerDistributedSubscription('dist-sub', 'articles', 'test', {}, 'node-2');
+
+      expect(coordinator.getSubscriptionCount()).toBe(2);
+
+      coordinator.unsubscribeByCoordinator('node-2');
+
+      expect(coordinator.getSubscriptionCount()).toBe(1);
+      // Local sub should still exist
+      expect(coordinator.getDistributedSubscription('local-sub')).toBeUndefined(); // not distributed
+    });
+  });
 });

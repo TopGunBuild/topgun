@@ -705,6 +705,33 @@ export class SearchCoordinator extends EventEmitter {
   }
 
   /**
+   * Unsubscribe all distributed subscriptions where the given node was the coordinator.
+   * Called when a cluster node disconnects.
+   *
+   * @param coordinatorNodeId - Node ID of the disconnected coordinator
+   */
+  unsubscribeByCoordinator(coordinatorNodeId: string): void {
+    const subscriptionsToRemove: string[] = [];
+
+    for (const [subId, sub] of this.subscriptions) {
+      if (sub.isDistributed && sub.coordinatorNodeId === coordinatorNodeId) {
+        subscriptionsToRemove.push(subId);
+      }
+    }
+
+    for (const subId of subscriptionsToRemove) {
+      this.unsubscribe(subId);
+    }
+
+    if (subscriptionsToRemove.length > 0) {
+      logger.debug(
+        { coordinatorNodeId, count: subscriptionsToRemove.length },
+        'Cleaned up distributed subscriptions for disconnected coordinator'
+      );
+    }
+  }
+
+  /**
    * Notify subscribers about a document change.
    * Computes delta (ENTER/UPDATE/LEAVE) for each affected subscription.
    * For distributed subscriptions, emits 'distributedUpdate' event instead of sending to client.

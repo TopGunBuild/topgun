@@ -150,6 +150,13 @@ describe('MetricsService', () => {
       expect(output).toContain('topgun_distributed_sub_initial_results_count_bucket');
       expect(output).toContain('topgun_distributed_sub_initial_results_count_count{type="SEARCH"} 2');
     });
+
+    test('should track node disconnect events', async () => {
+      metrics.incDistributedSubNodeDisconnect();
+      metrics.incDistributedSubNodeDisconnect();
+      const output = await metrics.getMetrics();
+      expect(output).toContain('topgun_distributed_sub_node_disconnect_total 2');
+    });
   });
 });
 

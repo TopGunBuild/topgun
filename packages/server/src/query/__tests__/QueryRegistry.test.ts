@@ -370,4 +370,62 @@ describe('QueryRegistry - Distributed Subscriptions', () => {
     expect(updateMessages[0].payload.timestamp).toBeGreaterThanOrEqual(beforeUpdate);
     expect(updateMessages[0].payload.timestamp).toBeLessThanOrEqual(afterUpdate);
   });
+
+  describe('unregisterByCoordinator', () => {
+    it('should unregister all distributed subscriptions for a coordinator', () => {
+      mapRecords.set('rec-1', createRecord({ status: 'active' }));
+
+      // Register distributed subscriptions from different coordinators
+      registry.registerDistributed('sub1', 'items', { where: { status: 'active' } }, 'node-2');
+      registry.registerDistributed('sub2', 'items', { where: { status: 'active' } }, 'node-2');
+      registry.registerDistributed('sub3', 'items', { where: { status: 'active' } }, 'node-3');
+
+      expect(registry.getDistributedSubscription('sub1')).toBeDefined();
+      expect(registry.getDistributedSubscription('sub2')).toBeDefined();
+      expect(registry.getDistributedSubscription('sub3')).toBeDefined();
+
+      // Unregister all from node-2
+      registry.unregisterByCoordinator('node-2');
+
+      expect(registry.getDistributedSubscription('sub1')).toBeUndefined();
+      expect(registry.getDistributedSubscription('sub2')).toBeUndefined();
+      expect(registry.getDistributedSubscription('sub3')).toBeDefined();
+    });
+
+    it('should do nothing if no subscriptions for coordinator', () => {
+      mapRecords.set('rec-1', createRecord({ status: 'active' }));
+      registry.registerDistributed('sub1', 'items', { where: { status: 'active' } }, 'node-2');
+
+      registry.unregisterByCoordinator('node-unknown');
+
+      expect(registry.getDistributedSubscription('sub1')).toBeDefined();
+    });
+
+    it('should not affect local (non-distributed) subscriptions', () => {
+      mapRecords.set('rec-1', createRecord({ status: 'active' }));
+
+      // Local subscription
+      const socket = createMockSocket();
+      const localSub: Subscription = {
+        id: 'local-sub',
+        clientId: 'client1',
+        mapName: 'items',
+        query: { where: { status: 'active' } },
+        socket,
+        previousResultKeys: new Set(['rec-1']),
+      };
+      registry.register(localSub);
+
+      // Distributed subscription
+      registry.registerDistributed('dist-sub', 'items', { where: { status: 'active' } }, 'node-2');
+
+      registry.unregisterByCoordinator('node-2');
+
+      // Distributed should be removed
+      expect(registry.getDistributedSubscription('dist-sub')).toBeUndefined();
+      // Local should still be queryable via getSubscriptionsForMap
+      const subs = registry.getSubscriptionsForMap('items');
+      expect(subs.some(s => s.id === 'local-sub')).toBe(true);
+    });
+  });
 });
