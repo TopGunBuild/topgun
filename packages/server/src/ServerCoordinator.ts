@@ -1320,91 +1320,147 @@ export class ServerCoordinator {
                 logger.info({ clientId: client.id, mapName, query }, 'Client subscribed');
                 this.metricsService.incOp('SUBSCRIBE', mapName);
 
-                // Identify all relevant nodes
-                const allMembers = this.cluster.getMembers();
-                let remoteMembers = allMembers.filter(id => !this.cluster.isLocal(id));
-
-                // Phase 10.03: Read-from-Replica Optimization
-                // If query targets a specific key, we can optimize by routing to a specific replica
-                // instead of broadcasting to the entire cluster.
-                const queryKey = (query as any)._id || (query as any).where?._id;
-                
-                if (queryKey && typeof queryKey === 'string' && this.readReplicaHandler) {
-                    try {
-                        const targetNode = this.readReplicaHandler.selectReadNode({
-                            mapName,
-                            key: queryKey,
-                            options: { 
-                                // Default to EVENTUAL for read scaling unless specified otherwise
-                                // In future, we could extract consistency from query options if available
-                                consistency: ConsistencyLevel.EVENTUAL 
-                            }
+                // Phase 14.2: Use distributed subscription if cluster mode with multiple nodes
+                if (this.distributedSubCoordinator && this.cluster && this.cluster.getMembers().length > 1) {
+                    // Distributed query subscription
+                    this.distributedSubCoordinator.subscribeQuery(
+                        queryId,
+                        client.socket,
+                        mapName,
+                        query
+                    ).then((result) => {
+                        // Apply Field Level Security to results
+                        const filteredResults = result.results.map((res: any) => {
+                            const filteredValue = this.securityManager.filterObject(res.value, client.principal!, mapName);
+                            return { ...res, value: filteredValue };
                         });
 
-                        if (targetNode) {
-                            if (this.cluster.isLocal(targetNode)) {
-                                // Serve locally only
-                                remoteMembers = [];
-                                logger.debug({ clientId: client.id, mapName, key: queryKey }, 'Read optimization: Serving locally');
-                            } else if (remoteMembers.includes(targetNode)) {
-                                // Serve from specific remote replica
-                                remoteMembers = [targetNode];
-                                logger.debug({ clientId: client.id, mapName, key: queryKey, targetNode }, 'Read optimization: Routing to replica');
-                            }
-                        }
-                    } catch (e) {
-                        logger.warn({ err: e }, 'Error in ReadReplicaHandler selection');
-                    }
-                }
+                        client.writer.write({
+                            type: 'QUERY_RESP',
+                            payload: {
+                                queryId,
+                                results: filteredResults,
+                            },
+                        });
 
-                const requestId = crypto.randomUUID();
+                        // Track subscription on client
+                        client.subscriptions.add(queryId);
 
-                const pending: PendingClusterQuery = {
-                    requestId,
-                    client,
-                    queryId,
-                    mapName,
-                    query,
-                    results: [], // Will populate with local results first
-                    expectedNodes: new Set(remoteMembers),
-                    respondedNodes: new Set(),
-                    timer: setTimeout(() => this.finalizeClusterQuery(requestId, true), 5000) // 5s timeout
-                };
+                        logger.debug({
+                            clientId: client.id,
+                            queryId,
+                            mapName,
+                            resultCount: result.results.length,
+                            totalHits: result.totalHits,
+                            nodes: result.registeredNodes,
+                        }, 'Distributed query subscription created');
+                    }).catch((err) => {
+                        logger.error({ err, queryId }, 'Distributed query subscription failed');
+                        client.writer.write({
+                            type: 'QUERY_RESP',
+                            payload: {
+                                queryId,
+                                results: [],
+                                error: 'Failed to create distributed subscription',
+                            },
+                        });
+                    });
+                } else {
+                    // Single-node fallback: use existing logic
+                    // Identify all relevant nodes
+                    const allMembers = this.cluster.getMembers();
+                    let remoteMembers = allMembers.filter(id => !this.cluster.isLocal(id));
 
-                this.pendingClusterQueries.set(requestId, pending);
+                    // Phase 10.03: Read-from-Replica Optimization
+                    // If query targets a specific key, we can optimize by routing to a specific replica
+                    // instead of broadcasting to the entire cluster.
+                    const queryKey = (query as any)._id || (query as any).where?._id;
 
-                // Execute Locally (async - wait for map to load from storage)
-                // [FIX] Using await ensures handleMessage completes only after query execution
-                // This is important for:
-                // 1. Tests that need to verify results immediately after handleMessage
-                // 2. Ensuring storage is loaded before returning results
-                try {
-                    const localResults = await this.executeLocalQuery(mapName, query);
-                    pending.results.push(...localResults);
-
-                    // Scatter: Send to other nodes
-                    if (remoteMembers.length > 0) {
-                        for (const nodeId of remoteMembers) {
-                            this.cluster.send(nodeId, 'CLUSTER_QUERY_EXEC', {
-                                requestId,
+                    if (queryKey && typeof queryKey === 'string' && this.readReplicaHandler) {
+                        try {
+                            const targetNode = this.readReplicaHandler.selectReadNode({
                                 mapName,
-                                query
+                                key: queryKey,
+                                options: {
+                                    // Default to EVENTUAL for read scaling unless specified otherwise
+                                    // In future, we could extract consistency from query options if available
+                                    consistency: ConsistencyLevel.EVENTUAL
+                                }
                             });
+
+                            if (targetNode) {
+                                if (this.cluster.isLocal(targetNode)) {
+                                    // Serve locally only
+                                    remoteMembers = [];
+                                    logger.debug({ clientId: client.id, mapName, key: queryKey }, 'Read optimization: Serving locally');
+                                } else if (remoteMembers.includes(targetNode)) {
+                                    // Serve from specific remote replica
+                                    remoteMembers = [targetNode];
+                                    logger.debug({ clientId: client.id, mapName, key: queryKey, targetNode }, 'Read optimization: Routing to replica');
+                                }
+                            }
+                        } catch (e) {
+                            logger.warn({ err: e }, 'Error in ReadReplicaHandler selection');
                         }
-                    } else {
-                        // Single node cluster: finalize immediately
+                    }
+
+                    const requestId = crypto.randomUUID();
+
+                    const pending: PendingClusterQuery = {
+                        requestId,
+                        client,
+                        queryId,
+                        mapName,
+                        query,
+                        results: [], // Will populate with local results first
+                        expectedNodes: new Set(remoteMembers),
+                        respondedNodes: new Set(),
+                        timer: setTimeout(() => this.finalizeClusterQuery(requestId, true), 5000) // 5s timeout
+                    };
+
+                    this.pendingClusterQueries.set(requestId, pending);
+
+                    // Execute Locally (async - wait for map to load from storage)
+                    // [FIX] Using await ensures handleMessage completes only after query execution
+                    // This is important for:
+                    // 1. Tests that need to verify results immediately after handleMessage
+                    // 2. Ensuring storage is loaded before returning results
+                    try {
+                        const localResults = await this.executeLocalQuery(mapName, query);
+                        pending.results.push(...localResults);
+
+                        // Scatter: Send to other nodes
+                        if (remoteMembers.length > 0) {
+                            for (const nodeId of remoteMembers) {
+                                this.cluster.send(nodeId, 'CLUSTER_QUERY_EXEC', {
+                                    requestId,
+                                    mapName,
+                                    query
+                                });
+                            }
+                        } else {
+                            // Single node cluster: finalize immediately
+                            this.finalizeClusterQuery(requestId);
+                        }
+                    } catch (err) {
+                        logger.error({ err, mapName }, 'Failed to execute local query');
+                        // Finalize with empty results on error
                         this.finalizeClusterQuery(requestId);
                     }
-                } catch (err) {
-                    logger.error({ err, mapName }, 'Failed to execute local query');
-                    // Finalize with empty results on error
-                    this.finalizeClusterQuery(requestId);
                 }
                 break;
             }
 
             case 'QUERY_UNSUB': {
                 const { queryId: unsubId } = message.payload;
+
+                // Phase 14.2: Unsubscribe from distributed coordinator if in cluster mode
+                if (this.distributedSubCoordinator && this.cluster && this.cluster.getMembers().length > 1) {
+                    this.distributedSubCoordinator.unsubscribe(unsubId).catch((err) => {
+                        logger.warn({ err, queryId: unsubId }, 'Failed to unsubscribe from distributed coordinator');
+                    });
+                }
+
                 this.queryRegistry.unregister(unsubId);
                 client.subscriptions.delete(unsubId);
                 break;
