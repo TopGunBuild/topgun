@@ -403,6 +403,103 @@ interface ReplicationHealth {
 }
 ```
 
+## Distributed Subscriptions
+
+TopGun supports **distributed live subscriptions** for both queries and full-text search. When a client subscribes, the subscription is automatically registered across all cluster nodes, and updates flow efficiently to the client.
+
+### Subscription Protocol
+
+The distributed subscription protocol uses four message types:
+
+| Message | Direction | Purpose |
+|---------|-----------|---------|
+| `CLUSTER_SUB_REGISTER` | Coordinator → All Nodes | Register subscription for evaluation |
+| `CLUSTER_SUB_ACK` | Node → Coordinator | Acknowledge registration + initial results |
+| `CLUSTER_SUB_UPDATE` | Node → Coordinator | Delta update (ENTER/UPDATE/LEAVE) |
+| `CLUSTER_SUB_UNREGISTER` | Coordinator → All Nodes | Remove subscription |
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      DISTRIBUTED SUBSCRIPTION FLOW                       │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  1. SUBSCRIBE                                                            │
+│  ────────────                                                            │
+│  Client ──SEARCH_SUB──▶ Coordinator ──CLUSTER_SUB_REGISTER──▶ All Nodes │
+│                                       CLUSTER_SUB_REGISTER               │
+│                                                                          │
+│  2. INITIAL RESULTS                                                      │
+│  ─────────────────                                                       │
+│  Coordinator ◀──CLUSTER_SUB_ACK── All Nodes (includes local results)    │
+│       │                                                                  │
+│       └──▶ Merge results (RRF for search, dedupe for query)             │
+│       └──▶ Send to Client                                                │
+│                                                                          │
+│  3. LIVE UPDATES                                                         │
+│  ───────────────                                                         │
+│  Document changes on Node B:                                             │
+│       │                                                                  │
+│       ▼                                                                  │
+│  Node B evaluates local subscriptions                                    │
+│       │                                                                  │
+│       ▼                                                                  │
+│  Node B ──CLUSTER_SUB_UPDATE──▶ Coordinator only (NOT broadcast)        │
+│       │                                                                  │
+│       ▼                                                                  │
+│  Coordinator forwards to Client                                          │
+│                                                                          │
+│  4. UNSUBSCRIBE                                                          │
+│  ────────────                                                            │
+│  Client ──UNSUB──▶ Coordinator ──CLUSTER_SUB_UNREGISTER──▶ All Nodes    │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Design Decisions
+
+1. **Coordinator Pattern**: The node receiving the client subscription becomes the "coordinator" - it aggregates results and forwards updates to the client
+2. **Targeted Updates**: Nodes send updates ONLY to coordinators with matching subscriptions, not broadcast to all nodes
+3. **Local Evaluation**: Each node evaluates subscriptions against its local data/index
+4. **Unified Protocol**: Same message structure for FTS and Query (different evaluation logic)
+
+### Node Disconnect Handling
+
+When a cluster node disconnects:
+
+- Its results are automatically removed from active subscriptions
+- Pending ACKs for the disconnected node are resolved
+- Local subscriptions where the disconnected node was coordinator are cleaned up
+- When the node rejoins, subscriptions can be re-registered
+
+### Metrics
+
+Distributed subscription metrics are available via Prometheus:
+
+```text
+# Active subscriptions by type (SEARCH/QUERY)
+topgun_distributed_sub_active{type="SEARCH"} 15
+topgun_distributed_sub_active{type="QUERY"} 8
+
+# Subscription registrations
+topgun_distributed_sub_total{type="SEARCH",status="success"} 100
+topgun_distributed_sub_total{type="QUERY",status="timeout"} 2
+
+# Update delivery
+topgun_distributed_sub_updates{direction="sent",change_type="ENTER"} 5000
+topgun_distributed_sub_updates{direction="received",change_type="UPDATE"} 4800
+
+# Latency histogram
+topgun_distributed_sub_update_latency_ms{type="SEARCH",quantile="0.99"} 12
+```
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+  <p className="text-sm text-blue-800 dark:text-blue-200">
+    <strong>See Also:</strong> <a href="/docs/guides/live-queries" className="underline">Live Queries</a> and <a href="/docs/guides/full-text-search" className="underline">Full-Text Search</a> guides for client-side usage of distributed subscriptions.
+  </p>
+</div>
+
 ## Best Practices
 
 <div className="space-y-4 my-6 not-prose">

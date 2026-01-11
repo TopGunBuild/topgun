@@ -1,0 +1,282 @@
+---
+title: "From Local to Global: Real-Time Search Across Clusters"
+excerpt: "Live subscriptions used to work only on the local node. TopGun v0.10.0 introduces distributed subscriptions that push updates from any cluster node to your client in real-time."
+date: "Jan 11, 2026"
+readTime: "7 min read"
+author: "Ivan Kalashnik"
+role: "Creator"
+category: "Release"
+image: "/images/blog-distributed-subscriptions.png"
+avatar: "/images/ivan-avatar.jpeg"
+---
+
+There's a moment in every distributed system's life when you realize your "real-time" feature only works on one machine.
+
+For TopGun, that moment came when a user reported that their live search wasn't showing results from other cluster nodes. They'd search for "machine learning" and see 3 results. Then they'd check the database directly and find 15 matching documents—spread across 3 nodes.
+
+The search was fast. The search was live. The search was also blind to 80% of the data.
+
+Today we're releasing **TopGun v0.10.0** with distributed live subscriptions that see everything.
+
+## The Problem: Single-Node Subscriptions
+
+TopGun v0.8.0 introduced live search subscriptions—a powerful feature that pushes updates to your client whenever matching documents change. But there was a catch we didn't fully appreciate until clusters got bigger.
+
+Here's what was happening:
+
+```
+Client subscribes to: search('articles', 'machine learning')
+                              │
+                              ▼
+                      ┌───────────────┐
+                      │   Node A      │
+                      │               │
+                      │ Local FTS     │  ← Only indexes LOCAL documents
+                      │ Index         │
+                      │               │
+                      │ Live Updates  │  ← Only triggers on LOCAL changes
+                      └───────────────┘
+                              │
+         ╔════════════════════╧════════════════════╗
+         ║  Documents on Node B and C are INVISIBLE ║
+         ║  Changes on Node B and C are MISSED      ║
+         ╚═════════════════════════════════════════╝
+```
+
+The client connected to Node A. Node A only knew about its own documents. Nodes B and C had plenty of matching content, but no mechanism existed to tell Node A about it.
+
+## Why Not Just Broadcast Everything?
+
+The naive solution is obvious: broadcast every data change to every node. When a document changes on Node B, tell Node A about it.
+
+We tried this. Here's why it failed.
+
+With 3 nodes and 100 changes per second per node:
+- Node A receives: 200 messages/sec (from B and C)
+- Node B receives: 200 messages/sec (from A and C)
+- Node C receives: 200 messages/sec (from A and B)
+
+Total cluster traffic: **600 messages/sec** for 300 actual changes.
+
+Now add 10 nodes:
+- Each node receives: 900 messages/sec
+- Total cluster traffic: **9,000 messages/sec** for 1,000 changes
+
+The math is O(N²). Every additional node multiplies the traffic for every other node. At 20 nodes, the network melts.
+
+Worse: most of these messages are irrelevant. If a client is searching for "machine learning" and someone updates a document about "cooking recipes," that update gets broadcast anyway. Every node processes it. Every node discards it.
+
+## The Solution: Targeted Updates via Coordinator Pattern
+
+TopGun v0.10.0 takes a different approach. Instead of broadcasting changes, we broadcast *subscriptions*.
+
+```
+Client subscribes to: search('articles', 'machine learning')
+                              │
+                              ▼
+                      ┌───────────────┐
+                      │ Coordinator   │
+                      │ (Node A)      │
+                      │               │
+                      │ Subscription  │──────────────────────────────┐
+                      │ Registry      │                              │
+                      └───────────────┘                              │
+                              │                                      │
+            ┌─────────────────┼─────────────────┐                    │
+            ▼                 ▼                 ▼                    │
+    ┌───────────────┐ ┌───────────────┐ ┌───────────────┐           │
+    │   Node A      │ │   Node B      │ │   Node C      │           │
+    │               │ │               │ │               │           │
+    │ SUBSCRIBE     │ │ SUBSCRIBE     │ │ SUBSCRIBE     │           │
+    │ registered    │ │ registered    │ │ registered    │           │
+    │               │ │               │ │               │           │
+    │ On change:    │ │ On change:    │ │ On change:    │           │
+    │ Evaluate      │ │ Evaluate  ────┼─┼───────────────┼───────────┘
+    │ locally       │ │ Send UPDATE   │ │ Send UPDATE   │
+    │               │ │ to coordinator│ │ to coordinator│
+    └───────────────┘ └───────────────┘ └───────────────┘
+```
+
+Here's the key insight: **subscriptions are registered once, but evaluated locally on every node.**
+
+When a document changes on Node B:
+1. Node B checks its local subscription registry
+2. If the document matches any subscription, Node B sends a targeted update to that subscription's coordinator
+3. The coordinator (Node A) forwards the update to the client
+
+No broadcast. No O(N²). Just targeted messages to nodes that actually care.
+
+## The Protocol: Four Messages
+
+The distributed subscription protocol uses exactly four message types:
+
+| Message | Direction | Purpose |
+|---------|-----------|---------|
+| `CLUSTER_SUB_REGISTER` | Coordinator → All Nodes | "Evaluate this subscription locally" |
+| `CLUSTER_SUB_ACK` | Node → Coordinator | "Here are my initial results" |
+| `CLUSTER_SUB_UPDATE` | Node → Coordinator | "This document entered/updated/left" |
+| `CLUSTER_SUB_UNREGISTER` | Coordinator → All Nodes | "Stop evaluating this subscription" |
+
+The elegance is in the asymmetry. Registration goes to all nodes (once). Updates flow only to coordinators with matching subscriptions (as needed).
+
+## Merging Results: The RRF Problem
+
+When a client subscribes to a search, they expect results sorted by relevance. But each node calculates BM25 scores independently against its local index.
+
+Document A on Node 1 might score 2.34. Document B on Node 2 might score 2.31. Which ranks higher?
+
+You can't just compare scores directly. BM25 scores depend on corpus statistics (average document length, term frequencies) that differ between nodes.
+
+We solved this with **Reciprocal Rank Fusion (RRF)**—a technique used by hybrid search systems to merge rankings from different sources.
+
+```typescript
+// RRF formula: score(d) = Σ 1 / (k + rank(d))
+// k = 60 (standard constant)
+
+// Node A results (ranked by local BM25):
+// 1. doc-a1 (score: 2.34)
+// 2. doc-a2 (score: 1.89)
+// 3. doc-a3 (score: 1.45)
+
+// Node B results (ranked by local BM25):
+// 1. doc-b1 (score: 3.12)  ← Higher score, but different corpus
+// 2. doc-a1 (score: 2.01)  ← Same doc, different score!
+// 3. doc-b2 (score: 1.78)
+
+// RRF merge:
+// doc-a1: 1/(60+1) + 1/(60+2) = 0.0164 + 0.0161 = 0.0325
+// doc-b1: 1/(60+1) = 0.0164
+// doc-a2: 1/(60+2) = 0.0161
+// ...
+
+// Final ranking by RRF score (not BM25 score)
+```
+
+RRF is rank-based, not score-based. A document that appears in multiple nodes' top results gets boosted. A document with a high score on one node but missing from others doesn't dominate.
+
+## Delta Updates: ENTER, UPDATE, LEAVE
+
+Once initial results are merged, the subscription enters "live" mode. Updates flow as deltas through the cluster protocol:
+
+```typescript
+// Internal cluster protocol (between nodes):
+// CLUSTER_SUB_UPDATE with changeType: 'ENTER' | 'UPDATE' | 'LEAVE'
+```
+
+But you don't see any of this. The `SearchHandle` abstracts it away:
+
+```typescript
+const handle = client.searchSubscribe('articles', 'machine learning');
+
+handle.subscribe((results) => {
+  // `results` is always the current sorted array
+  // The handle internally processes ENTER/UPDATE/LEAVE deltas
+  // and maintains the result set for you
+
+  for (const result of results) {
+    console.log(`[${result.score.toFixed(2)}] ${result.key}: ${result.value.title}`);
+  }
+});
+
+// What happens under the hood when a document changes on Node B:
+//
+// 1. Node B detects change, evaluates against registered subscriptions
+// 2. Node B sends CLUSTER_SUB_UPDATE to coordinator (Node A)
+// 3. Coordinator receives: { changeType: 'ENTER', key: 'article-42', score: 1.87, ... }
+// 4. Coordinator updates internal result set
+// 5. Coordinator calls your subscribe callback with the new sorted array
+//
+// You just see the updated results. The delta mechanics are invisible.
+```
+
+The three update types determine how the coordinator modifies the result set:
+
+| Internal Type | What Happens |
+|---------------|--------------|
+| `ENTER` | New result added, array re-sorted by score |
+| `UPDATE` | Existing result updated, may re-sort if score changed |
+| `LEAVE` | Result removed from array |
+
+No need to re-fetch the entire search. The UI stays synchronized with sub-millisecond latency.
+
+## Handling Node Failures
+
+Distributed systems fail. What happens when Node B crashes while holding 100 active subscriptions?
+
+The coordinator (Node A) handles this gracefully:
+
+1. `ClusterManager` detects Node B disconnect via heartbeat timeout
+2. `DistributedSubscriptionCoordinator` receives `memberLeft` event
+3. All results from Node B are removed from active subscriptions
+4. Clients see updated (smaller) result sets immediately
+
+When Node B recovers and rejoins:
+
+1. It announces itself to the cluster
+2. Active coordinators re-register their subscriptions
+3. Node B sends fresh `CLUSTER_SUB_ACK` with its current data
+4. Results are merged back into the client's view
+
+No manual intervention. No stale data. The subscription "heals" automatically.
+
+## What This Enables
+
+Distributed live subscriptions unlock patterns that weren't practical before:
+
+**Real-time dashboards across sharded data:**
+```typescript
+// Monitor orders across all regions
+const handle = client.searchSubscribe('orders', 'status:pending', {
+  limit: 100,
+  sort: { createdAt: 'desc' }
+});
+
+handle.subscribe((orders) => {
+  // Shows pending orders from ALL cluster nodes
+  // Updates in real-time as orders are created/fulfilled
+  updateDashboard(orders);
+});
+```
+
+**Collaborative search:**
+```typescript
+// Team members on different nodes see the same live results
+const handle = client.searchSubscribe('documents', userQuery);
+
+// Alice on Node A and Bob on Node B both see:
+// - Initial results from all nodes
+// - Real-time updates when anyone edits matching docs
+```
+
+**Cross-node notifications:**
+```typescript
+// Subscribe to events matching criteria, regardless of origin
+const handle = client.query('events', {
+  predicate: Predicates.and(
+    Predicates.equal('type', 'alert'),
+    Predicates.greaterThan('severity', 7)
+  )
+});
+
+handle.subscribe((alerts) => {
+  // Fires when high-severity alerts are created on ANY node
+  notifyOnCall(alerts);
+});
+```
+
+## Try It Today
+
+TopGun v0.10.0 is available now:
+
+```bash
+npm install @topgunbuild/core @topgunbuild/client @topgunbuild/server
+```
+
+The API is unchanged—your existing `searchSubscribe()` and `query().subscribe()` calls automatically work across clusters. No code changes required.
+
+Check out the updated documentation:
+- [Live Queries Guide](/docs/guides/live-queries) — Distributed query subscriptions
+- [Full-Text Search Guide](/docs/guides/full-text-search) — Cluster-wide live search
+- [Cluster Replication Guide](/docs/guides/cluster-replication) — Subscription protocol details
+
+Real-time should mean real-time everywhere. Now it does.

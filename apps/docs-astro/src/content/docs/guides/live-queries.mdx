@@ -5,7 +5,7 @@ order: 12
 ---
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
-import { ChevronRight, Activity, Zap, Filter } from 'lucide-react';
+import { ChevronRight, Activity, Zap, Filter, Server } from 'lucide-react';
 import { FeatureCard } from '../../../components/docs/FeatureCard';
 
 export const basicQueryCode = `const query = client.query('todos', {
@@ -27,6 +27,26 @@ const query = client.query('products', {
     Predicates.greaterThan('price', 100),
     Predicates.equal('category', 'electronics')
   )
+});`;
+
+export const clusterQueryCode = `// Live queries work seamlessly in clustered environments
+// The client connects to any node - queries see data from ALL nodes
+
+const client = new TopGunClient({
+  serverUrl: 'ws://node1:8080'  // Connect to any cluster node
+});
+
+// This subscription receives updates from all cluster nodes
+const query = client.query('orders', {
+  predicate: Predicates.greaterThan('total', 100)
+});
+
+// Updates are pushed automatically when:
+// - New matching documents are added on ANY node
+// - Existing documents are modified to match/unmatch on ANY node
+// - Documents are removed from ANY node
+query.subscribe((results) => {
+  console.log('All matching orders across cluster:', results.length);
 });`;
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
@@ -141,6 +161,81 @@ If you are using React, we recommend using the `useQuery` hook which handles sub
 <div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-4 not-prose">
   <p className="text-sm text-blue-800 dark:text-blue-200">
     See the <a href="/docs/reference/react-hooks" className="underline hover:no-underline">React Hooks</a> reference for detailed documentation on <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">useQuery</code> (including change tracking), <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">useMutation</code>, and other hooks.
+  </p>
+</div>
+
+## Distributed Live Queries (Cluster Mode)
+
+In clustered environments, live queries automatically work across all nodes. When you subscribe to a query, you receive real-time updates for matching documents regardless of which node owns the data.
+
+<div className="grid md:grid-cols-2 gap-6 mb-8 not-prose">
+  <FeatureCard
+    icon={Server}
+    iconColor="text-purple-500"
+    title="Cluster-Wide Updates"
+    description="Changes on any cluster node automatically push to all relevant subscribers."
+  />
+  <FeatureCard
+    icon={Activity}
+    iconColor="text-blue-500"
+    title="Transparent Coordination"
+    description="The node you connect to becomes the coordinator, aggregating updates from all nodes."
+  />
+</div>
+
+### How It Works
+
+<div className="not-prose">
+  <CodeBlock title="Cluster Live Query" language="typescript" code={clusterQueryCode} />
+</div>
+
+### Architecture
+
+When a client subscribes to a live query in a cluster:
+
+1. **Registration Phase**: The connected node (coordinator) broadcasts the subscription to all cluster nodes
+2. **Initial Results**: Each node evaluates the query against its local data and sends results
+3. **Result Merging**: The coordinator deduplicates and merges results from all nodes
+4. **Live Updates**: When data changes on any node, that node evaluates affected subscriptions and sends targeted updates to the coordinator
+5. **Client Delivery**: The coordinator forwards updates to the client
+
+```
+Client ──QUERY_SUB──▶ Coordinator ──CLUSTER_SUB_REGISTER──▶ All Nodes
+                            │                                    │
+                            │◀───────────────────────────────────┘
+                            │         Initial results + ACKs
+                            │
+                            ▼
+                     Merge & Send to Client
+                            │
+              ┌─────────────┼─────────────┐
+              │             │             │
+         On change:    On change:    On change:
+         Node A        Node B        Node C
+              │             │             │
+              └─────────────┼─────────────┘
+                            │
+                    CLUSTER_SUB_UPDATE
+                            │
+                            ▼
+                  Forward to Client
+```
+
+### Delta Updates
+
+Instead of resending full result sets, nodes send targeted delta updates:
+
+| Update Type | Description |
+|-------------|-------------|
+| `ENTER` | Document now matches the query predicate |
+| `UPDATE` | Document still matches but its value changed |
+| `LEAVE` | Document no longer matches the query predicate |
+
+This approach minimizes network traffic and enables efficient UI updates.
+
+<div className="bg-green-50 dark:bg-green-900/20 border-l-4 border-green-500 p-4 my-6 not-prose">
+  <p className="text-sm text-green-800 dark:text-green-200">
+    <strong>Automatic failover:</strong> If a cluster node disconnects, the coordinator automatically removes its results from the subscription state. When the node rejoins, its data becomes visible again through normal query updates.
   </p>
 </div>
 

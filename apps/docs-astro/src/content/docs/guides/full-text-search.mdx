@@ -901,6 +901,42 @@ The server sends incremental updates instead of full result sets:
 | `UPDATE` | Document still matches but score or value changed |
 | `LEAVE` | Document no longer matches (removed or score dropped below threshold) |
 
+### Cluster-Wide Live Search
+
+In clustered environments, live search subscriptions work **across all nodes**. When you subscribe to a search query, you receive real-time updates for matching documents regardless of which node owns the data.
+
+```typescript
+// Connect to any node in the cluster
+const client = new TopGunClient({
+  serverUrl: 'ws://node1:8080'
+});
+
+// Subscribe to search - automatically distributed across cluster
+const handle = client.searchSubscribe<Article>('articles', 'machine learning');
+
+handle.subscribe((results) => {
+  // Results include matches from ALL cluster nodes
+  // Updates push automatically when documents change on ANY node
+  console.log('Results from all nodes:', results.length);
+});
+```
+
+**How it works:**
+
+1. **Subscription broadcast**: The coordinator node registers the search subscription on all cluster nodes
+2. **Local evaluation**: Each node maintains a local FTS index and evaluates changes against subscriptions
+3. **Targeted updates**: When a document changes, only the owning node sends an update (via `CLUSTER_SUB_UPDATE`)
+4. **RRF merging**: Initial results are merged using Reciprocal Rank Fusion for consistent relevance ordering
+5. **Client delivery**: The coordinator forwards delta updates to the client
+
+This architecture eliminates the need to broadcast every data change to all nodes - only subscription-relevant updates are sent to coordinators.
+
+<div className="bg-purple-50 dark:bg-purple-900/20 border-l-4 border-purple-500 p-4 my-6 not-prose">
+  <p className="text-sm text-purple-800 dark:text-purple-200">
+    <strong>Scalability:</strong> Each node evaluates subscriptions locally against its FTS index. Update messages flow only to coordinators with active subscriptions, making this approach efficient even with many concurrent subscriptions.
+  </p>
+</div>
+
 ## React Integration
 
 The `@topgunbuild/react` package provides the `useSearch` hook for easy integration with React applications:
