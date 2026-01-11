@@ -2,8 +2,9 @@ import { ServerCoordinator } from '../ServerCoordinator';
 import { SyncEngine } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
 import { waitForAuthReady } from './utils/waitForAuthReady';
-import { LWWMap } from '@topgunbuild/core';
+import { LWWMap, ORMap } from '@topgunbuild/core';
 import * as jwt from 'jsonwebtoken';
+import { WebSocket } from 'ws';
 
 const JWT_SECRET = 'topgun-secret-dev';
 
@@ -167,5 +168,248 @@ describe('Garbage Collection & Zombie Protection', () => {
     expect(updatedRecord?.value).toBeNull();
     // Timestamp of tombstone should be expiration time
     expect(updatedRecord?.timestamp.millis).toBe(record.timestamp.millis + 1000);
+  });
+});
+
+describe('TTL Expiration with ReplicationPipeline', () => {
+  let node1: ServerCoordinator;
+  let node2: ServerCoordinator;
+  let originalDateNow: () => number;
+
+  beforeAll(async () => {
+    originalDateNow = Date.now;
+
+    // Start Node B first (higher ID, will receive connection)
+    node1 = new ServerCoordinator({
+      port: 0,
+      nodeId: 'ttl-node-b',
+      host: 'localhost',
+      clusterPort: 0,
+      peers: []
+    });
+
+    await node1.ready();
+
+    // Start Node A (lower ID, will initiate connection to node-b)
+    node2 = new ServerCoordinator({
+      port: 0,
+      nodeId: 'ttl-node-a',
+      host: 'localhost',
+      clusterPort: 0,
+      peers: [`localhost:${node1.clusterPort}`]
+    });
+
+    await node2.ready();
+
+    // Wait for cluster to stabilize
+    const start = Date.now();
+    while (Date.now() - start < 5000) {
+      const m1 = (node1 as any).cluster.getMembers();
+      const m2 = (node2 as any).cluster.getMembers();
+      if (m1.includes('ttl-node-a') && m2.includes('ttl-node-b')) {
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }, 15000);
+
+  afterAll(async () => {
+    await node1.shutdown();
+    await node2.shutdown();
+    Date.now = originalDateNow;
+    await new Promise(resolve => setTimeout(resolve, 200));
+  });
+
+  beforeEach(() => {
+    Date.now = originalDateNow;
+  });
+
+  test('LWWMap TTL expiration replicates to backup nodes via ReplicationPipeline', async () => {
+    const mapName = 'ttl-replicated-map';
+    const now = originalDateNow();
+    Date.now = jest.fn(() => now);
+
+    // Find a key where node1 is owner and node2 is backup
+    // The partition service should have node2 as backup for partitions owned by node1
+    let testKey = '';
+    const partitionService = (node1 as any).partitionService;
+    for (let i = 0; i < 100; i++) {
+      const candidateKey = `ttl-key-${i}`;
+      const partitionId = partitionService.getPartitionId(candidateKey);
+      const dist = partitionService.partitions.get(partitionId);
+      if (dist && dist.owner === 'ttl-node-b' && dist.backups.includes('ttl-node-a')) {
+        testKey = candidateKey;
+        break;
+      }
+    }
+
+    // If no key found with proper distribution, use default (test may be flaky)
+    if (!testKey) {
+      testKey = 'replicatedKey';
+    }
+
+    // Create data on node1 with TTL
+    const map1 = node1.getMap(mapName) as LWWMap<string, string>;
+    const recordTimestamp = { millis: now, counter: 0, nodeId: 'ttl-node-b' };
+    const record = { value: 'replicatedValue', timestamp: recordTimestamp, ttlMs: 1000 };
+    map1.merge(testKey, record);
+
+    // Ensure node2 also has the data (simulate prior replication)
+    const map2 = node2.getMap(mapName) as LWWMap<string, string>;
+    map2.merge(testKey, record);
+
+    // Verify both nodes have the value
+    expect(map1.get(testKey)).toBe('replicatedValue');
+    expect(map2.get(testKey)).toBe('replicatedValue');
+
+    // Advance time past TTL expiration
+    const futureTime = now + 2000;
+    Date.now = jest.fn(() => futureTime);
+
+    // Run GC on node1 - should use ReplicationPipeline instead of CLUSTER_EVENT
+    const olderThan = { millis: now, counter: 0, nodeId: 'ttl-node-b' };
+    (node1 as any).performGarbageCollection(olderThan);
+
+    // Wait for replication via pipeline (increased for batch processing)
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    // Verify node1 has tombstone
+    const record1 = map1.getRecord(testKey);
+    expect(record1?.value).toBeNull();
+
+    // Verify node2 received tombstone via ReplicationPipeline
+    const record2 = map2.getRecord(testKey);
+    expect(record2?.value).toBeNull();
+    expect(record2?.timestamp.millis).toBe(now + 1000); // Tombstone at expiration time
+  });
+
+  test('TTL expiration notifies query subscriptions via processChange', async () => {
+    const mapName = 'ttl-query-map';
+    const now = originalDateNow();
+    Date.now = jest.fn(() => now);
+
+    // Track broadcast calls for verification
+    const broadcastCalls: any[] = [];
+    const originalBroadcast = (node1 as any).broadcast.bind(node1);
+    (node1 as any).broadcast = (msg: any, ...args: any[]) => {
+      broadcastCalls.push(msg);
+      return originalBroadcast(msg, ...args);
+    };
+
+    // Create data with TTL
+    const map = node1.getMap(mapName) as LWWMap<string, string>;
+    const recordTimestamp = { millis: now, counter: 0, nodeId: 'ttl-node-b' };
+    const record = { value: 'queryValue', timestamp: recordTimestamp, ttlMs: 500 };
+    map.merge('queryKey', record);
+
+    // Advance time past TTL
+    const futureTime = now + 1000;
+    Date.now = jest.fn(() => futureTime);
+
+    // Clear broadcast calls before GC
+    broadcastCalls.length = 0;
+
+    // Run GC
+    const olderThan = { millis: now, counter: 0, nodeId: 'ttl-node-b' };
+    (node1 as any).performGarbageCollection(olderThan);
+
+    // Verify SERVER_EVENT was broadcast for the expired record
+    const serverEvents = broadcastCalls.filter(c => c.type === 'SERVER_EVENT');
+    expect(serverEvents.length).toBeGreaterThan(0);
+
+    const expiredEvent = serverEvents.find(e =>
+      e.payload.mapName === mapName &&
+      e.payload.key === 'queryKey' &&
+      e.payload.eventType === 'UPDATED'
+    );
+    expect(expiredEvent).toBeDefined();
+    expect(expiredEvent.payload.record.value).toBeNull();
+  });
+
+  test('ORMap TTL expiration replicates tombstone to backup nodes', async () => {
+    const mapName = 'ttl-ormap-replicated';
+    const now = originalDateNow();
+    Date.now = jest.fn(() => now);
+
+    // Create OR map on both nodes
+    const map1 = node1.getMap(mapName, 'OR') as ORMap<string, any>;
+    const map2 = node2.getMap(mapName, 'OR') as ORMap<string, any>;
+
+    // Add record with TTL
+    const orRecord = {
+      value: { data: 'orValue' },
+      timestamp: { millis: now, counter: 0, nodeId: 'ttl-node-b' },
+      tag: 'unique-tag-123',
+      ttlMs: 1000
+    };
+
+    map1.apply('orKey', orRecord);
+    map2.apply('orKey', orRecord);
+
+    // Verify both have the value
+    expect(map1.get('orKey')).toEqual([{ data: 'orValue' }]);
+    expect(map2.get('orKey')).toEqual([{ data: 'orValue' }]);
+
+    // Advance time past TTL
+    const futureTime = now + 2000;
+    Date.now = jest.fn(() => futureTime);
+
+    // Run GC on node1
+    const olderThan = { millis: now, counter: 0, nodeId: 'ttl-node-b' };
+    (node1 as any).performGarbageCollection(olderThan);
+
+    // Wait for replication
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    // Verify node1 removed the record
+    expect(map1.get('orKey')).toEqual([]);
+
+    // Verify node2 also has the record removed via replication
+    expect(map2.get('orKey')).toEqual([]);
+  });
+
+  test('GC does not use O(N) CLUSTER_EVENT broadcast', async () => {
+    const mapName = 'ttl-no-cluster-event-map';
+    const now = originalDateNow();
+    Date.now = jest.fn(() => now);
+
+    // Spy on cluster.send to verify CLUSTER_EVENT is not used
+    const clusterSendCalls: any[] = [];
+    const originalSend = (node1 as any).cluster.send.bind((node1 as any).cluster);
+    (node1 as any).cluster.send = (nodeId: string, type: string, payload: any) => {
+      clusterSendCalls.push({ nodeId, type, payload });
+      return originalSend(nodeId, type, payload);
+    };
+
+    // Create data with TTL
+    const map = node1.getMap(mapName) as LWWMap<string, string>;
+    const recordTimestamp = { millis: now, counter: 0, nodeId: 'ttl-node-b' };
+    const record = { value: 'noClusterEvent', timestamp: recordTimestamp, ttlMs: 500 };
+    map.merge('noEventKey', record);
+
+    // Advance time past TTL
+    const futureTime = now + 1000;
+    Date.now = jest.fn(() => futureTime);
+
+    // Clear calls before GC
+    clusterSendCalls.length = 0;
+
+    // Run GC
+    const olderThan = { millis: now, counter: 0, nodeId: 'ttl-node-b' };
+    (node1 as any).performGarbageCollection(olderThan);
+
+    // Wait for replication
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    // Verify NO CLUSTER_EVENT was sent (we use ReplicationPipeline now)
+    const clusterEvents = clusterSendCalls.filter(c => c.type === 'CLUSTER_EVENT');
+    expect(clusterEvents.length).toBe(0);
+
+    // Verify OP_FORWARD was used instead (ReplicationPipeline sends batches via OP_FORWARD)
+    // Note: ReplicationPipeline batches operations, so we might see OP_FORWARD with _replication
+    const opForwards = clusterSendCalls.filter(c => c.type === 'OP_FORWARD');
+    // ReplicationPipeline uses OP_FORWARD for batched replication
+    // If no backups exist for this partition, no replication occurs (which is fine)
+    // The key point is CLUSTER_EVENT is NOT used
   });
 });

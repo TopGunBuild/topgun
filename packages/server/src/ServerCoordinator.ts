@@ -4465,9 +4465,6 @@ export class ServerCoordinator {
 
                             if (changed) {
                                 // Persist and Broadcast
-                                // Construct an artificial op to reuse pipeline logic or do manual steps
-                                // Manual steps are safer here as we don't have a client op context
-
                                 if (this.storage) {
                                     this.storage.store(name, key, tombstone).catch(err =>
                                         logger.error({ mapName: name, key, err }, 'Failed to persist expired tombstone')
@@ -4481,17 +4478,29 @@ export class ServerCoordinator {
                                     record: tombstone
                                 };
 
+                                // Broadcast to local clients
                                 this.broadcast({
                                     type: 'SERVER_EVENT',
                                     payload: eventPayload,
                                     timestamp: this.hlc.now()
                                 });
 
-                                const members = this.cluster.getMembers();
-                                for (const memberId of members) {
-                                    if (!this.cluster.isLocal(memberId)) {
-                                        this.cluster.send(memberId, 'CLUSTER_EVENT', eventPayload);
-                                    }
+                                // Notify query subscriptions (handles both local and distributed via CLUSTER_SUB_UPDATE)
+                                this.queryRegistry.processChange(name, map, key, tombstone, record);
+
+                                // Replicate to backup nodes via partition-aware ReplicationPipeline
+                                // This replaces the O(N) CLUSTER_EVENT broadcast
+                                if (this.replicationPipeline) {
+                                    const op = {
+                                        opType: 'set',
+                                        mapName: name,
+                                        key: key,
+                                        record: tombstone
+                                    };
+                                    const opId = `ttl:${name}:${key}:${Date.now()}`;
+                                    this.replicationPipeline.replicate(op, opId, key).catch(err => {
+                                        logger.warn({ opId, key, err }, 'TTL expiration replication failed (non-fatal)');
+                                    });
                                 }
                             }
                         }
@@ -4532,6 +4541,9 @@ export class ServerCoordinator {
                 for (const { key, tag } of tagsToExpire) {
                     logger.info({ mapName: name, key, tag }, 'ORMap Record expired (TTL). Removing.');
 
+                    // Get old records for processChange before modification
+                    const oldRecords = map.getRecords(key);
+
                     // Remove by adding tag to tombstones
                     map.applyTombstone(tag);
 
@@ -4561,17 +4573,30 @@ export class ServerCoordinator {
                         orTag: tag
                     };
 
+                    // Broadcast to local clients
                     this.broadcast({
                         type: 'SERVER_EVENT',
                         payload: eventPayload,
                         timestamp: this.hlc.now()
                     });
 
-                    const members = this.cluster.getMembers();
-                    for (const memberId of members) {
-                        if (!this.cluster.isLocal(memberId)) {
-                            this.cluster.send(memberId, 'CLUSTER_EVENT', eventPayload);
-                        }
+                    // Notify query subscriptions (handles both local and distributed via CLUSTER_SUB_UPDATE)
+                    const newRecords = map.getRecords(key);
+                    this.queryRegistry.processChange(name, map, key, newRecords, oldRecords);
+
+                    // Replicate to backup nodes via partition-aware ReplicationPipeline
+                    // This replaces the O(N) CLUSTER_EVENT broadcast
+                    if (this.replicationPipeline) {
+                        const op = {
+                            opType: 'OR_REMOVE',
+                            mapName: name,
+                            key: key,
+                            orTag: tag
+                        };
+                        const opId = `ttl:${name}:${key}:${tag}:${Date.now()}`;
+                        this.replicationPipeline.replicate(op, opId, key).catch(err => {
+                            logger.warn({ opId, key, err }, 'ORMap TTL expiration replication failed (non-fatal)');
+                        });
                     }
                 }
 
