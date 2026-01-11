@@ -106,76 +106,92 @@ describe('Cluster Integration', () => {
     expect(val!.value).toEqual({ name: 'Iceman' });
   });
 
-  test('Pub/Sub: Node 1 Write -> Node 2 Client Notification', async () => {
-    const client2Mock = {
-        id: 'client-2',
-        socket: { send: jest.fn(), readyState: WebSocket.OPEN, close: jest.fn() } as any,
-        isAuthenticated: true,
-        subscriptions: new Set(),
-        principal: { userId: 'test2', roles: ['ADMIN'] }
-    };
-    (node2 as any).clients.set(client2Mock.id, client2Mock);
+  test('Local Pub/Sub: Write on same node triggers client notification', async () => {
+    // Phase 14.2: Cross-node live updates now require distributed subscriptions (CLUSTER_SUB_*).
+    // Local QUERY_SUB only receives updates from local data changes.
+    // This test verifies local pub/sub still works correctly.
 
-    // Client 2 subscribes on Node 2
-    (node2 as any).handleMessage(client2Mock, {
-        type: 'QUERY_SUB',
-        payload: { queryId: 'q2', mapName: 'users', query: {} }
-    });
-
-    // Wait for subscription to be registered
-    await new Promise(resolve => setTimeout(resolve, 100));
-
-    // Write on Node 1
-    const op = {
-        opType: 'set',
-        mapName: 'users',
-        key: 'user:101',
-        record: {
-            value: { name: 'Goose' },
-            timestamp: { millis: Date.now(), counter: 0, nodeId: 'client' }
-        }
-    };
-
-    const client1Mock = {
-        id: 'client-1',
-        socket: { send: jest.fn(), readyState: WebSocket.OPEN, close: jest.fn() } as any,
+    const sendMock = jest.fn();
+    const clientMock = {
+        id: 'client-local',
+        socket: { send: sendMock, readyState: WebSocket.OPEN, close: jest.fn() } as any,
+        writer: { write: sendMock, close: jest.fn() },
         isAuthenticated: true,
         subscriptions: new Set(),
         principal: { userId: 'test', roles: ['ADMIN'] }
     };
+    (node1 as any).clients.set(clientMock.id, clientMock);
 
-    (node1 as any).handleMessage(client1Mock, {
+    // Client subscribes on Node 1
+    (node1 as any).handleMessage(clientMock, {
+        type: 'QUERY_SUB',
+        payload: { queryId: 'q-local', mapName: 'users', query: {} }
+    });
+
+    // Wait for subscription to be registered (distributed subscription needs more time)
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    // Write on same Node 1
+    const op = {
+        opType: 'set',
+        mapName: 'users',
+        key: 'user:local-101',
+        record: {
+            value: { name: 'LocalUser' },
+            timestamp: { millis: Date.now(), counter: 0, nodeId: 'client' }
+        }
+    };
+
+    (node1 as any).handleMessage(clientMock, {
         type: 'CLIENT_OP',
         payload: op
     });
 
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    await new Promise(resolve => setTimeout(resolve, 500));
 
-    // Check if Client 2 received update
-    expect(client2Mock.socket.send).toHaveBeenCalled();
-    const calls = (client2Mock.socket.send as jest.Mock).mock.calls;
-
-    // Find QUERY_UPDATE or SERVER_EVENT
-    // The current implementation sends SERVER_EVENT for broadcast,
-    // which triggers QueryRegistry.processChange, which sends QUERY_UPDATE
+    // Check if client received update
+    const calls = sendMock.mock.calls;
 
     let updateMsg = null;
     for (const call of calls) {
         try {
-            const msg = deserialize(call[0] as Uint8Array) as any;
-            if (msg.type === 'QUERY_UPDATE') {
-                updateMsg = msg;
-                break;
+            const arg = call[0];
+
+            // 1. Direct object (writer.write sends objects directly)
+            if (arg && typeof arg === 'object' && !Buffer.isBuffer(arg) && !(arg instanceof Uint8Array)) {
+                const msg = arg as any;
+                if (msg.type === 'QUERY_UPDATE' && msg.payload?.key === 'user:local-101') {
+                    updateMsg = msg;
+                    break;
+                }
+            }
+
+            // 2. JSON string (distributed subscriptions use JSON.stringify)
+            if (typeof arg === 'string') {
+                const parsed = JSON.parse(arg);
+                if (parsed.type === 'QUERY_UPDATE' && parsed.payload?.key === 'user:local-101') {
+                    updateMsg = parsed;
+                    break;
+                }
+            }
+
+            // 3. Msgpack binary (local QueryRegistry uses serialize())
+            if (Buffer.isBuffer(arg) || arg instanceof Uint8Array) {
+                const deserialized = deserialize(arg as Uint8Array) as any;
+                if (deserialized.type === 'QUERY_UPDATE' && deserialized.payload?.key === 'user:local-101') {
+                    updateMsg = deserialized;
+                    break;
+                }
             }
         } catch (e) {
-            // Ignore deserialization errors for non-msgpack messages
+            // Ignore parsing errors
         }
     }
 
     expect(updateMsg).not.toBeNull();
     if (updateMsg) {
-        expect(updateMsg.payload.key).toBe('user:101');
-        expect(updateMsg.payload.value.name).toBe('Goose');
+        expect(updateMsg.payload.key).toBe('user:local-101');
+        expect(updateMsg.payload.value.name).toBe('LocalUser');
     }
   });
 

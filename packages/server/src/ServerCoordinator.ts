@@ -3684,18 +3684,6 @@ export class ServerCoordinator {
     }
 
     /**
-     * Broadcast event to cluster members (excluding self).
-     */
-    private broadcastToCluster(eventPayload: any): void {
-        const members = this.cluster.getMembers();
-        for (const memberId of members) {
-            if (!this.cluster.isLocal(memberId)) {
-                this.cluster.send(memberId, 'CLUSTER_EVENT', eventPayload);
-            }
-        }
-    }
-
-    /**
      * Apply replicated operation from another node (callback for ReplicationPipeline)
      * This is called when we receive a replicated operation as a backup node
      */
@@ -3863,9 +3851,9 @@ export class ServerCoordinator {
             timestamp: this.hlc.now()
         }, originalSenderId);
 
-        // 6. Broadcast to cluster (for subscribers on other nodes)
-        // Note: This is different from replication - this notifies subscribers
-        this.broadcastToCluster(eventPayload);
+        // 6. Distributed subscriptions are now handled via CLUSTER_SUB_UPDATE (Phase 14.2)
+        // ReplicationPipeline handles data replication to backup nodes
+        // No need for broadcastToCluster here - it was O(N) broadcast to all nodes
 
         // 7. Run onAfterOp interceptors
         this.runAfterInterceptors(op, context);
@@ -4031,8 +4019,9 @@ export class ServerCoordinator {
         // 5. Collect event for batched broadcast (instead of immediate broadcast)
         batchedEvents.push(eventPayload);
 
-        // 6. Broadcast to cluster (for subscribers)
-        this.broadcastToCluster(eventPayload);
+        // 6. Distributed subscriptions are now handled via CLUSTER_SUB_UPDATE (Phase 14.2)
+        // ReplicationPipeline handles data replication to backup nodes
+        // No need for broadcastToCluster here - it was O(N) broadcast to all nodes
 
         // 7. Run onAfterOp interceptors
         this.runAfterInterceptors(op, context);
