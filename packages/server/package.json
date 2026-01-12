@@ -36,12 +36,14 @@
     "ws": "^8.18.3"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
     "@types/pg": "^8.6.6",
     "pino-pretty": "^13.1.2",
     "typescript": "^5.0.0"
   },
   "optionalDependencies": {
     "@topgunbuild/native": "workspace:*",
+    "better-sqlite3": "^11.7.0",
     "isolated-vm": "^4.7.2"
   },
   "engines": {
