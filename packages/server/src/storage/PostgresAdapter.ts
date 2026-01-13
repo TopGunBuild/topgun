@@ -1,6 +1,6 @@
 import { Pool, PoolConfig } from 'pg';
 import { LWWRecord } from '@topgunbuild/core';
-import { IServerStorage, StorageValue } from './IServerStorage';
+import { IServerStorage, StorageValue, ORMAP_MARKER } from './IServerStorage';
 
 export interface PostgresAdapterOptions {
   tableName?: string;
@@ -107,12 +107,11 @@ export class PostgresAdapter implements IServerStorage {
     let isDeleted: boolean;
 
     if (this.isORMapValue(record)) {
-        // Store ORMap data
-        // We use a special marker in ts_node_id to distinguish ORMap data from LWW data
+        // Store ORMap data using shared marker
         value = record;
         tsMillis = 0;
         tsCounter = 0;
-        tsNodeId = '__ORMAP__';
+        tsNodeId = ORMAP_MARKER;
         isDeleted = false;
     } else {
         // LWWRecord
@@ -176,7 +175,7 @@ export class PostgresAdapter implements IServerStorage {
   }
 
   private mapRowToRecord(row: any): StorageValue<any> {
-    if (row.ts_node_id === '__ORMAP__') {
+    if (row.ts_node_id === ORMAP_MARKER) {
         // It's an ORMap value (ORMapValue or ORMapTombstones)
         return row.value as StorageValue<any>;
     }

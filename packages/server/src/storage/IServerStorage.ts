@@ -1,5 +1,12 @@
 import { LWWRecord, ORMapRecord } from '@topgunbuild/core';
 
+/**
+ * Marker used in ts_node_id column to distinguish ORMap values from LWW records.
+ * This allows storing both CRDT types in the same table structure.
+ * Used by PostgresAdapter and BetterSqlite3Adapter.
+ */
+export const ORMAP_MARKER = '__ORMAP__';
+
 export type ORMapValue<V> = {
   type: 'OR';
   records: ORMapRecord<V>[];

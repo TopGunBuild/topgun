@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { LWWRecord } from '@topgunbuild/core';
-import { IServerStorage, StorageValue } from './IServerStorage';
+import { IServerStorage, StorageValue, ORMAP_MARKER } from './IServerStorage';
 
 /**
  * SQLite Development Adapter
@@ -46,12 +46,6 @@ export interface BetterSqlite3Config {
 
 const DEFAULT_TABLE_NAME = 'topgun_maps';
 const TABLE_NAME_REGEX = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
-
-/**
- * Marker used in ts_node_id to distinguish ORMap values from LWW records.
- * This allows storing both types in the same table structure.
- */
-const ORMAP_MARKER = '__ORMAP__';
 
 function validateTableName(name: string): void {
   if (!TABLE_NAME_REGEX.test(name)) {
