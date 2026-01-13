@@ -44,6 +44,9 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # Install production dependencies only
 RUN pnpm install --prod --frozen-lockfile
 
+# Run as non-root user for security
+USER node
+
 # Health check on default port 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
   CMD wget -q --spider http://localhost:${TOPGUN_PORT:-8080}/health || exit 1
