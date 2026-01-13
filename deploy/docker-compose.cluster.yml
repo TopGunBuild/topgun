@@ -16,7 +16,7 @@ services:
   topgun-node-1:
     build:
       context: ..
-      dockerfile: packages/server/Dockerfile
+      dockerfile: deploy/Dockerfile.server
     hostname: topgun-node-1
     environment:
       # Node identity
@@ -53,7 +53,7 @@ services:
   topgun-node-2:
     build:
       context: ..
-      dockerfile: packages/server/Dockerfile
+      dockerfile: deploy/Dockerfile.server
     hostname: topgun-node-2
     environment:
       - NODE_ID=node-2
@@ -83,7 +83,7 @@ services:
   topgun-node-3:
     build:
       context: ..
-      dockerfile: packages/server/Dockerfile
+      dockerfile: deploy/Dockerfile.server
     hostname: topgun-node-3
     environment:
       - NODE_ID=node-3

@@ -1,10 +1,11 @@
 # deploy/Dockerfile.server
+# Canonical production server image for TopGun
 FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Install pnpm
-RUN npm install -g pnpm@10.13.1
+# Install pnpm via corepack (official method)
+RUN corepack enable && corepack prepare pnpm@10.13.1 --activate
 
 # Copy package files
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
@@ -19,16 +20,17 @@ COPY packages/core ./packages/core
 COPY packages/server ./packages/server
 COPY tsconfig.json ./
 
-# Build
-RUN pnpm build
+# Build packages (core first, then server with start-server.ts)
+RUN pnpm --filter @topgunbuild/core build && \
+    pnpm --filter @topgunbuild/server build
 
 # Production image
 FROM node:20-alpine
 
 WORKDIR /app
 
-# Install pnpm for production deps
-RUN npm install -g pnpm@10.13.1
+# Install pnpm via corepack for production deps
+RUN corepack enable && corepack prepare pnpm@10.13.1 --activate
 
 # Copy built packages
 COPY --from=builder /app/packages/core/dist ./packages/core/dist
@@ -42,12 +44,12 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # Install production dependencies only
 RUN pnpm install --prod --frozen-lockfile
 
-# Health check
+# Health check on default port 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD wget -q --spider http://localhost:9091/health || exit 1
+  CMD wget -q --spider http://localhost:${TOPGUN_PORT:-8080}/health || exit 1
 
-# Expose ports
-EXPOSE 8080 9091 8081
+# Expose ports (client WebSocket, cluster, metrics)
+EXPOSE 8080 9080 9090
 
-# Start server
-CMD ["node", "packages/server/dist/index.js"]
+# Start server using the compiled entry point
+CMD ["node", "packages/server/dist/start-server.js"]

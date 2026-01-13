@@ -1,5 +1,6 @@
-# Build Stage
-FROM node:18-alpine AS builder
+# deploy/Dockerfile.notes-app
+# Build the notes-app example as a static site served by nginx
+FROM node:20-alpine AS builder
 
 # Build-time arguments for Vite
 ARG VITE_TOPGUN_SERVER_URL
@@ -15,7 +16,7 @@ ENV VITE_STORAGE_WORKER_URL=$VITE_STORAGE_WORKER_URL
 ENV VITE_PUSH_WORKER_URL=$VITE_PUSH_WORKER_URL
 ENV VITE_VAPID_PUBLIC_KEY=$VITE_VAPID_PUBLIC_KEY
 
-# Install pnpm
+# Install pnpm via corepack (official method)
 RUN corepack enable && corepack prepare pnpm@10.13.1 --activate
 
 WORKDIR /app

@@ -8,7 +8,7 @@ import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Server, Container, Layers, Lock, Shield, Zap } from 'lucide-react';
 
 export const dockerBuildCode = `# From the root of the repository
-docker build -t topgun-server .`;
+docker build -t topgun-server -f deploy/Dockerfile.server .`;
 
 export const dockerComposeCode = `version: '3.8'
 
@@ -33,7 +33,9 @@ services:
 
   # TopGun Server
   server:
-    build: .
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.server
     container_name: topgun-server
     depends_on:
       postgres:
@@ -42,11 +44,7 @@ services:
       - "8080:8080"
     environment:
       NODE_ENV: production
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_USER: postgres
-      DB_PASSWORD: postgres_password
-      DB_NAME: topgun
+      DATABASE_URL: postgres://postgres:postgres_password@postgres:5432/topgun
     restart: unless-stopped
 
 volumes:
@@ -71,7 +69,9 @@ services:
       retries: 5
 
   server:
-    build: .
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.server
     container_name: topgun-server
     depends_on:
       postgres:
@@ -83,11 +83,7 @@ services:
       NODE_ENV: production
       TOPGUN_PORT: 443
       TOPGUN_CLUSTER_PORT: 9443
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_USER: postgres
-      DB_PASSWORD: postgres_password
-      DB_NAME: topgun
+      DATABASE_URL: postgres://postgres:postgres_password@postgres:5432/topgun
       # TLS Configuration
       TOPGUN_TLS_ENABLED: "true"
       TOPGUN_TLS_CERT_PATH: /etc/topgun/tls/server.crt
@@ -236,10 +232,10 @@ Learn how to deploy the TopGun server to production using Docker, Docker Compose
 The Dockerfile handles:
 
 - Copying workspace package definitions
-- Installing dependencies via `npm ci`
-- Building all packages (core, server, adapters, etc.)
+- Installing dependencies via `pnpm install`
+- Building all packages (core, server)
 - Exposing port `8080`
-- Starting the server via `npm run start:server`
+- Starting the server via `node packages/server/dist/start-server.js`
 
 ## Docker Compose
 

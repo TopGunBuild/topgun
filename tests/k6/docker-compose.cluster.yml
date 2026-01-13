@@ -19,7 +19,7 @@ services:
     image: topgun-server:latest
     build:
       context: ../..
-      dockerfile: Dockerfile
+      dockerfile: deploy/Dockerfile.server
     container_name: topgun-node-1
     hostname: node-1
     ports:
@@ -49,7 +49,7 @@ services:
     image: topgun-server:latest
     build:
       context: ../..
-      dockerfile: Dockerfile
+      dockerfile: deploy/Dockerfile.server
     container_name: topgun-node-2
     hostname: node-2
     ports:
@@ -82,7 +82,7 @@ services:
     image: topgun-server:latest
     build:
       context: ../..
-      dockerfile: Dockerfile
+      dockerfile: deploy/Dockerfile.server
     container_name: topgun-node-3
     hostname: node-3
     ports:
@@ -117,7 +117,7 @@ services:
     image: topgun-server:latest
     build:
       context: ../..
-      dockerfile: Dockerfile
+      dockerfile: deploy/Dockerfile.server
     container_name: topgun-node-4
     hostname: node-4
     ports:
