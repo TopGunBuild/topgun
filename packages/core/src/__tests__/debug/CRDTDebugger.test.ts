@@ -77,6 +77,7 @@ describe('CRDTDebugger', () => {
       const loser: Timestamp = { millis: 999, counter: 1, nodeId: 'node2' };
 
       debugger_.recordConflict({
+        mapId: 'users',
         key: 'user1',
         winnerTimestamp: winner,
         winnerNodeId: 'node1',
@@ -90,6 +91,43 @@ describe('CRDTDebugger', () => {
       const conflicts = debugger_.getConflicts();
       expect(conflicts).toHaveLength(1);
       expect(conflicts[0].key).toBe('user1');
+      expect(conflicts[0].mapId).toBe('users');
+    });
+
+    it('should filter conflicts by mapId', () => {
+      debugger_.recordConflict({
+        mapId: 'users',
+        key: 'u1',
+        winnerTimestamp: { millis: 1000, counter: 0, nodeId: 'n1' },
+        winnerNodeId: 'n1',
+        winnerValue: 'v1',
+        loserTimestamp: { millis: 999, counter: 0, nodeId: 'n2' },
+        loserNodeId: 'n2',
+        loserValue: 'v2',
+        resolvedAt: new Date(),
+      });
+      debugger_.recordConflict({
+        mapId: 'posts',
+        key: 'p1',
+        winnerTimestamp: { millis: 1000, counter: 0, nodeId: 'n1' },
+        winnerNodeId: 'n1',
+        winnerValue: 'v1',
+        loserTimestamp: { millis: 999, counter: 0, nodeId: 'n2' },
+        loserNodeId: 'n2',
+        loserValue: 'v2',
+        resolvedAt: new Date(),
+      });
+
+      const allConflicts = debugger_.getConflicts();
+      expect(allConflicts).toHaveLength(2);
+
+      const userConflicts = debugger_.getConflicts('users');
+      expect(userConflicts).toHaveLength(1);
+      expect(userConflicts[0].mapId).toBe('users');
+
+      const postConflicts = debugger_.getConflicts('posts');
+      expect(postConflicts).toHaveLength(1);
+      expect(postConflicts[0].mapId).toBe('posts');
     });
 
     it('should trim snapshots when exceeding max', () => {
@@ -303,6 +341,7 @@ describe('CRDTDebugger', () => {
     it('should clear all data', () => {
       debugger_.recordSet('users', 'u1', 'v1', hlc.now(), 'node1');
       debugger_.recordConflict({
+        mapId: 'users',
         key: 'u1',
         winnerTimestamp: { millis: 1000, counter: 0, nodeId: 'n1' },
         winnerNodeId: 'n1',

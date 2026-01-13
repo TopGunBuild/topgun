@@ -21,6 +21,7 @@ export interface CRDTSnapshot {
  * Information about a resolved conflict.
  */
 export interface ConflictInfo {
+  mapId: string;
   key: string;
   winnerTimestamp: Timestamp;
   winnerNodeId: string;
@@ -225,8 +226,7 @@ export class CRDTDebugger {
 
   getConflicts(mapId?: string): ConflictInfo[] {
     if (mapId) {
-      // Filter by looking at snapshots associated with conflicts
-      return this.conflicts;
+      return this.conflicts.filter((c) => c.mapId === mapId);
     }
     return this.conflicts;
   }
