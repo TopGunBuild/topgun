@@ -62,19 +62,25 @@ program
   .description('Show cluster status')
   .action(require('./commands/cluster/status'));
 
-// Debug commands (placeholders for Part C)
+// Debug commands (Phase 14C)
 program
   .command('debug:crdt <action>')
-  .description('CRDT debugging tools (export, replay, diff)')
-  .option('--map <name>', 'Map name')
-  .option('--output <file>', 'Output file')
+  .description('CRDT debugging tools (export, stats, conflicts, timeline, replay, tail)')
+  .option('--map <name>', 'Map name to filter')
+  .option('--output <file>', 'Output file for export')
+  .option('--input <file>', 'Input file for replay')
+  .option('--format <format>', 'Export format: json, csv, ndjson', 'json')
+  .option('--interval <ms>', 'Timeline bucket interval in ms', '1000')
+  .option('--limit <n>', 'Limit number of operations to show')
   .action(require('./commands/debug/crdt'));
 
 program
   .command('search:explain')
-  .description('Explain search results')
-  .option('--query <query>', 'Search query')
-  .option('--map <name>', 'Map name')
+  .description('Explain search results with BM25/RRF score breakdown')
+  .option('--query <query>', 'Search query (required)')
+  .option('--map <name>', 'Map name to search')
+  .option('--limit <n>', 'Max results to show', '10')
+  .option('--verbose', 'Show detailed breakdown for each result')
   .action(require('./commands/debug/search'));
 
 // Docker commands

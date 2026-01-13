@@ -1,0 +1,400 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "topgun-overview",
+    "title": "TopGun Cluster Overview",
+    "tags": ["topgun"],
+    "timezone": "browser",
+    "schemaVersion": 30,
+    "version": 1,
+    "refresh": "5s",
+    "time": {
+      "from": "now-15m",
+      "to": "now"
+    },
+    "annotations": {
+      "list": []
+    },
+    "templating": {
+      "list": [
+        {
+          "name": "node",
+          "type": "query",
+          "datasource": "Prometheus",
+          "query": "label_values(topgun_ws_connections_active, node_id)",
+          "refresh": 2,
+          "includeAll": true,
+          "allValue": ".*",
+          "current": {
+            "selected": true,
+            "text": "All",
+            "value": "$__all"
+          }
+        }
+      ]
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Operations per Second",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+        "targets": [
+          {
+            "expr": "rate(topgun_operations_total{node_id=~\"$node\"}[1m])",
+            "legendFormat": "{{operation}} - {{status}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ops",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        },
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom"
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "P95 Latency",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(topgun_operation_duration_seconds_bucket{node_id=~\"$node\"}[5m]))",
+            "legendFormat": "p95 - {{operation}}"
+          },
+          {
+            "expr": "histogram_quantile(0.99, rate(topgun_operation_duration_seconds_bucket{node_id=~\"$node\"}[5m]))",
+            "legendFormat": "p99 - {{operation}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "Active Connections",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+        "targets": [
+          {
+            "expr": "topgun_ws_connections_active{node_id=~\"$node\"}",
+            "legendFormat": "{{node_id}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "Cluster Nodes",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 4, "x": 8, "y": 8 },
+        "targets": [
+          {
+            "expr": "sum(topgun_cluster_nodes_healthy{node_id=~\"$node\"})"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "red", "value": 0 },
+                { "color": "yellow", "value": 1 },
+                { "color": "green", "value": 3 }
+              ]
+            },
+            "unit": "short"
+          }
+        },
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none",
+          "justifyMode": "center"
+        }
+      },
+      {
+        "id": 5,
+        "title": "Partitions Distribution",
+        "type": "piechart",
+        "gridPos": { "h": 8, "w": 4, "x": 8, "y": 12 },
+        "targets": [
+          {
+            "expr": "topgun_partitions_owned{node_id=~\"$node\"}",
+            "legendFormat": "{{node_id}}"
+          }
+        ],
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "right"
+          },
+          "pieType": "pie"
+        }
+      },
+      {
+        "id": 6,
+        "title": "CRDT Merges",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+        "targets": [
+          {
+            "expr": "rate(topgun_crdt_merges_total{node_id=~\"$node\"}[1m])",
+            "legendFormat": "{{crdt_type}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ops",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        }
+      },
+      {
+        "id": 7,
+        "title": "Search Performance",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(topgun_search_duration_seconds_bucket{node_id=~\"$node\"}[5m]))",
+            "legendFormat": "p95 - {{search_type}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        }
+      },
+      {
+        "id": 8,
+        "title": "Sync Operations",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+        "targets": [
+          {
+            "expr": "rate(topgun_sync_operations_total{node_id=~\"$node\"}[1m])",
+            "legendFormat": "{{type}} - {{status}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ops",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        }
+      },
+      {
+        "id": 9,
+        "title": "Memory Usage",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 8, "x": 0, "y": 24 },
+        "targets": [
+          {
+            "expr": "topgun_nodejs_heap_size_used_bytes",
+            "legendFormat": "Heap Used"
+          },
+          {
+            "expr": "topgun_nodejs_heap_size_total_bytes",
+            "legendFormat": "Heap Total"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "bytes",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        }
+      },
+      {
+        "id": 10,
+        "title": "Conflicts Resolved",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 4, "x": 8, "y": 24 },
+        "targets": [
+          {
+            "expr": "sum(increase(topgun_crdt_conflicts_resolved_total{node_id=~\"$node\"}[1h]))"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "green", "value": 0 },
+                { "color": "yellow", "value": 100 },
+                { "color": "red", "value": 1000 }
+              ]
+            }
+          }
+        },
+        "options": {
+          "colorMode": "value",
+          "graphMode": "none"
+        }
+      },
+      {
+        "id": 11,
+        "title": "CRDT Map Sizes",
+        "type": "bargauge",
+        "gridPos": { "h": 8, "w": 8, "x": 8, "y": 28 },
+        "targets": [
+          {
+            "expr": "topgun_crdt_map_entries{node_id=~\"$node\"}",
+            "legendFormat": "{{map_name}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "green", "value": 0 },
+                { "color": "yellow", "value": 10000 },
+                { "color": "red", "value": 100000 }
+              ]
+            }
+          }
+        },
+        "options": {
+          "orientation": "horizontal",
+          "displayMode": "gradient"
+        }
+      },
+      {
+        "id": 12,
+        "title": "Index Hit Rate",
+        "type": "gauge",
+        "gridPos": { "h": 8, "w": 4, "x": 16, "y": 24 },
+        "targets": [
+          {
+            "expr": "sum(rate(topgun_index_hits_total{node_id=~\"$node\"}[5m])) / (sum(rate(topgun_index_hits_total{node_id=~\"$node\"}[5m])) + sum(rate(topgun_index_misses_total{node_id=~\"$node\"}[5m])))"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "red", "value": 0 },
+                { "color": "yellow", "value": 0.7 },
+                { "color": "green", "value": 0.9 }
+              ]
+            },
+            "min": 0,
+            "max": 1
+          }
+        },
+        "options": {
+          "showThresholdLabels": false,
+          "showThresholdMarkers": true
+        }
+      },
+      {
+        "id": 13,
+        "title": "Storage Operations",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 4, "x": 20, "y": 24 },
+        "targets": [
+          {
+            "expr": "rate(topgun_storage_operations_total{node_id=~\"$node\"}[1m])",
+            "legendFormat": "{{operation}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ops",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        }
+      },
+      {
+        "id": 14,
+        "title": "WebSocket Messages",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+        "targets": [
+          {
+            "expr": "rate(topgun_ws_messages_sent_total{node_id=~\"$node\"}[1m])",
+            "legendFormat": "Sent - {{type}}"
+          },
+          {
+            "expr": "rate(topgun_ws_messages_received_total{node_id=~\"$node\"}[1m])",
+            "legendFormat": "Received - {{type}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ops",
+            "color": {
+              "mode": "palette-classic"
+            }
+          }
+        }
+      },
+      {
+        "id": 15,
+        "title": "Replication Lag",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+        "targets": [
+          {
+            "expr": "topgun_replication_lag_seconds{node_id=~\"$node\"}",
+            "legendFormat": "{{node_id}} -> {{peer_id}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s",
+            "color": {
+              "mode": "palette-classic"
+            },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "color": "green", "value": 0 },
+                { "color": "yellow", "value": 1 },
+                { "color": "red", "value": 5 }
+              ]
+            }
+          }
+        }
+      }
+    ]
+  }
+}

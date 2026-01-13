@@ -48,6 +48,7 @@ import { ConflictResolverHandler } from './handlers/ConflictResolverHandler';
 import { EventJournalService, EventJournalServiceConfig } from './EventJournalService';
 import { SearchCoordinator, SearchConfig, ClusterSearchCoordinator, type ClusterSearchConfig } from './search';
 import { DistributedSubscriptionCoordinator } from './subscriptions/DistributedSubscriptionCoordinator';
+import { createDebugEndpoints, DebugEndpoints } from './debug';
 import type { JournalEvent, JournalEventType, MergeRejection, MergeContext, FullTextIndexConfig } from '@topgunbuild/core';
 
 interface ClientConnection {
@@ -169,6 +170,10 @@ export interface ServerCoordinatorConfig {
     // === Distributed Search Options (Phase 14) ===
     /** Configuration for distributed search across cluster nodes */
     distributedSearch?: ClusterSearchConfig;
+
+    // === Debug Options (Phase 14C) ===
+    /** Enable debug endpoints (/debug/crdt/*, /debug/search/*) (default: false, or TOPGUN_DEBUG=true) */
+    debugEnabled?: boolean;
 }
 
 export class ServerCoordinator {
@@ -265,6 +270,9 @@ export class ServerCoordinator {
 
     // Phase 14.2 - Distributed Live Subscriptions
     private distributedSubCoordinator?: DistributedSubscriptionCoordinator;
+
+    // Phase 14C - Debug Endpoints
+    private debugEndpoints?: DebugEndpoints;
 
     private readonly _nodeId: string;
 
@@ -380,8 +388,25 @@ export class ServerCoordinator {
             }
         }
 
+        // Phase 14C: Create debug endpoints
+        const debugEnabled = config.debugEnabled ?? process.env.TOPGUN_DEBUG === 'true';
+        this.debugEndpoints = createDebugEndpoints({
+            enabled: debugEnabled,
+            getMaps: () => this.maps,
+        });
+        if (debugEnabled) {
+            logger.info('Debug endpoints enabled');
+        }
+
         const metricsPort = config.metricsPort !== undefined ? config.metricsPort : 9090;
         this.metricsServer = createHttpServer(async (req, res) => {
+            // Try debug endpoints first (includes /health, /ready)
+            if (this.debugEndpoints) {
+                const handled = await this.debugEndpoints.handle(req, res);
+                if (handled) return;
+            }
+
+            // Metrics endpoint
             if (req.url === '/metrics') {
                 try {
                     res.setHeader('Content-Type', this.metricsService.getContentType());

@@ -57,3 +57,7 @@ export * from './config';
 
 // Full-Text Search (Phase 11.1)
 export { SearchCoordinator, SearchConfig, ServerSearchResult } from './search';
+
+// Observability (Phase 14C)
+export { PrometheusExporter, getPrometheusExporter, resetPrometheusExporter } from './metrics';
+export { DebugEndpoints, createDebugEndpoints, type DebugEndpointsConfig } from './debug';

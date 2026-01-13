@@ -308,3 +308,27 @@ export type {
   SearchCursorData,
   CursorableResult,
 } from './search';
+
+// Debug utilities exports (Phase 14C)
+export {
+  CRDTDebugger,
+  getCRDTDebugger,
+  resetCRDTDebugger,
+  SearchDebugger,
+  getSearchDebugger,
+  resetSearchDebugger,
+} from './debug';
+export type {
+  CRDTSnapshot,
+  ConflictInfo,
+  DebugStatistics,
+  OperationQueryOptions,
+  BM25DebugInfo,
+  ExactMatchDebugInfo,
+  RRFDebugInfo,
+  VectorDebugInfo,
+  SearchResultDebug,
+  SearchIndexStats,
+  SearchTiming,
+  SearchDebugInfo,
+} from './debug';
