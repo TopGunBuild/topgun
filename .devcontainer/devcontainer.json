@@ -1,0 +1,100 @@
+{
+  "name": "TopGun Development",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "devcontainer",
+  "workspaceFolder": "/workspace",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "ms-azuretools.vscode-docker",
+        "ms-vscode.vscode-typescript-next",
+        "bradlc.vscode-tailwindcss",
+        "streetsidesoftware.code-spell-checker",
+        "eamodio.gitlens",
+        "usernamehw.errorlens",
+        "vitest.explorer"
+      ],
+      "settings": {
+        "typescript.tsdk": "node_modules/typescript/lib",
+        "typescript.enablePromptUseWorkspaceTsdk": true,
+        "eslint.validate": ["typescript", "typescriptreact"],
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "editor.codeActionsOnSave": {
+          "source.fixAll.eslint": "explicit"
+        },
+        "files.exclude": {
+          "**/node_modules": true,
+          "**/dist": true,
+          "**/.turbo": true
+        },
+        "search.exclude": {
+          "**/node_modules": true,
+          "**/dist": true,
+          "**/coverage": true
+        },
+        "terminal.integrated.defaultProfile.linux": "zsh"
+      }
+    },
+    "codespaces": {
+      "openFiles": ["README.md", "CLAUDE.md"]
+    }
+  },
+
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+
+  "forwardPorts": [8080, 5432, 3001, 9090, 3000, 9091],
+  "portsAttributes": {
+    "8080": {
+      "label": "TopGun Server",
+      "onAutoForward": "notify"
+    },
+    "5432": {
+      "label": "PostgreSQL",
+      "onAutoForward": "silent"
+    },
+    "3001": {
+      "label": "Admin UI",
+      "onAutoForward": "openBrowser"
+    },
+    "9090": {
+      "label": "Prometheus",
+      "onAutoForward": "silent"
+    },
+    "3000": {
+      "label": "Grafana",
+      "onAutoForward": "silent"
+    },
+    "9091": {
+      "label": "Metrics",
+      "onAutoForward": "silent"
+    }
+  },
+
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "20",
+      "nodeGypDependencies": true
+    },
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "dockerDashComposeVersion": "v2"
+    },
+    "ghcr.io/devcontainers/features/git:1": {
+      "version": "latest"
+    }
+  },
+
+  "containerEnv": {
+    "STORAGE_MODE": "postgres",
+    "DB_HOST": "postgres",
+    "DB_PORT": "5432",
+    "DB_USER": "topgun",
+    "DB_PASSWORD": "topgun_dev",
+    "DB_NAME": "topgun"
+  },
+
+  "remoteUser": "node"
+}

@@ -1,43 +1,250 @@
+# docker-compose.yml (root of project)
 version: '3.8'
 
 services:
-  # PostgreSQL Database
+  # ============================================================================
+  # BASE SERVICES (always available)
+  # ============================================================================
+
   postgres:
-    image: postgres:15-alpine
-    container_name: topgun-postgres
+    image: postgres:16-alpine
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres_password
-      POSTGRES_DB: topgun
+      POSTGRES_USER: ${DB_USER:-topgun}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-topgun_dev}
+      POSTGRES_DB: ${DB_NAME:-topgun}
     ports:
-      - "5433:5432"
+      - "${DB_PORT:-5432}:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql/data
+      - ./deploy/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-topgun}"]
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - topgun
 
-  # TopGun Server
   server:
-    build: .
-    container_name: topgun-server
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.server
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+      - "${METRICS_PORT:-9091}:9091"
+    environment:
+      NODE_ENV: production
+      STORAGE_MODE: postgres
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-topgun}
+      DB_PASSWORD: ${DB_PASSWORD:-topgun_dev}
+      DB_NAME: ${DB_NAME:-topgun}
+      SERVER_PORT: 8080
+      METRICS_PORT: 9091
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9091/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - topgun
+
+  # ============================================================================
+  # PROFILE: admin
+  # ============================================================================
+
+  admin-ui:
+    build:
+      context: .
+      dockerfile: apps/admin-dashboard/Dockerfile
     ports:
-      - "8080:8080"
+      - "3001:3000"
     environment:
-      NODE_ENV: production
-      # Connect to the postgres service defined above
+      VITE_TOPGUN_SERVER_URL: ws://localhost:8080
+      VITE_TOPGUN_METRICS_URL: http://localhost:9091
+    profiles: ["admin", "all"]
+    depends_on:
+      - server
+    networks:
+      - topgun
+
+  # ============================================================================
+  # PROFILE: monitoring
+  # ============================================================================
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    profiles: ["monitoring", "all"]
+    depends_on:
+      - server
+    networks:
+      - topgun
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    profiles: ["monitoring", "all"]
+    depends_on:
+      - prometheus
+    networks:
+      - topgun
+
+  # ============================================================================
+  # PROFILE: dbtools
+  # ============================================================================
+
+  dbgate:
+    image: dbgate/dbgate:latest
+    ports:
+      - "3002:3000"
+    environment:
+      CONNECTIONS: |
+        {
+          "topgun-postgres": {
+            "engine": "postgres@dbgate-plugin-postgres",
+            "server": "postgres",
+            "port": 5432,
+            "user": "${DB_USER:-topgun}",
+            "password": "${DB_PASSWORD:-topgun_dev}",
+            "database": "${DB_NAME:-topgun}"
+          }
+        }
+    profiles: ["dbtools", "all"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - topgun
+
+  # ============================================================================
+  # PROFILE: k6 (load testing)
+  # ============================================================================
+
+  k6:
+    build:
+      context: ./tests/k6
+      dockerfile: Dockerfile.k6
+    volumes:
+      - ./tests/k6:/scripts:ro
+      - ./tests/k6/results:/results
+    environment:
+      K6_OUT: json=/results/output.json
+      SERVER_URL: ws://server:8080
+    profiles: ["k6"]
+    depends_on:
+      server:
+        condition: service_healthy
+    networks:
+      - topgun
+
+  # ============================================================================
+  # PROFILE: cluster (3-node cluster for testing)
+  # ============================================================================
+
+  node-1:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.server
+    ports:
+      - "10001:8080"
+      - "11001:8081"
+    environment:
+      NODE_ID: node-1
+      STORAGE_MODE: postgres
       DB_HOST: postgres
-      DB_PORT: 5432
-      DB_USER: postgres
-      DB_PASSWORD: postgres_password
-      DB_NAME: topgun
-    restart: unless-stopped
+      DB_USER: ${DB_USER:-topgun}
+      DB_PASSWORD: ${DB_PASSWORD:-topgun_dev}
+      DB_NAME: ${DB_NAME:-topgun}
+      SERVER_PORT: 8080
+      CLUSTER_ENABLED: "true"
+      CLUSTER_PORT: 8081
+      CLUSTER_SEEDS: ws://node-2:8081,ws://node-3:8081
+    profiles: ["cluster"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - topgun
+
+  node-2:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.server
+    ports:
+      - "10002:8080"
+      - "11002:8081"
+    environment:
+      NODE_ID: node-2
+      STORAGE_MODE: postgres
+      DB_HOST: postgres
+      DB_USER: ${DB_USER:-topgun}
+      DB_PASSWORD: ${DB_PASSWORD:-topgun_dev}
+      DB_NAME: ${DB_NAME:-topgun}
+      SERVER_PORT: 8080
+      CLUSTER_ENABLED: "true"
+      CLUSTER_PORT: 8081
+      CLUSTER_SEEDS: ws://node-1:8081,ws://node-3:8081
+    profiles: ["cluster"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - topgun
+
+  node-3:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.server
+    ports:
+      - "10003:8080"
+      - "11003:8081"
+    environment:
+      NODE_ID: node-3
+      STORAGE_MODE: postgres
+      DB_HOST: postgres
+      DB_USER: ${DB_USER:-topgun}
+      DB_PASSWORD: ${DB_PASSWORD:-topgun_dev}
+      DB_NAME: ${DB_NAME:-topgun}
+      SERVER_PORT: 8080
+      CLUSTER_ENABLED: "true"
+      CLUSTER_PORT: 8081
+      CLUSTER_SEEDS: ws://node-1:8081,ws://node-2:8081
+    profiles: ["cluster"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - topgun
 
 volumes:
-  postgres_data:
+  postgres-data:
+  prometheus-data:
+  grafana-data:
 
+networks:
+  topgun:
+    driver: bridge

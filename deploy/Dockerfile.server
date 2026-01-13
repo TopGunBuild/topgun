@@ -1,0 +1,53 @@
+# deploy/Dockerfile.server
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Install pnpm
+RUN npm install -g pnpm@10.13.1
+
+# Copy package files
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/core/package.json ./packages/core/
+COPY packages/server/package.json ./packages/server/
+
+# Install dependencies
+RUN pnpm install --frozen-lockfile
+
+# Copy source code
+COPY packages/core ./packages/core
+COPY packages/server ./packages/server
+COPY tsconfig.json ./
+
+# Build
+RUN pnpm build
+
+# Production image
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install pnpm for production deps
+RUN npm install -g pnpm@10.13.1
+
+# Copy built packages
+COPY --from=builder /app/packages/core/dist ./packages/core/dist
+COPY --from=builder /app/packages/core/package.json ./packages/core/
+COPY --from=builder /app/packages/server/dist ./packages/server/dist
+COPY --from=builder /app/packages/server/package.json ./packages/server/
+
+# Copy root package files
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+
+# Install production dependencies only
+RUN pnpm install --prod --frozen-lockfile
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD wget -q --spider http://localhost:9091/health || exit 1
+
+# Expose ports
+EXPOSE 8080 9091 8081
+
+# Start server
+CMD ["node", "packages/server/dist/index.js"]

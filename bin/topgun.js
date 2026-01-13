@@ -77,4 +77,30 @@ program
   .option('--map <name>', 'Map name')
   .action(require('./commands/debug/search'));
 
+// Docker commands
+const docker = require('./commands/docker');
+
+program
+  .command('docker:start')
+  .description('Start Docker services')
+  .option('--with <profiles>', 'Profiles to start (admin,monitoring,dbtools,k6,cluster,all)')
+  .action(docker.start);
+
+program
+  .command('docker:stop')
+  .description('Stop all Docker services')
+  .action(docker.stop);
+
+program
+  .command('docker:status')
+  .description('Show Docker service status')
+  .action(docker.status);
+
+program
+  .command('docker:logs')
+  .description('Show Docker logs')
+  .option('-s, --service <name>', 'Service name')
+  .option('-f, --follow', 'Follow logs')
+  .action(docker.logs);
+
 program.parse();

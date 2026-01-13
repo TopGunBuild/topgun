@@ -1,0 +1,31 @@
+# tests/k6/Dockerfile.k6
+FROM golang:1.22-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache git
+
+# Install xk6
+RUN go install go.k6.io/xk6/cmd/xk6@latest
+
+# Build k6 with WebSocket and msgpack extensions
+RUN xk6 build \
+    --with github.com/grafana/xk6-websockets \
+    --with github.com/tango-tango/xk6-msgpack \
+    --output /k6
+
+# Production image
+FROM alpine:3.19
+
+# Install runtime dependencies
+RUN apk add --no-cache ca-certificates
+
+# Copy k6 binary
+COPY --from=builder /k6 /usr/local/bin/k6
+
+# Create results directory
+RUN mkdir -p /results
+
+WORKDIR /scripts
+
+ENTRYPOINT ["k6"]
+CMD ["run", "--help"]
