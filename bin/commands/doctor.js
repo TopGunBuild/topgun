@@ -67,7 +67,8 @@ const checks = [
         if (process.platform === 'win32') {
           execSync('netstat -ano | findstr :8080', { encoding: 'utf8' });
         } else {
-          execSync('lsof -i :8080 2>/dev/null || ss -ltn | grep :8080', { encoding: 'utf8' });
+          // Use lsof on macOS/Linux; netstat as fallback for minimal Linux systems
+          execSync('lsof -i :8080 2>/dev/null || netstat -tln 2>/dev/null | grep :8080', { encoding: 'utf8' });
         }
         return {
           pass: false,

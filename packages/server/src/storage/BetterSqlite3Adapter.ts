@@ -47,6 +47,12 @@ export interface BetterSqlite3Config {
 const DEFAULT_TABLE_NAME = 'topgun_maps';
 const TABLE_NAME_REGEX = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 
+/**
+ * Marker used in ts_node_id to distinguish ORMap values from LWW records.
+ * This allows storing both types in the same table structure.
+ */
+const ORMAP_MARKER = '__ORMAP__';
+
 function validateTableName(name: string): void {
   if (!TABLE_NAME_REGEX.test(name)) {
     throw new Error(
@@ -182,73 +188,30 @@ export class BetterSqlite3Adapter implements IServerStorage {
   }
 
   async store(mapName: string, key: string, record: StorageValue<any>): Promise<void> {
-    let value: string;
-    let tsMillis: number;
-    let tsCounter: number;
-    let tsNodeId: string;
-    let isDeleted: number;
-
-    if (this.isORMapValue(record)) {
-      // Store ORMap data
-      // Use special marker in ts_node_id to distinguish from LWW data
-      value = JSON.stringify(record);
-      tsMillis = 0;
-      tsCounter = 0;
-      tsNodeId = '__ORMAP__';
-      isDeleted = 0;
-    } else {
-      // LWWRecord
-      const lww = record as LWWRecord<any>;
-      value = JSON.stringify(lww.value);
-      tsMillis = lww.timestamp.millis;
-      tsCounter = lww.timestamp.counter;
-      tsNodeId = lww.timestamp.nodeId;
-      isDeleted = lww.value === null ? 1 : 0;
-    }
-
+    const prepared = this.prepareRecordForStorage(record);
     this.statements.store.run(
       mapName,
       key,
-      value,
-      tsMillis,
-      tsCounter,
-      tsNodeId,
-      isDeleted
+      prepared.value,
+      prepared.tsMillis,
+      prepared.tsCounter,
+      prepared.tsNodeId,
+      prepared.isDeleted
     );
   }
 
   async storeAll(mapName: string, records: Map<string, StorageValue<any>>): Promise<void> {
     const storeMany = this.db.transaction((recs: Map<string, StorageValue<any>>) => {
       for (const [key, record] of recs) {
-        let value: string;
-        let tsMillis: number;
-        let tsCounter: number;
-        let tsNodeId: string;
-        let isDeleted: number;
-
-        if (this.isORMapValue(record)) {
-          value = JSON.stringify(record);
-          tsMillis = 0;
-          tsCounter = 0;
-          tsNodeId = '__ORMAP__';
-          isDeleted = 0;
-        } else {
-          const lww = record as LWWRecord<any>;
-          value = JSON.stringify(lww.value);
-          tsMillis = lww.timestamp.millis;
-          tsCounter = lww.timestamp.counter;
-          tsNodeId = lww.timestamp.nodeId;
-          isDeleted = lww.value === null ? 1 : 0;
-        }
-
+        const prepared = this.prepareRecordForStorage(record);
         this.statements.store.run(
           mapName,
           key,
-          value,
-          tsMillis,
-          tsCounter,
-          tsNodeId,
-          isDeleted
+          prepared.value,
+          prepared.tsMillis,
+          prepared.tsCounter,
+          prepared.tsNodeId,
+          prepared.isDeleted
         );
       }
     });
@@ -266,7 +229,7 @@ export class BetterSqlite3Adapter implements IServerStorage {
   }
 
   private mapRowToRecord(row: any): StorageValue<any> {
-    if (row.ts_node_id === '__ORMAP__') {
+    if (row.ts_node_id === ORMAP_MARKER) {
       // It's an ORMap value (ORMapValue or ORMapTombstones)
       return JSON.parse(row.value) as StorageValue<any>;
     }
@@ -284,6 +247,37 @@ export class BetterSqlite3Adapter implements IServerStorage {
 
   private isORMapValue(record: any): boolean {
     return record && typeof record === 'object' && (record.type === 'OR' || record.type === 'OR_TOMBSTONES');
+  }
+
+  /**
+   * Prepares a storage record for database insertion.
+   * Handles both LWWRecord and ORMap value types.
+   */
+  private prepareRecordForStorage(record: StorageValue<any>): {
+    value: string;
+    tsMillis: number;
+    tsCounter: number;
+    tsNodeId: string;
+    isDeleted: number;
+  } {
+    if (this.isORMapValue(record)) {
+      return {
+        value: JSON.stringify(record),
+        tsMillis: 0,
+        tsCounter: 0,
+        tsNodeId: ORMAP_MARKER,
+        isDeleted: 0,
+      };
+    }
+
+    const lww = record as LWWRecord<any>;
+    return {
+      value: JSON.stringify(lww.value),
+      tsMillis: lww.timestamp.millis,
+      tsCounter: lww.timestamp.counter,
+      tsNodeId: lww.timestamp.nodeId,
+      isDeleted: lww.value === null ? 1 : 0,
+    };
   }
 
   // Additional utility methods
