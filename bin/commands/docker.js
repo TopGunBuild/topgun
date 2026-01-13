@@ -74,7 +74,7 @@ async function start(options) {
 
 async function stop() {
   console.log(chalk.bold('\n Stopping all Docker services...\n'));
-  execSync('docker compose --profile all down', { stdio: 'inherit' });
+  execSync('docker compose down --remove-orphans', { stdio: 'inherit' });
   console.log(chalk.green('\n All services stopped.\n'));
 }
 

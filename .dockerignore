@@ -32,6 +32,10 @@ __tests__/
 # Project specific
 logs/
 docs/
+tests/k6/results/
+.devcontainer/
+apps/*/node_modules
+examples/*/node_modules
 
 # Keep deploy/ and examples/ - needed for Dockerfile.client
 # deploy/
