@@ -32,22 +32,17 @@ services:
       dockerfile: deploy/Dockerfile.server
     ports:
       - "${SERVER_PORT:-8080}:8080"
-      - "${METRICS_PORT:-9091}:9091"
+      - "${CLUSTER_PORT:-9080}:9080"
     environment:
       NODE_ENV: production
-      STORAGE_MODE: postgres
-      DB_HOST: postgres
-      DB_PORT: 5432
-      DB_USER: ${DB_USER:-topgun}
-      DB_PASSWORD: ${DB_PASSWORD:-topgun_dev}
-      DB_NAME: ${DB_NAME:-topgun}
-      SERVER_PORT: 8080
-      METRICS_PORT: 9091
+      TOPGUN_PORT: 8080
+      TOPGUN_CLUSTER_PORT: 9080
+      DATABASE_URL: postgres://${DB_USER:-topgun}:${DB_PASSWORD:-topgun_dev}@postgres:5432/${DB_NAME:-topgun}
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9091/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -171,18 +166,13 @@ services:
       dockerfile: deploy/Dockerfile.server
     ports:
       - "10001:8080"
-      - "11001:8081"
+      - "11001:9080"
     environment:
       NODE_ID: node-1
-      STORAGE_MODE: postgres
-      DB_HOST: postgres
-      DB_USER: ${DB_USER:-topgun}
-      DB_PASSWORD: ${DB_PASSWORD:-topgun_dev}
-      DB_NAME: ${DB_NAME:-topgun}
-      SERVER_PORT: 8080
-      CLUSTER_ENABLED: "true"
-      CLUSTER_PORT: 8081
-      CLUSTER_SEEDS: ws://node-2:8081,ws://node-3:8081
+      TOPGUN_PORT: 8080
+      TOPGUN_CLUSTER_PORT: 9080
+      TOPGUN_PEERS: node-2:9080,node-3:9080
+      DATABASE_URL: postgres://${DB_USER:-topgun}:${DB_PASSWORD:-topgun_dev}@postgres:5432/${DB_NAME:-topgun}
     profiles: ["cluster"]
     depends_on:
       postgres:
@@ -196,18 +186,13 @@ services:
       dockerfile: deploy/Dockerfile.server
     ports:
       - "10002:8080"
-      - "11002:8081"
+      - "11002:9080"
     environment:
       NODE_ID: node-2
-      STORAGE_MODE: postgres
-      DB_HOST: postgres
-      DB_USER: ${DB_USER:-topgun}
-      DB_PASSWORD: ${DB_PASSWORD:-topgun_dev}
-      DB_NAME: ${DB_NAME:-topgun}
-      SERVER_PORT: 8080
-      CLUSTER_ENABLED: "true"
-      CLUSTER_PORT: 8081
-      CLUSTER_SEEDS: ws://node-1:8081,ws://node-3:8081
+      TOPGUN_PORT: 8080
+      TOPGUN_CLUSTER_PORT: 9080
+      TOPGUN_PEERS: node-1:9080,node-3:9080
+      DATABASE_URL: postgres://${DB_USER:-topgun}:${DB_PASSWORD:-topgun_dev}@postgres:5432/${DB_NAME:-topgun}
     profiles: ["cluster"]
     depends_on:
       postgres:
@@ -221,18 +206,13 @@ services:
       dockerfile: deploy/Dockerfile.server
     ports:
       - "10003:8080"
-      - "11003:8081"
+      - "11003:9080"
     environment:
       NODE_ID: node-3
-      STORAGE_MODE: postgres
-      DB_HOST: postgres
-      DB_USER: ${DB_USER:-topgun}
-      DB_PASSWORD: ${DB_PASSWORD:-topgun_dev}
-      DB_NAME: ${DB_NAME:-topgun}
-      SERVER_PORT: 8080
-      CLUSTER_ENABLED: "true"
-      CLUSTER_PORT: 8081
-      CLUSTER_SEEDS: ws://node-1:8081,ws://node-2:8081
+      TOPGUN_PORT: 8080
+      TOPGUN_CLUSTER_PORT: 9080
+      TOPGUN_PEERS: node-1:9080,node-2:9080
+      DATABASE_URL: postgres://${DB_USER:-topgun}:${DB_PASSWORD:-topgun_dev}@postgres:5432/${DB_NAME:-topgun}
     profiles: ["cluster"]
     depends_on:
       postgres:

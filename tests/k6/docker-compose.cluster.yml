@@ -24,21 +24,16 @@ services:
     hostname: node-1
     ports:
       - "8081:8080"
-      - "9081:9090"
+      - "9081:9080"
     environment:
       - NODE_ID=node-1
-      - PORT=8080
-      - CLUSTER_PORT=9090
-      - HOST=node-1
-      - PEERS=
-      - REPLICATION_ENABLED=true
-      - DEFAULT_CONSISTENCY=EVENTUAL
-      - LOG_LEVEL=info
-      - JWT_SECRET=${JWT_SECRET:-test-secret-key-for-k6-cluster-tests}
+      - TOPGUN_PORT=8080
+      - TOPGUN_CLUSTER_PORT=9080
+      - TOPGUN_PEERS=
     networks:
       - topgun-cluster
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -54,24 +49,19 @@ services:
     hostname: node-2
     ports:
       - "8082:8080"
-      - "9082:9090"
+      - "9082:9080"
     environment:
       - NODE_ID=node-2
-      - PORT=8080
-      - CLUSTER_PORT=9090
-      - HOST=node-2
-      - PEERS=node-1:9090
-      - REPLICATION_ENABLED=true
-      - DEFAULT_CONSISTENCY=EVENTUAL
-      - LOG_LEVEL=info
-      - JWT_SECRET=${JWT_SECRET:-test-secret-key-for-k6-cluster-tests}
+      - TOPGUN_PORT=8080
+      - TOPGUN_CLUSTER_PORT=9080
+      - TOPGUN_PEERS=node-1:9080
     depends_on:
       node-1:
         condition: service_healthy
     networks:
       - topgun-cluster
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -87,17 +77,12 @@ services:
     hostname: node-3
     ports:
       - "8083:8080"
-      - "9083:9090"
+      - "9083:9080"
     environment:
       - NODE_ID=node-3
-      - PORT=8080
-      - CLUSTER_PORT=9090
-      - HOST=node-3
-      - PEERS=node-1:9090,node-2:9090
-      - REPLICATION_ENABLED=true
-      - DEFAULT_CONSISTENCY=EVENTUAL
-      - LOG_LEVEL=info
-      - JWT_SECRET=${JWT_SECRET:-test-secret-key-for-k6-cluster-tests}
+      - TOPGUN_PORT=8080
+      - TOPGUN_CLUSTER_PORT=9080
+      - TOPGUN_PEERS=node-1:9080,node-2:9080
     depends_on:
       node-1:
         condition: service_healthy
@@ -106,7 +91,7 @@ services:
     networks:
       - topgun-cluster
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -122,17 +107,12 @@ services:
     hostname: node-4
     ports:
       - "8084:8080"
-      - "9084:9090"
+      - "9084:9080"
     environment:
       - NODE_ID=node-4
-      - PORT=8080
-      - CLUSTER_PORT=9090
-      - HOST=node-4
-      - PEERS=node-1:9090,node-2:9090,node-3:9090
-      - REPLICATION_ENABLED=true
-      - DEFAULT_CONSISTENCY=EVENTUAL
-      - LOG_LEVEL=info
-      - JWT_SECRET=${JWT_SECRET:-test-secret-key-for-k6-cluster-tests}
+      - TOPGUN_PORT=8080
+      - TOPGUN_CLUSTER_PORT=9080
+      - TOPGUN_PEERS=node-1:9080,node-2:9080,node-3:9080
     profiles:
       - scale  # Only starts with --profile scale or explicit service name
     depends_on:
@@ -145,7 +125,7 @@ services:
     networks:
       - topgun-cluster
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 5s
       timeout: 3s
       retries: 5
