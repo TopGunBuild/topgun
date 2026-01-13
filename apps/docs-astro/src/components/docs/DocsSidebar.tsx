@@ -183,6 +183,7 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                         <SubItem to="/docs/reference/client" currentPath={currentPath}>Client API</SubItem>
                         <SubItem to="/docs/reference/data-structures" currentPath={currentPath}>Data Structures API</SubItem>
                         <SubItem to="/docs/reference/server" currentPath={currentPath}>Server API</SubItem>
+                        <SubItem to="/docs/reference/cli" currentPath={currentPath}>CLI Reference</SubItem>
                         <SubItem to="/docs/reference/adapter" currentPath={currentPath}>Adapter API</SubItem>
                         <SubItem to="/docs/reference/react-hooks" currentPath={currentPath}>React Hooks</SubItem>
                         <SubItem to="/docs/reference/protocol" currentPath={currentPath}>Protocol</SubItem>

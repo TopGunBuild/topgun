@@ -89,6 +89,29 @@ const db = new TopGun({
   />
 </div>
 
+<div className="mb-10 not-prose">
+  <h3 className="text-lg font-semibold text-foreground mb-2">Server Development</h3>
+  <p className="text-neutral-600 dark:text-neutral-300 mb-4">
+    To run the TopGun server locally for development or self-hosting, use the TopGun CLI. It provides a zero-Docker development mode with SQLite storage.
+  </p>
+  <CodeBlock
+    title="terminal"
+    code={`# Clone repository and setup (2 minutes)
+git clone https://github.com/topgunbuild/topgun.git
+cd topgun
+npx topgun setup --yes
+npx topgun dev
+
+# Server running at http://localhost:8080`}
+  />
+  <div className="p-4 mt-4 rounded-lg bg-green-500/10 border border-green-500/20 flex gap-3">
+    <div className="mt-1">
+      <div className="w-4 h-4 rounded-full bg-green-500 flex items-center justify-center text-white text-[10px] font-bold">i</div>
+    </div>
+    <span className="text-sm text-neutral-700 dark:text-neutral-300"><span className="font-semibold text-green-600 dark:text-green-400">No Docker required!</span> The CLI defaults to SQLite storage for instant development. See the <a href="/docs/reference/cli" className="underline">CLI Reference</a> for all commands.</span>
+  </div>
+</div>
+
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
   <a href="/docs/comparison" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Previous</span>

@@ -1,0 +1,398 @@
+---
+title: CLI Reference
+description: Complete reference for the TopGun CLI - unified command-line interface for development, testing, and cluster management.
+order: 22.5
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Terminal, Stethoscope, Wrench, Play, TestTube, Settings, Server, Bug, Search } from 'lucide-react';
+
+export const doctorOutput = `TopGun Environment Check
+
+  ✓ Node.js: v20.10.0 (OK)
+  ✓ pnpm: 10.13.1 (OK)
+  ○ Docker: Not installed (optional for SQLite mode)
+  ✓ Port 8080: Available
+  ✓ Dependencies: Installed
+  ✓ Build: Built
+  ✓ .env file: Present
+
+All checks passed! Ready to run.`;
+
+export const setupOutput = `TopGun Setup Wizard
+
+[1/4] Creating .env file...
+  ✓ .env created
+
+[2/4] Installing dependencies...
+  ✓ Dependencies installed
+
+[3/4] Building packages...
+  ✓ Build complete
+
+[4/4] Skipping database (SQLite mode)
+  ✓ SQLite will be used
+
+Setup complete!
+
+  Run:
+    npx topgun dev
+
+  Server will start at http://localhost:8080`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Reference</span>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">CLI</span>
+</div>
+
+# CLI Reference
+
+The TopGun CLI provides a unified interface for development, testing, and cluster management. It drastically simplifies the developer experience by reducing onboarding from 30-60 minutes to under 5 minutes.
+
+<div className="bg-green-50 dark:bg-green-900/20 border border-green-100 dark:border-green-800 rounded-xl p-6 mb-6 not-prose">
+  <h3 className="text-lg font-semibold text-green-800 dark:text-green-300 mb-2">Zero Docker Required</h3>
+  <span className="text-green-700 dark:text-green-400">The CLI defaults to SQLite storage, allowing you to start developing immediately without Docker or PostgreSQL setup.</span>
+</div>
+
+## Quick Start
+
+<div className="not-prose">
+  <CodeBlock
+    title="terminal"
+    language="bash"
+    code={`# Clone and setup (2 minutes)
+git clone https://github.com/topgunbuild/topgun.git
+cd topgun
+npx topgun setup --yes
+npx topgun dev
+
+# Server running at http://localhost:8080`}
+  />
+</div>
+
+## Commands
+
+### topgun doctor
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Stethoscope className="w-6 h-6 text-blue-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Check your environment for required dependencies and configuration.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code="npx topgun doctor" />
+</div>
+
+**Checks performed:**
+
+| Check | Required | Description |
+|-------|----------|-------------|
+| Node.js | Yes | Version 18 or higher |
+| pnpm | Yes | Version 10.13.1 or higher |
+| Docker | No | Optional (required for PostgreSQL mode) |
+| Port 8080 | Yes | Default server port must be available |
+| Dependencies | Yes | node_modules must be installed |
+| Build | Yes | packages/server/dist must exist |
+| .env file | Yes | Environment configuration |
+
+**Example output:**
+
+<div className="not-prose">
+  <CodeBlock title="output" code={doctorOutput} />
+</div>
+
+### topgun setup
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Wrench className="w-6 h-6 text-purple-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Interactive project setup wizard.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={`# Interactive mode
+npx topgun setup
+
+# Non-interactive with defaults (SQLite)
+npx topgun setup --yes
+
+# Specify storage backend
+npx topgun setup --storage postgres
+npx topgun setup --storage sqlite
+npx topgun setup --storage memory`} />
+</div>
+
+**Options:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-y, --yes` | Skip prompts, use defaults | `false` |
+| `--storage <type>` | Storage backend: `sqlite`, `postgres`, `memory` | `sqlite` |
+
+**Interactive mode prompts:**
+
+1. **Storage backend** - Choose between SQLite (no Docker), PostgreSQL (production), or Memory (testing)
+2. **k6 installation** - Optional load testing tools
+3. **Dev Container** - VS Code/Codespaces configuration
+
+**Example output:**
+
+<div className="not-prose">
+  <CodeBlock title="output" code={setupOutput} />
+</div>
+
+### topgun dev
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Play className="w-6 h-6 text-green-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Start the development server with live reload.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={`# Start with defaults
+npx topgun dev
+
+# Custom port
+npx topgun dev --port 3000
+
+# Skip database startup (PostgreSQL mode)
+npx topgun dev --no-db`} />
+</div>
+
+**Options:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-p, --port <port>` | Server port | `8080` |
+| `--no-db` | Skip database startup | `false` |
+
+The dev server uses `tsx watch` for automatic reloading when source files change.
+
+### topgun test
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <TestTube className="w-6 h-6 text-yellow-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Run tests for specific packages or the entire project.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={`# Run all tests
+npx topgun test
+
+# Package-specific tests
+npx topgun test core
+npx topgun test client
+npx topgun test server
+npx topgun test react
+npx topgun test adapters
+
+# E2E tests
+npx topgun test e2e
+
+# k6 load tests
+npx topgun test k6:smoke
+npx topgun test k6:throughput
+
+# With coverage
+npx topgun test core --coverage`} />
+</div>
+
+**Available scopes:**
+
+| Scope | Package | Description |
+|-------|---------|-------------|
+| `core` | `@topgunbuild/core` | CRDT, HLC, MerkleTree |
+| `client` | `@topgunbuild/client` | Browser/Node SDK |
+| `server` | `@topgunbuild/server` | WebSocket server |
+| `react` | `@topgunbuild/react` | React hooks |
+| `adapters` | `@topgunbuild/adapters` | Storage adapters |
+| `e2e` | - | End-to-end tests |
+| `k6:smoke` | - | Quick load test |
+| `k6:throughput` | - | Full throughput test |
+
+### topgun config
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Settings className="w-6 h-6 text-neutral-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Manage project configuration.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={`# Show current configuration
+npx topgun config --show
+
+# Set transport mode
+npx topgun config --transport ws
+npx topgun config --transport http
+
+# Set storage backend
+npx topgun config --storage sqlite
+npx topgun config --storage postgres`} />
+</div>
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--show` | Display current configuration |
+| `--transport <type>` | Set transport: `ws`, `http` |
+| `--storage <type>` | Set storage: `sqlite`, `postgres`, `memory` |
+
+## Cluster Commands
+
+### topgun cluster:start
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Server className="w-6 h-6 text-blue-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Start a local multi-node cluster for testing.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={`# Start 3-node cluster (default)
+npx topgun cluster:start
+
+# Custom node count
+npx topgun cluster:start --nodes 5`} />
+</div>
+
+**Options:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-n, --nodes <count>` | Number of cluster nodes | `3` |
+
+### topgun cluster:stop
+
+Stop all running cluster nodes.
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code="npx topgun cluster:stop" />
+</div>
+
+### topgun cluster:status
+
+Display the status of running cluster nodes.
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code="npx topgun cluster:status" />
+</div>
+
+## Debug Commands
+
+### topgun debug:crdt
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Bug className="w-6 h-6 text-red-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">CRDT debugging and inspection tools.</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={`# Export CRDT state
+npx topgun debug:crdt export --map users --output users.json
+
+# Replay operations
+npx topgun debug:crdt replay --map users
+
+# Compare states
+npx topgun debug:crdt diff --map users`} />
+</div>
+
+**Actions:**
+
+| Action | Description |
+|--------|-------------|
+| `export` | Export map state to JSON |
+| `replay` | Replay operations for debugging |
+| `diff` | Compare states between nodes |
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--map <name>` | Target map name |
+| `--output <file>` | Output file path |
+
+### topgun search:explain
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Search className="w-6 h-6 text-orange-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Explain search query scoring (BM25/RRF breakdown).</span>
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={`npx topgun search:explain --query "example search" --map documents`} />
+</div>
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--query <query>` | Search query to explain |
+| `--map <name>` | Target map name |
+
+## Environment Variables
+
+The CLI respects the following environment variables (set in `.env`):
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `STORAGE_MODE` | Storage backend | `sqlite` |
+| `DB_PATH` | SQLite file path | `./topgun.db` |
+| `SERVER_PORT` | Server port | `8080` |
+| `DATABASE_URL` | PostgreSQL connection string | - |
+| `DB_HOST` | PostgreSQL host | `localhost` |
+| `DB_PORT` | PostgreSQL port | `5432` |
+| `DB_USER` | PostgreSQL user | `topgun` |
+| `DB_PASSWORD` | PostgreSQL password | - |
+| `DB_NAME` | PostgreSQL database | `topgun` |
+
+## Storage Modes
+
+### SQLite (Default)
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 mb-6 not-prose">
+  <h3 className="text-lg font-semibold text-blue-800 dark:text-blue-300 mb-2">Recommended for Development</h3>
+  <span className="text-blue-700 dark:text-blue-400">SQLite requires no external dependencies and is perfect for local development, prototyping, and CI/CD testing.</span>
+</div>
+
+**Limitations:**
+- Single-node only (no clustering)
+- Lower performance than PostgreSQL
+- Max ~500K records recommended
+
+### PostgreSQL
+
+Recommended for production. Requires Docker or external PostgreSQL instance.
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={`# Setup with PostgreSQL
+npx topgun setup --storage postgres
+
+# Requires Docker running
+docker compose up -d postgres`} />
+</div>
+
+### Memory
+
+For testing only. Data is lost on restart.
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code="npx topgun setup --storage memory" />
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/reference/server" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Server API
+    </div>
+  </a>
+  <a href="/docs/reference/adapter" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Adapters <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>
