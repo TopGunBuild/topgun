@@ -49,6 +49,7 @@ import { EventJournalService, EventJournalServiceConfig } from './EventJournalSe
 import { SearchCoordinator, SearchConfig, ClusterSearchCoordinator, type ClusterSearchConfig } from './search';
 import { DistributedSubscriptionCoordinator } from './subscriptions/DistributedSubscriptionCoordinator';
 import { createDebugEndpoints, DebugEndpoints } from './debug';
+import { BootstrapController, createBootstrapController } from './bootstrap';
 import type { JournalEvent, JournalEventType, MergeRejection, MergeContext, FullTextIndexConfig } from '@topgunbuild/core';
 
 interface ClientConnection {
@@ -274,6 +275,9 @@ export class ServerCoordinator {
     // Phase 14C - Debug Endpoints
     private debugEndpoints?: DebugEndpoints;
 
+    // Phase 14D - Bootstrap Controller
+    private bootstrapController: BootstrapController;
+
     private readonly _nodeId: string;
 
     private _actualPort: number = 0;
@@ -398,9 +402,68 @@ export class ServerCoordinator {
             logger.info('Debug endpoints enabled');
         }
 
+        // Phase 14D: Create bootstrap controller for setup wizard
+        this.bootstrapController = createBootstrapController();
+        // Provide data accessors for admin API endpoints
+        this.bootstrapController.setDataAccessors({
+            getMaps: () => this.maps,
+            getClusterStatus: () => {
+                // getMembers returns string[] of node IDs
+                const memberIds = this.cluster?.getMembers() || [];
+                const nodes = memberIds.map(nodeId => {
+                    // Count partitions owned by this node
+                    let partitionCount = 0;
+                    if (this.partitionService) {
+                        for (let i = 0; i < 271; i++) {
+                            if (this.partitionService.getPartitionOwner(i) === nodeId) {
+                                partitionCount++;
+                            }
+                        }
+                    }
+
+                    return {
+                        id: nodeId,
+                        address: nodeId, // Node ID is used as address identifier
+                        status: 'healthy' as const,
+                        partitions: Array.from({ length: partitionCount }, (_, i) => i),
+                        connections: this.clients.size,
+                        memory: { used: process.memoryUsage().heapUsed, total: process.memoryUsage().heapTotal },
+                        uptime: process.uptime(),
+                    };
+                });
+
+                // Generate partition info
+                const partitions: { id: number; owner: string; replicas: string[] }[] = [];
+                if (this.partitionService) {
+                    for (let i = 0; i < 271; i++) {
+                        const owner = this.partitionService.getPartitionOwner(i);
+                        const backups = this.partitionService.getBackups(i);
+                        partitions.push({
+                            id: i,
+                            owner: owner || 'unknown',
+                            replicas: backups,
+                        });
+                    }
+                }
+
+                return {
+                    nodes,
+                    partitions,
+                    isRebalancing: this.partitionService?.getMigrationStatus() !== null,
+                };
+            },
+        });
+        if (this.bootstrapController.isBootstrapMode) {
+            logger.info('Server running in BOOTSTRAP MODE - visit /setup to configure');
+        }
+
         const metricsPort = config.metricsPort !== undefined ? config.metricsPort : 9090;
         this.metricsServer = createHttpServer(async (req, res) => {
-            // Try debug endpoints first (includes /health, /ready)
+            // Try bootstrap controller first (handles /api/status, /api/setup)
+            const bootstrapHandled = await this.bootstrapController.handle(req, res);
+            if (bootstrapHandled) return;
+
+            // Try debug endpoints (includes /health, /ready)
             if (this.debugEndpoints) {
                 const handled = await this.debugEndpoints.handle(req, res);
                 if (handled) return;

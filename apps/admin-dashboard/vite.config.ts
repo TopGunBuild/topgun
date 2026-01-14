@@ -10,6 +10,7 @@ export default defineConfig({
       '@topgunbuild/core': path.resolve(__dirname, '../../packages/core/src/index.ts'),
       '@topgunbuild/client': path.resolve(__dirname, '../../packages/client/src/index.ts'),
       '@topgunbuild/react': path.resolve(__dirname, '../../packages/react/src/index.ts'),
+      '@': path.resolve(__dirname, './src'),
     },
   },
   optimizeDeps: {
