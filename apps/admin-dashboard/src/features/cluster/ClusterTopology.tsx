@@ -1,10 +1,13 @@
-import { useState, useEffect } from 'react';
-import { useQuery } from '@topgunbuild/react';
+import { useState, useEffect, useCallback } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
+import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { Server, Activity, HardDrive, Users, RefreshCw } from 'lucide-react';
+import { Server, Activity, HardDrive, Users, RefreshCw, Loader2 } from 'lucide-react';
+
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:9090';
+const POLL_INTERVAL = 5000; // 5 seconds
 
 interface ClusterNode {
   id: string;
@@ -20,6 +23,24 @@ interface PartitionInfo {
   id: number;
   owner: string;
   replicas: string[];
+}
+
+interface ClusterStatusResponse {
+  nodes: Array<{
+    nodeId: string;
+    address: string;
+    status: 'healthy' | 'suspect' | 'dead';
+    partitionCount: number;
+    connections: number;
+    memory: { used: number; total: number };
+    uptime: number;
+  }>;
+  partitions: Array<{
+    id: number;
+    owner: string;
+    replicas: string[];
+  }>;
+  isRebalancing: boolean;
 }
 
 const TOTAL_PARTITIONS = 271;
@@ -52,44 +73,50 @@ export function ClusterTopology() {
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [nodes, setNodes] = useState<ClusterNode[]>([]);
   const [partitions, setPartitions] = useState<PartitionInfo[]>([]);
-  const [isRebalancing] = useState(false);
+  const [isRebalancing, setIsRebalancing] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // Get cluster status from system maps
-  const { data: clusterData } = useQuery('$sys/cluster');
-  useQuery('$sys/stats'); // Keep subscription active for stats updates
-
-  useEffect(() => {
-    if (clusterData && typeof clusterData === 'object' && !Array.isArray(clusterData)) {
-      const clusterNodes: ClusterNode[] = Object.entries(clusterData)
-        .filter(([key]) => !key.startsWith('_'))
-        .map(([id, data]) => {
-          const nodeData = data as Record<string, unknown>;
-          return {
-            id,
-            address: (nodeData.address as string) || 'unknown',
-            status: (nodeData.status as 'healthy' | 'suspect' | 'dead') || 'healthy',
-            partitions: (nodeData.partitions as number[]) || [],
-            connections: (nodeData.connections as number) || 0,
-            memory: (nodeData.memory as { used: number; total: number }) || { used: 0, total: 0 },
-            uptime: (nodeData.uptime as number) || 0,
-          };
-        });
-      setNodes(clusterNodes);
-
-      // Generate partition info based on nodes
-      const generatedPartitions: PartitionInfo[] = [];
-      const nodeIds = clusterNodes.map((n) => n.id);
-      for (let i = 0; i < TOTAL_PARTITIONS; i++) {
-        const ownerIndex = i % nodeIds.length;
-        generatedPartitions.push({
-          id: i,
-          owner: nodeIds[ownerIndex] || 'unknown',
-          replicas: nodeIds.filter((_, idx) => idx !== ownerIndex).slice(0, 2),
-        });
+  const fetchClusterStatus = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/admin/cluster/status`);
+      if (!res.ok) {
+        throw new Error('Failed to fetch cluster status');
       }
-      setPartitions(generatedPartitions);
+      const data: ClusterStatusResponse = await res.json();
+
+      // Transform API response to component state
+      const clusterNodes: ClusterNode[] = data.nodes.map((node) => ({
+        id: node.nodeId,
+        address: node.address,
+        status: node.status,
+        partitions: data.partitions
+          .filter((p) => p.owner === node.nodeId)
+          .map((p) => p.id),
+        connections: node.connections,
+        memory: node.memory,
+        uptime: node.uptime,
+      }));
+
+      setNodes(clusterNodes);
+      setPartitions(data.partitions);
+      setIsRebalancing(data.isRebalancing);
+      setError(null);
+    } catch (err) {
+      console.error('Failed to fetch cluster status:', err);
+      setError(err instanceof Error ? err.message : 'Unknown error');
+    } finally {
+      setLoading(false);
     }
-  }, [clusterData]);
+  }, []);
+
+  // Initial fetch and polling
+  useEffect(() => {
+    fetchClusterStatus();
+
+    const interval = setInterval(fetchClusterStatus, POLL_INTERVAL);
+    return () => clearInterval(interval);
+  }, [fetchClusterStatus]);
 
   const healthyNodes = nodes.filter((n) => n.status === 'healthy').length;
 
@@ -97,8 +124,31 @@ export function ClusterTopology() {
   const nodeColors = ['hsl(200, 70%, 50%)', 'hsl(150, 70%, 50%)', 'hsl(280, 70%, 50%)', 'hsl(30, 70%, 50%)'];
   const nodeColorClasses = ['bg-blue-500', 'bg-green-500', 'bg-purple-500', 'bg-orange-500'];
 
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
   return (
     <div className="p-4 space-y-4 overflow-y-auto">
+      {/* Header with refresh */}
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold">Cluster Topology</h1>
+        <Button variant="outline" size="sm" onClick={fetchClusterStatus}>
+          <RefreshCw className="h-4 w-4 mr-2" />
+          Refresh
+        </Button>
+      </div>
+
+      {error && (
+        <div className="bg-destructive/10 text-destructive px-4 py-2 rounded-md">
+          {error}
+        </div>
+      )}
+
       {/* Overview Cards */}
       <div className="grid grid-cols-4 gap-4">
         <Card>

@@ -36,7 +36,7 @@ interface SetupConfig {
 const TOTAL_STEPS = 6;
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:9090';
 
-export function SetupWizard({ onComplete: _onComplete }: { onComplete: () => void }) {
+export function SetupWizard({ onComplete }: { onComplete: () => void }) {
   const [step, setStep] = useState(1);
   const [config, setConfig] = useState<Partial<SetupConfig>>({
     deploymentMode: 'standalone',
@@ -102,7 +102,7 @@ export function SetupWizard({ onComplete: _onComplete }: { onComplete: () => voi
         // Show success, wait for restart
         setStep(TOTAL_STEPS + 1); // Success step
         setTimeout(() => {
-          window.location.reload();
+          onComplete();
         }, 3000);
       } else {
         setError(data.message);

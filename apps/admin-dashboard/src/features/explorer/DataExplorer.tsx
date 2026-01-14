@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { useMap, useQuery } from '@topgunbuild/react';
+import { useMap } from '@topgunbuild/react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { DataTable, type Column } from '@/components/DataTable';
@@ -12,7 +12,9 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
-import { Search, Plus, Pencil, Trash2, RefreshCw, Database } from 'lucide-react';
+import { Search, Plus, Pencil, Trash2, RefreshCw, Database, Loader2 } from 'lucide-react';
+
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:9090';
 
 interface MapInfo {
   name: string;
@@ -28,6 +30,7 @@ interface MapEntry {
 
 export function DataExplorer() {
   const [maps, setMaps] = useState<MapInfo[]>([]);
+  const [mapsLoading, setMapsLoading] = useState(true);
   const [selectedMap, setSelectedMap] = useState<string | null>(null);
   const [searchFilter, setSearchFilter] = useState('');
   const [mapFilter, setMapFilter] = useState('');
@@ -35,20 +38,29 @@ export function DataExplorer() {
   const [isNewRecord, setIsNewRecord] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
 
-  // Get list of maps from system map
-  const { data: mapsData } = useQuery('$sys/maps');
+  // Fetch list of maps from API endpoint
+  const fetchMaps = useCallback(async () => {
+    try {
+      setMapsLoading(true);
+      const res = await fetch(`${API_BASE}/api/admin/maps`);
+      if (!res.ok) {
+        throw new Error('Failed to fetch maps');
+      }
+      const data = await res.json();
+      if (data.maps && Array.isArray(data.maps)) {
+        setMaps(data.maps.filter((m: MapInfo) => !m.name.startsWith('$sys/')));
+      }
+    } catch (err) {
+      console.error('Failed to load maps:', err);
+      setMaps([]);
+    } finally {
+      setMapsLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    if (mapsData && Array.isArray(mapsData)) {
-      const mapList = mapsData
-        .filter((m: { name?: string }) => m?.name && !m.name.startsWith('$sys/'))
-        .map((m: { name: string; entryCount?: number }) => ({
-          name: m.name,
-          entryCount: m.entryCount || 0,
-        }));
-      setMaps(mapList);
-    }
-  }, [mapsData]);
+    fetchMaps();
+  }, [fetchMaps]);
 
   // Get data from selected map using useMap hook
   const mapInstance = useMap(selectedMap || '_empty');
@@ -84,7 +96,8 @@ export function DataExplorer() {
 
   const handleRefresh = useCallback(() => {
     setRefreshKey((k) => k + 1);
-  }, []);
+    fetchMaps();
+  }, [fetchMaps]);
 
   const handleSave = useCallback(async () => {
     if (!editingRecord || !selectedMap || !mapInstance) return;
@@ -176,10 +189,15 @@ export function DataExplorer() {
     <div className="grid grid-cols-[280px_1fr] h-full">
       {/* Sidebar: Map list */}
       <div className="border-r p-4 space-y-4 overflow-y-auto">
-        <h2 className="font-semibold flex items-center gap-2">
-          <Database className="h-5 w-5" />
-          Maps
-        </h2>
+        <div className="flex items-center justify-between">
+          <h2 className="font-semibold flex items-center gap-2">
+            <Database className="h-5 w-5" />
+            Maps
+          </h2>
+          <Button variant="ghost" size="sm" onClick={fetchMaps} disabled={mapsLoading}>
+            <RefreshCw className={cn('h-4 w-4', mapsLoading && 'animate-spin')} />
+          </Button>
+        </div>
         <div className="relative">
           <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input
@@ -191,7 +209,11 @@ export function DataExplorer() {
         </div>
 
         <div className="space-y-1">
-          {filteredMaps.length === 0 ? (
+          {mapsLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+            </div>
+          ) : filteredMaps.length === 0 ? (
             <p className="text-sm text-muted-foreground py-4 text-center">No maps found</p>
           ) : (
             filteredMaps.map((map) => (
