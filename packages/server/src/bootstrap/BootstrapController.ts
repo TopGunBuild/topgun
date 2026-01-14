@@ -320,7 +320,7 @@ export class BootstrapController {
       }
     }
 
-    this.sendJson(res, 200, mapInfos);
+    this.sendJson(res, 200, { maps: mapInfos });
     return true;
   }
 
@@ -330,7 +330,20 @@ export class BootstrapController {
   private handleClusterStatus(res: ServerResponse): boolean {
     if (this.getClusterStatus) {
       const status = this.getClusterStatus();
-      this.sendJson(res, 200, status);
+      // Transform to match frontend expected format (nodeId instead of id)
+      const transformedStatus = {
+        ...status,
+        nodes: status.nodes.map((node) => ({
+          nodeId: node.id,
+          address: node.address,
+          status: node.status,
+          partitionCount: node.partitions.length,
+          connections: node.connections,
+          memory: node.memory,
+          uptime: node.uptime,
+        })),
+      };
+      this.sendJson(res, 200, transformedStatus);
     } else {
       // Return default standalone status
       this.sendJson(res, 200, {
