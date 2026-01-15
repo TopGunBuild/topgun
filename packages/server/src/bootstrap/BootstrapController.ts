@@ -13,6 +13,30 @@ import * as jwt from 'jsonwebtoken';
 import { PARTITION_COUNT } from '@topgunbuild/core';
 import { logger } from '../utils/logger';
 
+/**
+ * Environment variable names for Zero-Touch Setup
+ */
+const ENV_KEYS = {
+  AUTO_SETUP: 'TOPGUN_AUTO_SETUP',
+  AUTO_SETUP_STRICT: 'TOPGUN_AUTO_SETUP_STRICT',
+  DEPLOYMENT_MODE: 'TOPGUN_DEPLOYMENT_MODE',
+  STORAGE_TYPE: 'TOPGUN_STORAGE_TYPE',
+  DATABASE_URL: 'DATABASE_URL',
+  DATA_DIR: 'TOPGUN_DATA_DIR',
+  ADMIN_USER: 'TOPGUN_ADMIN_USER',
+  ADMIN_PASSWORD: 'TOPGUN_ADMIN_PASSWORD',
+  ADMIN_PASSWORD_FILE: 'TOPGUN_ADMIN_PASSWORD_FILE',
+  ADMIN_EMAIL: 'TOPGUN_ADMIN_EMAIL',
+  PORT: 'TOPGUN_PORT',
+  METRICS_PORT: 'TOPGUN_METRICS_PORT',
+  MCP_ENABLED: 'TOPGUN_MCP_ENABLED',
+  MCP_PORT: 'TOPGUN_MCP_PORT',
+  MCP_TOKEN: 'TOPGUN_MCP_TOKEN',
+  VECTOR_ENABLED: 'TOPGUN_VECTOR_ENABLED',
+  VECTOR_MODEL: 'TOPGUN_VECTOR_MODEL',
+  SECRETS_PROVIDER: 'TOPGUN_SECRETS_PROVIDER',
+} as const;
+
 export interface SetupConfig {
   deploymentMode: 'standalone' | 'cluster';
   storage: {
@@ -142,6 +166,164 @@ export class BootstrapController {
   get isConfigured(): boolean {
     return this._isConfigured;
   }
+
+  // ============================================
+  // Zero-Touch Setup (Phase 14D-2)
+  // ============================================
+
+  /**
+   * Check for auto-setup environment and run if enabled.
+   * Called during server initialization before starting HTTP servers.
+   */
+  async checkAutoSetup(): Promise<void> {
+    if (process.env[ENV_KEYS.AUTO_SETUP] !== 'true') {
+      return;
+    }
+
+    if (this._isConfigured) {
+      logger.info('[AutoSetup] Server already configured, skipping auto-setup');
+      return;
+    }
+
+    logger.info('[AutoSetup] Starting automatic configuration...');
+
+    try {
+      const config = this.buildConfigFromEnv();
+      this.validateAutoSetupConfig(config);
+      await this.initializeStorage(config.storage);
+      await this.createAdminUser(config.admin, config.storage);
+      await this.saveConfiguration(config);
+
+      this._isConfigured = true;
+      logger.info('[AutoSetup] Configuration complete');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      logger.error({ error }, `[AutoSetup] Failed: ${message}`);
+
+      // Decide behavior based on strict mode
+      if (process.env[ENV_KEYS.AUTO_SETUP_STRICT] === 'true') {
+        // Strict mode: fail fast
+        logger.error('[AutoSetup] Strict mode enabled, exiting...');
+        process.exit(1);
+      } else {
+        // Lenient mode: continue to bootstrap mode (show Setup Wizard)
+        logger.warn('[AutoSetup] Falling back to interactive setup mode');
+      }
+    }
+  }
+
+  /**
+   * Build SetupConfig from environment variables
+   */
+  private buildConfigFromEnv(): SetupConfig {
+    const password = this.resolveSecret(ENV_KEYS.ADMIN_PASSWORD);
+
+    if (!password) {
+      throw new Error(
+        `${ENV_KEYS.ADMIN_PASSWORD} or ${ENV_KEYS.ADMIN_PASSWORD_FILE} is required for auto-setup`
+      );
+    }
+
+    const storageType = (process.env[ENV_KEYS.STORAGE_TYPE] as 'sqlite' | 'postgres' | 'memory') || 'sqlite';
+
+    return {
+      deploymentMode: (process.env[ENV_KEYS.DEPLOYMENT_MODE] as 'standalone' | 'cluster') || 'standalone',
+      storage: {
+        type: storageType,
+        connectionString: process.env[ENV_KEYS.DATABASE_URL],
+        dataDir: process.env[ENV_KEYS.DATA_DIR] || './data',
+      },
+      admin: {
+        username: process.env[ENV_KEYS.ADMIN_USER] || 'admin',
+        password,
+        email: process.env[ENV_KEYS.ADMIN_EMAIL],
+      },
+      server: {
+        port: parseInt(process.env[ENV_KEYS.PORT] || '8080', 10),
+        metricsPort: parseInt(process.env[ENV_KEYS.METRICS_PORT] || '9090', 10),
+      },
+      integrations: {
+        mcpEnabled: process.env[ENV_KEYS.MCP_ENABLED] === 'true',
+        mcpPort: process.env[ENV_KEYS.MCP_PORT] ? parseInt(process.env[ENV_KEYS.MCP_PORT]!, 10) : undefined,
+        mcpToken: process.env[ENV_KEYS.MCP_TOKEN],
+        vectorSearchEnabled: process.env[ENV_KEYS.VECTOR_ENABLED] === 'true',
+        vectorModel: process.env[ENV_KEYS.VECTOR_MODEL],
+      },
+    };
+  }
+
+  /**
+   * Resolve secret from environment variable or file.
+   * Supports Docker Secrets and Kubernetes Secrets mounted as files.
+   */
+  private resolveSecret(key: string): string | undefined {
+    const provider = process.env[ENV_KEYS.SECRETS_PROVIDER] || 'env';
+
+    switch (provider) {
+      case 'file':
+        return this.resolveSecretFromFile(key);
+      case 'env':
+      default:
+        // Try direct env var first, then fall back to file
+        return process.env[key] || this.resolveSecretFromFile(key);
+    }
+  }
+
+  /**
+   * Read secret from file (Docker Secrets, Kubernetes Secrets mounted as files).
+   * Looks for {KEY}_FILE environment variable pointing to the secret file.
+   */
+  private resolveSecretFromFile(key: string): string | undefined {
+    const fileKey = `${key}_FILE`;
+    const filePath = process.env[fileKey];
+
+    if (filePath) {
+      if (!fs.existsSync(filePath)) {
+        throw new Error(`Secret file not found: ${filePath}`);
+      }
+      return fs.readFileSync(filePath, 'utf-8').trim();
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Validate auto-setup configuration with detailed error messages
+   */
+  private validateAutoSetupConfig(config: SetupConfig): void {
+    // Password requirements
+    if (!config.admin.password) {
+      throw new Error('Admin password is required');
+    }
+    if (config.admin.password.length < 8) {
+      throw new Error('Admin password must be at least 8 characters');
+    }
+
+    // Storage validation
+    if (config.storage.type === 'postgres' && !config.storage.connectionString) {
+      throw new Error(`${ENV_KEYS.DATABASE_URL} is required for PostgreSQL storage`);
+    }
+
+    // Port validation
+    if (config.server.port < 1 || config.server.port > 65535) {
+      throw new Error(`Invalid port number: must be between 1 and 65535`);
+    }
+    if (config.server.metricsPort < 1 || config.server.metricsPort > 65535) {
+      throw new Error(`Invalid metrics port number: must be between 1 and 65535`);
+    }
+
+    // Username validation
+    if (config.admin.username.length < 3) {
+      throw new Error('Admin username must be at least 3 characters');
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(config.admin.username)) {
+      throw new Error('Admin username can only contain alphanumeric characters, underscores, and hyphens');
+    }
+  }
+
+  // ============================================
+  // HTTP Request Handlers
+  // ============================================
 
   /**
    * Handle HTTP requests for bootstrap endpoints

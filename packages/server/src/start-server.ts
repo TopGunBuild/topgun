@@ -2,6 +2,7 @@ import { ServerCoordinator } from './ServerCoordinator';
 import { PostgresAdapter } from './storage/PostgresAdapter';
 import { logger } from './utils/logger';
 import { TLSConfig, ClusterTLSConfig } from './types/TLSConfig';
+import { createBootstrapController } from './bootstrap';
 
 // Configuration
 const PORT = parseInt(process.env.TOPGUN_PORT || '8080', 10);
@@ -75,51 +76,65 @@ if (CLUSTER_TLS_ENABLED) {
     }, 'Cluster TLS configured');
 }
 
-// Setup Storage
-let storage;
-if (DB_URL) {
-    storage = new PostgresAdapter({ connectionString: DB_URL });
-    logger.info('Using PostgresAdapter with DATABASE_URL');
-} else {
-    logger.info('No DATABASE_URL provided, using in-memory storage (non-persistent)');
+// Main startup function (async to support auto-setup)
+async function main() {
+    // Phase 14D-2: Zero-Touch Setup
+    // Run auto-setup before creating ServerCoordinator
+    const bootstrapController = createBootstrapController();
+    await bootstrapController.checkAutoSetup();
+
+    // Setup Storage
+    let storage;
+    if (DB_URL) {
+        storage = new PostgresAdapter({ connectionString: DB_URL });
+        logger.info('Using PostgresAdapter with DATABASE_URL');
+    } else {
+        logger.info('No DATABASE_URL provided, using in-memory storage (non-persistent)');
+    }
+
+    const server = new ServerCoordinator({
+        port: PORT,
+        clusterPort: CLUSTER_PORT,
+        nodeId: NODE_ID,
+        peers: PEERS,
+        discovery: DISCOVERY_MODE,
+        serviceName: DISCOVERY_SERVICE,
+        discoveryInterval: DISCOVERY_INTERVAL,
+        storage,
+        host: '0.0.0.0', // Bind to all interfaces in Docker
+        securityPolicies: [
+            // Default permissive policy for now - in prod this should be configured
+            {
+                role: 'USER',
+                mapNamePattern: '*',
+                actions: ['ALL']
+            }
+        ],
+        tls: tlsConfig,
+        clusterTls: clusterTlsConfig,
+    });
+
+    // Graceful Shutdown
+    const shutdown = async (signal: string) => {
+        logger.info({ signal }, 'Starting graceful shutdown');
+        try {
+            await server.shutdown();
+            process.exit(0);
+        } catch (err) {
+            logger.error({ err }, 'Error during shutdown');
+            process.exit(1);
+        }
+    };
+
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
+
+    logger.info({ port: PORT, clusterPort: CLUSTER_PORT, nodeId: NODE_ID, discovery: DISCOVERY_MODE }, 'TopGun Server Starting');
 }
 
-const server = new ServerCoordinator({
-    port: PORT,
-    clusterPort: CLUSTER_PORT,
-    nodeId: NODE_ID,
-    peers: PEERS,
-    discovery: DISCOVERY_MODE,
-    serviceName: DISCOVERY_SERVICE,
-    discoveryInterval: DISCOVERY_INTERVAL,
-    storage,
-    host: '0.0.0.0', // Bind to all interfaces in Docker
-    securityPolicies: [
-        // Default permissive policy for now - in prod this should be configured
-        {
-            role: 'USER',
-            mapNamePattern: '*',
-            actions: ['ALL']
-        }
-    ],
-    tls: tlsConfig,
-    clusterTls: clusterTlsConfig,
+// Run main and handle errors
+main().catch((err) => {
+    logger.error({ err }, 'Failed to start server');
+    process.exit(1);
 });
-
-// Graceful Shutdown
-const shutdown = async (signal: string) => {
-    logger.info({ signal }, 'Starting graceful shutdown');
-    try {
-        await server.shutdown();
-        process.exit(0);
-    } catch (err) {
-        logger.error({ err }, 'Error during shutdown');
-        process.exit(1);
-    }
-};
-
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
-
-logger.info({ port: PORT, clusterPort: CLUSTER_PORT, nodeId: NODE_ID, discovery: DISCOVERY_MODE }, 'TopGun Server Starting');
 

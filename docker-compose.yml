@@ -157,6 +157,49 @@ services:
       - topgun
 
   # ============================================================================
+  # PROFILE: auto-setup (Zero-Touch Automated Setup)
+  # Usage: docker compose --profile auto-setup up
+  # This profile demonstrates automatic server configuration via env vars
+  # ============================================================================
+
+  server-auto:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.server
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+      - "${METRICS_PORT:-9090}:9090"
+    environment:
+      NODE_ENV: production
+      # Zero-Touch Setup Configuration
+      TOPGUN_AUTO_SETUP: "true"
+      TOPGUN_STORAGE_TYPE: postgres
+      TOPGUN_DEPLOYMENT_MODE: standalone
+      TOPGUN_PORT: 8080
+      TOPGUN_METRICS_PORT: 9090
+      DATABASE_URL: postgres://${DB_USER:-topgun}:${DB_PASSWORD:-topgun_dev}@postgres:5432/${DB_NAME:-topgun}
+      # Admin credentials from Docker secrets
+      TOPGUN_ADMIN_USER: admin
+      TOPGUN_ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+      TOPGUN_ADMIN_EMAIL: admin@example.com
+      # Optional integrations
+      TOPGUN_MCP_ENABLED: "false"
+      TOPGUN_VECTOR_ENABLED: "false"
+    secrets:
+      - admin_password
+    profiles: ["auto-setup"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/api/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - topgun
+
+  # ============================================================================
   # PROFILE: cluster (3-node cluster for testing)
   # ============================================================================
 
@@ -224,6 +267,10 @@ volumes:
   postgres-data:
   prometheus-data:
   grafana-data:
+
+secrets:
+  admin_password:
+    file: ./secrets/admin_password.txt
 
 networks:
   topgun:
