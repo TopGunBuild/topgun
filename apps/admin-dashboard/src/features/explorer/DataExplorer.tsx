@@ -12,9 +12,8 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
+import { adminFetch } from '@/lib/api';
 import { Search, Plus, Pencil, Trash2, RefreshCw, Database, Loader2 } from 'lucide-react';
-
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:9090';
 
 interface MapInfo {
   name: string;
@@ -42,7 +41,7 @@ export function DataExplorer() {
   const fetchMaps = useCallback(async () => {
     try {
       setMapsLoading(true);
-      const res = await fetch(`${API_BASE}/api/admin/maps`);
+      const res = await adminFetch('/api/admin/maps');
       if (!res.ok) {
         throw new Error('Failed to fetch maps');
       }

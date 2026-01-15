@@ -1,70 +1,99 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { setAuthToken } from '../lib/client';
-
-function isValidJwtFormat(token: string): boolean {
-    const parts = token.split('.');
-    return parts.length === 3 && parts.every((part) => part.length > 0);
-}
+import { login } from '../lib/api';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Label } from '@/components/ui/label';
+import { Loader2, LogIn } from 'lucide-react';
 
 export function Login() {
-    const [token, setToken] = useState('');
-    const [error, setError] = useState('');
-    const [loading, setLoading] = useState(false);
-    const navigate = useNavigate();
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const navigate = useNavigate();
 
-    const handleLogin = async (e: React.FormEvent) => {
-        e.preventDefault();
-        setError('');
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
 
-        if (!isValidJwtFormat(token)) {
-            setError('Invalid JWT format. Token must have 3 parts separated by dots.');
-            return;
-        }
+    if (!username.trim() || !password.trim()) {
+      setError('Username and password are required');
+      return;
+    }
 
-        setLoading(true);
-        try {
-            localStorage.setItem('topgun_token', token);
-            setAuthToken(token);
-            navigate('/');
-        } catch (err) {
-            setError('Login failed. Please try again.');
-        } finally {
-            setLoading(false);
-        }
-    };
+    setLoading(true);
+    try {
+      await login(username, password);
+      navigate('/');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Login failed');
+    } finally {
+      setLoading(false);
+    }
+  };
 
-    return (
-        <div className="min-h-screen flex items-center justify-center bg-gray-100">
-            <div className="bg-white p-8 rounded shadow-md w-96">
-                <h1 className="text-2xl font-bold mb-4">TopGun Admin</h1>
-                <form onSubmit={handleLogin}>
-                    <div className="mb-4">
-                        <label className="block text-gray-700 text-sm font-bold mb-2">
-                            Admin Token (JWT)
-                        </label>
-                        <input
-                            type="text"
-                            value={token}
-                            onChange={(e) => setToken(e.target.value)}
-                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-                            placeholder="Paste your JWT here"
-                        />
-                    </div>
-                    {error && (
-                        <div className="mb-4 text-red-500 text-sm">
-                            {error}
-                        </div>
-                    )}
-                    <button
-                        type="submit"
-                        disabled={loading}
-                        className="bg-blue-500 hover:bg-blue-700 disabled:bg-blue-300 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline w-full"
-                    >
-                        {loading ? 'Logging in...' : 'Login'}
-                    </button>
-                </form>
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-background">
+      <Card className="w-full max-w-md">
+        <CardHeader className="text-center">
+          <CardTitle className="text-2xl font-bold">TopGun Admin</CardTitle>
+          <p className="text-sm text-muted-foreground">
+            Sign in to access the admin dashboard
+          </p>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="username">Username</Label>
+              <Input
+                id="username"
+                type="text"
+                placeholder="admin"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                disabled={loading}
+                autoComplete="username"
+                autoFocus
+              />
             </div>
-        </div>
-    );
+
+            <div className="space-y-2">
+              <Label htmlFor="password">Password</Label>
+              <Input
+                id="password"
+                type="password"
+                placeholder="Enter your password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                disabled={loading}
+                autoComplete="current-password"
+              />
+            </div>
+
+            {error && (
+              <div className="text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-md">
+                {error}
+              </div>
+            )}
+
+            <Button type="submit" className="w-full" disabled={loading}>
+              {loading ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Signing in...
+                </>
+              ) : (
+                <>
+                  <LogIn className="mr-2 h-4 w-4" />
+                  Sign In
+                </>
+              )}
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
+    </div>
+  );
 }

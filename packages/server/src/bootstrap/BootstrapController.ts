@@ -67,6 +67,8 @@ export interface BootstrapControllerConfig {
   configPath?: string;
   dataDir?: string;
   version?: string;
+  /** JWT secret for auth tokens */
+  jwtSecret?: string;
   /** Function to get list of maps from ServerCoordinator */
   getMaps?: () => Map<string, unknown>;
   /** Function to get cluster status */
@@ -77,6 +79,7 @@ export class BootstrapController {
   private configPath: string;
   private dataDir: string;
   private version: string;
+  private jwtSecret: string;
   private _isConfigured: boolean;
   private getMaps?: () => Map<string, unknown>;
   private getClusterStatus?: () => ClusterStatus;
@@ -85,6 +88,7 @@ export class BootstrapController {
     this.configPath = config.configPath || process.env.TOPGUN_CONFIG_PATH || 'topgun.json';
     this.dataDir = config.dataDir || process.env.TOPGUN_DATA_DIR || './data';
     this.version = config.version || process.env.npm_package_version || '0.0.0';
+    this.jwtSecret = config.jwtSecret || process.env.JWT_SECRET || 'topgun-secret-dev';
     this._isConfigured = this.checkConfiguration();
     this.getMaps = config.getMaps;
     this.getClusterStatus = config.getClusterStatus;
@@ -147,7 +151,7 @@ export class BootstrapController {
     // Set CORS headers for admin dashboard
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
     // Handle preflight
     if (method === 'OPTIONS') {
@@ -161,6 +165,11 @@ export class BootstrapController {
       return this.handleStatus(res);
     }
 
+    // Login endpoint - available when configured
+    if (url === '/api/auth/login' && method === 'POST' && this.isConfigured) {
+      return this.handleLogin(req, res);
+    }
+
     // Bootstrap-only endpoints
     if (this.isBootstrapMode) {
       if (url === '/api/setup/test-connection' && method === 'POST') {
@@ -172,8 +181,17 @@ export class BootstrapController {
       }
     }
 
-    // Admin endpoints (available when configured)
+    // Admin endpoints (available when configured, require auth)
     if (this.isConfigured) {
+      // Verify JWT for all admin endpoints
+      if (url.startsWith('/api/admin/')) {
+        const authResult = this.verifyAdminToken(req);
+        if (!authResult.valid) {
+          this.sendJson(res, 401, { error: 'Unauthorized' });
+          return true;
+        }
+      }
+
       if (url === '/api/admin/maps' && method === 'GET') {
         return this.handleListMaps(res);
       }
@@ -333,6 +351,7 @@ export class BootstrapController {
       // Transform to match frontend expected format (nodeId instead of id)
       const transformedStatus = {
         ...status,
+        totalPartitions: 271, // Fixed partition count (see PHASE_14D_AUTH_SECURITY.md)
         nodes: status.nodes.map((node) => ({
           nodeId: node.id,
           address: node.address,
@@ -349,10 +368,167 @@ export class BootstrapController {
       this.sendJson(res, 200, {
         nodes: [],
         partitions: [],
+        totalPartitions: 271,
         isRebalancing: false,
       });
     }
     return true;
+  }
+
+  /**
+   * POST /api/auth/login
+   */
+  private async handleLogin(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
+    try {
+      const { username, password } = await this.parseBody(req);
+
+      if (!username || !password) {
+        this.sendJson(res, 400, { error: 'Username and password are required' });
+        return true;
+      }
+
+      // Find user in database
+      const user = await this.findUser(username);
+      if (!user) {
+        this.sendJson(res, 401, { error: 'Invalid credentials' });
+        return true;
+      }
+
+      // Verify password
+      const isValid = await this.verifyPassword(password, user.password_hash);
+      if (!isValid) {
+        this.sendJson(res, 401, { error: 'Invalid credentials' });
+        return true;
+      }
+
+      // Generate JWT
+      const token = this.generateJWT({
+        userId: user.id,
+        username: user.username,
+        role: user.role,
+      });
+
+      this.sendJson(res, 200, {
+        token,
+        user: {
+          id: user.id,
+          username: user.username,
+          role: user.role,
+        },
+      });
+    } catch (error) {
+      logger.error({ error }, 'Login failed');
+      this.sendJson(res, 500, { error: 'Login failed' });
+    }
+    return true;
+  }
+
+  /**
+   * Verify JWT token from Authorization header
+   */
+  private verifyAdminToken(req: IncomingMessage): { valid: boolean; principal?: Record<string, unknown> } {
+    const authHeader = req.headers['authorization'];
+    if (!authHeader?.startsWith('Bearer ')) {
+      return { valid: false };
+    }
+
+    const token = authHeader.slice(7);
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const jwt = require('jsonwebtoken');
+      const decoded = jwt.verify(token, this.jwtSecret);
+      return { valid: true, principal: decoded };
+    } catch {
+      return { valid: false };
+    }
+  }
+
+  /**
+   * Verify password against stored hash
+   */
+  private async verifyPassword(password: string, hash: string): Promise<boolean> {
+    const [salt, storedHash] = hash.split(':');
+    if (!salt || !storedHash) {
+      return false;
+    }
+    return new Promise((resolve, reject) => {
+      crypto.scrypt(password, salt, 64, (err, derivedKey) => {
+        if (err) reject(err);
+        else resolve(derivedKey.toString('hex') === storedHash);
+      });
+    });
+  }
+
+  /**
+   * Generate JWT token
+   */
+  private generateJWT(payload: { userId: string; username: string; role: string }): string {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const jwt = require('jsonwebtoken');
+    return jwt.sign(
+      {
+        sub: payload.userId,
+        userId: payload.userId,
+        username: payload.username,
+        roles: [payload.role.toUpperCase()],
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 24 * 60 * 60, // 24 hours
+      },
+      this.jwtSecret,
+      { algorithm: 'HS256' }
+    );
+  }
+
+  /**
+   * Find user by username in database
+   */
+  private async findUser(username: string): Promise<{
+    id: string;
+    username: string;
+    password_hash: string;
+    role: string;
+  } | null> {
+    const config = this.loadConfig();
+
+    if (config?.storage?.type === 'postgres') {
+      const pg = await import('pg');
+      const client = new pg.default.Client({
+        connectionString: config.storage.connectionString,
+      });
+      await client.connect();
+
+      const result = await client.query(
+        'SELECT id, username, password_hash, role FROM _users WHERE username = $1',
+        [username]
+      );
+      await client.end();
+
+      return result.rows[0] || null;
+    } else if (config?.storage?.type === 'sqlite') {
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(path.join(config.storage.dataDir || this.dataDir, 'topgun.db'));
+
+      const user = db
+        .prepare('SELECT id, username, password_hash, role FROM _users WHERE username = ?')
+        .get(username) as { id: string; username: string; password_hash: string; role: string } | undefined;
+      db.close();
+
+      return user || null;
+    }
+
+    return null;
+  }
+
+  /**
+   * Load configuration from file
+   */
+  private loadConfig(): {
+    storage?: { type: string; connectionString?: string; dataDir?: string };
+  } | null {
+    if (fs.existsSync(this.configPath)) {
+      return JSON.parse(fs.readFileSync(this.configPath, 'utf-8'));
+    }
+    return null;
   }
 
   /**

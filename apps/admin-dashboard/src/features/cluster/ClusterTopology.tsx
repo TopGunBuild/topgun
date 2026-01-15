@@ -4,9 +4,9 @@ import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { adminFetch } from '@/lib/api';
 import { Server, Activity, HardDrive, Users, RefreshCw, Loader2 } from 'lucide-react';
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:9090';
 const POLL_INTERVAL = 5000; // 5 seconds
 
 interface ClusterNode {
@@ -40,10 +40,9 @@ interface ClusterStatusResponse {
     owner: string;
     replicas: string[];
   }>;
+  totalPartitions: number;
   isRebalancing: boolean;
 }
-
-const TOTAL_PARTITIONS = 271;
 
 function polarToCartesian(cx: number, cy: number, r: number, angle: number) {
   const rad = ((angle - 90) * Math.PI) / 180;
@@ -73,13 +72,14 @@ export function ClusterTopology() {
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [nodes, setNodes] = useState<ClusterNode[]>([]);
   const [partitions, setPartitions] = useState<PartitionInfo[]>([]);
+  const [totalPartitions, setTotalPartitions] = useState(271);
   const [isRebalancing, setIsRebalancing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const fetchClusterStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/admin/cluster/status`);
+      const res = await adminFetch('/api/admin/cluster/status');
       if (!res.ok) {
         throw new Error('Failed to fetch cluster status');
       }
@@ -100,6 +100,7 @@ export function ClusterTopology() {
 
       setNodes(clusterNodes);
       setPartitions(data.partitions);
+      setTotalPartitions(data.totalPartitions || 271);
       setIsRebalancing(data.isRebalancing);
       setError(null);
     } catch (err) {
@@ -178,7 +179,7 @@ export function ClusterTopology() {
             <div className="flex items-center gap-3">
               <HardDrive className="h-8 w-8 text-muted-foreground" />
               <div>
-                <div className="text-2xl font-bold">{TOTAL_PARTITIONS}</div>
+                <div className="text-2xl font-bold">{totalPartitions}</div>
                 <div className="text-sm text-muted-foreground">Total Partitions</div>
               </div>
             </div>
@@ -227,8 +228,8 @@ export function ClusterTopology() {
                 const nodePartitions = partitions.filter((p) => p.owner === node.id);
 
                 return nodePartitions.map((partition) => {
-                  const startAngle = (partition.id / TOTAL_PARTITIONS) * 360;
-                  const endAngle = ((partition.id + 1) / TOTAL_PARTITIONS) * 360;
+                  const startAngle = (partition.id / totalPartitions) * 360;
+                  const endAngle = ((partition.id + 1) / totalPartitions) * 360;
 
                   const start = polarToCartesian(100, 100, 80, startAngle);
                   const end = polarToCartesian(100, 100, 80, endAngle);
@@ -310,7 +311,7 @@ export function ClusterTopology() {
                   </span>
                   <span>{node.partitions.length}</span>
                 </div>
-                <Progress value={(node.partitions.length / TOTAL_PARTITIONS) * 100} />
+                <Progress value={(node.partitions.length / totalPartitions) * 100} />
               </div>
 
               <div>
