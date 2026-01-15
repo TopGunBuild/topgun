@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import * as jwt from 'jsonwebtoken';
+import { PARTITION_COUNT } from '@topgunbuild/core';
 
 // Test configuration
 const TEST_DATA_DIR = path.join(__dirname, '.test-data-auth');
@@ -306,7 +307,7 @@ describe('BootstrapController Authentication', () => {
 
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.totalPartitions).toBe(271);
+      expect(body.totalPartitions).toBe(PARTITION_COUNT);
       expect(body.nodes).toBeDefined();
       expect(body.partitions).toBeDefined();
       expect(body.isRebalancing).toBeDefined();
@@ -334,7 +335,7 @@ describe('BootstrapController Authentication', () => {
 
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.totalPartitions).toBe(271);
+      expect(body.totalPartitions).toBe(PARTITION_COUNT);
     });
   });
 

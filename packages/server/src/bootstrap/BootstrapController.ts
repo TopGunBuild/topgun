@@ -9,6 +9,8 @@ import { IncomingMessage, ServerResponse } from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import * as jwt from 'jsonwebtoken';
+import { PARTITION_COUNT } from '@topgunbuild/core';
 import { logger } from '../utils/logger';
 
 export interface SetupConfig {
@@ -351,7 +353,7 @@ export class BootstrapController {
       // Transform to match frontend expected format (nodeId instead of id)
       const transformedStatus = {
         ...status,
-        totalPartitions: 271, // Fixed partition count (see PHASE_14D_AUTH_SECURITY.md)
+        totalPartitions: PARTITION_COUNT, // Fixed partition count (see PHASE_14D_AUTH_SECURITY.md)
         nodes: status.nodes.map((node) => ({
           nodeId: node.id,
           address: node.address,
@@ -368,7 +370,7 @@ export class BootstrapController {
       this.sendJson(res, 200, {
         nodes: [],
         partitions: [],
-        totalPartitions: 271,
+        totalPartitions: PARTITION_COUNT,
         isRebalancing: false,
       });
     }
@@ -434,10 +436,8 @@ export class BootstrapController {
 
     const token = authHeader.slice(7);
     try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const jwt = require('jsonwebtoken');
       const decoded = jwt.verify(token, this.jwtSecret);
-      return { valid: true, principal: decoded };
+      return { valid: true, principal: decoded as Record<string, unknown> };
     } catch {
       return { valid: false };
     }
@@ -463,8 +463,6 @@ export class BootstrapController {
    * Generate JWT token
    */
   private generateJWT(payload: { userId: string; username: string; role: string }): string {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const jwt = require('jsonwebtoken');
     return jwt.sign(
       {
         sub: payload.userId,

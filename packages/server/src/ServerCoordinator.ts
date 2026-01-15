@@ -3,7 +3,7 @@ import { createServer as createHttpsServer, Server as HttpsServer, ServerOptions
 import { readFileSync } from 'fs';
 import * as net from 'net';
 import { WebSocketServer, WebSocket } from 'ws';
-import { HLC, LWWMap, ORMap, MerkleTree, serialize, deserialize, PermissionPolicy, Principal, PermissionType, Timestamp, LWWRecord, ORMapRecord, MessageSchema, WriteConcern, WriteConcernValue, ConsistencyLevel, ReplicationConfig, DEFAULT_REPLICATION_CONFIG, IndexedLWWMap, IndexedORMap, QueryCursor, DEFAULT_QUERY_CURSOR_MAX_AGE_MS, type QueryExpression as CoreQuery } from '@topgunbuild/core';
+import { HLC, LWWMap, ORMap, MerkleTree, serialize, deserialize, PermissionPolicy, Principal, PermissionType, Timestamp, LWWRecord, ORMapRecord, MessageSchema, WriteConcern, WriteConcernValue, ConsistencyLevel, ReplicationConfig, DEFAULT_REPLICATION_CONFIG, IndexedLWWMap, IndexedORMap, QueryCursor, DEFAULT_QUERY_CURSOR_MAX_AGE_MS, PARTITION_COUNT, type QueryExpression as CoreQuery } from '@topgunbuild/core';
 import { IServerStorage, StorageValue, ORMapValue, ORMapTombstones } from './storage/IServerStorage';
 import { IInterceptor, ServerOp, OpContext, ConnectionContext } from './interceptor/IInterceptor';
 import * as jwt from 'jsonwebtoken';
@@ -403,7 +403,9 @@ export class ServerCoordinator {
         }
 
         // Phase 14D: Create bootstrap controller for setup wizard
-        this.bootstrapController = createBootstrapController();
+        this.bootstrapController = createBootstrapController({
+            jwtSecret: this.jwtSecret,
+        });
         // Provide data accessors for admin API endpoints
         this.bootstrapController.setDataAccessors({
             getMaps: () => this.maps,
@@ -414,7 +416,7 @@ export class ServerCoordinator {
                     // Count partitions owned by this node
                     let partitionCount = 0;
                     if (this.partitionService) {
-                        for (let i = 0; i < 271; i++) {
+                        for (let i = 0; i < PARTITION_COUNT; i++) {
                             if (this.partitionService.getPartitionOwner(i) === nodeId) {
                                 partitionCount++;
                             }
@@ -435,7 +437,7 @@ export class ServerCoordinator {
                 // Generate partition info
                 const partitions: { id: number; owner: string; replicas: string[] }[] = [];
                 if (this.partitionService) {
-                    for (let i = 0; i < 271; i++) {
+                    for (let i = 0; i < PARTITION_COUNT; i++) {
                         const owner = this.partitionService.getPartitionOwner(i);
                         const backups = this.partitionService.getBackups(i);
                         partitions.push({
