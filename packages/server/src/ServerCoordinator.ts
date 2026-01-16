@@ -50,6 +50,7 @@ import { SearchCoordinator, SearchConfig, ClusterSearchCoordinator, type Cluster
 import { DistributedSubscriptionCoordinator } from './subscriptions/DistributedSubscriptionCoordinator';
 import { createDebugEndpoints, DebugEndpoints } from './debug';
 import { BootstrapController, createBootstrapController } from './bootstrap';
+import { SettingsController, createSettingsController } from './settings';
 import type { JournalEvent, JournalEventType, MergeRejection, MergeContext, FullTextIndexConfig } from '@topgunbuild/core';
 
 interface ClientConnection {
@@ -278,6 +279,9 @@ export class ServerCoordinator {
     // Phase 14D - Bootstrap Controller
     private bootstrapController: BootstrapController;
 
+    // Phase 14D-3 - Settings Controller
+    private settingsController: SettingsController;
+
     private readonly _nodeId: string;
 
     private _actualPort: number = 0;
@@ -459,11 +463,36 @@ export class ServerCoordinator {
             logger.info('Server running in BOOTSTRAP MODE - visit /setup to configure');
         }
 
+        // Phase 14D-3: Create settings controller for runtime configuration
+        this.settingsController = createSettingsController({
+            jwtSecret: this.jwtSecret,
+        });
+        // React to settings changes
+        this.settingsController.setOnSettingsChange((settings) => {
+            if (settings.logLevel) {
+                logger.level = settings.logLevel;
+                logger.info({ level: settings.logLevel }, '[Settings] Log level changed');
+            }
+            if (settings.rateLimits) {
+                this.rateLimiter.updateConfig({
+                    maxConnectionsPerSecond: settings.rateLimits.connections,
+                });
+                logger.info({ rateLimits: settings.rateLimits }, '[Settings] Rate limits changed');
+            }
+        });
+
         const metricsPort = config.metricsPort !== undefined ? config.metricsPort : 9090;
         this.metricsServer = createHttpServer(async (req, res) => {
-            // Try bootstrap controller first (handles /api/status, /api/setup)
+            // Try bootstrap controller first (handles /api/status, /api/setup, /api/auth/login, /api/admin/*)
             const bootstrapHandled = await this.bootstrapController.handle(req, res);
             if (bootstrapHandled) return;
+
+            // Try settings controller (handles /api/admin/settings)
+            const url = req.url || '';
+            if (url.startsWith('/api/admin/settings')) {
+                const settingsHandled = await this.settingsController.handle(req, res);
+                if (settingsHandled) return;
+            }
 
             // Try debug endpoints (includes /health, /ready)
             if (this.debugEndpoints) {

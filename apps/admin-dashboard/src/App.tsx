@@ -12,6 +12,7 @@ import { SetupWizard } from './features/setup';
 import { DataExplorer } from './features/explorer';
 import { QueryPlayground } from './features/query';
 import { ClusterTopology } from './features/cluster';
+import { Settings } from './features/settings';
 import { useServerStatus } from './hooks/useServerStatus';
 
 // Protected Route Wrapper
@@ -29,16 +30,6 @@ const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
 
   return <>{children}</>;
 };
-
-// Settings placeholder page
-function Settings() {
-  return (
-    <div className="p-6">
-      <h1 className="text-2xl font-bold mb-4">Settings</h1>
-      <p className="text-muted-foreground">Server configuration and preferences.</p>
-    </div>
-  );
-}
 
 // Main App with Bootstrap Mode detection
 function AppContent() {
