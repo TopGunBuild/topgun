@@ -272,6 +272,10 @@ export class BootstrapController {
   /**
    * Read secret from file (Docker Secrets, Kubernetes Secrets mounted as files).
    * Looks for {KEY}_FILE environment variable pointing to the secret file.
+   *
+   * Note: Uses synchronous file reading intentionally - this runs during server
+   * startup before any async operations begin. Sync read is appropriate here
+   * as it blocks only the initialization phase, not request handling.
    */
   private resolveSecretFromFile(key: string): string | undefined {
     const fileKey = `${key}_FILE`;
