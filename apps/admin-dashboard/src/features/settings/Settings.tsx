@@ -76,13 +76,14 @@ function Toast({
   onClose: () => void;
 }) {
   useEffect(() => {
-    const timer = setTimeout(onClose, 3000);
+    const timer = setTimeout(onClose, 5000);
     return () => clearTimeout(timer);
   }, [onClose]);
 
   return (
-    <div
-      className={`fixed bottom-4 right-4 px-4 py-3 rounded-lg shadow-lg flex items-center gap-2 z-50 ${
+    <button
+      onClick={onClose}
+      className={`fixed bottom-4 right-4 px-4 py-3 rounded-lg shadow-lg flex items-center gap-2 z-50 cursor-pointer transition-opacity hover:opacity-90 ${
         type === 'success'
           ? 'bg-green-600 text-white'
           : type === 'error'
@@ -93,7 +94,8 @@ function Toast({
       {type === 'success' && <CheckCircle2 className="w-4 h-4" />}
       {type === 'error' && <AlertCircle className="w-4 h-4" />}
       <span>{message}</span>
-    </div>
+      <span className="ml-2 text-xs opacity-75">×</span>
+    </button>
   );
 }
 
@@ -135,6 +137,27 @@ export function Settings() {
     setSaving(true);
     try {
       const body = unflattenObject(changes);
+
+      // Validate first
+      const validateRes = await adminFetch('/api/admin/settings/validate', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      const validateData = await validateRes.json();
+
+      if (!validateData.valid) {
+        const errorMessages = validateData.errors
+          .map((e: { path: string; message: string }) => `${e.path}: ${e.message}`)
+          .join('; ');
+        setToast({
+          message: `Validation failed: ${errorMessages}`,
+          type: 'error',
+        });
+        setSaving(false);
+        return;
+      }
+
+      // Apply changes
       const res = await adminFetch('/api/admin/settings', {
         method: 'PATCH',
         body: JSON.stringify(body),
@@ -285,22 +308,40 @@ export function Settings() {
                 </div>
               </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="logLevel">Log Level</Label>
-                <select
-                  id="logLevel"
-                  className="flex h-10 w-full max-w-xs rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  value={getValue('logLevel', settings.general.logLevel) as string}
-                  onChange={(e) => handleChange('logLevel', e.target.value)}
-                >
-                  <option value="debug">Debug</option>
-                  <option value="info">Info</option>
-                  <option value="warn">Warn</option>
-                  <option value="error">Error</option>
-                </select>
-                <Badge variant="outline" className="text-xs">
-                  Hot-reloadable
-                </Badge>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="space-y-2">
+                  <Label htmlFor="logLevel">Log Level</Label>
+                  <select
+                    id="logLevel"
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    value={getValue('logLevel', settings.general.logLevel) as string}
+                    onChange={(e) => handleChange('logLevel', e.target.value)}
+                  >
+                    <option value="debug">Debug</option>
+                    <option value="info">Info</option>
+                    <option value="warn">Warn</option>
+                    <option value="error">Error</option>
+                  </select>
+                  <Badge variant="outline" className="text-xs">
+                    Hot-reloadable
+                  </Badge>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Prometheus Metrics</Label>
+                  <div className="flex items-center gap-3 h-10">
+                    <Switch
+                      checked={getValue('metricsEnabled', true) as boolean}
+                      onCheckedChange={(v) => handleChange('metricsEnabled', v)}
+                    />
+                    <span className="text-sm text-muted-foreground">
+                      {getValue('metricsEnabled', true) ? 'Enabled' : 'Disabled'}
+                    </span>
+                  </div>
+                  <Badge variant="outline" className="text-xs">
+                    Hot-reloadable
+                  </Badge>
+                </div>
               </div>
 
               <div className="pt-4 border-t">

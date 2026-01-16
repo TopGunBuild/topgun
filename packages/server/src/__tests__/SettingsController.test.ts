@@ -371,7 +371,7 @@ describe('SettingsController', () => {
       expect(data.errors[0].path).toBe('logLevel');
     });
 
-    it('should validate rate limits', async () => {
+    it('should validate rate limits (negative)', async () => {
       const token = generateToken();
       const req = createMockRequest(
         '/api/admin/settings/validate',
@@ -387,6 +387,25 @@ describe('SettingsController', () => {
       const data = JSON.parse(res.body);
       expect(data.valid).toBe(false);
       expect(data.errors[0].path).toBe('rateLimits.messagesPerSecond');
+    });
+
+    it('should validate rate limits (zero is invalid)', async () => {
+      const token = generateToken();
+      const req = createMockRequest(
+        '/api/admin/settings/validate',
+        'POST',
+        { rateLimits: { connections: 0 } },
+        { Authorization: `Bearer ${token}` }
+      );
+      const res = createMockResponse();
+
+      await controller.handle(req, res);
+
+      expect(res.statusCode).toBe(200);
+      const data = JSON.parse(res.body);
+      expect(data.valid).toBe(false);
+      expect(data.errors[0].path).toBe('rateLimits.connections');
+      expect(data.errors[0].message).toContain('minimum 1');
     });
 
     it('should validate boolean fields', async () => {

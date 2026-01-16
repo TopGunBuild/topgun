@@ -408,12 +408,12 @@ export class SettingsController {
         }
       }
 
-      // Rate limits validation
+      // Rate limits validation - must be >= 1 to prevent blocking all connections
       if (path.startsWith('rateLimits.')) {
-        if (typeof value !== 'number' || value < 0) {
+        if (typeof value !== 'number' || value < 1) {
           errors.push({
             path,
-            message: 'Must be a positive number',
+            message: 'Must be a positive number (minimum 1)',
             value,
           });
         }
