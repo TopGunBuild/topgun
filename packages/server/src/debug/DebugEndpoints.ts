@@ -259,7 +259,7 @@ export class DebugEndpoints {
         res.setHeader('Content-Type', 'application/json');
         res.end(
           JSON.stringify({
-            error: 'No debug info available. Run a search with SEARCH_DEBUG=true first.',
+            error: 'No search history available. Execute a search query via client first, then use this endpoint to inspect results.',
             query: body.query,
           })
         );

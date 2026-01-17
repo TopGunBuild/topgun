@@ -2,7 +2,8 @@
  * Admin API client with authentication
  */
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:9090';
+// Admin API runs on metrics port (9091), not main WebSocket port (8080)
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:9091';
 const TOKEN_KEY = 'topgun_admin_token';
 
 /**

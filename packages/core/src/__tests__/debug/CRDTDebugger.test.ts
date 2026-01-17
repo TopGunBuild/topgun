@@ -18,7 +18,7 @@ describe('CRDTDebugger', () => {
   describe('control', () => {
     it('should be disabled by default', () => {
       const d = new CRDTDebugger();
-      // Without CRDT_DEBUG env, it should be disabled
+      // Without TOPGUN_DEBUG env, it should be disabled
       expect(d.isEnabled()).toBe(false);
     });
 

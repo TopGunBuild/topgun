@@ -34,7 +34,8 @@ interface SetupConfig {
 }
 
 const TOTAL_STEPS = 6;
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:9090';
+// Admin API runs on metrics port (9091), not main WebSocket port (8080)
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:9091';
 
 export function SetupWizard({ onComplete }: { onComplete: () => void }) {
   const [step, setStep] = useState(1);

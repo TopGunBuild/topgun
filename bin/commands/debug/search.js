@@ -6,7 +6,7 @@ const chalk = require('chalk');
  * Explains search results with BM25/RRF score breakdown.
  */
 module.exports = async function searchExplain(options) {
-  const serverUrl = process.env.TOPGUN_SERVER_URL || 'http://localhost:9090';
+  const serverUrl = process.env.TOPGUN_SERVER_URL || 'http://localhost:9091';
 
   console.log(chalk.bold('\n  TopGun Search Explainer\n'));
 
@@ -25,7 +25,7 @@ module.exports = async function searchExplain(options) {
     console.log(chalk.gray('    topgun search:explain --query "john doe" --map users'));
     console.log(chalk.gray('    topgun search:explain --query "react hooks" --map docs --verbose'));
     console.log('');
-    console.log(chalk.yellow('  Note: Server must be running with SEARCH_DEBUG=true'));
+    console.log(chalk.yellow('  Note: Server must be running with TOPGUN_DEBUG=true'));
     console.log('');
     return;
   }
@@ -137,7 +137,7 @@ module.exports = async function searchExplain(options) {
     }
   } catch (error) {
     console.error(chalk.red(`  Connection error: ${error.message}`));
-    console.log(chalk.gray('\n  Make sure the server is running with SEARCH_DEBUG=true'));
+    console.log(chalk.gray('\n  Make sure the server is running with TOPGUN_DEBUG=true'));
     process.exit(1);
   }
 };

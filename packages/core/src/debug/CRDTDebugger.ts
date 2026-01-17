@@ -81,7 +81,7 @@ export class CRDTDebugger {
 
   constructor(options: { maxSnapshots?: number; enabled?: boolean } = {}) {
     this.maxSnapshots = options.maxSnapshots || 10000;
-    this.enabled = options.enabled ?? process.env.CRDT_DEBUG === 'true';
+    this.enabled = options.enabled ?? process.env.TOPGUN_DEBUG === 'true';
   }
 
   // ============================================================================

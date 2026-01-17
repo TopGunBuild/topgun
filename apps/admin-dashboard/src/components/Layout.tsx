@@ -9,10 +9,13 @@ import {
   Moon,
   Sun,
   Command,
+  WifiOff,
+  Wifi,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { useEffect, useState } from 'react';
+import { useServerStatus } from '@/hooks/useServerStatus';
 
 const navItems = [
   { path: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -25,6 +28,7 @@ const navItems = [
 export function Layout() {
   const location = useLocation();
   const navigate = useNavigate();
+  const { status, error, loading } = useServerStatus();
   const [isDark, setIsDark] = useState(() => {
     // Check localStorage or system preference
     if (typeof window !== 'undefined') {
@@ -67,6 +71,22 @@ export function Layout() {
             <span className="text-2xl">🔫</span>
             TopGun Admin
           </h1>
+          {/* Server connection status */}
+          <div className="mt-2 flex items-center gap-2 text-xs">
+            {loading ? (
+              <span className="text-muted-foreground">Checking server...</span>
+            ) : error ? (
+              <span className="text-destructive flex items-center gap-1">
+                <WifiOff className="h-3 w-3" />
+                Server disconnected
+              </span>
+            ) : (
+              <span className="text-green-600 dark:text-green-400 flex items-center gap-1">
+                <Wifi className="h-3 w-3" />
+                Connected
+              </span>
+            )}
+          </div>
         </div>
 
         <nav className="flex-1 p-4 space-y-1">

@@ -14,7 +14,7 @@ const path = require('path');
  * - tail: Watch live operations (requires WebSocket)
  */
 module.exports = async function debugCrdt(action, options) {
-  const serverUrl = process.env.TOPGUN_SERVER_URL || 'http://localhost:9090';
+  const serverUrl = process.env.TOPGUN_SERVER_URL || 'http://localhost:9091';
 
   const validActions = ['export', 'stats', 'conflicts', 'timeline', 'replay', 'tail'];
 
@@ -101,7 +101,7 @@ async function exportHistory(serverUrl, options) {
     }
   } catch (error) {
     console.error(chalk.red(`  Connection error: ${error.message}`));
-    console.log(chalk.gray('\n  Make sure the server is running with CRDT_DEBUG=true'));
+    console.log(chalk.gray('\n  Make sure the server is running with TOPGUN_DEBUG=true'));
     process.exit(1);
   }
 
@@ -147,7 +147,7 @@ async function showStatistics(serverUrl, options) {
     }
   } catch (error) {
     console.error(chalk.red(`  Connection error: ${error.message}`));
-    console.log(chalk.gray('\n  Make sure the server is running with CRDT_DEBUG=true'));
+    console.log(chalk.gray('\n  Make sure the server is running with TOPGUN_DEBUG=true'));
     process.exit(1);
   }
 
@@ -188,7 +188,7 @@ async function showConflicts(serverUrl, options) {
     }
   } catch (error) {
     console.error(chalk.red(`  Connection error: ${error.message}`));
-    console.log(chalk.gray('\n  Make sure the server is running with CRDT_DEBUG=true'));
+    console.log(chalk.gray('\n  Make sure the server is running with TOPGUN_DEBUG=true'));
     process.exit(1);
   }
 }

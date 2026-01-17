@@ -114,7 +114,7 @@ export class SearchDebugger {
   private maxHistory: number;
 
   constructor(options: { enabled?: boolean; maxHistory?: number } = {}) {
-    this.enabled = options.enabled ?? process.env.SEARCH_DEBUG === 'true';
+    this.enabled = options.enabled ?? process.env.TOPGUN_DEBUG === 'true';
     this.maxHistory = options.maxHistory || 100;
   }
 

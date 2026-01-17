@@ -1,10 +1,8 @@
 import { TopGunClient, IDBAdapter } from '@topgunbuild/client';
 
-// Use environment variable for server URL, default to API_URL port for WebSocket
-const WS_URL = import.meta.env.VITE_WS_URL ||
-  (import.meta.env.VITE_API_URL
-    ? import.meta.env.VITE_API_URL.replace(/^http/, 'ws')
-    : 'ws://localhost:9090');
+// Use environment variable for server URL
+// WebSocket connects to main server port (8080), not admin API port (9091)
+const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8080';
 
 export const client = new TopGunClient({
   serverUrl: WS_URL,

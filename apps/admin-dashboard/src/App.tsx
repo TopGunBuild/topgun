@@ -14,6 +14,8 @@ import { QueryPlayground } from './features/query';
 import { ClusterTopology } from './features/cluster';
 import { Settings } from './features/settings';
 import { useServerStatus } from './hooks/useServerStatus';
+import { ServerOff, RefreshCw } from 'lucide-react';
+import { Button } from './components/ui/button';
 
 // Protected Route Wrapper
 const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
@@ -31,9 +33,37 @@ const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
   return <>{children}</>;
 };
 
+// Server Unavailable Screen
+function ServerUnavailable({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="min-h-screen bg-background flex items-center justify-center p-4">
+      <div className="text-center space-y-6 max-w-md">
+        <div className="w-16 h-16 mx-auto rounded-full bg-destructive/10 flex items-center justify-center">
+          <ServerOff className="h-8 w-8 text-destructive" />
+        </div>
+        <div>
+          <h1 className="text-2xl font-bold mb-2">Server Unavailable</h1>
+          <p className="text-muted-foreground">
+            Cannot connect to TopGun server. Make sure the server is running on port 8080
+            with the admin API on port 9091.
+          </p>
+        </div>
+        <div className="bg-muted/50 p-4 rounded-lg text-left text-sm font-mono">
+          <p className="text-muted-foreground mb-2">Start the server:</p>
+          <code>node bin/topgun.js dev</code>
+        </div>
+        <Button onClick={onRetry} variant="outline">
+          <RefreshCw className="h-4 w-4 mr-2" />
+          Retry Connection
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 // Main App with Bootstrap Mode detection
 function AppContent() {
-  const { status, loading } = useServerStatus();
+  const { status, loading, error, refetch } = useServerStatus();
   const [initialized, setInitialized] = useState(false);
 
   // Initialize theme on mount
@@ -45,13 +75,18 @@ function AppContent() {
     setInitialized(true);
   }, []);
 
-  // Show loading state
+  // Show loading state (only on initial load)
   if (loading || !initialized) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
       </div>
     );
+  }
+
+  // Show Server Unavailable screen if connection failed
+  if (error && !status) {
+    return <ServerUnavailable onRetry={refetch} />;
   }
 
   // Show Setup Wizard if in bootstrap mode

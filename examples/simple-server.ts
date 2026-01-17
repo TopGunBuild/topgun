@@ -1,8 +1,10 @@
-import { ServerCoordinator, PostgresAdapter, MemoryServerAdapter, IServerStorage } from '@topgunbuild/server';
+import { ServerCoordinator, PostgresAdapter, MemoryServerAdapter, BetterSqlite3Adapter, IServerStorage } from '@topgunbuild/server';
 import { PoolConfig } from 'pg';
+import * as path from 'path';
 
-// Storage mode: 'memory' (default) or 'postgres'
+// Storage mode: 'memory' (default), 'sqlite', or 'postgres'
 const STORAGE_MODE = process.env.STORAGE_MODE || 'memory';
+const DB_PATH = process.env.DB_PATH || './data/topgun.db';
 
 // Configuration priority: DATABASE_URL > Env Vars > Defaults
 const getDbConfig = (): PoolConfig => {
@@ -36,6 +38,17 @@ const createStorageAdapter = (): IServerStorage => {
       console.log(`Connecting to Postgres at ${dbConfig.host}:${dbConfig.port}`);
     }
     return new PostgresAdapter(dbConfig);
+  }
+
+  if (STORAGE_MODE === 'sqlite') {
+    // Ensure directory exists
+    const dbDir = path.dirname(DB_PATH);
+    const fs = require('fs');
+    if (!fs.existsSync(dbDir)) {
+      fs.mkdirSync(dbDir, { recursive: true });
+    }
+    console.log(`Storage mode: SQLite (${DB_PATH})`);
+    return new BetterSqlite3Adapter(DB_PATH);
   }
 
   console.log('Storage mode: In-Memory (data will be lost on restart)');

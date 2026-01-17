@@ -2805,6 +2805,13 @@ export class ServerCoordinator {
                 break;
             }
 
+            case 'AUTH': {
+                // Client already authenticated, ignore duplicate AUTH messages
+                // This can happen if client sends AUTH before receiving AUTH_ACK
+                logger.debug({ clientId: client.id }, 'Ignoring duplicate AUTH from already authenticated client');
+                break;
+            }
+
             default:
                 logger.warn({ type: message.type }, 'Unknown message type');
         }

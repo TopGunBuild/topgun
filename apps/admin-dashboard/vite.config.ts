@@ -7,13 +7,10 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      '@topgunbuild/core': path.resolve(__dirname, '../../packages/core/src/index.ts'),
-      '@topgunbuild/client': path.resolve(__dirname, '../../packages/client/src/index.ts'),
-      '@topgunbuild/react': path.resolve(__dirname, '../../packages/react/src/index.ts'),
+      '@topgunbuild/core': path.resolve(__dirname, '../../packages/core/dist/index.mjs'),
+      '@topgunbuild/client': path.resolve(__dirname, '../../packages/client/dist/index.mjs'),
+      '@topgunbuild/react': path.resolve(__dirname, '../../packages/react/dist/index.mjs'),
       '@': path.resolve(__dirname, './src'),
     },
-  },
-  optimizeDeps: {
-    exclude: ['@topgunbuild/client', '@topgunbuild/core', '@topgunbuild/react'],
   },
 })

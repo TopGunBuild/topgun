@@ -34,8 +34,7 @@ module.exports = async function config(options) {
 
     console.log('');
     console.log(chalk.cyan('  Debug'));
-    console.log(`    CRDT Debug: ${config.CRDT_DEBUG || 'false'}`);
-    console.log(`    Search Debug: ${config.SEARCH_DEBUG || 'false'}`);
+    console.log(`    Debug Mode: ${config.TOPGUN_DEBUG || 'false'}`);
     console.log(`    Log Level: ${config.LOG_LEVEL || 'info'}`);
 
     console.log('');

@@ -132,8 +132,7 @@ function generateEnvFile(config) {
   lines.push('METRICS_PORT=9091');
   lines.push('');
   lines.push('# Debug (enable for development)');
-  lines.push('# CRDT_DEBUG=true');
-  lines.push('# SEARCH_DEBUG=true');
+  lines.push('# TOPGUN_DEBUG=true  # Enables all debug features (CRDT, Search, endpoints)');
   lines.push('# LOG_LEVEL=debug');
 
   return lines.join('\n') + '\n';
