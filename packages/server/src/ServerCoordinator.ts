@@ -460,7 +460,9 @@ export class ServerCoordinator {
             },
         });
         if (this.bootstrapController.isBootstrapMode) {
-            logger.info('Server running in BOOTSTRAP MODE - visit /setup to configure');
+            logger.info('Server running in BOOTSTRAP MODE - start Admin UI and visit /setup to configure');
+            logger.info('  Run: cd apps/admin-dashboard && pnpm dev');
+            logger.info('  Then open: http://localhost:5173/setup');
         }
 
         // Phase 14D-3: Create settings controller for runtime configuration
