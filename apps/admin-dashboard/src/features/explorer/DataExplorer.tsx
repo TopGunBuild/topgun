@@ -47,7 +47,12 @@ export function DataExplorer() {
       }
       const data = await res.json();
       if (data.maps && Array.isArray(data.maps)) {
-        setMaps(data.maps.filter((m: MapInfo) => !m.name.startsWith('$sys/')));
+        // Filter out system maps and internal placeholder maps
+        setMaps(data.maps.filter((m: MapInfo) =>
+          !m.name.startsWith('$sys/') &&
+          !m.name.startsWith('__') &&
+          m.name !== '_empty'
+        ));
       }
     } catch (err) {
       console.error('Failed to load maps:', err);
@@ -62,10 +67,12 @@ export function DataExplorer() {
   }, [fetchMaps]);
 
   // Get data from selected map using useMap hook
-  const mapInstance = useMap(selectedMap || '_empty');
+  // Note: useMap always creates the map, so we use a placeholder that won't pollute the maps list
+  // We filter out entries when selectedMap is null anyway
+  const mapInstance = useMap(selectedMap || '__admin_placeholder__');
 
   const entries: MapEntry[] = useMemo(() => {
-    if (!selectedMap || !mapInstance) return [];
+    if (!selectedMap) return [];
 
     // Get all entries from the map using entries() iterator
     const allEntries: MapEntry[] = [];

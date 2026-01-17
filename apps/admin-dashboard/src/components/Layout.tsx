@@ -13,6 +13,7 @@ import {
   Wifi,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { TopGunLogo } from '@/components/TopGunLogo';
 import { cn } from '@/lib/utils';
 import { useEffect, useState } from 'react';
 import { useServerStatus } from '@/hooks/useServerStatus';
@@ -49,8 +50,10 @@ export function Layout() {
   }, [isDark]);
 
   const handleLogout = () => {
-    localStorage.removeItem('topgun_token');
-    navigate('/login');
+    if (window.confirm('Are you sure you want to logout?')) {
+      localStorage.removeItem('topgun_token');
+      navigate('/login');
+    }
   };
 
   const toggleTheme = () => {
@@ -68,7 +71,7 @@ export function Layout() {
       <div className="w-64 border-r bg-card flex flex-col">
         <div className="p-6 border-b">
           <h1 className="text-xl font-bold flex items-center gap-2">
-            <span className="text-2xl">🔫</span>
+            <TopGunLogo className="h-6 w-6" />
             TopGun Admin
           </h1>
           {/* Server connection status */}
@@ -153,7 +156,7 @@ export function Layout() {
           <Button
             variant="ghost"
             size="sm"
-            className="w-full justify-start text-destructive hover:text-destructive hover:bg-destructive/10"
+            className="w-full justify-start text-red-600 dark:text-red-400 hover:text-red-700 dark:hover:text-red-300 hover:bg-red-500/10"
             onClick={handleLogout}
           >
             <LogOut className="h-4 w-4 mr-2" />

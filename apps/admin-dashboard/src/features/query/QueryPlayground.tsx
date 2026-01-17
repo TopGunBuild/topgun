@@ -7,19 +7,35 @@ import { DataTable } from '@/components/DataTable';
 import { client } from '@/lib/client';
 import { Play, Loader2, Clock, AlertCircle } from 'lucide-react';
 
-const EXAMPLE_QUERY = `// Example: Query all entries from a map
+const EXAMPLE_QUERY = `// Example: Query entries from a map
 // Access the TopGun client via 'client'
 
-// Get all entries from 'users' map
-const users = await client.map('users').get();
-return users;
+// Create a query handle with optional filters
+const handle = client.query('users', {
+  // where: { status: 'active' },
+  // sort: { createdAt: 'desc' },
+  limit: 100
+});
 
-// Or use a filter:
-// const activeUsers = await client.query('users', {
-//   filter: { status: 'active' },
-//   limit: 10
-// });
-// return activeUsers;`;
+// Subscribe and get results as a Promise
+const results = await new Promise((resolve) => {
+  const unsubscribe = handle.subscribe((data) => {
+    unsubscribe(); // Unsubscribe after first result
+    resolve(data);
+  });
+});
+
+return results;
+
+// Other examples:
+// Full-text search:
+// return await client.search('articles', 'hello world');
+//
+// Hybrid query (FTS + filters):
+// const h = client.hybridQuery('products', {
+//   predicate: { $fts: 'laptop' },
+//   where: { price: { $lt: 1000 } }
+// });`;
 
 export function QueryPlayground() {
   const [code, setCode] = useState(EXAMPLE_QUERY);
