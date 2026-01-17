@@ -100,6 +100,11 @@ export function SetupWizard({ onComplete }: { onComplete: () => void }) {
       const data = await res.json();
 
       if (data.success) {
+        // Save token if returned by setup endpoint
+        if (data.token) {
+          localStorage.setItem('topgun_token', data.token);
+        }
+
         // Show success, wait for restart
         setStep(TOTAL_STEPS + 1); // Success step
         setTimeout(() => {

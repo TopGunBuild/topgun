@@ -469,7 +469,7 @@ export class BootstrapController {
       await this.initializeStorage(config.storage);
 
       // 3. Create admin user
-      await this.createAdminUser(config.admin, config.storage);
+      const adminUserId = await this.createAdminUser(config.admin, config.storage);
 
       // 4. Save configuration
       await this.saveConfiguration(config);
@@ -477,10 +477,18 @@ export class BootstrapController {
       // Mark as configured
       this._isConfigured = true;
 
+      // Generate token for the admin user so they can use it immediately
+      const token = this.generateJWT({
+        userId: adminUserId,
+        username: config.admin.username,
+        role: 'ADMIN',
+      });
+
       this.sendJson(res, 200, {
         success: true,
         message: 'Setup complete',
         restartRequired: true,
+        token,
       });
 
       // Schedule restart
@@ -795,12 +803,12 @@ export class BootstrapController {
   }
 
   /**
-   * Create admin user
+   * Create admin user and return user ID
    */
   private async createAdminUser(
     admin: SetupConfig['admin'],
     storage: SetupConfig['storage']
-  ): Promise<void> {
+  ): Promise<string> {
     // Use crypto.scrypt for password hashing (no bcrypt dependency needed)
     const salt = crypto.randomBytes(16).toString('hex');
     const passwordHash = await new Promise<string>((resolve, reject) => {
@@ -810,16 +818,18 @@ export class BootstrapController {
       });
     });
 
+    const userId = crypto.randomUUID();
+
     if (storage.type === 'postgres') {
       const pg = await import('pg');
       const client = new pg.default.Client({ connectionString: storage.connectionString });
       await client.connect();
 
       await client.query(
-        `INSERT INTO _users (username, password_hash, email, role)
-         VALUES ($1, $2, $3, 'admin')
-         ON CONFLICT (username) DO UPDATE SET password_hash = $2`,
-        [admin.username, passwordHash, admin.email || null]
+        `INSERT INTO _users (id, username, password_hash, email, role)
+         VALUES ($1, $2, $3, $4, 'admin')
+         ON CONFLICT (username) DO UPDATE SET password_hash = $3`,
+        [userId, admin.username, passwordHash, admin.email || null]
       );
 
       await client.end();
@@ -831,12 +841,13 @@ export class BootstrapController {
       db.prepare(`
         INSERT OR REPLACE INTO _users (id, username, password_hash, email, role)
         VALUES (?, ?, ?, ?, 'admin')
-      `).run(crypto.randomUUID(), admin.username, passwordHash, admin.email || null);
+      `).run(userId, admin.username, passwordHash, admin.email || null);
 
       db.close();
     }
 
     logger.info({ username: admin.username }, '[Bootstrap] Admin user created');
+    return userId;
   }
 
   /**
