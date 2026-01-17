@@ -776,8 +776,11 @@ export class ServerCoordinator {
         });
 
         if (this.storage) {
-            this.storage.initialize().then(() => {
+            // Wait for server to be ready (searchCoordinator initialized) before backfilling
+            this.storage.initialize().then(async () => {
                 logger.info('Storage adapter initialized');
+                // Wait for ready signal to ensure searchCoordinator is initialized
+                await this.ready();
                 this.backfillSearchIndexes();
             }).catch(err => {
                 logger.error({ err }, 'Failed to initialize storage');
