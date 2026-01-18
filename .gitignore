@@ -34,6 +34,7 @@ examples/**/*.d.ts
 
 # Keep package-level config files
 !packages/**/jest.config.js
+!packages/**/jest.setup.js
 
 # Keep test config files
 !tests/**/jest.config.js
