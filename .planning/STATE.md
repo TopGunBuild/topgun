@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-01-18)
 ## Current Position
 
 Phase: 3 of 7 (Bug Fixes)
-Plan: 0 of 3 in current phase
-Status: Ready to plan
-Last activity: 2026-01-18 - Phase 2 verified and complete
+Plan: 2 of 3 in current phase
+Status: In progress
+Last activity: 2026-01-18 - Completed 03-02-PLAN.md (Topic Offline Queue)
 
-Progress: [======--------------] 29%
+Progress: [========------------] 38%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 6
-- Average duration: 6.2 min
-- Total execution time: 37 min
+- Total plans completed: 8
+- Average duration: 5.9 min
+- Total execution time: 47 min
 
 **By Phase:**
 
@@ -29,9 +29,10 @@ Progress: [======--------------] 29%
 |-------|-------|-------|----------|
 | 01-security-hardening | 3 | 17 min | 5.7 min |
 | 02-worker-test-fixes | 3 | 20 min | 6.7 min |
+| 03-bug-fixes | 2 | 10 min | 5.0 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-03 (2 min), 02-01 (4 min), 02-02 (10 min), 02-03 (6 min)
+- Last 5 plans: 02-01 (4 min), 02-02 (10 min), 02-03 (6 min), 03-01 (6 min), 03-02 (4 min)
 - Trend: stable
 
 *Updated after each plan completion*
@@ -63,6 +64,9 @@ Recent decisions affecting current work:
 - 02-03: AUTH_ACK is server's auth success message (not AUTH_SUCCESS/AUTH_RESP)
 - 02-03: metricsPort: 0 in tests to avoid port conflicts
 - 02-03: LWWMap.set() generates timestamp internally (no hlc.now() parameter)
+- 03-02: Queue topic messages when offline instead of dropping
+- 03-02: drop-oldest as default eviction (preserves recent messages)
+- 03-02: Flush queue immediately on AUTH_ACK
 
 ### Pending Todos
 
@@ -78,5 +82,5 @@ Known fragile areas (from CONCERNS.md):
 ## Session Continuity
 
 Last session: 2026-01-18
-Stopped at: Phase 2 complete, ready for Phase 3
+Stopped at: Completed 03-02-PLAN.md
 Resume file: None
