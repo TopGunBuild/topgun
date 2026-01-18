@@ -62,7 +62,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
   };
 
   const injectClient = (clientMock: any) => {
-    (server as any).clients.set(clientMock.id, clientMock);
+    (server as any).connectionManager.getClients().set(clientMock.id, clientMock);
   };
 
   describe('ORMAP_SYNC_INIT', () => {

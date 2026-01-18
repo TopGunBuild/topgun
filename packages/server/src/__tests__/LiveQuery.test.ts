@@ -69,7 +69,7 @@ describe('Live Query Sliding Window Integration', () => {
     };
 
     // Inject client
-    (server as any).clients.set('client-1', clientMock);
+    (server as any).connectionManager.getClients().set('client-1', clientMock);
 
     // Send SUBSCRIBE
     const queryId = 'q1';
@@ -149,7 +149,7 @@ describe('Live Query Sliding Window Integration', () => {
       subscriptions: new Set(),
       principal: { userId: 'test2', roles: ['ADMIN'] }
     };
-    (server as any).clients.set('client-2', clientMock);
+    (server as any).connectionManager.getClients().set('client-2', clientMock);
 
     // 3. Subscribe with Predicate (Active & Age > 22) -> Expect u3
     const queryId = 'q2';

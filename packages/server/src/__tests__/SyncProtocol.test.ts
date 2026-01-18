@@ -58,7 +58,7 @@ describe('Sync Protocol Integration', () => {
     };
 
     // Inject client
-    (server as any).clients.set('client-1', clientMock);
+    (server as any).connectionManager.getClients().set('client-1', clientMock);
 
     const ops = [
       {
@@ -115,7 +115,7 @@ describe('Sync Protocol Integration', () => {
       subscriptions: new Set()
     };
 
-    (server as any).clients.set('client-retry', clientMock);
+    (server as any).connectionManager.getClients().set('client-retry', clientMock);
 
     const ts = Date.now();
     const ops = [
@@ -172,7 +172,7 @@ describe('Sync Protocol Integration', () => {
       subscriptions: new Set()
     };
 
-    (server as any).clients.set('client-or', clientMock);
+    (server as any).connectionManager.getClients().set('client-or', clientMock);
 
     const ts = Date.now();
     // Use a distinct map name for ORMap

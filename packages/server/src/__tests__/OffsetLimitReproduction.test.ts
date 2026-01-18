@@ -71,7 +71,7 @@ describe('Cursor-Based Pagination (formerly Offset/Limit Reproduction)', () => {
     };
 
     // Inject client
-    (server as any).clients.set('client-repro', clientMock);
+    (server as any).connectionManager.getClients().set('client-repro', clientMock);
 
     // 3. First page: Get first 3 items (sorted by score asc)
     const queryId = 'q1';

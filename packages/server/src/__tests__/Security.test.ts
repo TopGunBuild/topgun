@@ -80,7 +80,7 @@ describe('Field-Level Security (RBAC)', () => {
           subscriptions: new Set(),
           principal: { userId: 'u1', roles: ['USER'] }
       };
-      (server as any).clients.set('client-user', clientMock);
+      (server as any).connectionManager.getClients().set('client-user', clientMock);
 
       // 3. Send QUERY_SUB
       const queryId = 'q1';
@@ -118,7 +118,7 @@ describe('Field-Level Security (RBAC)', () => {
           subscriptions: new Set(),
           principal: { userId: 'a1', roles: ['ADMIN'] }
       };
-      (server as any).clients.set('client-admin', clientMock);
+      (server as any).connectionManager.getClients().set('client-admin', clientMock);
 
       // 3. Send QUERY_SUB
       const queryId = 'q2';
@@ -178,9 +178,9 @@ describe('Field-Level Security (RBAC)', () => {
           lastPingReceived: Date.now()
       };
 
-      (server as any).clients.set('client-user-2', userClient);
-      (server as any).clients.set('client-admin-2', adminClient);
-      (server as any).clients.set('client-admin-listener', adminListener);
+      (server as any).connectionManager.getClients().set('client-user-2', userClient);
+      (server as any).connectionManager.getClients().set('client-admin-2', adminClient);
+      (server as any).connectionManager.getClients().set('client-admin-listener', adminListener);
 
       // IMPORTANT: Clients must subscribe to receive SERVER_EVENT (subscription-based routing)
       await (server as any).handleMessage(userClient, {
