@@ -31,12 +31,20 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. HLC can be configured to reject timestamps beyond a configurable drift threshold
   3. All WebSocket messages are validated against Zod schemas before processing
   4. Invalid messages are logged with rate limiting to prevent log flooding
-**Plans**: TBD
+**Plans**: 3 plans in 2 waves
 
 Plans:
-- [ ] 01-01: JWT strict validation and startup checks
-- [ ] 01-02: HLC strict mode for clock drift rejection
-- [ ] 01-03: WebSocket message validation and rate-limited logging
+- [ ] 01-01-PLAN.md — Rate-limited logger utility and integration (SEC-04)
+- [ ] 01-02-PLAN.md — JWT secret production validation (SEC-01)
+- [ ] 01-03-PLAN.md — HLC strict mode for clock drift rejection (SEC-02)
+
+**Note:** SEC-03 (WebSocket message validation) is already implemented in ServerCoordinator line 1365 via `MessageSchema.safeParse()`. Verification only needed.
+
+**Wave Structure:**
+| Wave | Plans | Can Run Parallel |
+|------|-------|------------------|
+| 1 | 01-01, 01-02 | Yes |
+| 2 | 01-03 | After wave 1 |
 
 ### Phase 2: Worker Test Fixes
 **Goal**: All worker tests pass without skipping; CI is fully green
@@ -140,7 +148,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Security Hardening | 0/3 | Not started | - |
+| 1. Security Hardening | 0/3 | Planned | - |
 | 2. Worker Test Fixes | 0/3 | Not started | - |
 | 3. Bug Fixes | 0/3 | Not started | - |
 | 4. ServerCoordinator Refactor | 0/4 | Not started | - |
@@ -150,5 +158,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 
 ---
 *Roadmap created: 2026-01-18*
+*Phase 1 planned: 2026-01-18*
 *Depth: standard (7 phases)*
 *Coverage: 24/24 requirements mapped*
