@@ -55,12 +55,18 @@ Plans:
   2. MerkleWorker tests run without test.skip
   3. SerializationWorker tests run without test.skip
   4. DistributedSearch E2E test runs without describe.skip
-**Plans**: TBD
+**Plans**: 3 plans in 2 waves
 
 Plans:
-- [ ] 02-01: CRDTMergeWorker test fixes
-- [ ] 02-02: MerkleWorker test fixes
-- [ ] 02-03: SerializationWorker and DistributedSearch test fixes
+- [ ] 02-01-PLAN.md — Build infrastructure for compiled worker scripts (BUG-01, BUG-02, BUG-03, BUG-04 foundation)
+- [ ] 02-02-PLAN.md — Unskip CRDTMergeWorker, MerkleWorker, SerializationWorker tests (BUG-01, BUG-02, BUG-03)
+- [ ] 02-03-PLAN.md — Fix DistributedSearch E2E with proper JWT auth (BUG-04)
+
+**Wave Structure:**
+| Wave | Plans | Can Run Parallel |
+|------|-------|------------------|
+| 1 | 02-01 | Foundation (must run first) |
+| 2 | 02-02, 02-03 | Yes (after wave 1) |
 
 ### Phase 3: Bug Fixes
 **Goal**: Known bugs in production code paths are fixed
@@ -149,7 +155,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Security Hardening | 3/3 | ✓ Complete | 2026-01-18 |
-| 2. Worker Test Fixes | 0/3 | Not started | - |
+| 2. Worker Test Fixes | 0/3 | Planned | - |
 | 3. Bug Fixes | 0/3 | Not started | - |
 | 4. ServerCoordinator Refactor | 0/4 | Not started | - |
 | 5. SyncEngine Refactor | 0/3 | Not started | - |
@@ -159,5 +165,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 ---
 *Roadmap created: 2026-01-18*
 *Phase 1 planned: 2026-01-18*
+*Phase 2 planned: 2026-01-18*
 *Depth: standard (7 phases)*
 *Coverage: 24/24 requirements mapped*
