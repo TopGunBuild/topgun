@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-01-18)
 ## Current Position
 
 Phase: 4 of 7 (ServerCoordinator Refactor)
-Plan: 0 of 4 in current phase
-Status: Ready to plan
-Last activity: 2026-01-18 - Phase 3 verified and complete
+Plan: 2 of 4 in current phase
+Status: In progress
+Last activity: 2026-01-18 - Completed 04-02-PLAN.md (ConnectionManager extraction)
 
-Progress: [==========-----------] 43%
+Progress: [===========---------] 52%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 9
-- Average duration: 5.6 min
-- Total execution time: 50 min
+- Total plans completed: 11
+- Average duration: 5.8 min
+- Total execution time: 64 min
 
 **By Phase:**
 
@@ -30,9 +30,10 @@ Progress: [==========-----------] 43%
 | 01-security-hardening | 3 | 17 min | 5.7 min |
 | 02-worker-test-fixes | 3 | 20 min | 6.7 min |
 | 03-bug-fixes | 3 | 13 min | 4.3 min |
+| 04-servercoordinator-refactor | 2 | 14 min | 7.0 min |
 
 **Recent Trend:**
-- Last 5 plans: 02-02 (10 min), 02-03 (6 min), 03-01 (6 min), 03-02 (4 min), 03-03 (3 min)
+- Last 5 plans: 03-01 (6 min), 03-02 (4 min), 03-03 (3 min), 04-01 (est), 04-02 (16 min)
 - Trend: stable
 
 *Updated after each plan completion*
@@ -72,6 +73,10 @@ Recent decisions affecting current work:
 - 03-02: Flush queue immediately on AUTH_ACK
 - 03-03: Check process.env.TOPGUN_DEBUG === 'true' inside method rather than caching as class field
 - 03-03: Map size calculations only happen inside debug condition (no wasted CPU when disabled)
+- 04-02: ConnectionManager owns clients Map (single source of truth)
+- 04-02: ServerCoordinator delegates isClientAlive/getClientIdleTime to ConnectionManager
+- 04-02: Broadcast methods stay in ServerCoordinator (have queryRegistry/securityManager deps)
+- 04-02: Client access pattern: this.connectionManager.getClient(id) for all lookups
 
 ### Pending Todos
 
@@ -87,5 +92,5 @@ Known fragile areas (from CONCERNS.md):
 ## Session Continuity
 
 Last session: 2026-01-18
-Stopped at: Phase 3 complete, ready for Phase 4
+Stopped at: Completed 04-02-PLAN.md (ConnectionManager extraction)
 Resume file: None
