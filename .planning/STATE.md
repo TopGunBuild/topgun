@@ -5,33 +5,33 @@
 See: .planning/PROJECT.md (updated 2026-01-18)
 
 **Core value:** Make TopGun safe for production and easier to maintain
-**Current focus:** Phase 1 - Security Hardening
+**Current focus:** Phase 1 - Security Hardening (COMPLETE)
 
 ## Current Position
 
 Phase: 1 of 7 (Security Hardening)
-Plan: 2 of 3 in current phase
-Status: In progress
-Last activity: 2026-01-18 - Completed 01-02-PLAN.md (JWT Secret Validation)
+Plan: 3 of 3 in current phase
+Status: Phase complete
+Last activity: 2026-01-18 - Completed 01-03-PLAN.md (HLC Strict Mode)
 
-Progress: [==------------------] 10%
+Progress: [===-----------------] 15%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 2
-- Average duration: 7.5 min
-- Total execution time: 15 min
+- Total plans completed: 3
+- Average duration: 5.7 min
+- Total execution time: 17 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01-security-hardening | 2 | 15 min | 7.5 min |
+| 01-security-hardening | 3 | 17 min | 5.7 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (4 min), 01-02 (11 min)
-- Trend: -
+- Last 5 plans: 01-01 (4 min), 01-02 (11 min), 01-03 (2 min)
+- Trend: improving
 
 *Updated after each plan completion*
 
@@ -50,6 +50,9 @@ Recent decisions affecting current work:
 - 01-02: Separate utility file for JWT validation (clean separation, testable)
 - 01-02: Config secret takes precedence over env secret
 - 01-02: Error messages include openssl generation hint
+- 01-03: Instance maxDriftMs replaces static MAX_DRIFT for configurability
+- 01-03: Strict mode throws detailed error with drift value and threshold
+- 01-03: Default strictMode=false preserves backwards compatibility
 
 ### Pending Todos
 
@@ -64,6 +67,6 @@ Known fragile areas (from CONCERNS.md):
 
 ## Session Continuity
 
-Last session: 2026-01-18T13:29:27Z
-Stopped at: Completed 01-02-PLAN.md (JWT Secret Validation)
+Last session: 2026-01-18T13:33:15Z
+Stopped at: Completed 01-03-PLAN.md (HLC Strict Mode) - Phase 1 complete
 Resume file: None
