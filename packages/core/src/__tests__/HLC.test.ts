@@ -1,4 +1,4 @@
-import { HLC, Timestamp } from '../HLC';
+import { HLC, Timestamp, HLCOptions } from '../HLC';
 
 describe('HLC (Hybrid Logical Clock)', () => {
   let hlc: HLC;
@@ -351,7 +351,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
       const currentTime = 1000000;
       jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
 
-      // Remote clock is way ahead (more than MAX_DRIFT of 60000ms)
+      // Remote clock is way ahead (more than default maxDriftMs of 60000ms)
       const remote: Timestamp = {
         millis: currentTime + 100000, // 100 seconds ahead
         counter: 0,
@@ -370,6 +370,116 @@ describe('HLC (Hybrid Logical Clock)', () => {
       expect(ts.millis).toBe(currentTime + 100000);
 
       consoleWarnSpy.mockRestore();
+    });
+  });
+
+  describe('Strict Mode', () => {
+    test('should throw error in strict mode when drift exceeds threshold', () => {
+      const strictHlc = new HLC('strict-node', { strictMode: true, maxDriftMs: 5000 });
+      const currentTime = 1000000;
+      jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
+
+      const remote: Timestamp = {
+        millis: currentTime + 10000, // 10 seconds ahead, exceeds 5s threshold
+        counter: 0,
+        nodeId: 'remote-node'
+      };
+
+      expect(() => strictHlc.update(remote)).toThrow('Clock drift detected');
+      expect(() => strictHlc.update(remote)).toThrow('10000ms ahead');
+      expect(() => strictHlc.update(remote)).toThrow('threshold: 5000ms');
+    });
+
+    test('should accept timestamps within threshold in strict mode', () => {
+      const strictHlc = new HLC('strict-node', { strictMode: true, maxDriftMs: 10000 });
+      const currentTime = 1000000;
+      jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
+
+      const remote: Timestamp = {
+        millis: currentTime + 5000, // 5 seconds ahead, within 10s threshold
+        counter: 0,
+        nodeId: 'remote-node'
+      };
+
+      expect(() => strictHlc.update(remote)).not.toThrow();
+
+      // Verify timestamp was accepted
+      const ts = strictHlc.now();
+      expect(ts.millis).toBe(currentTime + 5000);
+    });
+
+    test('should use default maxDriftMs of 60000 when not specified', () => {
+      const strictHlc = new HLC('strict-node', { strictMode: true });
+      const currentTime = 1000000;
+      jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
+
+      // 50 seconds ahead - within default 60s threshold
+      const withinThreshold: Timestamp = {
+        millis: currentTime + 50000,
+        counter: 0,
+        nodeId: 'remote'
+      };
+      expect(() => strictHlc.update(withinThreshold)).not.toThrow();
+
+      // 70 seconds ahead - exceeds default 60s threshold
+      const exceedsThreshold: Timestamp = {
+        millis: currentTime + 70000,
+        counter: 0,
+        nodeId: 'remote'
+      };
+      expect(() => strictHlc.update(exceedsThreshold)).toThrow('Clock drift detected');
+    });
+
+    test('should warn but accept in non-strict mode (default)', () => {
+      const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation();
+      const permissiveHlc = new HLC('permissive-node'); // strictMode defaults to false
+      const currentTime = 1000000;
+      jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
+
+      const remote: Timestamp = {
+        millis: currentTime + 100000, // 100 seconds ahead
+        counter: 0,
+        nodeId: 'remote-node'
+      };
+
+      // Should NOT throw
+      expect(() => permissiveHlc.update(remote)).not.toThrow();
+
+      // Should have warned
+      expect(consoleWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Clock drift detected')
+      );
+
+      // Timestamp should have been accepted
+      const ts = permissiveHlc.now();
+      expect(ts.millis).toBe(currentTime + 100000);
+
+      consoleWarnSpy.mockRestore();
+    });
+
+    test('should expose configuration via getters', () => {
+      const hlc1 = new HLC('node-1', { strictMode: true, maxDriftMs: 30000 });
+      expect(hlc1.getStrictMode).toBe(true);
+      expect(hlc1.getMaxDriftMs).toBe(30000);
+
+      const hlc2 = new HLC('node-2'); // defaults
+      expect(hlc2.getStrictMode).toBe(false);
+      expect(hlc2.getMaxDriftMs).toBe(60000);
+    });
+
+    test('should handle negative drift (remote behind local) without strict mode issues', () => {
+      const strictHlc = new HLC('strict-node', { strictMode: true, maxDriftMs: 5000 });
+      const currentTime = 1000000;
+      jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
+
+      const remote: Timestamp = {
+        millis: currentTime - 100000, // 100 seconds BEHIND (not ahead)
+        counter: 0,
+        nodeId: 'remote-node'
+      };
+
+      // Negative drift should not trigger rejection (only future drift is problematic)
+      expect(() => strictHlc.update(remote)).not.toThrow();
     });
   });
 });
