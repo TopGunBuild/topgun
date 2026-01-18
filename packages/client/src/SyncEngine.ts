@@ -63,6 +63,18 @@ export interface BackoffConfig {
   maxRetries: number;
 }
 
+export interface TopicQueueConfig {
+  /** Maximum queued topic messages when offline (default: 100) */
+  maxSize: number;
+  /** Strategy when queue is full: 'drop-oldest' | 'drop-newest' (default: 'drop-oldest') */
+  strategy: 'drop-oldest' | 'drop-newest';
+}
+
+const DEFAULT_TOPIC_QUEUE_CONFIG: TopicQueueConfig = {
+  maxSize: 100,
+  strategy: 'drop-oldest',
+};
+
 export interface SyncEngineConfig {
   nodeId: string;
   /** @deprecated Use connectionProvider instead */
@@ -74,6 +86,8 @@ export interface SyncEngineConfig {
   heartbeat?: Partial<HeartbeatConfig>;
   backoff?: Partial<BackoffConfig>;
   backpressure?: Partial<BackpressureConfig>;
+  /** Configuration for offline topic message queue */
+  topicQueue?: Partial<TopicQueueConfig>;
 }
 
 const DEFAULT_BACKOFF_CONFIG: BackoffConfig = {
@@ -83,6 +97,12 @@ const DEFAULT_BACKOFF_CONFIG: BackoffConfig = {
   jitter: true,
   maxRetries: 10,
 };
+
+interface QueuedTopicMessage {
+  topic: string;
+  data: any;
+  timestamp: number;
+}
 
 export class SyncEngine {
   private readonly nodeId: string;
@@ -129,6 +149,10 @@ export class SyncEngine {
   // Conflict Resolver client (Phase 5.05)
   private readonly conflictResolverClient: ConflictResolverClient;
 
+  // Topic offline queue (Phase 3 BUG-06)
+  private topicQueue: QueuedTopicMessage[] = [];
+  private readonly topicQueueConfig: TopicQueueConfig;
+
   constructor(config: SyncEngineConfig) {
     // Validate config: either serverUrl or connectionProvider required
     if (!config.serverUrl && !config.connectionProvider) {
@@ -160,6 +184,12 @@ export class SyncEngine {
     this.backpressureConfig = {
       ...DEFAULT_BACKPRESSURE_CONFIG,
       ...config.backpressure,
+    };
+
+    // Merge topic queue config with defaults (Phase 3 BUG-06)
+    this.topicQueueConfig = {
+      ...DEFAULT_TOPIC_QUEUE_CONFIG,
+      ...config.topicQueue,
     };
 
     // Initialize connection provider
@@ -636,12 +666,51 @@ export class SyncEngine {
         payload: { topic, data }
       });
     } else {
-      // TODO: Queue topic messages or drop?
-      // Spec says Fire-and-Forget, so dropping is acceptable if offline,
-      // but queueing is better UX.
-      // For now, log warning.
-      logger.warn({ topic }, 'Dropped topic publish (offline)');
+      this.queueTopicMessage(topic, data);
     }
+  }
+
+  private queueTopicMessage(topic: string, data: any): void {
+    const message: QueuedTopicMessage = {
+      topic,
+      data,
+      timestamp: Date.now(),
+    };
+
+    if (this.topicQueue.length >= this.topicQueueConfig.maxSize) {
+      if (this.topicQueueConfig.strategy === 'drop-oldest') {
+        const dropped = this.topicQueue.shift();
+        logger.warn({ topic: dropped?.topic }, 'Dropped oldest queued topic message (queue full)');
+      } else {
+        logger.warn({ topic }, 'Dropped newest topic message (queue full)');
+        return;
+      }
+    }
+
+    this.topicQueue.push(message);
+    logger.debug({ topic, queueSize: this.topicQueue.length }, 'Queued topic message for offline');
+  }
+
+  private flushTopicQueue(): void {
+    if (this.topicQueue.length === 0) return;
+
+    logger.info({ count: this.topicQueue.length }, 'Flushing queued topic messages');
+
+    for (const msg of this.topicQueue) {
+      this.sendMessage({
+        type: 'TOPIC_PUB',
+        payload: { topic: msg.topic, data: msg.data },
+      });
+    }
+
+    this.topicQueue = [];
+  }
+
+  public getTopicQueueStatus(): { size: number; maxSize: number } {
+    return {
+      size: this.topicQueue.length,
+      maxSize: this.topicQueueConfig.maxSize,
+    };
   }
 
   private sendTopicSubscription(topic: string) {
@@ -827,6 +896,9 @@ export class SyncEngine {
         this.resetBackoff();
 
         this.syncPendingOperations();
+
+        // Flush any queued topic messages from offline period
+        this.flushTopicQueue();
 
         // Only re-subscribe on first authentication to prevent UI flickering
         if (!wasAuthenticated) {
