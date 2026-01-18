@@ -7,15 +7,13 @@
  * - Search result ranking across nodes
  * - Cursor-based pagination
  *
- * NOTE: These tests require full server setup with WebSocket connections.
- * For quick validation, run ClusterSearchCoordinator unit tests instead.
- * Skip these in CI for now as they require more complex setup.
+ * Run: pnpm test:workers -- --testPathPattern=DistributedSearch --runInBand
  */
 
 import { ServerCoordinator } from '../ServerCoordinator';
 import { WebSocket } from 'ws';
 import jwt from 'jsonwebtoken';
-import { serialize, deserialize, HLC } from '@topgunbuild/core';
+import { serialize, deserialize } from '@topgunbuild/core';
 
 const JWT_SECRET = 'test-secret-for-e2e-tests';
 
@@ -24,9 +22,8 @@ function createTestToken(userId = 'test-user', roles = ['ADMIN']): string {
   return jwt.sign({ userId, roles }, JWT_SECRET, { expiresIn: '1h' });
 }
 
-// Skip E2E tests in CI - they require complex server setup
 // Run: npx jest --testPathPattern="DistributedSearch.e2e" --runInBand
-describe.skip('Distributed Search E2E', () => {
+describe('Distributed Search E2E', () => {
   let node1: ServerCoordinator;
   let node2: ServerCoordinator;
 
@@ -51,8 +48,8 @@ describe.skip('Distributed Search E2E', () => {
   // Helper to insert data via internal API
   async function insertData(node: ServerCoordinator, mapName: string, key: string, value: any): Promise<void> {
     const map = (node as any).getMap(mapName);
-    const hlc = (node as any).hlc as HLC;
-    map.set(key, value, hlc.now());
+    // LWWMap.set(key, value, ttlMs?) - timestamp is generated internally by map's HLC
+    map.set(key, value);
     // Trigger FTS index update
     (node as any).searchCoordinator?.onDataChange(mapName, key, value, 'add');
   }
@@ -83,7 +80,7 @@ describe.skip('Distributed Search E2E', () => {
         try {
           const msg = deserialize(data) as { type: string; payload?: any; error?: string };
 
-          if (msg.type === 'AUTH_SUCCESS' || msg.type === 'AUTH_RESP') {
+          if (msg.type === 'AUTH_ACK' || msg.type === 'AUTH_SUCCESS' || msg.type === 'AUTH_RESP') {
             // Now send search request
             client.send(serialize({
               type: 'SEARCH',
@@ -100,10 +97,10 @@ describe.skip('Distributed Search E2E', () => {
             clearTimeout(timeout);
             client.close();
             resolve(msg.payload);
-          } else if (msg.type === 'ERROR') {
+          } else if (msg.type === 'ERROR' || msg.type === 'AUTH_FAIL') {
             clearTimeout(timeout);
             client.close();
-            reject(new Error(msg.error || 'Unknown error'));
+            reject(new Error(msg.error || msg.payload?.message || 'Unknown error'));
           }
         } catch (err) {
           // Skip parsing errors for non-msgpack messages
@@ -127,6 +124,7 @@ describe.skip('Distributed Search E2E', () => {
         clusterPort: 0,
         peers: [],
         jwtSecret: JWT_SECRET,
+        metricsPort: 0, // Use random port to avoid conflicts
         fullTextSearch: {
           articles: {
             fields: ['title', 'content'],
@@ -143,6 +141,7 @@ describe.skip('Distributed Search E2E', () => {
         clusterPort: 0,
         peers: [`localhost:${node1.clusterPort}`],
         jwtSecret: JWT_SECRET,
+        metricsPort: 0, // Use random port to avoid conflicts
         fullTextSearch: {
           articles: {
             fields: ['title', 'content'],
@@ -157,7 +156,7 @@ describe.skip('Distributed Search E2E', () => {
 
       // Give some time for cluster stabilization
       await new Promise(resolve => setTimeout(resolve, 500));
-    }, 15000);
+    }, 30000);
 
     afterAll(async () => {
       await Promise.all([
@@ -250,6 +249,7 @@ describe.skip('Distributed Search E2E', () => {
         clusterPort: 0,
         peers: [],
         jwtSecret: JWT_SECRET,
+        metricsPort: 0, // Use random port to avoid conflicts
         fullTextSearch: {
           docs: {
             fields: ['title', 'body'],
