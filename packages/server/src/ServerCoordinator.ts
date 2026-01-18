@@ -4248,23 +4248,32 @@ export class ServerCoordinator {
         // Wait for loading to complete if in progress
         const loadingPromise = this.mapLoadingPromises.get(name);
 
-        // [DEBUG] Log state for troubleshooting sync issues
-        const map = this.maps.get(name);
-        const mapSize = map instanceof LWWMap ? Array.from(map.entries()).length :
-                       map instanceof ORMap ? map.size : 0;
-        logger.info({
-            mapName: name,
-            mapExisted,
-            hasLoadingPromise: !!loadingPromise,
-            currentMapSize: mapSize
-        }, '[getMapAsync] State check');
+        // Debug logging gated behind TOPGUN_DEBUG
+        const debugEnabled = process.env.TOPGUN_DEBUG === 'true';
+
+        if (debugEnabled) {
+            const map = this.maps.get(name);
+            const mapSize = map instanceof LWWMap ? Array.from(map.entries()).length :
+                           map instanceof ORMap ? map.size : 0;
+            logger.info({
+                mapName: name,
+                mapExisted,
+                hasLoadingPromise: !!loadingPromise,
+                currentMapSize: mapSize
+            }, '[getMapAsync] State check');
+        }
 
         if (loadingPromise) {
-            logger.info({ mapName: name }, '[getMapAsync] Waiting for loadMapFromStorage...');
+            if (debugEnabled) {
+                logger.info({ mapName: name }, '[getMapAsync] Waiting for loadMapFromStorage...');
+            }
             await loadingPromise;
-            const newMapSize = map instanceof LWWMap ? Array.from(map.entries()).length :
-                              map instanceof ORMap ? map.size : 0;
-            logger.info({ mapName: name, mapSizeAfterLoad: newMapSize }, '[getMapAsync] Load completed');
+            if (debugEnabled) {
+                const map = this.maps.get(name);
+                const newMapSize = map instanceof LWWMap ? Array.from(map.entries()).length :
+                                  map instanceof ORMap ? map.size : 0;
+                logger.info({ mapName: name, mapSizeAfterLoad: newMapSize }, '[getMapAsync] Load completed');
+            }
         }
 
         return this.maps.get(name)!;
