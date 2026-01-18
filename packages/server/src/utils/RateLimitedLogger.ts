@@ -1,6 +1,14 @@
 import { logger } from './logger';
 
 /**
+ * Minimal logger interface for dependency injection.
+ */
+export interface BaseLogger {
+    warn(obj: object, msg: string): void;
+    error(obj: object, msg: string): void;
+}
+
+/**
  * Configuration for the rate-limited logger.
  */
 export interface RateLimitConfig {
@@ -8,6 +16,8 @@ export interface RateLimitConfig {
     windowMs: number;
     /** Maximum logs per window per key (default: 5) */
     maxPerWindow: number;
+    /** Optional custom logger for testing/customization */
+    baseLogger?: BaseLogger;
 }
 
 /**
@@ -38,10 +48,11 @@ const DEFAULT_CONFIG: RateLimitConfig = {
 export class RateLimitedLogger {
     private states: Map<string, WindowState> = new Map();
     private config: RateLimitConfig;
-    private baseLogger = logger;
+    private baseLogger: BaseLogger;
 
     constructor(config: Partial<RateLimitConfig> = {}) {
         this.config = { ...DEFAULT_CONFIG, ...config };
+        this.baseLogger = config.baseLogger ?? logger;
     }
 
     /**
