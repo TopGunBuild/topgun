@@ -3,8 +3,8 @@
  * Phase 1.07: SerializationWorker Implementation
  *
  * Tests for serialization/deserialization operations.
- * NOTE: Worker thread tests are skipped in Jest due to ts-node limitations.
- * Only inline operations (batch size < 10) are tested here.
+ * Worker thread tests require pre-compiled workers (pnpm build first).
+ * Run: pnpm test:workers for full coverage including worker thread tests.
  */
 
 import { WorkerPool, SerializationWorker } from '../../workers';
@@ -330,8 +330,9 @@ describe('SerializationWorker Tests', () => {
     });
   });
 
-  // Worker thread tests - skipped due to ts-node limitations
-  describe.skip('Worker Thread Operations', () => {
+  // Worker thread tests require pre-compiled workers (pnpm build first)
+  // Run: pnpm test:workers for full coverage
+  describe('Worker Thread Operations', () => {
     it('should serialize large batch via worker thread', async () => {
       const items: unknown[] = [];
       for (let i = 0; i < 100; i++) {
@@ -345,7 +346,7 @@ describe('SerializationWorker Tests', () => {
       const serialized = await worker.serializeBatch(items);
 
       expect(serialized.length).toBe(100);
-    });
+    }, 15000);
 
     it('should deserialize large batch via worker thread', async () => {
       const items: unknown[] = [];
@@ -358,6 +359,6 @@ describe('SerializationWorker Tests', () => {
 
       expect(deserialized.length).toBe(100);
       expect(deserialized).toEqual(items);
-    });
+    }, 15000);
   });
 });
