@@ -10,27 +10,27 @@ See: .planning/PROJECT.md (updated 2026-01-18)
 ## Current Position
 
 Phase: 1 of 7 (Security Hardening)
-Plan: 1 of 3 in current phase
+Plan: 2 of 3 in current phase
 Status: In progress
-Last activity: 2026-01-18 - Completed 01-01-PLAN.md (Rate-Limited Logger)
+Last activity: 2026-01-18 - Completed 01-02-PLAN.md (JWT Secret Validation)
 
-Progress: [=-------------------] 5%
+Progress: [==------------------] 10%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 1
-- Average duration: 4 min
-- Total execution time: 4 min
+- Total plans completed: 2
+- Average duration: 7.5 min
+- Total execution time: 15 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01-security-hardening | 1 | 4 min | 4 min |
+| 01-security-hardening | 2 | 15 min | 7.5 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (4 min)
+- Last 5 plans: 01-01 (4 min), 01-02 (11 min)
 - Trend: -
 
 *Updated after each plan completion*
@@ -47,6 +47,9 @@ Recent decisions affecting current work:
 - LRU over hard limits: Graceful degradation preferred
 - 01-01: 10s window, 5 errors max for rate-limited logging (SEC-04)
 - 01-01: Only log errorCode, not full error object to prevent log bloat
+- 01-02: Separate utility file for JWT validation (clean separation, testable)
+- 01-02: Config secret takes precedence over env secret
+- 01-02: Error messages include openssl generation hint
 
 ### Pending Todos
 
@@ -61,6 +64,6 @@ Known fragile areas (from CONCERNS.md):
 
 ## Session Continuity
 
-Last session: 2026-01-18T13:22:43Z
-Stopped at: Completed 01-01-PLAN.md (Rate-Limited Logger)
+Last session: 2026-01-18T13:29:27Z
+Stopped at: Completed 01-02-PLAN.md (JWT Secret Validation)
 Resume file: None
