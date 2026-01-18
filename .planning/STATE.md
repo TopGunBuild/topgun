@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-01-18)
 ## Current Position
 
 Phase: 3 of 7 (Bug Fixes)
-Plan: 2 of 3 in current phase
-Status: In progress
-Last activity: 2026-01-18 - Completed 03-02-PLAN.md (Topic Offline Queue)
+Plan: 3 of 3 in current phase
+Status: Phase complete
+Last activity: 2026-01-18 - Completed 03-03-PLAN.md (Debug Logging Gating)
 
-Progress: [========------------] 38%
+Progress: [==========-----------] 43%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 8
-- Average duration: 5.9 min
-- Total execution time: 47 min
+- Total plans completed: 9
+- Average duration: 5.6 min
+- Total execution time: 50 min
 
 **By Phase:**
 
@@ -29,10 +29,10 @@ Progress: [========------------] 38%
 |-------|-------|-------|----------|
 | 01-security-hardening | 3 | 17 min | 5.7 min |
 | 02-worker-test-fixes | 3 | 20 min | 6.7 min |
-| 03-bug-fixes | 2 | 10 min | 5.0 min |
+| 03-bug-fixes | 3 | 13 min | 4.3 min |
 
 **Recent Trend:**
-- Last 5 plans: 02-01 (4 min), 02-02 (10 min), 02-03 (6 min), 03-01 (6 min), 03-02 (4 min)
+- Last 5 plans: 02-02 (10 min), 02-03 (6 min), 03-01 (6 min), 03-02 (4 min), 03-03 (3 min)
 - Trend: stable
 
 *Updated after each plan completion*
@@ -70,6 +70,8 @@ Recent decisions affecting current work:
 - 03-02: Queue topic messages when offline instead of dropping
 - 03-02: drop-oldest as default eviction (preserves recent messages)
 - 03-02: Flush queue immediately on AUTH_ACK
+- 03-03: Check process.env.TOPGUN_DEBUG === 'true' inside method rather than caching as class field
+- 03-03: Map size calculations only happen inside debug condition (no wasted CPU when disabled)
 
 ### Pending Todos
 
@@ -85,5 +87,5 @@ Known fragile areas (from CONCERNS.md):
 ## Session Continuity
 
 Last session: 2026-01-18
-Stopped at: Completed 03-02-PLAN.md
+Stopped at: Phase 3 complete, ready for Phase 4
 Resume file: None
