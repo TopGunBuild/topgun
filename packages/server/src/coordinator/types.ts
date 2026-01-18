@@ -1,6 +1,7 @@
 import type { WebSocket } from 'ws';
-import type { HLC, Principal, Timestamp } from '@topgunbuild/core';
+import type { HLC, Principal, Timestamp, LWWMap, ORMap, FullTextIndexConfig } from '@topgunbuild/core';
 import type { CoalescingWriter, CoalescingWriterOptions } from '../utils/CoalescingWriter';
+import type { IServerStorage } from '../storage/IServerStorage';
 
 /**
  * Represents a connected client with its WebSocket and state.
@@ -113,4 +114,46 @@ export interface IAuthHandler {
      * @returns AuthResult with success status and principal or error
      */
     handleAuth(client: ClientConnection, token: string): Promise<AuthResult>;
+}
+
+// ============================================================================
+// StorageManager Types
+// ============================================================================
+
+/**
+ * Interface for managing in-memory CRDT maps and their storage persistence.
+ * StorageManager is the single owner of the maps Map.
+ */
+export interface IStorageManager {
+    /** Get or create a map by name (synchronous, may return empty map while loading) */
+    getMap(name: string, typeHint?: 'LWW' | 'OR'): LWWMap<string, any> | ORMap<string, any>;
+
+    /** Get map with async loading guarantee (waits for storage load) */
+    getMapAsync(name: string, typeHint?: 'LWW' | 'OR'): Promise<LWWMap<string, any> | ORMap<string, any>>;
+
+    /** Get all maps (for iteration/debug) */
+    getMaps(): Map<string, LWWMap<string, any> | ORMap<string, any>>;
+
+    /** Check if a map exists */
+    hasMap(name: string): boolean;
+
+    /** Load a map from storage (triggers async load) */
+    loadMapFromStorage(name: string, typeHint: 'LWW' | 'OR'): Promise<void>;
+
+    /** Check if map is currently loading */
+    isMapLoading(name: string): boolean;
+}
+
+/**
+ * Configuration for StorageManager.
+ */
+export interface StorageManagerConfig {
+    nodeId: string;
+    hlc: HLC;
+    storage?: IServerStorage;
+    fullTextSearch?: Record<string, FullTextIndexConfig>;
+    /** Function to check if a key is related to this node (owner or backup) */
+    isRelatedKey?: (key: string) => boolean;
+    /** Callback when a map is loaded from storage */
+    onMapLoaded?: (mapName: string, recordCount: number) => void;
 }

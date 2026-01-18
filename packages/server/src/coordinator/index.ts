@@ -3,6 +3,7 @@
 
 export { AuthHandler } from './auth-handler';
 export { ConnectionManager } from './connection-manager';
+export { StorageManager } from './storage-manager';
 export type {
     // Auth types
     IAuthHandler,
@@ -12,4 +13,7 @@ export type {
     ClientConnection,
     IConnectionManager,
     ConnectionManagerConfig,
+    // Storage types
+    IStorageManager,
+    StorageManagerConfig,
 } from './types';
