@@ -4,22 +4,49 @@ export interface Timestamp {
   nodeId: string;
 }
 
+/**
+ * Configuration options for HLC behavior.
+ */
+export interface HLCOptions {
+  /**
+   * When true, update() throws an error if remote timestamp drift exceeds maxDriftMs.
+   * When false (default), a warning is logged but the timestamp is accepted.
+   */
+  strictMode?: boolean;
+
+  /**
+   * Maximum allowable clock drift in milliseconds.
+   * Remote timestamps beyond this threshold trigger strict mode rejection or warning.
+   * Default: 60000 (1 minute)
+   */
+  maxDriftMs?: number;
+}
+
 export class HLC {
   private lastMillis: number;
   private lastCounter: number;
   private readonly nodeId: string;
+  private readonly strictMode: boolean;
+  private readonly maxDriftMs: number;
 
-  // Max allowable drift in milliseconds (1 minute)
-  private static readonly MAX_DRIFT = 60000;
-
-  constructor(nodeId: string) {
+  constructor(nodeId: string, options: HLCOptions = {}) {
     this.nodeId = nodeId;
+    this.strictMode = options.strictMode ?? false;
+    this.maxDriftMs = options.maxDriftMs ?? 60000;
     this.lastMillis = 0;
     this.lastCounter = 0;
   }
 
   public get getNodeId(): string {
     return this.nodeId;
+  }
+
+  public get getStrictMode(): boolean {
+    return this.strictMode;
+  }
+
+  public get getMaxDriftMs(): number {
+    return this.maxDriftMs;
   }
 
   /**
@@ -52,10 +79,17 @@ export class HLC {
   public update(remote: Timestamp): void {
     const systemTime = Date.now();
 
-    // Validate drift (optional but good practice)
-    if (remote.millis > systemTime + HLC.MAX_DRIFT) {
-      console.warn(`Clock drift detected: Remote time ${remote.millis} is far ahead of local ${systemTime}`);
-      // In strict systems we might reject, but in AP systems we usually accept and fast-forward
+    // Validate drift
+    const drift = remote.millis - systemTime;
+    if (drift > this.maxDriftMs) {
+      const message = `Clock drift detected: Remote time ${remote.millis} is ${drift}ms ahead of local ${systemTime} (threshold: ${this.maxDriftMs}ms)`;
+
+      if (this.strictMode) {
+        throw new Error(message);
+      } else {
+        console.warn(message);
+        // In AP systems we accept and fast-forward
+      }
     }
 
     const maxMillis = Math.max(this.lastMillis, systemTime, remote.millis);
