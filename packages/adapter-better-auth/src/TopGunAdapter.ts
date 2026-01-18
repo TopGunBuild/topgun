@@ -14,6 +14,8 @@ export interface TopGunAdapterOptions {
    * Default: "auth_user", "auth_session", etc.
    */
   modelMap?: Record<string, string>;
+  /** Wait for client storage to be ready before accepting requests (default: true) */
+  waitForReady?: boolean;
 }
 
 export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterInstance => {
@@ -22,6 +24,22 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
 
     const getMapName = (model: string) => {
       return modelMap[model] || `auth_${model}`;
+    };
+
+    // Ready state tracking for cold start race condition fix
+    const shouldWaitForReady = adapterOptions.waitForReady ?? true;
+    let isReady = false;
+    let readyPromise: Promise<void> | null = null;
+
+    const ensureReady = async (): Promise<void> => {
+      if (!shouldWaitForReady || isReady) return;
+      if (!readyPromise) {
+        // client.start() ensures storage is initialized and loaded
+        readyPromise = client.start().then(() => {
+          isReady = true;
+        });
+      }
+      await readyPromise;
     };
 
     const whereToPredicate = (where: Where[]): PredicateNode | undefined => {
@@ -102,6 +120,7 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
       id: 'topgun-adapter',
       
       async create({ model, data }) {
+        await ensureReady();
         const mapName = getMapName(model);
         const id = (data as any).id || crypto.randomUUID();
         const record = { ...data, id };
@@ -118,22 +137,7 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
       },
 
       async findOne({ model, where, select, join }) {
-        // Optimization: If where is just ID check, use getMap().get()
-        const idCheck = where.find(w => w.field === 'id' && (w.operator === 'eq' || w.operator === undefined));
-        if (idCheck && where.length === 1) {
-          const mapName = getMapName(model);
-          const map = client.getMap<string, any>(mapName);
-          // LWWMap.get is synchronous from memory (loaded from storage).
-          // If we haven't loaded yet, we might miss it.
-          // Ideally we should ensure map is loaded.
-          // TopGunClient.getMap returns immediately but starts restoring in background.
-          // This creates a race condition for cold start.
-          
-          // Workaround: Use runQuery which waits for initial load via QueryHandle -> loadInitialLocalData
-          // But for simple ID, query is overkill?
-          // Let's use runQuery to be safe and consistent.
-        }
-
+        await ensureReady();
         const results = await runQuery<any>(model, where, undefined, 1);
         
         if (results.length > 0) {
@@ -198,11 +202,13 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
       },
 
       async findMany({ model, where, limit, offset, sortBy }) {
+         await ensureReady();
          const results = await runQuery<any>(model, where, sortBy ? {[sortBy.field]: sortBy.direction} : undefined, limit, offset);
          return results;
       },
 
       async update({ model, where, update }) {
+        await ensureReady();
         // We need to find the records first to update them
         const results = await runQuery<any>(model, where);
         if (results.length === 0) return null;
@@ -224,6 +230,7 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
       },
 
       async updateMany({ model, where, update }) {
+        await ensureReady();
         const results = await runQuery<any>(model, where);
         const mapName = getMapName(model);
         const map = client.getMap<string, any>(mapName);
@@ -235,6 +242,7 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
       },
 
       async delete({ model, where }) {
+         await ensureReady();
          const results = await runQuery<any>(model, where);
          const mapName = getMapName(model);
          const map = client.getMap<string, any>(mapName);
@@ -245,6 +253,7 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
       },
 
       async deleteMany({ model, where }) {
+         await ensureReady();
          const results = await runQuery<any>(model, where);
          const mapName = getMapName(model);
          const map = client.getMap<string, any>(mapName);
@@ -256,6 +265,7 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
       },
       
       async count({ model, where }) {
+         await ensureReady();
          const results = await runQuery<any>(model, where);
          return results.length;
       },
