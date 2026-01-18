@@ -14,7 +14,15 @@
 
 import { ServerCoordinator } from '../ServerCoordinator';
 import { WebSocket } from 'ws';
+import jwt from 'jsonwebtoken';
 import { serialize, deserialize, HLC } from '@topgunbuild/core';
+
+const JWT_SECRET = 'test-secret-for-e2e-tests';
+
+// Helper: Create a valid JWT token with ADMIN role for full access
+function createTestToken(userId = 'test-user', roles = ['ADMIN']): string {
+  return jwt.sign({ userId, roles }, JWT_SECRET, { expiresIn: '1h' });
+}
 
 // Skip E2E tests in CI - they require complex server setup
 // Run: npx jest --testPathPattern="DistributedSearch.e2e" --runInBand
@@ -64,10 +72,10 @@ describe.skip('Distributed Search E2E', () => {
       }, 5000);
 
       client.on('open', () => {
-        // First authenticate
+        // First authenticate with proper JWT
         client.send(serialize({
           type: 'AUTH',
-          token: 'test-token',
+          token: createTestToken(),
         }));
       });
 
@@ -118,6 +126,7 @@ describe.skip('Distributed Search E2E', () => {
         host: 'localhost',
         clusterPort: 0,
         peers: [],
+        jwtSecret: JWT_SECRET,
         fullTextSearch: {
           articles: {
             fields: ['title', 'content'],
@@ -133,6 +142,7 @@ describe.skip('Distributed Search E2E', () => {
         host: 'localhost',
         clusterPort: 0,
         peers: [`localhost:${node1.clusterPort}`],
+        jwtSecret: JWT_SECRET,
         fullTextSearch: {
           articles: {
             fields: ['title', 'content'],
@@ -239,6 +249,7 @@ describe.skip('Distributed Search E2E', () => {
         host: 'localhost',
         clusterPort: 0,
         peers: [],
+        jwtSecret: JWT_SECRET,
         fullTextSearch: {
           docs: {
             fields: ['title', 'body'],
