@@ -92,16 +92,33 @@ export class WorkerPool {
    * Resolve the worker script path based on environment
    */
   private resolveWorkerScript(): string {
-    // Check if we're in a compiled environment (.js files)
-    const jsPath = join(__dirname, 'worker-scripts', 'base.worker.js');
+    // When running via ts-jest, __dirname is src/workers
+    // When running compiled, __dirname is dist/workers
+    // We need to check both locations for the compiled .js file
+
+    // Path 1: Direct location (compiled environment - __dirname is dist/workers)
+    const directJsPath = join(__dirname, 'worker-scripts', 'base.worker.js');
+
+    // Path 2: dist directory from package root (ts-jest - __dirname is src/workers)
+    // Go up from src/workers to package root, then into dist/workers/worker-scripts
+    const distJsPath = join(__dirname, '..', '..', 'dist', 'workers', 'worker-scripts', 'base.worker.js');
+
+    // Path 3: Fallback to .ts for development without build
     const tsPath = join(__dirname, 'worker-scripts', 'base.worker.ts');
 
-    // Prefer .js if it exists (production), otherwise use .ts (development/test)
+    // Try paths in order: direct .js, dist .js, then .ts fallback
     try {
-      require.resolve(jsPath);
-      return jsPath;
+      require.resolve(directJsPath);
+      return directJsPath;
     } catch {
-      // .js not found, try .ts for ts-node environments
+      // Direct .js not found, try dist path
+    }
+
+    try {
+      require.resolve(distJsPath);
+      return distJsPath;
+    } catch {
+      // dist .js not found, fall back to .ts (will fail in worker_threads but works inline)
       return tsPath;
     }
   }

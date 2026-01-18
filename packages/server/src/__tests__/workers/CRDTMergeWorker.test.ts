@@ -178,8 +178,9 @@ describe('CRDTMergeWorker', () => {
       expect(result.toApply[0].ttlMs).toBe(60000);
     });
 
-    // Skip worker thread tests in Jest
-    it.skip('should handle large batches (worker thread)', async () => {
+    // Worker thread tests require pre-compiled workers (pnpm build first)
+    // Run: pnpm test:workers for full coverage
+    it('should handle large batches (worker thread)', async () => {
       const records: LWWMergePayload['records'] = [];
       for (let i = 0; i < 100; i++) {
         records.push({
@@ -367,8 +368,9 @@ describe('CRDTMergeWorker', () => {
       expect(result.tagsToRemove).toHaveLength(0);
     });
 
-    // Skip worker thread tests in Jest
-    it.skip('should handle large batches (worker thread)', async () => {
+    // Worker thread tests require pre-compiled workers (pnpm build first)
+    // Run: pnpm test:workers for full coverage
+    it('should handle large batches (worker thread)', async () => {
       const items: ORMapMergePayload['items'] = [];
       for (let i = 0; i < 100; i++) {
         items.push({

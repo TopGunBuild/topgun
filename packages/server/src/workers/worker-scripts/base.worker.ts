@@ -1,9 +1,9 @@
 /**
- * Base Worker Script Template
+ * Base Worker Script
  * Phase 1.02: Worker Threads Implementation
  *
- * This is a template that will be extended by specific workers.
- * It provides the message handling loop and handler registration.
+ * Main worker entry point that handles all task types.
+ * Imports specialized workers to register their handlers.
  */
 
 import { parentPort } from 'worker_threads';
@@ -82,3 +82,11 @@ if (parentPort) {
 
 // Export for testing
 export { handlers };
+
+// Load specialized workers to register their handlers
+// Using require() to ensure side effects are executed (not tree-shaken)
+// Each specialized worker calls registerHandler() when loaded
+/* eslint-disable @typescript-eslint/no-require-imports */
+require('./crdt.worker');
+require('./merkle.worker');
+require('./serialization.worker');

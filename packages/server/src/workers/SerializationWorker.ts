@@ -99,12 +99,22 @@ export class SerializationWorker {
   }
 
   private resolveWorkerScript(): string {
-    const jsPath = join(__dirname, 'worker-scripts', 'serialization.worker.js');
+    // When running via ts-jest, __dirname is src/workers
+    // When running compiled, __dirname is dist/workers
+    const directJsPath = join(__dirname, 'worker-scripts', 'serialization.worker.js');
+    const distJsPath = join(__dirname, '..', '..', 'dist', 'workers', 'worker-scripts', 'serialization.worker.js');
     const tsPath = join(__dirname, 'worker-scripts', 'serialization.worker.ts');
 
     try {
-      require.resolve(jsPath);
-      return jsPath;
+      require.resolve(directJsPath);
+      return directJsPath;
+    } catch {
+      // Direct .js not found, try dist path
+    }
+
+    try {
+      require.resolve(distJsPath);
+      return distJsPath;
     } catch {
       return tsPath;
     }

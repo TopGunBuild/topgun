@@ -11,6 +11,7 @@ export default defineConfig([
     external: ['@topgunbuild/native', 'isolated-vm'],
   },
   // Worker scripts - CJS only, preserve directory structure
+  // Each worker file is self-contained with all handlers bundled
   {
     entry: ['src/workers/worker-scripts/*.worker.ts'],
     format: ['cjs'],
