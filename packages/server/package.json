@@ -22,6 +22,7 @@
     "build": "tsup",
     "test": "jest",
     "test:coverage": "jest --coverage",
+    "test:workers": "pnpm build && jest --testPathPattern=workers",
     "test:integration": "jest --config jest.integration.config.js --runInBand",
     "test:integration:distributed": "jest --config jest.integration.config.js --testPathPattern=distributed-subscriptions --runInBand"
   },
