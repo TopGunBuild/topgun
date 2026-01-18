@@ -95,9 +95,9 @@ describe('MerkleWorker', () => {
       expect(result.buckets).toHaveLength(0);
     });
 
-    // Skip worker thread tests in Jest (ts-node doesn't support workers with .ts files)
-    // These tests pass after compilation to .js
-    it.skip('should handle large batches (worker thread)', async () => {
+    // Worker thread tests require pre-compiled workers (pnpm build first)
+    // Run: pnpm test:workers for full coverage
+    it('should handle large batches (worker thread)', async () => {
       // Create 100 entries to exceed threshold
       const entries: MerkleHashPayload['entries'] = [];
       for (let i = 0; i < 100; i++) {
@@ -219,8 +219,9 @@ describe('MerkleWorker', () => {
       expect(rebuildResult.rootHash).toBe(hashResult.rootHash);
     });
 
-    // Skip worker thread tests in Jest
-    it.skip('should handle large rebuilds (worker thread)', async () => {
+    // Worker thread tests require pre-compiled workers (pnpm build first)
+    // Run: pnpm test:workers for full coverage
+    it('should handle large rebuilds (worker thread)', async () => {
       const records: MerkleRebuildPayload['records'] = [];
       for (let i = 0; i < 100; i++) {
         records.push({
@@ -284,8 +285,9 @@ describe('MerkleWorker', () => {
   });
 
   describe('performance', () => {
-    // Skip worker thread tests in Jest
-    it.skip('should handle 10,000+ entries', async () => {
+    // Worker thread tests require pre-compiled workers (pnpm build first)
+    // Run: pnpm test:workers for full coverage
+    it('should handle 10,000+ entries', async () => {
       const entries: MerkleHashPayload['entries'] = [];
       for (let i = 0; i < 10000; i++) {
         entries.push({
