@@ -54,17 +54,7 @@ import { createDebugEndpoints, DebugEndpoints } from './debug';
 import { BootstrapController, createBootstrapController } from './bootstrap';
 import { SettingsController, createSettingsController } from './settings';
 import type { JournalEvent, JournalEventType, MergeRejection, MergeContext, FullTextIndexConfig } from '@topgunbuild/core';
-
-interface ClientConnection {
-    id: string;
-    socket: WebSocket;
-    writer: CoalescingWriter; // Per-connection write coalescing
-    principal?: Principal; // Auth info
-    isAuthenticated: boolean;
-    subscriptions: Set<string>; // Set of Query IDs
-    lastActiveHlc: Timestamp;
-    lastPingReceived: number; // Date.now() of last PING received
-}
+import { AuthHandler, ConnectionManager, ClientConnection } from './coordinator';
 
 interface PendingClusterQuery {
     requestId: string;
@@ -185,7 +175,7 @@ export class ServerCoordinator {
     private metricsServer?: HttpServer;
     private metricsService: MetricsService;
     private wss: WebSocketServer;
-    private clients: Map<string, ClientConnection> = new Map();
+    private connectionManager!: ConnectionManager;
 
     // Interceptors
     private interceptors: IInterceptor[] = [];
@@ -203,6 +193,7 @@ export class ServerCoordinator {
     private lockManager!: LockManager;
     private topicManager!: TopicManager;
     private securityManager: SecurityManager;
+    private authHandler!: AuthHandler;
     private systemManager!: SystemManager;
 
     private pendingClusterQueries: Map<string, PendingClusterQuery> = new Map();
@@ -339,6 +330,13 @@ export class ServerCoordinator {
             maxBatchBytes: config.writeCoalescingMaxBytes ?? preset.maxBatchBytes,
         };
 
+        // Initialize ConnectionManager (single owner of clients Map)
+        this.connectionManager = new ConnectionManager({
+            hlc: this.hlc,
+            writeCoalescingEnabled: this.writeCoalescingEnabled,
+            writeCoalescingOptions: this.writeCoalescingOptions,
+        });
+
         // Initialize memory pools for GC pressure reduction
         this.eventPayloadPool = createEventPayloadPool({
             maxSize: 4096,
@@ -362,6 +360,17 @@ export class ServerCoordinator {
             maxConnectionsPerSecond: config.maxConnectionsPerSecond ?? 100,
             maxPendingConnections: config.maxPendingConnections ?? 1000,
             cooldownMs: 1000,
+        });
+
+        // Initialize AuthHandler for JWT authentication (Phase 4 - extracted module)
+        this.authHandler = new AuthHandler({
+            jwtSecret: this.jwtSecret,
+            onAuthSuccess: (_clientId, _principal) => {
+                // Mark connection as established (handshake complete)
+                if (this.rateLimitingEnabled) {
+                    this.rateLimiter.onConnectionEstablished();
+                }
+            },
         });
 
         // Initialize rate-limited logger for invalid message errors (SEC-04)
@@ -443,7 +452,7 @@ export class ServerCoordinator {
                         address: nodeId, // Node ID is used as address identifier
                         status: 'healthy' as const,
                         partitions: Array.from({ length: partitionCount }, (_, i) => i),
-                        connections: this.clients.size,
+                        connections: this.connectionManager.getClientCount(),
                         memory: { used: process.memoryUsage().heapUsed, total: process.memoryUsage().heapTotal },
                         uptime: process.uptime(),
                     };
@@ -614,7 +623,7 @@ export class ServerCoordinator {
             this.topicManager = new TopicManager({
                 cluster: this.cluster,
                 sendToClient: (clientId, message) => {
-                    const client = this.clients.get(clientId);
+                    const client = this.connectionManager.getClient(clientId);
                     if (client && client.socket.readyState === WebSocket.OPEN) {
                         client.writer.write(message);
                     }
@@ -713,7 +722,7 @@ export class ServerCoordinator {
             });
             // Phase 11.1b: Set up search update callback for live subscriptions
             this.searchCoordinator.setSendUpdateCallback((clientId, subscriptionId, key, value, score, matchedTerms, type) => {
-                const client = this.clients.get(clientId);
+                const client = this.connectionManager.getClient(clientId);
                 if (client) {
                     client.writer.write({
                         type: 'SEARCH_UPDATE',
@@ -1095,10 +1104,10 @@ export class ServerCoordinator {
         this.wss.close();
 
         // 2. Notify and Close Clients
-        logger.info(`Closing ${this.clients.size} client connections...`);
+        logger.info(`Closing ${this.connectionManager.getClientCount()} client connections...`);
         const shutdownMsg = serialize({ type: 'SHUTDOWN_PENDING', retryAfter: 5000 });
 
-        for (const client of this.clients.values()) {
+        for (const client of this.connectionManager.getClients().values()) {
             try {
                 if (client.socket.readyState === WebSocket.OPEN) {
                     // Send shutdown message directly to socket (bypass batching)
@@ -1113,7 +1122,7 @@ export class ServerCoordinator {
                 logger.error({ err: e, clientId: client.id }, 'Error closing client connection');
             }
         }
-        this.clients.clear();
+        this.connectionManager.getClients().clear();
 
         // 3. Shutdown event executor (wait for pending tasks)
         logger.info('Shutting down event executor...');
@@ -1235,17 +1244,9 @@ export class ServerCoordinator {
             maxBatchBytes: 0,
         });
 
-        const connection: ClientConnection = {
-            id: clientId,
-            socket: ws,
-            writer,
-            isAuthenticated: false,
-            subscriptions: new Set(),
-            lastActiveHlc: this.hlc.now(), // Initialize with current time
-            lastPingReceived: Date.now(), // Initialize heartbeat tracking
-        };
-        this.clients.set(clientId, connection);
-        this.metricsService.setConnectedClients(this.clients.size);
+        // Register client connection via ConnectionManager
+        const connection = this.connectionManager.registerClient(clientId, ws, writer);
+        this.metricsService.setConnectedClients(this.connectionManager.getClientCount());
 
         // Run onConnection interceptors
         try {
@@ -1263,7 +1264,7 @@ export class ServerCoordinator {
         } catch (err) {
             logger.error({ clientId, err }, 'Interceptor rejected connection');
             ws.close(4000, 'Connection Rejected');
-            this.clients.delete(clientId);
+            this.connectionManager.removeClient(clientId);
             return;
         }
 
@@ -1363,8 +1364,8 @@ export class ServerCoordinator {
                 }
             }
 
-            this.clients.delete(clientId);
-            this.metricsService.setConnectedClients(this.clients.size);
+            this.connectionManager.removeClient(clientId);
+            this.metricsService.setConnectedClients(this.connectionManager.getClientCount());
         });
 
         // Send Auth Challenge immediately
@@ -1398,42 +1399,18 @@ export class ServerCoordinator {
         // Try to extract from payload if present, otherwise assume near current time but logically before next op
         this.updateClientHlc(client, message);
 
-        // Handshake / Auth handling
+        // Handshake / Auth handling (delegated to AuthHandler - Phase 4)
         if (!client.isAuthenticated) {
             if (message.type === 'AUTH') {
                 const token = message.token;
-                try {
-                    // Verify JWT - support both HS256 (symmetric) and RS256 (asymmetric/Clerk)
-                    const isRSAKey = this.jwtSecret.includes('-----BEGIN');
-                    const verifyOptions: jwt.VerifyOptions = isRSAKey
-                        ? { algorithms: ['RS256'] }
-                        : { algorithms: ['HS256'] };
-                    const decoded = jwt.verify(token, this.jwtSecret, verifyOptions) as any;
-                    // Ensure roles exist
-                    if (!decoded.roles) {
-                        decoded.roles = ['USER']; // Default role
-                    }
-                    // Ensure userId exists (map from sub if needed)
-                    if (!decoded.userId && decoded.sub) {
-                        decoded.userId = decoded.sub;
-                    }
-
-                    client.principal = decoded;
-                    client.isAuthenticated = true;
-                    logger.info({ clientId: client.id, user: client.principal!.userId || 'anon' }, 'Client authenticated');
-
-                    // Mark connection as established (handshake complete)
-                    if (this.rateLimitingEnabled) {
-                        this.rateLimiter.onConnectionEstablished();
-                    }
-
+                const result = await this.authHandler.handleAuth(client, token);
+                if (result.success) {
                     client.writer.write({ type: 'AUTH_ACK' }, true); // urgent: bypass batching
-                    return; // Stop processing this message
-                } catch (e) {
-                    logger.error({ clientId: client.id, err: e }, 'Auth failed');
-                    client.writer.write({ type: 'AUTH_FAIL', error: 'Invalid token' }, true); // urgent
+                } else {
+                    client.writer.write({ type: 'AUTH_FAIL', error: result.error || 'Invalid token' }, true); // urgent
                     client.socket.close(4001, 'Unauthorized');
                 }
+                return;
             } else {
                 // Reject any other message before auth
                 client.socket.close(4001, 'Auth required');
@@ -2016,7 +1993,7 @@ export class ServerCoordinator {
 
                 // Broadcast to other subscribed clients
                 for (const targetClientId of result.broadcastTo) {
-                    const targetClient = this.clients.get(targetClientId);
+                    const targetClient = this.connectionManager.getClient(targetClientId);
                     if (targetClient && targetClient.socket.readyState === WebSocket.OPEN) {
                         targetClient.writer.write(result.broadcastMessage);
                     }
@@ -2531,7 +2508,7 @@ export class ServerCoordinator {
                         if (types && types.length > 0 && !types.includes(event.type)) return;
 
                         // Check if client still connected
-                        const clientConn = this.clients.get(client.id);
+                        const clientConn = this.connectionManager.getClient(client.id);
                         if (!clientConn) {
                             unsubscribe();
                             this.journalSubscriptions.delete(subscriptionId);
@@ -2876,7 +2853,7 @@ export class ServerCoordinator {
         };
 
         let broadcastCount = 0;
-        for (const client of this.clients.values()) {
+        for (const client of this.connectionManager.getClients().values()) {
             if (client.isAuthenticated && client.socket.readyState === WebSocket.OPEN && client.writer) {
                 client.writer.write(message);
                 broadcastCount++;
@@ -2896,7 +2873,7 @@ export class ServerCoordinator {
     private notifyMergeRejection(rejection: MergeRejection): void {
         // Find client by node ID
         // Node ID format: "client-{uuid}" - we need to find matching client
-        for (const [clientId, client] of this.clients) {
+        for (const [clientId, client] of this.connectionManager.getClients()) {
             // Check if this client sent the rejected operation
             // The nodeId in rejection matches the remoteNodeId from the operation
             if (clientId === rejection.nodeId || rejection.nodeId.includes(clientId)) {
@@ -2915,7 +2892,7 @@ export class ServerCoordinator {
         // If no matching client found, broadcast to all clients subscribed to this map
         const subscribedClientIds = this.queryRegistry.getSubscribedClientIds(rejection.mapName);
         for (const clientId of subscribedClientIds) {
-            const client = this.clients.get(clientId);
+            const client = this.connectionManager.getClient(clientId);
             if (client) {
                 client.writer.write({
                     type: 'MERGE_REJECTED',
@@ -2956,7 +2933,7 @@ export class ServerCoordinator {
             for (const clientId of subscribedClientIds) {
                 if (clientId === excludeClientId) continue;
 
-                const client = this.clients.get(clientId);
+                const client = this.connectionManager.getClient(clientId);
                 if (!client || client.socket.readyState !== 1 || !client.isAuthenticated || !client.principal) {
                     continue;
                 }
@@ -2979,7 +2956,7 @@ export class ServerCoordinator {
         } else {
             // Non-event messages (GC_PRUNE, SHUTDOWN_PENDING) still go to all clients
             const msgData = serialize(message);
-            for (const [id, client] of this.clients) {
+            for (const [id, client] of this.connectionManager.getClients()) {
                 if (id !== excludeClientId && client.socket.readyState === 1) { // 1 = OPEN
                     client.writer.writeRaw(msgData);
                 }
@@ -3032,7 +3009,7 @@ export class ServerCoordinator {
         for (const clientId of subscribedClientIds) {
             if (clientId === excludeClientId) continue;
 
-            const client = this.clients.get(clientId);
+            const client = this.connectionManager.getClient(clientId);
             if (!client || client.socket.readyState !== 1 || !client.isAuthenticated || !client.principal) {
                 continue;
             }
@@ -3143,7 +3120,7 @@ export class ServerCoordinator {
         for (const clientId of subscribedClientIds) {
             if (clientId === excludeClientId) continue;
 
-            const client = this.clients.get(clientId);
+            const client = this.connectionManager.getClient(clientId);
             if (!client || client.socket.readyState !== 1 || !client.isAuthenticated || !client.principal) {
                 continue;
             }
@@ -3329,7 +3306,7 @@ export class ServerCoordinator {
 
                 case 'CLUSTER_LOCK_RELEASED': {
                     const { clientId, requestId, name, success } = msg.payload;
-                    const client = this.clients.get(clientId);
+                    const client = this.connectionManager.getClient(clientId);
                     if (client) {
                         client.writer.write({
                             type: 'LOCK_RELEASED',
@@ -3341,7 +3318,7 @@ export class ServerCoordinator {
 
                 case 'CLUSTER_LOCK_GRANTED': {
                     const { clientId, requestId, name, fencingToken } = msg.payload;
-                    const client = this.clients.get(clientId);
+                    const client = this.connectionManager.getClient(clientId);
                     if (client) {
                         client.writer.write({
                             type: 'LOCK_GRANTED',
@@ -3876,7 +3853,7 @@ export class ServerCoordinator {
         };
 
         if (!fromCluster) {
-            const client = this.clients.get(clientId);
+            const client = this.connectionManager.getClient(clientId);
             if (client) {
                 context = {
                     clientId: client.id,
@@ -3926,7 +3903,7 @@ export class ServerCoordinator {
 
     private handleLockGranted({ clientId, requestId, name, fencingToken }: { clientId: string, requestId: string, name: string, fencingToken: number }) {
         // Check if local client
-        const client = this.clients.get(clientId);
+        const client = this.connectionManager.getClient(clientId);
         if (client) {
             client.writer.write({
                 type: 'LOCK_GRANTED',
@@ -4454,23 +4431,18 @@ export class ServerCoordinator {
 
     /**
      * Checks if a client is still alive based on heartbeat.
+     * Delegates to ConnectionManager.
      */
     public isClientAlive(clientId: string): boolean {
-        const client = this.clients.get(clientId);
-        if (!client) return false;
-
-        const idleTime = Date.now() - client.lastPingReceived;
-        return idleTime < CLIENT_HEARTBEAT_TIMEOUT_MS;
+        return this.connectionManager.isClientAlive(clientId);
     }
 
     /**
      * Returns how long the client has been idle (no PING received).
+     * Delegates to ConnectionManager.
      */
     public getClientIdleTime(clientId: string): number {
-        const client = this.clients.get(clientId);
-        if (!client) return Infinity;
-
-        return Date.now() - client.lastPingReceived;
+        return this.connectionManager.getClientIdleTime(clientId);
     }
 
     /**
@@ -4480,7 +4452,7 @@ export class ServerCoordinator {
         const now = Date.now();
         const deadClients: string[] = [];
 
-        for (const [clientId, client] of this.clients) {
+        for (const [clientId, client] of this.connectionManager.getClients()) {
             // Only check authenticated clients (unauthenticated ones will timeout via auth mechanism)
             if (client.isAuthenticated) {
                 const idleTime = now - client.lastPingReceived;
@@ -4491,7 +4463,7 @@ export class ServerCoordinator {
         }
 
         for (const clientId of deadClients) {
-            const client = this.clients.get(clientId);
+            const client = this.connectionManager.getClient(clientId);
             if (client) {
                 logger.warn({
                     clientId,
@@ -4511,7 +4483,7 @@ export class ServerCoordinator {
         // 1. Calculate Local Min HLC
         let minHlc = this.hlc.now();
 
-        for (const client of this.clients.values()) {
+        for (const client of this.connectionManager.getClients().values()) {
             if (HLC.compare(client.lastActiveHlc, minHlc) < 0) {
                 minHlc = client.lastActiveHlc;
             }
