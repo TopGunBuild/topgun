@@ -76,12 +76,17 @@ Plans:
   1. BetterAuth adapter waits for storage load before accepting requests
   2. Topic messages are queued when offline with configurable max queue size
   3. getMapAsync debug logging only appears when TOPGUN_DEBUG is set
-**Plans**: TBD
+**Plans**: 3 plans in 1 wave
 
 Plans:
-- [ ] 03-01: BetterAuth adapter cold start fix
-- [ ] 03-02: Topic offline queue implementation
-- [ ] 03-03: Debug logging gating
+- [ ] 03-01-PLAN.md — BetterAuth adapter cold start fix (BUG-05)
+- [ ] 03-02-PLAN.md — Topic offline queue implementation (BUG-06)
+- [ ] 03-03-PLAN.md — Debug logging gating (BUG-07)
+
+**Wave Structure:**
+| Wave | Plans | Can Run Parallel |
+|------|-------|------------------|
+| 1 | 03-01, 03-02, 03-03 | Yes (all independent) |
 
 ### Phase 4: ServerCoordinator Refactor
 **Goal**: ServerCoordinator is split into maintainable, testable modules
@@ -156,7 +161,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 |-------|----------------|--------|-----------|
 | 1. Security Hardening | 3/3 | ✓ Complete | 2026-01-18 |
 | 2. Worker Test Fixes | 3/3 | ✓ Complete | 2026-01-18 |
-| 3. Bug Fixes | 0/3 | Not started | - |
+| 3. Bug Fixes | 0/3 | Planned | - |
 | 4. ServerCoordinator Refactor | 0/4 | Not started | - |
 | 5. SyncEngine Refactor | 0/3 | Not started | - |
 | 6. Type Safety | 0/3 | Not started | - |
@@ -166,5 +171,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 *Roadmap created: 2026-01-18*
 *Phase 1 planned: 2026-01-18*
 *Phase 2 planned: 2026-01-18*
+*Phase 3 planned: 2026-01-18*
 *Depth: standard (7 phases)*
 *Coverage: 24/24 requirements mapped*
