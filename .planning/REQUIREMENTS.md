@@ -16,10 +16,10 @@ Requirements for this hardening milestone. Each maps to roadmap phases.
 
 ### Bug Fixes
 
-- [ ] **BUG-01**: CRDTMergeWorker tests pass (no test.skip)
-- [ ] **BUG-02**: MerkleWorker tests pass (no test.skip)
-- [ ] **BUG-03**: SerializationWorker tests pass (no test.skip)
-- [ ] **BUG-04**: DistributedSearch E2E test passes (no describe.skip)
+- [x] **BUG-01**: CRDTMergeWorker tests pass (no test.skip)
+- [x] **BUG-02**: MerkleWorker tests pass (no test.skip)
+- [x] **BUG-03**: SerializationWorker tests pass (no test.skip)
+- [x] **BUG-04**: DistributedSearch E2E test passes (no describe.skip)
 - [ ] **BUG-05**: BetterAuth adapter waits for data load before accepting requests
 - [ ] **BUG-06**: Topic messages queued when offline with configurable max size
 - [ ] **BUG-07**: getMapAsync debug logging gated behind TOPGUN_DEBUG env var
@@ -74,10 +74,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SEC-02 | Phase 1 | Complete |
 | SEC-03 | Phase 1 | Complete |
 | SEC-04 | Phase 1 | Complete |
-| BUG-01 | Phase 2 | Pending |
-| BUG-02 | Phase 2 | Pending |
-| BUG-03 | Phase 2 | Pending |
-| BUG-04 | Phase 2 | Pending |
+| BUG-01 | Phase 2 | Complete |
+| BUG-02 | Phase 2 | Complete |
+| BUG-03 | Phase 2 | Complete |
+| BUG-04 | Phase 2 | Complete |
 | BUG-05 | Phase 3 | Pending |
 | BUG-06 | Phase 3 | Pending |
 | BUG-07 | Phase 3 | Pending |
@@ -102,4 +102,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-01-18*
-*Last updated: 2026-01-18 after Phase 1 completion*
+*Last updated: 2026-01-18 after Phase 2 completion*

@@ -13,7 +13,7 @@ This hardening milestone takes TopGun from development-ready to production-safe.
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Security Hardening** - Block unsafe production deployments and validate all inputs
-- [ ] **Phase 2: Worker Test Fixes** - Fix skipped worker tests to restore CI confidence
+- [x] **Phase 2: Worker Test Fixes** - Fix skipped worker tests to restore CI confidence
 - [ ] **Phase 3: Bug Fixes** - Address BetterAuth race, topic queueing, and debug logging
 - [ ] **Phase 4: ServerCoordinator Refactor** - Split 5086-line god object into focused modules
 - [ ] **Phase 5: SyncEngine Refactor** - Split 2540-line file into focused classes
@@ -58,9 +58,9 @@ Plans:
 **Plans**: 3 plans in 2 waves
 
 Plans:
-- [ ] 02-01-PLAN.md — Build infrastructure for compiled worker scripts (BUG-01, BUG-02, BUG-03, BUG-04 foundation)
-- [ ] 02-02-PLAN.md — Unskip CRDTMergeWorker, MerkleWorker, SerializationWorker tests (BUG-01, BUG-02, BUG-03)
-- [ ] 02-03-PLAN.md — Fix DistributedSearch E2E with proper JWT auth (BUG-04)
+- [x] 02-01-PLAN.md — Build infrastructure for compiled worker scripts (BUG-01, BUG-02, BUG-03, BUG-04 foundation)
+- [x] 02-02-PLAN.md — Unskip CRDTMergeWorker, MerkleWorker, SerializationWorker tests (BUG-01, BUG-02, BUG-03)
+- [x] 02-03-PLAN.md — Fix DistributedSearch E2E with proper JWT auth (BUG-04)
 
 **Wave Structure:**
 | Wave | Plans | Can Run Parallel |
@@ -155,7 +155,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Security Hardening | 3/3 | ✓ Complete | 2026-01-18 |
-| 2. Worker Test Fixes | 0/3 | Planned | - |
+| 2. Worker Test Fixes | 3/3 | ✓ Complete | 2026-01-18 |
 | 3. Bug Fixes | 0/3 | Not started | - |
 | 4. ServerCoordinator Refactor | 0/4 | Not started | - |
 | 5. SyncEngine Refactor | 0/3 | Not started | - |
