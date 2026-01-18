@@ -21,6 +21,7 @@ import { LockManager } from './cluster/LockManager';
 import { executeQuery, Query } from './query/Matcher';
 import { SecurityManager } from './security/SecurityManager';
 import { logger } from './utils/logger';
+import { validateJwtSecret } from './utils/validateConfig';
 import { MetricsService } from './monitoring/MetricsService';
 import { SystemManager } from './system/SystemManager';
 import { TLSConfig, ClusterTLSConfig } from './types/TLSConfig';
@@ -29,6 +30,7 @@ import { BackpressureRegulator } from './utils/BackpressureRegulator';
 import { CoalescingWriter, CoalescingWriterOptions } from './utils/CoalescingWriter';
 import { coalescingPresets, CoalescingPreset } from './utils/coalescingPresets';
 import { ConnectionRateLimiter } from './utils/ConnectionRateLimiter';
+import { RateLimitedLogger } from './utils/RateLimitedLogger';
 import { WorkerPool, MerkleWorker, CRDTMergeWorker, SerializationWorker, WorkerPoolConfig } from './workers';
 import {
     ObjectPool,
@@ -230,6 +232,9 @@ export class ServerCoordinator {
     private rateLimiter: ConnectionRateLimiter;
     private rateLimitingEnabled: boolean;
 
+    // Rate-limited logger for invalid message errors (SEC-04)
+    private rateLimitedLogger: RateLimitedLogger;
+
     // Worker pool for CPU-bound operations
     private workerPool?: WorkerPool;
     private merkleWorker?: MerkleWorker;
@@ -297,8 +302,8 @@ export class ServerCoordinator {
         this._nodeId = config.nodeId;
         this.hlc = new HLC(config.nodeId);
         this.storage = config.storage;
-        // Handle JWT_SECRET with escaped newlines (e.g., from Docker/Dokploy env vars)
-        const rawSecret = config.jwtSecret || process.env.JWT_SECRET || 'topgun-secret-dev';
+        // Validate and handle JWT_SECRET with escaped newlines (e.g., from Docker/Dokploy env vars)
+        const rawSecret = validateJwtSecret(config.jwtSecret, process.env.JWT_SECRET);
         this.jwtSecret = rawSecret.replace(/\\n/g, '\n');
         this.queryRegistry = new QueryRegistry();
         this.securityManager = new SecurityManager(config.securityPolicies || []);
@@ -357,6 +362,12 @@ export class ServerCoordinator {
             maxConnectionsPerSecond: config.maxConnectionsPerSecond ?? 100,
             maxPendingConnections: config.maxPendingConnections ?? 1000,
             cooldownMs: 1000,
+        });
+
+        // Initialize rate-limited logger for invalid message errors (SEC-04)
+        this.rateLimitedLogger = new RateLimitedLogger({
+            windowMs: 10000,  // 10 second window
+            maxPerWindow: 5   // 5 errors per client per window
         });
 
         // Initialize worker pool for CPU-bound operations
@@ -1364,7 +1375,11 @@ export class ServerCoordinator {
         // Validation with Zod
         const parseResult = MessageSchema.safeParse(rawMessage);
         if (!parseResult.success) {
-            logger.error({ clientId: client.id, error: parseResult.error }, 'Invalid message format from client');
+            this.rateLimitedLogger.error(
+                `invalid-message:${client.id}`,
+                { clientId: client.id, errorCode: parseResult.error.issues[0]?.code },
+                'Invalid message format from client'
+            );
             client.writer.write({
                 type: 'ERROR',
                 payload: { code: 400, message: 'Invalid message format', details: (parseResult.error as any).errors }
