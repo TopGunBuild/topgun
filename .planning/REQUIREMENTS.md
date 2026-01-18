@@ -9,10 +9,10 @@ Requirements for this hardening milestone. Each maps to roadmap phases.
 
 ### Security
 
-- [ ] **SEC-01**: Server throws error on startup if JWT_SECRET is missing or uses default in production mode
-- [ ] **SEC-02**: HLC provides configurable strict mode that rejects timestamps beyond threshold (e.g., 5 minutes)
-- [ ] **SEC-03**: All WebSocket messages validated via Zod schemas before processing
-- [ ] **SEC-04**: Invalid messages logged and rate-limited (not just rejected)
+- [x] **SEC-01**: Server throws error on startup if JWT_SECRET is missing or uses default in production mode
+- [x] **SEC-02**: HLC provides configurable strict mode that rejects timestamps beyond threshold (e.g., 5 minutes)
+- [x] **SEC-03**: All WebSocket messages validated via Zod schemas before processing
+- [x] **SEC-04**: Invalid messages logged and rate-limited (not just rejected)
 
 ### Bug Fixes
 
@@ -70,10 +70,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| SEC-01 | Phase 1 | Pending |
-| SEC-02 | Phase 1 | Pending |
-| SEC-03 | Phase 1 | Pending |
-| SEC-04 | Phase 1 | Pending |
+| SEC-01 | Phase 1 | Complete |
+| SEC-02 | Phase 1 | Complete |
+| SEC-03 | Phase 1 | Complete |
+| SEC-04 | Phase 1 | Complete |
 | BUG-01 | Phase 2 | Pending |
 | BUG-02 | Phase 2 | Pending |
 | BUG-03 | Phase 2 | Pending |
@@ -102,4 +102,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-01-18*
-*Last updated: 2026-01-18 after roadmap creation*
+*Last updated: 2026-01-18 after Phase 1 completion*

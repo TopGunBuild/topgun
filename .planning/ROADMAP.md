@@ -12,7 +12,7 @@ This hardening milestone takes TopGun from development-ready to production-safe.
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Security Hardening** - Block unsafe production deployments and validate all inputs
+- [x] **Phase 1: Security Hardening** - Block unsafe production deployments and validate all inputs
 - [ ] **Phase 2: Worker Test Fixes** - Fix skipped worker tests to restore CI confidence
 - [ ] **Phase 3: Bug Fixes** - Address BetterAuth race, topic queueing, and debug logging
 - [ ] **Phase 4: ServerCoordinator Refactor** - Split 5086-line god object into focused modules
@@ -34,9 +34,9 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 3 plans in 2 waves
 
 Plans:
-- [ ] 01-01-PLAN.md — Rate-limited logger utility and integration (SEC-04)
-- [ ] 01-02-PLAN.md — JWT secret production validation (SEC-01)
-- [ ] 01-03-PLAN.md — HLC strict mode for clock drift rejection (SEC-02)
+- [x] 01-01-PLAN.md — Rate-limited logger utility and integration (SEC-04)
+- [x] 01-02-PLAN.md — JWT secret production validation (SEC-01)
+- [x] 01-03-PLAN.md — HLC strict mode for clock drift rejection (SEC-02)
 
 **Note:** SEC-03 (WebSocket message validation) is already implemented in ServerCoordinator line 1365 via `MessageSchema.safeParse()`. Verification only needed.
 
@@ -148,7 +148,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Security Hardening | 0/3 | Planned | - |
+| 1. Security Hardening | 3/3 | ✓ Complete | 2026-01-18 |
 | 2. Worker Test Fixes | 0/3 | Not started | - |
 | 3. Bug Fixes | 0/3 | Not started | - |
 | 4. ServerCoordinator Refactor | 0/4 | Not started | - |
