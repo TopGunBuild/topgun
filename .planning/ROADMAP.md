@@ -98,13 +98,20 @@ Plans:
   3. CRDT operation handling lives in OperationHandler module
   4. Storage/persistence logic lives in StorageManager module
   5. ServerCoordinator orchestrates modules but delegates all logic
-**Plans**: TBD
+**Plans**: 4 plans in 3 waves
 
 Plans:
-- [ ] 04-01: Extract AuthHandler module
-- [ ] 04-02: Extract ConnectionManager module
-- [ ] 04-03: Extract OperationHandler module
-- [ ] 04-04: Extract StorageManager module
+- [ ] 04-01-PLAN.md — Extract AuthHandler module (REF-01)
+- [ ] 04-02-PLAN.md — Extract ConnectionManager module (REF-02)
+- [ ] 04-03-PLAN.md — Extract StorageManager module (REF-04)
+- [ ] 04-04-PLAN.md — Extract OperationHandler module with message registry (REF-03)
+
+**Wave Structure:**
+| Wave | Plans | Can Run Parallel |
+|------|-------|------------------|
+| 1 | 04-01, 04-02 | Yes (independent module extractions) |
+| 2 | 04-03 | After types established |
+| 3 | 04-04 | After ConnectionManager + StorageManager |
 
 ### Phase 5: SyncEngine Refactor
 **Goal**: SyncEngine is split into focused, single-responsibility classes
@@ -162,7 +169,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 1. Security Hardening | 3/3 | ✓ Complete | 2026-01-18 |
 | 2. Worker Test Fixes | 3/3 | ✓ Complete | 2026-01-18 |
 | 3. Bug Fixes | 3/3 | ✓ Complete | 2026-01-18 |
-| 4. ServerCoordinator Refactor | 0/4 | Not started | - |
+| 4. ServerCoordinator Refactor | 0/4 | Planned | - |
 | 5. SyncEngine Refactor | 0/3 | Not started | - |
 | 6. Type Safety | 0/3 | Not started | - |
 | 7. LRU Eviction | 0/2 | Not started | - |
@@ -172,5 +179,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 *Phase 1 planned: 2026-01-18*
 *Phase 2 planned: 2026-01-18*
 *Phase 3 planned: 2026-01-18*
+*Phase 4 planned: 2026-01-18*
 *Depth: standard (7 phases)*
 *Coverage: 24/24 requirements mapped*
