@@ -20,9 +20,9 @@ Requirements for this hardening milestone. Each maps to roadmap phases.
 - [x] **BUG-02**: MerkleWorker tests pass (no test.skip)
 - [x] **BUG-03**: SerializationWorker tests pass (no test.skip)
 - [x] **BUG-04**: DistributedSearch E2E test passes (no describe.skip)
-- [ ] **BUG-05**: BetterAuth adapter waits for data load before accepting requests
-- [ ] **BUG-06**: Topic messages queued when offline with configurable max size
-- [ ] **BUG-07**: getMapAsync debug logging gated behind TOPGUN_DEBUG env var
+- [x] **BUG-05**: BetterAuth adapter waits for data load before accepting requests
+- [x] **BUG-06**: Topic messages queued when offline with configurable max size
+- [x] **BUG-07**: getMapAsync debug logging gated behind TOPGUN_DEBUG env var
 
 ### Refactoring
 
@@ -78,9 +78,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | BUG-02 | Phase 2 | Complete |
 | BUG-03 | Phase 2 | Complete |
 | BUG-04 | Phase 2 | Complete |
-| BUG-05 | Phase 3 | Pending |
-| BUG-06 | Phase 3 | Pending |
-| BUG-07 | Phase 3 | Pending |
+| BUG-05 | Phase 3 | Complete |
+| BUG-06 | Phase 3 | Complete |
+| BUG-07 | Phase 3 | Complete |
 | REF-01 | Phase 4 | Pending |
 | REF-02 | Phase 4 | Pending |
 | REF-03 | Phase 4 | Pending |
@@ -102,4 +102,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-01-18*
-*Last updated: 2026-01-18 after Phase 2 completion*
+*Last updated: 2026-01-18 after Phase 3 completion*

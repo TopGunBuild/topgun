@@ -14,7 +14,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Security Hardening** - Block unsafe production deployments and validate all inputs
 - [x] **Phase 2: Worker Test Fixes** - Fix skipped worker tests to restore CI confidence
-- [ ] **Phase 3: Bug Fixes** - Address BetterAuth race, topic queueing, and debug logging
+- [x] **Phase 3: Bug Fixes** - Address BetterAuth race, topic queueing, and debug logging
 - [ ] **Phase 4: ServerCoordinator Refactor** - Split 5086-line god object into focused modules
 - [ ] **Phase 5: SyncEngine Refactor** - Split 2540-line file into focused classes
 - [ ] **Phase 6: Type Safety** - Replace 100+ `as any` casts with proper types
@@ -79,9 +79,9 @@ Plans:
 **Plans**: 3 plans in 1 wave
 
 Plans:
-- [ ] 03-01-PLAN.md — BetterAuth adapter cold start fix (BUG-05)
-- [ ] 03-02-PLAN.md — Topic offline queue implementation (BUG-06)
-- [ ] 03-03-PLAN.md — Debug logging gating (BUG-07)
+- [x] 03-01-PLAN.md — BetterAuth adapter cold start fix (BUG-05)
+- [x] 03-02-PLAN.md — Topic offline queue implementation (BUG-06)
+- [x] 03-03-PLAN.md — Debug logging gating (BUG-07)
 
 **Wave Structure:**
 | Wave | Plans | Can Run Parallel |
@@ -161,7 +161,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 |-------|----------------|--------|-----------|
 | 1. Security Hardening | 3/3 | ✓ Complete | 2026-01-18 |
 | 2. Worker Test Fixes | 3/3 | ✓ Complete | 2026-01-18 |
-| 3. Bug Fixes | 0/3 | Planned | - |
+| 3. Bug Fixes | 3/3 | ✓ Complete | 2026-01-18 |
 | 4. ServerCoordinator Refactor | 0/4 | Not started | - |
 | 5. SyncEngine Refactor | 0/3 | Not started | - |
 | 6. Type Safety | 0/3 | Not started | - |
