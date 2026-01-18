@@ -239,3 +239,128 @@ describe('TopGunAdapter', () => {
   });
 });
 
+describe('cold start handling', () => {
+  it('waits for storage ready before first operation', async () => {
+    // Create a mock client with delayed start
+    let startResolved = false;
+    const mockClient = {
+      start: jest.fn().mockImplementation(() => {
+        return new Promise<void>(resolve => {
+          setTimeout(() => {
+            startResolved = true;
+            resolve();
+          }, 50);
+        });
+      }),
+      getMap: jest.fn().mockReturnValue({
+        set: jest.fn(),
+        get: jest.fn(),
+        remove: jest.fn(),
+      }),
+      query: jest.fn().mockReturnValue({
+        subscribe: jest.fn((cb) => {
+          // Delay callback to allow unsubscribe to be assigned first
+          setTimeout(() => cb([]), 0);
+          return () => {};
+        }),
+      }),
+    };
+
+    const adapter = topGunAdapter({ client: mockClient as any })({} as any);
+
+    // Start operation before storage is ready
+    const createPromise = adapter.create({ model: 'user', data: { name: 'test' } });
+
+    // Verify start was called
+    expect(mockClient.start).toHaveBeenCalled();
+
+    // Wait for create to complete
+    await createPromise;
+
+    // Verify storage was ready before create proceeded
+    expect(startResolved).toBe(true);
+  });
+
+  it('concurrent requests share same ready promise', async () => {
+    let startCallCount = 0;
+    const mockClient = {
+      start: jest.fn().mockImplementation(() => {
+        startCallCount++;
+        return new Promise<void>(resolve => setTimeout(resolve, 50));
+      }),
+      getMap: jest.fn().mockReturnValue({
+        set: jest.fn(),
+        get: jest.fn(),
+      }),
+      query: jest.fn().mockReturnValue({
+        subscribe: jest.fn((cb) => {
+          // Delay callback to allow unsubscribe to be assigned first
+          setTimeout(() => cb([]), 0);
+          return () => {};
+        }),
+      }),
+    };
+
+    const adapter = topGunAdapter({ client: mockClient as any })({} as any);
+
+    // Fire multiple concurrent requests
+    await Promise.all([
+      adapter.create({ model: 'user', data: { name: 'test1' } }),
+      adapter.create({ model: 'user', data: { name: 'test2' } }),
+      adapter.findMany({ model: 'user' }),
+    ]);
+
+    // start() should only be called once
+    expect(startCallCount).toBe(1);
+  });
+
+  it('subsequent requests do not wait if already ready', async () => {
+    let startCallCount = 0;
+    const mockClient = {
+      start: jest.fn().mockImplementation(() => {
+        startCallCount++;
+        return Promise.resolve();
+      }),
+      getMap: jest.fn().mockReturnValue({
+        set: jest.fn(),
+      }),
+      query: jest.fn().mockReturnValue({
+        subscribe: jest.fn((cb) => {
+          // Delay callback to allow unsubscribe to be assigned first
+          setTimeout(() => cb([]), 0);
+          return () => {};
+        }),
+      }),
+    };
+
+    const adapter = topGunAdapter({ client: mockClient as any })({} as any);
+
+    // First request triggers ready
+    await adapter.create({ model: 'user', data: { name: 'test1' } });
+
+    // Second request should not call start again
+    await adapter.create({ model: 'user', data: { name: 'test2' } });
+
+    expect(startCallCount).toBe(1);
+  });
+
+  it('can disable waitForReady via option', async () => {
+    const mockClient = {
+      start: jest.fn(),
+      getMap: jest.fn().mockReturnValue({
+        set: jest.fn(),
+      }),
+    };
+
+    const adapter = topGunAdapter({
+      client: mockClient as any,
+      waitForReady: false
+    })({} as any);
+
+    await adapter.create({ model: 'user', data: { name: 'test' } });
+
+    // start() should not be called when waitForReady is false
+    expect(mockClient.start).not.toHaveBeenCalled();
+  });
+});
+
