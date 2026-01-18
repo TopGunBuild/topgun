@@ -12,6 +12,7 @@ import * as fs from 'fs';
 import * as jwt from 'jsonwebtoken';
 import { PARTITION_COUNT } from '@topgunbuild/core';
 import { logger } from '../utils/logger';
+import { validateJwtSecret } from '../utils/validateConfig';
 
 /**
  * Runtime settings that can be changed without restart
@@ -135,7 +136,7 @@ export class SettingsController {
 
   constructor(config: SettingsControllerConfig = {}) {
     this.configPath = config.configPath || process.env.TOPGUN_CONFIG_PATH || 'topgun.json';
-    this.jwtSecret = config.jwtSecret || process.env.JWT_SECRET || 'topgun-secret-dev';
+    this.jwtSecret = validateJwtSecret(config.jwtSecret, process.env.JWT_SECRET);
     this.onSettingsChange = config.onSettingsChange;
     this.getStorageStatus = config.getStorageStatus;
     this.runtimeSettings = this.loadRuntimeSettings();

@@ -12,6 +12,7 @@ import * as crypto from 'crypto';
 import * as jwt from 'jsonwebtoken';
 import { PARTITION_COUNT } from '@topgunbuild/core';
 import { logger } from '../utils/logger';
+import { validateJwtSecret } from '../utils/validateConfig';
 
 /**
  * Environment variable names for Zero-Touch Setup
@@ -114,7 +115,7 @@ export class BootstrapController {
     this.configPath = config.configPath || process.env.TOPGUN_CONFIG_PATH || 'topgun.json';
     this.dataDir = config.dataDir || process.env.TOPGUN_DATA_DIR || './data';
     this.version = config.version || process.env.npm_package_version || '0.0.0';
-    this.jwtSecret = config.jwtSecret || process.env.JWT_SECRET || 'topgun-secret-dev';
+    this.jwtSecret = validateJwtSecret(config.jwtSecret, process.env.JWT_SECRET);
     this._isConfigured = this.checkConfiguration();
     this.getMaps = config.getMaps;
     this.getClusterStatus = config.getClusterStatus;
