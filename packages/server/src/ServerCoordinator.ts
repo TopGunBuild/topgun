@@ -54,7 +54,7 @@ import { createDebugEndpoints, DebugEndpoints } from './debug';
 import { BootstrapController, createBootstrapController } from './bootstrap';
 import { SettingsController, createSettingsController } from './settings';
 import type { JournalEvent, JournalEventType, MergeRejection, MergeContext, FullTextIndexConfig } from '@topgunbuild/core';
-import { AuthHandler, ConnectionManager, ClientConnection } from './coordinator';
+import { AuthHandler, ConnectionManager, StorageManager, ClientConnection } from './coordinator';
 
 interface PendingClusterQuery {
     requestId: string;
@@ -180,8 +180,8 @@ export class ServerCoordinator {
     // Interceptors
     private interceptors: IInterceptor[] = [];
 
-    // In-memory storage (partitioned later)
-    private maps: Map<string, LWWMap<string, any> | ORMap<string, any>> = new Map();
+    // In-memory storage - delegated to StorageManager
+    private storageManager!: StorageManager;
     private hlc: HLC;
     private storage?: IServerStorage;
     private jwtSecret: string;
@@ -202,9 +202,6 @@ export class ServerCoordinator {
 
     // GC Consensus State
     private gcReports: Map<string, Timestamp> = new Map();
-
-    // Track map loading state to avoid returning empty results during async load
-    private mapLoadingPromises: Map<string, Promise<void>> = new Map();
 
     // Track pending batch operations for testing purposes
     private pendingBatchOperations: Set<Promise<void>> = new Set();
@@ -337,6 +334,26 @@ export class ServerCoordinator {
             writeCoalescingOptions: this.writeCoalescingOptions,
         });
 
+        // Initialize StorageManager (single owner of maps Map)
+        // Note: isRelatedKey is deferred to partitionService which is initialized in start()
+        this.storageManager = new StorageManager({
+            nodeId: config.nodeId,
+            hlc: this.hlc,
+            storage: this.storage,
+            fullTextSearch: config.fullTextSearch,
+            // Partition filter: defer to partitionService (initialized later in start())
+            isRelatedKey: (key: string) => this.partitionService?.isRelated(key) ?? true,
+            onMapLoaded: (mapName, recordCount) => {
+                // Refresh query subscriptions and update metrics after map load
+                const map = this.storageManager.getMaps().get(mapName);
+                if (map) {
+                    this.queryRegistry.refreshSubscriptions(mapName, map);
+                    const mapSize = (map instanceof ORMap) ? map.totalRecords : map.size;
+                    this.metricsService.setMapSize(mapName, mapSize);
+                }
+            },
+        });
+
         // Initialize memory pools for GC pressure reduction
         this.eventPayloadPool = createEventPayloadPool({
             maxSize: 4096,
@@ -420,7 +437,7 @@ export class ServerCoordinator {
         const debugEnabled = config.debugEnabled ?? process.env.TOPGUN_DEBUG === 'true';
         this.debugEndpoints = createDebugEndpoints({
             enabled: debugEnabled,
-            getMaps: () => this.maps,
+            getMaps: () => this.storageManager.getMaps(),
         });
         if (debugEnabled) {
             logger.info('Debug endpoints enabled');
@@ -432,7 +449,7 @@ export class ServerCoordinator {
         });
         // Provide data accessors for admin API endpoints
         this.bootstrapController.setDataAccessors({
-            getMaps: () => this.maps,
+            getMaps: () => this.storageManager.getMaps(),
             getClusterStatus: () => {
                 // getMembers returns string[] of node IDs
                 const memberIds = this.cluster?.getMembers() || [];
@@ -716,7 +733,7 @@ export class ServerCoordinator {
             this.searchCoordinator = new SearchCoordinator();
             // Set up document value getter
             this.searchCoordinator.setDocumentValueGetter((mapName, key) => {
-                const map = this.maps.get(mapName);
+                const map = this.storageManager.getMaps().get(mapName);
                 if (!map) return undefined;
                 return map.get(key);
             });
@@ -819,13 +836,11 @@ export class ServerCoordinator {
      */
     private async backfillSearchIndexes(): Promise<void> {
         const enabledMaps = this.searchCoordinator.getEnabledMaps();
-        
+
         const promises = enabledMaps.map(async (mapName) => {
             try {
                 // Ensure map is loaded from storage
-                await this.getMapAsync(mapName);
-                
-                const map = this.maps.get(mapName);
+                const map = await this.getMapAsync(mapName);
                 if (!map) return;
 
                 if (map instanceof LWWMap) {
@@ -943,7 +958,7 @@ export class ServerCoordinator {
         this.searchCoordinator.enableSearch(mapName, config);
 
         // Build index from existing data
-        const map = this.maps.get(mapName);
+        const map = this.storageManager.getMaps().get(mapName);
         if (map) {
             const entries: Array<[string, Record<string, unknown> | null]> = [];
             if (map instanceof LWWMap) {
@@ -4187,73 +4202,21 @@ export class ServerCoordinator {
         });
     }
 
+    /**
+     * Get or create a map by name.
+     * Delegates to StorageManager.
+     */
     public getMap(name: string, typeHint: 'LWW' | 'OR' = 'LWW'): LWWMap<string, any> | ORMap<string, any> {
-        if (!this.maps.has(name)) {
-            let map: LWWMap<string, any> | ORMap<string, any>;
-
-            if (typeHint === 'OR') {
-                map = new ORMap(this.hlc);
-            } else {
-                map = new LWWMap(this.hlc);
-            }
-
-            this.maps.set(name, map);
-
-            // Lazy load from storage - track the promise for getMapAsync
-            if (this.storage) {
-                logger.info({ mapName: name }, 'Loading map from storage...');
-                const loadPromise = this.loadMapFromStorage(name, typeHint);
-                this.mapLoadingPromises.set(name, loadPromise);
-                loadPromise.finally(() => {
-                    this.mapLoadingPromises.delete(name);
-                });
-            }
-        }
-        return this.maps.get(name)!;
+        return this.storageManager.getMap(name, typeHint);
     }
 
     /**
      * Returns map after ensuring it's fully loaded from storage.
      * Use this for queries to avoid returning empty results during initial load.
+     * Delegates to StorageManager.
      */
     public async getMapAsync(name: string, typeHint: 'LWW' | 'OR' = 'LWW'): Promise<LWWMap<string, any> | ORMap<string, any>> {
-        const mapExisted = this.maps.has(name);
-
-        // First ensure map exists (this triggers loading if needed)
-        this.getMap(name, typeHint);
-
-        // Wait for loading to complete if in progress
-        const loadingPromise = this.mapLoadingPromises.get(name);
-
-        // Debug logging gated behind TOPGUN_DEBUG
-        const debugEnabled = process.env.TOPGUN_DEBUG === 'true';
-
-        if (debugEnabled) {
-            const map = this.maps.get(name);
-            const mapSize = map instanceof LWWMap ? Array.from(map.entries()).length :
-                           map instanceof ORMap ? map.size : 0;
-            logger.info({
-                mapName: name,
-                mapExisted,
-                hasLoadingPromise: !!loadingPromise,
-                currentMapSize: mapSize
-            }, '[getMapAsync] State check');
-        }
-
-        if (loadingPromise) {
-            if (debugEnabled) {
-                logger.info({ mapName: name }, '[getMapAsync] Waiting for loadMapFromStorage...');
-            }
-            await loadingPromise;
-            if (debugEnabled) {
-                const map = this.maps.get(name);
-                const newMapSize = map instanceof LWWMap ? Array.from(map.entries()).length :
-                                  map instanceof ORMap ? map.size : 0;
-                logger.info({ mapName: name, mapSizeAfterLoad: newMapSize }, '[getMapAsync] Load completed');
-            }
-        }
-
-        return this.maps.get(name)!;
+        return this.storageManager.getMapAsync(name, typeHint);
     }
 
     /**
@@ -4269,7 +4232,7 @@ export class ServerCoordinator {
         const mapName = key.substring(0, separatorIndex);
         const actualKey = key.substring(separatorIndex + 1);
 
-        const map = this.maps.get(mapName);
+        const map = this.storageManager.getMaps().get(mapName);
         if (!map || !(map instanceof LWWMap)) {
             return null;
         }
@@ -4316,84 +4279,6 @@ export class ServerCoordinator {
         }
     }
 
-    private async loadMapFromStorage(name: string, typeHint: 'LWW' | 'OR'): Promise<void> {
-        try {
-            const keys = await this.storage!.loadAllKeys(name);
-            if (keys.length === 0) return;
-
-            // Check for ORMap markers in keys
-            const hasTombstones = keys.includes('__tombstones__');
-
-            const relatedKeys = keys.filter(k => this.partitionService.isRelated(k));
-            if (relatedKeys.length === 0) return;
-
-            const records = await this.storage!.loadAll(name, relatedKeys);
-            let count = 0;
-
-            // Check for Type Mismatch and Replace Map if needed
-            let isOR = hasTombstones;
-            if (!isOR) {
-                // Check first record
-                for (const [k, v] of records) {
-                    if (k !== '__tombstones__' && (v as any).type === 'OR') {
-                        isOR = true;
-                        break;
-                    }
-                }
-            }
-
-            // If we created LWW but it's OR, replace it.
-            // If we created OR but it's LWW, replace it? (Less likely if hint was OR, but possible if hint was wrong?)
-            const currentMap = this.maps.get(name);
-            if (!currentMap) return;
-            let targetMap = currentMap;
-
-            if (isOR && currentMap instanceof LWWMap) {
-                logger.info({ mapName: name }, 'Map auto-detected as ORMap. Switching type.');
-                targetMap = new ORMap(this.hlc);
-                this.maps.set(name, targetMap);
-            } else if (!isOR && currentMap instanceof ORMap && typeHint !== 'OR') {
-                // Only switch back to LWW if hint wasn't explicit OR
-                logger.info({ mapName: name }, 'Map auto-detected as LWWMap. Switching type.');
-                targetMap = new LWWMap(this.hlc);
-                this.maps.set(name, targetMap);
-            }
-
-            if (targetMap instanceof ORMap) {
-                for (const [key, record] of records) {
-                    if (key === '__tombstones__') {
-                        const t = record as ORMapTombstones;
-                        if (t && t.tags) t.tags.forEach(tag => targetMap.applyTombstone(tag));
-                    } else {
-                        const orVal = record as ORMapValue<any>;
-                        if (orVal && orVal.records) {
-                            orVal.records.forEach(r => targetMap.apply(key, r));
-                            count++;
-                        }
-                    }
-                }
-            } else if (targetMap instanceof LWWMap) {
-                for (const [key, record] of records) {
-                    // Expect LWWRecord
-                    // If record is actually ORMapValue (mismatch), we skip or error?
-                    // If !isOR, we assume LWWRecord.
-                    if (!(record as any).type) { // LWWRecord doesn't have type property in my impl
-                        targetMap.merge(key, record as LWWRecord<any>);
-                        count++;
-                    }
-                }
-            }
-
-            if (count > 0) {
-                logger.info({ mapName: name, count }, 'Loaded records for map');
-                this.queryRegistry.refreshSubscriptions(name, targetMap);
-                const mapSize = (targetMap instanceof ORMap) ? targetMap.totalRecords : targetMap.size;
-                this.metricsService.setMapSize(name, mapSize);
-            }
-        } catch (err) {
-            logger.error({ mapName: name, err }, 'Failed to load map');
-        }
-    }
 
     private startGarbageCollection() {
         this.gcInterval = setInterval(() => {
@@ -4568,7 +4453,7 @@ export class ServerCoordinator {
         logger.info({ olderThanMillis: olderThan.millis }, 'Performing Garbage Collection');
         const now = Date.now();
 
-        for (const [name, map] of this.maps) {
+        for (const [name, map] of this.storageManager.getMaps()) {
             // 1. Check for active expired records (TTL)
             if (map instanceof LWWMap) {
                 for (const key of map.allKeys()) {
