@@ -874,4 +874,103 @@ describe('SyncEngine', () => {
       expect(hlc.now()).toBeDefined();
     });
   });
+
+  describe('topic offline queue', () => {
+    it('queues topic messages when offline', async () => {
+      syncEngine = new SyncEngine(config);
+      await jest.runAllTimersAsync();
+
+      // Not authenticated = offline
+      syncEngine.publishTopic('chat', { message: 'hello' });
+      syncEngine.publishTopic('chat', { message: 'world' });
+
+      const status = syncEngine.getTopicQueueStatus();
+      expect(status.size).toBe(2);
+      expect(status.maxSize).toBe(100); // default
+    });
+
+    it('respects maxSize with drop-oldest strategy', async () => {
+      syncEngine = new SyncEngine({
+        ...config,
+        topicQueue: { maxSize: 3, strategy: 'drop-oldest' },
+      });
+      await jest.runAllTimersAsync();
+
+      // Queue 5 messages with maxSize 3
+      for (let i = 0; i < 5; i++) {
+        syncEngine.publishTopic('chat', { index: i });
+      }
+
+      const status = syncEngine.getTopicQueueStatus();
+      expect(status.size).toBe(3);
+      expect(status.maxSize).toBe(3);
+    });
+
+    it('respects drop-newest strategy', async () => {
+      syncEngine = new SyncEngine({
+        ...config,
+        topicQueue: { maxSize: 2, strategy: 'drop-newest' },
+      });
+      await jest.runAllTimersAsync();
+
+      syncEngine.publishTopic('chat', { index: 0 });
+      syncEngine.publishTopic('chat', { index: 1 });
+      syncEngine.publishTopic('chat', { index: 2 }); // dropped
+
+      const status = syncEngine.getTopicQueueStatus();
+      expect(status.size).toBe(2);
+    });
+
+    it('returns correct default config', async () => {
+      syncEngine = new SyncEngine(config);
+      await jest.runAllTimersAsync();
+
+      const status = syncEngine.getTopicQueueStatus();
+      expect(status.maxSize).toBe(100);
+    });
+
+    it('flushes queued messages on AUTH_ACK', async () => {
+      syncEngine = new SyncEngine(config);
+      syncEngine.setAuthToken('test-token');
+      await jest.runAllTimersAsync();
+
+      const ws = MockWebSocket.getLastInstance()!;
+
+      // Queue messages while not yet authenticated
+      // (AUTH was sent but not yet ACK'd)
+      ws.sentMessages = [];
+
+      // Manually queue by calling publishTopic when not authenticated
+      // Need to close and recreate to be in unauthenticated state
+      syncEngine.close();
+
+      syncEngine = new SyncEngine(config);
+      await jest.runAllTimersAsync();
+
+      // Publish while offline (not authenticated)
+      syncEngine.publishTopic('chat', { message: 'queued1' });
+      syncEngine.publishTopic('chat', { message: 'queued2' });
+
+      expect(syncEngine.getTopicQueueStatus().size).toBe(2);
+
+      // Set token and get AUTH_ACK
+      syncEngine.setAuthToken('test-token');
+      await jest.runAllTimersAsync();
+
+      const ws2 = MockWebSocket.getLastInstance()!;
+      ws2.sentMessages = [];
+
+      ws2.simulateMessage({ type: 'AUTH_ACK' });
+      await jest.runAllTimersAsync();
+
+      // Queue should be flushed
+      expect(syncEngine.getTopicQueueStatus().size).toBe(0);
+
+      // Messages should have been sent
+      const topicPubs = ws2.sentMessages.filter((m) => m.type === 'TOPIC_PUB');
+      expect(topicPubs).toHaveLength(2);
+      expect(topicPubs[0].payload.data).toEqual({ message: 'queued1' });
+      expect(topicPubs[1].payload.data).toEqual({ message: 'queued2' });
+    });
+  });
 });
