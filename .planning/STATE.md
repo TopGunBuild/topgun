@@ -64,6 +64,9 @@ Recent decisions affecting current work:
 - 02-03: AUTH_ACK is server's auth success message (not AUTH_SUCCESS/AUTH_RESP)
 - 02-03: metricsPort: 0 in tests to avoid port conflicts
 - 02-03: LWWMap.set() generates timestamp internally (no hlc.now() parameter)
+- 03-01: Default waitForReady=true for safe cold start behavior
+- 03-01: ensureReady() gates on client.start() for storage initialization
+- 03-01: Single readyPromise shared across concurrent requests
 - 03-02: Queue topic messages when offline instead of dropping
 - 03-02: drop-oldest as default eviction (preserves recent messages)
 - 03-02: Flush queue immediately on AUTH_ACK
@@ -77,7 +80,7 @@ None yet.
 Known fragile areas (from CONCERNS.md):
 - ClusterMessage type union (30+ message types) - affects Phase 4
 - IndexedLWWMap/IndexedORMap complexity - avoid touching during refactors
-- Storage loading race conditions - related to BUG-05
+- ~~Storage loading race conditions - related to BUG-05~~ (FIXED in 03-01)
 
 ## Session Continuity
 
