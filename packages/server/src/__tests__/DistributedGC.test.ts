@@ -17,15 +17,16 @@ describe('Distributed Garbage Collection Consensus', () => {
       id: clientId,
       socket: { 
         send: jest.fn(), 
-        readyState: WebSocket.OPEN, 
-        close: jest.fn() 
+        readyState: WebSocket.OPEN,
+        close: jest.fn()
       } as any,
       isAuthenticated: true,
       subscriptions: new Set(),
       principal: { userId: clientId, roles: ['USER'] },
-      lastActiveHlc: lastActiveHlc || (node as any).hlc.now()
+      lastActiveHlc: lastActiveHlc || (node as any).hlc.now(),
+      lastPingReceived: Date.now(),
     };
-    (node as any).clients.set(clientId, mockConn);
+    (node as any).connectionManager.getClients().set(clientId, mockConn);
     return mockConn;
   }
 
@@ -161,7 +162,7 @@ describe('Distributed Garbage Collection Consensus', () => {
 
     // 6. Update Lagging Client (Client catches up)
     const caughtUpTime = futureTime;
-    const clientConn = (node3 as any).clients.get('client-lag');
+    const clientConn = (node3 as any).connectionManager.getClients().get('client-lag');
     clientConn.lastActiveHlc = { millis: caughtUpTime, counter: 0, nodeId: 'client-lag' };
 
     // 7. Trigger Consensus Again

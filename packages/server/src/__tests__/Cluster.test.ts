@@ -118,9 +118,11 @@ describe('Cluster Integration', () => {
         writer: { write: sendMock, close: jest.fn() },
         isAuthenticated: true,
         subscriptions: new Set(),
-        principal: { userId: 'test', roles: ['ADMIN'] }
+        principal: { userId: 'test', roles: ['ADMIN'] },
+        lastActiveHlc: { millis: Date.now(), counter: 0, nodeId: 'node-b' },
+        lastPingReceived: Date.now(),
     };
-    (node1 as any).clients.set(clientMock.id, clientMock);
+    (node1 as any).connectionManager.getClients().set(clientMock.id, clientMock);
 
     // Client subscribes on Node 1
     (node1 as any).handleMessage(clientMock, {
