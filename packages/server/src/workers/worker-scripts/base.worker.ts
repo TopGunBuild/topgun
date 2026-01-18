@@ -90,3 +90,4 @@ export { handlers };
 require('./crdt.worker');
 require('./merkle.worker');
 require('./serialization.worker');
+require('./test.worker');

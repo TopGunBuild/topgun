@@ -161,7 +161,8 @@ describe('WorkerPool', () => {
     });
 
     it('should timeout long-running tasks', async () => {
-      const task = createTask('slow-task', { delay: 5000 });
+      // Use delayed-echo handler with delay longer than timeout (100ms)
+      const task = createTask('delayed-echo', { data: 'test', delay: 5000 });
 
       await expect(pool.submit(task)).rejects.toThrow(WorkerTimeoutError);
     });
