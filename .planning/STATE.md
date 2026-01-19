@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-01-18)
 ## Current Position
 
 Phase: 4 of 7 (ServerCoordinator Refactor)
-Plan: 2 of 4 in current phase
+Plan: 3 of 4 in current phase
 Status: In progress
-Last activity: 2026-01-18 - Completed 04-02-PLAN.md (ConnectionManager extraction)
+Last activity: 2026-01-19 - Completed 04-03-PLAN.md (StorageManager extraction)
 
-Progress: [===========---------] 52%
+Progress: [============--------] 57%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 11
-- Average duration: 5.8 min
-- Total execution time: 64 min
+- Total plans completed: 12
+- Average duration: 5.7 min
+- Total execution time: 68 min
 
 **By Phase:**
 
@@ -30,10 +30,10 @@ Progress: [===========---------] 52%
 | 01-security-hardening | 3 | 17 min | 5.7 min |
 | 02-worker-test-fixes | 3 | 20 min | 6.7 min |
 | 03-bug-fixes | 3 | 13 min | 4.3 min |
-| 04-servercoordinator-refactor | 2 | 14 min | 7.0 min |
+| 04-servercoordinator-refactor | 3 | 18 min | 6.0 min |
 
 **Recent Trend:**
-- Last 5 plans: 03-01 (6 min), 03-02 (4 min), 03-03 (3 min), 04-01 (est), 04-02 (16 min)
+- Last 5 plans: 03-02 (4 min), 03-03 (3 min), 04-01 (est), 04-02 (16 min), 04-03 (4 min)
 - Trend: stable
 
 *Updated after each plan completion*
@@ -77,6 +77,10 @@ Recent decisions affecting current work:
 - 04-02: ServerCoordinator delegates isClientAlive/getClientIdleTime to ConnectionManager
 - 04-02: Broadcast methods stay in ServerCoordinator (have queryRegistry/securityManager deps)
 - 04-02: Client access pattern: this.connectionManager.getClient(id) for all lookups
+- 04-03: StorageManager owns maps Map (single source of truth)
+- 04-03: ServerCoordinator delegates all map operations to StorageManager
+- 04-03: getMapAsync debug logging gated behind TOPGUN_DEBUG check
+- 04-03: onMapLoaded callback for additional processing after storage load
 
 ### Pending Todos
 
@@ -91,6 +95,6 @@ Known fragile areas (from CONCERNS.md):
 
 ## Session Continuity
 
-Last session: 2026-01-18
-Stopped at: Completed 04-02-PLAN.md (ConnectionManager extraction)
+Last session: 2026-01-19
+Stopped at: Completed 04-03-PLAN.md (StorageManager extraction)
 Resume file: None
