@@ -5,6 +5,8 @@ export { AuthHandler } from './auth-handler';
 export { ConnectionManager } from './connection-manager';
 export { StorageManager } from './storage-manager';
 export { OperationHandler } from './operation-handler';
+export { createMessageRegistry } from './message-registry';
+export type { MessageRegistry, MessageHandler, MessageHandlers } from './message-registry';
 export type {
     // Auth types
     IAuthHandler,
