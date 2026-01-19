@@ -4,6 +4,7 @@
 export { AuthHandler } from './auth-handler';
 export { ConnectionManager } from './connection-manager';
 export { StorageManager } from './storage-manager';
+export { OperationHandler } from './operation-handler';
 export type {
     // Auth types
     IAuthHandler,
@@ -16,4 +17,7 @@ export type {
     // Storage types
     IStorageManager,
     StorageManagerConfig,
+    // Operation types
+    IOperationHandler,
+    OperationHandlerConfig,
 } from './types';

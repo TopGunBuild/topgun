@@ -1,5 +1,5 @@
 import type { WebSocket } from 'ws';
-import type { HLC, Principal, Timestamp, LWWMap, ORMap, FullTextIndexConfig } from '@topgunbuild/core';
+import type { HLC, Principal, Timestamp, LWWMap, ORMap, FullTextIndexConfig, PermissionType } from '@topgunbuild/core';
 import type { CoalescingWriter, CoalescingWriterOptions } from '../utils/CoalescingWriter';
 import type { IServerStorage } from '../storage/IServerStorage';
 
@@ -156,4 +156,73 @@ export interface StorageManagerConfig {
     isRelatedKey?: (key: string) => boolean;
     /** Callback when a map is loaded from storage */
     onMapLoaded?: (mapName: string, recordCount: number) => void;
+}
+
+// ============================================================================
+// OperationHandler Types
+// ============================================================================
+
+/**
+ * Interface for handling CRDT operations (CLIENT_OP, OP_BATCH).
+ * OperationHandler processes write operations and manages Write Concern.
+ */
+export interface IOperationHandler {
+    /** Process a single client operation (CLIENT_OP) */
+    processClientOp(client: ClientConnection, op: any): Promise<void>;
+
+    /** Process a batch of operations (OP_BATCH) */
+    processOpBatch(
+        client: ClientConnection,
+        ops: any[],
+        writeConcern?: string,
+        timeout?: number
+    ): Promise<void>;
+}
+
+/**
+ * Configuration for OperationHandler.
+ * This handler requires many dependencies due to the complexity of
+ * CRDT operations (interceptors, Write Concern, replication, journal, search).
+ */
+export interface OperationHandlerConfig {
+    /** Process a local operation (delegates to ServerCoordinator) */
+    processLocalOp: (op: any, isForwarded: boolean, originClientId?: string) => Promise<void>;
+
+    /** Process a batch with Write Concern (delegates to ServerCoordinator) */
+    processBatchAsync: (
+        ops: any[],
+        clientId: string,
+        writeConcern?: string,
+        timeout?: number
+    ) => Promise<void>;
+
+    /** Get effective Write Concern from op-level and batch-level settings */
+    getEffectiveWriteConcern: (opLevel?: string, batchLevel?: string) => string | undefined;
+
+    /** Convert Write Concern string to enum value */
+    stringToWriteConcern: (wc?: string) => any;
+
+    /** Forward operation to partition owner */
+    forwardToOwner: (op: any) => void;
+
+    /** Check if key is owned by local node */
+    isLocalOwner: (key: string) => boolean;
+
+    /** Security manager for permission checks */
+    checkPermission: (principal: Principal, mapName: string, action: PermissionType) => boolean;
+
+    /** Metrics service for operation tracking */
+    incOp: (action: string, mapName: string) => void;
+
+    /** Write ACK manager for deferred acknowledgments */
+    writeAckManager: {
+        registerPending: (
+            opId: string,
+            writeConcern: any,
+            timeout?: number
+        ) => Promise<{ success: boolean; achievedLevel: string; error?: string }>;
+    };
+
+    /** Track pending batch operations (for testing) */
+    pendingBatchOperations: Set<Promise<void>>;
 }
