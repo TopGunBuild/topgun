@@ -5,23 +5,23 @@
 See: .planning/PROJECT.md (updated 2026-01-18)
 
 **Core value:** Make TopGun safe for production and easier to maintain
-**Current focus:** Phase 4 - ServerCoordinator Refactor
+**Current focus:** Phase 4 - ServerCoordinator Refactor (COMPLETE)
 
 ## Current Position
 
 Phase: 4 of 7 (ServerCoordinator Refactor)
-Plan: 3 of 4 in current phase
-Status: In progress
-Last activity: 2026-01-19 - Completed 04-03-PLAN.md (StorageManager extraction)
+Plan: 4 of 4 in current phase (COMPLETE)
+Status: Phase complete
+Last activity: 2026-01-19 - Completed 04-04-PLAN.md (OperationHandler and MessageRegistry)
 
-Progress: [============--------] 57%
+Progress: [=============-------] 62%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 12
-- Average duration: 5.7 min
-- Total execution time: 68 min
+- Total plans completed: 13
+- Average duration: 6.0 min
+- Total execution time: 93 min
 
 **By Phase:**
 
@@ -30,11 +30,11 @@ Progress: [============--------] 57%
 | 01-security-hardening | 3 | 17 min | 5.7 min |
 | 02-worker-test-fixes | 3 | 20 min | 6.7 min |
 | 03-bug-fixes | 3 | 13 min | 4.3 min |
-| 04-servercoordinator-refactor | 3 | 18 min | 6.0 min |
+| 04-servercoordinator-refactor | 4 | 43 min | 10.8 min |
 
 **Recent Trend:**
-- Last 5 plans: 03-02 (4 min), 03-03 (3 min), 04-01 (est), 04-02 (16 min), 04-03 (4 min)
-- Trend: stable
+- Last 5 plans: 03-03 (3 min), 04-01 (est), 04-02 (16 min), 04-03 (4 min), 04-04 (25 min)
+- Trend: Phase 4 plans more complex due to refactoring
 
 *Updated after each plan completion*
 
@@ -81,6 +81,10 @@ Recent decisions affecting current work:
 - 04-03: ServerCoordinator delegates all map operations to StorageManager
 - 04-03: getMapAsync debug logging gated behind TOPGUN_DEBUG check
 - 04-03: onMapLoaded callback for additional processing after storage load
+- 04-04: Registry intercepts before switch for gradual migration
+- 04-04: CLIENT_OP and OP_BATCH prioritized for OperationHandler
+- 04-04: OperationHandlerConfig uses any types for flexibility with strict union types
+- 04-04: Minimal extraction approach - entry points delegated, complex logic stays initially
 
 ### Pending Todos
 
@@ -89,12 +93,12 @@ None yet.
 ### Blockers/Concerns
 
 Known fragile areas (from CONCERNS.md):
-- ClusterMessage type union (30+ message types) - affects Phase 4
+- ClusterMessage type union (30+ message types) - MITIGATED via MessageRegistry pattern
 - IndexedLWWMap/IndexedORMap complexity - avoid touching during refactors
 - ~~Storage loading race conditions - related to BUG-05~~ (FIXED in 03-01)
 
 ## Session Continuity
 
 Last session: 2026-01-19
-Stopped at: Completed 04-03-PLAN.md (StorageManager extraction)
+Stopped at: Completed 04-04-PLAN.md (OperationHandler and MessageRegistry) - Phase 4 complete
 Resume file: None
