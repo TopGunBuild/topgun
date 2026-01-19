@@ -167,6 +167,7 @@ describe('Sync Protocol Integration', () => {
     const clientMock = {
       id: 'client-or',
       socket: clientSocket as any,
+      writer: createMockWriter(clientSocket) as any,
       isAuthenticated: true,
       principal: { roles: ['ADMIN'] }, // Add principal with ADMIN role
       subscriptions: new Set()
