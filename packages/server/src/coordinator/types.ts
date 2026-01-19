@@ -192,15 +192,15 @@ export interface OperationHandlerConfig {
     processBatchAsync: (
         ops: any[],
         clientId: string,
-        writeConcern?: string,
+        writeConcern?: any,
         timeout?: number
     ) => Promise<void>;
 
     /** Get effective Write Concern from op-level and batch-level settings */
-    getEffectiveWriteConcern: (opLevel?: string, batchLevel?: string) => string | undefined;
+    getEffectiveWriteConcern: (opLevel?: any, batchLevel?: any) => any;
 
     /** Convert Write Concern string to enum value */
-    stringToWriteConcern: (wc?: string) => any;
+    stringToWriteConcern: (wc?: any) => any;
 
     /** Forward operation to partition owner */
     forwardToOwner: (op: any) => void;
@@ -212,7 +212,7 @@ export interface OperationHandlerConfig {
     checkPermission: (principal: Principal, mapName: string, action: PermissionType) => boolean;
 
     /** Metrics service for operation tracking */
-    incOp: (action: string, mapName: string) => void;
+    incOp: (action: any, mapName: string) => void;
 
     /** Write ACK manager for deferred acknowledgments */
     writeAckManager: {

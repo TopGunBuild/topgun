@@ -54,7 +54,14 @@ import { createDebugEndpoints, DebugEndpoints } from './debug';
 import { BootstrapController, createBootstrapController } from './bootstrap';
 import { SettingsController, createSettingsController } from './settings';
 import type { JournalEvent, JournalEventType, MergeRejection, MergeContext, FullTextIndexConfig } from '@topgunbuild/core';
-import { AuthHandler, ConnectionManager, StorageManager, ClientConnection } from './coordinator';
+import {
+    AuthHandler,
+    ConnectionManager,
+    StorageManager,
+    OperationHandler,
+    type MessageRegistry,
+    type ClientConnection,
+} from './coordinator';
 
 interface PendingClusterQuery {
     requestId: string;
@@ -194,6 +201,8 @@ export class ServerCoordinator {
     private topicManager!: TopicManager;
     private securityManager: SecurityManager;
     private authHandler!: AuthHandler;
+    private operationHandler!: OperationHandler;
+    private messageRegistry!: MessageRegistry;
     private systemManager!: SystemManager;
 
     private pendingClusterQueries: Map<string, PendingClusterQuery> = new Map();
@@ -790,6 +799,33 @@ export class ServerCoordinator {
 
             // Set map getter for QueryRegistry (needed for distributed query initial results)
             this.queryRegistry.setMapGetter((name) => this.getMap(name));
+
+            // Phase 4: Initialize OperationHandler for CRDT operations (CLIENT_OP, OP_BATCH)
+            this.operationHandler = new OperationHandler({
+                processLocalOp: this.processLocalOp.bind(this),
+                processBatchAsync: this.processBatchAsyncWithWriteConcern.bind(this),
+                getEffectiveWriteConcern: this.getEffectiveWriteConcern.bind(this),
+                stringToWriteConcern: this.stringToWriteConcern.bind(this),
+                forwardToOwner: (op) => {
+                    const owner = this.partitionService.getOwner(op.key);
+                    logger.info({ key: op.key, owner }, 'Forwarding op');
+                    this.cluster.sendToNode(owner, op);
+                },
+                isLocalOwner: (key) => this.partitionService.isLocalOwner(key),
+                checkPermission: this.securityManager.checkPermission.bind(this.securityManager),
+                incOp: this.metricsService.incOp.bind(this.metricsService),
+                writeAckManager: this.writeAckManager,
+                pendingBatchOperations: this.pendingBatchOperations,
+            });
+
+            // Phase 4: Initialize MessageRegistry for CLIENT_OP and OP_BATCH routing
+            // These message types are now delegated to OperationHandler
+            this.messageRegistry = {
+                'CLIENT_OP': (client, msg) => this.operationHandler.processClientOp(client, msg.payload),
+                'OP_BATCH': (client, msg) => this.operationHandler.processOpBatch(
+                    client, msg.payload.ops, msg.payload.writeConcern, msg.payload.timeout
+                ),
+            };
 
             this.systemManager = new SystemManager(
                 this.cluster,
@@ -1434,6 +1470,14 @@ export class ServerCoordinator {
         }
 
         // Standard Protocol Handling (Authenticated)
+        // Phase 4: Check message registry first (CLIENT_OP and OP_BATCH are delegated to OperationHandler)
+        const registryHandler = this.messageRegistry?.[message.type];
+        if (registryHandler) {
+            await registryHandler(client, message);
+            return;
+        }
+
+        // Handle remaining message types via switch statement
         switch (message.type) {
             case 'QUERY_SUB': {
                 const { queryId, mapName, query } = message.payload;
