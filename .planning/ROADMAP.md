@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Security Hardening** - Block unsafe production deployments and validate all inputs
 - [x] **Phase 2: Worker Test Fixes** - Fix skipped worker tests to restore CI confidence
 - [x] **Phase 3: Bug Fixes** - Address BetterAuth race, topic queueing, and debug logging
-- [ ] **Phase 4: ServerCoordinator Refactor** - Split 5086-line god object into focused modules
+- [x] **Phase 4: ServerCoordinator Refactor** - Split 5086-line god object into focused modules
 - [ ] **Phase 5: SyncEngine Refactor** - Split 2540-line file into focused classes
 - [ ] **Phase 6: Type Safety** - Replace 100+ `as any` casts with proper types
 - [ ] **Phase 7: LRU Eviction** - Add eviction policies to unbounded collections
@@ -101,10 +101,10 @@ Plans:
 **Plans**: 4 plans in 3 waves
 
 Plans:
-- [ ] 04-01-PLAN.md — Extract AuthHandler module (REF-01)
-- [ ] 04-02-PLAN.md — Extract ConnectionManager module (REF-02)
-- [ ] 04-03-PLAN.md — Extract StorageManager module (REF-04)
-- [ ] 04-04-PLAN.md — Extract OperationHandler module with message registry (REF-03)
+- [x] 04-01-PLAN.md — Extract AuthHandler module (REF-01)
+- [x] 04-02-PLAN.md — Extract ConnectionManager module (REF-02)
+- [x] 04-03-PLAN.md — Extract StorageManager module (REF-04)
+- [x] 04-04-PLAN.md — Extract OperationHandler module with message registry (REF-03)
 
 **Wave Structure:**
 | Wave | Plans | Can Run Parallel |
@@ -169,7 +169,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 1. Security Hardening | 3/3 | ✓ Complete | 2026-01-18 |
 | 2. Worker Test Fixes | 3/3 | ✓ Complete | 2026-01-18 |
 | 3. Bug Fixes | 3/3 | ✓ Complete | 2026-01-18 |
-| 4. ServerCoordinator Refactor | 0/4 | Planned | - |
+| 4. ServerCoordinator Refactor | 4/4 | ✓ Complete | 2026-01-19 |
 | 5. SyncEngine Refactor | 0/3 | Not started | - |
 | 6. Type Safety | 0/3 | Not started | - |
 | 7. LRU Eviction | 0/2 | Not started | - |

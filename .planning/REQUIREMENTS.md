@@ -26,10 +26,10 @@ Requirements for this hardening milestone. Each maps to roadmap phases.
 
 ### Refactoring
 
-- [ ] **REF-01**: ServerCoordinator auth logic extracted to AuthHandler module
-- [ ] **REF-02**: ServerCoordinator connection logic extracted to ConnectionManager module
-- [ ] **REF-03**: ServerCoordinator operation handling extracted to OperationHandler module
-- [ ] **REF-04**: ServerCoordinator storage logic extracted to StorageManager module
+- [x] **REF-01**: ServerCoordinator auth logic extracted to AuthHandler module
+- [x] **REF-02**: ServerCoordinator connection logic extracted to ConnectionManager module
+- [x] **REF-03**: ServerCoordinator operation handling extracted to OperationHandler module
+- [x] **REF-04**: ServerCoordinator storage logic extracted to StorageManager module
 - [ ] **REF-05**: SyncEngine WebSocket logic extracted to WebSocketManager class
 - [ ] **REF-06**: SyncEngine query handling extracted to QueryManager class
 - [ ] **REF-07**: SyncEngine backpressure logic extracted to BackpressureController class
@@ -81,10 +81,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | BUG-05 | Phase 3 | Complete |
 | BUG-06 | Phase 3 | Complete |
 | BUG-07 | Phase 3 | Complete |
-| REF-01 | Phase 4 | Pending |
-| REF-02 | Phase 4 | Pending |
-| REF-03 | Phase 4 | Pending |
-| REF-04 | Phase 4 | Pending |
+| REF-01 | Phase 4 | Complete |
+| REF-02 | Phase 4 | Complete |
+| REF-03 | Phase 4 | Complete |
+| REF-04 | Phase 4 | Complete |
 | REF-05 | Phase 5 | Pending |
 | REF-06 | Phase 5 | Pending |
 | REF-07 | Phase 5 | Pending |
@@ -102,4 +102,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-01-18*
-*Last updated: 2026-01-18 after Phase 3 completion*
+*Last updated: 2026-01-19 after Phase 4 completion*
