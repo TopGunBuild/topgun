@@ -10,18 +10,18 @@ See: .planning/PROJECT.md (updated 2026-01-18)
 ## Current Position
 
 Phase: 5 of 7 (SyncEngine Refactor)
-Plan: 1 of 3 in current phase
-Status: In progress
-Last activity: 2026-01-20 - Completed 05-01-PLAN.md (WebSocketManager Extraction)
+Plan: 3 of 3 in current phase
+Status: Phase complete
+Last activity: 2026-01-20 - Completed 05-03-PLAN.md (BackpressureController Extraction)
 
-Progress: [===============-----] 75%
+Progress: [================----] 80%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 14
-- Average duration: 5.8 min
-- Total execution time: 98 min
+- Total plans completed: 17
+- Average duration: 6.5 min
+- Total execution time: 113 min
 
 **By Phase:**
 
@@ -31,11 +31,11 @@ Progress: [===============-----] 75%
 | 02-worker-test-fixes | 3 | 20 min | 6.7 min |
 | 03-bug-fixes | 3 | 13 min | 4.3 min |
 | 04-servercoordinator-refactor | 4 | 43 min | 10.8 min |
-| 05-syncengine-refactor | 1 | 5 min | 5.0 min |
+| 05-syncengine-refactor | 4 | 20 min | 5.0 min |
 
 **Recent Trend:**
-- Last 5 plans: 04-02 (16 min), 04-03 (4 min), 04-04 (25 min), 05-01 (5 min)
-- Trend: Phase 5 starting efficiently with smaller focused extractions
+- Last 5 plans: 04-04 (25 min), 05-01 (5 min), 05-02 (auto), 05-03 (15 min)
+- Trend: Phase 5 completing efficiently with focused extractions
 
 *Updated after each plan completion*
 
@@ -89,6 +89,8 @@ Recent decisions affecting current work:
 - 05-01: WebSocketManager owns all WebSocket/connection lifecycle (single responsibility)
 - 05-01: Callback-based integration with SyncEngine (loose coupling)
 - 05-01: Support both direct WebSocket and IConnectionProvider modes (backwards compatible)
+- 05-03: BackpressureController receives shared opLog reference (enables counting and drop-oldest)
+- 05-03: loadOpLog mutates array instead of reassigning (preserves controller reference)
 
 ### Pending Todos
 
@@ -103,6 +105,6 @@ Known fragile areas (from CONCERNS.md):
 
 ## Session Continuity
 
-Last session: 2026-01-20 11:15
-Stopped at: Completed 05-01-PLAN.md (WebSocketManager Extraction)
+Last session: 2026-01-20 11:30
+Stopped at: Completed 05-03-PLAN.md (BackpressureController Extraction)
 Resume file: None
