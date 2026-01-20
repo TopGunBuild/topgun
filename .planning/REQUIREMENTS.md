@@ -30,9 +30,9 @@ Requirements for this hardening milestone. Each maps to roadmap phases.
 - [x] **REF-02**: ServerCoordinator connection logic extracted to ConnectionManager module
 - [x] **REF-03**: ServerCoordinator operation handling extracted to OperationHandler module
 - [x] **REF-04**: ServerCoordinator storage logic extracted to StorageManager module
-- [ ] **REF-05**: SyncEngine WebSocket logic extracted to WebSocketManager class
-- [ ] **REF-06**: SyncEngine query handling extracted to QueryManager class
-- [ ] **REF-07**: SyncEngine backpressure logic extracted to BackpressureController class
+- [x] **REF-05**: SyncEngine WebSocket logic extracted to WebSocketManager class
+- [x] **REF-06**: SyncEngine query handling extracted to QueryManager class
+- [x] **REF-07**: SyncEngine backpressure logic extracted to BackpressureController class
 - [ ] **REF-08**: All `as any` casts in packages/server replaced with proper types
 - [ ] **REF-09**: All `as any` casts in packages/client replaced with proper types
 - [ ] **REF-10**: All `as any` casts in packages/adapter-better-auth replaced with proper types
@@ -85,9 +85,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | REF-02 | Phase 4 | Complete |
 | REF-03 | Phase 4 | Complete |
 | REF-04 | Phase 4 | Complete |
-| REF-05 | Phase 5 | Pending |
-| REF-06 | Phase 5 | Pending |
-| REF-07 | Phase 5 | Pending |
+| REF-05 | Phase 5 | Complete |
+| REF-06 | Phase 5 | Complete |
+| REF-07 | Phase 5 | Complete |
 | REF-08 | Phase 6 | Pending |
 | REF-09 | Phase 6 | Pending |
 | REF-10 | Phase 6 | Pending |
@@ -102,4 +102,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-01-18*
-*Last updated: 2026-01-19 after Phase 4 completion*
+*Last updated: 2026-01-20 after Phase 5 completion*
