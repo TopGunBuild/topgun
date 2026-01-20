@@ -1,5 +1,5 @@
-import { HLC, LWWMap, ORMap, serialize, deserialize, evaluatePredicate } from '@topgunbuild/core';
-import type { EntryProcessorDef, EntryProcessorResult, EntryProcessKeyResult, SearchOptions, SearchRespPayload } from '@topgunbuild/core';
+import { HLC, LWWMap, ORMap, deserialize, evaluatePredicate } from '@topgunbuild/core';
+import type { EntryProcessorDef, EntryProcessorResult, EntryProcessKeyResult, SearchOptions } from '@topgunbuild/core';
 import type { LWWRecord, ORMapRecord, Timestamp } from '@topgunbuild/core';
 import type { IStorageAdapter } from './IStorageAdapter';
 import { QueryHandle } from './QueryHandle';
@@ -13,14 +13,13 @@ import { BackpressureError } from './errors/BackpressureError';
 import type {
   BackpressureConfig,
   BackpressureStatus,
-  BackpressureStrategy,
   BackpressureThresholdEvent,
   OperationDroppedEvent,
 } from './BackpressureConfig';
 import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 import type { IConnectionProvider } from './types';
-import { SingleServerProvider } from './connection/SingleServerProvider';
 import { ConflictResolverClient } from './ConflictResolverClient';
+import { WebSocketManager } from './sync';
 
 /**
  * Search result item from server.
@@ -106,31 +105,23 @@ interface QueuedTopicMessage {
 
 export class SyncEngine {
   private readonly nodeId: string;
-  private readonly serverUrl: string;
   private readonly storageAdapter: IStorageAdapter;
   private readonly hlc: HLC;
   private readonly stateMachine: SyncStateMachine;
+  private readonly heartbeatConfig: HeartbeatConfig;
   private readonly backoffConfig: BackoffConfig;
-  private readonly connectionProvider: IConnectionProvider;
-  private readonly useConnectionProvider: boolean;
 
-  private websocket: WebSocket | null = null;
+  // WebSocketManager handles all connection/websocket operations
+  private readonly webSocketManager: WebSocketManager;
+
   private opLog: OpLogEntry[] = [];
   private maps: Map<string, LWWMap<any, any> | ORMap<any, any>> = new Map();
   private queries: Map<string, QueryHandle<any>> = new Map();
   private topics: Map<string, TopicHandle> = new Map();
   private pendingLockRequests: Map<string, { resolve: (res: any) => void, reject: (err: any) => void, timer: any }> = new Map();
   private lastSyncTimestamp: number = 0;
-  private reconnectTimer: any = null; // NodeJS.Timeout
   private authToken: string | null = null;
   private tokenProvider: (() => Promise<string | null>) | null = null;
-  private backoffAttempt: number = 0;
-
-  // Heartbeat state
-  private readonly heartbeatConfig: HeartbeatConfig;
-  private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-  private lastPongReceived: number = Date.now();
-  private lastRoundTripTime: number | null = null;
 
   // Backpressure state
   private readonly backpressureConfig: BackpressureConfig;
@@ -160,7 +151,6 @@ export class SyncEngine {
     }
 
     this.nodeId = config.nodeId;
-    this.serverUrl = config.serverUrl || '';
     this.storageAdapter = config.storageAdapter;
     this.hlc = new HLC(this.nodeId);
 
@@ -192,22 +182,62 @@ export class SyncEngine {
       ...config.topicQueue,
     };
 
-    // Initialize connection provider
-    if (config.connectionProvider) {
-      this.connectionProvider = config.connectionProvider;
-      this.useConnectionProvider = true;
-      this.initConnectionProvider();
-    } else {
-      // Legacy mode: create SingleServerProvider internally
-      this.connectionProvider = new SingleServerProvider({ url: config.serverUrl! });
-      this.useConnectionProvider = false;
-      this.initConnection();
-    }
+    // Initialize WebSocketManager with callbacks to SyncEngine
+    this.webSocketManager = new WebSocketManager({
+      serverUrl: config.serverUrl,
+      connectionProvider: config.connectionProvider,
+      stateMachine: this.stateMachine,
+      backoffConfig: this.backoffConfig,
+      heartbeatConfig: this.heartbeatConfig,
+      onMessage: (msg) => this.handleServerMessage(msg),
+      onConnected: () => this.handleConnectionEstablished(),
+      onDisconnected: () => this.handleConnectionLost(),
+      onReconnected: () => this.handleReconnection(),
+    });
 
     // Initialize Conflict Resolver client (Phase 5.05)
     this.conflictResolverClient = new ConflictResolverClient(this);
 
+    // Start connection
+    this.webSocketManager.connect();
+
     this.loadOpLog();
+  }
+
+  // ============================================
+  // Connection Callbacks (from WebSocketManager)
+  // ============================================
+
+  /**
+   * Called when connection is established (initial or reconnect).
+   */
+  private handleConnectionEstablished(): void {
+    if (this.authToken || this.tokenProvider) {
+      logger.info('Connection established. Sending auth...');
+      this.stateMachine.transition(SyncState.AUTHENTICATING);
+      this.sendAuth();
+    } else {
+      logger.info('Connection established. Waiting for auth token...');
+      this.stateMachine.transition(SyncState.AUTHENTICATING);
+    }
+  }
+
+  /**
+   * Called when connection is lost.
+   */
+  private handleConnectionLost(): void {
+    // WebSocketManager already stopped heartbeat and transitioned state
+    // SyncEngine can do additional cleanup if needed
+  }
+
+  /**
+   * Called when reconnection succeeds.
+   */
+  private handleReconnection(): void {
+    if (this.authToken || this.tokenProvider) {
+      this.stateMachine.transition(SyncState.AUTHENTICATING);
+      this.sendAuth();
+    }
   }
 
   // ============================================
@@ -269,217 +299,20 @@ export class SyncEngine {
   }
 
   // ============================================
-  // Connection Management
+  // Message Sending (delegates to WebSocketManager)
   // ============================================
 
   /**
-   * Initialize connection using IConnectionProvider (Phase 4.5 cluster mode).
-   * Sets up event handlers for the connection provider.
-   */
-  private initConnectionProvider(): void {
-    // Transition to CONNECTING state
-    this.stateMachine.transition(SyncState.CONNECTING);
-
-    // Set up event handlers
-    this.connectionProvider.on('connected', (_nodeId: string) => {
-      if (this.authToken || this.tokenProvider) {
-        logger.info('ConnectionProvider connected. Sending auth...');
-        this.stateMachine.transition(SyncState.AUTHENTICATING);
-        this.sendAuth();
-      } else {
-        logger.info('ConnectionProvider connected. Waiting for auth token...');
-        this.stateMachine.transition(SyncState.AUTHENTICATING);
-      }
-    });
-
-    this.connectionProvider.on('disconnected', (_nodeId: string) => {
-      logger.info('ConnectionProvider disconnected.');
-      this.stopHeartbeat();
-      this.stateMachine.transition(SyncState.DISCONNECTED);
-      // Don't schedule reconnect - provider handles it
-    });
-
-    this.connectionProvider.on('reconnected', (_nodeId: string) => {
-      logger.info('ConnectionProvider reconnected.');
-      this.stateMachine.transition(SyncState.CONNECTING);
-      if (this.authToken || this.tokenProvider) {
-        this.stateMachine.transition(SyncState.AUTHENTICATING);
-        this.sendAuth();
-      }
-    });
-
-    this.connectionProvider.on('message', (_nodeId: string, data: any) => {
-      let message: any;
-      if (data instanceof ArrayBuffer) {
-        message = deserialize(new Uint8Array(data));
-      } else if (data instanceof Uint8Array) {
-        message = deserialize(data);
-      } else {
-        try {
-          message = typeof data === 'string' ? JSON.parse(data) : data;
-        } catch (e) {
-          logger.error({ err: e }, 'Failed to parse message from ConnectionProvider');
-          return;
-        }
-      }
-      this.handleServerMessage(message);
-    });
-
-    this.connectionProvider.on('partitionMapUpdated', () => {
-      logger.debug('Partition map updated');
-      // Could trigger re-subscriptions if needed
-    });
-
-    this.connectionProvider.on('error', (error: Error) => {
-      logger.error({ err: error }, 'ConnectionProvider error');
-    });
-
-    // Start connection
-    this.connectionProvider.connect().catch((err) => {
-      logger.error({ err }, 'Failed to connect via ConnectionProvider');
-      this.stateMachine.transition(SyncState.DISCONNECTED);
-    });
-  }
-
-  /**
-   * Initialize connection using direct WebSocket (legacy single-server mode).
-   */
-  private initConnection(): void {
-    // Transition to CONNECTING state
-    this.stateMachine.transition(SyncState.CONNECTING);
-
-    this.websocket = new WebSocket(this.serverUrl);
-    this.websocket.binaryType = 'arraybuffer';
-
-    this.websocket.onopen = () => {
-      // WebSocket is open, now we need to authenticate
-      // [CHANGE] Don't send auth immediately if we don't have a token
-      // This prevents the "AUTH_REQUIRED -> Close -> Retry loop" for anonymous initial connects
-      if (this.authToken || this.tokenProvider) {
-        logger.info('WebSocket connected. Sending auth...');
-        this.stateMachine.transition(SyncState.AUTHENTICATING);
-        this.sendAuth();
-      } else {
-        logger.info('WebSocket connected. Waiting for auth token...');
-        // Stay in CONNECTING state until we have a token
-        // We're online but not authenticated
-        this.stateMachine.transition(SyncState.AUTHENTICATING);
-      }
-    };
-
-    this.websocket.onmessage = (event) => {
-      let message: any;
-      if (event.data instanceof ArrayBuffer) {
-        message = deserialize(new Uint8Array(event.data));
-      } else {
-        try {
-          message = JSON.parse(event.data);
-        } catch (e) {
-          logger.error({ err: e }, 'Failed to parse message');
-          return;
-        }
-      }
-      this.handleServerMessage(message);
-    };
-
-    this.websocket.onclose = () => {
-      logger.info('WebSocket disconnected.');
-      this.stopHeartbeat();
-      this.stateMachine.transition(SyncState.DISCONNECTED);
-      this.scheduleReconnect();
-    };
-
-    this.websocket.onerror = (error) => {
-      logger.error({ err: error }, 'WebSocket error');
-      // Error will typically be followed by close, so we don't transition here
-    };
-  }
-
-  private scheduleReconnect(): void {
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-
-    // Check if we've exceeded max retries
-    if (this.backoffAttempt >= this.backoffConfig.maxRetries) {
-      logger.error(
-        { attempts: this.backoffAttempt },
-        'Max reconnection attempts reached. Entering ERROR state.'
-      );
-      this.stateMachine.transition(SyncState.ERROR);
-      return;
-    }
-
-    // Transition to BACKOFF state
-    this.stateMachine.transition(SyncState.BACKOFF);
-
-    const delay = this.calculateBackoffDelay();
-    logger.info({ delay, attempt: this.backoffAttempt }, `Backing off for ${delay}ms`);
-
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      this.backoffAttempt++;
-      this.initConnection();
-    }, delay);
-  }
-
-  private calculateBackoffDelay(): number {
-    const { initialDelayMs, maxDelayMs, multiplier, jitter } = this.backoffConfig;
-    let delay = initialDelayMs * Math.pow(multiplier, this.backoffAttempt);
-    delay = Math.min(delay, maxDelayMs);
-
-    if (jitter) {
-      // Add jitter: 0.5x to 1.5x of calculated delay
-      delay = delay * (0.5 + Math.random());
-    }
-
-    return Math.floor(delay);
-  }
-
-  /**
-   * Reset backoff counter (called on successful connection)
-   */
-  private resetBackoff(): void {
-    this.backoffAttempt = 0;
-  }
-
-  /**
    * Send a message through the current connection.
-   * Uses connectionProvider if in cluster mode, otherwise uses direct websocket.
-   * @param message Message object to serialize and send
-   * @param key Optional key for routing (cluster mode only)
-   * @returns true if message was sent, false otherwise
+   * Delegates to WebSocketManager.
    */
   private sendMessage(message: any, key?: string): boolean {
-    const data = serialize(message);
-
-    if (this.useConnectionProvider) {
-      try {
-        this.connectionProvider.send(data, key);
-        return true;
-      } catch (err) {
-        logger.warn({ err }, 'Failed to send via ConnectionProvider');
-        return false;
-      }
-    } else {
-      if (this.websocket?.readyState === WebSocket.OPEN) {
-        this.websocket.send(data);
-        return true;
-      }
-      return false;
-    }
+    return this.webSocketManager.sendMessage(message, key);
   }
 
-  /**
-   * Check if we can send messages (connection is ready).
-   */
-  private canSend(): boolean {
-    if (this.useConnectionProvider) {
-      return this.connectionProvider.isConnected();
-    }
-    return this.websocket?.readyState === WebSocket.OPEN;
-  }
+  // ============================================
+  // Op Log Management
+  // ============================================
 
   private async loadOpLog(): Promise<void> {
     const storedTimestamp = await this.storageAdapter.getMeta('lastSyncTimestamp');
@@ -593,15 +426,12 @@ export class SyncEngine {
       // If we are already connected (e.g. waiting for token), send it now
       this.sendAuth();
     } else if (state === SyncState.BACKOFF || state === SyncState.DISCONNECTED) {
-      // [CHANGE] Force immediate reconnect if we were waiting for retry timer
+      // Force immediate reconnect if we were waiting for retry timer
       logger.info('Auth token set during backoff/disconnect. Reconnecting immediately.');
-      if (this.reconnectTimer) {
-        clearTimeout(this.reconnectTimer);
-        this.reconnectTimer = null;
-      }
+      this.webSocketManager.clearReconnectTimer();
       // Reset backoff since user provided new credentials
-      this.resetBackoff();
-      this.initConnection();
+      this.webSocketManager.resetBackoff();
+      this.webSocketManager.connect();
     }
   }
 
@@ -893,7 +723,7 @@ export class SyncEngine {
         this.stateMachine.transition(SyncState.SYNCING);
 
         // Reset backoff on successful auth
-        this.resetBackoff();
+        this.webSocketManager.resetBackoff();
 
         this.syncPendingOperations();
 
@@ -902,7 +732,7 @@ export class SyncEngine {
 
         // Only re-subscribe on first authentication to prevent UI flickering
         if (!wasAuthenticated) {
-          this.startHeartbeat();
+          this.webSocketManager.startHeartbeat();
           this.startMerkleSync();
           for (const query of this.queries.values()) {
             this.sendQuerySubscription(query);
@@ -919,7 +749,8 @@ export class SyncEngine {
       }
 
       case 'PONG': {
-        this.handlePong(message);
+        // PONG is handled internally by WebSocketManager for RTT tracking
+        // Message still comes here for any additional processing if needed
         break;
       }
 
@@ -1379,24 +1210,7 @@ export class SyncEngine {
    * Closes the WebSocket connection and cleans up resources.
    */
   public close(): void {
-    this.stopHeartbeat();
-
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-
-    if (this.useConnectionProvider) {
-      // Close via connection provider
-      this.connectionProvider.close().catch((err) => {
-        logger.error({ err }, 'Error closing ConnectionProvider');
-      });
-    } else if (this.websocket) {
-      // Legacy: close direct websocket
-      this.websocket.onclose = null; // Prevent reconnect on intentional close
-      this.websocket.close();
-      this.websocket = null;
-    }
+    this.webSocketManager.close();
 
     // Cancel pending Write Concern promises (Phase 5.01)
     this.cancelAllWriteConcernPromises(new Error('SyncEngine closed'));
@@ -1412,12 +1226,8 @@ export class SyncEngine {
   public resetConnection(): void {
     this.close();
     this.stateMachine.reset();
-    this.resetBackoff();
-    if (this.useConnectionProvider) {
-      this.initConnectionProvider();
-    } else {
-      this.initConnection();
-    }
+    this.webSocketManager.reset();
+    this.webSocketManager.connect();
   }
 
   // ============================================
@@ -1435,14 +1245,15 @@ export class SyncEngine {
   public waitForPartitionMapUpdate(timeoutMs: number = 5000): Promise<void> {
     return new Promise((resolve) => {
       const timeout = setTimeout(resolve, timeoutMs);
+      const connectionProvider = this.webSocketManager.getConnectionProvider();
 
       const handler = () => {
         clearTimeout(timeout);
-        this.connectionProvider.off('partitionMapUpdated', handler);
+        connectionProvider.off('partitionMapUpdated', handler);
         resolve();
       };
 
-      this.connectionProvider.on('partitionMapUpdated', handler);
+      connectionProvider.on('partitionMapUpdated', handler);
     });
   }
 
@@ -1456,24 +1267,26 @@ export class SyncEngine {
    */
   public waitForConnection(timeoutMs: number = 10000): Promise<void> {
     return new Promise((resolve, reject) => {
+      const connectionProvider = this.webSocketManager.getConnectionProvider();
+
       // If already connected, resolve immediately
-      if (this.connectionProvider.isConnected()) {
+      if (connectionProvider.isConnected()) {
         resolve();
         return;
       }
 
       const timeout = setTimeout(() => {
-        this.connectionProvider.off('connected', handler);
+        connectionProvider.off('connected', handler);
         reject(new Error('Connection timeout waiting for reconnection'));
       }, timeoutMs);
 
       const handler = () => {
         clearTimeout(timeout);
-        this.connectionProvider.off('connected', handler);
+        connectionProvider.off('connected', handler);
         resolve();
       };
 
-      this.connectionProvider.on('connected', handler);
+      connectionProvider.on('connected', handler);
     });
   }
 
@@ -1513,7 +1326,7 @@ export class SyncEngine {
    * Convenience method for failover logic.
    */
   public isProviderConnected(): boolean {
-    return this.connectionProvider.isConnected();
+    return this.webSocketManager.getConnectionProvider().isConnected();
   }
 
   /**
@@ -1521,7 +1334,7 @@ export class SyncEngine {
    * Use with caution - prefer using SyncEngine methods.
    */
   public getConnectionProvider(): IConnectionProvider {
-    return this.connectionProvider;
+    return this.webSocketManager.getConnectionProvider();
   }
 
   private async resetMap(mapName: string): Promise<void> {
@@ -1544,94 +1357,14 @@ export class SyncEngine {
     logger.info({ mapName, removedStorageCount: mapKeys.length }, 'Reset map: Cleared memory and storage');
   }
 
-  // ============ Heartbeat Methods ============
-
-  /**
-   * Starts the heartbeat mechanism after successful connection.
-   */
-  private startHeartbeat(): void {
-    if (!this.heartbeatConfig.enabled) {
-      return;
-    }
-
-    this.stopHeartbeat(); // Clear any existing interval
-    this.lastPongReceived = Date.now();
-
-    this.heartbeatInterval = setInterval(() => {
-      this.sendPing();
-      this.checkHeartbeatTimeout();
-    }, this.heartbeatConfig.intervalMs);
-
-    logger.info({ intervalMs: this.heartbeatConfig.intervalMs }, 'Heartbeat started');
-  }
-
-  /**
-   * Stops the heartbeat mechanism.
-   */
-  private stopHeartbeat(): void {
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
-      this.heartbeatInterval = null;
-      logger.info('Heartbeat stopped');
-    }
-  }
-
-  /**
-   * Sends a PING message to the server.
-   */
-  private sendPing(): void {
-    if (this.canSend()) {
-      const pingMessage = {
-        type: 'PING',
-        timestamp: Date.now(),
-      };
-      this.sendMessage(pingMessage);
-    }
-  }
-
-  /**
-   * Handles incoming PONG message from server.
-   */
-  private handlePong(msg: { timestamp: number; serverTime: number }): void {
-    const now = Date.now();
-    this.lastPongReceived = now;
-    this.lastRoundTripTime = now - msg.timestamp;
-
-    logger.debug({
-      rtt: this.lastRoundTripTime,
-      serverTime: msg.serverTime,
-      clockSkew: msg.serverTime - (msg.timestamp + this.lastRoundTripTime / 2),
-    }, 'Received PONG');
-  }
-
-  /**
-   * Checks if heartbeat has timed out and triggers reconnection if needed.
-   */
-  private checkHeartbeatTimeout(): void {
-    const now = Date.now();
-    const timeSinceLastPong = now - this.lastPongReceived;
-
-    if (timeSinceLastPong > this.heartbeatConfig.timeoutMs) {
-      logger.warn({
-        timeSinceLastPong,
-        timeoutMs: this.heartbeatConfig.timeoutMs,
-      }, 'Heartbeat timeout - triggering reconnection');
-
-      this.stopHeartbeat();
-
-      // Force close and reconnect
-      if (this.websocket) {
-        this.websocket.close();
-      }
-    }
-  }
+  // ============ Heartbeat Methods (delegate to WebSocketManager) ============
 
   /**
    * Returns the last measured round-trip time in milliseconds.
    * Returns null if no PONG has been received yet.
    */
   public getLastRoundTripTime(): number | null {
-    return this.lastRoundTripTime;
+    return this.webSocketManager.getLastRoundTripTime();
   }
 
   /**
@@ -1640,16 +1373,7 @@ export class SyncEngine {
    * a PONG within the timeout window.
    */
   public isConnectionHealthy(): boolean {
-    if (!this.isOnline() || !this.isAuthenticated()) {
-      return false;
-    }
-
-    if (!this.heartbeatConfig.enabled) {
-      return true; // If heartbeat disabled, consider healthy if online
-    }
-
-    const timeSinceLastPong = Date.now() - this.lastPongReceived;
-    return timeSinceLastPong < this.heartbeatConfig.timeoutMs;
+    return this.webSocketManager.isConnectionHealthy();
   }
 
   // ============ ORMap Sync Methods ============
