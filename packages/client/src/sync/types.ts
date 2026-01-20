@@ -1,13 +1,22 @@
 /**
- * WebSocket Manager Types
+ * Sync Module Types
  *
- * Types and interfaces for the WebSocketManager module that handles
- * all WebSocket/connection operations for SyncEngine.
+ * Types and interfaces for the sync module that handles
+ * WebSocket/connection operations and query management for SyncEngine.
  */
 
 import type { IConnectionProvider, ConnectionProviderEvent, ConnectionEventHandler } from '../types';
 import type { SyncStateMachine } from '../SyncStateMachine';
-import type { BackoffConfig, HeartbeatConfig } from '../SyncEngine';
+import type { BackoffConfig, HeartbeatConfig, OpLogEntry } from '../SyncEngine';
+import type {
+  BackpressureConfig,
+  BackpressureStatus,
+  BackpressureThresholdEvent,
+  OperationDroppedEvent,
+} from '../BackpressureConfig';
+import type { QueryHandle, QueryFilter } from '../QueryHandle';
+import type { HybridQueryHandle, HybridQueryFilter } from '../HybridQueryHandle';
+import type { IStorageAdapter } from '../IStorageAdapter';
 
 /**
  * Interface for WebSocket connection management.
@@ -154,4 +163,71 @@ export interface WebSocketManagerConfig {
    * Callback invoked when reconnection succeeds.
    */
   onReconnected?: () => void;
+}
+
+// ============================================
+// BackpressureController Types
+// ============================================
+
+/**
+ * Interface for backpressure control.
+ * Handles flow control for pending operations, including pause/resume/throw/drop
+ * strategies and high/low water mark events.
+ */
+export interface IBackpressureController {
+  /**
+   * Get current pending ops count.
+   */
+  getPendingOpsCount(): number;
+
+  /**
+   * Get backpressure status.
+   */
+  getBackpressureStatus(): BackpressureStatus;
+
+  /**
+   * Check if writes are paused.
+   */
+  isBackpressurePaused(): boolean;
+
+  /**
+   * Check backpressure before adding operation (may pause/throw/drop).
+   */
+  checkBackpressure(): Promise<void>;
+
+  /**
+   * Check high water mark after adding operation.
+   */
+  checkHighWaterMark(): void;
+
+  /**
+   * Check low water mark after ACKs.
+   */
+  checkLowWaterMark(): void;
+
+  /**
+   * Subscribe to backpressure events.
+   * @param event Event name: 'backpressure:high', 'backpressure:low', 'backpressure:paused', 'backpressure:resumed', 'operation:dropped'
+   * @param listener Callback function
+   * @returns Unsubscribe function
+   */
+  onBackpressure(
+    event: 'backpressure:high' | 'backpressure:low' | 'backpressure:paused' | 'backpressure:resumed' | 'operation:dropped',
+    listener: (data?: BackpressureThresholdEvent | OperationDroppedEvent) => void
+  ): () => void;
+}
+
+/**
+ * Configuration for BackpressureController.
+ */
+export interface BackpressureControllerConfig {
+  /**
+   * Backpressure configuration.
+   */
+  config: BackpressureConfig;
+
+  /**
+   * Reference to opLog array (shared state from SyncEngine).
+   */
+  opLog: OpLogEntry[];
 }
