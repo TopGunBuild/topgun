@@ -231,3 +231,98 @@ export interface BackpressureControllerConfig {
    */
   opLog: OpLogEntry[];
 }
+
+// ============================================
+// Query Manager Types
+// ============================================
+
+/**
+ * Interface for query management.
+ * Handles query subscriptions, unsubscriptions, and local query execution.
+ */
+export interface IQueryManager {
+  /**
+   * Get all queries (read-only access).
+   */
+  getQueries(): Map<string, QueryHandle<any>>;
+
+  /**
+   * Get all hybrid queries.
+   */
+  getHybridQueries(): Map<string, HybridQueryHandle<any>>;
+
+  /**
+   * Subscribe to a standard query.
+   * @param query - Query handle to subscribe
+   */
+  subscribeToQuery(query: QueryHandle<any>): void;
+
+  /**
+   * Unsubscribe from a query.
+   * @param queryId - ID of the query to unsubscribe
+   */
+  unsubscribeFromQuery(queryId: string): void;
+
+  /**
+   * Subscribe to a hybrid query (FTS + filter).
+   * @param query - Hybrid query handle to subscribe
+   */
+  subscribeToHybridQuery<T>(query: HybridQueryHandle<T>): void;
+
+  /**
+   * Unsubscribe from a hybrid query.
+   * @param queryId - ID of the hybrid query to unsubscribe
+   */
+  unsubscribeFromHybridQuery(queryId: string): void;
+
+  /**
+   * Get a hybrid query by ID.
+   * @param queryId - ID of the hybrid query
+   */
+  getHybridQuery(queryId: string): HybridQueryHandle<any> | undefined;
+
+  /**
+   * Run a local query against storage.
+   * @param mapName - Name of the map to query
+   * @param filter - Query filter
+   */
+  runLocalQuery(mapName: string, filter: QueryFilter): Promise<{ key: string; value: any }[]>;
+
+  /**
+   * Run a local hybrid query.
+   * @param mapName - Name of the map to query
+   * @param filter - Hybrid query filter
+   */
+  runLocalHybridQuery<T>(
+    mapName: string,
+    filter: HybridQueryFilter
+  ): Promise<Array<{ key: string; value: T; score?: number; matchedTerms?: string[] }>>;
+
+  /**
+   * Re-subscribe all queries (called after auth).
+   */
+  resubscribeAll(): void;
+}
+
+/**
+ * Configuration for QueryManager.
+ */
+export interface QueryManagerConfig {
+  /**
+   * Storage adapter for local queries.
+   */
+  storageAdapter: IStorageAdapter;
+
+  /**
+   * Callback to send messages via SyncEngine/WebSocketManager.
+   * @param message - Message to send
+   * @param key - Optional key for routing
+   * @returns true if sent successfully
+   */
+  sendMessage: (message: any, key?: string) => boolean;
+
+  /**
+   * Callback to check if authenticated.
+   */
+  isAuthenticated: () => boolean;
+}
