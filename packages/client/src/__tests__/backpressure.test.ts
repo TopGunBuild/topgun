@@ -131,7 +131,7 @@ describe('Backpressure', () => {
       // Simulate ACKs to free up capacity (mark all as synced)
       // Access internal opLog to simulate ACK
       (engine as any).opLog.forEach((op: any) => { op.synced = true; });
-      (engine as any).checkLowWaterMark();
+      (engine as any).backpressureController.checkLowWaterMark();
 
       // Now the write should resolve
       await writePromise;
@@ -192,7 +192,7 @@ describe('Backpressure', () => {
 
       // Simulate ACKs
       (engine as any).opLog.forEach((op: any) => { op.synced = true; });
-      (engine as any).checkLowWaterMark();
+      (engine as any).backpressureController.checkLowWaterMark();
 
       expect(resumedHandler).toHaveBeenCalled();
     });
@@ -228,7 +228,7 @@ describe('Backpressure', () => {
 
       // Simulate ACKs
       (engine as any).opLog.forEach((op: any) => { op.synced = true; });
-      (engine as any).checkLowWaterMark();
+      (engine as any).backpressureController.checkLowWaterMark();
 
       // All should resolve
       const results = await Promise.all(promises);
@@ -480,7 +480,7 @@ describe('Backpressure', () => {
 
       // Simulate ACKs
       (engine as any).opLog.forEach((op: any) => { op.synced = true; });
-      (engine as any).checkLowWaterMark();
+      (engine as any).backpressureController.checkLowWaterMark();
 
       expect(lowHandler).toHaveBeenCalled();
     });

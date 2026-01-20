@@ -324,11 +324,15 @@ export class SyncEngine {
     }
 
     const pendingOps = await this.storageAdapter.getPendingOps();
-    this.opLog = pendingOps.map(op => ({
-      ...op,
-      id: String(op.id),
-      synced: false
-    })) as unknown as OpLogEntry[];
+    // Clear and push to existing array (preserves BackpressureController reference)
+    this.opLog.length = 0;
+    for (const op of pendingOps) {
+      this.opLog.push({
+        ...op,
+        id: String(op.id),
+        synced: false,
+      } as unknown as OpLogEntry);
+    }
 
     if (this.opLog.length > 0) {
       logger.info({ count: this.opLog.length }, 'Loaded pending operations from local storage');
