@@ -16,7 +16,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: Worker Test Fixes** - Fix skipped worker tests to restore CI confidence
 - [x] **Phase 3: Bug Fixes** - Address BetterAuth race, topic queueing, and debug logging
 - [x] **Phase 4: ServerCoordinator Refactor** - Split 5086-line god object into focused modules
-- [ ] **Phase 5: SyncEngine Refactor** - Split 2540-line file into focused classes
+- [ ] **Phase 5: SyncEngine Refactor** - Split 2612-line file into focused classes
 - [ ] **Phase 6: Type Safety** - Replace 100+ `as any` casts with proper types
 - [ ] **Phase 7: LRU Eviction** - Add eviction policies to unbounded collections
 
@@ -122,12 +122,18 @@ Plans:
   2. Query handling lives in QueryManager class
   3. Backpressure control lives in BackpressureController class
   4. SyncEngine orchestrates classes but delegates all logic
-**Plans**: TBD
+**Plans**: 3 plans in 2 waves
 
 Plans:
-- [ ] 05-01: Extract WebSocketManager class
-- [ ] 05-02: Extract QueryManager class
-- [ ] 05-03: Extract BackpressureController class
+- [ ] 05-01-PLAN.md — Extract WebSocketManager class (REF-05)
+- [ ] 05-02-PLAN.md — Extract QueryManager class (REF-06)
+- [ ] 05-03-PLAN.md — Extract BackpressureController class (REF-07)
+
+**Wave Structure:**
+| Wave | Plans | Can Run Parallel |
+|------|-------|------------------|
+| 1 | 05-01 | Foundation (establishes sync/ folder and patterns) |
+| 2 | 05-02, 05-03 | Yes (after 05-01, independent of each other) |
 
 ### Phase 6: Type Safety
 **Goal**: TypeScript provides full type safety; no runtime type surprises
@@ -170,7 +176,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 | 2. Worker Test Fixes | 3/3 | ✓ Complete | 2026-01-18 |
 | 3. Bug Fixes | 3/3 | ✓ Complete | 2026-01-18 |
 | 4. ServerCoordinator Refactor | 4/4 | ✓ Complete | 2026-01-19 |
-| 5. SyncEngine Refactor | 0/3 | Not started | - |
+| 5. SyncEngine Refactor | 0/3 | Planned | - |
 | 6. Type Safety | 0/3 | Not started | - |
 | 7. LRU Eviction | 0/2 | Not started | - |
 
@@ -180,5 +186,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7
 *Phase 2 planned: 2026-01-18*
 *Phase 3 planned: 2026-01-18*
 *Phase 4 planned: 2026-01-18*
+*Phase 5 planned: 2026-01-20*
 *Depth: standard (7 phases)*
 *Coverage: 24/24 requirements mapped*
