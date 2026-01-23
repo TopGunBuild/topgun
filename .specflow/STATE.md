@@ -2,20 +2,20 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-001
-- **Status:** review
-- **Next Step:** /sf:review
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | # | ID | Title | Priority | Status |
-|---|-------|----------|--------|
-| 1 | SPEC-001 | Complete Phase 4 ServerCoordinator Refactor | high | review |
+|---|-------|----------|--------|--------|
 
 ## Decisions
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-01-23 | SPEC-001 | MessageRegistry pattern for routing CLIENT_OP and OP_BATCH to handlers |
 
 ## Project Patterns
 
@@ -30,4 +30,4 @@
 |------|---------------|--------|
 
 ---
-*Last updated: 2026-01-22*
+*Last updated: 2026-01-23*

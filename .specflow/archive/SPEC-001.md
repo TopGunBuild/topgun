@@ -1,7 +1,7 @@
 ---
 id: SPEC-001
 type: refactor
-status: audited
+status: done
 priority: high
 complexity: small
 created: 2026-01-22
@@ -35,8 +35,8 @@ Complete Phase 4 by:
 
 ### Files to Modify
 
-- [ ] `packages/server/src/ServerCoordinator.ts` — Delete dead switch cases for CLIENT_OP and OP_BATCH
-- [ ] `.planning/phases/04-servercoordinator-refactor/04-UAT.md` — Update test results from pending to passed/failed
+- [x] `packages/server/src/ServerCoordinator.ts` — Delete dead switch cases for CLIENT_OP and OP_BATCH
+- [x] `.planning/phases/04-servercoordinator-refactor/04-UAT.md` — Update test results from pending to passed/failed
 
 ### Dead Code Deletion
 
@@ -69,11 +69,11 @@ Both commands should return no matches after deletion.
 
 ## Acceptance Criteria
 
-- [ ] Dead code deleted from ServerCoordinator.ts (CLIENT_OP and OP_BATCH switch cases removed)
-- [ ] No matches for `case 'CLIENT_OP':` or `case 'OP_BATCH':` in ServerCoordinator.ts
-- [ ] All 6 UAT tests executed and documented in 04-UAT.md
-- [ ] UAT.md summary shows passed/failed counts (not pending)
-- [ ] Server test suite passes: `pnpm --filter @topgunbuild/server test`
+- [x] Dead code deleted from ServerCoordinator.ts (CLIENT_OP and OP_BATCH switch cases removed)
+- [x] No matches for `case 'CLIENT_OP':` or `case 'OP_BATCH':` in ServerCoordinator.ts
+- [x] All 6 UAT tests executed and documented in 04-UAT.md
+- [x] UAT.md summary shows passed/failed counts (not pending)
+- [x] Server test suite passes: `pnpm --filter @topgunbuild/server test`
 
 ## Constraints
 
@@ -172,3 +172,38 @@ None - implementation followed specification exactly.
   - EntryProcessor.integration.test.ts (isolated-vm not available)
   - Resilience.test.ts (flaky convergence timing)
 - All Phase 4-related tests passed successfully
+
+---
+
+## Review History
+
+### Review v1 (2026-01-22 22:30)
+**Result:** APPROVED
+**Reviewer:** impl-reviewer (subagent)
+
+**Findings:**
+
+**Passed:**
+- [x] Dead code deleted from ServerCoordinator.ts — grep confirms no matches for `case 'CLIENT_OP':` or `case 'OP_BATCH':` in the switch statement
+- [x] File reduction verified — ServerCoordinator.ts reduced from ~5,011 to 4,857 lines (154 lines removed, matches commit)
+- [x] MessageRegistry properly intercepts CLIENT_OP and OP_BATCH at lines 1474-1477 before the switch statement
+- [x] No lingering references to deleted switch cases — remaining CLIENT_OP references are in comments, MessageRegistry initialization, and utility functions (updateClientHlc, message construction)
+- [x] UAT document updated — all 6 tests marked as passed with evidence
+- [x] UAT summary shows 6 passed, 0 pending, 0 issues
+- [x] Commits properly structured — 3 commits with proper format (refactor, docs, docs)
+- [x] No security issues introduced
+- [x] Code follows existing project patterns
+
+**Minor:**
+1. The specification status in frontmatter was still "audited" rather than "done" — corrected during review
+
+**Summary:** Implementation fully meets the specification. Dead code for CLIENT_OP and OP_BATCH switch cases was successfully removed (154 lines). MessageRegistry correctly intercepts these message types before the switch statement. UAT document was properly updated with test results showing all 6 tests passed. No lingering references to the deleted code patterns exist in the switch statement. The remaining references to CLIENT_OP/OP_BATCH are appropriate (comments, registry initialization, utility functions, and message construction in other contexts).
+
+---
+
+## Completion
+
+**Completed:** 2026-01-23 10:45 UTC
+**Total Commits:** 3
+**Audit Cycles:** 2
+**Review Cycles:** 1

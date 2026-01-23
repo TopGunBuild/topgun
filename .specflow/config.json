@@ -1,0 +1,10 @@
+{
+  "auto_commit": true,
+  "commit_format": "feat(sf-{id}): {description}",
+  "ask_questions": "critical_only",
+  "complexity_threshold": {
+    "small": 50000,
+    "medium": 150000
+  },
+  "audit_storage": "hybrid"
+}
