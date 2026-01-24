@@ -2,21 +2,21 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-002
-- **Status:** review
-- **Next Step:** /sf:review
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | # | ID | Title | Priority | Status |
 |---|-------|----------|--------|--------|
-| 1 | SPEC-002 | Server Test Timeout and Polling Hardening | high | review |
 
 ## Decisions
 
 | Date | Specification | Decision |
 |------|---------------|----------|
 | 2026-01-23 | SPEC-001 | MessageRegistry pattern for routing CLIENT_OP and OP_BATCH to handlers |
+| 2026-01-24 | SPEC-002 | PollOptions pattern for bounded test polling (timeoutMs, intervalMs, maxIterations, description) |
 
 ## Project Patterns
 
@@ -25,10 +25,11 @@
 - Commit format: `type(scope): description`
 - CRDTs use Hybrid Logical Clocks for causality tracking
 - Handler extraction pattern: separate message handlers into focused modules with config injection
+- Test polling pattern: use centralized test-helpers.ts with PollOptions for bounded iterations
 
 ## Warnings
 
 _No active warnings_
 
 ---
-*Last updated: 2026-01-24 17:35*
+*Last updated: 2026-01-24 18:20*

@@ -3,7 +3,7 @@
 ```yaml
 id: SPEC-002
 type: refactor
-status: review
+status: done
 priority: high
 complexity: medium
 created: 2026-01-24
@@ -249,3 +249,40 @@ None.
 - jest.retryTimes(3) kept in LiveQuery.test.ts and Chaos.test.ts per constraint (don't remove until proven stable); TODO added for future evaluation
 - EntryProcessor.integration.test.ts has a pre-existing unrelated issue (wrong import for MemoryStorageAdapter)
 - DistributedGC.test.ts has a pre-existing flaky test (tombstone propagation timing) unrelated to polling changes
+
+---
+
+## Review History
+
+### Review v1 (2026-01-24 18:15)
+**Result:** APPROVED
+**Reviewer:** impl-reviewer (subagent)
+
+**Findings:**
+
+**Minor:**
+1. TODO comment for jest.retryTimes is only present in LiveQuery.test.ts but not in Chaos.test.ts or Resilience.test.ts, which also have jest.retryTimes(3). For consistency, the same TODO should be added to those files.
+
+**Passed:**
+- [x] **No unbounded loops:** All polling loops in test files now use `pollUntil` with timeoutMs and maxIterations bounds. Verified: Chaos.test.ts, GC.test.ts, Cluster.test.ts, DistributedGC.test.ts all now import and use the bounded polling utilities.
+- [x] **Clear timeout errors:** `pollUntil` includes description, elapsed time, and iteration count in error messages. `waitForConvergence` enhances errors with current map values.
+- [x] **Test isolation:** Each polling call specifies its own timeout via PollOptions, not relying on global Jest timeout.
+- [x] **Reduced flakiness:** jest.retryTimes evaluated and kept per constraint with TODO for future removal.
+- [x] **Consistent patterns:** All utilities follow PollOptions interface (timeoutMs, intervalMs, maxIterations, description).
+- [x] **Files created:** `test-helpers.ts` exists with correct PollOptions interface and all specified functions.
+- [x] **Files modified:** All 10 test files properly import from `./utils/test-helpers` (or `../utils/test-helpers` for integration subfolder).
+- [x] **Files deleted:** None required, none deleted (correct).
+- [x] **Backward compatibility:** `waitForAuthReady` re-exported from test-helpers.ts for existing import paths.
+- [x] **No duplicate local functions:** grep confirms no local `waitForCluster`, `waitForConvergence`, `pollUntil`, or `waitForClusterFormation` functions remain outside test-helpers.ts.
+- [x] **No business logic changes:** Test assertions and setup unchanged, only polling infrastructure refactored.
+- [x] **Architecture fit:** Follows existing patterns with utils directory, TypeScript types, and consistent error messaging.
+
+**Summary:** Implementation meets all acceptance criteria. The test-helpers.ts module provides well-documented, bounded polling utilities with clear error messages. All 10 test files have been properly refactored to use the centralized utilities. The single minor issue (missing TODO comments in 2 files) does not affect functionality or correctness.
+
+---
+
+## Completion
+
+**Completed:** 2026-01-24 18:20
+**Total Commits:** 11
+**Review Cycles:** 1
