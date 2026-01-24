@@ -2,6 +2,7 @@ import { ServerCoordinator } from '../ServerCoordinator';
 import { WebSocket } from 'ws';
 import { LWWMap, HLC, Timestamp } from '@topgunbuild/core';
 import * as jwt from 'jsonwebtoken';
+import { pollUntil } from './utils/test-helpers';
 
 const JWT_SECRET = 'topgun-secret-dev';
 
@@ -75,15 +76,20 @@ describe('Distributed Garbage Collection Consensus', () => {
     });
     await node3.ready();
 
-    // Wait for cluster formation
-    const start = Date.now();
-    while (Date.now() - start < 5000) {
+    // Wait for cluster formation with bounded polling
+    await pollUntil(
+      () => {
         const m1 = (node1 as any).cluster.getMembers();
         const m2 = (node2 as any).cluster.getMembers();
         const m3 = (node3 as any).cluster.getMembers();
-        if (m1.length === 3 && m2.length === 3 && m3.length === 3) break;
-        await new Promise(r => setTimeout(r, 100));
-    }
+        return m1.length === 3 && m2.length === 3 && m3.length === 3;
+      },
+      {
+        timeoutMs: 5000,
+        intervalMs: 100,
+        description: '3-node cluster formation for distributed GC',
+      }
+    );
   }, 20000);
 
   afterAll(async () => {
