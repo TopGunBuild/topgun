@@ -12,29 +12,12 @@
 import { ServerCoordinator } from '../ServerCoordinator';
 import { WebSocket } from 'ws';
 import { LWWMap, ConsistencyLevel, deserialize } from '@topgunbuild/core';
+import { waitForCluster } from './utils/test-helpers';
 
 describe('Cluster E2E Replication', () => {
   let node1: ServerCoordinator;
   let node2: ServerCoordinator;
   let node3: ServerCoordinator;
-
-  // Helper to wait for cluster stabilization
-  async function waitForCluster(nodes: ServerCoordinator[], expectedSize: number, timeoutMs = 10000): Promise<boolean> {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      let allReady = true;
-      for (const node of nodes) {
-        const members = (node as any).cluster?.getMembers() || [];
-        if (members.length < expectedSize) {
-          allReady = false;
-          break;
-        }
-      }
-      if (allReady) return true;
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
-    return false;
-  }
 
   // Helper to create a mock client
   function createMockClient(id: string) {
@@ -84,8 +67,7 @@ describe('Cluster E2E Replication', () => {
       await node3.ready();
 
       // Wait for full mesh
-      const formed = await waitForCluster([node1, node2, node3], 3);
-      expect(formed).toBe(true);
+      await waitForCluster([node1, node2, node3], 3, 15000);
     }, 20000);
 
     afterAll(async () => {
