@@ -2,14 +2,15 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-002
+- **Status:** review
+- **Next Step:** /sf:review
 
 ## Queue
 
 | # | ID | Title | Priority | Status |
 |---|-------|----------|--------|--------|
+| 1 | SPEC-002 | Server Test Timeout and Polling Hardening | high | review |
 
 ## Decisions
 
@@ -30,4 +31,4 @@
 _No active warnings_
 
 ---
-*Last updated: 2026-01-24*
+*Last updated: 2026-01-24 17:35*
