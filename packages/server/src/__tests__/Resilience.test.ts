@@ -2,7 +2,7 @@ import { ServerCoordinator } from '../ServerCoordinator';
 import { ChaosProxy } from './utils/ChaosProxy';
 import { SyncEngine } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
-import { waitForAuthReady } from './utils/waitForAuthReady';
+import { waitForAuthReady, waitForConvergence } from './utils/test-helpers';
 import { LWWMap } from '@topgunbuild/core';
 import * as jwt from 'jsonwebtoken';
 
@@ -23,8 +23,6 @@ describe('Resilience & Chaos Testing', () => {
   let proxyPort: number;
 
   beforeAll(async () => {
-    jest.setTimeout(30000);
-
     // 1. Start Server with dynamic ports
     server = new ServerCoordinator({
       port: 0,
@@ -171,20 +169,3 @@ describe('Resilience & Chaos Testing', () => {
     expect(serverMap.get('keyA')).toBe('OnlyA');
   }, 30000);
 });
-
-async function waitForConvergence(mapA: LWWMap<any, any>, mapB: LWWMap<any, any>, key: string, expectedValue: any, timeout: number) {
-    const start = Date.now();
-    while (Date.now() - start < timeout) {
-        const valA = mapA.get(key);
-        const valB = mapB.get(key);
-        if (valA === expectedValue && valB === expectedValue) {
-            return;
-        }
-        await new Promise(r => setTimeout(r, 100));
-    }
-    // If failed, throw with details
-    throw new Error(`Convergence failed after ${timeout}ms.
-      A: ${JSON.stringify(mapA.get(key))},
-      B: ${JSON.stringify(mapB.get(key))},
-      Expected: ${expectedValue}`);
-}
