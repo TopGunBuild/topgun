@@ -1,7 +1,7 @@
 import { ServerCoordinator } from '../ServerCoordinator';
 import { SyncEngine } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
-import { waitForAuthReady } from './utils/waitForAuthReady';
+import { waitForAuthReady, pollUntil } from './utils/test-helpers';
 import { LWWMap, ORMap } from '@topgunbuild/core';
 import * as jwt from 'jsonwebtoken';
 import { WebSocket } from 'ws';
@@ -201,16 +201,19 @@ describe('TTL Expiration with ReplicationPipeline', () => {
 
     await node2.ready();
 
-    // Wait for cluster to stabilize
-    const start = Date.now();
-    while (Date.now() - start < 5000) {
-      const m1 = (node1 as any).cluster.getMembers();
-      const m2 = (node2 as any).cluster.getMembers();
-      if (m1.includes('ttl-node-a') && m2.includes('ttl-node-b')) {
-        break;
+    // Wait for cluster to stabilize with bounded polling
+    await pollUntil(
+      () => {
+        const m1 = (node1 as any).cluster.getMembers();
+        const m2 = (node2 as any).cluster.getMembers();
+        return m1.includes('ttl-node-a') && m2.includes('ttl-node-b');
+      },
+      {
+        timeoutMs: 5000,
+        intervalMs: 100,
+        description: 'TTL cluster formation (nodes see each other)',
       }
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
+    );
   }, 15000);
 
   afterAll(async () => {
