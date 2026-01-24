@@ -59,6 +59,18 @@ import {
     ConnectionManager,
     StorageManager,
     OperationHandler,
+    createMessageRegistry,
+    PartitionHandler,
+    TopicHandler,
+    LockHandler,
+    CounterHandlerAdapter,
+    ResolverHandler,
+    JournalHandler,
+    LwwSyncHandler,
+    ORMapSyncHandler,
+    EntryProcessorAdapter,
+    SearchHandler,
+    QueryHandler,
     type MessageRegistry,
     type ClientConnection,
 } from './coordinator';
@@ -818,14 +830,196 @@ export class ServerCoordinator {
                 pendingBatchOperations: this.pendingBatchOperations,
             });
 
-            // Phase 4: Initialize MessageRegistry for CLIENT_OP and OP_BATCH routing
-            // These message types are now delegated to OperationHandler
-            this.messageRegistry = {
-                'CLIENT_OP': (client, msg) => this.operationHandler.processClientOp(client, msg.payload),
-                'OP_BATCH': (client, msg) => this.operationHandler.processOpBatch(
+            // Phase 4: Initialize all message handlers
+            const partitionHandler = new PartitionHandler({
+                partitionService: {
+                    getPartitionMap: () => this.partitionService.getPartitionMap(),
+                },
+            });
+
+            const topicHandler = new TopicHandler({
+                topicManager: {
+                    subscribe: (clientId, topic) => this.topicManager.subscribe(clientId, topic),
+                    unsubscribe: (clientId, topic) => this.topicManager.unsubscribe(clientId, topic),
+                    publish: (topic, data, senderId) => this.topicManager.publish(topic, data, senderId),
+                },
+                securityManager: {
+                    checkPermission: this.securityManager.checkPermission.bind(this.securityManager),
+                },
+            });
+
+            const lockHandler = new LockHandler({
+                lockManager: {
+                    acquire: (name, clientId, requestId, ttl) => this.lockManager.acquire(name, clientId, requestId, ttl),
+                    release: (name, clientId, fencingToken) => this.lockManager.release(name, clientId, fencingToken),
+                },
+                partitionService: {
+                    isLocalOwner: (key) => this.partitionService.isLocalOwner(key),
+                    getOwner: (key) => this.partitionService.getOwner(key),
+                },
+                cluster: {
+                    getMembers: () => this.cluster.getMembers(),
+                    send: (nodeId, type, payload) => this.cluster.send(nodeId, type, payload),
+                    config: { nodeId: config.nodeId },
+                },
+                securityManager: {
+                    checkPermission: this.securityManager.checkPermission.bind(this.securityManager),
+                },
+            });
+
+            const counterHandlerAdapter = new CounterHandlerAdapter({
+                counterHandler: {
+                    handleCounterRequest: (clientId, name) => this.counterHandler.handleCounterRequest(clientId, name),
+                    handleCounterSync: (clientId, name, state) => this.counterHandler.handleCounterSync(clientId, name, state),
+                },
+                getClient: (clientId) => this.connectionManager.getClient(clientId),
+            });
+
+            const resolverHandler = new ResolverHandler({
+                conflictResolverHandler: {
+                    registerResolver: (mapName, resolver, clientId) => this.conflictResolverHandler.registerResolver(mapName, resolver, clientId),
+                    unregisterResolver: (mapName, resolverName, clientId) => this.conflictResolverHandler.unregisterResolver(mapName, resolverName, clientId),
+                    listResolvers: (mapName) => this.conflictResolverHandler.listResolvers(mapName),
+                },
+                securityManager: {
+                    checkPermission: this.securityManager.checkPermission.bind(this.securityManager),
+                },
+            });
+
+            const journalHandler = new JournalHandler({
+                eventJournalService: this.eventJournalService,
+                journalSubscriptions: this.journalSubscriptions,
+                getClient: (clientId) => this.connectionManager.getClient(clientId),
+            });
+
+            const lwwSyncHandler = new LwwSyncHandler({
+                getMapAsync: this.getMapAsync.bind(this),
+                hlc: this.hlc,
+                securityManager: {
+                    checkPermission: this.securityManager.checkPermission.bind(this.securityManager),
+                },
+                metricsService: {
+                    incOp: this.metricsService.incOp.bind(this.metricsService),
+                },
+                gcAgeMs: GC_AGE_MS,
+            });
+
+            const ormapSyncHandler = new ORMapSyncHandler({
+                getMapAsync: this.getMapAsync.bind(this),
+                hlc: this.hlc,
+                securityManager: {
+                    checkPermission: this.securityManager.checkPermission.bind(this.securityManager),
+                },
+                metricsService: {
+                    incOp: this.metricsService.incOp.bind(this.metricsService),
+                },
+                storage: this.storage,
+                broadcast: (message, excludeClientId) => this.connectionManager.broadcast(message, excludeClientId),
+                gcAgeMs: GC_AGE_MS,
+            });
+
+            const entryProcessorAdapter = new EntryProcessorAdapter({
+                entryProcessorHandler: {
+                    executeOnKey: (map, key, processor) => this.entryProcessorHandler.executeOnKey(map, key, processor),
+                    executeOnKeys: (map, keys, processor) => this.entryProcessorHandler.executeOnKeys(map, keys, processor),
+                },
+                getMap: (name) => this.getMap(name),
+                securityManager: {
+                    checkPermission: this.securityManager.checkPermission.bind(this.securityManager),
+                },
+                queryRegistry: {
+                    processChange: (mapName, map, key, record, oldValue) => this.queryRegistry.processChange(mapName, map, key, record, oldValue),
+                },
+            });
+
+            const searchHandler = new SearchHandler({
+                searchCoordinator: {
+                    isSearchEnabled: (mapName) => this.searchCoordinator.isSearchEnabled(mapName),
+                    search: (mapName, query, options) => this.searchCoordinator.search(mapName, query, options),
+                    subscribe: (clientId, subscriptionId, mapName, query, options) => this.searchCoordinator.subscribe(clientId, subscriptionId, mapName, query, options),
+                    unsubscribe: (subscriptionId) => this.searchCoordinator.unsubscribe(subscriptionId),
+                },
+                clusterSearchCoordinator: this.clusterSearchCoordinator,
+                distributedSubCoordinator: this.distributedSubCoordinator,
+                cluster: {
+                    getMembers: () => this.cluster.getMembers(),
+                },
+                securityManager: {
+                    checkPermission: this.securityManager.checkPermission.bind(this.securityManager),
+                },
+            });
+
+            const queryHandler = new QueryHandler({
+                securityManager: {
+                    checkPermission: this.securityManager.checkPermission.bind(this.securityManager),
+                    filterObject: (value, principal, mapName) => this.securityManager.filterObject(value, principal, mapName),
+                },
+                metricsService: {
+                    incOp: this.metricsService.incOp.bind(this.metricsService),
+                },
+                queryRegistry: {
+                    unregister: (queryId) => this.queryRegistry.unregister(queryId),
+                },
+                distributedSubCoordinator: this.distributedSubCoordinator,
+                cluster: {
+                    getMembers: () => this.cluster.getMembers(),
+                    isLocal: (id) => id === config.nodeId,
+                    send: (nodeId, type, payload) => this.cluster.send(nodeId, type, payload),
+                    config: { nodeId: config.nodeId },
+                },
+                executeLocalQuery: this.executeLocalQuery.bind(this),
+                finalizeClusterQuery: this.finalizeClusterQuery.bind(this),
+                pendingClusterQueries: this.pendingClusterQueries,
+                readReplicaHandler: this.readReplicaHandler,
+                ConsistencyLevel: { EVENTUAL: ConsistencyLevel.EVENTUAL },
+            });
+
+            // Phase 4: Initialize MessageRegistry with all handlers
+            this.messageRegistry = createMessageRegistry({
+                // CRDT operations
+                onClientOp: (client, msg) => this.operationHandler.processClientOp(client, msg.payload),
+                onOpBatch: (client, msg) => this.operationHandler.processOpBatch(
                     client, msg.payload.ops, msg.payload.writeConcern, msg.payload.timeout
                 ),
-            };
+                // Query operations
+                onQuerySub: (client, msg) => queryHandler.handleQuerySub(client, msg),
+                onQueryUnsub: (client, msg) => queryHandler.handleQueryUnsub(client, msg),
+                // LWW Sync protocol
+                onSyncInit: (client, msg) => lwwSyncHandler.handleSyncInit(client, msg),
+                onMerkleReqBucket: (client, msg) => lwwSyncHandler.handleMerkleReqBucket(client, msg),
+                // ORMap Sync protocol
+                onORMapSyncInit: (client, msg) => ormapSyncHandler.handleORMapSyncInit(client, msg),
+                onORMapMerkleReqBucket: (client, msg) => ormapSyncHandler.handleORMapMerkleReqBucket(client, msg),
+                onORMapDiffRequest: (client, msg) => ormapSyncHandler.handleORMapDiffRequest(client, msg),
+                onORMapPushDiff: (client, msg) => ormapSyncHandler.handleORMapPushDiff(client, msg),
+                // Lock operations
+                onLockRequest: (client, msg) => lockHandler.handleLockRequest(client, msg),
+                onLockRelease: (client, msg) => lockHandler.handleLockRelease(client, msg),
+                // Topic operations
+                onTopicSub: (client, msg) => topicHandler.handleTopicSub(client, msg),
+                onTopicUnsub: (client, msg) => topicHandler.handleTopicUnsub(client, msg),
+                onTopicPub: (client, msg) => topicHandler.handleTopicPub(client, msg),
+                // PN Counter operations
+                onCounterRequest: (client, msg) => counterHandlerAdapter.handleCounterRequest(client, msg),
+                onCounterSync: (client, msg) => counterHandlerAdapter.handleCounterSync(client, msg),
+                // Entry processor operations
+                onEntryProcess: (client, msg) => entryProcessorAdapter.handleEntryProcess(client, msg),
+                onEntryProcessBatch: (client, msg) => entryProcessorAdapter.handleEntryProcessBatch(client, msg),
+                // Conflict resolver operations
+                onRegisterResolver: (client, msg) => resolverHandler.handleRegisterResolver(client, msg),
+                onUnregisterResolver: (client, msg) => resolverHandler.handleUnregisterResolver(client, msg),
+                onListResolvers: (client, msg) => resolverHandler.handleListResolvers(client, msg),
+                // Partition operations
+                onPartitionMapRequest: (client, msg) => partitionHandler.handlePartitionMapRequest(client, msg),
+                // Full-text search operations
+                onSearch: (client, msg) => searchHandler.handleSearch(client, msg),
+                onSearchSub: (client, msg) => searchHandler.handleSearchSub(client, msg),
+                onSearchUnsub: (client, msg) => searchHandler.handleSearchUnsub(client, msg),
+                // Event journal operations
+                onJournalSubscribe: (client, msg) => journalHandler.handleJournalSubscribe(client, msg),
+                onJournalUnsubscribe: (client, msg) => journalHandler.handleJournalUnsubscribe(client, msg),
+                onJournalRead: (client, msg) => journalHandler.handleJournalRead(client, msg),
+            });
 
             this.systemManager = new SystemManager(
                 this.cluster,
@@ -1470,1249 +1664,39 @@ export class ServerCoordinator {
         }
 
         // Standard Protocol Handling (Authenticated)
-        // Phase 4: Check message registry first (CLIENT_OP and OP_BATCH are delegated to OperationHandler)
+        // Phase 4: All message types are now routed through MessageRegistry
         const registryHandler = this.messageRegistry?.[message.type];
         if (registryHandler) {
             await registryHandler(client, message);
             return;
         }
 
-        // Handle remaining message types via switch statement
-        switch (message.type) {
-            case 'QUERY_SUB': {
-                const { queryId, mapName, query } = message.payload;
-
-                // Check READ permission
-                if (!this.securityManager.checkPermission(client.principal!, mapName, 'READ')) {
-                    logger.warn({ clientId: client.id, mapName }, 'Access Denied: QUERY_SUB');
-                    client.writer.write({
-                        type: 'ERROR',
-                        payload: { code: 403, message: `Access Denied for map ${mapName}` }
-                    }, true);
-                    return;
-                }
-
-                logger.info({ clientId: client.id, mapName, query }, 'Client subscribed');
-                this.metricsService.incOp('SUBSCRIBE', mapName);
-
-                // Phase 14.2: Use distributed subscription if cluster mode with multiple nodes
-                if (this.distributedSubCoordinator && this.cluster && this.cluster.getMembers().length > 1) {
-                    // Distributed query subscription
-                    this.distributedSubCoordinator.subscribeQuery(
-                        queryId,
-                        client.socket,
-                        mapName,
-                        query
-                    ).then((result) => {
-                        // Apply Field Level Security to results
-                        const filteredResults = result.results.map((res: any) => {
-                            const filteredValue = this.securityManager.filterObject(res.value, client.principal!, mapName);
-                            return { ...res, value: filteredValue };
-                        });
-
-                        client.writer.write({
-                            type: 'QUERY_RESP',
-                            payload: {
-                                queryId,
-                                results: filteredResults,
-                            },
-                        });
-
-                        // Track subscription on client
-                        client.subscriptions.add(queryId);
-
-                        logger.debug({
-                            clientId: client.id,
-                            queryId,
-                            mapName,
-                            resultCount: result.results.length,
-                            totalHits: result.totalHits,
-                            nodes: result.registeredNodes,
-                        }, 'Distributed query subscription created');
-                    }).catch((err) => {
-                        logger.error({ err, queryId }, 'Distributed query subscription failed');
-                        client.writer.write({
-                            type: 'QUERY_RESP',
-                            payload: {
-                                queryId,
-                                results: [],
-                                error: 'Failed to create distributed subscription',
-                            },
-                        });
-                    });
-                } else {
-                    // Single-node fallback: use existing logic
-                    // Identify all relevant nodes
-                    const allMembers = this.cluster.getMembers();
-                    let remoteMembers = allMembers.filter(id => !this.cluster.isLocal(id));
-
-                    // Phase 10.03: Read-from-Replica Optimization
-                    // If query targets a specific key, we can optimize by routing to a specific replica
-                    // instead of broadcasting to the entire cluster.
-                    const queryKey = (query as any)._id || (query as any).where?._id;
-
-                    if (queryKey && typeof queryKey === 'string' && this.readReplicaHandler) {
-                        try {
-                            const targetNode = this.readReplicaHandler.selectReadNode({
-                                mapName,
-                                key: queryKey,
-                                options: {
-                                    // Default to EVENTUAL for read scaling unless specified otherwise
-                                    // In future, we could extract consistency from query options if available
-                                    consistency: ConsistencyLevel.EVENTUAL
-                                }
-                            });
-
-                            if (targetNode) {
-                                if (this.cluster.isLocal(targetNode)) {
-                                    // Serve locally only
-                                    remoteMembers = [];
-                                    logger.debug({ clientId: client.id, mapName, key: queryKey }, 'Read optimization: Serving locally');
-                                } else if (remoteMembers.includes(targetNode)) {
-                                    // Serve from specific remote replica
-                                    remoteMembers = [targetNode];
-                                    logger.debug({ clientId: client.id, mapName, key: queryKey, targetNode }, 'Read optimization: Routing to replica');
-                                }
-                            }
-                        } catch (e) {
-                            logger.warn({ err: e }, 'Error in ReadReplicaHandler selection');
-                        }
-                    }
-
-                    const requestId = crypto.randomUUID();
-
-                    const pending: PendingClusterQuery = {
-                        requestId,
-                        client,
-                        queryId,
-                        mapName,
-                        query,
-                        results: [], // Will populate with local results first
-                        expectedNodes: new Set(remoteMembers),
-                        respondedNodes: new Set(),
-                        timer: setTimeout(() => this.finalizeClusterQuery(requestId, true), 5000) // 5s timeout
-                    };
-
-                    this.pendingClusterQueries.set(requestId, pending);
-
-                    // Execute Locally (async - wait for map to load from storage)
-                    // [FIX] Using await ensures handleMessage completes only after query execution
-                    // This is important for:
-                    // 1. Tests that need to verify results immediately after handleMessage
-                    // 2. Ensuring storage is loaded before returning results
-                    try {
-                        const localResults = await this.executeLocalQuery(mapName, query);
-                        pending.results.push(...localResults);
-
-                        // Scatter: Send to other nodes
-                        if (remoteMembers.length > 0) {
-                            for (const nodeId of remoteMembers) {
-                                this.cluster.send(nodeId, 'CLUSTER_QUERY_EXEC', {
-                                    requestId,
-                                    mapName,
-                                    query
-                                });
-                            }
-                        } else {
-                            // Single node cluster: finalize immediately
-                            this.finalizeClusterQuery(requestId);
-                        }
-                    } catch (err) {
-                        logger.error({ err, mapName }, 'Failed to execute local query');
-                        // Finalize with empty results on error
-                        this.finalizeClusterQuery(requestId);
-                    }
-                }
-                break;
-            }
-
-            case 'QUERY_UNSUB': {
-                const { queryId: unsubId } = message.payload;
-
-                // Phase 14.2: Unsubscribe from distributed coordinator if in cluster mode
-                if (this.distributedSubCoordinator && this.cluster && this.cluster.getMembers().length > 1) {
-                    this.distributedSubCoordinator.unsubscribe(unsubId).catch((err) => {
-                        logger.warn({ err, queryId: unsubId }, 'Failed to unsubscribe from distributed coordinator');
-                    });
-                }
-
-                this.queryRegistry.unregister(unsubId);
-                client.subscriptions.delete(unsubId);
-                break;
-            }
-
-            case 'SYNC_INIT': {
-                // Check READ permission
-                if (!this.securityManager.checkPermission(client.principal!, message.mapName, 'READ')) {
-                    logger.warn({ clientId: client.id, mapName: message.mapName }, 'Access Denied: SYNC_INIT');
-                    client.writer.write({
-                        type: 'ERROR',
-                        payload: { code: 403, message: `Access Denied for map ${message.mapName}` }
-                    }, true);
-                    return;
-                }
-
-                const lastSync = message.lastSyncTimestamp || 0;
-                const now = Date.now();
-                if (lastSync > 0 && (now - lastSync) > GC_AGE_MS) {
-                    logger.warn({ clientId: client.id, lastSync, age: now - lastSync }, 'Client too old, sending SYNC_RESET_REQUIRED');
-                    client.writer.write({
-                        type: 'SYNC_RESET_REQUIRED',
-                        payload: { mapName: message.mapName }
-                    });
-                    return;
-                }
-
-                logger.info({ clientId: client.id, mapName: message.mapName }, 'Client requested sync');
-                this.metricsService.incOp('GET', message.mapName);
-
-                // [FIX] Wait for map to be fully loaded from storage before sending rootHash
-                // This prevents sending rootHash=0 for maps that are still loading from PostgreSQL
-                try {
-                    const mapForSync = await this.getMapAsync(message.mapName);
-                    if (mapForSync instanceof LWWMap) {
-                        // Use the incremental Merkle Tree from LWWMap
-                        const tree = mapForSync.getMerkleTree();
-                        const rootHash = tree.getRootHash();
-
-                        client.writer.write({
-                            type: 'SYNC_RESP_ROOT',
-                            payload: {
-                                mapName: message.mapName,
-                                rootHash,
-                                timestamp: this.hlc.now()
-                            }
-                        });
-                    } else {
-                        // ORMap sync not implemented via Merkle Tree yet
-                        logger.warn({ mapName: message.mapName }, 'SYNC_INIT requested for ORMap - Not Implemented');
-                        client.writer.write({
-                            type: 'ERROR',
-                            payload: { code: 501, message: `Merkle Sync not supported for ORMap ${message.mapName}` }
-                        }, true);
-                    }
-                } catch (err) {
-                    logger.error({ err, mapName: message.mapName }, 'Failed to load map for SYNC_INIT');
-                    client.writer.write({
-                        type: 'ERROR',
-                        payload: { code: 500, message: `Failed to load map ${message.mapName}` }
-                    }, true);
-                }
-                break;
-            }
-
-            case 'MERKLE_REQ_BUCKET': {
-                // Check READ permission
-                if (!this.securityManager.checkPermission(client.principal!, message.payload.mapName, 'READ')) {
-                    client.writer.write({
-                        type: 'ERROR',
-                        payload: { code: 403, message: `Access Denied for map ${message.payload.mapName}` }
-                    }, true);
-                    return;
-                }
-
-                const { mapName, path } = message.payload;
-
-                // [FIX] Wait for map to be fully loaded before accessing Merkle tree
-                try {
-                    const mapForBucket = await this.getMapAsync(mapName);
-                    if (mapForBucket instanceof LWWMap) {
-                        const treeForBucket = mapForBucket.getMerkleTree();
-                        const buckets = treeForBucket.getBuckets(path);
-                        const node = treeForBucket.getNode(path);
-                        if (node && node.entries && node.entries.size > 0) {
-                            const diffRecords = [];
-                            for (const key of node.entries.keys()) {
-                                diffRecords.push({ key, record: mapForBucket.getRecord(key) });
-                            }
-                            client.writer.write({
-                                type: 'SYNC_RESP_LEAF',
-                                payload: { mapName, path, records: diffRecords }
-                            });
-                        } else {
-                            client.writer.write({
-                                type: 'SYNC_RESP_BUCKETS',
-                                payload: { mapName, path, buckets }
-                            });
-                        }
-                    }
-                } catch (err) {
-                    logger.error({ err, mapName }, 'Failed to load map for MERKLE_REQ_BUCKET');
-                }
-                break;
-            }
-
-            case 'LOCK_REQUEST': {
-                const { requestId, name, ttl } = message.payload;
-
-                // 1. Access Control
-                // Define a convention: lock names are resources.
-                // Check if user has 'WRITE' permission on "locks" map or specific lock name.
-                // Since locks are ephemeral, we might treat them as a special resource "sys:locks".
-                // Or just check against the lock name itself.
-                // Let's use `sys:lock:${name}` pattern or just `${name}`.
-                // If we use just name, it might conflict with map names if policies are strict.
-                // Assuming for now that lock name represents the resource being protected.
-                if (!this.securityManager.checkPermission(client.principal!, name, 'PUT')) {
-                    client.writer.write({
-                        // We don't have LOCK_DENIED type in schema yet?
-                        // Using LOCK_RELEASED with success=false as a hack or ERROR.
-                        // Ideally ERROR.
-                        type: 'ERROR',
-                        payload: { code: 403, message: `Access Denied for lock ${name}` }
-                    }, true);
-                    return;
-                }
-
-                if (this.partitionService.isLocalOwner(name)) {
-                    const result = this.lockManager.acquire(name, client.id, requestId, ttl || 10000);
-                    if (result.granted) {
-                        client.writer.write({
-                            type: 'LOCK_GRANTED',
-                            payload: { requestId, name, fencingToken: result.fencingToken }
-                        });
-                    }
-                    // If not granted, it is queued. Response sent later via event.
-                } else {
-                    const owner = this.partitionService.getOwner(name);
-                    // 2. Cluster Reliability Check
-                    if (!this.cluster.getMembers().includes(owner)) {
-                        client.writer.write({
-                            type: 'ERROR',
-                            payload: { code: 503, message: `Lock owner ${owner} is unavailable` }
-                        }, true);
-                        return;
-                    }
-
-                    this.cluster.send(owner, 'CLUSTER_LOCK_REQ', {
-                        originNodeId: this.cluster.config.nodeId,
-                        clientId: client.id,
-                        requestId,
-                        name,
-                        ttl
-                    });
-                }
-                break;
-            }
-
-            case 'LOCK_RELEASE': {
-                const { requestId, name, fencingToken } = message.payload;
-
-                if (this.partitionService.isLocalOwner(name)) {
-                    const success = this.lockManager.release(name, client.id, fencingToken);
-                    client.writer.write({
-                        type: 'LOCK_RELEASED',
-                        payload: { requestId, name, success }
-                    });
-                } else {
-                    const owner = this.partitionService.getOwner(name);
-                    this.cluster.send(owner, 'CLUSTER_LOCK_RELEASE', {
-                        originNodeId: this.cluster.config.nodeId,
-                        clientId: client.id,
-                        requestId,
-                        name,
-                        fencingToken
-                    });
-                }
-                break;
-            }
-
-            case 'TOPIC_SUB': {
-                const { topic } = message.payload;
-
-                // C1: Access Control
-                // We treat topics as resources.
-                // Policy check: action 'READ' on resource `topic:${topic}`
-                if (!this.securityManager.checkPermission(client.principal!, `topic:${topic}`, 'READ')) {
-                    logger.warn({ clientId: client.id, topic }, 'Access Denied: TOPIC_SUB');
-                    client.writer.write({
-                        type: 'ERROR',
-                        payload: { code: 403, message: `Access Denied for topic ${topic}` }
-                    }, true);
-                    return;
-                }
-
-                try {
-                    this.topicManager.subscribe(client.id, topic);
-                } catch (e: any) {
-                    client.writer.write({
-                        type: 'ERROR',
-                        payload: { code: 400, message: e.message }
-                    }, true);
-                }
-                break;
-            }
-
-            case 'TOPIC_UNSUB': {
-                const { topic } = message.payload;
-                this.topicManager.unsubscribe(client.id, topic);
-                break;
-            }
-
-            case 'TOPIC_PUB': {
-                const { topic, data } = message.payload;
-
-                // C1: Access Control
-                // Policy check: action 'PUT' (publish) on resource `topic:${topic}`
-                if (!this.securityManager.checkPermission(client.principal!, `topic:${topic}`, 'PUT')) {
-                    logger.warn({ clientId: client.id, topic }, 'Access Denied: TOPIC_PUB');
-                    // No error sent back? Fire and forget usually implies silent drop or async error.
-                    // But for security violations, an error is useful during dev.
-                    // Spec says fire-and-forget delivery, but security rejection should ideally notify.
-                    // Let's send error.
-                    client.writer.write({
-                        type: 'ERROR',
-                        payload: { code: 403, message: `Access Denied for topic ${topic}` }
-                    }, true);
-                    return;
-                }
-
-                try {
-                    this.topicManager.publish(topic, data, client.id);
-                } catch (e: any) {
-                    // Invalid topic name etc
-                    client.writer.write({
-                        type: 'ERROR',
-                        payload: { code: 400, message: e.message }
-                    }, true);
-                }
-                break;
-            }
-
-            // ============ Phase 5.2: PN Counter Handlers ============
-
-            case 'COUNTER_REQUEST': {
-                const { name } = message.payload;
-                const response = this.counterHandler.handleCounterRequest(client.id, name);
-                client.writer.write(response);
-                logger.debug({ clientId: client.id, name }, 'Counter request handled');
-                break;
-            }
-
-            case 'COUNTER_SYNC': {
-                const { name, state } = message.payload;
-                const result = this.counterHandler.handleCounterSync(client.id, name, state);
-
-                // Send response to the syncing client
-                client.writer.write(result.response);
-
-                // Broadcast to other subscribed clients
-                for (const targetClientId of result.broadcastTo) {
-                    const targetClient = this.connectionManager.getClient(targetClientId);
-                    if (targetClient && targetClient.socket.readyState === WebSocket.OPEN) {
-                        targetClient.writer.write(result.broadcastMessage);
-                    }
-                }
-                logger.debug({ clientId: client.id, name, broadcastCount: result.broadcastTo.length }, 'Counter sync handled');
-                break;
-            }
-
-            // ============ Phase 5.03: Entry Processor Handlers ============
-
-            case 'ENTRY_PROCESS': {
-                const { requestId, mapName, key, processor } = message;
-
-                // Check PUT permission (entry processor modifies data)
-                if (!this.securityManager.checkPermission(client.principal!, mapName, 'PUT')) {
-                    client.writer.write({
-                        type: 'ENTRY_PROCESS_RESPONSE',
-                        requestId,
-                        success: false,
-                        error: `Access Denied for map ${mapName}`,
-                    }, true);
-                    break;
-                }
-
-                // Get or create the map
-                const entryMap = this.getMap(mapName) as LWWMap<string, any>;
-
-                // Execute the processor
-                const { result, timestamp } = await this.entryProcessorHandler.executeOnKey(
-                    entryMap,
-                    key,
-                    processor,
-                );
-
-                // Send response to client
-                client.writer.write({
-                    type: 'ENTRY_PROCESS_RESPONSE',
-                    requestId,
-                    success: result.success,
-                    result: result.result,
-                    newValue: result.newValue,
-                    error: result.error,
-                });
-
-                // If successful and value changed, notify query subscribers
-                if (result.success && timestamp) {
-                    const record = entryMap.getRecord(key);
-                    if (record) {
-                        this.queryRegistry.processChange(mapName, entryMap, key, record, undefined);
-                    }
-                }
-
-                logger.debug({
-                    clientId: client.id,
-                    mapName,
-                    key,
-                    processor: processor.name,
-                    success: result.success,
-                }, 'Entry processor executed');
-                break;
-            }
-
-            case 'ENTRY_PROCESS_BATCH': {
-                const { requestId, mapName, keys, processor } = message;
-
-                // Check PUT permission
-                if (!this.securityManager.checkPermission(client.principal!, mapName, 'PUT')) {
-                    const errorResults: Record<string, { success: boolean; error: string }> = {};
-                    for (const key of keys) {
-                        errorResults[key] = {
-                            success: false,
-                            error: `Access Denied for map ${mapName}`,
-                        };
-                    }
-                    client.writer.write({
-                        type: 'ENTRY_PROCESS_BATCH_RESPONSE',
-                        requestId,
-                        results: errorResults,
-                    }, true);
-                    break;
-                }
-
-                // Get or create the map
-                const batchMap = this.getMap(mapName) as LWWMap<string, any>;
-
-                // Execute the processor on all keys
-                const { results, timestamps } = await this.entryProcessorHandler.executeOnKeys(
-                    batchMap,
-                    keys,
-                    processor,
-                );
-
-                // Convert Map to Record for serialization
-                const resultsRecord: Record<string, {
-                    success: boolean;
-                    result?: unknown;
-                    newValue?: unknown;
-                    error?: string;
-                }> = {};
-
-                for (const [key, keyResult] of results) {
-                    resultsRecord[key] = {
-                        success: keyResult.success,
-                        result: keyResult.result,
-                        newValue: keyResult.newValue,
-                        error: keyResult.error,
-                    };
-                }
-
-                // Send batch response to client
-                client.writer.write({
-                    type: 'ENTRY_PROCESS_BATCH_RESPONSE',
-                    requestId,
-                    results: resultsRecord,
-                });
-
-                // Notify query subscribers about changes
-                for (const [key] of timestamps) {
-                    const record = batchMap.getRecord(key);
-                    if (record) {
-                        this.queryRegistry.processChange(mapName, batchMap, key, record, undefined);
-                    }
-                }
-
-                logger.debug({
-                    clientId: client.id,
-                    mapName,
-                    keyCount: keys.length,
-                    processor: processor.name,
-                    successCount: Array.from(results.values()).filter(r => r.success).length,
-                }, 'Entry processor batch executed');
-                break;
-            }
-
-            // ============ Phase 5.05: Conflict Resolver Handlers ============
-
-            case 'REGISTER_RESOLVER': {
-                const { requestId, mapName, resolver } = message;
-
-                // Check PUT permission (resolver registration is a privileged operation)
-                if (!this.securityManager.checkPermission(client.principal!, mapName, 'PUT')) {
-                    client.writer.write({
-                        type: 'REGISTER_RESOLVER_RESPONSE',
-                        requestId,
-                        success: false,
-                        error: `Access Denied for map ${mapName}`,
-                    }, true);
-                    break;
-                }
-
-                try {
-                    this.conflictResolverHandler.registerResolver(
-                        mapName,
-                        {
-                            name: resolver.name,
-                            code: resolver.code,
-                            priority: resolver.priority,
-                            keyPattern: resolver.keyPattern,
-                        },
-                        client.id,
-                    );
-
-                    client.writer.write({
-                        type: 'REGISTER_RESOLVER_RESPONSE',
-                        requestId,
-                        success: true,
-                    });
-
-                    logger.info({
-                        clientId: client.id,
-                        mapName,
-                        resolverName: resolver.name,
-                        priority: resolver.priority,
-                    }, 'Conflict resolver registered');
-                } catch (err) {
-                    const errorMessage = err instanceof Error ? err.message : String(err);
-                    client.writer.write({
-                        type: 'REGISTER_RESOLVER_RESPONSE',
-                        requestId,
-                        success: false,
-                        error: errorMessage,
-                    }, true);
-                    logger.warn({
-                        clientId: client.id,
-                        mapName,
-                        error: errorMessage,
-                    }, 'Failed to register conflict resolver');
-                }
-                break;
-            }
-
-            case 'UNREGISTER_RESOLVER': {
-                const { requestId, mapName, resolverName } = message;
-
-                // Check PUT permission
-                if (!this.securityManager.checkPermission(client.principal!, mapName, 'PUT')) {
-                    client.writer.write({
-                        type: 'UNREGISTER_RESOLVER_RESPONSE',
-                        requestId,
-                        success: false,
-                        error: `Access Denied for map ${mapName}`,
-                    }, true);
-                    break;
-                }
-
-                const removed = this.conflictResolverHandler.unregisterResolver(
-                    mapName,
-                    resolverName,
-                    client.id,
-                );
-
-                client.writer.write({
-                    type: 'UNREGISTER_RESOLVER_RESPONSE',
-                    requestId,
-                    success: removed,
-                    error: removed ? undefined : 'Resolver not found or not owned by this client',
-                });
-
-                if (removed) {
-                    logger.info({
-                        clientId: client.id,
-                        mapName,
-                        resolverName,
-                    }, 'Conflict resolver unregistered');
-                }
-                break;
-            }
-
-            case 'LIST_RESOLVERS': {
-                const { requestId, mapName } = message;
-
-                // Check READ permission if mapName specified
-                if (mapName && !this.securityManager.checkPermission(client.principal!, mapName, 'READ')) {
-                    client.writer.write({
-                        type: 'LIST_RESOLVERS_RESPONSE',
-                        requestId,
-                        resolvers: [],
-                    });
-                    break;
-                }
-
-                const resolvers = this.conflictResolverHandler.listResolvers(mapName);
-
-                client.writer.write({
-                    type: 'LIST_RESOLVERS_RESPONSE',
-                    requestId,
-                    resolvers,
-                });
-                break;
-            }
-
-            // ============ Phase 4: Partition Map Request Handler ============
-
-            case 'PARTITION_MAP_REQUEST': {
-                // Client is requesting the current partition map
-                // This is used for cluster-aware routing
-                const clientVersion = message.payload?.currentVersion ?? 0;
-                const currentMap = this.partitionService.getPartitionMap();
-
-                // Only send if client has stale version or no version
-                if (clientVersion < currentMap.version) {
-                    client.writer.write({
-                        type: 'PARTITION_MAP',
-                        payload: currentMap
-                    });
-                    logger.debug({
-                        clientId: client.id,
-                        clientVersion,
-                        serverVersion: currentMap.version
-                    }, 'Sent partition map to client');
-                }
-                break;
-            }
-
-            // ============ ORMap Sync Message Handlers ============
-
-            case 'ORMAP_SYNC_INIT': {
-                // Check READ permission
-                if (!this.securityManager.checkPermission(client.principal!, message.mapName, 'READ')) {
-                    client.writer.write({
-                        type: 'ERROR',
-                        payload: { code: 403, message: `Access Denied for map ${message.mapName}` }
-                    }, true);
-                    return;
-                }
-
-                const lastSync = message.lastSyncTimestamp || 0;
-                const now = Date.now();
-                if (lastSync > 0 && (now - lastSync) > GC_AGE_MS) {
-                    logger.warn({ clientId: client.id, lastSync, age: now - lastSync }, 'ORMap client too old, sending SYNC_RESET_REQUIRED');
-                    client.writer.write({
-                        type: 'SYNC_RESET_REQUIRED',
-                        payload: { mapName: message.mapName }
-                    });
-                    return;
-                }
-
-                logger.info({ clientId: client.id, mapName: message.mapName }, 'Client requested ORMap sync');
-                this.metricsService.incOp('GET', message.mapName);
-
-                try {
-                    const mapForSync = await this.getMapAsync(message.mapName, 'OR');
-                    if (mapForSync instanceof ORMap) {
-                        const tree = mapForSync.getMerkleTree();
-                        const rootHash = tree.getRootHash();
-
-                        client.writer.write({
-                            type: 'ORMAP_SYNC_RESP_ROOT',
-                            payload: {
-                                mapName: message.mapName,
-                                rootHash,
-                                timestamp: this.hlc.now()
-                            }
-                        });
-                    } else {
-                        // It's actually an LWWMap, client should use SYNC_INIT
-                        client.writer.write({
-                            type: 'ERROR',
-                            payload: { code: 400, message: `Map ${message.mapName} is not an ORMap` }
-                        }, true);
-                    }
-                } catch (err) {
-                    logger.error({ err, mapName: message.mapName }, 'Failed to load map for ORMAP_SYNC_INIT');
-                    client.writer.write({
-                        type: 'ERROR',
-                        payload: { code: 500, message: `Failed to load map ${message.mapName}` }
-                    }, true);
-                }
-                break;
-            }
-
-            case 'ORMAP_MERKLE_REQ_BUCKET': {
-                // Check READ permission
-                if (!this.securityManager.checkPermission(client.principal!, message.payload.mapName, 'READ')) {
-                    client.writer.write({
-                        type: 'ERROR',
-                        payload: { code: 403, message: `Access Denied for map ${message.payload.mapName}` }
-                    }, true);
-                    return;
-                }
-
-                const { mapName, path } = message.payload;
-
-                try {
-                    const mapForBucket = await this.getMapAsync(mapName, 'OR');
-                    if (mapForBucket instanceof ORMap) {
-                        const tree = mapForBucket.getMerkleTree();
-                        const buckets = tree.getBuckets(path);
-                        const isLeaf = tree.isLeaf(path);
-
-                        if (isLeaf) {
-                            // This is a leaf node - send actual records
-                            const keys = tree.getKeysInBucket(path);
-                            const entries: Array<{ key: string; records: ORMapRecord<any>[]; tombstones: string[] }> = [];
-
-                            for (const key of keys) {
-                                const recordsMap = mapForBucket.getRecordsMap(key);
-                                if (recordsMap && recordsMap.size > 0) {
-                                    entries.push({
-                                        key,
-                                        records: Array.from(recordsMap.values()),
-                                        tombstones: mapForBucket.getTombstones()
-                                    });
-                                }
-                            }
-
-                            client.writer.write({
-                                type: 'ORMAP_SYNC_RESP_LEAF',
-                                payload: { mapName, path, entries }
-                            });
-                        } else {
-                            // Not a leaf - send bucket hashes
-                            client.writer.write({
-                                type: 'ORMAP_SYNC_RESP_BUCKETS',
-                                payload: { mapName, path, buckets }
-                            });
-                        }
-                    }
-                } catch (err) {
-                    logger.error({ err, mapName }, 'Failed to load map for ORMAP_MERKLE_REQ_BUCKET');
-                }
-                break;
-            }
-
-            case 'ORMAP_DIFF_REQUEST': {
-                // Check READ permission
-                if (!this.securityManager.checkPermission(client.principal!, message.payload.mapName, 'READ')) {
-                    client.writer.write({
-                        type: 'ERROR',
-                        payload: { code: 403, message: `Access Denied for map ${message.payload.mapName}` }
-                    }, true);
-                    return;
-                }
-
-                const { mapName: diffMapName, keys } = message.payload;
-
-                try {
-                    const mapForDiff = await this.getMapAsync(diffMapName, 'OR');
-                    if (mapForDiff instanceof ORMap) {
-                        const entries: Array<{ key: string; records: ORMapRecord<any>[]; tombstones: string[] }> = [];
-                        const allTombstones = mapForDiff.getTombstones();
-
-                        for (const key of keys) {
-                            const recordsMap = mapForDiff.getRecordsMap(key);
-                            entries.push({
-                                key,
-                                records: recordsMap ? Array.from(recordsMap.values()) : [],
-                                tombstones: allTombstones
-                            });
-                        }
-
-                        client.writer.write({
-                            type: 'ORMAP_DIFF_RESPONSE',
-                            payload: { mapName: diffMapName, entries }
-                        });
-                    }
-                } catch (err) {
-                    logger.error({ err, mapName: diffMapName }, 'Failed to load map for ORMAP_DIFF_REQUEST');
-                }
-                break;
-            }
-
-            case 'ORMAP_PUSH_DIFF': {
-                // Check WRITE permission
-                if (!this.securityManager.checkPermission(client.principal!, message.payload.mapName, 'PUT')) {
-                    client.writer.write({
-                        type: 'ERROR',
-                        payload: { code: 403, message: `Access Denied for map ${message.payload.mapName}` }
-                    }, true);
-                    return;
-                }
-
-                const { mapName: pushMapName, entries: pushEntries } = message.payload;
-
-                try {
-                    const mapForPush = await this.getMapAsync(pushMapName, 'OR');
-                    if (mapForPush instanceof ORMap) {
-                        let totalAdded = 0;
-                        let totalUpdated = 0;
-
-                        for (const entry of pushEntries) {
-                            const { key, records, tombstones } = entry;
-                            const result = mapForPush.mergeKey(key, records, tombstones);
-                            totalAdded += result.added;
-                            totalUpdated += result.updated;
-                        }
-
-                        if (totalAdded > 0 || totalUpdated > 0) {
-                            logger.info({ mapName: pushMapName, added: totalAdded, updated: totalUpdated, clientId: client.id }, 'Merged ORMap diff from client');
-
-                            // Broadcast changes to other clients
-                            for (const entry of pushEntries) {
-                                for (const record of entry.records) {
-                                    this.broadcast({
-                                        type: 'SERVER_EVENT',
-                                        payload: {
-                                            mapName: pushMapName,
-                                            eventType: 'OR_ADD',
-                                            key: entry.key,
-                                            orRecord: record
-                                        }
-                                    }, client.id);
-                                }
-                            }
-
-                            // Persist to storage
-                            if (this.storage) {
-                                for (const entry of pushEntries) {
-                                    const recordsMap = mapForPush.getRecordsMap(entry.key);
-                                    if (recordsMap && recordsMap.size > 0) {
-                                        await this.storage.store(pushMapName, entry.key, {
-                                            type: 'OR',
-                                            records: Array.from(recordsMap.values())
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } catch (err) {
-                    logger.error({ err, mapName: pushMapName }, 'Failed to process ORMAP_PUSH_DIFF');
-                }
-                break;
-            }
-
-            // === Event Journal Messages (Phase 5.04) ===
-
-            case 'JOURNAL_SUBSCRIBE': {
-                if (!this.eventJournalService) {
-                    client.writer.write({
-                        type: 'ERROR',
-                        payload: { code: 503, message: 'Event journal not enabled' }
-                    }, true);
-                    break;
-                }
-
-                const { requestId, fromSequence, mapName, types } = message;
-                const subscriptionId = requestId;
-
-                // Store subscription metadata
-                this.journalSubscriptions.set(subscriptionId, {
-                    clientId: client.id,
-                    mapName,
-                    types,
-                });
-
-                // Subscribe to journal events
-                const unsubscribe = this.eventJournalService.subscribe(
-                    (event) => {
-                        // Apply filters
-                        if (mapName && event.mapName !== mapName) return;
-                        if (types && types.length > 0 && !types.includes(event.type)) return;
-
-                        // Check if client still connected
-                        const clientConn = this.connectionManager.getClient(client.id);
-                        if (!clientConn) {
-                            unsubscribe();
-                            this.journalSubscriptions.delete(subscriptionId);
-                            return;
-                        }
-
-                        // Send event to client
-                        clientConn.writer.write({
-                            type: 'JOURNAL_EVENT',
-                            event: {
-                                sequence: event.sequence.toString(),
-                                type: event.type,
-                                mapName: event.mapName,
-                                key: event.key,
-                                value: event.value,
-                                previousValue: event.previousValue,
-                                timestamp: event.timestamp,
-                                nodeId: event.nodeId,
-                                metadata: event.metadata,
-                            },
-                        });
-                    },
-                    fromSequence ? BigInt(fromSequence) : undefined
-                );
-
-                logger.info({ clientId: client.id, subscriptionId, mapName }, 'Journal subscription created');
-                break;
-            }
-
-            case 'JOURNAL_UNSUBSCRIBE': {
-                const { subscriptionId } = message;
-                this.journalSubscriptions.delete(subscriptionId);
-                logger.info({ clientId: client.id, subscriptionId }, 'Journal subscription removed');
-                break;
-            }
-
-            case 'JOURNAL_READ': {
-                if (!this.eventJournalService) {
-                    client.writer.write({
-                        type: 'ERROR',
-                        payload: { code: 503, message: 'Event journal not enabled' }
-                    }, true);
-                    break;
-                }
-
-                const { requestId: readReqId, fromSequence: readFromSeq, limit, mapName: readMapName } = message;
-                const startSeq = BigInt(readFromSeq);
-                const eventLimit = limit ?? 100;
-
-                let events = this.eventJournalService.readFrom(startSeq, eventLimit);
-
-                // Filter by map name if provided
-                if (readMapName) {
-                    events = events.filter(e => e.mapName === readMapName);
-                }
-
-                // Serialize events
-                const serializedEvents = events.map(e => ({
-                    sequence: e.sequence.toString(),
-                    type: e.type,
-                    mapName: e.mapName,
-                    key: e.key,
-                    value: e.value,
-                    previousValue: e.previousValue,
-                    timestamp: e.timestamp,
-                    nodeId: e.nodeId,
-                    metadata: e.metadata,
-                }));
-
-                client.writer.write({
-                    type: 'JOURNAL_READ_RESPONSE',
-                    requestId: readReqId,
-                    events: serializedEvents,
-                    hasMore: events.length === eventLimit,
-                });
-                break;
-            }
-
-            // Phase 11.1: Full-Text Search (Phase 14: Distributed Search)
-            case 'SEARCH': {
-                const { requestId: searchReqId, mapName: searchMapName, query: searchQuery, options: searchOptions } = message.payload;
-
-                // Check READ permission
-                if (!this.securityManager.checkPermission(client.principal!, searchMapName, 'READ')) {
-                    logger.warn({ clientId: client.id, mapName: searchMapName }, 'Access Denied: SEARCH');
-                    client.writer.write({
-                        type: 'SEARCH_RESP',
-                        payload: {
-                            requestId: searchReqId,
-                            results: [],
-                            totalCount: 0,
-                            error: `Access denied for map: ${searchMapName}`,
-                        }
-                    });
-                    break;
-                }
-
-                // Check if FTS is enabled for this map
-                if (!this.searchCoordinator.isSearchEnabled(searchMapName)) {
-                    client.writer.write({
-                        type: 'SEARCH_RESP',
-                        payload: {
-                            requestId: searchReqId,
-                            results: [],
-                            totalCount: 0,
-                            error: `Full-text search not enabled for map: ${searchMapName}`,
-                        }
-                    });
-                    break;
-                }
-
-                // Phase 14: Use distributed search if ClusterSearchCoordinator is available
-                // and we have more than one node in the cluster
-                if (this.clusterSearchCoordinator && this.cluster.getMembers().length > 1) {
-                    // Execute distributed search across cluster
-                    this.clusterSearchCoordinator.search(searchMapName, searchQuery, {
-                        limit: searchOptions?.limit ?? 10,
-                        minScore: searchOptions?.minScore,
-                        boost: searchOptions?.boost,
-                    }).then(distributedResult => {
-                        logger.debug({
-                            clientId: client.id,
-                            mapName: searchMapName,
-                            query: searchQuery,
-                            resultCount: distributedResult.results.length,
-                            totalHits: distributedResult.totalHits,
-                            respondedNodes: distributedResult.respondedNodes.length,
-                            failedNodes: distributedResult.failedNodes.length,
-                            executionTimeMs: distributedResult.executionTimeMs,
-                        }, 'Distributed search executed');
-
-                        client.writer.write({
-                            type: 'SEARCH_RESP',
-                            payload: {
-                                requestId: searchReqId,
-                                results: distributedResult.results,
-                                totalCount: distributedResult.totalHits,
-                                // Include cursor for pagination if available
-                                nextCursor: distributedResult.nextCursor,
-                            },
-                        });
-                    }).catch(err => {
-                        logger.error({ err, mapName: searchMapName, query: searchQuery }, 'Distributed search failed');
-                        client.writer.write({
-                            type: 'SEARCH_RESP',
-                            payload: {
-                                requestId: searchReqId,
-                                results: [],
-                                totalCount: 0,
-                                error: `Distributed search failed: ${err.message}`,
-                            },
-                        });
-                    });
-                } else {
-                    // Execute local search (single node or no cluster)
-                    const searchResult = this.searchCoordinator.search(searchMapName, searchQuery, searchOptions);
-                    searchResult.requestId = searchReqId;
-
-                    logger.debug({
-                        clientId: client.id,
-                        mapName: searchMapName,
-                        query: searchQuery,
-                        resultCount: searchResult.results.length
-                    }, 'Local search executed');
-
-                    client.writer.write({
-                        type: 'SEARCH_RESP',
-                        payload: searchResult,
-                    });
-                }
-                break;
-            }
-
-            // Phase 11.1b: Live Search Subscriptions
-            case 'SEARCH_SUB': {
-                const { subscriptionId, mapName: subMapName, query: subQuery, options: subOptions } = message.payload;
-
-                // Check READ permission
-                if (!this.securityManager.checkPermission(client.principal!, subMapName, 'READ')) {
-                    logger.warn({ clientId: client.id, mapName: subMapName }, 'Access Denied: SEARCH_SUB');
-                    client.writer.write({
-                        type: 'SEARCH_RESP',
-                        payload: {
-                            requestId: subscriptionId,
-                            results: [],
-                            totalCount: 0,
-                            error: `Access denied for map: ${subMapName}`,
-                        }
-                    });
-                    break;
-                }
-
-                // Check if FTS is enabled for this map
-                if (!this.searchCoordinator.isSearchEnabled(subMapName)) {
-                    client.writer.write({
-                        type: 'SEARCH_RESP',
-                        payload: {
-                            requestId: subscriptionId,
-                            results: [],
-                            totalCount: 0,
-                            error: `Full-text search not enabled for map: ${subMapName}`,
-                        }
-                    });
-                    break;
-                }
-
-                // Phase 14.2: Use distributed subscription if cluster mode with multiple nodes
-                if (this.distributedSubCoordinator && this.cluster && this.cluster.getMembers().length > 1) {
-                    // Distributed search subscription
-                    this.distributedSubCoordinator.subscribeSearch(
-                        subscriptionId,
-                        client.socket,
-                        subMapName,
-                        subQuery,
-                        subOptions || {}
-                    ).then((result) => {
-                        client.writer.write({
-                            type: 'SEARCH_RESP',
-                            payload: {
-                                requestId: subscriptionId,
-                                results: result.results,
-                                totalCount: result.totalHits,
-                            },
-                        });
-
-                        logger.debug({
-                            clientId: client.id,
-                            subscriptionId,
-                            mapName: subMapName,
-                            query: subQuery,
-                            resultCount: result.results.length,
-                            totalHits: result.totalHits,
-                            nodes: result.registeredNodes,
-                        }, 'Distributed search subscription created');
-                    }).catch((err) => {
-                        logger.error({ err, subscriptionId }, 'Distributed search subscription failed');
-                        client.writer.write({
-                            type: 'SEARCH_RESP',
-                            payload: {
-                                requestId: subscriptionId,
-                                results: [],
-                                totalCount: 0,
-                                error: 'Failed to create distributed subscription',
-                            },
-                        });
-                    });
-                } else {
-                    // Single-node fallback: use local SearchCoordinator
-                    const initialResults = this.searchCoordinator.subscribe(
-                        client.id,
-                        subscriptionId,
-                        subMapName,
-                        subQuery,
-                        subOptions
-                    );
-
-                    logger.debug({
-                        clientId: client.id,
-                        subscriptionId,
-                        mapName: subMapName,
-                        query: subQuery,
-                        resultCount: initialResults.length
-                    }, 'Search subscription created (local)');
-
-                    // Send initial snapshot as SEARCH_RESP
-                    client.writer.write({
-                        type: 'SEARCH_RESP',
-                        payload: {
-                            requestId: subscriptionId,
-                            results: initialResults,
-                            totalCount: initialResults.length,
-                        },
-                    });
-                }
-                break;
-            }
-
-            case 'SEARCH_UNSUB': {
-                const { subscriptionId: unsubId } = message.payload;
-                // Unsubscribe from both local and distributed
-                this.searchCoordinator.unsubscribe(unsubId);
-                if (this.distributedSubCoordinator) {
-                    this.distributedSubCoordinator.unsubscribe(unsubId);
-                }
-                logger.debug({ clientId: client.id, subscriptionId: unsubId }, 'Search unsubscription');
-                break;
-            }
-
-            case 'AUTH': {
-                // Client already authenticated, ignore duplicate AUTH messages
-                // This can happen if client sends AUTH before receiving AUTH_ACK
-                logger.debug({ clientId: client.id }, 'Ignoring duplicate AUTH from already authenticated client');
-                break;
-            }
-
-            default:
-                logger.warn({ type: message.type }, 'Unknown message type');
+        // Only AUTH for already-authenticated clients remains (duplicate AUTH handling)
+        if (message.type === 'AUTH') {
+            // Client already authenticated, ignore duplicate AUTH messages
+            // This can happen if client sends AUTH before receiving AUTH_ACK
+            logger.debug({ clientId: client.id }, 'Ignoring duplicate AUTH from already authenticated client');
+            return;
         }
+
+        logger.warn({ type: message.type }, 'Unknown message type');
     }
+
+    /* NOTE: All message handlers have been extracted to coordinator/ modules:
+     * - QueryHandler: QUERY_SUB, QUERY_UNSUB
+     * - LwwSyncHandler: SYNC_INIT, MERKLE_REQ_BUCKET
+     * - ORMapSyncHandler: ORMAP_SYNC_INIT, ORMAP_MERKLE_REQ_BUCKET, ORMAP_DIFF_REQUEST, ORMAP_PUSH_DIFF
+     * - LockHandler: LOCK_REQUEST, LOCK_RELEASE
+     * - TopicHandler: TOPIC_SUB, TOPIC_UNSUB, TOPIC_PUB
+     * - CounterHandlerAdapter: COUNTER_REQUEST, COUNTER_SYNC
+     * - EntryProcessorAdapter: ENTRY_PROCESS, ENTRY_PROCESS_BATCH
+     * - ResolverHandler: REGISTER_RESOLVER, UNREGISTER_RESOLVER, LIST_RESOLVERS
+     * - PartitionHandler: PARTITION_MAP_REQUEST
+     * - SearchHandler: SEARCH, SEARCH_SUB, SEARCH_UNSUB
+     * - JournalHandler: JOURNAL_SUBSCRIBE, JOURNAL_UNSUBSCRIBE, JOURNAL_READ
+     * The switch statement (1234 LOC) has been removed and replaced with MessageRegistry dispatch.
+     */
+
 
     private updateClientHlc(client: ClientConnection, message: any) {
         // Try to extract timestamp from message if available

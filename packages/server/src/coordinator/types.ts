@@ -226,3 +226,339 @@ export interface OperationHandlerConfig {
     /** Track pending batch operations (for testing) */
     pendingBatchOperations: Set<Promise<void>>;
 }
+
+// ============================================================================
+// PartitionHandler Types
+// ============================================================================
+
+/**
+ * Interface for handling PARTITION_MAP_REQUEST messages.
+ */
+export interface IPartitionHandler {
+    handlePartitionMapRequest(client: ClientConnection, message: any): void;
+}
+
+/**
+ * Configuration for PartitionHandler.
+ */
+export interface PartitionHandlerConfig {
+    partitionService: {
+        getPartitionMap: () => any;
+    };
+}
+
+// ============================================================================
+// TopicHandler Types
+// ============================================================================
+
+/**
+ * Interface for handling topic pub/sub messages.
+ */
+export interface ITopicHandler {
+    handleTopicSub(client: ClientConnection, message: any): void;
+    handleTopicUnsub(client: ClientConnection, message: any): void;
+    handleTopicPub(client: ClientConnection, message: any): void;
+}
+
+/**
+ * Configuration for TopicHandler.
+ */
+export interface TopicHandlerConfig {
+    topicManager: {
+        subscribe: (clientId: string, topic: string) => void;
+        unsubscribe: (clientId: string, topic: string) => void;
+        publish: (topic: string, data: any, senderId: string) => void;
+    };
+    securityManager: {
+        checkPermission: (principal: Principal, resource: string, action: PermissionType) => boolean;
+    };
+}
+
+// ============================================================================
+// LockHandler Types
+// ============================================================================
+
+/**
+ * Interface for handling distributed lock messages.
+ */
+export interface ILockHandler {
+    handleLockRequest(client: ClientConnection, message: any): void;
+    handleLockRelease(client: ClientConnection, message: any): void;
+}
+
+/**
+ * Configuration for LockHandler.
+ */
+export interface LockHandlerConfig {
+    lockManager: {
+        acquire: (name: string, clientId: string, requestId: string, ttl: number) => { granted: boolean; fencingToken?: number };
+        release: (name: string, clientId: string, fencingToken: number) => boolean;
+    };
+    partitionService: {
+        isLocalOwner: (key: string) => boolean;
+        getOwner: (key: string) => string;
+    };
+    cluster: {
+        getMembers: () => string[];
+        send: (nodeId: string, type: any, payload: any) => void;
+        config: { nodeId: string };
+    };
+    securityManager: {
+        checkPermission: (principal: Principal, resource: string, action: PermissionType) => boolean;
+    };
+}
+
+// ============================================================================
+// CounterHandlerAdapter Types
+// ============================================================================
+
+/**
+ * Interface for handling PN Counter messages.
+ */
+export interface ICounterHandlerAdapter {
+    handleCounterRequest(client: ClientConnection, message: any): void;
+    handleCounterSync(client: ClientConnection, message: any): void;
+}
+
+/**
+ * Configuration for CounterHandlerAdapter.
+ */
+export interface CounterHandlerAdapterConfig {
+    counterHandler: {
+        handleCounterRequest: (clientId: string, name: string) => any;
+        handleCounterSync: (clientId: string, name: string, state: any) => {
+            response: any;
+            broadcastTo: string[];
+            broadcastMessage: any;
+        };
+    };
+    getClient: (clientId: string) => ClientConnection | undefined;
+}
+
+// ============================================================================
+// ResolverHandler Types
+// ============================================================================
+
+/**
+ * Interface for handling conflict resolver messages.
+ */
+export interface IResolverHandler {
+    handleRegisterResolver(client: ClientConnection, message: any): void;
+    handleUnregisterResolver(client: ClientConnection, message: any): void;
+    handleListResolvers(client: ClientConnection, message: any): void;
+}
+
+/**
+ * Configuration for ResolverHandler.
+ */
+export interface ResolverHandlerConfig {
+    conflictResolverHandler: {
+        registerResolver: (mapName: string, resolver: any, clientId: string) => void;
+        unregisterResolver: (mapName: string, resolverName: string, clientId: string) => boolean;
+        listResolvers: (mapName?: string) => any[];
+    };
+    securityManager: {
+        checkPermission: (principal: Principal, resource: string, action: PermissionType) => boolean;
+    };
+}
+
+// ============================================================================
+// JournalHandler Types
+// ============================================================================
+
+/**
+ * Interface for handling event journal messages.
+ */
+export interface IJournalHandler {
+    handleJournalSubscribe(client: ClientConnection, message: any): void;
+    handleJournalUnsubscribe(client: ClientConnection, message: any): void;
+    handleJournalRead(client: ClientConnection, message: any): void;
+}
+
+/**
+ * Configuration for JournalHandler.
+ */
+export interface JournalHandlerConfig {
+    eventJournalService?: {
+        subscribe: (callback: (event: any) => void, fromSequence?: bigint) => () => void;
+        readFrom: (startSeq: bigint, limit: number) => any[];
+    };
+    journalSubscriptions: Map<string, { clientId: string; mapName?: string; types?: string[] }>;
+    getClient: (clientId: string) => ClientConnection | undefined;
+}
+
+// ============================================================================
+// LwwSyncHandler Types
+// ============================================================================
+
+/**
+ * Interface for handling LWW map sync messages.
+ */
+export interface ILwwSyncHandler {
+    handleSyncInit(client: ClientConnection, message: any): Promise<void>;
+    handleMerkleReqBucket(client: ClientConnection, message: any): Promise<void>;
+}
+
+/**
+ * Configuration for LwwSyncHandler.
+ */
+export interface LwwSyncHandlerConfig {
+    getMapAsync: (name: string, typeHint?: 'LWW' | 'OR') => Promise<LWWMap<string, any> | ORMap<string, any>>;
+    hlc: HLC;
+    securityManager: {
+        checkPermission: (principal: Principal, resource: string, action: PermissionType) => boolean;
+    };
+    metricsService: {
+        incOp: (op: any, mapName: string) => void;
+    };
+    gcAgeMs: number;
+}
+
+// ============================================================================
+// ORMapSyncHandler Types
+// ============================================================================
+
+/**
+ * Interface for handling ORMap sync messages.
+ */
+export interface IORMapSyncHandler {
+    handleORMapSyncInit(client: ClientConnection, message: any): Promise<void>;
+    handleORMapMerkleReqBucket(client: ClientConnection, message: any): Promise<void>;
+    handleORMapDiffRequest(client: ClientConnection, message: any): Promise<void>;
+    handleORMapPushDiff(client: ClientConnection, message: any): Promise<void>;
+}
+
+/**
+ * Configuration for ORMapSyncHandler.
+ */
+export interface ORMapSyncHandlerConfig {
+    getMapAsync: (name: string, typeHint?: 'LWW' | 'OR') => Promise<LWWMap<string, any> | ORMap<string, any>>;
+    hlc: HLC;
+    securityManager: {
+        checkPermission: (principal: Principal, resource: string, action: PermissionType) => boolean;
+    };
+    metricsService: {
+        incOp: (op: any, mapName: string) => void;
+    };
+    storage?: IServerStorage;
+    broadcast: (message: any, excludeClientId?: string) => void;
+    gcAgeMs: number;
+}
+
+// ============================================================================
+// EntryProcessorAdapter Types
+// ============================================================================
+
+/**
+ * Interface for handling entry processor messages.
+ */
+export interface IEntryProcessorAdapter {
+    handleEntryProcess(client: ClientConnection, message: any): Promise<void>;
+    handleEntryProcessBatch(client: ClientConnection, message: any): Promise<void>;
+}
+
+/**
+ * Configuration for EntryProcessorAdapter.
+ */
+export interface EntryProcessorAdapterConfig {
+    entryProcessorHandler: {
+        executeOnKey: (map: LWWMap<string, any>, key: string, processor: any) => Promise<{
+            result: { success: boolean; result?: any; newValue?: any; error?: string };
+            timestamp?: any;
+        }>;
+        executeOnKeys: (map: LWWMap<string, any>, keys: string[], processor: any) => Promise<{
+            results: Map<string, { success: boolean; result?: any; newValue?: any; error?: string }>;
+            timestamps: Map<string, any>;
+        }>;
+    };
+    getMap: (name: string) => LWWMap<string, any> | ORMap<string, any>;
+    securityManager: {
+        checkPermission: (principal: Principal, resource: string, action: PermissionType) => boolean;
+    };
+    queryRegistry: {
+        processChange: (mapName: string, map: any, key: string, record: any, oldValue: any) => void;
+    };
+}
+
+// ============================================================================
+// SearchHandler Types
+// ============================================================================
+
+/**
+ * Interface for handling full-text search messages.
+ */
+export interface ISearchHandler {
+    handleSearch(client: ClientConnection, message: any): Promise<void>;
+    handleSearchSub(client: ClientConnection, message: any): Promise<void>;
+    handleSearchUnsub(client: ClientConnection, message: any): void;
+}
+
+/**
+ * Configuration for SearchHandler.
+ */
+export interface SearchHandlerConfig {
+    searchCoordinator: {
+        isSearchEnabled: (mapName: string) => boolean;
+        search: (mapName: string, query: string, options?: any) => any;
+        subscribe: (clientId: string, subscriptionId: string, mapName: string, query: string, options?: any) => any[];
+        unsubscribe: (subscriptionId: string) => void;
+    };
+    clusterSearchCoordinator?: {
+        search: (mapName: string, query: string, options: any) => Promise<any>;
+    };
+    distributedSubCoordinator?: {
+        subscribeSearch: (subscriptionId: string, socket: WebSocket, mapName: string, query: string, options: any) => Promise<any>;
+        unsubscribe: (subscriptionId: string) => Promise<void>;
+    };
+    cluster: {
+        getMembers: () => string[];
+    };
+    securityManager: {
+        checkPermission: (principal: Principal, resource: string, action: PermissionType) => boolean;
+    };
+}
+
+// ============================================================================
+// QueryHandler Types
+// ============================================================================
+
+/**
+ * Interface for handling query subscription messages.
+ */
+export interface IQueryHandler {
+    handleQuerySub(client: ClientConnection, message: any): Promise<void>;
+    handleQueryUnsub(client: ClientConnection, message: any): Promise<void>;
+}
+
+/**
+ * Configuration for QueryHandler.
+ */
+export interface QueryHandlerConfig {
+    securityManager: {
+        checkPermission: (principal: Principal, resource: string, action: PermissionType) => boolean;
+        filterObject: (value: any, principal: Principal, mapName: string) => any;
+    };
+    metricsService: {
+        incOp: (op: any, mapName: string) => void;
+    };
+    queryRegistry: {
+        unregister: (queryId: string) => void;
+    };
+    distributedSubCoordinator?: {
+        subscribeQuery: (queryId: string, socket: WebSocket, mapName: string, query: any) => Promise<any>;
+        unsubscribe: (id: string) => Promise<void>;
+    };
+    cluster: {
+        getMembers: () => string[];
+        isLocal: (id: string) => boolean;
+        send: (nodeId: string, type: any, payload: any) => void;
+        config: { nodeId: string };
+    };
+    executeLocalQuery: (mapName: string, query: any) => Promise<any[]>;
+    finalizeClusterQuery: (requestId: string, timeout?: boolean) => void;
+    pendingClusterQueries: Map<string, any>;
+    readReplicaHandler?: {
+        selectReadNode: (req: any) => string | null;
+    };
+    ConsistencyLevel: { EVENTUAL: any };
+}
