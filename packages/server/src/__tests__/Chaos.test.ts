@@ -2,7 +2,7 @@ import { ServerCoordinator } from '../ServerCoordinator';
 import { ChaosProxy } from './utils/ChaosProxy';
 import { SyncEngine } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
-import { waitForAuthReady } from './utils/waitForAuthReady';
+import { waitForAuthReady, waitForCluster, pollUntil } from './utils/test-helpers';
 import { LWWMap } from '@topgunbuild/core';
 import * as jwt from 'jsonwebtoken';
 import { WebSocket } from 'ws';
@@ -201,31 +201,24 @@ describe('Chaos Testing', () => {
             await new Promise(r => setTimeout(r, 5)); // Slight delay to spread out slightly
         }
 
-        // Wait for convergence
-        // We check the server state
-        const start = Date.now();
-        let synced = false;
-        
-        // Allow plenty of time for retries
-        while (Date.now() - start < 20000) {
-            const serverMap = server.getMap('flake-data');
-            if (serverMap) {
-                // Check if all items are present
-                let count = 0;
+        // Wait for convergence with bounded polling
+        await pollUntil(
+            () => {
+                const serverMap = server.getMap('flake-data');
+                if (!serverMap) return false;
                 for (let i = 0; i < ITEM_COUNT; i++) {
-                    if (serverMap.get(`item-${i}`) === `value-${i}`) {
-                        count++;
+                    if (serverMap.get(`item-${i}`) !== `value-${i}`) {
+                        return false;
                     }
                 }
-                if (count === ITEM_COUNT) {
-                    synced = true;
-                    break;
-                }
+                return true;
+            },
+            {
+                timeoutMs: 20000,
+                intervalMs: 200,
+                description: 'all items synced to server despite packet loss',
             }
-            await new Promise(r => setTimeout(r, 200));
-        }
-
-        expect(synced).toBe(true);
+        );
     }, 30000);
   });
 
@@ -333,19 +326,18 @@ describe('Chaos Testing', () => {
         const rec = checkMap.set('check', 'alive');
         checkClient.recordOperation('check-data', 'PUT', 'check', { record: rec, timestamp: rec.timestamp });
 
-        // Should succeed
-        let alive = false;
-        const checkStart = Date.now();
-        while (Date.now() - checkStart < 5000) {
-            const m = server.getMap('check-data');
-            if (m && m.get('check') === 'alive') {
-                alive = true;
-                break;
+        // Should succeed - verify with bounded polling
+        await pollUntil(
+            () => {
+                const m = server.getMap('check-data');
+                return m && m.get('check') === 'alive';
+            },
+            {
+                timeoutMs: 5000,
+                intervalMs: 100,
+                description: 'server still responsive after slow consumer backpressure',
             }
-            await new Promise(r => setTimeout(r, 100));
-        }
-        
-        expect(alive).toBe(true);
+        );
 
         // Cleanup
         producer.close();
@@ -356,17 +348,3 @@ describe('Chaos Testing', () => {
   });
 
 });
-
-async function waitForCluster(nodes: ServerCoordinator[], expectedSize: number) {
-    const start = Date.now();
-    while (Date.now() - start < 15000) {
-        let ready = true;
-        for (const node of nodes) {
-            const members = (node as any).cluster.getMembers();
-            if (members.length < expectedSize) ready = false;
-        }
-        if (ready) return;
-        await new Promise(r => setTimeout(r, 200));
-    }
-    throw new Error('Cluster failed to form');
-}
