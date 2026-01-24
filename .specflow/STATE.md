@@ -2,14 +2,15 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-001
+- **Status:** review
+- **Next Step:** /sf:review
 
 ## Queue
 
 | # | ID | Title | Priority | Status |
 |---|-------|----------|--------|--------|
+| 1 | SPEC-001 | Remove Dead Code from ServerCoordinator | high | review |
 
 ## Decisions
 
@@ -26,8 +27,7 @@
 
 ## Warnings
 
-| Date | Specification | Reason |
-|------|---------------|--------|
+_No active warnings_
 
 ---
-*Last updated: 2026-01-23*
+*Last updated: 2026-01-24*
