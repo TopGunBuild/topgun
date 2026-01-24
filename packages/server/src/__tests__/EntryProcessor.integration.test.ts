@@ -12,6 +12,7 @@ import { ServerCoordinator, ServerCoordinatorConfig } from '../ServerCoordinator
 import { TopGunClient } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from '@topgunbuild/adapters';
 import { BuiltInProcessors } from '@topgunbuild/core';
+import { waitForConnection } from './utils/test-helpers';
 
 const TEST_PORT_BASE = 12100;
 
@@ -43,17 +44,8 @@ describe('Entry Processor Integration', () => {
       require('jsonwebtoken').sign({ sub: 'test-user', role: 'admin' }, 'test-secret'),
     );
 
-    // Wait for connection
-    await new Promise<void>((resolve) => {
-      const checkConnection = () => {
-        if (client.getConnectionState() === 'CONNECTED') {
-          resolve();
-        } else {
-          setTimeout(checkConnection, 50);
-        }
-      };
-      checkConnection();
-    });
+    // Wait for connection with bounded polling
+    await waitForConnection(client, 'CONNECTED', 5000);
   }, 10000);
 
   afterEach(async () => {
