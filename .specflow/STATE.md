@@ -2,15 +2,14 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-001
-- **Status:** review
-- **Next Step:** /sf:review
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | # | ID | Title | Priority | Status |
 |---|-------|----------|--------|--------|
-| 1 | SPEC-001 | Remove Dead Code from ServerCoordinator | high | review |
 
 ## Decisions
 
@@ -24,6 +23,7 @@
 - TypeScript with strict mode
 - Commit format: `type(scope): description`
 - CRDTs use Hybrid Logical Clocks for causality tracking
+- Handler extraction pattern: separate message handlers into focused modules with config injection
 
 ## Warnings
 
