@@ -1,6 +1,7 @@
 import { ServerCoordinator } from '../ServerCoordinator';
 import { WebSocket } from 'ws';
 import { LWWMap, deserialize } from '@topgunbuild/core';
+import { pollUntil } from './utils/test-helpers';
 
 describe('Cluster Integration', () => {
   let node1: ServerCoordinator;
@@ -34,17 +35,19 @@ describe('Cluster Integration', () => {
     // Wait for node-a to be ready
     await node2.ready();
 
-    // Wait for cluster to stabilize
-    // Poll until both nodes see each other
-    const start = Date.now();
-    while (Date.now() - start < 5000) {
+    // Wait for cluster to stabilize with bounded polling
+    await pollUntil(
+      () => {
         const m1 = (node1 as any).cluster.getMembers();
         const m2 = (node2 as any).cluster.getMembers();
-        if (m1.includes('node-a') && m2.includes('node-b')) {
-            break;
-        }
-        await new Promise(resolve => setTimeout(resolve, 100));
-    }
+        return m1.includes('node-a') && m2.includes('node-b');
+      },
+      {
+        timeoutMs: 5000,
+        intervalMs: 100,
+        description: 'cluster formation (both nodes see each other)',
+      }
+    );
   }, 15000);
 
   afterAll(async () => {
