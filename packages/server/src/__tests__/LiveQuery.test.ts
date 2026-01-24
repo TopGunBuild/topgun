@@ -20,6 +20,7 @@ const createMockWriter = (socket: any) => ({
 });
 
 // Retry flaky tests up to 3 times
+// TODO(sf-002): Evaluate removing after test suite hardening is proven stable
 jest.retryTimes(3);
 
 describe('Live Query Sliding Window Integration', () => {
