@@ -16,6 +16,7 @@ import { WebSocket } from 'ws';
 import jwt from 'jsonwebtoken';
 import { ServerCoordinator } from '../../ServerCoordinator';
 import { serialize, deserialize, ConsistencyLevel } from '@topgunbuild/core';
+import { waitForCluster } from '../utils/test-helpers';
 
 const JWT_SECRET = 'test-secret-for-e2e-tests';
 
@@ -34,30 +35,6 @@ interface TestNode {
 // Helper: Sleep for a given number of milliseconds
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// Helper: Wait for cluster formation
-async function waitForClusterFormation(
-  nodes: TestNode[],
-  expectedCount: number,
-  timeoutMs = 15000
-): Promise<boolean> {
-  const startTime = Date.now();
-
-  while (Date.now() - startTime < timeoutMs) {
-    let allReady = true;
-    for (const node of nodes) {
-      const members = (node.server as any).cluster?.getMembers() || [];
-      if (members.length < expectedCount) {
-        allReady = false;
-        break;
-      }
-    }
-    if (allReady) return true;
-    await sleep(100);
-  }
-
-  return false;
 }
 
 // Helper: Create WebSocket client connection
@@ -310,10 +287,8 @@ describe('Distributed Subscriptions E2E', () => {
     });
 
     // Wait for cluster formation
-    const formed = await waitForClusterFormation(nodes, 3);
-    if (!formed) {
-      throw new Error('Failed to form 3-node cluster');
-    }
+    const servers = nodes.map(n => n.server);
+    await waitForCluster(servers, 3, 15000);
 
     // Give extra time for cluster stabilization
     await sleep(500);
