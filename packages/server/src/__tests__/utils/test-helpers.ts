@@ -198,11 +198,11 @@ export async function waitForConnection(
  * @param expectedValue Expected value at key
  * @param timeoutMs Maximum wait time (default: 10000)
  */
-export async function waitForConvergence<K extends string, V>(
-  mapA: LWWMap<K, V>,
-  mapB: LWWMap<K, V>,
-  key: K,
-  expectedValue: V,
+export async function waitForConvergence(
+  mapA: LWWMap<any, any>,
+  mapB: LWWMap<any, any>,
+  key: string,
+  expectedValue: any,
   timeoutMs?: number
 ): Promise<void>;
 
@@ -213,37 +213,37 @@ export async function waitForConvergence<K extends string, V>(
  * @param expectedValue Expected value at key
  * @param timeoutMs Maximum wait time (default: 10000)
  */
-export async function waitForConvergence<K extends string, V>(
-  maps: LWWMap<K, V>[],
-  key: K,
-  expectedValue: V,
+export async function waitForConvergence(
+  maps: LWWMap<any, any>[],
+  key: string,
+  expectedValue: any,
   timeoutMs?: number
 ): Promise<void>;
 
-export async function waitForConvergence<K extends string, V>(
-  mapAOrMaps: LWWMap<K, V> | LWWMap<K, V>[],
-  mapBOrKey: LWWMap<K, V> | K,
-  keyOrExpected: K | V,
-  expectedOrTimeout?: V | number,
+export async function waitForConvergence(
+  mapAOrMaps: LWWMap<any, any> | LWWMap<any, any>[],
+  mapBOrKey: LWWMap<any, any> | string,
+  keyOrExpected: string | any,
+  expectedOrTimeout?: any | number,
   timeoutMsArg?: number
 ): Promise<void> {
   // Determine which overload was called
-  let maps: LWWMap<K, V>[];
-  let key: K;
-  let expectedValue: V;
+  let maps: LWWMap<any, any>[];
+  let key: string;
+  let expectedValue: any;
   let timeoutMs: number;
 
   if (Array.isArray(mapAOrMaps)) {
     // Array overload: (maps, key, expectedValue, timeoutMs?)
     maps = mapAOrMaps;
-    key = mapBOrKey as K;
-    expectedValue = keyOrExpected as V;
+    key = mapBOrKey as string;
+    expectedValue = keyOrExpected;
     timeoutMs = (expectedOrTimeout as number) ?? 10000;
   } else {
     // Two-map overload: (mapA, mapB, key, expectedValue, timeoutMs?)
-    maps = [mapAOrMaps, mapBOrKey as LWWMap<K, V>];
-    key = keyOrExpected as K;
-    expectedValue = expectedOrTimeout as V;
+    maps = [mapAOrMaps, mapBOrKey as LWWMap<any, any>];
+    key = keyOrExpected as string;
+    expectedValue = expectedOrTimeout;
     timeoutMs = timeoutMsArg ?? 10000;
   }
 
@@ -262,9 +262,9 @@ export async function waitForConvergence<K extends string, V>(
     {
       timeoutMs,
       intervalMs: 100,
-      description: `map convergence on key "${String(key)}" to value "${JSON.stringify(expectedValue)}"`,
+      description: `map convergence on key "${key}" to value "${JSON.stringify(expectedValue)}"`,
     }
-  ).catch((err) => {
+  ).catch(() => {
     // Enhance error with current state
     const currentValues = maps.map((m, i) => `map[${i}]=${JSON.stringify(m.get(key))}`);
     throw new Error(
