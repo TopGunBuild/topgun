@@ -10,6 +10,9 @@ export { createMessageRegistry } from './message-registry';
 // SPEC-003a: Broadcast handler
 export { BroadcastHandler } from './broadcast-handler';
 
+// SPEC-003b: GC handler
+export { GCHandler } from './gc-handler';
+
 // Phase 4: Additional handler modules
 export { PartitionHandler } from './partition-handler';
 export { TopicHandler } from './topic-handler';
@@ -42,6 +45,9 @@ export type {
     // Broadcast types
     IBroadcastHandler,
     BroadcastHandlerConfig,
+    // GC types
+    IGCHandler,
+    GCHandlerConfig,
     // Partition types
     IPartitionHandler,
     PartitionHandlerConfig,

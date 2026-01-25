@@ -590,3 +590,51 @@ export interface BroadcastHandlerConfig {
     };
     hlc: HLC;
 }
+
+// ============================================================================
+// GCHandler Types
+// ============================================================================
+
+/**
+ * Interface for handling garbage collection operations.
+ */
+export interface IGCHandler {
+    start(): void;
+    stop(): void;
+    handleGcReport(nodeId: string, minHlc: Timestamp): void;
+    performGarbageCollection(olderThan: Timestamp): void;
+}
+
+/**
+ * Configuration for GCHandler.
+ */
+export interface GCHandlerConfig {
+    storageManager: IStorageManager;
+    connectionManager: IConnectionManager;
+    cluster: {
+        getMembers: () => string[];
+        send: (nodeId: string, type: any, payload: any) => void;
+        isLocal: (id: string) => boolean;
+        config: { nodeId: string };
+        getLeaderId?: () => string | null;
+    };
+    partitionService: {
+        isRelated: (key: string) => boolean;
+        getPartitionId: (key: string) => number;
+    };
+    replicationPipeline?: {
+        replicate: (op: any, opId: string, key: string) => Promise<void>;
+    };
+    merkleTreeManager?: {
+        updateRecord: (partitionId: number, key: string, record: any) => void;
+    };
+    queryRegistry: {
+        processChange: (mapName: string, map: any, key: string, record: any, oldValue: any) => void;
+    };
+    hlc: HLC;
+    storage?: IServerStorage;
+    broadcast: (message: any) => void;
+    metricsService: { incOp: (op: any, mapName: string) => void };
+    gcIntervalMs?: number;
+    gcAgeMs?: number;
+}
