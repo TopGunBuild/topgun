@@ -6,9 +6,10 @@
  * - Cluster event replication (CLUSTER_EVENT)
  * - Distributed query execution (CLUSTER_QUERY_EXEC/RESP)
  * - GC consensus messages (CLUSTER_GC_REPORT/COMMIT)
- * - Distributed locks (CLUSTER_LOCK_*)
+ * - Distributed locks (CLUSTER_LOCK_REQ/RELEASE/GRANTED/RELEASED)
+ * - Client disconnect notification (CLUSTER_CLIENT_DISCONNECTED)
  * - Topic publication forwarding (CLUSTER_TOPIC_PUB)
- * - Anti-entropy repair (CLUSTER_MERKLE_*/CLUSTER_REPAIR_*)
+ * - Anti-entropy repair (CLUSTER_MERKLE_ROOT, CLUSTER_REPAIR_DATA)
  *
  * Extracted from ServerCoordinator as part of SPEC-003c refactoring.
  */

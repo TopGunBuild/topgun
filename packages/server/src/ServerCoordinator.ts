@@ -60,6 +60,7 @@ import {
     OperationHandler,
     BroadcastHandler,
     GCHandler,
+    ClusterEventHandler,
     createMessageRegistry,
     PartitionHandler,
     TopicHandler,
@@ -217,6 +218,7 @@ export class ServerCoordinator {
     private operationHandler!: OperationHandler;
     private broadcastHandler!: BroadcastHandler;
     private gcHandler!: GCHandler;
+    private clusterEventHandler!: ClusterEventHandler;
     private messageRegistry!: MessageRegistry;
     private systemManager!: SystemManager;
 
@@ -879,6 +881,53 @@ export class ServerCoordinator {
                 },
             });
 
+            // SPEC-003c: Initialize ClusterEventHandler for cluster message routing
+            this.clusterEventHandler = new ClusterEventHandler({
+                cluster: {
+                    on: (event, handler) => this.cluster.on(event, handler),
+                    off: (event, handler) => this.cluster.off(event, handler),
+                    send: (nodeId, type, payload) => this.cluster.send(nodeId, type, payload),
+                    config: { nodeId: config.nodeId },
+                },
+                partitionService: {
+                    isLocalOwner: (key) => this.partitionService.isLocalOwner(key),
+                    getOwner: (key) => this.partitionService.getOwner(key),
+                    isRelated: (key) => this.partitionService.isRelated(key),
+                },
+                lockManager: {
+                    acquire: (name, clientId, requestId, ttl) => this.lockManager.acquire(name, clientId, requestId, ttl),
+                    release: (name, clientId, fencingToken) => this.lockManager.release(name, clientId, fencingToken),
+                    handleClientDisconnect: (clientId) => this.lockManager.handleClientDisconnect(clientId),
+                },
+                topicManager: {
+                    publish: (topic, data, senderId, fromCluster) => this.topicManager.publish(topic, data, senderId, fromCluster),
+                },
+                repairScheduler: this.repairScheduler ? {
+                    emit: (event, data) => this.repairScheduler!.emit(event, data),
+                } : undefined,
+                connectionManager: this.connectionManager,
+                storageManager: this.storageManager,
+                queryRegistry: {
+                    processChange: this.queryRegistry.processChange.bind(this.queryRegistry),
+                },
+                metricsService: {
+                    incOp: this.metricsService.incOp.bind(this.metricsService),
+                    setClusterMembers: this.metricsService.setClusterMembers.bind(this.metricsService),
+                },
+                gcHandler: this.gcHandler,
+                hlc: this.hlc,
+                merkleTreeManager: this.merkleTreeManager ? {
+                    getRootHash: (partitionId) => this.merkleTreeManager!.getRootHash(partitionId),
+                } : undefined,
+                processLocalOp: this.processLocalOp.bind(this),
+                executeLocalQuery: this.executeLocalQuery.bind(this),
+                finalizeClusterQuery: this.finalizeClusterQuery.bind(this),
+                getLocalRecord: this.getLocalRecord.bind(this),
+                broadcast: this.broadcast.bind(this),
+                getMap: this.getMap.bind(this),
+                pendingClusterQueries: this.pendingClusterQueries,
+            });
+
             // Phase 4: Initialize all message handlers
             const partitionHandler = new PartitionHandler({
                 partitionService: {
@@ -1076,7 +1125,7 @@ export class ServerCoordinator {
                 (name) => this.getMap(name) as LWWMap<string, any>
             );
 
-            this.setupClusterListeners();
+            this.clusterEventHandler.setupListeners();
             this.cluster.start().then((actualClusterPort) => {
                 this._actualClusterPort = actualClusterPort;
                 this.metricsService.setClusterMembers(this.cluster.getMembers().length);
@@ -1868,205 +1917,6 @@ export class ServerCoordinator {
         await this.broadcastHandler.broadcastBatchSync(events, excludeClientId);
     }
 
-    private setupClusterListeners() {
-        this.cluster.on('memberJoined', () => {
-            this.metricsService.setClusterMembers(this.cluster.getMembers().length);
-        });
-        this.cluster.on('memberLeft', () => {
-            this.metricsService.setClusterMembers(this.cluster.getMembers().length);
-        });
-
-        this.cluster.on('message', (msg) => {
-            switch (msg.type) {
-                case 'OP_FORWARD':
-                    // OP_FORWARD is used for multiple purposes:
-                    // 1. Actual operation forwards (has key field) - route to partition owner
-                    // 2. Replication messages (has _replication field) - handled by ReplicationPipeline
-                    // 3. Migration messages (has _migration field) - handled by MigrationManager
-                    // Only validate key for actual operation forwards
-                    if (msg.payload._replication || msg.payload._migration) {
-                        // These are handled by ReplicationPipeline and MigrationManager listeners
-                        // No routing check needed
-                        break;
-                    }
-
-                    // Actual operation forward - validate key and route
-                    logger.info({ senderId: msg.senderId }, 'Received forwarded op');
-                    if (!msg.payload.key) {
-                        logger.warn({ senderId: msg.senderId }, 'OP_FORWARD missing key, dropping');
-                        break;
-                    }
-                    if (this.partitionService.isLocalOwner(msg.payload.key)) {
-                        this.processLocalOp(msg.payload, true, msg.senderId).catch(err => {
-                            logger.error({ err, senderId: msg.senderId }, 'Forwarded op failed');
-                        });
-                    } else {
-                        logger.warn({ key: msg.payload.key }, 'Received OP_FORWARD but not owner. Dropping.');
-                    }
-                    break;
-                case 'CLUSTER_EVENT':
-                    this.handleClusterEvent(msg.payload);
-                    break;
-
-                case 'CLUSTER_QUERY_EXEC': {
-                    const { requestId, mapName, query } = msg.payload;
-                    this.executeLocalQuery(mapName, query).then(results => {
-                        this.cluster.send(msg.senderId, 'CLUSTER_QUERY_RESP', {
-                            requestId,
-                            results
-                        });
-                    }).catch(err => {
-                        logger.error({ err, mapName }, 'Failed to execute cluster query');
-                        this.cluster.send(msg.senderId, 'CLUSTER_QUERY_RESP', {
-                            requestId,
-                            results: []
-                        });
-                    });
-                    break;
-                }
-
-                case 'CLUSTER_QUERY_RESP': {
-                    const { requestId: reqId, results: remoteResults } = msg.payload;
-                    const pendingQuery = this.pendingClusterQueries.get(reqId);
-                    if (pendingQuery) {
-                        pendingQuery.results.push(...remoteResults);
-                        pendingQuery.respondedNodes.add(msg.senderId);
-
-                        if (pendingQuery.respondedNodes.size === pendingQuery.expectedNodes.size) {
-                            this.finalizeClusterQuery(reqId);
-                        }
-                    }
-                    break;
-                }
-
-                case 'CLUSTER_GC_REPORT': {
-                    this.gcHandler.handleGcReport(msg.senderId, msg.payload.minHlc);
-                    break;
-                }
-
-                case 'CLUSTER_GC_COMMIT': {
-                    this.gcHandler.performGarbageCollection(msg.payload.safeTimestamp);
-                    break;
-                }
-
-                case 'CLUSTER_LOCK_REQ': {
-                    const { originNodeId, clientId, requestId, name, ttl } = msg.payload;
-                    const compositeId = `${originNodeId}:${clientId}`;
-                    const result = this.lockManager.acquire(name, compositeId, requestId, ttl || 10000);
-                    if (result.granted) {
-                        this.cluster.send(originNodeId, 'CLUSTER_LOCK_GRANTED', {
-                            clientId,
-                            requestId,
-                            name,
-                            fencingToken: result.fencingToken
-                        });
-                    }
-                    break;
-                }
-
-                case 'CLUSTER_LOCK_RELEASE': {
-                    const { originNodeId, clientId, requestId, name, fencingToken } = msg.payload;
-                    const compositeId = `${originNodeId}:${clientId}`;
-                    const success = this.lockManager.release(name, compositeId, fencingToken);
-                    this.cluster.send(originNodeId, 'CLUSTER_LOCK_RELEASED', {
-                        clientId, requestId, name, success
-                    });
-                    break;
-                }
-
-                case 'CLUSTER_LOCK_RELEASED': {
-                    const { clientId, requestId, name, success } = msg.payload;
-                    const client = this.connectionManager.getClient(clientId);
-                    if (client) {
-                        client.writer.write({
-                            type: 'LOCK_RELEASED',
-                            payload: { requestId, name, success }
-                        });
-                    }
-                    break;
-                }
-
-                case 'CLUSTER_LOCK_GRANTED': {
-                    const { clientId, requestId, name, fencingToken } = msg.payload;
-                    const client = this.connectionManager.getClient(clientId);
-                    if (client) {
-                        client.writer.write({
-                            type: 'LOCK_GRANTED',
-                            payload: { requestId, name, fencingToken }
-                        });
-                    }
-                    break;
-                }
-
-                case 'CLUSTER_CLIENT_DISCONNECTED': {
-                    const { clientId, originNodeId } = msg.payload;
-                    const compositeId = `${originNodeId}:${clientId}`;
-                    this.lockManager.handleClientDisconnect(compositeId);
-                    break;
-                }
-
-                case 'CLUSTER_TOPIC_PUB': {
-                    const { topic, data, originalSenderId } = msg.payload;
-                    this.topicManager.publish(topic, data, originalSenderId, true);
-                    break;
-                }
-
-                // Phase 10.04: Anti-entropy repair messages
-                case 'CLUSTER_MERKLE_ROOT_REQ': {
-                    const { partitionId, requestId } = msg.payload;
-                    const rootHash = this.merkleTreeManager?.getRootHash(partitionId) ?? 0;
-                    this.cluster.send(msg.senderId, 'CLUSTER_MERKLE_ROOT_RESP', {
-                        requestId,
-                        partitionId,
-                        rootHash
-                    });
-                    break;
-                }
-
-                case 'CLUSTER_MERKLE_ROOT_RESP': {
-                    // Response handled by RepairScheduler via event or callback
-                    // For now, emit as an event that RepairScheduler can listen to
-                    if (this.repairScheduler) {
-                        this.repairScheduler.emit('merkleRootResponse', {
-                            nodeId: msg.senderId,
-                            ...msg.payload
-                        });
-                    }
-                    break;
-                }
-
-                case 'CLUSTER_REPAIR_DATA_REQ': {
-                    // Request for data records from a specific partition
-                    const { partitionId, keys, requestId } = msg.payload;
-                    const records: Record<string, any> = {};
-                    for (const key of keys) {
-                        const record = this.getLocalRecord(key);
-                        if (record) {
-                            records[key] = record;
-                        }
-                    }
-                    this.cluster.send(msg.senderId, 'CLUSTER_REPAIR_DATA_RESP', {
-                        requestId,
-                        partitionId,
-                        records
-                    });
-                    break;
-                }
-
-                case 'CLUSTER_REPAIR_DATA_RESP': {
-                    // Response with data records for repair
-                    if (this.repairScheduler) {
-                        this.repairScheduler.emit('repairDataResponse', {
-                            nodeId: msg.senderId,
-                            ...msg.payload
-                        });
-                    }
-                    break;
-                }
-            }
-        });
-    }
-
     private async executeLocalQuery(mapName: string, query: Query) {
         // Wait for map to be fully loaded from storage before querying
         const map = await this.getMapAsync(mapName);
@@ -2818,43 +2668,6 @@ export class ServerCoordinator {
 
         // 7. Run onAfterOp interceptors
         this.runAfterInterceptors(op, context);
-    }
-
-    private handleClusterEvent(payload: any) {
-        // 1. Replication Logic: Am I a Backup?
-        const { mapName, key, eventType } = payload;
-
-        // Guard against undefined key (can happen with malformed cluster messages)
-        if (!key) {
-            logger.warn({ mapName, eventType }, 'Received cluster event with undefined key, ignoring');
-            return;
-        }
-
-        const map = this.getMap(mapName, (eventType === 'OR_ADD' || eventType === 'OR_REMOVE') ? 'OR' : 'LWW');
-        const oldRecord = (map instanceof LWWMap) ? map.getRecord(key) : null;
-
-        // Only store if we are Owner (shouldn't receive event unless forwarded) or Backup
-        if (this.partitionService.isRelated(key)) {
-            if (map instanceof LWWMap && payload.record) {
-                map.merge(key, payload.record);
-            } else if (map instanceof ORMap) {
-                if (eventType === 'OR_ADD' && payload.orRecord) {
-                    map.apply(key, payload.orRecord);
-                } else if (eventType === 'OR_REMOVE' && payload.orTag) {
-                    map.applyTombstone(payload.orTag);
-                }
-            }
-        }
-
-        // 2. Notify Query Subscriptions
-        this.queryRegistry.processChange(mapName, map, key, payload.record || payload.orRecord, oldRecord);
-
-        // 3. Broadcast to local clients (Notification)
-        this.broadcast({
-            type: 'SERVER_EVENT',
-            payload: payload,
-            timestamp: this.hlc.now()
-        });
     }
 
     /**
