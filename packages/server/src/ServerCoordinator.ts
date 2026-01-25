@@ -59,6 +59,7 @@ import {
     ConnectionManager,
     StorageManager,
     OperationHandler,
+    BroadcastHandler,
     createMessageRegistry,
     PartitionHandler,
     TopicHandler,
@@ -214,6 +215,7 @@ export class ServerCoordinator {
     private securityManager: SecurityManager;
     private authHandler!: AuthHandler;
     private operationHandler!: OperationHandler;
+    private broadcastHandler!: BroadcastHandler;
     private messageRegistry!: MessageRegistry;
     private systemManager!: SystemManager;
 
@@ -828,6 +830,23 @@ export class ServerCoordinator {
                 incOp: this.metricsService.incOp.bind(this.metricsService),
                 writeAckManager: this.writeAckManager,
                 pendingBatchOperations: this.pendingBatchOperations,
+            });
+
+            // SPEC-003a: Initialize BroadcastHandler for broadcast operations
+            this.broadcastHandler = new BroadcastHandler({
+                connectionManager: this.connectionManager,
+                securityManager: {
+                    filterObject: this.securityManager.filterObject.bind(this.securityManager),
+                },
+                queryRegistry: {
+                    getSubscribedClientIds: this.queryRegistry.getSubscribedClientIds.bind(this.queryRegistry),
+                },
+                metricsService: {
+                    incEventsRouted: this.metricsService.incEventsRouted.bind(this.metricsService),
+                    incEventsFilteredBySubscription: this.metricsService.incEventsFilteredBySubscription.bind(this.metricsService),
+                    recordSubscribersPerEvent: this.metricsService.recordSubscribersPerEvent.bind(this.metricsService),
+                },
+                hlc: this.hlc,
             });
 
             // Phase 4: Initialize all message handlers
@@ -1796,61 +1815,7 @@ export class ServerCoordinator {
     }
 
     private broadcast(message: any, excludeClientId?: string) {
-        const isServerEvent = message.type === 'SERVER_EVENT';
-
-        if (isServerEvent) {
-            const payload = message.payload;
-            const mapName = payload.mapName;
-
-            // === SUBSCRIPTION-BASED ROUTING ===
-            // Only send to clients that have active subscriptions for this map
-            const subscribedClientIds = this.queryRegistry.getSubscribedClientIds(mapName);
-
-            // Track metrics
-            this.metricsService.incEventsRouted();
-
-            if (subscribedClientIds.size === 0) {
-                // Early exit - no subscribers for this map!
-                this.metricsService.incEventsFilteredBySubscription();
-                return;
-            }
-
-            // Track average subscribers per event
-            this.metricsService.recordSubscribersPerEvent(subscribedClientIds.size);
-
-            // Send only to subscribed clients with FLS filtering
-            for (const clientId of subscribedClientIds) {
-                if (clientId === excludeClientId) continue;
-
-                const client = this.connectionManager.getClient(clientId);
-                if (!client || client.socket.readyState !== 1 || !client.isAuthenticated || !client.principal) {
-                    continue;
-                }
-
-                // Shallow clone payload for FLS filtering
-                const newPayload = { ...payload };
-
-                if (newPayload.record) { // LWW
-                    const newVal = this.securityManager.filterObject(newPayload.record.value, client.principal, mapName);
-                    newPayload.record = { ...newPayload.record, value: newVal };
-                }
-
-                if (newPayload.orRecord) { // OR_ADD
-                    const newVal = this.securityManager.filterObject(newPayload.orRecord.value, client.principal, mapName);
-                    newPayload.orRecord = { ...newPayload.orRecord, value: newVal };
-                }
-
-                client.writer.write({ ...message, payload: newPayload });
-            }
-        } else {
-            // Non-event messages (GC_PRUNE, SHUTDOWN_PENDING) still go to all clients
-            const msgData = serialize(message);
-            for (const [id, client] of this.connectionManager.getClients()) {
-                if (id !== excludeClientId && client.socket.readyState === 1) { // 1 = OPEN
-                    client.writer.writeRaw(msgData);
-                }
-            }
-        }
+        this.broadcastHandler.broadcast(message, excludeClientId);
     }
 
     /**
@@ -1861,117 +1826,7 @@ export class ServerCoordinator {
      * Only sends events to clients with active subscriptions for affected maps.
      */
     private broadcastBatch(events: any[], excludeClientId?: string): void {
-        if (events.length === 0) return;
-
-        // === SUBSCRIPTION-BASED ROUTING ===
-        // Get unique map names from events
-        const affectedMaps = new Set<string>();
-        for (const event of events) {
-            if (event.mapName) {
-                affectedMaps.add(event.mapName);
-            }
-        }
-
-        // Get all subscribed client IDs across all affected maps
-        const subscribedClientIds = new Set<string>();
-        for (const mapName of affectedMaps) {
-            const mapSubscribers = this.queryRegistry.getSubscribedClientIds(mapName);
-            for (const clientId of mapSubscribers) {
-                subscribedClientIds.add(clientId);
-            }
-        }
-
-        // Track metrics
-        this.metricsService.incEventsRouted();
-
-        if (subscribedClientIds.size === 0) {
-            // Early exit - no subscribers for any of the affected maps!
-            this.metricsService.incEventsFilteredBySubscription();
-            return;
-        }
-
-        this.metricsService.recordSubscribersPerEvent(subscribedClientIds.size);
-
-        // Group subscribed clients by their role signature for serialization caching
-        const clientsByRoleSignature = new Map<string, ClientConnection[]>();
-
-        for (const clientId of subscribedClientIds) {
-            if (clientId === excludeClientId) continue;
-
-            const client = this.connectionManager.getClient(clientId);
-            if (!client || client.socket.readyState !== 1 || !client.isAuthenticated || !client.principal) {
-                continue;
-            }
-
-            // Create a role signature for grouping (sorted roles joined)
-            const roleSignature = (client.principal.roles || ['USER']).sort().join(',');
-
-            if (!clientsByRoleSignature.has(roleSignature)) {
-                clientsByRoleSignature.set(roleSignature, []);
-            }
-            clientsByRoleSignature.get(roleSignature)!.push(client);
-        }
-
-        // For each role group, filter events once and serialize once
-        for (const [, clients] of clientsByRoleSignature) {
-            if (clients.length === 0) continue;
-
-            // Use first client as representative for filtering (same roles = same permissions)
-            const representativeClient = clients[0];
-
-            // Filter all events for this role group
-            const filteredEvents = events.map(eventPayload => {
-                const mapName = eventPayload.mapName;
-                const newPayload = { ...eventPayload };
-
-                if (newPayload.record) { // LWW
-                    const newVal = this.securityManager.filterObject(
-                        newPayload.record.value,
-                        representativeClient.principal!,
-                        mapName
-                    );
-                    newPayload.record = { ...newPayload.record, value: newVal };
-                }
-
-                if (newPayload.orRecord) { // OR_ADD
-                    const newVal = this.securityManager.filterObject(
-                        newPayload.orRecord.value,
-                        representativeClient.principal!,
-                        mapName
-                    );
-                    newPayload.orRecord = { ...newPayload.orRecord, value: newVal };
-                }
-
-                return newPayload;
-            });
-
-            // Serialize ONCE for this entire group
-            const batchMessage = {
-                type: 'SERVER_BATCH_EVENT',
-                payload: { events: filteredEvents },
-                timestamp: this.hlc.now()
-            };
-            const serializedBatch = serialize(batchMessage);
-
-            // Send to all clients in this role group
-            for (const client of clients) {
-                try {
-                    client.writer.writeRaw(serializedBatch);
-                } catch (err) {
-                    logger.error({ clientId: client.id, err }, 'Failed to send batch to client');
-                }
-            }
-        }
-    }
-
-    /**
-     * Helper method to get role signature for a client (for caching key)
-     */
-    private getClientRoleSignature(client: ClientConnection): string {
-        if (!client.principal || !client.principal.roles) {
-            return 'USER';
-        }
-        return client.principal.roles.sort().join(',');
+        this.broadcastHandler.broadcastBatch(events, excludeClientId);
     }
 
     /**
@@ -1980,111 +1835,7 @@ export class ServerCoordinator {
      * Used when backpressure forces sync processing to drain the pipeline.
      */
     private async broadcastBatchSync(events: any[], excludeClientId?: string): Promise<void> {
-        if (events.length === 0) return;
-
-        // Get unique map names from events
-        const affectedMaps = new Set<string>();
-        for (const event of events) {
-            if (event.mapName) {
-                affectedMaps.add(event.mapName);
-            }
-        }
-
-        // Get all subscribed client IDs across all affected maps
-        const subscribedClientIds = new Set<string>();
-        for (const mapName of affectedMaps) {
-            const mapSubscribers = this.queryRegistry.getSubscribedClientIds(mapName);
-            for (const clientId of mapSubscribers) {
-                subscribedClientIds.add(clientId);
-            }
-        }
-
-        if (subscribedClientIds.size === 0) {
-            return;
-        }
-
-        // Group subscribed clients by their role signature
-        const clientsByRoleSignature = new Map<string, ClientConnection[]>();
-
-        for (const clientId of subscribedClientIds) {
-            if (clientId === excludeClientId) continue;
-
-            const client = this.connectionManager.getClient(clientId);
-            if (!client || client.socket.readyState !== 1 || !client.isAuthenticated || !client.principal) {
-                continue;
-            }
-
-            const roleSignature = (client.principal.roles || ['USER']).sort().join(',');
-
-            if (!clientsByRoleSignature.has(roleSignature)) {
-                clientsByRoleSignature.set(roleSignature, []);
-            }
-            clientsByRoleSignature.get(roleSignature)!.push(client);
-        }
-
-        // Collect all send promises
-        const sendPromises: Promise<void>[] = [];
-
-        for (const [, clients] of clientsByRoleSignature) {
-            if (clients.length === 0) continue;
-
-            const representativeClient = clients[0];
-
-            // Filter all events for this role group
-            const filteredEvents = events.map(eventPayload => {
-                const mapName = eventPayload.mapName;
-                const newPayload = { ...eventPayload };
-
-                if (newPayload.record) {
-                    const newVal = this.securityManager.filterObject(
-                        newPayload.record.value,
-                        representativeClient.principal!,
-                        mapName
-                    );
-                    newPayload.record = { ...newPayload.record, value: newVal };
-                }
-
-                if (newPayload.orRecord) {
-                    const newVal = this.securityManager.filterObject(
-                        newPayload.orRecord.value,
-                        representativeClient.principal!,
-                        mapName
-                    );
-                    newPayload.orRecord = { ...newPayload.orRecord, value: newVal };
-                }
-
-                return newPayload;
-            });
-
-            const batchMessage = {
-                type: 'SERVER_BATCH_EVENT',
-                payload: { events: filteredEvents },
-                timestamp: this.hlc.now()
-            };
-            const serializedBatch = serialize(batchMessage);
-
-            // Send to all clients and collect promises
-            for (const client of clients) {
-                sendPromises.push(new Promise<void>((resolve, reject) => {
-                    try {
-                        client.socket.send(serializedBatch, (err) => {
-                            if (err) {
-                                logger.error({ clientId: client.id, err }, 'Failed to send sync batch to client');
-                                reject(err);
-                            } else {
-                                resolve();
-                            }
-                        });
-                    } catch (err) {
-                        logger.error({ clientId: client.id, err }, 'Exception sending sync batch to client');
-                        reject(err);
-                    }
-                }));
-            }
-        }
-
-        // Wait for all sends to complete (ignore individual failures)
-        await Promise.allSettled(sendPromises);
+        await this.broadcastHandler.broadcastBatchSync(events, excludeClientId);
     }
 
     private setupClusterListeners() {
