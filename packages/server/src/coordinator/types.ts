@@ -562,3 +562,31 @@ export interface QueryHandlerConfig {
     };
     ConsistencyLevel: { EVENTUAL: any };
 }
+
+// ============================================================================
+// BroadcastHandler Types
+// ============================================================================
+
+/**
+ * Interface for handling broadcast operations.
+ */
+export interface IBroadcastHandler {
+    broadcast(message: any, excludeClientId?: string): void;
+    broadcastBatch(events: any[], excludeClientId?: string): void;
+    broadcastBatchSync(events: any[], excludeClientId?: string): Promise<void>;
+}
+
+/**
+ * Configuration for BroadcastHandler.
+ */
+export interface BroadcastHandlerConfig {
+    connectionManager: IConnectionManager;
+    securityManager: { filterObject: (value: any, principal: Principal, mapName: string) => any };
+    queryRegistry: { getSubscribedClientIds: (mapName: string) => Set<string> };
+    metricsService: {
+        incEventsRouted: () => void;
+        incEventsFilteredBySubscription: () => void;
+        recordSubscribersPerEvent: (count: number) => void;
+    };
+    hlc: HLC;
+}
