@@ -10,7 +10,7 @@
 
 import { ServerCoordinator, ServerCoordinatorConfig } from '../ServerCoordinator';
 import { TopGunClient } from '@topgunbuild/client';
-import { MemoryStorageAdapter } from '@topgunbuild/adapters';
+import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
 import { BuiltInProcessors } from '@topgunbuild/core';
 import { waitForConnection } from './utils/test-helpers';
 

@@ -351,7 +351,7 @@ describe('Conflict Resolver Integration', () => {
       expect(rejections.length).toBe(0);
 
       // Deletion should be rejected
-      map.delete('config');
+      map.remove('config');
       await new Promise(r => setTimeout(r, 500));
 
       expect(rejections.length).toBe(1);
@@ -370,7 +370,7 @@ describe('Conflict Resolver Integration', () => {
       await new Promise(r => setTimeout(r, 300));
 
       // Delete should succeed (no resolver to block it)
-      map1.delete('item1');
+      map1.remove('item1');
       await new Promise(r => setTimeout(r, 300));
 
       // Verify deletion propagated
@@ -409,7 +409,7 @@ describe('Conflict Resolver Integration', () => {
 
       // Client2 tries to delete - should be rejected
       const map2 = client2.getMap<string, { ownerId: string; data: string }>('owned-data');
-      map2.delete('doc1');
+      map2.remove('doc1');
       await new Promise(r => setTimeout(r, 500));
 
       expect(rejections.length).toBe(1);
