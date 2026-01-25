@@ -13,6 +13,9 @@ export { BroadcastHandler } from './broadcast-handler';
 // SPEC-003b: GC handler
 export { GCHandler } from './gc-handler';
 
+// SPEC-003c: Cluster event handler
+export { ClusterEventHandler } from './cluster-event-handler';
+
 // Phase 4: Additional handler modules
 export { PartitionHandler } from './partition-handler';
 export { TopicHandler } from './topic-handler';
@@ -48,6 +51,9 @@ export type {
     // GC types
     IGCHandler,
     GCHandlerConfig,
+    // Cluster event types
+    IClusterEventHandler,
+    ClusterEventHandlerConfig,
     // Partition types
     IPartitionHandler,
     PartitionHandlerConfig,

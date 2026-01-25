@@ -638,3 +638,66 @@ export interface GCHandlerConfig {
     gcIntervalMs?: number;
     gcAgeMs?: number;
 }
+
+// ============================================================================
+// ClusterEventHandler Types
+// ============================================================================
+
+/**
+ * Interface for handling cluster event messages.
+ */
+export interface IClusterEventHandler {
+    setupListeners(): void;
+    teardownListeners(): void;
+}
+
+/**
+ * Configuration for ClusterEventHandler.
+ */
+export interface ClusterEventHandlerConfig {
+    cluster: {
+        on: (event: string, handler: (...args: any[]) => void) => void;
+        off?: (event: string, handler: (...args: any[]) => void) => void;
+        send: (nodeId: string, type: any, payload: any) => void;
+        config: { nodeId: string };
+    };
+    partitionService: {
+        isLocalOwner: (key: string) => boolean;
+        getOwner: (key: string) => string;
+        isRelated: (key: string) => boolean;
+    };
+    lockManager: {
+        acquire: (name: string, clientId: string, requestId: string, ttl: number) => { granted: boolean; fencingToken?: number };
+        release: (name: string, clientId: string, fencingToken: number) => boolean;
+        handleClientDisconnect: (clientId: string) => void;
+    };
+    topicManager: {
+        publish: (topic: string, data: any, senderId: string, fromCluster?: boolean) => void;
+    };
+    repairScheduler?: {
+        emit: (event: string, data: any) => void;
+    };
+    connectionManager: IConnectionManager;
+    storageManager: IStorageManager;
+    queryRegistry: {
+        processChange: (mapName: string, map: any, key: string, record: any, oldValue: any) => void;
+    };
+    metricsService: {
+        incOp: (op: any, mapName: string) => void;
+        setClusterMembers: (count: number) => void;
+    };
+    gcHandler: IGCHandler;
+    hlc: HLC;
+    merkleTreeManager?: {
+        getRootHash: (partitionId: number) => number;
+    };
+
+    // Callbacks for operations that remain in ServerCoordinator
+    processLocalOp: (op: any, fromCluster: boolean, senderId?: string) => Promise<void>;
+    executeLocalQuery: (mapName: string, query: any) => Promise<any[]>;
+    finalizeClusterQuery: (requestId: string, timeout?: boolean) => void;
+    getLocalRecord: (key: string) => any;
+    broadcast: (message: any, excludeClientId?: string) => void;
+    getMap: (name: string, typeHint: 'LWW' | 'OR') => any;
+    pendingClusterQueries: Map<string, any>;
+}
