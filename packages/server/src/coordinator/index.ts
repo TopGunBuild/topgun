@@ -7,6 +7,9 @@ export { StorageManager } from './storage-manager';
 export { OperationHandler } from './operation-handler';
 export { createMessageRegistry } from './message-registry';
 
+// SPEC-003a: Broadcast handler
+export { BroadcastHandler } from './broadcast-handler';
+
 // Phase 4: Additional handler modules
 export { PartitionHandler } from './partition-handler';
 export { TopicHandler } from './topic-handler';
@@ -36,6 +39,9 @@ export type {
     // Operation types
     IOperationHandler,
     OperationHandlerConfig,
+    // Broadcast types
+    IBroadcastHandler,
+    BroadcastHandlerConfig,
     // Partition types
     IPartitionHandler,
     PartitionHandlerConfig,
