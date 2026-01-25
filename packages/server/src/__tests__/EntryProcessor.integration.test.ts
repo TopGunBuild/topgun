@@ -41,7 +41,7 @@ describe('Entry Processor Integration', () => {
 
     await client.start();
     client.setAuthToken(
-      require('jsonwebtoken').sign({ sub: 'test-user', role: 'admin' }, 'test-secret'),
+      require('jsonwebtoken').sign({ sub: 'test-user', roles: ['ADMIN'] }, 'test-secret'),
     );
 
     // Wait for connection with bounded polling
