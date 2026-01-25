@@ -2,17 +2,16 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-003b
-- **Status:** review
-- **Next Step:** /sf:review
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-003b | Extract GCHandler from ServerCoordinator | high | review | - |
-| 2 | SPEC-003c | Extract ClusterEventHandler from ServerCoordinator | high | draft | SPEC-003b |
-| 3 | SPEC-003d | Extract Additional Handlers to Reach 1500 Line Target | high | draft | SPEC-003c |
+| 1 | SPEC-003c | Extract ClusterEventHandler from ServerCoordinator | high | draft | - |
+| 2 | SPEC-003d | Extract Additional Handlers to Reach 1500 Line Target | high | draft | SPEC-003c |
 
 ## Decisions
 
@@ -23,7 +22,7 @@
 | 2026-01-25 | PRE-001 | Handler extraction pattern for ServerCoordinator reduction (BroadcastHandler, GCHandler, ClusterEventHandler) |
 | 2026-01-25 | SPEC-003 | Split SPEC-003 into 4 parts: SPEC-003a (BroadcastHandler), SPEC-003b (GCHandler), SPEC-003c (ClusterEventHandler), SPEC-003d (Additional Handlers) |
 | 2026-01-25 | SPEC-003a | BroadcastHandler extraction pattern with Config-based DI and delegation from ServerCoordinator |
-| 2026-01-25 | SPEC-003b | GCHandler extraction approved - follows established handler pattern |
+| 2026-01-25 | SPEC-003b | GCHandler extraction approved - follows established handler pattern with distributed consensus |
 
 ## Project Patterns
 
