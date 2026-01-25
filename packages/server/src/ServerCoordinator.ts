@@ -3,17 +3,16 @@ import { createServer as createHttpsServer, Server as HttpsServer, ServerOptions
 import { readFileSync } from 'fs';
 import * as net from 'net';
 import { WebSocketServer, WebSocket } from 'ws';
-import { HLC, LWWMap, ORMap, MerkleTree, serialize, deserialize, PermissionPolicy, Principal, PermissionType, Timestamp, LWWRecord, ORMapRecord, MessageSchema, WriteConcern, WriteConcernValue, ConsistencyLevel, ReplicationConfig, DEFAULT_REPLICATION_CONFIG, IndexedLWWMap, IndexedORMap, QueryCursor, DEFAULT_QUERY_CURSOR_MAX_AGE_MS, PARTITION_COUNT, type QueryExpression as CoreQuery } from '@topgunbuild/core';
+import { HLC, LWWMap, ORMap, MerkleTree, serialize, deserialize, PermissionPolicy, Principal, PermissionType, Timestamp, LWWRecord, MessageSchema, WriteConcern, WriteConcernValue, ConsistencyLevel, ReplicationConfig, DEFAULT_REPLICATION_CONFIG, IndexedLWWMap, IndexedORMap, QueryCursor, DEFAULT_QUERY_CURSOR_MAX_AGE_MS, PARTITION_COUNT, type QueryExpression as CoreQuery } from '@topgunbuild/core';
 import { IServerStorage, StorageValue, ORMapValue, ORMapTombstones } from './storage/IServerStorage';
 import { IInterceptor, ServerOp, OpContext, ConnectionContext } from './interceptor/IInterceptor';
 import * as jwt from 'jsonwebtoken';
 import * as crypto from 'crypto';
 import { QueryRegistry, Subscription } from './query/QueryRegistry';
 
-const GC_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
-const GC_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const CLIENT_HEARTBEAT_TIMEOUT_MS = 20000; // 20 seconds - evict clients that haven't pinged
 const CLIENT_HEARTBEAT_CHECK_INTERVAL_MS = 5000; // Check for dead clients every 5 seconds
+const GC_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days - used by sync handlers for tombstone filtering
 import { TopicManager } from './topic/TopicManager';
 import { ClusterManager } from './cluster/ClusterManager';
 import { PartitionService } from './cluster/PartitionService';
@@ -60,6 +59,7 @@ import {
     StorageManager,
     OperationHandler,
     BroadcastHandler,
+    GCHandler,
     createMessageRegistry,
     PartitionHandler,
     TopicHandler,
@@ -216,15 +216,12 @@ export class ServerCoordinator {
     private authHandler!: AuthHandler;
     private operationHandler!: OperationHandler;
     private broadcastHandler!: BroadcastHandler;
+    private gcHandler!: GCHandler;
     private messageRegistry!: MessageRegistry;
     private systemManager!: SystemManager;
 
     private pendingClusterQueries: Map<string, PendingClusterQuery> = new Map();
-    private gcInterval?: NodeJS.Timeout;
     private heartbeatCheckInterval?: NodeJS.Timeout;
-
-    // GC Consensus State
-    private gcReports: Map<string, Timestamp> = new Map();
 
     // Track pending batch operations for testing purposes
     private pendingBatchOperations: Set<Promise<void>> = new Set();
@@ -849,6 +846,39 @@ export class ServerCoordinator {
                 hlc: this.hlc,
             });
 
+            // SPEC-003b: Initialize GCHandler for garbage collection
+            this.gcHandler = new GCHandler({
+                storageManager: this.storageManager,
+                connectionManager: this.connectionManager,
+                cluster: {
+                    getMembers: () => this.cluster.getMembers(),
+                    send: (nodeId, type, payload) => this.cluster.send(nodeId, type, payload),
+                    isLocal: (id) => this.cluster.isLocal(id),
+                    config: { nodeId: config.nodeId },
+                },
+                partitionService: {
+                    isRelated: (key) => this.partitionService.isRelated(key),
+                    getPartitionId: (key) => this.partitionService.getPartitionId(key),
+                },
+                replicationPipeline: this.replicationPipeline ? {
+                    replicate: async (op, opId, key) => {
+                        await this.replicationPipeline!.replicate(op, opId, key);
+                    }
+                } : undefined,
+                merkleTreeManager: this.merkleTreeManager ? {
+                    updateRecord: (partitionId, key, record) => this.merkleTreeManager!.updateRecord(partitionId, key, record),
+                } : undefined,
+                queryRegistry: {
+                    processChange: this.queryRegistry.processChange.bind(this.queryRegistry),
+                },
+                hlc: this.hlc,
+                storage: this.storage,
+                broadcast: (message) => this.broadcast(message),
+                metricsService: {
+                    incOp: this.metricsService.incOp.bind(this.metricsService),
+                },
+            });
+
             // Phase 4: Initialize all message handlers
             const partitionHandler = new PartitionHandler({
                 partitionService: {
@@ -1052,6 +1082,7 @@ export class ServerCoordinator {
                 this.metricsService.setClusterMembers(this.cluster.getMembers().length);
                 logger.info({ clusterPort: this._actualClusterPort }, 'Cluster started');
                 this.systemManager.start();
+                this.gcHandler.start();
                 this._readyResolve();
             }).catch((err) => {
                 // Fallback for ClusterManager that doesn't return port
@@ -1059,6 +1090,7 @@ export class ServerCoordinator {
                 this.metricsService.setClusterMembers(this.cluster.getMembers().length);
                 logger.info({ clusterPort: this._actualClusterPort }, 'Cluster started (sync)');
                 this.systemManager.start();
+                this.gcHandler.start();
                 this._readyResolve();
             });
         });
@@ -1075,7 +1107,6 @@ export class ServerCoordinator {
             });
         }
 
-        this.startGarbageCollection();
         this.startHeartbeatCheck();
     }
 
@@ -1431,9 +1462,8 @@ export class ServerCoordinator {
         }
 
         // 6. Cleanup
-        if (this.gcInterval) {
-            clearInterval(this.gcInterval);
-            this.gcInterval = undefined;
+        if (this.gcHandler) {
+            this.gcHandler.stop();
         }
 
         if (this.heartbeatCheckInterval) {
@@ -1910,12 +1940,12 @@ export class ServerCoordinator {
                 }
 
                 case 'CLUSTER_GC_REPORT': {
-                    this.handleGcReport(msg.senderId, msg.payload.minHlc);
+                    this.gcHandler.handleGcReport(msg.senderId, msg.payload.minHlc);
                     break;
                 }
 
                 case 'CLUSTER_GC_COMMIT': {
-                    this.performGarbageCollection(msg.payload.safeTimestamp);
+                    this.gcHandler.performGarbageCollection(msg.payload.safeTimestamp);
                     break;
                 }
 
@@ -2845,6 +2875,14 @@ export class ServerCoordinator {
     }
 
     /**
+     * Performs garbage collection (for testing/manual invocation).
+     * Delegates to GCHandler.
+     */
+    public performGarbageCollection(olderThan: Timestamp): void {
+        this.gcHandler.performGarbageCollection(olderThan);
+    }
+
+    /**
      * Phase 10.04: Get local record for anti-entropy repair
      * Returns the LWWRecord for a key, used by RepairScheduler
      */
@@ -2904,12 +2942,6 @@ export class ServerCoordinator {
         }
     }
 
-
-    private startGarbageCollection() {
-        this.gcInterval = setInterval(() => {
-            this.reportLocalHlc();
-        }, GC_INTERVAL_MS);
-    }
 
     // ============ Heartbeat Methods ============
 
@@ -2989,280 +3021,6 @@ export class ServerCoordinator {
         }
     }
 
-    private reportLocalHlc() {
-        // 1. Calculate Local Min HLC
-        let minHlc = this.hlc.now();
-
-        for (const client of this.connectionManager.getClients().values()) {
-            if (HLC.compare(client.lastActiveHlc, minHlc) < 0) {
-                minHlc = client.lastActiveHlc;
-            }
-        }
-
-        const members = this.cluster.getMembers().sort();
-        const leaderId = members[0];
-        const myId = this.cluster.config.nodeId;
-
-        if (leaderId === myId) {
-            // I am Leader
-            this.handleGcReport(myId, minHlc);
-        } else {
-            // Send to Leader
-            this.cluster.send(leaderId, 'CLUSTER_GC_REPORT', { minHlc });
-        }
-    }
-
-    private handleGcReport(nodeId: string, minHlc: Timestamp) {
-        this.gcReports.set(nodeId, minHlc);
-
-        const members = this.cluster.getMembers();
-
-        // Check if we have reports from ALL members
-        // (Including self, which is inserted directly)
-        const allReported = members.every(m => this.gcReports.has(m));
-
-        if (allReported) {
-            // Calculate Global Safe Timestamp
-            let globalSafe = this.hlc.now(); // Start high
-            let initialized = false;
-
-            for (const ts of this.gcReports.values()) {
-                if (!initialized || HLC.compare(ts, globalSafe) < 0) {
-                    globalSafe = ts;
-                    initialized = true;
-                }
-            }
-
-            // Add safety buffer (e.g. GC_AGE)
-            // prune(timestamp) removes items OLDER than timestamp.
-            // We want to remove items OLDER than (GlobalMin - GC_AGE).
-
-            const olderThanMillis = globalSafe.millis - GC_AGE_MS;
-            const safeTimestamp: Timestamp = {
-                millis: olderThanMillis,
-                counter: 0,
-                nodeId: globalSafe.nodeId // Doesn't matter much for comparison if millis match, but best effort
-            };
-
-            logger.info({
-                globalMinHlc: globalSafe.millis,
-                safeGcTimestamp: olderThanMillis,
-                reportsCount: this.gcReports.size
-            }, 'GC Consensus Reached. Broadcasting Commit.');
-
-            // Broadcast Commit
-            const commitMsg = {
-                type: 'CLUSTER_GC_COMMIT', // Handled by cluster listener
-                payload: { safeTimestamp }
-            };
-
-            // Send to others
-            for (const member of members) {
-                if (!this.cluster.isLocal(member)) {
-                    this.cluster.send(member, 'CLUSTER_GC_COMMIT', { safeTimestamp });
-                }
-            }
-
-            // Execute Locally
-            this.performGarbageCollection(safeTimestamp);
-
-            // Clear reports for next round?
-            // Or keep them and overwrite?
-            // Overwriting is better for partial updates, but clearing ensures freshness.
-            // Since we run interval based, clearing is safer to ensure active participation next time.
-            this.gcReports.clear();
-        }
-    }
-
-    private performGarbageCollection(olderThan: Timestamp) {
-        logger.info({ olderThanMillis: olderThan.millis }, 'Performing Garbage Collection');
-        const now = Date.now();
-
-        for (const [name, map] of this.storageManager.getMaps()) {
-            // 1. Check for active expired records (TTL)
-            if (map instanceof LWWMap) {
-                for (const key of map.allKeys()) {
-                    const record = map.getRecord(key);
-                    if (record && record.value !== null && record.ttlMs) {
-                        const expirationTime = record.timestamp.millis + record.ttlMs;
-                        if (expirationTime < now) {
-                            logger.info({ mapName: name, key }, 'Record expired (TTL). Converting to tombstone.');
-
-                            // Create Tombstone at expiration time to handle "Resurrection" correctly
-                            const tombstoneTimestamp: Timestamp = {
-                                millis: expirationTime,
-                                counter: 0, // Reset counter for expiration time
-                                nodeId: this.hlc.getNodeId // Use our ID
-                            };
-
-                            const tombstone: LWWRecord<any> = { value: null, timestamp: tombstoneTimestamp };
-
-                            // Apply locally
-                            const changed = map.merge(key, tombstone);
-
-                            if (changed) {
-                                // Persist and Broadcast
-                                if (this.storage) {
-                                    this.storage.store(name, key, tombstone).catch(err =>
-                                        logger.error({ mapName: name, key, err }, 'Failed to persist expired tombstone')
-                                    );
-                                }
-
-                                const eventPayload = {
-                                    mapName: name,
-                                    key: key,
-                                    eventType: 'UPDATED',
-                                    record: tombstone
-                                };
-
-                                // Broadcast to local clients
-                                this.broadcast({
-                                    type: 'SERVER_EVENT',
-                                    payload: eventPayload,
-                                    timestamp: this.hlc.now()
-                                });
-
-                                // Notify query subscriptions (handles both local and distributed via CLUSTER_SUB_UPDATE)
-                                this.queryRegistry.processChange(name, map, key, tombstone, record);
-
-                                // Replicate to backup nodes via partition-aware ReplicationPipeline
-                                // This replaces the O(N) CLUSTER_EVENT broadcast
-                                if (this.replicationPipeline) {
-                                    const op = {
-                                        opType: 'set',
-                                        mapName: name,
-                                        key: key,
-                                        record: tombstone
-                                    };
-                                    const opId = `ttl:${name}:${key}:${Date.now()}`;
-                                    this.replicationPipeline.replicate(op, opId, key).catch(err => {
-                                        logger.warn({ opId, key, err }, 'TTL expiration replication failed (non-fatal)');
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 2. Prune old tombstones
-                const removedKeys = map.prune(olderThan);
-                if (removedKeys.length > 0) {
-                    logger.info({ mapName: name, count: removedKeys.length }, 'Pruned records from LWW map');
-                    if (this.storage) {
-                        this.storage.deleteAll(name, removedKeys).catch(err => {
-                            logger.error({ mapName: name, err }, 'Failed to delete pruned keys from storage');
-                        });
-                    }
-                }
-            } else if (map instanceof ORMap) {
-                // ORMap Expiration
-                // We need to check all active records in the ORMap
-                const items = (map as any).items as Map<string, Map<string, ORMapRecord<any>>>;
-                const tombstonesSet = (map as any).tombstones as Set<string>;
-
-                const tagsToExpire: { key: string; tag: string }[] = [];
-
-                for (const [key, keyMap] of items) {
-                    for (const [tag, record] of keyMap) {
-                        if (!tombstonesSet.has(tag)) {
-                            if (record.ttlMs) {
-                                const expirationTime = record.timestamp.millis + record.ttlMs;
-                                if (expirationTime < now) {
-                                    tagsToExpire.push({ key, tag });
-                                }
-                            }
-                        }
-                    }
-                }
-
-                for (const { key, tag } of tagsToExpire) {
-                    logger.info({ mapName: name, key, tag }, 'ORMap Record expired (TTL). Removing.');
-
-                    // Get old records for processChange before modification
-                    const oldRecords = map.getRecords(key);
-
-                    // Remove by adding tag to tombstones
-                    map.applyTombstone(tag);
-
-                    // Persist change
-                    if (this.storage) {
-                        // We need to update the key's record list and tombstones
-                        // Optimally, we should batch these updates
-                        const records = map.getRecords(key);
-                        if (records.length > 0) {
-                            this.storage.store(name, key, { type: 'OR', records });
-                        } else {
-                            this.storage.delete(name, key);
-                        }
-
-                        const currentTombstones = map.getTombstones();
-                        this.storage.store(name, '__tombstones__', {
-                            type: 'OR_TOMBSTONES',
-                            tags: currentTombstones
-                        });
-                    }
-
-                    // Broadcast
-                    const eventPayload = {
-                        mapName: name,
-                        key: key,
-                        eventType: 'OR_REMOVE',
-                        orTag: tag
-                    };
-
-                    // Broadcast to local clients
-                    this.broadcast({
-                        type: 'SERVER_EVENT',
-                        payload: eventPayload,
-                        timestamp: this.hlc.now()
-                    });
-
-                    // Notify query subscriptions (handles both local and distributed via CLUSTER_SUB_UPDATE)
-                    const newRecords = map.getRecords(key);
-                    this.queryRegistry.processChange(name, map, key, newRecords, oldRecords);
-
-                    // Replicate to backup nodes via partition-aware ReplicationPipeline
-                    // This replaces the O(N) CLUSTER_EVENT broadcast
-                    if (this.replicationPipeline) {
-                        const op = {
-                            opType: 'OR_REMOVE',
-                            mapName: name,
-                            key: key,
-                            orTag: tag
-                        };
-                        const opId = `ttl:${name}:${key}:${tag}:${Date.now()}`;
-                        this.replicationPipeline.replicate(op, opId, key).catch(err => {
-                            logger.warn({ opId, key, err }, 'ORMap TTL expiration replication failed (non-fatal)');
-                        });
-                    }
-                }
-
-                // 2. Prune old tombstones
-                const removedTags = map.prune(olderThan);
-                if (removedTags.length > 0) {
-                    logger.info({ mapName: name, count: removedTags.length }, 'Pruned tombstones from OR map');
-                    // We need to update __tombstones__ in storage
-                    if (this.storage) {
-                        const currentTombstones = map.getTombstones();
-                        this.storage.store(name, '__tombstones__', {
-                            type: 'OR_TOMBSTONES',
-                            tags: currentTombstones
-                        }).catch(err => {
-                            logger.error({ mapName: name, err }, 'Failed to update tombstones');
-                        });
-                    }
-                }
-            }
-        }
-
-        // Broadcast to clients
-        this.broadcast({
-            type: 'GC_PRUNE',
-            payload: {
-                olderThan
-            }
-        });
-    }
     private buildTLSOptions(config: TLSConfig): HttpsServerOptions {
         const options: HttpsServerOptions = {
             cert: readFileSync(config.certPath),
