@@ -724,6 +724,32 @@ export interface PersistenceHandlerConfig {
 }
 
 /**
+ * Interface for OperationContextHandler.
+ */
+export interface IOperationContextHandler {
+    /** Build operation context from clientId */
+    buildOpContext(clientId: string, fromCluster: boolean): any;
+    /** Run before interceptors on operation */
+    runBeforeInterceptors(op: any, context: any): Promise<any | null>;
+    /** Run after interceptors on operation (fire-and-forget) */
+    runAfterInterceptors(op: any, context: any): void;
+    /** Handle lock granted notification */
+    handleLockGranted(event: { clientId: string, requestId: string, name: string, fencingToken: number }): void;
+}
+
+/**
+ * Configuration for OperationContextHandler.
+ */
+export interface OperationContextHandlerConfig {
+    connectionManager: IConnectionManager;
+    interceptors: any[];
+    cluster: {
+        config: { nodeId: string };
+        send: (nodeId: string, type: any, payload: any) => void;
+    };
+}
+
+/**
  * Configuration for ClusterEventHandler.
  */
 export interface ClusterEventHandlerConfig {

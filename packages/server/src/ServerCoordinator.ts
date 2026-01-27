@@ -62,6 +62,7 @@ import {
     HeartbeatHandler,
     ClientMessageHandler,
     PersistenceHandler,
+    OperationContextHandler,
     createMessageRegistry,
     PartitionHandler,
     TopicHandler,
@@ -223,6 +224,7 @@ export class ServerCoordinator {
     private heartbeatHandler!: HeartbeatHandler;
     private clientMessageHandler!: ClientMessageHandler;
     private persistenceHandler!: PersistenceHandler;
+    private operationContextHandler!: OperationContextHandler;
     private messageRegistry!: MessageRegistry;
     private systemManager!: SystemManager;
 
@@ -947,6 +949,13 @@ export class ServerCoordinator {
             this.persistenceHandler = new PersistenceHandler({
                 storage: this.storage ?? null,
                 getMap: this.getMap.bind(this),
+            });
+
+            // SPEC-003d: Initialize OperationContextHandler for operation context and interceptors
+            this.operationContextHandler = new OperationContextHandler({
+                connectionManager: this.connectionManager,
+                interceptors: this.interceptors,
+                cluster: this.cluster,
             });
 
             // Phase 4: Initialize all message handlers
@@ -2310,90 +2319,25 @@ export class ServerCoordinator {
      * Build OpContext for interceptors.
      */
     private buildOpContext(clientId: string, fromCluster: boolean): OpContext {
-        let context: OpContext = {
-            clientId,
-            isAuthenticated: false,
-            fromCluster,
-            originalSenderId: clientId
-        };
-
-        if (!fromCluster) {
-            const client = this.connectionManager.getClient(clientId);
-            if (client) {
-                context = {
-                    clientId: client.id,
-                    socket: client.socket,
-                    isAuthenticated: client.isAuthenticated,
-                    principal: client.principal,
-                    fromCluster,
-                    originalSenderId: clientId
-                };
-            }
-        }
-
-        return context;
+        return this.operationContextHandler.buildOpContext(clientId, fromCluster);
     }
 
     /**
      * Run onBeforeOp interceptors. Returns modified op or null if dropped.
      */
     private async runBeforeInterceptors(op: any, context: OpContext): Promise<any | null> {
-        let currentOp: ServerOp | null = op;
-
-        for (const interceptor of this.interceptors) {
-            if (interceptor.onBeforeOp && currentOp) {
-                currentOp = await interceptor.onBeforeOp(currentOp, context);
-                if (!currentOp) {
-                    logger.debug({ interceptor: interceptor.name, opId: op.id }, 'Interceptor silently dropped op');
-                    return null;
-                }
-            }
-        }
-
-        return currentOp;
+        return this.operationContextHandler.runBeforeInterceptors(op, context);
     }
 
     /**
      * Run onAfterOp interceptors (fire-and-forget).
      */
     private runAfterInterceptors(op: any, context: OpContext): void {
-        for (const interceptor of this.interceptors) {
-            if (interceptor.onAfterOp) {
-                interceptor.onAfterOp(op, context).catch(err => {
-                    logger.error({ err }, 'Error in onAfterOp');
-                });
-            }
-        }
+        this.operationContextHandler.runAfterInterceptors(op, context);
     }
 
     private handleLockGranted({ clientId, requestId, name, fencingToken }: { clientId: string, requestId: string, name: string, fencingToken: number }) {
-        // Check if local client
-        const client = this.connectionManager.getClient(clientId);
-        if (client) {
-            client.writer.write({
-                type: 'LOCK_GRANTED',
-                payload: { requestId, name, fencingToken }
-            });
-            return;
-        }
-
-        // Check if remote client (composite ID: "nodeId:realClientId")
-        const parts = clientId.split(':');
-        if (parts.length === 2) {
-            const [nodeId, realClientId] = parts;
-            // Verify nodeId is not self (loopback check, though split should handle it)
-            if (nodeId !== this.cluster.config.nodeId) {
-                this.cluster.send(nodeId, 'CLUSTER_LOCK_GRANTED', {
-                    clientId: realClientId,
-                    requestId,
-                    name,
-                    fencingToken
-                });
-                return;
-            }
-        }
-
-        logger.warn({ clientId, name }, 'Lock granted to unknown client');
+        this.operationContextHandler.handleLockGranted({ clientId, requestId, name, fencingToken });
     }
 
     private async processLocalOp(op: any, fromCluster: boolean, originalSenderId?: string) {
