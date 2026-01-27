@@ -21,6 +21,7 @@ export { HeartbeatHandler } from './heartbeat-handler';
 export { ClientMessageHandler } from './client-message-handler';
 export { PersistenceHandler } from './persistence-handler';
 export { OperationContextHandler } from './operation-context-handler';
+export { QueryConversionHandler } from './query-conversion-handler';
 
 // Phase 4: Additional handler modules
 export { PartitionHandler } from './partition-handler';
@@ -105,4 +106,7 @@ export type {
     // Operation context types (SPEC-003d)
     IOperationContextHandler,
     OperationContextHandlerConfig,
+    // Query conversion types (SPEC-003d)
+    IQueryConversionHandler,
+    QueryConversionHandlerConfig,
 } from './types';

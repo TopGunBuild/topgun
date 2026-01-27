@@ -750,6 +750,34 @@ export interface OperationContextHandlerConfig {
 }
 
 /**
+ * Interface for QueryConversionHandler.
+ */
+export interface IQueryConversionHandler {
+    /** Execute query on local map */
+    executeLocalQuery(mapName: string, query: any): Promise<any[]>;
+    /** Convert server query to core query format */
+    convertToCoreQuery(query: any): any | null;
+    /** Convert predicate AST to core query */
+    predicateToCoreQuery(predicate: any): any | null;
+    /** Convert server operator to core operator */
+    convertOperator(op: string): 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | null;
+    /** Finalize cluster query with aggregation and pagination */
+    finalizeClusterQuery(requestId: string, timeout?: boolean): Promise<void>;
+}
+
+/**
+ * Configuration for QueryConversionHandler.
+ */
+export interface QueryConversionHandlerConfig {
+    getMapAsync: (mapName: string, typeHint?: 'LWW' | 'OR') => Promise<LWWMap<string, any> | ORMap<string, any>>;
+    pendingClusterQueries: Map<string, any>;
+    queryRegistry: any;
+    securityManager: {
+        filterObject: (value: any, principal: any, mapName: string) => any;
+    };
+}
+
+/**
  * Configuration for ClusterEventHandler.
  */
 export interface ClusterEventHandlerConfig {
