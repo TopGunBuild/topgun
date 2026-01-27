@@ -2,16 +2,15 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-003d
+- **Status:** review
+- **Next Step:** /sf:review
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-003c | Extract ClusterEventHandler from ServerCoordinator | high | draft | - |
-| 2 | SPEC-003d | Extract Additional Handlers to Reach 1500 Line Target | high | draft | SPEC-003c |
+| 1 | SPEC-003d | Extract Additional Handlers from ServerCoordinator | high | running | SPEC-003c |
 
 ## Decisions
 
@@ -23,6 +22,9 @@
 | 2026-01-25 | SPEC-003 | Split SPEC-003 into 4 parts: SPEC-003a (BroadcastHandler), SPEC-003b (GCHandler), SPEC-003c (ClusterEventHandler), SPEC-003d (Additional Handlers) |
 | 2026-01-25 | SPEC-003a | BroadcastHandler extraction pattern with Config-based DI and delegation from ServerCoordinator |
 | 2026-01-25 | SPEC-003b | GCHandler extraction approved - follows established handler pattern with distributed consensus |
+| 2026-01-25 | SPEC-003c | ClusterEventHandler extraction approved - routes 16 cluster message types with callback pattern |
+| 2026-01-26 | SPEC-003c | ClusterEventHandler implementation approved - all 16 message types correctly routed, 187 lines removed from ServerCoordinator |
+| 2026-01-27 | SPEC-003d | Extract 7 additional handlers (HeartbeatHandler, QueryConversionHandler, BatchProcessingHandler, WriteConcernHandler, ClientMessageHandler, PersistenceHandler, OperationContextHandler) - all methods verified, ~948 lines total |
 
 ## Project Patterns
 
@@ -38,4 +40,4 @@
 _No active warnings_
 
 ---
-*Last updated: 2026-01-25*
+*Last updated: 2026-01-27*
