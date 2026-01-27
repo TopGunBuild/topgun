@@ -827,3 +827,130 @@ export interface ClusterEventHandlerConfig {
     getMap: (name: string, typeHint: 'LWW' | 'OR') => any;
     pendingClusterQueries: Map<string, any>;
 }
+
+// ============================================================================
+// BatchProcessingHandler Types (SPEC-003d)
+// ============================================================================
+
+/**
+ * Interface for handling batch operation processing with backpressure.
+ */
+export interface IBatchProcessingHandler {
+    /** Process batch asynchronously with backpressure regulation */
+    processBatchAsync(ops: any[], clientId: string): Promise<void>;
+    /** Process batch synchronously (blocking) */
+    processBatchSync(ops: any[], clientId: string): Promise<void>;
+    /** Process single operation for batch (collects events instead of immediate broadcast) */
+    processLocalOpForBatch(op: any, clientId: string, batchedEvents: any[]): Promise<void>;
+    /** Forward operation to partition owner and wait for completion */
+    forwardOpAndWait(op: any, owner: string): Promise<void>;
+}
+
+/**
+ * Configuration for BatchProcessingHandler.
+ */
+export interface BatchProcessingHandlerConfig {
+    backpressure: {
+        shouldForceSync: () => boolean;
+        registerPending: () => boolean;
+        waitForCapacity: () => Promise<void>;
+        completePending: () => void;
+        getPendingOps: () => number;
+    };
+    partitionService: {
+        isLocalOwner: (key: string) => boolean;
+        getOwner: (key: string) => string;
+    };
+    cluster: {
+        sendToNode: (nodeId: string, message: any) => void;
+    };
+    metricsService: {
+        incBackpressureSyncForced: () => void;
+        incBackpressureWaits: () => void;
+        incBackpressureTimeouts: () => void;
+        setBackpressurePendingOps: (count: number) => void;
+    };
+    replicationPipeline?: {
+        replicate: (op: any, opId: string, key: string) => Promise<any>;
+    };
+    broadcastBatch: (events: any[], excludeClientId?: string) => void;
+    broadcastBatchSync: (events: any[], excludeClientId?: string) => Promise<void>;
+    buildOpContext: (clientId: string, fromCluster: boolean) => any;
+    runBeforeInterceptors: (op: any, context: any) => Promise<any | null>;
+    runAfterInterceptors: (op: any, context: any) => void;
+    applyOpToMap: (op: any, clientId?: string) => Promise<{ eventPayload: any; oldRecord?: any; rejected?: boolean }>;
+}
+
+// ============================================================================
+// WriteConcernHandler Types (SPEC-003d)
+// ============================================================================
+
+/**
+ * Interface for handling Write Concern tracking and acknowledgments.
+ */
+export interface IWriteConcernHandler {
+    /** Get effective Write Concern level for an operation */
+    getEffectiveWriteConcern(opLevel?: any, batchLevel?: any): any;
+    /** Convert string WriteConcern value to enum */
+    stringToWriteConcern(value?: any): any;
+    /** Process batch asynchronously with Write Concern tracking */
+    processBatchAsyncWithWriteConcern(
+        ops: any[],
+        clientId: string,
+        batchWriteConcern?: any,
+        batchTimeout?: number
+    ): Promise<void>;
+    /** Process batch synchronously with Write Concern tracking */
+    processBatchSyncWithWriteConcern(
+        ops: any[],
+        clientId: string,
+        batchWriteConcern?: any,
+        batchTimeout?: number
+    ): Promise<void>;
+    /** Process single operation with Write Concern level notifications */
+    processLocalOpWithWriteConcern(
+        op: any,
+        clientId: string,
+        batchedEvents: any[],
+        batchWriteConcern?: any
+    ): Promise<void>;
+}
+
+/**
+ * Configuration for WriteConcernHandler.
+ */
+export interface WriteConcernHandlerConfig {
+    backpressure: {
+        shouldForceSync: () => boolean;
+        registerPending: () => boolean;
+        waitForCapacity: () => Promise<void>;
+        completePending: () => void;
+        getPendingOps: () => number;
+    };
+    partitionService: {
+        isLocalOwner: (key: string) => boolean;
+        getOwner: (key: string) => string;
+    };
+    cluster: {
+        sendToNode: (nodeId: string, message: any) => void;
+    };
+    metricsService: {
+        incBackpressureSyncForced: () => void;
+        incBackpressureWaits: () => void;
+        incBackpressureTimeouts: () => void;
+        setBackpressurePendingOps: (count: number) => void;
+    };
+    writeAckManager: {
+        notifyLevel: (opId: string, level: any) => void;
+        failPending: (opId: string, error: string) => void;
+    };
+    storage: IServerStorage | null;
+    broadcastBatch: (events: any[], excludeClientId?: string) => void;
+    broadcastBatchSync: (events: any[], excludeClientId?: string) => Promise<void>;
+    buildOpContext: (clientId: string, fromCluster: boolean) => any;
+    runBeforeInterceptors: (op: any, context: any) => Promise<any | null>;
+    runAfterInterceptors: (op: any, context: any) => void;
+    applyOpToMap: (op: any, clientId?: string) => Promise<{ eventPayload: any; oldRecord?: any; rejected?: boolean }>;
+    persistOpSync: (op: any) => Promise<void>;
+    persistOpAsync: (op: any) => Promise<void>;
+}

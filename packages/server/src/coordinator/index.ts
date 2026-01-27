@@ -22,6 +22,8 @@ export { ClientMessageHandler } from './client-message-handler';
 export { PersistenceHandler } from './persistence-handler';
 export { OperationContextHandler } from './operation-context-handler';
 export { QueryConversionHandler } from './query-conversion-handler';
+export { BatchProcessingHandler } from './batch-processing-handler';
+export { WriteConcernHandler } from './write-concern-handler';
 
 // Phase 4: Additional handler modules
 export { PartitionHandler } from './partition-handler';
@@ -109,4 +111,10 @@ export type {
     // Query conversion types (SPEC-003d)
     IQueryConversionHandler,
     QueryConversionHandlerConfig,
+    // Batch processing types (SPEC-003d)
+    IBatchProcessingHandler,
+    BatchProcessingHandlerConfig,
+    // Write concern types (SPEC-003d)
+    IWriteConcernHandler,
+    WriteConcernHandlerConfig,
 } from './types';

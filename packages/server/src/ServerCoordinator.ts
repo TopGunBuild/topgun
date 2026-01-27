@@ -64,6 +64,8 @@ import {
     PersistenceHandler,
     OperationContextHandler,
     QueryConversionHandler,
+    BatchProcessingHandler,
+    WriteConcernHandler,
     createMessageRegistry,
     PartitionHandler,
     TopicHandler,
@@ -227,6 +229,8 @@ export class ServerCoordinator {
     private persistenceHandler!: PersistenceHandler;
     private operationContextHandler!: OperationContextHandler;
     private queryConversionHandler!: QueryConversionHandler;
+    private batchProcessingHandler!: BatchProcessingHandler;
+    private writeConcernHandler!: WriteConcernHandler;
     private messageRegistry!: MessageRegistry;
     private systemManager!: SystemManager;
 
@@ -966,6 +970,39 @@ export class ServerCoordinator {
                 pendingClusterQueries: this.pendingClusterQueries,
                 queryRegistry: this.queryRegistry,
                 securityManager: this.securityManager,
+            });
+
+            // SPEC-003d: Initialize BatchProcessingHandler for batch operation processing
+            this.batchProcessingHandler = new BatchProcessingHandler({
+                backpressure: this.backpressure,
+                partitionService: this.partitionService,
+                cluster: this.cluster,
+                metricsService: this.metricsService,
+                replicationPipeline: this.replicationPipeline,
+                broadcastBatch: this.broadcastBatch.bind(this),
+                broadcastBatchSync: this.broadcastBatchSync.bind(this),
+                buildOpContext: this.buildOpContext.bind(this),
+                runBeforeInterceptors: this.runBeforeInterceptors.bind(this),
+                runAfterInterceptors: this.runAfterInterceptors.bind(this),
+                applyOpToMap: this.applyOpToMap.bind(this),
+            });
+
+            // SPEC-003d: Initialize WriteConcernHandler for Write Concern tracking
+            this.writeConcernHandler = new WriteConcernHandler({
+                backpressure: this.backpressure,
+                partitionService: this.partitionService,
+                cluster: this.cluster,
+                metricsService: this.metricsService,
+                writeAckManager: this.writeAckManager,
+                storage: this.storage ?? null,
+                broadcastBatch: this.broadcastBatch.bind(this),
+                broadcastBatchSync: this.broadcastBatchSync.bind(this),
+                buildOpContext: this.buildOpContext.bind(this),
+                runBeforeInterceptors: this.runBeforeInterceptors.bind(this),
+                runAfterInterceptors: this.runAfterInterceptors.bind(this),
+                applyOpToMap: this.applyOpToMap.bind(this),
+                persistOpSync: this.persistOpSync.bind(this),
+                persistOpAsync: this.persistOpAsync.bind(this),
             });
 
             // Phase 4: Initialize all message handlers
@@ -2164,170 +2201,34 @@ export class ServerCoordinator {
 
     /**
      * === OPTIMIZATION 1: Async Batch Processing with Backpressure ===
-     * Processes validated operations asynchronously after ACK has been sent.
-     * Uses BackpressureRegulator to periodically force sync processing and
-     * prevent unbounded accumulation of async work.
+     * Delegates to BatchProcessingHandler.
      */
     private async processBatchAsync(ops: any[], clientId: string): Promise<void> {
-        // === BACKPRESSURE: Check if we should force sync processing ===
-        if (this.backpressure.shouldForceSync()) {
-            this.metricsService.incBackpressureSyncForced();
-            await this.processBatchSync(ops, clientId);
-            return;
-        }
-
-        // === BACKPRESSURE: Check and wait for capacity ===
-        if (!this.backpressure.registerPending()) {
-            this.metricsService.incBackpressureWaits();
-            try {
-                await this.backpressure.waitForCapacity();
-                this.backpressure.registerPending();
-            } catch (err) {
-                this.metricsService.incBackpressureTimeouts();
-                logger.warn({ clientId, pendingOps: ops.length }, 'Backpressure timeout - rejecting batch');
-                throw new Error('Server overloaded');
-            }
-        }
-
-        // Update pending ops metric
-        this.metricsService.setBackpressurePendingOps(this.backpressure.getPendingOps());
-
-        try {
-            // === OPTIMIZATION 3: Batch Broadcast ===
-            // Collect all events for a single batched broadcast at the end
-            const batchedEvents: any[] = [];
-
-            for (const op of ops) {
-                if (this.partitionService.isLocalOwner(op.key)) {
-                    try {
-                        // Process without immediate broadcast (we'll batch them)
-                        await this.processLocalOpForBatch(op, clientId, batchedEvents);
-                    } catch (err) {
-                        logger.warn({ clientId, mapName: op.mapName, key: op.key, err }, 'Op failed in async batch');
-                    }
-                } else {
-                    // Forward to owner
-                    const owner = this.partitionService.getOwner(op.key);
-                    this.cluster.sendToNode(owner, {
-                        type: 'CLIENT_OP',
-                        payload: {
-                            mapName: op.mapName,
-                            key: op.key,
-                            record: op.record,
-                            orRecord: op.orRecord,
-                            orTag: op.orTag,
-                            opType: op.opType
-                        }
-                    });
-                }
-            }
-
-            // Send batched broadcast if we have events
-            if (batchedEvents.length > 0) {
-                this.broadcastBatch(batchedEvents, clientId);
-            }
-        } finally {
-            this.backpressure.completePending();
-            this.metricsService.setBackpressurePendingOps(this.backpressure.getPendingOps());
-        }
+        return this.batchProcessingHandler.processBatchAsync(ops, clientId);
     }
 
     /**
      * === BACKPRESSURE: Synchronous Batch Processing ===
-     * Processes operations synchronously, waiting for broadcast completion.
-     * Used when backpressure forces sync to drain the pipeline.
+     * Delegates to BatchProcessingHandler.
      */
     private async processBatchSync(ops: any[], clientId: string): Promise<void> {
-        const batchedEvents: any[] = [];
-
-        for (const op of ops) {
-            if (this.partitionService.isLocalOwner(op.key)) {
-                try {
-                    await this.processLocalOpForBatch(op, clientId, batchedEvents);
-                } catch (err) {
-                    logger.warn({ clientId, mapName: op.mapName, key: op.key, err }, 'Op failed in sync batch');
-                }
-            } else {
-                // Forward to owner and wait for acknowledgment
-                const owner = this.partitionService.getOwner(op.key);
-                await this.forwardOpAndWait(op, owner);
-            }
-        }
-
-        // Send batched broadcast SYNCHRONOUSLY - wait for all sends to complete
-        if (batchedEvents.length > 0) {
-            await this.broadcastBatchSync(batchedEvents, clientId);
-        }
+        return this.batchProcessingHandler.processBatchSync(ops, clientId);
     }
 
     /**
      * Forward operation to owner node and wait for completion.
-     * Used in sync processing mode.
+     * Delegates to BatchProcessingHandler.
      */
     private async forwardOpAndWait(op: any, owner: string): Promise<void> {
-        return new Promise<void>((resolve) => {
-            // Fire and forget for now - cluster forwarding doesn't have ack mechanism
-            // In a full implementation, this would wait for cluster ACK
-            this.cluster.sendToNode(owner, {
-                type: 'CLIENT_OP',
-                payload: {
-                    mapName: op.mapName,
-                    key: op.key,
-                    record: op.record,
-                    orRecord: op.orRecord,
-                    orTag: op.orTag,
-                    opType: op.opType
-                }
-            });
-            // Resolve immediately since cluster doesn't support sync ACK yet
-            resolve();
-        });
+        return this.batchProcessingHandler.forwardOpAndWait(op, owner);
     }
 
     /**
      * Process a single operation for batch processing.
-     * Uses shared applyOpToMap but collects events instead of broadcasting immediately.
+     * Delegates to BatchProcessingHandler.
      */
     private async processLocalOpForBatch(op: any, clientId: string, batchedEvents: any[]): Promise<void> {
-        // 1. Build context for interceptors
-        const context = this.buildOpContext(clientId, false);
-
-        // 2. Run onBeforeOp interceptors
-        try {
-            const processedOp = await this.runBeforeInterceptors(op, context);
-            if (!processedOp) return; // Silently dropped by interceptor
-            op = processedOp;
-        } catch (err) {
-            logger.warn({ err, opId: op.id }, 'Interceptor rejected op in batch');
-            throw err;
-        }
-
-        // 3. Apply operation to map (shared logic)
-        const { eventPayload, rejected } = await this.applyOpToMap(op, clientId);
-
-        // Skip further processing if operation was rejected by conflict resolver
-        if (rejected || !eventPayload) {
-            return;
-        }
-
-        // 4. Replicate to backup nodes (Hazelcast pattern: after local merge)
-        if (this.replicationPipeline) {
-            const opId = op.id || `${op.mapName}:${op.key}:${Date.now()}`;
-            // Fire-and-forget for batch operations (EVENTUAL by default)
-            this.replicationPipeline.replicate(op, opId, op.key).catch(err => {
-                logger.warn({ opId, key: op.key, err }, 'Batch replication failed (non-fatal)');
-            });
-        }
-
-        // 5. Collect event for batched broadcast (instead of immediate broadcast)
-        batchedEvents.push(eventPayload);
-
-        // 6. Distributed subscriptions are now handled via CLUSTER_SUB_UPDATE (Phase 14.2)
-        // ReplicationPipeline handles data replication to backup nodes
-        // No need for broadcastToCluster here - it was O(N) broadcast to all nodes
-
-        // 7. Run onAfterOp interceptors
-        this.runAfterInterceptors(op, context);
+        return this.batchProcessingHandler.processLocalOpForBatch(op, clientId, batchedEvents);
     }
 
     /**
@@ -2464,42 +2365,30 @@ export class ServerCoordinator {
         return options;
     }
 
-    // ============ Write Concern Methods (Phase 5.01) ============
+    // ============ Write Concern Methods (Phase 5.01) - Delegated to WriteConcernHandler (SPEC-003d) ============
 
     /**
      * Get effective Write Concern level for an operation.
-     * Per-op writeConcern overrides batch-level.
+     * Delegates to WriteConcernHandler.
      */
     private getEffectiveWriteConcern(
         opWriteConcern: WriteConcernValue | undefined,
         batchWriteConcern: WriteConcernValue | undefined
     ): WriteConcernValue | undefined {
-        return opWriteConcern ?? batchWriteConcern;
+        return this.writeConcernHandler.getEffectiveWriteConcern(opWriteConcern, batchWriteConcern);
     }
 
     /**
      * Convert string WriteConcern value to enum.
+     * Delegates to WriteConcernHandler.
      */
     private stringToWriteConcern(value: WriteConcernValue | undefined): WriteConcern {
-        switch (value) {
-            case 'FIRE_AND_FORGET':
-                return WriteConcern.FIRE_AND_FORGET;
-            case 'MEMORY':
-                return WriteConcern.MEMORY;
-            case 'APPLIED':
-                return WriteConcern.APPLIED;
-            case 'REPLICATED':
-                return WriteConcern.REPLICATED;
-            case 'PERSISTED':
-                return WriteConcern.PERSISTED;
-            default:
-                return WriteConcern.MEMORY;
-        }
+        return this.writeConcernHandler.stringToWriteConcern(value);
     }
 
     /**
      * Process batch with Write Concern tracking.
-     * Notifies WriteAckManager at each stage of processing.
+     * Delegates to WriteConcernHandler.
      */
     private async processBatchAsyncWithWriteConcern(
         ops: any[],
@@ -2507,92 +2396,12 @@ export class ServerCoordinator {
         batchWriteConcern?: WriteConcernValue,
         batchTimeout?: number
     ): Promise<void> {
-        // === BACKPRESSURE: Check if we should force sync processing ===
-        if (this.backpressure.shouldForceSync()) {
-            this.metricsService.incBackpressureSyncForced();
-            await this.processBatchSyncWithWriteConcern(ops, clientId, batchWriteConcern, batchTimeout);
-            return;
-        }
-
-        // === BACKPRESSURE: Check and wait for capacity ===
-        if (!this.backpressure.registerPending()) {
-            this.metricsService.incBackpressureWaits();
-            try {
-                await this.backpressure.waitForCapacity();
-                this.backpressure.registerPending();
-            } catch (err) {
-                this.metricsService.incBackpressureTimeouts();
-                logger.warn({ clientId, pendingOps: ops.length }, 'Backpressure timeout - rejecting batch');
-                // Fail all pending operations
-                for (const op of ops) {
-                    if (op.id) {
-                        this.writeAckManager.failPending(op.id, 'Server overloaded');
-                    }
-                }
-                throw new Error('Server overloaded');
-            }
-        }
-
-        // Update pending ops metric
-        this.metricsService.setBackpressurePendingOps(this.backpressure.getPendingOps());
-
-        try {
-            // === OPTIMIZATION 3: Batch Broadcast ===
-            // Collect all events for a single batched broadcast at the end
-            const batchedEvents: any[] = [];
-
-            for (const op of ops) {
-                if (this.partitionService.isLocalOwner(op.key)) {
-                    try {
-                        // Process operation with Write Concern tracking
-                        await this.processLocalOpWithWriteConcern(op, clientId, batchedEvents, batchWriteConcern);
-                    } catch (err) {
-                        logger.warn({ clientId, mapName: op.mapName, key: op.key, err }, 'Op failed in async batch');
-                        // Fail the pending write
-                        if (op.id) {
-                            this.writeAckManager.failPending(op.id, String(err));
-                        }
-                    }
-                } else {
-                    // Forward to owner
-                    const owner = this.partitionService.getOwner(op.key);
-                    this.cluster.sendToNode(owner, {
-                        type: 'CLIENT_OP',
-                        payload: {
-                            mapName: op.mapName,
-                            key: op.key,
-                            record: op.record,
-                            orRecord: op.orRecord,
-                            orTag: op.orTag,
-                            opType: op.opType,
-                            writeConcern: op.writeConcern ?? batchWriteConcern,
-                        }
-                    });
-                    // For forwarded ops, we mark REPLICATED immediately since it's sent to cluster
-                    if (op.id) {
-                        this.writeAckManager.notifyLevel(op.id, WriteConcern.REPLICATED);
-                    }
-                }
-            }
-
-            // Send batched broadcast if we have events
-            if (batchedEvents.length > 0) {
-                this.broadcastBatch(batchedEvents, clientId);
-                // Notify REPLICATED for all ops that were broadcast
-                for (const op of ops) {
-                    if (op.id && this.partitionService.isLocalOwner(op.key)) {
-                        this.writeAckManager.notifyLevel(op.id, WriteConcern.REPLICATED);
-                    }
-                }
-            }
-        } finally {
-            this.backpressure.completePending();
-            this.metricsService.setBackpressurePendingOps(this.backpressure.getPendingOps());
-        }
+        return this.writeConcernHandler.processBatchAsyncWithWriteConcern(ops, clientId, batchWriteConcern, batchTimeout);
     }
 
     /**
      * Synchronous batch processing with Write Concern.
+     * Delegates to WriteConcernHandler.
      */
     private async processBatchSyncWithWriteConcern(
         ops: any[],
@@ -2600,43 +2409,12 @@ export class ServerCoordinator {
         batchWriteConcern?: WriteConcernValue,
         batchTimeout?: number
     ): Promise<void> {
-        const batchedEvents: any[] = [];
-
-        for (const op of ops) {
-            if (this.partitionService.isLocalOwner(op.key)) {
-                try {
-                    await this.processLocalOpWithWriteConcern(op, clientId, batchedEvents, batchWriteConcern);
-                } catch (err) {
-                    logger.warn({ clientId, mapName: op.mapName, key: op.key, err }, 'Op failed in sync batch');
-                    if (op.id) {
-                        this.writeAckManager.failPending(op.id, String(err));
-                    }
-                }
-            } else {
-                // Forward to owner and wait for acknowledgment
-                const owner = this.partitionService.getOwner(op.key);
-                await this.forwardOpAndWait(op, owner);
-                // Mark REPLICATED after forwarding
-                if (op.id) {
-                    this.writeAckManager.notifyLevel(op.id, WriteConcern.REPLICATED);
-                }
-            }
-        }
-
-        // Send batched broadcast SYNCHRONOUSLY - wait for all sends to complete
-        if (batchedEvents.length > 0) {
-            await this.broadcastBatchSync(batchedEvents, clientId);
-            // Notify REPLICATED for all local ops
-            for (const op of ops) {
-                if (op.id && this.partitionService.isLocalOwner(op.key)) {
-                    this.writeAckManager.notifyLevel(op.id, WriteConcern.REPLICATED);
-                }
-            }
-        }
+        return this.writeConcernHandler.processBatchSyncWithWriteConcern(ops, clientId, batchWriteConcern, batchTimeout);
     }
 
     /**
      * Process a single operation with Write Concern level notifications.
+     * Delegates to WriteConcernHandler.
      */
     private async processLocalOpWithWriteConcern(
         op: any,
@@ -2644,89 +2422,7 @@ export class ServerCoordinator {
         batchedEvents: any[],
         batchWriteConcern?: WriteConcernValue
     ): Promise<void> {
-        // 1. Build context for interceptors
-        const context = this.buildOpContext(clientId, false);
-
-        // 2. Run onBeforeOp interceptors
-        try {
-            const processedOp = await this.runBeforeInterceptors(op, context);
-            if (!processedOp) {
-                // Silently dropped by interceptor - fail the pending write
-                if (op.id) {
-                    this.writeAckManager.failPending(op.id, 'Dropped by interceptor');
-                }
-                return;
-            }
-            op = processedOp;
-        } catch (err) {
-            logger.warn({ opId: op.id, err }, 'Interceptor rejected op');
-            if (op.id) {
-                this.writeAckManager.failPending(op.id, String(err));
-            }
-            return;
-        }
-
-        // 3. Apply operation to map
-        const { eventPayload, rejected } = await this.applyOpToMap(op, clientId);
-
-        // If rejected by conflict resolver, fail the pending write
-        if (rejected) {
-            if (op.id) {
-                this.writeAckManager.failPending(op.id, 'Rejected by conflict resolver');
-            }
-            return;
-        }
-
-        // 4. Notify APPLIED level (CRDT merged)
-        if (op.id) {
-            this.writeAckManager.notifyLevel(op.id, WriteConcern.APPLIED);
-        }
-
-        // 5. Collect event for batched broadcast
-        if (eventPayload) {
-            batchedEvents.push({
-                mapName: op.mapName,
-                key: op.key,
-                ...eventPayload
-            });
-        }
-
-        // 6. Handle PERSISTED Write Concern
-        const effectiveWriteConcern = this.getEffectiveWriteConcern(op.writeConcern, batchWriteConcern);
-        if (effectiveWriteConcern === 'PERSISTED' && this.storage) {
-            try {
-                // Wait for storage write to complete
-                await this.persistOpSync(op);
-                if (op.id) {
-                    this.writeAckManager.notifyLevel(op.id, WriteConcern.PERSISTED);
-                }
-            } catch (err) {
-                logger.error({ opId: op.id, err }, 'Persistence failed');
-                if (op.id) {
-                    this.writeAckManager.failPending(op.id, `Persistence failed: ${err}`);
-                }
-            }
-        } else if (this.storage && op.id) {
-            // Fire-and-forget persistence for non-PERSISTED writes
-            this.persistOpAsync(op).catch(err => {
-                logger.error({ opId: op.id, err }, 'Async persistence failed');
-            });
-        }
-
-        // 7. Run onAfterOp interceptors
-        try {
-            const serverOp: ServerOp = {
-                mapName: op.mapName,
-                key: op.key,
-                opType: op.opType || (op.record?.value === null ? 'REMOVE' : 'PUT'),
-                record: op.record,
-                orRecord: op.orRecord,
-                orTag: op.orTag,
-            };
-            await this.runAfterInterceptors(serverOp, context);
-        } catch (err) {
-            logger.warn({ opId: op.id, err }, 'onAfterOp interceptor failed');
-        }
+        return this.writeConcernHandler.processLocalOpWithWriteConcern(op, clientId, batchedEvents, batchWriteConcern);
     }
 
     /**
