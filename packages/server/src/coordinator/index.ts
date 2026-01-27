@@ -19,6 +19,7 @@ export { ClusterEventHandler } from './cluster-event-handler';
 // SPEC-003d: Additional handlers
 export { HeartbeatHandler } from './heartbeat-handler';
 export { ClientMessageHandler } from './client-message-handler';
+export { PersistenceHandler } from './persistence-handler';
 
 // Phase 4: Additional handler modules
 export { PartitionHandler } from './partition-handler';
@@ -97,4 +98,7 @@ export type {
     // Client message types (SPEC-003d)
     IClientMessageHandler,
     ClientMessageHandlerConfig,
+    // Persistence types (SPEC-003d)
+    IPersistenceHandler,
+    PersistenceHandlerConfig,
 } from './types';

@@ -706,6 +706,24 @@ export interface ClientMessageHandlerConfig {
 }
 
 /**
+ * Interface for PersistenceHandler.
+ */
+export interface IPersistenceHandler {
+    /** Persist operation synchronously (blocking) */
+    persistOpSync(op: any): Promise<void>;
+    /** Persist operation asynchronously (fire-and-forget) */
+    persistOpAsync(op: any): Promise<void>;
+}
+
+/**
+ * Configuration for PersistenceHandler.
+ */
+export interface PersistenceHandlerConfig {
+    storage: IServerStorage | null;
+    getMap: (mapName: string, type: 'LWW' | 'OR') => LWWMap<string, any> | ORMap<string, any>;
+}
+
+/**
  * Configuration for ClusterEventHandler.
  */
 export interface ClusterEventHandlerConfig {

@@ -4,7 +4,7 @@ import { readFileSync } from 'fs';
 import * as net from 'net';
 import { WebSocketServer, WebSocket } from 'ws';
 import { HLC, LWWMap, ORMap, MerkleTree, serialize, deserialize, PermissionPolicy, Principal, PermissionType, Timestamp, LWWRecord, MessageSchema, WriteConcern, WriteConcernValue, ConsistencyLevel, ReplicationConfig, DEFAULT_REPLICATION_CONFIG, IndexedLWWMap, IndexedORMap, QueryCursor, DEFAULT_QUERY_CURSOR_MAX_AGE_MS, PARTITION_COUNT, type QueryExpression as CoreQuery } from '@topgunbuild/core';
-import { IServerStorage, StorageValue, ORMapValue, ORMapTombstones } from './storage/IServerStorage';
+import { IServerStorage, StorageValue } from './storage/IServerStorage';
 import { IInterceptor, ServerOp, OpContext, ConnectionContext } from './interceptor/IInterceptor';
 import * as jwt from 'jsonwebtoken';
 import * as crypto from 'crypto';
@@ -61,6 +61,7 @@ import {
     ClusterEventHandler,
     HeartbeatHandler,
     ClientMessageHandler,
+    PersistenceHandler,
     createMessageRegistry,
     PartitionHandler,
     TopicHandler,
@@ -221,6 +222,7 @@ export class ServerCoordinator {
     private clusterEventHandler!: ClusterEventHandler;
     private heartbeatHandler!: HeartbeatHandler;
     private clientMessageHandler!: ClientMessageHandler;
+    private persistenceHandler!: PersistenceHandler;
     private messageRegistry!: MessageRegistry;
     private systemManager!: SystemManager;
 
@@ -939,6 +941,12 @@ export class ServerCoordinator {
                 connectionManager: this.connectionManager,
                 queryRegistry: this.queryRegistry,
                 hlc: this.hlc,
+            });
+
+            // SPEC-003d: Initialize PersistenceHandler for operation persistence
+            this.persistenceHandler = new PersistenceHandler({
+                storage: this.storage ?? null,
+                getMap: this.getMap.bind(this),
             });
 
             // Phase 4: Initialize all message handlers
@@ -3011,31 +3019,7 @@ export class ServerCoordinator {
      * Used for PERSISTED Write Concern.
      */
     private async persistOpSync(op: any): Promise<void> {
-        if (!this.storage) return;
-
-        const isORMapOp = op.opType === 'OR_ADD' || op.opType === 'OR_REMOVE' || op.orRecord || op.orTag;
-
-        if (isORMapOp) {
-            const orMap = this.getMap(op.mapName, 'OR') as ORMap<string, any>;
-            const records = orMap.getRecords(op.key);
-            const tombstones = orMap.getTombstones();
-
-            if (records.length > 0) {
-                await this.storage.store(op.mapName, op.key, { type: 'OR', records } as ORMapValue<any>);
-            } else {
-                await this.storage.delete(op.mapName, op.key);
-            }
-
-            if (tombstones.length > 0) {
-                await this.storage.store(op.mapName, '__tombstones__', { type: 'OR_TOMBSTONES', tags: tombstones } as ORMapTombstones);
-            }
-        } else {
-            const lwwMap = this.getMap(op.mapName, 'LWW') as LWWMap<string, any>;
-            const record = lwwMap.getRecord(op.key);
-            if (record) {
-                await this.storage.store(op.mapName, op.key, record);
-            }
-        }
+        return this.persistenceHandler.persistOpSync(op);
     }
 
     /**
@@ -3043,6 +3027,6 @@ export class ServerCoordinator {
      * Used for non-PERSISTED Write Concern levels.
      */
     private async persistOpAsync(op: any): Promise<void> {
-        return this.persistOpSync(op);
+        return this.persistenceHandler.persistOpAsync(op);
     }
 }
