@@ -16,6 +16,10 @@ export { GCHandler } from './gc-handler';
 // SPEC-003c: Cluster event handler
 export { ClusterEventHandler } from './cluster-event-handler';
 
+// SPEC-003d: Additional handlers
+export { HeartbeatHandler } from './heartbeat-handler';
+export { ClientMessageHandler } from './client-message-handler';
+
 // Phase 4: Additional handler modules
 export { PartitionHandler } from './partition-handler';
 export { TopicHandler } from './topic-handler';
@@ -87,4 +91,10 @@ export type {
     // Query types
     IQueryHandler,
     QueryHandlerConfig,
+    // Heartbeat types (SPEC-003d)
+    IHeartbeatHandler,
+    HeartbeatHandlerConfig,
+    // Client message types (SPEC-003d)
+    IClientMessageHandler,
+    ClientMessageHandlerConfig,
 } from './types';

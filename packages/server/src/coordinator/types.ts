@@ -651,6 +651,60 @@ export interface IClusterEventHandler {
     teardownListeners(): void;
 }
 
+// ============================================================================
+// HeartbeatHandler Types (SPEC-003d)
+// ============================================================================
+
+/**
+ * Interface for handling client heartbeat/ping operations.
+ */
+export interface IHeartbeatHandler {
+    /** Start the periodic heartbeat check */
+    start(): void;
+    /** Stop the periodic heartbeat check */
+    stop(): void;
+    /** Handle incoming PING from client */
+    handlePing(client: ClientConnection, clientTimestamp: number): void;
+    /** Check if a client is still alive based on heartbeat */
+    isClientAlive(clientId: string): boolean;
+    /** Get client idle time in ms */
+    getClientIdleTime(clientId: string): number;
+}
+
+/**
+ * Configuration for HeartbeatHandler.
+ */
+export interface HeartbeatHandlerConfig {
+    connectionManager: IConnectionManager;
+    /** Client heartbeat timeout in ms (default: 20000) */
+    heartbeatTimeoutMs?: number;
+    /** Heartbeat check interval in ms (default: 5000) */
+    heartbeatCheckIntervalMs?: number;
+}
+
+/**
+ * Interface for ClientMessageHandler.
+ */
+export interface IClientMessageHandler {
+    /** Update client's HLC timestamp from incoming message */
+    updateClientHlc(client: ClientConnection, message: any): void;
+    /** Broadcast partition map to all authenticated clients */
+    broadcastPartitionMap(partitionMap: any): void;
+    /** Notify client about merge rejection */
+    notifyMergeRejection(rejection: any): void;
+}
+
+/**
+ * Configuration for ClientMessageHandler.
+ */
+export interface ClientMessageHandlerConfig {
+    connectionManager: IConnectionManager;
+    queryRegistry: {
+        getSubscribedClientIds: (mapName: string) => Set<string>;
+    };
+    hlc: HLC;
+}
+
 /**
  * Configuration for ClusterEventHandler.
  */

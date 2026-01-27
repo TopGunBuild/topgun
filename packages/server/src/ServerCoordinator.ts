@@ -10,8 +10,6 @@ import * as jwt from 'jsonwebtoken';
 import * as crypto from 'crypto';
 import { QueryRegistry, Subscription } from './query/QueryRegistry';
 
-const CLIENT_HEARTBEAT_TIMEOUT_MS = 20000; // 20 seconds - evict clients that haven't pinged
-const CLIENT_HEARTBEAT_CHECK_INTERVAL_MS = 5000; // Check for dead clients every 5 seconds
 const GC_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days - used by sync handlers for tombstone filtering
 import { TopicManager } from './topic/TopicManager';
 import { ClusterManager } from './cluster/ClusterManager';
@@ -61,6 +59,8 @@ import {
     BroadcastHandler,
     GCHandler,
     ClusterEventHandler,
+    HeartbeatHandler,
+    ClientMessageHandler,
     createMessageRegistry,
     PartitionHandler,
     TopicHandler,
@@ -219,11 +219,12 @@ export class ServerCoordinator {
     private broadcastHandler!: BroadcastHandler;
     private gcHandler!: GCHandler;
     private clusterEventHandler!: ClusterEventHandler;
+    private heartbeatHandler!: HeartbeatHandler;
+    private clientMessageHandler!: ClientMessageHandler;
     private messageRegistry!: MessageRegistry;
     private systemManager!: SystemManager;
 
     private pendingClusterQueries: Map<string, PendingClusterQuery> = new Map();
-    private heartbeatCheckInterval?: NodeJS.Timeout;
 
     // Track pending batch operations for testing purposes
     private pendingBatchOperations: Set<Promise<void>> = new Set();
@@ -928,6 +929,18 @@ export class ServerCoordinator {
                 pendingClusterQueries: this.pendingClusterQueries,
             });
 
+            // SPEC-003d: Initialize HeartbeatHandler for client liveness detection
+            this.heartbeatHandler = new HeartbeatHandler({
+                connectionManager: this.connectionManager,
+            });
+
+            // SPEC-003d: Initialize ClientMessageHandler for client messaging operations
+            this.clientMessageHandler = new ClientMessageHandler({
+                connectionManager: this.connectionManager,
+                queryRegistry: this.queryRegistry,
+                hlc: this.hlc,
+            });
+
             // Phase 4: Initialize all message handlers
             const partitionHandler = new PartitionHandler({
                 partitionService: {
@@ -1156,7 +1169,7 @@ export class ServerCoordinator {
             });
         }
 
-        this.startHeartbeatCheck();
+        this.heartbeatHandler.start();
     }
 
     /**
@@ -1515,9 +1528,8 @@ export class ServerCoordinator {
             this.gcHandler.stop();
         }
 
-        if (this.heartbeatCheckInterval) {
-            clearInterval(this.heartbeatCheckInterval);
-            this.heartbeatCheckInterval = undefined;
+        if (this.heartbeatHandler) {
+            this.heartbeatHandler.stop();
         }
 
         // Stop LockManager
@@ -1797,34 +1809,7 @@ export class ServerCoordinator {
 
 
     private updateClientHlc(client: ClientConnection, message: any) {
-        // Try to extract timestamp from message if available
-        // This is heuristic based on typical message structure
-        let ts: Timestamp | undefined;
-
-        if (message.type === 'CLIENT_OP') {
-            const op = message.payload;
-            if (op.record && op.record.timestamp) {
-                ts = op.record.timestamp;
-            } else if (op.orRecord && op.orRecord.timestamp) {
-                // orRecord usually has entries which have timestamps, or value itself is decorated?
-                // Depends on implementation.
-            } else if (op.orTag) {
-                try {
-                    ts = HLC.parse(op.orTag);
-                } catch (e) { }
-            }
-        }
-
-        if (ts) {
-            // Client sent an explicit timestamp, update their HLC
-            this.hlc.update(ts); // Also update server clock
-            // Client HLC is at least this
-            client.lastActiveHlc = ts;
-        } else {
-            // Just bump to current server time if no explicit TS
-            // This assumes client is "alive" at this moment.
-            client.lastActiveHlc = this.hlc.now();
-        }
+        this.clientMessageHandler.updateClientHlc(client, message);
     }
 
     // ============ Phase 4: Partition Map Broadcast ============
@@ -1834,23 +1819,7 @@ export class ServerCoordinator {
      * Called when partition topology changes (node join/leave/failover).
      */
     private broadcastPartitionMap(partitionMap: any): void {
-        const message = {
-            type: 'PARTITION_MAP',
-            payload: partitionMap
-        };
-
-        let broadcastCount = 0;
-        for (const client of this.connectionManager.getClients().values()) {
-            if (client.isAuthenticated && client.socket.readyState === WebSocket.OPEN && client.writer) {
-                client.writer.write(message);
-                broadcastCount++;
-            }
-        }
-
-        logger.info({
-            version: partitionMap.version,
-            clientCount: broadcastCount
-        }, 'Broadcast partition map to clients');
+        this.clientMessageHandler.broadcastPartitionMap(partitionMap);
     }
 
     /**
@@ -1858,39 +1827,7 @@ export class ServerCoordinator {
      * Finds the client by node ID and sends MERGE_REJECTED message.
      */
     private notifyMergeRejection(rejection: MergeRejection): void {
-        // Find client by node ID
-        // Node ID format: "client-{uuid}" - we need to find matching client
-        for (const [clientId, client] of this.connectionManager.getClients()) {
-            // Check if this client sent the rejected operation
-            // The nodeId in rejection matches the remoteNodeId from the operation
-            if (clientId === rejection.nodeId || rejection.nodeId.includes(clientId)) {
-                client.writer.write({
-                    type: 'MERGE_REJECTED',
-                    mapName: rejection.mapName,
-                    key: rejection.key,
-                    attemptedValue: rejection.attemptedValue,
-                    reason: rejection.reason,
-                    timestamp: rejection.timestamp,
-                }, true); // urgent - bypass batching
-                return;
-            }
-        }
-
-        // If no matching client found, broadcast to all clients subscribed to this map
-        const subscribedClientIds = this.queryRegistry.getSubscribedClientIds(rejection.mapName);
-        for (const clientId of subscribedClientIds) {
-            const client = this.connectionManager.getClient(clientId);
-            if (client) {
-                client.writer.write({
-                    type: 'MERGE_REJECTED',
-                    mapName: rejection.mapName,
-                    key: rejection.key,
-                    attemptedValue: rejection.attemptedValue,
-                    reason: rejection.reason,
-                    timestamp: rejection.timestamp,
-                });
-            }
-        }
+        this.clientMessageHandler.notifyMergeRejection(rejection);
     }
 
     private broadcast(message: any, excludeClientId?: string) {
@@ -2756,82 +2693,30 @@ export class ServerCoordinator {
     }
 
 
-    // ============ Heartbeat Methods ============
-
-    /**
-     * Starts the periodic check for dead clients (those that haven't sent PING).
-     */
-    private startHeartbeatCheck() {
-        this.heartbeatCheckInterval = setInterval(() => {
-            this.evictDeadClients();
-        }, CLIENT_HEARTBEAT_CHECK_INTERVAL_MS);
-    }
+    // ============ Heartbeat Methods (delegated to HeartbeatHandler - SPEC-003d) ============
 
     /**
      * Handles incoming PING message from client.
-     * Responds with PONG immediately.
+     * Delegates to HeartbeatHandler.
      */
     private handlePing(client: ClientConnection, clientTimestamp: number): void {
-        client.lastPingReceived = Date.now();
-
-        const pongMessage = {
-            type: 'PONG',
-            timestamp: clientTimestamp,
-            serverTime: Date.now(),
-        };
-
-        // PONG is urgent - bypass batching for accurate RTT measurement
-        client.writer.write(pongMessage, true);
+        this.heartbeatHandler.handlePing(client, clientTimestamp);
     }
 
     /**
      * Checks if a client is still alive based on heartbeat.
-     * Delegates to ConnectionManager.
+     * Delegates to HeartbeatHandler.
      */
     public isClientAlive(clientId: string): boolean {
-        return this.connectionManager.isClientAlive(clientId);
+        return this.heartbeatHandler.isClientAlive(clientId);
     }
 
     /**
      * Returns how long the client has been idle (no PING received).
-     * Delegates to ConnectionManager.
+     * Delegates to HeartbeatHandler.
      */
     public getClientIdleTime(clientId: string): number {
-        return this.connectionManager.getClientIdleTime(clientId);
-    }
-
-    /**
-     * Evicts clients that haven't sent a PING within the timeout period.
-     */
-    private evictDeadClients(): void {
-        const now = Date.now();
-        const deadClients: string[] = [];
-
-        for (const [clientId, client] of this.connectionManager.getClients()) {
-            // Only check authenticated clients (unauthenticated ones will timeout via auth mechanism)
-            if (client.isAuthenticated) {
-                const idleTime = now - client.lastPingReceived;
-                if (idleTime > CLIENT_HEARTBEAT_TIMEOUT_MS) {
-                    deadClients.push(clientId);
-                }
-            }
-        }
-
-        for (const clientId of deadClients) {
-            const client = this.connectionManager.getClient(clientId);
-            if (client) {
-                logger.warn({
-                    clientId,
-                    idleTime: now - client.lastPingReceived,
-                    timeoutMs: CLIENT_HEARTBEAT_TIMEOUT_MS,
-                }, 'Evicting dead client (heartbeat timeout)');
-
-                // Close the connection
-                if (client.socket.readyState === WebSocket.OPEN) {
-                    client.socket.close(4002, 'Heartbeat timeout');
-                }
-            }
-        }
+        return this.heartbeatHandler.getClientIdleTime(clientId);
     }
 
     private buildTLSOptions(config: TLSConfig): HttpsServerOptions {
