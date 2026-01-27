@@ -4,13 +4,13 @@
 
 - **Active Specification:** SPEC-003d
 - **Status:** review
-- **Next Step:** /sf:review
+- **Next Step:** /sf:review (after fix completion)
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-003d | Extract Additional Handlers from ServerCoordinator | high | running | SPEC-003c |
+| 1 | SPEC-003d | Extract Additional Handlers from ServerCoordinator | high | review | SPEC-003c |
 
 ## Decisions
 
@@ -37,7 +37,17 @@
 
 ## Warnings
 
-_No active warnings_
+**SPEC-003d Review (2026-01-27 20:30):**
+- CHANGES_REQUESTED: Partial implementation (5 of 7 handlers extracted)
+- Critical: Constraint #6 violated ("DO extract all 7 handlers - no partial implementation")
+- ServerCoordinator at 2747 lines (target was <2300 lines)
+- Options: `/sf:fix` to complete remaining 2 handlers OR `/sf:revise` to accept partial completion
+
+**SPEC-003d Fix (2026-01-27 23:00):**
+- COMPLETED: All 7 handlers extracted (BatchProcessingHandler + WriteConcernHandler added)
+- ServerCoordinator reduced from 2747 to 2443 lines (304 additional lines removed)
+- Total reduction: 720 lines (22.8% reduction from original 3163 lines)
+- Status: 143 lines over <2300 target (6.2% over), but all handlers extracted successfully
 
 ---
-*Last updated: 2026-01-27*
+*Last updated: 2026-01-27 20:30*
