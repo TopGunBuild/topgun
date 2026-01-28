@@ -1,8 +1,10 @@
 import { ServerCoordinator, ServerFactory } from '../';
 import { LWWRecord, deserialize, ORMap, LWWMap, serialize } from '@topgunbuild/core';
+import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
 
 describe('Sync Protocol Integration', () => {
   let server: ServerCoordinator;
+  let harness: ServerTestHarness;
 
   beforeAll(async () => {
     server = ServerFactory.create({
@@ -13,6 +15,7 @@ describe('Sync Protocol Integration', () => {
       peers: []
     });
     await server.ready();
+    harness = createTestHarness(server);
   });
 
   afterAll(async () => {
@@ -58,7 +61,7 @@ describe('Sync Protocol Integration', () => {
     };
 
     // Inject client
-    (server as any).connectionManager.getClients().set('client-1', clientMock);
+    harness.connectionManager.getClients().set('client-1', clientMock);
 
     const ops = [
       {
@@ -78,7 +81,7 @@ describe('Sync Protocol Integration', () => {
     ];
 
     // Simulate sending OP_BATCH (await async handleMessage)
-    await (server as any).handleMessage(clientMock, {
+    await harness.handleMessage(clientMock, {
       type: 'OP_BATCH',
       payload: { ops }
     });
@@ -115,7 +118,7 @@ describe('Sync Protocol Integration', () => {
       subscriptions: new Set()
     };
 
-    (server as any).connectionManager.getClients().set('client-retry', clientMock);
+    harness.connectionManager.getClients().set('client-retry', clientMock);
 
     const ts = Date.now();
     const ops = [
@@ -129,7 +132,7 @@ describe('Sync Protocol Integration', () => {
     ];
 
     // First attempt
-    await (server as any).handleMessage(clientMock, {
+    await harness.handleMessage(clientMock, {
       type: 'OP_BATCH',
       payload: { ops }
     });
@@ -143,7 +146,7 @@ describe('Sync Protocol Integration', () => {
     // Second attempt (simulate retry)
     // Sending same batch
     clientSocket.send.mockClear();
-    await (server as any).handleMessage(clientMock, {
+    await harness.handleMessage(clientMock, {
       type: 'OP_BATCH',
       payload: { ops }
     });
@@ -173,7 +176,7 @@ describe('Sync Protocol Integration', () => {
       subscriptions: new Set()
     };
 
-    (server as any).connectionManager.getClients().set('client-or', clientMock);
+    harness.connectionManager.getClients().set('client-or', clientMock);
 
     const ts = Date.now();
     // Use a distinct map name for ORMap
@@ -194,7 +197,7 @@ describe('Sync Protocol Integration', () => {
         orRecord
     };
 
-    await (server as any).handleMessage(clientMock, {
+    await harness.handleMessage(clientMock, {
         type: 'CLIENT_OP',
         payload: addOp
     });
@@ -215,7 +218,7 @@ describe('Sync Protocol Integration', () => {
         orTag: 'tag-1'
     };
 
-    await (server as any).handleMessage(clientMock, {
+    await harness.handleMessage(clientMock, {
         type: 'CLIENT_OP',
         payload: removeOp
     });
