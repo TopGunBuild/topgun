@@ -2,15 +2,15 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-005
-- **Status:** review
-- **Next Step:** `/sf:review` - audit implementation
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** `/sf:new "task"` or `/sf:next`
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-005 | Remove Unused Artifacts from ServerCoordinator | medium | audited | - |
+| - | - | Queue empty | - | - | - |
 
 ## Decisions
 
@@ -33,6 +33,8 @@
 | 2026-01-28 | SPEC-004 | FIXED (Fix Response): All TypeScript errors resolved. Handler configs corrected to match actual interfaces. Build passes with DTS generation. ClusterEventHandler removed from factory (requires ServerCoordinator callbacks). |
 | 2026-01-28 | SPEC-004 | COMPLETED: ServerCoordinator reduced 19.4% (1070→862 lines). Late binding pattern for handler callbacks. Archived to .specflow/archive/SPEC-004.md |
 | 2026-01-28 | SPEC-005 | Audit v1: Identified 2 critical issues - wss and messageRegistry were misclassified as "Remove" (Part 2) but are used in constructor wiring. Corrected to "Convert to locals" (Part 3). Spec updated with corrections. |
+| 2026-01-28 | SPEC-005 | APPROVED (Review v1): All acceptance criteria met. 4 imports removed, 20 properties removed, 5 converted to locals. Build passes. Public API unchanged. 858→798 lines (-60, 25% better than expected). Bonus cleanup in commit 4538d2b removed additional 88 lines (total: 858→710, -148 lines). |
+| 2026-01-28 | SPEC-005 | COMPLETED: ServerCoordinator artifacts cleanup finished. 148 lines removed (17.2% reduction). Archived to .specflow/archive/SPEC-005.md |
 
 ## Project Patterns
 
@@ -52,4 +54,4 @@
 - Requires separate task to update test architecture
 
 ---
-*Last updated: 2026-01-28 14:30*
+*Last updated: 2026-01-28 21:34*
