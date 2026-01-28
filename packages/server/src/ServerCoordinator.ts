@@ -1,14 +1,11 @@
-import { createServer as createHttpServer, Server as HttpServer } from 'http';
-import { createServer as createHttpsServer, Server as HttpsServer, ServerOptions as HttpsServerOptions } from 'https';
-import { readFileSync } from 'fs';
-import * as net from 'net';
-import { WebSocketServer, WebSocket } from 'ws';
-import { HLC, LWWMap, ORMap, MerkleTree, serialize, deserialize, PermissionPolicy, Principal, PermissionType, Timestamp, LWWRecord, MessageSchema, WriteConcern, WriteConcernValue, ConsistencyLevel, ReplicationConfig, DEFAULT_REPLICATION_CONFIG, PARTITION_COUNT, type QueryExpression as CoreQuery } from '@topgunbuild/core';
-import { IServerStorage, StorageValue } from './storage/IServerStorage';
-import { IInterceptor, ServerOp, OpContext, ConnectionContext } from './interceptor/IInterceptor';
-import * as jwt from 'jsonwebtoken';
-import * as crypto from 'crypto';
+import { Server as HttpServer } from 'http';
+import { Server as HttpsServer } from 'https';
+import { WebSocketServer } from 'ws';
+import { HLC, LWWMap, ORMap, PermissionPolicy, Timestamp, LWWRecord, ConsistencyLevel, ReplicationConfig } from '@topgunbuild/core';
+import { IServerStorage } from './storage/IServerStorage';
+import { IInterceptor } from './interceptor/IInterceptor';
 import { QueryRegistry } from './query/QueryRegistry';
+import { ServerDependencies } from './ServerDependencies';
 
 const GC_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days - used by sync handlers for tombstone filtering
 import { TopicManager } from './topic/TopicManager';
@@ -18,20 +15,17 @@ import { LockManager } from './cluster/LockManager';
 import { Query } from './query/Matcher';
 import { SecurityManager } from './security/SecurityManager';
 import { logger } from './utils/logger';
-import { validateJwtSecret } from './utils/validateConfig';
 import { MetricsService } from './monitoring/MetricsService';
-import { SystemManager } from './system/SystemManager';
 import { TLSConfig, ClusterTLSConfig } from './types/TLSConfig';
 import { StripedEventExecutor } from './utils/StripedEventExecutor';
 import { BackpressureRegulator } from './utils/BackpressureRegulator';
-import { CoalescingWriter, CoalescingWriterOptions } from './utils/CoalescingWriter';
-import { coalescingPresets, CoalescingPreset } from './utils/coalescingPresets';
+import { CoalescingWriterOptions } from './utils/CoalescingWriter';
+import { CoalescingPreset } from './utils/coalescingPresets';
 import { ConnectionRateLimiter } from './utils/ConnectionRateLimiter';
 import { RateLimitedLogger } from './utils/RateLimitedLogger';
 import { WorkerPool, MerkleWorker, CRDTMergeWorker, SerializationWorker, WorkerPoolConfig } from './workers';
 import {
     ObjectPool,
-    createEventPayloadPool,
     PooledEventPayload,
 } from './memory';
 import { TaskletScheduler } from './tasklet';
@@ -50,7 +44,7 @@ import { DistributedSubscriptionCoordinator } from './subscriptions/DistributedS
 import { createDebugEndpoints, DebugEndpoints } from './debug';
 import { BootstrapController, createBootstrapController } from './bootstrap';
 import { SettingsController, createSettingsController } from './settings';
-import type { JournalEvent, JournalEventType, MergeRejection, MergeContext, FullTextIndexConfig } from '@topgunbuild/core';
+import type { MergeRejection, FullTextIndexConfig } from '@topgunbuild/core';
 import {
     AuthHandler,
     ConnectionManager,
@@ -58,7 +52,6 @@ import {
     OperationHandler,
     BroadcastHandler,
     GCHandler,
-    ClusterEventHandler,
     HeartbeatHandler,
     ClientMessageHandler,
     PersistenceHandler,
@@ -66,6 +59,9 @@ import {
     QueryConversionHandler,
     BatchProcessingHandler,
     WriteConcernHandler,
+    ClusterEventHandler,
+    WebSocketHandler,
+    LifecycleManager,
     createMessageRegistry,
     PartitionHandler,
     TopicHandler,
@@ -221,18 +217,26 @@ export class ServerCoordinator {
     private securityManager: SecurityManager;
     private authHandler!: AuthHandler;
     private operationHandler!: OperationHandler;
+    private webSocketHandler!: WebSocketHandler;
+    private lifecycleManager!: LifecycleManager;
     private broadcastHandler!: BroadcastHandler;
     private gcHandler!: GCHandler;
-    private clusterEventHandler!: ClusterEventHandler;
     private heartbeatHandler!: HeartbeatHandler;
     private clientMessageHandler!: ClientMessageHandler;
-    private persistenceHandler!: PersistenceHandler;
     private operationContextHandler!: OperationContextHandler;
     private queryConversionHandler!: QueryConversionHandler;
     private batchProcessingHandler!: BatchProcessingHandler;
-    private writeConcernHandler!: WriteConcernHandler;
     private messageRegistry!: MessageRegistry;
-    private systemManager!: SystemManager;
+
+    // Independent Handlers (Injected)
+    private persistenceHandler!: PersistenceHandler;
+    private lockHandler!: LockHandler;
+    private topicHandler!: TopicHandler;
+    private partitionHandler!: PartitionHandler;
+    private searchHandler!: SearchHandler;
+    private journalHandler!: JournalHandler;
+    private writeConcernHandler!: WriteConcernHandler;
+    private clusterEventHandler!: ClusterEventHandler;
 
     private pendingClusterQueries: Map<string, PendingClusterQuery> = new Map();
 
@@ -282,7 +286,6 @@ export class ServerCoordinator {
 
     // Event Journal (Phase 5.04)
     private eventJournalService?: EventJournalService;
-    private journalSubscriptions: Map<string, { clientId: string; mapName?: string; types?: JournalEventType[] }> = new Map();
 
     // Phase 10 - Cluster Enhancements
     private partitionReassigner?: PartitionReassigner;
@@ -315,960 +318,200 @@ export class ServerCoordinator {
     private _readyPromise: Promise<void>;
     private _readyResolve!: () => void;
 
-    constructor(config: ServerCoordinatorConfig) {
+    constructor(
+        config: ServerCoordinatorConfig,
+        dependencies: ServerDependencies
+    ) {
         this._readyPromise = new Promise((resolve) => {
             this._readyResolve = resolve;
         });
 
         this._nodeId = config.nodeId;
-        this.hlc = new HLC(config.nodeId);
-        this.storage = config.storage;
-        // Validate and handle JWT_SECRET with escaped newlines (e.g., from Docker/Dokploy env vars)
-        const rawSecret = validateJwtSecret(config.jwtSecret, process.env.JWT_SECRET);
-        this.jwtSecret = rawSecret.replace(/\\n/g, '\n');
-        this.queryRegistry = new QueryRegistry();
-        this.securityManager = new SecurityManager(config.securityPolicies || []);
         this.interceptors = config.interceptors || [];
-        this.metricsService = new MetricsService();
-
-        // Initialize bounded event queue executor
-        this.eventExecutor = new StripedEventExecutor({
-            stripeCount: config.eventStripeCount ?? 4,
-            queueCapacity: config.eventQueueCapacity ?? 10000,
-            name: `${config.nodeId}-event-executor`,
-            onReject: (task) => {
-                logger.warn({ nodeId: config.nodeId, key: task.key }, 'Event task rejected due to queue capacity');
-                this.metricsService.incEventQueueRejected();
-            }
-        });
-
-        // Initialize backpressure regulator for periodic sync processing
-        this.backpressure = new BackpressureRegulator({
-            syncFrequency: config.backpressureSyncFrequency ?? 100,
-            maxPendingOps: config.backpressureMaxPending ?? 1000,
-            backoffTimeoutMs: config.backpressureBackoffMs ?? 5000,
-            enabled: config.backpressureEnabled ?? true
-        });
-
-        // Initialize write coalescing options with preset support
-        // Default preset changed from 'conservative' to 'highThroughput' for better performance
         this.writeCoalescingEnabled = config.writeCoalescingEnabled ?? true;
-        const preset = coalescingPresets[config.writeCoalescingPreset ?? 'highThroughput'];
-        this.writeCoalescingOptions = {
-            maxBatchSize: config.writeCoalescingMaxBatch ?? preset.maxBatchSize,
-            maxDelayMs: config.writeCoalescingMaxDelayMs ?? preset.maxDelayMs,
-            maxBatchBytes: config.writeCoalescingMaxBytes ?? preset.maxBatchBytes,
-        };
-
-        // Initialize ConnectionManager (single owner of clients Map)
-        this.connectionManager = new ConnectionManager({
-            hlc: this.hlc,
-            writeCoalescingEnabled: this.writeCoalescingEnabled,
-            writeCoalescingOptions: this.writeCoalescingOptions,
-        });
-
-        // Initialize StorageManager (single owner of maps Map)
-        // Note: isRelatedKey is deferred to partitionService which is initialized in start()
-        this.storageManager = new StorageManager({
-            nodeId: config.nodeId,
-            hlc: this.hlc,
-            storage: this.storage,
-            fullTextSearch: config.fullTextSearch,
-            // Partition filter: defer to partitionService (initialized later in start())
-            isRelatedKey: (key: string) => this.partitionService?.isRelated(key) ?? true,
-            onMapLoaded: (mapName, recordCount) => {
-                // Refresh query subscriptions and update metrics after map load
-                const map = this.storageManager.getMaps().get(mapName);
-                if (map) {
-                    this.queryRegistry.refreshSubscriptions(mapName, map);
-                    const mapSize = (map instanceof ORMap) ? map.totalRecords : map.size;
-                    this.metricsService.setMapSize(mapName, mapSize);
-                }
-            },
-        });
-
-        // Initialize memory pools for GC pressure reduction
-        this.eventPayloadPool = createEventPayloadPool({
-            maxSize: 4096,
-            initialSize: 128,
-        });
-
-        // Initialize tasklet scheduler for cooperative multitasking
-        this.taskletScheduler = new TaskletScheduler({
-            defaultTimeBudgetMs: 5,
-            maxConcurrent: 20,
-        });
-
-        // Initialize Write Concern acknowledgment manager (Phase 5.01)
-        this.writeAckManager = new WriteAckManager({
-            defaultTimeout: config.writeAckTimeout ?? 5000,
-        });
-
-        // Initialize connection rate limiter
         this.rateLimitingEnabled = config.rateLimitingEnabled ?? true;
-        this.rateLimiter = new ConnectionRateLimiter({
-            maxConnectionsPerSecond: config.maxConnectionsPerSecond ?? 100,
-            maxPendingConnections: config.maxPendingConnections ?? 1000,
-            cooldownMs: 1000,
-        });
 
-        // Initialize AuthHandler for JWT authentication (Phase 4 - extracted module)
-        this.authHandler = new AuthHandler({
-            jwtSecret: this.jwtSecret,
-            onAuthSuccess: (_clientId, _principal) => {
-                // Mark connection as established (handshake complete)
-                if (this.rateLimitingEnabled) {
-                    this.rateLimiter.onConnectionEstablished();
-                }
-            },
-        });
+        // Inject Dependencies
+        this.hlc = dependencies.hlc;
+        this.metricsService = dependencies.metricsService;
+        this.securityManager = dependencies.securityManager;
+        this.eventExecutor = dependencies.eventExecutor;
+        this.backpressure = dependencies.backpressure;
+        this.writeCoalescingOptions = dependencies.writeCoalescingOptions;
+        this.connectionManager = dependencies.connectionManager;
+        this.cluster = dependencies.cluster;
+        this.partitionService = dependencies.partitionService;
+        this.storageManager = dependencies.storageManager;
+        this.queryRegistry = dependencies.queryRegistry;
+        this.eventPayloadPool = dependencies.eventPayloadPool;
+        this.taskletScheduler = dependencies.taskletScheduler;
+        this.writeAckManager = dependencies.writeAckManager;
+        this.rateLimiter = dependencies.rateLimiter;
+        this.authHandler = dependencies.authHandler;
+        this.rateLimitedLogger = dependencies.rateLimitedLogger;
+        this.workerPool = dependencies.workerPool;
+        this.merkleWorker = dependencies.merkleWorker;
+        this.crdtMergeWorker = dependencies.crdtMergeWorker;
+        this.serializationWorker = dependencies.serializationWorker;
+        this.httpServer = dependencies.httpServer;
+        this.debugEndpoints = dependencies.debugEndpoints;
+        this.bootstrapController = dependencies.bootstrapController;
+        this.settingsController = dependencies.settingsController;
+        this.metricsServer = dependencies.metricsServer;
+        this.wss = dependencies.wss;
+        this.replicationPipeline = dependencies.replicationPipeline;
+        this.lockManager = dependencies.lockManager;
+        this.topicManager = dependencies.topicManager;
+        this.counterHandler = dependencies.counterHandler;
+        this.entryProcessorHandler = dependencies.entryProcessorHandler;
+        this.conflictResolverHandler = dependencies.conflictResolverHandler;
+        this.eventJournalService = dependencies.eventJournalService;
+        this.partitionReassigner = dependencies.partitionReassigner;
+        this.readReplicaHandler = dependencies.readReplicaHandler;
+        this.merkleTreeManager = dependencies.merkleTreeManager;
+        this.repairScheduler = dependencies.repairScheduler;
+        this.searchCoordinator = dependencies.searchCoordinator;
+        this.clusterSearchCoordinator = dependencies.clusterSearchCoordinator;
+        this.distributedSubCoordinator = dependencies.distributedSubCoordinator;
+        this.pendingBatchOperations = dependencies.pendingBatchOperations;
+        this.jwtSecret = dependencies.jwtSecret;
+        this.storage = config.storage;
 
-        // Initialize rate-limited logger for invalid message errors (SEC-04)
-        this.rateLimitedLogger = new RateLimitedLogger({
-            windowMs: 10000,  // 10 second window
-            maxPerWindow: 5   // 5 errors per client per window
-        });
+        // Initialize Listeners & Wiring (Minimal logic required to bind handlers to THIS instance)
 
-        // Initialize worker pool for CPU-bound operations
-        if (config.workerPoolEnabled) {
-            this.workerPool = new WorkerPool({
-                minWorkers: config.workerPoolConfig?.minWorkers ?? 2,
-                maxWorkers: config.workerPoolConfig?.maxWorkers,
-                taskTimeout: config.workerPoolConfig?.taskTimeout ?? 5000,
-                idleTimeout: config.workerPoolConfig?.idleTimeout ?? 30000,
-                autoRestart: config.workerPoolConfig?.autoRestart ?? true,
-            });
-            this.merkleWorker = new MerkleWorker(this.workerPool);
-            this.crdtMergeWorker = new CRDTMergeWorker(this.workerPool);
-            this.serializationWorker = new SerializationWorker(this.workerPool);
-            logger.info({
-                minWorkers: config.workerPoolConfig?.minWorkers ?? 2,
-                maxWorkers: config.workerPoolConfig?.maxWorkers ?? 'auto'
-            }, 'Worker pool initialized for CPU-bound operations');
+        // Setup operation applier for incoming replications
+        if (this.replicationPipeline) {
+            this.replicationPipeline.setOperationApplier(this.applyReplicatedOperation.bind(this));
         }
 
-        // HTTP Server Setup first (to get actual port if port=0)
-        if (config.tls?.enabled) {
-            const tlsOptions = this.buildTLSOptions(config.tls);
-            this.httpServer = createHttpsServer(tlsOptions, (_req, res) => {
-                res.writeHead(200);
-                res.end('TopGun Server Running (Secure)');
-            });
-            logger.info('TLS enabled for client connections');
-        } else {
-            this.httpServer = createHttpServer((_req, res) => {
-                res.writeHead(200);
-                res.end('TopGun Server Running');
-            });
-
-            if (process.env.NODE_ENV === 'production') {
-                logger.warn('⚠️  TLS is disabled! Client connections are NOT encrypted.');
-            }
-        }
-
-        // Phase 14C: Create debug endpoints
-        const debugEnabled = config.debugEnabled ?? process.env.TOPGUN_DEBUG === 'true';
-        this.debugEndpoints = createDebugEndpoints({
-            enabled: debugEnabled,
-            getMaps: () => this.storageManager.getMaps(),
-        });
-        if (debugEnabled) {
-            logger.info('Debug endpoints enabled');
-        }
-
-        // Phase 14D: Create bootstrap controller for setup wizard
-        this.bootstrapController = createBootstrapController({
-            jwtSecret: this.jwtSecret,
-        });
-        // Provide data accessors for admin API endpoints
-        this.bootstrapController.setDataAccessors({
-            getMaps: () => this.storageManager.getMaps(),
-            getClusterStatus: () => {
-                // getMembers returns string[] of node IDs
-                const memberIds = this.cluster?.getMembers() || [];
-                const nodes = memberIds.map(nodeId => {
-                    // Count partitions owned by this node
-                    let partitionCount = 0;
-                    if (this.partitionService) {
-                        for (let i = 0; i < PARTITION_COUNT; i++) {
-                            if (this.partitionService.getPartitionOwner(i) === nodeId) {
-                                partitionCount++;
-                            }
-                        }
-                    }
-
-                    return {
-                        id: nodeId,
-                        address: nodeId, // Node ID is used as address identifier
-                        status: 'healthy' as const,
-                        partitions: Array.from({ length: partitionCount }, (_, i) => i),
-                        connections: this.connectionManager.getClientCount(),
-                        memory: { used: process.memoryUsage().heapUsed, total: process.memoryUsage().heapTotal },
-                        uptime: process.uptime(),
-                    };
-                });
-
-                // Generate partition info
-                const partitions: { id: number; owner: string; replicas: string[] }[] = [];
-                if (this.partitionService) {
-                    for (let i = 0; i < PARTITION_COUNT; i++) {
-                        const owner = this.partitionService.getPartitionOwner(i);
-                        const backups = this.partitionService.getBackups(i);
-                        partitions.push({
-                            id: i,
-                            owner: owner || 'unknown',
-                            replicas: backups,
-                        });
-                    }
-                }
-
-                return {
-                    nodes,
-                    partitions,
-                    isRebalancing: this.partitionService?.getMigrationStatus() !== null,
-                };
-            },
-        });
-        if (this.bootstrapController.isBootstrapMode) {
-            logger.info('Server running in BOOTSTRAP MODE - start Admin UI and visit /setup to configure');
-            logger.info('  Run: cd apps/admin-dashboard && pnpm dev');
-            logger.info('  Then open: http://localhost:5173/setup');
-        }
-
-        // Phase 14D-3: Create settings controller for runtime configuration
-        this.settingsController = createSettingsController({
-            jwtSecret: this.jwtSecret,
-        });
-        // React to settings changes
-        this.settingsController.setOnSettingsChange((settings) => {
-            if (settings.logLevel) {
-                logger.level = settings.logLevel;
-                logger.info({ level: settings.logLevel }, '[Settings] Log level changed');
-            }
-            if (settings.rateLimits) {
-                this.rateLimiter.updateConfig({
-                    maxConnectionsPerSecond: settings.rateLimits.connections,
-                });
-                logger.info({ rateLimits: settings.rateLimits }, '[Settings] Rate limits changed');
-            }
+        // Listen for partition map changes
+        this.partitionService.on('rebalanced', (partitionMap) => {
+            this.broadcastPartitionMap(partitionMap);
         });
 
-        const metricsPort = config.metricsPort !== undefined ? config.metricsPort : 9090;
-        this.metricsServer = createHttpServer(async (req, res) => {
-            // Try bootstrap controller first (handles /api/status, /api/setup, /api/auth/login, /api/admin/*)
-            const bootstrapHandled = await this.bootstrapController.handle(req, res);
-            if (bootstrapHandled) return;
+        // Wire up LockManager
+        this.lockManager.on('lockGranted', (evt) => this.handleLockGranted(evt));
 
-            // Try settings controller (handles /api/admin/settings)
-            const url = req.url || '';
-            if (url.startsWith('/api/admin/settings')) {
-                const settingsHandled = await this.settingsController.handle(req, res);
-                if (settingsHandled) return;
-            }
-
-            // Try debug endpoints (includes /health, /ready)
-            if (this.debugEndpoints) {
-                const handled = await this.debugEndpoints.handle(req, res);
-                if (handled) return;
-            }
-
-            // Metrics endpoint
-            if (req.url === '/metrics') {
-                try {
-                    res.setHeader('Content-Type', this.metricsService.getContentType());
-                    res.end(await this.metricsService.getMetrics());
-                } catch (err) {
-                    res.statusCode = 500;
-                    res.end('Internal Server Error');
-                }
-            } else {
-                res.statusCode = 404;
-                res.end();
-            }
-        });
-        this.metricsServer.listen(metricsPort, () => {
-            logger.info({ port: metricsPort }, 'Metrics server listening');
-        });
-        this.metricsServer.on('error', (err) => {
-            logger.error({ err, port: metricsPort }, 'Metrics server failed to start');
+        // Wire up ConflictResolver
+        this.conflictResolverHandler.onRejection((rejection) => {
+            this.notifyMergeRejection(rejection);
         });
 
-        // Configure WebSocketServer with optimal options for connection scaling
-        this.wss = new WebSocketServer({
-            server: this.httpServer,
-            // Increase backlog for pending connections (default Linux is 128)
-            backlog: config.wsBacklog ?? 511,
-            // Disable per-message deflate by default (CPU overhead)
-            perMessageDeflate: config.wsCompression ?? false,
-            // Max payload size (64MB default)
-            maxPayload: config.wsMaxPayload ?? 64 * 1024 * 1024,
-            // Skip UTF-8 validation for binary messages (performance)
-            skipUTF8Validation: true,
-        });
-        this.wss.on('connection', (ws) => this.handleConnection(ws));
-
-        // Configure HTTP server limits for connection scaling
-        this.httpServer.maxConnections = config.maxConnections ?? 10000;
-        this.httpServer.timeout = config.serverTimeout ?? 120000; // 2 min
-        this.httpServer.keepAliveTimeout = config.keepAliveTimeout ?? 5000;
-        this.httpServer.headersTimeout = config.headersTimeout ?? 60000;
-
-        // Configure socket options for all incoming connections
-        this.httpServer.on('connection', (socket: net.Socket) => {
-            // Disable Nagle's algorithm for lower latency
-            socket.setNoDelay(true);
-            // Enable keep-alive with 60s interval
-            socket.setKeepAlive(true, 60000);
-        });
-
-        // Use port 0 to let OS assign a free port
-        this.httpServer.listen(config.port, () => {
-            const addr = this.httpServer.address();
-            this._actualPort = typeof addr === 'object' && addr ? addr.port : config.port;
-            logger.info({ port: this._actualPort }, 'Server Coordinator listening');
-
-            // Now setup cluster with actual/configured cluster port
-            const clusterPort = config.clusterPort ?? 0;
-
-            // Resolve peers dynamically if callback provided
-            const peers = config.resolvePeers ? config.resolvePeers() : (config.peers || []);
-
-            this.cluster = new ClusterManager({
-                nodeId: config.nodeId,
-                host: config.host || 'localhost',
-                port: clusterPort,
-                peers,
-                discovery: config.discovery,
-                serviceName: config.serviceName,
-                discoveryInterval: config.discoveryInterval,
-                tls: config.clusterTls
-            });
-            this.partitionService = new PartitionService(this.cluster);
-
-            // Phase 4: Create ReplicationPipeline (Hazelcast pattern: always create, runtime check)
-            // ReplicationPipeline checks cluster size at runtime - no replication for single node
-            if (config.replicationEnabled !== false) {
-                this.replicationPipeline = new ReplicationPipeline(
-                    this.cluster,
-                    this.partitionService,
-                    {
-                        ...DEFAULT_REPLICATION_CONFIG,
-                        defaultConsistency: config.defaultConsistency ?? ConsistencyLevel.EVENTUAL,
-                        ...config.replicationConfig,
-                    }
-                );
-                // Setup operation applier for incoming replications
-                this.replicationPipeline.setOperationApplier(this.applyReplicatedOperation.bind(this));
-                logger.info({ nodeId: config.nodeId }, 'ReplicationPipeline initialized');
-            }
-
-            // Phase 4: Listen for partition map changes and broadcast to clients
-            this.partitionService.on('rebalanced', (partitionMap, changes) => {
-                this.broadcastPartitionMap(partitionMap);
-            });
-
-            this.lockManager = new LockManager();
-            this.lockManager.on('lockGranted', (evt) => this.handleLockGranted(evt));
-
-            this.topicManager = new TopicManager({
-                cluster: this.cluster,
-                sendToClient: (clientId, message) => {
-                    const client = this.connectionManager.getClient(clientId);
-                    if (client && client.socket.readyState === WebSocket.OPEN) {
-                        client.writer.write(message);
-                    }
-                }
-            });
-
-            // PN Counter handler (Phase 5.2)
-            this.counterHandler = new CounterHandler(this._nodeId);
-
-            // Entry Processor handler (Phase 5.03)
-            this.entryProcessorHandler = new EntryProcessorHandler({ hlc: this.hlc });
-
-            // Conflict Resolver handler (Phase 5.05)
-            this.conflictResolverHandler = new ConflictResolverHandler({ nodeId: this._nodeId });
-            // Wire up rejection notifications to clients
-            this.conflictResolverHandler.onRejection((rejection: MergeRejection) => {
-                this.notifyMergeRejection(rejection);
-            });
-
-            // Event Journal (Phase 5.04) - requires PostgresAdapter with pool
-            if (config.eventJournalEnabled && this.storage && 'pool' in (this.storage as any)) {
-                const pool = (this.storage as any).pool;
-                this.eventJournalService = new EventJournalService({
-                    capacity: 10000,
-                    ttlMs: 0,
-                    persistent: true,
-                    pool,
-                    ...config.eventJournalConfig,
-                });
-                this.eventJournalService.initialize().then(() => {
-                    logger.info('EventJournalService initialized');
-                }).catch(err => {
-                    logger.error({ err }, 'Failed to initialize EventJournalService');
-                });
-            }
-
-            // Phase 10.02: Automatic partition failover
-            this.partitionReassigner = new PartitionReassigner(
-                this.cluster,
-                this.partitionService,
-                { reassignmentDelayMs: 1000 }
-            );
+        // Wire up PartitionFailover
+        if (this.partitionReassigner) {
             this.partitionReassigner.on('failoverComplete', (event) => {
                 logger.info({
                     failedNodeId: event.failedNodeId,
                     partitionsReassigned: event.partitionsReassigned,
                     durationMs: event.durationMs
                 }, 'Partition failover completed');
-                // Broadcast updated partition map to clients
                 this.broadcastPartitionMap(this.partitionService.getPartitionMap());
             });
-            logger.info('PartitionReassigner initialized');
+        }
 
-            // Phase 10.03: Read replica handler for read scaling
-            this.readReplicaHandler = new ReadReplicaHandler(
-                this.partitionService,
-                this.cluster,
-                this._nodeId,
-                undefined, // LagTracker - can be added later
-                {
-                    defaultConsistency: config.defaultConsistency ?? ConsistencyLevel.STRONG,
-                    preferLocalReplica: true,
-                    loadBalancing: 'latency-based'
-                }
-            );
-            logger.info('ReadReplicaHandler initialized');
-
-            // Phase 10.04: Anti-entropy repair
-            this.merkleTreeManager = new MerkleTreeManager(this._nodeId);
-            this.repairScheduler = new RepairScheduler(
-                this.merkleTreeManager,
-                this.cluster,
-                this.partitionService,
-                this._nodeId,
-                {
-                    enabled: true,
-                    scanIntervalMs: 300000, // 5 minutes
-                    maxConcurrentRepairs: 2
-                }
-            );
-            // Wire up data accessors for repair
+        // Wire up RepairScheduler
+        if (this.repairScheduler) {
             this.repairScheduler.setDataAccessors(
                 (key: string) => this.getLocalRecord(key) ?? undefined,
                 (key: string, record: any) => this.applyRepairRecord(key, record)
             );
             this.repairScheduler.start();
-            logger.info('MerkleTreeManager and RepairScheduler initialized');
+        }
 
-            // Phase 11.1: Full-Text Search
-            this.searchCoordinator = new SearchCoordinator();
-            // Set up document value getter
-            this.searchCoordinator.setDocumentValueGetter((mapName, key) => {
-                const map = this.storageManager.getMaps().get(mapName);
-                if (!map) return undefined;
-                return map.get(key);
-            });
-            // Phase 11.1b: Set up search update callback for live subscriptions
-            this.searchCoordinator.setSendUpdateCallback((clientId, subscriptionId, key, value, score, matchedTerms, type) => {
-                const client = this.connectionManager.getClient(clientId);
-                if (client) {
-                    client.writer.write({
-                        type: 'SEARCH_UPDATE',
-                        payload: {
-                            subscriptionId,
-                            key,
-                            value,
-                            score,
-                            matchedTerms,
-                            type,
-                        }
-                    });
-                }
-            });
-            // Enable FTS for configured maps
-            if (config.fullTextSearch) {
-                for (const [mapName, ftsConfig] of Object.entries(config.fullTextSearch)) {
-                    this.searchCoordinator.enableSearch(mapName, ftsConfig);
-                    logger.info({ mapName, fields: ftsConfig.fields }, 'FTS enabled for map');
-                }
-            }
-
-            // Phase 14: Initialize ClusterSearchCoordinator for distributed search
-            this.clusterSearchCoordinator = new ClusterSearchCoordinator(
-                this.cluster,
-                this.partitionService,
-                this.searchCoordinator,
-                config.distributedSearch,
-                this.metricsService
-            );
-            logger.info('ClusterSearchCoordinator initialized for distributed search');
-
-            // Phase 14.2: Initialize DistributedSubscriptionCoordinator for live subscriptions
-            this.distributedSubCoordinator = new DistributedSubscriptionCoordinator(
-                this.cluster,
-                this.queryRegistry,
-                this.searchCoordinator,
-                undefined, // Use default config
-                this.metricsService
-            );
-            logger.info('DistributedSubscriptionCoordinator initialized for distributed live subscriptions');
-
-            // Set node ID for SearchCoordinator (needed for distributed update routing)
-            this.searchCoordinator.setNodeId(config.nodeId);
-
-            // Set ClusterManager on QueryRegistry for distributed updates
-            this.queryRegistry.setClusterManager(this.cluster, config.nodeId);
-
-            // Set map getter for QueryRegistry (needed for distributed query initial results)
-            this.queryRegistry.setMapGetter((name) => this.getMap(name));
-
-            // Phase 4: Initialize OperationHandler for CRDT operations (CLIENT_OP, OP_BATCH)
-            this.operationHandler = new OperationHandler({
-                processLocalOp: this.processLocalOp.bind(this),
-                processBatchAsync: this.processBatchAsyncWithWriteConcern.bind(this),
-                getEffectiveWriteConcern: this.getEffectiveWriteConcern.bind(this),
-                stringToWriteConcern: this.stringToWriteConcern.bind(this),
-                forwardToOwner: (op) => {
-                    const owner = this.partitionService.getOwner(op.key);
-                    logger.info({ key: op.key, owner }, 'Forwarding op');
-                    this.cluster.sendToNode(owner, op);
-                },
-                isLocalOwner: (key) => this.partitionService.isLocalOwner(key),
-                checkPermission: this.securityManager.checkPermission.bind(this.securityManager),
-                incOp: this.metricsService.incOp.bind(this.metricsService),
-                writeAckManager: this.writeAckManager,
-                pendingBatchOperations: this.pendingBatchOperations,
-            });
-
-            // SPEC-003a: Initialize BroadcastHandler for broadcast operations
-            this.broadcastHandler = new BroadcastHandler({
-                connectionManager: this.connectionManager,
-                securityManager: {
-                    filterObject: this.securityManager.filterObject.bind(this.securityManager),
-                },
-                queryRegistry: {
-                    getSubscribedClientIds: this.queryRegistry.getSubscribedClientIds.bind(this.queryRegistry),
-                },
-                metricsService: {
-                    incEventsRouted: this.metricsService.incEventsRouted.bind(this.metricsService),
-                    incEventsFilteredBySubscription: this.metricsService.incEventsFilteredBySubscription.bind(this.metricsService),
-                    recordSubscribersPerEvent: this.metricsService.recordSubscribersPerEvent.bind(this.metricsService),
-                },
-                hlc: this.hlc,
-            });
-
-            // SPEC-003b: Initialize GCHandler for garbage collection
-            this.gcHandler = new GCHandler({
-                storageManager: this.storageManager,
-                connectionManager: this.connectionManager,
-                cluster: {
-                    getMembers: () => this.cluster.getMembers(),
-                    send: (nodeId, type, payload) => this.cluster.send(nodeId, type, payload),
-                    isLocal: (id) => this.cluster.isLocal(id),
-                    config: { nodeId: config.nodeId },
-                },
-                partitionService: {
-                    isRelated: (key) => this.partitionService.isRelated(key),
-                    getPartitionId: (key) => this.partitionService.getPartitionId(key),
-                },
-                replicationPipeline: this.replicationPipeline ? {
-                    replicate: async (op, opId, key) => {
-                        await this.replicationPipeline!.replicate(op, opId, key);
-                    }
-                } : undefined,
-                merkleTreeManager: this.merkleTreeManager ? {
-                    updateRecord: (partitionId, key, record) => this.merkleTreeManager!.updateRecord(partitionId, key, record),
-                } : undefined,
-                queryRegistry: {
-                    processChange: this.queryRegistry.processChange.bind(this.queryRegistry),
-                },
-                hlc: this.hlc,
-                storage: this.storage,
-                broadcast: (message) => this.broadcast(message),
-                metricsService: {
-                    incOp: this.metricsService.incOp.bind(this.metricsService),
-                },
-            });
-
-            // SPEC-003c: Initialize ClusterEventHandler for cluster message routing
-            this.clusterEventHandler = new ClusterEventHandler({
-                cluster: {
-                    on: (event, handler) => this.cluster.on(event, handler),
-                    off: (event, handler) => this.cluster.off(event, handler),
-                    send: (nodeId, type, payload) => this.cluster.send(nodeId, type, payload),
-                    config: { nodeId: config.nodeId },
-                },
-                partitionService: {
-                    isLocalOwner: (key) => this.partitionService.isLocalOwner(key),
-                    getOwner: (key) => this.partitionService.getOwner(key),
-                    isRelated: (key) => this.partitionService.isRelated(key),
-                },
-                lockManager: {
-                    acquire: (name, clientId, requestId, ttl) => this.lockManager.acquire(name, clientId, requestId, ttl),
-                    release: (name, clientId, fencingToken) => this.lockManager.release(name, clientId, fencingToken),
-                    handleClientDisconnect: (clientId) => this.lockManager.handleClientDisconnect(clientId),
-                },
-                topicManager: {
-                    publish: (topic, data, senderId, fromCluster) => this.topicManager.publish(topic, data, senderId, fromCluster),
-                },
-                repairScheduler: this.repairScheduler ? {
-                    emit: (event, data) => this.repairScheduler!.emit(event, data),
-                } : undefined,
-                connectionManager: this.connectionManager,
-                storageManager: this.storageManager,
-                queryRegistry: {
-                    processChange: this.queryRegistry.processChange.bind(this.queryRegistry),
-                },
-                metricsService: {
-                    incOp: this.metricsService.incOp.bind(this.metricsService),
-                    setClusterMembers: this.metricsService.setClusterMembers.bind(this.metricsService),
-                },
-                gcHandler: this.gcHandler,
-                hlc: this.hlc,
-                merkleTreeManager: this.merkleTreeManager ? {
-                    getRootHash: (partitionId) => this.merkleTreeManager!.getRootHash(partitionId),
-                } : undefined,
-                processLocalOp: this.processLocalOp.bind(this),
-                executeLocalQuery: this.executeLocalQuery.bind(this),
-                finalizeClusterQuery: this.finalizeClusterQuery.bind(this),
-                getLocalRecord: this.getLocalRecord.bind(this),
-                broadcast: this.broadcast.bind(this),
-                getMap: this.getMap.bind(this),
-                pendingClusterQueries: this.pendingClusterQueries,
-            });
-
-            // SPEC-003d: Initialize HeartbeatHandler for client liveness detection
-            this.heartbeatHandler = new HeartbeatHandler({
-                connectionManager: this.connectionManager,
-            });
-
-            // SPEC-003d: Initialize ClientMessageHandler for client messaging operations
-            this.clientMessageHandler = new ClientMessageHandler({
-                connectionManager: this.connectionManager,
-                queryRegistry: this.queryRegistry,
-                hlc: this.hlc,
-            });
-
-            // SPEC-003d: Initialize PersistenceHandler for operation persistence
-            this.persistenceHandler = new PersistenceHandler({
-                storage: this.storage ?? null,
-                getMap: this.getMap.bind(this),
-            });
-
-            // SPEC-003d: Initialize OperationContextHandler for operation context and interceptors
-            this.operationContextHandler = new OperationContextHandler({
-                connectionManager: this.connectionManager,
-                interceptors: this.interceptors,
-                cluster: this.cluster,
-            });
-
-            // SPEC-003d: Initialize QueryConversionHandler for query conversion and cluster query finalization
-            this.queryConversionHandler = new QueryConversionHandler({
-                getMapAsync: this.getMapAsync.bind(this),
-                pendingClusterQueries: this.pendingClusterQueries,
-                queryRegistry: this.queryRegistry,
-                securityManager: this.securityManager,
-            });
-
-            // SPEC-003d: Initialize BatchProcessingHandler for batch operation processing
-            this.batchProcessingHandler = new BatchProcessingHandler({
-                backpressure: this.backpressure,
-                partitionService: this.partitionService,
-                cluster: this.cluster,
-                metricsService: this.metricsService,
-                replicationPipeline: this.replicationPipeline,
-                broadcastBatch: this.broadcastBatch.bind(this),
-                broadcastBatchSync: this.broadcastBatchSync.bind(this),
-                buildOpContext: this.buildOpContext.bind(this),
-                runBeforeInterceptors: this.runBeforeInterceptors.bind(this),
-                runAfterInterceptors: this.runAfterInterceptors.bind(this),
-                applyOpToMap: this.applyOpToMap.bind(this),
-            });
-
-            // SPEC-003d: Initialize WriteConcernHandler for Write Concern tracking
-            this.writeConcernHandler = new WriteConcernHandler({
-                backpressure: this.backpressure,
-                partitionService: this.partitionService,
-                cluster: this.cluster,
-                metricsService: this.metricsService,
-                writeAckManager: this.writeAckManager,
-                storage: this.storage ?? null,
-                broadcastBatch: this.broadcastBatch.bind(this),
-                broadcastBatchSync: this.broadcastBatchSync.bind(this),
-                buildOpContext: this.buildOpContext.bind(this),
-                runBeforeInterceptors: this.runBeforeInterceptors.bind(this),
-                runAfterInterceptors: this.runAfterInterceptors.bind(this),
-                applyOpToMap: this.applyOpToMap.bind(this),
-                persistOpSync: this.persistOpSync.bind(this),
-                persistOpAsync: this.persistOpAsync.bind(this),
-            });
-
-            // Phase 4: Initialize all message handlers
-            const partitionHandler = new PartitionHandler({
-                partitionService: {
-                    getPartitionMap: () => this.partitionService.getPartitionMap(),
-                },
-            });
-
-            const topicHandler = new TopicHandler({
-                topicManager: {
-                    subscribe: (clientId, topic) => this.topicManager.subscribe(clientId, topic),
-                    unsubscribe: (clientId, topic) => this.topicManager.unsubscribe(clientId, topic),
-                    publish: (topic, data, senderId) => this.topicManager.publish(topic, data, senderId),
-                },
-                securityManager: {
-                    checkPermission: this.securityManager.checkPermission.bind(this.securityManager),
-                },
-            });
-
-            const lockHandler = new LockHandler({
-                lockManager: {
-                    acquire: (name, clientId, requestId, ttl) => this.lockManager.acquire(name, clientId, requestId, ttl),
-                    release: (name, clientId, fencingToken) => this.lockManager.release(name, clientId, fencingToken),
-                },
-                partitionService: {
-                    isLocalOwner: (key) => this.partitionService.isLocalOwner(key),
-                    getOwner: (key) => this.partitionService.getOwner(key),
-                },
-                cluster: {
-                    getMembers: () => this.cluster.getMembers(),
-                    send: (nodeId, type, payload) => this.cluster.send(nodeId, type, payload),
-                    config: { nodeId: config.nodeId },
-                },
-                securityManager: {
-                    checkPermission: this.securityManager.checkPermission.bind(this.securityManager),
-                },
-            });
-
-            const counterHandlerAdapter = new CounterHandlerAdapter({
-                counterHandler: {
-                    handleCounterRequest: (clientId, name) => this.counterHandler.handleCounterRequest(clientId, name),
-                    handleCounterSync: (clientId, name, state) => this.counterHandler.handleCounterSync(clientId, name, state),
-                },
-                getClient: (clientId) => this.connectionManager.getClient(clientId),
-            });
-
-            const resolverHandler = new ResolverHandler({
-                conflictResolverHandler: {
-                    registerResolver: (mapName, resolver, clientId) => this.conflictResolverHandler.registerResolver(mapName, resolver, clientId),
-                    unregisterResolver: (mapName, resolverName, clientId) => this.conflictResolverHandler.unregisterResolver(mapName, resolverName, clientId),
-                    listResolvers: (mapName) => this.conflictResolverHandler.listResolvers(mapName),
-                },
-                securityManager: {
-                    checkPermission: this.securityManager.checkPermission.bind(this.securityManager),
-                },
-            });
-
-            const journalHandler = new JournalHandler({
-                eventJournalService: this.eventJournalService,
-                journalSubscriptions: this.journalSubscriptions,
-                getClient: (clientId) => this.connectionManager.getClient(clientId),
-            });
-
-            const lwwSyncHandler = new LwwSyncHandler({
-                getMapAsync: this.getMapAsync.bind(this),
-                hlc: this.hlc,
-                securityManager: {
-                    checkPermission: this.securityManager.checkPermission.bind(this.securityManager),
-                },
-                metricsService: {
-                    incOp: this.metricsService.incOp.bind(this.metricsService),
-                },
-                gcAgeMs: GC_AGE_MS,
-            });
-
-            const ormapSyncHandler = new ORMapSyncHandler({
-                getMapAsync: this.getMapAsync.bind(this),
-                hlc: this.hlc,
-                securityManager: {
-                    checkPermission: this.securityManager.checkPermission.bind(this.securityManager),
-                },
-                metricsService: {
-                    incOp: this.metricsService.incOp.bind(this.metricsService),
-                },
-                storage: this.storage,
-                broadcast: (message, excludeClientId) => this.connectionManager.broadcast(message, excludeClientId),
-                gcAgeMs: GC_AGE_MS,
-            });
-
-            const entryProcessorAdapter = new EntryProcessorAdapter({
-                entryProcessorHandler: {
-                    executeOnKey: (map, key, processor) => this.entryProcessorHandler.executeOnKey(map, key, processor),
-                    executeOnKeys: (map, keys, processor) => this.entryProcessorHandler.executeOnKeys(map, keys, processor),
-                },
-                getMap: (name) => this.getMap(name),
-                securityManager: {
-                    checkPermission: this.securityManager.checkPermission.bind(this.securityManager),
-                },
-                queryRegistry: {
-                    processChange: (mapName, map, key, record, oldValue) => this.queryRegistry.processChange(mapName, map, key, record, oldValue),
-                },
-            });
-
-            const searchHandler = new SearchHandler({
-                searchCoordinator: {
-                    isSearchEnabled: (mapName) => this.searchCoordinator.isSearchEnabled(mapName),
-                    search: (mapName, query, options) => this.searchCoordinator.search(mapName, query, options),
-                    subscribe: (clientId, subscriptionId, mapName, query, options) => this.searchCoordinator.subscribe(clientId, subscriptionId, mapName, query, options),
-                    unsubscribe: (subscriptionId) => this.searchCoordinator.unsubscribe(subscriptionId),
-                },
-                clusterSearchCoordinator: this.clusterSearchCoordinator,
-                distributedSubCoordinator: this.distributedSubCoordinator,
-                cluster: {
-                    getMembers: () => this.cluster.getMembers(),
-                },
-                securityManager: {
-                    checkPermission: this.securityManager.checkPermission.bind(this.securityManager),
-                },
-            });
-
-            const queryHandler = new QueryHandler({
-                securityManager: {
-                    checkPermission: this.securityManager.checkPermission.bind(this.securityManager),
-                    filterObject: (value, principal, mapName) => this.securityManager.filterObject(value, principal, mapName),
-                },
-                metricsService: {
-                    incOp: this.metricsService.incOp.bind(this.metricsService),
-                },
-                queryRegistry: {
-                    unregister: (queryId) => this.queryRegistry.unregister(queryId),
-                },
-                distributedSubCoordinator: this.distributedSubCoordinator,
-                cluster: {
-                    getMembers: () => this.cluster.getMembers(),
-                    isLocal: (id) => id === config.nodeId,
-                    send: (nodeId, type, payload) => this.cluster.send(nodeId, type, payload),
-                    config: { nodeId: config.nodeId },
-                },
-                executeLocalQuery: this.executeLocalQuery.bind(this),
-                finalizeClusterQuery: this.finalizeClusterQuery.bind(this),
-                pendingClusterQueries: this.pendingClusterQueries,
-                readReplicaHandler: this.readReplicaHandler,
-                ConsistencyLevel: { EVENTUAL: ConsistencyLevel.EVENTUAL },
-            });
-
-            // Phase 4: Initialize MessageRegistry with all handlers
-            this.messageRegistry = createMessageRegistry({
-                // CRDT operations
-                onClientOp: (client, msg) => this.operationHandler.processClientOp(client, msg.payload),
-                onOpBatch: (client, msg) => this.operationHandler.processOpBatch(
-                    client, msg.payload.ops, msg.payload.writeConcern, msg.payload.timeout
-                ),
-                // Query operations
-                onQuerySub: (client, msg) => queryHandler.handleQuerySub(client, msg),
-                onQueryUnsub: (client, msg) => queryHandler.handleQueryUnsub(client, msg),
-                // LWW Sync protocol
-                onSyncInit: (client, msg) => lwwSyncHandler.handleSyncInit(client, msg),
-                onMerkleReqBucket: (client, msg) => lwwSyncHandler.handleMerkleReqBucket(client, msg),
-                // ORMap Sync protocol
-                onORMapSyncInit: (client, msg) => ormapSyncHandler.handleORMapSyncInit(client, msg),
-                onORMapMerkleReqBucket: (client, msg) => ormapSyncHandler.handleORMapMerkleReqBucket(client, msg),
-                onORMapDiffRequest: (client, msg) => ormapSyncHandler.handleORMapDiffRequest(client, msg),
-                onORMapPushDiff: (client, msg) => ormapSyncHandler.handleORMapPushDiff(client, msg),
-                // Lock operations
-                onLockRequest: (client, msg) => lockHandler.handleLockRequest(client, msg),
-                onLockRelease: (client, msg) => lockHandler.handleLockRelease(client, msg),
-                // Topic operations
-                onTopicSub: (client, msg) => topicHandler.handleTopicSub(client, msg),
-                onTopicUnsub: (client, msg) => topicHandler.handleTopicUnsub(client, msg),
-                onTopicPub: (client, msg) => topicHandler.handleTopicPub(client, msg),
-                // PN Counter operations
-                onCounterRequest: (client, msg) => counterHandlerAdapter.handleCounterRequest(client, msg),
-                onCounterSync: (client, msg) => counterHandlerAdapter.handleCounterSync(client, msg),
-                // Entry processor operations
-                onEntryProcess: (client, msg) => entryProcessorAdapter.handleEntryProcess(client, msg),
-                onEntryProcessBatch: (client, msg) => entryProcessorAdapter.handleEntryProcessBatch(client, msg),
-                // Conflict resolver operations
-                onRegisterResolver: (client, msg) => resolverHandler.handleRegisterResolver(client, msg),
-                onUnregisterResolver: (client, msg) => resolverHandler.handleUnregisterResolver(client, msg),
-                onListResolvers: (client, msg) => resolverHandler.handleListResolvers(client, msg),
-                // Partition operations
-                onPartitionMapRequest: (client, msg) => partitionHandler.handlePartitionMapRequest(client, msg),
-                // Full-text search operations
-                onSearch: (client, msg) => searchHandler.handleSearch(client, msg),
-                onSearchSub: (client, msg) => searchHandler.handleSearchSub(client, msg),
-                onSearchUnsub: (client, msg) => searchHandler.handleSearchUnsub(client, msg),
-                // Event journal operations
-                onJournalSubscribe: (client, msg) => journalHandler.handleJournalSubscribe(client, msg),
-                onJournalUnsubscribe: (client, msg) => journalHandler.handleJournalUnsubscribe(client, msg),
-                onJournalRead: (client, msg) => journalHandler.handleJournalRead(client, msg),
-            });
-
-            this.systemManager = new SystemManager(
-                this.cluster,
-                this.metricsService,
-                (name) => this.getMap(name) as LWWMap<string, any>
-            );
-
-            this.clusterEventHandler.setupListeners();
-            this.cluster.start().then((actualClusterPort) => {
-                this._actualClusterPort = actualClusterPort;
-                this.metricsService.setClusterMembers(this.cluster.getMembers().length);
-                logger.info({ clusterPort: this._actualClusterPort }, 'Cluster started');
-                this.systemManager.start();
-                this.gcHandler.start();
-                this._readyResolve();
-            }).catch((err) => {
-                // Fallback for ClusterManager that doesn't return port
-                this._actualClusterPort = clusterPort;
-                this.metricsService.setClusterMembers(this.cluster.getMembers().length);
-                logger.info({ clusterPort: this._actualClusterPort }, 'Cluster started (sync)');
-                this.systemManager.start();
-                this.gcHandler.start();
-                this._readyResolve();
-            });
+        // Wire up FTS updates
+        this.searchCoordinator.setDocumentValueGetter((mapName, key) => {
+            const map = this.storageManager.getMaps().get(mapName);
+            if (!map) return undefined;
+            return map.get(key);
         });
 
+        this.searchCoordinator.setSendUpdateCallback((clientId, subscriptionId, key, value, score, matchedTerms, type) => {
+            const client = this.connectionManager.getClient(clientId);
+            if (client) {
+                client.writer.write({
+                    type: 'SEARCH_UPDATE',
+                    payload: {
+                        subscriptionId,
+                        key,
+                        value,
+                        score,
+                        matchedTerms,
+                        type,
+                    }
+                });
+            }
+        });
+
+        // Initialize Handlers
+        // Independent handlers injected from dependencies
+        this.broadcastHandler = dependencies.broadcastHandler;
+        this.heartbeatHandler = dependencies.heartbeatHandler;
+        this.persistenceHandler = dependencies.persistenceHandler;
+        this.operationContextHandler = dependencies.operationContextHandler;
+        this.lockHandler = dependencies.lockHandler;
+        this.topicHandler = dependencies.topicHandler;
+        this.partitionHandler = dependencies.partitionHandler;
+        this.searchHandler = dependencies.searchHandler;
+        this.journalHandler = dependencies.journalHandler;
+        this.operationHandler = dependencies.operationHandler;
+        this.webSocketHandler = dependencies.webSocketHandler;
+        this.clientMessageHandler = dependencies.clientMessageHandler;
+        this.gcHandler = dependencies.gcHandler;
+        this.queryConversionHandler = dependencies.queryConversionHandler;
+        this.batchProcessingHandler = dependencies.batchProcessingHandler;
+        this.writeConcernHandler = dependencies.writeConcernHandler;
+        this.clusterEventHandler = dependencies.clusterEventHandler;
+        this.messageRegistry = dependencies.messageRegistry;
+        this.lifecycleManager = dependencies.lifecycleManager;
+
+        // Set coordinator callbacks via late binding pattern
+        this.gcHandler.setCoordinatorCallbacks({
+            broadcast: this.broadcast.bind(this),
+        });
+
+        this.batchProcessingHandler.setCoordinatorCallbacks({
+            broadcastBatch: this.broadcastBatch.bind(this),
+            broadcastBatchSync: this.broadcastBatchSync.bind(this),
+        });
+
+        // Set message registry on WebSocketHandler (late binding)
+        this.webSocketHandler.setMessageRegistry(this.messageRegistry);
+
+        this.heartbeatHandler.start();
+        this.gcHandler.start();
+
+        // Listen for connections and errors
+        this.wss.on('connection', (ws) => this.webSocketHandler.handleConnection(ws));
+        this.httpServer.on('error', (err) => {
+            logger.error({ err }, 'HTTP Server error');
+        });
+
+        // Final startup log
+        const actualPort = (this.httpServer.address() as any)?.port || config.port;
+        this._actualPort = actualPort;
+        this._actualClusterPort = config.clusterPort || 0;
+
+        logger.info({
+            port: actualPort,
+            nodeId: this._nodeId,
+            mode: 'CLUSTERED'
+        }, 'Server Coordinator Initialized via Factory');
+
+        // Initialize storage and backfill FTS if needed
         if (this.storage) {
-            // Wait for server to be ready (searchCoordinator initialized) before backfilling
             this.storage.initialize().then(async () => {
                 logger.info('Storage adapter initialized');
-                // Wait for ready signal to ensure searchCoordinator is initialized
                 await this.ready();
-                this.backfillSearchIndexes();
+                this.lifecycleManager.backfillSearchIndexes();
             }).catch(err => {
                 logger.error({ err }, 'Failed to initialize storage');
             });
         }
 
-        this.heartbeatHandler.start();
+        this._readyResolve(); // Mark as ready
     }
 
-    /**
-     * Populate FTS indexes from existing map data.
-     * Called after storage initialization.
-     */
-    private async backfillSearchIndexes(): Promise<void> {
-        const enabledMaps = this.searchCoordinator.getEnabledMaps();
-
-        const promises = enabledMaps.map(async (mapName) => {
-            try {
-                // Ensure map is loaded from storage
-                const map = await this.getMapAsync(mapName);
-                if (!map) return;
-
-                if (map instanceof LWWMap) {
-                    const entries = Array.from(map.entries());
-                    if (entries.length > 0) {
-                        logger.info({ mapName, count: entries.length }, 'Backfilling FTS index');
-                        this.searchCoordinator.buildIndexFromEntries(
-                            mapName,
-                            map.entries() as Iterable<[string, Record<string, unknown> | null]>
-                        );
-                    }
-                } else {
-                    logger.warn({ mapName }, 'FTS backfill skipped: Map type not supported (only LWWMap)');
-                }
-            } catch (err) {
-                logger.error({ mapName, err }, 'Failed to backfill FTS index');
-            }
-        });
-
-        await Promise.all(promises);
-        logger.info('FTS backfill completed');
-    }
+    // NOTE: backfillSearchIndexes moved to LifecycleManager (Phase 2)
 
     /** Wait for server to be fully ready (ports assigned) */
     public ready(): Promise<void> {
@@ -1412,469 +655,17 @@ export class ServerCoordinator {
         return this.searchCoordinator.getIndexStats(mapName);
     }
 
-    /**
-     * Phase 10.02: Graceful cluster departure
-     *
-     * Notifies the cluster that this node is leaving and allows time for:
-     * 1. Pending replication to complete
-     * 2. Other nodes to detect departure
-     * 3. Partition reassignment to begin
-     */
-    private async gracefulClusterDeparture(): Promise<void> {
-        if (!this.cluster || this.cluster.getMembers().length <= 1) {
-            // Single node or no cluster - nothing to coordinate
-            return;
-        }
-
-        const nodeId = this._nodeId;
-        const ownedPartitions = this.partitionService
-            ? this.getOwnedPartitions()
-            : [];
-
-        logger.info({
-            nodeId,
-            ownedPartitions: ownedPartitions.length,
-            clusterMembers: this.cluster.getMembers().length
-        }, 'Initiating graceful cluster departure');
-
-        // Notify cluster peers that we're leaving
-        const departureMessage = {
-            type: 'NODE_LEAVING',
-            nodeId,
-            partitions: ownedPartitions,
-            timestamp: Date.now()
-        };
-
-        // Broadcast to all cluster members
-        for (const memberId of this.cluster.getMembers()) {
-            if (memberId !== nodeId) {
-                try {
-                    this.cluster.send(memberId, 'CLUSTER_EVENT', departureMessage);
-                } catch (e) {
-                    logger.warn({ memberId, err: e }, 'Failed to notify peer of departure');
-                }
-            }
-        }
-
-        // Wait for pending replication to flush
-        if (this.replicationPipeline) {
-            logger.info('Waiting for pending replication to complete...');
-            try {
-                await this.waitForReplicationFlush(3000);
-                logger.info('Replication flush complete');
-            } catch (e) {
-                logger.warn({ err: e }, 'Replication flush timeout - some data may not be replicated');
-            }
-        }
-
-        // Brief delay to allow cluster to process departure
-        await new Promise(resolve => setTimeout(resolve, 500));
-
-        logger.info({ nodeId }, 'Graceful cluster departure complete');
-    }
+    // NOTE: gracefulClusterDeparture, getOwnedPartitions, waitForReplicationFlush moved to LifecycleManager (Phase 2)
 
     /**
-     * Get list of partition IDs owned by this node
+     * Shutdown the server coordinator.
+     * Delegates to LifecycleManager for graceful shutdown.
      */
-    private getOwnedPartitions(): number[] {
-        if (!this.partitionService) return [];
-
-        const partitionMap = this.partitionService.getPartitionMap();
-        const owned: number[] = [];
-
-        for (const partition of partitionMap.partitions) {
-            if (partition.ownerNodeId === this._nodeId) {
-                owned.push(partition.partitionId);
-            }
-        }
-
-        return owned;
+    public async shutdown(): Promise<void> {
+        return this.lifecycleManager.shutdown();
     }
 
-    /**
-     * Wait for replication pipeline to flush pending operations
-     */
-    private async waitForReplicationFlush(timeoutMs: number): Promise<void> {
-        if (!this.replicationPipeline) return;
-
-        const startTime = Date.now();
-
-        while (Date.now() - startTime < timeoutMs) {
-            const pendingOps = this.replicationPipeline.getTotalPending();
-            if (pendingOps === 0) {
-                return;
-            }
-            await new Promise(resolve => setTimeout(resolve, 100));
-        }
-
-        throw new Error('Replication flush timeout');
-    }
-
-    public async shutdown() {
-        logger.info('Shutting down Server Coordinator...');
-
-        // Phase 10.02: Graceful cluster departure with partition notification
-        await this.gracefulClusterDeparture();
-
-        // 1. Stop accepting new connections
-        this.httpServer.close();
-        if (this.metricsServer) {
-            this.metricsServer.close();
-        }
-        this.metricsService.destroy();
-        this.wss.close();
-
-        // 2. Notify and Close Clients
-        logger.info(`Closing ${this.connectionManager.getClientCount()} client connections...`);
-        const shutdownMsg = serialize({ type: 'SHUTDOWN_PENDING', retryAfter: 5000 });
-
-        for (const client of this.connectionManager.getClients().values()) {
-            try {
-                if (client.socket.readyState === WebSocket.OPEN) {
-                    // Send shutdown message directly to socket (bypass batching)
-                    // This ensures message is sent before socket.close()
-                    client.socket.send(shutdownMsg);
-                    if (client.writer) {
-                        client.writer.close();
-                    }
-                    client.socket.close(1001, 'Server Shutdown');
-                }
-            } catch (e) {
-                logger.error({ err: e, clientId: client.id }, 'Error closing client connection');
-            }
-        }
-        this.connectionManager.getClients().clear();
-
-        // 3. Shutdown event executor (wait for pending tasks)
-        logger.info('Shutting down event executor...');
-        await this.eventExecutor.shutdown(true);
-
-        // 3.5. Shutdown worker pool
-        if (this.workerPool) {
-            logger.info('Shutting down worker pool...');
-            await this.workerPool.shutdown(5000);
-            logger.info('Worker pool shutdown complete.');
-        }
-
-        // 4. Close ReplicationPipeline
-        if (this.replicationPipeline) {
-            this.replicationPipeline.close();
-        }
-
-        // 4.5. Stop Phase 10 components
-        if (this.repairScheduler) {
-            this.repairScheduler.stop();
-            logger.info('RepairScheduler stopped');
-        }
-        if (this.partitionReassigner) {
-            this.partitionReassigner.stop();
-            logger.info('PartitionReassigner stopped');
-        }
-
-        // 5. Stop Cluster
-        if (this.cluster) {
-            this.cluster.stop();
-        }
-
-        // 6. Close Storage
-        if (this.storage) {
-            logger.info('Closing storage connection...');
-            try {
-                await this.storage.close();
-                logger.info('Storage closed successfully.');
-            } catch (err) {
-                logger.error({ err }, 'Error closing storage');
-            }
-        }
-
-        // 6. Cleanup
-        if (this.gcHandler) {
-            this.gcHandler.stop();
-        }
-
-        if (this.heartbeatHandler) {
-            this.heartbeatHandler.stop();
-        }
-
-        // Stop LockManager
-        if (this.lockManager) {
-            this.lockManager.stop();
-        }
-
-        // Stop SystemManager
-        if (this.systemManager) {
-            this.systemManager.stop();
-        }
-
-        // Clear memory pools
-        this.eventPayloadPool.clear();
-
-        // Shutdown tasklet scheduler
-        this.taskletScheduler.shutdown();
-
-        // Shutdown Write Concern manager (Phase 5.01)
-        this.writeAckManager.shutdown();
-
-        // Dispose Entry Processor handler (Phase 5.03)
-        this.entryProcessorHandler.dispose();
-
-        // Dispose Event Journal (Phase 5.04)
-        if (this.eventJournalService) {
-            this.eventJournalService.dispose();
-        }
-
-        // Destroy ClusterSearchCoordinator (Phase 14)
-        if (this.clusterSearchCoordinator) {
-            this.clusterSearchCoordinator.destroy();
-        }
-
-        // Phase 14.2: Cleanup distributed subscription coordinator
-        if (this.distributedSubCoordinator) {
-            this.distributedSubCoordinator.destroy();
-        }
-
-        logger.info('Server Coordinator shutdown complete.');
-    }
-
-    private async handleConnection(ws: WebSocket) {
-        // Check rate limit before accepting connection
-        if (this.rateLimitingEnabled && !this.rateLimiter.shouldAccept()) {
-            logger.warn('Connection rate limit exceeded, rejecting');
-            this.rateLimiter.onConnectionRejected();
-            this.metricsService.incConnectionsRejected();
-            ws.close(1013, 'Server overloaded'); // 1013 = Try Again Later
-            return;
-        }
-
-        // Register connection attempt
-        if (this.rateLimitingEnabled) {
-            this.rateLimiter.onConnectionAttempt();
-        }
-        this.metricsService.incConnectionsAccepted();
-
-        // Client ID is temporary until auth
-        const clientId = crypto.randomUUID();
-        logger.info({ clientId }, 'Client connected (pending auth)');
-
-        // Create CoalescingWriter if enabled, otherwise create a pass-through writer
-        const writer = new CoalescingWriter(ws, this.writeCoalescingEnabled ? this.writeCoalescingOptions : {
-            maxBatchSize: 1, // Disable batching by flushing immediately
-            maxDelayMs: 0,
-            maxBatchBytes: 0,
-        });
-
-        // Register client connection via ConnectionManager
-        const connection = this.connectionManager.registerClient(clientId, ws, writer);
-        this.metricsService.setConnectedClients(this.connectionManager.getClientCount());
-
-        // Run onConnection interceptors
-        try {
-            const context: ConnectionContext = {
-                clientId: connection.id,
-                socket: connection.socket,
-                isAuthenticated: connection.isAuthenticated,
-                principal: connection.principal
-            };
-            for (const interceptor of this.interceptors) {
-                if (interceptor.onConnection) {
-                    await interceptor.onConnection(context);
-                }
-            }
-        } catch (err) {
-            logger.error({ clientId, err }, 'Interceptor rejected connection');
-            ws.close(4000, 'Connection Rejected');
-            this.connectionManager.removeClient(clientId);
-            return;
-        }
-
-        ws.on('message', (message) => {
-            try {
-                let data: any;
-                let buf: Uint8Array;
-
-                if (Buffer.isBuffer(message)) {
-                    buf = message;
-                } else if (message instanceof ArrayBuffer) {
-                    buf = new Uint8Array(message);
-                } else if (Array.isArray(message)) {
-                    buf = Buffer.concat(message);
-                } else {
-                    // Fallback or unexpected type
-                    buf = Buffer.from(message as any);
-                }
-
-                try {
-                    data = deserialize(buf);
-                } catch (e) {
-                    // If msgpack fails, try JSON (legacy support)
-                    try {
-                        // Use Buffer.toString() or TextDecoder
-                        const text = Buffer.isBuffer(buf) ? buf.toString() : new TextDecoder().decode(buf);
-                        data = JSON.parse(text);
-                    } catch (jsonErr) {
-                        // Original error likely relevant
-                        throw e;
-                    }
-                }
-
-                this.handleMessage(connection, data);
-            } catch (err) {
-                logger.error({ err }, 'Invalid message format');
-                ws.close(1002, 'Protocol Error');
-            }
-        });
-
-        ws.on('close', () => {
-            logger.info({ clientId }, 'Client disconnected');
-
-            // If connection was still pending (not authenticated), mark as failed
-            if (this.rateLimitingEnabled && !connection.isAuthenticated) {
-                this.rateLimiter.onPendingConnectionFailed();
-            }
-
-            // Close the CoalescingWriter to flush any pending messages
-            connection.writer.close();
-
-            // Run onDisconnect interceptors
-            const context: ConnectionContext = {
-                clientId: connection.id,
-                socket: connection.socket,
-                isAuthenticated: connection.isAuthenticated,
-                principal: connection.principal
-            };
-            for (const interceptor of this.interceptors) {
-                if (interceptor.onDisconnect) {
-                    interceptor.onDisconnect(context).catch(err => {
-                        logger.error({ clientId, err }, 'Error in onDisconnect interceptor');
-                    });
-                }
-            }
-
-            // Cleanup subscriptions
-            for (const subId of connection.subscriptions) {
-                this.queryRegistry.unregister(subId);
-            }
-
-            // Cleanup Locks (Local)
-            this.lockManager.handleClientDisconnect(clientId);
-
-            // Cleanup Topics (Local)
-            this.topicManager.unsubscribeAll(clientId);
-
-            // Cleanup Counters (Local)
-            this.counterHandler.unsubscribeAll(clientId);
-
-            // Phase 11.1b: Cleanup Search Subscriptions
-            this.searchCoordinator.unsubscribeClient(clientId);
-
-            // Phase 14.2: Cleanup distributed subscriptions for this client
-            if (this.distributedSubCoordinator && connection) {
-                this.distributedSubCoordinator.unsubscribeClient(connection.socket);
-            }
-
-            // Notify Cluster to Cleanup Locks (Remote)
-            const members = this.cluster.getMembers();
-            for (const memberId of members) {
-                if (!this.cluster.isLocal(memberId)) {
-                    this.cluster.send(memberId, 'CLUSTER_CLIENT_DISCONNECTED', {
-                        originNodeId: this.cluster.config.nodeId,
-                        clientId
-                    });
-                }
-            }
-
-            this.connectionManager.removeClient(clientId);
-            this.metricsService.setConnectedClients(this.connectionManager.getClientCount());
-        });
-
-        // Send Auth Challenge immediately
-        ws.send(serialize({ type: 'AUTH_REQUIRED' }));
-    }
-
-    private async handleMessage(client: ClientConnection, rawMessage: any) {
-        // Validation with Zod
-        const parseResult = MessageSchema.safeParse(rawMessage);
-        if (!parseResult.success) {
-            this.rateLimitedLogger.error(
-                `invalid-message:${client.id}`,
-                { clientId: client.id, errorCode: parseResult.error.issues[0]?.code },
-                'Invalid message format from client'
-            );
-            client.writer.write({
-                type: 'ERROR',
-                payload: { code: 400, message: 'Invalid message format', details: (parseResult.error as any).errors }
-            }, true); // urgent
-            return;
-        }
-        const message = parseResult.data;
-
-        // Handle PING immediately (even before auth check for authenticated clients)
-        if (message.type === 'PING') {
-            this.handlePing(client, message.timestamp);
-            return;
-        }
-
-        // Update client's last active HLC
-        // Try to extract from payload if present, otherwise assume near current time but logically before next op
-        this.updateClientHlc(client, message);
-
-        // Handshake / Auth handling (delegated to AuthHandler - Phase 4)
-        if (!client.isAuthenticated) {
-            if (message.type === 'AUTH') {
-                const token = message.token;
-                const result = await this.authHandler.handleAuth(client, token);
-                if (result.success) {
-                    client.writer.write({ type: 'AUTH_ACK' }, true); // urgent: bypass batching
-                } else {
-                    client.writer.write({ type: 'AUTH_FAIL', error: result.error || 'Invalid token' }, true); // urgent
-                    client.socket.close(4001, 'Unauthorized');
-                }
-                return;
-            } else {
-                // Reject any other message before auth
-                client.socket.close(4001, 'Auth required');
-            }
-            return;
-        }
-
-        // Standard Protocol Handling (Authenticated)
-        // Phase 4: All message types are now routed through MessageRegistry
-        const registryHandler = this.messageRegistry?.[message.type];
-        if (registryHandler) {
-            await registryHandler(client, message);
-            return;
-        }
-
-        // Only AUTH for already-authenticated clients remains (duplicate AUTH handling)
-        if (message.type === 'AUTH') {
-            // Client already authenticated, ignore duplicate AUTH messages
-            // This can happen if client sends AUTH before receiving AUTH_ACK
-            logger.debug({ clientId: client.id }, 'Ignoring duplicate AUTH from already authenticated client');
-            return;
-        }
-
-        logger.warn({ type: message.type }, 'Unknown message type');
-    }
-
-    /* NOTE: All message handlers have been extracted to coordinator/ modules:
-     * - QueryHandler: QUERY_SUB, QUERY_UNSUB
-     * - LwwSyncHandler: SYNC_INIT, MERKLE_REQ_BUCKET
-     * - ORMapSyncHandler: ORMAP_SYNC_INIT, ORMAP_MERKLE_REQ_BUCKET, ORMAP_DIFF_REQUEST, ORMAP_PUSH_DIFF
-     * - LockHandler: LOCK_REQUEST, LOCK_RELEASE
-     * - TopicHandler: TOPIC_SUB, TOPIC_UNSUB, TOPIC_PUB
-     * - CounterHandlerAdapter: COUNTER_REQUEST, COUNTER_SYNC
-     * - EntryProcessorAdapter: ENTRY_PROCESS, ENTRY_PROCESS_BATCH
-     * - ResolverHandler: REGISTER_RESOLVER, UNREGISTER_RESOLVER, LIST_RESOLVERS
-     * - PartitionHandler: PARTITION_MAP_REQUEST
-     * - SearchHandler: SEARCH, SEARCH_SUB, SEARCH_UNSUB
-     * - JournalHandler: JOURNAL_SUBSCRIBE, JOURNAL_UNSUBSCRIBE, JOURNAL_READ
-     * The switch statement (1234 LOC) has been removed and replaced with MessageRegistry dispatch.
-     */
-
-
-    private updateClientHlc(client: ClientConnection, message: any) {
-        this.clientMessageHandler.updateClientHlc(client, message);
-    }
+    // NOTE: handleConnection and handleMessage have been extracted to WebSocketHandler (Phase 1)
 
     // ============ Phase 4: Partition Map Broadcast ============
 
@@ -1922,170 +713,8 @@ export class ServerCoordinator {
         return this.queryConversionHandler.executeLocalQuery(mapName, query);
     }
 
-    /**
-     * Convert server Query format to core Query format for indexed execution.
-     * Returns null if conversion is not possible (complex queries).
-     */
-    private convertToCoreQuery(query: Query): CoreQuery | null {
-        return this.queryConversionHandler.convertToCoreQuery(query);
-    }
-
-    /**
-     * Convert predicate node to core Query format.
-     */
-    private predicateToCoreQuery(predicate: any): CoreQuery | null {
-        return this.queryConversionHandler.predicateToCoreQuery(predicate);
-    }
-
-    /**
-     * Convert server operator to core query type.
-     */
-    private convertOperator(op: string): 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | null {
-        return this.queryConversionHandler.convertOperator(op);
-    }
-
     private async finalizeClusterQuery(requestId: string, timeout = false) {
         return this.queryConversionHandler.finalizeClusterQuery(requestId, timeout);
-    }
-
-    /**
-     * Core operation application logic shared between processLocalOp and processLocalOpForBatch.
-     * Handles map merge, storage persistence, query evaluation, and event generation.
-     *
-     * @returns Event payload for broadcasting (or null if operation failed)
-     */
-    private async applyOpToMap(op: any, remoteNodeId?: string): Promise<{ eventPayload: any; oldRecord: any; rejected?: boolean }> {
-        // Determine type hint from op
-        const typeHint = (op.opType === 'OR_ADD' || op.opType === 'OR_REMOVE') ? 'OR' : 'LWW';
-        const map = this.getMap(op.mapName, typeHint);
-
-        // Check compatibility
-        if (typeHint === 'OR' && map instanceof LWWMap) {
-            logger.error({ mapName: op.mapName }, 'Map type mismatch: LWWMap but received OR op');
-            throw new Error('Map type mismatch: LWWMap but received OR op');
-        }
-        if (typeHint === 'LWW' && map instanceof ORMap) {
-            logger.error({ mapName: op.mapName }, 'Map type mismatch: ORMap but received LWW op');
-            throw new Error('Map type mismatch: ORMap but received LWW op');
-        }
-
-        let oldRecord: any;
-        let recordToStore: StorageValue<any> | undefined;
-        let tombstonesToStore: StorageValue<any> | undefined;
-
-        const eventPayload: any = {
-            mapName: op.mapName,
-            key: op.key,
-        };
-
-        if (map instanceof LWWMap) {
-            oldRecord = map.getRecord(op.key);
-
-            // Use conflict resolver if registered (Phase 5.05)
-            if (this.conflictResolverHandler.hasResolvers(op.mapName)) {
-                const mergeResult = await this.conflictResolverHandler.mergeWithResolver(
-                    map,
-                    op.mapName,
-                    op.key,
-                    op.record,
-                    remoteNodeId || this._nodeId,
-                );
-
-                if (!mergeResult.applied) {
-                    // Operation was rejected or local value kept
-                    if (mergeResult.rejection) {
-                        logger.debug(
-                            { mapName: op.mapName, key: op.key, reason: mergeResult.rejection.reason },
-                            'Merge rejected by resolver'
-                        );
-                    }
-                    return { eventPayload: null, oldRecord, rejected: true };
-                }
-
-                // Use the resolved record
-                recordToStore = mergeResult.record;
-                eventPayload.eventType = 'UPDATED';
-                eventPayload.record = mergeResult.record;
-            } else {
-                // Standard merge without resolver
-                map.merge(op.key, op.record);
-                recordToStore = op.record;
-                eventPayload.eventType = 'UPDATED';
-                eventPayload.record = op.record;
-            }
-        } else if (map instanceof ORMap) {
-            oldRecord = map.getRecords(op.key);
-
-            if (op.opType === 'OR_ADD') {
-                map.apply(op.key, op.orRecord);
-                eventPayload.eventType = 'OR_ADD';
-                eventPayload.orRecord = op.orRecord;
-                recordToStore = { type: 'OR', records: map.getRecords(op.key) };
-            } else if (op.opType === 'OR_REMOVE') {
-                map.applyTombstone(op.orTag);
-                eventPayload.eventType = 'OR_REMOVE';
-                eventPayload.orTag = op.orTag;
-                recordToStore = { type: 'OR', records: map.getRecords(op.key) };
-                tombstonesToStore = { type: 'OR_TOMBSTONES', tags: map.getTombstones() };
-            }
-        }
-
-        // Live Query Evaluation
-        this.queryRegistry.processChange(op.mapName, map, op.key, op.record || op.orRecord, oldRecord);
-
-        // Update metrics
-        const mapSize = (map instanceof ORMap) ? map.totalRecords : map.size;
-        this.metricsService.setMapSize(op.mapName, mapSize);
-
-        // Persist to storage (async, don't wait)
-        if (this.storage) {
-            if (recordToStore) {
-                this.storage.store(op.mapName, op.key, recordToStore).catch(err => {
-                    logger.error({ mapName: op.mapName, key: op.key, err }, 'Failed to persist op');
-                });
-            }
-            if (tombstonesToStore) {
-                this.storage.store(op.mapName, '__tombstones__', tombstonesToStore).catch(err => {
-                    logger.error({ mapName: op.mapName, err }, 'Failed to persist tombstones');
-                });
-            }
-        }
-
-        // Append to Event Journal (Phase 5.04)
-        if (this.eventJournalService) {
-            const isDelete = op.opType === 'REMOVE' || op.opType === 'OR_REMOVE' ||
-                (op.record && op.record.value === null);
-            const isNew = !oldRecord || (Array.isArray(oldRecord) && oldRecord.length === 0);
-            const journalEventType: JournalEventType = isDelete ? 'DELETE' : (isNew ? 'PUT' : 'UPDATE');
-
-            const timestamp = op.record?.timestamp || op.orRecord?.timestamp || this.hlc.now();
-
-            this.eventJournalService.append({
-                type: journalEventType,
-                mapName: op.mapName,
-                key: op.key,
-                value: op.record?.value ?? op.orRecord?.value,
-                previousValue: oldRecord?.value ?? (Array.isArray(oldRecord) ? oldRecord[0]?.value : undefined),
-                timestamp,
-                nodeId: this._nodeId,
-            });
-        }
-
-        // Phase 10.04: Update Merkle tree for anti-entropy
-        if (this.merkleTreeManager && recordToStore && op.key) {
-            const partitionId = this.partitionService.getPartitionId(op.key);
-            this.merkleTreeManager.updateRecord(partitionId, op.key, recordToStore as LWWRecord<any>);
-        }
-
-        // Phase 11.1: Update FTS index
-        if (this.searchCoordinator.isSearchEnabled(op.mapName)) {
-            const isRemove = op.opType === 'REMOVE' || (op.record && op.record.value === null);
-            const value = isRemove ? null : (op.record?.value ?? op.orRecord?.value);
-            const changeType = isRemove ? 'remove' : (oldRecord ? 'update' : 'add');
-            this.searchCoordinator.onDataChange(op.mapName, op.key, value, changeType);
-        }
-
-        return { eventPayload, oldRecord };
     }
 
     /**
@@ -2102,7 +731,7 @@ export class ServerCoordinator {
             logger.debug({ sourceNode, opId, mapName: op.mapName, key: op.key }, 'Applying replicated operation');
 
             // Apply operation to local map (as backup)
-            const { eventPayload, rejected } = await this.applyOpToMap(op, sourceNode);
+            const { eventPayload, rejected } = await this.operationHandler.applyOpToMap(op, sourceNode);
 
             // Skip broadcast if operation was rejected by resolver
             if (rejected || !eventPayload) {
@@ -2123,112 +752,8 @@ export class ServerCoordinator {
         }
     }
 
-    /**
-     * Build OpContext for interceptors.
-     */
-    private buildOpContext(clientId: string, fromCluster: boolean): OpContext {
-        return this.operationContextHandler.buildOpContext(clientId, fromCluster);
-    }
-
-    /**
-     * Run onBeforeOp interceptors. Returns modified op or null if dropped.
-     */
-    private async runBeforeInterceptors(op: any, context: OpContext): Promise<any | null> {
-        return this.operationContextHandler.runBeforeInterceptors(op, context);
-    }
-
-    /**
-     * Run onAfterOp interceptors (fire-and-forget).
-     */
-    private runAfterInterceptors(op: any, context: OpContext): void {
-        this.operationContextHandler.runAfterInterceptors(op, context);
-    }
-
     private handleLockGranted({ clientId, requestId, name, fencingToken }: { clientId: string, requestId: string, name: string, fencingToken: number }) {
         this.operationContextHandler.handleLockGranted({ clientId, requestId, name, fencingToken });
-    }
-
-    private async processLocalOp(op: any, fromCluster: boolean, originalSenderId?: string) {
-        // 1. Build context for interceptors
-        const context = this.buildOpContext(originalSenderId || 'unknown', fromCluster);
-
-        // 2. Run onBeforeOp interceptors
-        try {
-            const processedOp = await this.runBeforeInterceptors(op, context);
-            if (!processedOp) return; // Silently dropped by interceptor
-            op = processedOp;
-        } catch (err) {
-            logger.warn({ err, opId: op.id }, 'Interceptor rejected op');
-            throw err;
-        }
-
-        // 3. Apply operation to map (shared logic)
-        const { eventPayload, rejected } = await this.applyOpToMap(op, originalSenderId);
-
-        // Skip further processing if operation was rejected by conflict resolver
-        if (rejected || !eventPayload) {
-            return;
-        }
-
-        // 4. Replicate to backup nodes (Hazelcast pattern: after local merge)
-        // Note: Replicate if we are the owner. This includes:
-        // - Direct client operations (fromCluster=false)
-        // - Operations forwarded from other nodes (fromCluster=true) where we are the owner
-        // The key insight: the owner is responsible for replicating to backups,
-        // regardless of whether the op originated locally or was forwarded.
-        if (this.replicationPipeline) {
-            const opId = op.id || `${op.mapName}:${op.key}:${Date.now()}`;
-            // Fire-and-forget for EVENTUAL, or await for STRONG/QUORUM
-            this.replicationPipeline.replicate(op, opId, op.key).catch(err => {
-                logger.warn({ opId, key: op.key, err }, 'Replication failed (non-fatal)');
-            });
-        }
-
-        // 5. Broadcast EVENT to other clients
-        this.broadcast({
-            type: 'SERVER_EVENT',
-            payload: eventPayload,
-            timestamp: this.hlc.now()
-        }, originalSenderId);
-
-        // 6. Distributed subscriptions are now handled via CLUSTER_SUB_UPDATE (Phase 14.2)
-        // ReplicationPipeline handles data replication to backup nodes
-        // No need for broadcastToCluster here - it was O(N) broadcast to all nodes
-
-        // 7. Run onAfterOp interceptors
-        this.runAfterInterceptors(op, context);
-    }
-
-    /**
-     * === OPTIMIZATION 1: Async Batch Processing with Backpressure ===
-     * Delegates to BatchProcessingHandler.
-     */
-    private async processBatchAsync(ops: any[], clientId: string): Promise<void> {
-        return this.batchProcessingHandler.processBatchAsync(ops, clientId);
-    }
-
-    /**
-     * === BACKPRESSURE: Synchronous Batch Processing ===
-     * Delegates to BatchProcessingHandler.
-     */
-    private async processBatchSync(ops: any[], clientId: string): Promise<void> {
-        return this.batchProcessingHandler.processBatchSync(ops, clientId);
-    }
-
-    /**
-     * Forward operation to owner node and wait for completion.
-     * Delegates to BatchProcessingHandler.
-     */
-    private async forwardOpAndWait(op: any, owner: string): Promise<void> {
-        return this.batchProcessingHandler.forwardOpAndWait(op, owner);
-    }
-
-    /**
-     * Process a single operation for batch processing.
-     * Delegates to BatchProcessingHandler.
-     */
-    private async processLocalOpForBatch(op: any, clientId: string, batchedEvents: any[]): Promise<void> {
-        return this.batchProcessingHandler.processLocalOpForBatch(op, clientId, batchedEvents);
     }
 
     /**
@@ -2297,7 +822,7 @@ export class ServerCoordinator {
         // Only apply if the repaired record is newer (LWW semantics)
         if (!existingRecord || record.timestamp.millis > existingRecord.timestamp.millis ||
             (record.timestamp.millis === existingRecord.timestamp.millis &&
-             record.timestamp.counter > existingRecord.timestamp.counter)) {
+                record.timestamp.counter > existingRecord.timestamp.counter)) {
             map.merge(actualKey, record);
             logger.debug({ mapName, key: actualKey }, 'Applied repair record');
 
@@ -2320,14 +845,6 @@ export class ServerCoordinator {
     // ============ Heartbeat Methods (delegated to HeartbeatHandler - SPEC-003d) ============
 
     /**
-     * Handles incoming PING message from client.
-     * Delegates to HeartbeatHandler.
-     */
-    private handlePing(client: ClientConnection, clientTimestamp: number): void {
-        this.heartbeatHandler.handlePing(client, clientTimestamp);
-    }
-
-    /**
      * Checks if a client is still alive based on heartbeat.
      * Delegates to HeartbeatHandler.
      */
@@ -2341,103 +858,5 @@ export class ServerCoordinator {
      */
     public getClientIdleTime(clientId: string): number {
         return this.heartbeatHandler.getClientIdleTime(clientId);
-    }
-
-    private buildTLSOptions(config: TLSConfig): HttpsServerOptions {
-        const options: HttpsServerOptions = {
-            cert: readFileSync(config.certPath),
-            key: readFileSync(config.keyPath),
-            minVersion: config.minVersion || 'TLSv1.2',
-        };
-
-        if (config.caCertPath) {
-            options.ca = readFileSync(config.caCertPath);
-        }
-
-        if (config.ciphers) {
-            options.ciphers = config.ciphers;
-        }
-
-        if (config.passphrase) {
-            options.passphrase = config.passphrase;
-        }
-
-        return options;
-    }
-
-    // ============ Write Concern Methods (Phase 5.01) - Delegated to WriteConcernHandler (SPEC-003d) ============
-
-    /**
-     * Get effective Write Concern level for an operation.
-     * Delegates to WriteConcernHandler.
-     */
-    private getEffectiveWriteConcern(
-        opWriteConcern: WriteConcernValue | undefined,
-        batchWriteConcern: WriteConcernValue | undefined
-    ): WriteConcernValue | undefined {
-        return this.writeConcernHandler.getEffectiveWriteConcern(opWriteConcern, batchWriteConcern);
-    }
-
-    /**
-     * Convert string WriteConcern value to enum.
-     * Delegates to WriteConcernHandler.
-     */
-    private stringToWriteConcern(value: WriteConcernValue | undefined): WriteConcern {
-        return this.writeConcernHandler.stringToWriteConcern(value);
-    }
-
-    /**
-     * Process batch with Write Concern tracking.
-     * Delegates to WriteConcernHandler.
-     */
-    private async processBatchAsyncWithWriteConcern(
-        ops: any[],
-        clientId: string,
-        batchWriteConcern?: WriteConcernValue,
-        batchTimeout?: number
-    ): Promise<void> {
-        return this.writeConcernHandler.processBatchAsyncWithWriteConcern(ops, clientId, batchWriteConcern, batchTimeout);
-    }
-
-    /**
-     * Synchronous batch processing with Write Concern.
-     * Delegates to WriteConcernHandler.
-     */
-    private async processBatchSyncWithWriteConcern(
-        ops: any[],
-        clientId: string,
-        batchWriteConcern?: WriteConcernValue,
-        batchTimeout?: number
-    ): Promise<void> {
-        return this.writeConcernHandler.processBatchSyncWithWriteConcern(ops, clientId, batchWriteConcern, batchTimeout);
-    }
-
-    /**
-     * Process a single operation with Write Concern level notifications.
-     * Delegates to WriteConcernHandler.
-     */
-    private async processLocalOpWithWriteConcern(
-        op: any,
-        clientId: string,
-        batchedEvents: any[],
-        batchWriteConcern?: WriteConcernValue
-    ): Promise<void> {
-        return this.writeConcernHandler.processLocalOpWithWriteConcern(op, clientId, batchedEvents, batchWriteConcern);
-    }
-
-    /**
-     * Persist operation synchronously (blocking).
-     * Used for PERSISTED Write Concern.
-     */
-    private async persistOpSync(op: any): Promise<void> {
-        return this.persistenceHandler.persistOpSync(op);
-    }
-
-    /**
-     * Persist operation asynchronously (fire-and-forget).
-     * Used for non-PERSISTED Write Concern levels.
-     */
-    private async persistOpAsync(op: any): Promise<void> {
-        return this.persistenceHandler.persistOpAsync(op);
     }
 }

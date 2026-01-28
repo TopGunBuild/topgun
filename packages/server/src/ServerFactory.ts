@@ -680,10 +680,79 @@ export class ServerFactory {
 
         // Create LifecycleManager with direct dependencies
         const lifecycleManager = new LifecycleManager({
-            storageManager,
-            metricsService,
-            hlc,
-            queryRegistry,
+            nodeId: config.nodeId,
+            httpServer,
+            metricsServer,
+            wss,
+            metricsService: {
+                destroy: () => metricsService.destroy(),
+            },
+            eventExecutor: {
+                shutdown: (wait) => eventExecutor.shutdown(wait),
+            },
+            connectionManager: {
+                getClientCount: () => connectionManager.getClientCount(),
+                getClients: () => connectionManager.getClients(),
+            },
+            cluster: {
+                getMembers: () => cluster.getMembers(),
+                send: (nodeId, type, payload) => cluster.send(nodeId, type, payload),
+                stop: () => cluster.stop(),
+            },
+            partitionService: {
+                getPartitionMap: () => partitionService.getPartitionMap(),
+            },
+            replicationPipeline: replicationPipeline ? {
+                getTotalPending: () => replicationPipeline!.getTotalPending(),
+                close: () => replicationPipeline!.close(),
+            } : undefined,
+            workerPool: workerPool ? {
+                shutdown: (timeout) => workerPool!.shutdown(timeout),
+            } : undefined,
+            storage: config.storage ? {
+                close: () => config.storage!.close(),
+            } : undefined,
+            gcHandler: {
+                stop: () => gcHandler.stop(),
+            },
+            heartbeatHandler: {
+                stop: () => heartbeatHandler.stop(),
+            },
+            lockManager: {
+                stop: () => lockManager.stop(),
+            },
+            repairScheduler: repairScheduler ? {
+                stop: () => repairScheduler!.stop(),
+            } : undefined,
+            partitionReassigner: partitionReassigner ? {
+                stop: () => partitionReassigner!.stop(),
+            } : undefined,
+            taskletScheduler: {
+                shutdown: () => taskletScheduler.shutdown(),
+            },
+            writeAckManager: {
+                shutdown: () => writeAckManager.shutdown(),
+            },
+            entryProcessorHandler: {
+                dispose: () => entryProcessorHandler.dispose(),
+            },
+            eventJournalService: eventJournalService ? {
+                dispose: () => eventJournalService!.dispose(),
+            } : undefined,
+            eventPayloadPool: {
+                clear: () => eventPayloadPool.clear(),
+            },
+            clusterSearchCoordinator: clusterSearchCoordinator ? {
+                destroy: () => clusterSearchCoordinator!.destroy(),
+            } : undefined,
+            distributedSubCoordinator: distributedSubCoordinator ? {
+                destroy: () => distributedSubCoordinator!.destroy(),
+            } : undefined,
+            searchCoordinator: {
+                getEnabledMaps: () => searchCoordinator.getEnabledMaps(),
+                buildIndexFromEntries: (mapName, entries) => searchCoordinator.buildIndexFromEntries(mapName, entries),
+            },
+            getMapAsync: (name) => storageManager.getMapAsync(name),
         });
 
         // Initialize WebSocket Handler (Phase 1)
