@@ -1,5 +1,6 @@
 import { ServerCoordinator, ServerFactory } from '../';
 import { LWWRecord, deserialize, PermissionPolicy, serialize } from '@topgunbuild/core';
+import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
 
 // Mock WebSocket
 class MockWebSocket {
@@ -29,6 +30,7 @@ const createMockWriter = (socket: any) => ({
 
 describe('Field-Level Security (RBAC)', () => {
   let server: ServerCoordinator;
+  let harness: ServerTestHarness;
   const policies: PermissionPolicy[] = [
       {
           role: 'USER',
@@ -54,6 +56,7 @@ describe('Field-Level Security (RBAC)', () => {
       securityPolicies: policies
     });
     await server.ready();
+    harness = createTestHarness(server);
   });
 
   afterAll(async () => {
@@ -80,11 +83,11 @@ describe('Field-Level Security (RBAC)', () => {
           subscriptions: new Set(),
           principal: { userId: 'u1', roles: ['USER'] }
       };
-      (server as any).connectionManager.getClients().set('client-user', clientMock);
+      harness.connectionManager.getClients().set('client-user', clientMock);
 
       // 3. Send QUERY_SUB
       const queryId = 'q1';
-      await (server as any).handleMessage(clientMock, {
+      await harness.handleMessage(clientMock, {
           type: 'QUERY_SUB',
           payload: {
               queryId,
@@ -118,11 +121,11 @@ describe('Field-Level Security (RBAC)', () => {
           subscriptions: new Set(),
           principal: { userId: 'a1', roles: ['ADMIN'] }
       };
-      (server as any).connectionManager.getClients().set('client-admin', clientMock);
+      harness.connectionManager.getClients().set('client-admin', clientMock);
 
       // 3. Send QUERY_SUB
       const queryId = 'q2';
-      await (server as any).handleMessage(clientMock, {
+      await harness.handleMessage(clientMock, {
           type: 'QUERY_SUB',
           payload: {
               queryId,
@@ -178,16 +181,16 @@ describe('Field-Level Security (RBAC)', () => {
           lastPingReceived: Date.now()
       };
 
-      (server as any).connectionManager.getClients().set('client-user-2', userClient);
-      (server as any).connectionManager.getClients().set('client-admin-2', adminClient);
-      (server as any).connectionManager.getClients().set('client-admin-listener', adminListener);
+      harness.connectionManager.getClients().set('client-user-2', userClient);
+      harness.connectionManager.getClients().set('client-admin-2', adminClient);
+      harness.connectionManager.getClients().set('client-admin-listener', adminListener);
 
       // IMPORTANT: Clients must subscribe to receive SERVER_EVENT (subscription-based routing)
-      await (server as any).handleMessage(userClient, {
+      await harness.handleMessage(userClient, {
           type: 'QUERY_SUB',
           payload: { queryId: 'user-q', mapName: 'profiles', query: {} }
       });
-      await (server as any).handleMessage(adminListener, {
+      await harness.handleMessage(adminListener, {
           type: 'QUERY_SUB',
           payload: { queryId: 'admin-q', mapName: 'profiles', query: {} }
       });
@@ -198,7 +201,7 @@ describe('Field-Level Security (RBAC)', () => {
 
       // Trigger update via ADMIN
       // This calls processLocalOp -> broadcast
-      await (server as any).handleMessage(adminClient, {
+      await harness.handleMessage(adminClient, {
           type: 'CLIENT_OP',
           payload: {
               opType: 'set',
