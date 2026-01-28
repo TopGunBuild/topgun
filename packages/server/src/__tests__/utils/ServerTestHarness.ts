@@ -52,8 +52,9 @@ export class ServerTestHarness {
 
     /**
      * Access the ConnectionManager for client manipulation.
+     * Returns as any for test flexibility with partial mock clients.
      */
-    get connectionManager(): IConnectionManager {
+    get connectionManager(): any {
         return (this.server as any).connectionManager;
     }
 
@@ -128,9 +129,10 @@ export class ServerTestHarness {
     /**
      * Simulate receiving a message from a client.
      * Delegates to WebSocketHandler.handleMessage().
+     * Accepts any client-like object for test flexibility (cast to full type internally).
      */
-    async handleMessage(client: ClientConnection, message: any): Promise<void> {
-        return this.webSocketHandler.handleMessage(client, message);
+    async handleMessage(client: { id: string; [key: string]: any }, message: any): Promise<void> {
+        return this.webSocketHandler.handleMessage(client as ClientConnection, message);
     }
 
     // ============================================================================
@@ -152,9 +154,10 @@ export class ServerTestHarness {
 
     /**
      * Register a mock client connection for testing.
+     * Accepts any client-like object for test flexibility (cast to full type internally).
      */
-    registerMockClient(client: ClientConnection): void {
-        this.connectionManager.getClients().set(client.id, client);
+    registerMockClient(client: { id: string; [key: string]: any }): void {
+        this.connectionManager.getClients().set(client.id, client as ClientConnection);
     }
 
     /**
@@ -166,9 +169,10 @@ export class ServerTestHarness {
 
     /**
      * Get all connected clients.
+     * Returns as Map<string, any> for test flexibility when working with partial mock clients.
      */
-    getClients(): Map<string, ClientConnection> {
-        return this.connectionManager.getClients();
+    getClients(): Map<string, any> {
+        return this.connectionManager.getClients() as Map<string, any>;
     }
 
     // ============================================================================
