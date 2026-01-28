@@ -6,8 +6,6 @@ import { IServerStorage } from './storage/IServerStorage';
 import { IInterceptor } from './interceptor/IInterceptor';
 import { QueryRegistry } from './query/QueryRegistry';
 import { ServerDependencies } from './ServerDependencies';
-
-const GC_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days - used by sync handlers for tombstone filtering
 import { TopicManager } from './topic/TopicManager';
 import { ClusterManager } from './cluster/ClusterManager';
 import { PartitionService } from './cluster/PartitionService';
@@ -39,11 +37,11 @@ import { CounterHandler } from './handlers/CounterHandler';
 import { EntryProcessorHandler } from './handlers/EntryProcessorHandler';
 import { ConflictResolverHandler } from './handlers/ConflictResolverHandler';
 import { EventJournalService, EventJournalServiceConfig } from './EventJournalService';
-import { SearchCoordinator, SearchConfig, ClusterSearchCoordinator, type ClusterSearchConfig } from './search';
+import { SearchCoordinator, ClusterSearchCoordinator, type ClusterSearchConfig } from './search';
 import { DistributedSubscriptionCoordinator } from './subscriptions/DistributedSubscriptionCoordinator';
-import { createDebugEndpoints, DebugEndpoints } from './debug';
-import { BootstrapController, createBootstrapController } from './bootstrap';
-import { SettingsController, createSettingsController } from './settings';
+import { DebugEndpoints } from './debug';
+import { BootstrapController } from './bootstrap';
+import { SettingsController } from './settings';
 import type { MergeRejection, FullTextIndexConfig } from '@topgunbuild/core';
 import {
     AuthHandler,
