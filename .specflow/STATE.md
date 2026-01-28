@@ -2,15 +2,15 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-004
+- **Status:** review
+- **Next Step:** `/sf:fix` - fix TypeScript compilation errors in ServerFactory.ts
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| - | - | - | - | - | - |
+| 1 | SPEC-004 | Simplify ServerCoordinator Constructor | high | review | - |
 
 ## Decisions
 
@@ -26,6 +26,10 @@
 | 2026-01-26 | SPEC-003c | ClusterEventHandler implementation approved - all 16 message types correctly routed, 187 lines removed from ServerCoordinator |
 | 2026-01-27 | SPEC-003d | Extract 7 additional handlers (HeartbeatHandler, QueryConversionHandler, BatchProcessingHandler, WriteConcernHandler, ClientMessageHandler, PersistenceHandler, OperationContextHandler) - all methods verified, ~948 lines total |
 | 2026-01-27 | SPEC-003d | APPROVED: All 7 handlers extracted successfully (720 lines removed, 22.8% reduction). ServerCoordinator reduced from 3163 to 2443 lines. Target was <2300 (6.2% over), but acceptable due to delegation overhead and core coordination logic. |
+| 2026-01-28 | SPEC-004 | Imported external feedback: 2 critical (QueryHandler/LifecycleManager circular deps), 3 major (target size, init order, interface fields), 1 minor (architecture docs) |
+| 2026-01-28 | SPEC-004 | Response v1: Applied items 1,2,4,5 (QueryHandler wiring, LifecycleManager getMapAsync, init order, ServerDependencies clarification). Added note for item 3 (target size). Skipped item 6 (architecture docs out of scope). |
+| 2026-01-28 | SPEC-004 | APPROVED: Audit v2 passed all 9 dimensions. ~35% context estimate (GOOD range). Late binding pattern for GCHandler/BatchProcessingHandler broadcast callbacks. QueryHandler wired through QueryConversionHandler. |
+| 2026-01-28 | SPEC-004 | CHANGES_REQUESTED (Review v1): 58+ TypeScript compilation errors in ServerFactory.ts. Handler configurations don't match actual handler interfaces. Late binding pattern correctly implemented, but handler instantiation code needs fixes. |
 
 ## Project Patterns
 
@@ -35,10 +39,14 @@
 - CRDTs use Hybrid Logical Clocks for causality tracking
 - Handler extraction pattern: separate message handlers into focused modules with config injection
 - Test polling pattern: use centralized test-helpers.ts with PollOptions for bounded iterations
+- Late binding pattern: handlers can receive callbacks after construction via setXxxCallbacks methods
 
 ## Warnings
 
-None - all active warnings resolved.
+**SPEC-004 Implementation Issues:**
+- TypeScript compilation fails due to handler interface mismatches in ServerFactory.ts
+- Build cannot complete until 58+ type errors are resolved
+- Tests cannot run until build succeeds
 
 ---
-*Last updated: 2026-01-27 23:45*
+*Last updated: 2026-01-28 19:30*

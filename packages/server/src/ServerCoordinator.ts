@@ -59,7 +59,6 @@ import {
     QueryConversionHandler,
     BatchProcessingHandler,
     WriteConcernHandler,
-    ClusterEventHandler,
     WebSocketHandler,
     LifecycleManager,
     createMessageRegistry,
@@ -236,7 +235,6 @@ export class ServerCoordinator {
     private searchHandler!: SearchHandler;
     private journalHandler!: JournalHandler;
     private writeConcernHandler!: WriteConcernHandler;
-    private clusterEventHandler!: ClusterEventHandler;
 
     private pendingClusterQueries: Map<string, PendingClusterQuery> = new Map();
 
@@ -460,7 +458,6 @@ export class ServerCoordinator {
         this.queryConversionHandler = dependencies.queryConversionHandler;
         this.batchProcessingHandler = dependencies.batchProcessingHandler;
         this.writeConcernHandler = dependencies.writeConcernHandler;
-        this.clusterEventHandler = dependencies.clusterEventHandler;
         this.messageRegistry = dependencies.messageRegistry;
         this.lifecycleManager = dependencies.lifecycleManager;
 

@@ -18,7 +18,6 @@ import { WebSocketHandler } from './coordinator';
 import { LifecycleManager } from './coordinator';
 import { BroadcastHandler } from './coordinator';
 import { GCHandler } from './coordinator';
-import { ClusterEventHandler } from './coordinator';
 import { HeartbeatHandler } from './coordinator';
 import { ClientMessageHandler } from './coordinator';
 import { PersistenceHandler } from './coordinator';
@@ -115,7 +114,6 @@ export interface ServerDependencies {
     queryConversionHandler: QueryConversionHandler;
     batchProcessingHandler: BatchProcessingHandler;
     writeConcernHandler: WriteConcernHandler;
-    clusterEventHandler: ClusterEventHandler;
     messageRegistry: MessageRegistry;
     lifecycleManager: LifecycleManager;
 }

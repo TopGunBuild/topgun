@@ -1,4 +1,4 @@
-import { ServerCoordinator } from './ServerCoordinator';
+import { ServerFactory } from './ServerFactory';
 import { PostgresAdapter } from './storage/PostgresAdapter';
 import { logger } from './utils/logger';
 import { TLSConfig, ClusterTLSConfig } from './types/TLSConfig';
@@ -92,7 +92,7 @@ async function main() {
         logger.info('No DATABASE_URL provided, using in-memory storage (non-persistent)');
     }
 
-    const server = new ServerCoordinator({
+    const server = ServerFactory.create({
         port: PORT,
         clusterPort: CLUSTER_PORT,
         nodeId: NODE_ID,

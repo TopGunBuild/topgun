@@ -518,10 +518,9 @@ export class ServerFactory {
             connectionManager,
             cluster: {
                 getMembers: () => cluster.getMembers(),
-                send: (nodeId, type, payload) => cluster.send(nodeId, type, payload),
-                isLocal: (id) => cluster.isLocal(id),
+                send: (nodeId: string, type: any, payload: any) => cluster.send(nodeId, type, payload),
+                isLocal: (id: string) => cluster.isLocal(id),
                 config: { nodeId: config.nodeId },
-                getLeaderId: () => cluster.getLeaderId ? cluster.getLeaderId() : null,
             },
             partitionService: {
                 isRelated: (key) => partitionService.isRelated(key),
@@ -539,25 +538,20 @@ export class ServerFactory {
                 processChange: queryRegistry.processChange.bind(queryRegistry),
             },
             hlc,
-            storage: config.storage || null,
+            storage: config.storage || undefined,
             // broadcast callback will be set via late binding in ServerCoordinator
             metricsService: {
-                incOp: (op, mapName) => metricsService.incOp(op, mapName),
+                incOp: (op: any, mapName: string) => metricsService.incOp(op, mapName),
             },
-            gcIntervalMs: config.gcIntervalMs,
-            gcAgeMs: config.gcAgeMs,
         });
 
         // Initialize QueryConversionHandler (no late binding needed)
         const queryConversionHandler = new QueryConversionHandler({
-            storageManager,
-            cluster: {
-                getMembers: () => cluster.getMembers(),
-                send: (nodeId, type, payload) => cluster.send(nodeId, type, payload),
-                config: { nodeId: config.nodeId },
-            },
-            partitionService: {
-                getPartitionMap: () => partitionService.getPartitionMap(),
+            getMapAsync: (mapName: string, typeHint?: 'LWW' | 'OR') => storageManager.getMapAsync(mapName, typeHint),
+            pendingClusterQueries: new Map(),
+            queryRegistry,
+            securityManager: {
+                filterObject: (value: any, principal: any, mapName: string) => securityManager.filterObject(value, principal, mapName),
             },
         });
 
@@ -597,85 +591,172 @@ export class ServerFactory {
 
         // Initialize WriteConcernHandler (no late binding needed)
         const writeConcernHandler = new WriteConcernHandler({
-            writeAckManager: {
-                registerWrite: (reqId, ackConfig, onComplete) => writeAckManager.registerWrite(reqId, ackConfig, onComplete),
-            },
-        });
-
-        // Initialize ClusterEventHandler (no late binding needed)
-        const clusterEventHandler = new ClusterEventHandler({
-            storageManager,
-            cluster: {
-                getMembers: () => cluster.getMembers(),
+            backpressure: {
+                shouldForceSync: () => backpressure.shouldForceSync(),
+                registerPending: () => backpressure.registerPending(),
+                waitForCapacity: () => backpressure.waitForCapacity(),
+                completePending: () => backpressure.completePending(),
+                getPendingOps: () => backpressure.getPendingOps(),
             },
             partitionService: {
-                getOwner: (key) => partitionService.getOwner(key),
+                isLocalOwner: (key: string) => partitionService.isLocalOwner(key),
+                getOwner: (key: string) => partitionService.getOwner(key),
             },
-            gcHandler: {
-                handleGcReport: (nodeId, minHlc) => gcHandler.handleGcReport(nodeId, minHlc),
-                handleGcCommit: (globalSafe) => gcHandler.handleGcCommit(globalSafe),
+            cluster: {
+                sendToNode: (nodeId: string, message: any) => cluster.send(nodeId, message.type, message.payload),
             },
-            queryConversionHandler: {
-                handleQueryFinalRequest: (reqId, originNode) => queryConversionHandler.handleQueryFinalRequest(reqId, originNode),
-                handleQueryFinalResponse: (reqId, partialResults) => queryConversionHandler.handleQueryFinalResponse(reqId, partialResults),
+            metricsService: {
+                incBackpressureSyncForced: () => metricsService.incBackpressureSyncForced(),
+                incBackpressureWaits: () => metricsService.incBackpressureWaits(),
+                incBackpressureTimeouts: () => metricsService.incBackpressureTimeouts(),
+                setBackpressurePendingOps: (count: number) => metricsService.setBackpressurePendingOps(count),
             },
-            writeConcernHandler: {
-                handleWriteAck: (reqId, nodeId) => writeConcernHandler.handleWriteAck(reqId, nodeId),
+            writeAckManager: {
+                notifyLevel: (opId: string, level: any) => writeAckManager.notifyLevel(opId, level),
+                failPending: (opId: string, error: string) => writeAckManager.failPending(opId, error),
             },
-            replicationPipeline: replicationPipeline ? {
-                handleReplicationAck: (opId, nodeId) => replicationPipeline!.handleReplicationAck(opId, nodeId),
-            } : undefined,
+            storage: config.storage || null,
+            // broadcast callbacks will be set via late binding in ServerCoordinator
+            broadcastBatch: () => {},
+            broadcastBatchSync: async () => {},
+            buildOpContext: operationContextHandler.buildOpContext.bind(operationContextHandler),
+            runBeforeInterceptors: operationContextHandler.runBeforeInterceptors.bind(operationContextHandler),
+            runAfterInterceptors: operationContextHandler.runAfterInterceptors.bind(operationContextHandler),
+            applyOpToMap: operationHandler.applyOpToMap.bind(operationHandler),
+            persistOpSync: persistenceHandler.persistOpSync.bind(persistenceHandler),
+            persistOpAsync: persistenceHandler.persistOpAsync.bind(persistenceHandler),
         });
 
         // Create local handlers for MessageRegistry
         const queryHandler = new QueryHandler({
-            executeLocalQuery: (map, query) => queryConversionHandler.executeLocalQuery(map, query),
-            finalizeClusterQuery: (reqId, timeout) => queryConversionHandler.finalizeClusterQuery(reqId, timeout),
+            securityManager: {
+                checkPermission: (principal: any, resource: string, action: any) => securityManager.checkPermission(principal, resource, action),
+                filterObject: (value: any, principal: any, mapName: string) => securityManager.filterObject(value, principal, mapName),
+            },
+            metricsService: {
+                incOp: (op: any, mapName: string) => metricsService.incOp(op, mapName),
+            },
+            queryRegistry: {
+                unregister: (queryId: string) => queryRegistry.unregister(queryId),
+            },
+            distributedSubCoordinator: distributedSubCoordinator,
+            cluster: {
+                getMembers: () => cluster.getMembers(),
+                isLocal: (id: string) => cluster.isLocal(id),
+                send: (nodeId: string, type: any, payload: any) => cluster.send(nodeId, type, payload),
+                config: { nodeId: config.nodeId },
+            },
+            executeLocalQuery: (mapName: string, query: any) => queryConversionHandler.executeLocalQuery(mapName, query),
+            finalizeClusterQuery: (reqId: string, timeout?: boolean) => queryConversionHandler.finalizeClusterQuery(reqId, timeout),
+            pendingClusterQueries: new Map(),
+            readReplicaHandler: readReplicaHandler,
+            ConsistencyLevel: { EVENTUAL: ConsistencyLevel.EVENTUAL },
         });
 
         const counterHandlerAdapter = new CounterHandlerAdapter({
             counterHandler: {
-                handleIncrement: (clientId, mapName, key, delta) => counterHandler.handleIncrement(clientId, mapName, key, delta),
-                handleGet: (clientId, mapName, key) => counterHandler.handleGet(clientId, mapName, key),
-                handleSubscribe: (clientId, mapName, key, subscriptionId) => counterHandler.handleSubscribe(clientId, mapName, key, subscriptionId),
-                handleUnsubscribe: (subscriptionId) => counterHandler.handleUnsubscribe(subscriptionId),
+                handleCounterRequest: (clientId: string, name: string) => counterHandler.handleCounterRequest(clientId, name),
+                handleCounterSync: (clientId: string, name: string, state: any) => counterHandler.handleCounterSync(clientId, name, state),
             },
+            getClient: (clientId: string) => connectionManager.getClient(clientId),
         });
 
         const resolverHandler = new ResolverHandler({
             conflictResolverHandler: {
-                registerResolver: (mapName, resolver) => conflictResolverHandler.registerResolver(mapName, resolver),
-                unregisterResolver: (mapName) => conflictResolverHandler.unregisterResolver(mapName),
+                registerResolver: (mapName: string, resolver: any, clientId: string) => conflictResolverHandler.registerResolver(mapName, resolver, clientId),
+                unregisterResolver: (mapName: string, resolverName: string, clientId: string) => conflictResolverHandler.unregisterResolver(mapName, resolverName, clientId),
+                listResolvers: (mapName?: string) => conflictResolverHandler.listResolvers(mapName),
+            },
+            securityManager: {
+                checkPermission: (principal: any, resource: string, action: any) => securityManager.checkPermission(principal, resource, action),
             },
         });
 
         const lwwSyncHandler = new LwwSyncHandler({
-            storageManager,
+            getMapAsync: (name: string, typeHint?: 'LWW' | 'OR') => storageManager.getMapAsync(name, typeHint),
+            hlc,
+            securityManager: {
+                checkPermission: (principal: any, resource: string, action: any) => securityManager.checkPermission(principal, resource, action),
+            },
+            metricsService: {
+                incOp: (op: any, mapName: string) => metricsService.incOp(op, mapName),
+            },
+            gcAgeMs: 30 * 24 * 60 * 60 * 1000, // 30 days
         });
 
         const orMapSyncHandler = new ORMapSyncHandler({
-            storageManager,
+            getMapAsync: (name: string, typeHint?: 'LWW' | 'OR') => storageManager.getMapAsync(name, typeHint),
+            hlc,
+            securityManager: {
+                checkPermission: (principal: any, resource: string, action: any) => securityManager.checkPermission(principal, resource, action),
+            },
+            metricsService: {
+                incOp: (op: any, mapName: string) => metricsService.incOp(op, mapName),
+            },
+            storage: config.storage,
+            broadcast: (message: any, excludeClientId?: string) => broadcastHandler.broadcast(message, excludeClientId),
+            gcAgeMs: 30 * 24 * 60 * 60 * 1000, // 30 days
         });
 
         const entryProcessorAdapter = new EntryProcessorAdapter({
             entryProcessorHandler: {
-                execute: (mapName, key, processorName, args, principal) => entryProcessorHandler.execute(mapName, key, processorName, args, principal),
+                executeOnKey: (map: any, key: string, processor: any) => entryProcessorHandler.executeOnKey(map, key, processor),
+                executeOnKeys: (map: any, keys: string[], processor: any) => entryProcessorHandler.executeOnKeys(map, keys, processor),
+            },
+            getMap: (name: string) => storageManager.getMap(name),
+            securityManager: {
+                checkPermission: (principal: any, resource: string, action: any) => securityManager.checkPermission(principal, resource, action),
+            },
+            queryRegistry: {
+                processChange: (mapName: string, map: any, key: string, record: any, oldValue: any) => queryRegistry.processChange(mapName, map, key, record, oldValue),
             },
         });
 
         // Create MessageRegistry with all handlers
         const messageRegistry = createMessageRegistry({
-            queryHandler,
-            lockHandler,
-            topicHandler,
-            counterHandlerAdapter,
-            resolverHandler,
-            partitionHandler,
-            searchHandler,
-            journalHandler,
-            lwwSyncHandler,
-            orMapSyncHandler,
-            entryProcessorAdapter,
+            // CRDT operations
+            onClientOp: (client, msg) => operationHandler.processClientOp(client, msg.payload),
+            onOpBatch: (client, msg) => operationHandler.processOpBatch(
+                client, msg.payload.ops, msg.payload.writeConcern, msg.payload.timeout
+            ),
+            // Query operations
+            onQuerySub: (client, msg) => queryHandler.handleQuerySub(client, msg),
+            onQueryUnsub: (client, msg) => queryHandler.handleQueryUnsub(client, msg),
+            // LWW Sync protocol
+            onSyncInit: (client, msg) => lwwSyncHandler.handleSyncInit(client, msg),
+            onMerkleReqBucket: (client, msg) => lwwSyncHandler.handleMerkleReqBucket(client, msg),
+            // ORMap Sync protocol
+            onORMapSyncInit: (client, msg) => orMapSyncHandler.handleORMapSyncInit(client, msg),
+            onORMapMerkleReqBucket: (client, msg) => orMapSyncHandler.handleORMapMerkleReqBucket(client, msg),
+            onORMapDiffRequest: (client, msg) => orMapSyncHandler.handleORMapDiffRequest(client, msg),
+            onORMapPushDiff: (client, msg) => orMapSyncHandler.handleORMapPushDiff(client, msg),
+            // Lock operations
+            onLockRequest: (client, msg) => lockHandler.handleLockRequest(client, msg),
+            onLockRelease: (client, msg) => lockHandler.handleLockRelease(client, msg),
+            // Topic operations
+            onTopicSub: (client, msg) => topicHandler.handleTopicSub(client, msg),
+            onTopicUnsub: (client, msg) => topicHandler.handleTopicUnsub(client, msg),
+            onTopicPub: (client, msg) => topicHandler.handleTopicPub(client, msg),
+            // PN Counter operations
+            onCounterRequest: (client, msg) => counterHandlerAdapter.handleCounterRequest(client, msg),
+            onCounterSync: (client, msg) => counterHandlerAdapter.handleCounterSync(client, msg),
+            // Entry processor operations
+            onEntryProcess: (client, msg) => entryProcessorAdapter.handleEntryProcess(client, msg),
+            onEntryProcessBatch: (client, msg) => entryProcessorAdapter.handleEntryProcessBatch(client, msg),
+            // Conflict resolver operations
+            onRegisterResolver: (client, msg) => resolverHandler.handleRegisterResolver(client, msg),
+            onUnregisterResolver: (client, msg) => resolverHandler.handleUnregisterResolver(client, msg),
+            onListResolvers: (client, msg) => resolverHandler.handleListResolvers(client, msg),
+            // Partition operations
+            onPartitionMapRequest: (client, msg) => partitionHandler.handlePartitionMapRequest(client, msg),
+            // Full-text search operations
+            onSearch: (client, msg) => searchHandler.handleSearch(client, msg),
+            onSearchSub: (client, msg) => searchHandler.handleSearchSub(client, msg),
+            onSearchUnsub: (client, msg) => searchHandler.handleSearchUnsub(client, msg),
+            // Event journal operations
+            onJournalSubscribe: (client, msg) => journalHandler.handleJournalSubscribe(client, msg),
+            onJournalUnsubscribe: (client, msg) => journalHandler.handleJournalUnsubscribe(client, msg),
+            onJournalRead: (client, msg) => journalHandler.handleJournalRead(client, msg),
         });
 
         // Create LifecycleManager with direct dependencies
@@ -864,7 +945,6 @@ export class ServerFactory {
             queryConversionHandler,
             batchProcessingHandler,
             writeConcernHandler,
-            clusterEventHandler,
             messageRegistry,
             lifecycleManager,
         });

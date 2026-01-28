@@ -60,4 +60,8 @@ export { SearchCoordinator, SearchConfig, ServerSearchResult } from './search';
 
 // Observability (Phase 14C)
 export { PrometheusExporter, getPrometheusExporter, resetPrometheusExporter } from './metrics';
-export { DebugEndpoints, createDebugEndpoints, type DebugEndpointsConfig } from './debug';
+
+// Server Factory (Phase 4.05)
+export { ServerFactory } from './ServerFactory';
+export * from './ServerDependencies';
+

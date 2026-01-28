@@ -38,6 +38,12 @@ export { EntryProcessorAdapter } from './entry-processor-adapter';
 export { SearchHandler } from './search-handler';
 export { QueryHandler } from './query-handler';
 
+// Phase 1: WebSocket handler
+export { WebSocketHandler } from './websocket-handler';
+
+// Phase 2: Lifecycle manager
+export { LifecycleManager } from './lifecycle-manager';
+
 export type { MessageRegistry, MessageHandler, MessageHandlers } from './message-registry';
 export type {
     // Auth types
@@ -117,4 +123,7 @@ export type {
     // Write concern types (SPEC-003d)
     IWriteConcernHandler,
     WriteConcernHandlerConfig,
+    // WebSocket types (Phase 1)
+    IWebSocketHandler,
+    WebSocketHandlerConfig,
 } from './types';
