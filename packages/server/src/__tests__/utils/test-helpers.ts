@@ -10,6 +10,7 @@
 import type { ServerCoordinator } from '../../ServerCoordinator';
 import type { LWWMap } from '@topgunbuild/core';
 import type { TopGunClient, SyncEngine } from '@topgunbuild/client';
+import { createTestHarness } from './ServerTestHarness';
 
 export interface PollOptions {
   /** Max wait time in milliseconds (default: 5000) */
@@ -148,7 +149,8 @@ export async function waitForCluster(
   await pollUntil(
     () => {
       for (const node of nodes) {
-        const members = (node as any).cluster?.getMembers() || [];
+        const harness = createTestHarness(node);
+        const members = harness.cluster?.getMembers() || [];
         if (members.length < expectedSize) {
           return false;
         }
