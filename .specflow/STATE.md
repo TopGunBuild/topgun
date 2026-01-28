@@ -3,14 +3,14 @@
 ## Current Position
 
 - **Active Specification:** SPEC-005
-- **Status:** drafting
-- **Next Step:** `/sf:audit` - audit specification before implementation
+- **Status:** review
+- **Next Step:** `/sf:review` - audit implementation
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-005 | Remove Unused Artifacts from ServerCoordinator | medium | draft | - |
+| 1 | SPEC-005 | Remove Unused Artifacts from ServerCoordinator | medium | audited | - |
 
 ## Decisions
 
@@ -32,6 +32,7 @@
 | 2026-01-28 | SPEC-004 | CHANGES_REQUESTED (Review v1): 58+ TypeScript compilation errors in ServerFactory.ts. Handler configurations don't match actual handler interfaces. Late binding pattern correctly implemented, but handler instantiation code needs fixes. |
 | 2026-01-28 | SPEC-004 | FIXED (Fix Response): All TypeScript errors resolved. Handler configs corrected to match actual interfaces. Build passes with DTS generation. ClusterEventHandler removed from factory (requires ServerCoordinator callbacks). |
 | 2026-01-28 | SPEC-004 | COMPLETED: ServerCoordinator reduced 19.4% (1070→862 lines). Late binding pattern for handler callbacks. Archived to .specflow/archive/SPEC-004.md |
+| 2026-01-28 | SPEC-005 | Audit v1: Identified 2 critical issues - wss and messageRegistry were misclassified as "Remove" (Part 2) but are used in constructor wiring. Corrected to "Convert to locals" (Part 3). Spec updated with corrections. |
 
 ## Project Patterns
 
@@ -51,4 +52,4 @@
 - Requires separate task to update test architecture
 
 ---
-*Last updated: 2026-01-28 21:15*
+*Last updated: 2026-01-28 14:30*
