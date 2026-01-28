@@ -3,6 +3,7 @@ import { WebSocket } from 'ws';
 import { LWWMap, HLC, Timestamp } from '@topgunbuild/core';
 import * as jwt from 'jsonwebtoken';
 import { pollUntil } from './utils/test-helpers';
+import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
 
 const JWT_SECRET = 'topgun-secret-dev';
 
@@ -10,34 +11,37 @@ describe('Distributed Garbage Collection Consensus', () => {
   let node1: ServerCoordinator;
   let node2: ServerCoordinator;
   let node3: ServerCoordinator;
+  let harness1: ServerTestHarness;
+  let harness2: ServerTestHarness;
+  let harness3: ServerTestHarness;
   let originalDateNow: () => number;
 
   // Helper to create a mock client connection on a node
-  function mockClient(node: ServerCoordinator, clientId: string, lastActiveHlc?: Timestamp) {
+  function mockClient(harness: ServerTestHarness, clientId: string, lastActiveHlc?: Timestamp) {
     const mockConn = {
       id: clientId,
-      socket: { 
-        send: jest.fn(), 
+      socket: {
+        send: jest.fn(),
         readyState: WebSocket.OPEN,
         close: jest.fn()
       } as any,
       isAuthenticated: true,
       subscriptions: new Set(),
       principal: { userId: clientId, roles: ['USER'] },
-      lastActiveHlc: lastActiveHlc || (node as any).hlc.now(),
+      lastActiveHlc: lastActiveHlc || harness.hlc.now(),
       lastPingReceived: Date.now(),
     };
-    (node as any).connectionManager.getClients().set(clientId, mockConn);
+    harness.connectionManager.getClients().set(clientId, mockConn);
     return mockConn;
   }
 
   // Helper to trigger GC cycle manually
   async function triggerConsensusCycle() {
     // We manually invoke reportLocalHlc on all nodes to simulate the interval firing
-    (node1 as any).reportLocalHlc();
-    (node2 as any).reportLocalHlc();
-    (node3 as any).reportLocalHlc();
-    
+    harness1.reportLocalHlc();
+    harness2.reportLocalHlc();
+    harness3.reportLocalHlc();
+
     // Give time for messages to exchange and commit to happen
     await new Promise(resolve => setTimeout(resolve, 500));
   }
@@ -55,6 +59,7 @@ describe('Distributed Garbage Collection Consensus', () => {
       peers: []
     });
     await node1.ready();
+    harness1 = createTestHarness(node1);
 
     // Node 2
     node2 = ServerFactory.create({
@@ -65,6 +70,7 @@ describe('Distributed Garbage Collection Consensus', () => {
       peers: [`localhost:${node1.clusterPort}`]
     });
     await node2.ready();
+    harness2 = createTestHarness(node2);
 
     // Node 3
     node3 = ServerFactory.create({
@@ -75,13 +81,14 @@ describe('Distributed Garbage Collection Consensus', () => {
       peers: [`localhost:${node1.clusterPort}`]
     });
     await node3.ready();
+    harness3 = createTestHarness(node3);
 
     // Wait for cluster formation with bounded polling
     await pollUntil(
       () => {
-        const m1 = (node1 as any).cluster.getMembers();
-        const m2 = (node2 as any).cluster.getMembers();
-        const m3 = (node3 as any).cluster.getMembers();
+        const m1 = harness1.cluster.getMembers();
+        const m2 = harness2.cluster.getMembers();
+        const m3 = harness3.cluster.getMembers();
         return m1.length === 3 && m2.length === 3 && m3.length === 3;
       },
       {
@@ -111,8 +118,8 @@ describe('Distributed Garbage Collection Consensus', () => {
     const key = 'zombie-key';
     
     // Write LWW Record
-    const rec = { value: 'test', timestamp: (node1 as any).hlc.now() };
-    (node1 as any).processLocalOp({
+    const rec = { value: 'test', timestamp: harness1.hlc.now() };
+    harness1.processLocalOp({
         mapName,
         key,
         record: rec,
@@ -125,8 +132,8 @@ describe('Distributed Garbage Collection Consensus', () => {
     expect((node2.getMap(mapName) as LWWMap<any, any>).getRecord(key)?.value).toBe('test');
 
     // Delete (Create Tombstone)
-    const tombstone = { value: null, timestamp: (node1 as any).hlc.now() };
-    (node1 as any).processLocalOp({
+    const tombstone = { value: null, timestamp: harness1.hlc.now() };
+    harness1.processLocalOp({
         mapName,
         key,
         record: tombstone,
@@ -152,7 +159,7 @@ describe('Distributed Garbage Collection Consensus', () => {
     const laggingTime = originalDateNow() - 1000; // 1s before start
     const laggingTs: Timestamp = { millis: laggingTime, counter: 0, nodeId: 'client-lag' };
     
-    mockClient(node3, 'client-lag', laggingTs);
+    mockClient(harness3, 'client-lag', laggingTs);
 
     // 4. Trigger Consensus
     await triggerConsensusCycle();
@@ -168,7 +175,7 @@ describe('Distributed Garbage Collection Consensus', () => {
 
     // 6. Update Lagging Client (Client catches up)
     const caughtUpTime = futureTime;
-    const clientConn = (node3 as any).connectionManager.getClients().get('client-lag');
+    const clientConn = harness3.connectionManager.getClients().get('client-lag');
     clientConn.lastActiveHlc = { millis: caughtUpTime, counter: 0, nodeId: 'client-lag' };
 
     // 7. Trigger Consensus Again
