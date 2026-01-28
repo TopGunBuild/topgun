@@ -1,5 +1,6 @@
 import { ServerCoordinator, ServerFactory } from '../';
 import { LWWRecord, deserialize, serialize, QueryCursor } from '@topgunbuild/core';
+import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
 
 /**
  * Phase 14.1: This test was updated from offset-based to cursor-based pagination.
@@ -8,6 +9,7 @@ import { LWWRecord, deserialize, serialize, QueryCursor } from '@topgunbuild/cor
  */
 describe('Cursor-Based Pagination (formerly Offset/Limit Reproduction)', () => {
   let server: ServerCoordinator;
+  let harness: ServerTestHarness;
 
   beforeAll(async () => {
     server = ServerFactory.create({
@@ -18,6 +20,7 @@ describe('Cursor-Based Pagination (formerly Offset/Limit Reproduction)', () => {
       peers: []
     });
     await server.ready();
+    harness = createTestHarness(server);
   });
 
   afterAll(async () => {
@@ -71,11 +74,11 @@ describe('Cursor-Based Pagination (formerly Offset/Limit Reproduction)', () => {
     };
 
     // Inject client
-    (server as any).connectionManager.getClients().set('client-repro', clientMock);
+    harness.connectionManager.getClients().set('client-repro', clientMock);
 
     // 3. First page: Get first 3 items (sorted by score asc)
     const queryId = 'q1';
-    await (server as any).handleMessage(clientMock, {
+    await harness.handleMessage(clientMock, {
       type: 'QUERY_SUB',
       payload: {
         queryId,
@@ -105,7 +108,7 @@ describe('Cursor-Based Pagination (formerly Offset/Limit Reproduction)', () => {
     // 5. Second page: Use cursor to get next 3 items
     clientSocket.send.mockClear();
     const queryId2 = 'q2';
-    await (server as any).handleMessage(clientMock, {
+    await harness.handleMessage(clientMock, {
       type: 'QUERY_SUB',
       payload: {
         queryId: queryId2,
