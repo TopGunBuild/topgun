@@ -13,11 +13,15 @@ import { ServerCoordinator, ServerFactory } from '../';
 import { WebSocket } from 'ws';
 import { LWWMap, ConsistencyLevel, deserialize } from '@topgunbuild/core';
 import { waitForCluster } from './utils/test-helpers';
+import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
 
 describe('Cluster E2E Replication', () => {
   let node1: ServerCoordinator;
   let node2: ServerCoordinator;
   let node3: ServerCoordinator;
+  let harness1: ServerTestHarness;
+  let harness2: ServerTestHarness;
+  let harness3: ServerTestHarness;
 
   // Helper to create a mock client
   function createMockClient(id: string) {
@@ -43,6 +47,7 @@ describe('Cluster E2E Replication', () => {
         defaultConsistency: ConsistencyLevel.EVENTUAL,
       });
       await node1.ready();
+      harness1 = createTestHarness(node1);
 
       node2 = ServerFactory.create({
         port: 0,
@@ -54,6 +59,7 @@ describe('Cluster E2E Replication', () => {
         defaultConsistency: ConsistencyLevel.EVENTUAL,
       });
       await node2.ready();
+      harness2 = createTestHarness(node2);
 
       node3 = ServerFactory.create({
         port: 0,
@@ -65,6 +71,7 @@ describe('Cluster E2E Replication', () => {
         defaultConsistency: ConsistencyLevel.EVENTUAL,
       });
       await node3.ready();
+      harness3 = createTestHarness(node3);
 
       // Wait for full mesh
       await waitForCluster([node1, node2, node3], 3, 15000);
@@ -80,9 +87,9 @@ describe('Cluster E2E Replication', () => {
     });
 
     test('should form 3-node cluster', () => {
-      const members1 = (node1 as any).cluster.getMembers();
-      const members2 = (node2 as any).cluster.getMembers();
-      const members3 = (node3 as any).cluster.getMembers();
+      const members1 = harness1.cluster.getMembers();
+      const members2 = harness2.cluster.getMembers();
+      const members3 = harness3.cluster.getMembers();
 
       expect(members1).toHaveLength(3);
       expect(members2).toHaveLength(3);
@@ -94,7 +101,7 @@ describe('Cluster E2E Replication', () => {
     });
 
     test('should distribute partitions across all nodes', () => {
-      const ps1 = (node1 as any).partitionService;
+      const ps1 = harness1.partitionService;
       const partitionMap = ps1.getPartitionMap();
 
       // Count partitions per node
@@ -113,7 +120,7 @@ describe('Cluster E2E Replication', () => {
 
     test('should replicate write to backup nodes (EVENTUAL)', async () => {
       // Find a key owned by node1
-      const ps1 = (node1 as any).partitionService;
+      const ps1 = harness1.partitionService;
       let testKey = '';
       for (let i = 0; i < 100; i++) {
         const key = `test-key-${i}`;
@@ -137,7 +144,7 @@ describe('Cluster E2E Replication', () => {
         }
       };
 
-      (node1 as any).handleMessage(client, {
+      harness1.handleMessage(client, {
         type: 'CLIENT_OP',
         payload: op
       });
@@ -178,7 +185,7 @@ describe('Cluster E2E Replication', () => {
         }
       };
 
-      (node1 as any).handleMessage(writer, {
+      harness1.handleMessage(writer, {
         type: 'CLIENT_OP',
         payload: op
       });
@@ -187,9 +194,9 @@ describe('Cluster E2E Replication', () => {
       await new Promise(resolve => setTimeout(resolve, 500));
 
       // Verify data is replicated - at least one other node should have it
-      const map1 = (node1 as any).getMap('events-test') as LWWMap<string, any>;
-      const map2 = (node2 as any).getMap('events-test') as LWWMap<string, any>;
-      const map3 = (node3 as any).getMap('events-test') as LWWMap<string, any>;
+      const map1 = node1.getMap('events-test') as LWWMap<string, any>;
+      const map2 = node2.getMap('events-test') as LWWMap<string, any>;
+      const map3 = node3.getMap('events-test') as LWWMap<string, any>;
 
       const value1 = map1.get('event-key-1');
       const value2 = map2.get('event-key-1');
@@ -206,17 +213,18 @@ describe('Cluster E2E Replication', () => {
     test('should handle concurrent writes to different keys', async () => {
       const promises: Promise<void>[] = [];
       const keys: string[] = [];
+      const harnesses = [harness1, harness2, harness3];
 
       // Write 10 keys in parallel from different nodes
       for (let i = 0; i < 10; i++) {
         const key = `concurrent-${i}`;
         keys.push(key);
 
-        const node = [node1, node2, node3][i % 3];
+        const harness = harnesses[i % 3];
         const client = createMockClient(`concurrent-writer-${i}`);
 
         promises.push(new Promise((resolve) => {
-          (node as any).handleMessage(client, {
+          harness.handleMessage(client, {
             type: 'CLIENT_OP',
             payload: {
               opType: 'set',
@@ -255,7 +263,7 @@ describe('Cluster E2E Replication', () => {
     });
 
     test('should report replication pipeline status', () => {
-      const pipeline = (node1 as any).replicationPipeline;
+      const pipeline = harness1.replicationPipeline;
       expect(pipeline).toBeDefined();
 
       const health = pipeline.getHealth();
@@ -266,6 +274,7 @@ describe('Cluster E2E Replication', () => {
 
   describe('Partition Ownership', () => {
     let localNode: ServerCoordinator;
+    let localHarness: ServerTestHarness;
 
     beforeAll(async () => {
       localNode = ServerFactory.create({
@@ -277,6 +286,7 @@ describe('Cluster E2E Replication', () => {
         replicationEnabled: true,
       });
       await localNode.ready();
+      localHarness = createTestHarness(localNode);
     }, 10000);
 
     afterAll(async () => {
@@ -285,7 +295,7 @@ describe('Cluster E2E Replication', () => {
     });
 
     test('single node should own all partitions', () => {
-      const ps = (localNode as any).partitionService;
+      const ps = localHarness.partitionService;
       const partitionMap = ps.getPartitionMap();
 
       for (const partition of partitionMap.partitions) {
@@ -294,7 +304,7 @@ describe('Cluster E2E Replication', () => {
     });
 
     test('single node should have no backups', () => {
-      const ps = (localNode as any).partitionService;
+      const ps = localHarness.partitionService;
 
       for (let i = 0; i < 271; i++) {
         const backups = ps.getBackups(i);
@@ -314,7 +324,7 @@ describe('Cluster E2E Replication', () => {
         }
       };
 
-      (localNode as any).handleMessage(client, {
+      localHarness.handleMessage(client, {
         type: 'CLIENT_OP',
         payload: op
       });
