@@ -177,6 +177,12 @@ export interface IOperationHandler {
         writeConcern?: string,
         timeout?: number
     ): Promise<void>;
+
+    /** Core operation processing logic */
+    processLocalOp(op: any, fromCluster: boolean, originalSenderId?: string): Promise<void>;
+
+    /** Core CRDT merge logic - applies operation to map and returns event payload */
+    applyOpToMap(op: any, remoteNodeId?: string): Promise<{ eventPayload: any; oldRecord: any; rejected?: boolean }>;
 }
 
 /**
@@ -184,47 +190,50 @@ export interface IOperationHandler {
  * This handler requires many dependencies due to the complexity of
  * CRDT operations (interceptors, Write Concern, replication, journal, search).
  */
+// Core OperationHandler Configuration
 export interface OperationHandlerConfig {
-    /** Process a local operation (delegates to ServerCoordinator) */
-    processLocalOp: (op: any, isForwarded: boolean, originClientId?: string) => Promise<void>;
-
-    /** Process a batch with Write Concern (delegates to ServerCoordinator) */
-    processBatchAsync: (
-        ops: any[],
-        clientId: string,
-        writeConcern?: any,
-        timeout?: number
-    ) => Promise<void>;
-
-    /** Get effective Write Concern from op-level and batch-level settings */
-    getEffectiveWriteConcern: (opLevel?: any, batchLevel?: any) => any;
-
-    /** Convert Write Concern string to enum value */
-    stringToWriteConcern: (wc?: any) => any;
-
-    /** Forward operation to partition owner */
-    forwardToOwner: (op: any) => void;
-
-    /** Check if key is owned by local node */
-    isLocalOwner: (key: string) => boolean;
-
-    /** Security manager for permission checks */
-    checkPermission: (principal: Principal, mapName: string, action: PermissionType) => boolean;
-
-    /** Metrics service for operation tracking */
-    incOp: (action: any, mapName: string) => void;
-
-    /** Write ACK manager for deferred acknowledgments */
-    writeAckManager: {
-        registerPending: (
-            opId: string,
-            writeConcern: any,
-            timeout?: number
-        ) => Promise<{ success: boolean; achievedLevel: string; error?: string }>;
+    nodeId: string;
+    hlc: HLC;
+    metricsService: any; // Using any for now to avoid circular imports, ideally import MetricsService interface
+    securityManager: {
+        checkPermission: (principal: Principal, mapName: string, action: PermissionType) => boolean;
     };
+    storageManager: IStorageManager;
+    conflictResolverHandler: {
+        hasResolvers: (mapName: string) => boolean;
+        mergeWithResolver: (map: any, mapName: string, key: string, record: any, nodeId: string) => Promise<any>;
+    };
+    queryRegistry: {
+        processChange: (mapName: string, map: any, key: string, record: any, oldValue: any) => void;
+    };
+    eventJournalService?: {
+        append: (event: any) => void;
+    };
+    merkleTreeManager?: {
+        updateRecord: (partitionId: number, key: string, record: any) => void;
+    };
+    partitionService: {
+        getPartitionId: (key: string) => number;
+        getOwner: (key: string) => string;
+        isLocalOwner: (key: string) => boolean;
+    };
+    searchCoordinator: {
+        isSearchEnabled: (mapName: string) => boolean;
+        onDataChange: (mapName: string, key: string, value: any, changeType: string) => void;
+    };
+    storage?: IServerStorage | null;
+    replicationPipeline?: {
+        replicate: (op: any, opId: string, key: string) => Promise<void>;
+    };
+    broadcastHandler: IBroadcastHandler;
+    operationContextHandler: IOperationContextHandler;
 
-    /** Track pending batch operations (for testing) */
-    pendingBatchOperations: Set<Promise<void>>;
+    // Optional for backpressure customization
+    backpressure?: {
+        registerPending: () => boolean;
+        waitForCapacity: () => Promise<void>;
+        shouldForceSync: () => boolean;
+    };
 }
 
 // ============================================================================
@@ -633,7 +642,7 @@ export interface GCHandlerConfig {
     };
     hlc: HLC;
     storage?: IServerStorage;
-    broadcast: (message: any) => void;
+    broadcast?: (message: any) => void;
     metricsService: { incOp: (op: any, mapName: string) => void };
     gcIntervalMs?: number;
     gcAgeMs?: number;
@@ -873,8 +882,8 @@ export interface BatchProcessingHandlerConfig {
     replicationPipeline?: {
         replicate: (op: any, opId: string, key: string) => Promise<any>;
     };
-    broadcastBatch: (events: any[], excludeClientId?: string) => void;
-    broadcastBatchSync: (events: any[], excludeClientId?: string) => Promise<void>;
+    broadcastBatch?: (events: any[], excludeClientId?: string) => void;
+    broadcastBatchSync?: (events: any[], excludeClientId?: string) => Promise<void>;
     buildOpContext: (clientId: string, fromCluster: boolean) => any;
     runBeforeInterceptors: (op: any, context: any) => Promise<any | null>;
     runAfterInterceptors: (op: any, context: any) => void;
@@ -953,4 +962,82 @@ export interface WriteConcernHandlerConfig {
     applyOpToMap: (op: any, clientId?: string) => Promise<{ eventPayload: any; oldRecord?: any; rejected?: boolean }>;
     persistOpSync: (op: any) => Promise<void>;
     persistOpAsync: (op: any) => Promise<void>;
+}
+
+// ============================================================================
+// WebSocketHandler Types (Phase 1 Extraction)
+// ============================================================================
+
+/**
+ * Interface for handling WebSocket connections and messages.
+ */
+export interface IWebSocketHandler {
+    /** Handle new WebSocket connection */
+    handleConnection(ws: WebSocket): Promise<void>;
+    /** Handle incoming message from client */
+    handleMessage(client: ClientConnection, rawMessage: any): Promise<void>;
+    /** Set message registry for routing (late binding) */
+    setMessageRegistry(registry: Record<string, (client: ClientConnection, message: any) => void | Promise<void>>): void;
+}
+
+/**
+ * Configuration for WebSocketHandler.
+ */
+export interface WebSocketHandlerConfig {
+    nodeId: string;
+    rateLimitingEnabled: boolean;
+    writeCoalescingEnabled: boolean;
+    writeCoalescingOptions: any;
+    interceptors: any[];
+
+    // Dependencies
+    rateLimiter: {
+        shouldAccept: () => boolean;
+        onConnectionAttempt: () => void;
+        onConnectionRejected: () => void;
+        onPendingConnectionFailed: () => void;
+    };
+    metricsService: {
+        incConnectionsRejected: () => void;
+        incConnectionsAccepted: () => void;
+        setConnectedClients: (count: number) => void;
+    };
+    connectionManager: IConnectionManager;
+    authHandler: IAuthHandler;
+    rateLimitedLogger: {
+        error: (key: string, context: any, message: string) => void;
+    };
+
+    // Message routing (optional - can be set later via setMessageRegistry)
+    messageRegistry?: Record<string, (client: ClientConnection, message: any) => void | Promise<void>>;
+
+    // Cleanup handlers
+    queryRegistry: {
+        unregister: (subId: string) => void;
+    };
+    lockManager: {
+        handleClientDisconnect: (clientId: string) => void;
+    };
+    topicManager: {
+        unsubscribeAll: (clientId: string) => void;
+    };
+    counterHandler: {
+        unsubscribeAll: (clientId: string) => void;
+    };
+    searchCoordinator: {
+        unsubscribeClient: (clientId: string) => void;
+    };
+    distributedSubCoordinator?: {
+        unsubscribeClient: (socket: WebSocket) => void;
+    };
+    cluster: {
+        getMembers: () => string[];
+        isLocal: (id: string) => boolean;
+        send: (nodeId: string, type: any, payload: any) => void;
+        config: { nodeId: string };
+    };
+
+    // Heartbeat
+    heartbeatHandler: IHeartbeatHandler;
+    clientMessageHandler: IClientMessageHandler;
 }

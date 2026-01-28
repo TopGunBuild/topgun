@@ -15,9 +15,45 @@ import type { IBatchProcessingHandler, BatchProcessingHandlerConfig } from './ty
 
 export class BatchProcessingHandler implements IBatchProcessingHandler {
     private readonly config: BatchProcessingHandlerConfig;
+    private broadcastBatchFn?: (events: any[], excludeClientId?: string) => void;
+    private broadcastBatchSyncFn?: (events: any[], excludeClientId?: string) => Promise<void>;
 
     constructor(config: BatchProcessingHandlerConfig) {
         this.config = config;
+        this.broadcastBatchFn = config.broadcastBatch;
+        this.broadcastBatchSyncFn = config.broadcastBatchSync;
+    }
+
+    /**
+     * Set coordinator callbacks after construction (late binding pattern).
+     * Used by ServerCoordinator to wire broadcast callbacks.
+     */
+    setCoordinatorCallbacks(callbacks: {
+        broadcastBatch: (events: any[], excludeClientId?: string) => void;
+        broadcastBatchSync: (events: any[], excludeClientId?: string) => Promise<void>;
+    }): void {
+        this.broadcastBatchFn = callbacks.broadcastBatch;
+        this.broadcastBatchSyncFn = callbacks.broadcastBatchSync;
+    }
+
+    /**
+     * Broadcast batch of events to all clients (async).
+     * Uses late-bound callback from ServerCoordinator.
+     */
+    private broadcastBatch(events: any[], excludeClientId?: string): void {
+        if (this.broadcastBatchFn) {
+            this.broadcastBatchFn(events, excludeClientId);
+        }
+    }
+
+    /**
+     * Broadcast batch of events to all clients (sync).
+     * Uses late-bound callback from ServerCoordinator.
+     */
+    private async broadcastBatchSync(events: any[], excludeClientId?: string): Promise<void> {
+        if (this.broadcastBatchSyncFn) {
+            await this.broadcastBatchSyncFn(events, excludeClientId);
+        }
     }
 
     /**
@@ -82,7 +118,7 @@ export class BatchProcessingHandler implements IBatchProcessingHandler {
 
             // Send batched broadcast if we have events
             if (batchedEvents.length > 0) {
-                this.config.broadcastBatch(batchedEvents, clientId);
+                this.broadcastBatch(batchedEvents, clientId);
             }
         } finally {
             this.config.backpressure.completePending();
@@ -114,7 +150,7 @@ export class BatchProcessingHandler implements IBatchProcessingHandler {
 
         // Send batched broadcast SYNCHRONOUSLY - wait for all sends to complete
         if (batchedEvents.length > 0) {
-            await this.config.broadcastBatchSync(batchedEvents, clientId);
+            await this.broadcastBatchSync(batchedEvents, clientId);
         }
     }
 

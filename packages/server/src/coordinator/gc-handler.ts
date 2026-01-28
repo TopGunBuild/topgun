@@ -23,11 +23,31 @@ export class GCHandler implements IGCHandler {
     private gcReports: Map<string, Timestamp> = new Map();
     private readonly gcIntervalMs: number;
     private readonly gcAgeMs: number;
+    private broadcastFn?: (message: any) => void;
 
     constructor(config: GCHandlerConfig) {
         this.config = config;
         this.gcIntervalMs = config.gcIntervalMs ?? DEFAULT_GC_INTERVAL_MS;
         this.gcAgeMs = config.gcAgeMs ?? DEFAULT_GC_AGE_MS;
+        this.broadcastFn = config.broadcast;
+    }
+
+    /**
+     * Set coordinator callbacks after construction (late binding pattern).
+     * Used by ServerCoordinator to wire broadcast callback.
+     */
+    setCoordinatorCallbacks(callbacks: { broadcast: (message: any) => void }): void {
+        this.broadcastFn = callbacks.broadcast;
+    }
+
+    /**
+     * Broadcast message to all clients.
+     * Uses late-bound callback from ServerCoordinator.
+     */
+    private broadcast(message: any): void {
+        if (this.broadcastFn) {
+            this.broadcastFn(message);
+        }
     }
 
     /**
@@ -152,7 +172,7 @@ export class GCHandler implements IGCHandler {
         }
 
         // Broadcast to clients
-        this.config.broadcast({
+        this.broadcast({
             type: 'GC_PRUNE',
             payload: {
                 olderThan
@@ -232,7 +252,7 @@ export class GCHandler implements IGCHandler {
             };
 
             // Broadcast to local clients
-            this.config.broadcast({
+            this.broadcast({
                 type: 'SERVER_EVENT',
                 payload: eventPayload,
                 timestamp: this.config.hlc.now()
@@ -350,7 +370,7 @@ export class GCHandler implements IGCHandler {
         };
 
         // Broadcast to local clients
-        this.config.broadcast({
+        this.broadcast({
             type: 'SERVER_EVENT',
             payload: eventPayload,
             timestamp: this.config.hlc.now()
