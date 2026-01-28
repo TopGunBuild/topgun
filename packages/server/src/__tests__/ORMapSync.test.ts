@@ -1,5 +1,6 @@
 import { ServerCoordinator, ServerFactory } from '../';
 import { HLC, ORMap, serialize, deserialize, ORMapRecord } from '@topgunbuild/core';
+import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
 
 const createMockWriter = (socket: any) => ({
   write: jest.fn((message: any, _urgent?: boolean) => {
@@ -21,6 +22,7 @@ const createMockWriter = (socket: any) => ({
 
 describe('ORMap Merkle Tree Sync Integration', () => {
   let server: ServerCoordinator;
+  let harness: ServerTestHarness;
 
   beforeAll(async () => {
     server = ServerFactory.create({
@@ -31,6 +33,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
       peers: []
     });
     await server.ready();
+    harness = createTestHarness(server);
   });
 
   afterAll(async () => {
@@ -62,7 +65,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
   };
 
   const injectClient = (clientMock: any) => {
-    (server as any).connectionManager.getClients().set(clientMock.id, clientMock);
+    harness.connectionManager.getClients().set(clientMock.id, clientMock);
   };
 
   describe('ORMAP_SYNC_INIT', () => {
@@ -78,7 +81,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
       injectClient(client);
 
       // Send ORMAP_SYNC_INIT
-      await (server as any).handleMessage(client, {
+      await harness.handleMessage(client, {
         type: 'ORMAP_SYNC_INIT',
         mapName: 'or:tags',
         rootHash: 0, // Client has empty map
@@ -101,7 +104,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
       const { client, socket, responses } = createMockClient('client-2');
       injectClient(client);
 
-      await (server as any).handleMessage(client, {
+      await harness.handleMessage(client, {
         type: 'ORMAP_SYNC_INIT',
         mapName: 'or:empty',
         rootHash: 0,
@@ -128,7 +131,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
       const { client, socket, responses } = createMockClient('client-3');
       injectClient(client);
 
-      await (server as any).handleMessage(client, {
+      await harness.handleMessage(client, {
         type: 'ORMAP_MERKLE_REQ_BUCKET',
         payload: {
           mapName: 'or:buckets-test',
@@ -153,7 +156,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
       const { client, socket, responses } = createMockClient('client-4');
       injectClient(client);
 
-      await (server as any).handleMessage(client, {
+      await harness.handleMessage(client, {
         type: 'ORMAP_DIFF_REQUEST',
         payload: {
           mapName: 'or:diff-test',
@@ -182,7 +185,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
       const { client, socket, responses } = createMockClient('client-5');
       injectClient(client);
 
-      await (server as any).handleMessage(client, {
+      await harness.handleMessage(client, {
         type: 'ORMAP_DIFF_REQUEST',
         payload: {
           mapName: 'or:non-existent-map',
@@ -211,7 +214,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
         tag: `${Date.now()}:1:client-6`
       };
 
-      await (server as any).handleMessage(client, {
+      await harness.handleMessage(client, {
         type: 'ORMAP_PUSH_DIFF',
         payload: {
           mapName: 'or:push-test',
@@ -239,7 +242,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
       server.getMap('or:broadcast-test', 'OR');
 
       // IMPORTANT: Client 2 must subscribe to receive SERVER_EVENT (subscription-based routing)
-      await (server as any).handleMessage(client2, {
+      await harness.handleMessage(client2, {
         type: 'QUERY_SUB',
         payload: { queryId: 'sub-or-broadcast', mapName: 'or:broadcast-test', query: {} }
       });
@@ -254,7 +257,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
         tag: `${Date.now()}:1:client-7-broadcast`
       };
 
-      await (server as any).handleMessage(client1, {
+      await harness.handleMessage(client1, {
         type: 'ORMAP_PUSH_DIFF',
         payload: {
           mapName: 'or:broadcast-test',
@@ -287,7 +290,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
       injectClient(client);
 
       // Push tombstone for the initial record
-      await (server as any).handleMessage(client, {
+      await harness.handleMessage(client, {
         type: 'ORMAP_PUSH_DIFF',
         payload: {
           mapName: 'or:tombstone-test',
@@ -333,7 +336,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
 
       // Client A pushes its data to server
       const recordsA = mapA.getRecords('shared-key');
-      await (server as any).handleMessage(clientA, {
+      await harness.handleMessage(clientA, {
         type: 'ORMAP_PUSH_DIFF',
         payload: {
           mapName,
@@ -347,7 +350,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
 
       // Client B pushes its data
       const recordsB = mapB.getRecords('shared-key');
-      await (server as any).handleMessage(clientB, {
+      await harness.handleMessage(clientB, {
         type: 'ORMAP_PUSH_DIFF',
         payload: {
           mapName,
@@ -361,7 +364,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
 
       // Client C pushes its data
       const recordsC = mapC.getRecords('shared-key');
-      await (server as any).handleMessage(clientC, {
+      await harness.handleMessage(clientC, {
         type: 'ORMAP_PUSH_DIFF',
         payload: {
           mapName,
@@ -384,7 +387,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
       const { client: clientD, responses: responsesD } = createMockClient('client-D');
       injectClient(clientD);
 
-      await (server as any).handleMessage(clientD, {
+      await harness.handleMessage(clientD, {
         type: 'ORMAP_DIFF_REQUEST',
         payload: {
           mapName,
@@ -416,7 +419,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
       const { client: clientA, responses: responsesA } = createMockClient('client-A-concurrent');
       injectClient(clientA);
 
-      await (server as any).handleMessage(clientA, {
+      await harness.handleMessage(clientA, {
         type: 'ORMAP_PUSH_DIFF',
         payload: {
           mapName,
@@ -439,7 +442,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
       const removedTags = mapA.remove('concurrent-key', 'original-value');
 
       // Client A pushes tombstone
-      await (server as any).handleMessage(clientA, {
+      await harness.handleMessage(clientA, {
         type: 'ORMAP_PUSH_DIFF',
         payload: {
           mapName,
@@ -455,7 +458,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
       const { client: clientB, responses: responsesB } = createMockClient('client-B-concurrent');
       injectClient(clientB);
 
-      await (server as any).handleMessage(clientB, {
+      await harness.handleMessage(clientB, {
         type: 'ORMAP_PUSH_DIFF',
         payload: {
           mapName,
@@ -499,7 +502,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
       // For this test, assume default policy allows all (as no policy is set)
       // The test primarily validates that the security check is in place
 
-      await (server as any).handleMessage(clientMock, {
+      await harness.handleMessage(clientMock, {
         type: 'ORMAP_SYNC_INIT',
         mapName: 'or:protected',
         rootHash: 0,
