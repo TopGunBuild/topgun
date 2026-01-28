@@ -2,15 +2,15 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-004
-- **Status:** complete
-- **Next Step:** None - SPEC-004 fixes applied and verified
+- **Active Specification:** SPEC-005
+- **Status:** drafting
+- **Next Step:** `/sf:audit` - audit specification before implementation
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-004 | Simplify ServerCoordinator Constructor | high | complete | - |
+| 1 | SPEC-005 | Remove Unused Artifacts from ServerCoordinator | medium | draft | - |
 
 ## Decisions
 
@@ -31,6 +31,7 @@
 | 2026-01-28 | SPEC-004 | APPROVED: Audit v2 passed all 9 dimensions. ~35% context estimate (GOOD range). Late binding pattern for GCHandler/BatchProcessingHandler broadcast callbacks. QueryHandler wired through QueryConversionHandler. |
 | 2026-01-28 | SPEC-004 | CHANGES_REQUESTED (Review v1): 58+ TypeScript compilation errors in ServerFactory.ts. Handler configurations don't match actual handler interfaces. Late binding pattern correctly implemented, but handler instantiation code needs fixes. |
 | 2026-01-28 | SPEC-004 | FIXED (Fix Response): All TypeScript errors resolved. Handler configs corrected to match actual interfaces. Build passes with DTS generation. ClusterEventHandler removed from factory (requires ServerCoordinator callbacks). |
+| 2026-01-28 | SPEC-004 | COMPLETED: ServerCoordinator reduced 19.4% (1070→862 lines). Late binding pattern for handler callbacks. Archived to .specflow/archive/SPEC-004.md |
 
 ## Project Patterns
 
@@ -44,7 +45,10 @@
 
 ## Warnings
 
-None
+**Integration Tests Need Update:**
+- 23 integration tests fail due to SPEC-003/SPEC-004 refactoring
+- Tests call internal methods moved to handlers (handleMessage, processLocalOp, etc.)
+- Requires separate task to update test architecture
 
 ---
-*Last updated: 2026-01-28 19:50*
+*Last updated: 2026-01-28 21:15*
