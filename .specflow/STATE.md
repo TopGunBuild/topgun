@@ -2,15 +2,15 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** `/sf:new "task"` or `/sf:next`
+- **Active Specification:** SPEC-006
+- **Status:** review
+- **Next Step:** `/sf:review`
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| - | - | Queue empty | - | - | - |
+| 1 | SPEC-006 | Update Integration Tests for Handler Extraction Architecture | high | review | - |
 
 ## Decisions
 
@@ -31,10 +31,12 @@
 | 2026-01-28 | SPEC-004 | APPROVED: Audit v2 passed all 9 dimensions. ~35% context estimate (GOOD range). Late binding pattern for GCHandler/BatchProcessingHandler broadcast callbacks. QueryHandler wired through QueryConversionHandler. |
 | 2026-01-28 | SPEC-004 | CHANGES_REQUESTED (Review v1): 58+ TypeScript compilation errors in ServerFactory.ts. Handler configurations don't match actual handler interfaces. Late binding pattern correctly implemented, but handler instantiation code needs fixes. |
 | 2026-01-28 | SPEC-004 | FIXED (Fix Response): All TypeScript errors resolved. Handler configs corrected to match actual interfaces. Build passes with DTS generation. ClusterEventHandler removed from factory (requires ServerCoordinator callbacks). |
-| 2026-01-28 | SPEC-004 | COMPLETED: ServerCoordinator reduced 19.4% (1070→862 lines). Late binding pattern for handler callbacks. Archived to .specflow/archive/SPEC-004.md |
+| 2026-01-28 | SPEC-004 | COMPLETED: ServerCoordinator reduced 19.4% (1070->862 lines). Late binding pattern for handler callbacks. Archived to .specflow/archive/SPEC-004.md |
 | 2026-01-28 | SPEC-005 | Audit v1: Identified 2 critical issues - wss and messageRegistry were misclassified as "Remove" (Part 2) but are used in constructor wiring. Corrected to "Convert to locals" (Part 3). Spec updated with corrections. |
-| 2026-01-28 | SPEC-005 | APPROVED (Review v1): All acceptance criteria met. 4 imports removed, 20 properties removed, 5 converted to locals. Build passes. Public API unchanged. 858→798 lines (-60, 25% better than expected). Bonus cleanup in commit 4538d2b removed additional 88 lines (total: 858→710, -148 lines). |
+| 2026-01-28 | SPEC-005 | APPROVED (Review v1): All acceptance criteria met. 4 imports removed, 20 properties removed, 5 converted to locals. Build passes. Public API unchanged. 858->798 lines (-60, 25% better than expected). Bonus cleanup in commit 4538d2b removed additional 88 lines (total: 858->710, -148 lines). |
 | 2026-01-28 | SPEC-005 | COMPLETED: ServerCoordinator artifacts cleanup finished. 148 lines removed (17.2% reduction). Archived to .specflow/archive/SPEC-005.md |
+| 2026-01-28 | SPEC-006 | Audit v1: APPROVED. Test harness pattern for controlled handler access. ~35% context estimate (GOOD range). Added cluster/reportLocalHlc accessors for Part 3. |
+| 2026-01-28 | SPEC-006 | EXECUTION: Harness created, 12 test files updated. 16/16 heartbeat tests pass. Other tests fail due to pre-existing event broadcast issue in handler architecture (not harness issue). |
 
 ## Project Patterns
 
@@ -45,13 +47,15 @@
 - Handler extraction pattern: separate message handlers into focused modules with config injection
 - Test polling pattern: use centralized test-helpers.ts with PollOptions for bounded iterations
 - Late binding pattern: handlers can receive callbacks after construction via setXxxCallbacks methods
+- Test harness pattern: ServerTestHarness provides controlled access to internal handlers for tests
 
 ## Warnings
 
-**Integration Tests Need Update:**
-- 23 integration tests fail due to SPEC-003/SPEC-004 refactoring
-- Tests call internal methods moved to handlers (handleMessage, processLocalOp, etc.)
-- Requires separate task to update test architecture
+**Integration Tests Partially Fixed:** (SPEC-006 complete, follow-up needed)
+- ServerTestHarness created and 12 test files updated
+- heartbeat.test.ts fully passes (16/16 tests)
+- Other tests fail due to event broadcast mechanism issue (pre-existing bug in SPEC-003/004)
+- Recommend SPEC-007 to fix event broadcast/subscription notification in handlers
 
 ---
-*Last updated: 2026-01-28 21:34*
+*Last updated: 2026-01-28 22:45*
