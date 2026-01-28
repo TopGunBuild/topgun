@@ -1,9 +1,11 @@
 import { ServerCoordinator, ServerFactory } from '../';
 import { deserialize, serialize } from '@topgunbuild/core';
+import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
 
 describe('Heartbeat', () => {
   describe('Server', () => {
     let server: ServerCoordinator;
+    let harness: ServerTestHarness;
 
     beforeAll(async () => {
       server = ServerFactory.create({
@@ -14,6 +16,7 @@ describe('Heartbeat', () => {
         peers: [],
       });
       await server.ready();
+      harness = createTestHarness(server);
     });
 
     afterAll(async () => {
@@ -62,11 +65,11 @@ describe('Heartbeat', () => {
 
     it('should respond with PONG immediately on PING', async () => {
       const { client, socket } = createMockClient('client-ping-1');
-      (server as any).connectionManager.getClients().set('client-ping-1', client);
+      harness.connectionManager.getClients().set('client-ping-1', client);
 
       const clientTimestamp = Date.now();
 
-      await (server as any).handleMessage(client, {
+      await harness.handleMessage(client, {
         type: 'PING',
         timestamp: clientTimestamp,
       });
@@ -82,17 +85,17 @@ describe('Heartbeat', () => {
       expect(pongMsg.serverTime).toBeGreaterThan(0);
 
       // Cleanup
-      (server as any).connectionManager.getClients().delete('client-ping-1');
+      harness.connectionManager.getClients().delete('client-ping-1');
     });
 
     it('should include serverTime in PONG', async () => {
       const { client, socket } = createMockClient('client-ping-2');
-      (server as any).connectionManager.getClients().set('client-ping-2', client);
+      harness.connectionManager.getClients().set('client-ping-2', client);
 
       const beforeTime = Date.now();
       const clientTimestamp = beforeTime - 100;
 
-      await (server as any).handleMessage(client, {
+      await harness.handleMessage(client, {
         type: 'PING',
         timestamp: clientTimestamp,
       });
@@ -108,7 +111,7 @@ describe('Heartbeat', () => {
       expect(pongMsg.serverTime).toBeLessThanOrEqual(afterTime);
 
       // Cleanup
-      (server as any).connectionManager.getClients().delete('client-ping-2');
+      harness.connectionManager.getClients().delete('client-ping-2');
     });
 
     it('should track lastPingReceived per client', async () => {
@@ -119,13 +122,13 @@ describe('Heartbeat', () => {
       client1.lastPingReceived = Date.now() - 10000;
       client2.lastPingReceived = Date.now() - 5000;
 
-      (server as any).connectionManager.getClients().set('client-ping-3', client1);
-      (server as any).connectionManager.getClients().set('client-ping-4', client2);
+      harness.connectionManager.getClients().set('client-ping-3', client1);
+      harness.connectionManager.getClients().set('client-ping-4', client2);
 
       const timestamp1 = Date.now();
 
       // Only client1 sends PING
-      await (server as any).handleMessage(client1, {
+      await harness.handleMessage(client1, {
         type: 'PING',
         timestamp: timestamp1,
       });
@@ -137,8 +140,8 @@ describe('Heartbeat', () => {
       expect(client2.lastPingReceived).toBeLessThan(timestamp1);
 
       // Cleanup
-      (server as any).connectionManager.getClients().delete('client-ping-3');
-      (server as any).connectionManager.getClients().delete('client-ping-4');
+      harness.connectionManager.getClients().delete('client-ping-3');
+      harness.connectionManager.getClients().delete('client-ping-4');
     });
 
     it('should report client as not alive after clientTimeoutMs', async () => {
@@ -147,12 +150,12 @@ describe('Heartbeat', () => {
       // Set lastPingReceived to old time (beyond 20s timeout)
       client.lastPingReceived = Date.now() - 25000;
 
-      (server as any).connectionManager.getClients().set('client-ping-5', client);
+      harness.connectionManager.getClients().set('client-ping-5', client);
 
       expect(server.isClientAlive('client-ping-5')).toBe(false);
 
       // Cleanup
-      (server as any).connectionManager.getClients().delete('client-ping-5');
+      harness.connectionManager.getClients().delete('client-ping-5');
     });
 
     it('should report client as alive when recently pinged', async () => {
@@ -161,12 +164,12 @@ describe('Heartbeat', () => {
       // Set lastPingReceived to recent time
       client.lastPingReceived = Date.now() - 5000;
 
-      (server as any).connectionManager.getClients().set('client-ping-6', client);
+      harness.connectionManager.getClients().set('client-ping-6', client);
 
       expect(server.isClientAlive('client-ping-6')).toBe(true);
 
       // Cleanup
-      (server as any).connectionManager.getClients().delete('client-ping-6');
+      harness.connectionManager.getClients().delete('client-ping-6');
     });
 
     it('should return Infinity idle time for unknown client', () => {
@@ -183,14 +186,14 @@ describe('Heartbeat', () => {
       const tenSecondsAgo = Date.now() - 10000;
       client.lastPingReceived = tenSecondsAgo;
 
-      (server as any).connectionManager.getClients().set('client-ping-7', client);
+      harness.connectionManager.getClients().set('client-ping-7', client);
 
       const idleTime = server.getClientIdleTime('client-ping-7');
       expect(idleTime).toBeGreaterThanOrEqual(10000);
       expect(idleTime).toBeLessThan(11000); // Allow 1 second tolerance
 
       // Cleanup
-      (server as any).connectionManager.getClients().delete('client-ping-7');
+      harness.connectionManager.getClients().delete('client-ping-7');
     });
 
     it('should update lastPingReceived after PING', async () => {
@@ -200,11 +203,11 @@ describe('Heartbeat', () => {
       const oldTime = Date.now() - 15000;
       client.lastPingReceived = oldTime;
 
-      (server as any).connectionManager.getClients().set('client-ping-8', client);
+      harness.connectionManager.getClients().set('client-ping-8', client);
 
       // Send PING
       const timestamp = Date.now();
-      await (server as any).handleMessage(client, {
+      await harness.handleMessage(client, {
         type: 'PING',
         timestamp,
       });
@@ -214,16 +217,16 @@ describe('Heartbeat', () => {
       expect(client.lastPingReceived).toBeGreaterThanOrEqual(timestamp);
 
       // Cleanup
-      (server as any).connectionManager.getClients().delete('client-ping-8');
+      harness.connectionManager.getClients().delete('client-ping-8');
     });
 
     it('should handle PING even for unauthenticated clients', async () => {
       const { client, socket } = createMockClient('client-ping-9', false);
-      (server as any).connectionManager.getClients().set('client-ping-9', client);
+      harness.connectionManager.getClients().set('client-ping-9', client);
 
       const clientTimestamp = Date.now();
 
-      await (server as any).handleMessage(client, {
+      await harness.handleMessage(client, {
         type: 'PING',
         timestamp: clientTimestamp,
       });
@@ -238,12 +241,13 @@ describe('Heartbeat', () => {
       expect(pongMsg.timestamp).toBe(clientTimestamp);
 
       // Cleanup
-      (server as any).connectionManager.getClients().delete('client-ping-9');
+      harness.connectionManager.getClients().delete('client-ping-9');
     });
   });
 
   describe('Server - Dead Client Eviction', () => {
     let server: ServerCoordinator;
+    let harness: ServerTestHarness;
 
     beforeEach(async () => {
       server = ServerFactory.create({
@@ -254,6 +258,7 @@ describe('Heartbeat', () => {
         peers: [],
       });
       await server.ready();
+      harness = createTestHarness(server);
     });
 
     afterEach(async () => {
@@ -277,10 +282,10 @@ describe('Heartbeat', () => {
         lastPingReceived: Date.now() - 25000, // 25 seconds ago (beyond 20s timeout)
       };
 
-      (server as any).connectionManager.getClients().set('dead-client-1', client);
+      harness.connectionManager.getClients().set('dead-client-1', client);
 
       // Manually trigger eviction check
-      (server as any).evictDeadClients();
+      harness.evictDeadClients();
 
       // Socket should be closed
       expect(socket.close).toHaveBeenCalledWith(4002, 'Heartbeat timeout');
@@ -303,16 +308,16 @@ describe('Heartbeat', () => {
         lastPingReceived: Date.now() - 5000, // 5 seconds ago (within 20s timeout)
       };
 
-      (server as any).connectionManager.getClients().set('alive-client-1', client);
+      harness.connectionManager.getClients().set('alive-client-1', client);
 
       // Manually trigger eviction check
-      (server as any).evictDeadClients();
+      harness.evictDeadClients();
 
       // Socket should NOT be closed
       expect(socket.close).not.toHaveBeenCalled();
 
       // Cleanup
-      (server as any).connectionManager.getClients().delete('alive-client-1');
+      harness.connectionManager.getClients().delete('alive-client-1');
     });
 
     it('should NOT evict unauthenticated clients', async () => {
@@ -331,21 +336,22 @@ describe('Heartbeat', () => {
         lastPingReceived: Date.now() - 25000, // Old but unauthenticated
       };
 
-      (server as any).connectionManager.getClients().set('unauth-client-1', client);
+      harness.connectionManager.getClients().set('unauth-client-1', client);
 
       // Manually trigger eviction check
-      (server as any).evictDeadClients();
+      harness.evictDeadClients();
 
       // Socket should NOT be closed (unauthenticated clients are handled by auth timeout)
       expect(socket.close).not.toHaveBeenCalled();
 
       // Cleanup
-      (server as any).connectionManager.getClients().delete('unauth-client-1');
+      harness.connectionManager.getClients().delete('unauth-client-1');
     });
   });
 
   describe('Integration', () => {
     let server: ServerCoordinator;
+    let harness: ServerTestHarness;
 
     beforeEach(async () => {
       server = ServerFactory.create({
@@ -356,6 +362,7 @@ describe('Heartbeat', () => {
         peers: [],
       });
       await server.ready();
+      harness = createTestHarness(server);
     });
 
     afterEach(async () => {
@@ -398,7 +405,7 @@ describe('Heartbeat', () => {
         lastPingReceived: Date.now(),
       };
 
-      (server as any).connectionManager.getClients().set('long-lived-client', client);
+      harness.connectionManager.getClients().set('long-lived-client', client);
 
       // Simulate 30 seconds of heartbeats (every 5 seconds)
       for (let i = 0; i < 6; i++) {
@@ -407,7 +414,7 @@ describe('Heartbeat', () => {
 
         // Simulate PING from client
         const timestamp = Date.now();
-        await (server as any).handleMessage(client, {
+        await harness.handleMessage(client, {
           type: 'PING',
           timestamp,
         });
@@ -428,7 +435,7 @@ describe('Heartbeat', () => {
       expect(server.isClientAlive('long-lived-client')).toBe(true);
 
       // Cleanup
-      (server as any).connectionManager.getClients().delete('long-lived-client');
+      harness.connectionManager.getClients().delete('long-lived-client');
     });
 
     it('should detect and evict after simulated freeze', async () => {
@@ -448,7 +455,7 @@ describe('Heartbeat', () => {
         lastPingReceived: Date.now(),
       };
 
-      (server as any).connectionManager.getClients().set('frozen-client', client);
+      harness.connectionManager.getClients().set('frozen-client', client);
 
       // Initially alive
       expect(server.isClientAlive('frozen-client')).toBe(true);
@@ -461,7 +468,7 @@ describe('Heartbeat', () => {
       expect(server.isClientAlive('frozen-client')).toBe(false);
 
       // Trigger eviction
-      (server as any).evictDeadClients();
+      harness.evictDeadClients();
 
       // Socket should be closed
       expect(socket.close).toHaveBeenCalledWith(4002, 'Heartbeat timeout');
@@ -485,11 +492,11 @@ describe('Heartbeat', () => {
         lastPingReceived: Date.now(),
       };
 
-      (server as any).connectionManager.getClients().set('rapid-client', client);
+      harness.connectionManager.getClients().set('rapid-client', client);
 
       // Send 100 rapid PINGs
       for (let i = 0; i < 100; i++) {
-        await (server as any).handleMessage(client, {
+        await harness.handleMessage(client, {
           type: 'PING',
           timestamp: Date.now() + i,
         });
@@ -506,7 +513,7 @@ describe('Heartbeat', () => {
       expect(server.isClientAlive('rapid-client')).toBe(true);
 
       // Cleanup
-      (server as any).connectionManager.getClients().delete('rapid-client');
+      harness.connectionManager.getClients().delete('rapid-client');
     });
   });
 });
