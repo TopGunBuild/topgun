@@ -2,6 +2,7 @@ import { ServerCoordinator, ServerFactory } from '../';
 import { SyncEngine } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
 import { waitForAuthReady, pollUntil } from './utils/test-helpers';
+import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
 import { LWWMap, ORMap } from '@topgunbuild/core';
 import * as jwt from 'jsonwebtoken';
 import { WebSocket } from 'ws';
@@ -103,7 +104,7 @@ describe('Garbage Collection & Zombie Protection', () => {
     // performGarbageCollection now requires a Timestamp parameter (olderThan)
     // We pass the futureTime as the safe GC cutoff
     const safeTimestamp = { millis: futureTime, counter: 0, nodeId: 'gc-server' };
-    (server as any).performGarbageCollection(safeTimestamp);
+    server.performGarbageCollection(safeTimestamp);
 
     // Verify tombstone is gone from server
     expect((serverMap as LWWMap<any, any>).getRecord('key1')).toBeUndefined();
@@ -160,7 +161,7 @@ describe('Garbage Collection & Zombie Protection', () => {
     // - TTL expiration check uses Date.now() = futureTime (expired)
     // - prune() won't delete the freshly created tombstone (tombstone.millis = now+1000 > now)
     const olderThan = { millis: now, counter: 0, nodeId: 'gc-server' };
-    (server as any).performGarbageCollection(olderThan);
+    server.performGarbageCollection(olderThan);
 
     // 4. Verify it became a tombstone
     const updatedRecord = map.getRecord('tempKey');
@@ -174,6 +175,8 @@ describe('Garbage Collection & Zombie Protection', () => {
 describe('TTL Expiration with ReplicationPipeline', () => {
   let node1: ServerCoordinator;
   let node2: ServerCoordinator;
+  let harness1: ServerTestHarness;
+  let harness2: ServerTestHarness;
   let originalDateNow: () => number;
 
   beforeAll(async () => {
@@ -189,6 +192,7 @@ describe('TTL Expiration with ReplicationPipeline', () => {
     });
 
     await node1.ready();
+    harness1 = createTestHarness(node1);
 
     // Start Node A (lower ID, will initiate connection to node-b)
     node2 = ServerFactory.create({
@@ -200,12 +204,13 @@ describe('TTL Expiration with ReplicationPipeline', () => {
     });
 
     await node2.ready();
+    harness2 = createTestHarness(node2);
 
     // Wait for cluster to stabilize with bounded polling
     await pollUntil(
       () => {
-        const m1 = (node1 as any).cluster.getMembers();
-        const m2 = (node2 as any).cluster.getMembers();
+        const m1 = harness1.cluster.getMembers();
+        const m2 = harness2.cluster.getMembers();
         return m1.includes('ttl-node-a') && m2.includes('ttl-node-b');
       },
       {
@@ -235,7 +240,7 @@ describe('TTL Expiration with ReplicationPipeline', () => {
     // Find a key where node1 is owner and node2 is backup
     // The partition service should have node2 as backup for partitions owned by node1
     let testKey = '';
-    const partitionService = (node1 as any).partitionService;
+    const partitionService = harness1.partitionService;
     for (let i = 0; i < 100; i++) {
       const candidateKey = `ttl-key-${i}`;
       const partitionId = partitionService.getPartitionId(candidateKey);
@@ -271,7 +276,7 @@ describe('TTL Expiration with ReplicationPipeline', () => {
 
     // Run GC on node1 - should use ReplicationPipeline instead of CLUSTER_EVENT
     const olderThan = { millis: now, counter: 0, nodeId: 'ttl-node-b' };
-    (node1 as any).performGarbageCollection(olderThan);
+    node1.performGarbageCollection(olderThan);
 
     // Wait for replication via pipeline (increased for batch processing)
     await new Promise(resolve => setTimeout(resolve, 300));
@@ -293,8 +298,8 @@ describe('TTL Expiration with ReplicationPipeline', () => {
 
     // Track broadcast calls for verification
     const broadcastCalls: any[] = [];
-    const originalBroadcast = (node1 as any).broadcast.bind(node1);
-    (node1 as any).broadcast = (msg: any, ...args: any[]) => {
+    const originalBroadcast = harness1.broadcast.bind(node1);
+    harness1.broadcast = (msg: any, ...args: any[]) => {
       broadcastCalls.push(msg);
       return originalBroadcast(msg, ...args);
     };
@@ -314,7 +319,7 @@ describe('TTL Expiration with ReplicationPipeline', () => {
 
     // Run GC
     const olderThan = { millis: now, counter: 0, nodeId: 'ttl-node-b' };
-    (node1 as any).performGarbageCollection(olderThan);
+    node1.performGarbageCollection(olderThan);
 
     // Verify SERVER_EVENT was broadcast for the expired record
     const serverEvents = broadcastCalls.filter(c => c.type === 'SERVER_EVENT');
@@ -359,7 +364,7 @@ describe('TTL Expiration with ReplicationPipeline', () => {
 
     // Run GC on node1
     const olderThan = { millis: now, counter: 0, nodeId: 'ttl-node-b' };
-    (node1 as any).performGarbageCollection(olderThan);
+    node1.performGarbageCollection(olderThan);
 
     // Wait for replication
     await new Promise(resolve => setTimeout(resolve, 500));
@@ -378,8 +383,8 @@ describe('TTL Expiration with ReplicationPipeline', () => {
 
     // Spy on cluster.send to verify CLUSTER_EVENT is not used
     const clusterSendCalls: any[] = [];
-    const originalSend = (node1 as any).cluster.send.bind((node1 as any).cluster);
-    (node1 as any).cluster.send = (nodeId: string, type: string, payload: any) => {
+    const originalSend = harness1.cluster.send.bind(harness1.cluster);
+    harness1.cluster.send = (nodeId: string, type: string, payload: any) => {
       clusterSendCalls.push({ nodeId, type, payload });
       return originalSend(nodeId, type, payload);
     };
@@ -399,7 +404,7 @@ describe('TTL Expiration with ReplicationPipeline', () => {
 
     // Run GC
     const olderThan = { millis: now, counter: 0, nodeId: 'ttl-node-b' };
-    (node1 as any).performGarbageCollection(olderThan);
+    node1.performGarbageCollection(olderThan);
 
     // Wait for replication
     await new Promise(resolve => setTimeout(resolve, 300));
