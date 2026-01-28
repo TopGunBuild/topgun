@@ -1,4 +1,4 @@
-import { ServerCoordinator } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../';
 import { WebSocket } from 'ws';
 import { LWWMap, HLC, Timestamp } from '@topgunbuild/core';
 import * as jwt from 'jsonwebtoken';
@@ -47,7 +47,7 @@ describe('Distributed Garbage Collection Consensus', () => {
 
     // Setup 3-node cluster
     // Node 1 (Leader - lowest ID)
-    node1 = new ServerCoordinator({
+    node1 = ServerFactory.create({
       port: 0,
       nodeId: 'node-1',
       host: 'localhost',
@@ -57,7 +57,7 @@ describe('Distributed Garbage Collection Consensus', () => {
     await node1.ready();
 
     // Node 2
-    node2 = new ServerCoordinator({
+    node2 = ServerFactory.create({
       port: 0,
       nodeId: 'node-2',
       host: 'localhost',
@@ -67,7 +67,7 @@ describe('Distributed Garbage Collection Consensus', () => {
     await node2.ready();
 
     // Node 3
-    node3 = new ServerCoordinator({
+    node3 = ServerFactory.create({
       port: 0,
       nodeId: 'node-3',
       host: 'localhost',

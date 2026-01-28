@@ -1,4 +1,4 @@
-import { ServerCoordinator } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../';
 import { WebSocket } from 'ws';
 import { createServer } from 'http';
 import { IInterceptor, ServerOp, OpContext, ConnectionContext } from '../interceptor/IInterceptor';
@@ -30,7 +30,7 @@ describe('ServerCoordinator Interceptor Integration', () => {
     beforeEach(async () => {
         jest.clearAllMocks();
         
-        server = new ServerCoordinator({
+        server = ServerFactory.create({
             port: 0, // Random port
             nodeId: 'test-node',
             storage: mockStorage,
@@ -97,7 +97,7 @@ describe('ServerCoordinator Interceptor Integration', () => {
             onConnection: jest.fn().mockRejectedValue(new Error('Get out!'))
         };
         
-        const rejectingServer = new ServerCoordinator({
+        const rejectingServer = ServerFactory.create({
             port: 0,
             nodeId: 'reject-node',
             interceptors: [rejectingInterceptor]
@@ -141,7 +141,7 @@ describe('ServerCoordinator Interceptor Integration', () => {
             }))
         };
 
-        const serverWithInterceptor = new ServerCoordinator({
+        const serverWithInterceptor = ServerFactory.create({
             port: 0,
             nodeId: 'test-node-2',
             storage: mockStorage,
@@ -178,7 +178,7 @@ describe('ServerCoordinator Interceptor Integration', () => {
             onBeforeOp: jest.fn().mockRejectedValue(new Error('Block this!'))
         };
 
-        const serverWithInterceptor = new ServerCoordinator({
+        const serverWithInterceptor = ServerFactory.create({
             port: 0,
             nodeId: 'test-node-3',
             storage: mockStorage,
@@ -211,7 +211,7 @@ describe('ServerCoordinator Interceptor Integration', () => {
             onBeforeOp: jest.fn().mockResolvedValue(null)
         };
 
-        const serverWithInterceptor = new ServerCoordinator({
+        const serverWithInterceptor = ServerFactory.create({
             port: 0,
             nodeId: 'test-node-4',
             storage: mockStorage,

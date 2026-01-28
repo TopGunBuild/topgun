@@ -8,7 +8,7 @@
  * - Key pattern matching
  */
 
-import { ServerCoordinator, ServerCoordinatorConfig } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory, ServerCoordinatorConfig } from '../';
 import { TopGunClient } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
 import { MergeRejection } from '@topgunbuild/core';
@@ -30,7 +30,7 @@ describe('Conflict Resolver Integration', () => {
       jwtSecret: 'test-secret',
     };
 
-    server = new ServerCoordinator(serverConfig);
+    server = ServerFactory.create(serverConfig);
     await server.ready();
 
     // Create two clients to simulate concurrent updates

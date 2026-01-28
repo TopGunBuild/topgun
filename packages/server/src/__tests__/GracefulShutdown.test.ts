@@ -1,4 +1,4 @@
-import { ServerCoordinator } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../';
 import { IServerStorage } from '../storage/IServerStorage';
 import { WebSocket } from 'ws';
 import { deserialize } from '@topgunbuild/core';
@@ -21,7 +21,7 @@ describe('ServerCoordinator Graceful Shutdown', () => {
       deleteAll: jest.fn(),
     };
 
-    server = new ServerCoordinator({
+    server = ServerFactory.create({
       port: 0,
       nodeId: 'test-server',
       storage: mockStorage,

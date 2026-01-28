@@ -1,4 +1,4 @@
-import { ServerCoordinator } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../';
 import { SyncEngine } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
 import { waitForAuthReady, pollUntil } from './utils/test-helpers';
@@ -23,7 +23,7 @@ describe('Garbage Collection & Zombie Protection', () => {
     originalDateNow = Date.now;
 
     // Start Server with dynamic port
-    server = new ServerCoordinator({
+    server = ServerFactory.create({
       port: 0,
       nodeId: 'gc-server',
       host: 'localhost',
@@ -180,7 +180,7 @@ describe('TTL Expiration with ReplicationPipeline', () => {
     originalDateNow = Date.now;
 
     // Start Node B first (higher ID, will receive connection)
-    node1 = new ServerCoordinator({
+    node1 = ServerFactory.create({
       port: 0,
       nodeId: 'ttl-node-b',
       host: 'localhost',
@@ -191,7 +191,7 @@ describe('TTL Expiration with ReplicationPipeline', () => {
     await node1.ready();
 
     // Start Node A (lower ID, will initiate connection to node-b)
-    node2 = new ServerCoordinator({
+    node2 = ServerFactory.create({
       port: 0,
       nodeId: 'ttl-node-a',
       host: 'localhost',

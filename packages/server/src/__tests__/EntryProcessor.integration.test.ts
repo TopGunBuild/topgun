@@ -8,7 +8,7 @@
  * - Concurrent execution
  */
 
-import { ServerCoordinator, ServerCoordinatorConfig } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory, ServerCoordinatorConfig } from '../';
 import { TopGunClient } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
 import { BuiltInProcessors } from '@topgunbuild/core';
@@ -30,7 +30,7 @@ describe('Entry Processor Integration', () => {
       jwtSecret: 'test-secret',
     };
 
-    server = new ServerCoordinator(serverConfig);
+    server = ServerFactory.create(serverConfig);
     await server.ready();
 
     client = new TopGunClient({

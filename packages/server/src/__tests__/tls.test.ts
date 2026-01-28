@@ -1,4 +1,4 @@
-import { ServerCoordinator } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../';
 import * as https from 'https';
 import * as path from 'path';
 import { logger } from '../utils/logger';
@@ -9,6 +9,17 @@ jest.mock('../utils/logger', () => ({
         info: jest.fn(),
         warn: jest.fn(),
         error: jest.fn(),
+        debug: jest.fn(),
+        trace: jest.fn(),
+        fatal: jest.fn(),
+        child: jest.fn(() => ({
+            info: jest.fn(),
+            warn: jest.fn(),
+            error: jest.fn(),
+            debug: jest.fn(),
+            trace: jest.fn(),
+            fatal: jest.fn(),
+        })),
     }
 }));
 
@@ -26,7 +37,7 @@ describe('TLS Configuration', () => {
     });
 
     it('should create HTTPS server when TLS is enabled', async () => {
-        server = new ServerCoordinator({
+        server = ServerFactory.create({
             port: 0,
             metricsPort: 0, // Random port to avoid conflict
             nodeId: 'test-node-tls',
@@ -63,7 +74,7 @@ describe('TLS Configuration', () => {
         // Spy is already effective due to manual mock, but let's just check call count or args
         // Since we mocked it with jest.fn(), we can import it and check.
 
-        server = new ServerCoordinator({
+        server = ServerFactory.create({
             port: 0,
             metricsPort: 0,
             nodeId: 'test-node-no-tls',

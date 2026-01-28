@@ -1,4 +1,4 @@
-import { ServerCoordinator } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../';
 import { LWWRecord, deserialize, PermissionPolicy, serialize } from '@topgunbuild/core';
 
 // Default policy that allows all operations for testing
@@ -45,7 +45,7 @@ describe('Subscription-Based Event Routing', () => {
   let server: ServerCoordinator;
 
   beforeAll(async () => {
-    server = new ServerCoordinator({
+    server = ServerFactory.create({
       port: 0,
       nodeId: 'test-node',
       host: 'localhost',
@@ -258,7 +258,7 @@ describe('Subscription-Based Event Routing', () => {
       }
     ];
 
-    const flsServer = new ServerCoordinator({
+    const flsServer = ServerFactory.create({
       port: 0,
       nodeId: 'fls-test-node',
       host: 'localhost',
@@ -489,7 +489,7 @@ describe('QueryRegistry.getSubscriptionsForMap', () => {
   let server: ServerCoordinator;
 
   beforeAll(async () => {
-    server = new ServerCoordinator({
+    server = ServerFactory.create({
       port: 0,
       nodeId: 'registry-test-node',
       host: 'localhost',

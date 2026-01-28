@@ -1,4 +1,4 @@
-import { ServerCoordinator } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../';
 import { LWWRecord, deserialize, Predicates, serialize } from '@topgunbuild/core';
 
 const createMockWriter = (socket: any) => ({
@@ -27,7 +27,7 @@ describe('Live Query Sliding Window Integration', () => {
   let server: ServerCoordinator;
 
   beforeAll(async () => {
-    server = new ServerCoordinator({
+    server = ServerFactory.create({
       port: 0,
       nodeId: 'test-node',
       host: 'localhost',

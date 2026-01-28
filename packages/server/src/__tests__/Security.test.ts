@@ -1,4 +1,4 @@
-import { ServerCoordinator } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../';
 import { LWWRecord, deserialize, PermissionPolicy, serialize } from '@topgunbuild/core';
 
 // Mock WebSocket
@@ -45,7 +45,7 @@ describe('Field-Level Security (RBAC)', () => {
   ];
 
   beforeAll(async () => {
-    server = new ServerCoordinator({
+    server = ServerFactory.create({
       port: 0,
       nodeId: 'test-node-sec',
       host: 'localhost',

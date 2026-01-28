@@ -3,7 +3,7 @@
  * Phase 1.05-08: Integration with ServerCoordinator
  */
 
-import { ServerCoordinator } from '../../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../../';
 import { MerkleWorker, CRDTMergeWorker, SerializationWorker } from '../../workers';
 
 // Helper to wait
@@ -12,7 +12,7 @@ const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 describe('WorkerPool Integration with ServerCoordinator', () => {
   describe('Configuration', () => {
     it('should create server without worker pool by default', async () => {
-      const server = new ServerCoordinator({
+      const server = ServerFactory.create({
         port: 0,
         nodeId: 'test-node-1',
       });
@@ -26,7 +26,7 @@ describe('WorkerPool Integration with ServerCoordinator', () => {
     });
 
     it('should create server with worker pool when enabled', async () => {
-      const server = new ServerCoordinator({
+      const server = ServerFactory.create({
         port: 0,
         nodeId: 'test-node-2',
         workerPoolEnabled: true,
@@ -50,7 +50,7 @@ describe('WorkerPool Integration with ServerCoordinator', () => {
     });
 
     it('should use custom worker pool config', async () => {
-      const server = new ServerCoordinator({
+      const server = ServerFactory.create({
         port: 0,
         nodeId: 'test-node-3',
         workerPoolEnabled: true,
@@ -76,7 +76,7 @@ describe('WorkerPool Integration with ServerCoordinator', () => {
 
   describe('Shutdown', () => {
     it('should gracefully shutdown worker pool', async () => {
-      const server = new ServerCoordinator({
+      const server = ServerFactory.create({
         port: 0,
         nodeId: 'test-node-4',
         workerPoolEnabled: true,
@@ -102,7 +102,7 @@ describe('WorkerPool Integration with ServerCoordinator', () => {
     });
 
     it('should shutdown cleanly even with no worker pool', async () => {
-      const server = new ServerCoordinator({
+      const server = ServerFactory.create({
         port: 0,
         nodeId: 'test-node-5',
         workerPoolEnabled: false,
@@ -117,7 +117,7 @@ describe('WorkerPool Integration with ServerCoordinator', () => {
 
   describe('Worker Accessors', () => {
     it('should return null for workers when pool is disabled', async () => {
-      const server = new ServerCoordinator({
+      const server = ServerFactory.create({
         port: 0,
         nodeId: 'test-node-6',
         workerPoolEnabled: false,
@@ -133,7 +133,7 @@ describe('WorkerPool Integration with ServerCoordinator', () => {
     });
 
     it('should return workers when pool is enabled', async () => {
-      const server = new ServerCoordinator({
+      const server = ServerFactory.create({
         port: 0,
         nodeId: 'test-node-7',
         workerPoolEnabled: true,
@@ -163,7 +163,7 @@ describe('WorkerPool Integration with ServerCoordinator', () => {
     });
 
     it('should allow using SerializationWorker for batch operations', async () => {
-      const server = new ServerCoordinator({
+      const server = ServerFactory.create({
         port: 0,
         nodeId: 'test-node-8',
         workerPoolEnabled: true,

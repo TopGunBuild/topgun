@@ -1,4 +1,4 @@
-import { ServerCoordinator } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../';
 import * as path from 'path';
 
 describe('TLS Integration', () => {
@@ -23,7 +23,7 @@ describe('TLS Integration', () => {
 
         beforeAll(async () => {
             // Start Node 1
-            server1 = new ServerCoordinator({
+            server1 = ServerFactory.create({
                 port: 0,
                 clusterPort: 0,
                 metricsPort: 0,
@@ -45,7 +45,7 @@ describe('TLS Integration', () => {
             await server1.ready();
 
             // Start Node 2 (connects to Node 1)
-            server2 = new ServerCoordinator({
+            server2 = ServerFactory.create({
                 port: 0,
                 clusterPort: 0,
                 metricsPort: 0,
@@ -94,7 +94,7 @@ describe('TLS Integration', () => {
 
         beforeAll(async () => {
             // Start server requiring mTLS
-            serverWithMTLS = new ServerCoordinator({
+            serverWithMTLS = ServerFactory.create({
                 port: 0,
                 clusterPort: 0,
                 metricsPort: 0,
@@ -116,7 +116,7 @@ describe('TLS Integration', () => {
             await serverWithMTLS.ready();
 
             // Start server WITHOUT providing client cert for cluster (simulates invalid/missing cert)
-            serverWithoutClientCert = new ServerCoordinator({
+            serverWithoutClientCert = ServerFactory.create({
                 port: 0,
                 clusterPort: 0,
                 metricsPort: 0,

@@ -14,7 +14,7 @@
 
 import { WebSocket } from 'ws';
 import jwt from 'jsonwebtoken';
-import { ServerCoordinator } from '../../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../../';
 import { serialize, deserialize, ConsistencyLevel } from '@topgunbuild/core';
 import { waitForCluster } from '../utils/test-helpers';
 
@@ -212,7 +212,7 @@ describe('Distributed Subscriptions E2E', () => {
   beforeAll(async () => {
     // Start 3-node cluster
     // Start first node
-    const server1 = new ServerCoordinator({
+    const server1 = ServerFactory.create({
       port: BASE_PORT,
       nodeId: 'e2e-node-1',
       host: 'localhost',
@@ -237,7 +237,7 @@ describe('Distributed Subscriptions E2E', () => {
     });
 
     // Start second node, connect to first
-    const server2 = new ServerCoordinator({
+    const server2 = ServerFactory.create({
       port: BASE_PORT + 1,
       nodeId: 'e2e-node-2',
       host: 'localhost',
@@ -262,7 +262,7 @@ describe('Distributed Subscriptions E2E', () => {
     });
 
     // Start third node, connect to first two
-    const server3 = new ServerCoordinator({
+    const server3 = ServerFactory.create({
       port: BASE_PORT + 2,
       nodeId: 'e2e-node-3',
       host: 'localhost',

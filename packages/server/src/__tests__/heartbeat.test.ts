@@ -1,4 +1,4 @@
-import { ServerCoordinator } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../';
 import { deserialize, serialize } from '@topgunbuild/core';
 
 describe('Heartbeat', () => {
@@ -6,7 +6,7 @@ describe('Heartbeat', () => {
     let server: ServerCoordinator;
 
     beforeAll(async () => {
-      server = new ServerCoordinator({
+      server = ServerFactory.create({
         port: 0,
         nodeId: 'test-server',
         host: 'localhost',
@@ -246,7 +246,7 @@ describe('Heartbeat', () => {
     let server: ServerCoordinator;
 
     beforeEach(async () => {
-      server = new ServerCoordinator({
+      server = ServerFactory.create({
         port: 0,
         nodeId: 'test-server-eviction',
         host: 'localhost',
@@ -348,7 +348,7 @@ describe('Heartbeat', () => {
     let server: ServerCoordinator;
 
     beforeEach(async () => {
-      server = new ServerCoordinator({
+      server = ServerFactory.create({
         port: 0,
         nodeId: 'test-server-integration',
         host: 'localhost',

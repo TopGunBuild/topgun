@@ -9,7 +9,7 @@
  * - Partition ownership verification
  */
 
-import { ServerCoordinator } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../';
 import { WebSocket } from 'ws';
 import { LWWMap, ConsistencyLevel, deserialize } from '@topgunbuild/core';
 import { waitForCluster } from './utils/test-helpers';
@@ -33,7 +33,7 @@ describe('Cluster E2E Replication', () => {
   describe('3-Node Cluster', () => {
     beforeAll(async () => {
       // Start nodes in order: node-c (highest), node-b, node-a (lowest initiates)
-      node1 = new ServerCoordinator({
+      node1 = ServerFactory.create({
         port: 0,
         nodeId: 'node-c',
         host: 'localhost',
@@ -44,7 +44,7 @@ describe('Cluster E2E Replication', () => {
       });
       await node1.ready();
 
-      node2 = new ServerCoordinator({
+      node2 = ServerFactory.create({
         port: 0,
         nodeId: 'node-b',
         host: 'localhost',
@@ -55,7 +55,7 @@ describe('Cluster E2E Replication', () => {
       });
       await node2.ready();
 
-      node3 = new ServerCoordinator({
+      node3 = ServerFactory.create({
         port: 0,
         nodeId: 'node-a',
         host: 'localhost',
@@ -268,7 +268,7 @@ describe('Cluster E2E Replication', () => {
     let localNode: ServerCoordinator;
 
     beforeAll(async () => {
-      localNode = new ServerCoordinator({
+      localNode = ServerFactory.create({
         port: 0,
         nodeId: 'single-node',
         host: 'localhost',

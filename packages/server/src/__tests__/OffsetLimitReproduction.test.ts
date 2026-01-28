@@ -1,4 +1,4 @@
-import { ServerCoordinator } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../';
 import { LWWRecord, deserialize, serialize, QueryCursor } from '@topgunbuild/core';
 
 /**
@@ -10,7 +10,7 @@ describe('Cursor-Based Pagination (formerly Offset/Limit Reproduction)', () => {
   let server: ServerCoordinator;
 
   beforeAll(async () => {
-    server = new ServerCoordinator({
+    server = ServerFactory.create({
       port: 0,
       nodeId: 'test-node',
       host: 'localhost',

@@ -1,4 +1,4 @@
-import { ServerCoordinator } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../';
 import { ChaosProxy } from './utils/ChaosProxy';
 import { SyncEngine } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
@@ -24,7 +24,7 @@ describe('Resilience & Chaos Testing', () => {
 
   beforeAll(async () => {
     // 1. Start Server with dynamic ports
-    server = new ServerCoordinator({
+    server = ServerFactory.create({
       port: 0,
       nodeId: 'server-1',
       host: 'localhost',

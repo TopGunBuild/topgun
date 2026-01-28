@@ -10,7 +10,7 @@
  * Run: pnpm test:workers -- --testPathPattern=DistributedSearch --runInBand
  */
 
-import { ServerCoordinator } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../';
 import { WebSocket } from 'ws';
 import jwt from 'jsonwebtoken';
 import { serialize, deserialize } from '@topgunbuild/core';
@@ -100,7 +100,7 @@ describe('Distributed Search E2E', () => {
   describe('2-Node Distributed Search', () => {
     beforeAll(async () => {
       // Start first node with FTS enabled
-      node1 = new ServerCoordinator({
+      node1 = ServerFactory.create({
         port: 0,
         nodeId: 'search-node-1',
         host: 'localhost',
@@ -117,7 +117,7 @@ describe('Distributed Search E2E', () => {
       await node1.ready();
 
       // Start second node with FTS enabled
-      node2 = new ServerCoordinator({
+      node2 = ServerFactory.create({
         port: 0,
         nodeId: 'search-node-2',
         host: 'localhost',
@@ -224,7 +224,7 @@ describe('Distributed Search E2E', () => {
 
     beforeAll(async () => {
       // Start single node with FTS enabled
-      singleNode = new ServerCoordinator({
+      singleNode = ServerFactory.create({
         port: 0,
         nodeId: 'single-search-node',
         host: 'localhost',

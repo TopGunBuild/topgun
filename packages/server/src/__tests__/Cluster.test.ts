@@ -1,4 +1,4 @@
-import { ServerCoordinator } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../';
 import { WebSocket } from 'ws';
 import { LWWMap, deserialize } from '@topgunbuild/core';
 import { pollUntil } from './utils/test-helpers';
@@ -12,7 +12,7 @@ describe('Cluster Integration', () => {
     // So we name nodes such that node-a < node-b, and node-a initiates connection.
 
     // Start Node B first (higher ID, will receive connection)
-    node1 = new ServerCoordinator({
+    node1 = ServerFactory.create({
       port: 0,
       nodeId: 'node-b',
       host: 'localhost',
@@ -24,7 +24,7 @@ describe('Cluster Integration', () => {
     await node1.ready();
 
     // Start Node A (lower ID, will initiate connection to node-b)
-    node2 = new ServerCoordinator({
+    node2 = ServerFactory.create({
       port: 0,
       nodeId: 'node-a',
       host: 'localhost',

@@ -1,4 +1,4 @@
-import { ServerCoordinator } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../';
 import { ChaosProxy } from './utils/ChaosProxy';
 import { SyncEngine } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
@@ -22,7 +22,7 @@ describe('Chaos Testing', () => {
 
     beforeAll(async () => {
       // Start C first
-      nodeC = new ServerCoordinator({
+      nodeC = ServerFactory.create({
         port: 0,
         nodeId: 'node-c',
         host: 'localhost',
@@ -33,7 +33,7 @@ describe('Chaos Testing', () => {
       await nodeC.ready();
 
       // Start B, peer C
-      nodeB = new ServerCoordinator({
+      nodeB = ServerFactory.create({
         port: 0,
         nodeId: 'node-b',
         host: 'localhost',
@@ -44,7 +44,7 @@ describe('Chaos Testing', () => {
       await nodeB.ready();
 
       // Start A, peer C AND B (to form full mesh without gossip)
-      nodeA = new ServerCoordinator({
+      nodeA = ServerFactory.create({
         port: 0,
         nodeId: 'node-a',
         host: 'localhost',
@@ -148,7 +148,7 @@ describe('Chaos Testing', () => {
     let token: string;
 
     beforeAll(async () => {
-        server = new ServerCoordinator({
+        server = ServerFactory.create({
             port: 0,
             nodeId: 'server-flake',
             host: 'localhost',
@@ -228,7 +228,7 @@ describe('Chaos Testing', () => {
     let port: number;
 
     beforeAll(async () => {
-        server = new ServerCoordinator({
+        server = ServerFactory.create({
             port: 0,
             nodeId: 'server-slow',
             host: 'localhost',

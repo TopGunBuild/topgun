@@ -1,11 +1,11 @@
-import { ServerCoordinator } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../';
 import { LWWRecord, deserialize, ORMap, LWWMap, serialize } from '@topgunbuild/core';
 
 describe('Sync Protocol Integration', () => {
   let server: ServerCoordinator;
 
   beforeAll(async () => {
-    server = new ServerCoordinator({
+    server = ServerFactory.create({
       port: 0,
       nodeId: 'test-server',
       host: 'localhost',

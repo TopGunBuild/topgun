@@ -1,4 +1,4 @@
-import { ServerCoordinator } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../';
 import { WebSocket } from 'ws';
 import { register } from 'prom-client';
 import * as http from 'http';
@@ -14,7 +14,7 @@ describe('Metrics Integration', () => {
 
   beforeAll(async () => {
     register.clear();
-    server = new ServerCoordinator({
+    server = ServerFactory.create({
       port: SERVER_PORT,
       nodeId: 'test-node',
       host: 'localhost',

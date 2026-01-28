@@ -1,4 +1,4 @@
-import { ServerCoordinator } from '../ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../';
 import { HLC, ORMap, serialize, deserialize, ORMapRecord } from '@topgunbuild/core';
 
 const createMockWriter = (socket: any) => ({
@@ -23,7 +23,7 @@ describe('ORMap Merkle Tree Sync Integration', () => {
   let server: ServerCoordinator;
 
   beforeAll(async () => {
-    server = new ServerCoordinator({
+    server = ServerFactory.create({
       port: 0,
       nodeId: 'test-server',
       host: 'localhost',
