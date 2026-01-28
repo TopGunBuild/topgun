@@ -15,6 +15,7 @@ import { WebSocket } from 'ws';
 import jwt from 'jsonwebtoken';
 import { serialize, deserialize } from '@topgunbuild/core';
 import { waitForCluster } from './utils/test-helpers';
+import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
 
 const JWT_SECRET = 'test-secret-for-e2e-tests';
 
@@ -30,11 +31,12 @@ describe('Distributed Search E2E', () => {
 
   // Helper to insert data via internal API
   async function insertData(node: ServerCoordinator, mapName: string, key: string, value: any): Promise<void> {
-    const map = (node as any).getMap(mapName);
+    const harness = createTestHarness(node);
+    const map = node.getMap(mapName);
     // LWWMap.set(key, value, ttlMs?) - timestamp is generated internally by map's HLC
-    map.set(key, value);
+    (map as any).set(key, value);
     // Trigger FTS index update
-    (node as any).searchCoordinator?.onDataChange(mapName, key, value, 'add');
+    harness.searchCoordinator?.onDataChange(mapName, key, value, 'add');
   }
 
   // Helper to perform search via WebSocket
