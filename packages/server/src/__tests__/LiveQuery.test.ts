@@ -1,5 +1,6 @@
 import { ServerCoordinator, ServerFactory } from '../';
 import { LWWRecord, deserialize, Predicates, serialize } from '@topgunbuild/core';
+import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
 
 const createMockWriter = (socket: any) => ({
   write: jest.fn((message: any, _urgent?: boolean) => {
@@ -25,6 +26,7 @@ jest.retryTimes(3);
 
 describe('Live Query Sliding Window Integration', () => {
   let server: ServerCoordinator;
+  let harness: ServerTestHarness;
 
   beforeAll(async () => {
     server = ServerFactory.create({
@@ -35,6 +37,7 @@ describe('Live Query Sliding Window Integration', () => {
       peers: []
     });
     await server.ready();
+    harness = createTestHarness(server);
   });
 
   afterAll(async () => {
@@ -70,11 +73,11 @@ describe('Live Query Sliding Window Integration', () => {
     };
 
     // Inject client
-    (server as any).connectionManager.getClients().set('client-1', clientMock);
+    harness.connectionManager.getClients().set('client-1', clientMock);
 
     // Send SUBSCRIBE
     const queryId = 'q1';
-    await (server as any).handleMessage(clientMock, {
+    await harness.handleMessage(clientMock, {
       type: 'QUERY_SUB',
       payload: {
         queryId,
@@ -108,7 +111,7 @@ describe('Live Query Sliding Window Integration', () => {
     };
 
     // Simulate Client OP (or direct server op)
-    await (server as any).handleMessage(clientMock, {
+    await harness.handleMessage(clientMock, {
       type: 'CLIENT_OP',
       payload: op
     });
@@ -150,11 +153,11 @@ describe('Live Query Sliding Window Integration', () => {
       subscriptions: new Set(),
       principal: { userId: 'test2', roles: ['ADMIN'] }
     };
-    (server as any).connectionManager.getClients().set('client-2', clientMock);
+    harness.connectionManager.getClients().set('client-2', clientMock);
 
     // 3. Subscribe with Predicate (Active & Age > 22) -> Expect u3
     const queryId = 'q2';
-    await (server as any).handleMessage(clientMock, {
+    await harness.handleMessage(clientMock, {
       type: 'QUERY_SUB',
       payload: {
         queryId,
@@ -180,7 +183,7 @@ describe('Live Query Sliding Window Integration', () => {
     clientSocket.send.mockClear();
 
     // 4. Update u1 age to 23 -> Should enter result
-    await (server as any).handleMessage(clientMock, {
+    await harness.handleMessage(clientMock, {
       type: 'CLIENT_OP',
       payload: {
         opType: 'set',
