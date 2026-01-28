@@ -1,5 +1,6 @@
 import { ServerCoordinator, ServerFactory } from '../';
 import { LWWRecord, deserialize, PermissionPolicy, serialize } from '@topgunbuild/core';
+import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
 
 // Default policy that allows all operations for testing
 const defaultTestPolicies: PermissionPolicy[] = [
@@ -43,6 +44,7 @@ const createMockWriter = (socket: any) => ({
 
 describe('Subscription-Based Event Routing', () => {
   let server: ServerCoordinator;
+  let harness: ServerTestHarness;
 
   beforeAll(async () => {
     server = ServerFactory.create({
@@ -55,6 +57,7 @@ describe('Subscription-Based Event Routing', () => {
       metricsPort: 0 // Use random port for metrics to avoid conflicts
     });
     await server.ready();
+    harness = createTestHarness(server);
   });
 
   afterAll(async () => {
@@ -97,11 +100,11 @@ describe('Subscription-Based Event Routing', () => {
     const unsubscribedClient = createMockClient('unsubscribed-client');
 
     // Inject clients into server
-    (server as any).connectionManager.getClients().set(subscribedClient.id, subscribedClient);
-    (server as any).connectionManager.getClients().set(unsubscribedClient.id, unsubscribedClient);
+    harness.connectionManager.getClients().set(subscribedClient.id, subscribedClient);
+    harness.connectionManager.getClients().set(unsubscribedClient.id, unsubscribedClient);
 
     // Only one client subscribes to the map
-    await (server as any).handleMessage(subscribedClient, {
+    await harness.handleMessage(subscribedClient, {
       type: 'QUERY_SUB',
       payload: {
         queryId: 'q-subscribed',
@@ -116,9 +119,9 @@ describe('Subscription-Based Event Routing', () => {
 
     // Send an operation from a third client (or simulate server-side event)
     const operatorClient = createMockClient('operator-client');
-    (server as any).connectionManager.getClients().set(operatorClient.id, operatorClient);
+    harness.connectionManager.getClients().set(operatorClient.id, operatorClient);
 
-    await (server as any).handleMessage(operatorClient, {
+    await harness.handleMessage(operatorClient, {
       type: 'CLIENT_OP',
       payload: {
         opType: 'set',
@@ -147,10 +150,10 @@ describe('Subscription-Based Event Routing', () => {
     const mapName = 'routing-test-2';
 
     const client = createMockClient('client-2');
-    (server as any).connectionManager.getClients().set(client.id, client);
+    harness.connectionManager.getClients().set(client.id, client);
 
     // Subscribe to the map
-    await (server as any).handleMessage(client, {
+    await harness.handleMessage(client, {
       type: 'QUERY_SUB',
       payload: {
         queryId: 'q-2',
@@ -164,9 +167,9 @@ describe('Subscription-Based Event Routing', () => {
 
     // Create another client to send the operation
     const operatorClient = createMockClient('operator-2');
-    (server as any).connectionManager.getClients().set(operatorClient.id, operatorClient);
+    harness.connectionManager.getClients().set(operatorClient.id, operatorClient);
 
-    await (server as any).handleMessage(operatorClient, {
+    await harness.handleMessage(operatorClient, {
       type: 'CLIENT_OP',
       payload: {
         opType: 'set',
@@ -197,10 +200,10 @@ describe('Subscription-Based Event Routing', () => {
 
     // Create a client but DON'T subscribe to this map
     const client = createMockClient('client-no-sub');
-    (server as any).connectionManager.getClients().set(client.id, client);
+    harness.connectionManager.getClients().set(client.id, client);
 
     // Subscribe to a DIFFERENT map
-    await (server as any).handleMessage(client, {
+    await harness.handleMessage(client, {
       type: 'QUERY_SUB',
       payload: {
         queryId: 'q-other-map',
@@ -213,9 +216,9 @@ describe('Subscription-Based Event Routing', () => {
 
     // Send an operation to the map with no subscribers
     const operatorClient = createMockClient('operator-no-sub');
-    (server as any).connectionManager.getClients().set(operatorClient.id, operatorClient);
+    harness.connectionManager.getClients().set(operatorClient.id, operatorClient);
 
-    await (server as any).handleMessage(operatorClient, {
+    await harness.handleMessage(operatorClient, {
       type: 'CLIENT_OP',
       payload: {
         opType: 'set',
@@ -268,6 +271,7 @@ describe('Subscription-Based Event Routing', () => {
       metricsPort: 0
     });
     await flsServer.ready();
+    const flsHarness = createTestHarness(flsServer);
 
     try {
       // Create USER client and ADMIN client
@@ -277,15 +281,15 @@ describe('Subscription-Based Event Routing', () => {
         principal: { userId: 'admin', roles: ['ADMIN'] }
       };
 
-      (flsServer as any).connectionManager.getClients().set(userClient.id, userClient);
-      (flsServer as any).connectionManager.getClients().set(adminClient.id, adminClient);
+      flsHarness.connectionManager.getClients().set(userClient.id, userClient);
+      flsHarness.connectionManager.getClients().set(adminClient.id, adminClient);
 
       // Both subscribe to the same map
-      await (flsServer as any).handleMessage(userClient, {
+      await flsHarness.handleMessage(userClient, {
         type: 'QUERY_SUB',
         payload: { queryId: 'user-query', mapName, query: {} }
       });
-      await (flsServer as any).handleMessage(adminClient, {
+      await flsHarness.handleMessage(adminClient, {
         type: 'QUERY_SUB',
         payload: { queryId: 'admin-query', mapName, query: {} }
       });
@@ -298,9 +302,9 @@ describe('Subscription-Based Event Routing', () => {
         ...createMockClient('operator'),
         principal: { userId: 'op', roles: ['ADMIN'] }
       };
-      (flsServer as any).connectionManager.getClients().set(operator.id, operator);
+      flsHarness.connectionManager.getClients().set(operator.id, operator);
 
-      await (flsServer as any).handleMessage(operator, {
+      await flsHarness.handleMessage(operator, {
         type: 'CLIENT_OP',
         payload: {
           opType: 'set',
@@ -352,13 +356,13 @@ describe('Subscription-Based Event Routing', () => {
     const client2 = createMockClient('multi-2');
     const client3 = createMockClient('multi-3');
 
-    (server as any).connectionManager.getClients().set(client1.id, client1);
-    (server as any).connectionManager.getClients().set(client2.id, client2);
-    (server as any).connectionManager.getClients().set(client3.id, client3);
+    harness.connectionManager.getClients().set(client1.id, client1);
+    harness.connectionManager.getClients().set(client2.id, client2);
+    harness.connectionManager.getClients().set(client3.id, client3);
 
     // All clients subscribe to the same map
     for (const client of [client1, client2, client3]) {
-      await (server as any).handleMessage(client, {
+      await harness.handleMessage(client, {
         type: 'QUERY_SUB',
         payload: {
           queryId: `q-${client.id}`,
@@ -371,9 +375,9 @@ describe('Subscription-Based Event Routing', () => {
 
     // Create operator to send data
     const operatorClient = createMockClient('operator-multi');
-    (server as any).connectionManager.getClients().set(operatorClient.id, operatorClient);
+    harness.connectionManager.getClients().set(operatorClient.id, operatorClient);
 
-    await (server as any).handleMessage(operatorClient, {
+    await harness.handleMessage(operatorClient, {
       type: 'CLIENT_OP',
       payload: {
         opType: 'set',
@@ -403,12 +407,12 @@ describe('Subscription-Based Event Routing', () => {
     const mapName = 'unsub-test-map';
 
     const client = createMockClient('unsub-client');
-    (server as any).connectionManager.getClients().set(client.id, client);
+    harness.connectionManager.getClients().set(client.id, client);
 
     const queryId = 'q-unsub-test';
 
     // Subscribe
-    await (server as any).handleMessage(client, {
+    await harness.handleMessage(client, {
       type: 'QUERY_SUB',
       payload: {
         queryId,
@@ -420,7 +424,7 @@ describe('Subscription-Based Event Routing', () => {
     client.socket.send.mockClear();
 
     // Unsubscribe
-    await (server as any).handleMessage(client, {
+    await harness.handleMessage(client, {
       type: 'QUERY_UNSUB',
       payload: { queryId }
     });
@@ -429,9 +433,9 @@ describe('Subscription-Based Event Routing', () => {
 
     // Send an operation
     const operatorClient = createMockClient('operator-unsub');
-    (server as any).connectionManager.getClients().set(operatorClient.id, operatorClient);
+    harness.connectionManager.getClients().set(operatorClient.id, operatorClient);
 
-    await (server as any).handleMessage(operatorClient, {
+    await harness.handleMessage(operatorClient, {
       type: 'CLIENT_OP',
       payload: {
         opType: 'set',
@@ -457,8 +461,8 @@ describe('Subscription-Based Event Routing', () => {
     const client1 = createMockClient('gc-client-1');
     const client2 = createMockClient('gc-client-2');
 
-    (server as any).connectionManager.getClients().set(client1.id, client1);
-    (server as any).connectionManager.getClients().set(client2.id, client2);
+    harness.connectionManager.getClients().set(client1.id, client1);
+    harness.connectionManager.getClients().set(client2.id, client2);
 
     client1.socket.send.mockClear();
     client2.socket.send.mockClear();
@@ -471,7 +475,7 @@ describe('Subscription-Based Event Routing', () => {
       }
     };
 
-    (server as any).broadcast(gcMessage);
+    harness.broadcast(gcMessage);
 
     // Both clients should receive the message even without subscriptions
     expect(client1.socket.send).toHaveBeenCalled();
@@ -487,6 +491,7 @@ describe('Subscription-Based Event Routing', () => {
 
 describe('QueryRegistry.getSubscriptionsForMap', () => {
   let server: ServerCoordinator;
+  let harness: ServerTestHarness;
 
   beforeAll(async () => {
     server = ServerFactory.create({
@@ -499,6 +504,7 @@ describe('QueryRegistry.getSubscriptionsForMap', () => {
       metricsPort: 0
     });
     await server.ready();
+    harness = createTestHarness(server);
   });
 
   afterAll(async () => {
@@ -506,14 +512,14 @@ describe('QueryRegistry.getSubscriptionsForMap', () => {
   });
 
   test('Returns empty array for maps with no subscriptions', () => {
-    const queryRegistry = (server as any).queryRegistry;
+    const queryRegistry = harness.queryRegistry;
     const result = queryRegistry.getSubscriptionsForMap('non-existent-map');
     expect(result).toEqual([]);
   });
 
   test('Returns all subscriptions for a map', async () => {
     const mapName = 'registry-test-map';
-    const queryRegistry = (server as any).queryRegistry;
+    const queryRegistry = harness.queryRegistry;
 
     const createMockClient = (id: string) => {
       const socket = {
@@ -536,16 +542,16 @@ describe('QueryRegistry.getSubscriptionsForMap', () => {
     const client1 = createMockClient('reg-client-1');
     const client2 = createMockClient('reg-client-2');
 
-    (server as any).connectionManager.getClients().set(client1.id, client1);
-    (server as any).connectionManager.getClients().set(client2.id, client2);
+    harness.connectionManager.getClients().set(client1.id, client1);
+    harness.connectionManager.getClients().set(client2.id, client2);
 
     // Subscribe both clients
-    await (server as any).handleMessage(client1, {
+    await harness.handleMessage(client1, {
       type: 'QUERY_SUB',
       payload: { queryId: 'reg-q1', mapName, query: {} }
     });
 
-    await (server as any).handleMessage(client2, {
+    await harness.handleMessage(client2, {
       type: 'QUERY_SUB',
       payload: { queryId: 'reg-q2', mapName, query: {} }
     });
