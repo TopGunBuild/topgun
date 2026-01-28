@@ -192,27 +192,16 @@ export interface ServerCoordinatorConfig {
 export class ServerCoordinator {
     private httpServer: HttpServer | HttpsServer;
     private metricsServer?: HttpServer;
-    private metricsService: MetricsService;
-    private wss: WebSocketServer;
     private connectionManager!: ConnectionManager;
-
-    // Interceptors
-    private interceptors: IInterceptor[] = [];
 
     // In-memory storage - delegated to StorageManager
     private storageManager!: StorageManager;
     private hlc: HLC;
     private storage?: IServerStorage;
-    private jwtSecret: string;
     private queryRegistry: QueryRegistry;
 
     private cluster!: ClusterManager;
     private partitionService!: PartitionService;
-    private replicationPipeline?: ReplicationPipeline;
-    private lockManager!: LockManager;
-    private topicManager!: TopicManager;
-    private securityManager: SecurityManager;
-    private authHandler!: AuthHandler;
     private operationHandler!: OperationHandler;
     private webSocketHandler!: WebSocketHandler;
     private lifecycleManager!: LifecycleManager;
@@ -223,16 +212,9 @@ export class ServerCoordinator {
     private operationContextHandler!: OperationContextHandler;
     private queryConversionHandler!: QueryConversionHandler;
     private batchProcessingHandler!: BatchProcessingHandler;
-    private messageRegistry!: MessageRegistry;
 
     // Independent Handlers (Injected)
     private persistenceHandler!: PersistenceHandler;
-    private lockHandler!: LockHandler;
-    private topicHandler!: TopicHandler;
-    private partitionHandler!: PartitionHandler;
-    private searchHandler!: SearchHandler;
-    private journalHandler!: JournalHandler;
-    private writeConcernHandler!: WriteConcernHandler;
 
     private pendingClusterQueries: Map<string, PendingClusterQuery> = new Map();
 
@@ -245,16 +227,8 @@ export class ServerCoordinator {
     // Backpressure regulator for periodic sync processing
     private backpressure: BackpressureRegulator;
 
-    // Write coalescing options
-    private writeCoalescingEnabled: boolean;
-    private writeCoalescingOptions: Partial<CoalescingWriterOptions>;
-
     // Connection rate limiter
     private rateLimiter: ConnectionRateLimiter;
-    private rateLimitingEnabled: boolean;
-
-    // Rate-limited logger for invalid message errors (SEC-04)
-    private rateLimitedLogger: RateLimitedLogger;
 
     // Worker pool for CPU-bound operations
     private workerPool?: WorkerPool;
@@ -268,17 +242,8 @@ export class ServerCoordinator {
     // Tasklet scheduler for cooperative multitasking
     private taskletScheduler: TaskletScheduler;
 
-    // Write Concern acknowledgment manager (Phase 5.01)
-    private writeAckManager: WriteAckManager;
-
     // PN Counter handler (Phase 5.2)
     private counterHandler!: CounterHandler;
-
-    // Entry Processor handler (Phase 5.03)
-    private entryProcessorHandler!: EntryProcessorHandler;
-
-    // Conflict Resolver handler (Phase 5.05)
-    private conflictResolverHandler!: ConflictResolverHandler;
 
     // Event Journal (Phase 5.04)
     private eventJournalService?: EventJournalService;
@@ -301,12 +266,6 @@ export class ServerCoordinator {
     // Phase 14C - Debug Endpoints
     private debugEndpoints?: DebugEndpoints;
 
-    // Phase 14D - Bootstrap Controller
-    private bootstrapController: BootstrapController;
-
-    // Phase 14D-3 - Settings Controller
-    private settingsController: SettingsController;
-
     private readonly _nodeId: string;
 
     private _actualPort: number = 0;
@@ -323,17 +282,11 @@ export class ServerCoordinator {
         });
 
         this._nodeId = config.nodeId;
-        this.interceptors = config.interceptors || [];
-        this.writeCoalescingEnabled = config.writeCoalescingEnabled ?? true;
-        this.rateLimitingEnabled = config.rateLimitingEnabled ?? true;
 
         // Inject Dependencies
         this.hlc = dependencies.hlc;
-        this.metricsService = dependencies.metricsService;
-        this.securityManager = dependencies.securityManager;
         this.eventExecutor = dependencies.eventExecutor;
         this.backpressure = dependencies.backpressure;
-        this.writeCoalescingOptions = dependencies.writeCoalescingOptions;
         this.connectionManager = dependencies.connectionManager;
         this.cluster = dependencies.cluster;
         this.partitionService = dependencies.partitionService;
@@ -341,26 +294,15 @@ export class ServerCoordinator {
         this.queryRegistry = dependencies.queryRegistry;
         this.eventPayloadPool = dependencies.eventPayloadPool;
         this.taskletScheduler = dependencies.taskletScheduler;
-        this.writeAckManager = dependencies.writeAckManager;
         this.rateLimiter = dependencies.rateLimiter;
-        this.authHandler = dependencies.authHandler;
-        this.rateLimitedLogger = dependencies.rateLimitedLogger;
         this.workerPool = dependencies.workerPool;
         this.merkleWorker = dependencies.merkleWorker;
         this.crdtMergeWorker = dependencies.crdtMergeWorker;
         this.serializationWorker = dependencies.serializationWorker;
         this.httpServer = dependencies.httpServer;
         this.debugEndpoints = dependencies.debugEndpoints;
-        this.bootstrapController = dependencies.bootstrapController;
-        this.settingsController = dependencies.settingsController;
         this.metricsServer = dependencies.metricsServer;
-        this.wss = dependencies.wss;
-        this.replicationPipeline = dependencies.replicationPipeline;
-        this.lockManager = dependencies.lockManager;
-        this.topicManager = dependencies.topicManager;
         this.counterHandler = dependencies.counterHandler;
-        this.entryProcessorHandler = dependencies.entryProcessorHandler;
-        this.conflictResolverHandler = dependencies.conflictResolverHandler;
         this.eventJournalService = dependencies.eventJournalService;
         this.partitionReassigner = dependencies.partitionReassigner;
         this.readReplicaHandler = dependencies.readReplicaHandler;
@@ -370,14 +312,20 @@ export class ServerCoordinator {
         this.clusterSearchCoordinator = dependencies.clusterSearchCoordinator;
         this.distributedSubCoordinator = dependencies.distributedSubCoordinator;
         this.pendingBatchOperations = dependencies.pendingBatchOperations;
-        this.jwtSecret = dependencies.jwtSecret;
         this.storage = config.storage;
+
+        // Constructor-only locals for wiring (Part 3)
+        const wss = dependencies.wss;
+        const replicationPipeline = dependencies.replicationPipeline;
+        const lockManager = dependencies.lockManager;
+        const conflictResolverHandler = dependencies.conflictResolverHandler;
+        const messageRegistry = dependencies.messageRegistry;
 
         // Initialize Listeners & Wiring (Minimal logic required to bind handlers to THIS instance)
 
         // Setup operation applier for incoming replications
-        if (this.replicationPipeline) {
-            this.replicationPipeline.setOperationApplier(this.applyReplicatedOperation.bind(this));
+        if (replicationPipeline) {
+            replicationPipeline.setOperationApplier(this.applyReplicatedOperation.bind(this));
         }
 
         // Listen for partition map changes
@@ -386,10 +334,10 @@ export class ServerCoordinator {
         });
 
         // Wire up LockManager
-        this.lockManager.on('lockGranted', (evt) => this.handleLockGranted(evt));
+        lockManager.on('lockGranted', (evt) => this.handleLockGranted(evt));
 
         // Wire up ConflictResolver
-        this.conflictResolverHandler.onRejection((rejection) => {
+        conflictResolverHandler.onRejection((rejection) => {
             this.notifyMergeRejection(rejection);
         });
 
@@ -444,19 +392,12 @@ export class ServerCoordinator {
         this.heartbeatHandler = dependencies.heartbeatHandler;
         this.persistenceHandler = dependencies.persistenceHandler;
         this.operationContextHandler = dependencies.operationContextHandler;
-        this.lockHandler = dependencies.lockHandler;
-        this.topicHandler = dependencies.topicHandler;
-        this.partitionHandler = dependencies.partitionHandler;
-        this.searchHandler = dependencies.searchHandler;
-        this.journalHandler = dependencies.journalHandler;
         this.operationHandler = dependencies.operationHandler;
         this.webSocketHandler = dependencies.webSocketHandler;
         this.clientMessageHandler = dependencies.clientMessageHandler;
         this.gcHandler = dependencies.gcHandler;
         this.queryConversionHandler = dependencies.queryConversionHandler;
         this.batchProcessingHandler = dependencies.batchProcessingHandler;
-        this.writeConcernHandler = dependencies.writeConcernHandler;
-        this.messageRegistry = dependencies.messageRegistry;
         this.lifecycleManager = dependencies.lifecycleManager;
 
         // Set coordinator callbacks via late binding pattern
@@ -470,13 +411,13 @@ export class ServerCoordinator {
         });
 
         // Set message registry on WebSocketHandler (late binding)
-        this.webSocketHandler.setMessageRegistry(this.messageRegistry);
+        this.webSocketHandler.setMessageRegistry(messageRegistry);
 
         this.heartbeatHandler.start();
         this.gcHandler.start();
 
         // Listen for connections and errors
-        this.wss.on('connection', (ws) => this.webSocketHandler.handleConnection(ws));
+        wss.on('connection', (ws) => this.webSocketHandler.handleConnection(ws));
         this.httpServer.on('error', (err) => {
             logger.error({ err }, 'HTTP Server error');
         });
