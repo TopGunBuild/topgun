@@ -1,50 +1,26 @@
 import { Server as HttpServer } from 'http';
 import { Server as HttpsServer } from 'https';
-import { WebSocketServer } from 'ws';
 import { HLC, LWWMap, ORMap, PermissionPolicy, Timestamp, LWWRecord, ConsistencyLevel, ReplicationConfig } from '@topgunbuild/core';
 import { IServerStorage } from './storage/IServerStorage';
 import { IInterceptor } from './interceptor/IInterceptor';
-import { QueryRegistry } from './query/QueryRegistry';
 import { ServerDependencies } from './ServerDependencies';
-import { TopicManager } from './topic/TopicManager';
-import { ClusterManager } from './cluster/ClusterManager';
 import { PartitionService } from './cluster/PartitionService';
-import { LockManager } from './cluster/LockManager';
 import { Query } from './query/Matcher';
-import { SecurityManager } from './security/SecurityManager';
 import { logger } from './utils/logger';
-import { MetricsService } from './monitoring/MetricsService';
 import { TLSConfig, ClusterTLSConfig } from './types/TLSConfig';
 import { StripedEventExecutor } from './utils/StripedEventExecutor';
-import { BackpressureRegulator } from './utils/BackpressureRegulator';
-import { CoalescingWriterOptions } from './utils/CoalescingWriter';
 import { CoalescingPreset } from './utils/coalescingPresets';
 import { ConnectionRateLimiter } from './utils/ConnectionRateLimiter';
-import { RateLimitedLogger } from './utils/RateLimitedLogger';
 import { WorkerPool, MerkleWorker, CRDTMergeWorker, SerializationWorker, WorkerPoolConfig } from './workers';
-import {
-    ObjectPool,
-    PooledEventPayload,
-} from './memory';
+import { ObjectPool, PooledEventPayload } from './memory';
 import { TaskletScheduler } from './tasklet';
-import { WriteAckManager } from './ack/WriteAckManager';
-import { ReplicationPipeline } from './cluster/ReplicationPipeline';
 import { PartitionReassigner } from './cluster/PartitionReassigner';
-import { ReadReplicaHandler } from './cluster/ReadReplicaHandler';
 import { MerkleTreeManager } from './cluster/MerkleTreeManager';
 import { RepairScheduler } from './cluster/RepairScheduler';
-import { CounterHandler } from './handlers/CounterHandler';
-import { EntryProcessorHandler } from './handlers/EntryProcessorHandler';
-import { ConflictResolverHandler } from './handlers/ConflictResolverHandler';
-import { EventJournalService, EventJournalServiceConfig } from './EventJournalService';
-import { SearchCoordinator, ClusterSearchCoordinator, type ClusterSearchConfig } from './search';
-import { DistributedSubscriptionCoordinator } from './subscriptions/DistributedSubscriptionCoordinator';
-import { DebugEndpoints } from './debug';
-import { BootstrapController } from './bootstrap';
-import { SettingsController } from './settings';
+import { EventJournalServiceConfig } from './EventJournalService';
+import { SearchCoordinator, type ClusterSearchConfig } from './search';
 import type { MergeRejection, FullTextIndexConfig } from '@topgunbuild/core';
 import {
-    AuthHandler,
     ConnectionManager,
     StorageManager,
     OperationHandler,
@@ -52,40 +28,12 @@ import {
     GCHandler,
     HeartbeatHandler,
     ClientMessageHandler,
-    PersistenceHandler,
     OperationContextHandler,
     QueryConversionHandler,
     BatchProcessingHandler,
-    WriteConcernHandler,
     WebSocketHandler,
     LifecycleManager,
-    createMessageRegistry,
-    PartitionHandler,
-    TopicHandler,
-    LockHandler,
-    CounterHandlerAdapter,
-    ResolverHandler,
-    JournalHandler,
-    LwwSyncHandler,
-    ORMapSyncHandler,
-    EntryProcessorAdapter,
-    SearchHandler,
-    QueryHandler,
-    type MessageRegistry,
-    type ClientConnection,
 } from './coordinator';
-
-interface PendingClusterQuery {
-    requestId: string;
-    client: ClientConnection;
-    queryId: string; // Client's Query ID
-    mapName: string;
-    query: Query;
-    results: { key: string; value: any }[];
-    expectedNodes: Set<string>;
-    respondedNodes: Set<string>;
-    timer: NodeJS.Timeout;
-}
 
 export interface ServerCoordinatorConfig {
     port: number;
@@ -198,9 +146,7 @@ export class ServerCoordinator {
     private storageManager!: StorageManager;
     private hlc: HLC;
     private storage?: IServerStorage;
-    private queryRegistry: QueryRegistry;
 
-    private cluster!: ClusterManager;
     private partitionService!: PartitionService;
     private operationHandler!: OperationHandler;
     private webSocketHandler!: WebSocketHandler;
@@ -213,19 +159,11 @@ export class ServerCoordinator {
     private queryConversionHandler!: QueryConversionHandler;
     private batchProcessingHandler!: BatchProcessingHandler;
 
-    // Independent Handlers (Injected)
-    private persistenceHandler!: PersistenceHandler;
-
-    private pendingClusterQueries: Map<string, PendingClusterQuery> = new Map();
-
     // Track pending batch operations for testing purposes
     private pendingBatchOperations: Set<Promise<void>> = new Set();
 
     // Bounded event queue executor for backpressure control
     private eventExecutor: StripedEventExecutor;
-
-    // Backpressure regulator for periodic sync processing
-    private backpressure: BackpressureRegulator;
 
     // Connection rate limiter
     private rateLimiter: ConnectionRateLimiter;
@@ -242,29 +180,13 @@ export class ServerCoordinator {
     // Tasklet scheduler for cooperative multitasking
     private taskletScheduler: TaskletScheduler;
 
-    // PN Counter handler (Phase 5.2)
-    private counterHandler!: CounterHandler;
-
-    // Event Journal (Phase 5.04)
-    private eventJournalService?: EventJournalService;
-
     // Phase 10 - Cluster Enhancements
     private partitionReassigner?: PartitionReassigner;
-    private readReplicaHandler?: ReadReplicaHandler;
     private merkleTreeManager?: MerkleTreeManager;
     private repairScheduler?: RepairScheduler;
 
     // Phase 11.1 - Full-Text Search
     private searchCoordinator!: SearchCoordinator;
-
-    // Phase 14 - Distributed Search
-    private clusterSearchCoordinator?: ClusterSearchCoordinator;
-
-    // Phase 14.2 - Distributed Live Subscriptions
-    private distributedSubCoordinator?: DistributedSubscriptionCoordinator;
-
-    // Phase 14C - Debug Endpoints
-    private debugEndpoints?: DebugEndpoints;
 
     private readonly _nodeId: string;
 
@@ -286,12 +208,9 @@ export class ServerCoordinator {
         // Inject Dependencies
         this.hlc = dependencies.hlc;
         this.eventExecutor = dependencies.eventExecutor;
-        this.backpressure = dependencies.backpressure;
         this.connectionManager = dependencies.connectionManager;
-        this.cluster = dependencies.cluster;
         this.partitionService = dependencies.partitionService;
         this.storageManager = dependencies.storageManager;
-        this.queryRegistry = dependencies.queryRegistry;
         this.eventPayloadPool = dependencies.eventPayloadPool;
         this.taskletScheduler = dependencies.taskletScheduler;
         this.rateLimiter = dependencies.rateLimiter;
@@ -300,17 +219,11 @@ export class ServerCoordinator {
         this.crdtMergeWorker = dependencies.crdtMergeWorker;
         this.serializationWorker = dependencies.serializationWorker;
         this.httpServer = dependencies.httpServer;
-        this.debugEndpoints = dependencies.debugEndpoints;
         this.metricsServer = dependencies.metricsServer;
-        this.counterHandler = dependencies.counterHandler;
-        this.eventJournalService = dependencies.eventJournalService;
         this.partitionReassigner = dependencies.partitionReassigner;
-        this.readReplicaHandler = dependencies.readReplicaHandler;
         this.merkleTreeManager = dependencies.merkleTreeManager;
         this.repairScheduler = dependencies.repairScheduler;
         this.searchCoordinator = dependencies.searchCoordinator;
-        this.clusterSearchCoordinator = dependencies.clusterSearchCoordinator;
-        this.distributedSubCoordinator = dependencies.distributedSubCoordinator;
         this.pendingBatchOperations = dependencies.pendingBatchOperations;
         this.storage = config.storage;
 
@@ -390,7 +303,6 @@ export class ServerCoordinator {
         // Independent handlers injected from dependencies
         this.broadcastHandler = dependencies.broadcastHandler;
         this.heartbeatHandler = dependencies.heartbeatHandler;
-        this.persistenceHandler = dependencies.persistenceHandler;
         this.operationContextHandler = dependencies.operationContextHandler;
         this.operationHandler = dependencies.operationHandler;
         this.webSocketHandler = dependencies.webSocketHandler;
