@@ -23,7 +23,7 @@ import {
   waitForDataOnNode,
   ClusterNode,
 } from './helpers';
-import { ServerCoordinator } from '@topgunbuild/server';
+import { ServerCoordinator, ServerFactory } from '@topgunbuild/server';
 
 jest.setTimeout(90000);
 
@@ -168,7 +168,7 @@ describe('Node Failure E2E', () => {
       await sleep(500);
 
       // Rejoin with new ServerCoordinator
-      const newNode = new ServerCoordinator({
+      const newNode = ServerFactory.create({
         port: 0,
         nodeId: 'rejoin-2',
         host: 'localhost',
@@ -493,7 +493,7 @@ describe('Node Failure E2E', () => {
       await sleep(1000);
 
       // Rejoin node
-      const newNode = new ServerCoordinator({
+      const newNode = ServerFactory.create({
         port: 0,
         nodeId: 'long-2',
         host: 'localhost',

@@ -6,7 +6,7 @@
  * as k6 scripts use JSON instead of MessagePack.
  */
 
-import { ServerCoordinator } from '@topgunbuild/server';
+import { ServerCoordinator, ServerFactory } from '@topgunbuild/server';
 import { deserialize } from '@topgunbuild/core';
 import * as jwt from 'jsonwebtoken';
 import WebSocket from 'ws';
@@ -18,7 +18,7 @@ describe('JSON Fallback Protocol', () => {
   let serverUrl: string;
 
   beforeAll(async () => {
-    server = new ServerCoordinator({
+    server = ServerFactory.create({
       port: 0,
       nodeId: 'json-test-server',
       host: 'localhost',

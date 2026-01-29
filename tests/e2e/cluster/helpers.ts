@@ -4,7 +4,7 @@
  * Utilities for creating, managing, and testing multi-node TopGun clusters.
  */
 
-import { ServerCoordinator, ServerCoordinatorConfig } from '@topgunbuild/server';
+import { ServerCoordinator, ServerCoordinatorConfig, ServerFactory } from '@topgunbuild/server';
 import { TopGunClient, TopGunClientConfig } from '@topgunbuild/client';
 import { ConsistencyLevel, LWWMap, ORMap, serialize, deserialize } from '@topgunbuild/core';
 import WebSocket from 'ws';
@@ -88,7 +88,7 @@ export async function createCluster(config: ClusterConfig): Promise<ClusterConte
   const firstNodeId = nodeIds[0];
   const firstPorts = portAllocations[0];
 
-  const firstNode = new ServerCoordinator({
+  const firstNode = ServerFactory.create({
     port: firstPorts.port,
     nodeId: firstNodeId,
     host: 'localhost',
@@ -118,7 +118,7 @@ export async function createCluster(config: ClusterConfig): Promise<ClusterConte
     // Connect to first node as seed
     const peers = [`localhost:${nodes[0].clusterPort}`];
 
-    const node = new ServerCoordinator({
+    const node = ServerFactory.create({
       port: ports.port,
       nodeId,
       host: 'localhost',

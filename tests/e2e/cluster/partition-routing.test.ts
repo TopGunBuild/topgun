@@ -20,7 +20,7 @@ import {
   waitForPartitionStability,
   ClusterNode,
 } from './helpers';
-import { ServerCoordinator } from '@topgunbuild/server';
+import { ServerCoordinator, ServerFactory } from '@topgunbuild/server';
 
 jest.setTimeout(60000);
 
@@ -181,7 +181,7 @@ describe('Partition Routing E2E', () => {
 
       // Add third node
       const newNodeId = 'rebalance-3';
-      const thirdNode = new ServerCoordinator({
+      const thirdNode = ServerFactory.create({
         port: 0,
         nodeId: newNodeId,
         host: 'localhost',

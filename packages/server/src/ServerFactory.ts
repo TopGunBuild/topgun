@@ -274,6 +274,11 @@ export class ServerFactory {
             socket.setKeepAlive(true, 60000);
         });
 
+        // Start HTTP Server listening
+        httpServer.listen(config.port, () => {
+            logger.info({ port: (httpServer.address() as any)?.port ?? config.port }, 'Server Coordinator listening');
+        });
+
         // Replication Pipeline
         let replicationPipeline: ReplicationPipeline | undefined;
         if (config.replicationEnabled !== false) {

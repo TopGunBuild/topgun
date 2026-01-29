@@ -1,4 +1,4 @@
-import { ServerCoordinator, ServerCoordinatorConfig } from '@topgunbuild/server';
+import { ServerCoordinator, ServerCoordinatorConfig, ServerFactory } from '@topgunbuild/server';
 import { TopGunClient } from '@topgunbuild/client';
 import { serialize, deserialize } from '@topgunbuild/core';
 import * as jwt from 'jsonwebtoken';
@@ -38,7 +38,7 @@ function getNextPort(): number {
 export async function createTestServer(
   overrides: Partial<ServerCoordinatorConfig> = {}
 ): Promise<ServerCoordinator> {
-  const server = new ServerCoordinator({
+  const server = ServerFactory.create({
     port: 0, // Let OS assign port
     nodeId: `test-server-${Date.now()}`,
     host: 'localhost',
