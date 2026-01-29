@@ -11,6 +11,11 @@
 
 import type { ServerCoordinator } from '../../ServerCoordinator';
 import type { ClusterManager } from '../../cluster/ClusterManager';
+import type { PartitionService } from '../../cluster/PartitionService';
+import type { ReplicationPipeline } from '../../cluster/ReplicationPipeline';
+import type { SearchCoordinator } from '../../search/SearchCoordinator';
+import type { QueryRegistry } from '../../query/QueryRegistry';
+import type { HLC } from '@topgunbuild/core';
 import type {
     ClientConnection,
     IConnectionManager,
@@ -54,7 +59,7 @@ export class ServerTestHarness {
      * Access the ConnectionManager for client manipulation.
      * Returns as any for test flexibility with partial mock clients.
      */
-    get connectionManager(): any {
+    get connectionManager(): IConnectionManager {
         return (this.server as any).connectionManager;
     }
 
@@ -92,7 +97,7 @@ export class ServerTestHarness {
      * Note: queryRegistry is now accessed through queryConversionHandler's config
      * after SPEC-003/004/005 refactoring removed it from ServerCoordinator.
      */
-    get queryRegistry(): any {
+    get queryRegistry(): QueryRegistry {
         // Try direct access first (legacy path)
         const direct = (this.server as any).queryRegistry;
         if (direct) return direct;
@@ -105,28 +110,28 @@ export class ServerTestHarness {
     /**
      * Access the PartitionService for partition tests.
      */
-    get partitionService(): any {
+    get partitionService(): PartitionService {
         return (this.server as any).partitionService;
     }
 
     /**
      * Access the HLC for timestamp tests.
      */
-    get hlc(): any {
+    get hlc(): HLC {
         return (this.server as any).hlc;
     }
 
     /**
      * Access the SearchCoordinator for FTS tests.
      */
-    get searchCoordinator(): any {
+    get searchCoordinator(): SearchCoordinator {
         return (this.server as any).searchCoordinator;
     }
 
     /**
      * Access the ReplicationPipeline for replication tests.
      */
-    get replicationPipeline(): any {
+    get replicationPipeline(): ReplicationPipeline | undefined {
         return (this.server as any).replicationPipeline;
     }
 
