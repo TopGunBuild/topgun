@@ -2,15 +2,18 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-009a
+- **Status:** review
+- **Next Step:** /sf:review
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| - | - | - | - | - | - |
+| 1 | SPEC-009a | Extract Core Feature Handlers | high | audited | - |
+| 2 | SPEC-009b | Extract Advanced Feature Handlers | high | draft | SPEC-009a |
+| 3 | SPEC-009c | Extract Sync Protocol Handlers | high | draft | SPEC-009a |
+| 4 | SPEC-009d | Create MessageRouter | high | draft | SPEC-009a, SPEC-009b, SPEC-009c |
 
 ## Decisions
 
@@ -46,6 +49,12 @@
 | 2026-01-29 | SPEC-008 | Audit v1: APPROVED. Small spec (~10-15% context). Implement OP_ACK response in ServerFactory.ts onOpBatch handler. Re-enable 2 skipped tests. All file references and line numbers verified. |
 | 2026-01-29 | SPEC-008 | COMPLETED: Implemented OP_ACK response after OP_BATCH processing. Modified ServerFactory.ts onOpBatch handler. Re-enabled 2 SyncProtocol tests - both pass. Server package builds successfully. 2 commits total. |
 | 2026-01-29 | SPEC-008 | APPROVED (Review v1): All acceptance criteria met (5/6 - E2E blocked by pre-existing issue). Unit tests pass (3/3), build succeeds, implementation correct. OP_ACK sent after successful batch processing with proper lastId. Error handling correct. Code quality excellent. |
+| 2026-01-29 | SPEC-009 | Split SPEC-009 into 4 parts: SPEC-009a (Core Handlers: TopicManager, LockManager, WriteConcernManager), SPEC-009b (Advanced Handlers: CounterManager, EntryProcessorClient, SearchClient), SPEC-009c (Sync Handlers: MerkleSyncHandler, ORMapSyncHandler), SPEC-009d (MessageRouter). Archived parent to .specflow/archive/SPEC-009.md |
+| 2026-01-29 | SPEC-009b | External audit: Added close() cleanup methods to EntryProcessorClient and SearchClient to reject pending promises on disconnect (prevents hanging promises). |
+| 2026-01-29 | SPEC-009c | External audit: Added sendSyncInit() methods to MerkleSyncHandler and ORMapSyncHandler for sync init message encapsulation (improves cohesion). |
+| 2026-01-29 | SPEC-009a | Audit v1: APPROVED. All 20+ line references verified against SyncEngine.ts (2015 lines). Config-based DI pattern matches existing handlers. ~20-25% context estimate (PEAK range). Recommendations: add getTopics() method for resubscription, ensure flushTopicQueue() is public. |
+| 2026-01-29 | SPEC-009a | Response v1: Applied all 3 recommendations from Audit v1. Added getTopics() method to TopicManager for AUTH_ACK resubscription. Marked flushTopicQueue() as public. Added acceptance criteria 11-12 for AUTH_ACK integration verification. |
+| 2026-01-29 | SPEC-009a | Audit v2: APPROVED. All line references re-verified. All recommendations from v1 incorporated. Specification ready for implementation. |
 
 ## Project Patterns
 
@@ -64,4 +73,4 @@
 None
 
 ---
-*Last updated: 2026-01-29 20:45*
+*Last updated: 2026-01-29 23:45*
