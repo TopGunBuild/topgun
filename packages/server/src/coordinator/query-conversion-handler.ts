@@ -298,4 +298,17 @@ export class QueryConversionHandler implements IQueryConversionHandler {
             payload: { queryId, results: filteredResults, nextCursor, hasMore, cursorStatus }
         });
     }
+
+    /**
+     * Stop handler and clear all pending cluster query timers.
+     * Called during server shutdown.
+     */
+    stop(): void {
+        for (const [_requestId, pending] of this.config.pendingClusterQueries) {
+            if (pending.timer) {
+                clearTimeout(pending.timer);
+            }
+        }
+        this.config.pendingClusterQueries.clear();
+    }
 }

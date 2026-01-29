@@ -778,6 +778,8 @@ export interface IQueryConversionHandler {
     convertOperator(op: string): 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | null;
     /** Finalize cluster query with aggregation and pagination */
     finalizeClusterQuery(requestId: string, timeout?: boolean): Promise<void>;
+    /** Stop handler and clear all pending cluster query timers */
+    stop(): void;
 }
 
 /**
