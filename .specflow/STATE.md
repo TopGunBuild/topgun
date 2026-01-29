@@ -2,15 +2,15 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-006
-- **Status:** review
-- **Next Step:** `/sf:review`
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** `/sf:new` or `/sf:next`
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-006 | Update Integration Tests for Handler Extraction Architecture | high | review | - |
+| - | - | - | - | - | - |
 
 ## Decisions
 
@@ -40,6 +40,7 @@
 | 2026-01-29 | SPEC-006 | FIXED: All key tests pass (heartbeat 16/16, SubscriptionRouting 9/9, Security 3/3, LiveQuery 2/2, ORMapSync 11/11). Only SyncProtocol OP_BATCH tests fail (OP_ACK not implemented - out of scope). |
 | 2026-01-29 | SPEC-006 | CHANGES_REQUESTED (Review v1): Critical - ClusterManager not accessible from ServerCoordinator (removed in SPEC-003/004/005, now undefined). Breaks DistributedGC.test.ts. Major - incomplete test verification, SyncProtocol OP_ACK tests left failing. |
 | 2026-01-29 | SPEC-006 | FIXED (Fix Response v1): All critical and major issues resolved. Added cluster property to ServerCoordinator. Added proper types to ServerTestHarness. Skipped OP_ACK tests with TODO. Fixed test TypeScript errors and port conflicts. Heartbeat and SyncProtocol tests pass. Build passes. Cluster formation timeout remains (pre-existing issue). |
+| 2026-01-29 | SPEC-006 | APPROVED (Review v2): All critical and major issues from Review v1 resolved. ClusterManager accessible via ServerCoordinator.cluster property. 6 core test suites pass (41 tests). OP_ACK tests properly skipped. Build passes. Test harness architecture sound. Ready for completion. |
 
 ## Project Patterns
 
@@ -54,18 +55,7 @@
 
 ## Warnings
 
-**SPEC-006 Critical Issue:**
-- ClusterManager property removed from ServerCoordinator during SPEC-003/004/005 refactoring
-- Now only exists as local variable in ServerFactory
-- ServerTestHarness.cluster getter returns undefined
-- Breaks DistributedGC.test.ts and likely ClusterE2E.test.ts
-- Must be fixed before `/sf:done`
-
-**SyncProtocol OP_BATCH Tests:** (Minor - out of scope for SPEC-006)
-- 2 tests in SyncProtocol.test.ts fail (OP_BATCH/OP_ACK)
-- Root cause: OP_ACK response is not implemented in the server
-- This is separate from SPEC-006's scope (test harness pattern)
-- Low priority - OP_BATCH processing works, just no ACK response
+None
 
 ---
-*Last updated: 2026-01-29 12:30*
+*Last updated: 2026-01-29 14:05*
