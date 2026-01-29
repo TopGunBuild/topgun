@@ -25,6 +25,11 @@ describe('Distributed Garbage Collection Consensus', () => {
         readyState: WebSocket.OPEN,
         close: jest.fn()
       } as any,
+      writer: {
+        write: jest.fn(),
+        flush: jest.fn(),
+        close: jest.fn(),
+      } as any,
       isAuthenticated: true,
       subscriptions: new Set(),
       principal: { userId: clientId, roles: ['USER'] },
@@ -176,7 +181,9 @@ describe('Distributed Garbage Collection Consensus', () => {
     // 6. Update Lagging Client (Client catches up)
     const caughtUpTime = futureTime;
     const clientConn = harness3.connectionManager.getClients().get('client-lag');
-    clientConn.lastActiveHlc = { millis: caughtUpTime, counter: 0, nodeId: 'client-lag' };
+    if (clientConn) {
+      clientConn.lastActiveHlc = { millis: caughtUpTime, counter: 0, nodeId: 'client-lag' };
+    }
 
     // 7. Trigger Consensus Again
     await triggerConsensusCycle();
