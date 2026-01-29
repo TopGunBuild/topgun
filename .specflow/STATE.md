@@ -4,12 +4,13 @@
 
 - **Active Specification:** none
 - **Status:** idle
-- **Next Step:** `/sf:new` or `/sf:next`
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
+| - | - | - | - | - | - |
 
 ## Decisions
 
@@ -42,6 +43,9 @@
 | 2026-01-29 | SPEC-006 | APPROVED (Review v2): All critical and major issues from Review v1 resolved. ClusterManager accessible via ServerCoordinator.cluster property. 6 core test suites pass (41 tests). OP_ACK tests properly skipped. Build passes. Test harness architecture sound. Ready for completion. |
 | 2026-01-29 | SPEC-007 | Audit v1: APPROVED. TimerRegistry pattern for timer cleanup. ~25% context estimate (PEAK range). All assumptions verified. Files table corrected (utils/index.ts: Modify -> Create). |
 | 2026-01-29 | SPEC-007 | COMPLETED: TimerRegistry utility for centralized timer management. QueryConversionHandler.stop() clears pending cluster query timers during shutdown. Archived to .specflow/archive/SPEC-007.md |
+| 2026-01-29 | SPEC-008 | Audit v1: APPROVED. Small spec (~10-15% context). Implement OP_ACK response in ServerFactory.ts onOpBatch handler. Re-enable 2 skipped tests. All file references and line numbers verified. |
+| 2026-01-29 | SPEC-008 | COMPLETED: Implemented OP_ACK response after OP_BATCH processing. Modified ServerFactory.ts onOpBatch handler. Re-enabled 2 SyncProtocol tests - both pass. Server package builds successfully. 2 commits total. |
+| 2026-01-29 | SPEC-008 | APPROVED (Review v1): All acceptance criteria met (5/6 - E2E blocked by pre-existing issue). Unit tests pass (3/3), build succeeds, implementation correct. OP_ACK sent after successful batch processing with proper lastId. Error handling correct. Code quality excellent. |
 
 ## Project Patterns
 
@@ -60,4 +64,4 @@
 None
 
 ---
-*Last updated: 2026-01-29 15:45*
+*Last updated: 2026-01-29 20:45*
