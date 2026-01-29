@@ -18,6 +18,7 @@ import type { QueryHandle, QueryFilter } from '../QueryHandle';
 import type { HybridQueryHandle, HybridQueryFilter } from '../HybridQueryHandle';
 import type { IStorageAdapter } from '../IStorageAdapter';
 import type { TopicHandle } from '../TopicHandle';
+import type { EntryProcessorDef, EntryProcessorResult } from '@topgunbuild/core';
 
 /**
  * Interface for WebSocket connection management.
@@ -518,4 +519,226 @@ export interface WriteConcernManagerConfig {
    * Default: 5000 (5 seconds)
    */
   defaultTimeout?: number;
+}
+
+// ============================================
+// CounterManager Types
+// ============================================
+
+/**
+ * Interface for PN counter management.
+ * Handles counter subscriptions, requests, and sync operations.
+ */
+export interface ICounterManager {
+  /**
+   * Subscribe to counter updates from server.
+   * @param name - Counter name
+   * @param listener - Callback when counter state is updated
+   * @returns Unsubscribe function
+   */
+  onCounterUpdate(name: string, listener: (state: any) => void): () => void;
+
+  /**
+   * Request initial counter state from server.
+   * @param name - Counter name
+   */
+  requestCounter(name: string): void;
+
+  /**
+   * Sync local counter state to server.
+   * @param name - Counter name
+   * @param state - Counter state to sync
+   */
+  syncCounter(name: string, state: any): void;
+
+  /**
+   * Handle incoming counter update from server.
+   * @param name - Counter name
+   * @param stateObj - Counter state object
+   */
+  handleCounterUpdate(name: string, stateObj: { positive: Record<string, number>; negative: Record<string, number> }): void;
+
+  /**
+   * Clean up resources (clear listeners).
+   */
+  close(): void;
+}
+
+/**
+ * Configuration for CounterManager.
+ */
+export interface CounterManagerConfig {
+  /**
+   * Callback to send messages via SyncEngine/WebSocketManager.
+   * @param message - Message to send
+   * @param key - Optional key for routing
+   * @returns true if sent successfully
+   */
+  sendMessage: (message: any, key?: string) => boolean;
+
+  /**
+   * Callback to check if authenticated.
+   */
+  isAuthenticated: () => boolean;
+}
+
+// ============================================
+// EntryProcessorClient Types
+// ============================================
+
+/**
+ * Interface for entry processor operations.
+ * Handles executing entry processors on single keys and batches.
+ */
+export interface IEntryProcessorClient {
+  /**
+   * Execute an entry processor on a single key atomically.
+   * @param mapName - Name of the map
+   * @param key - Key to process
+   * @param processor - Processor definition
+   * @returns Promise resolving to the processor result
+   */
+  executeOnKey<V, R = V>(
+    mapName: string,
+    key: string,
+    processor: EntryProcessorDef<V, R>
+  ): Promise<EntryProcessorResult<R>>;
+
+  /**
+   * Execute an entry processor on multiple keys.
+   * @param mapName - Name of the map
+   * @param keys - Keys to process
+   * @param processor - Processor definition
+   * @returns Promise resolving to a map of key -> result
+   */
+  executeOnKeys<V, R = V>(
+    mapName: string,
+    keys: string[],
+    processor: EntryProcessorDef<V, R>
+  ): Promise<Map<string, EntryProcessorResult<R>>>;
+
+  /**
+   * Handle entry processor response from server.
+   * @param message - Response message
+   */
+  handleEntryProcessResponse(message: {
+    requestId: string;
+    success: boolean;
+    result?: unknown;
+    newValue?: unknown;
+    error?: string;
+  }): void;
+
+  /**
+   * Handle entry processor batch response from server.
+   * @param message - Batch response message
+   */
+  handleEntryProcessBatchResponse(message: {
+    requestId: string;
+    results: Record<string, { success: boolean; result?: unknown; newValue?: unknown; error?: string }>;
+  }): void;
+
+  /**
+   * Clean up resources (cancel pending requests).
+   * @param error - Error to reject pending promises with
+   */
+  close(error?: Error): void;
+}
+
+/**
+ * Configuration for EntryProcessorClient.
+ */
+export interface EntryProcessorClientConfig {
+  /**
+   * Callback to send messages via SyncEngine/WebSocketManager.
+   * @param message - Message to send
+   * @param key - Optional key for routing
+   * @returns true if sent successfully
+   */
+  sendMessage: (message: any, key?: string) => boolean;
+
+  /**
+   * Callback to check if authenticated.
+   */
+  isAuthenticated: () => boolean;
+
+  /**
+   * Timeout for entry processor requests in milliseconds.
+   * Default: 30000 (30 seconds)
+   */
+  timeoutMs?: number;
+}
+
+// ============================================
+// SearchClient Types
+// ============================================
+
+/**
+ * Search result item from server.
+ */
+export interface SearchResult<T> {
+  key: string;
+  value: T;
+  score: number;
+  matchedTerms: string[];
+}
+
+/**
+ * Interface for full-text search operations.
+ * Handles one-shot BM25 search requests.
+ */
+export interface ISearchClient {
+  /**
+   * Perform a one-shot BM25 search on the server.
+   * @param mapName - Name of the map to search
+   * @param query - Search query text
+   * @param options - Search options (limit, minScore, boost)
+   * @returns Promise resolving to search results
+   */
+  search<T>(
+    mapName: string,
+    query: string,
+    options?: { limit?: number; minScore?: number; boost?: Record<string, number> }
+  ): Promise<SearchResult<T>[]>;
+
+  /**
+   * Handle search response from server.
+   * @param payload - Response payload
+   */
+  handleSearchResponse(payload: {
+    requestId: string;
+    results: SearchResult<unknown>[];
+    totalCount: number;
+    error?: string;
+  }): void;
+
+  /**
+   * Clean up resources (cancel pending requests).
+   * @param error - Error to reject pending promises with
+   */
+  close(error?: Error): void;
+}
+
+/**
+ * Configuration for SearchClient.
+ */
+export interface SearchClientConfig {
+  /**
+   * Callback to send messages via SyncEngine/WebSocketManager.
+   * @param message - Message to send
+   * @param key - Optional key for routing
+   * @returns true if sent successfully
+   */
+  sendMessage: (message: any, key?: string) => boolean;
+
+  /**
+   * Callback to check if authenticated.
+   */
+  isAuthenticated: () => boolean;
+
+  /**
+   * Timeout for search requests in milliseconds.
+   * Default: 30000 (30 seconds)
+   */
+  timeoutMs?: number;
 }
