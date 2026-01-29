@@ -266,9 +266,11 @@ describe('Cluster E2E Replication', () => {
       const pipeline = harness1.replicationPipeline;
       expect(pipeline).toBeDefined();
 
-      const health = pipeline.getHealth();
-      expect(health).toBeDefined();
-      expect(typeof health.healthy).toBe('boolean');
+      if (pipeline) {
+        const health = pipeline.getHealth();
+        expect(health).toBeDefined();
+        expect(typeof health.healthy).toBe('boolean');
+      }
     });
   });
 
