@@ -833,6 +833,9 @@ export class ServerFactory {
             distributedSubCoordinator: distributedSubCoordinator ? {
                 destroy: () => distributedSubCoordinator!.destroy(),
             } : undefined,
+            queryConversionHandler: {
+                stop: () => queryConversionHandler.stop(),
+            },
             searchCoordinator: {
                 getEnabledMaps: () => searchCoordinator.getEnabledMaps(),
                 buildIndexFromEntries: (mapName, entries) => searchCoordinator.buildIndexFromEntries(mapName, entries),
