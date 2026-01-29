@@ -36,7 +36,8 @@
 | 2026-01-28 | SPEC-005 | APPROVED (Review v1): All acceptance criteria met. 4 imports removed, 20 properties removed, 5 converted to locals. Build passes. Public API unchanged. 858->798 lines (-60, 25% better than expected). Bonus cleanup in commit 4538d2b removed additional 88 lines (total: 858->710, -148 lines). |
 | 2026-01-28 | SPEC-005 | COMPLETED: ServerCoordinator artifacts cleanup finished. 148 lines removed (17.2% reduction). Archived to .specflow/archive/SPEC-005.md |
 | 2026-01-28 | SPEC-006 | Audit v1: APPROVED. Test harness pattern for controlled handler access. ~35% context estimate (GOOD range). Added cluster/reportLocalHlc accessors for Part 3. |
-| 2026-01-28 | SPEC-006 | EXECUTION: Harness created, 12 test files updated. 16/16 heartbeat tests pass. Other tests fail due to pre-existing event broadcast issue in handler architecture (not harness issue). |
+| 2026-01-28 | SPEC-006 | EXECUTION: Harness created, 12 test files updated. Fixed inline: missing await in finalizeClusterQuery, shared pendingClusterQueries Map, OP_BATCH handler wiring, queryRegistry access path. |
+| 2026-01-29 | SPEC-006 | FIXED: All key tests pass (heartbeat 16/16, SubscriptionRouting 9/9, Security 3/3, LiveQuery 2/2, ORMapSync 11/11). Only SyncProtocol OP_BATCH tests fail (OP_ACK not implemented - out of scope). |
 
 ## Project Patterns
 
@@ -51,11 +52,11 @@
 
 ## Warnings
 
-**Integration Tests Partially Fixed:** (SPEC-006 complete, follow-up needed)
-- ServerTestHarness created and 12 test files updated
-- heartbeat.test.ts fully passes (16/16 tests)
-- Other tests fail due to event broadcast mechanism issue (pre-existing bug in SPEC-003/004)
-- Recommend SPEC-007 to fix event broadcast/subscription notification in handlers
+**SyncProtocol OP_BATCH Tests:** (Minor - out of scope for SPEC-006)
+- 2 tests in SyncProtocol.test.ts fail (OP_BATCH/OP_ACK)
+- Root cause: OP_ACK response is not implemented in the server
+- This is separate from SPEC-006's scope (test harness pattern)
+- Low priority - OP_BATCH processing works, just no ACK response
 
 ---
-*Last updated: 2026-01-28 22:45*
+*Last updated: 2026-01-29 11:50*
