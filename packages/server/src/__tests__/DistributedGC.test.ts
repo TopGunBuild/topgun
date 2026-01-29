@@ -31,7 +31,7 @@ describe('Distributed Garbage Collection Consensus', () => {
         close: jest.fn(),
       } as any,
       isAuthenticated: true,
-      subscriptions: new Set(),
+      subscriptions: new Set<string>(),
       principal: { userId: clientId, roles: ['USER'] },
       lastActiveHlc: lastActiveHlc || harness.hlc.now(),
       lastPingReceived: Date.now(),
@@ -61,6 +61,7 @@ describe('Distributed Garbage Collection Consensus', () => {
       nodeId: 'node-1',
       host: 'localhost',
       clusterPort: 0,
+      metricsPort: 0,
       peers: []
     });
     await node1.ready();
@@ -72,6 +73,7 @@ describe('Distributed Garbage Collection Consensus', () => {
       nodeId: 'node-2',
       host: 'localhost',
       clusterPort: 0,
+      metricsPort: 0,
       peers: [`localhost:${node1.clusterPort}`]
     });
     await node2.ready();
@@ -83,6 +85,7 @@ describe('Distributed Garbage Collection Consensus', () => {
       nodeId: 'node-3',
       host: 'localhost',
       clusterPort: 0,
+      metricsPort: 0,
       peers: [`localhost:${node1.clusterPort}`]
     });
     await node3.ready();
