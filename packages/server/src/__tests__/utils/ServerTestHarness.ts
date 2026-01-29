@@ -59,7 +59,7 @@ export class ServerTestHarness {
      * Access the ConnectionManager for client manipulation.
      * Returns as any for test flexibility with partial mock clients.
      */
-    get connectionManager(): IConnectionManager {
+    get connectionManager(): any {
         return (this.server as any).connectionManager;
     }
 
