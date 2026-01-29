@@ -720,9 +720,19 @@ export class ServerFactory {
         const messageRegistry = createMessageRegistry({
             // CRDT operations
             onClientOp: (client, msg) => operationHandler.processClientOp(client, msg.payload),
-            onOpBatch: (client, msg) => batchProcessingHandler.processBatchAsync(
-                msg.payload.ops, client.id
-            ),
+            onOpBatch: async (client, msg) => {
+                const ops = msg.payload.ops;
+                await batchProcessingHandler.processBatchAsync(ops, client.id);
+
+                // Send OP_ACK with lastId from the batch
+                if (ops.length > 0) {
+                    const lastId = ops[ops.length - 1].id;
+                    client.writer.write({
+                        type: 'OP_ACK',
+                        payload: { lastId }
+                    });
+                }
+            },
             // Query operations
             onQuerySub: (client, msg) => queryHandler.handleQuerySub(client, msg),
             onQueryUnsub: (client, msg) => queryHandler.handleQueryUnsub(client, msg),
