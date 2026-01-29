@@ -45,10 +45,7 @@ describe('Sync Protocol Integration', () => {
     })),
   });
 
-  // TODO: OP_ACK response is not implemented in the server yet.
-  // The batch processing works correctly, but acknowledgment messages are not sent.
-  // This is tracked as a separate feature implementation.
-  test.skip('Should handle OP_BATCH and send OP_ACK', async () => {
+  test('Should handle OP_BATCH and send OP_ACK', async () => {
     const clientSocket = {
       send: jest.fn(),
       readyState: 1 // OPEN
@@ -106,10 +103,7 @@ describe('Sync Protocol Integration', () => {
     expect(ackMsg.payload.lastId).toBe('101');
   });
 
-  // TODO: OP_ACK response is not implemented in the server yet.
-  // The idempotent batch processing works, but acknowledgment messages are not sent.
-  // This is tracked as a separate feature implementation.
-  test.skip('Should be idempotent (handle duplicate batches)', async () => {
+  test('Should be idempotent (handle duplicate batches)', async () => {
     const clientSocket = {
       send: jest.fn(),
       readyState: 1 // OPEN
