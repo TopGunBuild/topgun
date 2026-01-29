@@ -4,6 +4,7 @@ import { HLC, LWWMap, ORMap, PermissionPolicy, Timestamp, LWWRecord, Consistency
 import { IServerStorage } from './storage/IServerStorage';
 import { IInterceptor } from './interceptor/IInterceptor';
 import { ServerDependencies } from './ServerDependencies';
+import { ClusterManager } from './cluster/ClusterManager';
 import { PartitionService } from './cluster/PartitionService';
 import { Query } from './query/Matcher';
 import { logger } from './utils/logger';
@@ -147,6 +148,7 @@ export class ServerCoordinator {
     private hlc: HLC;
     private storage?: IServerStorage;
 
+    private cluster!: ClusterManager;
     private partitionService!: PartitionService;
     private operationHandler!: OperationHandler;
     private webSocketHandler!: WebSocketHandler;
@@ -209,6 +211,7 @@ export class ServerCoordinator {
         this.hlc = dependencies.hlc;
         this.eventExecutor = dependencies.eventExecutor;
         this.connectionManager = dependencies.connectionManager;
+        this.cluster = dependencies.cluster;
         this.partitionService = dependencies.partitionService;
         this.storageManager = dependencies.storageManager;
         this.eventPayloadPool = dependencies.eventPayloadPool;
