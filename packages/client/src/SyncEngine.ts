@@ -19,7 +19,7 @@ import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 import { BackpressureError } from './errors/BackpressureError';
 import type { IConnectionProvider } from './types';
 import { ConflictResolverClient } from './ConflictResolverClient';
-import { WebSocketManager, BackpressureController, QueryManager } from './sync';
+import { WebSocketManager, BackpressureController, QueryManager, TopicManager, LockManager, WriteConcernManager } from './sync';
 
 /**
  * Search result item from server.
@@ -97,12 +97,6 @@ const DEFAULT_BACKOFF_CONFIG: BackoffConfig = {
   maxRetries: 10,
 };
 
-interface QueuedTopicMessage {
-  topic: string;
-  data: any;
-  timestamp: number;
-}
-
 export class SyncEngine {
   private readonly nodeId: string;
   private readonly storageAdapter: IStorageAdapter;
@@ -117,10 +111,17 @@ export class SyncEngine {
   // QueryManager handles all query operations (Phase 05-02)
   private readonly queryManager: QueryManager;
 
+  // TopicManager handles all topic (pub/sub) operations (Phase 09a)
+  private readonly topicManager: TopicManager;
+
+  // LockManager handles distributed lock operations (Phase 09a)
+  private readonly lockManager: LockManager;
+
+  // WriteConcernManager handles write concern tracking (Phase 09a)
+  private readonly writeConcernManager: WriteConcernManager;
+
   private opLog: OpLogEntry[] = [];
   private maps: Map<string, LWWMap<any, any> | ORMap<any, any>> = new Map();
-  private topics: Map<string, TopicHandle> = new Map();
-  private pendingLockRequests: Map<string, { resolve: (res: any) => void, reject: (err: any) => void, timer: any }> = new Map();
   private lastSyncTimestamp: number = 0;
   private authToken: string | null = null;
   private tokenProvider: (() => Promise<string | null>) | null = null;
@@ -129,19 +130,8 @@ export class SyncEngine {
   private readonly backpressureConfig: BackpressureConfig;
   private readonly backpressureController: BackpressureController;
 
-  // Write Concern state (Phase 5.01)
-  private pendingWriteConcernPromises: Map<string, {
-    resolve: (result: any) => void;
-    reject: (error: Error) => void;
-    timeoutHandle?: ReturnType<typeof setTimeout>;
-  }> = new Map();
-
   // Conflict Resolver client (Phase 5.05)
   private readonly conflictResolverClient: ConflictResolverClient;
-
-  // Topic offline queue (Phase 3 BUG-06)
-  private topicQueue: QueuedTopicMessage[] = [];
-  private readonly topicQueueConfig: TopicQueueConfig;
 
   constructor(config: SyncEngineConfig) {
     // Validate config: either serverUrl or connectionProvider required
@@ -182,7 +172,7 @@ export class SyncEngine {
     });
 
     // Merge topic queue config with defaults (Phase 3 BUG-06)
-    this.topicQueueConfig = {
+    const topicQueueConfig: TopicQueueConfig = {
       ...DEFAULT_TOPIC_QUEUE_CONFIG,
       ...config.topicQueue,
     };
@@ -205,6 +195,25 @@ export class SyncEngine {
       storageAdapter: this.storageAdapter,
       sendMessage: (msg, key) => this.webSocketManager.sendMessage(msg, key),
       isAuthenticated: () => this.isAuthenticated(),
+    });
+
+    // Initialize TopicManager with callbacks (Phase 09a)
+    this.topicManager = new TopicManager({
+      topicQueueConfig,
+      sendMessage: (msg, key) => this.webSocketManager.sendMessage(msg, key),
+      isAuthenticated: () => this.isAuthenticated(),
+    });
+
+    // Initialize LockManager with callbacks (Phase 09a)
+    this.lockManager = new LockManager({
+      sendMessage: (msg, key) => this.webSocketManager.sendMessage(msg, key),
+      isAuthenticated: () => this.isAuthenticated(),
+      isOnline: () => this.isOnline(),
+    });
+
+    // Initialize WriteConcernManager (Phase 09a)
+    this.writeConcernManager = new WriteConcernManager({
+      defaultTimeout: 5000,
     });
 
     // Initialize Conflict Resolver client (Phase 5.05)
@@ -489,82 +498,36 @@ export class SyncEngine {
     this.queryManager.subscribeToQuery(query);
   }
 
-  public subscribeToTopic(topic: string, handle: TopicHandle) {
-    this.topics.set(topic, handle);
-    if (this.isAuthenticated()) {
-      this.sendTopicSubscription(topic);
-    }
+  /**
+   * Subscribe to a topic.
+   * Delegates to TopicManager.
+   */
+  public subscribeToTopic(topic: string, handle: TopicHandle): void {
+    this.topicManager.subscribeToTopic(topic, handle);
   }
 
-  public unsubscribeFromTopic(topic: string) {
-    this.topics.delete(topic);
-    if (this.isAuthenticated()) {
-      this.sendMessage({
-        type: 'TOPIC_UNSUB',
-        payload: { topic }
-      });
-    }
+  /**
+   * Unsubscribe from a topic.
+   * Delegates to TopicManager.
+   */
+  public unsubscribeFromTopic(topic: string): void {
+    this.topicManager.unsubscribeFromTopic(topic);
   }
 
-  public publishTopic(topic: string, data: any) {
-    if (this.isAuthenticated()) {
-      this.sendMessage({
-        type: 'TOPIC_PUB',
-        payload: { topic, data }
-      });
-    } else {
-      this.queueTopicMessage(topic, data);
-    }
+  /**
+   * Publish a message to a topic.
+   * Delegates to TopicManager.
+   */
+  public publishTopic(topic: string, data: any): void {
+    this.topicManager.publishTopic(topic, data);
   }
 
-  private queueTopicMessage(topic: string, data: any): void {
-    const message: QueuedTopicMessage = {
-      topic,
-      data,
-      timestamp: Date.now(),
-    };
-
-    if (this.topicQueue.length >= this.topicQueueConfig.maxSize) {
-      if (this.topicQueueConfig.strategy === 'drop-oldest') {
-        const dropped = this.topicQueue.shift();
-        logger.warn({ topic: dropped?.topic }, 'Dropped oldest queued topic message (queue full)');
-      } else {
-        logger.warn({ topic }, 'Dropped newest topic message (queue full)');
-        return;
-      }
-    }
-
-    this.topicQueue.push(message);
-    logger.debug({ topic, queueSize: this.topicQueue.length }, 'Queued topic message for offline');
-  }
-
-  private flushTopicQueue(): void {
-    if (this.topicQueue.length === 0) return;
-
-    logger.info({ count: this.topicQueue.length }, 'Flushing queued topic messages');
-
-    for (const msg of this.topicQueue) {
-      this.sendMessage({
-        type: 'TOPIC_PUB',
-        payload: { topic: msg.topic, data: msg.data },
-      });
-    }
-
-    this.topicQueue = [];
-  }
-
+  /**
+   * Get topic queue status.
+   * Delegates to TopicManager.
+   */
   public getTopicQueueStatus(): { size: number; maxSize: number } {
-    return {
-      size: this.topicQueue.length,
-      maxSize: this.topicQueueConfig.maxSize,
-    };
-  }
-
-  private sendTopicSubscription(topic: string) {
-    this.sendMessage({
-      type: 'TOPIC_SUB',
-      payload: { topic }
-    });
+    return this.topicManager.getTopicQueueStatus();
   }
 
   /**
@@ -583,74 +546,20 @@ export class SyncEngine {
     this.queryManager.unsubscribeFromQuery(queryId);
   }
 
+  /**
+   * Request a distributed lock.
+   * Delegates to LockManager.
+   */
   public requestLock(name: string, requestId: string, ttl: number): Promise<{ fencingToken: number }> {
-    if (!this.isAuthenticated()) {
-      return Promise.reject(new Error('Not connected or authenticated'));
-    }
-
-    return new Promise((resolve, reject) => {
-      // Timeout if no response (server might be down or message lost)
-      // We set a client-side timeout slightly larger than TTL if TTL is short,
-      // but usually we want a separate "Wait Timeout".
-      // For now, use a fixed 30s timeout for the *response*.
-      const timer = setTimeout(() => {
-        if (this.pendingLockRequests.has(requestId)) {
-          this.pendingLockRequests.delete(requestId);
-          reject(new Error('Lock request timed out waiting for server response'));
-        }
-      }, 30000);
-
-      this.pendingLockRequests.set(requestId, { resolve, reject, timer });
-
-      try {
-        const sent = this.sendMessage({
-          type: 'LOCK_REQUEST',
-          payload: { requestId, name, ttl }
-        });
-        if (!sent) {
-          clearTimeout(timer);
-          this.pendingLockRequests.delete(requestId);
-          reject(new Error('Failed to send lock request'));
-        }
-      } catch (e) {
-        clearTimeout(timer);
-        this.pendingLockRequests.delete(requestId);
-        reject(e);
-      }
-    });
+    return this.lockManager.requestLock(name, requestId, ttl);
   }
 
+  /**
+   * Release a distributed lock.
+   * Delegates to LockManager.
+   */
   public releaseLock(name: string, requestId: string, fencingToken: number): Promise<boolean> {
-    if (!this.isOnline()) return Promise.resolve(false);
-
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        if (this.pendingLockRequests.has(requestId)) {
-          this.pendingLockRequests.delete(requestId);
-          // Resolve false on timeout? Or reject?
-          // Release is usually fire-and-forget but we wanted ACK.
-          resolve(false);
-        }
-      }, 5000);
-
-      this.pendingLockRequests.set(requestId, { resolve, reject, timer });
-
-      try {
-        const sent = this.sendMessage({
-          type: 'LOCK_RELEASE',
-          payload: { requestId, name, fencingToken }
-        });
-        if (!sent) {
-          clearTimeout(timer);
-          this.pendingLockRequests.delete(requestId);
-          resolve(false);
-        }
-      } catch (e) {
-        clearTimeout(timer);
-        this.pendingLockRequests.delete(requestId);
-        resolve(false);
-      }
-    });
+    return this.lockManager.releaseLock(name, requestId, fencingToken);
   }
 
   private async handleServerMessage(message: any): Promise<void> {
@@ -697,8 +606,8 @@ export class SyncEngine {
 
         this.syncPendingOperations();
 
-        // Flush any queued topic messages from offline period
-        this.flushTopicQueue();
+        // Flush any queued topic messages from offline period (delegates to TopicManager)
+        this.topicManager.flushTopicQueue();
 
         // Only re-subscribe on first authentication to prevent UI flickering
         if (!wasAuthenticated) {
@@ -706,10 +615,8 @@ export class SyncEngine {
           this.startMerkleSync();
           // Re-subscribe all queries via QueryManager
           this.queryManager.resubscribeAll();
-          // Re-subscribe topics
-          for (const topic of this.topics.keys()) {
-            this.sendTopicSubscription(topic);
-          }
+          // Re-subscribe topics via TopicManager
+          this.topicManager.resubscribeAll();
         }
 
         // After initial sync setup, transition to CONNECTED
@@ -743,8 +650,8 @@ export class SyncEngine {
               op.synced = true;
               logger.debug({ opId: result.opId, achievedLevel: result.achievedLevel, success: result.success }, 'Op ACK with Write Concern');
             }
-            // Resolve pending Write Concern promise if exists
-            this.resolveWriteConcernPromise(result.opId, result);
+            // Resolve pending Write Concern promise if exists (delegates to WriteConcernManager)
+            this.writeConcernManager.resolveWriteConcernPromise(result.opId, result);
           }
         }
 
@@ -775,23 +682,13 @@ export class SyncEngine {
 
       case 'LOCK_GRANTED': {
         const { requestId, fencingToken } = message.payload;
-        const req = this.pendingLockRequests.get(requestId);
-        if (req) {
-          clearTimeout(req.timer);
-          this.pendingLockRequests.delete(requestId);
-          req.resolve({ fencingToken });
-        }
+        this.lockManager.handleLockGranted(requestId, fencingToken);
         break;
       }
 
       case 'LOCK_RELEASED': {
         const { requestId, success } = message.payload;
-        const req = this.pendingLockRequests.get(requestId);
-        if (req) {
-          clearTimeout(req.timer);
-          this.pendingLockRequests.delete(requestId);
-          req.resolve(success);
-        }
+        this.lockManager.handleLockReleased(requestId, success);
         break;
       }
 
@@ -841,10 +738,7 @@ export class SyncEngine {
 
       case 'TOPIC_MESSAGE': {
         const { topic, data, publisherId, timestamp } = message.payload;
-        const handle = this.topics.get(topic);
-        if (handle) {
-          handle.onMessage(data, { publisherId, timestamp });
-        }
+        this.topicManager.handleTopicMessage(topic, data, publisherId, timestamp);
         break;
       }
 
@@ -1182,8 +1076,8 @@ export class SyncEngine {
   public close(): void {
     this.webSocketManager.close();
 
-    // Cancel pending Write Concern promises (Phase 5.01)
-    this.cancelAllWriteConcernPromises(new Error('SyncEngine closed'));
+    // Cancel pending Write Concern promises (delegates to WriteConcernManager)
+    this.writeConcernManager.cancelAllWriteConcernPromises(new Error('SyncEngine closed'));
 
     this.stateMachine.transition(SyncState.DISCONNECTED);
     logger.info('SyncEngine closed');
@@ -1445,55 +1339,14 @@ export class SyncEngine {
 
   /**
    * Register a pending Write Concern promise for an operation.
-   * The promise will be resolved when the server sends an ACK with the operation result.
+   * Delegates to WriteConcernManager.
    *
    * @param opId - Operation ID
    * @param timeout - Timeout in ms (default: 5000)
    * @returns Promise that resolves with the Write Concern result
    */
   public registerWriteConcernPromise(opId: string, timeout: number = 5000): Promise<any> {
-    return new Promise((resolve, reject) => {
-      const timeoutHandle = setTimeout(() => {
-        this.pendingWriteConcernPromises.delete(opId);
-        reject(new Error(`Write Concern timeout for operation ${opId}`));
-      }, timeout);
-
-      this.pendingWriteConcernPromises.set(opId, {
-        resolve,
-        reject,
-        timeoutHandle,
-      });
-    });
-  }
-
-  /**
-   * Resolve a pending Write Concern promise with the server result.
-   *
-   * @param opId - Operation ID
-   * @param result - Result from server ACK
-   */
-  private resolveWriteConcernPromise(opId: string, result: any): void {
-    const pending = this.pendingWriteConcernPromises.get(opId);
-    if (pending) {
-      if (pending.timeoutHandle) {
-        clearTimeout(pending.timeoutHandle);
-      }
-      pending.resolve(result);
-      this.pendingWriteConcernPromises.delete(opId);
-    }
-  }
-
-  /**
-   * Cancel all pending Write Concern promises (e.g., on disconnect).
-   */
-  private cancelAllWriteConcernPromises(error: Error): void {
-    for (const [opId, pending] of this.pendingWriteConcernPromises.entries()) {
-      if (pending.timeoutHandle) {
-        clearTimeout(pending.timeoutHandle);
-      }
-      pending.reject(error);
-    }
-    this.pendingWriteConcernPromises.clear();
+    return this.writeConcernManager.registerWriteConcernPromise(opId, timeout);
   }
 
   // ============================================

@@ -126,6 +126,16 @@ export class TopicManager implements ITopicManager {
   }
 
   /**
+   * Re-subscribe all topics after authentication.
+   * Called by SyncEngine after AUTH_ACK.
+   */
+  public resubscribeAll(): void {
+    for (const topic of this.topics.keys()) {
+      this.sendTopicSubscription(topic);
+    }
+  }
+
+  /**
    * Handle incoming topic message from server.
    */
   public handleTopicMessage(topic: string, data: any, publisherId: string, timestamp: number): void {

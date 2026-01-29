@@ -375,6 +375,12 @@ export interface ITopicManager {
   getTopics(): IterableIterator<string>;
 
   /**
+   * Re-subscribe all topics after authentication.
+   * Called by SyncEngine after AUTH_ACK.
+   */
+  resubscribeAll(): void;
+
+  /**
    * Handle incoming topic message from server.
    * @param topic - Topic name
    * @param data - Message data
