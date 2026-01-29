@@ -8,6 +8,9 @@
  * - TopicManager: Manages topic (pub/sub) subscriptions and offline queueing
  * - LockManager: Manages distributed lock acquisition and release
  * - WriteConcernManager: Manages write concern promise tracking
+ * - CounterManager: Manages PN counter subscriptions and sync
+ * - EntryProcessorClient: Manages entry processor execution
+ * - SearchClient: Manages full-text search operations
  */
 
 // Types
@@ -24,6 +27,13 @@ export type {
   LockManagerConfig,
   IWriteConcernManager,
   WriteConcernManagerConfig,
+  ICounterManager,
+  CounterManagerConfig,
+  IEntryProcessorClient,
+  EntryProcessorClientConfig,
+  ISearchClient,
+  SearchClientConfig,
+  SearchResult,
 } from './types';
 
 // Implementation
@@ -33,3 +43,6 @@ export { QueryManager } from './QueryManager';
 export { TopicManager } from './TopicManager';
 export { LockManager } from './LockManager';
 export { WriteConcernManager } from './WriteConcernManager';
+export { CounterManager } from './CounterManager';
+export { EntryProcessorClient } from './EntryProcessorClient';
+export { SearchClient } from './SearchClient';
