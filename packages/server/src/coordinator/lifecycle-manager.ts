@@ -92,6 +92,11 @@ export interface LifecycleManagerConfig {
         destroy: () => void;
     };
 
+    // Query conversion handler for cleanup
+    queryConversionHandler?: {
+        stop: () => void;
+    };
+
     // Search backfill dependencies
     searchCoordinator: {
         getEnabledMaps: () => string[];
@@ -145,6 +150,11 @@ export class LifecycleManager {
      */
     async shutdown(): Promise<void> {
         logger.info('Shutting down Server Coordinator...');
+
+        // 0. Clear pending cluster queries (before closing connections)
+        if (this.config.queryConversionHandler) {
+            this.config.queryConversionHandler.stop();
+        }
 
         // Graceful cluster departure with partition notification
         await this.gracefulClusterDeparture();
