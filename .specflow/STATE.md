@@ -2,15 +2,14 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-007
-- **Status:** review
-- **Next Step:** `/sf:review`
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** `/sf:new` or `/sf:next`
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-007 | Timer/Resource Cleanup in Server Shutdown | medium | review | - |
 
 ## Decisions
 
@@ -42,6 +41,7 @@
 | 2026-01-29 | SPEC-006 | FIXED (Fix Response v1): All critical and major issues resolved. Added cluster property to ServerCoordinator. Added proper types to ServerTestHarness. Skipped OP_ACK tests with TODO. Fixed test TypeScript errors and port conflicts. Heartbeat and SyncProtocol tests pass. Build passes. Cluster formation timeout remains (pre-existing issue). |
 | 2026-01-29 | SPEC-006 | APPROVED (Review v2): All critical and major issues from Review v1 resolved. ClusterManager accessible via ServerCoordinator.cluster property. 6 core test suites pass (41 tests). OP_ACK tests properly skipped. Build passes. Test harness architecture sound. Ready for completion. |
 | 2026-01-29 | SPEC-007 | Audit v1: APPROVED. TimerRegistry pattern for timer cleanup. ~25% context estimate (PEAK range). All assumptions verified. Files table corrected (utils/index.ts: Modify -> Create). |
+| 2026-01-29 | SPEC-007 | COMPLETED: TimerRegistry utility for centralized timer management. QueryConversionHandler.stop() clears pending cluster query timers during shutdown. Archived to .specflow/archive/SPEC-007.md |
 
 ## Project Patterns
 
@@ -53,10 +53,11 @@
 - Test polling pattern: use centralized test-helpers.ts with PollOptions for bounded iterations
 - Late binding pattern: handlers can receive callbacks after construction via setXxxCallbacks methods
 - Test harness pattern: ServerTestHarness provides controlled access to internal handlers for tests
+- Timer cleanup pattern: handlers with timers implement stop() method, called by LifecycleManager during shutdown
 
 ## Warnings
 
 None
 
 ---
-*Last updated: 2026-01-29 15:15*
+*Last updated: 2026-01-29 15:45*
