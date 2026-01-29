@@ -2,15 +2,15 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** `/sf:new` or `/sf:next`
+- **Active Specification:** SPEC-007
+- **Status:** review
+- **Next Step:** `/sf:review`
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| - | - | - | - | - | - |
+| 1 | SPEC-007 | Timer/Resource Cleanup in Server Shutdown | medium | review | - |
 
 ## Decisions
 
@@ -41,6 +41,7 @@
 | 2026-01-29 | SPEC-006 | CHANGES_REQUESTED (Review v1): Critical - ClusterManager not accessible from ServerCoordinator (removed in SPEC-003/004/005, now undefined). Breaks DistributedGC.test.ts. Major - incomplete test verification, SyncProtocol OP_ACK tests left failing. |
 | 2026-01-29 | SPEC-006 | FIXED (Fix Response v1): All critical and major issues resolved. Added cluster property to ServerCoordinator. Added proper types to ServerTestHarness. Skipped OP_ACK tests with TODO. Fixed test TypeScript errors and port conflicts. Heartbeat and SyncProtocol tests pass. Build passes. Cluster formation timeout remains (pre-existing issue). |
 | 2026-01-29 | SPEC-006 | APPROVED (Review v2): All critical and major issues from Review v1 resolved. ClusterManager accessible via ServerCoordinator.cluster property. 6 core test suites pass (41 tests). OP_ACK tests properly skipped. Build passes. Test harness architecture sound. Ready for completion. |
+| 2026-01-29 | SPEC-007 | Audit v1: APPROVED. TimerRegistry pattern for timer cleanup. ~25% context estimate (PEAK range). All assumptions verified. Files table corrected (utils/index.ts: Modify -> Create). |
 
 ## Project Patterns
 
@@ -58,4 +59,4 @@
 None
 
 ---
-*Last updated: 2026-01-29 14:05*
+*Last updated: 2026-01-29 15:15*
