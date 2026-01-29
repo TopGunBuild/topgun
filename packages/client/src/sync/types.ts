@@ -7,7 +7,7 @@
 
 import type { IConnectionProvider, ConnectionProviderEvent, ConnectionEventHandler } from '../types';
 import type { SyncStateMachine } from '../SyncStateMachine';
-import type { BackoffConfig, HeartbeatConfig, OpLogEntry } from '../SyncEngine';
+import type { BackoffConfig, HeartbeatConfig, OpLogEntry, TopicQueueConfig } from '../SyncEngine';
 import type {
   BackpressureConfig,
   BackpressureStatus,
@@ -17,6 +17,7 @@ import type {
 import type { QueryHandle, QueryFilter } from '../QueryHandle';
 import type { HybridQueryHandle, HybridQueryFilter } from '../HybridQueryHandle';
 import type { IStorageAdapter } from '../IStorageAdapter';
+import type { TopicHandle } from '../TopicHandle';
 
 /**
  * Interface for WebSocket connection management.
@@ -325,4 +326,190 @@ export interface QueryManagerConfig {
    * Callback to check if authenticated.
    */
   isAuthenticated: () => boolean;
+}
+
+// ============================================
+// TopicManager Types
+// ============================================
+
+/**
+ * Interface for topic (pub/sub) management.
+ * Handles topic subscriptions, publications, and offline message queueing.
+ */
+export interface ITopicManager {
+  /**
+   * Subscribe to a topic.
+   * @param topic - Topic name
+   * @param handle - Topic handle for message delivery
+   */
+  subscribeToTopic(topic: string, handle: TopicHandle): void;
+
+  /**
+   * Unsubscribe from a topic.
+   * @param topic - Topic name
+   */
+  unsubscribeFromTopic(topic: string): void;
+
+  /**
+   * Publish a message to a topic.
+   * @param topic - Topic name
+   * @param data - Message data
+   */
+  publishTopic(topic: string, data: any): void;
+
+  /**
+   * Flush queued topic messages (called after authentication).
+   */
+  flushTopicQueue(): void;
+
+  /**
+   * Get topic queue status.
+   * @returns Queue size and max size
+   */
+  getTopicQueueStatus(): { size: number; maxSize: number };
+
+  /**
+   * Get all subscribed topics (for resubscription).
+   * @returns Iterator of topic names
+   */
+  getTopics(): IterableIterator<string>;
+
+  /**
+   * Handle incoming topic message from server.
+   * @param topic - Topic name
+   * @param data - Message data
+   * @param publisherId - Publisher node ID
+   * @param timestamp - Message timestamp
+   */
+  handleTopicMessage(topic: string, data: any, publisherId: string, timestamp: number): void;
+}
+
+/**
+ * Configuration for TopicManager.
+ */
+export interface TopicManagerConfig {
+  /**
+   * Topic queue configuration for offline messages.
+   */
+  topicQueueConfig: TopicQueueConfig;
+
+  /**
+   * Callback to send messages via SyncEngine/WebSocketManager.
+   * @param message - Message to send
+   * @param key - Optional key for routing
+   * @returns true if sent successfully
+   */
+  sendMessage: (message: any, key?: string) => boolean;
+
+  /**
+   * Callback to check if authenticated.
+   */
+  isAuthenticated: () => boolean;
+}
+
+// ============================================
+// LockManager Types
+// ============================================
+
+/**
+ * Interface for distributed lock management.
+ * Handles lock acquisition, release, and timeout tracking.
+ */
+export interface ILockManager {
+  /**
+   * Request a distributed lock.
+   * @param name - Lock name
+   * @param requestId - Unique request ID
+   * @param ttl - Time-to-live in milliseconds
+   * @returns Promise that resolves with fencing token
+   */
+  requestLock(name: string, requestId: string, ttl: number): Promise<{ fencingToken: number }>;
+
+  /**
+   * Release a distributed lock.
+   * @param name - Lock name
+   * @param requestId - Unique request ID
+   * @param fencingToken - Fencing token from lock grant
+   * @returns Promise that resolves with success status
+   */
+  releaseLock(name: string, requestId: string, fencingToken: number): Promise<boolean>;
+
+  /**
+   * Handle lock granted message from server.
+   * @param requestId - Request ID
+   * @param fencingToken - Fencing token
+   */
+  handleLockGranted(requestId: string, fencingToken: number): void;
+
+  /**
+   * Handle lock released message from server.
+   * @param requestId - Request ID
+   * @param success - Release success status
+   */
+  handleLockReleased(requestId: string, success: boolean): void;
+}
+
+/**
+ * Configuration for LockManager.
+ */
+export interface LockManagerConfig {
+  /**
+   * Callback to send messages via SyncEngine/WebSocketManager.
+   * @param message - Message to send
+   * @param key - Optional key for routing
+   * @returns true if sent successfully
+   */
+  sendMessage: (message: any, key?: string) => boolean;
+
+  /**
+   * Callback to check if authenticated.
+   */
+  isAuthenticated: () => boolean;
+
+  /**
+   * Callback to check if online.
+   */
+  isOnline: () => boolean;
+}
+
+// ============================================
+// WriteConcernManager Types
+// ============================================
+
+/**
+ * Interface for write concern management.
+ * Tracks pending write concern promises and resolves them on server ACK.
+ */
+export interface IWriteConcernManager {
+  /**
+   * Register a pending write concern promise for an operation.
+   * @param opId - Operation ID
+   * @param timeout - Timeout in milliseconds
+   * @returns Promise that resolves with the write concern result
+   */
+  registerWriteConcernPromise(opId: string, timeout?: number): Promise<any>;
+
+  /**
+   * Resolve a pending write concern promise with the server result.
+   * @param opId - Operation ID
+   * @param result - Result from server ACK
+   */
+  resolveWriteConcernPromise(opId: string, result: any): void;
+
+  /**
+   * Cancel all pending write concern promises (e.g., on disconnect).
+   * @param error - Error to reject promises with
+   */
+  cancelAllWriteConcernPromises(error: Error): void;
+}
+
+/**
+ * Configuration for WriteConcernManager.
+ */
+export interface WriteConcernManagerConfig {
+  /**
+   * Default timeout for write concern promises in milliseconds.
+   * Default: 5000 (5 seconds)
+   */
+  defaultTimeout?: number;
 }
