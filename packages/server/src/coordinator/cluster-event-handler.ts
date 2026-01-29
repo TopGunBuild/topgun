@@ -249,7 +249,7 @@ export class ClusterEventHandler implements IClusterEventHandler {
     /**
      * Handle CLUSTER_QUERY_RESP - aggregate remote query results.
      */
-    private handleClusterQueryResp(msg: any): void {
+    private async handleClusterQueryResp(msg: any): Promise<void> {
         const { requestId: reqId, results: remoteResults } = msg.payload;
         const pendingQuery = this.config.pendingClusterQueries.get(reqId);
         if (pendingQuery) {
@@ -257,7 +257,7 @@ export class ClusterEventHandler implements IClusterEventHandler {
             pendingQuery.respondedNodes.add(msg.senderId);
 
             if (pendingQuery.respondedNodes.size === pendingQuery.expectedNodes.size) {
-                this.config.finalizeClusterQuery(reqId);
+                await this.config.finalizeClusterQuery(reqId);
             }
         }
     }

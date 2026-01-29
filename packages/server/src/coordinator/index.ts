@@ -127,3 +127,6 @@ export type {
     IWebSocketHandler,
     WebSocketHandlerConfig,
 } from './types';
+
+// Constants
+export { DEFAULT_GC_AGE_MS } from './types';

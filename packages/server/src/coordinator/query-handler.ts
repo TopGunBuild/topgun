@@ -160,12 +160,12 @@ export class QueryHandler implements IQueryHandler {
                     }
                 } else {
                     // Single node cluster: finalize immediately
-                    this.config.finalizeClusterQuery(requestId);
+                    await this.config.finalizeClusterQuery(requestId);
                 }
             } catch (err) {
                 logger.error({ err, mapName }, 'Failed to execute local query');
                 // Finalize with empty results on error
-                this.config.finalizeClusterQuery(requestId);
+                await this.config.finalizeClusterQuery(requestId);
             }
         }
     }

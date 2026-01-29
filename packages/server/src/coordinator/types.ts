@@ -4,6 +4,12 @@ import type { CoalescingWriter, CoalescingWriterOptions } from '../utils/Coalesc
 import type { IServerStorage } from '../storage/IServerStorage';
 
 /**
+ * Default garbage collection age in milliseconds (30 days).
+ * Records older than this are eligible for tombstone cleanup.
+ */
+export const DEFAULT_GC_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
  * Represents a connected client with its WebSocket and state.
  */
 export interface ClientConnection {
@@ -564,7 +570,7 @@ export interface QueryHandlerConfig {
         config: { nodeId: string };
     };
     executeLocalQuery: (mapName: string, query: any) => Promise<any[]>;
-    finalizeClusterQuery: (requestId: string, timeout?: boolean) => void;
+    finalizeClusterQuery: (requestId: string, timeout?: boolean) => Promise<void>;
     pendingClusterQueries: Map<string, any>;
     readReplicaHandler?: {
         selectReadNode: (req: any) => string | null;
@@ -830,7 +836,7 @@ export interface ClusterEventHandlerConfig {
     // Callbacks for operations that remain in ServerCoordinator
     processLocalOp: (op: any, fromCluster: boolean, senderId?: string) => Promise<void>;
     executeLocalQuery: (mapName: string, query: any) => Promise<any[]>;
-    finalizeClusterQuery: (requestId: string, timeout?: boolean) => void;
+    finalizeClusterQuery: (requestId: string, timeout?: boolean) => Promise<void>;
     getLocalRecord: (key: string) => any;
     broadcast: (message: any, excludeClientId?: string) => void;
     getMap: (name: string, typeHint: 'LWW' | 'OR') => any;

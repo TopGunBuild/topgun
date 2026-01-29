@@ -89,9 +89,17 @@ export class ServerTestHarness {
 
     /**
      * Access the QueryRegistry for subscription tests.
+     * Note: queryRegistry is now accessed through queryConversionHandler's config
+     * after SPEC-003/004/005 refactoring removed it from ServerCoordinator.
      */
     get queryRegistry(): any {
-        return (this.server as any).queryRegistry;
+        // Try direct access first (legacy path)
+        const direct = (this.server as any).queryRegistry;
+        if (direct) return direct;
+
+        // Access through queryConversionHandler's config (post-refactoring path)
+        const handler = (this.server as any).queryConversionHandler;
+        return handler?.config?.queryRegistry;
     }
 
     /**

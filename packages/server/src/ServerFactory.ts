@@ -73,6 +73,7 @@ import {
     SearchHandler,
     QueryHandler,
     LifecycleManager,
+    DEFAULT_GC_AGE_MS,
 } from './coordinator';
 
 export class ServerFactory {
@@ -545,10 +546,13 @@ export class ServerFactory {
             },
         });
 
+        // Shared pending cluster queries map (used by QueryHandler and QueryConversionHandler)
+        const pendingClusterQueries = new Map();
+
         // Initialize QueryConversionHandler (no late binding needed)
         const queryConversionHandler = new QueryConversionHandler({
             getMapAsync: (mapName: string, typeHint?: 'LWW' | 'OR') => storageManager.getMapAsync(mapName, typeHint),
-            pendingClusterQueries: new Map(),
+            pendingClusterQueries,
             queryRegistry,
             securityManager: {
                 filterObject: (value: any, principal: any, mapName: string) => securityManager.filterObject(value, principal, mapName),
@@ -648,7 +652,7 @@ export class ServerFactory {
             },
             executeLocalQuery: (mapName: string, query: any) => queryConversionHandler.executeLocalQuery(mapName, query),
             finalizeClusterQuery: (reqId: string, timeout?: boolean) => queryConversionHandler.finalizeClusterQuery(reqId, timeout),
-            pendingClusterQueries: new Map(),
+            pendingClusterQueries, // Shared with QueryConversionHandler
             readReplicaHandler: readReplicaHandler,
             ConsistencyLevel: { EVENTUAL: ConsistencyLevel.EVENTUAL },
         });
@@ -681,7 +685,7 @@ export class ServerFactory {
             metricsService: {
                 incOp: (op: any, mapName: string) => metricsService.incOp(op, mapName),
             },
-            gcAgeMs: 30 * 24 * 60 * 60 * 1000, // 30 days
+            gcAgeMs: DEFAULT_GC_AGE_MS,
         });
 
         const orMapSyncHandler = new ORMapSyncHandler({
@@ -695,7 +699,7 @@ export class ServerFactory {
             },
             storage: config.storage,
             broadcast: (message: any, excludeClientId?: string) => broadcastHandler.broadcast(message, excludeClientId),
-            gcAgeMs: 30 * 24 * 60 * 60 * 1000, // 30 days
+            gcAgeMs: DEFAULT_GC_AGE_MS,
         });
 
         const entryProcessorAdapter = new EntryProcessorAdapter({
@@ -716,8 +720,8 @@ export class ServerFactory {
         const messageRegistry = createMessageRegistry({
             // CRDT operations
             onClientOp: (client, msg) => operationHandler.processClientOp(client, msg.payload),
-            onOpBatch: (client, msg) => operationHandler.processOpBatch(
-                client, msg.payload.ops, msg.payload.writeConcern, msg.payload.timeout
+            onOpBatch: (client, msg) => batchProcessingHandler.processBatchAsync(
+                msg.payload.ops, client.id
             ),
             // Query operations
             onQuerySub: (client, msg) => queryHandler.handleQuerySub(client, msg),

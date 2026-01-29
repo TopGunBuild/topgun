@@ -12,10 +12,9 @@
 
 import { HLC, LWWMap, ORMap, Timestamp, LWWRecord, ORMapRecord } from '@topgunbuild/core';
 import { logger } from '../utils/logger';
-import type { IGCHandler, GCHandlerConfig } from './types';
+import { DEFAULT_GC_AGE_MS, type IGCHandler, type GCHandlerConfig } from './types';
 
 const DEFAULT_GC_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
-const DEFAULT_GC_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 export class GCHandler implements IGCHandler {
     private readonly config: GCHandlerConfig;
