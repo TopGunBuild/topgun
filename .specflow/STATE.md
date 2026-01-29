@@ -2,18 +2,17 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-009a
-- **Status:** review
-- **Next Step:** /sf:review
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-009a | Extract Core Feature Handlers | high | audited | - |
-| 2 | SPEC-009b | Extract Advanced Feature Handlers | high | draft | SPEC-009a |
-| 3 | SPEC-009c | Extract Sync Protocol Handlers | high | draft | SPEC-009a |
-| 4 | SPEC-009d | Create MessageRouter | high | draft | SPEC-009a, SPEC-009b, SPEC-009c |
+| 1 | SPEC-009b | Extract Advanced Feature Handlers | high | draft | - |
+| 2 | SPEC-009c | Extract Sync Protocol Handlers | high | draft | - |
+| 3 | SPEC-009d | Create MessageRouter | high | draft | SPEC-009b, SPEC-009c |
 
 ## Decisions
 
@@ -55,6 +54,8 @@
 | 2026-01-29 | SPEC-009a | Audit v1: APPROVED. All 20+ line references verified against SyncEngine.ts (2015 lines). Config-based DI pattern matches existing handlers. ~20-25% context estimate (PEAK range). Recommendations: add getTopics() method for resubscription, ensure flushTopicQueue() is public. |
 | 2026-01-29 | SPEC-009a | Response v1: Applied all 3 recommendations from Audit v1. Added getTopics() method to TopicManager for AUTH_ACK resubscription. Marked flushTopicQueue() as public. Added acceptance criteria 11-12 for AUTH_ACK integration verification. |
 | 2026-01-29 | SPEC-009a | Audit v2: APPROVED. All line references re-verified. All recommendations from v1 incorporated. Specification ready for implementation. |
+| 2026-01-29 | SPEC-009a | APPROVED (Review v1): All acceptance criteria met. All three handlers created and properly integrated. SyncEngine reduced by 147 lines (7.3%). Build passes, 22/24 test suites pass (2 pre-existing failures). Clean code quality, no issues identified. |
+| 2026-01-29 | SPEC-009a | COMPLETED: Core feature handlers extracted (TopicManager, LockManager, WriteConcernManager). SyncEngine reduced 2015→1868 lines (-7.3%). Archived to .specflow/archive/SPEC-009a.md |
 
 ## Project Patterns
 
@@ -73,4 +74,4 @@
 None
 
 ---
-*Last updated: 2026-01-29 23:45*
+*Last updated: 2026-01-29 22:30*
