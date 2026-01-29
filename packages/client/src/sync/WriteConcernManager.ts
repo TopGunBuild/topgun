@@ -8,7 +8,6 @@
  * - Timeout handling for operations that don't receive ACK
  */
 
-import { logger } from '../utils/logger';
 import type { IWriteConcernManager, WriteConcernManagerConfig } from './types';
 
 /**
