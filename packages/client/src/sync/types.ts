@@ -742,3 +742,178 @@ export interface SearchClientConfig {
    */
   timeoutMs?: number;
 }
+
+// ============================================
+// MerkleSyncHandler Types
+// ============================================
+
+/**
+ * Interface for Merkle tree synchronization handler (LWWMap).
+ * Handles sync protocol messages for LWWMap synchronization.
+ */
+export interface IMerkleSyncHandler {
+  /**
+   * Handle SYNC_RESP_ROOT message from server.
+   * @param payload - Root hash and timestamp from server
+   */
+  handleSyncRespRoot(payload: { mapName: string; rootHash: number; timestamp?: any }): Promise<void>;
+
+  /**
+   * Handle SYNC_RESP_BUCKETS message from server.
+   * @param payload - Bucket hashes for a path
+   */
+  handleSyncRespBuckets(payload: { mapName: string; path: string; buckets: Record<string, number> }): void;
+
+  /**
+   * Handle SYNC_RESP_LEAF message from server.
+   * @param payload - Leaf records to merge
+   */
+  handleSyncRespLeaf(payload: { mapName: string; records: Array<{ key: string; record: any }> }): Promise<void>;
+
+  /**
+   * Handle SYNC_RESET_REQUIRED message from server.
+   * @param payload - Map name that requires reset
+   */
+  handleSyncResetRequired(payload: { mapName: string }): Promise<void>;
+
+  /**
+   * Send SYNC_INIT message to server.
+   * @param mapName - Map name to sync
+   * @param lastSyncTimestamp - Last sync timestamp
+   */
+  sendSyncInit(mapName: string, lastSyncTimestamp: number): void;
+
+  /**
+   * Get the last sync timestamp for debugging/testing.
+   * @returns Last sync timestamp
+   */
+  getLastSyncTimestamp(): number;
+}
+
+/**
+ * Configuration for MerkleSyncHandler.
+ */
+export interface MerkleSyncHandlerConfig {
+  /**
+   * Callback to get a map by name.
+   * @param mapName - Map name
+   * @returns LWWMap or ORMap instance, or undefined if not found
+   */
+  getMap: (mapName: string) => any; // LWWMap<any, any> | ORMap<any, any> | undefined
+
+  /**
+   * Callback to send messages via SyncEngine/WebSocketManager.
+   * @param message - Message to send
+   * @param key - Optional key for routing
+   * @returns true if sent successfully
+   */
+  sendMessage: (message: any, key?: string) => boolean;
+
+  /**
+   * Storage adapter for persistence.
+   */
+  storageAdapter: IStorageAdapter;
+
+  /**
+   * HLC instance for timestamp updates.
+   */
+  hlc: any; // HLC from @topgunbuild/core
+
+  /**
+   * Callback when timestamp is updated.
+   * @param timestamp - New timestamp to update
+   */
+  onTimestampUpdate: (timestamp: any) => Promise<void>;
+
+  /**
+   * Callback to reset a map (clear memory and storage).
+   * @param mapName - Map name to reset
+   */
+  resetMap: (mapName: string) => Promise<void>;
+}
+
+// ============================================
+// ORMapSyncHandler Types
+// ============================================
+
+/**
+ * Interface for ORMap Merkle tree synchronization handler.
+ * Handles sync protocol messages for ORMap synchronization.
+ */
+export interface IORMapSyncHandler {
+  /**
+   * Handle ORMAP_SYNC_RESP_ROOT message from server.
+   * @param payload - Root hash and timestamp from server
+   */
+  handleORMapSyncRespRoot(payload: { mapName: string; rootHash: number; timestamp?: any }): Promise<void>;
+
+  /**
+   * Handle ORMAP_SYNC_RESP_BUCKETS message from server.
+   * @param payload - Bucket hashes for a path
+   */
+  handleORMapSyncRespBuckets(payload: { mapName: string; path: string; buckets: Record<string, number> }): Promise<void>;
+
+  /**
+   * Handle ORMAP_SYNC_RESP_LEAF message from server.
+   * @param payload - Leaf entries to merge
+   */
+  handleORMapSyncRespLeaf(payload: { mapName: string; entries: Array<{ key: string; records: any[]; tombstones: string[] }> }): Promise<void>;
+
+  /**
+   * Handle ORMAP_DIFF_RESPONSE message from server.
+   * @param payload - Diff entries to merge
+   */
+  handleORMapDiffResponse(payload: { mapName: string; entries: Array<{ key: string; records: any[]; tombstones: string[] }> }): Promise<void>;
+
+  /**
+   * Push local ORMap diff to server for given keys.
+   * @param mapName - Map name
+   * @param keys - Keys to push
+   * @param map - ORMap instance
+   */
+  pushORMapDiff(mapName: string, keys: string[], map: any): Promise<void>;
+
+  /**
+   * Send ORMAP_SYNC_INIT message to server.
+   * @param mapName - Map name to sync
+   * @param lastSyncTimestamp - Last sync timestamp
+   */
+  sendSyncInit(mapName: string, lastSyncTimestamp: number): void;
+
+  /**
+   * Get the last sync timestamp for debugging/testing.
+   * @returns Last sync timestamp
+   */
+  getLastSyncTimestamp(): number;
+}
+
+/**
+ * Configuration for ORMapSyncHandler.
+ */
+export interface ORMapSyncHandlerConfig {
+  /**
+   * Callback to get a map by name.
+   * @param mapName - Map name
+   * @returns LWWMap or ORMap instance, or undefined if not found
+   */
+  getMap: (mapName: string) => any; // LWWMap<any, any> | ORMap<any, any> | undefined
+
+  /**
+   * Callback to send messages via SyncEngine/WebSocketManager.
+   * @param message - Message to send
+   * @param key - Optional key for routing
+   * @returns true if sent successfully
+   */
+  sendMessage: (message: any, key?: string) => boolean;
+
+  /**
+   * HLC instance for timestamp updates.
+   */
+  hlc: any; // HLC from @topgunbuild/core
+
+  /**
+   * Callback when timestamp is updated.
+   * @param timestamp - New timestamp to update
+   */
+  onTimestampUpdate: (timestamp: any) => Promise<void>;
+}
