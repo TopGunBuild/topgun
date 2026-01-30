@@ -2,15 +2,15 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:next or /sf:new
+- **Active Specification:** SPEC-011d
+- **Status:** review
+- **Next Step:** /sf:review
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-011d | Handlers Module + MessageRegistry | high | draft | - |
+| 1 | SPEC-011d | Handlers Module + MessageRegistry | high | audited | - |
 | 2 | SPEC-011e | Search + Lifecycle + Final Assembly | high | draft | SPEC-011d |
 | 3 | SPEC-010 | Extract SyncEngine Message Handlers | medium | draft | - |
 
@@ -33,6 +33,11 @@
 | 2026-01-30 | SPEC-011c | EXECUTED: Created network-module.ts (91 lines). Updated types.ts with NetworkModule interfaces. ServerFactory.ts refactored for deferred startup (-38 lines net). 4 commits. Build passes, tests pass. |
 | 2026-01-30 | SPEC-011c | APPROVED (Review v1): All 17 acceptance criteria met. Deferred startup successfully implemented. NetworkModule cleanly separates HTTP/WSS/rate limiter creation from startup. No ports bound until after ServerCoordinator assembly. Error recovery safe. Build passes, tests pass, no circular dependencies. Critical behavioral change executed correctly. |
 | 2026-01-30 | SPEC-011c | COMPLETED: Network Module with deferred startup. ServerFactory.ts reduced 38 lines. Archived to .specflow/archive/SPEC-011c.md |
+| 2026-01-30 | SPEC-011d | Audit v1: NEEDS_REVISION. 6 critical issues: (1) incorrect line numbers, (2) incorrect handler/message counts, (3) ClusterEventHandler not instantiated in current code, (4) missing dependencies in HandlersModuleDeps, (5) cross-handler dependencies not addressed, (6) R5 late binding pattern incomplete. Line numbers corrected to 160-593 handlers, 609-663 registry. Handler count corrected to 25. Message count corrected to 30. |
+| 2026-01-30 | SPEC-011d | Response v1: All 10 issues addressed (6 critical + 4 recommendations). ClusterEventHandler excluded from scope. HandlersModuleDeps updated with explicit fields. Factory ordering documented with 4-step dependency graph. R5 updated for GCHandler late binding. Internal manager creation documented. Shared state management documented. MESSAGE_ROUTES updated to 30. Ready for re-audit. |
+| 2026-01-30 | SPEC-011d | Audit v2: APPROVED. ~40% context (GOOD range). All 6 critical issues from v1 resolved. Handler count corrected to 26 (AC#3). Message type count corrected to 29 (AC#5, AC#7, AC#8). All 9 audit dimensions passed. 2 optional recommendations: (1) validation test for handler count, (2) rateLimitedLogger dependency documentation. |
+| 2026-01-30 | SPEC-011d | Response v2: Both optional recommendations applied. Added AC#11 for handler count validation test. Updated HandlersModuleDeps.network to include rateLimitedLogger. Ready for re-audit. |
+| 2026-01-31 | SPEC-011d | Audit v3: APPROVED. ~40% context (GOOD range). Fresh eyes verification confirmed 26 handlers, 29 message types against current codebase. Line numbers verified. Context and Current State sections updated for consistency. All 9 audit dimensions passed. Specification complete and ready for implementation. |
 
 ## Project Patterns
 
@@ -54,4 +59,4 @@
 (none)
 
 ---
-*Last updated: 2026-01-30 20:25*
+*Last updated: 2026-01-31 00:15*
