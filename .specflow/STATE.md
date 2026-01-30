@@ -2,18 +2,17 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-011c
-- **Status:** review
-- **Next Step:** /sf:review
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** /sf:next or /sf:new
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-011c | Network Module (Deferred Startup) | high | review | - |
-| 2 | SPEC-011d | Handlers Module + MessageRegistry | high | draft | SPEC-011c |
-| 3 | SPEC-011e | Search + Lifecycle + Final Assembly | high | draft | SPEC-011d |
-| 4 | SPEC-010 | Extract SyncEngine Message Handlers | medium | draft | - |
+| 1 | SPEC-011d | Handlers Module + MessageRegistry | high | draft | - |
+| 2 | SPEC-011e | Search + Lifecycle + Final Assembly | high | draft | SPEC-011d |
+| 3 | SPEC-010 | Extract SyncEngine Message Handlers | medium | draft | - |
 
 ## Decisions
 
@@ -32,6 +31,8 @@
 | 2026-01-30 | SPEC-011c | Response v3: All 2 recommendations applied. R5 test marked as async. R2 code updated with complete buildTLSOptions function (lines 93-103) and inline default handlers for HTTP/HTTPS. Ready for re-audit. |
 | 2026-01-30 | SPEC-011c | Audit v4: APPROVED. ~13% context (PEAK range). All line numbers verified. All code examples complete with imports, buildTLSOptions definition, inline handlers, async test. Specification complete and ready for implementation. |
 | 2026-01-30 | SPEC-011c | EXECUTED: Created network-module.ts (91 lines). Updated types.ts with NetworkModule interfaces. ServerFactory.ts refactored for deferred startup (-38 lines net). 4 commits. Build passes, tests pass. |
+| 2026-01-30 | SPEC-011c | APPROVED (Review v1): All 17 acceptance criteria met. Deferred startup successfully implemented. NetworkModule cleanly separates HTTP/WSS/rate limiter creation from startup. No ports bound until after ServerCoordinator assembly. Error recovery safe. Build passes, tests pass, no circular dependencies. Critical behavioral change executed correctly. |
+| 2026-01-30 | SPEC-011c | COMPLETED: Network Module with deferred startup. ServerFactory.ts reduced 38 lines. Archived to .specflow/archive/SPEC-011c.md |
 
 ## Project Patterns
 
@@ -46,10 +47,11 @@
 - Timer cleanup pattern: handlers with timers implement stop() method, called by LifecycleManager during shutdown
 - Message routing pattern: MessageRouter provides declarative type-based routing for server messages
 - Module factory pattern: each domain gets its own factory function with explicit dependency injection
+- Deferred startup pattern: module factories create resources but do not bind ports; start() method called after assembly
 
 ## Warnings
 
 (none)
 
 ---
-*Last updated: 2026-01-30 23:15*
+*Last updated: 2026-01-30 20:25*

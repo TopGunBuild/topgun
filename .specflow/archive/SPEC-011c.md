@@ -4,7 +4,7 @@
 id: SPEC-011c
 parent: SPEC-011
 type: refactor
-status: running
+status: done
 priority: high
 complexity: small
 depends_on: [SPEC-011a]
@@ -621,6 +621,40 @@ None
 - Tests confirm deferred startup works correctly (Security, SyncProtocol, heartbeat all pass)
 - The buildTLSOptions helper was moved to network-module.ts and removed from ServerFactory
 - ServerFactory.ts reduced by ~38 lines net (removed HTTP/WSS setup, added module calls)
+
+---
+
+## Review History
+
+### Review v1 (2026-01-30 20:18)
+**Result:** APPROVED
+**Reviewer:** impl-reviewer (subagent)
+
+**Passed:**
+- [✓] NetworkModule types correctly defined - All three interfaces (NetworkModuleConfig, NetworkModuleDeps, NetworkModule) present in `/Users/koristuvac/Projects/topgun/topgun/packages/server/src/modules/types.ts` (lines 114-144)
+- [✓] Deferred startup implemented - `network.start()` called at line 860 in ServerFactory.ts, AFTER ServerCoordinator construction (line 857)
+- [✓] Socket configuration present - Lines 48-56 in network-module.ts configure setNoDelay, setKeepAlive with proper defaults
+- [✓] No .listen() in module factory - `createNetworkModule()` creates servers but does NOT call .listen() (verified at lines 24-90)
+- [✓] Metrics server deferred - metricsServer.listen() called at line 862, AFTER network.start() and coordinator assembly
+- [✓] Module exports correct - `/Users/koristuvac/Projects/topgun/topgun/packages/server/src/modules/index.ts` line 6 exports network-module
+- [✓] TLS handling - Lines 30-40 in network-module.ts correctly handle HTTP vs HTTPS with buildTLSOptions helper
+- [✓] WebSocket server attached correctly - Lines 59-64 attach WSS to httpServer without listening
+- [✓] Build passes - Verified pnpm build completes successfully for @topgunbuild/server package
+- [✓] Tests pass - Security.test.ts passes (3/3 tests), confirming deferred startup works correctly
+- [✓] No circular dependencies - Build succeeds with TypeScript strict mode
+- [✓] Architecture alignment - Follows established module factory pattern from SPEC-011a/011b
+- [✓] Proper error recovery path - No .listen() calls before coordinator assembly ensures ports aren't bound on initialization failure
+
+**Summary:** The implementation successfully achieves the critical behavioral change (deferred startup) while maintaining code quality. The network module cleanly separates HTTP/WSS/rate limiter creation from startup, ensuring no port binding occurs until after ServerCoordinator is fully assembled. Key strengths: (1) Clean separation - NetworkModule handles only HTTP/WSS + rate limiter (controllers stay in ServerFactory as specified), (2) Proper deferred startup - `start()` method called at the correct time (line 860, after coordinator at line 857), (3) Metrics server also deferred - Both main and metrics servers start after coordinator assembly, (4) Error safety - Initialization failures won't leave ports bound (verified by code path), (5) Socket configuration - Properly extracted with configurable defaults, (6) Optional dependencies - metricsServer correctly made optional throughout codebase (ServerDependencies, LifecycleManagerConfig). The implementation matches the specification exactly, with appropriate handling of the optional metricsServer (marked as deviation but actually a necessary fix).
+
+---
+
+## Completion
+
+**Completed:** 2026-01-30 20:25
+**Total Commits:** 4
+**Audit Cycles:** 4
+**Review Cycles:** 1
 
 ---
 *Created by SpecFlow split from SPEC-011 on 2026-01-30*
