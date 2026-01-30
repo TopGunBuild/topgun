@@ -34,6 +34,10 @@ export type {
   ISearchClient,
   SearchClientConfig,
   SearchResult,
+  IMerkleSyncHandler,
+  MerkleSyncHandlerConfig,
+  IORMapSyncHandler,
+  ORMapSyncHandlerConfig,
 } from './types';
 
 // Implementation
@@ -46,3 +50,5 @@ export { WriteConcernManager } from './WriteConcernManager';
 export { CounterManager } from './CounterManager';
 export { EntryProcessorClient } from './EntryProcessorClient';
 export { SearchClient } from './SearchClient';
+export { MerkleSyncHandler } from './MerkleSyncHandler';
+export { ORMapSyncHandler } from './ORMapSyncHandler';
