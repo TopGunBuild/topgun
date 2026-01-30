@@ -4,7 +4,7 @@
 id: SPEC-011b
 parent: SPEC-011
 type: refactor
-status: running
+status: done
 priority: high
 complexity: small
 depends_on: [SPEC-011a]
@@ -408,3 +408,50 @@ const { storageManager, queryRegistry, eventPayloadPool, taskletScheduler, write
 - Removed unused imports from ServerFactory: `crypto`, `MergeRejection`, `QueryRegistry`, `StorageManager`
 - Kept `ClusterManager` and `PartitionService` imports for `getClusterStatus()` static method type annotations
 - Net reduction of 62 lines in ServerFactory.ts (97 removed, 35 added)
+
+---
+
+## Review History
+
+### Review v1 (2026-01-30 15:32)
+**Result:** APPROVED
+**Reviewer:** impl-reviewer (subagent)
+
+**Findings:**
+
+**Passed:**
+- [✓] All 6 type interfaces properly exported from `modules/types.ts` (ClusterModuleConfig, ClusterModuleDeps, ClusterModule, StorageModuleConfig, StorageModuleDeps, StorageModule)
+- [✓] `createClusterModule()` correctly implements module factory pattern with proper dependency injection
+- [✓] Conditional replicationPipeline creation works correctly (enabled by default, created when `replicationEnabled !== false`)
+- [✓] All cluster components properly instantiated (ClusterManager, PartitionService, LockManager, MerkleTreeManager, PartitionReassigner, ReadReplicaHandler, RepairScheduler)
+- [✓] `createStorageModule()` correctly implements module factory pattern with proper dependency injection
+- [✓] QueryRegistry created before StorageManager to enable proper callback closure
+- [✓] StorageManager's onMapLoaded callback correctly captures queryRegistry in closure
+- [✓] All storage components properly instantiated (StorageManager, QueryRegistry, eventPayloadPool, TaskletScheduler, WriteAckManager)
+- [✓] ServerFactory correctly uses module factories instead of inline creation
+- [✓] Config mapping is complete and accurate in ServerFactory
+- [✓] Dependency order correct: storage module receives partitionService from cluster module
+- [✓] Module exports properly added to `modules/index.ts`
+- [✓] Build passes with full TypeScript compilation and DTS generation
+- [✓] No circular dependencies detected
+- [✓] TypeScript strict mode passes
+- [✓] All specified tests pass (heartbeat 16/16, SubscriptionRouting 9/9, Security 3/3, LiveQuery 2/2, ORMapSync 11/11, SyncProtocol 3/3)
+- [✓] Code quality excellent - clean extraction pattern, proper encapsulation
+- [✓] Zero behavior change achieved - ServerFactory behavior identical
+- [✓] Unused imports properly cleaned up (crypto, MergeRejection, QueryRegistry, StorageManager)
+- [✓] Required imports retained (ClusterManager, PartitionService for static method type annotations)
+
+**Summary:** Implementation is flawless. All 14 acceptance criteria met. The module factory pattern is cleanly applied to both cluster and storage domains. Proper dependency injection ensures testability. QueryRegistry closure in StorageManager callback is correctly handled. Build passes, tests pass, no circular dependencies. Zero behavior change achieved. Code quality is excellent with clear separation of concerns. Ready for finalization.
+
+---
+
+**Next Step:** `/sf:done` — finalize and archive
+
+---
+
+## Completion
+
+**Completed:** 2026-01-30 17:35
+**Total Commits:** 5
+**Audit Cycles:** 1
+**Review Cycles:** 1
