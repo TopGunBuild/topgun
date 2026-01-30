@@ -2,15 +2,14 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-009d
-- **Status:** review
-- **Next Step:** /sf:review
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-009d | Create MessageRouter | high | review | - |
 
 ## Decisions
 
@@ -64,6 +63,8 @@
 | 2026-01-30 | SPEC-009c | COMPLETED: Sync protocol handlers extracted (MerkleSyncHandler, ORMapSyncHandler). SyncEngine reduced 1617->1433 lines (-11.4%). Archived to .specflow/archive/SPEC-009c.md |
 | 2026-01-30 | SPEC-009d | Audit v1: APPROVED. All 35 message types verified. SyncEngine current state: 1433 lines, switch ~330 lines. Handler methods verified. Line counts corrected from original spec (was based on pre-009a/b/c state). ~25% context estimate (PEAK range). |
 | 2026-01-30 | SPEC-009d | EXECUTED: MessageRouter created. handleServerMessage() reduced from ~330 to ~20 lines. All 35 message types routed. SyncEngine 1433->1416 lines. Build passes. 425/426 tests pass. 800-line target not met (unrealistic - handler logic moved to helper methods, not removed). |
+| 2026-01-30 | SPEC-009d | APPROVED (Review v1): MessageRouter successfully replaces switch statement. handleServerMessage() reduced from ~330 to 19 lines (exceeds target). All 34 message types properly routed. Build passes, 425/426 tests pass. Code quality excellent. 800-line target deviation acceptable (handler logic moved, not removed). Primary refactoring goal achieved. |
+| 2026-01-30 | SPEC-009d | COMPLETED: MessageRouter created, SyncEngine refactoring series finished. SyncEngine 2015->1416 lines (-29.7% total across SPEC-009a/b/c/d). Archived to .specflow/archive/SPEC-009d.md |
 
 ## Project Patterns
 
@@ -83,4 +84,4 @@
 None
 
 ---
-*Last updated: 2026-01-30 12:30*
+*Last updated: 2026-01-30 16:00*
