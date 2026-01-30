@@ -91,7 +91,7 @@ function createInternalManagers(
   const connectionManager = new ConnectionManager({
     hlc: deps.core.hlc,
     writeCoalescingEnabled: config.writeCoalescingEnabled ?? true,
-    writeCoalescingOptions: config.writeCoalescingOptions,
+    writeCoalescingOptions: config.writeCoalescingOptions ?? {},
   });
 
   // TopicManager needs cluster and a sendToClient callback
@@ -633,7 +633,7 @@ function createClientHandlers(
     nodeId: config.nodeId,
     rateLimitingEnabled: config.rateLimitingEnabled ?? true,
     writeCoalescingEnabled: config.writeCoalescingEnabled ?? true,
-    writeCoalescingOptions: config.writeCoalescingOptions,
+    writeCoalescingOptions: config.writeCoalescingOptions ?? {},
     interceptors: config.interceptors || [],
     rateLimiter: {
       shouldAccept: () => deps.network.rateLimiter.shouldAccept(),
