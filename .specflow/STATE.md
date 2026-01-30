@@ -2,20 +2,19 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-011a
-- **Status:** review
-- **Next Step:** /sf:review
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** /sf:next
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-011a | Module Types + Core + Workers | high | audited | - |
-| 2 | SPEC-011b | Cluster + Storage Modules | high | draft | SPEC-011a |
-| 3 | SPEC-011c | Network Module (Deferred Startup) | high | draft | SPEC-011a |
-| 4 | SPEC-011d | Handlers Module + MessageRegistry | high | draft | SPEC-011a, SPEC-011b, SPEC-011c |
-| 5 | SPEC-011e | Search + Lifecycle + Final Assembly | high | draft | SPEC-011d |
-| 6 | SPEC-010 | Extract SyncEngine Message Handlers | medium | draft | - |
+| 1 | SPEC-011b | Cluster + Storage Modules | high | draft | - |
+| 2 | SPEC-011c | Network Module (Deferred Startup) | high | draft | - |
+| 3 | SPEC-011d | Handlers Module + MessageRegistry | high | draft | SPEC-011b, SPEC-011c |
+| 4 | SPEC-011e | Search + Lifecycle + Final Assembly | high | draft | SPEC-011d |
+| 5 | SPEC-010 | Extract SyncEngine Message Handlers | medium | draft | - |
 
 ## Decisions
 
@@ -74,6 +73,8 @@
 | 2026-01-30 | SPEC-011 | Split SPEC-011 into 5 parts: SPEC-011a (Types + Core + Workers), SPEC-011b (Cluster + Storage), SPEC-011c (Network Deferred Startup), SPEC-011d (Handlers + MessageRegistry), SPEC-011e (Search + Lifecycle + Assembly). Archived parent to .specflow/archive/SPEC-011.md |
 | 2026-01-30 | SPEC-011a | Audit v1: APPROVED. ~17% context (PEAK range). Corrected config field names (workerPoolEnabled, workerPoolConfig). Corrected line numbers. WorkerPool constructor fixed to match actual interface. |
 | 2026-01-30 | SPEC-011a | EXECUTED: Created modules directory with types.ts, core-module.ts, workers-module.ts, index.ts. ServerFactory.create() refactored to use module factories. Build passes. Tests pass. 22 lines removed from ServerFactory. 2 commits total. |
+| 2026-01-30 | SPEC-011a | APPROVED (Review v1): All 13 required acceptance criteria met. Module factory pattern cleanly implemented. Zero behavior change achieved. Foundation established for SPEC-011b through SPEC-011e. |
+| 2026-01-30 | SPEC-011a | COMPLETED: Module infrastructure created (types.ts, core-module.ts, workers-module.ts). ServerFactory.create() refactored. 22 lines removed. Archived to .specflow/archive/SPEC-011a.md |
 
 ## Project Patterns
 
@@ -94,4 +95,4 @@
 (none)
 
 ---
-*Last updated: 2026-01-30 13:46*
+*Last updated: 2026-01-30 14:00*
