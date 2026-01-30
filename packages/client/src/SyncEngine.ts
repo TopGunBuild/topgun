@@ -16,7 +16,6 @@ import type {
   OperationDroppedEvent,
 } from './BackpressureConfig';
 import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
-import { BackpressureError } from './errors/BackpressureError';
 import type { IConnectionProvider } from './types';
 import { ConflictResolverClient } from './ConflictResolverClient';
 import { WebSocketManager, BackpressureController, QueryManager, TopicManager, LockManager, WriteConcernManager, CounterManager, EntryProcessorClient, SearchClient, MerkleSyncHandler, ORMapSyncHandler, MessageRouter } from './sync';
