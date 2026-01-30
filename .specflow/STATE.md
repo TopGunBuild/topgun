@@ -2,15 +2,15 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:next
+- **Active Specification:** SPEC-011b
+- **Status:** review
+- **Next Step:** `/sf:review`
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-011b | Cluster + Storage Modules | high | draft | - |
+| 1 | SPEC-011b | Cluster + Storage Modules | high | review | - |
 | 2 | SPEC-011c | Network Module (Deferred Startup) | high | draft | - |
 | 3 | SPEC-011d | Handlers Module + MessageRegistry | high | draft | SPEC-011b, SPEC-011c |
 | 4 | SPEC-011e | Search + Lifecycle + Final Assembly | high | draft | SPEC-011d |
@@ -75,6 +75,8 @@
 | 2026-01-30 | SPEC-011a | EXECUTED: Created modules directory with types.ts, core-module.ts, workers-module.ts, index.ts. ServerFactory.create() refactored to use module factories. Build passes. Tests pass. 22 lines removed from ServerFactory. 2 commits total. |
 | 2026-01-30 | SPEC-011a | APPROVED (Review v1): All 13 required acceptance criteria met. Module factory pattern cleanly implemented. Zero behavior change achieved. Foundation established for SPEC-011b through SPEC-011e. |
 | 2026-01-30 | SPEC-011a | COMPLETED: Module infrastructure created (types.ts, core-module.ts, workers-module.ts). ServerFactory.create() refactored. 22 lines removed. Archived to .specflow/archive/SPEC-011a.md |
+| 2026-01-30 | SPEC-011b | Audit v1: APPROVED. ~20% context (PEAK range). All constructors verified. Line numbers corrected. ClusterModule interface updated (required vs optional fields). Code examples completed with all instantiation details. |
+| 2026-01-30 | SPEC-011b | EXECUTED: Created cluster-module.ts (78 lines) and storage-module.ts (47 lines). Updated types.ts with 6 interfaces. ServerFactory.ts refactored (-62 lines net). Build passes. 46+ tests pass. 5 commits total. |
 
 ## Project Patterns
 
@@ -95,4 +97,4 @@
 (none)
 
 ---
-*Last updated: 2026-01-30 14:00*
+*Last updated: 2026-01-30 17:00*
