@@ -24,6 +24,43 @@ import type { ObjectPool, PooledEventPayload } from '../memory';
 import type { TaskletScheduler } from '../tasklet';
 import type { WriteAckManager } from '../ack/WriteAckManager';
 import type { IServerStorage } from '../storage';
+import type {
+  AuthHandler,
+  OperationHandler,
+  BatchProcessingHandler,
+  GCHandler,
+  LwwSyncHandler,
+  ORMapSyncHandler,
+  QueryHandler,
+  QueryConversionHandler,
+  TopicHandler,
+  BroadcastHandler,
+  LockHandler,
+  PartitionHandler,
+  SearchHandler,
+  JournalHandler,
+  CounterHandlerAdapter,
+  EntryProcessorAdapter,
+  ResolverHandler,
+  WebSocketHandler,
+  ClientMessageHandler,
+  HeartbeatHandler,
+  PersistenceHandler,
+  OperationContextHandler,
+  WriteConcernHandler,
+} from '../coordinator';
+import type { MessageRegistry } from '../coordinator/message-registry';
+import type { CounterHandler } from '../handlers/CounterHandler';
+import type { EntryProcessorHandler } from '../handlers/EntryProcessorHandler';
+import type { ConflictResolverHandler } from '../handlers/ConflictResolverHandler';
+import type { TopicManager } from '../topic/TopicManager';
+import type { SearchCoordinator, ClusterSearchCoordinator } from '../search';
+import type { DistributedSubscriptionCoordinator } from '../subscriptions/DistributedSubscriptionCoordinator';
+import type { ConnectionManager } from '../coordinator/ConnectionManager';
+import type { EventJournalService } from '../EventJournalService';
+import type { CoalescingWriterOptions } from '../utils/CoalescingWriter';
+import type { IInterceptor } from '../interceptors/IInterceptor';
+import type { FTSConfig, DistributedSearchConfig } from '../types/search-types';
 
 // Core module - no dependencies
 export interface CoreModule {
@@ -143,8 +180,142 @@ export interface NetworkModule {
   start: () => void;  // DEFERRED startup - call AFTER assembly
 }
 
+// CRDT handlers - conflict resolution and operations
+export interface CRDTHandlers {
+  operationHandler: OperationHandler;
+  batchProcessingHandler: BatchProcessingHandler;
+  gcHandler: GCHandler;
+}
+
+// Sync handlers - merkle tree and OR-Map sync
+export interface SyncHandlers {
+  lwwSyncHandler: LwwSyncHandler;
+  orMapSyncHandler: ORMapSyncHandler;
+}
+
+// Query handlers - subscriptions and conversions
+export interface QueryHandlers {
+  queryHandler: QueryHandler;
+  queryConversionHandler: QueryConversionHandler;
+}
+
+// Messaging handlers - topics, broadcast
+export interface MessagingHandlers {
+  topicHandler: TopicHandler;
+  broadcastHandler: BroadcastHandler;
+}
+
+// Coordination handlers - locks, partitions
+export interface CoordinationHandlers {
+  lockHandler: LockHandler;
+  partitionHandler: PartitionHandler;
+}
+
+// Search handlers
+export interface SearchHandlers {
+  searchHandler: SearchHandler;
+}
+
+// Persistence handlers - journals, counters, entry processors
+export interface PersistenceHandlers {
+  journalHandler: JournalHandler;
+  counterHandler: CounterHandlerAdapter;
+  entryProcessorHandler: EntryProcessorAdapter;
+  resolverHandler: ResolverHandler;
+}
+
+// Client handlers - auth, websocket, client messages
+export interface ClientHandlers {
+  authHandler: AuthHandler;
+  webSocketHandler: WebSocketHandler;
+  clientMessageHandler: ClientMessageHandler;
+}
+
+// Server handlers - heartbeat, persistence, write concern
+export interface ServerHandlers {
+  heartbeatHandler: HeartbeatHandler;
+  persistenceHandler: PersistenceHandler;
+  operationContextHandler: OperationContextHandler;
+  writeConcernHandler: WriteConcernHandler;
+}
+
+// All handlers combined (ClusterHandlers excluded - not instantiated in current code)
+export interface HandlersModule {
+  crdt: CRDTHandlers;
+  sync: SyncHandlers;
+  query: QueryHandlers;
+  messaging: MessagingHandlers;
+  coordination: CoordinationHandlers;
+  search: SearchHandlers;
+  persistence: PersistenceHandlers;
+  client: ClientHandlers;
+  server: ServerHandlers;
+  messageRegistry: MessageRegistry;
+  // Internal managers created by handlers-module (not exposed)
+  _internal: {
+    topicManager: TopicManager;
+    searchCoordinator: SearchCoordinator;
+    clusterSearchCoordinator: ClusterSearchCoordinator;
+    distributedSubCoordinator: DistributedSubscriptionCoordinator;
+    connectionManager: ConnectionManager;
+    counterHandler: CounterHandler;
+    entryProcessorHandler: EntryProcessorHandler;
+    conflictResolverHandler: ConflictResolverHandler;
+    eventJournalService?: EventJournalService;
+    pendingClusterQueries: Map<string, any>;
+    pendingBatchOperations: Set<Promise<void>>;
+    journalSubscriptions: Map<string, any>;
+  };
+}
+
+export interface HandlersModuleConfig {
+  nodeId: string;
+  jwtSecret: string;
+  rateLimitingEnabled?: boolean;
+  writeCoalescingEnabled?: boolean;
+  writeCoalescingOptions?: Partial<CoalescingWriterOptions>;
+  interceptors?: IInterceptor[];
+  storage?: IServerStorage;
+  eventJournalEnabled?: boolean;
+  eventJournalConfig?: Partial<any>;
+  fullTextSearch?: Record<string, FTSConfig>;
+  distributedSearch?: DistributedSearchConfig;
+  defaultConsistency?: ConsistencyLevel;
+}
+
+// Dependencies from other modules
+export interface HandlersModuleDeps {
+  // From CoreModule
+  core: {
+    hlc: HLC;
+    metricsService: MetricsService;
+    securityManager: SecurityManager;
+    eventExecutor: StripedEventExecutor;
+    backpressure: BackpressureRegulator;
+  };
+  // From NetworkModule
+  network: {
+    rateLimiter: ConnectionRateLimiter;
+    rateLimitedLogger: RateLimitedLogger;
+  };
+  // From ClusterModule
+  cluster: {
+    cluster: ClusterManager;
+    partitionService: PartitionService;
+    replicationPipeline?: ReplicationPipeline;
+    lockManager: LockManager;
+    merkleTreeManager?: MerkleTreeManager;
+    readReplicaHandler?: ReadReplicaHandler;
+  };
+  // From StorageModule
+  storage: {
+    storageManager: StorageManager;
+    queryRegistry: QueryRegistry;
+    writeAckManager: WriteAckManager;
+  };
+}
+
 // Placeholder interfaces for later sub-specs
-export interface HandlersModule { /* defined in SPEC-011d */ }
 export interface SearchModule { /* defined in SPEC-011e */ }
 export interface LifecycleModule { /* defined in SPEC-011e */ }
 
