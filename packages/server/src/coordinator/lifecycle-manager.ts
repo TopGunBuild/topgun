@@ -12,7 +12,7 @@ export interface LifecycleManagerConfig {
 
     // HTTP/WebSocket servers
     httpServer: HttpServer;
-    metricsServer: HttpServer;
+    metricsServer?: HttpServer;  // Optional - only present if metricsPort configured
     wss: { close: () => void };
 
     // Core services

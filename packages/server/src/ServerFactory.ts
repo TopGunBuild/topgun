@@ -1,8 +1,5 @@
 import { createServer as createHttpServer, Server as HttpServer } from 'http';
-import { createServer as createHttpsServer, Server as HttpsServer } from 'https';
-import { readFileSync } from 'fs';
-import * as net from 'net';
-import { WebSocketServer, WebSocket } from 'ws';
+import { WebSocket } from 'ws';
 import { ConsistencyLevel, PARTITION_COUNT } from '@topgunbuild/core';
 import { ServerCoordinatorConfig, ServerCoordinator } from './ServerCoordinator';
 import { ClusterManager } from './cluster/ClusterManager';
@@ -11,9 +8,7 @@ import { TopicManager } from './topic/TopicManager';
 import { logger } from './utils/logger';
 import { validateJwtSecret } from './utils/validateConfig';
 import { coalescingPresets } from './utils/coalescingPresets';
-import { ConnectionRateLimiter } from './utils/ConnectionRateLimiter';
-import { RateLimitedLogger } from './utils/RateLimitedLogger';
-import { createCoreModule, createWorkersModule, createClusterModule, createStorageModule } from './modules';
+import { createCoreModule, createWorkersModule, createClusterModule, createStorageModule, createNetworkModule } from './modules';
 import type { MetricsService } from './monitoring/MetricsService';
 import { CounterHandler } from './handlers/CounterHandler';
 import { EntryProcessorHandler } from './handlers/EntryProcessorHandler';
@@ -25,7 +20,6 @@ import { createDebugEndpoints } from './debug';
 import { createBootstrapController, BootstrapController } from './bootstrap';
 import { createSettingsController, SettingsController } from './settings';
 import { DebugEndpoints } from './debug';
-import { ServerOptions as HttpsServerOptions } from 'https';
 
 import {
     AuthHandler,
@@ -132,15 +126,36 @@ export class ServerFactory {
 
         const { storageManager, queryRegistry, eventPayloadPool, taskletScheduler, writeAckManager } = storageMod;
 
-        const rateLimits = {
-            maxConnectionsPerSecond: config.maxConnectionsPerSecond ?? 100,
-            maxPendingConnections: config.maxPendingConnections ?? 1000,
-        };
-
-        const rateLimiter = new ConnectionRateLimiter({
-            ...rateLimits,
-            cooldownMs: 1000,
+        // Create workers module
+        const workers = createWorkersModule({
+            workerPoolEnabled: config.workerPoolEnabled,
+            workerPoolConfig: config.workerPoolConfig,
         });
+
+        const { workerPool, merkleWorker, crdtMergeWorker, serializationWorker } = workers;
+
+        // Create network module (does NOT start listening)
+        const network = createNetworkModule(
+            {
+                port: config.port,
+                tls: config.tls,
+                wsBacklog: config.wsBacklog,
+                wsCompression: config.wsCompression,
+                wsMaxPayload: config.wsMaxPayload ?? 64 * 1024 * 1024,
+                maxConnections: config.maxConnections,
+                serverTimeout: config.serverTimeout,
+                keepAliveTimeout: config.keepAliveTimeout,
+                headersTimeout: config.headersTimeout,
+                maxConnectionsPerSecond: config.maxConnectionsPerSecond,
+                maxPendingConnections: config.maxPendingConnections,
+                socketNoDelay: true,
+                socketKeepAlive: true,
+                socketKeepAliveMs: 60000,
+            },
+            {} // No dependencies currently required
+        );
+
+        const { httpServer, wss, rateLimiter, rateLimitedLogger } = network;
 
         const authHandler = new AuthHandler({
             jwtSecret,
@@ -150,31 +165,6 @@ export class ServerFactory {
                 }
             },
         });
-
-        const rateLimitedLogger = new RateLimitedLogger({ windowMs: 10000, maxPerWindow: 5 });
-
-        // Create workers module
-        const workers = createWorkersModule({
-            workerPoolEnabled: config.workerPoolEnabled,
-            workerPoolConfig: config.workerPoolConfig,
-        });
-
-        const { workerPool, merkleWorker, crdtMergeWorker, serializationWorker } = workers;
-
-        // HTTP Server Setup
-        let httpServer: HttpServer | HttpsServer;
-        if (config.tls?.enabled) {
-            const tlsOptions = ServerFactory.buildTLSOptions(config.tls);
-            httpServer = createHttpsServer(tlsOptions, (_req, res) => {
-                res.writeHead(200);
-                res.end('TopGun Server Running (Secure)');
-            });
-        } else {
-            httpServer = createHttpServer((_req, res) => {
-                res.writeHead(200);
-                res.end('TopGun Server Running');
-            });
-        }
 
         // Reuse existing endpoint creation logic
         const debugEndpoints = createDebugEndpoints({
@@ -200,37 +190,15 @@ export class ServerFactory {
             }
         });
 
-        const metricsServer = ServerFactory.createMetricsServer(
-            config.metricsPort ?? 9090,
-            bootstrapController,
-            settingsController,
-            debugEndpoints,
-            metricsService
-        );
-
-        const wss = new WebSocketServer({
-            server: httpServer,
-            backlog: config.wsBacklog ?? 511,
-            perMessageDeflate: config.wsCompression ?? false,
-            maxPayload: config.wsMaxPayload ?? 64 * 1024 * 1024,
-            skipUTF8Validation: true,
-        });
-
-        // HTTP Server Limits
-        httpServer.maxConnections = config.maxConnections ?? 10000;
-        httpServer.timeout = config.serverTimeout ?? 120000;
-        httpServer.keepAliveTimeout = config.keepAliveTimeout ?? 5000;
-        httpServer.headersTimeout = config.headersTimeout ?? 60000;
-
-        httpServer.on('connection', (socket: net.Socket) => {
-            socket.setNoDelay(true);
-            socket.setKeepAlive(true, 60000);
-        });
-
-        // Start HTTP Server listening
-        httpServer.listen(config.port, () => {
-            logger.info({ port: (httpServer.address() as any)?.port ?? config.port }, 'Server Coordinator listening');
-        });
+        // Create metrics server (does NOT start listening yet)
+        const metricsServer = config.metricsPort
+            ? ServerFactory.createMetricsServer(
+                bootstrapController,
+                settingsController,
+                debugEndpoints,
+                metricsService
+            )
+            : undefined;
 
         const topicManager = new TopicManager({
             cluster,
@@ -823,7 +791,8 @@ export class ServerFactory {
             clientMessageHandler,
         });
 
-        return new ServerCoordinator(config, {
+        // Assemble ServerCoordinator
+        const coordinator = new ServerCoordinator(config, {
             hlc,
             metricsService,
             securityManager,
@@ -886,28 +855,25 @@ export class ServerFactory {
             messageRegistry,
             lifecycleManager,
         });
-    }
 
-    // Helper to build TLS options
-    private static buildTLSOptions(config: any): HttpsServerOptions {
-        const options: HttpsServerOptions = {
-            cert: readFileSync(config.certPath),
-            key: readFileSync(config.keyPath),
-            minVersion: config.minVersion || 'TLSv1.2',
-        };
-        if (config.caCertPath) options.ca = readFileSync(config.caCertPath);
-        if (config.ciphers) options.ciphers = config.ciphers;
-        if (config.passphrase) options.passphrase = config.passphrase;
-        return options;
+        // DEFERRED STARTUP - now safe to listen
+        network.start();
+        if (metricsServer && config.metricsPort) {
+            metricsServer.listen(config.metricsPort, () => {
+                logger.info({ port: config.metricsPort }, 'Metrics server listening');
+            });
+        }
+
+        return coordinator;
     }
 
     private static createMetricsServer(
-        port: number,
         bootstrap: BootstrapController,
         settings: SettingsController,
         debug: DebugEndpoints,
         metrics: MetricsService
     ): HttpServer {
+        // Create server but do NOT start listening (deferred startup)
         const server = createHttpServer(async (req, res) => {
             const bootstrapHandled = await bootstrap.handle(req, res);
             if (bootstrapHandled) return;
@@ -933,10 +899,6 @@ export class ServerFactory {
                 res.statusCode = 404;
                 res.end();
             }
-        });
-
-        server.listen(port, () => {
-            logger.info({ port }, 'Metrics server listening');
         });
 
         return server;

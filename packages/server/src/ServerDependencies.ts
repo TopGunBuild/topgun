@@ -80,7 +80,7 @@ export interface ServerDependencies {
     debugEndpoints?: DebugEndpoints;
     bootstrapController: BootstrapController;
     settingsController: SettingsController;
-    metricsServer: HttpServer;
+    metricsServer?: HttpServer;  // Optional - only present if metricsPort configured
     wss: WebSocketServer;
     replicationPipeline?: ReplicationPipeline;
     lockManager: LockManager;
