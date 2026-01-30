@@ -1,8 +1,13 @@
+import type { Server as HttpServer } from 'node:http';
+import type { Server as HttpsServer } from 'node:https';
+import type { WebSocketServer } from 'ws';
 import type { HLC, PermissionPolicy, ConsistencyLevel, ReplicationConfig, FullTextIndexConfig } from '@topgunbuild/core';
 import type { MetricsService } from '../monitoring/MetricsService';
 import type { SecurityManager } from '../security/SecurityManager';
 import type { StripedEventExecutor } from '../utils/StripedEventExecutor';
 import type { BackpressureRegulator } from '../utils/BackpressureRegulator';
+import type { ConnectionRateLimiter } from '../utils/ConnectionRateLimiter';
+import type { RateLimitedLogger } from '../utils/RateLimitedLogger';
 import type { WorkerPool, MerkleWorker, CRDTMergeWorker, SerializationWorker, WorkerPoolConfig } from '../workers';
 import type { ClusterManager } from '../cluster/ClusterManager';
 import type { PartitionService } from '../cluster/PartitionService';
@@ -12,7 +17,7 @@ import type { MerkleTreeManager } from '../cluster/MerkleTreeManager';
 import type { PartitionReassigner } from '../cluster/PartitionReassigner';
 import type { ReadReplicaHandler } from '../cluster/ReadReplicaHandler';
 import type { RepairScheduler } from '../cluster/RepairScheduler';
-import type { ClusterTLSConfig } from '../types/TLSConfig';
+import type { TLSConfig, ClusterTLSConfig } from '../types/TLSConfig';
 import type { StorageManager } from '../coordinator/storage-manager';
 import type { QueryRegistry } from '../query/QueryRegistry';
 import type { ObjectPool, PooledEventPayload } from '../memory';
@@ -106,8 +111,39 @@ export interface StorageModule {
   writeAckManager: WriteAckManager;
 }
 
+// Network module - HTTP, WSS, rate limiting
+export interface NetworkModuleConfig {
+  port: number;
+  tls?: TLSConfig;
+  wsBacklog?: number;
+  wsCompression?: boolean;
+  wsMaxPayload?: number;
+  maxConnections?: number;
+  serverTimeout?: number;
+  keepAliveTimeout?: number;
+  headersTimeout?: number;
+  maxConnectionsPerSecond?: number;
+  maxPendingConnections?: number;
+  // Socket-level configuration
+  socketNoDelay?: boolean;       // Default: true
+  socketKeepAlive?: boolean;     // Default: true
+  socketKeepAliveMs?: number;    // Default: 60000
+}
+
+export interface NetworkModuleDeps {
+  // Currently no dependencies required for HTTP/WSS/RateLimiter creation
+  // metricsService could be added in future for connection tracking metrics
+}
+
+export interface NetworkModule {
+  httpServer: HttpServer | HttpsServer;
+  wss: WebSocketServer;
+  rateLimiter: ConnectionRateLimiter;
+  rateLimitedLogger: RateLimitedLogger;
+  start: () => void;  // DEFERRED startup - call AFTER assembly
+}
+
 // Placeholder interfaces for later sub-specs
-export interface NetworkModule { /* defined in SPEC-011c */ }
 export interface HandlersModule { /* defined in SPEC-011d */ }
 export interface SearchModule { /* defined in SPEC-011e */ }
 export interface LifecycleModule { /* defined in SPEC-011e */ }
