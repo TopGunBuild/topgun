@@ -2,14 +2,20 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-011a
+- **Status:** review
+- **Next Step:** /sf:review
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
+| 1 | SPEC-011a | Module Types + Core + Workers | high | audited | - |
+| 2 | SPEC-011b | Cluster + Storage Modules | high | draft | SPEC-011a |
+| 3 | SPEC-011c | Network Module (Deferred Startup) | high | draft | SPEC-011a |
+| 4 | SPEC-011d | Handlers Module + MessageRegistry | high | draft | SPEC-011a, SPEC-011b, SPEC-011c |
+| 5 | SPEC-011e | Search + Lifecycle + Final Assembly | high | draft | SPEC-011d |
+| 6 | SPEC-010 | Extract SyncEngine Message Handlers | medium | draft | - |
 
 ## Decisions
 
@@ -65,6 +71,9 @@
 | 2026-01-30 | SPEC-009d | EXECUTED: MessageRouter created. handleServerMessage() reduced from ~330 to ~20 lines. All 35 message types routed. SyncEngine 1433->1416 lines. Build passes. 425/426 tests pass. 800-line target not met (unrealistic - handler logic moved to helper methods, not removed). |
 | 2026-01-30 | SPEC-009d | APPROVED (Review v1): MessageRouter successfully replaces switch statement. handleServerMessage() reduced from ~330 to 19 lines (exceeds target). All 34 message types properly routed. Build passes, 425/426 tests pass. Code quality excellent. 800-line target deviation acceptable (handler logic moved, not removed). Primary refactoring goal achieved. |
 | 2026-01-30 | SPEC-009d | COMPLETED: MessageRouter created, SyncEngine refactoring series finished. SyncEngine 2015->1416 lines (-29.7% total across SPEC-009a/b/c/d). Archived to .specflow/archive/SPEC-009d.md |
+| 2026-01-30 | SPEC-011 | Split SPEC-011 into 5 parts: SPEC-011a (Types + Core + Workers), SPEC-011b (Cluster + Storage), SPEC-011c (Network Deferred Startup), SPEC-011d (Handlers + MessageRegistry), SPEC-011e (Search + Lifecycle + Assembly). Archived parent to .specflow/archive/SPEC-011.md |
+| 2026-01-30 | SPEC-011a | Audit v1: APPROVED. ~17% context (PEAK range). Corrected config field names (workerPoolEnabled, workerPoolConfig). Corrected line numbers. WorkerPool constructor fixed to match actual interface. |
+| 2026-01-30 | SPEC-011a | EXECUTED: Created modules directory with types.ts, core-module.ts, workers-module.ts, index.ts. ServerFactory.create() refactored to use module factories. Build passes. Tests pass. 22 lines removed from ServerFactory. 2 commits total. |
 
 ## Project Patterns
 
@@ -78,10 +87,11 @@
 - Test harness pattern: ServerTestHarness provides controlled access to internal handlers for tests
 - Timer cleanup pattern: handlers with timers implement stop() method, called by LifecycleManager during shutdown
 - Message routing pattern: MessageRouter provides declarative type-based routing for server messages
+- Module factory pattern: each domain gets its own factory function with explicit dependency injection
 
 ## Warnings
 
-None
+(none)
 
 ---
-*Last updated: 2026-01-30 16:00*
+*Last updated: 2026-01-30 13:46*
