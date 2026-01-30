@@ -19,8 +19,8 @@ import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 import { BackpressureError } from './errors/BackpressureError';
 import type { IConnectionProvider } from './types';
 import { ConflictResolverClient } from './ConflictResolverClient';
-import { WebSocketManager, BackpressureController, QueryManager, TopicManager, LockManager, WriteConcernManager, CounterManager, EntryProcessorClient, SearchClient, MerkleSyncHandler, ORMapSyncHandler } from './sync';
-import type { SearchResult } from './sync';
+import { WebSocketManager, BackpressureController, QueryManager, TopicManager, LockManager, WriteConcernManager, CounterManager, EntryProcessorClient, SearchClient, MerkleSyncHandler, ORMapSyncHandler, MessageRouter } from './sync';
+import type { SearchResult, IMessageRouter } from './sync';
 
 // Re-export SearchResult from sync module for backwards compatibility
 export type { SearchResult } from './sync';
@@ -128,6 +128,9 @@ export class SyncEngine {
 
   // ORMapSyncHandler handles ORMap sync protocol messages (Phase 09c)
   private readonly orMapSyncHandler: ORMapSyncHandler;
+
+  // MessageRouter handles type-based message routing (Phase 09d)
+  private readonly messageRouter: IMessageRouter;
 
   private opLog: OpLogEntry[] = [];
   private maps: Map<string, LWWMap<any, any> | ORMap<any, any>> = new Map();
@@ -272,10 +275,134 @@ export class SyncEngine {
     // Initialize Conflict Resolver client (Phase 5.05)
     this.conflictResolverClient = new ConflictResolverClient(this);
 
+    // Initialize MessageRouter and register all handlers (Phase 09d)
+    this.messageRouter = new MessageRouter({
+      onUnhandled: (msg) => logger.warn({ type: msg?.type }, 'Unhandled message type'),
+    });
+    this.registerMessageHandlers();
+
     // Start connection
     this.webSocketManager.connect();
 
     this.loadOpLog();
+  }
+
+  // ============================================
+  // Message Handler Registration (Phase 09d)
+  // ============================================
+
+  /**
+   * Register all message handlers with the MessageRouter.
+   * Called during construction.
+   */
+  private registerMessageHandlers(): void {
+    this.messageRouter.registerHandlers({
+      // AUTH handlers
+      'AUTH_REQUIRED': () => this.sendAuth(),
+      'AUTH_ACK': () => this.handleAuthAck(),
+      'AUTH_FAIL': (msg) => this.handleAuthFail(msg),
+
+      // HEARTBEAT - handled by WebSocketManager, no-op here
+      'PONG': () => {},
+
+      // SYNC handlers
+      'OP_ACK': (msg) => this.handleOpAck(msg),
+      'SYNC_RESP_ROOT': (msg) => this.merkleSyncHandler.handleSyncRespRoot(msg.payload),
+      'SYNC_RESP_BUCKETS': (msg) => this.merkleSyncHandler.handleSyncRespBuckets(msg.payload),
+      'SYNC_RESP_LEAF': (msg) => this.merkleSyncHandler.handleSyncRespLeaf(msg.payload),
+      'SYNC_RESET_REQUIRED': (msg) => this.merkleSyncHandler.handleSyncResetRequired(msg.payload),
+
+      // ORMAP SYNC handlers
+      'ORMAP_SYNC_RESP_ROOT': (msg) => this.orMapSyncHandler.handleORMapSyncRespRoot(msg.payload),
+      'ORMAP_SYNC_RESP_BUCKETS': (msg) => this.orMapSyncHandler.handleORMapSyncRespBuckets(msg.payload),
+      'ORMAP_SYNC_RESP_LEAF': (msg) => this.orMapSyncHandler.handleORMapSyncRespLeaf(msg.payload),
+      'ORMAP_DIFF_RESPONSE': (msg) => this.orMapSyncHandler.handleORMapDiffResponse(msg.payload),
+
+      // QUERY handlers
+      'QUERY_RESP': (msg) => this.handleQueryResp(msg),
+      'QUERY_UPDATE': (msg) => this.handleQueryUpdate(msg),
+
+      // EVENT handlers
+      'SERVER_EVENT': (msg) => this.handleServerEvent(msg),
+      'SERVER_BATCH_EVENT': (msg) => this.handleServerBatchEvent(msg),
+
+      // TOPIC handlers
+      'TOPIC_MESSAGE': (msg) => {
+        const { topic, data, publisherId, timestamp } = msg.payload;
+        this.topicManager.handleTopicMessage(topic, data, publisherId, timestamp);
+      },
+
+      // LOCK handlers
+      'LOCK_GRANTED': (msg) => {
+        const { requestId, fencingToken } = msg.payload;
+        this.lockManager.handleLockGranted(requestId, fencingToken);
+      },
+      'LOCK_RELEASED': (msg) => {
+        const { requestId, success } = msg.payload;
+        this.lockManager.handleLockReleased(requestId, success);
+      },
+
+      // GC handler
+      'GC_PRUNE': (msg) => this.handleGcPrune(msg),
+
+      // COUNTER handlers
+      'COUNTER_UPDATE': (msg) => {
+        const { name, state } = msg.payload;
+        logger.debug({ name }, 'Received COUNTER_UPDATE');
+        this.counterManager.handleCounterUpdate(name, state);
+      },
+      'COUNTER_RESPONSE': (msg) => {
+        const { name, state } = msg.payload;
+        logger.debug({ name }, 'Received COUNTER_RESPONSE');
+        this.counterManager.handleCounterUpdate(name, state);
+      },
+
+      // PROCESSOR handlers
+      'ENTRY_PROCESS_RESPONSE': (msg) => {
+        logger.debug({ requestId: msg.requestId, success: msg.success }, 'Received ENTRY_PROCESS_RESPONSE');
+        this.entryProcessorClient.handleEntryProcessResponse(msg);
+      },
+      'ENTRY_PROCESS_BATCH_RESPONSE': (msg) => {
+        logger.debug({ requestId: msg.requestId }, 'Received ENTRY_PROCESS_BATCH_RESPONSE');
+        this.entryProcessorClient.handleEntryProcessBatchResponse(msg);
+      },
+
+      // RESOLVER handlers
+      'REGISTER_RESOLVER_RESPONSE': (msg) => {
+        logger.debug({ requestId: msg.requestId, success: msg.success }, 'Received REGISTER_RESOLVER_RESPONSE');
+        this.conflictResolverClient.handleRegisterResponse(msg);
+      },
+      'UNREGISTER_RESOLVER_RESPONSE': (msg) => {
+        logger.debug({ requestId: msg.requestId, success: msg.success }, 'Received UNREGISTER_RESOLVER_RESPONSE');
+        this.conflictResolverClient.handleUnregisterResponse(msg);
+      },
+      'LIST_RESOLVERS_RESPONSE': (msg) => {
+        logger.debug({ requestId: msg.requestId }, 'Received LIST_RESOLVERS_RESPONSE');
+        this.conflictResolverClient.handleListResponse(msg);
+      },
+      'MERGE_REJECTED': (msg) => {
+        logger.debug({ mapName: msg.mapName, key: msg.key, reason: msg.reason }, 'Received MERGE_REJECTED');
+        this.conflictResolverClient.handleMergeRejected(msg);
+      },
+
+      // SEARCH handlers
+      'SEARCH_RESP': (msg) => {
+        logger.debug({ requestId: msg.payload?.requestId, resultCount: msg.payload?.results?.length }, 'Received SEARCH_RESP');
+        this.searchClient.handleSearchResponse(msg.payload);
+      },
+      'SEARCH_UPDATE': (msg) => {
+        logger.debug({
+          subscriptionId: msg.payload?.subscriptionId,
+          key: msg.payload?.key,
+          type: msg.payload?.type
+        }, 'Received SEARCH_UPDATE');
+        // SEARCH_UPDATE is handled by SearchHandle via emitMessage, no-op here
+      },
+
+      // HYBRID handlers
+      'HYBRID_QUERY_RESP': (msg) => this.handleHybridQueryResponse(msg.payload),
+      'HYBRID_QUERY_DELTA': (msg) => this.handleHybridQueryDelta(msg.payload),
+    });
   }
 
   // ============================================
@@ -601,330 +728,186 @@ export class SyncEngine {
     // Emit to generic listeners (used by EventJournalReader)
     this.emitMessage(message);
 
-    switch (message.type) {
-      case 'BATCH': {
-        // Unbatch and process each message
-        // Format: [4 bytes: count][4 bytes: len1][msg1][4 bytes: len2][msg2]...
-        const batchData = message.data as Uint8Array;
-        const view = new DataView(batchData.buffer, batchData.byteOffset, batchData.byteLength);
-        let offset = 0;
-
-        const count = view.getUint32(offset, true);
-        offset += 4;
-
-        for (let i = 0; i < count; i++) {
-          const msgLen = view.getUint32(offset, true);
-          offset += 4;
-
-          const msgData = batchData.slice(offset, offset + msgLen);
-          offset += msgLen;
-
-          const innerMsg = deserialize(msgData);
-          await this.handleServerMessage(innerMsg);
-        }
-        break;
-      }
-
-      case 'AUTH_REQUIRED':
-        this.sendAuth();
-        break;
-
-      case 'AUTH_ACK': {
-        logger.info('Authenticated successfully');
-        const wasAuthenticated = this.isAuthenticated();
-
-        // Transition to SYNCING state
-        this.stateMachine.transition(SyncState.SYNCING);
-
-        // Reset backoff on successful auth
-        this.webSocketManager.resetBackoff();
-
-        this.syncPendingOperations();
-
-        // Flush any queued topic messages from offline period (delegates to TopicManager)
-        this.topicManager.flushTopicQueue();
-
-        // Only re-subscribe on first authentication to prevent UI flickering
-        if (!wasAuthenticated) {
-          this.webSocketManager.startHeartbeat();
-          this.startMerkleSync();
-          // Re-subscribe all queries via QueryManager
-          this.queryManager.resubscribeAll();
-          // Re-subscribe topics via TopicManager
-          this.topicManager.resubscribeAll();
-        }
-
-        // After initial sync setup, transition to CONNECTED
-        // In a real implementation, you might wait for SYNC_COMPLETE message
-        this.stateMachine.transition(SyncState.CONNECTED);
-        break;
-      }
-
-      case 'PONG': {
-        // PONG is handled internally by WebSocketManager for RTT tracking
-        // Message still comes here for any additional processing if needed
-        break;
-      }
-
-      case 'AUTH_FAIL':
-        logger.error({ error: message.error }, 'Authentication failed');
-        this.authToken = null; // Clear invalid token
-        // Stay in AUTHENTICATING or go to ERROR depending on severity
-        // For now, let the connection close naturally or retry with new token
-        break;
-
-      case 'OP_ACK': {
-        const { lastId, achievedLevel, results } = message.payload;
-        logger.info({ lastId, achievedLevel, hasResults: !!results }, 'Received ACK for ops');
-
-        // Handle per-operation results if available (Write Concern Phase 5.01)
-        if (results && Array.isArray(results)) {
-          for (const result of results) {
-            const op = this.opLog.find(o => o.id === result.opId);
-            if (op && !op.synced) {
-              op.synced = true;
-              logger.debug({ opId: result.opId, achievedLevel: result.achievedLevel, success: result.success }, 'Op ACK with Write Concern');
-            }
-            // Resolve pending Write Concern promise if exists (delegates to WriteConcernManager)
-            this.writeConcernManager.resolveWriteConcernPromise(result.opId, result);
-          }
-        }
-
-        // Backwards compatible: mark all ops up to lastId as synced
-        let maxSyncedId = -1;
-        let ackedCount = 0;
-        this.opLog.forEach(op => {
-          if (op.id && op.id <= lastId) {
-            if (!op.synced) {
-              ackedCount++;
-            }
-            op.synced = true;
-            const idNum = parseInt(op.id, 10);
-            if (!isNaN(idNum) && idNum > maxSyncedId) {
-              maxSyncedId = idNum;
-            }
-          }
-        });
-        if (maxSyncedId !== -1) {
-          this.storageAdapter.markOpsSynced(maxSyncedId).catch(err => logger.error({ err }, 'Failed to mark ops synced'));
-        }
-        // Check low water mark after ACKs reduce pending count (delegates to BackpressureController)
-        if (ackedCount > 0) {
-          this.backpressureController.checkLowWaterMark();
-        }
-        break;
-      }
-
-      case 'LOCK_GRANTED': {
-        const { requestId, fencingToken } = message.payload;
-        this.lockManager.handleLockGranted(requestId, fencingToken);
-        break;
-      }
-
-      case 'LOCK_RELEASED': {
-        const { requestId, success } = message.payload;
-        this.lockManager.handleLockReleased(requestId, success);
-        break;
-      }
-
-      case 'QUERY_RESP': {
-        const { queryId, results, nextCursor, hasMore, cursorStatus } = message.payload;
-        const query = this.queryManager.getQueries().get(queryId);
-        if (query) {
-          query.onResult(results, 'server');
-          // Phase 14.1: Update pagination info
-          query.updatePaginationInfo({ nextCursor, hasMore, cursorStatus });
-        }
-        break;
-      }
-
-      case 'QUERY_UPDATE': {
-        const { queryId, key, value, type } = message.payload;
-        const query = this.queryManager.getQueries().get(queryId);
-        if (query) {
-          query.onUpdate(key, type === 'REMOVE' ? null : value);
-        }
-        break;
-      }
-
-      case 'SERVER_EVENT': {
-        // Modified to support ORMap
-        const { mapName, eventType, key, record, orRecord, orTag } = message.payload;
-        await this.applyServerEvent(mapName, eventType, key, record, orRecord, orTag);
-        break;
-      }
-
-      case 'SERVER_BATCH_EVENT': {
-        // === OPTIMIZATION: Batch event processing ===
-        // Server sends multiple events in a single message for efficiency
-        const { events } = message.payload;
-        for (const event of events) {
-          await this.applyServerEvent(
-            event.mapName,
-            event.eventType,
-            event.key,
-            event.record,
-            event.orRecord,
-            event.orTag
-          );
-        }
-        break;
-      }
-
-      case 'TOPIC_MESSAGE': {
-        const { topic, data, publisherId, timestamp } = message.payload;
-        this.topicManager.handleTopicMessage(topic, data, publisherId, timestamp);
-        break;
-      }
-
-      case 'GC_PRUNE': {
-        const { olderThan } = message.payload;
-        logger.info({ olderThan: olderThan.millis }, 'Received GC_PRUNE request');
-
-        for (const [name, map] of this.maps) {
-          if (map instanceof LWWMap) {
-            const removedKeys = map.prune(olderThan);
-            for (const key of removedKeys) {
-              await this.storageAdapter.remove(`${name}:${key}`);
-            }
-            if (removedKeys.length > 0) {
-              logger.info({ mapName: name, count: removedKeys.length }, 'Pruned tombstones from LWWMap');
-            }
-          } else if (map instanceof ORMap) {
-            const removedTags = map.prune(olderThan);
-            if (removedTags.length > 0) {
-              logger.info({ mapName: name, count: removedTags.length }, 'Pruned tombstones from ORMap');
-            }
-          }
-        }
-        break;
-      }
-
-      case 'SYNC_RESET_REQUIRED': {
-        await this.merkleSyncHandler.handleSyncResetRequired(message.payload);
-        break;
-      }
-
-      case 'SYNC_RESP_ROOT': {
-        await this.merkleSyncHandler.handleSyncRespRoot(message.payload);
-        break;
-      }
-
-      case 'SYNC_RESP_BUCKETS': {
-        this.merkleSyncHandler.handleSyncRespBuckets(message.payload);
-        break;
-      }
-
-      case 'SYNC_RESP_LEAF': {
-        await this.merkleSyncHandler.handleSyncRespLeaf(message.payload);
-        break;
-      }
-
-      // ============ ORMap Sync Message Handlers ============
-
-      case 'ORMAP_SYNC_RESP_ROOT': {
-        await this.orMapSyncHandler.handleORMapSyncRespRoot(message.payload);
-        break;
-      }
-
-      case 'ORMAP_SYNC_RESP_BUCKETS': {
-        await this.orMapSyncHandler.handleORMapSyncRespBuckets(message.payload);
-        break;
-      }
-
-      case 'ORMAP_SYNC_RESP_LEAF': {
-        await this.orMapSyncHandler.handleORMapSyncRespLeaf(message.payload);
-        break;
-      }
-
-      case 'ORMAP_DIFF_RESPONSE': {
-        await this.orMapSyncHandler.handleORMapDiffResponse(message.payload);
-        break;
-      }
-
-      // ============ PN Counter Message Handlers (Phase 5.2) ============
-
-      case 'COUNTER_UPDATE': {
-        const { name, state } = message.payload;
-        logger.debug({ name }, 'Received COUNTER_UPDATE');
-        this.counterManager.handleCounterUpdate(name, state);
-        break;
-      }
-
-      case 'COUNTER_RESPONSE': {
-        // Initial counter state response
-        const { name, state } = message.payload;
-        logger.debug({ name }, 'Received COUNTER_RESPONSE');
-        this.counterManager.handleCounterUpdate(name, state);
-        break;
-      }
-
-      // ============ Entry Processor Message Handlers (Phase 5.03) ============
-
-      case 'ENTRY_PROCESS_RESPONSE': {
-        logger.debug({ requestId: message.requestId, success: message.success }, 'Received ENTRY_PROCESS_RESPONSE');
-        this.entryProcessorClient.handleEntryProcessResponse(message);
-        break;
-      }
-
-      case 'ENTRY_PROCESS_BATCH_RESPONSE': {
-        logger.debug({ requestId: message.requestId }, 'Received ENTRY_PROCESS_BATCH_RESPONSE');
-        this.entryProcessorClient.handleEntryProcessBatchResponse(message);
-        break;
-      }
-
-      // ============ Conflict Resolver Message Handlers (Phase 5.05) ============
-
-      case 'REGISTER_RESOLVER_RESPONSE': {
-        logger.debug({ requestId: message.requestId, success: message.success }, 'Received REGISTER_RESOLVER_RESPONSE');
-        this.conflictResolverClient.handleRegisterResponse(message);
-        break;
-      }
-
-      case 'UNREGISTER_RESOLVER_RESPONSE': {
-        logger.debug({ requestId: message.requestId, success: message.success }, 'Received UNREGISTER_RESOLVER_RESPONSE');
-        this.conflictResolverClient.handleUnregisterResponse(message);
-        break;
-      }
-
-      case 'LIST_RESOLVERS_RESPONSE': {
-        logger.debug({ requestId: message.requestId }, 'Received LIST_RESOLVERS_RESPONSE');
-        this.conflictResolverClient.handleListResponse(message);
-        break;
-      }
-
-      case 'MERGE_REJECTED': {
-        logger.debug({ mapName: message.mapName, key: message.key, reason: message.reason }, 'Received MERGE_REJECTED');
-        this.conflictResolverClient.handleMergeRejected(message);
-        break;
-      }
-
-      // ============ Full-Text Search Message Handlers (Phase 11.1a) ============
-
-      case 'SEARCH_RESP': {
-        logger.debug({ requestId: message.payload?.requestId, resultCount: message.payload?.results?.length }, 'Received SEARCH_RESP');
-        this.searchClient.handleSearchResponse(message.payload);
-        break;
-      }
-
-      // ============ Live Search Message Handlers (Phase 11.1b) ============
-
-      case 'SEARCH_UPDATE': {
-        logger.debug({
-          subscriptionId: message.payload?.subscriptionId,
-          key: message.payload?.key,
-          type: message.payload?.type
-        }, 'Received SEARCH_UPDATE');
-        // SEARCH_UPDATE is handled by SearchHandle via emitMessage
-        // No additional processing needed here
-        break;
-      }
+    // Handle BATCH specially (recursive unbatch)
+    if (message.type === 'BATCH') {
+      await this.handleBatch(message);
+      return;
     }
 
+    // Route to registered handler
+    await this.messageRouter.route(message);
+
+    // Update HLC if message has timestamp
     if (message.timestamp) {
       this.hlc.update(message.timestamp);
       this.lastSyncTimestamp = message.timestamp.millis;
       await this.saveOpLog();
+    }
+  }
+
+  // ============================================
+  // Message Handler Helpers (extracted from switch)
+  // ============================================
+
+  private async handleBatch(message: any): Promise<void> {
+    // Unbatch and process each message
+    // Format: [4 bytes: count][4 bytes: len1][msg1][4 bytes: len2][msg2]...
+    const batchData = message.data as Uint8Array;
+    const view = new DataView(batchData.buffer, batchData.byteOffset, batchData.byteLength);
+    let offset = 0;
+
+    const count = view.getUint32(offset, true);
+    offset += 4;
+
+    for (let i = 0; i < count; i++) {
+      const msgLen = view.getUint32(offset, true);
+      offset += 4;
+
+      const msgData = batchData.slice(offset, offset + msgLen);
+      offset += msgLen;
+
+      const innerMsg = deserialize(msgData);
+      await this.handleServerMessage(innerMsg);
+    }
+  }
+
+  private handleAuthAck(): void {
+    logger.info('Authenticated successfully');
+    const wasAuthenticated = this.isAuthenticated();
+
+    // Transition to SYNCING state
+    this.stateMachine.transition(SyncState.SYNCING);
+
+    // Reset backoff on successful auth
+    this.webSocketManager.resetBackoff();
+
+    this.syncPendingOperations();
+
+    // Flush any queued topic messages from offline period (delegates to TopicManager)
+    this.topicManager.flushTopicQueue();
+
+    // Only re-subscribe on first authentication to prevent UI flickering
+    if (!wasAuthenticated) {
+      this.webSocketManager.startHeartbeat();
+      this.startMerkleSync();
+      // Re-subscribe all queries via QueryManager
+      this.queryManager.resubscribeAll();
+      // Re-subscribe topics via TopicManager
+      this.topicManager.resubscribeAll();
+    }
+
+    // After initial sync setup, transition to CONNECTED
+    // In a real implementation, you might wait for SYNC_COMPLETE message
+    this.stateMachine.transition(SyncState.CONNECTED);
+  }
+
+  private handleAuthFail(message: any): void {
+    logger.error({ error: message.error }, 'Authentication failed');
+    this.authToken = null; // Clear invalid token
+    // Stay in AUTHENTICATING or go to ERROR depending on severity
+    // For now, let the connection close naturally or retry with new token
+  }
+
+  private handleOpAck(message: any): void {
+    const { lastId, achievedLevel, results } = message.payload;
+    logger.info({ lastId, achievedLevel, hasResults: !!results }, 'Received ACK for ops');
+
+    // Handle per-operation results if available (Write Concern Phase 5.01)
+    if (results && Array.isArray(results)) {
+      for (const result of results) {
+        const op = this.opLog.find(o => o.id === result.opId);
+        if (op && !op.synced) {
+          op.synced = true;
+          logger.debug({ opId: result.opId, achievedLevel: result.achievedLevel, success: result.success }, 'Op ACK with Write Concern');
+        }
+        // Resolve pending Write Concern promise if exists (delegates to WriteConcernManager)
+        this.writeConcernManager.resolveWriteConcernPromise(result.opId, result);
+      }
+    }
+
+    // Backwards compatible: mark all ops up to lastId as synced
+    let maxSyncedId = -1;
+    let ackedCount = 0;
+    this.opLog.forEach(op => {
+      if (op.id && op.id <= lastId) {
+        if (!op.synced) {
+          ackedCount++;
+        }
+        op.synced = true;
+        const idNum = parseInt(op.id, 10);
+        if (!isNaN(idNum) && idNum > maxSyncedId) {
+          maxSyncedId = idNum;
+        }
+      }
+    });
+    if (maxSyncedId !== -1) {
+      this.storageAdapter.markOpsSynced(maxSyncedId).catch(err => logger.error({ err }, 'Failed to mark ops synced'));
+    }
+    // Check low water mark after ACKs reduce pending count (delegates to BackpressureController)
+    if (ackedCount > 0) {
+      this.backpressureController.checkLowWaterMark();
+    }
+  }
+
+  private handleQueryResp(message: any): void {
+    const { queryId, results, nextCursor, hasMore, cursorStatus } = message.payload;
+    const query = this.queryManager.getQueries().get(queryId);
+    if (query) {
+      query.onResult(results, 'server');
+      // Phase 14.1: Update pagination info
+      query.updatePaginationInfo({ nextCursor, hasMore, cursorStatus });
+    }
+  }
+
+  private handleQueryUpdate(message: any): void {
+    const { queryId, key, value, type } = message.payload;
+    const query = this.queryManager.getQueries().get(queryId);
+    if (query) {
+      query.onUpdate(key, type === 'REMOVE' ? null : value);
+    }
+  }
+
+  private async handleServerEvent(message: any): Promise<void> {
+    // Modified to support ORMap
+    const { mapName, eventType, key, record, orRecord, orTag } = message.payload;
+    await this.applyServerEvent(mapName, eventType, key, record, orRecord, orTag);
+  }
+
+  private async handleServerBatchEvent(message: any): Promise<void> {
+    // === OPTIMIZATION: Batch event processing ===
+    // Server sends multiple events in a single message for efficiency
+    const { events } = message.payload;
+    for (const event of events) {
+      await this.applyServerEvent(
+        event.mapName,
+        event.eventType,
+        event.key,
+        event.record,
+        event.orRecord,
+        event.orTag
+      );
+    }
+  }
+
+  private async handleGcPrune(message: any): Promise<void> {
+    const { olderThan } = message.payload;
+    logger.info({ olderThan: olderThan.millis }, 'Received GC_PRUNE request');
+
+    for (const [name, map] of this.maps) {
+      if (map instanceof LWWMap) {
+        const removedKeys = map.prune(olderThan);
+        for (const key of removedKeys) {
+          await this.storageAdapter.remove(`${name}:${key}`);
+        }
+        if (removedKeys.length > 0) {
+          logger.info({ mapName: name, count: removedKeys.length }, 'Pruned tombstones from LWWMap');
+        }
+      } else if (map instanceof ORMap) {
+        const removedTags = map.prune(olderThan);
+        if (removedTags.length > 0) {
+          logger.info({ mapName: name, count: removedTags.length }, 'Pruned tombstones from ORMap');
+        }
+      }
     }
   }
 
