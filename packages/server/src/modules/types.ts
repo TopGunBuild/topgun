@@ -56,7 +56,7 @@ import type { ConflictResolverHandler } from '../handlers/ConflictResolverHandle
 import type { TopicManager } from '../topic/TopicManager';
 import type { SearchCoordinator, ClusterSearchCoordinator } from '../search';
 import type { DistributedSubscriptionCoordinator } from '../subscriptions/DistributedSubscriptionCoordinator';
-import type { ConnectionManager } from '../coordinator/ConnectionManager';
+import type { ConnectionManager } from '../coordinator/connection-manager';
 import type { EventJournalService } from '../EventJournalService';
 import type { CoalescingWriterOptions } from '../utils/CoalescingWriter';
 import type { IInterceptor } from '../interceptors/IInterceptor';

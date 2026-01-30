@@ -53,7 +53,7 @@ import { ConflictResolverHandler } from '../handlers/ConflictResolverHandler';
 import { TopicManager } from '../topic/TopicManager';
 import { SearchCoordinator, ClusterSearchCoordinator } from '../search';
 import { DistributedSubscriptionCoordinator } from '../subscriptions/DistributedSubscriptionCoordinator';
-import { ConnectionManager } from '../coordinator/ConnectionManager';
+import { ConnectionManager } from '../coordinator/connection-manager';
 import { EventJournalService } from '../EventJournalService';
 
 import type {
