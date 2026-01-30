@@ -1,7 +1,7 @@
 import type { Server as HttpServer } from 'node:http';
 import type { Server as HttpsServer } from 'node:https';
 import type { WebSocketServer } from 'ws';
-import type { HLC, PermissionPolicy, ConsistencyLevel, ReplicationConfig, FullTextIndexConfig } from '@topgunbuild/core';
+import type { HLC, PermissionPolicy, ConsistencyLevel, ReplicationConfig, FullTextIndexConfig, FTSConfig as FTSConfigCore } from '@topgunbuild/core';
 import type { MetricsService } from '../monitoring/MetricsService';
 import type { SecurityManager } from '../security/SecurityManager';
 import type { StripedEventExecutor } from '../utils/StripedEventExecutor';
@@ -59,8 +59,11 @@ import type { DistributedSubscriptionCoordinator } from '../subscriptions/Distri
 import type { ConnectionManager } from '../coordinator/connection-manager';
 import type { EventJournalService } from '../EventJournalService';
 import type { CoalescingWriterOptions } from '../utils/CoalescingWriter';
-import type { IInterceptor } from '../interceptors/IInterceptor';
-import type { FTSConfig, DistributedSearchConfig } from '../types/search-types';
+import type { IInterceptor } from '../interceptor/IInterceptor';
+import type { DistributedSearchConfig } from '../search/ClusterSearchCoordinator';
+
+// Re-export FTSConfig from core for consistency
+export type FTSConfig = FTSConfigCore;
 
 // Core module - no dependencies
 export interface CoreModule {

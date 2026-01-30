@@ -5,7 +5,7 @@
  * across 9 groups as specified in SPEC-011d.
  */
 
-import { describe, it, expect } from '@jest/globals';
+// Jest globals are available automatically
 import { createHandlersModule, MessageType, MESSAGE_ROUTES } from '../modules/handlers-module';
 import { createCoreModule, createClusterModule, createStorageModule, createNetworkModule } from '../modules';
 import type { HandlersModule } from '../modules/types';
