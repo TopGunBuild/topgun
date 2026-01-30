@@ -1,8 +1,11 @@
 /**
  * HandlersModule test - verify handler count and structure
  *
- * This test validates that the HandlersModule contains exactly 26 handlers
- * across 9 groups as specified in SPEC-011d.
+ * This test validates that the HandlersModule contains exactly 23 handlers
+ * across 9 public groups as specified in SPEC-011d. Note: The spec counts
+ * 26 total handlers which includes 3 base handlers in _internal (counterHandler,
+ * entryProcessorHandler, conflictResolverHandler) that are not part of the
+ * 9 public groups.
  */
 
 // Jest globals are available automatically
@@ -92,7 +95,7 @@ describe('HandlersModule', () => {
     }
   });
 
-  it('should contain exactly 26 handlers across 9 groups', () => {
+  it('should contain exactly 23 handlers across 9 public groups', () => {
     // Verify 9 handler groups exist
     expect(handlers).toHaveProperty('crdt');
     expect(handlers).toHaveProperty('sync');
@@ -126,11 +129,11 @@ describe('HandlersModule', () => {
     expect(clientCount).toBe(3); // authHandler, webSocketHandler, clientMessageHandler
     expect(serverCount).toBe(4); // heartbeatHandler, persistenceHandler, operationContextHandler, writeConcernHandler
 
-    // Verify total handler count is 26
+    // Verify total handler count is 23 (public groups only, excludes 3 base handlers in _internal)
     const totalHandlers = crdtCount + syncCount + queryCount + messagingCount +
                          coordinationCount + searchCount + persistenceCount +
                          clientCount + serverCount;
-    expect(totalHandlers).toBe(26);
+    expect(totalHandlers).toBe(23);
   });
 
   it('should contain messageRegistry with 29 message type routes', () => {
