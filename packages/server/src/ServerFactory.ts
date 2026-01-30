@@ -3,30 +3,18 @@ import { createServer as createHttpsServer, Server as HttpsServer } from 'https'
 import { readFileSync } from 'fs';
 import * as net from 'net';
 import { WebSocketServer, WebSocket } from 'ws';
-import * as crypto from 'crypto';
-import { ConsistencyLevel, DEFAULT_REPLICATION_CONFIG, PARTITION_COUNT } from '@topgunbuild/core';
+import { ConsistencyLevel, PARTITION_COUNT } from '@topgunbuild/core';
 import { ServerCoordinatorConfig, ServerCoordinator } from './ServerCoordinator';
 import { ClusterManager } from './cluster/ClusterManager';
 import { PartitionService } from './cluster/PartitionService';
-import { ReplicationPipeline } from './cluster/ReplicationPipeline';
-import { PartitionReassigner } from './cluster/PartitionReassigner';
-import { ReadReplicaHandler } from './cluster/ReadReplicaHandler';
-import { MerkleTreeManager } from './cluster/MerkleTreeManager';
-import { RepairScheduler } from './cluster/RepairScheduler';
-import { LockManager } from './cluster/LockManager';
 import { TopicManager } from './topic/TopicManager';
 import { logger } from './utils/logger';
 import { validateJwtSecret } from './utils/validateConfig';
-import { SystemManager } from './system/SystemManager';
-import { CoalescingWriter } from './utils/CoalescingWriter';
 import { coalescingPresets } from './utils/coalescingPresets';
 import { ConnectionRateLimiter } from './utils/ConnectionRateLimiter';
 import { RateLimitedLogger } from './utils/RateLimitedLogger';
-import { createCoreModule, createWorkersModule } from './modules';
+import { createCoreModule, createWorkersModule, createClusterModule, createStorageModule } from './modules';
 import type { MetricsService } from './monitoring/MetricsService';
-import { createEventPayloadPool } from './memory';
-import { TaskletScheduler } from './tasklet';
-import { WriteAckManager } from './ack/WriteAckManager';
 import { CounterHandler } from './handlers/CounterHandler';
 import { EntryProcessorHandler } from './handlers/EntryProcessorHandler';
 import { ConflictResolverHandler } from './handlers/ConflictResolverHandler';
@@ -36,15 +24,12 @@ import { DistributedSubscriptionCoordinator } from './subscriptions/DistributedS
 import { createDebugEndpoints } from './debug';
 import { createBootstrapController, BootstrapController } from './bootstrap';
 import { createSettingsController, SettingsController } from './settings';
-import { QueryRegistry } from './query/QueryRegistry';
 import { DebugEndpoints } from './debug';
 import { ServerOptions as HttpsServerOptions } from 'https';
-import type { MergeRejection } from '@topgunbuild/core';
 
 import {
     AuthHandler,
     ConnectionManager,
-    StorageManager,
     OperationHandler,
     WebSocketHandler,
     BroadcastHandler,
@@ -109,53 +94,43 @@ export class ServerFactory {
             writeCoalescingOptions,
         });
 
-        // Initialize Cluster Logic
-        const clusterPort = config.clusterPort ?? 0;
-        const peers = config.resolvePeers ? config.resolvePeers() : (config.peers || []);
-
-        const cluster = new ClusterManager({
-            nodeId: config.nodeId,
-            host: config.host || 'localhost',
-            port: clusterPort,
-            peers,
-            discovery: config.discovery,
-            serviceName: config.serviceName,
-            discoveryInterval: config.discoveryInterval,
-            tls: config.clusterTls
-        });
-
-        const partitionService = new PartitionService(cluster);
-
-        // Initialize Query Registry (Moved up)
-        const queryRegistry = new QueryRegistry();
-
-        // Initialize StorageManager
-        const storageManager = new StorageManager({
-            nodeId: config.nodeId,
-            hlc,
-            storage: config.storage,
-            fullTextSearch: config.fullTextSearch,
-            isRelatedKey: (key: string) => partitionService.isRelated(key) ?? true,
-            onMapLoaded: (mapName: string, _recordCount: number) => {
-                const map = storageManager.getMaps().get(mapName);
-                if (map) {
-                    queryRegistry.refreshSubscriptions(mapName, map);
-                    const mapSize = (map as any).totalRecords ?? map.size;
-                    metricsService.setMapSize(mapName, mapSize);
-                }
+        // Create cluster module
+        const clusterMod = createClusterModule(
+            {
+                nodeId: config.nodeId,
+                host: config.host,
+                clusterPort: config.clusterPort,
+                peers: config.peers,
+                resolvePeers: config.resolvePeers,
+                discovery: config.discovery,
+                serviceName: config.serviceName,
+                discoveryInterval: config.discoveryInterval,
+                clusterTls: config.clusterTls,
+                replicationEnabled: config.replicationEnabled,
+                defaultConsistency: config.defaultConsistency,
+                replicationConfig: config.replicationConfig,
             },
-        });
+            { hlc: core.hlc }
+        );
 
-        const eventPayloadPool = createEventPayloadPool({ maxSize: 4096, initialSize: 128 });
+        const { cluster, partitionService, replicationPipeline, lockManager, merkleTreeManager, partitionReassigner, readReplicaHandler, repairScheduler } = clusterMod;
 
-        const taskletScheduler = new TaskletScheduler({
-            defaultTimeBudgetMs: 5,
-            maxConcurrent: 20,
-        });
+        // Create storage module
+        const storageMod = createStorageModule(
+            {
+                nodeId: config.nodeId,
+                storage: config.storage,
+                fullTextSearch: config.fullTextSearch,
+                writeAckTimeout: config.writeAckTimeout,
+            },
+            {
+                hlc: core.hlc,
+                metricsService: core.metricsService,
+                partitionService: clusterMod.partitionService,
+            }
+        );
 
-        const writeAckManager = new WriteAckManager({
-            defaultTimeout: config.writeAckTimeout ?? 5000,
-        });
+        const { storageManager, queryRegistry, eventPayloadPool, taskletScheduler, writeAckManager } = storageMod;
 
         const rateLimits = {
             maxConnectionsPerSecond: config.maxConnectionsPerSecond ?? 100,
@@ -257,21 +232,6 @@ export class ServerFactory {
             logger.info({ port: (httpServer.address() as any)?.port ?? config.port }, 'Server Coordinator listening');
         });
 
-        // Replication Pipeline
-        let replicationPipeline: ReplicationPipeline | undefined;
-        if (config.replicationEnabled !== false) {
-            replicationPipeline = new ReplicationPipeline(
-                cluster,
-                partitionService,
-                {
-                    ...DEFAULT_REPLICATION_CONFIG,
-                    defaultConsistency: config.defaultConsistency ?? ConsistencyLevel.EVENTUAL,
-                    ...config.replicationConfig,
-                }
-            );
-        }
-
-        const lockManager = new LockManager();
         const topicManager = new TopicManager({
             cluster,
             sendToClient: (clientId, message) => {
@@ -296,28 +256,6 @@ export class ServerFactory {
                 ...config.eventJournalConfig,
             });
         }
-
-        const partitionReassigner = new PartitionReassigner(cluster, partitionService, { reassignmentDelayMs: 1000 });
-        const readReplicaHandler = new ReadReplicaHandler(
-            partitionService,
-            cluster,
-            config.nodeId,
-            undefined,
-            {
-                defaultConsistency: config.defaultConsistency ?? ConsistencyLevel.STRONG,
-                preferLocalReplica: true,
-                loadBalancing: 'latency-based'
-            }
-        );
-
-        const merkleTreeManager = new MerkleTreeManager(config.nodeId);
-        const repairScheduler = new RepairScheduler(
-            merkleTreeManager,
-            cluster,
-            partitionService,
-            config.nodeId,
-            { enabled: true, scanIntervalMs: 300000, maxConcurrentRepairs: 2 }
-        );
 
         const searchCoordinator = new SearchCoordinator();
         if (config.fullTextSearch) {
