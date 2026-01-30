@@ -4,7 +4,7 @@ import { readFileSync } from 'fs';
 import * as net from 'net';
 import { WebSocketServer, WebSocket } from 'ws';
 import * as crypto from 'crypto';
-import { HLC, ConsistencyLevel, DEFAULT_REPLICATION_CONFIG, PARTITION_COUNT } from '@topgunbuild/core';
+import { ConsistencyLevel, DEFAULT_REPLICATION_CONFIG, PARTITION_COUNT } from '@topgunbuild/core';
 import { ServerCoordinatorConfig, ServerCoordinator } from './ServerCoordinator';
 import { ClusterManager } from './cluster/ClusterManager';
 import { PartitionService } from './cluster/PartitionService';
@@ -15,18 +15,15 @@ import { MerkleTreeManager } from './cluster/MerkleTreeManager';
 import { RepairScheduler } from './cluster/RepairScheduler';
 import { LockManager } from './cluster/LockManager';
 import { TopicManager } from './topic/TopicManager';
-import { SecurityManager } from './security/SecurityManager';
 import { logger } from './utils/logger';
 import { validateJwtSecret } from './utils/validateConfig';
-import { MetricsService } from './monitoring/MetricsService';
 import { SystemManager } from './system/SystemManager';
-import { StripedEventExecutor } from './utils/StripedEventExecutor';
-import { BackpressureRegulator } from './utils/BackpressureRegulator';
 import { CoalescingWriter } from './utils/CoalescingWriter';
 import { coalescingPresets } from './utils/coalescingPresets';
 import { ConnectionRateLimiter } from './utils/ConnectionRateLimiter';
 import { RateLimitedLogger } from './utils/RateLimitedLogger';
-import { WorkerPool, MerkleWorker, CRDTMergeWorker, SerializationWorker } from './workers';
+import { createCoreModule, createWorkersModule } from './modules';
+import type { MetricsService } from './monitoring/MetricsService';
 import { createEventPayloadPool } from './memory';
 import { TaskletScheduler } from './tasklet';
 import { WriteAckManager } from './ack/WriteAckManager';
@@ -82,28 +79,19 @@ export class ServerFactory {
         const rawSecret = validateJwtSecret(config.jwtSecret, process.env.JWT_SECRET);
         const jwtSecret = rawSecret.replace(/\\n/g, '\n');
 
-        const hlc = new HLC(config.nodeId);
-        const metricsService = new MetricsService();
-        const securityManager = new SecurityManager(config.securityPolicies || []);
-
-        // Initialize bounded event queue executor
-        const eventExecutor = new StripedEventExecutor({
-            stripeCount: config.eventStripeCount ?? 4,
-            queueCapacity: config.eventQueueCapacity ?? 10000,
-            name: `${config.nodeId}-event-executor`,
-            onReject: (task) => {
-                logger.warn({ nodeId: config.nodeId, key: task.key }, 'Event task rejected due to queue capacity');
-                metricsService.incEventQueueRejected();
-            }
+        // Create core module
+        const core = createCoreModule({
+            nodeId: config.nodeId,
+            eventStripeCount: config.eventStripeCount,
+            eventQueueCapacity: config.eventQueueCapacity,
+            backpressureEnabled: config.backpressureEnabled,
+            backpressureSyncFrequency: config.backpressureSyncFrequency,
+            backpressureMaxPending: config.backpressureMaxPending,
+            backpressureBackoffMs: config.backpressureBackoffMs,
+            securityPolicies: config.securityPolicies,
         });
 
-        // Initialize backpressure regulator
-        const backpressure = new BackpressureRegulator({
-            syncFrequency: config.backpressureSyncFrequency ?? 100,
-            maxPendingOps: config.backpressureMaxPending ?? 1000,
-            backoffTimeoutMs: config.backpressureBackoffMs ?? 5000,
-            enabled: config.backpressureEnabled ?? true
-        });
+        const { hlc, metricsService, securityManager, eventExecutor, backpressure } = core;
 
         // Initialize write coalescing options
         const writeCoalescingEnabled = config.writeCoalescingEnabled ?? true;
@@ -190,23 +178,13 @@ export class ServerFactory {
 
         const rateLimitedLogger = new RateLimitedLogger({ windowMs: 10000, maxPerWindow: 5 });
 
-        let workerPool: WorkerPool | undefined;
-        let merkleWorker: MerkleWorker | undefined;
-        let crdtMergeWorker: CRDTMergeWorker | undefined;
-        let serializationWorker: SerializationWorker | undefined;
+        // Create workers module
+        const workers = createWorkersModule({
+            workerPoolEnabled: config.workerPoolEnabled,
+            workerPoolConfig: config.workerPoolConfig,
+        });
 
-        if (config.workerPoolEnabled) {
-            workerPool = new WorkerPool({
-                minWorkers: config.workerPoolConfig?.minWorkers ?? 2,
-                maxWorkers: config.workerPoolConfig?.maxWorkers,
-                taskTimeout: config.workerPoolConfig?.taskTimeout ?? 5000,
-                idleTimeout: config.workerPoolConfig?.idleTimeout ?? 30000,
-                autoRestart: config.workerPoolConfig?.autoRestart ?? true,
-            });
-            merkleWorker = new MerkleWorker(workerPool);
-            crdtMergeWorker = new CRDTMergeWorker(workerPool);
-            serializationWorker = new SerializationWorker(workerPool);
-        }
+        const { workerPool, merkleWorker, crdtMergeWorker, serializationWorker } = workers;
 
         // HTTP Server Setup
         let httpServer: HttpServer | HttpsServer;
