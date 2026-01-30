@@ -2,17 +2,16 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-011d
-- **Status:** review
-- **Next Step:** /sf:review
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-011d | Handlers Module + MessageRegistry | high | audited | - |
-| 2 | SPEC-011e | Search + Lifecycle + Final Assembly | high | draft | SPEC-011d |
-| 3 | SPEC-010 | Extract SyncEngine Message Handlers | medium | draft | - |
+| 1 | SPEC-011e | Search + Lifecycle + Final Assembly | high | draft | - |
+| 2 | SPEC-010 | Extract SyncEngine Message Handlers | medium | draft | - |
 
 ## Decisions
 
@@ -38,6 +37,13 @@
 | 2026-01-30 | SPEC-011d | Audit v2: APPROVED. ~40% context (GOOD range). All 6 critical issues from v1 resolved. Handler count corrected to 26 (AC#3). Message type count corrected to 29 (AC#5, AC#7, AC#8). All 9 audit dimensions passed. 2 optional recommendations: (1) validation test for handler count, (2) rateLimitedLogger dependency documentation. |
 | 2026-01-30 | SPEC-011d | Response v2: Both optional recommendations applied. Added AC#11 for handler count validation test. Updated HandlersModuleDeps.network to include rateLimitedLogger. Ready for re-audit. |
 | 2026-01-31 | SPEC-011d | Audit v3: APPROVED. ~40% context (GOOD range). Fresh eyes verification confirmed 26 handlers, 29 message types against current codebase. Line numbers verified. Context and Current State sections updated for consistency. All 9 audit dimensions passed. Specification complete and ready for implementation. |
+| 2026-01-31 | SPEC-011d | EXECUTED: Created handlers-module.ts (932 lines). Updated types.ts with handler interfaces. ServerFactory.ts refactored (-455 lines net). Validation test added. 5 commits. Build passes. |
+| 2026-01-31 | SPEC-011d | CHANGES_REQUESTED (Review v1): 1 critical type mismatch: writeCoalescingOptions passed as potentially undefined to ConnectionManager which requires non-optional value. Causes test compilation failure at handlers-module.ts:94 and :636. Fix needed: provide default empty object when undefined. All 26 handlers correctly grouped, MessageRegistry with 29 routes working, factory ordering sound. |
+| 2026-01-31 | SPEC-011d | Fix Response v1: Applied fix for writeCoalescingOptions type mismatch at lines 94 and 636 (added ?? {}). Build verified passing. Commit c39cf78. |
+| 2026-01-31 | SPEC-011d | CHANGES_REQUESTED (Review v2): Validation test fails - expects 26 handlers "across 9 groups" but 9 groups only contain 23 handlers (CRDT:3, Sync:2, Query:2, Messaging:2, Coordination:2, Search:1, Persistence:4, Client:3, Server:4 = 23). The 26 count includes 3 base handlers in _internal. Test expectation needs correction from 26 to 23. All other aspects pass. |
+| 2026-01-31 | SPEC-011d | Fix Response v2: Corrected handler count in validation test from 26 to 23 (9 public groups only). Updated test comment, description, assertion, and AC#11. All 5 HandlersModule tests pass. Commit b532c54. |
+| 2026-01-31 | SPEC-011d | APPROVED (Review v3): Outstanding implementation. All 26 handlers extracted and grouped into 9 domains. MessageRegistry routes 29 message types correctly. 4-step factory dependency graph ensures correct creation order. Internal managers keep external API clean. ServerFactory reduced by 455 lines (-87%). Validation test confirms structure. Build passes with zero TypeScript errors. Zero behavior change. Excellent architecture demonstrating proper dependency injection and clean separation of concerns. Ready for Rust Actor Model translation. |
+| 2026-01-31 | SPEC-011d | COMPLETED: Handlers Module + MessageRegistry extracted. handlers-module.ts (932 lines) with 26 handlers in 9 domain groups. MessageRegistry routes 29 message types. ServerFactory.ts reduced 455 lines. Archived to .specflow/archive/SPEC-011d.md |
 
 ## Project Patterns
 
@@ -53,10 +59,11 @@
 - Message routing pattern: MessageRouter provides declarative type-based routing for server messages
 - Module factory pattern: each domain gets its own factory function with explicit dependency injection
 - Deferred startup pattern: module factories create resources but do not bind ports; start() method called after assembly
+- Domain grouping pattern: handlers grouped by domain (CRDT, Sync, Query, Messaging, etc.) for Actor Model portability
 
 ## Warnings
 
 (none)
 
 ---
-*Last updated: 2026-01-31 00:15*
+*Last updated: 2026-01-31 02:20*
