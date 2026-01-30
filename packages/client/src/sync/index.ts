@@ -38,6 +38,9 @@ export type {
   MerkleSyncHandlerConfig,
   IORMapSyncHandler,
   ORMapSyncHandlerConfig,
+  IMessageRouter,
+  MessageRouterConfig,
+  MessageHandler,
 } from './types';
 
 // Implementation
@@ -52,3 +55,4 @@ export { EntryProcessorClient } from './EntryProcessorClient';
 export { SearchClient } from './SearchClient';
 export { MerkleSyncHandler } from './MerkleSyncHandler';
 export { ORMapSyncHandler } from './ORMapSyncHandler';
+export { MessageRouter } from './MessageRouter';

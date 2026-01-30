@@ -917,3 +917,62 @@ export interface ORMapSyncHandlerConfig {
    */
   onTimestampUpdate: (timestamp: any) => Promise<void>;
 }
+
+// ============================================
+// MessageRouter Types
+// ============================================
+
+/**
+ * Handler function for a message type.
+ * Can be sync or async.
+ */
+export type MessageHandler = (message: any) => Promise<void> | void;
+
+/**
+ * Configuration for MessageRouter.
+ */
+export interface MessageRouterConfig {
+  /**
+   * Handlers registered during construction.
+   */
+  handlers?: Map<string, MessageHandler>;
+
+  /**
+   * Fallback for unregistered message types.
+   */
+  onUnhandled?: (message: any) => void;
+}
+
+/**
+ * Interface for message routing.
+ * Routes incoming messages to appropriate handlers based on message type.
+ */
+export interface IMessageRouter {
+  /**
+   * Register a handler for a message type.
+   * @param type - Message type to handle
+   * @param handler - Handler function
+   */
+  registerHandler(type: string, handler: MessageHandler): void;
+
+  /**
+   * Register multiple handlers at once.
+   * @param handlers - Record of type -> handler
+   */
+  registerHandlers(handlers: Record<string, MessageHandler>): void;
+
+  /**
+   * Route a message to its registered handler.
+   * Returns true if handled, false if no handler found.
+   * @param message - Message to route
+   * @returns Promise resolving to true if handled
+   */
+  route(message: any): Promise<boolean>;
+
+  /**
+   * Check if a handler is registered for a message type.
+   * @param type - Message type to check
+   * @returns true if handler exists
+   */
+  hasHandler(type: string): boolean;
+}
