@@ -11,9 +11,9 @@ created: 2026-01-30
 
 ## Context
 
-`packages/client/src/SyncEngine.ts` (1,416 lines) is a well-structured Facade that delegates to 12+ specialized managers. SPEC-009d introduced `MessageRouter` for declarative message routing, replacing a ~330-line switch statement with a 19-line `handleServerMessage()` method.
+`packages/client/src/SyncEngine.ts` (1,415 lines) is a well-structured Facade that delegates to 12+ specialized managers. SPEC-009d introduced `MessageRouter` for declarative message routing, replacing a ~330-line switch statement with a 19-line `handleServerMessage()` method.
 
-However, the `registerMessageHandlers()` method (lines 297-405) contains ~35 inline handler registrations that:
+However, the `registerMessageHandlers()` method (lines 297-405) contains ~33 inline handler registrations that:
 - Occupy ~110 lines in the main class
 - Mix routing configuration with the Facade
 - Cannot be tested in isolation from SyncEngine
@@ -41,7 +41,7 @@ Message handler registration is extracted from SyncEngine into a testable, maint
 ### Observable Truths (when done)
 1. `registerMessageHandlers()` method no longer exists in SyncEngine.ts
 2. SyncEngine constructor calls `registerClientMessageHandlers()` from external module
-3. All 35 message types are registered (AUTH_REQUIRED, AUTH_ACK, AUTH_FAIL, PONG, OP_ACK, SYNC_RESP_ROOT, SYNC_RESP_BUCKETS, SYNC_RESP_LEAF, SYNC_RESET_REQUIRED, ORMAP_SYNC_RESP_ROOT, ORMAP_SYNC_RESP_BUCKETS, ORMAP_SYNC_RESP_LEAF, ORMAP_DIFF_RESPONSE, QUERY_RESP, QUERY_UPDATE, SERVER_EVENT, SERVER_BATCH_EVENT, TOPIC_MESSAGE, LOCK_GRANTED, LOCK_RELEASED, GC_PRUNE, COUNTER_UPDATE, COUNTER_RESPONSE, ENTRY_PROCESS_RESPONSE, ENTRY_PROCESS_BATCH_RESPONSE, REGISTER_RESOLVER_RESPONSE, UNREGISTER_RESOLVER_RESPONSE, LIST_RESOLVERS_RESPONSE, MERGE_REJECTED, SEARCH_RESP, SEARCH_UPDATE, HYBRID_QUERY_RESP, HYBRID_QUERY_DELTA)
+3. All 33 message types are registered (AUTH_REQUIRED, AUTH_ACK, AUTH_FAIL, PONG, OP_ACK, SYNC_RESP_ROOT, SYNC_RESP_BUCKETS, SYNC_RESP_LEAF, SYNC_RESET_REQUIRED, ORMAP_SYNC_RESP_ROOT, ORMAP_SYNC_RESP_BUCKETS, ORMAP_SYNC_RESP_LEAF, ORMAP_DIFF_RESPONSE, QUERY_RESP, QUERY_UPDATE, SERVER_EVENT, SERVER_BATCH_EVENT, TOPIC_MESSAGE, LOCK_GRANTED, LOCK_RELEASED, GC_PRUNE, COUNTER_UPDATE, COUNTER_RESPONSE, ENTRY_PROCESS_RESPONSE, ENTRY_PROCESS_BATCH_RESPONSE, REGISTER_RESOLVER_RESPONSE, UNREGISTER_RESOLVER_RESPONSE, LIST_RESOLVERS_RESPONSE, MERGE_REJECTED, SEARCH_RESP, SEARCH_UPDATE, HYBRID_QUERY_RESP, HYBRID_QUERY_DELTA)
 4. Unit test verifies all message types are registered
 5. Existing SyncEngine tests pass unchanged
 
@@ -345,7 +345,7 @@ describe('ClientMessageHandlers', () => {
         expect(router.hasHandler(type)).toBe(true);
       }
 
-      // Verify count matches
+      // Verify count matches (using concrete MessageRouter, not IMessageRouter interface)
       expect(router.handlerCount).toBe(CLIENT_MESSAGE_TYPES.length);
     });
 
@@ -461,8 +461,8 @@ describe('ClientMessageHandlers', () => {
   });
 
   describe('CLIENT_MESSAGE_TYPES', () => {
-    it('should contain 35 message types', () => {
-      expect(CLIENT_MESSAGE_TYPES.length).toBe(35);
+    it('should contain 33 message types', () => {
+      expect(CLIENT_MESSAGE_TYPES.length).toBe(33);
     });
 
     it('should include all auth types', () => {
@@ -495,15 +495,15 @@ describe('ClientMessageHandlers', () => {
 1. `registerMessageHandlers()` method removed from SyncEngine.ts
 2. `ClientMessageHandlers.ts` created with `MessageHandlerDelegates` interface
 3. `ClientMessageHandlers.ts` created with `ManagerDelegates` interface
-4. `ClientMessageHandlers.ts` exports `CLIENT_MESSAGE_TYPES` constant (35 types)
-5. `registerClientMessageHandlers()` function registers all 35 message types
+4. `ClientMessageHandlers.ts` exports `CLIENT_MESSAGE_TYPES` constant (33 types)
+5. `registerClientMessageHandlers()` function registers all 33 message types
 6. SyncEngine constructor calls `registerClientMessageHandlers()` with correct arguments
 7. `sync/index.ts` exports `registerClientMessageHandlers`, `CLIENT_MESSAGE_TYPES`, and interfaces
-8. Unit test verifies all 35 message types are registered
+8. Unit test verifies all 33 message types are registered
 9. Unit test verifies unknown types trigger `onUnhandled`
 10. Unit test verifies delegate routing (AUTH_ACK -> handleAuthAck)
 11. Unit test verifies manager routing (TOPIC_MESSAGE -> topicManager)
-12. SyncEngine.ts reduced by ~110 lines (from ~1,416 to ~1,306)
+12. SyncEngine.ts reduced by ~110 lines (from ~1,415 to ~1,305)
 13. Client package builds successfully
 14. All existing SyncEngine tests pass unchanged
 
@@ -516,7 +516,88 @@ describe('ClientMessageHandlers', () => {
 
 ## Assumptions
 
-1. The 35 message types in `registerMessageHandlers()` represent the complete set (verified by line count)
+1. The 33 message types in `registerMessageHandlers()` represent the complete set (verified by counting)
 2. TypeScript interfaces with `any` types are acceptable for initial extraction (can be refined later)
 3. Test file location follows existing pattern (`sync/__tests__/`)
 4. ConflictResolverClient is a direct dependency of SyncEngine (not from sync module)
+
+---
+
+## Audit History
+
+### Audit v1 (2026-01-31 14:30)
+**Status:** APPROVED
+
+**Context Estimate:** ~15% total (PEAK range)
+
+| Metric | Est. Context | Target | Status |
+|--------|--------------|--------|--------|
+| Total spec context | ~15% | <=50% | OK |
+| Largest task | ~8% | <=30% | OK |
+
+**Quality Projection:** PEAK range (0-30%)
+
+**Corrections Applied:**
+1. Message type count corrected from 35 to 33 (verified against codebase lines 297-405)
+2. SyncEngine line count corrected from 1,416 to 1,415 (verified via grep)
+3. AC#4, AC#5, AC#8 updated to reflect 33 types
+4. Test assertion `CLIENT_MESSAGE_TYPES.length` corrected from 35 to 33
+5. Assumption #1 updated to "verified by counting"
+6. R5 test comment added clarifying `handlerCount` is on concrete MessageRouter class
+
+**Dimensions Evaluated:**
+- Clarity: PASS - Task clearly describes what to extract and how
+- Completeness: PASS - All files listed, interfaces defined, test code provided
+- Testability: PASS - Each criterion is measurable (line counts, type counts, test assertions)
+- Scope: PASS - Well-bounded to handler extraction only
+- Feasibility: PASS - Follows established patterns from SPEC-009 series
+- Architecture fit: PASS - Continues sync module extraction pattern
+- Non-duplication: PASS - No existing ClientMessageHandlers module
+- Cognitive load: PASS - Simple extraction, no new concepts
+- Strategic fit: PASS - Aligns with project goal of maintainable, testable code
+
+**Comment:** Well-crafted specification following established patterns. Minor count corrections applied. Ready for implementation.
+
+---
+
+## Execution Summary
+
+**Executed:** 2026-01-31 13:32
+**Commits:** 4
+
+### Files Created
+- `packages/client/src/sync/ClientMessageHandlers.ts` (194 lines) - Message handler registration module with MessageHandlerDelegates and ManagerDelegates interfaces, CLIENT_MESSAGE_TYPES constant, and registerClientMessageHandlers() function
+- `packages/client/src/sync/__tests__/ClientMessageHandlers.test.ts` (176 lines) - Unit tests for handler registration (7 tests)
+
+### Files Modified
+- `packages/client/src/SyncEngine.ts` - Removed registerMessageHandlers() method, now calls registerClientMessageHandlers() with explicit delegate object
+- `packages/client/src/sync/index.ts` - Added exports for registerClientMessageHandlers, CLIENT_MESSAGE_TYPES, and type interfaces
+
+### Files Deleted
+None
+
+### Acceptance Criteria Status
+- [x] AC#1: `registerMessageHandlers()` method removed from SyncEngine.ts
+- [x] AC#2: `ClientMessageHandlers.ts` created with `MessageHandlerDelegates` interface
+- [x] AC#3: `ClientMessageHandlers.ts` created with `ManagerDelegates` interface
+- [x] AC#4: `ClientMessageHandlers.ts` exports `CLIENT_MESSAGE_TYPES` constant (33 types)
+- [x] AC#5: `registerClientMessageHandlers()` function registers all 33 message types
+- [x] AC#6: SyncEngine constructor calls `registerClientMessageHandlers()` with correct arguments
+- [x] AC#7: `sync/index.ts` exports `registerClientMessageHandlers`, `CLIENT_MESSAGE_TYPES`, and interfaces
+- [x] AC#8: Unit test verifies all 33 message types are registered
+- [x] AC#9: Unit test verifies unknown types trigger `onUnhandled`
+- [x] AC#10: Unit test verifies delegate routing (AUTH_ACK -> handleAuthAck)
+- [x] AC#11: Unit test verifies manager routing (TOPIC_MESSAGE -> topicManager)
+- [x] AC#12: SyncEngine.ts reduced by 93 lines (from 1,415 to 1,322) - slightly less than 110 target due to explicit delegate object
+- [x] AC#13: Client package builds successfully
+- [x] AC#14: All existing SyncEngine tests pass unchanged (46 tests)
+
+### Deviations
+1. [Rule 1 - Bug] Passed explicit delegate object instead of `this` to registerClientMessageHandlers() because SyncEngine methods are private and TypeScript won't allow passing `this` to a public interface. This added ~17 lines to the constructor but maintains proper encapsulation.
+
+### Notes
+- The spec suggested passing `this` directly as the delegate, but this fails TypeScript compilation because SyncEngine's handler methods are private. The fix uses explicit arrow function wrappers in the delegate object.
+- Line reduction is 93 lines instead of expected ~110 because the explicit delegate object construction adds ~17 lines. Net effect: 109 lines removed (old method) - 17 lines added (delegate object) = 92 lines reduced, with 1 line saved from import consolidation = 93 lines total.
+- All 7 new unit tests pass.
+- All 46 existing SyncEngine tests pass unchanged.
+- Logger.debug calls were removed from handlers as specified (they existed in manager methods already).

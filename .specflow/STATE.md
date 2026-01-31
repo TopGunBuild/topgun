@@ -2,15 +2,15 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-010
+- **Status:** review
+- **Next Step:** /sf:review
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-010 | Extract SyncEngine Message Handlers | medium | draft | - |
+| 1 | SPEC-010 | Extract SyncEngine Message Handlers | medium | review | - |
 
 ## Decisions
 
@@ -49,6 +49,8 @@
 | 2026-01-31 | SPEC-011e | EXECUTED: Created lifecycle-module.ts (119 lines). Updated types.ts with LifecycleModule interfaces. ServerFactory.ts refactored (-47 lines, 489→442). Module exports added to index.ts. 3 commits. Build passes. GracefulShutdown test confirms lifecycle integration (2/3 tests pass, 1 flaky timeout). |
 | 2026-01-31 | SPEC-011e | APPROVED (Review v1): Outstanding implementation completing SPEC-011 modularization series. lifecycle-module.ts (119 lines) cleanly extracts LifecycleManager with 27 shutdown hooks via dependency injection. ServerFactory.ts reduced 47 lines net (489→442). ServerFactory.create() is 311 lines (vs 250 target) - acknowledged tradeoff for backward compatibility. All 7 modules (core, workers, cluster, storage, network, handlers, lifecycle) follow consistent patterns. Build passes, architecture sound, ready for Rust Actor Model translation. |
 | 2026-01-31 | SPEC-011e | COMPLETED: SPEC-011 series finished. Lifecycle module extracted. ServerFactory.ts reduced 53% total (947→442 lines). 7 modules with explicit interfaces ready for Rust Actor Model. Archived to .specflow/archive/SPEC-011e.md |
+| 2026-01-31 | SPEC-010 | Audit v1: APPROVED. ~15% context (PEAK range). Message type count corrected from 35 to 33. SyncEngine line count corrected to 1,415. All 9 dimensions passed. Well-crafted specification following established patterns. Ready for implementation. |
+| 2026-01-31 | SPEC-010 | EXECUTED: Created ClientMessageHandlers.ts (194 lines) and unit tests (176 lines). Updated sync/index.ts exports. SyncEngine.ts refactored (-93 lines, 1,415->1,322). 4 commits. Build passes. All 46 SyncEngine tests pass. 7 new unit tests pass. |
 
 ## Project Patterns
 
@@ -71,4 +73,4 @@
 (none)
 
 ---
-*Last updated: 2026-01-31 12:45*
+*Last updated: 2026-01-31 13:35*
