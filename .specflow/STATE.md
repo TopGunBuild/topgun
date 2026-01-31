@@ -2,15 +2,14 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-010
-- **Status:** review
-- **Next Step:** /sf:review
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-010 | Extract SyncEngine Message Handlers | medium | review | - |
 
 ## Decisions
 
@@ -51,6 +50,8 @@
 | 2026-01-31 | SPEC-011e | COMPLETED: SPEC-011 series finished. Lifecycle module extracted. ServerFactory.ts reduced 53% total (947→442 lines). 7 modules with explicit interfaces ready for Rust Actor Model. Archived to .specflow/archive/SPEC-011e.md |
 | 2026-01-31 | SPEC-010 | Audit v1: APPROVED. ~15% context (PEAK range). Message type count corrected from 35 to 33. SyncEngine line count corrected to 1,415. All 9 dimensions passed. Well-crafted specification following established patterns. Ready for implementation. |
 | 2026-01-31 | SPEC-010 | EXECUTED: Created ClientMessageHandlers.ts (194 lines) and unit tests (176 lines). Updated sync/index.ts exports. SyncEngine.ts refactored (-93 lines, 1,415->1,322). 4 commits. Build passes. All 46 SyncEngine tests pass. 7 new unit tests pass. |
+| 2026-01-31 | SPEC-010 | APPROVED (Review v1): Outstanding implementation. All 33 message types registered correctly. ClientMessageHandlers.ts (194 lines) with MessageHandlerDelegates and ManagerDelegates interfaces. 7 unit tests pass. All 46 SyncEngine tests pass unchanged. SyncEngine.ts reduced 93 lines (1,415→1,322). Build passes, no breaking changes, no behavior changes. Ready to finalize. |
+| 2026-01-31 | SPEC-010 | COMPLETED: ClientMessageHandlers module extracted. SyncEngine.ts reduced 93 lines (1,415→1,322). 33 message types registered via registerClientMessageHandlers(). Archived to .specflow/archive/SPEC-010.md |
 
 ## Project Patterns
 
@@ -67,10 +68,11 @@
 - Module factory pattern: each domain gets its own factory function with explicit dependency injection
 - Deferred startup pattern: module factories create resources but do not bind ports; start() method called after assembly
 - Domain grouping pattern: handlers grouped by domain (CRDT, Sync, Query, Messaging, etc.) for Actor Model portability
+- Client message handler pattern: ClientMessageHandlers module registers all client-side message types via registerClientMessageHandlers()
 
 ## Warnings
 
 (none)
 
 ---
-*Last updated: 2026-01-31 13:35*
+*Last updated: 2026-01-31 13:37*
