@@ -2,34 +2,41 @@ import { topGunAdapter } from '../TopGunAdapter';
 import { TopGunClient } from '@topgunbuild/client';
 import { IStorageAdapter, OpLogEntry } from '@topgunbuild/client';
 import { LWWRecord, ORMapRecord } from '@topgunbuild/core';
+import type { BetterAuthOptions } from 'better-auth';
+
+/**
+ * Mock TopGunClient type for testing.
+ * Contains only the methods required by the adapter.
+ */
+type MockTopGunClient = Pick<TopGunClient, 'start' | 'getMap' | 'query'>;
 
 // Mock WebSocket
 class MockWebSocket {
   onopen: () => void = () => {};
-  onmessage: (event: any) => void = () => {};
+  onmessage: (event: MessageEvent) => void = () => {};
   onclose: () => void = () => {};
-  onerror: (error: any) => void = () => {};
+  onerror: (error: Event) => void = () => {};
   send() {}
   close() {}
   static OPEN = 1;
   readyState = 1;
 }
-(global as any).WebSocket = MockWebSocket;
+(globalThis as unknown as { WebSocket: typeof MockWebSocket }).WebSocket = MockWebSocket;
 
 class MemoryStorageAdapter implements IStorageAdapter {
-  private data = new Map<string, any>();
-  private meta = new Map<string, any>();
+  private data = new Map<string, LWWRecord<unknown> | ORMapRecord<unknown>[]>();
+  private meta = new Map<string, unknown>();
   private opLog: OpLogEntry[] = [];
   private opIdCounter = 1;
 
   async initialize(dbName: string): Promise<void> {}
   async close(): Promise<void> {}
 
-  async get<V>(key: string): Promise<LWWRecord<V> | ORMapRecord<V>[] | any | undefined> {
-    return this.data.get(key);
+  async get<V>(key: string): Promise<LWWRecord<V> | ORMapRecord<V>[] | undefined> {
+    return this.data.get(key) as LWWRecord<V> | ORMapRecord<V>[] | undefined;
   }
 
-  async put(key: string, value: any): Promise<void> {
+  async put(key: string, value: LWWRecord<unknown> | ORMapRecord<unknown>[]): Promise<void> {
     this.data.set(key, value);
   }
 
@@ -37,15 +44,15 @@ class MemoryStorageAdapter implements IStorageAdapter {
     this.data.delete(key);
   }
 
-  async getMeta(key: string): Promise<any> {
+  async getMeta(key: string): Promise<unknown> {
     return this.meta.get(key);
   }
 
-  async setMeta(key: string, value: any): Promise<void> {
+  async setMeta(key: string, value: unknown): Promise<void> {
     this.meta.set(key, value);
   }
 
-  async batchPut(entries: Map<string, any>): Promise<void> {
+  async batchPut(entries: Map<string, LWWRecord<unknown> | ORMapRecord<unknown>[]>): Promise<void> {
     for (const [k, v] of entries) {
       this.data.set(k, v);
     }
@@ -90,7 +97,7 @@ describe('TopGunAdapter', () => {
 
     const factory = topGunAdapter({ client });
     // Better Auth passes options to the factory instance
-    adapter = factory({} as any);
+    adapter = factory({} as BetterAuthOptions);
   });
 
   const testUser = {
@@ -196,7 +203,7 @@ describe('TopGunAdapter', () => {
     });
 
     expect(found).toHaveLength(1);
-    expect((found[0] as any).id).toBe('user-1');
+    expect(found[0]).toHaveProperty('id', 'user-1');
   });
   
   it('should handle IN operator', async () => {
@@ -233,9 +240,14 @@ describe('TopGunAdapter', () => {
 
       expect(found).not.toBeNull();
       // Expect accounts array attached
-      expect((found as any).accounts).toBeDefined();
-      expect((found as any).accounts).toHaveLength(1);
-      expect((found as any).accounts[0].providerId).toBe('credential');
+      if (found && typeof found === 'object' && 'accounts' in found) {
+          const accounts = found.accounts as unknown[];
+          expect(accounts).toBeDefined();
+          expect(accounts).toHaveLength(1);
+          expect(accounts[0]).toHaveProperty('providerId', 'credential');
+      } else {
+          throw new Error('Expected found to have accounts property');
+      }
   });
 });
 
@@ -243,7 +255,7 @@ describe('cold start handling', () => {
   it('waits for storage ready before first operation', async () => {
     // Create a mock client with delayed start
     let startResolved = false;
-    const mockClient = {
+    const mockClient: MockTopGunClient = {
       start: jest.fn().mockImplementation(() => {
         return new Promise<void>(resolve => {
           setTimeout(() => {
@@ -266,7 +278,7 @@ describe('cold start handling', () => {
       }),
     };
 
-    const adapter = topGunAdapter({ client: mockClient as any })({} as any);
+    const adapter = topGunAdapter({ client: mockClient as TopGunClient })({} as BetterAuthOptions);
 
     // Start operation before storage is ready
     const createPromise = adapter.create({ model: 'user', data: { name: 'test' } });
@@ -283,7 +295,7 @@ describe('cold start handling', () => {
 
   it('concurrent requests share same ready promise', async () => {
     let startCallCount = 0;
-    const mockClient = {
+    const mockClient: MockTopGunClient = {
       start: jest.fn().mockImplementation(() => {
         startCallCount++;
         return new Promise<void>(resolve => setTimeout(resolve, 50));
@@ -301,7 +313,7 @@ describe('cold start handling', () => {
       }),
     };
 
-    const adapter = topGunAdapter({ client: mockClient as any })({} as any);
+    const adapter = topGunAdapter({ client: mockClient as TopGunClient })({} as BetterAuthOptions);
 
     // Fire multiple concurrent requests
     await Promise.all([
@@ -316,7 +328,7 @@ describe('cold start handling', () => {
 
   it('subsequent requests do not wait if already ready', async () => {
     let startCallCount = 0;
-    const mockClient = {
+    const mockClient: MockTopGunClient = {
       start: jest.fn().mockImplementation(() => {
         startCallCount++;
         return Promise.resolve();
@@ -333,7 +345,7 @@ describe('cold start handling', () => {
       }),
     };
 
-    const adapter = topGunAdapter({ client: mockClient as any })({} as any);
+    const adapter = topGunAdapter({ client: mockClient as TopGunClient })({} as BetterAuthOptions);
 
     // First request triggers ready
     await adapter.create({ model: 'user', data: { name: 'test1' } });
@@ -345,7 +357,7 @@ describe('cold start handling', () => {
   });
 
   it('can disable waitForReady via option', async () => {
-    const mockClient = {
+    const mockClient: Partial<MockTopGunClient> = {
       start: jest.fn(),
       getMap: jest.fn().mockReturnValue({
         set: jest.fn(),
@@ -353,9 +365,9 @@ describe('cold start handling', () => {
     };
 
     const adapter = topGunAdapter({
-      client: mockClient as any,
+      client: mockClient as TopGunClient,
       waitForReady: false
-    })({} as any);
+    })({} as BetterAuthOptions);
 
     await adapter.create({ model: 'user', data: { name: 'test' } });
 
