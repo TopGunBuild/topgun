@@ -2,15 +2,15 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-017
-- **Status:** review
-- **Next Step:** /sf:review
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-017 | Add ESLint + Prettier Configuration | medium | audited | - |
+| - | - | Queue empty | - | - | - |
 
 ## Decisions
 
@@ -32,6 +32,10 @@
 | 2026-01-31 | SPEC-017 | REVISED v2: Applied minor recommendation. Added k6 test exclusion clarification to Out of Scope section. Ready for re-audit. |
 | 2026-01-31 | SPEC-017 | AUDITED v3: APPROVED. Context estimate ~12% (PEAK). All 9 dimensions PASS. All assumptions validated against codebase. Ready for implementation. |
 | 2026-01-31 | SPEC-017 | EXECUTED: ESLint + Prettier configuration added. 3 commits (config files, package.json scripts, bug fix). Dependencies installed (eslint ^9.39, prettier ^3.8, typescript-eslint ^8.49). Lint finds 2333 violations, format:check finds 441 unformatted files (not auto-fixed per constraint). Build passes, 1813/1815 tests pass (2 flaky performance tests unrelated). |
+| 2026-01-31 | SPEC-017 | REVIEWED: Implementation APPROVED. All 8 acceptance criteria verified. Config files match spec exactly. No formatting conflicts. Build and tests unaffected. 2 minor issues (module type warning, apps/ directory exclusion) are optional improvements only. |
+| 2026-01-31 | SPEC-017 | FIXED: Applied both minor issues. Renamed eslint.config.js to .mjs (a2309d0). Added apps/ to lint/format patterns (5392656). Ready for re-review. |
+| 2026-01-31 | SPEC-017 | REVIEWED v2: Implementation APPROVED. Both fixes verified (eslint.config.mjs exists, old .js removed, .gitignore updated, no module warnings; apps/ directory now linted/formatted). All config files intact, all commands functional, build and tests pass. No remaining issues. Ready for finalization. |
+| 2026-01-31 | SPEC-017 | COMPLETED: ESLint + Prettier Configuration. 3 config files created (eslint.config.mjs, .prettierrc, .prettierignore). 4 scripts added (lint, lint:fix, format, format:check). 5 commits, 3 audit cycles, 2 review cycles. Archived to .specflow/archive/SPEC-017.md |
 
 ## Project Patterns
 
