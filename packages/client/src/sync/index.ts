@@ -56,3 +56,9 @@ export { SearchClient } from './SearchClient';
 export { MerkleSyncHandler } from './MerkleSyncHandler';
 export { ORMapSyncHandler } from './ORMapSyncHandler';
 export { MessageRouter } from './MessageRouter';
+export {
+  registerClientMessageHandlers,
+  CLIENT_MESSAGE_TYPES,
+  type MessageHandlerDelegates,
+  type ManagerDelegates,
+} from './ClientMessageHandlers';
