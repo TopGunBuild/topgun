@@ -2,6 +2,10 @@
 module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
+  // Force exit after tests complete - pino-pretty transport keeps thread open
+  forceExit: true,
+  // Timeout for slow integration tests
+  testTimeout: 30000,
   rootDir: '.',
   setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
   testMatch: [

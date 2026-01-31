@@ -15,17 +15,21 @@ import type { HandlersModule } from '../modules/types';
 
 describe('HandlersModule', () => {
   let handlers: HandlersModule;
+  let core: ReturnType<typeof createCoreModule>;
+  let network: ReturnType<typeof createNetworkModule>;
+  let cluster: ReturnType<typeof createClusterModule>;
+  let storage: ReturnType<typeof createStorageModule>;
 
   beforeAll(() => {
     // Create minimal dependencies for handlers module
-    const core = createCoreModule({
+    core = createCoreModule({
       nodeId: 'test-node',
       eventStripeCount: 1,
       eventQueueCapacity: 100,
       backpressureEnabled: false,
     });
 
-    const network = createNetworkModule(
+    network = createNetworkModule(
       {
         port: 10301,
         maxConnectionsPerSecond: 100,
@@ -34,7 +38,7 @@ describe('HandlersModule', () => {
       {}
     );
 
-    const cluster = createClusterModule(
+    cluster = createClusterModule(
       {
         nodeId: 'test-node',
         clusterPort: 11301,
@@ -42,7 +46,7 @@ describe('HandlersModule', () => {
       { hlc: core.hlc }
     );
 
-    const storage = createStorageModule(
+    storage = createStorageModule(
       {
         nodeId: 'test-node',
       },
@@ -89,10 +93,35 @@ describe('HandlersModule', () => {
   });
 
   afterAll(async () => {
-    // Clean up
+    // Clean up handlers
     if (handlers._internal.eventJournalService) {
       handlers._internal.eventJournalService.dispose();
     }
+    if (handlers._internal.clusterSearchCoordinator) {
+      handlers._internal.clusterSearchCoordinator.destroy();
+    }
+    if (handlers._internal.distributedSubCoordinator) {
+      handlers._internal.distributedSubCoordinator.destroy();
+    }
+
+    // Clean up cluster (has timers)
+    if (cluster.replicationPipeline) cluster.replicationPipeline.close();
+    if (cluster.lockManager) cluster.lockManager.stop();
+    if (cluster.repairScheduler) cluster.repairScheduler.stop();
+    if (cluster.partitionReassigner) cluster.partitionReassigner.stop();
+    if (cluster.cluster) cluster.cluster.stop();
+
+    // Clean up network (has open ports)
+    if (network.wss) network.wss.close();
+    if (network.httpServer) network.httpServer.close();
+
+    // Clean up core
+    if (core.eventExecutor) await core.eventExecutor.shutdown(false);
+    if (core.metricsService) core.metricsService.destroy();
+
+    // Clean up storage
+    if (storage.taskletScheduler) storage.taskletScheduler.shutdown();
+    if (storage.writeAckManager) storage.writeAckManager.shutdown();
   });
 
   it('should contain exactly 23 handlers across 9 public groups', () => {
