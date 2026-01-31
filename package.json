@@ -48,7 +48,11 @@
     "profile:inspect": "./scripts/profile-server.sh inspect",
     "clean": "rm -rf node_modules packages/*/node_modules examples/*/node_modules apps/*/node_modules packages/*/dist",
     "start:server": "pnpm exec ts-node -r tsconfig-paths/register --project ./examples/tsconfig.json ./examples/simple-server.ts",
-    "start:docs": "pnpm --filter apps-docs-astro dev"
+    "start:docs": "pnpm --filter apps-docs-astro dev",
+    "lint": "eslint 'packages/*/src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}'",
+    "lint:fix": "eslint 'packages/*/src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}' --fix",
+    "format": "prettier --write 'packages/*/src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}'",
+    "format:check": "prettier --check 'packages/*/src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}'"
   },
   "dependencies": {
     "chalk": "^4.1.2",
@@ -63,17 +67,20 @@
     "@types/node": "^18.0.0",
     "@types/pg": "^8.15.6",
     "@types/ws": "^8.18.1",
+    "eslint": "^9.18.0",
     "hdr-histogram-js": "^3.0.1",
     "jest": "^29.7.0",
     "jsonwebtoken": "^9.0.2",
     "msgpackr": "^1.11.8",
     "pg": "^8.16.3",
     "pg-mem": "^3.0.5",
+    "prettier": "^3.4.2",
     "ts-jest": "^29.4.5",
     "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
     "tsup": "^8.5.1",
     "typescript": "^5.0.0",
+    "typescript-eslint": "^8.19.1",
     "ws": "^8.18.3",
     "zod": "^4.1.13"
   },
