@@ -319,9 +319,82 @@ export interface HandlersModuleDeps {
   };
 }
 
+// Lifecycle module - depends on all other modules
+export interface LifecycleModuleConfig {
+  nodeId: string;
+  gracefulShutdownTimeoutMs?: number;
+}
+
+export interface LifecycleModuleDeps {
+  // Network shutdown
+  httpServer: HttpServer | HttpsServer;
+  metricsServer?: HttpServer | HttpsServer;
+  wss: { close: () => void };
+
+  // Core shutdown
+  metricsService: { destroy: () => void };
+  eventExecutor: { shutdown: (waitForPending: boolean) => Promise<void> };
+  connectionManager: {
+    getClientCount: () => number;
+    getClients: () => Map<string, { id: string; socket: any; writer?: { close: () => void } }>;
+  };
+
+  // Cluster shutdown
+  cluster?: {
+    getMembers: () => string[];
+    send: (nodeId: string, type: any, payload: any) => void;
+    stop: () => void;
+  };
+  partitionService?: {
+    getPartitionMap: () => { partitions: Array<{ partitionId: number; ownerNodeId: string }> };
+  };
+  replicationPipeline?: {
+    getTotalPending: () => number;
+    close: () => void;
+  };
+
+  // Worker shutdown
+  workerPool?: {
+    shutdown: (timeoutMs: number) => Promise<void>;
+  };
+
+  // Storage shutdown
+  storage?: {
+    close: () => Promise<void>;
+  };
+  taskletScheduler: { shutdown: () => void };
+  writeAckManager: { shutdown: () => void };
+  eventPayloadPool: { clear: () => void };
+
+  // Handler shutdown
+  gcHandler?: { stop: () => void };
+  heartbeatHandler?: { stop: () => void };
+  lockManager?: { stop: () => void };
+  systemManager?: { stop: () => void };
+  repairScheduler?: { stop: () => void };
+  partitionReassigner?: { stop: () => void };
+  queryConversionHandler?: { stop: () => void };
+  entryProcessorHandler: { dispose: () => void };
+  eventJournalService?: { dispose: () => void };
+
+  // Search shutdown
+  clusterSearchCoordinator?: { destroy: () => void };
+  distributedSubCoordinator?: { destroy: () => void };
+  searchCoordinator: {
+    getEnabledMaps: () => string[];
+    buildIndexFromEntries: (mapName: string, entries: Iterable<[string, Record<string, unknown> | null]>) => void;
+  };
+
+  // Map access for backfill
+  getMapAsync: (name: string) => Promise<any>;
+}
+
+export interface LifecycleModule {
+  lifecycleManager: any; // LifecycleManager type from coordinator
+}
+
 // Placeholder interfaces for later sub-specs
 export interface SearchModule { /* defined in SPEC-011e */ }
-export interface LifecycleModule { /* defined in SPEC-011e */ }
 
 // All modules combined
 export interface ServerModules {

@@ -5,3 +5,4 @@ export * from './cluster-module';
 export * from './storage-module';
 export * from './network-module';
 export * from './handlers-module';
+export * from './lifecycle-module';
