@@ -93,10 +93,16 @@ pnpm start:docs
 - `IStorageAdapter` - Interface for local persistence (IndexedDB, etc.)
 
 **Server:**
-- `ServerCoordinator` - Main WebSocket server, routes requests, handles auth
-- `ClusterManager` - Peer-to-peer WebSocket mesh between server nodes
-- `PartitionService` - Consistent hashing for data distribution (271 partitions)
-- `WorkerPool` - Thread pool for CPU-intensive ops (CRDT merge, Merkle diffs)
+- `ServerFactory` - Assembles server from domain modules via dependency injection
+- `modules/` - Domain-specific factories (see `packages/server/src/modules/`):
+  - `core-module` - HLC, nodeId, base configuration
+  - `workers-module` - WorkerPool for CPU-intensive ops
+  - `cluster-module` - ClusterManager, PartitionService (271 partitions)
+  - `storage-module` - PostgreSQL adapter initialization
+  - `network-module` - HTTP/WSS servers with deferred startup
+  - `handlers-module` - 26 message handlers grouped by domain (CRDT, Sync, Query, Messaging, Coordination, Search, Persistence, Client, Server)
+  - `lifecycle-module` - LifecycleManager with graceful shutdown hooks
+- `ServerCoordinator` - Main entry point, routes requests, manages connections
 
 ### Data Flow
 
