@@ -22,6 +22,7 @@ import type {
   OperationDroppedEvent,
 } from './BackpressureConfig';
 import { ClusterClient } from './cluster/ClusterClient';
+import { SingleServerProvider } from './connection/SingleServerProvider';
 import type { NodeHealth } from '@topgunbuild/core';
 
 // ============================================
@@ -151,10 +152,12 @@ export class TopGunClient {
 
       logger.info({ seeds: this.clusterConfig.seeds }, 'TopGunClient initialized in cluster mode');
     } else {
-      // Single-server mode (existing behavior)
+      // Single-server mode: create SingleServerProvider from serverUrl
+      const singleServerProvider = new SingleServerProvider({ url: config.serverUrl! });
+
       this.syncEngine = new SyncEngine({
         nodeId: this.nodeId,
-        serverUrl: config.serverUrl!,
+        connectionProvider: singleServerProvider,
         storageAdapter: this.storageAdapter,
         backoff: config.backoff,
         backpressure: config.backpressure,

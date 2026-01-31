@@ -69,10 +69,8 @@ const DEFAULT_TOPIC_QUEUE_CONFIG: TopicQueueConfig = {
 
 export interface SyncEngineConfig {
   nodeId: string;
-  /** @deprecated Use connectionProvider instead */
-  serverUrl?: string;
-  /** Connection provider (preferred over serverUrl) */
-  connectionProvider?: IConnectionProvider;
+  /** Connection provider for WebSocket connections */
+  connectionProvider: IConnectionProvider;
   storageAdapter: IStorageAdapter;
   reconnectInterval?: number;
   heartbeat?: Partial<HeartbeatConfig>;
@@ -145,9 +143,9 @@ export class SyncEngine {
   private readonly conflictResolverClient: ConflictResolverClient;
 
   constructor(config: SyncEngineConfig) {
-    // Validate config: either serverUrl or connectionProvider required
-    if (!config.serverUrl && !config.connectionProvider) {
-      throw new Error('SyncEngine requires either serverUrl or connectionProvider');
+    // Validate config: connectionProvider is required
+    if (!config.connectionProvider) {
+      throw new Error('SyncEngine requires connectionProvider');
     }
 
     this.nodeId = config.nodeId;
@@ -190,7 +188,6 @@ export class SyncEngine {
 
     // Initialize WebSocketManager with callbacks to SyncEngine
     this.webSocketManager = new WebSocketManager({
-      serverUrl: config.serverUrl,
       connectionProvider: config.connectionProvider,
       stateMachine: this.stateMachine,
       backoffConfig: this.backoffConfig,

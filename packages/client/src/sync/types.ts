@@ -118,16 +118,10 @@ export interface IWebSocketManager {
  */
 export interface WebSocketManagerConfig {
   /**
-   * Direct WebSocket URL for single-server mode.
-   * @deprecated Use connectionProvider instead
-   */
-  serverUrl?: string;
-
-  /**
-   * Connection provider (preferred over serverUrl).
+   * Connection provider for WebSocket connections.
    * Supports both single-server and cluster modes.
    */
-  connectionProvider?: IConnectionProvider;
+  connectionProvider: IConnectionProvider;
 
   /**
    * State machine reference for managing connection states.
