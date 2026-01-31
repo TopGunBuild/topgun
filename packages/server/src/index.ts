@@ -65,3 +65,6 @@ export { PrometheusExporter, getPrometheusExporter, resetPrometheusExporter } fr
 export { ServerFactory } from './ServerFactory';
 export * from './ServerDependencies';
 
+// Server Modules (Phase 14A - SPEC-011)
+export * from './modules';
+
