@@ -18,7 +18,7 @@ import type {
 import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 import type { IConnectionProvider } from './types';
 import { ConflictResolverClient } from './ConflictResolverClient';
-import { WebSocketManager, BackpressureController, QueryManager, TopicManager, LockManager, WriteConcernManager, CounterManager, EntryProcessorClient, SearchClient, MerkleSyncHandler, ORMapSyncHandler, MessageRouter } from './sync';
+import { WebSocketManager, BackpressureController, QueryManager, TopicManager, LockManager, WriteConcernManager, CounterManager, EntryProcessorClient, SearchClient, MerkleSyncHandler, ORMapSyncHandler, MessageRouter, registerClientMessageHandlers } from './sync';
 import type { SearchResult, IMessageRouter } from './sync';
 
 // Re-export SearchResult from sync module for backwards compatibility
@@ -278,130 +278,37 @@ export class SyncEngine {
     this.messageRouter = new MessageRouter({
       onUnhandled: (msg) => logger.warn({ type: msg?.type }, 'Unhandled message type'),
     });
-    this.registerMessageHandlers();
+    registerClientMessageHandlers(
+      this.messageRouter,
+      {
+        sendAuth: () => this.sendAuth(),
+        handleAuthAck: () => this.handleAuthAck(),
+        handleAuthFail: (msg) => this.handleAuthFail(msg),
+        handleOpAck: (msg) => this.handleOpAck(msg),
+        handleQueryResp: (msg) => this.handleQueryResp(msg),
+        handleQueryUpdate: (msg) => this.handleQueryUpdate(msg),
+        handleServerEvent: (msg) => this.handleServerEvent(msg),
+        handleServerBatchEvent: (msg) => this.handleServerBatchEvent(msg),
+        handleGcPrune: (msg) => this.handleGcPrune(msg),
+        handleHybridQueryResponse: (payload) => this.handleHybridQueryResponse(payload),
+        handleHybridQueryDelta: (payload) => this.handleHybridQueryDelta(payload),
+      },
+      {
+        topicManager: this.topicManager,
+        lockManager: this.lockManager,
+        counterManager: this.counterManager,
+        entryProcessorClient: this.entryProcessorClient,
+        conflictResolverClient: this.conflictResolverClient,
+        searchClient: this.searchClient,
+        merkleSyncHandler: this.merkleSyncHandler,
+        orMapSyncHandler: this.orMapSyncHandler,
+      }
+    );
 
     // Start connection
     this.webSocketManager.connect();
 
     this.loadOpLog();
-  }
-
-  // ============================================
-  // Message Handler Registration (Phase 09d)
-  // ============================================
-
-  /**
-   * Register all message handlers with the MessageRouter.
-   * Called during construction.
-   */
-  private registerMessageHandlers(): void {
-    this.messageRouter.registerHandlers({
-      // AUTH handlers
-      'AUTH_REQUIRED': () => this.sendAuth(),
-      'AUTH_ACK': () => this.handleAuthAck(),
-      'AUTH_FAIL': (msg) => this.handleAuthFail(msg),
-
-      // HEARTBEAT - handled by WebSocketManager, no-op here
-      'PONG': () => {},
-
-      // SYNC handlers
-      'OP_ACK': (msg) => this.handleOpAck(msg),
-      'SYNC_RESP_ROOT': (msg) => this.merkleSyncHandler.handleSyncRespRoot(msg.payload),
-      'SYNC_RESP_BUCKETS': (msg) => this.merkleSyncHandler.handleSyncRespBuckets(msg.payload),
-      'SYNC_RESP_LEAF': (msg) => this.merkleSyncHandler.handleSyncRespLeaf(msg.payload),
-      'SYNC_RESET_REQUIRED': (msg) => this.merkleSyncHandler.handleSyncResetRequired(msg.payload),
-
-      // ORMAP SYNC handlers
-      'ORMAP_SYNC_RESP_ROOT': (msg) => this.orMapSyncHandler.handleORMapSyncRespRoot(msg.payload),
-      'ORMAP_SYNC_RESP_BUCKETS': (msg) => this.orMapSyncHandler.handleORMapSyncRespBuckets(msg.payload),
-      'ORMAP_SYNC_RESP_LEAF': (msg) => this.orMapSyncHandler.handleORMapSyncRespLeaf(msg.payload),
-      'ORMAP_DIFF_RESPONSE': (msg) => this.orMapSyncHandler.handleORMapDiffResponse(msg.payload),
-
-      // QUERY handlers
-      'QUERY_RESP': (msg) => this.handleQueryResp(msg),
-      'QUERY_UPDATE': (msg) => this.handleQueryUpdate(msg),
-
-      // EVENT handlers
-      'SERVER_EVENT': (msg) => this.handleServerEvent(msg),
-      'SERVER_BATCH_EVENT': (msg) => this.handleServerBatchEvent(msg),
-
-      // TOPIC handlers
-      'TOPIC_MESSAGE': (msg) => {
-        const { topic, data, publisherId, timestamp } = msg.payload;
-        this.topicManager.handleTopicMessage(topic, data, publisherId, timestamp);
-      },
-
-      // LOCK handlers
-      'LOCK_GRANTED': (msg) => {
-        const { requestId, fencingToken } = msg.payload;
-        this.lockManager.handleLockGranted(requestId, fencingToken);
-      },
-      'LOCK_RELEASED': (msg) => {
-        const { requestId, success } = msg.payload;
-        this.lockManager.handleLockReleased(requestId, success);
-      },
-
-      // GC handler
-      'GC_PRUNE': (msg) => this.handleGcPrune(msg),
-
-      // COUNTER handlers
-      'COUNTER_UPDATE': (msg) => {
-        const { name, state } = msg.payload;
-        logger.debug({ name }, 'Received COUNTER_UPDATE');
-        this.counterManager.handleCounterUpdate(name, state);
-      },
-      'COUNTER_RESPONSE': (msg) => {
-        const { name, state } = msg.payload;
-        logger.debug({ name }, 'Received COUNTER_RESPONSE');
-        this.counterManager.handleCounterUpdate(name, state);
-      },
-
-      // PROCESSOR handlers
-      'ENTRY_PROCESS_RESPONSE': (msg) => {
-        logger.debug({ requestId: msg.requestId, success: msg.success }, 'Received ENTRY_PROCESS_RESPONSE');
-        this.entryProcessorClient.handleEntryProcessResponse(msg);
-      },
-      'ENTRY_PROCESS_BATCH_RESPONSE': (msg) => {
-        logger.debug({ requestId: msg.requestId }, 'Received ENTRY_PROCESS_BATCH_RESPONSE');
-        this.entryProcessorClient.handleEntryProcessBatchResponse(msg);
-      },
-
-      // RESOLVER handlers
-      'REGISTER_RESOLVER_RESPONSE': (msg) => {
-        logger.debug({ requestId: msg.requestId, success: msg.success }, 'Received REGISTER_RESOLVER_RESPONSE');
-        this.conflictResolverClient.handleRegisterResponse(msg);
-      },
-      'UNREGISTER_RESOLVER_RESPONSE': (msg) => {
-        logger.debug({ requestId: msg.requestId, success: msg.success }, 'Received UNREGISTER_RESOLVER_RESPONSE');
-        this.conflictResolverClient.handleUnregisterResponse(msg);
-      },
-      'LIST_RESOLVERS_RESPONSE': (msg) => {
-        logger.debug({ requestId: msg.requestId }, 'Received LIST_RESOLVERS_RESPONSE');
-        this.conflictResolverClient.handleListResponse(msg);
-      },
-      'MERGE_REJECTED': (msg) => {
-        logger.debug({ mapName: msg.mapName, key: msg.key, reason: msg.reason }, 'Received MERGE_REJECTED');
-        this.conflictResolverClient.handleMergeRejected(msg);
-      },
-
-      // SEARCH handlers
-      'SEARCH_RESP': (msg) => {
-        logger.debug({ requestId: msg.payload?.requestId, resultCount: msg.payload?.results?.length }, 'Received SEARCH_RESP');
-        this.searchClient.handleSearchResponse(msg.payload);
-      },
-      'SEARCH_UPDATE': (msg) => {
-        logger.debug({
-          subscriptionId: msg.payload?.subscriptionId,
-          key: msg.payload?.key,
-          type: msg.payload?.type
-        }, 'Received SEARCH_UPDATE');
-        // SEARCH_UPDATE is handled by SearchHandle via emitMessage, no-op here
-      },
-
-      // HYBRID handlers
-      'HYBRID_QUERY_RESP': (msg) => this.handleHybridQueryResponse(msg.payload),
-      'HYBRID_QUERY_DELTA': (msg) => this.handleHybridQueryDelta(msg.payload),
-    });
   }
 
   // ============================================
