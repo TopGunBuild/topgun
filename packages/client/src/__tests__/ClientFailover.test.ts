@@ -308,20 +308,6 @@ describe('Client Failover', () => {
     });
   });
 
-  describe('SyncEngine Failover Methods', () => {
-    // SyncEngine failover methods are tested via integration tests
-    // Unit testing is complex due to module dependencies
-    // The methods are: waitForPartitionMapUpdate, waitForConnection, waitForState,
-    // isProviderConnected, getConnectionProvider
-
-    test.skip('SyncEngine module exports the class', () => {
-      // Skipping: requires full module setup with storage adapters
-      // The failover methods exist in SyncEngine.ts and are tested via
-      // integration tests in packages/e2e/src/__tests__
-      expect(true).toBe(true);
-    });
-  });
-
   describe('ClusterClient sendWithRetry', () => {
     const { ClusterClient } = require('../cluster/ClusterClient');
 
