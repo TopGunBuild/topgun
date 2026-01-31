@@ -49,10 +49,10 @@
     "clean": "rm -rf node_modules packages/*/node_modules examples/*/node_modules apps/*/node_modules packages/*/dist",
     "start:server": "pnpm exec ts-node -r tsconfig-paths/register --project ./examples/tsconfig.json ./examples/simple-server.ts",
     "start:docs": "pnpm --filter apps-docs-astro dev",
-    "lint": "eslint 'packages/*/src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}'",
-    "lint:fix": "eslint 'packages/*/src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}' --fix",
-    "format": "prettier --write 'packages/*/src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}'",
-    "format:check": "prettier --check 'packages/*/src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}'"
+    "lint": "eslint 'packages/*/src/**/*.{ts,tsx}' 'apps/*/src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}'",
+    "lint:fix": "eslint 'packages/*/src/**/*.{ts,tsx}' 'apps/*/src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}' --fix",
+    "format": "prettier --write 'packages/*/src/**/*.{ts,tsx}' 'apps/*/src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}'",
+    "format:check": "prettier --check 'packages/*/src/**/*.{ts,tsx}' 'apps/*/src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}'"
   },
   "dependencies": {
     "chalk": "^4.1.2",
