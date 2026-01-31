@@ -29,7 +29,7 @@ const navItems = [
 export function Layout() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { status, error, loading } = useServerStatus();
+  const { status: _status, error, loading } = useServerStatus();
   const [isDark, setIsDark] = useState(() => {
     // Check localStorage or system preference
     if (typeof window !== 'undefined') {
