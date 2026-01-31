@@ -2,15 +2,15 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-016
-- **Status:** review
-- **Next Step:** /sf:review
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-016 | BetterAuth Adapter Type Safety | medium | audited | - |
+| - | - | (empty) | - | - | - |
 
 ## Decisions
 
@@ -23,6 +23,8 @@
 | 2026-01-31 | SPEC-016 | AUDITED: Audit v1 approved with 3 recommendations. Spec updated with missing `any` occurrences (lines 161, 168, 175, 192, 193) and expanded test file coverage. |
 | 2026-01-31 | SPEC-016 | REVISED: Applied all 3 recommendations from Audit v1. Added Verification Commands section, updated test file to use MockTopGunClient interface, replaced Observable Truth #4 with measurable criterion. Ready for re-audit. |
 | 2026-01-31 | SPEC-016 | AUDITED v2: All 9 dimensions PASS. Line numbers verified against source. Context estimate ~15% (PEAK range). Ready for implementation. |
+| 2026-01-31 | SPEC-016 | REVIEWED: Implementation APPROVED. Zero `any` types in both files, all 13 tests pass, build succeeds, type declarations correct. Ready for finalization. |
+| 2026-01-31 | SPEC-016 | COMPLETED: BetterAuth Adapter Type Safety. Eliminated all `any` types in TopGunAdapter.ts and test file. Added AuthRecord/SortSpec interfaces. 4 commits. Archived to .specflow/archive/SPEC-016.md |
 
 ## Project Patterns
 
@@ -48,4 +50,4 @@
 (none)
 
 ---
-*Last updated: 2026-01-31 17:00*
+*Last updated: 2026-01-31 20:30*
