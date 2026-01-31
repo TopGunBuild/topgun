@@ -10,6 +10,7 @@
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
+| - | - | - | - | - | - |
 
 ## Decisions
 
@@ -52,6 +53,11 @@
 | 2026-01-31 | SPEC-010 | EXECUTED: Created ClientMessageHandlers.ts (194 lines) and unit tests (176 lines). Updated sync/index.ts exports. SyncEngine.ts refactored (-93 lines, 1,415->1,322). 4 commits. Build passes. All 46 SyncEngine tests pass. 7 new unit tests pass. |
 | 2026-01-31 | SPEC-010 | APPROVED (Review v1): Outstanding implementation. All 33 message types registered correctly. ClientMessageHandlers.ts (194 lines) with MessageHandlerDelegates and ManagerDelegates interfaces. 7 unit tests pass. All 46 SyncEngine tests pass unchanged. SyncEngine.ts reduced 93 lines (1,415→1,322). Build passes, no breaking changes, no behavior changes. Ready to finalize. |
 | 2026-01-31 | SPEC-010 | COMPLETED: ClientMessageHandlers module extracted. SyncEngine.ts reduced 93 lines (1,415→1,322). 33 message types registered via registerClientMessageHandlers(). Archived to .specflow/archive/SPEC-010.md |
+| 2026-01-31 | SPEC-012 | Created: React Hooks Test Suite - Missing Hook Coverage. 3 hooks need tests: useConflictResolver, useEntryProcessor, useMergeRejections. Complexity: small. Priority: high (from TODO-001). |
+| 2026-01-31 | SPEC-012 | Audit v1: APPROVED. ~15% context (PEAK range). All 9 dimensions passed. Hook implementations verified (217, 246, 120 lines). Mock structures validated against ConflictResolverClient API. Test patterns verified against existing test files. Dependencies confirmed (RTL v14, Jest with jsdom). Small scope suitable for single execution. |
+| 2026-01-31 | SPEC-012 | EXECUTED: Created 3 test files (useConflictResolver: 341 lines/16 tests, useEntryProcessor: 327 lines/15 tests, useMergeRejections: 247 lines/11 tests). All 182 tests pass. 3 commits. |
+| 2026-01-31 | SPEC-012 | APPROVED (Review v1): Outstanding test implementation. 42 total test cases exceed requirements (28 minimum). All 182 tests pass (increased from 140). Hook implementations unchanged. Tests follow established patterns with proper edge case coverage, error handling, and cleanup verification. Mock structures accurately reflect client API contracts. No issues found. Ready to finalize. |
+| 2026-01-31 | SPEC-012 | COMPLETED: React Hooks Test Suite. 3 test files created (useConflictResolver, useEntryProcessor, useMergeRejections). 42 test cases total. All 182 tests pass. Archived to .specflow/archive/SPEC-012.md |
 
 ## Project Patterns
 
@@ -69,10 +75,11 @@
 - Deferred startup pattern: module factories create resources but do not bind ports; start() method called after assembly
 - Domain grouping pattern: handlers grouped by domain (CRDT, Sync, Query, Messaging, etc.) for Actor Model portability
 - Client message handler pattern: ClientMessageHandlers module registers all client-side message types via registerClientMessageHandlers()
+- React hook testing pattern: use renderHook + act from @testing-library/react with mock client wrapped in TopGunProvider
 
 ## Warnings
 
 (none)
 
 ---
-*Last updated: 2026-01-31 13:37*
+*Last updated: 2026-01-31 15:00*
