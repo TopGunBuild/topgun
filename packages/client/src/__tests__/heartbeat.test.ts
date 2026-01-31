@@ -1,6 +1,7 @@
 import { SyncEngine, SyncEngineConfig } from '../SyncEngine';
 import { IStorageAdapter } from '../IStorageAdapter';
 import { serialize, deserialize } from '@topgunbuild/core';
+import { SingleServerProvider } from '../connection/SingleServerProvider';
 
 // --- Mock WebSocket ---
 class MockWebSocket {
@@ -125,7 +126,7 @@ describe('Heartbeat', () => {
       mockStorage = createMockStorageAdapter();
       config = {
         nodeId: 'test-node',
-        serverUrl: 'ws://localhost:8080',
+        connectionProvider: new SingleServerProvider({ url: 'ws://localhost:8080' }),
         storageAdapter: mockStorage,
         reconnectInterval: 1000,
         heartbeat: {
@@ -319,7 +320,7 @@ describe('Heartbeat', () => {
     it('should use default heartbeat config when not specified', async () => {
       const configWithoutHeartbeat: SyncEngineConfig = {
         nodeId: 'test-node',
-        serverUrl: 'ws://localhost:8080',
+        connectionProvider: new SingleServerProvider({ url: 'ws://localhost:8080' }),
         storageAdapter: mockStorage,
       };
 

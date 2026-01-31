@@ -7,6 +7,7 @@
 import { SyncEngine, SearchResult } from '../SyncEngine';
 import { TopGunClient } from '../TopGunClient';
 import { SyncState } from '../SyncState';
+import { SingleServerProvider } from '../connection/SingleServerProvider';
 
 // Mock storage adapter
 const createMockStorage = () => ({
@@ -48,7 +49,7 @@ describe('Client Search', () => {
 
       syncEngine = new SyncEngine({
         nodeId: 'test-node',
-        serverUrl: 'ws://localhost:8080',
+        connectionProvider: new SingleServerProvider({ url: 'ws://localhost:8080' }),
         storageAdapter: createMockStorage() as any,
       });
 
@@ -249,7 +250,7 @@ describe('Client Search', () => {
 
       syncEngine = new SyncEngine({
         nodeId: 'test-node',
-        serverUrl: 'ws://localhost:8080',
+        connectionProvider: new SingleServerProvider({ url: 'ws://localhost:8080' }),
         storageAdapter: createMockStorage() as any,
       });
 

@@ -2,6 +2,7 @@ import { SyncEngine, SyncEngineConfig } from '../SyncEngine';
 import { BackpressureError } from '../errors/BackpressureError';
 import type { BackpressureConfig, BackpressureStatus } from '../BackpressureConfig';
 import type { IStorageAdapter } from '../IStorageAdapter';
+import { SingleServerProvider } from '../connection/SingleServerProvider';
 
 // Mock WebSocket
 class MockWebSocket {
@@ -69,7 +70,7 @@ describe('Backpressure', () => {
   function createSyncEngine(backpressure?: Partial<BackpressureConfig>): SyncEngine {
     const config: SyncEngineConfig = {
       nodeId: 'test-node',
-      serverUrl: 'ws://localhost:8080',
+      connectionProvider: new SingleServerProvider({ url: 'ws://localhost:8080' }),
       storageAdapter: createMockStorage(),
       backpressure,
     };

@@ -110,30 +110,7 @@ describe('IConnectionProvider', () => {
       provider.close();
     });
 
-    test('should accept serverUrl in config (backward compatible)', () => {
-      const mockStorage = {
-        put: jest.fn(),
-        get: jest.fn(),
-        remove: jest.fn(),
-        getAllKeys: jest.fn().mockResolvedValue([]),
-        appendOpLog: jest.fn().mockResolvedValue(1),
-        getPendingOps: jest.fn().mockResolvedValue([]),
-        markOpsSynced: jest.fn(),
-        getMeta: jest.fn().mockResolvedValue(null),
-        setMeta: jest.fn(),
-      };
-
-      const engine = new SyncEngine({
-        nodeId: 'test-node',
-        serverUrl: 'ws://localhost:8080',
-        storageAdapter: mockStorage,
-      });
-
-      expect(engine).toBeDefined();
-      engine.close();
-    });
-
-    test('should throw if neither serverUrl nor connectionProvider provided', () => {
+    test('should throw if connectionProvider not provided', () => {
       const mockStorage = {
         put: jest.fn(),
         get: jest.fn(),
@@ -149,7 +126,7 @@ describe('IConnectionProvider', () => {
       expect(() => new SyncEngine({
         nodeId: 'test-node',
         storageAdapter: mockStorage,
-      })).toThrow('SyncEngine requires either serverUrl or connectionProvider');
+      } as any)).toThrow('SyncEngine requires connectionProvider');
     });
   });
 });

@@ -1,6 +1,7 @@
 import { SyncEngine, SyncEngineConfig, OpLogEntry } from '../SyncEngine';
 import { IStorageAdapter } from '../IStorageAdapter';
 import { serialize, deserialize, LWWMap, ORMap, HLC } from '@topgunbuild/core';
+import { SingleServerProvider } from '../connection/SingleServerProvider';
 
 // --- Mock WebSocket ---
 class MockWebSocket {
@@ -106,7 +107,7 @@ describe('SyncEngine', () => {
     mockStorage = createMockStorageAdapter();
     config = {
       nodeId: 'test-node',
-      serverUrl: 'ws://localhost:8080',
+      connectionProvider: new SingleServerProvider({ url: 'ws://localhost:8080' }),
       storageAdapter: mockStorage,
       reconnectInterval: 1000,
       // Disable heartbeat for these tests to prevent fake timer conflicts
