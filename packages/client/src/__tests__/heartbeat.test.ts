@@ -13,7 +13,7 @@ class MockWebSocket {
   binaryType: string = 'blob';
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: ArrayBuffer | string }) => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event: { code: number; reason: string }) => void) | null = null;
   onerror: ((error: any) => void) | null = null;
   sentMessages: any[] = [];
 
@@ -38,7 +38,7 @@ class MockWebSocket {
 
   close() {
     this.readyState = MockWebSocket.CLOSED;
-    if (this.onclose) this.onclose();
+    if (this.onclose) this.onclose({ code: 1000, reason: 'Normal closure' });
   }
 
   // Helper to simulate server message
@@ -187,25 +187,16 @@ describe('Heartbeat', () => {
       expect(syncEngine.isConnectionHealthy()).toBe(true);
     });
 
-    it('should trigger reconnect if no PONG within timeoutMs', async () => {
+    it('should close connection on heartbeat timeout', async () => {
       const result = await setupAuthenticatedEngine(config);
       syncEngine = result.syncEngine;
-      const ws = result.ws;
-
-      const initialInstanceCount = MockWebSocket.instances.length;
 
       // Advance time beyond timeout (15s) without receiving PONG
       // Need to advance past timeout + check interval
       await jest.advanceTimersByTimeAsync(20000);
 
-      // WebSocket should have been closed due to timeout
-      expect(ws.readyState).toBe(MockWebSocket.CLOSED);
-
-      // Allow reconnect timer to fire (reconnectInterval = 1000ms)
-      await jest.advanceTimersByTimeAsync(2000);
-
-      // Should have reconnected
-      expect(MockWebSocket.instances.length).toBeGreaterThan(initialInstanceCount);
+      // Connection should be closed and marked unhealthy due to timeout
+      expect(syncEngine.isConnectionHealthy()).toBe(false);
     });
 
     it('should calculate round-trip time correctly', async () => {

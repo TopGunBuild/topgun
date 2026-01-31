@@ -13,7 +13,7 @@ class MockWebSocket {
   binaryType: string = 'blob';
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: ArrayBuffer | string }) => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((event: { code: number; reason: string }) => void) | null = null;
   onerror: ((error: any) => void) | null = null;
   sentMessages: any[] = [];
 
@@ -38,7 +38,7 @@ class MockWebSocket {
 
   close() {
     this.readyState = MockWebSocket.CLOSED;
-    if (this.onclose) this.onclose();
+    if (this.onclose) this.onclose({ code: 1000, reason: 'Normal closure' });
   }
 
   // Helper to simulate server message
