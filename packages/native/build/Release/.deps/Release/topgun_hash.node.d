@@ -1,1 +1,0 @@
-cmd_Release/topgun_hash.node := c++ -bundle -undefined dynamic_lookup -Wl,-search_paths_first -mmacosx-version-min=10.15 -arch arm64 -L./Release -stdlib=libc++  -o Release/topgun_hash.node Release/obj.target/topgun_hash/src/hash.o Release/nothing.a 
