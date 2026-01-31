@@ -2,15 +2,15 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-017
+- **Status:** review
+- **Next Step:** /sf:review
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| - | - | (empty) | - | - | - |
+| 1 | SPEC-017 | Add ESLint + Prettier Configuration | medium | audited | - |
 
 ## Decisions
 
@@ -25,6 +25,13 @@
 | 2026-01-31 | SPEC-016 | AUDITED v2: All 9 dimensions PASS. Line numbers verified against source. Context estimate ~15% (PEAK range). Ready for implementation. |
 | 2026-01-31 | SPEC-016 | REVIEWED: Implementation APPROVED. Zero `any` types in both files, all 13 tests pass, build succeeds, type declarations correct. Ready for finalization. |
 | 2026-01-31 | SPEC-016 | COMPLETED: BetterAuth Adapter Type Safety. Eliminated all `any` types in TopGunAdapter.ts and test file. Added AuthRecord/SortSpec interfaces. 4 commits. Archived to .specflow/archive/SPEC-016.md |
+| 2026-01-31 | SPEC-017 | CREATED: Add ESLint + Prettier Configuration. Infrastructure task to add linting and formatting to monorepo. |
+| 2026-01-31 | SPEC-017 | AUDITED v1: APPROVED with 3 recommendations. Context estimate ~14% (PEAK). All 9 dimensions pass. Recommendations: include .tsx files in scripts, consider unified typescript-eslint package, add Key Links to Goal Analysis. |
+| 2026-01-31 | SPEC-017 | REVISED: Applied all 3 recommendations. Updated scripts to include .tsx files, replaced separate packages with unified typescript-eslint, added Key Links to Goal Analysis. Ready for re-audit. |
+| 2026-01-31 | SPEC-017 | AUDITED v2: APPROVED with 1 minor recommendation. Context estimate ~13% (PEAK). All 9 dimensions PASS. Previous recommendations verified as applied. Ready for implementation. |
+| 2026-01-31 | SPEC-017 | REVISED v2: Applied minor recommendation. Added k6 test exclusion clarification to Out of Scope section. Ready for re-audit. |
+| 2026-01-31 | SPEC-017 | AUDITED v3: APPROVED. Context estimate ~12% (PEAK). All 9 dimensions PASS. All assumptions validated against codebase. Ready for implementation. |
+| 2026-01-31 | SPEC-017 | EXECUTED: ESLint + Prettier configuration added. 3 commits (config files, package.json scripts, bug fix). Dependencies installed (eslint ^9.39, prettier ^3.8, typescript-eslint ^8.49). Lint finds 2333 violations, format:check finds 441 unformatted files (not auto-fixed per constraint). Build passes, 1813/1815 tests pass (2 flaky performance tests unrelated). |
 
 ## Project Patterns
 
@@ -50,4 +57,4 @@
 (none)
 
 ---
-*Last updated: 2026-01-31 20:30*
+*Last updated: 2026-01-31*
