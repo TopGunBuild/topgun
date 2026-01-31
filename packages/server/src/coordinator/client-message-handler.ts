@@ -40,7 +40,9 @@ export class ClientMessageHandler implements IClientMessageHandler {
             } else if (op.orTag) {
                 try {
                     ts = HLC.parse(op.orTag);
-                } catch (e) { }
+                } catch (e) {
+                    logger.debug({ orTag: op.orTag, error: e }, 'Failed to parse HLC from orTag');
+                }
             }
         }
 
