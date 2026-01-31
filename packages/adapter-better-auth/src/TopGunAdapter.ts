@@ -104,7 +104,7 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
      * For BetterAuth compatibility, we fetch limit+offset results and slice client-side.
      * This is acceptable for auth queries which typically have small result sets.
      */
-    const runQuery = async <T>(model: string, where?: Where[], sort?: any, limit?: number, offset?: number): Promise<T[]> => {
+    const runQuery = async <T extends AuthRecord>(model: string, where?: Where[], sort?: SortSpec, limit?: number, offset?: number): Promise<T[]> => {
       const mapName = getMapName(model);
       const predicate = where ? whereToPredicate(where) : undefined;
 
@@ -141,23 +141,24 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
       async create({ model, data }) {
         await ensureReady();
         const mapName = getMapName(model);
-        const id = (data as any).id || crypto.randomUUID();
-        const record = { ...data, id };
-        
+        const dataWithId = data as Partial<AuthRecord> & Record<string, unknown>;
+        const id = dataWithId.id || crypto.randomUUID();
+        const record: AuthRecord = { ...data, id };
+
         // Use LWWMap for standard records
-        const map = client.getMap<string, any>(mapName);
+        const map = client.getMap<string, AuthRecord>(mapName);
         map.set(id, record);
-        
+
         // map.set is optimistic and writes to local storage/sync engine.
-        // Ideally we wait for confirmation? TopGun doesn't expose Promise for set completion easily 
+        // Ideally we wait for confirmation? TopGun doesn't expose Promise for set completion easily
         // (it returns the record). But SyncEngine queues it.
-        
-        return record as any;
+
+        return record;
       },
 
       async findOne({ model, where, select, join }) {
         await ensureReady();
-        const results = await runQuery<any>(model, where, undefined, 1);
+        const results = await runQuery<AuthRecord>(model, where, undefined, 1);
         
         if (results.length > 0) {
           const result = results[0];
@@ -177,21 +178,26 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
                  
                  // Attach to result using pluralized name (simple heuristic)
                  const pluralName = joinModel.endsWith('s') ? joinModel : joinModel + 's';
-                 (result as any)[pluralName] = joinResults;
+                 result[pluralName] = joinResults;
              }
           }
 
           // console.log(`[Adapter] findOne final result:`, result);
           
           // Ensure Dates are Date objects if they are strings (basic fix for JSON/serialization issues)
-          const fixDates = (obj: any) => {
+          const fixDates = (obj: Record<string, unknown>): Record<string, unknown> => {
               if (!obj) return obj;
               for (const key in obj) {
-                  if (typeof obj[key] === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(obj[key])) {
-                      obj[key] = new Date(obj[key]);
-                  } else if (typeof obj[key] === 'object' && obj[key] !== null) {
-                      if (Array.isArray(obj[key])) {
-                          obj[key].forEach((item: any) => fixDates(item));
+                  const value = obj[key];
+                  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value)) {
+                      obj[key] = new Date(value);
+                  } else if (typeof value === 'object' && value !== null) {
+                      if (Array.isArray(value)) {
+                          value.forEach((item: unknown) => {
+                              if (typeof item === 'object' && item !== null) {
+                                  fixDates(item as Record<string, unknown>);
+                              }
+                          });
                       }
                   }
               }
@@ -200,16 +206,16 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
           fixDates(result);
 
           if (select) {
-             const selected: any = {};
+             const selected: Partial<AuthRecord> = {};
              select.forEach(field => selected[field] = result[field]);
-             // Ensure joined props are kept if they are not in select? 
-             // Usually select applies to the main model fields. 
+             // Ensure joined props are kept if they are not in select?
+             // Usually select applies to the main model fields.
              // If join is requested, it implies we want those too.
              if (join) {
                  for (const joinModel of Object.keys(join)) {
                      const propName = joinModel.endsWith('s') ? joinModel : joinModel + 's';
-                     if ((result as any)[propName]) {
-                         selected[propName] = (result as any)[propName];
+                     if (result[propName]) {
+                         selected[propName] = result[propName];
                      }
                  }
              }
@@ -222,38 +228,38 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
 
       async findMany({ model, where, limit, offset, sortBy }) {
          await ensureReady();
-         const results = await runQuery<any>(model, where, sortBy ? {[sortBy.field]: sortBy.direction} : undefined, limit, offset);
+         const results = await runQuery<AuthRecord>(model, where, sortBy ? {[sortBy.field]: sortBy.direction} : undefined, limit, offset);
          return results;
       },
 
       async update({ model, where, update }) {
         await ensureReady();
         // We need to find the records first to update them
-        const results = await runQuery<any>(model, where);
+        const results = await runQuery<AuthRecord>(model, where);
         if (results.length === 0) return null;
 
         const mapName = getMapName(model);
-        const map = client.getMap<string, any>(mapName);
-        
-        // Update implies modifying existing. 
+        const map = client.getMap<string, AuthRecord>(mapName);
+
+        // Update implies modifying existing.
         // If multiple matches, update only first? The interface says "Update may not return the updated data if multiple where clauses are provided".
         // Usually update finds one.
         // But if where is implicit AND, it finds specific set.
         // Standard behavior for 'update' (singular) is update ONE.
-        
+
         const item = results[0];
         const updatedItem = { ...item, ...update };
         map.set(item.id, updatedItem);
-        
+
         return updatedItem;
       },
 
       async updateMany({ model, where, update }) {
         await ensureReady();
-        const results = await runQuery<any>(model, where);
+        const results = await runQuery<AuthRecord>(model, where);
         const mapName = getMapName(model);
-        const map = client.getMap<string, any>(mapName);
-        
+        const map = client.getMap<string, AuthRecord>(mapName);
+
         for (const item of results) {
            map.set(item.id, { ...item, ...update });
         }
@@ -262,10 +268,10 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
 
       async delete({ model, where }) {
          await ensureReady();
-         const results = await runQuery<any>(model, where);
+         const results = await runQuery<AuthRecord>(model, where);
          const mapName = getMapName(model);
-         const map = client.getMap<string, any>(mapName);
-         
+         const map = client.getMap<string, AuthRecord>(mapName);
+
          if (results.length > 0) {
             map.remove(results[0].id);
          }
@@ -273,10 +279,10 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
 
       async deleteMany({ model, where }) {
          await ensureReady();
-         const results = await runQuery<any>(model, where);
+         const results = await runQuery<AuthRecord>(model, where);
          const mapName = getMapName(model);
-         const map = client.getMap<string, any>(mapName);
-         
+         const map = client.getMap<string, AuthRecord>(mapName);
+
          for (const item of results) {
             map.remove(item.id);
          }
@@ -285,7 +291,7 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
       
       async count({ model, where }) {
          await ensureReady();
-         const results = await runQuery<any>(model, where);
+         const results = await runQuery<AuthRecord>(model, where);
          return results.length;
       },
 
@@ -294,7 +300,7 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
          // We execute sequentially as per BetterAuth fallback.
          // But DBTransactionAdapter is Omit<DBAdapter, "transaction">.
          // We just pass 'this' as the transaction adapter (cast it).
-         return callback(this as any); 
+         return callback(this as Omit<DBAdapter, 'transaction'>);
       }
     };
   };
