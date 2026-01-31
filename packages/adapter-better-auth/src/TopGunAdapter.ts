@@ -135,9 +135,12 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
       });
     };
 
+    // Type assertion needed because BetterAuth's DBAdapter uses method-level generics
+    // that TypeScript can't verify at compile time. Our AuthRecord constraint provides
+    // internal type safety while the adapter boundary requires runtime type flexibility.
     return {
       id: 'topgun-adapter',
-      
+
       async create({ model, data }) {
         await ensureReady();
         const mapName = getMapName(model);
@@ -153,7 +156,8 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
         // Ideally we wait for confirmation? TopGun doesn't expose Promise for set completion easily
         // (it returns the record). But SyncEngine queues it.
 
-        return record;
+        // Type assertion needed to match DBAdapter's generic return type
+        return record as unknown as typeof data & { id: string };
       },
 
       async findOne({ model, where, select, join }) {
@@ -219,9 +223,11 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
                      }
                  }
              }
-             return selected;
+             // Type assertion needed to match DBAdapter's generic return type
+             return selected as unknown as Record<string, unknown>;
           }
-          return result;
+          // Type assertion needed to match DBAdapter's generic return type
+          return result as unknown as Record<string, unknown>;
         }
         return null;
       },
@@ -229,7 +235,8 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
       async findMany({ model, where, limit, offset, sortBy }) {
          await ensureReady();
          const results = await runQuery<AuthRecord>(model, where, sortBy ? {[sortBy.field]: sortBy.direction} : undefined, limit, offset);
-         return results;
+         // Type assertion needed to match DBAdapter's generic return type
+         return results as unknown as Record<string, unknown>[];
       },
 
       async update({ model, where, update }) {
@@ -251,7 +258,8 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
         const updatedItem = { ...item, ...update };
         map.set(item.id, updatedItem);
 
-        return updatedItem;
+        // Type assertion needed to match DBAdapter's generic return type
+        return updatedItem as unknown as Record<string, unknown>;
       },
 
       async updateMany({ model, where, update }) {
@@ -302,6 +310,6 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
          // We just pass 'this' as the transaction adapter (cast it).
          return callback(this as Omit<DBAdapter, 'transaction'>);
       }
-    };
+    } as DBAdapter;
   };
 };
