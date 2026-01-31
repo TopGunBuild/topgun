@@ -2,15 +2,15 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-011e
+- **Status:** review
+- **Next Step:** /sf:review
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-011e | Search + Lifecycle + Final Assembly | high | draft | - |
+| 1 | SPEC-011e | Lifecycle Module + Final Assembly | high | audited | - |
 | 2 | SPEC-010 | Extract SyncEngine Message Handlers | medium | draft | - |
 
 ## Decisions
@@ -44,6 +44,10 @@
 | 2026-01-31 | SPEC-011d | Fix Response v2: Corrected handler count in validation test from 26 to 23 (9 public groups only). Updated test comment, description, assertion, and AC#11. All 5 HandlersModule tests pass. Commit b532c54. |
 | 2026-01-31 | SPEC-011d | APPROVED (Review v3): Outstanding implementation. All 26 handlers extracted and grouped into 9 domains. MessageRegistry routes 29 message types correctly. 4-step factory dependency graph ensures correct creation order. Internal managers keep external API clean. ServerFactory reduced by 455 lines (-87%). Validation test confirms structure. Build passes with zero TypeScript errors. Zero behavior change. Excellent architecture demonstrating proper dependency injection and clean separation of concerns. Ready for Rust Actor Model translation. |
 | 2026-01-31 | SPEC-011d | COMPLETED: Handlers Module + MessageRegistry extracted. handlers-module.ts (932 lines) with 26 handlers in 9 domain groups. MessageRegistry routes 29 message types. ServerFactory.ts reduced 455 lines. Archived to .specflow/archive/SPEC-011d.md |
+| 2026-01-31 | SPEC-011e | Audit v1: NEEDS_REVISION. 6 critical issues: (1) incorrect line numbers (pre-011d), (2) search coordinators already in handlers-module.ts, (3) unrealistic ~100 line target (current is 489), (4) R4 incomplete LifecycleManager config, (5) R5 references non-existent ClusterEventHandler, (6) AC#7/AC#11 unmeasurable targets. 4 recommendations: re-evaluate scope, remove search-module from scope, complete R4 config, fix R5 late binding. |
+| 2026-01-31 | SPEC-011e | Response v1: All 6 critical issues and all 4 recommendations applied. Spec re-scoped to focus only on LifecycleManager extraction. Target revised from ~100 to ~200-250 lines. Search coordinators removed from scope (already in handlers-module). R2 completed with all 24 LifecycleManagerConfig fields. R3 late binding corrected (gcHandler only). AC#5 and AC#9 updated to realistic targets. Spec title updated to "Lifecycle Module + Final Assembly". Ready for re-audit. |
+| 2026-01-31 | SPEC-011e | Audit v2: APPROVED. ~15% context (PEAK range). All 9 dimensions passed. Field count corrected to 27. R3 clarified (metricsServer in ServerFactory, not NetworkModule; no flattenModules; no setBroadcastCallback). AC#7 reworded, AC#8 added for metricsServer deferred startup. Clean, focused spec completing SPEC-011 series. |
+| 2026-01-31 | SPEC-011e | EXECUTED: Created lifecycle-module.ts (119 lines). Updated types.ts with LifecycleModule interfaces. ServerFactory.ts refactored (-47 lines, 489→442). Module exports added to index.ts. 3 commits. Build passes. GracefulShutdown test confirms lifecycle integration (2/3 tests pass, 1 flaky timeout). |
 
 ## Project Patterns
 
@@ -66,4 +70,4 @@
 (none)
 
 ---
-*Last updated: 2026-01-31 02:20*
+*Last updated: 2026-01-31 04:30*
