@@ -1,11 +1,30 @@
 import { TopGunClient, Predicates } from '@topgunbuild/client';
 import type { BetterAuthOptions } from 'better-auth';
-import type { 
-  DBAdapter, 
+import type {
+  DBAdapter,
   Where,
   DBAdapterInstance
 } from 'better-auth/adapters';
 import type { PredicateNode } from '@topgunbuild/core';
+
+/**
+ * Base interface for all BetterAuth records stored in TopGun.
+ * Allows string-indexed properties for flexibility with different model types.
+ */
+interface AuthRecord {
+  id: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Sort direction for query ordering.
+ */
+type SortDirection = 'asc' | 'desc';
+
+/**
+ * Sort specification mapping field names to sort directions.
+ */
+type SortSpec = Record<string, SortDirection>;
 
 export interface TopGunAdapterOptions {
   client: TopGunClient;
