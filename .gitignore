@@ -30,6 +30,7 @@ examples/**/*.d.ts
 # Keep root configuration files only
 !/jest.config.js
 !/webpack.config.js
+!/eslint.config.js
 !/scripts/*.js
 
 # Keep package-level config files
