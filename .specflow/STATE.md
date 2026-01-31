@@ -2,14 +2,15 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-016
+- **Status:** review
+- **Next Step:** /sf:review
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
+| 1 | SPEC-016 | BetterAuth Adapter Type Safety | medium | audited | - |
 
 ## Decisions
 
@@ -19,6 +20,9 @@
 | 2026-01-31 | SPEC-013 | COMPLETED: Silent Error Handling Audit. Added debug logging to client-message-handler.ts:43. 1 commit. Archived to .specflow/archive/SPEC-013.md |
 | 2026-01-31 | SPEC-014 | COMPLETED: Skipped test removed from ClientFailover.test.ts. Codebase now has zero test.skip() or test.only() patterns. Archived to .specflow/archive/SPEC-014.md |
 | 2026-01-31 | SPEC-015 | COMPLETED: Schema File Splitting. Split schemas.ts (1160 lines) into 6 domain modules + barrel. All 53 message types preserved in MessageSchema union. Build passes. Archived to .specflow/archive/SPEC-015.md |
+| 2026-01-31 | SPEC-016 | AUDITED: Audit v1 approved with 3 recommendations. Spec updated with missing `any` occurrences (lines 161, 168, 175, 192, 193) and expanded test file coverage. |
+| 2026-01-31 | SPEC-016 | REVISED: Applied all 3 recommendations from Audit v1. Added Verification Commands section, updated test file to use MockTopGunClient interface, replaced Observable Truth #4 with measurable criterion. Ready for re-audit. |
+| 2026-01-31 | SPEC-016 | AUDITED v2: All 9 dimensions PASS. Line numbers verified against source. Context estimate ~15% (PEAK range). Ready for implementation. |
 
 ## Project Patterns
 
@@ -44,4 +48,4 @@
 (none)
 
 ---
-*Last updated: 2026-01-31 23:50*
+*Last updated: 2026-01-31 17:00*
