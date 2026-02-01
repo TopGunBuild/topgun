@@ -448,9 +448,9 @@ export class SearchCoordinator extends EventEmitter {
   dispose(): void {
     // Flush pending notifications before clearing timer
     if (this.notificationTimer) {
+      this.flushNotifications();
       clearTimeout(this.notificationTimer);
       this.notificationTimer = null;
-      this.flushNotifications();
     }
     logger.debug('SearchCoordinator disposed');
   }
