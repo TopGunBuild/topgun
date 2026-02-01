@@ -12,10 +12,10 @@ import { SyncStateMachine } from './SyncStateMachine';
 import { BackpressureError } from './errors/BackpressureError';
 import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 
-// Cluster imports (Phase 4)
+// Cluster imports
 import { ConnectionPool, PartitionRouter, ClusterClient } from './cluster';
 
-// Connection provider imports (Phase 4.5)
+// Connection provider imports
 import { SingleServerProvider } from './connection';
 
 // Type imports
@@ -39,33 +39,33 @@ export { SyncState, VALID_TRANSITIONS, isValidTransition, SyncStateMachine };
 export { BackpressureError, DEFAULT_BACKPRESSURE_CONFIG, DEFAULT_CLUSTER_CONFIG };
 export { logger } from './utils/logger';
 
-// Change tracking exports (Phase 5.1)
+// Change tracking exports
 export { ChangeTracker };
 export type { ChangeEvent } from './ChangeTracker';
 
-// PN Counter exports (Phase 5.2)
+// PN Counter exports
 export { PNCounterHandle } from './PNCounterHandle';
 
-// Event Journal exports (Phase 5.04)
+// Event Journal exports
 export { EventJournalReader } from './EventJournalReader';
 export type { JournalEventData, JournalSubscribeOptions } from './EventJournalReader';
 
-// Conflict Resolver exports (Phase 5.05)
+// Conflict Resolver exports
 export { ConflictResolverClient } from './ConflictResolverClient';
 export type { ResolverInfo, RegisterResult } from './ConflictResolverClient';
 
-// Full-Text Search exports (Phase 11.1a)
+// Full-Text Search exports
 export type { SearchResult } from './SyncEngine';
 
-// Live Search exports (Phase 11.1b)
+// Live Search exports
 export { SearchHandle } from './SearchHandle';
 export type { SearchResultsCallback } from './SearchHandle';
 
-// Hybrid Query exports (Phase 12)
+// Hybrid Query exports
 export { HybridQueryHandle } from './HybridQueryHandle';
 export type { HybridQueryFilter, HybridResultItem, HybridResultSource } from './HybridQueryHandle';
 
-// Cluster exports (Phase 4)
+// Cluster exports
 export { ConnectionPool, PartitionRouter, ClusterClient };
 export type {
   ConnectionPoolEvents,
@@ -77,7 +77,7 @@ export type {
   CircuitState,
 } from './cluster';
 
-// Connection provider exports (Phase 4.5)
+// Connection provider exports
 export { SingleServerProvider };
 export type {
   IConnectionProvider,
@@ -86,7 +86,7 @@ export type {
   SingleServerProviderConfig,
 } from './types';
 
-// TopGunClient cluster config types (Phase 4.5)
+// TopGunClient cluster config types
 export type { TopGunClusterConfig, TopGunClientConfig } from './TopGunClient';
 
 // Type exports
@@ -98,7 +98,7 @@ export type {
   QueryFilter,
   QueryResultItem,
   QueryResultSource,
-  // Pagination types (Phase 14.1)
+  // Pagination types
   CursorStatus,
   PaginationInfo,
   TopicCallback,
