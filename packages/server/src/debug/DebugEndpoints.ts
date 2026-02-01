@@ -38,6 +38,24 @@ export class DebugEndpoints {
 
   constructor(config: DebugEndpointsConfig) {
     this.config = config;
+
+    if (config.enabled) {
+      logger.warn(
+        {
+          endpoints: [
+            '/debug/crdt/export',
+            '/debug/crdt/stats',
+            '/debug/crdt/conflicts',
+            '/debug/crdt/operations',
+            '/debug/crdt/timeline',
+            '/debug/search/explain',
+            '/debug/search/stats',
+            '/debug/search/history',
+          ],
+        },
+        'Debug endpoints are ENABLED and expose internal CRDT state. Never enable in production. Set TOPGUN_DEBUG_ENDPOINTS=false to disable.'
+      );
+    }
   }
 
   /**
