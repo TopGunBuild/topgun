@@ -45,7 +45,6 @@ export async function handleSearch(rawArgs: unknown, ctx: ToolContext): Promise<
   const effectiveMinScore = minScore ?? 0;
 
   try {
-    // Use the client's search API (Phase 11)
     const results = await ctx.client.search<Record<string, unknown>>(map, query, {
       limit: effectiveLimit,
       minScore: effectiveMinScore,

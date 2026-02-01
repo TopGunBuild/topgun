@@ -1,7 +1,7 @@
 /**
  * topgun_query - Query data from a TopGun map with filters
  *
- * Phase 14.1: Updated to use cursor-based pagination via QueryHandle.
+ * Uses cursor-based pagination via QueryHandle.
  */
 
 import type { MCPTool, MCPToolResult, ToolContext } from '../types';
@@ -57,7 +57,6 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
       queryFilter.sort = { [sort.field]: sort.order };
     }
 
-    // Add cursor for pagination (Phase 14.1)
     if (cursor) {
       queryFilter.cursor = cursor;
     }
