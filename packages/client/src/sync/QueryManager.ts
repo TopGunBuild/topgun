@@ -5,8 +5,6 @@
  * - Standard query subscriptions (QueryHandle)
  * - Hybrid query subscriptions (HybridQueryHandle with FTS)
  * - Local query execution against storage adapter
- *
- * Part of Phase 05: SyncEngine Refactor
  */
 
 import { evaluatePredicate } from '@topgunbuild/core';
