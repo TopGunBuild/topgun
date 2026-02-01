@@ -1,7 +1,7 @@
 /**
  * SearchCoordinator Batching Tests
  *
- * Phase 11.2: Tests notification batching functionality.
+ * Tests notification batching functionality.
  */
 
 import { SearchCoordinator, type BatchedUpdate } from '../SearchCoordinator';

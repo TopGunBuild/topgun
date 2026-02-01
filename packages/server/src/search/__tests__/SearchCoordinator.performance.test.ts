@@ -1,7 +1,7 @@
 /**
  * SearchCoordinator Performance Tests
  *
- * Phase 11.2: Validates O(1) scoreDocument performance optimization.
+ * Validates O(1) scoreDocument performance optimization.
  * Tests that scoreDocument time is independent of index size.
  */
 

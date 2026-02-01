@@ -33,13 +33,13 @@ export class MetricsService {
   private connectionsPending: Gauge;
   private connectionRatePerSecond: Gauge;
 
-  // Distributed search metrics (Phase 14)
+  // Distributed search metrics
   private distributedSearchTotal: Counter;
   private distributedSearchDuration: Summary;
   private distributedSearchFailedNodes: Counter;
   private distributedSearchPartialResults: Counter;
 
-  // Distributed subscription metrics (Phase 14.2)
+  // Distributed subscription metrics
   private distributedSubTotal: Counter;
   private distributedSubUnsubscribeTotal: Counter;
   private distributedSubActive: Gauge;
@@ -188,7 +188,7 @@ export class MetricsService {
       registers: [this.registry],
     });
 
-    // === Distributed search metrics (Phase 14) ===
+    // === Distributed search metrics ===
     this.distributedSearchTotal = new Counter({
       name: 'topgun_distributed_search_total',
       help: 'Total number of distributed search requests',
@@ -216,7 +216,7 @@ export class MetricsService {
       registers: [this.registry],
     });
 
-    // === Distributed subscription metrics (Phase 14.2) ===
+    // === Distributed subscription metrics ===
     this.distributedSubTotal = new Counter({
       name: 'topgun_distributed_sub_total',
       help: 'Total distributed subscriptions created',
@@ -422,7 +422,7 @@ export class MetricsService {
     this.connectionRatePerSecond.set(rate);
   }
 
-  // === Distributed search metric methods (Phase 14) ===
+  // === Distributed search metric methods ===
 
   /**
    * Record a distributed search request.
@@ -457,7 +457,7 @@ export class MetricsService {
     this.distributedSearchPartialResults.inc();
   }
 
-  // === Distributed subscription metric methods (Phase 14.2) ===
+  // === Distributed subscription metric methods ===
 
   /**
    * Record a distributed subscription creation.

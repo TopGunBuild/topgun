@@ -258,7 +258,7 @@ describe('SearchCoordinator', () => {
   });
 
   // ============================================
-  // Phase 11.1b: Live Search Subscription Tests
+  // Live Search Subscription Tests
   // ============================================
 
   describe('subscribe / unsubscribe', () => {

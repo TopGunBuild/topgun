@@ -1,6 +1,6 @@
 /**
  * Baseline benchmark for scoreDocument performance.
- * Run BEFORE Phase 11.2 implementation to capture "before" metrics.
+ * Capture baseline "before" metrics.
  */
 import { SearchCoordinator } from '../SearchCoordinator';
 

@@ -2,9 +2,9 @@
  * SearchCoordinator - Server-side Full-Text Search Handler
  *
  * Manages FullTextIndex instances per map and handles search requests.
- * Part of Phase 11.1a: Server-side BM25 Search.
- * Phase 11.1b: Live Search Subscriptions with delta updates.
- * Phase 14.2: Distributed Live Subscriptions support.
+ * Server-side BM25 Search.
+ * Live Search Subscriptions with delta updates.
+ * Distributed Live Subscriptions support.
  *
  * @module search/SearchCoordinator
  */
@@ -65,7 +65,7 @@ interface SearchSubscription {
   options: SchemaSearchOptions;
   /** Cache of current results for delta computation */
   currentResults: Map<string, CachedResult>;
-  // Phase 14.2: Distributed subscription fields
+  // Distributed subscription fields
   /** If set, send updates to this coordinator node instead of local client */
   coordinatorNodeId?: string;
   /** True if registered via CLUSTER_SUB_REGISTER */
@@ -151,7 +151,7 @@ export class SearchCoordinator extends EventEmitter {
   private getDocumentValue?: (mapName: string, key: string) => unknown | undefined;
 
   // ============================================
-  // Phase 11.1b: Live Search Subscription tracking
+  // Live Search Subscription tracking
   // ============================================
 
   /** Subscription ID → SearchSubscription */
@@ -170,7 +170,7 @@ export class SearchCoordinator extends EventEmitter {
   private sendBatchUpdate?: SendBatchUpdateCallback;
 
   // ============================================
-  // Phase 11.2: Notification Batching
+  // Notification Batching
   // ============================================
 
   /** Queue of pending notifications per map */
@@ -183,7 +183,7 @@ export class SearchCoordinator extends EventEmitter {
   private readonly BATCH_INTERVAL = 16;
 
   // ============================================
-  // Phase 14.2: Distributed Subscription support
+  // Distributed Subscription support
   // ============================================
 
   /** Node ID for this server (set during init) */
@@ -369,7 +369,7 @@ export class SearchCoordinator extends EventEmitter {
       index.onSet(key, value);
     }
 
-    // Phase 11.1b: Notify subscribers of potential changes
+    // Notify subscribers of potential changes
     this.notifySubscribers(mapName, key, value ?? null, changeType);
   }
 
@@ -427,11 +427,11 @@ export class SearchCoordinator extends EventEmitter {
     }
     this.indexes.clear();
     this.configs.clear();
-    // Phase 11.1b: Clear subscriptions
+    // Clear subscriptions
     this.subscriptions.clear();
     this.subscriptionsByMap.clear();
     this.subscriptionsByClient.clear();
-    // Phase 11.2: Clear batching state
+    // Clear batching state
     this.pendingNotifications.clear();
     if (this.notificationTimer) {
       clearTimeout(this.notificationTimer);
@@ -441,7 +441,7 @@ export class SearchCoordinator extends EventEmitter {
   }
 
   // ============================================
-  // Phase 11.1b: Live Search Subscription Methods
+  // Live Search Subscription Methods
   // ============================================
 
   /**
@@ -596,7 +596,7 @@ export class SearchCoordinator extends EventEmitter {
   }
 
   // ============================================
-  // Phase 14.2: Distributed Subscription Methods
+  // Distributed Subscription Methods
   // ============================================
 
   /**
@@ -800,7 +800,7 @@ export class SearchCoordinator extends EventEmitter {
       logger.debug({ subId, key, wasInResults, isInResults, updateType, newScore }, 'Update decision');
 
       if (updateType) {
-        // Phase 14.2: Route based on subscription type
+        // Route based on subscription type
         if (sub.isDistributed && sub.coordinatorNodeId) {
           // Distributed subscription: emit event for ClusterSearchCoordinator/DistributedSubscriptionCoordinator
           this.sendDistributedUpdate(sub, key, value, newScore, matchedTerms, updateType);
@@ -891,7 +891,7 @@ export class SearchCoordinator extends EventEmitter {
   }
 
   // ============================================
-  // Phase 11.2: Notification Batching Methods
+  // Notification Batching Methods
   // ============================================
 
   /**

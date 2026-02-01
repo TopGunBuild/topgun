@@ -1,14 +1,14 @@
 /**
  * SearchCoordinator scoreDocument Performance Benchmarks
  *
- * Phase 11.2: Measures the improvement from O(N) to O(1) scoring.
+ * Measures the improvement from O(N) to O(1) scoring.
  *
- * BEFORE Phase 11.2 (baseline - scoreDocument used full search):
+ * BEFORE optimization (baseline - scoreDocument used full search):
  *   100 docs:   ~1ms per update
  *   1000 docs:  ~10ms per update
  *   10000 docs: ~100ms per update  <- PROBLEM: Linear scaling
  *
- * AFTER Phase 11.2 (scoreSingleDocument):
+ * AFTER optimization (scoreSingleDocument):
  *   100 docs:   ~0.01ms per update
  *   1000 docs:  ~0.01ms per update
  *   10000 docs: ~0.01ms per update  <- FIXED: Constant time!
@@ -21,7 +21,7 @@ import { SearchCoordinator } from '../SearchCoordinator';
 
 const SIZES = [100, 1_000, 10_000] as const;
 
-describe('SearchCoordinator scoreDocument Performance (Phase 11.2)', () => {
+describe('SearchCoordinator scoreDocument Performance', () => {
   describe('Single document scoring - O(1) vs index size', () => {
     for (const size of SIZES) {
       const coordinator = new SearchCoordinator();
