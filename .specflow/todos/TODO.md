@@ -2,48 +2,6 @@
 
 ## High Priority
 
-### TODO-009: Environment Variable Validation
-**Priority:** high | **Complexity:** small | **Source:** SCAN.md
-
-Add startup validation for required environment variables using Zod schema.
-
-**Context:**
-- No validation for required env vars at startup (SCAN.md: Security Considerations)
-- `JWT_SECRET` validation exists (`validateJwtSecret()`) but is incomplete
-- Other required vars like `TOPGUN_CLUSTER_SEEDS`, `DATABASE_URL` have no validation
-
-**Files:**
-- `packages/server/src/start-server.ts:8-32` — env var usage
-- Create: `packages/server/src/config/env-schema.ts`
-
-**Acceptance Criteria:**
-- [ ] Zod schema validates all required env vars at startup
-- [ ] Server fails fast with clear error message if validation fails
-- [ ] Optional vars have documented defaults
-
----
-
-### TODO-010: Debug Endpoint Security Audit
-**Priority:** high | **Complexity:** small | **Source:** SCAN.md
-
-Document and harden debug endpoint protection to prevent accidental production exposure.
-
-**Context:**
-- Debug endpoints (`/debug/crdt/*`, `/debug/search/*`) expose internal state (SCAN.md: Security)
-- Gated by `debugEnabled` flag in `ServerCoordinator.ts:137`
-- Defaults to `TOPGUN_DEBUG === 'true'` in `ServerFactory.ts:155`
-
-**Files:**
-- `packages/server/src/ServerCoordinator.ts:137`
-- `packages/server/src/ServerFactory.ts:155`
-
-**Acceptance Criteria:**
-- [ ] Warning logged if debug endpoints enabled
-- [ ] Documentation updated with security implications
-- [ ] Consider: require explicit `TOPGUN_DEBUG_ENDPOINTS=true` separate from logging
-
----
-
 ### TODO-011: Error Handling Standardization
 **Priority:** high | **Complexity:** medium | **Source:** SCAN.md
 
@@ -133,4 +91,4 @@ Add support for custom foreign key configuration in BetterAuth adapter.
 
 ---
 
-*Last updated: 2026-02-01 (Added TODO-009 through TODO-014 from SCAN.md)*
+*Last updated: 2026-02-01 (Converted TODO-010 to SPEC-022)*
