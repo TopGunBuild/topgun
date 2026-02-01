@@ -14,6 +14,7 @@
 import { Worker } from 'worker_threads';
 import { cpus } from 'os';
 import { join } from 'path';
+import { logger } from '../utils/logger';
 import {
   WorkerPoolConfig,
   WorkerTask,
@@ -293,7 +294,7 @@ export class WorkerPool {
 
       // Handle worker errors
       worker.on('error', (error) => {
-        console.error(`Worker ${workerId} error:`, error);
+        logger.error({ err: error, workerId, context: 'worker_error' }, `Worker ${workerId} error`);
         this.handleWorkerError(workerId, error);
       });
 
@@ -305,7 +306,7 @@ export class WorkerPool {
       this.workers.set(workerId, state);
       return state;
     } catch (error) {
-      console.error('Failed to create worker:', error);
+      logger.error({ err: error, workerId, context: 'worker_creation' }, 'Failed to create worker');
       return null;
     }
   }

@@ -483,7 +483,9 @@ export class ClusterManager extends EventEmitter {
               logger.info({ initiatorId, receiverId }, 'Dropping connection (Low-ID Initiator Policy)');
               try {
                   ws.close();
-              } catch(e) {}
+              } catch(e) {
+                  logger.debug({ err: e, receiverId }, 'WebSocket close error (expected during disconnect)');
+              }
               return;
           }
           */
