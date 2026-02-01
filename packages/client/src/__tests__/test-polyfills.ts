@@ -6,7 +6,7 @@
 
 import * as crypto from 'crypto';
 
-// Extend globalThis for WebCrypto polyfill
+// Extend globalThis for WebCrypto polyfill (Node.js environment)
 declare global {
   // eslint-disable-next-line no-var
   var crypto: Crypto;
@@ -16,9 +16,21 @@ declare global {
 if (!globalThis.crypto) {
   globalThis.crypto = crypto.webcrypto as Crypto;
 }
+
+// Create window object if it doesn't exist (Node.js environment)
 if (!globalThis.window) {
-  (globalThis as typeof globalThis & { window: typeof globalThis }).window = globalThis;
+  Object.defineProperty(globalThis, 'window', {
+    value: globalThis,
+    writable: true,
+    configurable: true,
+  });
 }
+
+// Set window.crypto if it doesn't exist
 if (!window.crypto) {
-  (window as { crypto: Crypto }).crypto = crypto.webcrypto as Crypto;
+  Object.defineProperty(window, 'crypto', {
+    value: crypto.webcrypto,
+    writable: true,
+    configurable: true,
+  });
 }

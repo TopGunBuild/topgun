@@ -367,7 +367,7 @@ export class SettingsController {
       }
 
       // Apply the change
-      this.setNestedValue(this.runtimeSettings, path, value);
+      this.setNestedValue(this.runtimeSettings as unknown as Record<string, unknown>, path, value);
       updated.push(path);
     }
 
@@ -561,13 +561,9 @@ export class SettingsController {
   /**
    * Set nested value by dot-notation path
    */
-  private setNestedValue<T extends Record<string, unknown>>(
-    obj: T,
-    path: string,
-    value: unknown
-  ): void {
+  private setNestedValue(obj: Record<string, unknown>, path: string, value: unknown): void {
     const keys = path.split('.');
-    let current: Record<string, unknown> = obj;
+    let current: Record<string, unknown> = obj as Record<string, unknown>;
 
     for (let i = 0; i < keys.length - 1; i++) {
       const key = keys[i];
