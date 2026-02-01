@@ -209,6 +209,10 @@ export { encodeBase64Url, decodeBase64Url } from './utils/base64url';
 // Compare utilities
 export { compareValues } from './utils/compare';
 
+// Logger utilities
+export { logger } from './utils/logger';
+export type { Logger } from './utils/logger';
+
 export type {
   // Attribute system
   Attribute,

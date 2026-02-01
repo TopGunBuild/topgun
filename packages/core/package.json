@@ -32,6 +32,7 @@
   },
   "dependencies": {
     "msgpackr": "^1.11.8",
+    "pino": "^9.5.0",
     "sorted-btree": "^2.1.0",
     "zod": "^4.1.13"
   },
