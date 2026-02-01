@@ -10,7 +10,6 @@
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| - | - | Queue empty | - | - | - |
 
 ## Decisions
 
@@ -36,6 +35,12 @@
 | 2026-01-31 | SPEC-017 | FIXED: Applied both minor issues. Renamed eslint.config.js to .mjs (a2309d0). Added apps/ to lint/format patterns (5392656). Ready for re-review. |
 | 2026-01-31 | SPEC-017 | REVIEWED v2: Implementation APPROVED. Both fixes verified (eslint.config.mjs exists, old .js removed, .gitignore updated, no module warnings; apps/ directory now linted/formatted). All config files intact, all commands functional, build and tests pass. No remaining issues. Ready for finalization. |
 | 2026-01-31 | SPEC-017 | COMPLETED: ESLint + Prettier Configuration. 3 config files created (eslint.config.mjs, .prettierrc, .prettierignore). 4 scripts added (lint, lint:fix, format, format:check). 5 commits, 3 audit cycles, 2 review cycles. Archived to .specflow/archive/SPEC-017.md |
+| 2026-01-31 | SPEC-018 | CREATED: Remove Deprecated serverUrl Parameter. Refactor to remove deprecated serverUrl from SyncEngine/WebSocketManager config. From TODO-007. |
+| 2026-01-31 | SPEC-018 | AUDITED v1: APPROVED with 2 recommendations. Context estimate ~18% (PEAK). All 9 dimensions PASS. Line numbers verified. Goal Analysis complete. 15 files total (3 source, 11 test, 1 new). Recommendations: minor line number fix, verification command refinement. |
+| 2026-01-31 | SPEC-018 | REVISED: Applied both recommendations from Audit v1. Added line 130 clarification, updated grep command to exclude TopGunClient.ts. Ready for re-audit. |
+| 2026-01-31 | SPEC-018 | AUDITED v2: APPROVED. Context estimate ~18% (PEAK). All 9 dimensions PASS. Previous recommendations verified as applied. Line numbers re-verified. Test file counts match. Ready for implementation. |
+| 2026-02-01 | SPEC-018 | REVIEWED: Implementation APPROVED. All 8 acceptance criteria verified. serverUrl removed from SyncEngine/WebSocketManager configs. 431 tests pass. Full build succeeds. MIGRATION.md created. All dual-path code eliminated. Ready for finalization. |
+| 2026-02-01 | SPEC-018 | COMPLETED: Remove Deprecated serverUrl Parameter. Removed serverUrl from SyncEngine/WebSocketManager configs. 8 files modified, 1 created (MIGRATION.md). 4 commits, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-018.md |
 
 ## Project Patterns
 
@@ -61,4 +66,4 @@
 (none)
 
 ---
-*Last updated: 2026-01-31*
+*Last updated: 2026-02-01*
