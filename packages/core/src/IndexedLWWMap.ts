@@ -9,7 +9,7 @@
  * - Live queries with StandingQueryIndex
  * - Automatic index updates on CRDT operations
  * - Cost-based query optimization
- * - Adaptive indexing with query pattern tracking (Phase 8.02)
+ * - Adaptive indexing with query pattern tracking
  *
  * @module IndexedLWWMap
  */
@@ -45,7 +45,7 @@ import { UnionResultSet } from './query/resultset/UnionResultSet';
 import { FilteringResultSet } from './query/resultset/FilteringResultSet';
 import { evaluatePredicate, PredicateNode } from './predicate';
 
-// Adaptive indexing imports (Phase 8.02)
+// Adaptive indexing imports
 import {
   QueryPatternTracker,
   IndexAdvisor,
@@ -76,7 +76,7 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
   private liveQueryManager: LiveQueryManager<K, V>;
   private queryOptimizer: QueryOptimizer<K, V>;
 
-  // Adaptive indexing (Phase 8.02)
+  // Adaptive indexing
   private readonly queryTracker: QueryPatternTracker;
   private readonly indexAdvisor: IndexAdvisor;
   private readonly autoIndexManager: AutoIndexManager<K, V> | null;
@@ -110,7 +110,7 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
       )
     );
 
-    // Initialize adaptive indexing (Phase 8.02)
+    // Initialize adaptive indexing
     this.queryTracker = new QueryPatternTracker();
     this.indexAdvisor = new IndexAdvisor(this.queryTracker);
 
@@ -278,7 +278,7 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
    * Execute a query using indexes.
    * Returns lazy ResultSet of matching keys.
    *
-   * Also tracks query patterns for adaptive indexing (Phase 8.02).
+   * Also tracks query patterns for adaptive indexing.
    *
    * @param query - Query to execute
    * @returns ResultSet of matching keys
@@ -288,7 +288,7 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
     const plan = this.queryOptimizer.optimize(query);
     const resultSet = this.executePlan(plan.root);
 
-    // Materialize for statistics (Phase 8.02)
+    // Materialize for statistics
     const results = resultSet.toArray();
     const duration = performance.now() - start;
 
@@ -576,7 +576,7 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
     const oldValue = this.get(key);
     const result = super.set(key, value, ttlMs);
 
-    // Apply default indexing on first record (Phase 8.02)
+    // Apply default indexing on first record
     if (this.defaultIndexingStrategy && !this.defaultIndexingStrategy.isApplied()) {
       this.defaultIndexingStrategy.applyToMap(this, value);
     }
@@ -711,7 +711,7 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
     return this.queryOptimizer.optimize(query);
   }
 
-  // ==================== Adaptive Indexing (Phase 8.02) ====================
+  // ==================== Adaptive Indexing ====================
 
   /**
    * Register an attribute for auto-indexing.
@@ -806,7 +806,7 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
     return this.autoIndexManager !== null;
   }
 
-  // ==================== Lazy Indexing (Phase 9.01) ====================
+  // ==================== Lazy Indexing ====================
 
   /**
    * Check if lazy index building is enabled.

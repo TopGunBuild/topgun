@@ -6,7 +6,7 @@ export type PredicateOp =
   | 'like' | 'regex'
   | 'contains' | 'containsAll' | 'containsAny'
   | 'and' | 'or' | 'not'
-  // Full-Text Search predicates (Phase 12)
+  // Full-Text Search predicates
   | 'match' | 'matchPhrase' | 'matchPrefix';
 
 /**
@@ -128,7 +128,7 @@ export class Predicates {
     return { op: 'containsAny', attribute, value: values };
   }
 
-  // ============== Full-Text Search Predicates (Phase 12) ==============
+  // ============== Full-Text Search Predicates ==============
 
   /**
    * Create a 'match' predicate for full-text search.

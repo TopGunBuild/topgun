@@ -21,7 +21,7 @@ export { HLC, LWWMap, ORMap, MerkleTree, ORMapMerkleTree, PNCounterImpl };
 export { hashORMapEntry, hashORMapRecord, timestampToString, compareTimestamps };
 export type { PNCounter, PNCounterState, PNCounterStateObject, PNCounterConfig };
 
-// Event Journal exports (Phase 5.04)
+// Event Journal exports
 export { Ringbuffer, EventJournalImpl, DEFAULT_EVENT_JOURNAL_CONFIG };
 export type {
   EventJournal,
@@ -32,7 +32,7 @@ export type {
   JournalEventListener,
 };
 
-// Entry Processor exports (Phase 5.03)
+// Entry Processor exports
 export {
   EntryProcessorDefSchema,
   validateProcessorCode,
@@ -47,7 +47,7 @@ export type {
   ProcessorRateLimitConfig,
 } from './EntryProcessor';
 
-// Conflict Resolver exports (Phase 5.05)
+// Conflict Resolver exports
 export {
   ConflictResolverDefSchema,
   validateResolverCode,
@@ -76,7 +76,7 @@ export type { Timestamp, LWWRecord, ORMapRecord, MergeKeyResult, ORMapSnapshot, 
 // Re-export heartbeat types for convenience
 export type { PingMessage, PongMessage } from './schemas';
 
-// Write Concern exports (Phase 5.01)
+// Write Concern exports
 export {
   WriteConcern,
   WriteOptions,
@@ -89,7 +89,7 @@ export {
 } from './types/WriteConcern';
 export type { WriteConcernValue } from './schemas';
 
-// Cluster types exports (Phase 4)
+// Cluster types exports
 export type {
   NodeStatus,
   NodeInfo,
@@ -109,7 +109,7 @@ export type {
   ConnectionState,
   NodeHealth,
   ClusterEvents,
-  // Migration types (Task 03)
+  // Migration types
   PartitionMigration,
   MigrationConfig,
   MigrationStatus,
@@ -120,7 +120,7 @@ export type {
   MigrationCompleteMessage,
   MigrationVerifyMessage,
   MigrationMessage,
-  // Replication types (Task 04)
+  // Replication types
   WriteOptions as ClusterWriteOptions,
   ReadOptions as ClusterReadOptions,
   ReplicationConfig,
@@ -140,15 +140,15 @@ export {
   DEFAULT_CIRCUIT_BREAKER_CONFIG,
   PARTITION_COUNT,
   DEFAULT_BACKUP_COUNT,
-  // Migration exports (Task 03)
+  // Migration exports
   PartitionState,
   DEFAULT_MIGRATION_CONFIG,
-  // Replication exports (Task 04)
+  // Replication exports
   ConsistencyLevel,
   DEFAULT_REPLICATION_CONFIG,
 } from './types/cluster';
 
-// Query Engine exports (Phase 7 + Phase 8.01)
+// Query Engine exports
 // Note: Query from schemas conflicts with Query from query/QueryTypes
 // We rename query engine Query to QueryExpression to avoid conflict
 export {
@@ -166,7 +166,7 @@ export {
   FallbackIndex,
   createPredicateMatcher,
   InvertedIndex,
-  // Tokenization (Phase 8.01)
+  // Tokenization
   TokenizationPipeline,
   WhitespaceTokenizer,
   WordBoundaryTokenizer,
@@ -198,15 +198,15 @@ export {
   StandingQueryRegistry,
   // Live Query Manager
   LiveQueryManager,
-  // Query Cursor (Phase 14.1)
+  // Query Cursor
   QueryCursor,
   DEFAULT_QUERY_CURSOR_MAX_AGE_MS,
 } from './query';
 
-// Base64URL utilities (Phase 14.1)
+// Base64URL utilities
 export { encodeBase64Url, decodeBase64Url } from './utils/base64url';
 
-// Compare utilities (Phase 14.1)
+// Compare utilities
 export { compareValues } from './utils/compare';
 
 export type {
@@ -219,7 +219,7 @@ export type {
   IndexQuery,
   IndexStats,
   InvertedIndexStats,
-  // Tokenization (Phase 8.01)
+  // Tokenization
   Tokenizer,
   TokenFilter,
   TokenizationPipelineOptions,
@@ -255,7 +255,7 @@ export type {
   LiveQueryEvent,
   LiveQueryInitialEvent,
   LiveQueryDeltaEvent,
-  // Query Cursor (Phase 14.1)
+  // Query Cursor
   QueryCursorData,
   CursorableQueryResult,
   QueryCursorOptions,
@@ -265,11 +265,11 @@ export type {
 // Re-export Query from query module as QueryExpression to avoid conflict
 export type { Query as QueryExpression } from './query';
 
-// Indexed CRDT exports (Phase 7.07)
+// Indexed CRDT exports
 export { IndexedLWWMap } from './IndexedLWWMap';
 export { IndexedORMap, type ORMapQueryResult, type ORMapSearchResult } from './IndexedORMap';
 
-// Full-Text Search exports (Phase 11)
+// Full-Text Search exports
 export {
   // Tokenizer
   Tokenizer as FTSTokenizer,
@@ -295,7 +295,7 @@ export type {
   SerializedIndex,
 } from './fts';
 
-// Search utilities exports (Phase 12 + Phase 14)
+// Search utilities exports
 export {
   ReciprocalRankFusion,
   SearchCursor,
@@ -309,7 +309,7 @@ export type {
   CursorableResult,
 } from './search';
 
-// Debug utilities exports (Phase 14C)
+// Debug utilities exports
 export {
   CRDTDebugger,
   getCRDTDebugger,

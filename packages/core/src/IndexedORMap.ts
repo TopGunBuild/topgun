@@ -12,7 +12,7 @@
  * - Composite key indexing (key:tag)
  * - Automatic index updates on CRDT operations
  * - Lazy filtering for tombstones
- * - Adaptive indexing with query pattern tracking (Phase 8.02)
+ * - Adaptive indexing with query pattern tracking
  *
  * @module IndexedORMap
  */
@@ -37,11 +37,11 @@ import { UnionResultSet } from './query/resultset/UnionResultSet';
 import { FilteringResultSet } from './query/resultset/FilteringResultSet';
 import { evaluatePredicate, PredicateNode } from './predicate';
 
-// Full-Text Search imports (Phase 11)
+// Full-Text Search imports
 import { FullTextIndex } from './fts/FullTextIndex';
 import type { FullTextIndexConfig, SearchOptions as FTSSearchOptions, ScoredDocument } from './fts/types';
 
-// Adaptive indexing imports (Phase 8.02)
+// Adaptive indexing imports
 import {
   QueryPatternTracker,
   IndexAdvisor,
@@ -92,7 +92,7 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
   private indexRegistry: IndexRegistry<string, V>;
   private queryOptimizer: QueryOptimizer<string, V>;
 
-  // Adaptive indexing (Phase 8.02)
+  // Adaptive indexing
   private readonly queryTracker: QueryPatternTracker;
   private readonly indexAdvisor: IndexAdvisor;
   private readonly autoIndexManager: AutoIndexManager<string, V> | null;
