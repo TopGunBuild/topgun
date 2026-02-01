@@ -15,6 +15,9 @@
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-01 | SPEC-026 | COMPLETED: Custom Foreign Key Configuration for BetterAuth Adapter. Added foreignKeyMap option to TopGunAdapterOptions for configurable join foreign keys. 2 files modified, 2 commits, 1 audit cycle, 1 review cycle. Archived to .specflow/archive/SPEC-026.md |
+| 2026-02-01 | SPEC-026 | AUDITED v1: Approved. All 9 dimensions passed. Line numbers verified accurate (line 176 hardcodes userId, lines 174-175 contain TODO). Context estimate ~18%. Existing join test verifies backwards compatibility. Ready for implementation. |
+| 2026-02-01 | SPEC-026 | CREATED: Custom Foreign Key Configuration for BetterAuth Adapter. Adds foreignKeyMap option to TopGunAdapterOptions for configurable join foreign keys. Default remains userId for backwards compatibility. Source: TODO-014. |
 | 2026-02-01 | SPEC-025 | COMPLETED: Timer Cleanup System. Added dispose() method to SearchCoordinator that flushes notifications before clearing timer. Wired into LifecycleManager.shutdown(). 2 files modified, 3 commits, 2 audit cycles, 2 review cycles. Archived to .specflow/archive/SPEC-025.md |
 | 2026-02-01 | SPEC-025 | REVIEWED v2: Implementation APPROVED. Critical issue from v1 resolved in commit 0c7b82d. dispose() method now correctly flushes notifications BEFORE clearing timer. All 4 acceptance criteria fully met. All tests pass (35 SearchCoordinator + 10 ClusterSearchCoordinator). Build passes. Code quality excellent, follows established patterns. 100% complete. Ready for finalization. |
 | 2026-02-01 | SPEC-025 | FIXED v1: Reordered operations in dispose() to flush notifications BEFORE clearing timer. 1 commit (0c7b82d). Build passes. Ready for re-review. |
