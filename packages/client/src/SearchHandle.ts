@@ -2,7 +2,6 @@
  * SearchHandle - Client-side Live Search Subscription Handle
  *
  * Manages a live search subscription with delta updates.
- * Part of Phase 11.1b: Live Search Subscriptions.
  *
  * @module SearchHandle
  */

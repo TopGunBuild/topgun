@@ -8,14 +8,14 @@ export interface QueryFilter {
   predicate?: PredicateNode;
   sort?: Record<string, 'asc' | 'desc'>;
   limit?: number;
-  /** Cursor for pagination (Phase 14.1: replaces offset) */
+  /** Cursor for pagination */
   cursor?: string;
 }
 
-/** Cursor status for debugging (Phase 14.1) */
+/** Cursor status for debugging */
 export type CursorStatus = 'valid' | 'expired' | 'invalid' | 'none';
 
-/** Pagination info from server (Phase 14.1) */
+/** Pagination info from server */
 export interface PaginationInfo {
   /** Cursor for fetching next page */
   nextCursor?: string;
@@ -39,12 +39,12 @@ export class QueryHandle<T> {
   private listeners: Set<(results: QueryResultItem<T>[]) => void> = new Set();
   private currentResults: Map<string, T> = new Map();
 
-  // Change tracking (Phase 5.1)
+  // Change tracking for delta notifications
   private changeTracker = new ChangeTracker<T>();
   private pendingChanges: ChangeEvent<T>[] = [];
   private changeListeners: Set<(changes: ChangeEvent<T>[]) => void> = new Set();
 
-  // Pagination info (Phase 14.1)
+  // Pagination info
   private _paginationInfo: PaginationInfo = { hasMore: false, cursorStatus: 'none' };
   private paginationListeners: Set<(info: PaginationInfo) => void> = new Set();
 
@@ -160,7 +160,7 @@ export class QueryHandle<T> {
       resultCount: this.currentResults.size
     }, 'QueryHandle after merge');
 
-    // Compute changes for delta tracking (Phase 5.1)
+    // Compute changes for delta tracking
     this.computeAndNotifyChanges(Date.now());
 
     this.notify();
@@ -176,14 +176,14 @@ export class QueryHandle<T> {
       this.currentResults.set(key, value);
     }
 
-    // Compute changes for delta tracking (Phase 5.1)
+    // Compute changes for delta tracking
     this.computeAndNotifyChanges(Date.now());
 
     this.notify();
   }
 
   /**
-   * Subscribe to change events (Phase 5.1).
+   * Subscribe to change events.
    * Returns an unsubscribe function.
    *
    * @example
@@ -203,7 +203,7 @@ export class QueryHandle<T> {
   }
 
   /**
-   * Get and clear pending changes (Phase 5.1).
+   * Get and clear pending changes.
    * Call this to retrieve all changes since the last consume.
    */
   public consumeChanges(): ChangeEvent<T>[] {
@@ -213,7 +213,7 @@ export class QueryHandle<T> {
   }
 
   /**
-   * Get last change without consuming (Phase 5.1).
+   * Get last change without consuming.
    * Returns null if no pending changes.
    */
   public getLastChange(): ChangeEvent<T> | null {
@@ -223,21 +223,21 @@ export class QueryHandle<T> {
   }
 
   /**
-   * Get all pending changes without consuming (Phase 5.1).
+   * Get all pending changes without consuming.
    */
   public getPendingChanges(): ChangeEvent<T>[] {
     return [...this.pendingChanges];
   }
 
   /**
-   * Clear all pending changes (Phase 5.1).
+   * Clear all pending changes.
    */
   public clearChanges(): void {
     this.pendingChanges = [];
   }
 
   /**
-   * Reset change tracker (Phase 5.1).
+   * Reset change tracker.
    * Use when query filter changes or on reconnect.
    */
   public resetChangeTracker(): void {
@@ -301,7 +301,7 @@ export class QueryHandle<T> {
     return this.mapName;
   }
 
-  // ============== Pagination Methods (Phase 14.1) ==============
+  // ============== Pagination Methods ==============
 
   /**
    * Get current pagination info.

@@ -570,7 +570,7 @@ export class TopGunClient {
   }
 
   // ============================================
-  // Full-Text Search API (Phase 11.1a)
+  // Full-Text Search API
   // ============================================
 
   /**
@@ -615,7 +615,7 @@ export class TopGunClient {
   }
 
   // ============================================
-  // Live Search API (Phase 11.1b)
+  // Live Search API
   // ============================================
 
   /**
@@ -661,7 +661,7 @@ export class TopGunClient {
   }
 
   // ============================================
-  // Hybrid Query API (Phase 12)
+  // Hybrid Query API
   // ============================================
 
   /**
@@ -700,7 +700,7 @@ export class TopGunClient {
   }
 
   // ============================================
-  // Entry Processor API (Phase 5.03)
+  // Entry Processor API
   // ============================================
 
   /**
@@ -803,7 +803,7 @@ export class TopGunClient {
   }
 
   // ============================================
-  // Event Journal API (Phase 5.04)
+  // Event Journal API
   // ============================================
 
   /** Cached EventJournalReader instance */
@@ -848,7 +848,7 @@ export class TopGunClient {
   }
 
   // ============================================
-  // Conflict Resolver API (Phase 5.05)
+  // Conflict Resolver API
   // ============================================
 
   /**

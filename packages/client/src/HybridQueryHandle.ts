@@ -6,8 +6,6 @@
  * - Score-based sorting (_score field)
  * - Hybrid queries combining FTS with traditional filters
  *
- * Part of Phase 12: Unified Search
- *
  * @module HybridQueryHandle
  */
 
@@ -29,7 +27,7 @@ export interface HybridQueryFilter {
   sort?: Record<string, 'asc' | 'desc'>;
   /** Maximum results */
   limit?: number;
-  /** Cursor for pagination (Phase 14.1: replaces offset) */
+  /** Cursor for pagination */
   cursor?: string;
 }
 
@@ -90,7 +88,7 @@ export class HybridQueryHandle<T> {
   // Track server data reception
   private hasReceivedServerData: boolean = false;
 
-  // Pagination info (Phase 14.1)
+  // Pagination info
   private _paginationInfo: PaginationInfo = { hasMore: false, cursorStatus: 'none' };
   private paginationListeners: Set<(info: PaginationInfo) => void> = new Set();
 
@@ -368,7 +366,7 @@ export class HybridQueryHandle<T> {
     return false;
   }
 
-  // ============== Pagination Methods (Phase 14.1) ==============
+  // ============== Pagination Methods ==============
 
   /**
    * Get current pagination info.

@@ -99,34 +99,34 @@ export class SyncEngine {
   // WebSocketManager handles all connection/websocket operations
   private readonly webSocketManager: WebSocketManager;
 
-  // QueryManager handles all query operations (Phase 05-02)
+  // QueryManager handles all query operations
   private readonly queryManager: QueryManager;
 
-  // TopicManager handles all topic (pub/sub) operations (Phase 09a)
+  // TopicManager handles all topic (pub/sub) operations
   private readonly topicManager: TopicManager;
 
-  // LockManager handles distributed lock operations (Phase 09a)
+  // LockManager handles distributed lock operations
   private readonly lockManager: LockManager;
 
-  // WriteConcernManager handles write concern tracking (Phase 09a)
+  // WriteConcernManager handles write concern tracking
   private readonly writeConcernManager: WriteConcernManager;
 
-  // CounterManager handles PN counter operations (Phase 09b)
+  // CounterManager handles PN counter operations
   private readonly counterManager: CounterManager;
 
-  // EntryProcessorClient handles entry processor operations (Phase 09b)
+  // EntryProcessorClient handles entry processor operations
   private readonly entryProcessorClient: EntryProcessorClient;
 
-  // SearchClient handles full-text search operations (Phase 09b)
+  // SearchClient handles full-text search operations
   private readonly searchClient: SearchClient;
 
-  // MerkleSyncHandler handles LWWMap sync protocol messages (Phase 09c)
+  // MerkleSyncHandler handles LWWMap sync protocol messages
   private readonly merkleSyncHandler: MerkleSyncHandler;
 
-  // ORMapSyncHandler handles ORMap sync protocol messages (Phase 09c)
+  // ORMapSyncHandler handles ORMap sync protocol messages
   private readonly orMapSyncHandler: ORMapSyncHandler;
 
-  // MessageRouter handles type-based message routing (Phase 09d)
+  // MessageRouter handles type-based message routing
   private readonly messageRouter: IMessageRouter;
 
   private opLog: OpLogEntry[] = [];
@@ -135,11 +135,11 @@ export class SyncEngine {
   private authToken: string | null = null;
   private tokenProvider: (() => Promise<string | null>) | null = null;
 
-  // BackpressureController handles all backpressure operations (Phase 05-03)
+  // BackpressureController handles all backpressure operations
   private readonly backpressureConfig: BackpressureConfig;
   private readonly backpressureController: BackpressureController;
 
-  // Conflict Resolver client (Phase 5.05)
+  // Conflict Resolver client
   private readonly conflictResolverClient: ConflictResolverClient;
 
   constructor(config: SyncEngineConfig) {
@@ -174,13 +174,13 @@ export class SyncEngine {
       ...config.backpressure,
     };
 
-    // Initialize BackpressureController with shared opLog reference (Phase 05-03)
+    // Initialize BackpressureController with shared opLog reference
     this.backpressureController = new BackpressureController({
       config: this.backpressureConfig,
       opLog: this.opLog, // Pass reference, not copy
     });
 
-    // Merge topic queue config with defaults (Phase 3 BUG-06)
+    // Merge topic queue config with defaults to ensure consistent backpressure behavior
     const topicQueueConfig: TopicQueueConfig = {
       ...DEFAULT_TOPIC_QUEUE_CONFIG,
       ...config.topicQueue,
@@ -198,51 +198,51 @@ export class SyncEngine {
       onReconnected: () => this.handleReconnection(),
     });
 
-    // Initialize QueryManager with callbacks (Phase 05-02)
+    // Initialize QueryManager with callbacks
     this.queryManager = new QueryManager({
       storageAdapter: this.storageAdapter,
       sendMessage: (msg, key) => this.webSocketManager.sendMessage(msg, key),
       isAuthenticated: () => this.isAuthenticated(),
     });
 
-    // Initialize TopicManager with callbacks (Phase 09a)
+    // Initialize TopicManager with callbacks
     this.topicManager = new TopicManager({
       topicQueueConfig,
       sendMessage: (msg, key) => this.webSocketManager.sendMessage(msg, key),
       isAuthenticated: () => this.isAuthenticated(),
     });
 
-    // Initialize LockManager with callbacks (Phase 09a)
+    // Initialize LockManager with callbacks
     this.lockManager = new LockManager({
       sendMessage: (msg, key) => this.webSocketManager.sendMessage(msg, key),
       isAuthenticated: () => this.isAuthenticated(),
       isOnline: () => this.isOnline(),
     });
 
-    // Initialize WriteConcernManager (Phase 09a)
+    // Initialize WriteConcernManager for distributed PN counter operations
     this.writeConcernManager = new WriteConcernManager({
       defaultTimeout: 5000,
     });
 
-    // Initialize CounterManager (Phase 09b)
+    // Initialize CounterManager for distributed PN counter operations
     this.counterManager = new CounterManager({
       sendMessage: (msg) => this.sendMessage(msg),
       isAuthenticated: () => this.isAuthenticated(),
     });
 
-    // Initialize EntryProcessorClient (Phase 09b)
+    // Initialize EntryProcessorClient for server-side entry processing
     this.entryProcessorClient = new EntryProcessorClient({
       sendMessage: (msg, key) => key !== undefined ? this.sendMessage(msg, key) : this.sendMessage(msg),
       isAuthenticated: () => this.isAuthenticated(),
     });
 
-    // Initialize SearchClient (Phase 09b)
+    // Initialize SearchClient for full-text search operations
     this.searchClient = new SearchClient({
       sendMessage: (msg) => this.sendMessage(msg),
       isAuthenticated: () => this.isAuthenticated(),
     });
 
-    // Initialize MerkleSyncHandler (Phase 09c)
+    // Initialize MerkleSyncHandler for LWWMap sync protocol
     this.merkleSyncHandler = new MerkleSyncHandler({
       getMap: (name) => this.maps.get(name),
       sendMessage: (msg, key) => this.webSocketManager.sendMessage(msg, key),
@@ -256,7 +256,7 @@ export class SyncEngine {
       resetMap: (name) => this.resetMap(name),
     });
 
-    // Initialize ORMapSyncHandler (Phase 09c)
+    // Initialize ORMapSyncHandler for ORMap sync protocol
     this.orMapSyncHandler = new ORMapSyncHandler({
       getMap: (name) => this.maps.get(name),
       sendMessage: (msg, key) => this.webSocketManager.sendMessage(msg, key),
@@ -268,10 +268,10 @@ export class SyncEngine {
       },
     });
 
-    // Initialize Conflict Resolver client (Phase 5.05)
+    // Initialize Conflict Resolver client
     this.conflictResolverClient = new ConflictResolverClient(this);
 
-    // Initialize MessageRouter and register all handlers (Phase 09d)
+    // Initialize MessageRouter and register all handlers
     this.messageRouter = new MessageRouter({
       onUnhandled: (msg) => logger.warn({ type: msg?.type }, 'Unhandled message type'),
     });
@@ -715,7 +715,7 @@ export class SyncEngine {
     const { lastId, achievedLevel, results } = message.payload;
     logger.info({ lastId, achievedLevel, hasResults: !!results }, 'Received ACK for ops');
 
-    // Handle per-operation results if available (Write Concern Phase 5.01)
+    // Handle per-operation results if available
     if (results && Array.isArray(results)) {
       for (const result of results) {
         const op = this.opLog.find(o => o.id === result.opId);
@@ -757,7 +757,6 @@ export class SyncEngine {
     const query = this.queryManager.getQueries().get(queryId);
     if (query) {
       query.onResult(results, 'server');
-      // Phase 14.1: Update pagination info
       query.updatePaginationInfo({ nextCursor, hasMore, cursorStatus });
     }
   }
@@ -856,13 +855,13 @@ export class SyncEngine {
     // Cancel pending Write Concern promises (delegates to WriteConcernManager)
     this.writeConcernManager.cancelAllWriteConcernPromises(new Error('SyncEngine closed'));
 
-    // Clean up CounterManager (Phase 09b)
+    // Clean up CounterManager
     this.counterManager.close();
 
-    // Clean up EntryProcessorClient (Phase 09b)
+    // Clean up EntryProcessorClient
     this.entryProcessorClient.close(new Error('SyncEngine closed'));
 
-    // Clean up SearchClient (Phase 09b)
+    // Clean up SearchClient
     this.searchClient.close(new Error('SyncEngine closed'));
 
     this.stateMachine.transition(SyncState.DISCONNECTED);
@@ -881,7 +880,7 @@ export class SyncEngine {
   }
 
   // ============================================
-  // Failover Support Methods (Phase 4.5 Task 05)
+  // Failover Support Methods
   // ============================================
 
   /**
@@ -1067,7 +1066,7 @@ export class SyncEngine {
   }
 
   // ============================================
-  // Write Concern Methods (Phase 5.01)
+  // Write Concern Methods
   // ============================================
 
   /**
@@ -1083,7 +1082,7 @@ export class SyncEngine {
   }
 
   // ============================================
-  // PN Counter Methods (Phase 5.2) - Delegates to CounterManager
+  // PN Counter Methods - Delegates to CounterManager
   // ============================================
 
   /**
@@ -1117,7 +1116,7 @@ export class SyncEngine {
   }
 
   // ============================================
-  // Entry Processor Methods (Phase 5.03) - Delegates to EntryProcessorClient
+  // Entry Processor Methods - Delegates to EntryProcessorClient
   // ============================================
 
   /**
@@ -1155,7 +1154,7 @@ export class SyncEngine {
   }
 
   // ============================================
-  // Event Journal Methods (Phase 5.04)
+  // Event Journal Methods
   // ============================================
 
   /** Message listeners for journal and other generic messages */
@@ -1211,7 +1210,7 @@ export class SyncEngine {
   }
 
   // ============================================
-  // Full-Text Search Methods (Phase 11.1a) - Delegates to SearchClient
+  // Full-Text Search Methods - Delegates to SearchClient
   // ============================================
 
   /**
@@ -1232,7 +1231,7 @@ export class SyncEngine {
   }
 
   // ============================================
-  // Conflict Resolver Client (Phase 5.05)
+  // Conflict Resolver Client
   // ============================================
 
   /**
@@ -1244,7 +1243,7 @@ export class SyncEngine {
   }
 
   // ============================================
-  // Hybrid Query Support (Phase 12) - Delegates to QueryManager
+  // Hybrid Query Support - Delegates to QueryManager
   // ============================================
 
   /**
@@ -1287,7 +1286,6 @@ export class SyncEngine {
     const query = this.queryManager.getHybridQuery(payload.subscriptionId);
     if (query) {
       query.onResult(payload.results as any, 'server');
-      // Phase 14.1: Update pagination info
       query.updatePaginationInfo({
         nextCursor: payload.nextCursor,
         hasMore: payload.hasMore,
