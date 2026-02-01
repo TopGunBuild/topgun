@@ -2,14 +2,15 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-019
+- **Status:** review
+- **Next Step:** /sf:review
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
+| 1 | SPEC-019 | MCP Protocol Compliance Integration Tests | low | audited | - |
 
 ## Decisions
 
@@ -41,6 +42,10 @@
 | 2026-01-31 | SPEC-018 | AUDITED v2: APPROVED. Context estimate ~18% (PEAK). All 9 dimensions PASS. Previous recommendations verified as applied. Line numbers re-verified. Test file counts match. Ready for implementation. |
 | 2026-02-01 | SPEC-018 | REVIEWED: Implementation APPROVED. All 8 acceptance criteria verified. serverUrl removed from SyncEngine/WebSocketManager configs. 431 tests pass. Full build succeeds. MIGRATION.md created. All dual-path code eliminated. Ready for finalization. |
 | 2026-02-01 | SPEC-018 | COMPLETED: Remove Deprecated serverUrl Parameter. Removed serverUrl from SyncEngine/WebSocketManager configs. 8 files modified, 1 created (MIGRATION.md). 4 commits, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-018.md |
+| 2026-02-01 | SPEC-019 | CREATED: MCP Protocol Compliance Integration Tests. Add integration tests for mcp-server package. From TODO-008. |
+| 2026-02-01 | SPEC-019 | AUDITED v1: APPROVED with 2 minor recommendations. Context estimate ~20% (PEAK). All 9 dimensions PASS. Assumptions validated. Goal Analysis complete. 2 test files to create. |
+| 2026-02-01 | SPEC-019 | REVISED: Applied both recommendations from Audit v1. Added explicit list of 8 MCP tool names to Observable Truth #1. Added port retrieval code pattern for HTTP transport tests. Ready for re-audit. |
+| 2026-02-01 | SPEC-019 | AUDITED v2: APPROVED. Context estimate ~20% (PEAK). All 9 dimensions PASS. Previous recommendations verified. Port retrieval pattern corrected during audit (httpServer is private, changed to fixed port approach). Ready for implementation. |
 
 ## Project Patterns
 
