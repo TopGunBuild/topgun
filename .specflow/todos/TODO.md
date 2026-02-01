@@ -1,30 +1,5 @@
 # To-Do List
 
-## High Priority
-
-### TODO-011: Error Handling Standardization
-**Priority:** high | **Complexity:** medium | **Source:** SCAN.md
-
-Replace console.error with structured logging and fix empty catch blocks.
-
-**Context:**
-- 40+ `console.error()` occurrences in production code (SCAN.md: Console Logging)
-- Empty catch block in `ClusterManager.ts:486` swallows WebSocket close errors
-- Inconsistent logging makes production debugging difficult
-
-**Files:**
-- `packages/server/src/cluster/ClusterManager.ts:486` — empty catch
-- `packages/core/src/EventJournal.ts:160,216` — console.error
-- `packages/client/src/TopicHandle.ts:52` — console.error
-- `packages/mcp-server/src/transport/http.ts:321` — console.error
-
-**Acceptance Criteria:**
-- [ ] Zero `console.error` in production code (tests OK)
-- [ ] All catch blocks either log or re-throw
-- [ ] Uses existing `TOPGUN_DEBUG` logger infrastructure
-
----
-
 ## Medium Priority
 
 ### TODO-012: Type Safety Cleanup
@@ -91,4 +66,4 @@ Add support for custom foreign key configuration in BetterAuth adapter.
 
 ---
 
-*Last updated: 2026-02-01 (Converted TODO-010 to SPEC-022)*
+*Last updated: 2026-02-01 (Converted TODO-011 to SPEC-023)*
