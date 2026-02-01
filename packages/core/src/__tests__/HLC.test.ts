@@ -457,7 +457,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
       const ts = permissiveHlc.now();
       expect(ts.millis).toBe(currentTime + 100000);
 
-      consoleWarnSpy.mockRestore();
+      warnSpy.mockRestore();
     });
 
     test('should expose configuration via getters', () => {
