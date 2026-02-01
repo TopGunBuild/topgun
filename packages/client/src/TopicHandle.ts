@@ -1,4 +1,5 @@
 import { SyncEngine } from './SyncEngine';
+import { logger } from './utils/logger';
 
 export type TopicCallback = (data: any, context: { timestamp: number; publisherId?: string }) => void;
 
@@ -49,7 +50,7 @@ export class TopicHandle {
       try {
         cb(data, context);
       } catch (e) {
-        console.error('Error in topic listener', e);
+        logger.error({ err: e, topicName: this.topicName, context: 'listener' }, 'Error in topic listener');
       }
     });
   }

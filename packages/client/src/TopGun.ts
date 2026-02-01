@@ -3,6 +3,7 @@ import { IDBAdapter } from './adapters/IDBAdapter';
 import type { IStorageAdapter } from './IStorageAdapter';
 import { LWWMap } from '@topgunbuild/core';
 import type { LWWRecord } from '@topgunbuild/core';
+import { logger } from './utils/logger';
 
 export interface TopGunConfig {
   sync: string;
@@ -52,7 +53,7 @@ export class TopGun<T extends TopGunSchema = any> {
     // Start client initialization (non-blocking)
     // The IDBAdapter now initializes in the background and queues operations
     this.initPromise = this.client.start().catch(err => {
-        console.error('Failed to start TopGun client:', err);
+        logger.error({ err, context: 'client_start' }, 'Failed to start TopGun client');
         throw err;
     });
 

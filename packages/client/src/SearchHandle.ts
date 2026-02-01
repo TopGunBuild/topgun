@@ -8,6 +8,7 @@
 
 import type { SearchOptions, SearchUpdateType } from '@topgunbuild/core';
 import type { SyncEngine, SearchResult } from './SyncEngine';
+import { logger } from './utils/logger';
 
 /**
  * Callback type for result change notifications.
@@ -340,7 +341,7 @@ export class SearchHandle<T = unknown> {
       try {
         listener(results);
       } catch (err) {
-        console.error('SearchHandle listener error:', err);
+        logger.error({ err, searchId: this.searchId, context: 'listener' }, 'SearchHandle listener error');
       }
     }
   }

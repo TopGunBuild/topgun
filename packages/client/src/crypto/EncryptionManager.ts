@@ -1,4 +1,5 @@
 import { serialize, deserialize } from '@topgunbuild/core';
+import { logger } from '../utils/logger';
 
 export class EncryptionManager {
     private static ALGORITHM = 'AES-GCM';
@@ -47,7 +48,7 @@ export class EncryptionManager {
 
             return deserialize(new Uint8Array(plaintextBuffer));
         } catch (err) {
-            console.error('Decryption failed', err);
+            logger.error({ err, context: 'decryption' }, 'Decryption failed');
             throw new Error('Failed to decrypt data: ' + err);
         }
     }
