@@ -8,6 +8,7 @@
  */
 
 import { HLC, Timestamp } from '../../../packages/core/src';
+import { logger } from '../../../packages/core/src/utils/logger';
 import { RateLimitedLogger, BaseLogger } from '../../../packages/server/src/utils/RateLimitedLogger';
 import { validateJwtSecret, DEFAULT_JWT_SECRET } from '../../../packages/server/src/utils/validateConfig';
 
@@ -486,7 +487,7 @@ describe('UAT Phase 01: Security Hardening', () => {
     });
 
     test('should warn but not throw when drift detected in default mode', () => {
-      const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation();
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation();
       const currentTime = 1000000;
       jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
 
@@ -504,14 +505,17 @@ describe('UAT Phase 01: Security Hardening', () => {
       }).not.toThrow();
 
       // Should have logged a warning
-      expect(consoleWarnSpy).toHaveBeenCalled();
-      expect(consoleWarnSpy).toHaveBeenCalledWith(expect.stringContaining('Clock drift detected'));
+      expect(warnSpy).toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ drift: expect.any(Number) }),
+        'Clock drift detected'
+      );
 
-      consoleWarnSpy.mockRestore();
+      warnSpy.mockRestore();
     });
 
     test('HLC continues to function after accepting drifted timestamp', () => {
-      jest.spyOn(console, 'warn').mockImplementation(); // Suppress warning
+      jest.spyOn(logger, 'warn').mockImplementation(); // Suppress warning
       const currentTime = 1000000;
       jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
 
@@ -538,7 +542,7 @@ describe('UAT Phase 01: Security Hardening', () => {
     });
 
     test('warning includes drift details', () => {
-      const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation();
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation();
       const currentTime = 1000000;
       jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
 
@@ -552,11 +556,13 @@ describe('UAT Phase 01: Security Hardening', () => {
 
       hlc.update(futureTimestamp);
 
-      // Warning should mention the drift amount
-      const warnCall = consoleWarnSpy.mock.calls[0][0];
-      expect(warnCall).toContain('Clock drift');
+      // Warning should include drift in structured fields
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ drift: 100000 }),
+        'Clock drift detected'
+      );
 
-      consoleWarnSpy.mockRestore();
+      warnSpy.mockRestore();
     });
   });
 });
