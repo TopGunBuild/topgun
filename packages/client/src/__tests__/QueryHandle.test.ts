@@ -160,7 +160,7 @@ describe('QueryHandle', () => {
     });
   });
 
-  describe('Change tracking (Phase 5.1)', () => {
+  describe('Change tracking', () => {
     let handle: QueryHandle<{ name: string }>;
 
     beforeEach(() => {

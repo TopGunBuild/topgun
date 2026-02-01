@@ -1,5 +1,5 @@
 /**
- * Tests for Partition Routing (Phase 4.5 Task 03)
+ * Tests for Partition Routing
  *
  * Verifies smart routing logic in ClusterClient:
  * - Routing to partition owner when connected

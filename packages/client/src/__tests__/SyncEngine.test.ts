@@ -378,7 +378,7 @@ describe('SyncEngine', () => {
         getFilter: () => ({}),
         onResult: jest.fn(),
         onUpdate: jest.fn(),
-        updatePaginationInfo: jest.fn(), // Phase 14.1
+        updatePaginationInfo: jest.fn(),
       };
 
       syncEngine.subscribeToQuery(mockQuery as any);
@@ -402,7 +402,7 @@ describe('SyncEngine', () => {
         'server'
       );
 
-      // Phase 14.1: Verify pagination info is updated
+      // Verify pagination info is updated
       expect(mockQuery.updatePaginationInfo).toHaveBeenCalledWith({
         nextCursor: 'cursor123',
         hasMore: true,

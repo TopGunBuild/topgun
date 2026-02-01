@@ -1,5 +1,5 @@
 /**
- * Tests for IConnectionProvider abstraction (Phase 4.5 Task 02)
+ * Tests for IConnectionProvider abstraction
  */
 import { SingleServerProvider } from '../connection/SingleServerProvider';
 import type { IConnectionProvider, ConnectionProviderEvent } from '../types';

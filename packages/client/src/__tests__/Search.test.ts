@@ -1,5 +1,5 @@
 /**
- * Client Search Tests (Phase 11.1a)
+ * Client Search Tests
  *
  * Tests for client-side search() method.
  */
@@ -238,7 +238,7 @@ describe('Client Search', () => {
   });
 
   // ============================================
-  // Phase 11.1b: SearchHandle Tests
+  // SearchHandle Tests
   // ============================================
 
   describe('SearchHandle', () => {

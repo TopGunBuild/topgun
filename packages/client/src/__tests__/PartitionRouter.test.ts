@@ -1,6 +1,5 @@
 /**
  * Tests for PartitionRouter
- * Phase 4: Partition-Aware Client Routing
  */
 
 import { PartitionRouter } from '../cluster/PartitionRouter';

@@ -1,7 +1,7 @@
 import { WriteConcern, WriteResult, WriteOptions } from '@topgunbuild/core';
 
 /**
- * Integration tests for Write Concern feature (Phase 5.01)
+ * Integration tests for Write Concern feature
  *
  * These tests verify the Write Concern behavior from client perspective.
  * They test the schema types and helper functions, as full integration

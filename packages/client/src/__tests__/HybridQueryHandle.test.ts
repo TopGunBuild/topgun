@@ -147,7 +147,7 @@ describe('HybridQueryHandle', () => {
       expect(results).toHaveLength(2);
     });
 
-    it('should store cursor in filter (Phase 14.1)', () => {
+    it('should store cursor in filter', () => {
       const handle = new HybridQueryHandle<{ title: string }>(
         mockSyncEngine,
         'articles',
@@ -157,7 +157,7 @@ describe('HybridQueryHandle', () => {
       expect(handle.getFilter().cursor).toBe('someCursorValue');
     });
 
-    it('should track pagination info (Phase 14.1)', () => {
+    it('should track pagination info', () => {
       const handle = new HybridQueryHandle<{ title: string }>(mockSyncEngine, 'articles');
       const paginationCallback = jest.fn();
 

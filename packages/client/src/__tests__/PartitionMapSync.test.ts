@@ -1,5 +1,5 @@
 /**
- * Tests for Partition Map Sync (Phase 4.5 Task 04)
+ * Tests for Partition Map Sync
  *
  * Verifies partition map subscription and updates:
  * - updateMap() accepts newer versions only

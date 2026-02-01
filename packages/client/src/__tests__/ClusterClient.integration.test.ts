@@ -1,5 +1,5 @@
 /**
- * ClusterClient Integration Tests (Phase 4.5 Task 06)
+ * ClusterClient Integration Tests
  *
  * Tests client-cluster interactions:
  * - Circuit breaker functionality

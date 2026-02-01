@@ -192,7 +192,6 @@ describe('TopGunClient', () => {
         where: { status: 'active' },
         sort: { createdAt: 'desc' as const },
         limit: 10,
-        // Phase 14.1: cursor-based pagination (no offset)
       };
 
       const handle = client.query<{ name: string; status: string }>('users', filter);
@@ -342,7 +341,7 @@ describe('TopGunClient', () => {
   });
 
   // ============================================
-  // Cluster Mode Configuration Tests (Phase 4.5)
+  // Cluster Mode Configuration Tests
   // ============================================
 
   describe('Cluster Mode Configuration', () => {

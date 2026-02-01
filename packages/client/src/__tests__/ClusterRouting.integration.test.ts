@@ -1,5 +1,5 @@
 /**
- * ClusterRouting Integration Tests (Phase 4.5 Gap Fix)
+ * ClusterRouting Integration Tests
  *
  * Tests client-side partition-aware routing:
  * - Smart routing to partition owners

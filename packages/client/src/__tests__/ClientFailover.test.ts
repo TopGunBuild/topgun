@@ -1,5 +1,5 @@
 /**
- * Tests for Client Failover (Phase 4.5 Task 05)
+ * Tests for Client Failover
  *
  * Verifies failover handling in ClusterClient:
  * - Circuit breaker pattern
