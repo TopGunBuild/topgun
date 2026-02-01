@@ -1,5 +1,5 @@
 /**
- * Phase 14D-3: Settings Controller
+ * Settings Controller
  *
  * Provides runtime settings management with hot-reload support.
  * Settings are divided into:

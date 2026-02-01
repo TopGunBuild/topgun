@@ -3,7 +3,7 @@
  *
  * Provides information about available native optimizations.
  *
- * Phase 3.05: Integration
+ * Integration
  */
 
 import { isUsingNativeHash } from '@topgunbuild/core';

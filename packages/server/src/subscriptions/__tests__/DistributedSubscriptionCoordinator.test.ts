@@ -2,7 +2,7 @@
  * DistributedSubscriptionCoordinator Tests
  *
  * Tests for distributed live subscriptions across cluster nodes.
- * Phase 14.2 implementation.
+ * Implementation.
  */
 
 import { DistributedSubscriptionCoordinator } from '../DistributedSubscriptionCoordinator';
@@ -599,7 +599,7 @@ describe('DistributedSubscriptionCoordinator', () => {
   });
 
   // ===========================================
-  // Phase 14.2.6: Query Distributed Subscription Tests
+  // Query Distributed Subscription Tests
   // ===========================================
 
   describe('subscribeQuery', () => {

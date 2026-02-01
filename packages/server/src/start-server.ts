@@ -78,7 +78,7 @@ if (CLUSTER_TLS_ENABLED) {
 
 // Main startup function (async to support auto-setup)
 async function main() {
-    // Phase 14D-2: Zero-Touch Setup
+    // Zero-Touch Setup
     // Run auto-setup before creating ServerCoordinator
     const bootstrapController = createBootstrapController();
     await bootstrapController.checkAutoSetup();

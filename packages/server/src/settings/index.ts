@@ -1,5 +1,5 @@
 /**
- * Settings module - Phase 14D-3
+ * Settings module3
  *
  * Exports runtime settings controller for hot-reloadable configuration.
  */

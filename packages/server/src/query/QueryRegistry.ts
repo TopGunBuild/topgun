@@ -13,7 +13,7 @@ export interface Subscription {
   previousResultKeys: Set<string>;
   interestedFields?: Set<string> | 'ALL';
   _cleanup?: () => void; // For Reverse Index cleanup
-  // Phase 14.2: Distributed subscription fields
+  // Distributed subscription fields
   /** If set, send updates to this coordinator node instead of local client */
   coordinatorNodeId?: string;
   /** True if registered via CLUSTER_SUB_REGISTER */
@@ -228,7 +228,7 @@ export class QueryRegistry {
   }
 
   // ============================================
-  // Phase 14.2: Distributed Subscription Methods
+  // Distributed Subscription Methods
   // ============================================
 
   /** ClusterManager for sending distributed updates */
@@ -743,7 +743,7 @@ export class QueryRegistry {
   }
 
   private sendUpdate(sub: Subscription, key: string, value: any, type: 'UPDATE' | 'REMOVE') {
-    // Phase 14.2: Route based on subscription type
+    // Route based on subscription type
     if (sub.isDistributed && sub.coordinatorNodeId && this.clusterManager) {
       // Distributed subscription: send to coordinator via cluster
       this.sendDistributedUpdate(sub, key, value, type);

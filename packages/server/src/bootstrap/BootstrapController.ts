@@ -1,5 +1,5 @@
 /**
- * Phase 14D: Bootstrap Controller
+ * Bootstrap Controller
  *
  * Handles initial server setup when no configuration exists.
  * Provides /api/setup endpoints for the Setup Wizard.
@@ -169,7 +169,7 @@ export class BootstrapController {
   }
 
   // ============================================
-  // Zero-Touch Setup (Phase 14D-2)
+  // Zero-Touch Setup
   // ============================================
 
   /**

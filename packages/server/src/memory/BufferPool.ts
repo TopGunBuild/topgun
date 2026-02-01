@@ -1,6 +1,6 @@
 /**
  * BufferPool - High-performance buffer reuse for serialization operations.
- * Phase 2.03: Memory Pooling
+ * Memory Pooling
  *
  * Reduces GC pressure by reusing pre-allocated Uint8Array buffers instead of
  * creating new ones for each serialization operation.

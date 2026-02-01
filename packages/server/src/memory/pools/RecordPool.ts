@@ -1,6 +1,6 @@
 /**
  * RecordPool - Pre-configured ObjectPool for LWW/OR record objects.
- * Phase 2.04: Object Pool Implementation
+ * Object Pool Implementation
  *
  * Reduces GC pressure when processing CRDT operations.
  */

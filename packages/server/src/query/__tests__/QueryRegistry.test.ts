@@ -128,7 +128,7 @@ describe('QueryRegistry', () => {
 });
 
 // ===========================================
-// Phase 14.2.6: QueryRegistry Distributed Subscription Tests
+// QueryRegistry Distributed Subscription Tests
 // ===========================================
 
 import { MockClusterManager } from '../../__tests__/utils/MockClusterManager';

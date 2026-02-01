@@ -1,6 +1,6 @@
 /**
  * MessagePool - Pre-configured ObjectPool for message objects.
- * Phase 2.04: Object Pool Implementation
+ * Object Pool Implementation
  *
  * Reduces GC pressure when processing incoming messages.
  */

@@ -5,7 +5,7 @@ export interface Query {
   predicate?: PredicateNode;
   sort?: Record<string, 'asc' | 'desc'>;
   limit?: number;
-  /** Cursor for pagination (Phase 14.1: replaces offset) */
+  /** Cursor for pagination (replaces offset) */
   cursor?: string;
 }
 
@@ -137,7 +137,7 @@ export function executeQueryWithCursor(records: Map<string, LWWRecord<any>> | LW
     });
   }
 
-  // 3. Apply cursor filtering (Phase 14.1) and track status
+  // 3. Apply cursor filtering and track status
   let cursorStatus: CursorStatus = 'none';
   if (query.cursor) {
     const cursorData = QueryCursor.decode(query.cursor);

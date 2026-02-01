@@ -1,6 +1,6 @@
 /**
  * TimestampPool - Pre-configured ObjectPool for HLC timestamp objects.
- * Phase 2.04: Object Pool Implementation
+ * Object Pool Implementation
  *
  * Reduces GC pressure for frequent timestamp operations.
  * Timestamps are created on every operation (set, merge, etc.).

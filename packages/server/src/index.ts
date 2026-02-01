@@ -11,7 +11,7 @@ export * from './interceptor/IInterceptor';
 export { TimestampInterceptor } from './interceptor/TimestampInterceptor';
 export { RateLimitInterceptor } from './interceptor/RateLimitInterceptor';
 
-// Native module utilities (Phase 3.05)
+// Native module utilities
 export {
   getNativeStats,
   getNativeModuleStatus,
@@ -20,14 +20,14 @@ export {
   type NativeModuleStatus,
 } from './utils/nativeStats';
 
-// Cluster module (Phase 4)
+// Cluster module
 export * from './cluster';
 
-// Entry Processor (Phase 5.03)
+// Entry Processor
 export { ProcessorSandbox, ProcessorSandboxConfig, DEFAULT_SANDBOX_CONFIG } from './ProcessorSandbox';
 export { EntryProcessorHandler, EntryProcessorHandlerConfig } from './handlers/EntryProcessorHandler';
 
-// Event Journal (Phase 5.04)
+// Event Journal
 export {
   EventJournalService,
   EventJournalServiceConfig,
@@ -35,7 +35,7 @@ export {
   ExportOptions,
 } from './EventJournalService';
 
-// Conflict Resolver (Phase 5.05)
+// Conflict Resolver
 export {
   ConflictResolverService,
   ConflictResolverServiceConfig,
@@ -52,19 +52,19 @@ export {
   MergeWithResolverResult,
 } from './handlers/ConflictResolverHandler';
 
-// Index Configuration (Phase 7.07)
+// Index Configuration
 export * from './config';
 
-// Full-Text Search (Phase 11.1)
+// Full-Text Search
 export { SearchCoordinator, SearchConfig, ServerSearchResult } from './search';
 
-// Observability (Phase 14C)
+// Observability 
 export { PrometheusExporter, getPrometheusExporter, resetPrometheusExporter } from './metrics';
 
-// Server Factory (Phase 4.05)
+// Server Factory
 export { ServerFactory } from './ServerFactory';
 export * from './ServerDependencies';
 
-// Server Modules (Phase 14A - SPEC-011)
+// Server Modules 
 export * from './modules';
 

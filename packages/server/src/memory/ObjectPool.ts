@@ -1,6 +1,6 @@
 /**
  * ObjectPool - Generic object pooling for reducing GC pressure.
- * Phase 2.04: Object Pool Implementation
+ * Object Pool Implementation
  *
  * Reuses objects instead of creating new ones in hot paths.
  * Works with any plain data structure type.

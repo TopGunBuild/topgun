@@ -147,7 +147,7 @@ describe('executeQuery', () => {
     expect(results.map(r => r.value.name)).toEqual(['A', 'B']);
   });
 
-  test('should apply cursor-based pagination (Phase 14.1)', () => {
+  test('should apply cursor-based pagination', () => {
     const { executeQueryWithCursor } = require('../Matcher');
 
     // First page

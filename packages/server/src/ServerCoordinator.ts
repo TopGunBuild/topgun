@@ -107,11 +107,11 @@ export interface ServerCoordinatorConfig {
     /** Worker pool configuration */
     workerPoolConfig?: Partial<WorkerPoolConfig>;
 
-    // === Write Concern Options (Phase 5.01) ===
+    // === Write Concern Options ===
     /** Default timeout for Write Concern acknowledgments in ms (default: 5000) */
     writeAckTimeout?: number;
 
-    // === Replication Options (Phase 4) ===
+    // === Replication Options ===
     /** Enable replication to backup nodes (default: true when cluster has peers) */
     replicationEnabled?: boolean;
     /** Default consistency level for replication (default: EVENTUAL) */
@@ -119,21 +119,21 @@ export interface ServerCoordinatorConfig {
     /** Replication configuration */
     replicationConfig?: Partial<ReplicationConfig>;
 
-    // === Event Journal Options (Phase 5.04) ===
+    // === Event Journal Options ===
     /** Enable event journal for audit/CDC (default: false) */
     eventJournalEnabled?: boolean;
     /** Event journal configuration */
     eventJournalConfig?: Partial<Omit<EventJournalServiceConfig, 'pool'>>;
 
-    // === Full-Text Search Options (Phase 11.1) ===
+    // === Full-Text Search Options ===
     /** Enable full-text search for specific maps */
     fullTextSearch?: Record<string, FullTextIndexConfig>;
 
-    // === Distributed Search Options (Phase 14) ===
+    // === Distributed Search Options ===
     /** Configuration for distributed search across cluster nodes */
     distributedSearch?: ClusterSearchConfig;
 
-    // === Debug Options (Phase 14C) ===
+    // === Debug Options  ===
     /** Enable debug endpoints (/debug/crdt/*, /debug/search/*) (default: false, or TOPGUN_DEBUG=true) */
     debugEnabled?: boolean;
 }
@@ -182,12 +182,12 @@ export class ServerCoordinator {
     // Tasklet scheduler for cooperative multitasking
     private taskletScheduler: TaskletScheduler;
 
-    // Phase 10 - Cluster Enhancements
+    // Cluster Enhancements
     private partitionReassigner?: PartitionReassigner;
     private merkleTreeManager?: MerkleTreeManager;
     private repairScheduler?: RepairScheduler;
 
-    // Phase 11.1 - Full-Text Search
+    // Full-Text Search
     private searchCoordinator!: SearchCoordinator;
 
     private readonly _nodeId: string;
@@ -362,7 +362,7 @@ export class ServerCoordinator {
         this._readyResolve(); // Mark as ready
     }
 
-    // NOTE: backfillSearchIndexes moved to LifecycleManager (Phase 2)
+    // NOTE: backfillSearchIndexes moved to LifecycleManager
 
     /** Wait for server to be fully ready (ports assigned) */
     public ready(): Promise<void> {
@@ -445,7 +445,7 @@ export class ServerCoordinator {
         return this.taskletScheduler;
     }
 
-    // === Phase 11.1: Full-Text Search Public API ===
+    // === Full-Text Search Public API ===
 
     /**
      * Enable full-text search for a map.
@@ -506,7 +506,7 @@ export class ServerCoordinator {
         return this.searchCoordinator.getIndexStats(mapName);
     }
 
-    // NOTE: gracefulClusterDeparture, getOwnedPartitions, waitForReplicationFlush moved to LifecycleManager (Phase 2)
+    // NOTE: gracefulClusterDeparture, getOwnedPartitions, waitForReplicationFlush moved to LifecycleManager
 
     /**
      * Shutdown the server coordinator.
@@ -516,9 +516,9 @@ export class ServerCoordinator {
         return this.lifecycleManager.shutdown();
     }
 
-    // NOTE: handleConnection and handleMessage have been extracted to WebSocketHandler (Phase 1)
+    // NOTE: handleConnection and handleMessage have been extracted to WebSocketHandler
 
-    // ============ Phase 4: Partition Map Broadcast ============
+    // ============ Partition Map Broadcast ============
 
     /**
      * Broadcast partition map to all connected and authenticated clients.
@@ -529,7 +529,7 @@ export class ServerCoordinator {
     }
 
     /**
-     * Notify a client about a merge rejection (Phase 5.05).
+     * Notify a client about a merge rejection.
      * Finds the client by node ID and sends MERGE_REJECTED message.
      */
     private notifyMergeRejection(rejection: MergeRejection): void {
@@ -633,7 +633,7 @@ export class ServerCoordinator {
     }
 
     /**
-     * Phase 10.04: Get local record for anti-entropy repair
+     * Get local record for anti-entropy repair
      * Returns the LWWRecord for a key, used by RepairScheduler
      */
     private getLocalRecord(key: string): LWWRecord<any> | null {
@@ -654,7 +654,7 @@ export class ServerCoordinator {
     }
 
     /**
-     * Phase 10.04: Apply repaired record from anti-entropy repair
+     * Apply repaired record from anti-entropy repair
      * Used by RepairScheduler to apply resolved conflicts
      */
     private applyRepairRecord(key: string, record: LWWRecord<any>): void {
@@ -693,7 +693,7 @@ export class ServerCoordinator {
     }
 
 
-    // ============ Heartbeat Methods (delegated to HeartbeatHandler - SPEC-003d) ============
+    // ============ Heartbeat Methods (delegated to handler) ============
 
     /**
      * Checks if a client is still alive based on heartbeat.
