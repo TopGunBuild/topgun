@@ -115,8 +115,7 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
         predicate,
         sort,
         limit: effectiveLimit,
-        // Note: TopGun uses cursor-based pagination (Phase 14.1)
-        // offset is handled client-side for BetterAuth compatibility
+        // TopGun uses cursor-based pagination; offset is handled client-side for BetterAuth compatibility
       };
 
       // We use client.query which subscribes. We wait for the first result.
