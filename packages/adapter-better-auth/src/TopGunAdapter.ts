@@ -35,6 +35,12 @@ export interface TopGunAdapterOptions {
   modelMap?: Record<string, string>;
   /** Wait for client storage to be ready before accepting requests (default: true) */
   waitForReady?: boolean;
+  /**
+   * Map model names to their foreign key field for join operations.
+   * Default: "userId" for all models.
+   * Example: { account: "ownerId", session: "userId" }
+   */
+  foreignKeyMap?: Record<string, string>;
 }
 
 export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterInstance => {
@@ -170,10 +176,9 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
           if (join) {
              for (const [joinModel, joinConfig] of Object.entries(join)) {
                  if (joinConfig === false) continue;
-                 
-                 // Assume standard relation on userId
-                 // TODO: Handle custom foreign keys if Better Auth passes them or we infer them
-                 const joinWhere: Where[] = [{ field: 'userId', value: result.id }];
+
+                 const foreignKey = adapterOptions.foreignKeyMap?.[joinModel] ?? 'userId';
+                 const joinWhere: Where[] = [{ field: foreignKey, value: result.id }];
                  
                  const limit = typeof joinConfig === 'object' ? joinConfig.limit : undefined;
                  
