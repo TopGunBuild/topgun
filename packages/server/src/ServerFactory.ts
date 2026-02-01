@@ -152,7 +152,7 @@ export class ServerFactory {
 
         // Reuse existing endpoint creation logic
         const debugEndpoints = createDebugEndpoints({
-            enabled: config.debugEnabled ?? process.env.TOPGUN_DEBUG === 'true',
+            enabled: config.debugEnabled ?? process.env.TOPGUN_DEBUG_ENDPOINTS === 'true',
             getMaps: () => storageManager.getMaps(),
         });
 
