@@ -306,7 +306,7 @@ export class WorkerPool {
       this.workers.set(workerId, state);
       return state;
     } catch (error) {
-      logger.error({ err: error, workerId, context: 'worker_creation' }, 'Failed to create worker');
+      logger.error({ err: error, context: 'worker_creation' }, 'Failed to create worker');
       return null;
     }
   }
