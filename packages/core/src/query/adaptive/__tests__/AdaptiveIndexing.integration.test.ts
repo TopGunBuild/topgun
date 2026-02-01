@@ -1,5 +1,5 @@
 /**
- * Integration Tests for Adaptive Indexing (Phase 8.02)
+ * Integration Tests for Adaptive Indexing
  *
  * Tests the complete adaptive indexing flow with IndexedLWWMap.
  */

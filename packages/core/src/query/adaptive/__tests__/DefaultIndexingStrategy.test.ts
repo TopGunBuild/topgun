@@ -1,5 +1,5 @@
 /**
- * Tests for DefaultIndexingStrategy (Phase 8.02.4)
+ * Tests for DefaultIndexingStrategy
  */
 
 import { DefaultIndexingStrategy } from '../DefaultIndexingStrategy';

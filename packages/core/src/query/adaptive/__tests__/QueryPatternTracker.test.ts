@@ -1,5 +1,5 @@
 /**
- * Tests for QueryPatternTracker (Phase 8.02.1)
+ * Tests for QueryPatternTracker
  */
 
 import { QueryPatternTracker } from '../QueryPatternTracker';

@@ -99,7 +99,7 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
   private readonly defaultIndexingStrategy: DefaultIndexingStrategy<V> | null;
   private readonly options: IndexedMapOptions;
 
-  // Full-Text Search (Phase 11)
+  // Full-Text Search
   private fullTextIndex: FullTextIndex | null = null;
 
   constructor(hlc: HLC, options: IndexedMapOptions = {}) {
@@ -120,7 +120,7 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
       )
     );
 
-    // Initialize adaptive indexing (Phase 8.02)
+    // Initialize adaptive indexing
     this.queryTracker = new QueryPatternTracker();
     this.indexAdvisor = new IndexAdvisor(this.queryTracker);
 
@@ -205,7 +205,7 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
     this.buildIndexFromExisting(index);
   }
 
-  // ==================== Full-Text Search (Phase 11) ====================
+  // ==================== Full-Text Search ====================
 
   /**
    * Enable BM25-based full-text search on specified fields.
@@ -369,7 +369,7 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
    * Execute a query across all records.
    * Returns array of matching results with key, tag, and value.
    *
-   * Also tracks query patterns for adaptive indexing (Phase 8.02).
+   * Also tracks query patterns for adaptive indexing.
    *
    * @param query - Query to execute
    * @returns Array of query results
@@ -389,7 +389,7 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
       }
     }
 
-    // Track query pattern for adaptive indexing (Phase 8.02)
+    // Track query pattern for adaptive indexing
     const duration = performance.now() - start;
     this.trackQueryPattern(query, duration, results.length, plan.usesIndexes);
 
@@ -497,7 +497,7 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
     const compositeKey = this.createCompositeKey(key, record.tag);
     this.indexRegistry.onRecordAdded(compositeKey, value);
 
-    // Update full-text index (Phase 11)
+    // Update full-text index
     if (this.fullTextIndex) {
       this.fullTextIndex.onSet(compositeKey, value as Record<string, unknown>);
     }
@@ -517,7 +517,7 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
       const compositeKey = this.createCompositeKey(key, record.tag);
       this.indexRegistry.onRecordRemoved(compositeKey, record.value);
 
-      // Update full-text index (Phase 11)
+      // Update full-text index
       if (this.fullTextIndex) {
         this.fullTextIndex.onRemove(compositeKey);
       }
@@ -535,7 +535,7 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
       const compositeKey = this.createCompositeKey(key, record.tag);
       this.indexRegistry.onRecordAdded(compositeKey, record.value);
 
-      // Update full-text index (Phase 11)
+      // Update full-text index
       if (this.fullTextIndex) {
         this.fullTextIndex.onSet(compositeKey, record.value as Record<string, unknown>);
       }
@@ -567,7 +567,7 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
       const compositeKey = this.createCompositeKey(removedKey, tag);
       this.indexRegistry.onRecordRemoved(compositeKey, removedValue);
 
-      // Update full-text index (Phase 11)
+      // Update full-text index
       if (this.fullTextIndex) {
         this.fullTextIndex.onRemove(compositeKey);
       }
@@ -581,7 +581,7 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
     super.clear();
     this.indexRegistry.clear();
 
-    // Clear full-text index (Phase 11)
+    // Clear full-text index
     if (this.fullTextIndex) {
       this.fullTextIndex.clear();
     }
@@ -794,7 +794,7 @@ export class IndexedORMap<K extends string, V> extends ORMap<K, V> {
     return this.queryOptimizer.optimize(query);
   }
 
-  // ==================== Adaptive Indexing (Phase 8.02) ====================
+  // ==================== Adaptive Indexing ====================
 
   /**
    * Register an attribute for auto-indexing.

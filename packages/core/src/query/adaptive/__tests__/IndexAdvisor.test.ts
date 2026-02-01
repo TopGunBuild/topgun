@@ -1,5 +1,5 @@
 /**
- * Tests for IndexAdvisor (Phase 8.02.2)
+ * Tests for IndexAdvisor
  */
 
 import { IndexAdvisor } from '../IndexAdvisor';

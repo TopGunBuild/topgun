@@ -1,5 +1,5 @@
 /**
- * Tests for AutoIndexManager (Phase 8.02.3)
+ * Tests for AutoIndexManager
  */
 
 import { AutoIndexManager } from '../AutoIndexManager';
