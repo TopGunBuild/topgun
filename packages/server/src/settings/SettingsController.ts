@@ -561,17 +561,20 @@ export class SettingsController {
   /**
    * Set nested value by dot-notation path
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private setNestedValue(obj: any, path: string, value: unknown): void {
+  private setNestedValue<T extends Record<string, unknown>>(
+    obj: T,
+    path: string,
+    value: unknown
+  ): void {
     const keys = path.split('.');
-    let current = obj;
+    let current: Record<string, unknown> = obj;
 
     for (let i = 0; i < keys.length - 1; i++) {
       const key = keys[i];
-      if (!(key in current) || typeof current[key] !== 'object') {
+      if (!(key in current) || typeof current[key] !== 'object' || current[key] === null) {
         current[key] = {};
       }
-      current = current[key];
+      current = current[key] as Record<string, unknown>;
     }
 
     current[keys[keys.length - 1]] = value;
