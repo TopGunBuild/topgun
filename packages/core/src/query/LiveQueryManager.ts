@@ -20,6 +20,7 @@ import {
 } from './StandingQueryRegistry';
 import type { StandingQueryChange } from './indexes/StandingQueryIndex';
 import type { Query } from './QueryTypes';
+import { logger } from '../utils/logger';
 
 /**
  * Initial results event sent when subscribing.
@@ -114,7 +115,7 @@ export class LiveQueryManager<K, V> {
         results: initialResults,
       });
     } catch (error) {
-      console.error('LiveQueryManager initial callback error:', error);
+      logger.error({ err: error, query, context: 'initial_callback' }, 'LiveQueryManager initial callback error');
     }
 
     // Return unsubscribe function
@@ -231,7 +232,7 @@ export class LiveQueryManager<K, V> {
           });
         } catch (error) {
           // Don't let one callback failure affect others
-          console.error('LiveQueryManager callback error:', error);
+          logger.error({ err: error, operation, context: 'delta_callback' }, 'LiveQueryManager callback error');
         }
       }
     }

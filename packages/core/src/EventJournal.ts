@@ -1,5 +1,6 @@
 import { Ringbuffer } from './Ringbuffer';
 import type { Timestamp } from './HLC';
+import { logger } from './utils/logger';
 
 /**
  * Type of journal event.
@@ -157,7 +158,7 @@ export class EventJournalImpl implements EventJournal {
       try {
         listener(event);
       } catch (e) {
-        console.error('EventJournal listener error:', e);
+        logger.error({ err: e, context: 'listener' }, 'EventJournal listener error');
       }
     }
 
@@ -213,7 +214,7 @@ export class EventJournalImpl implements EventJournal {
         try {
           listener(event);
         } catch (e) {
-          console.error('EventJournal replay error:', e);
+          logger.error({ err: e, context: 'replay' }, 'EventJournal replay error');
         }
       }
     }

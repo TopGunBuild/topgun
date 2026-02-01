@@ -22,6 +22,7 @@ import type {
 } from './types';
 import { ADAPTIVE_INDEXING_DEFAULTS } from './types';
 import type { Attribute } from '../Attribute';
+import { logger } from '../../utils/logger';
 
 /**
  * Interface for indexed map operations.
@@ -314,7 +315,7 @@ export class AutoIndexManager<K, V> {
       this.config.onIndexCreated(attributeName, indexType);
     } catch (error) {
       // Index creation failed - log but don't throw
-      console.error(`AutoIndexManager: Failed to create ${indexType} index on '${attributeName}':`, error);
+      logger.error({ err: error, attributeName, indexType, context: 'index_creation' }, `AutoIndexManager: Failed to create ${indexType} index on '${attributeName}'`);
     }
   }
 }
