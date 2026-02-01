@@ -10,9 +10,8 @@
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-020b | Clean packages/server/ comments | medium | draft | - |
-| 2 | SPEC-020c | Clean packages/client/ comments | medium | draft | - |
-| 3 | SPEC-020d | Clean packages/react/ + mcp-server/ + adapter-better-auth/ comments | medium | draft | - |
+| 1 | SPEC-020c | Clean packages/client/ comments | medium | draft | - |
+| 2 | SPEC-020d | Clean packages/react/ + mcp-server/ + adapter-better-auth/ comments | medium | draft | - |
 
 ## Decisions
 
@@ -55,6 +54,11 @@
 | 2026-02-01 | SPEC-020a | AUDITED v1: APPROVED. Context estimate ~42% (GOOD range). All 9 dimensions PASS. Patterns validated via grep (158 occurrences, 53 files). Ready for implementation. |
 | 2026-02-01 | SPEC-020a | REVIEWED v1: Implementation APPROVED. All 6 acceptance criteria met. 52 files modified (comment-only changes). Zero process references remain. Build succeeds, 1814/1815 tests pass (1 flaky performance test pre-existing). Section headers, export groupings, and meaningful context preserved exactly as specified. All constraints respected. Ready for finalization. |
 | 2026-02-01 | SPEC-020a | COMPLETED: Clean packages/core/ comments. Removed 158 process artifact references from 52 files. 6 commits, 1 audit cycle, 1 review cycle. Archived to .specflow/archive/SPEC-020a.md |
+| 2026-02-01 | SPEC-020b | AUDITED v1: APPROVED. Context estimate ~45% (GOOD range). All 9 dimensions PASS. Patterns validated via grep (196 occurrences across 105 files: 104 TS + 1 SQL). Sibling spec (SPEC-020a) completed successfully with identical structure. Ready for implementation. |
+| 2026-02-01 | SPEC-020b | REVISED v1: Applied all 3 recommendations from Audit v1. Added Execution Guidance subsection with 6-commit directory-batching strategy. Made file count breakdown explicit (104 TS + 1 SQL). Acknowledged Goal Analysis not needed. Ready for re-audit. |
+| 2026-02-01 | SPEC-020b | AUDITED v2: APPROVED. Context estimate ~45% (GOOD range). All 9 dimensions PASS. All 3 v1 recommendations verified as applied. Patterns re-validated (196 occurrences, 105 files). Directory structure matches Execution Guidance. Ready for implementation. |
+| 2026-02-01 | SPEC-020b | REVIEWED v1: Implementation APPROVED. All 6 acceptance criteria met. 105 files modified (comment-only changes). Zero process references remain. Build succeeds. Tests pass with pre-existing failures (Chaos.test.ts and Resilience.test.ts from SPEC-018 serverUrl removal). Section headers, export groupings, and meaningful context preserved exactly as specified. All constraints respected. Ready for finalization. |
+| 2026-02-01 | SPEC-020b | COMPLETED: Clean packages/server/ comments. Removed 196 process artifact references from 105 files. 6 commits, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-020b.md |
 
 ## Project Patterns
 
