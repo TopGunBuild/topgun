@@ -1,5 +1,6 @@
 import { EventJournalImpl, DEFAULT_EVENT_JOURNAL_CONFIG } from '../EventJournal';
 import type { JournalEventInput, JournalEvent } from '../EventJournal';
+import { logger } from '../utils/logger';
 
 describe('EventJournalImpl', () => {
   let journal: EventJournalImpl;
@@ -308,7 +309,7 @@ describe('EventJournalImpl', () => {
     });
 
     it('should handle errors in listeners gracefully', () => {
-      const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
+      const loggerSpy = jest.spyOn(logger, 'error').mockImplementation();
 
       journal.subscribe(() => {
         throw new Error('Listener error');
@@ -326,12 +327,12 @@ describe('EventJournalImpl', () => {
       // Should not throw
       expect(() => journal.append(baseEvent)).not.toThrow();
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        'EventJournal listener error:',
-        expect.any(Error)
+      expect(loggerSpy).toHaveBeenCalledWith(
+        { err: expect.any(Error), context: 'listener' },
+        'EventJournal listener error'
       );
 
-      consoleSpy.mockRestore();
+      loggerSpy.mockRestore();
     });
   });
 
