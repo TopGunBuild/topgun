@@ -101,6 +101,7 @@ export interface LifecycleManagerConfig {
     searchCoordinator: {
         getEnabledMaps: () => string[];
         buildIndexFromEntries: (mapName: string, entries: Iterable<[string, Record<string, unknown> | null]>) => void;
+        dispose?: () => void;
     };
     getMapAsync: (name: string) => Promise<LWWMap<string, any> | any>;
 }
@@ -210,6 +211,10 @@ export class LifecycleManager {
         if (this.config.partitionReassigner) {
             this.config.partitionReassigner.stop();
             logger.info('PartitionReassigner stopped');
+        }
+        if (this.config.searchCoordinator.dispose) {
+            this.config.searchCoordinator.dispose();
+            logger.info('SearchCoordinator disposed');
         }
 
         // 5. Stop Cluster
