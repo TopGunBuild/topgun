@@ -440,6 +440,21 @@ export class SearchCoordinator extends EventEmitter {
     logger.debug('SearchCoordinator cleared');
   }
 
+  /**
+   * Dispose of SearchCoordinator resources.
+   * Flushes pending notifications before clearing the timer.
+   * Called by LifecycleManager during graceful shutdown.
+   */
+  dispose(): void {
+    // Flush pending notifications before clearing timer
+    if (this.notificationTimer) {
+      clearTimeout(this.notificationTimer);
+      this.notificationTimer = null;
+      this.flushNotifications();
+    }
+    logger.debug('SearchCoordinator disposed');
+  }
+
   // ============================================
   // Live Search Subscription Methods
   // ============================================
