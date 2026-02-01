@@ -8,9 +8,6 @@ import * as jwt from 'jsonwebtoken';
 
 const JWT_SECRET = 'topgun-secret-dev';
 
-// Retry flaky resilience tests up to 3 times
-jest.retryTimes(3);
-
 describe('Resilience & Chaos Testing', () => {
   let server: ServerCoordinator;
   let proxy: ChaosProxy;
