@@ -1,5 +1,5 @@
 /**
- * FTS Query Types Tests (Phase 12)
+ * FTS Query Types Tests
  *
  * Tests for FTS query node types and type guards.
  */

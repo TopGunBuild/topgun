@@ -1,5 +1,5 @@
 /**
- * LiveFTSIndex Tests (Phase 12)
+ * LiveFTSIndex Tests
  *
  * Tests for LiveFTSIndex with O(1) updates via scoreSingleDocument.
  */

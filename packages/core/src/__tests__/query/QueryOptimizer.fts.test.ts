@@ -1,5 +1,5 @@
 /**
- * QueryOptimizer FTS Extension Tests (Phase 12)
+ * QueryOptimizer FTS Extension Tests
  *
  * Tests for FTS query optimization and fusion strategy selection.
  */

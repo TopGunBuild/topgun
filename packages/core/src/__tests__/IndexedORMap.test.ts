@@ -336,7 +336,7 @@ describe('IndexedORMap', () => {
     });
   });
 
-  // ==================== Full-Text Search (Phase 11) ====================
+  // ==================== Full-Text Search ====================
   describe('Full-Text Search', () => {
     interface Article {
       title: string;

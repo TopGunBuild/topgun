@@ -1,5 +1,5 @@
 /**
- * Full-Text Search Predicate Tests (Phase 12)
+ * Full-Text Search Predicate Tests
  *
  * Tests for FTS predicate builders and types.
  */

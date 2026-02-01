@@ -1,5 +1,5 @@
 /**
- * Tests for QueryOptimizer Compound Index Usage (Phase 9.03.4)
+ * Tests for QueryOptimizer Compound Index Usage
  *
  * Tests automatic detection and usage of CompoundIndex for AND queries:
  * - Automatic compound index selection

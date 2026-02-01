@@ -1,5 +1,5 @@
 /**
- * Tests for Attribute Factory (Phase 9.02)
+ * Tests for Attribute Factory
  *
  * Tests type-safe attribute generation functionality:
  * - generateAttributes() with schema definition

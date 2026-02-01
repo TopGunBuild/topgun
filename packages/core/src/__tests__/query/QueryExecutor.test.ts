@@ -1,5 +1,5 @@
 /**
- * QueryExecutor Tests (Phase 12)
+ * QueryExecutor Tests
  *
  * Integration tests for QueryExecutor with FTS and hybrid queries.
  */
@@ -398,7 +398,7 @@ describe('QueryExecutor', () => {
 
       const allResults = executor.execute(query, data);
 
-      // Use cursor to skip first result (Phase 14.1)
+      // Use cursor to skip first result
       const firstResult = allResults[0];
       const cursor = (executor as any).generateCursor
         ? (executor as any).generateCursor([firstResult], 'body', 'desc')

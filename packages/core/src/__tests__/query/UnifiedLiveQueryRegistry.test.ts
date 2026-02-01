@@ -1,5 +1,5 @@
 /**
- * UnifiedLiveQueryRegistry Tests (Phase 12)
+ * UnifiedLiveQueryRegistry Tests
  *
  * Tests for the unified live query registry that auto-detects
  * index type based on query predicates.

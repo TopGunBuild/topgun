@@ -1,5 +1,5 @@
 /**
- * Tests for CompoundIndex (Phase 9.03)
+ * Tests for CompoundIndex
  *
  * Tests multi-attribute indexing functionality:
  * - Composite key generation

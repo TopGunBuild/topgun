@@ -1,5 +1,5 @@
 /**
- * Tests for Lazy Indexes (Phase 9.01)
+ * Tests for Lazy Indexes
  *
  * Tests lazy index building functionality:
  * - LazyHashIndex

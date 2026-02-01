@@ -1,5 +1,5 @@
 /**
- * Tests for Compound Index Auto-Detection (Phase 9.03)
+ * Tests for Compound Index Auto-Detection
  *
  * Tests compound query pattern tracking and suggestions:
  * - QueryPatternTracker compound query recording
