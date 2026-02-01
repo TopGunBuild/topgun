@@ -1,4 +1,5 @@
 import { HLC, Timestamp, HLCOptions } from '../HLC';
+import { logger } from '../utils/logger';
 
 describe('HLC (Hybrid Logical Clock)', () => {
   let hlc: HLC;
@@ -347,7 +348,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
 
   describe('Clock Drift Detection', () => {
     test('should warn but accept timestamps with significant drift', () => {
-      const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation();
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation();
       const currentTime = 1000000;
       jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
 
@@ -361,15 +362,16 @@ describe('HLC (Hybrid Logical Clock)', () => {
       hlc.update(remote);
 
       // Should have logged a warning
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Clock drift detected')
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ drift: expect.any(Number) }),
+        'Clock drift detected'
       );
 
       // But should still accept the timestamp (AP system behavior)
       const ts = hlc.now();
       expect(ts.millis).toBe(currentTime + 100000);
 
-      consoleWarnSpy.mockRestore();
+      warnSpy.mockRestore();
     });
   });
 
@@ -431,7 +433,7 @@ describe('HLC (Hybrid Logical Clock)', () => {
     });
 
     test('should warn but accept in non-strict mode (default)', () => {
-      const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation();
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation();
       const permissiveHlc = new HLC('permissive-node'); // strictMode defaults to false
       const currentTime = 1000000;
       jest.spyOn(Date, 'now').mockImplementation(() => currentTime);
@@ -446,8 +448,9 @@ describe('HLC (Hybrid Logical Clock)', () => {
       expect(() => permissiveHlc.update(remote)).not.toThrow();
 
       // Should have warned
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Clock drift detected')
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ drift: expect.any(Number) }),
+        'Clock drift detected'
       );
 
       // Timestamp should have been accepted
