@@ -2,22 +2,12 @@
 
 **Date:** 2026-02-01
 **Focus:** all
-**Project:** TopGun v0.9.0 - Offline-First In-Memory Data Grid
 
 ## Executive Summary
 
-TopGun is a mature TypeScript monorepo with 263K+ lines of production code and 63K+ test lines. The codebase demonstrates solid architectural patterns with modular design, comprehensive test coverage (195 test files, ~57% test-to-code ratio), and good tooling (ESLint, Prettier, TypeScript strict mode). However, several technical debt items and quality improvements have been identified, primarily around error handling, console logging in production, and empty catch blocks.
+TopGun is a mature, well-architected offline-first in-memory data grid with 372,558 total lines of TypeScript code across 8 packages. The codebase demonstrates strong engineering practices with comprehensive test coverage (212 test files for 336 source files), strict TypeScript usage, and sophisticated distributed systems patterns. The architecture is clean with minimal technical debt, though opportunities exist for documentation, performance optimization, and security hardening.
 
-**Health Score:** Moderate
-
-**Key Metrics:**
-- Total source LOC: ~263K
-- Test LOC: ~63K
-- Test files: 195 (210 including e2e)
-- Packages: 8 monorepo packages
-- Classes: 57 extending classes
-- Async functions: 34+ occurrences
-- Type annotations issues: 9 files with `@ts-ignore`/`@ts-expect-error`
+**Health Score:** Good
 
 ---
 
@@ -25,71 +15,57 @@ TopGun is a mature TypeScript monorepo with 263K+ lines of production code and 6
 
 ### High Priority
 
-**Empty Catch Block - Silent Error Swallowing**
-- Files: `packages/server/src/cluster/ClusterManager.ts:486`
-- Problem: Empty catch block swallows exceptions during WebSocket close
-- Impact: Failures during connection cleanup are silently ignored, making debugging cluster issues difficult
-- Fix:
-  ```typescript
-  try {
-    ws.close();
-  } catch(e) {
-    logger.debug({ error: e, remoteNodeId }, 'Failed to close stale WebSocket');
-  }
-  ```
+**Extensive use of `any` type in message handling**
+- Files: `packages/client/src/SyncEngine.ts`, `packages/client/src/TopicHandle.ts`, `packages/client/src/sync/ClientMessageHandlers.ts`, `packages/server/src/cluster/ClusterManager.ts`
+- Problem: 50+ occurrences of `any` type in message routing, topic handling, and cluster communication. Reduces type safety in critical data paths.
+- Impact: Runtime errors possible from malformed messages, harder to refactor, reduced IDE support
+- Fix: Create strict Zod schemas for all message types (already using Zod in `packages/core/src/schemas`), replace `any` with validated types
 
-**TODO: Custom Foreign Key Support**
-- Files: `packages/adapter-better-auth/src/TopGunAdapter.ts:176`
-- Problem: Adapter assumes standard `userId` relation but doesn't handle custom foreign keys
-- Impact: BetterAuth integration breaks with non-standard schemas
-- Fix: Add foreign key configuration support or dynamic field resolution
+**Large file complexity - SyncEngine.ts (1,317 lines)**
+- Files: `packages/client/src/SyncEngine.ts`
+- Problem: Central orchestration class with too many responsibilities - WebSocket management, state machine, query handling, topic pub/sub, counter sync, merkle sync, conflict resolution
+- Impact: Difficult to test, maintain, and extend. Violates Single Responsibility Principle
+- Fix: Extract responsibilities into focused managers (already started with `WebSocketManager`, `QueryManager`, `TopicManager` in `sync/` subdirectory). Complete the extraction.
 
-**Commented Debug Logging Throughout**
-- Files:
-  - `packages/adapter-better-auth/src/TopGunAdapter.ts:189`
-  - `packages/server/src/cluster/ClusterManager.ts:557`
-- Problem: Commented-out console.log statements indicate incomplete debug infrastructure
-- Impact: Debugging requires code changes and redeployment
-- Fix: Leverage existing `TOPGUN_DEBUG` environment variable and structured logging
+**DistributedSubscriptionCoordinator.test.ts (1,282 lines)**
+- Files: `packages/server/src/subscriptions/__tests__/DistributedSubscriptionCoordinator.test.ts`
+- Problem: Massive test file indicates complex component
+- Impact: Test suite maintenance burden, slow test execution
+- Fix: Split distributed subscription logic into separate coordinators for FTS vs Query subscriptions
 
 ### Medium Priority
 
-**Phase Reference Without Completion Tracking**
-- Files: `packages/client/src/SyncEngine.ts:183`
-- Problem: Comment references "Phase 3 BUG-06" without link to issue tracker or completion status
-- Impact: Tech debt tracking is informal and hard to audit
-- Fix: Create GitHub issues for all phase references and link in comments
+**TODO comment in production code**
+- Files: `packages/server/src/__tests__/LiveQuery.test.ts:24`
+- Problem: `TODO(sf-002): Evaluate removing after test suite hardening is proven stable`
+- Impact: Uncertainty about test stability
+- Fix: Either remove if hardening is proven, or create a spec to address the underlying concern
 
-**Default Export Usage in Config Files**
-- Files: `packages/core/tsup.config.ts`, `packages/core/vitest.config.ts`
-- Problem: Config files use default exports, inconsistent with project's named export convention
-- Impact: Minor inconsistency, but config files are an exception
-- Fix: Document this as acceptable exception or refactor to named exports if possible
+**Console.log statements in source code**
+- Files: `packages/core/src/HLC.ts:90`, `packages/server/src/utils/nativeStats.ts:84-86`
+- Problem: Production code uses `console.warn` and `console.log` instead of structured logging
+- Impact: Inconsistent logging, harder to filter/search logs
+- Fix: Replace with logger imports (already using `pino` logger in most files)
 
-**Timer/Interval Cleanup**
-- Files: 304 occurrences of `setTimeout`/`setInterval` across 97 files
-- Problem: No systematic timer registry for cleanup during shutdown
-- Impact: Potential memory leaks and zombie timers after server shutdown
-- Fix: Already partially addressed with `TimerRegistry` in `packages/server/src/utils/TimerRegistry.ts` - ensure all timers use it
+**Legacy/deprecated code patterns**
+- Files: `packages/client/src/cluster/ClusterClient.ts:480-481`, `packages/core/src/debug/CRDTDebugger.ts:414`, `packages/core/src/query/QueryOptimizer.ts:79-91`
+- Problem: Deprecated APIs still present for backwards compatibility
+- Impact: Increases codebase size, confusion for new developers
+- Fix: Create migration guide, remove in next major version
 
 ### Low Priority
 
-**Deprecated Methods**
-- Files:
-  - `packages/core/src/query/QueryOptimizer.ts:79` - deprecated parameter in QueryOptimizer
-  - `packages/client/src/cluster/ClusterClient.ts:483` - deprecated `send()` method
-- Problem: Two deprecated APIs still in codebase without removal timeline
-- Impact: API confusion for new developers
-- Fix: Add deprecation warnings with removal version (e.g., v1.0.0) or remove if unused
+**Empty catch blocks (intentional)**
+- Files: `packages/react/src/__tests__/useEntryProcessor.test.tsx:225`, `packages/server/src/tasklet/__tests__/TaskletScheduler.test.ts:182,280`, `packages/server/src/__tests__/workers/WorkerPool.test.ts:103,141-143,184,208`
+- Problem: 9 occurrences of `.catch(() => {})` in test code
+- Impact: None - these are intentional error suppressions in test scenarios
+- Fix: Add comments explaining why errors are ignored
 
-**Minimal Package Documentation**
-- Files: Only 3 README files found in 8 packages
-  - `packages/core/src/__benchmarks__/README.md`
-  - `packages/mcp-server/README.md`
-  - `packages/adapter-better-auth/README.md`
-- Problem: Missing README files for core, client, server, react, adapters packages
-- Impact: Onboarding friction for contributors and users
-- Fix: Add README with package purpose, API overview, and examples
+**Commented-out console.log statements**
+- Files: `packages/adapter-better-auth/src/TopGunAdapter.ts:193`, `packages/server/src/cluster/ClusterManager.ts:559`
+- Problem: Dead code in comments
+- Impact: Minor clutter
+- Fix: Remove commented debugging code
 
 ---
 
@@ -97,220 +73,165 @@ TopGun is a mature TypeScript monorepo with 263K+ lines of production code and 6
 
 ### Type Safety
 
-**Type Assertion Suppressions**
-- Files: 9 files use `@ts-ignore` or `@ts-expect-error`
-  - `packages/core/src/utils/hash.ts:1`
-  - `packages/client/src/__tests__/EncryptedStorageAdapter.test.ts:3`
-  - `packages/client/src/__tests__/EncryptionManager.test.ts:3`
-  - `packages/server/src/settings/SettingsController.ts:1`
-  - `packages/server/src/workers/worker-scripts/base.worker.ts:1`
-- Count: 9 suppressions across 5 files
-- Fix: Investigate each case and either fix the underlying type issue or add explanatory comments
+**`any` type usage - 50+ occurrences**
+- Files: Concentrated in `packages/client/src/SyncEngine.ts` (26 uses), `packages/client/src/sync/ClientMessageHandlers.ts` (17 uses), `packages/adapters/src/IDBAdapter.ts` (4 uses)
+- Count: 50+ occurrences across message handling, topic data, oplog entries
+- Fix: Implement strict typing using Zod validation schemas. Example pattern from `packages/core/src/schemas`:
+  ```typescript
+  // Instead of: handleServerMessage(message: any)
+  // Use: handleServerMessage(message: ServerMessageSchema)
+  ```
 
-**`as any` Type Casts**
-- Files: 40+ occurrences in `packages/mcp-server/src/__tests__/mcp-integration.test.ts`
-- Problem: Test file heavily uses `(result as any)` to access properties
-- Impact: Test brittleness and potential runtime errors
-- Fix: Define proper result type interfaces for MCP responses
+**No `@ts-ignore` or `@ts-expect-error` suppressions**
+- Count: 0 occurrences
+- Impact: POSITIVE - Indicates clean TypeScript compilation with no type system workarounds
 
-**ESLint Warning: `@typescript-eslint/no-explicit-any: warn`**
-- Files: ESLint configured to warn (not error) on `any` usage
-- Problem: Allows `any` to creep into codebase
-- Fix: Consider upgrading to `error` level after existing occurrences are fixed
+**Strong exception handling**
+- Count: 124 `throw new Error` statements across 69 files
+- Impact: POSITIVE - Explicit error handling with typed errors in `packages/client/src/errors/BackpressureError.ts`, `packages/server/src/workers/errors.ts`
 
-### Error Handling
+### Test Coverage
 
-**No Skipped or Focused Tests**
-- Files: Zero `.skip()` or `.only()` found in test files
-- Status: Good - no test suite pollution
+**Excellent test coverage ratio**
+- Test files: 212
+- Source files: 336
+- Coverage ratio: ~63% of files have corresponding tests
+- Test organization: Unit tests colocated in `__tests__/`, integration tests in `tests/e2e/`, load tests in `tests/k6/`
+- Quality indicators:
+  - E2E test coverage: `live-queries.test.ts` (1,223 lines), `offline-online.test.ts` (1,180 lines), `pubsub.test.ts` (1,100 lines)
+  - Performance tests: k6 scenarios for throughput, stress, cluster failover
+  - Unit test depth: `packages/core/src/fts/__tests__/Tokenizer.test.ts` (745 lines)
 
-**Error Throwing Patterns**
-- Count: 122 occurrences of `throw new Error` across 68 files
-- Status: Appropriate - using proper error throwing, not string throws
-- Observation: Could benefit from custom error classes for better categorization
-
-### Console Logging in Production Code
-
-**Console Statements in Source Code**
-- Files: 40+ occurrences across production code (excluding tests)
-  - `packages/core/src/EventJournal.ts:160,216` - error logging
-  - `packages/mcp-server/src/transport/http.ts:321` - error logging
-  - `packages/client/src/TopicHandle.ts:52` - error in listener
-  - `packages/client/src/TopGunClient.ts` - multiple JSDoc examples with console
-  - `packages/server/src/cluster/ClusterManager.ts:557` - commented console
-- Problem: Production code uses `console.error()` instead of structured logger
-- Impact: Inconsistent logging, missing context, hard to filter in production
-- Fix: Replace all `console.*` with logger from `utils/logger` module
-
-**ESLint `no-console: warn` Configuration**
-- Files: `eslint.config.mjs:10`
-- Problem: Console usage only warns, doesn't error
-- Impact: New console statements can slip through code review
-- Fix: Consider upgrading to `error` level for non-test files
+**Missing linter configuration**
+- Files: No `.eslintrc.*` or `biome.json` found
+- Found: `tsconfig.json`, `.prettierrc.json` (implied from package.json scripts)
+- Impact: Inconsistent code style possible
+- Fix: Lint and format scripts exist in `package.json` (lines 52-55), verify ESLint config presence
 
 ### Code Duplication
 
-**Message Handler Registration Pattern**
-- Files: 12 message handler files in `packages/server/src`
-- Observation: Handlers use consistent registration pattern via `handlers-module.ts`
-- Status: Good architectural pattern, domain-grouped for Rust portability
+**Module-based architecture reduces duplication**
+- Handler groups: 26 message handlers organized by domain in `packages/server/src/modules/handlers-module.ts` (CRDT, Sync, Query, Messaging, Coordination, Search, Persistence, Client, Server)
+- Class hierarchy: 57 class extensions across 43 files - appropriate use of inheritance
+- Interface definitions: 582 interfaces across 189 files - strong abstraction layer
 
-**Export Re-export Pattern**
-- Files: 14 `index.ts` files with `export * from` statements
-- Status: Standard barrel export pattern, acceptable
+**Potential duplication in search coordinators**
+- Files: `packages/server/src/search/SearchCoordinator.ts` (1,073 lines), `packages/server/src/search/ClusterSearchCoordinator.ts`
+- Observation: Both handle search operations, may have overlapping logic
+- Recommendation: Audit for shared code extraction
 
 ---
 
 ## Security Considerations
 
-**Environment Variable Usage**
-- Files: 97+ files use `process.env.*`
-- Risk: Environment variables used throughout (see `packages/server/src/start-server.ts:8-32`)
-- Severity: Medium
-- Observations:
-  - Good: `JWT_SECRET` validation exists (`validateJwtSecret()`)
-  - Good: `.env` is in `.gitignore` (checked)
-  - Concern: No validation for required env vars at startup
-- Mitigation:
-  - Add centralized env validation at server startup
-  - Use schema validation (Zod) for environment variables
-  - Document required vs optional env vars in README
+**JWT Secret validation (GOOD)**
+- Files: `packages/server/src/utils/validateConfig.ts`, `packages/server/src/settings/SettingsController.ts`, `packages/server/src/config/env-schema.ts`
+- Implementation: JWT_SECRET required in production, minimum 32 characters enforced
+- Severity: N/A (properly implemented)
+- Evidence: Tests in `packages/server/src/config/__tests__/env-schema.test.ts` verify enforcement
 
-**Hardcoded Secrets Search**
-- Files: Searched for `password|secret|api_key` patterns
-- Results: Found references in debug commands and env config examples only
-- Status: No hardcoded secrets detected
-- Note: All references are for configuration or documentation
+**Environment variable usage for secrets (GOOD)**
+- Files: `packages/server/src/storage/createStorageAdapter.ts:70` (DB_PASSWORD), `packages/server/src/ServerFactory.ts:58` (JWT_SECRET)
+- Pattern: Secrets loaded from environment, not hardcoded
+- Severity: N/A (best practice followed)
+- Mitigation: Already implemented correctly
 
-**Production Debug Endpoints**
-- Files:
-  - `packages/server/src/ServerCoordinator.ts:137` - debug endpoints gated by `debugEnabled`
-  - `packages/server/src/ServerFactory.ts:155` - defaults to `TOPGUN_DEBUG === 'true'`
-- Risk: Debug endpoints (`/debug/crdt/*`, `/debug/search/*`) expose internal state
-- Severity: Medium
-- Mitigation: Ensure `TOPGUN_DEBUG` is never enabled in production, add warning in docs
+**PostgreSQL password masking in logs**
+- Files: `packages/server/src/settings/SettingsController.ts:497`
+- Implementation: Connection strings mask passwords in logs (`postgres://user:***@host`)
+- Severity: N/A (security measure in place)
 
-**TLS Configuration**
-- Files: `packages/server/src/start-server.ts:19-32`
-- Observation: TLS support exists for both client and cluster connections
-- Status: Good - mTLS available for cluster (`TOPGUN_CLUSTER_MTLS`)
-- Recommendation: Document TLS setup and provide example certificates for dev
+**Debug endpoints gated behind environment variable**
+- Files: `packages/server/src/debug/DebugEndpoints.ts:56`, `packages/server/src/ServerFactory.ts:155`, `packages/core/src/debug/CRDTDebugger.ts:84`, `packages/core/src/debug/SearchDebugger.ts:117`
+- Implementation: TOPGUN_DEBUG_ENDPOINTS=true required to expose internal CRDT state
+- Risk: Low (properly gated, warning message present)
+- Recommendation: Ensure documentation emphasizes never enabling in production
+
+**Processor sandbox isolation**
+- Files: `packages/server/src/ProcessorSandbox.ts:39`
+- Implementation: Uses `isolated-vm` for user code execution, stricter in production mode
+- Severity: N/A (security measure in place)
+
+**Rate limiting configured**
+- Files: `packages/server/src/ServerCoordinator.ts:97-100`, `packages/server/src/utils/ConnectionRateLimiter.ts`
+- Implementation: Connection rate limiting enabled by default (100 connections/sec)
+- Severity: N/A (DDoS protection in place)
 
 ---
 
 ## Test Coverage Gaps
 
-**Test-to-Code Ratio**
-- Source files: 343 TypeScript files (non-test)
-- Test files: 195 test files in packages + 15 e2e tests
-- Ratio: ~57% files have corresponding tests
-- Status: Good coverage
-
-**E2E Test Coverage**
-- Files: 15 e2e tests in `tests/e2e/`
-  - `basic-sync.test.ts` (706 LOC)
-  - `live-queries.test.ts` (1223 LOC)
-  - `offline-online.test.ts` (1180 LOC)
-  - `pubsub.test.ts` (1100 LOC)
-  - `multi-client.test.ts` (1096 LOC)
-  - `fulltext-search.test.ts` (892 LOC)
-  - Cluster tests: `node-failure`, `partition-routing`, `replication`
-  - Security: `uat-security-hardening.test.ts`
-- Status: Excellent - comprehensive e2e coverage
-
-**Missing Test Areas**
-
-**CLI Commands**
-- Files: Only 1 CLI test found (`tests/cli/doctor.test.ts`)
-- What's missing: Tests for `bin/commands/*.js` (cluster start/stop, dev, setup, config, docker)
+**CLI commands lack test coverage**
+- Files: `bin/commands/debug/search.js`, `bin/commands/debug/crdt.js`, `bin/commands/setup.js`, `bin/commands/config.js`, `bin/commands/cluster/*`
+- What's missing: No test files found for CLI command handlers
 - Priority: Medium
-- Fix: Add integration tests for CLI commands
+- Recommendation: Add integration tests in `tests/cli/` directory (exists but may be empty)
 
-**Load Testing Infrastructure**
-- Files: k6 scenarios exist but require manual execution
-- What's missing: Automated performance regression detection
+**MCP server integration tests**
+- Files: `packages/mcp-server/src/TopGunMCPServer.ts`, `packages/mcp-server/src/cli.ts`
+- What's missing: No `__tests__/` directory in `packages/mcp-server/src/`
+- Priority: Medium
+- Recommendation: Add tests for MCP protocol compliance
+
+**Native module fallback testing**
+- Files: `packages/native/src/hash.ts`, `packages/native/__tests__/hash.test.ts`
+- What's missing: Tests verify native availability but limited coverage of JS fallback behavior
 - Priority: Low
-- Fix: Integrate k6 tests into CI with baseline thresholds
+- Recommendation: Expand fallback scenario testing
 
-**Browser Adapter Testing**
-- Files: `packages/adapters/src/` has IDB adapter
-- What's missing: Browser-based tests (currently only Node.js tests)
-- Priority: Medium
-- Fix: Add Playwright/Puppeteer tests for browser storage adapters
+**Better Auth adapter edge cases**
+- Files: `packages/adapter-better-auth/src/TopGunAdapter.ts`
+- Coverage: Has test file (`__tests__/TopGunAdapter.test.ts`) but only 1 file
+- Priority: Low
+- Recommendation: Add tests for concurrent sessions, permission edge cases
 
 ---
 
 ## Architecture Observations
 
-**Module Boundary Clarity**
+**Well-structured monorepo with clear boundaries**
+- Current: 8 packages with explicit dependency hierarchy documented in `CLAUDE.md`
+  - Layer 0: `core` (no deps)
+  - Layer 1: `client`, `server` (depend on core)
+  - Layer 2: `adapters`, `react`, `adapter-better-auth` (depend on client)
+  - Tooling: `native`, `mcp-server`
+- Concern: None - excellent separation of concerns
+- Suggestion: Consider extracting `search` and `cluster` from `server` into separate packages for better modularity
 
-**Positive: Strong Package Hierarchy**
-- Current: `core` → `client`/`server` → `adapters`/`react`
-- Concern: None
-- Status: Clean dependency graph enforced by TypeScript paths
+**Modular domain-driven design in server**
+- Current: `packages/server/src/modules/` organizes initialization by domain (core, workers, cluster, storage, network, handlers, lifecycle)
+- Documentation: Well-documented in `packages/server/src/modules/handlers-module.ts:1-19` with migration plan to Rust Actor Model
+- Concern: None - forward-thinking architecture
+- Suggestion: Document the Rust migration strategy in `.specflow/research/`
 
-**Negative: Large Core Files**
+**Large coordinating classes**
 - Files:
-  - `packages/client/src/SyncEngine.ts` (1319 LOC)
-  - `packages/server/src/subscriptions/DistributedSubscriptionCoordinator.test.ts` (1282 LOC)
-  - `packages/server/src/subscriptions/DistributedSubscriptionCoordinator.ts` (1064 LOC)
-  - `packages/server/src/search/SearchCoordinator.ts` (1058 LOC)
-  - `packages/server/src/coordinator/types.ts` (1051 LOC)
-  - `packages/core/src/IndexedORMap.ts` (988 LOC)
-  - `packages/core/src/IndexedLWWMap.ts` (969 LOC)
-- Concern: Files >1000 LOC are complexity hotspots
-- Suggestion: Consider splitting by responsibility (e.g., SyncEngine → SyncEngine + SyncHandlers)
+  - `packages/server/src/search/SearchCoordinator.ts` (1,073 lines)
+  - `packages/server/src/subscriptions/DistributedSubscriptionCoordinator.ts` (1,064 lines)
+  - `packages/server/src/coordinator/types.ts` (1,051 lines - type definitions)
+  - `packages/core/src/IndexedORMap.ts` (988 lines)
+  - `packages/core/src/IndexedLWWMap.ts` (969 lines)
+- Current: Single-file implementations of complex features
+- Concern: Maintainability as features grow
+- Suggestion: Consider extracting subcomponents where cohesion is low
 
-**Modular Refactoring in Progress**
+**Excellent use of CRDT patterns**
+- Implementation: HLC for causality, LWWMap for last-write-wins, ORMap for observed-remove sets, MerkleTree for efficient sync
+- Files: `packages/core/src/HLC.ts`, `packages/core/src/LWWMap.ts`, `packages/core/src/ORMap.ts`, `packages/core/src/MerkleTree.ts`
+- Observation: Textbook implementation of distributed data structures
+- Quality: High
 
-**Positive: ServerFactory Modularization**
-- Files: `packages/server/src/modules/handlers-module.ts` (861 LOC)
-- Current: Handlers grouped by domain (CRDT, Sync, Query, Messaging, etc.)
-- Status: Excellent architectural pattern for Rust portability (SPEC-011d)
-- Suggestion: Document this pattern as reference for future modularization
+**Worker pool for CPU-intensive operations**
+- Files: `packages/server/src/workers/`, worker scripts in `worker-scripts/*.worker.ts`
+- Implementation: Separate workers for Merkle tree operations, CRDT merges, serialization
+- Observation: Proper offloading of blocking operations
+- Quality: High
 
-**Message Handler Architecture**
-- Files: 26 message handlers across 12 handler files
-- Pattern: Clean separation via `createMessageRegistry()`
-- Status: Good - supports message routing and testing
-
-**Cluster Architecture**
-
-**271 Partitions for Scalability**
-- Files: `packages/server/src/cluster/PartitionService.ts`
-- Observation: Fixed partition count for consistent hashing
-- Status: Good - industry-standard partition count
-- Concern: No dynamic repartitioning documented
-
-**Failure Detection and Recovery**
-- Files:
-  - `packages/server/src/cluster/FailureDetector.ts`
-  - `packages/server/src/cluster/RepairScheduler.ts`
-  - `packages/server/src/cluster/MigrationManager.ts`
-- Status: Comprehensive cluster resilience
-- Tests: E2E tests exist (`tests/e2e/cluster/node-failure.test.ts`)
-
-**Worker Pool for CPU-Intensive Operations**
-- Files:
-  - `packages/server/src/workers/WorkerPool.ts`
-  - Worker types: MerkleWorker, CRDTMergeWorker, SerializationWorker
-- Status: Good - offloads CPU work from event loop
-- Concern: Worker script dependencies unclear (`worker-scripts/base.worker.ts`)
-
-**Observability & Debugging**
-
-**Debug Infrastructure (Phase 14C)**
-- Files:
-  - `packages/core/src/debug/CRDTDebugger.ts`
-  - `packages/core/src/debug/SearchDebugger.ts`
-- Features: Operation recording, conflict tracking, replay capability
-- Status: Excellent - production-grade debugging
-- Activation: `TOPGUN_DEBUG=true` env variable
-
-**Metrics Service**
-- Files: Referenced in `ServerFactory.ts` but implementation not scanned
-- Observation: Metrics port configurable (`metricsPort`)
-- Recommendation: Document metrics endpoints and available metrics
+**Comprehensive configuration management**
+- Files: `packages/server/src/config/env-schema.ts`, `packages/server/src/bootstrap/BootstrapController.ts`
+- Implementation: Zod-based validation, environment-specific defaults, structured config files
+- Tests: `packages/server/src/config/__tests__/env-schema.test.ts` (comprehensive validation tests)
+- Quality: Excellent
 
 ---
 
@@ -318,56 +239,66 @@ TopGun is a mature TypeScript monorepo with 263K+ lines of production code and 6
 
 Based on this scan, consider creating specs for:
 
-1. **Error Handling Standardization** — Replace all console.error with structured logging, fix empty catch blocks
+1. **Type-safe message handling** — Replace `any` types in SyncEngine and cluster communication with strict Zod schemas
    - Priority: High
    - Complexity: medium
-   - Run: `/sf:new "Error Handling Standardization"`
+   - Impact: Prevents runtime errors, improves maintainability
+   - Run: `/sf:new "Type-safe message handling"`
 
-2. **Environment Variable Validation** — Add startup validation for required env vars using Zod
+2. **SyncEngine refactoring** — Complete extraction of responsibilities from 1,317-line SyncEngine into focused managers
    - Priority: High
-   - Complexity: small
-   - Run: `/sf:new "Environment Variable Validation"`
+   - Complexity: large
+   - Impact: Improves testability, reduces cognitive load
+   - Run: `/sf:new "SyncEngine refactoring"`
 
-3. **Package Documentation** — Add README files to core, client, server, react, adapters packages
+3. **CLI test coverage** — Add integration tests for all CLI commands in `bin/commands/`
    - Priority: Medium
    - Complexity: medium
-   - Run: `/sf:new "Package Documentation"`
+   - Impact: Prevents regressions in developer tools
+   - Run: `/sf:new "CLI test coverage"`
 
-4. **CLI Test Coverage** — Add integration tests for all CLI commands
-   - Priority: Medium
-   - Complexity: medium
-   - Run: `/sf:new "CLI Test Coverage"`
-
-5. **Type Safety Cleanup** — Remove all `@ts-ignore` and `as any` with proper typing
+4. **Remove deprecated APIs** — Clean up legacy code patterns and create migration guide
    - Priority: Medium
    - Complexity: small
-   - Run: `/sf:new "Type Safety Cleanup"`
+   - Impact: Reduces confusion, smaller bundle size
+   - Run: `/sf:new "Remove deprecated APIs"`
 
-6. **Large File Refactoring** — Split SyncEngine and SearchCoordinator files by responsibility
+5. **SearchCoordinator decomposition** — Split search coordination logic into smaller components
+   - Priority: Medium
+   - Complexity: large
+   - Impact: Easier to extend search features
+   - Run: `/sf:new "SearchCoordinator decomposition"`
+
+6. **ESLint configuration audit** — Verify ESLint config and ensure consistent rules across monorepo
+   - Priority: Low
+   - Complexity: small
+   - Impact: Code style consistency
+   - Run: `/sf:new "ESLint configuration audit"`
+
+7. **MCP server test suite** — Add comprehensive tests for MCP protocol implementation
+   - Priority: Low
+   - Complexity: medium
+   - Impact: Ensures MCP compliance
+   - Run: `/sf:new "MCP server test suite"`
+
+8. **Distributed subscriptions split** — Separate FTS and Query subscription coordinators
    - Priority: Low
    - Complexity: large
-   - Run: `/sf:new "Large File Refactoring"`
+   - Impact: Reduces DistributedSubscriptionCoordinator.ts size
+   - Run: `/sf:new "Distributed subscriptions split"`
 
-7. **Timer Cleanup System** — Ensure all timers use TimerRegistry for proper cleanup
-   - Priority: Medium
+9. **Logging standardization** — Replace remaining console.log/warn with structured logging
+   - Priority: Low
    - Complexity: small
-   - Run: `/sf:new "Timer Cleanup System"`
+   - Impact: Better log filtering and monitoring
+   - Run: `/sf:new "Logging standardization"`
 
-8. **BetterAuth Custom Foreign Keys** — Add support for custom foreign key configuration
-   - Priority: Medium
-   - Complexity: small
-   - Run: `/sf:new "BetterAuth Custom Foreign Keys"`
-
-9. **Debug Endpoint Security Audit** — Document and harden debug endpoint protection
-   - Priority: High
-   - Complexity: small
-   - Run: `/sf:new "Debug Endpoint Security Audit"`
-
-10. **Browser Storage Testing** — Add Playwright tests for IndexedDB adapter
-    - Priority: Medium
-    - Complexity: medium
-    - Run: `/sf:new "Browser Storage Testing"`
+10. **Server package modularization** — Extract `search` and `cluster` into separate packages
+    - Priority: Low
+    - Complexity: large
+    - Impact: Better dependency management, potential for independent releases
+    - Run: `/sf:new "Server package modularization"`
 
 ---
 
-*Scan completed: 2026-02-01 - Analyzed 343 source files, 195 test files, 8 packages*
+*Scan completed: 2026-02-01 23:45 UTC*
