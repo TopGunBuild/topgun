@@ -3,8 +3,6 @@
  *
  * Uses native xxHash64 when available (via @topgunbuild/native),
  * falls back to FNV-1a for JS-only environments.
- *
- * Phase 3.05: Native Hash Integration
  */
 
 // Try to load native hash module

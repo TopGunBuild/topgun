@@ -218,7 +218,6 @@ export class FullTextIndex {
   serialize(): SerializedIndex {
     // We only serialize the combined index for now as it's the primary one.
     // If field boosting is required after restore, we'd need to serialize field indexes too.
-    // For MVP/Phase 11, combined index serialization covers the main use case.
     return this.serializer.serialize(this.combinedIndex);
   }
 

@@ -1,5 +1,5 @@
 /**
- * Cluster types for Phase 4: Clustering Improvements
+ * Cluster types
  *
  * These types are shared between client and server packages
  * for partition-aware routing and cluster communication.
