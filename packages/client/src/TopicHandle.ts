@@ -50,7 +50,7 @@ export class TopicHandle {
       try {
         cb(data, context);
       } catch (e) {
-        logger.error({ err: e, topicName: this.topicName, context: 'listener' }, 'Error in topic listener');
+        logger.error({ err: e, topic: this.topic, context: 'listener' }, 'Error in topic listener');
       }
     });
   }

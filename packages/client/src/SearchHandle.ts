@@ -341,7 +341,7 @@ export class SearchHandle<T = unknown> {
       try {
         listener(results);
       } catch (err) {
-        logger.error({ err, searchId: this.searchId, context: 'listener' }, 'SearchHandle listener error');
+        logger.error({ err, mapName: this.mapName, context: 'listener' }, 'SearchHandle listener error');
       }
     }
   }
