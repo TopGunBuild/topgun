@@ -8,6 +8,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createServer, type Server as HTTPServer } from 'node:http';
+import { logger } from '../logger';
 import { randomUUID } from 'node:crypto';
 import type { TopGunMCPServer } from '../TopGunMCPServer';
 
@@ -318,7 +319,7 @@ export class HTTPTransport {
    */
   private log(message: string, data?: unknown): void {
     if (this.config.debug) {
-      console.error(`[HTTPTransport] ${message}`, data ? JSON.stringify(data) : '');
+      logger.debug({ data, context: 'HTTPTransport' }, message);
     }
   }
 
