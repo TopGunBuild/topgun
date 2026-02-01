@@ -80,6 +80,10 @@ const EnvSchema = z
             .enum(['true', 'false'])
             .default('false')
             .transform((v) => v === 'true'),
+        TOPGUN_DEBUG_ENDPOINTS: z
+            .enum(['true', 'false'])
+            .default('false')
+            .transform((v) => v === 'true'),
     })
     .superRefine((data, ctx) => {
         // Production requirements
