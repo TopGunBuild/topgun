@@ -9,7 +9,7 @@ const mockSubscribe = jest.fn();
 const mockGetFilter = jest.fn().mockReturnValue({});
 const mockGetMapName = jest.fn().mockReturnValue('testMap');
 const mockHasFTSPredicate = jest.fn().mockReturnValue(false);
-const mockOnPaginationChange = jest.fn(); // Phase 14.1
+const mockOnPaginationChange = jest.fn();
 
 const mockHybridQueryHandle = {
   id: 'test-id',
@@ -17,7 +17,7 @@ const mockHybridQueryHandle = {
   getFilter: mockGetFilter,
   getMapName: mockGetMapName,
   hasFTSPredicate: mockHasFTSPredicate,
-  onPaginationChange: mockOnPaginationChange, // Phase 14.1
+  onPaginationChange: mockOnPaginationChange,
 };
 
 // Mock TopGunClient
@@ -30,7 +30,7 @@ describe('useHybridQuery', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockSubscribe.mockReturnValue(() => {}); // Unsubscribe function
-    mockOnPaginationChange.mockReturnValue(() => {}); // Unsubscribe function for pagination (Phase 14.1)
+    mockOnPaginationChange.mockReturnValue(() => {});
   });
 
   const wrapper = ({ children }: { children: React.ReactNode }) => (

@@ -11,7 +11,7 @@ const mockOnPaginationChange = jest.fn();
 const mockQuery = jest.fn().mockReturnValue({
   subscribe: mockSubscribe,
   onChanges: mockOnChanges,
-  onPaginationChange: mockOnPaginationChange, // Phase 14.1
+  onPaginationChange: mockOnPaginationChange,
 });
 const mockClient = {
   query: mockQuery,
@@ -22,7 +22,7 @@ describe('useQuery', () => {
     jest.clearAllMocks();
     mockSubscribe.mockReturnValue(() => {}); // Unsubscribe function
     mockOnChanges.mockReturnValue(() => {}); // Unsubscribe function for changes
-    mockOnPaginationChange.mockReturnValue(() => {}); // Unsubscribe function for pagination (Phase 14.1)
+    mockOnPaginationChange.mockReturnValue(() => {});
   });
 
   const wrapper = ({ children }: { children: React.ReactNode }) => (
