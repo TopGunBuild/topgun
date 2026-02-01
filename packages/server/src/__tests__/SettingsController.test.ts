@@ -1,5 +1,5 @@
 /**
- * Phase 14D-3: Settings Controller Tests
+ * Settings Controller Tests
  */
 
 import { SettingsController } from '../settings/SettingsController';

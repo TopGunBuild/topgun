@@ -15,7 +15,7 @@
  * - Client: Auth, WebSocket, ClientMessage handlers
  * - Server: Heartbeat, Persistence, OperationContext, WriteConcern handlers
  *
- * Created as part of SPEC-011d (ServerFactory Modularization for Rust-Portability).
+ * Created for ServerFactory modularization.
  */
 
 import { WebSocket } from 'ws';

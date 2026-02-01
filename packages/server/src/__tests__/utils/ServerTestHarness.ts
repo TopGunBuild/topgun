@@ -5,8 +5,8 @@
  * This pattern centralizes all test-specific access to internals in one place,
  * making tests more maintainable and less coupled to implementation details.
  *
- * Created as part of SPEC-006 to fix 23 integration tests that broke after
- * handler extraction in SPEC-003/SPEC-004.
+ * Created during modularization to fix 23 integration tests that broke after
+ * handler extraction during handler extraction.
  */
 
 import type { ServerCoordinator } from '../../ServerCoordinator';
@@ -95,7 +95,7 @@ export class ServerTestHarness {
     /**
      * Access the QueryRegistry for subscription tests.
      * Note: queryRegistry is now accessed through queryConversionHandler's config
-     * after SPEC-003/004/005 refactoring removed it from ServerCoordinator.
+     * after handler extraction removed it from ServerCoordinator.
      */
     get queryRegistry(): QueryRegistry {
         // Try direct access first (legacy path)

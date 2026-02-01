@@ -1,6 +1,6 @@
 /**
  * CRDTMergeWorker Tests
- * Phase 1.04: CRDTMergeWorker Implementation
+ * CRDTMergeWorker Implementation
  */
 
 import {

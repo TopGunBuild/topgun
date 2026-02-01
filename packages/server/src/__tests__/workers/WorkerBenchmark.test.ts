@@ -1,6 +1,6 @@
 /**
  * Worker Benchmark Tests
- * Phase 1.06: Performance comparison inline vs worker threads
+ * Performance comparison inline vs worker threads
  *
  * These tests measure the performance characteristics of worker operations.
  * NOTE: Worker thread tests are skipped in Jest due to ts-node limitations.

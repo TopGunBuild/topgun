@@ -1,6 +1,6 @@
 /**
  * Tests for MigrationManager
- * Phase 4 Task 03: Parallel Partition Sync
+ * Parallel Partition Sync
  */
 
 import { MigrationManager } from '../cluster/MigrationManager';

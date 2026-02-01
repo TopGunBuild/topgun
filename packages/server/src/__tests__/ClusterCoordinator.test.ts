@@ -1,6 +1,6 @@
 /**
  * Tests for ClusterCoordinator
- * Phase 4 Task 06: System Integration
+ * System Integration
  */
 
 import { ClusterCoordinator, ClusterCoordinatorConfig } from '../cluster/ClusterCoordinator';

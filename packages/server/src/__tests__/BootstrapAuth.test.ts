@@ -1,5 +1,5 @@
 /**
- * Phase 14D-1: Bootstrap Controller Authentication Tests
+ * Bootstrap Controller Authentication Tests
  */
 
 import { BootstrapController } from '../bootstrap/BootstrapController';

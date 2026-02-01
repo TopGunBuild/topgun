@@ -1,6 +1,6 @@
 /**
  * MerkleWorker Tests
- * Phase 1.03: MerkleWorker Implementation
+ * MerkleWorker Implementation
  */
 
 import { MerkleTree, LWWMap, HLC } from '@topgunbuild/core';

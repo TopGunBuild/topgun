@@ -394,7 +394,7 @@ export interface LifecycleModule {
 }
 
 // Placeholder interfaces for later sub-specs
-export interface SearchModule { /* defined in SPEC-011e */ }
+export interface SearchModule { /* defined in search module */ }
 
 // All modules combined
 export interface ServerModules {

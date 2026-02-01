@@ -3,7 +3,7 @@ import { LWWRecord, deserialize, serialize, QueryCursor } from '@topgunbuild/cor
 import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
 
 /**
- * Phase 14.1: This test was updated from offset-based to cursor-based pagination.
+ * This test was updated from offset-based to cursor-based pagination.
  * The original test demonstrated a double-apply bug with offset/limit.
  * Cursor-based pagination eliminates this class of bugs entirely.
  */

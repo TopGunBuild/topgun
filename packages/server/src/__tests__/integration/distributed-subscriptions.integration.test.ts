@@ -1,5 +1,5 @@
 /**
- * Integration Tests: Distributed Subscriptions (Phase 14.2.7)
+ * Integration Tests: Distributed Subscriptions
  *
  * Tests distributed live subscriptions across a real 3-node cluster:
  * - Search subscriptions with initial results from all nodes
@@ -530,7 +530,7 @@ describe('Distributed Subscriptions E2E', () => {
     }, 30000);
 
     it('should receive live query updates from remote nodes', async () => {
-      // Phase 14.2: Cross-node Query live updates now work via DistributedSubscriptionCoordinator
+      // Cross-node Query live updates now work via DistributedSubscriptionCoordinator
       // Subscriber connects to node 0, writer connects to node 2 (different node)
       const subscriber = await createClient(nodes[0].port);
       const writer = await createClient(nodes[2].port); // Different node!

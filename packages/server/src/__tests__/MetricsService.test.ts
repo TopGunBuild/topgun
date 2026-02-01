@@ -55,7 +55,7 @@ describe('MetricsService', () => {
     expect(metrics.getContentType()).toBe('text/plain; version=0.0.4; charset=utf-8');
   });
 
-  // === Distributed Subscription Metrics (Phase 14.2) ===
+  // === Distributed Subscription Metrics ===
 
   describe('Distributed Subscription Metrics', () => {
     test('should increment subscription counter on success', async () => {

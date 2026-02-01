@@ -1,6 +1,6 @@
 /**
  * SerializationWorker Tests
- * Phase 1.07: SerializationWorker Implementation
+ * SerializationWorker Implementation
  *
  * Tests for serialization/deserialization operations.
  * Worker thread tests require pre-compiled workers (pnpm build first).

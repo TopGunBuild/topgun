@@ -1,6 +1,6 @@
 /**
  * Tests for ReplicationPipeline and LagTracker
- * Phase 4 Task 04: Async Replication Pipeline
+ * Async Replication Pipeline
  */
 
 import { ReplicationPipeline, ReplicationTimeoutError } from '../cluster/ReplicationPipeline';

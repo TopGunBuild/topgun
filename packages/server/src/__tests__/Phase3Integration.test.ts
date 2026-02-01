@@ -1,12 +1,12 @@
 /**
- * Phase 3 Integration Tests
+ * Integration Tests
  *
  * Tests for native module integration:
  * - Native hash (xxHash64) in core
  * - SharedArrayBuffer for worker communication
  * - Graceful fallback when native unavailable
  *
- * Phase 3.05: Integration
+ * Integration
  */
 
 import {
@@ -27,7 +27,7 @@ import {
   logNativeStatus,
 } from '../utils/nativeStats';
 
-describe('Phase 3 Integration', () => {
+describe('Integration Tests', () => {
   describe('Native Module Detection', () => {
     afterEach(() => {
       // Reset native module state for next test

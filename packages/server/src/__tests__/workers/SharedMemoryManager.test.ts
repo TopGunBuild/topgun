@@ -1,7 +1,7 @@
 /**
  * Tests for SharedMemoryManager
  *
- * Phase 3.04: SharedArrayBuffer Integration
+ * SharedArrayBuffer Integration
  */
 
 import { Worker } from 'worker_threads';

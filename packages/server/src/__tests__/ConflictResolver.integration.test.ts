@@ -1,7 +1,7 @@
 /**
  * Conflict Resolver Integration Tests
  *
- * Tests for Phase 5.05: Custom Conflict Resolvers
+ * Tests for Custom Conflict Resolvers
  * - Registering resolvers from client
  * - Merge rejection flow (client -> server -> client notification)
  * - Built-in resolvers

@@ -110,7 +110,7 @@ describe('Cluster Integration', () => {
   });
 
   test('Local Pub/Sub: Write on same node triggers client notification', async () => {
-    // Phase 14.2: Cross-node live updates now require distributed subscriptions (CLUSTER_SUB_*).
+    // Cross-node live updates now require distributed subscriptions (CLUSTER_SUB_*).
     // Local QUERY_SUB only receives updates from local data changes.
     // This test verifies local pub/sub still works correctly.
 

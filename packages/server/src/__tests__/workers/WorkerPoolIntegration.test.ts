@@ -1,6 +1,6 @@
 /**
  * WorkerPool Integration Tests
- * Phase 1.05-08: Integration with ServerCoordinator
+ * Integration with ServerCoordinator
  */
 
 import { ServerCoordinator, ServerFactory } from '../../';

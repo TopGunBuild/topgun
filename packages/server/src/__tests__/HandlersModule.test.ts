@@ -2,7 +2,7 @@
  * HandlersModule test - verify handler count and structure
  *
  * This test validates that the HandlersModule contains exactly 23 handlers
- * across 9 public groups as specified in SPEC-011d. Note: The spec counts
+ * across 9 public groups per specification. Note: The spec counts
  * 26 total handlers which includes 3 base handlers in _internal (counterHandler,
  * entryProcessorHandler, conflictResolverHandler) that are not part of the
  * 9 public groups.

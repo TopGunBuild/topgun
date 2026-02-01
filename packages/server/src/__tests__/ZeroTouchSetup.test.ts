@@ -1,5 +1,5 @@
 /**
- * Phase 14D-2: Zero-Touch Automated Setup Tests
+ * Zero-Touch Automated Setup Tests
  */
 
 import { BootstrapController } from '../bootstrap/BootstrapController';

@@ -1,5 +1,5 @@
 /**
- * Cursor Pagination Tests - Phase 14.1
+ * Cursor Pagination Tests
  *
  * Tests for cursor-based pagination in server-side query execution.
  */

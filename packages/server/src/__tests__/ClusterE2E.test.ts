@@ -172,7 +172,7 @@ describe('Cluster E2E Replication', () => {
     });
 
     test('should replicate data to backup nodes for local queries', async () => {
-      // Phase 14.2: Cross-node live updates now require distributed subscriptions (CLUSTER_SUB_*).
+      // Cross-node live updates now require distributed subscriptions (CLUSTER_SUB_*).
       // Local QUERY_SUB only receives updates from local data changes.
       // This test verifies that data is replicated to backup nodes, so local queries work.
 

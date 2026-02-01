@@ -1,7 +1,7 @@
 /**
  * Entry Processor Integration Tests
  *
- * Tests for Phase 5.03: Entry Processor feature
+ * Tests for Entry Processor feature
  * - Server-side atomic operations on map entries
  * - Built-in processors
  * - Custom processor execution

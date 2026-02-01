@@ -1,6 +1,6 @@
 /**
  * WorkerPool Tests
- * Phase 1.02: Worker Threads Implementation
+ * Worker Threads Implementation
  */
 
 import { join } from 'path';

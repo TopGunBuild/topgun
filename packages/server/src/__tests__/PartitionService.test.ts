@@ -1,6 +1,6 @@
 /**
  * Tests for PartitionService
- * Phase 4: Partition-Aware Server Routing
+ * Partition-Aware Server Routing
  */
 
 import { PartitionService } from '../cluster/PartitionService';
