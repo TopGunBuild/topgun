@@ -1,9 +1,7 @@
 /**
  * ClusterClient - Cluster-aware client wrapper
  *
- * Phase 4: Partition-Aware Client Routing
- * Phase 4.5: Implements IConnectionProvider for SyncEngine abstraction
- *
+ * Implements IConnectionProvider for SyncEngine abstraction.
  * Wraps the standard TopGunClient with cluster-aware routing capabilities.
  * Coordinates between ConnectionPool and PartitionRouter for optimal
  * request routing in a clustered environment.

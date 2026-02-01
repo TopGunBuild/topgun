@@ -1,8 +1,6 @@
 /**
  * PartitionRouter - Routes operations to the correct cluster node
  *
- * Phase 4: Partition-Aware Client Routing
- *
  * Features:
  * - Maintains local copy of partition map
  * - Routes keys to owner nodes using consistent hashing

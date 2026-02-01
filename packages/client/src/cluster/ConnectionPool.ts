@@ -1,8 +1,6 @@
 /**
  * ConnectionPool - Manages WebSocket connections to multiple cluster nodes
  *
- * Phase 4: Partition-Aware Client Routing
- *
  * Features:
  * - Maintains connections to all known cluster nodes
  * - Automatic reconnection with exponential backoff

@@ -1,7 +1,5 @@
 /**
  * Cluster module exports
- *
- * Phase 4: Partition-Aware Client Routing
  */
 
 export { ConnectionPool } from './ConnectionPool';
