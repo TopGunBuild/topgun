@@ -13,7 +13,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { TopGunClient } from '@topgunbuild/client';
 import type { IStorageAdapter, OpLogEntry } from '@topgunbuild/client';
-import type { MCPServerConfig, ResolvedMCPServerConfig, ToolContext } from './types';
+import type { MCPServerConfig, MCPToolResult, ResolvedMCPServerConfig, ToolContext } from './types';
 import { allTools, toolHandlers } from './tools';
 import { createLogger, type Logger } from './logger';
 
@@ -258,7 +258,7 @@ export class TopGunMCPServer {
   /**
    * Execute a tool directly (for testing)
    */
-  async callTool(name: string, args: unknown): Promise<unknown> {
+  async callTool(name: string, args: unknown): Promise<MCPToolResult> {
     const handler = toolHandlers[name];
     if (!handler) {
       throw new Error(`Unknown tool: ${name}`);
