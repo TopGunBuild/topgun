@@ -134,7 +134,7 @@ export interface ServerCoordinatorConfig {
     distributedSearch?: ClusterSearchConfig;
 
     // === Debug Options  ===
-    /** Enable debug endpoints (/debug/crdt/*, /debug/search/*) (default: false, or TOPGUN_DEBUG=true) */
+    /** Enable debug endpoints (/debug/crdt/*, /debug/search/*) (default: false, or TOPGUN_DEBUG_ENDPOINTS=true) */
     debugEnabled?: boolean;
 }
 
