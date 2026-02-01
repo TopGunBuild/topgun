@@ -1,5 +1,5 @@
 -- Event Journal table
--- Phase 5.04: Event Journal / Ringbuffer
+-- Event Journal / Ringbuffer
 --
 -- This table stores all map changes as an append-only log for:
 -- - Audit trails (regulatory compliance)
