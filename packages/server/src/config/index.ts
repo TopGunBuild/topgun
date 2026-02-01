@@ -12,3 +12,5 @@ export {
 } from './IndexConfig';
 
 export { MapFactory } from './MapFactory';
+
+export { validateEnv, type EnvConfig } from './env-schema';
