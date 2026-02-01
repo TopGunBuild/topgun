@@ -1,6 +1,6 @@
 /**
  * CRDT Worker Types
- * Phase 1.04: CRDTMergeWorker Implementation
+ * CRDTMergeWorker Implementation
  */
 
 import type { Timestamp } from '@topgunbuild/core';

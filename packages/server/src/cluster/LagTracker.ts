@@ -1,7 +1,7 @@
 /**
  * LagTracker - Monitors replication lag across cluster nodes
  *
- * Phase 4 Task 04: Async Replication Pipeline
+ * Async Replication Pipeline
  *
  * Features:
  * - Tracks replication lag per node

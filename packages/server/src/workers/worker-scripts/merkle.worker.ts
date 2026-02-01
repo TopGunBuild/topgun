@@ -1,6 +1,6 @@
 /**
  * Merkle Worker Script
- * Phase 1.03: MerkleWorker Implementation
+ * MerkleWorker Implementation
  *
  * Handles CPU-intensive Merkle tree operations:
  * - merkle-hash: Compute hashes for batch of LWWMap entries

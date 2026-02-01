@@ -1,6 +1,6 @@
 /**
  * Base Worker Script
- * Phase 1.02: Worker Threads Implementation
+ * Worker Threads Implementation
  *
  * Main worker entry point that handles all task types.
  * Imports specialized workers to register their handlers.

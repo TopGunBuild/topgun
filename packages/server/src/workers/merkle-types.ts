@@ -1,6 +1,6 @@
 /**
  * Merkle Worker Types
- * Phase 1.03: MerkleWorker Implementation
+ * MerkleWorker Implementation
  */
 
 import type { Timestamp } from '@topgunbuild/core';

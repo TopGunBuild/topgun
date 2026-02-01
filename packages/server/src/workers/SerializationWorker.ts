@@ -1,6 +1,6 @@
 /**
  * SerializationWorker - High-level API for serialization operations in worker threads
- * Phase 1.07: SerializationWorker Implementation
+ * SerializationWorker Implementation
  *
  * Provides a clean interface for CPU-intensive serialization/deserialization.
  * Delegates actual work to worker threads via WorkerPool for large payloads.

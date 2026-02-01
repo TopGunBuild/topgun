@@ -7,7 +7,7 @@
  * - Coordinates with MigrationManager for data transfer
  * - Broadcasts partition table updates
  *
- * This is Phase 10.02 of the TopGun cluster enhancements.
+ * TopGun cluster enhancements.
  */
 
 import { EventEmitter } from 'events';

@@ -1,7 +1,7 @@
 /**
  * MigrationManager - Manages gradual partition rebalancing
  *
- * Phase 4 Task 03: Parallel Partition Sync
+ * Parallel Partition Sync
  *
  * Features:
  * - Gradual rebalancing with configurable batch size

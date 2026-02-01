@@ -1,7 +1,7 @@
 /**
  * MerkleTreeManager - Per-Partition Merkle Tree Management
  *
- * Phase 10.04: Manages Merkle trees for each partition to enable:
+ * Manages Merkle trees for each partition to enable:
  * - Efficient delta sync between nodes
  * - Anti-entropy repair detection
  * - Incremental updates on writes

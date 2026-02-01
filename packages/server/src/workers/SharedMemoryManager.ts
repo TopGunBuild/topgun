@@ -4,7 +4,7 @@
  * Uses SharedArrayBuffer with Atomics for synchronization.
  * Provides slot-based allocation for concurrent operations.
  *
- * Phase 3.04: SharedArrayBuffer Integration
+ * SharedArrayBuffer Integration
  */
 
 export interface SharedMemoryConfig {

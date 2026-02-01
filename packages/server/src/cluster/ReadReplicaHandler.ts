@@ -1,7 +1,7 @@
 /**
  * ReadReplicaHandler - Read Scaling via Replicas
  *
- * Phase 10.03: Enables reading from backup nodes to:
+ * Enables reading from backup nodes to:
  * - Scale read throughput linearly with replicas
  * - Reduce latency by reading from nearest replica
  * - Provide availability during owner unavailability

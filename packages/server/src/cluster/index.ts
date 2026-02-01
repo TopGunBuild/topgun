@@ -1,7 +1,7 @@
 /**
  * Cluster module exports
  *
- * Phase 4: Clustering Improvements
+ * Clustering Improvements
  */
 
 // Core cluster manager
@@ -28,14 +28,14 @@ export { ClusterCoordinator, ClusterCoordinatorConfig, ClusterCoordinatorEvents,
 // Failure detector
 export { FailureDetector, FailureDetectorConfig, NodeState, FailureDetectorEvents, DEFAULT_FAILURE_DETECTOR_CONFIG } from './FailureDetector';
 
-// Partition reassigner (Phase 10.02 - Automatic Failover)
+// Partition reassigner
 export { PartitionReassigner, PartitionReassignerConfig, ReassignmentEvent, FailoverStatus, DEFAULT_REASSIGNER_CONFIG } from './PartitionReassigner';
 
-// Read replica handler (Phase 10.03 - Read Scaling)
+// Read replica handler
 export { ReadReplicaHandler, ReadReplicaConfig, ReadResult, ReadRequest, DEFAULT_READ_REPLICA_CONFIG } from './ReadReplicaHandler';
 
-// Merkle tree manager (Phase 10.04 - Anti-Entropy)
+// Merkle tree manager
 export { MerkleTreeManager, MerkleTreeManagerConfig, MerkleComparisonResult, PartitionMerkleInfo, DEFAULT_MERKLE_TREE_CONFIG } from './MerkleTreeManager';
 
-// Repair scheduler (Phase 10.04 - Anti-Entropy)
+// Repair scheduler
 export { RepairScheduler, RepairConfig, RepairTask, RepairResult, RepairMetrics, DEFAULT_REPAIR_CONFIG } from './RepairScheduler';

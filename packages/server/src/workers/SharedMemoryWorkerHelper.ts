@@ -3,7 +3,7 @@
  *
  * Used by workers to read/write data from/to shared memory allocated by main thread.
  *
- * Phase 3.04: SharedArrayBuffer Integration
+ * SharedArrayBuffer Integration
  */
 
 import { SlotStatus, SharedWorkerConfig } from './SharedMemoryManager';

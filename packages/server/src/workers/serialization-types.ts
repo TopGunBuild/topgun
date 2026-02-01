@@ -1,6 +1,6 @@
 /**
  * SerializationWorker Types
- * Phase 1.07: SerializationWorker Implementation
+ * SerializationWorker Implementation
  *
  * Type definitions for serialization/deserialization operations in worker threads.
  */

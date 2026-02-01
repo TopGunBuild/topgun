@@ -1,6 +1,6 @@
 /**
  * CRDTMergeWorker - High-level API for CRDT merge operations in worker threads
- * Phase 1.04: CRDTMergeWorker Implementation
+ * CRDTMergeWorker Implementation
  *
  * Provides a clean interface for CPU-intensive CRDT merge operations.
  * Delegates actual work to worker threads via WorkerPool for large batches.

@@ -1,6 +1,6 @@
 /**
  * WorkerPool Implementation
- * Phase 1.02: Worker Threads Implementation
+ * Worker Threads Implementation
  *
  * Manages a pool of worker threads for CPU-bound operations.
  * Features:

@@ -1,6 +1,6 @@
 /**
  * Serialization Worker Script
- * Phase 1.07: SerializationWorker Implementation
+ * SerializationWorker Implementation
  *
  * Handles CPU-intensive serialization/deserialization operations:
  * - serialize: Serialize objects to MessagePack binary format

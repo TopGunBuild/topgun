@@ -1,7 +1,7 @@
 /**
  * RepairScheduler - Anti-Entropy Repair System
  *
- * Phase 10.04: Proactively detects and repairs data inconsistencies:
+ * Proactively detects and repairs data inconsistencies:
  * - Periodic scanning of partitions
  * - Merkle tree-based difference detection
  * - LWW conflict resolution

@@ -1,6 +1,6 @@
 /**
  * MerkleWorker - High-level API for Merkle tree operations in worker threads
- * Phase 1.03: MerkleWorker Implementation
+ * MerkleWorker Implementation
  *
  * Provides a clean interface for CPU-intensive Merkle tree operations.
  * Delegates actual work to worker threads via WorkerPool.

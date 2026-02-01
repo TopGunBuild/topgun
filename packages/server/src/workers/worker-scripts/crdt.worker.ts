@@ -1,6 +1,6 @@
 /**
  * CRDT Merge Worker Script
- * Phase 1.04: CRDTMergeWorker Implementation
+ * CRDTMergeWorker Implementation
  *
  * Handles CPU-intensive CRDT merge operations:
  * - lww-merge: Merge LWWMap records (Last-Write-Wins)

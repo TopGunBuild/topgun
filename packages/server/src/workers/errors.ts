@@ -1,6 +1,6 @@
 /**
  * WorkerPool Custom Errors
- * Phase 1.02: Worker Threads Implementation
+ * Worker Threads Implementation
  */
 
 /**

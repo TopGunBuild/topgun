@@ -1,7 +1,7 @@
 /**
  * ClusterCoordinator - Unified cluster integration layer
  *
- * Phase 4 Task 06: System Integration
+ * System Integration
  *
  * Coordinates all cluster components:
  * - ClusterManager: P2P WebSocket mesh

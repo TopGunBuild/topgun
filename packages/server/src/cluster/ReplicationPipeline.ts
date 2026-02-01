@@ -1,7 +1,7 @@
 /**
  * ReplicationPipeline - Manages async replication with configurable consistency levels
  *
- * Phase 4 Task 04: Async Replication Pipeline
+ * Async Replication Pipeline
  *
  * Features:
  * - Three consistency levels: STRONG, QUORUM, EVENTUAL

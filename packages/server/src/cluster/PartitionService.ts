@@ -44,11 +44,11 @@ export class PartitionService extends EventEmitter {
   private readonly PARTITION_COUNT = PARTITION_COUNT;
   private readonly BACKUP_COUNT = DEFAULT_BACKUP_COUNT;
 
-  // Phase 4: Version tracking for partition map
+  // Version tracking for partition map
   private mapVersion: number = 0;
   private lastRebalanceTime: number = 0;
 
-  // Phase 4 Task 03: Gradual rebalancing
+  // Gradual rebalancing
   private config: PartitionServiceConfig;
   private migrationManager: MigrationManager | null = null;
 
@@ -129,7 +129,7 @@ export class PartitionService extends EventEmitter {
   }
 
   // ============================================
-  // Phase 4: Partition Map Methods
+  // Partition Map Methods
   // ============================================
 
   /**
@@ -263,7 +263,7 @@ export class PartitionService extends EventEmitter {
   }
 
   // ============================================
-  // Phase 4 Task 03: Gradual Rebalancing
+  // Gradual Rebalancing
   // ============================================
 
   /**
