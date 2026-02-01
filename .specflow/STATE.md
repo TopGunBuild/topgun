@@ -2,14 +2,15 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-021
+- **Status:** review
+- **Next Step:** /sf:review
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
+| 1 | SPEC-021 | Startup Environment Variable Validation | high | review | - |
 
 ## Decisions
 
@@ -65,6 +66,11 @@
 | 2026-02-01 | SPEC-020d | EXECUTED: Clean packages/react/, mcp-server/, adapter-better-auth/ comments. Removed 33 process artifact references from 8 files. 4 commits. Zero process references remain. Build succeeds. Tests pass (182+13=195 tests, plus mcp-server 73/77 with 4 pre-existing timeouts). Ready for review. |
 | 2026-02-01 | SPEC-020d | REVIEWED v1: Implementation APPROVED. All 7 acceptance criteria met. 8 files modified (comment-only changes). Zero process references remain. All builds succeed. React tests 182/182, better-auth 13/13, mcp-server 73/77 (4 pre-existing timeouts verified). Export grouping comments and pagination explanation preserved. All constraints respected. Ready for finalization. |
 | 2026-02-01 | SPEC-020d | COMPLETED: Clean packages/react/, mcp-server/, adapter-better-auth/ comments. Removed 33 process artifact references from 8 files. 4 commits, 1 audit cycle, 1 review cycle. Archived to .specflow/archive/SPEC-020d.md |
+| 2026-02-01 | SPEC-021 | CREATED: Startup Environment Variable Validation. Add Zod schema for env var validation at server startup. From TODO-009. |
+| 2026-02-01 | SPEC-021 | AUDITED v1: APPROVED with 1 recommendation. Context estimate ~15% (PEAK). All 9 dimensions PASS. Fixed: line numbers (36-77 not 36-60), duplicate acceptance criteria removed, Zod import assumption corrected. Ready for implementation. |
+| 2026-02-01 | SPEC-021 | REVISED v1: Applied recommendation 1. Added unit test file requirement (packages/server/src/config/__tests__/env-schema.test.ts) with 8 test case requirements. Added 7 new acceptance criteria (#8-14) for unit tests. Ready for re-audit. |
+| 2026-02-01 | SPEC-021 | AUDITED v2: APPROVED. Context estimate ~21% (PEAK). All 9 dimensions PASS. Recommendation v1 verified as applied. Fixed line number inconsistency in Files to Modify section (36-60 to 36-77). Ready for implementation. |
+| 2026-02-01 | SPEC-021 | EXECUTED: Startup Environment Variable Validation implemented. Created env-schema.ts with Zod validation for 20+ env vars. Created 27 unit tests (all pass). Modified start-server.ts to use validated config, removed ad-hoc TLS validation. 2 commits. Build succeeds. Ready for review. |
 
 ## Project Patterns
 
