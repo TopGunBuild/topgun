@@ -10,7 +10,7 @@ export const PartitionMapRequestSchema = z.object({
   }).optional(),
 });
 
-// --- Distributed Live Subscriptions (Phase 14.2) ---
+// --- Distributed Live Subscriptions ---
 export const ClusterSubRegisterPayloadSchema = z.object({
   subscriptionId: z.string(),
   coordinatorNodeId: z.string(),
@@ -83,7 +83,7 @@ export const ClusterSubUnregisterMessageSchema = z.object({
 });
 export type ClusterSubUnregisterMessage = z.infer<typeof ClusterSubUnregisterMessageSchema>;
 
-// --- Distributed Search (Phase 14) ---
+// --- Distributed Search ---
 export const ClusterSearchReqPayloadSchema = z.object({
   requestId: z.string(),
   mapName: z.string(),

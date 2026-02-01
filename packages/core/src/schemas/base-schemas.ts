@@ -56,7 +56,7 @@ export const QuerySchema = z.object({
   predicate: PredicateNodeSchema.optional(),
   sort: z.record(z.string(), z.enum(['asc', 'desc'])).optional(),
   limit: z.number().optional(),
-  cursor: z.string().optional(), // Phase 14.1: replaces offset
+  cursor: z.string().optional(), // Replaces offset for pagination
 });
 export type Query = z.infer<typeof QuerySchema>;
 

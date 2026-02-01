@@ -99,7 +99,7 @@ export const PongMessageSchema = z.object({
 });
 export type PongMessage = z.infer<typeof PongMessageSchema>;
 
-// --- Entry Processor Messages (Phase 5.03) ---
+// --- Entry Processor Messages ---
 export const EntryProcessorSchema = z.object({
   name: z.string().min(1).max(100),
   code: z.string().min(1).max(10000),
@@ -149,7 +149,7 @@ export const EntryProcessBatchResponseSchema = z.object({
 });
 export type EntryProcessBatchResponse = z.infer<typeof EntryProcessBatchResponseSchema>;
 
-// --- Event Journal Messages (Phase 5.04) ---
+// --- Event Journal Messages ---
 export const JournalEventTypeSchema = z.enum(['PUT', 'UPDATE', 'DELETE']);
 export type JournalEventType = z.infer<typeof JournalEventTypeSchema>;
 
@@ -204,7 +204,7 @@ export const JournalReadResponseSchema = z.object({
 });
 export type JournalReadResponse = z.infer<typeof JournalReadResponseSchema>;
 
-// --- Conflict Resolver Messages (Phase 5.05) ---
+// --- Conflict Resolver Messages ---
 export const ConflictResolverSchema = z.object({
   name: z.string().min(1).max(100),
   code: z.string().max(50000),
