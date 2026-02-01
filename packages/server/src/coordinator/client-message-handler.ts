@@ -6,7 +6,7 @@
  * - Partition map broadcasting to authenticated clients
  * - Merge rejection notifications to clients
  *
- * Extracted from ServerCoordinator as part of SPEC-003d refactoring.
+ * Extracted from ServerCoordinator.
  */
 
 import { WebSocket } from 'ws';
@@ -83,7 +83,7 @@ export class ClientMessageHandler implements IClientMessageHandler {
     }
 
     /**
-     * Notify a client about a merge rejection (Phase 5.05).
+     * Notify a client about a merge rejection .
      * Finds the client by node ID and sends MERGE_REJECTED message.
      */
     notifyMergeRejection(rejection: any): void {

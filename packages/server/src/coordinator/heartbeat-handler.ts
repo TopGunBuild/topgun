@@ -7,7 +7,7 @@
  * - Client idle time tracking
  * - Eviction of clients that exceed heartbeat timeout
  *
- * Extracted from ServerCoordinator as part of SPEC-003d refactoring.
+ * Extracted from ServerCoordinator.
  */
 
 import { WebSocket } from 'ws';

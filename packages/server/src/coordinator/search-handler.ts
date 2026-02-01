@@ -4,7 +4,7 @@
  * This handler manages full-text search operations with support for
  * both local and distributed search.
  *
- * Extracted from ServerCoordinator as part of Phase 4 refactoring.
+ * Extracted from ServerCoordinator .
  */
 
 import { logger } from '../utils/logger';
@@ -53,7 +53,7 @@ export class SearchHandler implements ISearchHandler {
             return;
         }
 
-        // Phase 14: Use distributed search if ClusterSearchCoordinator is available
+        // Use distributed search if ClusterSearchCoordinator is available
         // and we have more than one node in the cluster
         if (this.config.clusterSearchCoordinator && this.config.cluster.getMembers().length > 1) {
             // Execute distributed search across cluster
@@ -152,7 +152,7 @@ export class SearchHandler implements ISearchHandler {
             return;
         }
 
-        // Phase 14.2: Use distributed subscription if cluster mode with multiple nodes
+        // Use distributed subscription if cluster mode with multiple nodes
         if (this.config.distributedSubCoordinator && this.config.cluster.getMembers().length > 1) {
             // Distributed search subscription
             try {

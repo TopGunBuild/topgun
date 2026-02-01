@@ -4,7 +4,7 @@
  * This handler manages query subscriptions with support for both
  * local and distributed subscriptions.
  *
- * Extracted from ServerCoordinator as part of Phase 4 refactoring.
+ * Extracted from ServerCoordinator .
  */
 
 import * as crypto from 'crypto';
@@ -38,7 +38,7 @@ export class QueryHandler implements IQueryHandler {
         logger.info({ clientId: client.id, mapName, query }, 'Client subscribed');
         this.config.metricsService.incOp('SUBSCRIBE', mapName);
 
-        // Phase 14.2: Use distributed subscription if cluster mode with multiple nodes
+        // Use distributed subscription if cluster mode with multiple nodes
         if (this.config.distributedSubCoordinator && this.config.cluster && this.config.cluster.getMembers().length > 1) {
             // Distributed query subscription
             try {
@@ -91,7 +91,7 @@ export class QueryHandler implements IQueryHandler {
             const allMembers = this.config.cluster.getMembers();
             let remoteMembers = allMembers.filter(id => !this.config.cluster.isLocal(id));
 
-            // Phase 10.03: Read-from-Replica Optimization
+            // Read-from-Replica Optimization
             // If query targets a specific key, we can optimize by routing to a specific replica
             // instead of broadcasting to the entire cluster.
             const queryKey = (query as any)._id || (query as any).where?._id;
@@ -177,7 +177,7 @@ export class QueryHandler implements IQueryHandler {
     async handleQueryUnsub(client: ClientConnection, message: any): Promise<void> {
         const { queryId: unsubId } = message.payload;
 
-        // Phase 14.2: Unsubscribe from distributed coordinator if in cluster mode
+        // Unsubscribe from distributed coordinator if in cluster mode
         if (this.config.distributedSubCoordinator && this.config.cluster && this.config.cluster.getMembers().length > 1) {
             try {
                 await this.config.distributedSubCoordinator.unsubscribe(unsubId);

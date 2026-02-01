@@ -3,7 +3,7 @@
  *
  * This handler manages topic pub/sub functionality with access control.
  *
- * Extracted from ServerCoordinator as part of Phase 4 refactoring.
+ * Extracted from ServerCoordinator .
  */
 
 import { logger } from '../utils/logger';

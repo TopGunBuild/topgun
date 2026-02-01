@@ -4,7 +4,7 @@
  * This handler provides partition map information to clients for
  * cluster-aware routing.
  *
- * Extracted from ServerCoordinator as part of Phase 4 refactoring.
+ * Extracted from ServerCoordinator .
  */
 
 import { logger } from '../utils/logger';

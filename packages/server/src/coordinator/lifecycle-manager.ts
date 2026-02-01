@@ -202,7 +202,7 @@ export class LifecycleManager {
             this.config.replicationPipeline.close();
         }
 
-        // 4.5. Stop Phase 10 components
+        // 4.5. Stop additional components
         if (this.config.repairScheduler) {
             this.config.repairScheduler.stop();
             logger.info('RepairScheduler stopped');

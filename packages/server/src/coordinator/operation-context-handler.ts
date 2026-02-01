@@ -6,7 +6,7 @@
  * - Running before/after interceptors
  * - Handling lock granted notifications (local and cluster)
  *
- * Extracted from ServerCoordinator as part of SPEC-003d refactoring.
+ * Extracted from ServerCoordinator.
  */
 
 import { logger } from '../utils/logger';

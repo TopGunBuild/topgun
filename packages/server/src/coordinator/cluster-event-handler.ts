@@ -11,7 +11,7 @@
  * - Topic publication forwarding (CLUSTER_TOPIC_PUB)
  * - Anti-entropy repair (CLUSTER_MERKLE_ROOT, CLUSTER_REPAIR_DATA)
  *
- * Extracted from ServerCoordinator as part of SPEC-003c refactoring.
+ * Extracted from ServerCoordinator.
  */
 
 import { LWWMap, ORMap } from '@topgunbuild/core';

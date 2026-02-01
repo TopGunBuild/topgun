@@ -7,16 +7,16 @@ export { StorageManager } from './storage-manager';
 export { OperationHandler } from './operation-handler';
 export { createMessageRegistry } from './message-registry';
 
-// SPEC-003a: Broadcast handler
+// Broadcast handler
 export { BroadcastHandler } from './broadcast-handler';
 
-// SPEC-003b: GC handler
+// GC handler
 export { GCHandler } from './gc-handler';
 
-// SPEC-003c: Cluster event handler
+// Cluster event handler
 export { ClusterEventHandler } from './cluster-event-handler';
 
-// SPEC-003d: Additional handlers
+// Additional handlers
 export { HeartbeatHandler } from './heartbeat-handler';
 export { ClientMessageHandler } from './client-message-handler';
 export { PersistenceHandler } from './persistence-handler';
@@ -25,7 +25,7 @@ export { QueryConversionHandler } from './query-conversion-handler';
 export { BatchProcessingHandler } from './batch-processing-handler';
 export { WriteConcernHandler } from './write-concern-handler';
 
-// Phase 4: Additional handler modules
+// Additional handler modules
 export { PartitionHandler } from './partition-handler';
 export { TopicHandler } from './topic-handler';
 export { LockHandler } from './lock-handler';
@@ -38,10 +38,10 @@ export { EntryProcessorAdapter } from './entry-processor-adapter';
 export { SearchHandler } from './search-handler';
 export { QueryHandler } from './query-handler';
 
-// Phase 1: WebSocket handler
+// WebSocket handler
 export { WebSocketHandler } from './websocket-handler';
 
-// Phase 2: Lifecycle manager
+// Lifecycle manager
 export { LifecycleManager } from './lifecycle-manager';
 
 export type { MessageRegistry, MessageHandler, MessageHandlers } from './message-registry';
@@ -102,28 +102,28 @@ export type {
     // Query types
     IQueryHandler,
     QueryHandlerConfig,
-    // Heartbeat types (SPEC-003d)
+    // Heartbeat types
     IHeartbeatHandler,
     HeartbeatHandlerConfig,
-    // Client message types (SPEC-003d)
+    // Client message types
     IClientMessageHandler,
     ClientMessageHandlerConfig,
-    // Persistence types (SPEC-003d)
+    // Persistence types
     IPersistenceHandler,
     PersistenceHandlerConfig,
-    // Operation context types (SPEC-003d)
+    // Operation context types
     IOperationContextHandler,
     OperationContextHandlerConfig,
-    // Query conversion types (SPEC-003d)
+    // Query conversion types
     IQueryConversionHandler,
     QueryConversionHandlerConfig,
-    // Batch processing types (SPEC-003d)
+    // Batch processing types
     IBatchProcessingHandler,
     BatchProcessingHandlerConfig,
-    // Write concern types (SPEC-003d)
+    // Write concern types
     IWriteConcernHandler,
     WriteConcernHandlerConfig,
-    // WebSocket types (Phase 1)
+    // WebSocket types 
     IWebSocketHandler,
     WebSocketHandlerConfig,
 } from './types';

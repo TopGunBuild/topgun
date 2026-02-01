@@ -6,7 +6,7 @@
  * - Loading map data from persistent storage
  * - Tracking loading state for async operations
  *
- * Extracted from ServerCoordinator as part of Phase 4 refactoring.
+ * Extracted from ServerCoordinator .
  */
 
 import { HLC, LWWMap, ORMap, LWWRecord, FullTextIndexConfig } from '@topgunbuild/core';

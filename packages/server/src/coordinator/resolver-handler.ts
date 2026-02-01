@@ -3,7 +3,7 @@
  *
  * This handler manages custom conflict resolver registration and listing.
  *
- * Extracted from ServerCoordinator as part of Phase 4 refactoring.
+ * Extracted from ServerCoordinator .
  */
 
 import { logger } from '../utils/logger';

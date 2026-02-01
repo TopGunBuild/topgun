@@ -3,7 +3,7 @@
  *
  * This handler manages Merkle tree-based synchronization for LWW maps.
  *
- * Extracted from ServerCoordinator as part of Phase 4 refactoring.
+ * Extracted from ServerCoordinator .
  */
 
 import { LWWMap } from '@topgunbuild/core';

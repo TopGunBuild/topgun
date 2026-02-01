@@ -7,7 +7,7 @@
  * - Async/sync batch processing with Write Concern tracking
  * - ACK notifications at each stage (APPLIED, REPLICATED, PERSISTED)
  *
- * Extracted from ServerCoordinator as part of SPEC-003d refactoring.
+ * Extracted from ServerCoordinator.
  */
 
 import { WriteConcern, WriteConcernValue } from '@topgunbuild/core';

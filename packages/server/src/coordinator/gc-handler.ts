@@ -7,7 +7,7 @@
  * - TTL expiration for both LWW and ORMap entries
  * - Tombstone pruning
  *
- * Extracted from ServerCoordinator as part of SPEC-003b refactoring.
+ * Extracted from ServerCoordinator.
  */
 
 import { HLC, LWWMap, ORMap, Timestamp, LWWRecord, ORMapRecord } from '@topgunbuild/core';

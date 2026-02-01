@@ -4,7 +4,7 @@
  * This adapter delegates to the existing EntryProcessorHandler
  * from handlers/EntryProcessorHandler.ts.
  *
- * Extracted from ServerCoordinator as part of Phase 4 refactoring.
+ * Extracted from ServerCoordinator .
  */
 
 import { LWWMap } from '@topgunbuild/core';

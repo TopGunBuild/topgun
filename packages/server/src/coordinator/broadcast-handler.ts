@@ -5,7 +5,7 @@
  * optimizations for subscription-based routing, role-based serialization
  * caching, and Field Level Security filtering.
  *
- * Extracted from ServerCoordinator as part of SPEC-003a refactoring.
+ * Extracted from ServerCoordinator.
  */
 
 import { serialize } from '@topgunbuild/core';

@@ -12,7 +12,7 @@
  * 2. Look up handler by message.type
  * 3. Call handler(client, message)
  *
- * Extracted from ServerCoordinator as part of Phase 4 refactoring.
+ * Extracted from ServerCoordinator .
  */
 
 import type { ClientConnection } from './types';

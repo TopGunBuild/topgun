@@ -6,7 +6,7 @@
  * - Asynchronous fire-and-forget persistence
  * - Both LWW and OR map storage
  *
- * Extracted from ServerCoordinator as part of SPEC-003d refactoring.
+ * Extracted from ServerCoordinator.
  */
 
 import { LWWMap, ORMap } from '@topgunbuild/core';

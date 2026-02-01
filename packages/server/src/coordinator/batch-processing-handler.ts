@@ -7,7 +7,7 @@
  * - Operation forwarding to partition owners
  * - Batched broadcast optimization
  *
- * Extracted from ServerCoordinator as part of SPEC-003d refactoring.
+ * Extracted from ServerCoordinator.
  */
 
 import { logger } from '../utils/logger';
@@ -216,7 +216,7 @@ export class BatchProcessingHandler implements IBatchProcessingHandler {
         // 5. Collect event for batched broadcast (instead of immediate broadcast)
         batchedEvents.push(eventPayload);
 
-        // 6. Distributed subscriptions are now handled via CLUSTER_SUB_UPDATE (Phase 14.2)
+        // 6. Distributed subscriptions are now handled via CLUSTER_SUB_UPDATE 
         // ReplicationPipeline handles data replication to backup nodes
         // No need for broadcastToCluster here - it was O(N) broadcast to all nodes
 

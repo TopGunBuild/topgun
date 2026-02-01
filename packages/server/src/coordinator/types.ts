@@ -667,7 +667,7 @@ export interface IClusterEventHandler {
 }
 
 // ============================================================================
-// HeartbeatHandler Types (SPEC-003d)
+// HeartbeatHandler Types
 // ============================================================================
 
 /**
@@ -846,7 +846,7 @@ export interface ClusterEventHandlerConfig {
 }
 
 // ============================================================================
-// BatchProcessingHandler Types (SPEC-003d)
+// BatchProcessingHandler Types
 // ============================================================================
 
 /**
@@ -899,7 +899,7 @@ export interface BatchProcessingHandlerConfig {
 }
 
 // ============================================================================
-// WriteConcernHandler Types (SPEC-003d)
+// WriteConcernHandler Types
 // ============================================================================
 
 /**
@@ -973,7 +973,7 @@ export interface WriteConcernHandlerConfig {
 }
 
 // ============================================================================
-// WebSocketHandler Types (Phase 1 Extraction)
+// WebSocketHandler Types
 // ============================================================================
 
 /**

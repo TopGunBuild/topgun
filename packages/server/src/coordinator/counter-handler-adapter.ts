@@ -5,7 +5,7 @@
  * This is a thin adapter that delegates to the existing CounterHandler
  * from handlers/CounterHandler.ts.
  *
- * Extracted from ServerCoordinator as part of Phase 4 refactoring.
+ * Extracted from ServerCoordinator .
  */
 
 import { WebSocket } from 'ws';

@@ -7,7 +7,7 @@
  * - Finalizing cluster queries with deduplication, sorting, and pagination
  * - Cursor-based pagination support
  *
- * Extracted from ServerCoordinator as part of SPEC-003d refactoring.
+ * Extracted from ServerCoordinator.
  */
 
 import { LWWMap, ORMap, IndexedLWWMap, IndexedORMap, QueryCursor, DEFAULT_QUERY_CURSOR_MAX_AGE_MS, type QueryExpression as CoreQuery } from '@topgunbuild/core';
@@ -34,7 +34,7 @@ export class QueryConversionHandler implements IQueryConversionHandler {
         // Fix: Do not apply cursor/limit locally for cluster queries.
         // They will be applied in finalizeClusterQuery after aggregation.
         const localQuery = { ...query };
-        delete localQuery.cursor; // Phase 14.1: replaces offset
+        delete localQuery.cursor; // replaces offset
         delete localQuery.limit;
 
         // Use indexed query execution if available (O(1) to O(log N))
@@ -220,7 +220,7 @@ export class QueryConversionHandler implements IQueryConversionHandler {
             });
         }
 
-        // Phase 14.1: Apply cursor-based pagination
+        // Apply cursor-based pagination
         let slicedResults = finalResults;
         let nextCursor: string | undefined;
         let hasMore = false;
