@@ -2,15 +2,14 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-021
-- **Status:** review
-- **Next Step:** /sf:review
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-021 | Startup Environment Variable Validation | high | review | - |
 
 ## Decisions
 
@@ -71,6 +70,8 @@
 | 2026-02-01 | SPEC-021 | REVISED v1: Applied recommendation 1. Added unit test file requirement (packages/server/src/config/__tests__/env-schema.test.ts) with 8 test case requirements. Added 7 new acceptance criteria (#8-14) for unit tests. Ready for re-audit. |
 | 2026-02-01 | SPEC-021 | AUDITED v2: APPROVED. Context estimate ~21% (PEAK). All 9 dimensions PASS. Recommendation v1 verified as applied. Fixed line number inconsistency in Files to Modify section (36-60 to 36-77). Ready for implementation. |
 | 2026-02-01 | SPEC-021 | EXECUTED: Startup Environment Variable Validation implemented. Created env-schema.ts with Zod validation for 20+ env vars. Created 27 unit tests (all pass). Modified start-server.ts to use validated config, removed ad-hoc TLS validation. 2 commits. Build succeeds. Ready for review. |
+| 2026-02-01 | SPEC-021 | REVIEWED v1: Implementation APPROVED. All 14 acceptance criteria verified. 23 env vars validated (NODE_ENV, NODE_ID, DATABASE_URL, JWT_SECRET, 19 TOPGUN_ vars). Ad-hoc TLS validation removed (lines 36-77). 27/27 unit tests pass. Build succeeds. No issues found. Ready for finalization. |
+| 2026-02-01 | SPEC-021 | COMPLETED: Startup Environment Variable Validation. Created env-schema.ts with Zod validation for 23 env vars. 27 unit tests. 2 commits, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-021.md |
 
 ## Project Patterns
 
