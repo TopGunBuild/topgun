@@ -32,6 +32,7 @@ describe('validateEnv', () => {
             expect(config.TOPGUN_CLUSTER_TLS_ENABLED).toBe(false);
             expect(config.TOPGUN_TLS_MIN_VERSION).toBe('TLSv1.2');
             expect(config.TOPGUN_DEBUG).toBe(false);
+            expect(config.TOPGUN_DEBUG_ENDPOINTS).toBe(false);
             expect(config.TOPGUN_CLUSTER_MTLS).toBe(false);
             expect(config.TOPGUN_CLUSTER_TLS_REJECT_UNAUTHORIZED).toBe(true);
         });
