@@ -1,5 +1,5 @@
 /**
- * Types for Adaptive Indexing System (Phase 8.02)
+ * Types for Adaptive Indexing System
  *
  * Defines interfaces for query pattern tracking, index suggestions,
  * and auto-indexing configuration.
@@ -24,7 +24,7 @@ export type TrackedQueryType =
   | 'contains'
   | 'containsAll'
   | 'containsAny'
-  | 'compound'; // Phase 9.03: Compound query patterns
+  | 'compound'; // Compound query patterns
 
 /**
  * Statistics for a single attribute + query type combination.
@@ -49,7 +49,7 @@ export interface QueryStatistics {
 }
 
 /**
- * Statistics for compound query patterns (Phase 9.03).
+ * * Statistics for compound query patterns.
  * Tracks AND combinations of attributes for compound index suggestions.
  */
 export interface CompoundQueryStatistics {
@@ -167,7 +167,7 @@ export interface AdaptiveIndexingConfig {
 }
 
 /**
- * Progress callback for lazy index building (Phase 9.01).
+ * * Progress callback for lazy index building.
  */
 export type IndexBuildProgressCallback = (
   attributeName: string,
@@ -185,13 +185,13 @@ export interface IndexedMapOptions {
   /** Default indexing strategy (default: 'none') */
   defaultIndexing?: DefaultIndexingStrategy;
   /**
-   * Enable lazy index building (Phase 9.01).
+   * Enable lazy index building.
    * When true, indexes are not built until first query.
    * Default: false
    */
   lazyIndexBuilding?: boolean;
   /**
-   * Callback for index building progress (Phase 9.01).
+   * Callback for index building progress.
    * Called during lazy index materialization.
    */
   onIndexBuilding?: IndexBuildProgressCallback;

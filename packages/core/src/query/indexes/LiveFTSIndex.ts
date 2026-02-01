@@ -1,5 +1,5 @@
 /**
- * LiveFTSIndex Implementation (Phase 12)
+ * LiveFTSIndex Implementation
  *
  * Live query index for full-text search queries.
  * Uses scoreSingleDocument() for O(1) updates instead of O(N) full re-search.

@@ -18,7 +18,7 @@ export {
 } from './StandingQueryIndex';
 export { InvertedIndex, type InvertedIndexStats } from './InvertedIndex';
 
-// Compound Index (Phase 9.03)
+// Compound Index
 export {
   CompoundIndex,
   isCompoundIndex,
@@ -27,7 +27,7 @@ export {
   type CompoundIndexStats,
 } from './CompoundIndex';
 
-// Lazy indexes (Phase 9.01)
+// Lazy indexes
 // Note: IndexBuildProgressCallback is exported from ./adaptive
 export {
   LazyHashIndex,
@@ -38,7 +38,7 @@ export {
   type LazyIndexOptions,
 } from './lazy';
 
-// Live Query Indexes (Phase 12)
+// Live Query Indexes
 export {
   type ILiveQueryIndex,
   type LiveQueryDelta,

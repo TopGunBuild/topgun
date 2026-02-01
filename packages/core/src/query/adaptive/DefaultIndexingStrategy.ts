@@ -1,5 +1,5 @@
 /**
- * DefaultIndexingStrategy (Phase 8.02.4)
+ * * DefaultIndexingStrategy
  *
  * Automatically indexes fields based on data structure analysis.
  * Applied on first record insertion to index scalar fields.

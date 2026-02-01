@@ -1,5 +1,5 @@
 /**
- * AutoIndexManager (Phase 8.02.3)
+ * * AutoIndexManager
  *
  * Automatically creates indexes based on query patterns.
  * Intended for development mode to simplify index management.

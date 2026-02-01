@@ -1,5 +1,5 @@
 /**
- * Query Engine - Phase 7 + Phase 8.01 + Phase 8.02
+ * Query Engine
  *
  * CQEngine-inspired query engine for TopGun providing:
  * - O(1) to O(log N) query execution via indexes
@@ -7,8 +7,8 @@
  * - Cost-based query optimizer
  * - Lazy ResultSet with merge cost optimization
  * - Full CRDT integration (tombstone-aware, TTL-aware)
- * - Full-text search via InvertedIndex (Phase 8.01)
- * - Adaptive indexing with query pattern tracking (Phase 8.02)
+ * - Full-text search via InvertedIndex
+ * - Adaptive indexing with query pattern tracking
  */
 
 // Data structures
@@ -23,7 +23,7 @@ export {
   multiAttribute,
 } from './Attribute';
 
-// Attribute Factory (Phase 9.02)
+// Attribute Factory
 export {
   generateAttributes,
   attr,
@@ -56,13 +56,13 @@ export {
   type FilterStep,
   type NotStep,
   type QueryPlan,
-  // FTS Query Types (Phase 12)
+  // FTS Query Types
   type MatchQueryOptions,
   type MatchQueryNode,
   type MatchPhraseQueryNode,
   type MatchPrefixQueryNode,
   type FTSQueryNode,
-  // FTS Plan Types (Phase 12)
+  // FTS Plan Types
   type FTSScanStep,
   type FusionStep,
   type FusionStrategy,
@@ -103,13 +103,13 @@ export {
   type LiveQueryDeltaEvent,
 } from './LiveQueryManager';
 
-// Tokenization (Phase 8.01)
+// Tokenization
 export * from './tokenization';
 
-// Adaptive Indexing (Phase 8.02)
+// Adaptive Indexing
 export * from './adaptive';
 
-// Query Executor (Phase 12)
+// Query Executor
 export {
   QueryExecutor,
   type StepResult,
@@ -120,7 +120,7 @@ export {
   type CursorStatus,
 } from './QueryExecutor';
 
-// Unified Live Query Registry (Phase 12)
+// Unified Live Query Registry
 export {
   UnifiedLiveQueryRegistry,
   type UnifiedLiveQueryRegistryOptions,
@@ -128,7 +128,7 @@ export {
   type UnifiedDelta,
 } from './UnifiedLiveQueryRegistry';
 
-// Query Cursor (Phase 14.1)
+// Query Cursor
 export {
   QueryCursor,
   type QueryCursorData,

@@ -1,5 +1,5 @@
 /**
- * Adaptive Indexing System (Phase 8.02)
+ * Adaptive Indexing System
  *
  * Exports for query pattern tracking, index suggestions,
  * and automatic index creation.

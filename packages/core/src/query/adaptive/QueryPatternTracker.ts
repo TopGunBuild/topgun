@@ -1,5 +1,5 @@
 /**
- * QueryPatternTracker (Phase 8.02.1)
+ * * QueryPatternTracker
  *
  * Collects runtime statistics on query execution patterns.
  * Used by IndexAdvisor to generate index suggestions.
@@ -76,7 +76,7 @@ function parseStatsKey(key: StatsKey): { attribute: string; queryType: TrackedQu
  * tracker.recordQuery('category', 'eq', 5.2, 100, false);
  * tracker.recordQuery('category', 'eq', 4.8, 100, false);
  *
- * // Record compound AND queries (Phase 9.03)
+ * * // Record compound AND queries
  * tracker.recordCompoundQuery(['status', 'category'], 10.5, 50, false);
  *
  * // Get statistics
@@ -153,7 +153,7 @@ export class QueryPatternTracker {
   }
 
   /**
-   * Record a compound (AND) query execution for pattern tracking (Phase 9.03).
+   * Record a compound (AND) query execution for pattern tracking.
    *
    * @param attributes - Array of attribute names being queried together
    * @param executionTime - Query execution time in milliseconds
@@ -208,7 +208,7 @@ export class QueryPatternTracker {
   }
 
   /**
-   * Get all compound query statistics (Phase 9.03).
+   * Get all compound query statistics.
    *
    * @returns Array of compound query statistics, sorted by query count descending
    */
@@ -425,7 +425,7 @@ export class QueryPatternTracker {
   }
 
   /**
-   * Evict the oldest compound query entry (Phase 9.03).
+   * Evict the oldest compound query entry.
    */
   private evictOldestCompound(): void {
     let oldestKey: string | null = null;
@@ -444,7 +444,7 @@ export class QueryPatternTracker {
   }
 
   /**
-   * Prune stale compound statistics (Phase 9.03).
+   * Prune stale compound statistics.
    */
   private pruneStaleCompound(): void {
     const cutoff = Date.now() - this.statsTtl;

@@ -81,7 +81,7 @@ export interface IndexQuery<A> {
     | 'contains'
     | 'containsAll'
     | 'containsAny'
-    | 'compound'; // Phase 9.03: Compound query type
+    | 'compound'; // Compound query type
   /** Value for equality queries */
   value?: A;
   /** Values for 'in' queries or compound queries */

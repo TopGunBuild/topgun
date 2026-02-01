@@ -1,7 +1,7 @@
 /**
  * LazyInvertedIndex Implementation
  *
- * Full-text search index with deferred building (Phase 9.01).
+ * Full-text search index with deferred building.
  * Records are buffered until first query, then index is materialized.
  *
  * Benefits:

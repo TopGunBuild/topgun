@@ -5,7 +5,7 @@
  * Implements early termination for efficiency.
  *
  * NOTE: The offset parameter is intentionally retained in this internal component
- * even though Phase 14.1 replaced offset with cursor-based pagination in the query API.
+ * even though cursor-based pagination replaced offset in the query API.
  * This class is used internally by:
  * - EventJournalService (SQL queries require numeric offset)
  * - Index result set operations where offset is computed internally

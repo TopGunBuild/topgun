@@ -1,5 +1,5 @@
 /**
- * IndexAdvisor (Phase 8.02.2)
+ * * IndexAdvisor
  *
  * Analyzes query patterns and generates index suggestions.
  * Used in production mode to help developers optimize their indexes.
@@ -84,7 +84,7 @@ export class IndexAdvisor {
       }
     }
 
-    // Phase 9.03: Add compound index suggestions
+    // Add compound index suggestions
     const compoundSuggestions = this.getCompoundSuggestions({
       minQueryCount,
       minAverageCost,
@@ -366,7 +366,7 @@ export class IndexAdvisor {
   }
 
   // ========================================
-  // Phase 9.03: Compound Index Suggestions
+  // Compound Index Suggestions
   // ========================================
 
   /**

@@ -37,7 +37,7 @@ export interface SimpleQueryNode extends QueryNode {
   toInclusive?: boolean;
 }
 
-// ============== Full-Text Search Query Types (Phase 12) ==============
+// ============== Full-Text Search Query Types ==============
 
 /**
  * Options for full-text search match queries.
@@ -114,7 +114,7 @@ export interface QueryOptions {
   sort?: Record<string, 'asc' | 'desc'>;
   /** Maximum number of results to return */
   limit?: number;
-  /** Cursor for pagination (Phase 14.1: replaces offset) */
+  /** Cursor for pagination (replaces offset) */
   cursor?: string;
 }
 
@@ -185,7 +185,7 @@ export interface NotStep {
   allKeys: () => Set<unknown>;
 }
 
-// ============== Full-Text Search Plan Types (Phase 12) ==============
+// ============== Full-Text Search Plan Types ==============
 
 /**
  * Fusion strategy for combining results from different search methods.
@@ -246,7 +246,7 @@ export interface QueryPlan {
   };
   /** Limit configuration */
   limit?: number;
-  /** Cursor for pagination (Phase 14.1: replaces offset) */
+  /** Cursor for pagination (replaces offset) */
   cursor?: string;
 }
 

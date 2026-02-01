@@ -43,7 +43,7 @@ export interface QueryOptimizerOptions<K, V> {
   indexRegistry: IndexRegistry<K, V>;
   /** Standing query registry for pre-computed queries (optional) */
   standingQueryRegistry?: StandingQueryRegistry<K, V>;
-  /** Full-text index registry for FTS queries (Phase 12) */
+  /** Full-text index registry for FTS queries */
   fullTextIndexes?: Map<string, FullTextIndex>;
 }
 
@@ -96,7 +96,7 @@ export class QueryOptimizer<K, V> {
   }
 
   /**
-   * Register a full-text index for a field (Phase 12).
+   * Register a full-text index for a field.
    *
    * @param field - Field name
    * @param index - FullTextIndex instance
@@ -106,7 +106,7 @@ export class QueryOptimizer<K, V> {
   }
 
   /**
-   * Unregister a full-text index (Phase 12).
+   * Unregister a full-text index.
    *
    * @param field - Field name
    */
@@ -115,7 +115,7 @@ export class QueryOptimizer<K, V> {
   }
 
   /**
-   * Get registered full-text index for a field (Phase 12).
+   * Get registered full-text index for a field.
    *
    * @param field - Field name
    * @returns FullTextIndex or undefined
@@ -125,7 +125,7 @@ export class QueryOptimizer<K, V> {
   }
 
   /**
-   * Check if a full-text index exists for a field (Phase 12).
+   * Check if a full-text index exists for a field.
    *
    * @param field - Field name
    * @returns True if FTS index exists
@@ -212,7 +212,7 @@ export class QueryOptimizer<K, V> {
           ? { field: sortField, direction: sortDirection }
           : undefined,
       limit: options.limit,
-      cursor: options.cursor, // Phase 14.1: replaces offset
+      cursor: options.cursor, // replaces offset
     };
   }
 
@@ -233,7 +233,7 @@ export class QueryOptimizer<K, V> {
   }
 
   /**
-   * Optimize a full-text search query (Phase 12).
+   * Optimize a full-text search query.
    */
   private optimizeFTS(query: FTSQueryNode): PlanStep {
     const field = query.attribute;
@@ -249,7 +249,7 @@ export class QueryOptimizer<K, V> {
   }
 
   /**
-   * Build an FTS scan step from a query node (Phase 12).
+   * Build an FTS scan step from a query node.
    */
   private buildFTSScanStep(query: FTSQueryNode): FTSScanStep {
     const field = query.attribute;
@@ -294,7 +294,7 @@ export class QueryOptimizer<K, V> {
   }
 
   /**
-   * Estimate cost of FTS query based on index size (Phase 12).
+   * Estimate cost of FTS query based on index size.
    */
   private estimateFTSCost(field: string): number {
     const index = this.fullTextIndexes.get(field);
@@ -311,7 +311,7 @@ export class QueryOptimizer<K, V> {
   }
 
   /**
-   * Classify predicates by type for hybrid query planning (Phase 12).
+   * Classify predicates by type for hybrid query planning.
    *
    * @param predicates - Array of predicates to classify
    * @returns Classified predicates
@@ -356,7 +356,7 @@ export class QueryOptimizer<K, V> {
   }
 
   /**
-   * Determine fusion strategy based on step types (Phase 12).
+   * Determine fusion strategy based on step types.
    *
    * Strategy selection:
    * - All binary (exact/range with no scores) → 'intersection'
@@ -383,7 +383,7 @@ export class QueryOptimizer<K, V> {
   }
 
   /**
-   * Check if a plan step returns scored results (Phase 12).
+   * Check if a plan step returns scored results.
    */
   private stepReturnsScored(step: PlanStep): boolean {
     switch (step.type) {
@@ -437,7 +437,7 @@ export class QueryOptimizer<K, V> {
    * Strategy: Find child with lowest cost, use as base, filter with rest.
    *
    * CQEngine "smallest first" strategy:
-   * 1. Check for CompoundIndex covering all eq children (Phase 9.03)
+   * 1. Check for CompoundIndex covering all eq children
    * 2. Sort children by merge cost
    * 3. Use intersection if multiple indexes available
    * 4. Apply remaining predicates as filters
@@ -452,7 +452,7 @@ export class QueryOptimizer<K, V> {
       return this.optimizeNode(query.children[0]);
     }
 
-    // Phase 9.03: Check if a CompoundIndex can handle this AND query
+    // Check if a CompoundIndex can handle this AND query
     const compoundStep = this.tryCompoundIndex(query.children);
     if (compoundStep) {
       return compoundStep;
@@ -507,7 +507,7 @@ export class QueryOptimizer<K, V> {
   }
 
   /**
-   * Try to use a CompoundIndex for an AND query (Phase 9.03).
+   * Try to use a CompoundIndex for an AND query.
    *
    * Returns a compound index scan step if:
    * 1. All children are simple 'eq' queries
@@ -740,7 +740,7 @@ export class QueryOptimizer<K, V> {
         // NOT is expensive (needs all keys)
         return this.estimateCost(step.source) + 100;
 
-      // Phase 12: FTS step types
+      // FTS step types
       case 'fts-scan':
         return step.estimatedCost;
 
@@ -780,7 +780,7 @@ export class QueryOptimizer<K, V> {
       case 'not':
         return this.usesIndexes(step.source);
 
-      // Phase 12: FTS step types
+      // FTS step types
       case 'fts-scan':
         return true; // FTS uses FullTextIndex
 

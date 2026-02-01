@@ -1,5 +1,5 @@
 /**
- * CompoundIndex Implementation (Phase 9.03)
+ * CompoundIndex Implementation
  *
  * Multi-attribute index for optimizing AND queries.
  * Creates a composite key from multiple attribute values for O(1) lookup.

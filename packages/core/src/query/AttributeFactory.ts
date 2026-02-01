@@ -1,5 +1,5 @@
 /**
- * Attribute Factory (Phase 9.02)
+ * Attribute Factory
  *
  * Type-safe attribute generation with:
  * - Auto-generated attributes from schema definition

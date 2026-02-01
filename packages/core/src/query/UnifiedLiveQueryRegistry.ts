@@ -1,5 +1,5 @@
 /**
- * UnifiedLiveQueryRegistry Implementation (Phase 12)
+ * UnifiedLiveQueryRegistry Implementation
  *
  * Unified registry for managing live query indexes.
  * Auto-detects index type based on query predicates:

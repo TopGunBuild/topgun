@@ -1,5 +1,5 @@
 /**
- * QueryExecutor Implementation (Phase 12)
+ * QueryExecutor Implementation
  *
  * Executes query plans produced by QueryOptimizer.
  * Supports hybrid queries with FTS and traditional predicates,
@@ -79,7 +79,7 @@ export interface ExecuteOptions {
   orderBy?: OrderBy[];
   /** Maximum results to return */
   limit?: number;
-  /** Cursor for pagination (Phase 14.1: replaces offset) */
+  /** Cursor for pagination (replaces offset) */
   cursor?: string;
   /** Query predicate (for cursor validation) */
   predicate?: Query;
@@ -91,7 +91,7 @@ export interface ExecuteOptions {
 export type CursorStatus = 'valid' | 'expired' | 'invalid' | 'none';
 
 /**
- * Extended query result with cursor info (Phase 14.1).
+ * Extended query result with cursor info.
  */
 export interface QueryResultWithCursor<K, V> {
   /** Query results */

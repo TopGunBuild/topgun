@@ -1,7 +1,7 @@
 /**
  * LazyNavigableIndex Implementation
  *
- * Sorted index with deferred building (Phase 9.01).
+ * Sorted index with deferred building.
  * Records are buffered until first query, then index is materialized.
  *
  * Benefits:

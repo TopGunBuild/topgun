@@ -1,5 +1,5 @@
 /**
- * QueryCursor - Cursor-based pagination for distributed queries (Phase 14.1)
+ * QueryCursor - Cursor-based pagination for distributed queries
  *
  * Implements opaque cursor encoding for efficient deep pagination in distributed
  * predicate-based queries. Cursors encode the last seen position per node, enabling

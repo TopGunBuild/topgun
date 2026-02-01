@@ -1,5 +1,5 @@
 /**
- * ILiveQueryIndex Interface (Phase 12)
+ * ILiveQueryIndex Interface
  *
  * Common interface for live query indexes that track query results
  * and provide delta notifications on record changes.

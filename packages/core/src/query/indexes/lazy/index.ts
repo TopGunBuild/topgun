@@ -1,5 +1,5 @@
 /**
- * Lazy Indexes exports (Phase 9.01)
+ * Lazy Indexes exports
  *
  * Lazy indexes defer actual index construction until first query.
  * This provides fast application startup and memory efficiency.

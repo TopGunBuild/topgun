@@ -1,7 +1,7 @@
 /**
  * Lazy Index Types
  *
- * Types and interfaces for lazy index building (Phase 9.01).
+ * Types and interfaces for lazy index building.
  * Lazy indexes defer actual index construction until first query.
  *
  * @module query/indexes/lazy/types
