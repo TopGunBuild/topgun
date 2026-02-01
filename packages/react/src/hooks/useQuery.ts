@@ -3,7 +3,7 @@ import { QueryFilter, QueryResultItem, ChangeEvent, QueryHandle, CursorStatus, P
 import { useClient } from './useClient';
 
 /**
- * Options for useQuery change callbacks (Phase 5.1)
+ * Options for useQuery change callbacks.
  */
 export interface UseQueryOptions<T> {
   /** Called for any change event */
@@ -23,7 +23,7 @@ export interface UseQueryOptions<T> {
 }
 
 /**
- * Result type for useQuery hook with change tracking (Phase 5.1)
+ * Result type for useQuery hook with change tracking.
  */
 export interface UseQueryResult<T> {
   /** Current data array */
@@ -32,17 +32,17 @@ export interface UseQueryResult<T> {
   loading: boolean;
   /** Error if query failed */
   error: Error | null;
-  /** Last change event (Phase 5.1) */
+  /** Last change event */
   lastChange: ChangeEvent<T> | null;
-  /** All changes since last clearChanges() call (Phase 5.1) */
+  /** All changes since last clearChanges() call */
   changes: ChangeEvent<T>[];
-  /** Clear accumulated changes (Phase 5.1) */
+  /** Clear accumulated changes */
   clearChanges: () => void;
-  /** Cursor for fetching next page (Phase 14.1) */
+  /** Cursor for fetching next page */
   nextCursor?: string;
-  /** Whether more results are available (Phase 14.1) */
+  /** Whether more results are available */
   hasMore: boolean;
-  /** Debug info: status of input cursor processing (Phase 14.1) */
+  /** Debug info: status of input cursor processing */
   cursorStatus: CursorStatus;
 }
 
@@ -110,11 +110,9 @@ export function useQuery<T = any>(
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
 
-  // Phase 5.1: Change tracking state
   const [changes, setChanges] = useState<ChangeEvent<T>[]>([]);
   const [lastChange, setLastChange] = useState<ChangeEvent<T> | null>(null);
 
-  // Phase 14.1: Pagination state
   const [paginationInfo, setPaginationInfo] = useState<PaginationInfo>({
     hasMore: false,
     cursorStatus: 'none',
@@ -129,7 +127,6 @@ export function useQuery<T = any>(
   // We serialize the query to use it as a stable dependency for the effect
   const queryJson = JSON.stringify(query);
 
-  // Phase 5.1: Clear changes callback
   const clearChanges = useCallback(() => {
     setChanges([]);
     setLastChange(null);
@@ -159,7 +156,6 @@ export function useQuery<T = any>(
         }
       });
 
-      // Phase 5.1: Subscribe to change events
       const unsubscribeChanges = handle.onChanges((newChanges) => {
         if (!isMounted.current) return;
 
@@ -207,7 +203,6 @@ export function useQuery<T = any>(
         }
       });
 
-      // Phase 14.1: Subscribe to pagination info changes
       const unsubscribePagination = handle.onPaginationChange((info) => {
         if (isMounted.current) {
           setPaginationInfo(info);
@@ -233,7 +228,6 @@ export function useQuery<T = any>(
     }
   }, [client, mapName, queryJson]);
 
-  // Phase 14.1: Return pagination info from server
   return useMemo(
     () => ({
       data,

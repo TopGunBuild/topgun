@@ -9,12 +9,12 @@ export * from './hooks/usePNCounter';
 export * from './hooks/useEntryProcessor';
 export * from './hooks/useEventJournal';
 
-// Conflict Resolver hooks (Phase 5.05)
+// Conflict Resolver hooks
 export * from './hooks/useMergeRejections';
 export * from './hooks/useConflictResolver';
 
-// Full-Text Search hooks (Phase 11.1c)
+// Full-Text Search hooks
 export * from './hooks/useSearch';
 
-// Hybrid Query hooks (Phase 12)
+// Hybrid Query hooks
 export * from './hooks/useHybridQuery';

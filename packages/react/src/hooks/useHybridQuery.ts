@@ -23,11 +23,11 @@ export interface UseHybridQueryResult<T> {
   loading: boolean;
   /** Error if query failed */
   error: Error | null;
-  /** Cursor for fetching next page (Phase 14.1) */
+  /** Cursor for fetching next page */
   nextCursor?: string;
-  /** Whether more results are available (Phase 14.1) */
+  /** Whether more results are available */
   hasMore: boolean;
-  /** Debug info: status of input cursor processing (Phase 14.1) */
+  /** Debug info: status of input cursor processing */
   cursorStatus: CursorStatus;
 }
 
@@ -127,7 +127,6 @@ export function useHybridQuery<T = unknown>(
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
 
-  // Phase 14.1: Pagination state
   const [paginationInfo, setPaginationInfo] = useState<PaginationInfo>({
     hasMore: false,
     cursorStatus: 'none',
@@ -148,7 +147,7 @@ export function useHybridQuery<T = unknown>(
     JSON.stringify(filter.where),
     JSON.stringify(filter.sort),
     filter.limit,
-    filter.cursor, // Phase 14.1: replaces offset
+    filter.cursor,
   ]);
 
   // Skip option
@@ -196,7 +195,6 @@ export function useHybridQuery<T = unknown>(
         }
       });
 
-      // Phase 14.1: Subscribe to pagination info changes
       const unsubscribePagination = handle.onPaginationChange((info) => {
         if (isMounted.current) {
           setPaginationInfo(info);
@@ -227,7 +225,6 @@ export function useHybridQuery<T = unknown>(
     };
   }, [client, mapName, memoizedFilter, skip]);
 
-  // Phase 14.1: Return pagination info from server
   return useMemo(
     () => ({
       results,
