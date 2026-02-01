@@ -249,6 +249,53 @@ describe('TopGunAdapter', () => {
           throw new Error('Expected found to have accounts property');
       }
   });
+
+  it('should handle custom foreign key via foreignKeyMap', async () => {
+      const storage = new MemoryStorageAdapter();
+      const customClient = new TopGunClient({
+          serverUrl: 'ws://fake-url',
+          storage,
+          nodeId: 'test-node-custom'
+      });
+      await customClient.start();
+
+      const customAdapter = topGunAdapter({
+          client: customClient,
+          foreignKeyMap: { document: 'ownerId' }
+      })({} as BetterAuthOptions);
+
+      const owner = {
+          id: 'owner-1',
+          email: 'owner@example.com',
+          name: 'Document Owner'
+      };
+      await customAdapter.create({ model: 'user', data: owner });
+
+      const document = {
+          id: 'doc-1',
+          ownerId: owner.id,
+          title: 'My Document',
+          content: 'Some content'
+      };
+      await customAdapter.create({ model: 'document', data: document });
+
+      const found = await customAdapter.findOne({
+          model: 'user',
+          where: [{ field: 'id', value: 'owner-1' }],
+          join: { document: true }
+      });
+
+      expect(found).not.toBeNull();
+      if (found && typeof found === 'object' && 'documents' in found) {
+          const documents = found.documents as unknown[];
+          expect(documents).toBeDefined();
+          expect(documents).toHaveLength(1);
+          expect(documents[0]).toHaveProperty('title', 'My Document');
+          expect(documents[0]).toHaveProperty('ownerId', 'owner-1');
+      } else {
+          throw new Error('Expected found to have documents property');
+      }
+  });
 });
 
 describe('cold start handling', () => {
