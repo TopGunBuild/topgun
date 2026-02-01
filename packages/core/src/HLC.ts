@@ -1,3 +1,5 @@
+import { logger } from './utils/logger';
+
 export interface Timestamp {
   millis: number;
   counter: number;
@@ -82,12 +84,15 @@ export class HLC {
     // Validate drift
     const drift = remote.millis - systemTime;
     if (drift > this.maxDriftMs) {
-      const message = `Clock drift detected: Remote time ${remote.millis} is ${drift}ms ahead of local ${systemTime} (threshold: ${this.maxDriftMs}ms)`;
-
       if (this.strictMode) {
-        throw new Error(message);
+        throw new Error(`Clock drift detected: Remote time ${remote.millis} is ${drift}ms ahead of local ${systemTime} (threshold: ${this.maxDriftMs}ms)`);
       } else {
-        console.warn(message);
+        logger.warn({
+          drift,
+          remoteMillis: remote.millis,
+          localMillis: systemTime,
+          maxDriftMs: this.maxDriftMs
+        }, 'Clock drift detected');
         // In AP systems we accept and fast-forward
       }
     }
