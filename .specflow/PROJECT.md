@@ -47,6 +47,7 @@ tests/
 - Test files co-located with source in `__tests__/` directories
 - Server tests use ports 10000+ for servers, 11000+ for cluster nodes
 - CRDTs use Hybrid Logical Clocks for causality tracking
+- No phase/spec/bug references in code comments — use WHY-comments instead
 
 ## Constraints
 
