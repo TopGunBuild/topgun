@@ -1,20 +1,6 @@
 import { EncryptedStorageAdapter } from '../adapters/EncryptedStorageAdapter';
 import { IStorageAdapter, OpLogEntry } from '../IStorageAdapter';
-import * as crypto from 'crypto';
-
-// Polyfill WebCrypto for Node environment if needed
-if (!globalThis.crypto) {
-    // @ts-ignore
-    globalThis.crypto = crypto.webcrypto;
-}
-if (!globalThis.window) {
-    // @ts-ignore
-    globalThis.window = globalThis;
-}
-if (!window.crypto) {
-    // @ts-ignore
-    window.crypto = crypto.webcrypto;
-}
+import './test-polyfills';
 
 class MockStorageAdapter implements IStorageAdapter {
     store = new Map<string, any>();
