@@ -4,13 +4,12 @@
 
 - **Active Specification:** none
 - **Status:** idle
-- **Next Step:** /sf:next
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | # | ID | Title | Priority | Status | Depends On |
 |---|-------|----------|--------|--------|------------|
-| 1 | SPEC-020d | Clean packages/react/ + mcp-server/ + adapter-better-auth/ comments | medium | draft | - |
 
 ## Decisions
 
@@ -62,6 +61,10 @@
 | 2026-02-01 | SPEC-020c | EXECUTED: Clean packages/client/ comments. Removed 100 process artifact references from 24 files. 5 commits (sync/, cluster/, main files, index.ts, tests). Zero process references remain in src/. Build succeeds. 431/431 tests pass (2 test files have pre-existing compilation errors). Section headers, export groupings, and meaningful context preserved. All constraints respected. Ready for review. |
 | 2026-02-01 | SPEC-020c | REVIEWED v1: Implementation APPROVED. All 6 acceptance criteria met. 24 files modified (comment-only changes). Zero process references remain. Build succeeds, 431/431 tests pass (2 test files have pre-existing compilation errors from SPEC-018). WHY-comments enhanced (e.g., "for distributed PN counter operations", "to ensure consistent backpressure behavior"). Section headers and export groupings preserved exactly. All constraints respected. Ready for finalization. |
 | 2026-02-01 | SPEC-020c | COMPLETED: Clean packages/client/ comments. Removed 100 process artifact references from 24 files. 5 commits, 1 audit cycle, 1 review cycle. Archived to .specflow/archive/SPEC-020c.md |
+| 2026-02-01 | SPEC-020d | AUDITED v1: APPROVED. Context estimate ~22% (PEAK range). All 9 dimensions PASS. Patterns validated via grep (33 occurrences, 8 files). Final spec in SPEC-020 family. Ready for implementation. |
+| 2026-02-01 | SPEC-020d | EXECUTED: Clean packages/react/, mcp-server/, adapter-better-auth/ comments. Removed 33 process artifact references from 8 files. 4 commits. Zero process references remain. Build succeeds. Tests pass (182+13=195 tests, plus mcp-server 73/77 with 4 pre-existing timeouts). Ready for review. |
+| 2026-02-01 | SPEC-020d | REVIEWED v1: Implementation APPROVED. All 7 acceptance criteria met. 8 files modified (comment-only changes). Zero process references remain. All builds succeed. React tests 182/182, better-auth 13/13, mcp-server 73/77 (4 pre-existing timeouts verified). Export grouping comments and pagination explanation preserved. All constraints respected. Ready for finalization. |
+| 2026-02-01 | SPEC-020d | COMPLETED: Clean packages/react/, mcp-server/, adapter-better-auth/ comments. Removed 33 process artifact references from 8 files. 4 commits, 1 audit cycle, 1 review cycle. Archived to .specflow/archive/SPEC-020d.md |
 
 ## Project Patterns
 
