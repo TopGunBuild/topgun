@@ -9,9 +9,6 @@ import { WebSocket } from 'ws';
 
 const JWT_SECRET = 'topgun-secret-dev';
 
-// Retry flaky chaos tests up to 3 times
-jest.retryTimes(3);
-
 describe('Chaos Testing', () => {
 
   // Scenario 1: Split Brain
