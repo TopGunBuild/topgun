@@ -11,6 +11,7 @@ import {
   SharedMemoryManager,
   type SharedMemoryStats,
 } from '../workers/SharedMemoryManager';
+import { logger } from './logger';
 
 /**
  * Native module availability status
@@ -81,9 +82,8 @@ export function getNativeStats(
 export function logNativeStatus(): void {
   const status = getNativeModuleStatus();
 
-  console.log('[TopGun] Native Module Status:');
-  console.log(`  - Hash: ${status.nativeHash ? 'native xxHash64' : 'FNV-1a (JS)'}`);
-  console.log(
-    `  - SharedArrayBuffer: ${status.sharedArrayBuffer ? 'available' : 'unavailable'}`
-  );
+  logger.info({
+    nativeHash: status.nativeHash,
+    sharedArrayBuffer: status.sharedArrayBuffer
+  }, 'Native module status');
 }
