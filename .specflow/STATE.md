@@ -4,7 +4,7 @@
 
 - **Active Specification:** none
 - **Status:** idle
-- **Next Step:** `/sf:new` or `/sf:next`
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
@@ -15,6 +15,13 @@
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-02 | SPEC-031 | COMPLETED: Split DistributedSubscriptionCoordinator into Focused Coordinators. Created base class (559 lines), SearchCoordinator (381 lines), QueryCoordinator (291 lines), transformed facade (382 lines). 4 files created, 1 file modified, 6 commits, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-031.md |
+| 2026-02-02 | SPEC-031 | REVIEWED v1: Implementation APPROVED. All 7 acceptance criteria fully met. Base class (559 lines) extracts shared ACK/timeout/WebSocket logic. SearchCoordinator (381 lines) handles FTS with RRF. QueryCoordinator (291 lines) handles Query with dedupe. Facade (382 lines) preserves API. All 26 tests pass. No issues. Ready for finalization. |
+| 2026-02-02 | SPEC-031 | EXECUTED: Split DistributedSubscriptionCoordinator into focused coordinators. Created DistributedSubscriptionBase (559 lines), DistributedSearchCoordinator (381 lines), DistributedQueryCoordinator (291 lines), index.ts barrel exports. Transformed original 1,065-line class into 382-line facade. All 34 tests pass. 6 commits. Ready for review. |
+| 2026-02-02 | SPEC-031 | AUDITED v2: Approved with 1 recommendation. All 10 dimensions passed. Line numbers verified accurate. Context estimate ~56% (DEGRADING range but well-grouped). Goal Analysis validated. All v1 issues resolved. Ready for implementation with `/sf:run --parallel` recommended for Wave 2 parallelization. |
+| 2026-02-02 | SPEC-031 | REVISED v1: Applied all 7 audit items (4 critical + 3 recommendations). (1) Moved index.ts to Files to Create, (2-3) Added abstract cleanupByCoordinator() method for type-specific cleanup in handleMemberLeft, (4) Added sendToClient() helper and buildUpdateMessage() abstract method for WebSocket handling split, (5) Added composition vs inheritance note to assumptions, (6-7) Clarified facade owns handleSubUnregister() and getCoordinatorForSubscription(). Ready for re-audit. |
+| 2026-02-02 | SPEC-031 | AUDITED v1: Needs revision. 4 critical issues: (1) Non-existent index.ts file listed as modify instead of create, (2-3) handleMemberLeft type-specific cleanup not addressed in base class design, (4) forwardUpdateToClient shared vs type-specific code split unclear. Context estimate ~56%. 3 recommendations for clarity. |
+| 2026-02-02 | SPEC-031 | CREATED: Split DistributedSubscriptionCoordinator into Focused Coordinators. Extracts shared distributed subscription logic into base class, creates DistributedSearchCoordinator (FTS with RRF) and DistributedQueryCoordinator (Query with dedupe), preserves existing class as facade. Source: TODO-016. |
 | 2026-02-02 | SPEC-030 | COMPLETED: Clean Up Deprecated APIs and Legacy Code Patterns. Removed 3 deprecated APIs: ClusterClient.sendMessage(), CRDTDebugger legacy format, QueryOptimizer legacy constructor. 6 files modified, 5 commits, 1 audit cycle, 1 review cycle. Archived to .specflow/archive/SPEC-030.md |
 | 2026-02-02 | SPEC-030 | REVIEWED v1: Implementation APPROVED. All 6 acceptance criteria fully met. No deprecated APIs remain. Zero @deprecated annotations. QueryOptimizer only accepts options object. CRDTDebugger throws error for legacy format. MIGRATION.md complete with before/after examples. Build passes. All tests pass (1814 core + 431 client). Code quality excellent with clean removals. All 5 commits properly documented with breaking change markers. No issues. Ready for finalization. |
 | 2026-02-02 | SPEC-030 | EXECUTED: Removed 3 deprecated APIs: ClusterClient.sendMessage(), CRDTDebugger legacy format, QueryOptimizer legacy constructor. Updated 6 files. 5 commits. Build passes. 1814 core tests + 431 client tests pass (2 pre-existing failures unrelated). MIGRATION.md updated with before/after examples. Ready for review. |
