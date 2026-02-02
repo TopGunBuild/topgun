@@ -57,9 +57,10 @@ export class DistributedSearchCoordinator extends DistributedSubscriptionBase {
     clusterManager: ClusterManager,
     searchCoordinator: SearchCoordinator,
     config?: DistributedSubscriptionConfig,
-    metricsService?: MetricsService
+    metricsService?: MetricsService,
+    options?: { registerMemberLeftListener?: boolean }
   ) {
-    super(clusterManager, config, metricsService);
+    super(clusterManager, config, metricsService, options);
     this.localSearchCoordinator = searchCoordinator;
     this.rrf = new ReciprocalRankFusion({ k: this.config.rrfK });
 

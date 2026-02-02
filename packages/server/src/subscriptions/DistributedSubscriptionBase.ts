@@ -128,7 +128,8 @@ export abstract class DistributedSubscriptionBase extends EventEmitter {
   constructor(
     clusterManager: ClusterManager,
     config?: DistributedSubscriptionConfig,
-    metricsService?: MetricsService
+    metricsService?: MetricsService,
+    options?: { registerMemberLeftListener?: boolean }
   ) {
     super();
     this.clusterManager = clusterManager;
@@ -136,7 +137,10 @@ export abstract class DistributedSubscriptionBase extends EventEmitter {
     this.metricsService = metricsService;
 
     // Listen for cluster node disconnect to cleanup subscriptions
-    this.clusterManager.on('memberLeft', this.handleMemberLeft.bind(this));
+    // When used as part of a facade, the facade handles this to avoid double-counting metrics
+    if (options?.registerMemberLeftListener !== false) {
+      this.clusterManager.on('memberLeft', this.handleMemberLeft.bind(this));
+    }
   }
 
   /**
@@ -218,8 +222,10 @@ export abstract class DistributedSubscriptionBase extends EventEmitter {
 
   /**
    * Handle cluster node disconnect - cleanup subscriptions involving this node.
+   * Can be called directly by facade or triggered via memberLeft event listener.
+   * @param recordMetrics - Whether to record metrics (false when called by facade to avoid double-counting)
    */
-  protected handleMemberLeft(nodeId: string): void {
+  handleMemberLeft(nodeId: string, recordMetrics: boolean = true): void {
     logger.debug({ nodeId }, `Handling member left for ${this.getSubscriptionType()} subscriptions`);
 
     for (const [subId, subscription] of this.subscriptions) {
@@ -254,8 +260,10 @@ export abstract class DistributedSubscriptionBase extends EventEmitter {
     // Cleanup local subscriptions where the disconnected node was the coordinator
     this.cleanupByCoordinator(nodeId);
 
-    // Record metrics
-    this.metricsService?.incDistributedSubNodeDisconnect();
+    // Record metrics only if requested (false when called by facade to avoid double-counting)
+    if (recordMetrics) {
+      this.metricsService?.incDistributedSubNodeDisconnect();
+    }
   }
 
   /**

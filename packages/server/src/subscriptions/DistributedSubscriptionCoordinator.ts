@@ -73,6 +73,7 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
   private readonly localSearchCoordinator: SearchCoordinator;
   private readonly searchCoordinator: DistributedSearchCoordinator;
   private readonly queryCoordinator: DistributedQueryCoordinator;
+  private readonly metricsService?: MetricsService;
 
   constructor(
     clusterManager: ClusterManager,
@@ -85,24 +86,31 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
     this.clusterManager = clusterManager;
     this.localQueryRegistry = queryRegistry;
     this.localSearchCoordinator = searchCoordinator;
+    this.metricsService = metricsService;
 
-    // Create type-specific coordinators
+    // Create type-specific coordinators with memberLeft listener disabled
+    // The facade handles memberLeft to avoid double-counting metrics
     this.searchCoordinator = new DistributedSearchCoordinator(
       clusterManager,
       searchCoordinator,
       config,
-      metricsService
+      metricsService,
+      { registerMemberLeftListener: false }
     );
 
     this.queryCoordinator = new DistributedQueryCoordinator(
       clusterManager,
       queryRegistry,
       config,
-      metricsService
+      metricsService,
+      { registerMemberLeftListener: false }
     );
 
     // Listen for cluster messages
     this.clusterManager.on('message', this.handleClusterMessage.bind(this));
+
+    // Listen for cluster node disconnect - facade handles this centrally
+    this.clusterManager.on('memberLeft', this.handleMemberLeft.bind(this));
 
     logger.debug('DistributedSubscriptionCoordinator (facade) initialized');
   }
@@ -314,6 +322,23 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
 
     // Unregister from local QueryRegistry
     this.localQueryRegistry.unregister(payload.subscriptionId);
+  }
+
+  /**
+   * Handle cluster node disconnect - cleanup subscriptions involving this node.
+   * Centralizes memberLeft handling to avoid double-counting metrics.
+   */
+  private handleMemberLeft(nodeId: string): void {
+    logger.debug({ nodeId }, 'Handling member left for distributed subscriptions');
+
+    // Delegate to each coordinator with recordMetrics: false to avoid double-counting
+    // Each coordinator handles its own subscription cleanup (removing node from registered nodes,
+    // removing results from that node, checking pending ACKs)
+    this.searchCoordinator.handleMemberLeft(nodeId, false);
+    this.queryCoordinator.handleMemberLeft(nodeId, false);
+
+    // Record metric once (not per coordinator)
+    this.metricsService?.incDistributedSubNodeDisconnect();
   }
 
   /**

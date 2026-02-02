@@ -53,9 +53,10 @@ export class DistributedQueryCoordinator extends DistributedSubscriptionBase {
     clusterManager: ClusterManager,
     queryRegistry: QueryRegistry,
     config?: DistributedSubscriptionConfig,
-    metricsService?: MetricsService
+    metricsService?: MetricsService,
+    options?: { registerMemberLeftListener?: boolean }
   ) {
-    super(clusterManager, config, metricsService);
+    super(clusterManager, config, metricsService, options);
     this.localQueryRegistry = queryRegistry;
 
     logger.debug('DistributedQueryCoordinator initialized');
