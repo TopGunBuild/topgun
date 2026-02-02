@@ -11,6 +11,7 @@
     "topgun": "node ./bin/topgun.js",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
+    "test:cli": "jest --config tests/cli/jest.config.js",
     "test:e2e": "jest --config tests/e2e/jest.config.js",
     "test:e2e:coverage": "jest --config tests/e2e/jest.config.js --coverage",
     "test:coverage": "pnpm -r test:coverage",
