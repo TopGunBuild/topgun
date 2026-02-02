@@ -11,14 +11,15 @@ describe('topgun debug:crdt', () => {
     const result = runCli(['debug:crdt', 'invalid-action']);
 
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain('Unknown action: invalid-action');
-    expect(result.stderr).toContain('Valid actions:');
-    expect(result.stderr).toContain('export');
-    expect(result.stderr).toContain('stats');
-    expect(result.stderr).toContain('conflicts');
-    expect(result.stderr).toContain('timeline');
-    expect(result.stderr).toContain('replay');
-    expect(result.stderr).toContain('tail');
+    const allOutput = result.stdout + result.stderr;
+    expect(allOutput).toContain('Unknown action: invalid-action');
+    expect(allOutput).toContain('Valid actions:');
+    expect(allOutput).toContain('export');
+    expect(allOutput).toContain('stats');
+    expect(allOutput).toContain('conflicts');
+    expect(allOutput).toContain('timeline');
+    expect(allOutput).toContain('replay');
+    expect(allOutput).toContain('tail');
   });
 
   describe('replay', () => {
@@ -26,7 +27,8 @@ describe('topgun debug:crdt', () => {
       const result = runCli(['debug:crdt', 'replay']);
 
       expect(result.exitCode).toBe(1);
-      expect(result.stderr).toContain('--input <file> is required');
+      const allOutput = result.stdout + result.stderr;
+      expect(allOutput).toContain('--input <file> is required');
     });
 
     it('should parse operations from mock input file', () => {

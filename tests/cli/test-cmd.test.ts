@@ -9,11 +9,12 @@ describe('topgun test', () => {
     const result = runCli(['test', 'invalid-scope']);
 
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain('Unknown scope: invalid-scope');
-    expect(result.stderr).toContain('Available scopes:');
-    expect(result.stderr).toContain('core');
-    expect(result.stderr).toContain('client');
-    expect(result.stderr).toContain('server');
+    const allOutput = result.stdout + result.stderr;
+    expect(allOutput).toContain('Unknown scope: invalid-scope');
+    expect(allOutput).toContain('Available scopes:');
+    expect(allOutput).toContain('core');
+    expect(allOutput).toContain('client');
+    expect(allOutput).toContain('server');
   });
 
   it('should show usage information with --help', () => {

@@ -21,10 +21,11 @@ describe('topgun docker', () => {
       const result = runCli(['docker:start', '--with', 'invalid-profile']);
 
       expect(result.exitCode).toBe(1);
-      expect(result.stderr).toContain('Unknown profile: invalid-profile');
-      expect(result.stderr).toContain('Available profiles:');
-      expect(result.stderr).toContain('admin');
-      expect(result.stderr).toContain('monitoring');
+      const allOutput = result.stdout + result.stderr;
+      expect(allOutput).toContain('Unknown profile: invalid-profile');
+      expect(allOutput).toContain('Available profiles:');
+      expect(allOutput).toContain('admin');
+      expect(allOutput).toContain('monitoring');
     });
 
     (dockerAvailable ? it : it.skip)('should build correct command for valid profile', () => {

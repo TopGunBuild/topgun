@@ -2,11 +2,11 @@ import { execSync } from 'child_process';
 import path from 'path';
 import { runCli } from './test-utils';
 
-describe('topgun debug:search', () => {
+describe('topgun search:explain', () => {
   const cliPath = path.join(__dirname, '../../bin/topgun.js');
 
   it('should show help when no query provided', () => {
-    const output = execSync(`node ${cliPath} debug:search`, {
+    const output = execSync(`node ${cliPath} search:explain`, {
       encoding: 'utf8',
       cwd: path.join(__dirname, '../..'),
     });
@@ -19,7 +19,7 @@ describe('topgun debug:search', () => {
   });
 
   it('should attempt HTTP call when query provided', () => {
-    const result = runCli(['debug:search', '--query', 'test']);
+    const result = runCli(['search:explain', '--query', 'test']);
 
     // Command will attempt HTTP connection and fail
     // We verify it proceeds past argument validation

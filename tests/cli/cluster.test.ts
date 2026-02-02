@@ -12,8 +12,8 @@ describe('topgun cluster:start', () => {
       cwd: path.join(__dirname, '../..'),
     });
 
-    expect(output).toContain('TopGun CLI');
-    expect(output).toContain('cluster:start');
+    expect(output).toContain('Usage: topgun cluster:start');
+    expect(output).toContain('Start local cluster');
   });
 });
 
@@ -85,7 +85,7 @@ describe('topgun cluster:stop', () => {
       });
 
       expect(output).toContain('TopGun Cluster Stop');
-      expect(output).toContain('No cluster PID file found');
+      expect(output).toContain('No running cluster found');
     } finally {
       // Restore .cluster-pids
       if (fs.existsSync(backupPath)) {

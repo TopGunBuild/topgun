@@ -131,6 +131,16 @@ Examples:
   test(server): add cluster integration tests
 ```
 
+## Code Comments Convention
+
+- **Do NOT** add phase/spec/bug references in code comments (e.g., `// Phase 8.02`, `// BUG-06`, `// SPEC-011`)
+- Such references belong in **commit messages**, not in code
+- Instead, write WHY-comments explaining the reason for the code:
+  ```typescript
+  // BAD: // Merge defaults (Phase 3 BUG-06)
+  // GOOD: // Merge defaults to prevent race condition when topics subscribe before connection
+  ```
+
 ## Test Notes
 
 - Server tests use ports 10000+ for servers, 11000+ for cluster nodes

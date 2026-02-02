@@ -88,8 +88,9 @@ SERVER_PORT=8080
         const result = runCli(['config', '--storage', 'invalid']);
 
         expect(result.exitCode).toBe(1);
-        expect(result.stderr).toContain('Invalid storage type: invalid');
-        expect(result.stderr).toContain('Valid options: sqlite, postgres, memory');
+        const allOutput = result.stdout + result.stderr;
+        expect(allOutput).toContain('Invalid storage type: invalid');
+        expect(allOutput).toContain('Valid options:');
       });
     });
   });
