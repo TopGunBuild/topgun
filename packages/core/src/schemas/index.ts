@@ -18,6 +18,9 @@ export * from './cluster-schemas';
 // Messaging schemas (topics, counters, locks, journal, processors, resolvers)
 export * from './messaging-schemas';
 
+// Client message schemas (server events, query updates, GC, auth, hybrid queries, locks)
+export * from './client-message-schemas';
+
 // Union MessageSchema (combines all message types)
 import { z } from 'zod';
 import { AuthMessageSchema } from './base-schemas';
