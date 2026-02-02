@@ -411,8 +411,10 @@ export class CRDTDebugger {
       }, 0);
       this.idCounter = maxId;
     } else {
-      // Legacy format: just array of snapshots
-      this.snapshots = Array.isArray(data) ? data : [];
+      throw new Error(
+        'Unsupported history format. Expected v1.0 format with { version: "1.0", operations: [...], conflicts: [...] }. ' +
+        'Legacy array format is no longer supported.'
+      );
     }
   }
 
