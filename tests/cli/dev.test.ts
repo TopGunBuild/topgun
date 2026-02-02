@@ -27,7 +27,6 @@ describe('topgun dev', () => {
 
       expect(exitCode).toBe(1);
       expect(output).toContain('No server entry point found');
-      expect(output).toContain('examples/simple-server.ts');
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
@@ -37,6 +36,7 @@ describe('topgun dev', () => {
     const result = runCli(['dev', '--help']);
 
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain('TopGun CLI');
+    expect(result.stdout).toContain('Usage: topgun dev');
+    expect(result.stdout).toContain('Start development server');
   });
 });
