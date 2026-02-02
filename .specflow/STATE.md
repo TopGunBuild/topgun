@@ -10,11 +10,19 @@
 
 | Spec | Title | Priority | Complexity |
 |------|-------|----------|------------|
+| (empty) | | | |
 
 ## Decisions
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-02 | SPEC-029 | COMPLETED: Eliminate `any` Types in Message Handling. Created client-message-schemas.ts with Zod schemas. Updated 4 files with typed signatures. 1 file created, 5 files modified, 5 commits, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-029.md |
+| 2026-02-02 | SPEC-029 | REVIEWED v1: Implementation APPROVED. All 5 acceptance criteria met. Zero `any` in message handler signatures (documented exceptions preserved). TypeScript builds with strict mode. 431 tests pass (2 pre-existing failures unrelated). Proper Zod schema inference. All deviations justified. client-message-schemas.ts created. 5 files modified with typed signatures. Code quality excellent. No issues. Ready for finalization. |
+| 2026-02-02 | SPEC-029 | EXECUTED: Eliminated `any` types in message handling. Created client-message-schemas.ts with Zod schemas. Updated ClientMessageHandlers.ts, SyncEngine.ts, TopicHandle.ts, ClusterManager.ts with typed signatures. 5 commits. Build passes. 431 tests pass. 3 deviations documented (counter state type, ClusterMessage.payload, ClusterMessageType). Ready for review. |
+| 2026-02-02 | SPEC-029 | AUDITED v2: Approved. All 9 dimensions passed. Line numbers verified accurate (413, 586, 630, 655, 707-814, 824-831, 1095, 1114, 1161-1202 in SyncEngine.ts; 4, 23, 48 in TopicHandle.ts; 12-24, 29-65 in ClientMessageHandlers.ts; 33-37, 565, 579 in ClusterManager.ts). Context estimate ~38% (GOOD range). Implementation tasks generated with 5 groups across 2 waves. Ready for implementation. |
+| 2026-02-02 | SPEC-029 | REVISED v1: Applied all 7 audit items (4 critical + 3 recommendations). Corrected line numbers (707-814, 824-831), added sync payload type extraction, standardized on PNCounterStateObject, clarified AC1 scope, corrected assumption 5, added notes for schema reuse. Ready for re-audit. |
+| 2026-02-01 | SPEC-029 | AUDITED v1: Needs revision. 4 critical issues: (1) Line number inaccuracies for SyncEngine.ts, (2) Missing payload type definitions for sync handlers in ManagerDelegates, (3) PNCounterStateObject vs PNCounterState naming inconsistency, (4) AC1 wording conflicts with constraint about preserving Map<string, any>. 3 recommendations. Context estimate ~35%. |
+| 2026-02-01 | SPEC-029 | CREATED: Eliminate `any` Types in Message Handling. Replaces ~55 `any` type annotations with proper typed interfaces in SyncEngine.ts, TopicHandle.ts, ClientMessageHandlers.ts, and ClusterManager.ts. Creates new client-message-schemas.ts. Source: TODO-015. |
 | 2026-02-01 | SPEC-028 | COMPLETED: Remove jest.retryTimes from Hardened Server Tests. Removed jest.retryTimes(3) from 3 test files (LiveQuery.test.ts, Resilience.test.ts, Chaos.test.ts). 3 files modified, 3 commits, 1 audit cycle, 1 review cycle. Archived to .specflow/archive/SPEC-028.md |
 | 2026-02-01 | SPEC-028 | EXECUTED: Removed jest.retryTimes(3) from 3 test files. 3 commits. LiveQuery.test.ts verified stable (10 consecutive runs). Resilience.test.ts and Chaos.test.ts have pre-existing TS errors (serverUrl removed in SPEC-018). Ready for review. |
 | 2026-02-01 | SPEC-028 | AUDITED v1: Approved. All 9 dimensions passed. Line numbers verified accurate. Context estimate ~14% (PEAK range). Simple refactor with clear scope. Strategic fit confirmed. 1 optional recommendation (check CI/CD history). Ready for implementation. |
@@ -78,4 +86,4 @@
 (none)
 
 ---
-*Last updated: 2026-02-01*
+*Last updated: 2026-02-02*
