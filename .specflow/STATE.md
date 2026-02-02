@@ -3,8 +3,8 @@
 ## Current Position
 
 - **Active Specification:** SPEC-032
-- **Status:** running
-- **Next Step:** (in progress)
+- **Status:** review
+- **Next Step:** /sf:review
 
 ## Queue
 
