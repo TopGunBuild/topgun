@@ -1,7 +1,10 @@
 import { SyncEngine } from './SyncEngine';
 import { logger } from './utils/logger';
 
-export type TopicCallback = (data: any, context: { timestamp: number; publisherId?: string }) => void;
+export type TopicCallback<T = unknown> = (
+  data: T,
+  context: { timestamp: number; publisherId?: string }
+) => void;
 
 export class TopicHandle {
   private engine: SyncEngine;
@@ -20,7 +23,7 @@ export class TopicHandle {
   /**
    * Publish a message to the topic
    */
-  public publish(data: any) {
+  public publish(data: unknown): void {
     this.engine.publishTopic(this.topic, data);
   }
 
@@ -45,7 +48,7 @@ export class TopicHandle {
   /**
    * Called by SyncEngine when a message is received
    */
-  public onMessage(data: any, context: { timestamp: number; publisherId?: string }) {
+  public onMessage(data: unknown, context: { timestamp: number; publisherId?: string }): void {
     this.listeners.forEach(cb => {
       try {
         cb(data, context);
