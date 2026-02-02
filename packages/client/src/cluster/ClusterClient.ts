@@ -477,17 +477,6 @@ export class ClusterClient implements IConnectionProvider {
   }
 
   /**
-   * Send operation with automatic routing (legacy API for cluster operations).
-   * @deprecated Use send(data, key) for IConnectionProvider interface
-   */
-  public sendMessage(key: string, message: any): boolean {
-    if (this.config.routingMode === 'direct' && this.routingActive) {
-      return this.sendDirect(key, message);
-    }
-    return this.sendForward(message);
-  }
-
-  /**
    * Send directly to partition owner
    */
   public sendDirect(key: string, message: any): boolean {
