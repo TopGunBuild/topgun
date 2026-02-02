@@ -30,9 +30,45 @@ export interface ClusterMember {
   isSelf: boolean;
 }
 
+export type ClusterMessageType =
+  | 'HELLO'
+  | 'MEMBER_LIST'
+  | 'OP_FORWARD'
+  | 'PARTITION_UPDATE'
+  | 'HEARTBEAT'
+  | 'CLUSTER_EVENT'
+  | 'CLUSTER_QUERY_EXEC'
+  | 'CLUSTER_QUERY_RESP'
+  | 'CLUSTER_GC_REPORT'
+  | 'CLUSTER_GC_COMMIT'
+  | 'CLUSTER_LOCK_REQ'
+  | 'CLUSTER_LOCK_RELEASE'
+  | 'CLUSTER_LOCK_GRANTED'
+  | 'CLUSTER_LOCK_RELEASED'
+  | 'CLUSTER_CLIENT_DISCONNECTED'
+  | 'CLUSTER_TOPIC_PUB'
+  | 'CLUSTER_MERKLE_ROOT_REQ'
+  | 'CLUSTER_MERKLE_ROOT_RESP'
+  | 'CLUSTER_MERKLE_BUCKETS_REQ'
+  | 'CLUSTER_MERKLE_BUCKETS_RESP'
+  | 'CLUSTER_MERKLE_KEYS_REQ'
+  | 'CLUSTER_MERKLE_KEYS_RESP'
+  | 'CLUSTER_REPAIR_DATA_REQ'
+  | 'CLUSTER_REPAIR_DATA_RESP'
+  | 'CLUSTER_SEARCH_REQ'
+  | 'CLUSTER_SEARCH_RESP'
+  | 'CLUSTER_SEARCH_SUBSCRIBE'
+  | 'CLUSTER_SEARCH_UNSUBSCRIBE'
+  | 'CLUSTER_SEARCH_UPDATE'
+  | 'CLUSTER_SUB_REGISTER'
+  | 'CLUSTER_SUB_ACK'
+  | 'CLUSTER_SUB_UPDATE'
+  | 'CLUSTER_SUB_UNREGISTER';
+
 export interface ClusterMessage {
-  type: 'HELLO' | 'MEMBER_LIST' | 'OP_FORWARD' | 'PARTITION_UPDATE' | 'HEARTBEAT' | 'CLUSTER_EVENT' | 'CLUSTER_QUERY_EXEC' | 'CLUSTER_QUERY_RESP' | 'CLUSTER_GC_REPORT' | 'CLUSTER_GC_COMMIT' | 'CLUSTER_LOCK_REQ' | 'CLUSTER_LOCK_RELEASE' | 'CLUSTER_LOCK_GRANTED' | 'CLUSTER_LOCK_RELEASED' | 'CLUSTER_CLIENT_DISCONNECTED' | 'CLUSTER_TOPIC_PUB' | 'CLUSTER_MERKLE_ROOT_REQ' | 'CLUSTER_MERKLE_ROOT_RESP' | 'CLUSTER_MERKLE_BUCKETS_REQ' | 'CLUSTER_MERKLE_BUCKETS_RESP' | 'CLUSTER_MERKLE_KEYS_REQ' | 'CLUSTER_MERKLE_KEYS_RESP' | 'CLUSTER_REPAIR_DATA_REQ' | 'CLUSTER_REPAIR_DATA_RESP' | 'CLUSTER_SEARCH_REQ' | 'CLUSTER_SEARCH_RESP' | 'CLUSTER_SEARCH_SUBSCRIBE' | 'CLUSTER_SEARCH_UNSUBSCRIBE' | 'CLUSTER_SEARCH_UPDATE' | 'CLUSTER_SUB_REGISTER' | 'CLUSTER_SUB_ACK' | 'CLUSTER_SUB_UPDATE' | 'CLUSTER_SUB_UNREGISTER';
+  type: ClusterMessageType;
   senderId: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   payload: any;
 }
 
@@ -562,7 +598,8 @@ export class ClusterManager extends EventEmitter {
     });
   }
 
-  public send(nodeId: string, type: ClusterMessage['type'], payload: any) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  public send(nodeId: string, type: ClusterMessageType, payload: any): void {
     const member = this.members.get(nodeId);
     if (member && member.socket && member.socket.readyState === WebSocket.OPEN) {
       const msg: ClusterMessage = {
@@ -576,7 +613,8 @@ export class ClusterManager extends EventEmitter {
     }
   }
 
-  public sendToNode(nodeId: string, message: any) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  public sendToNode(nodeId: string, message: any): void {
     this.send(nodeId, 'OP_FORWARD', message);
   }
 
