@@ -2,20 +2,22 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-032
-- **Status:** review
-- **Next Step:** /sf:review
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | Spec | Title | Priority | Complexity |
 |------|-------|----------|------------|
-| SPEC-032 | Add Test Coverage for CLI Commands | low | medium |
 
 ## Decisions
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-02 | SPEC-032 | COMPLETED: Add Test Coverage for CLI Commands. Created 9 files (8 test files + 1 utility), modified package.json. 11 commits, 4 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-032.md |
+| 2026-02-02 | SPEC-032 | REVIEWED v1: Implementation APPROVED. All 9 files created and working. 28 tests pass, 4 skipped (Docker unavailable). Each command has 2+ test cases (success/error paths). Tests complete in 37s. No external service dependencies. No jest.retryTimes usage. All acceptance criteria fully met. No issues found. Ready for finalization. |
+| 2026-02-02 | SPEC-032 | EXECUTED: Add Test Coverage for CLI Commands. Created 9 files (8 test files + 1 utility), modified package.json. 14 commits. 28 tests pass, 4 skipped (Docker unavailable). 6 minor deviations auto-fixed (command names, output expectations). Ready for review. |
 | 2026-02-02 | SPEC-032 | AUDITED v4: Approved. Verified v3 response correctly updated debug-search test case to match actual search.js behavior. All 10 dimensions pass. All 6 assumptions verified against source. Context estimate ~25% (GOOD range). Ready for implementation. |
 | 2026-02-02 | SPEC-032 | REVISED v3: Applied Audit v3 recommendation 1. Updated debug-search.test.ts test case from "shows required argument error" to "attempts HTTP call and fails with connection error" to accurately reflect search.js behavior (does not validate --map requirement). Ready for re-audit. |
 | 2026-02-02 | SPEC-032 | AUDITED v3: Approved. All v2 critical issues verified as resolved. All 10 dimensions pass. Context estimate ~25% (GOOD range). 1 recommendation: debug-search test case may need adjustment since search.js does not validate --map requirement. Ready for implementation. |
