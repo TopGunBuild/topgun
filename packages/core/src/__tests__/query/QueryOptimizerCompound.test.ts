@@ -33,7 +33,7 @@ describe('QueryOptimizer Compound Index Usage', () => {
       const compoundIndex = new CompoundIndex<string, TestProduct>([statusAttr, categoryAttr]);
       registry.addIndex(compoundIndex);
 
-      const optimizer = new QueryOptimizer(registry);
+      const optimizer = new QueryOptimizer({ indexRegistry: registry });
 
       const query: Query = {
         type: 'and',
@@ -63,7 +63,7 @@ describe('QueryOptimizer Compound Index Usage', () => {
       ]);
       registry.addIndex(compoundIndex);
 
-      const optimizer = new QueryOptimizer(registry);
+      const optimizer = new QueryOptimizer({ indexRegistry: registry });
 
       const query: Query = {
         type: 'and',
@@ -88,7 +88,7 @@ describe('QueryOptimizer Compound Index Usage', () => {
       const compoundIndex = new CompoundIndex<string, TestProduct>([statusAttr, categoryAttr]);
       registry.addIndex(compoundIndex);
 
-      const optimizer = new QueryOptimizer(registry);
+      const optimizer = new QueryOptimizer({ indexRegistry: registry });
 
       // Query order: category first, then status
       const query: Query = {
@@ -114,7 +114,7 @@ describe('QueryOptimizer Compound Index Usage', () => {
       registry.addIndex(new HashIndex(statusAttr));
       registry.addIndex(new HashIndex(categoryAttr));
 
-      const optimizer = new QueryOptimizer(registry);
+      const optimizer = new QueryOptimizer({ indexRegistry: registry });
 
       const query: Query = {
         type: 'and',
@@ -139,7 +139,7 @@ describe('QueryOptimizer Compound Index Usage', () => {
       registry.addIndex(new HashIndex(statusAttr));
       registry.addIndex(new HashIndex(categoryAttr));
 
-      const optimizer = new QueryOptimizer(registry);
+      const optimizer = new QueryOptimizer({ indexRegistry: registry });
 
       // Query on status + category (not covered by compound index)
       const query: Query = {
@@ -163,7 +163,7 @@ describe('QueryOptimizer Compound Index Usage', () => {
       const compoundIndex = new CompoundIndex<string, TestProduct>([statusAttr, categoryAttr]);
       registry.addIndex(compoundIndex);
 
-      const optimizer = new QueryOptimizer(registry);
+      const optimizer = new QueryOptimizer({ indexRegistry: registry });
 
       // AND of two eq queries + a gt query
       const query: Query = {
@@ -196,7 +196,7 @@ describe('QueryOptimizer Compound Index Usage', () => {
       registry.addIndex(compoundIndex);
       registry.addIndex(new HashIndex(statusAttr));
 
-      const optimizer = new QueryOptimizer(registry);
+      const optimizer = new QueryOptimizer({ indexRegistry: registry });
 
       // AND with one eq and one gt - can't use compound index
       const query: Query = {
@@ -302,7 +302,7 @@ describe('QueryOptimizer Compound Index Usage', () => {
       registry.addIndex(new HashIndex(statusAttr));
       registry.addIndex(new HashIndex(categoryAttr));
 
-      const optimizer = new QueryOptimizer(registry);
+      const optimizer = new QueryOptimizer({ indexRegistry: registry });
 
       const query: Query = {
         type: 'and',

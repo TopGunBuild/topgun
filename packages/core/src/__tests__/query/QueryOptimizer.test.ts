@@ -24,7 +24,7 @@ describe('QueryOptimizer', () => {
 
   beforeEach(() => {
     registry = new IndexRegistry<string, TestRecord>();
-    optimizer = new QueryOptimizer(registry);
+    optimizer = new QueryOptimizer({ indexRegistry: registry });
   });
 
   describe('simple queries', () => {
@@ -548,19 +548,8 @@ describe('QueryOptimizer', () => {
       expect(plan.root.type).toBe('index-scan');
     });
 
-    it('should work with legacy constructor signature', () => {
-      const legacyOptimizer = new QueryOptimizer(registry, standingRegistry);
-
-      const query: SimpleQueryNode = { type: 'eq', attribute: 'status', value: 'active' };
-      standingRegistry.register(query);
-
-      const plan = legacyOptimizer.optimize(query);
-
-      expect(plan.estimatedCost).toBe(10);
-    });
-
     it('should work without StandingQueryRegistry', () => {
-      const simpleOptimizer = new QueryOptimizer(registry);
+      const simpleOptimizer = new QueryOptimizer({ indexRegistry: registry });
 
       const query: SimpleQueryNode = { type: 'eq', attribute: 'name', value: 'Alice' };
       const plan = simpleOptimizer.optimize(query);
