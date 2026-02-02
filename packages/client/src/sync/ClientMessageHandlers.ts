@@ -4,6 +4,32 @@
  */
 
 import type { IMessageRouter } from './types';
+import type {
+  AuthFailMessage,
+  OpAckMessage,
+  QueryRespMessage,
+  QueryUpdateMessage,
+  ServerEventMessage,
+  ServerBatchEventMessage,
+  GcPruneMessage,
+  HybridQueryRespPayload,
+  HybridQueryDeltaPayload,
+  SearchRespPayload,
+  SyncRespRootPayload,
+  SyncRespBucketsPayload,
+  SyncRespLeafPayload,
+  SyncResetRequiredPayload,
+  ORMapSyncRespRootPayload,
+  ORMapSyncRespBucketsPayload,
+  ORMapSyncRespLeafPayload,
+  ORMapDiffResponsePayload,
+  EntryProcessResponse,
+  EntryProcessBatchResponse,
+  RegisterResolverResponse,
+  UnregisterResolverResponse,
+  ListResolversResponse,
+  MergeRejectedMessage,
+} from '@topgunbuild/core';
 
 /**
  * SyncEngine methods used as handler delegates.
@@ -12,15 +38,15 @@ import type { IMessageRouter } from './types';
 export interface MessageHandlerDelegates {
   sendAuth(): Promise<void>;
   handleAuthAck(): void;
-  handleAuthFail(message: any): void;
-  handleOpAck(message: any): void;
-  handleQueryResp(message: any): void;
-  handleQueryUpdate(message: any): void;
-  handleServerEvent(message: any): Promise<void>;
-  handleServerBatchEvent(message: any): Promise<void>;
-  handleGcPrune(message: any): Promise<void>;
-  handleHybridQueryResponse(payload: any): void;
-  handleHybridQueryDelta(payload: any): void;
+  handleAuthFail(message: AuthFailMessage): void;
+  handleOpAck(message: OpAckMessage): void;
+  handleQueryResp(message: QueryRespMessage): void;
+  handleQueryUpdate(message: QueryUpdateMessage): void;
+  handleServerEvent(message: ServerEventMessage): Promise<void>;
+  handleServerBatchEvent(message: ServerBatchEventMessage): Promise<void>;
+  handleGcPrune(message: GcPruneMessage): Promise<void>;
+  handleHybridQueryResponse(payload: HybridQueryRespPayload): void;
+  handleHybridQueryDelta(payload: HybridQueryDeltaPayload): void;
 }
 
 /**
@@ -28,39 +54,39 @@ export interface MessageHandlerDelegates {
  */
 export interface ManagerDelegates {
   topicManager: {
-    handleTopicMessage(topic: string, data: any, publisherId: string, timestamp: any): void;
+    handleTopicMessage(topic: string, data: unknown, publisherId: string, timestamp: number): void;
   };
   lockManager: {
     handleLockGranted(requestId: string, fencingToken: number): void;
     handleLockReleased(requestId: string, success: boolean): void;
   };
   counterManager: {
-    handleCounterUpdate(name: string, state: any): void;
+    handleCounterUpdate(name: string, state: { positive: Record<string, number>; negative: Record<string, number> }): void;
   };
   entryProcessorClient: {
-    handleEntryProcessResponse(message: any): void;
-    handleEntryProcessBatchResponse(message: any): void;
+    handleEntryProcessResponse(message: EntryProcessResponse): void;
+    handleEntryProcessBatchResponse(message: EntryProcessBatchResponse): void;
   };
   conflictResolverClient: {
-    handleRegisterResponse(message: any): void;
-    handleUnregisterResponse(message: any): void;
-    handleListResponse(message: any): void;
-    handleMergeRejected(message: any): void;
+    handleRegisterResponse(message: RegisterResolverResponse): void;
+    handleUnregisterResponse(message: UnregisterResolverResponse): void;
+    handleListResponse(message: ListResolversResponse): void;
+    handleMergeRejected(message: MergeRejectedMessage): void;
   };
   searchClient: {
-    handleSearchResponse(payload: any): void;
+    handleSearchResponse(payload: SearchRespPayload): void;
   };
   merkleSyncHandler: {
-    handleSyncRespRoot(payload: any): void;
-    handleSyncRespBuckets(payload: any): void;
-    handleSyncRespLeaf(payload: any): void;
-    handleSyncResetRequired(payload: any): void;
+    handleSyncRespRoot(payload: SyncRespRootPayload): void;
+    handleSyncRespBuckets(payload: SyncRespBucketsPayload): void;
+    handleSyncRespLeaf(payload: SyncRespLeafPayload): void;
+    handleSyncResetRequired(payload: SyncResetRequiredPayload): void;
   };
   orMapSyncHandler: {
-    handleORMapSyncRespRoot(payload: any): void;
-    handleORMapSyncRespBuckets(payload: any): void;
-    handleORMapSyncRespLeaf(payload: any): void;
-    handleORMapDiffResponse(payload: any): void;
+    handleORMapSyncRespRoot(payload: ORMapSyncRespRootPayload): void;
+    handleORMapSyncRespBuckets(payload: ORMapSyncRespBucketsPayload): void;
+    handleORMapSyncRespLeaf(payload: ORMapSyncRespLeafPayload): void;
+    handleORMapDiffResponse(payload: ORMapDiffResponsePayload): void;
   };
 }
 
