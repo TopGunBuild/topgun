@@ -1,17 +1,5 @@
 # To-Do List
 
-## TODO-019 — 2026-02-01
-**Description:** Tech Debt: Legacy/deprecated code patterns
-**Priority:** medium
-**Notes:**
-- Source: SCAN.md (2026-02-01)
-- Files: `packages/client/src/cluster/ClusterClient.ts:480-481`, `packages/core/src/debug/CRDTDebugger.ts:414`, `packages/core/src/query/QueryOptimizer.ts:79-91`
-- Problem: Deprecated APIs still present for backwards compatibility
-- Suggested fix: Create migration guide, remove in next major version
-- Reorder reason: Benefits from type safety improvements in TODO-015
-
----
-
 ## TODO-020 — 2026-02-01
 **Description:** Test Coverage: CLI commands lack test coverage
 **Priority:** low
@@ -36,4 +24,4 @@
 
 ---
 
-*Last updated: 2026-02-01 (TODO-015 converted to SPEC-029)*
+*Last updated: 2026-02-02 (TODO-019 converted to SPEC-030)*

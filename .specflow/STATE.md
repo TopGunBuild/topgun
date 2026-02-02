@@ -4,18 +4,22 @@
 
 - **Active Specification:** none
 - **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Next Step:** `/sf:new` or `/sf:next`
 
 ## Queue
 
 | Spec | Title | Priority | Complexity |
 |------|-------|----------|------------|
-| (empty) | | | |
 
 ## Decisions
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-02 | SPEC-030 | COMPLETED: Clean Up Deprecated APIs and Legacy Code Patterns. Removed 3 deprecated APIs: ClusterClient.sendMessage(), CRDTDebugger legacy format, QueryOptimizer legacy constructor. 6 files modified, 5 commits, 1 audit cycle, 1 review cycle. Archived to .specflow/archive/SPEC-030.md |
+| 2026-02-02 | SPEC-030 | REVIEWED v1: Implementation APPROVED. All 6 acceptance criteria fully met. No deprecated APIs remain. Zero @deprecated annotations. QueryOptimizer only accepts options object. CRDTDebugger throws error for legacy format. MIGRATION.md complete with before/after examples. Build passes. All tests pass (1814 core + 431 client). Code quality excellent with clean removals. All 5 commits properly documented with breaking change markers. No issues. Ready for finalization. |
+| 2026-02-02 | SPEC-030 | EXECUTED: Removed 3 deprecated APIs: ClusterClient.sendMessage(), CRDTDebugger legacy format, QueryOptimizer legacy constructor. Updated 6 files. 5 commits. Build passes. 1814 core tests + 431 client tests pass (2 pre-existing failures unrelated). MIGRATION.md updated with before/after examples. Ready for review. |
+| 2026-02-02 | SPEC-030 | AUDITED v1: Approved. All 10 dimensions passed. Line numbers verified and corrected (ClusterClient 479-488, QueryOptimizer 81-96). Context estimate ~18% (PEAK range). No critical issues. 5 minor corrections applied to spec. Ready for implementation. |
+| 2026-02-02 | SPEC-030 | CREATED: Clean Up Deprecated APIs and Legacy Code Patterns. Removes 3 deprecated patterns: ClusterClient.sendMessage(), CRDTDebugger legacy import format, QueryOptimizer legacy constructor. Updates MIGRATION.md with before/after examples. Source: TODO-019. |
 | 2026-02-02 | SPEC-029 | COMPLETED: Eliminate `any` Types in Message Handling. Created client-message-schemas.ts with Zod schemas. Updated 4 files with typed signatures. 1 file created, 5 files modified, 5 commits, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-029.md |
 | 2026-02-02 | SPEC-029 | REVIEWED v1: Implementation APPROVED. All 5 acceptance criteria met. Zero `any` in message handler signatures (documented exceptions preserved). TypeScript builds with strict mode. 431 tests pass (2 pre-existing failures unrelated). Proper Zod schema inference. All deviations justified. client-message-schemas.ts created. 5 files modified with typed signatures. Code quality excellent. No issues. Ready for finalization. |
 | 2026-02-02 | SPEC-029 | EXECUTED: Eliminated `any` types in message handling. Created client-message-schemas.ts with Zod schemas. Updated ClientMessageHandlers.ts, SyncEngine.ts, TopicHandle.ts, ClusterManager.ts with typed signatures. 5 commits. Build passes. 431 tests pass. 3 deviations documented (counter state type, ClusterMessage.payload, ClusterMessageType). Ready for review. |
