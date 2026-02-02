@@ -75,24 +75,12 @@ export class QueryOptimizer<K, V> {
   /**
    * Create a QueryOptimizer.
    *
-   * @param indexRegistryOrOptions - IndexRegistry or options object
-   * @param standingQueryRegistry - Optional StandingQueryRegistry (deprecated, use options)
+   * @param options - QueryOptimizer options
    */
-  constructor(
-    indexRegistryOrOptions: IndexRegistry<K, V> | QueryOptimizerOptions<K, V>,
-    standingQueryRegistry?: StandingQueryRegistry<K, V>
-  ) {
-    if ('indexRegistry' in indexRegistryOrOptions) {
-      // Options object
-      this.indexRegistry = indexRegistryOrOptions.indexRegistry;
-      this.standingQueryRegistry = indexRegistryOrOptions.standingQueryRegistry;
-      this.fullTextIndexes = indexRegistryOrOptions.fullTextIndexes ?? new Map();
-    } else {
-      // Legacy: direct IndexRegistry
-      this.indexRegistry = indexRegistryOrOptions;
-      this.standingQueryRegistry = standingQueryRegistry;
-      this.fullTextIndexes = new Map();
-    }
+  constructor(options: QueryOptimizerOptions<K, V>) {
+    this.indexRegistry = options.indexRegistry;
+    this.standingQueryRegistry = options.standingQueryRegistry;
+    this.fullTextIndexes = options.fullTextIndexes ?? new Map();
   }
 
   /**
