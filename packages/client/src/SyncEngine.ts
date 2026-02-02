@@ -1,6 +1,18 @@
 import { HLC, LWWMap, ORMap, deserialize, evaluatePredicate } from '@topgunbuild/core';
 import type { EntryProcessorDef, EntryProcessorResult, SearchOptions } from '@topgunbuild/core';
 import type { LWWRecord, ORMapRecord, Timestamp } from '@topgunbuild/core';
+import type {
+  AuthFailMessage,
+  OpAckMessage,
+  QueryRespMessage,
+  QueryUpdateMessage,
+  ServerEventMessage,
+  ServerBatchEventMessage,
+  GcPruneMessage,
+  HybridQueryRespPayload,
+  HybridQueryDeltaPayload,
+  BatchMessage,
+} from '@topgunbuild/core';
 import type { IStorageAdapter } from './IStorageAdapter';
 import { QueryHandle } from './QueryHandle';
 import type { QueryFilter } from './QueryHandle';
@@ -410,7 +422,7 @@ export class SyncEngine {
    * Send a message through the current connection.
    * Delegates to WebSocketManager.
    */
-  private sendMessage(message: any, key?: string): boolean {
+  private sendMessage(message: unknown, key?: string): boolean {
     return this.webSocketManager.sendMessage(message, key);
   }
 
@@ -583,7 +595,7 @@ export class SyncEngine {
    * Publish a message to a topic.
    * Delegates to TopicManager.
    */
-  public publishTopic(topic: string, data: any): void {
+  public publishTopic(topic: string, data: unknown): void {
     this.topicManager.publishTopic(topic, data);
   }
 
@@ -627,13 +639,13 @@ export class SyncEngine {
     return this.lockManager.releaseLock(name, requestId, fencingToken);
   }
 
-  private async handleServerMessage(message: any): Promise<void> {
+  private async handleServerMessage(message: { type: string; payload?: unknown; timestamp?: Timestamp }): Promise<void> {
     // Emit to generic listeners (used by EventJournalReader)
     this.emitMessage(message);
 
     // Handle BATCH specially (recursive unbatch)
     if (message.type === 'BATCH') {
-      await this.handleBatch(message);
+      await this.handleBatch(message as BatchMessage);
       return;
     }
 
@@ -652,10 +664,10 @@ export class SyncEngine {
   // Message Handler Helpers (extracted from switch)
   // ============================================
 
-  private async handleBatch(message: any): Promise<void> {
+  private async handleBatch(message: BatchMessage): Promise<void> {
     // Unbatch and process each message
     // Format: [4 bytes: count][4 bytes: len1][msg1][4 bytes: len2][msg2]...
-    const batchData = message.data as Uint8Array;
+    const batchData = message.data;
     const view = new DataView(batchData.buffer, batchData.byteOffset, batchData.byteLength);
     let offset = 0;
 
@@ -669,7 +681,7 @@ export class SyncEngine {
       const msgData = batchData.slice(offset, offset + msgLen);
       offset += msgLen;
 
-      const innerMsg = deserialize(msgData);
+      const innerMsg = deserialize(msgData) as { type: string; payload?: unknown; timestamp?: Timestamp };
       await this.handleServerMessage(innerMsg);
     }
   }
@@ -704,14 +716,14 @@ export class SyncEngine {
     this.stateMachine.transition(SyncState.CONNECTED);
   }
 
-  private handleAuthFail(message: any): void {
+  private handleAuthFail(message: AuthFailMessage): void {
     logger.error({ error: message.error }, 'Authentication failed');
     this.authToken = null; // Clear invalid token
     // Stay in AUTHENTICATING or go to ERROR depending on severity
     // For now, let the connection close naturally or retry with new token
   }
 
-  private handleOpAck(message: any): void {
+  private handleOpAck(message: OpAckMessage): void {
     const { lastId, achievedLevel, results } = message.payload;
     logger.info({ lastId, achievedLevel, hasResults: !!results }, 'Received ACK for ops');
 
@@ -752,7 +764,7 @@ export class SyncEngine {
     }
   }
 
-  private handleQueryResp(message: any): void {
+  private handleQueryResp(message: QueryRespMessage): void {
     const { queryId, results, nextCursor, hasMore, cursorStatus } = message.payload;
     const query = this.queryManager.getQueries().get(queryId);
     if (query) {
@@ -761,7 +773,7 @@ export class SyncEngine {
     }
   }
 
-  private handleQueryUpdate(message: any): void {
+  private handleQueryUpdate(message: QueryUpdateMessage): void {
     const { queryId, key, value, type } = message.payload;
     const query = this.queryManager.getQueries().get(queryId);
     if (query) {
@@ -769,13 +781,13 @@ export class SyncEngine {
     }
   }
 
-  private async handleServerEvent(message: any): Promise<void> {
+  private async handleServerEvent(message: ServerEventMessage): Promise<void> {
     // Modified to support ORMap
     const { mapName, eventType, key, record, orRecord, orTag } = message.payload;
     await this.applyServerEvent(mapName, eventType, key, record, orRecord, orTag);
   }
 
-  private async handleServerBatchEvent(message: any): Promise<void> {
+  private async handleServerBatchEvent(message: ServerBatchEventMessage): Promise<void> {
     // === OPTIMIZATION: Batch event processing ===
     // Server sends multiple events in a single message for efficiency
     const { events } = message.payload;
@@ -791,7 +803,7 @@ export class SyncEngine {
     }
   }
 
-  private async handleGcPrune(message: any): Promise<void> {
+  private async handleGcPrune(message: GcPruneMessage): Promise<void> {
     const { olderThan } = message.payload;
     logger.info({ olderThan: olderThan.millis }, 'Received GC_PRUNE request');
 
@@ -823,10 +835,10 @@ export class SyncEngine {
    */
   private async applyServerEvent(
     mapName: string,
-    eventType: string,
+    eventType: 'PUT' | 'REMOVE' | 'OR_ADD' | 'OR_REMOVE',
     key: string,
-    record?: any,
-    orRecord?: any,
+    record?: LWWRecord<unknown>,
+    orRecord?: ORMapRecord<unknown>,
     orTag?: string
   ): Promise<void> {
     const localMap = this.maps.get(mapName);
@@ -1092,7 +1104,7 @@ export class SyncEngine {
    * @param listener Callback when counter state is updated
    * @returns Unsubscribe function
    */
-  public onCounterUpdate(name: string, listener: (state: any) => void): () => void {
+  public onCounterUpdate(name: string, listener: (state: { positive: Map<string, number>; negative: Map<string, number> }) => void): () => void {
     return this.counterManager.onCounterUpdate(name, listener);
   }
 
@@ -1111,7 +1123,7 @@ export class SyncEngine {
    * @param name Counter name
    * @param state Counter state to sync
    */
-  public syncCounter(name: string, state: any): void {
+  public syncCounter(name: string, state: { positive: Map<string, number>; negative: Map<string, number> }): void {
     this.counterManager.syncCounter(name, state);
   }
 
@@ -1158,7 +1170,7 @@ export class SyncEngine {
   // ============================================
 
   /** Message listeners for journal and other generic messages */
-  private messageListeners: Set<(message: any) => void> = new Set();
+  private messageListeners: Set<(message: unknown) => void> = new Set();
 
   /**
    * Subscribe to all incoming messages.
@@ -1167,7 +1179,7 @@ export class SyncEngine {
    * @param event Event type (currently only 'message')
    * @param handler Message handler
    */
-  public on(event: 'message', handler: (message: any) => void): void {
+  public on(event: 'message', handler: (message: unknown) => void): void {
     if (event === 'message') {
       this.messageListeners.add(handler);
     }
@@ -1179,7 +1191,7 @@ export class SyncEngine {
    * @param event Event type (currently only 'message')
    * @param handler Message handler to remove
    */
-  public off(event: 'message', handler: (message: any) => void): void {
+  public off(event: 'message', handler: (message: unknown) => void): void {
     if (event === 'message') {
       this.messageListeners.delete(handler);
     }
@@ -1191,7 +1203,7 @@ export class SyncEngine {
    *
    * @param message Message object to send
    */
-  public send(message: any): void {
+  public send(message: unknown): void {
     this.sendMessage(message);
   }
 
@@ -1199,7 +1211,7 @@ export class SyncEngine {
    * Emit message to all listeners.
    * Called internally when a message is received.
    */
-  private emitMessage(message: any): void {
+  private emitMessage(message: unknown): void {
     for (const listener of this.messageListeners) {
       try {
         listener(message);
@@ -1276,13 +1288,7 @@ export class SyncEngine {
   /**
    * Handle hybrid query response from server.
    */
-  public handleHybridQueryResponse(payload: {
-    subscriptionId: string;
-    results: Array<{ key: string; value: unknown; score: number; matchedTerms: string[] }>;
-    nextCursor?: string;
-    hasMore?: boolean;
-    cursorStatus?: 'valid' | 'expired' | 'invalid' | 'none';
-  }): void {
+  public handleHybridQueryResponse(payload: HybridQueryRespPayload): void {
     const query = this.queryManager.getHybridQuery(payload.subscriptionId);
     if (query) {
       query.onResult(payload.results as any, 'server');
@@ -1297,14 +1303,7 @@ export class SyncEngine {
   /**
    * Handle hybrid query delta update from server.
    */
-  public handleHybridQueryDelta(payload: {
-    subscriptionId: string;
-    key: string;
-    value: unknown | null;
-    score?: number;
-    matchedTerms?: string[];
-    type: 'ENTER' | 'UPDATE' | 'LEAVE';
-  }): void {
+  public handleHybridQueryDelta(payload: HybridQueryDeltaPayload): void {
     const query = this.queryManager.getHybridQuery(payload.subscriptionId);
     if (query) {
       if (payload.type === 'LEAVE') {
