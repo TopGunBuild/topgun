@@ -1,4 +1,4 @@
-import { ServerCoordinator, IServerStorage, StorageValue } from '@topgunbuild/server';
+import { ServerFactory, IServerStorage, StorageValue } from '@topgunbuild/server';
 import { TopGunClient, IStorageAdapter, OpLogEntry } from '@topgunbuild/client';
 import { topGunAdapter } from '@topgunbuild/adapter-better-auth';
 import { betterAuth } from 'better-auth';
@@ -116,7 +116,7 @@ class MemoryClientStorage implements IStorageAdapter {
 async function main() {
     // 1. Start Server
     const serverPort = 4000;
-    const server = new ServerCoordinator({
+    const server = ServerFactory.create({
         port: serverPort,
         clusterPort: 4001,
         nodeId: 'server-1',

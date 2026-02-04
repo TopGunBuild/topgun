@@ -9,13 +9,13 @@ const path = require('path');
 const serverPath = path.join(__dirname, '../packages/server/dist/index.js');
 
 // Импортируем сервер
-const { ServerCoordinator, MemoryServerAdapter } = require(serverPath);
+const { ServerFactory, MemoryServerAdapter } = require(serverPath);
 
 console.log('Starting TopGun server for profiling...');
 
 const adapter = new MemoryServerAdapter();
 
-const server = new ServerCoordinator({
+const server = ServerFactory.create({
   port: parseInt(process.env.PORT || '8080'),
   clusterPort: parseInt(process.env.CLUSTER_PORT || '9080'),
   metricsPort: parseInt(process.env.METRICS_PORT || '9091'),

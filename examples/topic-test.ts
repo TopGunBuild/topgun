@@ -1,4 +1,4 @@
-import { ServerCoordinator } from '../packages/server/src';
+import { ServerFactory } from '../packages/server/src';
 import { deserialize } from '../packages/core/src';
 import { WebSocket } from 'ws';
 
@@ -7,7 +7,7 @@ const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function runTest() {
     // Node 1
-    const node1 = new ServerCoordinator({
+    const node1 = ServerFactory.create({
         port: 8083,
         nodeId: 'node-1',
         host: 'localhost',
@@ -16,7 +16,7 @@ async function runTest() {
     });
 
     // Node 2
-    const node2 = new ServerCoordinator({
+    const node2 = ServerFactory.create({
         port: 8084,
         nodeId: 'node-2',
         host: 'localhost',

@@ -1,8 +1,8 @@
-import { ServerCoordinator } from '../packages/server/src';
+import { ServerFactory } from '../packages/server/src';
 import { WebSocket } from 'ws';
 
 // Node 1
-const node1 = new ServerCoordinator({
+const node1 = ServerFactory.create({
     port: 8081,
     nodeId: 'node-1',
     host: 'localhost',
@@ -11,7 +11,7 @@ const node1 = new ServerCoordinator({
 });
 
 // Node 2
-const node2 = new ServerCoordinator({
+const node2 = ServerFactory.create({
     port: 8082,
     nodeId: 'node-2',
     host: 'localhost',

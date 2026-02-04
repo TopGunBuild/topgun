@@ -16,7 +16,7 @@ import { WebSocket } from 'ws';
 (global as any).WebSocket = WebSocket;
 
 // Use relative import path for server module (cross-package dependency)
-import { ServerCoordinator } from '../../../server/src/ServerCoordinator';
+import { ServerCoordinator, ServerFactory } from '../../../server/src';
 import { ConsistencyLevel } from '@topgunbuild/core';
 import { ClusterClient } from '../cluster/ClusterClient';
 
@@ -50,7 +50,7 @@ describe('ClusterClient Integration', () => {
   describe('3-Node Cluster', () => {
     beforeAll(async () => {
       // Start nodes in order: node-c (highest), node-b, node-a (lowest initiates)
-      node1 = new ServerCoordinator({
+      node1 = ServerFactory.create({
         port: 0,
         nodeId: 'node-c',
         host: 'localhost',
@@ -61,7 +61,7 @@ describe('ClusterClient Integration', () => {
       });
       await node1.ready();
 
-      node2 = new ServerCoordinator({
+      node2 = ServerFactory.create({
         port: 0,
         nodeId: 'node-b',
         host: 'localhost',
@@ -72,7 +72,7 @@ describe('ClusterClient Integration', () => {
       });
       await node2.ready();
 
-      node3 = new ServerCoordinator({
+      node3 = ServerFactory.create({
         port: 0,
         nodeId: 'node-a',
         host: 'localhost',

@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-02-04
+
+### Breaking Changes
+
+> See [MIGRATION.md](./MIGRATION.md) for upgrade instructions.
+
+- **client**: Remove deprecated `ClusterClient.sendMessage()` - use `send(data, key)` instead
+- **core**: Remove legacy constructor from `QueryOptimizer` - use options object
+- **core**: Remove legacy array format from `CRDTDebugger.importHistory()` - use v1.0 format
+
+### Added
+
+#### Observability & Debugging
+- **CRDTDebugger** - Full CRDT operation recording, replay, conflict detection, and export (JSON/CSV/NDJSON)
+- **SearchDebugger** - BM25 TF-IDF breakdown, RRF rank contributions, timing analysis
+- **PrometheusExporter** - Comprehensive metrics: connections, operations, CRDT merges, sync, cluster, storage, queries
+- **Grafana Dashboard** - Pre-built dashboard JSON for TopGun monitoring
+
+#### Admin Dashboard
+- **SetupWizard** - 6-step guided setup for new deployments
+- **DataExplorer** - Browse and edit map data with JSON editor
+- **QueryPlayground** - Monaco editor with Cmd+Enter execution
+- **ClusterTopology** - Visual cluster ring and partition distribution
+- **CommandPalette** - Cmd+K quick navigation
+- **Settings** - Hot-reloadable runtime configuration
+- **Login/Auth** - JWT-based admin authentication
+
+#### Distributed Search & Subscriptions
+- **ClusterSearchCoordinator** - Scatter-gather distributed FTS with RRF merge
+- **DistributedSubscriptionCoordinator** - Live query subscriptions across cluster nodes
+- **QueryCursor** - Cursor-based pagination for distributed queries
+- **SearchCursor** - Cursor-based pagination for distributed search
+- **CLUSTER_SEARCH_REQ/RESP** - New cluster protocol messages
+- **CLUSTER_SUB_REGISTER/UPDATE** - Distributed subscription protocol
+
+#### CLI & Developer Experience
+- **CLI Commands** - `topgun doctor`, `setup`, `dev`, `test`, `config`, `cluster`, `debug:crdt`, `debug:search`
+- **BetterSqlite3Adapter** - SQLite storage adapter for server-side persistence
+- **DevContainer** - VS Code/Codespaces development environment
+- **Docker Compose Profiles** - `admin`, `monitoring`, `dbtools` profiles
+
+#### Infrastructure
+- **Environment Validation** - Zod schema for server configuration
+- **TOPGUN_DEBUG_ENDPOINTS** - Security control for debug endpoints (disabled by default)
+- **foreignKeyMap** - Custom database schema support for better-auth adapter
+
+### Changed
+
+- **server**: Refactor DistributedSubscriptionCoordinator into focused coordinators (Base, Search, Query)
+- **server**: Wire SearchCoordinator.dispose() into LifecycleManager for timer cleanup
+- **server**: Extract handlers from ServerCoordinator into domain modules
+- **core**: Split schemas.ts (1160 lines) into domain-focused modules
+- **core**: Structured logging with pino throughout codebase
+
+### Removed
+
+- Dead code from ServerCoordinator (~1,263 lines)
+- Phase/Spec/Bug references from code comments (488 occurrences)
+- `jest.retryTimes` from flaky tests (proper fixes applied)
+
+### Fixed
+
+- Timer cleanup in SearchCoordinator preventing memory leaks
+- Type safety improvements across client message handlers
+- WebCrypto polyfill for consistent test environment
+
+### Tests
+
+- CLI command tests (28 tests covering all commands)
+- 1814 tests in core package
+- Cluster E2E tests for partition routing, node failure, replication
+
 ## [0.9.0] - 2026-01-06
 
 ### Added

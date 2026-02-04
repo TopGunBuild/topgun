@@ -1,4 +1,4 @@
-import { ServerCoordinator, PostgresAdapter, MemoryServerAdapter, BetterSqlite3Adapter, IServerStorage } from '@topgunbuild/server';
+import { ServerFactory, PostgresAdapter, MemoryServerAdapter, BetterSqlite3Adapter, IServerStorage } from '@topgunbuild/server';
 import { PoolConfig } from 'pg';
 import * as path from 'path';
 
@@ -57,7 +57,7 @@ const createStorageAdapter = (): IServerStorage => {
 
 const adapter = createStorageAdapter();
 
-const server = new ServerCoordinator({
+const server = ServerFactory.create({
   port: parseInt(process.env.PORT || '8080'),
   clusterPort: parseInt(process.env.CLUSTER_PORT || '9080'),
   metricsPort: parseInt(process.env.METRICS_PORT || '9091'),

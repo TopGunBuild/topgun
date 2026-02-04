@@ -1,4 +1,4 @@
-import { ServerCoordinator } from '../packages/server/src';
+import { ServerFactory } from '../packages/server/src';
 import { WebSocket } from 'ws';
 import { deserialize } from '../packages/core/src/serializer';
 
@@ -9,7 +9,7 @@ async function runTest() {
     console.log('Starting Distributed Query Test...');
 
     // 1. Start 3 Nodes
-    const node1 = new ServerCoordinator({
+    const node1 = ServerFactory.create({
         port: 8081,
         nodeId: 'node-1',
         host: 'localhost',
@@ -17,7 +17,7 @@ async function runTest() {
         peers: ['localhost:9002', 'localhost:9003']
     });
 
-    const node2 = new ServerCoordinator({
+    const node2 = ServerFactory.create({
         port: 8082,
         nodeId: 'node-2',
         host: 'localhost',
@@ -25,7 +25,7 @@ async function runTest() {
         peers: ['localhost:9001', 'localhost:9003']
     });
 
-    const node3 = new ServerCoordinator({
+    const node3 = ServerFactory.create({
         port: 8083,
         nodeId: 'node-3',
         host: 'localhost',

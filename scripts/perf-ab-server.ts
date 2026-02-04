@@ -9,7 +9,7 @@
  *     - no-coalescing (writeCoalescingEnabled: false)
  *     - aggressive    (all optimizations combined)
  */
-import { ServerCoordinator, MemoryServerAdapter } from '@topgunbuild/server';
+import { ServerFactory, MemoryServerAdapter } from '@topgunbuild/server';
 
 type PerfProfile = 'baseline' | 'low-delay' | 'large-batch' | 'no-coalescing' | 'aggressive';
 
@@ -82,7 +82,7 @@ Object.entries(config).forEach(([key, value]) => {
 console.log('╚══════════════════════════════════════════════════════════════════╝');
 console.log('');
 
-const server = new ServerCoordinator({
+const server = ServerFactory.create({
     port: PORT,
     clusterPort: parseInt(process.env.CLUSTER_PORT || '9080'),
     metricsPort: parseInt(process.env.METRICS_PORT || '9091'),

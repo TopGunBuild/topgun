@@ -12,7 +12,7 @@
  *   npx 0x scripts/profile-server.js
  */
 
-const { ServerCoordinator, MemoryServerAdapter } = require('../packages/server/dist');
+const { ServerFactory, MemoryServerAdapter } = require('../packages/server/dist');
 
 console.log('Starting TopGun Server with profiling...');
 console.log('Press Ctrl+C to stop and generate profile data');
@@ -20,7 +20,7 @@ console.log('');
 
 const adapter = new MemoryServerAdapter();
 
-const server = new ServerCoordinator({
+const server = ServerFactory.create({
   port: parseInt(process.env.PORT || '8080'),
   clusterPort: parseInt(process.env.CLUSTER_PORT || '9080'),
   metricsPort: parseInt(process.env.METRICS_PORT || '9091'),
