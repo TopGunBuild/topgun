@@ -1,6 +1,6 @@
 {
   "name": "storage-worker",
-  "version": "0.0.0",
+  "version": "0.10.1",
   "private": true,
   "scripts": {
     "deploy": "wrangler deploy",
@@ -14,4 +14,3 @@
     "aws4fetch": "^1.0.17"
   }
 }
-
