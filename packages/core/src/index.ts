@@ -20,7 +20,6 @@ import type {
 export { HLC, LWWMap, ORMap, MerkleTree, ORMapMerkleTree, PNCounterImpl };
 export { hashORMapEntry, hashORMapRecord, timestampToString, compareTimestamps };
 export type { PNCounter, PNCounterState, PNCounterStateObject, PNCounterConfig };
-export type { ClockSource } from './HLC';
 
 // Event Journal exports
 export { Ringbuffer, EventJournalImpl, DEFAULT_EVENT_JOURNAL_CONFIG };
