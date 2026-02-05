@@ -71,7 +71,8 @@ describe('InvariantChecker', () => {
 
       expect(result.passed).toBe(false);
       expect(result.failures).toContain('positive');
-      expect(result.failures).toContain('lessThan10');
+      expect(result.failures).toContain('even');
+      expect(result.failures.length).toBeGreaterThan(1);
     });
 
     test('handles exceptions in invariant checks', () => {
@@ -264,8 +265,9 @@ describe('CRDTInvariants', () => {
       const tree1 = new MerkleTree();
       const tree2 = new MerkleTree();
 
-      tree1.update('key1', { value: 'data' });
-      tree2.update('key1', { value: 'data' });
+      const record = { value: 'data', timestamp: { millis: 1000, counter: 0, nodeId: 'a' } };
+      tree1.update('key1', record);
+      tree2.update('key1', record);
 
       expect(CRDTInvariants.merkleConsistency([tree1, tree2])).toBe(true);
     });
@@ -274,15 +276,18 @@ describe('CRDTInvariants', () => {
       const tree1 = new MerkleTree();
       const tree2 = new MerkleTree();
 
-      tree1.update('key1', { value: 'data1' });
-      tree2.update('key1', { value: 'data2' });
+      const record1 = { value: 'data1', timestamp: { millis: 1000, counter: 0, nodeId: 'a' } };
+      const record2 = { value: 'data2', timestamp: { millis: 2000, counter: 0, nodeId: 'b' } };
+      tree1.update('key1', record1);
+      tree2.update('key1', record2);
 
       expect(CRDTInvariants.merkleConsistency([tree1, tree2])).toBe(false);
     });
 
     test('passes for single tree', () => {
       const tree = new MerkleTree();
-      tree.update('key1', { value: 'data' });
+      const record = { value: 'data', timestamp: { millis: 1000, counter: 0, nodeId: 'a' } };
+      tree.update('key1', record);
 
       expect(CRDTInvariants.merkleConsistency([tree])).toBe(true);
     });

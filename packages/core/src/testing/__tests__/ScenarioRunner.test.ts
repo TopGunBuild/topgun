@@ -270,7 +270,7 @@ describe('ScenarioRunner', () => {
         duration: 10
       });
 
-      const checker = new InvariantChecker<null>();
+      const checker = new InvariantChecker<unknown>();
       checker.addInvariant('always-true', () => true);
 
       const result = runner.run(() => {}, () => {}, checker);
@@ -285,7 +285,7 @@ describe('ScenarioRunner', () => {
         duration: 10
       });
 
-      const checker = new InvariantChecker<null>();
+      const checker = new InvariantChecker<unknown>();
       checker.addInvariant('always-false', () => false);
 
       const result = runner.run(() => {}, () => {}, checker);
