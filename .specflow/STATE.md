@@ -2,19 +2,30 @@
 
 ## Current Position
 
-- **Active Specification:** (none)
+- **Active Specification:** none
 - **Status:** idle
-- **TODO Items:** 16
-- **Next Step:** /sf:next
+- **TODO Items:** 15
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
-(empty)
+| Position | Spec | Title | Status |
+|----------|------|-------|--------|
+| (empty) | - | - | - |
 
 ## Decisions
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-05 | SPEC-034 | COMPLETED: Network-aware Cost Model. Created 1 file (NetworkCostModel.test.ts with 16 tests), modified 4 files (QueryTypes, QueryOptimizer, query/index, core/index). 5 commits, 2 audit cycles, 2 review cycles. Archived to .specflow/archive/SPEC-034.md |
+| 2026-02-05 | SPEC-034 | REVIEWED v2: Implementation APPROVED. Critical issue from Review v1 resolved - all 4 exports (QueryContext, DistributedCost, COST_WEIGHTS, calculateTotalCost) now present in packages/core/src/index.ts. All 10 acceptance criteria fully satisfied. All 1956 tests pass (including 16 new NetworkCostModel tests). Build succeeds. No issues found. Ready for finalization. |
+| 2026-02-05 | SPEC-034 | FIXED v1: Added missing exports to packages/core/src/index.ts. Added COST_WEIGHTS, calculateTotalCost to value exports; QueryContext, DistributedCost to type exports. Build passes, all 16 tests pass. AC9 now satisfied. Ready for re-review. |
+| 2026-02-05 | SPEC-034 | REVIEWED v1: Changes Requested. 1 critical issue: missing exports in main package index (src/index.ts). AC9 blocked - QueryContext, DistributedCost, COST_WEIGHTS, calculateTotalCost not re-exported from main entry point. All other ACs pass. Code quality excellent. |
+| 2026-02-05 | SPEC-034 | EXECUTED: Network-aware Cost Model for Distributed Query Planning. Created 1 file (NetworkCostModel.test.ts with 16 tests), modified 3 files (QueryTypes, QueryOptimizer, query/index). 4 commits. All 10 acceptance criteria met. All 1956 tests pass. No deviations. Ready for review. |
+| 2026-02-05 | SPEC-034 | AUDITED v2: Approved. All 10 dimensions pass. Context estimate ~18% (PEAK range). Response v1 verified - index-scan test added, filter delegation test added, TestRecord updated, `children` property correctly used. Goal-backward validation complete. Ready for implementation. |
+| 2026-02-05 | SPEC-034 | REVISED v1: Applied both Audit v1 recommendations. Added index-scan test verifying network cost assignment. Added filter test verifying recursive delegation to source step's distributed cost. Updated TestRecord interface with status field. Ready for re-audit. |
+| 2026-02-05 | SPEC-034 | AUDITED v1: Approved. All 10 dimensions pass. Context estimate ~18% (PEAK range). 6 assumptions verified against source code. Goal-backward validation complete. 2 minor recommendations (index-scan test, filter delegation test). Ready for implementation. |
+| 2026-02-05 | SPEC-034 | CREATED: Network-aware Cost Model for Distributed Query Planning. Adds DistributedCost interface, COST_WEIGHTS constants, calculateTotalCost(), and estimateDistributedCost() method to QueryOptimizer. Source: TODO-037. |
 | 2026-02-05 | SPEC-033 | ARCHIVED: Point Lookup Optimization (renumbered from SPEC-002 due to ID conflict with archive). All 8 acceptance criteria met. Archived to .specflow/archive/SPEC-033.md |
 | 2026-02-05 | SPEC-002 | COMPLETED: Point Lookup Optimization. Created 1 file (PointLookup.test.ts with 12 tests), modified 5 files (QueryTypes, QueryOptimizer, QueryExecutor, query/index, IndexedLWWMap). 6 commits. All 8 acceptance criteria met. All 1940 tests pass. 1 deviation (IndexedLWWMap needed point lookup handling). Ready for review. |
 | 2026-02-05 | SPEC-002 | AUDITED v2: Approved. All 10 dimensions pass. Context estimate ~22% (PEAK range). Response v1 changes verified (empty values edge case added, AC8 updated to 9 tests, edge cases section added). Goal-backward validation complete. Ready for implementation. |

@@ -9,31 +9,6 @@
 
 *Goal: Build safety net, capture low-hanging fruit*
 
-### TODO-028: Point Lookup Optimization
-- **Priority:** 🟢 Quick Win
-- **Complexity:** Low
-- **Context:** [reference/HAZELCAST_QUICK_WINS.md](../reference/HAZELCAST_QUICK_WINS.md)
-- **Summary:** Optimize single-key lookups bypassing query planning
-- **Why Now:** 1-2 days effort, 2-3x speedup on common operation
-- **Current:** All queries go through QueryPlanner even for `equal('id', 'foo')`
-- **Solution:** Detect point lookups and use direct HashIndex access
-- **Expected:** 2-3x speedup for single-key queries
-- **Effort:** 1-2 days
-
----
-
-### TODO-037: Network-aware Cost Model
-- **Priority:** 🟢 Quick Win
-- **Complexity:** Low
-- **Context:** [reference/HAZELCAST_QUICK_WINS.md](../reference/HAZELCAST_QUICK_WINS.md)
-- **Summary:** Factor network latency into query cost estimation
-- **Why Now:** Low risk, improves query planner decisions
-- **Current:** Cost model considers only CPU/memory
-- **Solution:** Add network hop cost to distributed query planning
-- **Effort:** 2-3 days
-
----
-
 ### TODO-038: Index Hints
 - **Priority:** 🟢 Quick Win
 - **Complexity:** Low
@@ -285,7 +260,7 @@
 
 | Wave | Items | Total Effort | Focus |
 |------|-------|--------------|-------|
-| 1. Foundation | 4 | ~1 week | Quick wins + docs |
+| 1. Foundation | 2 | ~3 days | Quick wins + docs |
 | 2. Market Expansion | 3 | ~4 weeks | Serverless + cluster |
 | 3. Performance | 2 | ~6 weeks | Storage + WASM |
 | 4. Advanced Features | 3 | ~10 weeks | DAG + Vector + Extensions |
@@ -295,30 +270,26 @@
 
 | # | TODO | Wave | Effort | ROI |
 |---|------|------|--------|-----|
-| 1 | TODO-028 | 1 | 1-2 days | 🟢 High |
-| 2 | TODO-037 | 1 | 2-3 days | 🟢 Medium |
-| 3 | TODO-038 | 1 | 1-2 days | 🟢 Medium |
-| 4 | TODO-045 | 1 | 0.5-1 day | 🟢 Low |
-| 5 | TODO-026 | 2 | 2-3 weeks | 🔴 High |
-| 6 | TODO-029 | 2 | 1 week | 🟡 Medium |
-| 7 | TODO-023 | 2 | ~16 hours | 🟡 Medium |
-| 8 | TODO-033 | 3 | 2-3 weeks | 🟡 Medium |
-| 9 | TODO-034 | 3 | 4-6 weeks | 🟡 Medium |
-| 10 | TODO-025 | 4 | 4-6 weeks | 🟡 Medium |
-| 11 | TODO-039 | 4 | 4 weeks | 🟡 Medium |
-| 12 | TODO-036 | 4 | 2-3 weeks | 🟢 Low |
-| 13 | TODO-041 | 5 | Large | 🔵 Deferred |
-| 14 | TODO-043 | 5 | 6-8 weeks | 🔵 Deferred |
-| 15 | TODO-044 | 5 | 4-6 weeks | 🔵 Deferred |
-| 16 | TODO-040 | 5 | Large | 🔵 Deferred |
-| 17 | TODO-042 | 5 | Very Large | ⚠️ Risk |
+| 1 | TODO-038 | 1 | 1-2 days | 🟢 Medium |
+| 2 | TODO-045 | 1 | 0.5-1 day | 🟢 Low |
+| 3 | TODO-026 | 2 | 2-3 weeks | 🔴 High |
+| 4 | TODO-029 | 2 | 1 week | 🟡 Medium |
+| 5 | TODO-023 | 2 | ~16 hours | 🟡 Medium |
+| 6 | TODO-033 | 3 | 2-3 weeks | 🟡 Medium |
+| 7 | TODO-034 | 3 | 4-6 weeks | 🟡 Medium |
+| 8 | TODO-025 | 4 | 4-6 weeks | 🟡 Medium |
+| 9 | TODO-039 | 4 | 4 weeks | 🟡 Medium |
+| 10 | TODO-036 | 4 | 2-3 weeks | 🟢 Low |
+| 11 | TODO-041 | 5 | Large | 🔵 Deferred |
+| 12 | TODO-043 | 5 | 6-8 weeks | 🔵 Deferred |
+| 13 | TODO-044 | 5 | 4-6 weeks | 🔵 Deferred |
+| 14 | TODO-040 | 5 | Large | 🔵 Deferred |
+| 15 | TODO-042 | 5 | Very Large | ⚠️ Risk |
 
 ### Context Files
 
 | TODO | Context File | Lines |
 |------|--------------|-------|
-| TODO-028 | HAZELCAST_QUICK_WINS.md | 400+ |
-| TODO-037 | HAZELCAST_QUICK_WINS.md | 400+ |
 | TODO-038 | HAZELCAST_QUICK_WINS.md | 400+ |
 | TODO-026 | TURSO_INSIGHTS.md (Section 1) | 482 |
 | TODO-029 | HAZELCAST_QUICK_WINS.md | 400+ |
