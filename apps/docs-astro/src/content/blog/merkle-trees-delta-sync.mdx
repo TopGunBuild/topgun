@@ -1,0 +1,283 @@
+---
+title: "Merkle Trees: How TopGun Syncs Only What Changed"
+excerpt: "Syncing a 100MB dataset shouldn't transfer 100MB. Here's how Merkle Trees let TopGun identify differences with a handful of hashes and transfer only the records that actually changed."
+date: "Feb 5, 2026"
+readTime: "7 min read"
+author: "Ivan Kalashnik"
+role: "Creator"
+category: "Engineering"
+image: "/images/blog-merkle-sync.png"
+avatar: "/images/ivan-avatar.jpeg"
+---
+
+Your user has been offline for three days. They made 50 edits. The server has 10,000 new records from other users.
+
+How do you sync?
+
+The naive approach: download everything, compare locally, upload everything. For a 100MB dataset, that's 200MB transferred—most of it redundant.
+
+TopGun's approach: exchange a few hashes, identify exactly what differs, transfer only those records. For the same dataset, that might be 50KB.
+
+The secret is a data structure invented in 1979: the **Merkle Tree**.
+
+## The Problem: Efficient Difference Detection
+
+Consider two databases with 100,000 records each. They're mostly identical, but somewhere in there, 17 records differ.
+
+Finding those 17 records seems to require comparing all 100,000. That's O(n) comparisons at minimum. For large datasets over slow connections, this is painful.
+
+But what if we could narrow down to those 17 records in O(log n) steps?
+
+## Hash Trees: The Core Insight
+
+Ralph Merkle's insight was simple: organize hashes hierarchically.
+
+```
+                    Root Hash
+                   /         \
+           Hash(A+B)         Hash(C+D)
+           /      \          /      \
+      Hash(A)  Hash(B)  Hash(C)  Hash(D)
+         |        |        |        |
+      Record A Record B Record C Record D
+```
+
+Each leaf is a hash of actual data. Each parent is a hash of its children's hashes. The root hash represents the entire dataset.
+
+Here's the magic: **if two trees have the same root hash, they contain identical data**. If root hashes differ, we can drill down to find exactly which branches diverge.
+
+## TopGun's Implementation: The Prefix Trie
+
+TopGun uses a specialized Merkle Tree based on key hashes. Each record's key is hashed, and the hex digits of that hash determine its position in the tree.
+
+```typescript
+interface MerkleNode {
+  hash: number;
+  children?: { [key: string]: MerkleNode }; // Hex char → child
+  entries?: Map<string, number>;             // Leaf: key → contentHash
+}
+```
+
+For a tree with depth 3, a key like `"user:alice"` might hash to `"a7f3..."`, placing it at path `a → 7 → f`.
+
+```typescript
+public update(key: string, record: LWWRecord<any>) {
+  // Hash includes key + timestamp for change detection
+  const itemHash = hashString(
+    `${key}:${record.timestamp.millis}:${record.timestamp.counter}:${record.timestamp.nodeId}`
+  );
+
+  // Route by key hash (consistent bucket assignment)
+  const pathHash = hashString(key).toString(16).padStart(8, '0');
+
+  this.updateNode(this.root, key, itemHash, pathHash, 0);
+}
+```
+
+Two critical design decisions:
+
+1. **Item hash includes timestamp**: If a record's value or timestamp changes, its hash changes, bubbling up to the root.
+
+2. **Path is based on key hash only**: A record always lives in the same bucket, regardless of its value. This prevents records from "moving" during updates.
+
+## The Sync Protocol
+
+When a client reconnects after being offline, here's what happens:
+
+### Step 1: Exchange Root Hashes
+
+```
+Client → Server: "My root hash is 0x7a3f9b2c"
+Server → Client: "My root hash is 0x7a3f9b2c"
+```
+
+If hashes match: **sync complete**. Zero bytes of actual data transferred.
+
+If hashes differ: proceed to step 2.
+
+### Step 2: Compare Buckets
+
+```
+Client → Server: "What are your level-1 bucket hashes?"
+Server → Client: { "a": 0x123, "b": 0x456, "c": 0x789, ... }
+```
+
+The client compares these against its own buckets. Most will match. Let's say bucket "7" differs:
+
+```typescript
+public getBuckets(path: string): Record<string, number> {
+  const node = this.getNode(path);
+  if (!node || !node.children) return {};
+
+  const result: Record<string, number> = {};
+  for (const [key, child] of Object.entries(node.children)) {
+    result[key] = child.hash;
+  }
+  return result;
+}
+```
+
+### Step 3: Drill Down
+
+Now we only investigate bucket "7":
+
+```
+Client → Server: "What are your bucket hashes under path '7'?"
+Server → Client: { "a": 0xabc, "f": 0xdef, ... }
+```
+
+Compare again. Bucket "7f" differs. Continue drilling until we reach leaf nodes.
+
+### Step 4: Exchange Leaf Keys
+
+At the leaf level, we get actual keys:
+
+```typescript
+public getKeysInBucket(path: string): string[] {
+  const node = this.getNode(path);
+  if (!node || !node.entries) return [];
+  return Array.from(node.entries.keys());
+}
+```
+
+```
+Client → Server: "Keys in bucket '7f2': ['user:alice', 'user:bob', 'post:123']"
+Server → Client: "Keys in bucket '7f2': ['user:alice', 'user:charlie', 'post:123']"
+```
+
+Now we know:
+- `user:bob` exists only on client → send to server
+- `user:charlie` exists only on server → send to client
+- `user:alice` and `post:123` exist on both → compare timestamps, send the newer version
+
+### Step 5: Transfer Only Changed Records
+
+Finally, only the actual differing records are transmitted:
+
+```
+Client → Server: { "user:bob": { value: {...}, timestamp: {...} } }
+Server → Client: { "user:charlie": { value: {...}, timestamp: {...} } }
+```
+
+## Bandwidth Analysis
+
+Let's do the math for a realistic scenario:
+
+- **Dataset**: 100,000 records, average 1KB each = 100MB total
+- **Changes**: 100 records modified on server, 50 on client
+- **Tree depth**: 3 levels (16³ = 4,096 buckets)
+
+**Naive sync:**
+- Download: 100MB
+- Upload: 100MB (or at least send all keys for comparison)
+- **Total: ~200MB**
+
+**Merkle sync:**
+- Root hash exchange: 8 bytes × 2 = 16 bytes
+- Level 1 bucket hashes: ~16 × 4 bytes × 2 = 128 bytes
+- Level 2 (only differing buckets): ~50 buckets × 4 bytes × 2 = 400 bytes
+- Level 3 (leaf buckets): ~150 buckets × 4 bytes × 2 = 1,200 bytes
+- Key lists for differing leaves: ~150 keys × 50 bytes = 7,500 bytes
+- Actual records: 150 records × 1KB = 150KB
+- **Total: ~160KB**
+
+That's a **99.84% reduction** in bandwidth. For users on mobile networks or in low-connectivity regions, this is the difference between "works" and "unusable."
+
+## Hash Computation
+
+TopGun uses xxHash64 for speed. The hash function must be:
+
+1. **Deterministic**: Same input always produces same output
+2. **Fast**: Hash computation shouldn't be the bottleneck
+3. **Well-distributed**: Keys spread evenly across buckets
+
+```typescript
+const itemHash = hashString(
+  `${key}:${record.timestamp.millis}:${record.timestamp.counter}:${record.timestamp.nodeId}`
+);
+```
+
+By including the full HLC timestamp in the hash, any change to a record—even just updating to a newer timestamp with the same value—produces a different hash and triggers sync.
+
+## Incremental Updates
+
+The tree doesn't need to be rebuilt from scratch on every change. Updates are incremental:
+
+```typescript
+private updateNode(node: MerkleNode, key: string, itemHash: number,
+                   pathHash: string, level: number): number {
+  if (level >= this.depth) {
+    // Leaf: update entry and recalculate hash
+    if (!node.entries) node.entries = new Map();
+    node.entries.set(key, itemHash);
+
+    let h = 0;
+    for (const val of node.entries.values()) {
+      h = (h + val) | 0;
+    }
+    node.hash = h >>> 0;
+    return node.hash;
+  }
+
+  // Intermediate: update child and recalculate
+  const bucketChar = pathHash[level];
+  // ... recurse into child ...
+
+  let h = 0;
+  for (const child of Object.values(node.children)) {
+    h = (h + child.hash) | 0;
+  }
+  node.hash = h >>> 0;
+  return node.hash;
+}
+```
+
+Updating one record only touches nodes along its path—O(depth) operations, not O(n).
+
+## Deletions and Tombstones
+
+When records are deleted (via tombstones that later get garbage collected), they must be removed from the tree:
+
+```typescript
+public remove(key: string) {
+  const pathHash = hashString(key).toString(16).padStart(8, '0');
+  this.removeNode(this.root, key, pathHash, 0);
+}
+```
+
+The removal propagates up, recalculating parent hashes. This ensures that a deleted record doesn't cause perpetual sync attempts.
+
+## Why Not Just Track "Last Sync Time"?
+
+A common alternative is storing the last sync timestamp and fetching "all records modified since X."
+
+Problems:
+
+1. **Clock skew**: Client and server clocks may differ, causing missed records
+2. **Requires server-side indexing**: Must maintain modified_at indexes
+3. **Doesn't detect local changes**: What if the client modified data that the server also modified?
+4. **No verification**: You trust the server's response is complete
+
+Merkle Trees provide **cryptographic proof** of dataset equality. If root hashes match, you *know* the data is identical—no trust required.
+
+## Real-World Performance
+
+In production, we see:
+
+- **Reconnect after seconds offline**: Usually root hashes match. Zero data transferred.
+- **Reconnect after hours offline**: 2-3 levels of bucket comparison, then small record exchange.
+- **Reconnect after days offline**: Full tree traversal, but still transfers only actual differences.
+
+The protocol gracefully scales from "nothing changed" to "everything changed" without special-casing either extreme.
+
+## Conclusion
+
+Merkle Trees turn sync from an O(n) problem into an O(log n) problem. For offline-first applications, this isn't just an optimization—it's what makes the architecture viable.
+
+When your user opens the app after a week offline, they don't wait minutes for a full download. They wait milliseconds for hash comparison, then seconds for the actual changes. The UI updates, and they're back to work.
+
+That seamless experience? It's built on a tree of hashes, drilling down to find exactly what changed.
+
+---
+
+*Next in this series: How TopGun combines Merkle Trees with Hybrid Logical Clocks for conflict resolution during sync.*
