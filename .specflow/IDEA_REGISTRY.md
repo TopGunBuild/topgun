@@ -3,7 +3,27 @@
 **Purpose:** Centralized tracking of all ideas extracted from PROMPTS directory
 **Created:** 2026-02-03
 **Last Verified:** 2026-02-03
-**Status:** Verified against codebase
+**Migrated to SpecFlow:** 2026-02-05
+**Status:** Migrated with context preservation
+
+---
+
+## Migration Status (2026-02-05)
+
+**Context files preserved in:** `.specflow/reference/`
+
+| File | Source | TODO Coverage |
+|------|--------|---------------|
+| PHASE_4.5_CLIENT_CLUSTER_SPEC.md | PROMPTS | TODO-023 |
+| HAZELCAST_DAG_EXECUTOR_SPEC.md | PROMPTS | TODO-025 |
+| HAZELCAST_QUICK_WINS.md | PROMPTS | TODO-028, 029, 037, 038 |
+| TURSO_INSIGHTS.md | PROMPTS | TODO-026, 027, 036, 042, 043, 044 |
+| RUST_WASM_ANALYSIS.md | PROMPTS | TODO-034 |
+| PHASE_15_VECTOR_SEARCH_SPEC.md | PROMPTS | TODO-039 |
+| PHASE_5_MULTI_TENANCY_SPEC.md | PROMPTS | TODO-041 |
+| topgun-rocksdb.md | Downloads | TODO-033, 040 |
+
+**All 17 TODO items now have context links in:** `.specflow/todos/TODO.md`
 
 ---
 
@@ -12,7 +32,7 @@
 | Status | Count | Notes |
 |--------|-------|-------|
 | ✅ Implemented | ~60 items | Confirmed in codebase |
-| 📋 In TODO.md | 17 items | Verified unimplemented |
+| 📋 In TODO.md | 17 items | Migrated with context links |
 | ❌ Rejected | 3 items | Not applicable to TopGun |
 
 ---
