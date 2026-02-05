@@ -46,6 +46,24 @@
 
 ---
 
+### TODO-045: DST Documentation
+- **Priority:** 🟢 Quick Win
+- **Complexity:** Low
+- **Context:** Implements SPEC-001 (completed 2026-02-05)
+- **Summary:** Document Deterministic Simulation Testing utilities in official docs
+- **Why Now:** New public API (VirtualClock, SeededRNG, ScenarioRunner) exported from @topgunbuild/core
+- **Location:** `apps/docs-astro/src/content/docs/reference/testing.mdx`
+- **Contents:**
+  - VirtualClock: injectable time source for deterministic tests
+  - SeededRNG: reproducible randomness (same seed = same sequence)
+  - VirtualNetwork: simulated packet loss, latency, partitions
+  - InvariantChecker: CRDT convergence property assertions
+  - ScenarioRunner: orchestrates reproducible multi-node simulations
+- **Example:** Show ScenarioRunner usage for chaos testing with seeds
+- **Effort:** 0.5-1 day
+
+---
+
 ## Wave 2: Market Expansion
 
 *Goal: Unlock serverless deployments, improve cluster utilization*
@@ -267,7 +285,7 @@
 
 | Wave | Items | Total Effort | Focus |
 |------|-------|--------------|-------|
-| 1. Foundation | 3 | ~1 week | Quick wins |
+| 1. Foundation | 4 | ~1 week | Quick wins + docs |
 | 2. Market Expansion | 3 | ~4 weeks | Serverless + cluster |
 | 3. Performance | 2 | ~6 weeks | Storage + WASM |
 | 4. Advanced Features | 3 | ~10 weeks | DAG + Vector + Extensions |
@@ -280,19 +298,20 @@
 | 1 | TODO-028 | 1 | 1-2 days | 🟢 High |
 | 2 | TODO-037 | 1 | 2-3 days | 🟢 Medium |
 | 3 | TODO-038 | 1 | 1-2 days | 🟢 Medium |
-| 4 | TODO-026 | 2 | 2-3 weeks | 🔴 High |
-| 5 | TODO-029 | 2 | 1 week | 🟡 Medium |
-| 6 | TODO-023 | 2 | ~16 hours | 🟡 Medium |
-| 7 | TODO-033 | 3 | 2-3 weeks | 🟡 Medium |
-| 8 | TODO-034 | 3 | 4-6 weeks | 🟡 Medium |
-| 9 | TODO-025 | 4 | 4-6 weeks | 🟡 Medium |
-| 10 | TODO-039 | 4 | 4 weeks | 🟡 Medium |
-| 11 | TODO-036 | 4 | 2-3 weeks | 🟢 Low |
-| 12 | TODO-041 | 5 | Large | 🔵 Deferred |
-| 13 | TODO-043 | 5 | 6-8 weeks | 🔵 Deferred |
-| 14 | TODO-044 | 5 | 4-6 weeks | 🔵 Deferred |
-| 15 | TODO-040 | 5 | Large | 🔵 Deferred |
-| 16 | TODO-042 | 5 | Very Large | ⚠️ Risk |
+| 4 | TODO-045 | 1 | 0.5-1 day | 🟢 Low |
+| 5 | TODO-026 | 2 | 2-3 weeks | 🔴 High |
+| 6 | TODO-029 | 2 | 1 week | 🟡 Medium |
+| 7 | TODO-023 | 2 | ~16 hours | 🟡 Medium |
+| 8 | TODO-033 | 3 | 2-3 weeks | 🟡 Medium |
+| 9 | TODO-034 | 3 | 4-6 weeks | 🟡 Medium |
+| 10 | TODO-025 | 4 | 4-6 weeks | 🟡 Medium |
+| 11 | TODO-039 | 4 | 4 weeks | 🟡 Medium |
+| 12 | TODO-036 | 4 | 2-3 weeks | 🟢 Low |
+| 13 | TODO-041 | 5 | Large | 🔵 Deferred |
+| 14 | TODO-043 | 5 | 6-8 weeks | 🔵 Deferred |
+| 15 | TODO-044 | 5 | 4-6 weeks | 🔵 Deferred |
+| 16 | TODO-040 | 5 | Large | 🔵 Deferred |
+| 17 | TODO-042 | 5 | Very Large | ⚠️ Risk |
 
 ### Context Files
 
