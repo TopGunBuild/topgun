@@ -7,6 +7,13 @@ export interface Timestamp {
 }
 
 /**
+ * Clock source interface for time dependency injection.
+ */
+export interface ClockSource {
+  now(): number;
+}
+
+/**
  * Configuration options for HLC behavior.
  */
 export interface HLCOptions {
@@ -22,6 +29,13 @@ export interface HLCOptions {
    * Default: 60000 (1 minute)
    */
   maxDriftMs?: number;
+
+  /**
+   * Clock source for time generation.
+   * Defaults to Date.now() for production use.
+   * Can be replaced with VirtualClock for deterministic testing.
+   */
+  clockSource?: ClockSource;
 }
 
 export class HLC {
@@ -30,11 +44,13 @@ export class HLC {
   private readonly nodeId: string;
   private readonly strictMode: boolean;
   private readonly maxDriftMs: number;
+  private readonly clockSource: ClockSource;
 
   constructor(nodeId: string, options: HLCOptions = {}) {
     this.nodeId = nodeId;
     this.strictMode = options.strictMode ?? false;
     this.maxDriftMs = options.maxDriftMs ?? 60000;
+    this.clockSource = options.clockSource ?? { now: () => Date.now() };
     this.lastMillis = 0;
     this.lastCounter = 0;
   }
@@ -52,11 +68,19 @@ export class HLC {
   }
 
   /**
+   * Returns the clock source used by this HLC instance.
+   * Useful for LWWMap/ORMap to access the same clock for TTL checks.
+   */
+  public getClockSource(): ClockSource {
+    return this.clockSource;
+  }
+
+  /**
    * Generates a new unique timestamp for a local event.
    * Ensures monotonicity: always greater than any previously generated or received timestamp.
    */
   public now(): Timestamp {
-    const systemTime = Date.now();
+    const systemTime = this.clockSource.now();
     
     // If local physical time catches up to logical time, reset counter
     if (systemTime > this.lastMillis) {
@@ -79,7 +103,7 @@ export class HLC {
    * Must be called whenever a message/event is received from another node.
    */
   public update(remote: Timestamp): void {
-    const systemTime = Date.now();
+    const systemTime = this.clockSource.now();
 
     // Validate drift
     const drift = remote.millis - systemTime;
