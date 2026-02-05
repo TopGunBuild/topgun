@@ -121,10 +121,30 @@ export interface QueryOptions {
 // ============== Execution Plan Types ==============
 
 /**
+ * Point lookup step - O(1) direct key access.
+ */
+export interface PointLookupStep {
+  type: 'point-lookup';
+  key: unknown;
+  cost: number;
+}
+
+/**
+ * Multi-point lookup step - O(k) direct key access for k keys.
+ */
+export interface MultiPointLookupStep {
+  type: 'multi-point-lookup';
+  keys: unknown[];
+  cost: number;
+}
+
+/**
  * Execution plan step.
  * Represents a single operation in the query execution plan.
  */
 export type PlanStep =
+  | PointLookupStep
+  | MultiPointLookupStep
   | IndexScanStep
   | FullScanStep
   | IntersectionStep
