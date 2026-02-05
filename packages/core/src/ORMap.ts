@@ -175,11 +175,11 @@ export class ORMap<K, V> {
     if (!keyMap) return [];
 
     const values: V[] = [];
-    const now = Date.now();
+    const now = this.hlc.getClockSource().now();
 
     for (const [tag, record] of keyMap.entries()) {
       if (!this.tombstones.has(tag)) {
-        // Check expiration
+        // Check expiration using HLC's clock source
         if (record.ttlMs && record.timestamp.millis + record.ttlMs < now) {
           continue;
         }
@@ -199,11 +199,11 @@ export class ORMap<K, V> {
     if (!keyMap) return [];
 
     const records: ORMapRecord<V>[] = [];
-    const now = Date.now();
+    const now = this.hlc.getClockSource().now();
 
     for (const [tag, record] of keyMap.entries()) {
       if (!this.tombstones.has(tag)) {
-        // Check expiration
+        // Check expiration using HLC's clock source
         if (record.ttlMs && record.timestamp.millis + record.ttlMs < now) {
           continue;
         }
