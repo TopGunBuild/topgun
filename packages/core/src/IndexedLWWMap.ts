@@ -356,6 +356,26 @@ export class IndexedLWWMap<K extends string, V> extends LWWMap<K, V> {
    */
   private executePlan(step: PlanStep): ResultSet<K> {
     switch (step.type) {
+      case 'point-lookup': {
+        const key = step.key as K;
+        const result = new Set<K>();
+        if (this.get(key) !== undefined) {
+          result.add(key);
+        }
+        return new SetResultSet(result, 1);
+      }
+
+      case 'multi-point-lookup': {
+        const result = new Set<K>();
+        for (const key of step.keys) {
+          const k = key as K;
+          if (this.get(k) !== undefined) {
+            result.add(k);
+          }
+        }
+        return new SetResultSet(result, step.keys.length);
+      }
+
       case 'index-scan':
         return step.index.retrieve(step.query) as ResultSet<K>;
 
