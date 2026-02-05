@@ -2,21 +2,25 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-001
-- **Status:** review
+- **Active Specification:** none
+- **Status:** idle
 - **TODO Items:** 16
-- **Next Step:** /sf:review
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | Spec | Title | Priority | Complexity |
 |------|-------|----------|------------|
-| SPEC-001 | Deterministic Simulation Testing (DST) | critical | medium |
 
 ## Decisions
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-05 | SPEC-001 | COMPLETED: Deterministic Simulation Testing (DST). Created 11 files (VirtualClock, SeededRNG, VirtualNetwork, InvariantChecker, ScenarioRunner + 5 test files + index), modified 4 files (HLC, LWWMap, ORMap, index). 8 commits, 1 audit cycle, 2 review cycles. Archived to .specflow/archive/SPEC-001.md |
+| 2026-02-05 | SPEC-001 | REVIEWED v2: Implementation APPROVED. ClockSource consolidation verified - single definition in HLC.ts, properly imported by VirtualClock.ts. All 11 files created, 4 files modified. All 1928 tests pass. Build succeeds. All 9 acceptance criteria met. No issues found. Ready for finalization. |
+| 2026-02-05 | SPEC-001 | FIXED v1: Consolidated duplicate ClockSource interface. Removed from VirtualClock.ts, now imports from HLC.ts with re-export for compatibility. Build and all tests pass. Ready for re-review. |
+| 2026-02-05 | SPEC-001 | REVIEWED v1: Implementation APPROVED WITH MINOR ISSUE. All 11 files created, 4 files modified. All 9 acceptance criteria met. 1928 tests pass. Build succeeds. 1 minor issue: Duplicate ClockSource interface in HLC.ts and VirtualClock.ts (structurally compatible, no runtime impact). Ready for finalization as-is or optional fix. |
+| 2026-02-05 | SPEC-001 | EXECUTED: Deterministic Simulation Testing (DST). Created testing infrastructure in packages/core/src/testing/ (VirtualClock, SeededRNG, VirtualNetwork, InvariantChecker, ScenarioRunner + 5 test files). Modified HLC, LWWMap, ORMap to use injectable clockSource. Exported DST utilities from core index. 7 commits. 114 new tests. Ready for review. |
 | 2026-02-05 | SPEC-001 | AUDITED v1: Approved. All 10 dimensions pass. Context estimate ~36% (GOOD range). All 6 assumptions verified against source code. Minor clarification added: HLC needs getClockSource() getter for LWWMap/ORMap to access clock source for TTL checks. Ready for implementation. |
 | 2026-02-05 | SPEC-001 | CREATED: Deterministic Simulation Testing (DST). Creates testing infrastructure in packages/core/src/testing/ with VirtualClock, SeededRNG, VirtualNetwork, InvariantChecker, ScenarioRunner. Modifies HLC to accept injectable clockSource. Source: TODO-027. |
 | 2026-02-05 | MIGRATION | COMPLETED: Migrated 17 TODO items from PROMPTS directory with full context preservation. Created .specflow/reference/ with 10 key spec files (5,800+ lines of context). All TODO items in TODO.md now have links to detailed specifications. |
@@ -53,6 +57,7 @@
 - Client message handler pattern: ClientMessageHandlers module registers all client-side message types via registerClientMessageHandlers()
 - React hook testing pattern: use renderHook + act from @testing-library/react with mock client wrapped in TopGunProvider
 - Schema domain splitting pattern: organize schemas by domain (base, sync, query, search, cluster, messaging) with barrel re-exports
+- DST infrastructure pattern: VirtualClock/SeededRNG/VirtualNetwork for deterministic simulation testing; injectable ClockSource via HLC for reproducible time
 
 ## Warnings
 
