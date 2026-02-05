@@ -49,6 +49,8 @@ export {
   type Query,
   type QueryOptions,
   type PlanStep,
+  type PointLookupStep,
+  type MultiPointLookupStep,
   type IndexScanStep,
   type FullScanStep,
   type IntersectionStep,
