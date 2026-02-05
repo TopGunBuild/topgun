@@ -1,10 +1,7 @@
-/**
- * Clock source interface for time dependency injection.
- * Allows swapping real time with virtual time for deterministic testing.
- */
-export interface ClockSource {
-  now(): number;
-}
+import type { ClockSource } from '../HLC';
+
+// Re-export ClockSource for convenience
+export type { ClockSource };
 
 /**
  * Real clock source using system time.
