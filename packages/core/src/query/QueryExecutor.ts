@@ -264,6 +264,12 @@ export class QueryExecutor<K extends string, V> {
    */
   private executeStep(step: PlanStep, data: Map<K, V>): StepResult<K> {
     switch (step.type) {
+      case 'point-lookup':
+        return this.executePointLookup(step, data);
+
+      case 'multi-point-lookup':
+        return this.executeMultiPointLookup(step, data);
+
       case 'index-scan':
         return this.executeIndexScan(step, data);
 
@@ -291,6 +297,42 @@ export class QueryExecutor<K extends string, V> {
       default:
         throw new Error(`Unknown step type: ${(step as PlanStep).type}`);
     }
+  }
+
+  /**
+   * Execute a point lookup step - O(1) direct key access.
+   */
+  private executePointLookup(step: import('./QueryTypes').PointLookupStep, data: Map<K, V>): StepResult<K> {
+    const key = step.key as K;
+    const keys = new Set<K>();
+
+    if (data.has(key)) {
+      keys.add(key);
+    }
+
+    return {
+      keys,
+      source: 'exact',
+    };
+  }
+
+  /**
+   * Execute a multi-point lookup step - O(k) batch key access.
+   */
+  private executeMultiPointLookup(step: import('./QueryTypes').MultiPointLookupStep, data: Map<K, V>): StepResult<K> {
+    const keys = new Set<K>();
+
+    for (const key of step.keys) {
+      const k = key as K;
+      if (data.has(k)) {
+        keys.add(k);
+      }
+    }
+
+    return {
+      keys,
+      source: 'exact',
+    };
   }
 
   /**
