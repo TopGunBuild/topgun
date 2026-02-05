@@ -20,6 +20,7 @@ import type {
 export { HLC, LWWMap, ORMap, MerkleTree, ORMapMerkleTree, PNCounterImpl };
 export { hashORMapEntry, hashORMapRecord, timestampToString, compareTimestamps };
 export type { PNCounter, PNCounterState, PNCounterStateObject, PNCounterConfig };
+export type { ClockSource } from './HLC';
 
 // Event Journal exports
 export { Ringbuffer, EventJournalImpl, DEFAULT_EVENT_JOURNAL_CONFIG };
@@ -336,3 +337,23 @@ export type {
   SearchTiming,
   SearchDebugInfo,
 } from './debug';
+
+// Deterministic Simulation Testing (DST) exports
+export {
+  VirtualClock,
+  RealClock,
+  SeededRNG,
+  VirtualNetwork,
+  InvariantChecker,
+  CRDTInvariants,
+  ScenarioRunner,
+} from './testing';
+export type {
+  ClockSource,
+  NetworkConfig,
+  Message,
+  Invariant,
+  InvariantResult,
+  ScenarioConfig,
+  ScenarioResult,
+} from './testing';
