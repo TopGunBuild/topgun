@@ -83,9 +83,9 @@ export class LWWMap<K, V> {
       return undefined;
     }
 
-    // Check for expiration
+    // Check for expiration using HLC's clock source
     if (record.ttlMs) {
-      const now = Date.now();
+      const now = this.hlc.getClockSource().now();
       if (record.timestamp.millis + record.ttlMs < now) {
         return undefined;
       }
@@ -188,8 +188,8 @@ export class LWWMap<K, V> {
    */
   public entries(): IterableIterator<[K, V]> {
     const iterator = this.data.entries();
-    const now = Date.now();
-    
+    const clockSource = this.hlc.getClockSource();
+
     return {
       [Symbol.iterator]() { return this; },
       next: () => {
@@ -197,8 +197,8 @@ export class LWWMap<K, V> {
         while (!result.done) {
           const [key, record] = result.value;
           if (record.value !== null) {
-            // Check TTL
-            if (record.ttlMs && record.timestamp.millis + record.ttlMs < now) {
+            // Check TTL using clock source
+            if (record.ttlMs && record.timestamp.millis + record.ttlMs < clockSource.now()) {
                 result = iterator.next();
                 continue;
             }
