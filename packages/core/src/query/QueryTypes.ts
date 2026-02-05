@@ -270,6 +270,66 @@ export interface QueryPlan {
   cursor?: string;
 }
 
+// ============== Distributed Cost Model ==============
+
+/**
+ * Query execution context for distributed cost estimation.
+ */
+export interface QueryContext {
+  /** Whether query executes in distributed mode */
+  isDistributed: boolean;
+  /** Number of nodes in cluster */
+  nodeCount: number;
+  /** Whether query uses PostgreSQL storage */
+  usesStorage: boolean;
+  /** Local node ID for partition ownership checks */
+  localNodeId?: string;
+  /** Partition ownership map: partitionId -> ownerNodeId */
+  partitionOwners?: Map<number, string>;
+}
+
+/**
+ * Distributed query cost model.
+ * Inspired by Hazelcast CostUtils.java
+ */
+export interface DistributedCost {
+  /** Estimated number of rows */
+  rows: number;
+  /** CPU cost (computation) */
+  cpu: number;
+  /** Network cost (data transfer between nodes) */
+  network: number;
+  /** I/O cost (disk reads for PostgreSQL) */
+  io: number;
+}
+
+/**
+ * Cost multipliers for distributed query optimization.
+ * Network is weighted 10x higher than CPU because network latency
+ * typically dominates query execution time in distributed systems.
+ */
+export const COST_WEIGHTS = {
+  CPU: 1.0,
+  NETWORK: 10.0,    // Network is expensive (latency, bandwidth)
+  IO: 5.0,          // Disk I/O is moderately expensive
+  ROWS: 0.001,      // Row count factor
+} as const;
+
+/**
+ * Calculate total cost from distributed cost components.
+ *
+ * @param cost - Distributed cost breakdown
+ * @returns Weighted total cost
+ */
+export function calculateTotalCost(cost: DistributedCost): number {
+  return (
+    cost.rows * COST_WEIGHTS.ROWS +
+    cost.cpu * COST_WEIGHTS.CPU +
+    cost.network * COST_WEIGHTS.NETWORK +
+    cost.io * COST_WEIGHTS.IO
+  );
+}
+
 // ============== Type Guards ==============
 
 /**
