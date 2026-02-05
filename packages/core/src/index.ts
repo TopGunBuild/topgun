@@ -194,6 +194,9 @@ export {
   IndexRegistry,
   // Query Optimizer
   QueryOptimizer,
+  // Distributed Cost Model
+  COST_WEIGHTS,
+  calculateTotalCost,
   // Standing Query Registry
   StandingQueryRegistry,
   // Live Query Manager
@@ -245,6 +248,9 @@ export type {
   FilterStep,
   NotStep,
   QueryPlan,
+  // Distributed Cost Model
+  QueryContext,
+  DistributedCost,
   // Index Registry
   IndexRegistryStats,
   // Query Optimizer
