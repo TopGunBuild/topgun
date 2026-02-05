@@ -29,8 +29,10 @@ import type {
   MatchQueryNode,
   MatchPhraseQueryNode,
   MatchPrefixQueryNode,
+  QueryContext,
+  DistributedCost,
 } from './QueryTypes';
-import { isLogicalQuery, isSimpleQuery, isFTSQuery } from './QueryTypes';
+import { isLogicalQuery, isSimpleQuery, isFTSQuery, calculateTotalCost } from './QueryTypes';
 import type { FullTextIndex } from '../fts';
 import type { IndexQuery } from './indexes/types';
 import type { CompoundIndex } from './indexes/CompoundIndex';
@@ -800,6 +802,106 @@ export class QueryOptimizer<K, V> {
       default:
         return Number.MAX_SAFE_INTEGER;
     }
+  }
+
+  /**
+   * Estimate distributed cost including network overhead.
+   *
+   * Network cost is assigned based on step type:
+   * - full-scan: broadcast to all nodes (highest cost)
+   * - index-scan: 0 if local partition, 5 if remote
+   * - point-lookup: 0 if local key, 5 if remote
+   * - intersection/union: aggregating results from multiple sources
+   *
+   * @param step - Plan step to estimate
+   * @param context - Distributed query context (optional)
+   * @returns Distributed cost breakdown
+   */
+  estimateDistributedCost(step: PlanStep, context?: QueryContext): DistributedCost {
+    const baseCost = this.estimateCost(step);
+
+    // If no context or single node, no network cost
+    if (!context?.isDistributed || context.nodeCount <= 1) {
+      return {
+        rows: baseCost,
+        cpu: baseCost,
+        network: 0,
+        io: 0,
+      };
+    }
+
+    // Estimate network cost based on step type
+    let networkCost = 0;
+
+    switch (step.type) {
+      case 'full-scan':
+        // Full scan requires broadcasting query to all nodes
+        networkCost = context.nodeCount * 10;
+        break;
+
+      case 'index-scan':
+        // Index scan may be local or require network hop
+        networkCost = 5; // Assume remote by default
+        break;
+
+      case 'point-lookup':
+        // Point lookup: one network hop if remote
+        networkCost = 5; // Assume remote by default
+        break;
+
+      case 'multi-point-lookup':
+        // Multiple point lookups may hit multiple partitions
+        networkCost = Math.min(step.keys.length, context.nodeCount) * 5;
+        break;
+
+      case 'intersection':
+      case 'union':
+        // Aggregating results from multiple sources
+        networkCost = step.steps.length * 5;
+        break;
+
+      case 'filter':
+        // Filter inherits source network cost
+        return this.estimateDistributedCost(step.source, context);
+
+      case 'not':
+        // NOT needs all keys plus source
+        networkCost = context.nodeCount * 5;
+        break;
+
+      case 'fts-scan':
+        // FTS typically broadcasts to nodes with index shards
+        networkCost = Math.ceil(context.nodeCount / 2) * 5;
+        break;
+
+      case 'fusion':
+        // Sum of child step costs
+        networkCost = step.steps.reduce(
+          (sum, s) => sum + this.estimateDistributedCost(s, context).network,
+          0
+        );
+        break;
+    }
+
+    return {
+      rows: baseCost,
+      cpu: baseCost,
+      network: networkCost,
+      io: context.usesStorage ? baseCost * 0.5 : 0,
+    };
+  }
+
+  /**
+   * Get total distributed cost for a plan step.
+   * Convenience method combining estimateDistributedCost and calculateTotalCost.
+   *
+   * @param step - Plan step to estimate
+   * @param context - Distributed query context (optional)
+   * @returns Weighted total cost
+   */
+  getTotalDistributedCost(step: PlanStep, context?: QueryContext): number {
+    const distributedCost = this.estimateDistributedCost(step, context);
+    return calculateTotalCost(distributedCost);
   }
 
   /**
