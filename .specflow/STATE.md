@@ -2,20 +2,24 @@
 
 ## Current Position
 
-- **Active Specification:** none
+- **Active Specification:** None
 - **Status:** idle
-- **TODO Items:** 17
-- **Next Step:** /sf:new or /sf:next
+- **TODO Items:** 16
+- **Next Step:** /sf:next
 
 ## Queue
 
-| Spec | Title | Priority | Complexity |
-|------|-------|----------|------------|
+(empty)
 
 ## Decisions
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-05 | SPEC-002 | COMPLETED: Point Lookup Optimization. Created 1 file (PointLookup.test.ts with 12 tests), modified 5 files (QueryTypes, QueryOptimizer, QueryExecutor, query/index, IndexedLWWMap). 6 commits. All 8 acceptance criteria met. All 1940 tests pass. 1 deviation (IndexedLWWMap needed point lookup handling). Ready for review. |
+| 2026-02-05 | SPEC-002 | AUDITED v2: Approved. All 10 dimensions pass. Context estimate ~22% (PEAK range). Response v1 changes verified (empty values edge case added, AC8 updated to 9 tests, edge cases section added). Goal-backward validation complete. Ready for implementation. |
+| 2026-02-05 | SPEC-002 | REVISED v1: Applied Audit v1 recommendation 1. Added empty values array edge case test to Files to Create section. Updated AC8 from 8 to 9 test cases. Enhanced Test Strategy section with explicit edge cases subsection. Ready for re-audit. |
+| 2026-02-05 | SPEC-002 | AUDITED v1: Approved. All 10 dimensions pass. Context estimate ~22% (PEAK range). All 4 assumptions verified. Goal-backward validation complete. 1 minor recommendation (empty values edge case). Ready for implementation. |
+| 2026-02-05 | SPEC-002 | CREATED: Point Lookup Optimization. Bypasses query planning for primary key lookups (id, _key, key) using direct O(1) Map access. Adds PointLookupStep and MultiPointLookupStep types. Modifies QueryOptimizer, QueryExecutor, QueryTypes. Source: TODO-028. |
 | 2026-02-05 | SPEC-001 | COMPLETED: Deterministic Simulation Testing (DST). Created 11 files (VirtualClock, SeededRNG, VirtualNetwork, InvariantChecker, ScenarioRunner + 5 test files + index), modified 4 files (HLC, LWWMap, ORMap, index). 8 commits, 1 audit cycle, 2 review cycles. Archived to .specflow/archive/SPEC-001.md |
 | 2026-02-05 | SPEC-001 | REVIEWED v2: Implementation APPROVED. ClockSource consolidation verified - single definition in HLC.ts, properly imported by VirtualClock.ts. All 11 files created, 4 files modified. All 1928 tests pass. Build succeeds. All 9 acceptance criteria met. No issues found. Ready for finalization. |
 | 2026-02-05 | SPEC-001 | FIXED v1: Consolidated duplicate ClockSource interface. Removed from VirtualClock.ts, now imports from HLC.ts with re-export for compatibility. Build and all tests pass. Ready for re-review. |
