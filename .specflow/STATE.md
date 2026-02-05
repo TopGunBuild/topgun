@@ -2,20 +2,23 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **TODO Items:** 17 (migrated from PROMPTS 2026-02-05)
-- **Next Step:** /sf:todos, /sf:plan, or /sf:new
+- **Active Specification:** SPEC-001
+- **Status:** review
+- **TODO Items:** 16
+- **Next Step:** /sf:review
 
 ## Queue
 
 | Spec | Title | Priority | Complexity |
 |------|-------|----------|------------|
+| SPEC-001 | Deterministic Simulation Testing (DST) | critical | medium |
 
 ## Decisions
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-05 | SPEC-001 | AUDITED v1: Approved. All 10 dimensions pass. Context estimate ~36% (GOOD range). All 6 assumptions verified against source code. Minor clarification added: HLC needs getClockSource() getter for LWWMap/ORMap to access clock source for TTL checks. Ready for implementation. |
+| 2026-02-05 | SPEC-001 | CREATED: Deterministic Simulation Testing (DST). Creates testing infrastructure in packages/core/src/testing/ with VirtualClock, SeededRNG, VirtualNetwork, InvariantChecker, ScenarioRunner. Modifies HLC to accept injectable clockSource. Source: TODO-027. |
 | 2026-02-05 | MIGRATION | COMPLETED: Migrated 17 TODO items from PROMPTS directory with full context preservation. Created .specflow/reference/ with 10 key spec files (5,800+ lines of context). All TODO items in TODO.md now have links to detailed specifications. |
 | 2026-02-02 | SPEC-032 | COMPLETED: Add Test Coverage for CLI Commands. Created 9 files (8 test files + 1 utility), modified package.json. 11 commits, 4 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-032.md |
 | 2026-02-02 | SPEC-032 | REVIEWED v1: Implementation APPROVED. All 9 files created and working. 28 tests pass, 4 skipped (Docker unavailable). Each command has 2+ test cases (success/error paths). Tests complete in 37s. No external service dependencies. No jest.retryTimes usage. All acceptance criteria fully met. No issues found. Ready for finalization. |
@@ -56,4 +59,4 @@
 (none)
 
 ---
-*Last updated: 2026-02-02*
+*Last updated: 2026-02-05*
