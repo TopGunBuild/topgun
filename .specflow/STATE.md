@@ -2,7 +2,7 @@
 
 ## Current Position
 
-- **Active Specification:** None
+- **Active Specification:** (none)
 - **Status:** idle
 - **TODO Items:** 16
 - **Next Step:** /sf:next
@@ -15,6 +15,7 @@
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-05 | SPEC-033 | ARCHIVED: Point Lookup Optimization (renumbered from SPEC-002 due to ID conflict with archive). All 8 acceptance criteria met. Archived to .specflow/archive/SPEC-033.md |
 | 2026-02-05 | SPEC-002 | COMPLETED: Point Lookup Optimization. Created 1 file (PointLookup.test.ts with 12 tests), modified 5 files (QueryTypes, QueryOptimizer, QueryExecutor, query/index, IndexedLWWMap). 6 commits. All 8 acceptance criteria met. All 1940 tests pass. 1 deviation (IndexedLWWMap needed point lookup handling). Ready for review. |
 | 2026-02-05 | SPEC-002 | AUDITED v2: Approved. All 10 dimensions pass. Context estimate ~22% (PEAK range). Response v1 changes verified (empty values edge case added, AC8 updated to 9 tests, edge cases section added). Goal-backward validation complete. Ready for implementation. |
 | 2026-02-05 | SPEC-002 | REVISED v1: Applied Audit v1 recommendation 1. Added empty values array edge case test to Files to Create section. Updated AC8 from 8 to 9 test cases. Enhanced Test Strategy section with explicit edge cases subsection. Ready for re-audit. |
