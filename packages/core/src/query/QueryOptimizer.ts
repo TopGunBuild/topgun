@@ -126,14 +126,25 @@ export class QueryOptimizer<K, V> {
    * Optimize a query and return an execution plan.
    *
    * Optimization order (by cost):
-   * 1. StandingQueryIndex (cost: 10) - pre-computed results
-   * 2. Other indexes via optimizeNode
+   * 1. Point lookup (cost: 1) - direct primary key access
+   * 2. StandingQueryIndex (cost: 10) - pre-computed results
+   * 3. Other indexes via optimizeNode
    *
    * @param query - Query to optimize
    * @returns Query execution plan
    */
   optimize(query: Query): QueryPlan {
-    // Check for standing query index first (lowest cost)
+    // Check for point lookup first (absolute lowest cost)
+    const pointLookupStep = this.tryPointLookup(query);
+    if (pointLookupStep) {
+      return {
+        root: pointLookupStep,
+        estimatedCost: this.estimateCost(pointLookupStep),
+        usesIndexes: this.usesIndexes(pointLookupStep),
+      };
+    }
+
+    // Check for standing query index second (low cost)
     if (this.standingQueryRegistry) {
       const standingIndex = this.standingQueryRegistry.getIndex(query);
       if (standingIndex) {
@@ -202,6 +213,46 @@ export class QueryOptimizer<K, V> {
       limit: options.limit,
       cursor: options.cursor, // replaces offset
     };
+  }
+
+  /**
+   * Try to optimize query as a point lookup.
+   * Returns a point lookup step if query is an equality or IN query on primary key.
+   *
+   * @param query - Query to check
+   * @returns Point lookup step or null
+   */
+  private tryPointLookup(query: Query): PlanStep | null {
+    // Only simple queries can be point lookups
+    if (!isSimpleQuery(query)) {
+      return null;
+    }
+
+    // Check if attribute is a primary key field
+    const primaryKeyFields = ['_key', 'key', 'id'];
+    if (!primaryKeyFields.includes(query.attribute)) {
+      return null;
+    }
+
+    // Handle 'eq' type - single point lookup
+    if (query.type === 'eq') {
+      return {
+        type: 'point-lookup',
+        key: query.value,
+        cost: 1,
+      };
+    }
+
+    // Handle 'in' type - multi-point lookup
+    if (query.type === 'in' && query.values) {
+      return {
+        type: 'multi-point-lookup',
+        keys: query.values,
+        cost: query.values.length,
+      };
+    }
+
+    return null;
   }
 
   /**
@@ -699,6 +750,10 @@ export class QueryOptimizer<K, V> {
    */
   private estimateCost(step: PlanStep): number {
     switch (step.type) {
+      case 'point-lookup':
+      case 'multi-point-lookup':
+        return step.cost;
+
       case 'index-scan':
         return step.index.getRetrievalCost();
 
@@ -752,6 +807,10 @@ export class QueryOptimizer<K, V> {
    */
   private usesIndexes(step: PlanStep): boolean {
     switch (step.type) {
+      case 'point-lookup':
+      case 'multi-point-lookup':
+        return true;
+
       case 'index-scan':
         return true;
 
