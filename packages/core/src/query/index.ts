@@ -68,6 +68,11 @@ export {
   type FTSScanStep,
   type FusionStep,
   type FusionStrategy,
+  // Distributed Cost Model
+  type QueryContext,
+  type DistributedCost,
+  COST_WEIGHTS,
+  calculateTotalCost,
   // Type guards
   isSimpleQuery,
   isLogicalQuery,
