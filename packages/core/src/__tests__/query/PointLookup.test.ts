@@ -12,21 +12,21 @@ import type { Query, PointLookupStep, MultiPointLookupStep } from '../../query/Q
 import { HashIndex } from '../../query/indexes/HashIndex';
 import { simpleAttribute } from '../../query/Attribute';
 
+interface TestRecord {
+  id: string;
+  name: string;
+  age: number;
+}
+
 describe('Point Lookup Optimization', () => {
-  let indexRegistry: IndexRegistry<string, Record<string, unknown>>;
-  let standingQueryRegistry: StandingQueryRegistry<string, Record<string, unknown>>;
-  let optimizer: QueryOptimizer<string, Record<string, unknown>>;
-  let executor: QueryExecutor<string, Record<string, unknown>>;
-  let data: Map<string, Record<string, unknown>>;
+  let indexRegistry: IndexRegistry<string, TestRecord>;
+  let standingQueryRegistry: StandingQueryRegistry<string, TestRecord>;
+  let optimizer: QueryOptimizer<string, TestRecord>;
+  let executor: QueryExecutor<string, TestRecord>;
+  let data: Map<string, TestRecord>;
 
   beforeEach(() => {
-    indexRegistry = new IndexRegistry<string, Record<string, unknown>>();
-    standingQueryRegistry = new StandingQueryRegistry<string, Record<string, unknown>>();
-    optimizer = new QueryOptimizer({
-      indexRegistry,
-      standingQueryRegistry,
-    });
-    executor = new QueryExecutor(optimizer);
+    indexRegistry = new IndexRegistry<string, TestRecord>();
 
     // Create test data
     data = new Map([
@@ -34,6 +34,17 @@ describe('Point Lookup Optimization', () => {
       ['user-2', { id: 'user-2', name: 'Bob', age: 25 }],
       ['user-3', { id: 'user-3', name: 'Charlie', age: 35 }],
     ]);
+
+    standingQueryRegistry = new StandingQueryRegistry<string, TestRecord>({
+      getRecord: (key) => data.get(key),
+      getAllEntries: () => data.entries(),
+    });
+
+    optimizer = new QueryOptimizer({
+      indexRegistry,
+      standingQueryRegistry,
+    });
+    executor = new QueryExecutor(optimizer);
   });
 
   describe('Point Lookup on "id" field', () => {
@@ -182,12 +193,9 @@ describe('Point Lookup Optimization', () => {
     it('should prioritize point lookup over StandingQueryIndex', () => {
       // Register a standing query index for the same query
       const query: Query = { type: 'eq', attribute: 'id', value: 'user-1' };
-      const standingIndex = new HashIndex({
-        attribute: simpleAttribute('id'),
-        keyExtractor: (v) => v.id as string,
-      });
 
-      standingQueryRegistry.register(query, standingIndex);
+      // Register the standing query (this creates a StandingQueryIndex internally)
+      standingQueryRegistry.register(query);
 
       // Despite having a standing query, point lookup should be used (cost 1 < 10)
       const plan = optimizer.optimize(query);
