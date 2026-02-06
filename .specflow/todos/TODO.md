@@ -1,33 +1,11 @@
 # To-Do List
 
 **Last updated:** 2026-02-06
-**Source:** Migrated from PROMPTS directory, reordered by technical dependencies and ROI
+**Source:** Migrated from PROMPTS directory, reordered by technical dependencies and business impact
 
 ---
 
-## Wave 1: Foundation (Quality + Quick Wins)
-
-*Goal: Build safety net, capture low-hanging fruit*
-
-### TODO-045: DST Documentation
-- **Priority:** 🟢 Quick Win
-- **Complexity:** Low
-- **Context:** Implements SPEC-001 (completed 2026-02-05)
-- **Summary:** Document Deterministic Simulation Testing utilities in official docs
-- **Why Now:** New public API (VirtualClock, SeededRNG, ScenarioRunner) exported from @topgunbuild/core
-- **Location:** `apps/docs-astro/src/content/docs/reference/testing.mdx`
-- **Contents:**
-  - VirtualClock: injectable time source for deterministic tests
-  - SeededRNG: reproducible randomness (same seed = same sequence)
-  - VirtualNetwork: simulated packet loss, latency, partitions
-  - InvariantChecker: CRDT convergence property assertions
-  - ScenarioRunner: orchestrates reproducible multi-node simulations
-- **Example:** Show ScenarioRunner usage for chaos testing with seeds
-- **Effort:** 0.5-1 day
-
----
-
-## Wave 2: Market Expansion
+## Wave 1: Market Expansion
 
 *Goal: Unlock serverless deployments, improve cluster utilization*
 
@@ -52,7 +30,7 @@
 - **Complexity:** Medium
 - **Context:** [reference/HAZELCAST_QUICK_WINS.md](../reference/HAZELCAST_QUICK_WINS.md)
 - **Summary:** Skip partitions that can't contain matching records
-- **Why Now:** Required for efficient distributed queries at scale
+- **Why Now:** Required for efficient distributed queries at scale; prerequisite for TODO-025 (DAG Executor)
 - **Current:** Distributed queries scan all partitions
 - **Solution:** Use partition key to determine relevant partitions
 - **Example:** Query `tenantId = 'abc'` → only scan partitions where hash('abc') maps
@@ -77,9 +55,9 @@
 
 ---
 
-## Wave 3: Performance
+## Wave 2: Core Infrastructure
 
-*Goal: Enable slow backends, accelerate hot paths*
+*Goal: Enable slow backends, unlock distributed query processing*
 
 ### TODO-033: AsyncStorageWrapper (Write-Behind)
 - **Priority:** 🟡 Medium
@@ -96,38 +74,13 @@
 
 ---
 
-### TODO-034: Rust/WASM Hot Path Migration
-- **Priority:** 🟡 Medium
-- **Complexity:** Large
-- **Context:** [reference/RUST_WASM_ANALYSIS.md](../reference/RUST_WASM_ANALYSIS.md)
-- **Summary:** Migrate CPU-intensive hot paths to Rust/WASM
-- **Why Now:** 2-3x speedup on CPU-intensive operations
-- **Candidates (by priority):**
-  1. MerkleTree Hash/Diff → 50-60% speedup
-  2. CRDT Batch Merge → 30-40% speedup
-  3. DAG Executor → 2-5x speedup
-  4. SQL Parser (sqlparser-rs) → new feature
-- **Package Structure:**
-  ```
-  packages/core-rust/   # Rust crate
-  packages/core-wasm/   # TS wrapper with fallback
-  ```
-- **Strategy:** Conditional loading (browser=JS, server=WASM)
-- **Effort:** 4-6 weeks total
-
----
-
-## Wave 4: Advanced Features
-
-*Goal: Complex queries, AI capabilities, extensibility*
-
 ### TODO-025: DAG Executor for Distributed Queries
 - **Priority:** 🟡 Medium
 - **Complexity:** Large
 - **Context:** [reference/HAZELCAST_DAG_EXECUTOR_SPEC.md](../reference/HAZELCAST_DAG_EXECUTOR_SPEC.md)
 - **Additional:** [reference/HAZELCAST_ARCHITECTURE_COMPARISON.md](../reference/HAZELCAST_ARCHITECTURE_COMPARISON.md)
 - **Summary:** Implement Hazelcast-style DAG executor for distributed query processing
-- **Why Here:** Requires partition pruning (TODO-029) for efficiency
+- **Why Here:** Partition Pruning (TODO-029) must be completed first
 - **Key Features:**
   - DAG structure with Vertex/Edge graph
   - 3-tier processor model: Source → Transform → Sink
@@ -135,9 +88,13 @@
   - Backpressure handling
 - **Architecture Pattern:** Processors exchange data via Outbox/Inbox queues
 - **Effort:** 4-6 weeks
-- **Dependencies:** Wave 2 (TODO-029 Partition Pruning)
+- **Dependencies:** TODO-029 (Partition Pruning)
 
 ---
+
+## Wave 3: Advanced Features
+
+*Goal: AI capabilities, performance optimization, extensibility*
 
 ### TODO-039: Vector Search
 - **Priority:** 🟡 Medium
@@ -152,7 +109,28 @@
   - Tri-hybrid search: Exact + BM25 + Semantic
 - **Package:** `@topgunbuild/vector` (optional)
 - **Effort:** 4 weeks
-- **Dependencies:** Phase 12 (Hybrid Search), Phase 14 (Distributed Search) — ✅ complete
+- **Dependencies:** Phase 12 (Hybrid Search), Phase 14 (Distributed Search) — complete
+
+---
+
+### TODO-034: Rust/WASM Hot Path Migration
+- **Priority:** 🟡 Medium
+- **Complexity:** Large
+- **Context:** [reference/RUST_WASM_ANALYSIS.md](../reference/RUST_WASM_ANALYSIS.md)
+- **Summary:** Migrate CPU-intensive hot paths to Rust/WASM
+- **Why Here:** Benefits from having DAG Executor (TODO-025) as a prime WASM candidate
+- **Candidates (by priority):**
+  1. MerkleTree Hash/Diff → 50-60% speedup
+  2. CRDT Batch Merge → 30-40% speedup
+  3. DAG Executor → 2-5x speedup
+  4. SQL Parser (sqlparser-rs) → new feature
+- **Package Structure:**
+  ```
+  packages/core-rust/   # Rust crate
+  packages/core-wasm/   # TS wrapper with fallback
+  ```
+- **Strategy:** Conditional loading (browser=JS, server=WASM)
+- **Effort:** 4-6 weeks total
 
 ---
 
@@ -173,10 +151,33 @@
 
 ---
 
+## Wave 4: Documentation
+
+*Goal: Document public APIs when convenient*
+
+### TODO-045: DST Documentation
+- **Priority:** 🟢 Low
+- **Complexity:** Low
+- **Context:** Implements SPEC-001 (completed 2026-02-05)
+- **Summary:** Document Deterministic Simulation Testing utilities in official docs
+- **Why:** New public API (VirtualClock, SeededRNG, ScenarioRunner) exported from @topgunbuild/core
+- **Location:** `apps/docs-astro/src/content/docs/reference/testing.mdx`
+- **Contents:**
+  - VirtualClock: injectable time source for deterministic tests
+  - SeededRNG: reproducible randomness (same seed = same sequence)
+  - VirtualNetwork: simulated packet loss, latency, partitions
+  - InvariantChecker: CRDT convergence property assertions
+  - ScenarioRunner: orchestrates reproducible multi-node simulations
+- **Example:** Show ScenarioRunner usage for chaos testing with seeds
+- **Effort:** 0.5-1 day
+- **Note:** Can be done as a breather between heavy implementation tasks
+
+---
+
 ## Wave 5: Enterprise (Deferred)
 
 *Goal: Enterprise features, major architectural changes*
-*⚠️ Defer until Waves 1-4 complete*
+*Defer until Waves 1-4 complete*
 
 ### TODO-041: Multi-Tenancy
 - **Priority:** 🔵 Deferred
@@ -187,7 +188,6 @@
   - Tenant context in all operations
   - Resource quotas (storage, connections, ops/sec)
   - Tenant-aware partitioning
-- **Priority:** Enterprise feature
 
 ---
 
@@ -225,7 +225,6 @@
 - **Summary:** Hot data in memory/Redis, cold data in S3/cheap storage
 - **Features:** Transparent migration based on access patterns
 - **Use Case:** Cost reduction for large datasets
-- **Priority:** Enterprise feature
 
 ---
 
@@ -236,7 +235,7 @@
 - **Summary:** Implement DBSP (Database Stream Processing) for delta-based query updates
 - **Problem:** LiveQueryManager recomputes queries on every change
 - **Solution:** Compile queries to streaming operators, maintain incremental state
-- **Warning:** ⚠️ High risk — could become 6-month compiler project
+- **Warning:** High risk — could become 6-month compiler project
 - **Alternative:** Start with "React Signals" style fine-grained reactivity
 - **Reference:** Turso `/core/incremental/`, Materialize, differential-dataflow
 
@@ -248,25 +247,25 @@
 
 | Wave | Items | Total Effort | Focus |
 |------|-------|--------------|-------|
-| 1. Foundation | 1 | ~1 day | Quick wins + docs |
-| 2. Market Expansion | 3 | ~4 weeks | Serverless + cluster |
-| 3. Performance | 2 | ~6 weeks | Storage + WASM |
-| 4. Advanced Features | 3 | ~10 weeks | DAG + Vector + Extensions |
+| 1. Market Expansion | 3 | ~4 weeks | Serverless + cluster |
+| 2. Core Infrastructure | 2 | ~7 weeks | Storage + DAG |
+| 3. Advanced Features | 3 | ~10 weeks | Vector + WASM + Extensions |
+| 4. Documentation | 1 | ~1 day | DST docs |
 | 5. Enterprise | 5 | ~20+ weeks | Tenancy + S3 + Time-travel |
 
 ### Execution Order
 
 | # | TODO | Wave | Effort | ROI |
 |---|------|------|--------|-----|
-| 1 | TODO-045 | 1 | 0.5-1 day | 🟢 Low |
-| 2 | TODO-026 | 2 | 2-3 weeks | 🔴 High |
-| 3 | TODO-029 | 2 | 1 week | 🟡 Medium |
-| 4 | TODO-023 | 2 | ~16 hours | 🟡 Medium |
-| 5 | TODO-033 | 3 | 2-3 weeks | 🟡 Medium |
-| 6 | TODO-034 | 3 | 4-6 weeks | 🟡 Medium |
-| 7 | TODO-025 | 4 | 4-6 weeks | 🟡 Medium |
-| 8 | TODO-039 | 4 | 4 weeks | 🟡 Medium |
-| 9 | TODO-036 | 4 | 2-3 weeks | 🟢 Low |
+| 1 | TODO-026 | 1 | 2-3 weeks | 🔴 High |
+| 2 | TODO-029 | 1 | 1 week | 🟡 Medium |
+| 3 | TODO-023 | 1 | ~16 hours | 🟡 Medium |
+| 4 | TODO-033 | 2 | 2-3 weeks | 🟡 Medium |
+| 5 | TODO-025 | 2 | 4-6 weeks | 🟡 Medium |
+| 6 | TODO-039 | 3 | 4 weeks | 🟡 Medium |
+| 7 | TODO-034 | 3 | 4-6 weeks | 🟡 Medium |
+| 8 | TODO-036 | 3 | 2-3 weeks | 🟢 Low |
+| 9 | TODO-045 | 4 | 0.5-1 day | 🟢 Low |
 | 10 | TODO-041 | 5 | Large | 🔵 Deferred |
 | 11 | TODO-043 | 5 | 6-8 weeks | 🔵 Deferred |
 | 12 | TODO-044 | 5 | 4-6 weeks | 🔵 Deferred |
@@ -281,9 +280,9 @@
 | TODO-029 | HAZELCAST_QUICK_WINS.md | 400+ |
 | TODO-023 | PHASE_4.5_CLIENT_CLUSTER_SPEC.md | 336 |
 | TODO-033 | topgun-rocksdb.md | 650+ |
-| TODO-034 | RUST_WASM_ANALYSIS.md | 1127 |
 | TODO-025 | HAZELCAST_DAG_EXECUTOR_SPEC.md | 700+ |
 | TODO-039 | PHASE_15_VECTOR_SEARCH_SPEC.md | 1696 |
+| TODO-034 | RUST_WASM_ANALYSIS.md | 1127 |
 | TODO-036 | TURSO_INSIGHTS.md (Section 5) | 482 |
 | TODO-041 | PHASE_5_MULTI_TENANCY_SPEC.md | 700+ |
 | TODO-043 | TURSO_INSIGHTS.md (Section 7) | 482 |
@@ -293,4 +292,4 @@
 
 ---
 
-*Reordered by technical dependencies and ROI on 2026-02-05. TODO-038 converted to SPEC-035 on 2026-02-06.*
+*Reordered by technical dependencies and business impact on 2026-02-06.*
