@@ -172,18 +172,81 @@ export class QueryOptimizer<K, V> {
   }
 
   /**
-   * Optimize a query with sort/limit/offset options.
+   * Optimize a query with sort/limit/offset options and index hints.
+   *
+   * Hint precedence: disableOptimization > useIndex > forceIndexScan.
    *
    * @param query - Query to optimize
-   * @param options - Query options (sort, limit, offset)
+   * @param options - Query options (sort, limit, cursor, hints)
    * @returns Query execution plan with options
    */
   optimizeWithOptions(query: Query, options: QueryOptions): QueryPlan {
+    // 1. disableOptimization: skip everything, return raw full-scan
+    if (options.disableOptimization) {
+      return {
+        root: { type: 'full-scan', predicate: query },
+        estimatedCost: Number.MAX_SAFE_INTEGER,
+        usesIndexes: false,
+      };
+    }
+
+    // 2. useIndex: force specific attribute's index
+    if (options.useIndex) {
+      const indexes = this.indexRegistry.getIndexes(options.useIndex);
+      if (indexes.length === 0) {
+        throw new Error(
+          `Index hint: no index found for attribute "${options.useIndex}"`
+        );
+      }
+      // Pick lowest-cost index for this attribute
+      let best = indexes[0];
+      for (let i = 1; i < indexes.length; i++) {
+        if (indexes[i].getRetrievalCost() < best.getRetrievalCost()) {
+          best = indexes[i];
+        }
+      }
+      const step: PlanStep = {
+        type: 'index-scan',
+        index: best,
+        query: this.buildHintedIndexQuery(query, options.useIndex),
+      };
+      // Build plan with sort/limit if requested
+      return this.applyPlanOptions(
+        {
+          root: step,
+          estimatedCost: best.getRetrievalCost(),
+          usesIndexes: true,
+          hint: options.useIndex,
+        },
+        options
+      );
+    }
+
+    // 3. Normal optimization
     const basePlan = this.optimize(query);
 
-    // If no options specified, return base plan
+    // 4. forceIndexScan: verify indexes are used
+    if (options.forceIndexScan && !basePlan.usesIndexes) {
+      throw new Error(
+        'No suitable index found and forceIndexScan is enabled'
+      );
+    }
+
+    // 5. Apply sort/limit/cursor (existing logic)
+    return this.applyPlanOptions(basePlan, options);
+  }
+
+  /**
+   * Apply sort/limit/cursor options to a query plan.
+   *
+   * @param plan - Base query plan
+   * @param options - Query options with sort/limit/cursor
+   * @returns Plan with options applied
+   */
+  private applyPlanOptions(plan: QueryPlan, options: QueryOptions): QueryPlan {
+    // If no sort/limit/cursor specified, return plan as-is
     if (!options.sort && options.limit === undefined && options.cursor === undefined) {
-      return basePlan;
+      return plan;
     }
 
     let indexedSort = false;
@@ -206,15 +269,52 @@ export class QueryOptimizer<K, V> {
     }
 
     return {
-      ...basePlan,
+      ...plan,
       indexedSort,
       sort:
         sortField && sortDirection
           ? { field: sortField, direction: sortDirection }
           : undefined,
       limit: options.limit,
-      cursor: options.cursor, // replaces offset
+      cursor: options.cursor,
     };
+  }
+
+  /**
+   * Extract the relevant index query for a hinted attribute from the query tree.
+   * If the query directly references the attribute, build an index query from it.
+   * For compound (logical) queries, extract the matching child predicate.
+   * Falls back to { type: 'has' } when no matching predicate is found,
+   * retrieving all entries from the index for post-filtering.
+   * FTS query nodes also fall back to { type: 'has' } since full-text search
+   * queries are not compatible with regular index lookups.
+   *
+   * @param query - Original query tree
+   * @param attributeName - Hinted attribute name
+   * @returns Index query for the hinted attribute
+   */
+  private buildHintedIndexQuery(query: Query, attributeName: string): IndexQuery<unknown> {
+    // Simple query matching the hinted attribute
+    if (isSimpleQuery(query) && query.attribute === attributeName) {
+      return this.buildIndexQuery(query);
+    }
+
+    // FTS queries are not compatible with regular index lookups
+    if (isFTSQuery(query)) {
+      return { type: 'has' };
+    }
+
+    // Logical queries: search children for a matching simple predicate
+    if (isLogicalQuery(query) && query.children) {
+      for (const child of query.children) {
+        if (isSimpleQuery(child) && child.attribute === attributeName) {
+          return this.buildIndexQuery(child);
+        }
+      }
+    }
+
+    // No matching predicate found; retrieve all from index, filter later
+    return { type: 'has' };
   }
 
   /**
