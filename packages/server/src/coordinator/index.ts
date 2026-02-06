@@ -38,6 +38,10 @@ export { EntryProcessorAdapter } from './entry-processor-adapter';
 export { SearchHandler } from './search-handler';
 export { QueryHandler } from './query-handler';
 
+// HTTP sync handler
+export { HttpSyncHandler } from './http-sync-handler';
+export type { HttpSyncHandlerConfig } from './http-sync-handler';
+
 // WebSocket handler
 export { WebSocketHandler } from './websocket-handler';
 
