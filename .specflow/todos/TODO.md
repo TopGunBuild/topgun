@@ -1,6 +1,6 @@
 # To-Do List
 
-**Last updated:** 2026-02-06
+**Last updated:** 2026-02-06 (added TODO-046, TODO-047 for docs/blog)
 **Source:** Migrated from PROMPTS directory, reordered by technical dependencies and business impact
 
 ---
@@ -8,22 +8,6 @@
 ## Wave 1: Market Expansion
 
 *Goal: Unlock serverless deployments, improve cluster utilization*
-
-### TODO-026: HTTP Sync Fallback (Serverless)
-- **Priority:** 🔴 High (new market)
-- **Complexity:** Medium
-- **Context:** [reference/TURSO_INSIGHTS.md](../reference/TURSO_INSIGHTS.md) (Section 1)
-- **Summary:** Add HTTP request-response sync protocol as fallback for serverless environments
-- **Why Now:** Opens Vercel Edge, AWS Lambda, Cloudflare Workers market
-- **Problem:** WebSocket-only limits deployment to long-lived connections
-- **Solution:**
-  - `POST /sync` endpoint for push operations + receive deltas
-  - Stateless design for AWS Lambda, Vercel Edge, Cloudflare Workers
-  - Automatic protocol negotiation (WebSocket → HTTP)
-- **Target Market:** Frontend Cloud (Vercel Edge Functions without dedicated VPS)
-- **Effort:** 2-3 weeks
-
----
 
 ### TODO-029: Partition Pruning
 - **Priority:** 🟡 Medium
@@ -155,6 +139,50 @@
 
 *Goal: Document public APIs when convenient*
 
+### TODO-046: HTTP Sync & Serverless Documentation
+- **Priority:** 🟡 Medium
+- **Complexity:** Medium
+- **Context:** Implements SPEC-036 (completed 2026-02-06)
+- **Summary:** Document HTTP Sync Protocol and serverless deployment in official docs
+- **Why:** Major user-facing feature (HttpSyncProvider, AutoConnectionProvider, POST /sync) with no documentation
+- **Files to update:**
+  - `apps/docs-astro/src/content/docs/concepts/sync-protocol.mdx` — Add "HTTP Sync" section alongside existing WebSocket/Merkle content
+  - `apps/docs-astro/src/content/docs/guides/deployment.mdx` — Add "Serverless Deployment" section (Vercel Edge, AWS Lambda, Cloudflare Workers)
+  - `apps/docs-astro/src/content/docs/reference/client.mdx` — Add HttpSyncProvider, AutoConnectionProvider API reference
+  - `apps/docs-astro/src/content/docs/reference/server.mdx` — Add POST /sync endpoint documentation
+- **Contents:**
+  - HttpSyncProvider config (url, clientId, hlc, pollIntervalMs, requestTimeoutMs, syncMaps, fetchImpl)
+  - AutoConnectionProvider config (url, clientId, hlc, maxWsAttempts, httpOnly, httpPollIntervalMs, syncMaps)
+  - POST /sync request/response schema (HttpSyncRequest, HttpSyncResponse)
+  - Serverless deployment examples (Vercel Edge Function, AWS Lambda handler, Cloudflare Worker)
+  - When to use HTTP sync vs WebSocket (decision guide)
+- **Effort:** 1-2 days
+
+---
+
+### TODO-047: Blog Post — "TopGun Goes Serverless"
+- **Priority:** 🟡 Medium
+- **Complexity:** Low
+- **Context:** Implements SPEC-036 (completed 2026-02-06)
+- **Summary:** Engineering blog post about HTTP Sync Protocol for serverless environments
+- **Why:** Marketing milestone — "TopGun now works on serverless" is a headline feature for 0.11.0 release
+- **Location:** `apps/docs-astro/src/content/blog/serverless-http-sync.mdx`
+- **Category:** Engineering
+- **Outline:**
+  - The problem: WebSockets don't work in serverless (cold starts, timeouts, cost)
+  - The solution: stateless HTTP sync via POST /sync
+  - Architecture: how HttpSyncProvider translates IConnectionProvider to HTTP
+  - AutoConnectionProvider: transparent WS-to-HTTP fallback
+  - Delta computation: iterate LWWMap + HLC.compare() for efficient sync
+  - Code examples: Vercel Edge, AWS Lambda, Cloudflare Workers
+  - Performance characteristics: polling interval tradeoffs
+  - What's next: SSE for real-time push, cluster-aware HTTP routing
+- **Style:** Match existing blog posts (technical depth with practical examples, ~7 min read)
+- **Image:** Needs `/images/blog-serverless-sync.png` hero image
+- **Effort:** 0.5-1 day
+
+---
+
 ### TODO-045: DST Documentation
 - **Priority:** 🟢 Low
 - **Complexity:** Low
@@ -247,36 +275,36 @@
 
 | Wave | Items | Total Effort | Focus |
 |------|-------|--------------|-------|
-| 1. Market Expansion | 3 | ~4 weeks | Serverless + cluster |
+| 1. Market Expansion | 2 | ~2 weeks | Cluster utilization |
 | 2. Core Infrastructure | 2 | ~7 weeks | Storage + DAG |
 | 3. Advanced Features | 3 | ~10 weeks | Vector + WASM + Extensions |
-| 4. Documentation | 1 | ~1 day | DST docs |
+| 4. Documentation | 3 | ~3-4 days | HTTP Sync docs + Blog + DST docs |
 | 5. Enterprise | 5 | ~20+ weeks | Tenancy + S3 + Time-travel |
 
 ### Execution Order
 
 | # | TODO | Wave | Effort | ROI |
 |---|------|------|--------|-----|
-| 1 | TODO-026 | 1 | 2-3 weeks | 🔴 High |
-| 2 | TODO-029 | 1 | 1 week | 🟡 Medium |
-| 3 | TODO-023 | 1 | ~16 hours | 🟡 Medium |
-| 4 | TODO-033 | 2 | 2-3 weeks | 🟡 Medium |
-| 5 | TODO-025 | 2 | 4-6 weeks | 🟡 Medium |
-| 6 | TODO-039 | 3 | 4 weeks | 🟡 Medium |
-| 7 | TODO-034 | 3 | 4-6 weeks | 🟡 Medium |
-| 8 | TODO-036 | 3 | 2-3 weeks | 🟢 Low |
-| 9 | TODO-045 | 4 | 0.5-1 day | 🟢 Low |
-| 10 | TODO-041 | 5 | Large | 🔵 Deferred |
-| 11 | TODO-043 | 5 | 6-8 weeks | 🔵 Deferred |
-| 12 | TODO-044 | 5 | 4-6 weeks | 🔵 Deferred |
-| 13 | TODO-040 | 5 | Large | 🔵 Deferred |
-| 14 | TODO-042 | 5 | Very Large | ⚠️ Risk |
+| 1 | TODO-029 | 1 | 1 week | 🟡 Medium |
+| 2 | TODO-023 | 1 | ~16 hours | 🟡 Medium |
+| 3 | TODO-033 | 2 | 2-3 weeks | 🟡 Medium |
+| 4 | TODO-025 | 2 | 4-6 weeks | 🟡 Medium |
+| 5 | TODO-039 | 3 | 4 weeks | 🟡 Medium |
+| 6 | TODO-034 | 3 | 4-6 weeks | 🟡 Medium |
+| 7 | TODO-036 | 3 | 2-3 weeks | 🟢 Low |
+| 8 | TODO-046 | 4 | 1-2 days | 🟡 Medium |
+| 9 | TODO-047 | 4 | 0.5-1 day | 🟡 Medium |
+| 10 | TODO-045 | 4 | 0.5-1 day | 🟢 Low |
+| 11 | TODO-041 | 5 | Large | 🔵 Deferred |
+| 12 | TODO-043 | 5 | 6-8 weeks | 🔵 Deferred |
+| 13 | TODO-044 | 5 | 4-6 weeks | 🔵 Deferred |
+| 14 | TODO-040 | 5 | Large | 🔵 Deferred |
+| 15 | TODO-042 | 5 | Very Large | ⚠️ Risk |
 
 ### Context Files
 
 | TODO | Context File | Lines |
 |------|--------------|-------|
-| TODO-026 | TURSO_INSIGHTS.md (Section 1) | 482 |
 | TODO-029 | HAZELCAST_QUICK_WINS.md | 400+ |
 | TODO-023 | PHASE_4.5_CLIENT_CLUSTER_SPEC.md | 336 |
 | TODO-033 | topgun-rocksdb.md | 650+ |
