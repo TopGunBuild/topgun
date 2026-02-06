@@ -120,10 +120,12 @@ export class AutoConnectionProvider implements IConnectionProvider {
       fetchImpl: this.config.fetchImpl,
     });
 
-    await httpProvider.connect();
-
+    // Proxy events before connect so listeners capture the 'connected' event
     this.activeProvider = httpProvider;
     this.proxyEvents(httpProvider);
+
+    await httpProvider.connect();
+
     logger.info({ url: httpUrl }, 'AutoConnectionProvider: HTTP connected');
   }
 
