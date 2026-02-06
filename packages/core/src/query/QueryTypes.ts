@@ -116,6 +116,13 @@ export interface QueryOptions {
   limit?: number;
   /** Cursor for pagination (replaces offset) */
   cursor?: string;
+
+  /** Force use of an index on this attribute name. Throws if no index exists for the attribute. */
+  useIndex?: string;
+  /** Require that the query plan uses at least one index. Throws if plan would be a full scan. */
+  forceIndexScan?: boolean;
+  /** Skip all optimization; produce a full-scan plan. Useful for debugging. */
+  disableOptimization?: boolean;
 }
 
 // ============== Execution Plan Types ==============
@@ -268,6 +275,8 @@ export interface QueryPlan {
   limit?: number;
   /** Cursor for pagination (replaces offset) */
   cursor?: string;
+  /** Index hint that was applied (attribute name from useIndex option) */
+  hint?: string;
 }
 
 // ============== Distributed Cost Model ==============
