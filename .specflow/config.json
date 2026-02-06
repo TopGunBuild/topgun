@@ -6,5 +6,6 @@
     "small": 50000,
     "medium": 150000
   },
-  "audit_storage": "hybrid"
+  "audit_storage": "hybrid",
+  "model_profile": "max"
 }
