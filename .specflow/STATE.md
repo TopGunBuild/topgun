@@ -2,21 +2,26 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **TODO Items:** 15
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-035
+- **Status:** review
+- **TODO Items:** 14
+- **Next Step:** /sf:review
 
 ## Queue
 
 | Position | Spec | Title | Status |
 |----------|------|-------|--------|
-| (empty) | - | - | - |
+| 1 | SPEC-035 | Add Index Hint Options to QueryOptimizer | review |
 
 ## Decisions
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-06 | SPEC-035 | EXECUTED: Add Index Hint Options to QueryOptimizer. Created 1 file (IndexHints.test.ts with 14 tests), modified 2 files (QueryTypes, QueryOptimizer). 3 commits. All 11 acceptance criteria met. All existing tests pass. No deviations. Ready for review. |
+| 2026-02-06 | SPEC-035 | AUDITED v2: Approved. All 10 dimensions pass. Context estimate ~19% (PEAK range). All 5 assumptions re-verified against source code. Response v1 changes confirmed. No critical issues. No recommendations. Ready for implementation. |
+| 2026-02-06 | SPEC-035 | REVISED v1: Applied both Audit v1 recommendations. Added FTSQueryNode fallback note to buildHintedIndexQuery description. Added explicit applyPlanOptions method signature. Ready for re-audit. |
+| 2026-02-06 | SPEC-035 | AUDITED v1: Approved. All 10 dimensions pass. Context estimate ~21% (PEAK range). All 5 assumptions verified against source code. No critical issues. 2 minor recommendations (FTSQueryNode note for buildHintedIndexQuery, explicit applyPlanOptions signature). Ready for implementation. |
+| 2026-02-06 | SPEC-035 | CREATED: Add Index Hint Options to QueryOptimizer. Adds useIndex, forceIndexScan, disableOptimization to QueryOptions and hint to QueryPlan. Modifies QueryOptimizer.optimizeWithOptions(). Source: TODO-038. |
 | 2026-02-05 | SPEC-034 | COMPLETED: Network-aware Cost Model. Created 1 file (NetworkCostModel.test.ts with 16 tests), modified 4 files (QueryTypes, QueryOptimizer, query/index, core/index). 5 commits, 2 audit cycles, 2 review cycles. Archived to .specflow/archive/SPEC-034.md |
 | 2026-02-05 | SPEC-034 | REVIEWED v2: Implementation APPROVED. Critical issue from Review v1 resolved - all 4 exports (QueryContext, DistributedCost, COST_WEIGHTS, calculateTotalCost) now present in packages/core/src/index.ts. All 10 acceptance criteria fully satisfied. All 1956 tests pass (including 16 new NetworkCostModel tests). Build succeeds. No issues found. Ready for finalization. |
 | 2026-02-05 | SPEC-034 | FIXED v1: Added missing exports to packages/core/src/index.ts. Added COST_WEIGHTS, calculateTotalCost to value exports; QueryContext, DistributedCost to type exports. Build passes, all 16 tests pass. AC9 now satisfied. Ready for re-review. |
@@ -80,4 +85,4 @@
 (none)
 
 ---
-*Last updated: 2026-02-05*
+*Last updated: 2026-02-06*
