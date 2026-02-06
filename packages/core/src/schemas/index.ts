@@ -21,6 +21,9 @@ export * from './messaging-schemas';
 // Client message schemas (server events, query updates, GC, auth, hybrid queries, locks)
 export * from './client-message-schemas';
 
+// HTTP sync schemas (stateless request/response for serverless environments)
+export * from './http-sync-schemas';
+
 // Union MessageSchema (combines all message types)
 import { z } from 'zod';
 import { AuthMessageSchema } from './base-schemas';
