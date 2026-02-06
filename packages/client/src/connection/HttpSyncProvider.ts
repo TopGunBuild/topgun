@@ -21,7 +21,7 @@ export interface HttpSyncProviderConfig {
   authToken?: string;
   /** Polling interval in milliseconds (default: 5000) */
   pollIntervalMs?: number;
-  /** HTTP request timeout in milliseconds (default: 10000) */
+  /** HTTP request timeout in milliseconds (default: 30000) */
   requestTimeoutMs?: number;
   /** Map names to sync deltas for on each poll */
   syncMaps?: string[];
@@ -73,7 +73,7 @@ export class HttpSyncProvider implements IConnectionProvider {
     this.hlc = config.hlc;
     this.authToken = config.authToken || '';
     this.pollIntervalMs = config.pollIntervalMs ?? 5000;
-    this.requestTimeoutMs = config.requestTimeoutMs ?? 10000;
+    this.requestTimeoutMs = config.requestTimeoutMs ?? 30000;
     this.syncMaps = config.syncMaps || [];
     this.fetchImpl = config.fetchImpl || globalThis.fetch.bind(globalThis);
   }
