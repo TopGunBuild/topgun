@@ -16,7 +16,7 @@ import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 import { ConnectionPool, PartitionRouter, ClusterClient } from './cluster';
 
 // Connection provider imports
-import { SingleServerProvider } from './connection';
+import { SingleServerProvider, HttpSyncProvider, AutoConnectionProvider } from './connection';
 
 // Type imports
 import type { IStorageAdapter, OpLogEntry } from './IStorageAdapter';
@@ -78,13 +78,15 @@ export type {
 } from './cluster';
 
 // Connection provider exports
-export { SingleServerProvider };
+export { SingleServerProvider, HttpSyncProvider, AutoConnectionProvider };
 export type {
   IConnectionProvider,
   ConnectionProviderEvent,
   ConnectionEventHandler,
   SingleServerProviderConfig,
 } from './types';
+export type { HttpSyncProviderConfig } from './connection/HttpSyncProvider';
+export type { AutoConnectionProviderConfig } from './connection/AutoConnectionProvider';
 
 // TopGunClient cluster config types
 export type { TopGunClusterConfig, TopGunClientConfig } from './TopGunClient';
