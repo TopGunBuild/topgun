@@ -46,6 +46,42 @@ describe('AutoConnectionProvider', () => {
     mockFetch = jest.fn().mockResolvedValue(createMockResponse());
   });
 
+  it('uses WebSocket when available', async () => {
+    const { SingleServerProvider } = require('../connection/SingleServerProvider');
+
+    // Override mock so connect() succeeds for this test
+    SingleServerProvider.mockImplementationOnce(() => ({
+      connect: jest.fn().mockResolvedValue(undefined),
+      close: jest.fn().mockResolvedValue(undefined),
+      isConnected: jest.fn().mockReturnValue(true),
+      getConnectedNodes: jest.fn().mockReturnValue(['ws-node-1']),
+      on: jest.fn(),
+      off: jest.fn(),
+      send: jest.fn(),
+      getConnection: jest.fn(),
+      getAnyConnection: jest.fn(),
+    }));
+
+    const provider = new AutoConnectionProvider({
+      url: 'http://localhost:8080',
+      clientId: 'c1',
+      hlc,
+      authToken: 'token',
+      fetchImpl: mockFetch,
+    });
+
+    await provider.connect();
+
+    // Should be using WebSocket, not HTTP
+    expect(provider.isUsingHttp()).toBe(false);
+    expect(provider.isConnected()).toBe(true);
+    expect(provider.getConnectedNodes()).toEqual(['ws-node-1']);
+    // fetch should NOT have been called since WS succeeded
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    await provider.close();
+  });
+
   it('falls back to HTTP after maxWsAttempts failures', async () => {
     const provider = new AutoConnectionProvider({
       url: 'http://localhost:8080',
