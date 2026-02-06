@@ -1,6 +1,7 @@
-import { createServer as createHttpServer, Server as HttpServer } from 'http';
+import { createServer as createHttpServer, Server as HttpServer, IncomingMessage, ServerResponse } from 'http';
 import { WebSocket } from 'ws';
-import { ConsistencyLevel, PARTITION_COUNT } from '@topgunbuild/core';
+import { ConsistencyLevel, PARTITION_COUNT, serialize, deserialize, HttpSyncRequestSchema } from '@topgunbuild/core';
+import type { HttpSyncResponse } from '@topgunbuild/core';
 import { ServerCoordinatorConfig, ServerCoordinator } from './ServerCoordinator';
 import { ClusterManager } from './cluster/ClusterManager';
 import { PartitionService } from './cluster/PartitionService';
@@ -49,6 +50,7 @@ import {
     SearchHandler,
     QueryHandler,
     LifecycleManager,
+    HttpSyncHandler,
     DEFAULT_GC_AGE_MS,
 } from './coordinator';
 
@@ -256,6 +258,30 @@ export class ServerFactory {
             }
         } = handlers;
 
+        // Create HTTP sync handler and wire into network module
+        const httpSyncHandler = new HttpSyncHandler({
+            authHandler,
+            operationHandler,
+            storageManager,
+            queryConversionHandler,
+            searchCoordinator,
+            hlc,
+            securityManager,
+        });
+
+        // Wire /sync route into the network module's HTTP handler
+        if (network.setHttpRequestHandler) {
+            network.setHttpRequestHandler((req: IncomingMessage, res: ServerResponse) => {
+                if (req.method === 'POST' && req.url === '/sync') {
+                    ServerFactory.handleHttpSync(req, res, httpSyncHandler);
+                    return;
+                }
+                // Default response for non-sync routes
+                res.writeHead(200);
+                res.end('TopGun Server Running');
+            });
+        }
+
         // Create lifecycle module
         const lifecycle = createLifecycleModule(
             { nodeId: config.nodeId },
@@ -363,6 +389,89 @@ export class ServerFactory {
         }
 
         return coordinator;
+    }
+
+    /**
+     * Handle an HTTP sync request by parsing the body, validating auth,
+     * delegating to HttpSyncHandler, and serializing the response.
+     */
+    private static handleHttpSync(
+        req: IncomingMessage,
+        res: ServerResponse,
+        handler: HttpSyncHandler,
+    ): void {
+        // Extract auth token
+        const authHeader = req.headers['authorization'] || '';
+        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+
+        if (!token) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Missing Authorization header' }));
+            return;
+        }
+
+        // Collect request body
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => chunks.push(chunk));
+        req.on('end', async () => {
+            try {
+                const body = Buffer.concat(chunks);
+                const contentType = req.headers['content-type'] || '';
+                const isJson = contentType.includes('application/json');
+
+                // Parse request body
+                let parsed: any;
+                if (isJson) {
+                    parsed = JSON.parse(body.toString('utf-8'));
+                } else {
+                    parsed = deserialize(body);
+                }
+
+                // Validate against schema
+                const validation = HttpSyncRequestSchema.safeParse(parsed);
+                if (!validation.success) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        error: 'Invalid request body',
+                        details: validation.error.issues,
+                    }));
+                    return;
+                }
+
+                // Process the sync request
+                const response = await handler.handleSyncRequest(validation.data, token);
+
+                // Serialize response matching request content type
+                if (isJson) {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(response));
+                } else {
+                    const responseBytes = serialize(response);
+                    res.writeHead(200, { 'Content-Type': 'application/x-msgpack' });
+                    res.end(Buffer.from(responseBytes));
+                }
+            } catch (err: any) {
+                const message = err.message || 'Internal server error';
+
+                if (message.startsWith('401:')) {
+                    res.writeHead(401, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: message.slice(5).trim() }));
+                } else if (message.startsWith('403:')) {
+                    res.writeHead(403, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: message.slice(5).trim() }));
+                } else {
+                    logger.error({ err }, 'HTTP sync request failed');
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Internal server error' }));
+                }
+            }
+        });
+
+        req.on('error', (err) => {
+            logger.error({ err }, 'HTTP sync request stream error');
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Request stream error' }));
+        });
     }
 
     private static createMetricsServer(

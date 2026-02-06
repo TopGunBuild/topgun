@@ -25,18 +25,27 @@ export function createNetworkModule(
   config: NetworkModuleConfig,
   _deps: NetworkModuleDeps
 ): NetworkModule {
+  // Mutable request handler reference for deferred wiring.
+  // The default handler serves a simple status page; it can be replaced
+  // after assembly via setHttpRequestHandler() to add /sync routing.
+  let currentRequestHandler = (_req: any, res: any) => {
+    res.writeHead(200);
+    res.end(config.tls?.enabled ? 'TopGun Server Running (Secure)' : 'TopGun Server Running');
+  };
+
+  // Dispatcher delegates to the mutable handler so the HTTP server can
+  // be created once at construction time but route configuration can
+  // change later via deferred wiring.
+  const requestDispatcher = (req: any, res: any) => {
+    currentRequestHandler(req, res);
+  };
+
   // Create HTTP server (NOT listening yet)
   let httpServer: HttpServer | HttpsServer;
   if (config.tls?.enabled) {
-    httpServer = createHttpsServer(buildTLSOptions(config.tls), (_req, res) => {
-      res.writeHead(200);
-      res.end('TopGun Server Running (Secure)');
-    });
+    httpServer = createHttpsServer(buildTLSOptions(config.tls), requestDispatcher);
   } else {
-    httpServer = createHttpServer((_req, res) => {
-      res.writeHead(200);
-      res.end('TopGun Server Running');
-    });
+    httpServer = createHttpServer(requestDispatcher);
   }
 
   // Configure server limits
@@ -86,6 +95,11 @@ export function createNetworkModule(
       httpServer.listen(config.port, () => {
         logger.info({ port: config.port }, 'Server Coordinator listening');
       });
-    }
+    },
+    // Deferred wiring: allows ServerFactory to inject the /sync handler
+    // after HttpSyncHandler is assembled
+    setHttpRequestHandler: (handler: (req: any, res: any) => void) => {
+      currentRequestHandler = handler;
+    },
   };
 }

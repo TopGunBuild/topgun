@@ -182,6 +182,7 @@ export interface NetworkModule {
   rateLimiter: ConnectionRateLimiter;
   rateLimitedLogger: RateLimitedLogger;
   start: () => void;  // DEFERRED startup - call AFTER assembly
+  setHttpRequestHandler?: (handler: (req: any, res: any) => void) => void;
 }
 
 // CRDT handlers - conflict resolution and operations
