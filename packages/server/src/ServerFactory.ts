@@ -278,7 +278,7 @@ export class ServerFactory {
                 }
                 // Default response for non-sync routes
                 res.writeHead(200);
-                res.end('TopGun Server Running');
+                res.end(config.tls?.enabled ? 'TopGun Server Running (Secure)' : 'TopGun Server Running');
             });
         }
 
