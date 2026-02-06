@@ -1,7 +1,7 @@
 ---
 id: SPEC-035
 type: feature
-status: running
+status: done
 priority: quick-win
 complexity: small
 created: 2026-02-06
@@ -331,3 +331,48 @@ Use the same test patterns as existing optimizer tests (`QueryOptimizer.test.ts`
 - Implementation follows the spec exactly, including the precedence order and error messages
 - The buildHintedIndexQuery method correctly handles SimpleQueryNode, LogicalQueryNode (searching children), FTSQueryNode (fallback to has), and unmatched cases
 - The applyPlanOptions refactoring shares sort/limit/cursor logic between hinted and normal paths
+
+---
+
+## Review History
+
+### Review v1 (2026-02-06 13:00)
+**Result:** APPROVED
+**Reviewer:** impl-reviewer (subagent)
+
+**Findings:**
+
+**Passed:**
+- [x] AC1: `QueryOptions` has `useIndex?: string`, `forceIndexScan?: boolean`, `disableOptimization?: boolean` -- verified at `/Users/koristuvac/Projects/topgun/topgun/packages/core/src/query/QueryTypes.ts` lines 120-125
+- [x] AC2: `QueryPlan` has `hint?: string` -- verified at `/Users/koristuvac/Projects/topgun/topgun/packages/core/src/query/QueryTypes.ts` line 279
+- [x] AC3: `useIndex: 'status'` returns index-scan plan with `hint === 'status'` -- verified by tests "uses specified attribute index when available" and "sets hint field on returned QueryPlan"
+- [x] AC4: `useIndex: 'nonexistent'` throws with correct error message -- verified by test "throws when no index exists for specified attribute"
+- [x] AC5: `forceIndexScan: true` throws on full-scan -- verified by test "throws when plan would be full-scan"
+- [x] AC6: `forceIndexScan: true` does NOT throw with index -- verified by test "passes when plan uses indexes"
+- [x] AC7: `disableOptimization: true` returns full-scan with `usesIndexes === false` -- verified by test "returns full-scan plan regardless of available indexes"
+- [x] AC8: Precedence order correct: `disableOptimization > useIndex > forceIndexScan` -- verified by three combination tests
+- [x] AC9: All existing tests pass without modification -- 33 + 20 + 13 + 12 + 16 = 94 existing tests pass; no existing test files were modified in SPEC-035 commits
+- [x] AC10: IndexHints.test.ts contains exactly 14 test cases -- verified by grep and test run
+- [x] AC11: `pnpm build` succeeds with no type errors -- verified
+- [x] Constraint: `optimize()` method signature and behavior unchanged -- verified via git diff (no changes to optimize method)
+- [x] Constraint: No index name/label system added to `IndexRegistry` -- verified; only uses existing `getIndexes(attributeName)` API
+- [x] Constraint: No existing test files modified -- verified via git commit stats
+- [x] Constraint: `buildHintedIndexQuery` falls back to `{ type: 'has' }` for unmatched queries -- verified in code and test
+- [x] Code quality: Clean, readable implementation matching spec code examples exactly
+- [x] Architecture: Follows existing optimizer patterns (private helpers, type-safe plan building)
+- [x] Non-duplication: Reuses existing `buildIndexQuery`, `getIndexes`, `getRetrievalCost` APIs; `applyPlanOptions` properly extracts shared logic
+- [x] Cognitive load: Three orthogonal options with clear precedence, straightforward control flow, well-named methods
+- [x] Security: No external I/O, no user-facing input beyond type-safe interfaces, no hardcoded secrets
+- [x] Code comments: No spec/phase references in code comments; JSDoc WHY-comments used appropriately
+- [x] `{ type: 'has' }` is a valid `IndexQuery` type per `types.ts` line 75
+
+**Summary:** Implementation is clean, correct, and precisely matches the specification. All 11 acceptance criteria are fully satisfied. All constraints are respected. The code is additive-only (no existing behavior changes), well-structured, and follows established codebase patterns. The `applyPlanOptions` refactoring correctly shares sort/limit/cursor logic between the hinted and normal paths. The `buildHintedIndexQuery` method handles all query node types (Simple, Logical, FTS) with appropriate fallbacks. No issues found.
+
+---
+
+## Completion
+
+**Completed:** 2026-02-06
+**Total Commits:** 3
+**Audit Cycles:** 2
+**Review Cycles:** 1

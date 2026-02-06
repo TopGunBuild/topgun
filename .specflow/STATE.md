@@ -2,21 +2,22 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-035
-- **Status:** review
+- **Active Specification:** none
+- **Status:** idle
 - **TODO Items:** 14
-- **Next Step:** /sf:review
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | Position | Spec | Title | Status |
 |----------|------|-------|--------|
-| 1 | SPEC-035 | Add Index Hint Options to QueryOptimizer | review |
 
 ## Decisions
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-06 | SPEC-035 | COMPLETED: Index Hint Options. Created 1 file (IndexHints.test.ts with 14 tests), modified 2 files (QueryTypes, QueryOptimizer). 3 commits, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-035.md |
+| 2026-02-06 | SPEC-035 | REVIEWED v1: Implementation APPROVED. All 11 acceptance criteria fully satisfied. All constraints respected. 14 tests pass. 94 existing tests pass. Build succeeds. No critical, major, or minor issues. Clean additive implementation. Ready for finalization. |
 | 2026-02-06 | SPEC-035 | EXECUTED: Add Index Hint Options to QueryOptimizer. Created 1 file (IndexHints.test.ts with 14 tests), modified 2 files (QueryTypes, QueryOptimizer). 3 commits. All 11 acceptance criteria met. All existing tests pass. No deviations. Ready for review. |
 | 2026-02-06 | SPEC-035 | AUDITED v2: Approved. All 10 dimensions pass. Context estimate ~19% (PEAK range). All 5 assumptions re-verified against source code. Response v1 changes confirmed. No critical issues. No recommendations. Ready for implementation. |
 | 2026-02-06 | SPEC-035 | REVISED v1: Applied both Audit v1 recommendations. Added FTSQueryNode fallback note to buildHintedIndexQuery description. Added explicit applyPlanOptions method signature. Ready for re-audit. |

@@ -1,6 +1,6 @@
 # To-Do List
 
-**Last updated:** 2026-02-05
+**Last updated:** 2026-02-06
 **Source:** Migrated from PROMPTS directory, reordered by technical dependencies and ROI
 
 ---
@@ -8,18 +8,6 @@
 ## Wave 1: Foundation (Quality + Quick Wins)
 
 *Goal: Build safety net, capture low-hanging fruit*
-
-### TODO-038: Index Hints
-- **Priority:** 🟢 Quick Win
-- **Complexity:** Low
-- **Context:** [reference/HAZELCAST_QUICK_WINS.md](../reference/HAZELCAST_QUICK_WINS.md)
-- **Summary:** Allow explicit index hints in queries
-- **Why Now:** Low risk, useful for debugging and optimization
-- **Example:** `query.hint({ useIndex: 'status_idx' })`
-- **Use Case:** Override query planner when developer knows better
-- **Effort:** 1-2 days
-
----
 
 ### TODO-045: DST Documentation
 - **Priority:** 🟢 Quick Win
@@ -260,7 +248,7 @@
 
 | Wave | Items | Total Effort | Focus |
 |------|-------|--------------|-------|
-| 1. Foundation | 2 | ~3 days | Quick wins + docs |
+| 1. Foundation | 1 | ~1 day | Quick wins + docs |
 | 2. Market Expansion | 3 | ~4 weeks | Serverless + cluster |
 | 3. Performance | 2 | ~6 weeks | Storage + WASM |
 | 4. Advanced Features | 3 | ~10 weeks | DAG + Vector + Extensions |
@@ -270,27 +258,25 @@
 
 | # | TODO | Wave | Effort | ROI |
 |---|------|------|--------|-----|
-| 1 | TODO-038 | 1 | 1-2 days | 🟢 Medium |
-| 2 | TODO-045 | 1 | 0.5-1 day | 🟢 Low |
-| 3 | TODO-026 | 2 | 2-3 weeks | 🔴 High |
-| 4 | TODO-029 | 2 | 1 week | 🟡 Medium |
-| 5 | TODO-023 | 2 | ~16 hours | 🟡 Medium |
-| 6 | TODO-033 | 3 | 2-3 weeks | 🟡 Medium |
-| 7 | TODO-034 | 3 | 4-6 weeks | 🟡 Medium |
-| 8 | TODO-025 | 4 | 4-6 weeks | 🟡 Medium |
-| 9 | TODO-039 | 4 | 4 weeks | 🟡 Medium |
-| 10 | TODO-036 | 4 | 2-3 weeks | 🟢 Low |
-| 11 | TODO-041 | 5 | Large | 🔵 Deferred |
-| 12 | TODO-043 | 5 | 6-8 weeks | 🔵 Deferred |
-| 13 | TODO-044 | 5 | 4-6 weeks | 🔵 Deferred |
-| 14 | TODO-040 | 5 | Large | 🔵 Deferred |
-| 15 | TODO-042 | 5 | Very Large | ⚠️ Risk |
+| 1 | TODO-045 | 1 | 0.5-1 day | 🟢 Low |
+| 2 | TODO-026 | 2 | 2-3 weeks | 🔴 High |
+| 3 | TODO-029 | 2 | 1 week | 🟡 Medium |
+| 4 | TODO-023 | 2 | ~16 hours | 🟡 Medium |
+| 5 | TODO-033 | 3 | 2-3 weeks | 🟡 Medium |
+| 6 | TODO-034 | 3 | 4-6 weeks | 🟡 Medium |
+| 7 | TODO-025 | 4 | 4-6 weeks | 🟡 Medium |
+| 8 | TODO-039 | 4 | 4 weeks | 🟡 Medium |
+| 9 | TODO-036 | 4 | 2-3 weeks | 🟢 Low |
+| 10 | TODO-041 | 5 | Large | 🔵 Deferred |
+| 11 | TODO-043 | 5 | 6-8 weeks | 🔵 Deferred |
+| 12 | TODO-044 | 5 | 4-6 weeks | 🔵 Deferred |
+| 13 | TODO-040 | 5 | Large | 🔵 Deferred |
+| 14 | TODO-042 | 5 | Very Large | ⚠️ Risk |
 
 ### Context Files
 
 | TODO | Context File | Lines |
 |------|--------------|-------|
-| TODO-038 | HAZELCAST_QUICK_WINS.md | 400+ |
 | TODO-026 | TURSO_INSIGHTS.md (Section 1) | 482 |
 | TODO-029 | HAZELCAST_QUICK_WINS.md | 400+ |
 | TODO-023 | PHASE_4.5_CLIENT_CLUSTER_SPEC.md | 336 |
@@ -307,4 +293,4 @@
 
 ---
 
-*Reordered by technical dependencies and ROI on 2026-02-05*
+*Reordered by technical dependencies and ROI on 2026-02-05. TODO-038 converted to SPEC-035 on 2026-02-06.*
