@@ -327,6 +327,9 @@ function createCRDTHandlers(
     } : undefined,
     broadcastHandler: messagingHandlers.broadcastHandler,
     operationContextHandler: serverHandlers.operationContextHandler,
+    forwardToNode: (nodeId: string, op: any) => {
+      deps.cluster.cluster.send(nodeId, 'OP_FORWARD', op);
+    },
     backpressure: {
       registerPending: () => deps.core.backpressure.registerPending(),
       waitForCapacity: () => deps.core.backpressure.waitForCapacity(),

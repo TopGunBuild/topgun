@@ -6,6 +6,7 @@ import { IInterceptor } from './interceptor/IInterceptor';
 import { ServerDependencies } from './ServerDependencies';
 import { ClusterManager } from './cluster/ClusterManager';
 import { PartitionService } from './cluster/PartitionService';
+import { ReplicationPipeline } from './cluster/ReplicationPipeline';
 import { Query } from './query/Matcher';
 import { logger } from './utils/logger';
 import { TLSConfig, ClusterTLSConfig } from './types/TLSConfig';
@@ -187,6 +188,9 @@ export class ServerCoordinator {
     private merkleTreeManager?: MerkleTreeManager;
     private repairScheduler?: RepairScheduler;
 
+    // Replication
+    private replicationPipeline?: ReplicationPipeline;
+
     // Full-Text Search
     private searchCoordinator!: SearchCoordinator;
 
@@ -232,7 +236,8 @@ export class ServerCoordinator {
 
         // Constructor-only locals for wiring (Part 3)
         const wss = dependencies.wss;
-        const replicationPipeline = dependencies.replicationPipeline;
+        this.replicationPipeline = dependencies.replicationPipeline;
+        const replicationPipeline = this.replicationPipeline;
         const lockManager = dependencies.lockManager;
         const conflictResolverHandler = dependencies.conflictResolverHandler;
         const messageRegistry = dependencies.messageRegistry;

@@ -122,33 +122,26 @@ describe('Distributed Garbage Collection Consensus', () => {
 
   test('GC Consensus: Blocks pruning if a node has lagging clients', async () => {
     // 1. Create Data & Tombstones
+    // Merge directly on all nodes since BACKUP_COUNT=1 means replication
+    // only reaches 1 of 2 other nodes. This test is about GC consensus,
+    // not replication, so we ensure all nodes have the data.
     const mapName = 'dist-gc-map';
     const key = 'zombie-key';
-    
-    // Write LWW Record
-    const rec = { value: 'test', timestamp: harness1.hlc.now() };
-    harness1.processLocalOp({
-        mapName,
-        key,
-        record: rec,
-        opType: 'PUT'
-    }, false);
 
-    await new Promise(r => setTimeout(r, 200)); // Propagate
+    // Write LWW Record on all nodes
+    const rec = { value: 'test', timestamp: harness1.hlc.now() };
+    (node1.getMap(mapName) as LWWMap<any, any>).merge(key, rec);
+    (node2.getMap(mapName) as LWWMap<any, any>).merge(key, rec);
+    (node3.getMap(mapName) as LWWMap<any, any>).merge(key, rec);
 
     // Verify write
     expect((node2.getMap(mapName) as LWWMap<any, any>).getRecord(key)?.value).toBe('test');
 
-    // Delete (Create Tombstone)
+    // Delete (Create Tombstone) on all nodes
     const tombstone = { value: null, timestamp: harness1.hlc.now() };
-    harness1.processLocalOp({
-        mapName,
-        key,
-        record: tombstone,
-        opType: 'REMOVE'
-    }, false);
-
-    await new Promise(r => setTimeout(r, 200)); // Propagate
+    (node1.getMap(mapName) as LWWMap<any, any>).merge(key, tombstone);
+    (node2.getMap(mapName) as LWWMap<any, any>).merge(key, tombstone);
+    (node3.getMap(mapName) as LWWMap<any, any>).merge(key, tombstone);
 
     // Verify tombstone
     expect((node1.getMap(mapName) as LWWMap<any, any>).getRecord(key)?.value).toBeNull();

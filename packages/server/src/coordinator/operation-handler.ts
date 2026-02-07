@@ -44,14 +44,12 @@ export class OperationHandler implements IOperationHandler {
                 });
             }
         } else {
-            // Forward to owner
+            // Forward to partition owner via cluster
             const owner = this.config.partitionService.getOwner(op.key);
-            if (owner) {
-                this.config.broadcastHandler.broadcast({
-                    type: 'FORWARD_OP',
-                    payload: op,
-                    targetNode: owner
-                });
+            if (owner && this.config.forwardToNode) {
+                this.config.forwardToNode(owner, op);
+            } else if (owner) {
+                logger.warn({ key: op.key, owner }, 'No forwardToNode callback, cannot forward op');
             } else {
                 logger.warn({ key: op.key }, 'No owner found for key');
             }

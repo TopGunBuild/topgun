@@ -233,6 +233,8 @@ export interface OperationHandlerConfig {
     };
     broadcastHandler: IBroadcastHandler;
     operationContextHandler: IOperationContextHandler;
+    /** Forward operation to a specific cluster node (partition owner) */
+    forwardToNode?: (nodeId: string, op: any) => void;
 
     // Optional for backpressure customization
     backpressure?: {

@@ -1,6 +1,6 @@
 import { createServer as createHttpServer, Server as HttpServer, IncomingMessage, ServerResponse } from 'http';
 import { WebSocket } from 'ws';
-import { ConsistencyLevel, PARTITION_COUNT, serialize, deserialize, HttpSyncRequestSchema } from '@topgunbuild/core';
+import { ConsistencyLevel, PARTITION_COUNT, serialize, deserialize, HttpSyncRequestSchema, LWWMap } from '@topgunbuild/core';
 import type { HttpSyncResponse } from '@topgunbuild/core';
 import { ServerCoordinatorConfig, ServerCoordinator } from './ServerCoordinator';
 import { ClusterManager } from './cluster/ClusterManager';
@@ -257,6 +257,51 @@ export class ServerFactory {
                 journalSubscriptions,
             }
         } = handlers;
+
+        // Create ClusterEventHandler for inter-node message routing
+        const clusterEventHandler = new ClusterEventHandler({
+            cluster,
+            partitionService,
+            lockManager,
+            topicManager: {
+                publish: (topic: string, data: any, senderId: string, fromCluster?: boolean) =>
+                    topicManager.publish(topic, data, senderId, fromCluster),
+            },
+            repairScheduler,
+            connectionManager,
+            storageManager,
+            queryRegistry: {
+                processChange: queryRegistry.processChange.bind(queryRegistry),
+            },
+            metricsService: {
+                incOp: (op: any, mapName: string) => metricsService.incOp(op, mapName),
+                setClusterMembers: (count: number) => metricsService.setClusterMembers(count),
+            },
+            gcHandler,
+            hlc,
+            merkleTreeManager,
+            processLocalOp: (op: any, fromCluster: boolean, senderId?: string) =>
+                operationHandler.processLocalOp(op, fromCluster, senderId),
+            executeLocalQuery: (mapName: string, query: any) =>
+                queryConversionHandler.executeLocalQuery(mapName, query),
+            finalizeClusterQuery: (requestId: string, timeout?: boolean) =>
+                queryConversionHandler.finalizeClusterQuery(requestId, timeout),
+            getLocalRecord: (key: string) => {
+                const separatorIndex = key.indexOf(':');
+                if (separatorIndex === -1) return null;
+                const mapName = key.substring(0, separatorIndex);
+                const actualKey = key.substring(separatorIndex + 1);
+                const map = storageManager.getMaps().get(mapName);
+                if (!map || !(map instanceof LWWMap)) return null;
+                return map.getRecord(actualKey) ?? null;
+            },
+            broadcast: (message: any, excludeClientId?: string) =>
+                broadcastHandler.broadcast(message, excludeClientId),
+            getMap: (name: string, typeHint: 'LWW' | 'OR') =>
+                storageManager.getMap(name, typeHint),
+            pendingClusterQueries,
+        });
+        clusterEventHandler.setupListeners();
 
         // Create HTTP sync handler and wire into network module
         const httpSyncHandler = new HttpSyncHandler({

@@ -23,14 +23,17 @@ describe('Cluster E2E Replication', () => {
   let harness2: ServerTestHarness;
   let harness3: ServerTestHarness;
 
-  // Helper to create a mock client
+  // Helper to create a mock client with all required ClientConnection properties
   function createMockClient(id: string) {
     return {
       id,
       socket: { send: jest.fn(), readyState: WebSocket.OPEN, close: jest.fn() } as any,
+      writer: { write: jest.fn(), close: jest.fn() },
       isAuthenticated: true,
       subscriptions: new Set(),
-      principal: { userId: id, roles: ['ADMIN'] }
+      principal: { userId: id, roles: ['ADMIN'] },
+      lastActiveHlc: { millis: Date.now(), counter: 0, nodeId: 'client' },
+      lastPingReceived: Date.now(),
     };
   }
 

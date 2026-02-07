@@ -2,10 +2,13 @@ import { ServerCoordinator, ServerFactory } from '../';
 import { WebSocket } from 'ws';
 import { LWWMap, deserialize } from '@topgunbuild/core';
 import { pollUntil } from './utils/test-helpers';
+import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
 
 describe('Cluster Integration', () => {
   let node1: ServerCoordinator;
   let node2: ServerCoordinator;
+  let harness1: ServerTestHarness;
+  let harness2: ServerTestHarness;
 
   beforeAll(async () => {
     // Note: Low-ID Initiator Policy means the node with lower ID must initiate.
@@ -22,6 +25,7 @@ describe('Cluster Integration', () => {
 
     // Wait for node-b to be ready first
     await node1.ready();
+    harness1 = createTestHarness(node1);
 
     // Start Node A (lower ID, will initiate connection to node-b)
     node2 = ServerFactory.create({
@@ -34,12 +38,13 @@ describe('Cluster Integration', () => {
 
     // Wait for node-a to be ready
     await node2.ready();
+    harness2 = createTestHarness(node2);
 
     // Wait for cluster to stabilize with bounded polling
     await pollUntil(
       () => {
-        const m1 = (node1 as any).cluster.getMembers();
-        const m2 = (node2 as any).cluster.getMembers();
+        const m1 = harness1.cluster.getMembers();
+        const m2 = harness2.cluster.getMembers();
         return m1.includes('node-a') && m2.includes('node-b');
       },
       {
@@ -58,8 +63,8 @@ describe('Cluster Integration', () => {
   });
 
   test('Cluster Formation', () => {
-    const members1 = (node1 as any).cluster.getMembers();
-    const members2 = (node2 as any).cluster.getMembers();
+    const members1 = harness1.cluster.getMembers();
+    const members2 = harness2.cluster.getMembers();
 
     expect(members1).toContain('node-b');
     expect(members1).toContain('node-a');
@@ -72,9 +77,12 @@ describe('Cluster Integration', () => {
     const clientMock = {
       id: 'client-1',
       socket: { send: jest.fn(), readyState: WebSocket.OPEN, close: jest.fn() } as any,
+      writer: { write: jest.fn(), close: jest.fn() },
       isAuthenticated: true,
       subscriptions: new Set(),
-      principal: { userId: 'test', roles: ['ADMIN'] }
+      principal: { userId: 'test', roles: ['ADMIN'] },
+      lastActiveHlc: { millis: Date.now(), counter: 0, nodeId: 'node-b' },
+      lastPingReceived: Date.now(),
     };
 
     // We need a key that hashes such that Node 2 is either Owner or Backup.
@@ -92,8 +100,8 @@ describe('Cluster Integration', () => {
       }
     };
 
-    // Force processing
-    (node1 as any).handleMessage(clientMock, {
+    // Process via harness (routes through WebSocketHandler message registry)
+    await harness1.handleMessage(clientMock, {
       type: 'CLIENT_OP',
       payload: op
     });
@@ -125,10 +133,10 @@ describe('Cluster Integration', () => {
         lastActiveHlc: { millis: Date.now(), counter: 0, nodeId: 'node-b' },
         lastPingReceived: Date.now(),
     };
-    (node1 as any).connectionManager.getClients().set(clientMock.id, clientMock);
+    harness1.registerMockClient(clientMock);
 
     // Client subscribes on Node 1
-    (node1 as any).handleMessage(clientMock, {
+    await harness1.handleMessage(clientMock, {
         type: 'QUERY_SUB',
         payload: { queryId: 'q-local', mapName: 'users', query: {} }
     });
@@ -147,7 +155,7 @@ describe('Cluster Integration', () => {
         }
     };
 
-    (node1 as any).handleMessage(clientMock, {
+    await harness1.handleMessage(clientMock, {
         type: 'CLIENT_OP',
         payload: op
     });
@@ -201,8 +209,7 @@ describe('Cluster Integration', () => {
   });
 
   test('Partition Service Distribution', () => {
-      // Access private service via cast
-      const ps = (node1 as any).partitionService;
+      const ps = harness1.partitionService;
       const key = 'test-key-123';
 
       const dist = ps.getDistribution(key);
@@ -211,7 +218,7 @@ describe('Cluster Integration', () => {
       // With 2 nodes, we expect 1 backup
       expect(dist.backups.length).toBeGreaterThan(0);
 
-      const members = (node1 as any).cluster.getMembers();
+      const members = harness1.cluster.getMembers();
       // Owner + Backup should cover the cluster in 2-node scenario
       const covered = new Set([dist.owner, ...dist.backups]);
       expect(covered.size).toBe(2);

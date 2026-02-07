@@ -197,7 +197,7 @@ export class ServerTestHarness {
      * Used by DistributedGC.test.ts.
      */
     reportLocalHlc(): void {
-        (this.server as any).reportLocalHlc?.();
+        (this.gcHandler as any).reportLocalHlc();
     }
 
     /**
