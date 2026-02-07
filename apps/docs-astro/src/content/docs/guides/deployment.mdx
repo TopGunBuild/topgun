@@ -1,11 +1,11 @@
 ---
 title: Deployment Guide
-description: Learn how to deploy the TopGun server to production using Docker, Docker Compose, or Kubernetes.
+description: Learn how to deploy the TopGun server to production using Docker, Docker Compose, Kubernetes, or serverless platforms.
 order: 15
 ---
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
-import { ChevronRight, Server, Container, Layers, Lock, Shield, Zap } from 'lucide-react';
+import { ChevronRight, Server, Container, Layers, Lock, Shield, Zap, Cloud, Network } from 'lucide-react';
 
 export const dockerBuildCode = `# From the root of the repository
 docker build -t topgun-server -f deploy/Dockerfile.server .`;
@@ -204,6 +204,131 @@ spec:
         secret:
           secretName: topgun-tls`;
 
+export const vercelEdgeCode = `// app/api/sync/route.ts (Next.js App Router)
+import { HttpSyncHandler } from '@topgunbuild/server/coordinator';
+import { HLC } from '@topgunbuild/core';
+
+// Module-scoped singleton -- reused across warm invocations
+let handler: HttpSyncHandler | null = null;
+
+function getHandler(): HttpSyncHandler {
+  if (!handler) {
+    const hlc = new HLC('vercel-edge-1');
+    handler = new HttpSyncHandler(hlc);
+  }
+  return handler;
+}
+
+export async function POST(request: Request) {
+  const authHeader = request.headers.get('authorization');
+  const authToken = authHeader?.replace('Bearer ', '') ?? '';
+
+  const body = await request.json();
+  const result = await getHandler().handleSyncRequest(body, authToken);
+
+  return new Response(JSON.stringify(result), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}`;
+
+export const lambdaHandlerCode = `// handler.ts (AWS Lambda)
+import { HttpSyncHandler } from '@topgunbuild/server/coordinator';
+import { HLC } from '@topgunbuild/core';
+
+let handler: HttpSyncHandler | null = null;
+
+function getHandler(): HttpSyncHandler {
+  if (!handler) {
+    const hlc = new HLC('lambda-1');
+    handler = new HttpSyncHandler(hlc);
+  }
+  return handler;
+}
+
+export const syncHandler = async (event: any) => {
+  const authToken = (event.headers?.authorization ?? '').replace('Bearer ', '');
+  const body = JSON.parse(event.body ?? '{}');
+
+  const result = await getHandler().handleSyncRequest(body, authToken);
+
+  return {
+    statusCode: 200,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(result),
+  };
+};`;
+
+export const cloudflareWorkerCode = `// src/index.ts (Cloudflare Worker)
+import { HttpSyncHandler } from '@topgunbuild/server/coordinator';
+import { HLC } from '@topgunbuild/core';
+
+let handler: HttpSyncHandler | null = null;
+
+function getHandler(): HttpSyncHandler {
+  if (!handler) {
+    const hlc = new HLC('cf-worker-1');
+    handler = new HttpSyncHandler(hlc);
+  }
+  return handler;
+}
+
+export default {
+  async fetch(request: Request): Promise<Response> {
+    if (request.method !== 'POST') {
+      return new Response('Method not allowed', { status: 405 });
+    }
+
+    const authToken = (request.headers.get('authorization') ?? '').replace('Bearer ', '');
+    const body = await request.json();
+    const result = await getHandler().handleSyncRequest(body, authToken);
+
+    return new Response(JSON.stringify(result), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  },
+};`;
+
+export const serverlessClientHttpCode = `import { HttpSyncProvider, SyncEngine } from '@topgunbuild/client';
+import { HLC } from '@topgunbuild/core';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const hlc = new HLC('client-1');
+const provider = new HttpSyncProvider({
+  url: 'https://your-api.vercel.app',
+  clientId: 'client-1',
+  hlc,
+  authToken: 'your-jwt-token',
+  syncMaps: ['todos'],
+});
+
+const engine = new SyncEngine({
+  nodeId: 'client-1',
+  connectionProvider: provider,
+  storageAdapter: new IDBAdapter(),
+});`;
+
+export const serverlessClientAutoCode = `import { AutoConnectionProvider, SyncEngine } from '@topgunbuild/client';
+import { HLC } from '@topgunbuild/core';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const hlc = new HLC('client-1');
+const provider = new AutoConnectionProvider({
+  url: 'https://your-api.vercel.app',
+  clientId: 'client-1',
+  hlc,
+  authToken: 'your-jwt-token',
+  maxWsAttempts: 3,
+  syncMaps: ['todos'],
+});
+
+const engine = new SyncEngine({
+  nodeId: 'client-1',
+  connectionProvider: provider,
+  storageAdapter: new IDBAdapter(),
+});`;
+
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
   <span className="text-foreground font-medium">Docs</span>
   <ChevronRight className="w-4 h-4" />
@@ -367,6 +492,74 @@ docker-compose -f docker-compose.tls.yml up -d`} />
 <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 mb-6 not-prose">
   <h3 className="text-lg font-semibold text-blue-800 dark:text-blue-300 mb-2">cert-manager Integration</h3>
   <span className="text-blue-700 dark:text-blue-400">For automatic certificate management, consider using <a href="https://cert-manager.io/" className="underline">cert-manager</a> with Let's Encrypt or your internal CA. See the <a href="/docs/guides/security" className="underline">Security Guide</a> for detailed setup instructions.</span>
+</div>
+
+## Serverless Deployment
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Cloud className="w-6 h-6 text-indigo-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Deploy TopGun to serverless platforms using the HTTP sync protocol (<code>POST /sync</code> endpoint).</span>
+</div>
+
+TopGun supports serverless deployment via its HTTP sync protocol. The server exposes the `POST /sync` endpoint automatically when using `ServerFactory` or `ServerCoordinator`. For the endpoint's request/response format, see the [Server API reference](/docs/reference/server).
+
+For serverless environments where you want a lightweight handler without the full `ServerCoordinator` (which initializes WebSocket servers, cluster managers, and worker pools), `HttpSyncHandler` can be used directly. It provides the stateless `handleSyncRequest()` method designed for serverless cold-start environments.
+
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-6 mb-6 not-prose">
+  <h3 className="text-lg font-semibold text-yellow-800 dark:text-yellow-300 mb-2">Import Limitation</h3>
+  <span className="text-yellow-700 dark:text-yellow-400">
+    <code>HttpSyncHandler</code> is not currently exported from the <code>@topgunbuild/server</code> package. The main entry point (<code>@topgunbuild/server</code>) does not re-export from the coordinator module, and there is no <code>@topgunbuild/server/coordinator</code> sub-path export. The <code>package.json</code> exports map only contains <code>"."</code>, and the tsup build only produces <code>index.js</code>/<code>index.mjs</code> entry points.
+    A code change is needed to make <code>HttpSyncHandler</code> independently importable: add <code>"./coordinator"</code> to the package's <code>exports</code> map and add <code>src/coordinator/index.ts</code> as a tsup entry point.
+    The examples below show the intended usage pattern once this export is available.
+  </span>
+</div>
+
+### Vercel Edge Function
+
+<div className="not-prose">
+  <CodeBlock title="app/api/sync/route.ts" language="typescript" code={vercelEdgeCode} />
+</div>
+
+### AWS Lambda
+
+<div className="not-prose">
+  <CodeBlock title="handler.ts" language="typescript" code={lambdaHandlerCode} />
+</div>
+
+### Cloudflare Worker
+
+<div className="not-prose">
+  <CodeBlock title="src/index.ts" language="typescript" code={cloudflareWorkerCode} />
+</div>
+
+### Client Configuration for Serverless
+
+To connect a client to a serverless TopGun deployment, use `HttpSyncProvider` or `AutoConnectionProvider` with `SyncEngine`. These providers implement the `IConnectionProvider` interface and are used with `SyncEngine` directly -- not with `TopGunClient` (which only accepts `serverUrl` and `cluster` config options).
+
+#### Using HttpSyncProvider
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={serverlessClientHttpCode} />
+</div>
+
+#### Using AutoConnectionProvider
+
+For environments where you are unsure if WebSocket is available, `AutoConnectionProvider` tries WebSocket first and falls back to HTTP:
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={serverlessClientAutoCode} />
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 mb-6 not-prose">
+  <div className="flex items-center gap-2 mb-2">
+    <Network className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+    <h4 className="font-semibold text-blue-800 dark:text-blue-300">Provider Configuration Reference</h4>
+  </div>
+  <span className="text-blue-700 dark:text-blue-400">
+    For the full list of configuration options for <code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">HttpSyncProvider</code> and
+    <code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">AutoConnectionProvider</code>,
+    see the <a href="/docs/reference/client" className="underline">Client API reference</a>.
+  </span>
 </div>
 
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
