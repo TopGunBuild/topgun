@@ -78,6 +78,103 @@ It uses **Merkle Trees** (hash trees) to efficiently detect differences.
   </ol>
 </div>
 
+## HTTP Sync
+
+For serverless environments where persistent WebSocket connections are unavailable, TopGun provides a stateless HTTP sync transport via `POST /sync`.
+
+Unlike WebSocket sync, which maintains a persistent connection for real-time push updates and Merkle tree delta exchange, HTTP sync uses a polling-based request-response model. The client accumulates operations locally and periodically sends them to the server along with sync timestamps. The server processes the operations, computes deltas from its in-memory LWWMap for records newer than the client's `lastSyncTimestamp` (using HLC comparison), and returns acknowledgments and delta records in a single response.
+
+Each request carries full client context -- `clientId`, `clientHlc`, and `syncMaps` with per-map timestamps -- so any server node behind a load balancer can handle any request without session affinity. Authentication is performed via an `Authorization: Bearer <token>` header on every request.
+
+<div className="p-6 border border-card-border rounded-xl mb-6 bg-neutral-50 dark:bg-neutral-900/50 not-prose">
+  <h3 className="font-semibold mb-4">The HTTP Sync Exchange</h3>
+  <ol className="space-y-4">
+    <li className="flex gap-3">
+      <span className="flex-shrink-0 w-6 h-6 rounded-full bg-neutral-200 dark:bg-neutral-700 flex items-center justify-center text-xs font-bold">1</span>
+      <p className="text-sm text-neutral-600 dark:text-neutral-300">
+        <strong>Accumulate:</strong> Client writes operations to local state (LWWMap + OpLog) and queues them for sync.
+      </p>
+    </li>
+    <li className="flex gap-3">
+      <span className="flex-shrink-0 w-6 h-6 rounded-full bg-neutral-200 dark:bg-neutral-700 flex items-center justify-center text-xs font-bold">2</span>
+      <p className="text-sm text-neutral-600 dark:text-neutral-300">
+        <strong>Poll:</strong> At the configured poll interval (default 5 seconds), client sends <code>POST /sync</code> with queued operations and <code>syncMap</code> timestamps indicating the last known server state per map.
+      </p>
+    </li>
+    <li className="flex gap-3">
+      <span className="flex-shrink-0 w-6 h-6 rounded-full bg-neutral-200 dark:bg-neutral-700 flex items-center justify-center text-xs font-bold">3</span>
+      <p className="text-sm text-neutral-600 dark:text-neutral-300">
+        <strong>Process:</strong> Server applies client operations using CRDT merge semantics, then computes deltas by iterating in-memory maps and filtering records newer than the client's <code>lastSyncTimestamp</code>.
+      </p>
+    </li>
+    <li className="flex gap-3">
+      <span className="flex-shrink-0 w-6 h-6 rounded-full bg-neutral-200 dark:bg-neutral-700 flex items-center justify-center text-xs font-bold">4</span>
+      <p className="text-sm text-neutral-600 dark:text-neutral-300">
+        <strong>Respond:</strong> Server returns acknowledgments for processed operations, delta records for requested maps, and any one-shot query results -- all in a single response.
+      </p>
+    </li>
+    <li className="flex gap-3">
+      <span className="flex-shrink-0 w-6 h-6 rounded-full bg-neutral-200 dark:bg-neutral-700 flex items-center justify-center text-xs font-bold">5</span>
+      <p className="text-sm text-neutral-600 dark:text-neutral-300">
+        <strong>Apply:</strong> Client applies delta records to local state and updates <code>lastSyncTimestamp</code> per map for the next poll cycle.
+      </p>
+    </li>
+  </ol>
+</div>
+
+## When to Use Which Transport
+
+<div className="overflow-x-auto mb-6 not-prose">
+  <table className="w-full text-sm border-collapse">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="text-left py-3 px-4 font-semibold text-foreground">Criterion</th>
+        <th className="text-left py-3 px-4 font-semibold text-foreground">WebSocket</th>
+        <th className="text-left py-3 px-4 font-semibold text-foreground">HTTP Sync</th>
+        <th className="text-left py-3 px-4 font-semibold text-foreground">AutoConnectionProvider</th>
+      </tr>
+    </thead>
+    <tbody className="text-neutral-600 dark:text-neutral-300">
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Real-time updates</td>
+        <td className="py-3 px-4">Pushed instantly</td>
+        <td className="py-3 px-4">Polled (configurable interval)</td>
+        <td className="py-3 px-4">WS when available, HTTP fallback</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Serverless compatible</td>
+        <td className="py-3 px-4">No (needs persistent connection)</td>
+        <td className="py-3 px-4">Yes (stateless requests)</td>
+        <td className="py-3 px-4">Yes (auto-detects)</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Live query subscriptions</td>
+        <td className="py-3 px-4">Yes</td>
+        <td className="py-3 px-4">No (one-shot queries only)</td>
+        <td className="py-3 px-4">Depends on active transport</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Bandwidth efficiency</td>
+        <td className="py-3 px-4">Merkle tree delta sync</td>
+        <td className="py-3 px-4">Timestamp-based delta sync</td>
+        <td className="py-3 px-4">Best available</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Connection cost</td>
+        <td className="py-3 px-4">Per-connection billing</td>
+        <td className="py-3 px-4">Per-request billing</td>
+        <td className="py-3 px-4">Adapts to environment</td>
+      </tr>
+      <tr>
+        <td className="py-3 px-4 font-medium text-foreground">Recommended for</td>
+        <td className="py-3 px-4">Real-time apps, VPS/container deployments</td>
+        <td className="py-3 px-4">Serverless functions, edge functions</td>
+        <td className="py-3 px-4">Unknown deployment target</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
 ## Server Architecture
 
 While clients are "Local-First", TopGun is backed by a robust server cluster for persistence and scalability.
