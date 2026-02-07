@@ -42,7 +42,7 @@ interface ApiParamProps {
 export const ApiParam: React.FC<ApiParamProps> = ({ name, type, description }) => {
     return (
         <li className="flex flex-col sm:flex-row gap-2 sm:gap-8">
-            <code className="font-mono text-sm text-red-500 w-32 shrink-0">{name}</code>
+            <code className="font-mono text-sm text-red-500 shrink-0 whitespace-nowrap">{name}</code>
             <div className="text-sm text-neutral-600 dark:text-neutral-300">
                 <span className="font-semibold text-foreground">{type}</span>. {description}
             </div>
