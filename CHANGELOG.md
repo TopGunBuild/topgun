@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-02-07
+
+### Added
+
+#### HTTP Sync Protocol (`@topgunbuild/core`, `@topgunbuild/client`, `@topgunbuild/server`)
+- **Stateless HTTP sync** — new `POST /sync` endpoint enables CRDT synchronization without WebSocket connections, designed for serverless environments
+- **`HttpSyncProvider`** — client-side connection provider that translates sync operations into HTTP POST requests with configurable polling interval (`pollIntervalMs`)
+- **`AutoConnectionProvider`** — automatically selects WebSocket or HTTP transport with transparent fallback after configurable retry attempts (`maxWsAttempts`)
+- **`HttpSyncHandler`** — lightweight, stateless server-side handler for processing sync requests in serverless functions (Vercel Edge, AWS Lambda, Cloudflare Workers)
+- **HTTP sync Zod schemas** — `HttpSyncRequestSchema` and `HttpSyncResponseSchema` for request/response validation with msgpackr serialization
+- **Delta computation via HLC** — efficient timestamp-based filtering using `HLC.compare()` instead of Merkle tree round-trips
+
+#### Deterministic Simulation Testing (`@topgunbuild/core`)
+- **`VirtualClock`** — injectable time source for deterministic test execution
+- **`clockSource` injection** — HLC, LWWMap, and ORMap now accept pluggable clock sources
+- **DST infrastructure** — `SeededRNG`, `VirtualNetwork`, `InvariantChecker`, `ScenarioRunner` exported from core package
+
+#### Query Optimizer Enhancements (`@topgunbuild/core`)
+- **Point lookup optimization** — `QueryOptimizer` detects equality filters on indexed fields and generates `PointLookupStep`/`MultiPointLookupStep` execution plans
+- **Network-aware cost model** — distributed query cost estimation accounting for network latency, partition count, and data transfer
+- **Index hints** — `QueryOptions.indexHints` allows explicit index selection (`force`, `prefer`, `ignore`) for query planning
+
+### Fixed
+- **server**: Correct `HttpSyncError` field types and add optionality markers
+- **server**: Preserve TLS status message in HTTP sync handler
+- **client**: Align `requestTimeoutMs` default with spec (30s)
+- **core**: Consolidate `ClockSource` interface to single definition
+
+### Documentation
+- Serverless deployment guide with Vercel Edge, AWS Lambda, and Cloudflare Workers examples
+- `HttpSyncProvider` and `AutoConnectionProvider` API reference
+- `POST /sync` endpoint reference with request/response schemas
+- HTTP Sync section in transport decision guide
+- "TopGun Goes Serverless" blog post
+- "Merkle Trees & Delta Sync" blog post
+
+---
+
+## [0.10.1] - 2026-01-20
+
+### Fixed
+- Minor fixes and stability improvements
+
+---
+
 ## [0.10.0] - 2026-02-04
 
 ### Breaking Changes

@@ -1,20 +1,53 @@
 # To-Do List
 
-**Last updated:** 2026-02-07 (TODO-046 converted to SPEC-037)
-**Source:** Migrated from PROMPTS directory, reordered by technical dependencies and business impact
+**Last updated:** 2026-02-07 (added TODO-050; marked TODO-047 done; reordered by technical dependencies)
+**Source:** Migrated from PROMPTS directory, reordered by technical dependencies
 
 ---
 
-## Wave 1: Market Expansion
+## Wave 0: Foundation Refactoring
 
-*Goal: Unlock serverless deployments, improve cluster utilization*
+*Goal: Fix abstraction leaks that block transport evolution*
+
+### TODO-050: IConnection Abstraction
+- **Priority:** 🔴 High
+- **Complexity:** Low
+- **Summary:** Replace `WebSocket` return type in `IConnectionProvider` with abstract `IConnection` interface
+- **Why:** `HttpSyncProvider` throws runtime errors on `getConnection()`/`getAnyConnection()` because the interface forces `WebSocket` return type. `AutoConnectionProvider` inherits the same type-safety hole. Any new transport (SSE, QUIC) will hit the same problem. This is technical debt blocking TODO-048 and TODO-049.
+- **Current Problem:**
+  - `IConnectionProvider.getConnection()` returns `WebSocket` (types.ts:46)
+  - `HttpSyncProvider` throws on these methods (cannot return WebSocket)
+  - `AutoConnectionProvider` can throw at runtime in HTTP mode
+  - 90% of callers only need `send()` — not raw WebSocket access
+- **Proposed Interface:**
+  ```
+  IConnection { send(data): void; isOpen(): boolean; close(): void }
+  IConnectionProvider { getConnection(key): IConnection; getAnyConnection(): IConnection; ... }
+  ```
+- **Blast Radius:**
+  - `types.ts` — define `IConnection`, update `IConnectionProvider`
+  - `SingleServerProvider.ts` — wrap WebSocket in IConnection adapter
+  - `ConnectionPool.ts` — wrap WebSocket in IConnection adapter
+  - `ClusterClient.ts` — update 3 call sites (all just call `.send()`)
+  - `PartitionRouter.ts` — update 2 call sites
+  - `HttpSyncProvider.ts` — return null-transport or no-op IConnection instead of throwing
+  - Tests — update mock types
+- **Effort:** 4-6 hours (~100-150 lines changed)
+- **Dependencies:** None (pure refactoring)
+- **Unlocks:** TODO-048 (SSE), TODO-049 (Cluster HTTP)
+
+---
+
+## Wave 1: Cluster Infrastructure
+
+*Goal: Efficient distributed queries, partition-aware routing*
 
 ### TODO-029: Partition Pruning
 - **Priority:** 🟡 Medium
 - **Complexity:** Medium
 - **Context:** [reference/HAZELCAST_QUICK_WINS.md](../reference/HAZELCAST_QUICK_WINS.md)
 - **Summary:** Skip partitions that can't contain matching records
-- **Why Now:** Required for efficient distributed queries at scale; prerequisite for TODO-025 (DAG Executor)
+- **Why:** Required for efficient distributed queries at scale; prerequisite for TODO-025 (DAG Executor) and recommended for TODO-049 (Cluster HTTP Routing)
 - **Current:** Distributed queries scan all partitions
 - **Solution:** Use partition key to determine relevant partitions
 - **Example:** Query `tenantId = 'abc'` → only scan partitions where hash('abc') maps
@@ -27,7 +60,7 @@
 - **Complexity:** Large
 - **Context:** [reference/PHASE_4.5_CLIENT_CLUSTER_SPEC.md](../reference/PHASE_4.5_CLIENT_CLUSTER_SPEC.md)
 - **Summary:** Integrate ClusterClient with TopGunClient for transparent partition routing
-- **Why Now:** Full cluster utilization, reduces coordinator bottleneck
+- **Why:** Full cluster utilization, reduces coordinator bottleneck
 - **Key Features:**
   - Smart client routing to partition owners
   - Client-side failover on node failure
@@ -39,7 +72,43 @@
 
 ---
 
-## Wave 2: Core Infrastructure
+## Wave 2: Transport Evolution
+
+*Goal: Close the real-time gap for serverless, enable cluster HTTP*
+
+### TODO-048: SSE Push for HTTP Sync
+- **Priority:** 🟡 Medium
+- **Complexity:** Medium
+- **Context:** Extends SPEC-036 (HTTP Sync Protocol)
+- **Summary:** Add Server-Sent Events transport for real-time push in serverless environments
+- **Why:** HTTP polling introduces latency proportional to `pollIntervalMs`. SSE enables server-initiated push without WebSocket, closing the real-time gap for serverless deployments.
+- **Architecture:**
+  - Client POSTs writes to `POST /sync` (existing)
+  - Client receives real-time updates via `GET /events` (SSE stream)
+  - New `SsePushProvider` implements `IConnectionProvider`
+  - `AutoConnectionProvider` gains a third tier: WS → SSE → HTTP polling
+- **Platform Support:** Vercel Edge (streaming), Cloudflare Workers (with Durable Objects), AWS Lambda (response streaming)
+- **Effort:** 2-3 weeks
+- **Dependencies:** TODO-050 (IConnection abstraction)
+
+---
+
+### TODO-049: Cluster-Aware HTTP Routing
+- **Priority:** 🟡 Medium
+- **Complexity:** Medium
+- **Context:** Extends SPEC-036 (HTTP Sync Protocol), relates to TODO-023 (Client Cluster Smart Routing)
+- **Summary:** Enable `HttpSyncHandler` to route sync requests to partition owners in a cluster
+- **Why:** Currently HTTP sync runs standalone against a single node's data. In cluster mode without shared PostgreSQL, a client sees only data from the node it hits. This makes HTTP sync unusable for in-memory-only clusters.
+- **Architecture:**
+  - `HttpSyncHandler` queries `PartitionService` to find partition owner per map key
+  - Forwards delta computation to owner node via internal cluster protocol
+  - Merges responses from multiple partition owners into single HTTP response
+- **Effort:** 2-3 weeks
+- **Dependencies:** TODO-050 (IConnection abstraction), TODO-029 (Partition Pruning — recommended)
+
+---
+
+## Wave 3: Storage Infrastructure
 
 *Goal: Enable slow backends, unlock distributed query processing*
 
@@ -48,12 +117,13 @@
 - **Complexity:** Medium
 - **Context:** [reference/topgun-rocksdb.md](../reference/topgun-rocksdb.md)
 - **Summary:** Implement Hazelcast-style Write-Behind pattern for slow storage backends
-- **Why Now:** Enables S3/slow storage backends without latency impact
+- **Why:** Enables S3/slow storage backends without latency impact. Current IServerStorage is synchronous — slow backends block the write path.
 - **Key Features:**
   - Staging Area: In-memory buffer for Read-Your-Writes consistency
   - Write Coalescing: Merge multiple updates to same key
   - Batch Flush: Periodic flush to storage (5s intervals)
   - Retry Queue: Handle storage failures gracefully
+- **Note:** Server storage architecture is already clean — IServerStorage is pluggable with PostgreSQL, SQLite, and Memory implementations. This wraps any IServerStorage, not a rewrite.
 - **Effort:** 2-3 weeks
 
 ---
@@ -64,7 +134,6 @@
 - **Context:** [reference/HAZELCAST_DAG_EXECUTOR_SPEC.md](../reference/HAZELCAST_DAG_EXECUTOR_SPEC.md)
 - **Additional:** [reference/HAZELCAST_ARCHITECTURE_COMPARISON.md](../reference/HAZELCAST_ARCHITECTURE_COMPARISON.md)
 - **Summary:** Implement Hazelcast-style DAG executor for distributed query processing
-- **Why Here:** Partition Pruning (TODO-029) must be completed first
 - **Key Features:**
   - DAG structure with Vertex/Edge graph
   - 3-tier processor model: Source → Transform → Sink
@@ -76,7 +145,7 @@
 
 ---
 
-## Wave 3: Advanced Features
+## Wave 4: Advanced Features
 
 *Goal: AI capabilities, performance optimization, extensibility*
 
@@ -85,7 +154,6 @@
 - **Complexity:** Large
 - **Context:** [reference/PHASE_15_VECTOR_SEARCH_SPEC.md](../reference/PHASE_15_VECTOR_SEARCH_SPEC.md)
 - **Summary:** Semantic vector search with local embeddings (transformers.js)
-- **Why Here:** AI/semantic capability, differentiator
 - **Key Features:**
   - Local embedding generation (no API keys)
   - Vector storage as CRDT (synced)
@@ -102,7 +170,7 @@
 - **Complexity:** Large
 - **Context:** [reference/RUST_WASM_ANALYSIS.md](../reference/RUST_WASM_ANALYSIS.md)
 - **Summary:** Migrate CPU-intensive hot paths to Rust/WASM
-- **Why Here:** Benefits from having DAG Executor (TODO-025) as a prime WASM candidate
+- **Why:** Benefits from having DAG Executor (TODO-025) as a prime WASM candidate
 - **Candidates (by priority):**
   1. MerkleTree Hash/Diff → 50-60% speedup
   2. CRDT Batch Merge → 30-40% speedup
@@ -123,7 +191,7 @@
 - **Complexity:** Medium
 - **Context:** [reference/TURSO_INSIGHTS.md](../reference/TURSO_INSIGHTS.md) (Section 5)
 - **Summary:** Modular extension system for optional features
-- **Why Here:** Enables community contributions, smaller core bundle
+- **Why:** Enables community contributions, smaller core bundle
 - **Example Extensions:**
   ```
   @topgunbuild/ext-crypto      # Encryption at rest
@@ -135,30 +203,13 @@
 
 ---
 
-## Wave 4: Documentation
+## Wave 5: Documentation
 
 *Goal: Document public APIs when convenient*
 
-### TODO-047: Blog Post — "TopGun Goes Serverless"
-- **Priority:** 🟡 Medium
-- **Complexity:** Low
-- **Context:** Implements SPEC-036 (completed 2026-02-06)
-- **Summary:** Engineering blog post about HTTP Sync Protocol for serverless environments
-- **Why:** Marketing milestone — "TopGun now works on serverless" is a headline feature for 0.11.0 release
+### ~~TODO-047: Blog Post — "TopGun Goes Serverless"~~ DONE
+- **Completed:** 2026-02-07 (quick mode, commit `8861f63`)
 - **Location:** `apps/docs-astro/src/content/blog/serverless-http-sync.mdx`
-- **Category:** Engineering
-- **Outline:**
-  - The problem: WebSockets don't work in serverless (cold starts, timeouts, cost)
-  - The solution: stateless HTTP sync via POST /sync
-  - Architecture: how HttpSyncProvider translates IConnectionProvider to HTTP
-  - AutoConnectionProvider: transparent WS-to-HTTP fallback
-  - Delta computation: iterate LWWMap + HLC.compare() for efficient sync
-  - Code examples: Vercel Edge, AWS Lambda, Cloudflare Workers
-  - Performance characteristics: polling interval tradeoffs
-  - What's next: SSE for real-time push, cluster-aware HTTP routing
-- **Style:** Match existing blog posts (technical depth with practical examples, ~7 min read)
-- **Image:** Needs `/images/blog-serverless-sync.png` hero image
-- **Effort:** 0.5-1 day
 
 ---
 
@@ -181,10 +232,10 @@
 
 ---
 
-## Wave 5: Enterprise (Deferred)
+## Wave 6: Enterprise (Deferred)
 
 *Goal: Enterprise features, major architectural changes*
-*Defer until Waves 1-4 complete*
+*Defer until Waves 0-4 complete*
 
 ### TODO-041: Multi-Tenancy
 - **Priority:** 🔵 Deferred
@@ -210,6 +261,7 @@
   - 10x cheaper storage than managed PostgreSQL
 - **Challenges:** Major architectural change, S3 latency for writes
 - **Effort:** 6-8 weeks
+- **Dependencies:** TODO-033 (AsyncStorageWrapper)
 
 ---
 
@@ -232,6 +284,7 @@
 - **Summary:** Hot data in memory/Redis, cold data in S3/cheap storage
 - **Features:** Transparent migration based on access patterns
 - **Use Case:** Cost reduction for large datasets
+- **Dependencies:** TODO-033 (AsyncStorageWrapper)
 
 ---
 
@@ -250,34 +303,56 @@
 
 ## Quick Reference
 
+### Dependency Graph
+
+```
+TODO-050 (IConnection)          TODO-029 (Partition Pruning)
+    │                               │
+    ├──→ TODO-048 (SSE)             ├──→ TODO-025 (DAG Executor)
+    │                               │        │
+    └──→ TODO-049 (Cluster HTTP) ←──┘        └──→ TODO-034 (Rust/WASM)
+                                    │
+TODO-023 (Client Cluster)          TODO-033 (AsyncStorage)
+    (independent)                   │
+                                    ├──→ TODO-043 (S3 Bottomless)
+                                    │        │
+                                    │        └──→ TODO-044 (Bi-Temporal)
+                                    │
+                                    └──→ TODO-040 (Tiered Storage)
+```
+
 ### By Wave
 
 | Wave | Items | Total Effort | Focus |
 |------|-------|--------------|-------|
-| 1. Market Expansion | 2 | ~2 weeks | Cluster utilization |
-| 2. Core Infrastructure | 2 | ~7 weeks | Storage + DAG |
-| 3. Advanced Features | 3 | ~10 weeks | Vector + WASM + Extensions |
-| 4. Documentation | 2 | ~1.5-2 days | Blog + DST docs |
-| 5. Enterprise | 5 | ~20+ weeks | Tenancy + S3 + Time-travel |
+| 0. Foundation | 1 | 4-6 hours | Fix IConnection abstraction |
+| 1. Cluster | 2 | ~3 weeks | Partition pruning, client routing |
+| 2. Transport | 2 | ~4-6 weeks | SSE, cluster HTTP |
+| 3. Storage | 2 | ~7 weeks | Write-behind, DAG |
+| 4. Advanced | 3 | ~10 weeks | Vector, WASM, extensions |
+| 5. Documentation | 1 | 0.5-1 day | DST docs (TODO-047 done) |
+| 6. Enterprise | 5 | ~20+ weeks | Tenancy, S3, time-travel |
 
-### Execution Order
+### Execution Order (by technical dependency)
 
-| # | TODO | Wave | Effort | ROI |
-|---|------|------|--------|-----|
-| 1 | TODO-029 | 1 | 1 week | 🟡 Medium |
-| 2 | TODO-023 | 1 | ~16 hours | 🟡 Medium |
-| 3 | TODO-033 | 2 | 2-3 weeks | 🟡 Medium |
-| 4 | TODO-025 | 2 | 4-6 weeks | 🟡 Medium |
-| 5 | TODO-039 | 3 | 4 weeks | 🟡 Medium |
-| 6 | TODO-034 | 3 | 4-6 weeks | 🟡 Medium |
-| 7 | TODO-036 | 3 | 2-3 weeks | 🟢 Low |
-| 8 | TODO-047 | 4 | 0.5-1 day | 🟡 Medium |
-| 9 | TODO-045 | 4 | 0.5-1 day | 🟢 Low |
-| 10 | TODO-041 | 5 | Large | 🔵 Deferred |
-| 11 | TODO-043 | 5 | 6-8 weeks | 🔵 Deferred |
-| 12 | TODO-044 | 5 | 4-6 weeks | 🔵 Deferred |
-| 13 | TODO-040 | 5 | Large | 🔵 Deferred |
-| 14 | TODO-042 | 5 | Very Large | ⚠️ Risk |
+| # | TODO | Wave | Effort | Unlocks | Priority |
+|---|------|------|--------|---------|----------|
+| 1 | TODO-050 | 0 | 4-6 hours | TODO-048, TODO-049 | 🔴 High |
+| 2 | TODO-029 | 1 | 1 week | TODO-025, TODO-049 | 🟡 Medium |
+| 3 | TODO-023 | 1 | ~16 hours | — (independent) | 🟡 Medium |
+| 4 | TODO-048 | 2 | 2-3 weeks | — | 🟡 Medium |
+| 5 | TODO-049 | 2 | 2-3 weeks | — | 🟡 Medium |
+| 6 | TODO-033 | 3 | 2-3 weeks | TODO-043, TODO-040 | 🟡 Medium |
+| 7 | TODO-025 | 3 | 4-6 weeks | TODO-034 | 🟡 Medium |
+| 8 | TODO-039 | 4 | 4 weeks | — | 🟡 Medium |
+| 9 | TODO-034 | 4 | 4-6 weeks | — | 🟡 Medium |
+| 10 | TODO-036 | 4 | 2-3 weeks | — | 🟢 Low |
+| 11 | TODO-045 | 5 | 0.5-1 day | — | 🟢 Low |
+| 12 | TODO-041 | 6 | Large | — | 🔵 Deferred |
+| 13 | TODO-043 | 6 | 6-8 weeks | TODO-044 | 🔵 Deferred |
+| 14 | TODO-044 | 6 | 4-6 weeks | — | 🔵 Deferred |
+| 15 | TODO-040 | 6 | Large | — | 🔵 Deferred |
+| 16 | TODO-042 | 6 | Very Large | — | ⚠️ Risk |
 
 ### Context Files
 
@@ -298,4 +373,4 @@
 
 ---
 
-*Reordered by technical dependencies and business impact on 2026-02-06.*
+*Reordered by technical dependencies on 2026-02-07. Marketing considerations removed from prioritization.*
