@@ -134,6 +134,46 @@ unsubscribeMap();
 unsubscribeQuery();
 unsubscribeTopic();`;
 
+export const httpSyncModeCode = `import { HttpSyncProvider, SyncEngine } from '@topgunbuild/client';
+import { HLC } from '@topgunbuild/core';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const hlc = new HLC('client-1');
+const provider = new HttpSyncProvider({
+  url: 'https://your-api.example.com',
+  clientId: 'client-1',
+  hlc,
+  authToken: 'your-jwt-token',
+  syncMaps: ['todos'],
+  pollIntervalMs: 5000,
+});
+
+const engine = new SyncEngine({
+  nodeId: 'client-1',
+  connectionProvider: provider,
+  storageAdapter: new IDBAdapter(),
+});`;
+
+export const autoConnectionModeCode = `import { AutoConnectionProvider, SyncEngine } from '@topgunbuild/client';
+import { HLC } from '@topgunbuild/core';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const hlc = new HLC('client-1');
+const provider = new AutoConnectionProvider({
+  url: 'wss://your-api.example.com',
+  clientId: 'client-1',
+  hlc,
+  authToken: 'your-jwt-token',
+  maxWsAttempts: 3,
+  syncMaps: ['todos'],
+});
+
+const engine = new SyncEngine({
+  nodeId: 'client-1',
+  connectionProvider: provider,
+  storageAdapter: new IDBAdapter(),
+});`;
+
 export const failoverMonitorCode = `// Monitor connection state
 client.onConnectionChange((state) => {
   if (state === 'connected') {
@@ -245,6 +285,134 @@ For production deployments with multiple nodes, use the `cluster` configuration:
       description="Number of retry attempts on connection failure. Default: 3."
     />
   </ApiConstructor>
+</div>
+
+### HTTP Sync Mode
+
+For serverless environments where WebSocket connections are unavailable, use `HttpSyncProvider` to sync via HTTP polling. `HttpSyncProvider` implements the `IConnectionProvider` interface and is used with `SyncEngine` directly -- it is not compatible with the `TopGunClient` constructor, which only accepts `serverUrl` and `cluster` options.
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={httpSyncModeCode} />
+</div>
+
+#### HttpSyncProviderConfig
+
+<div className="not-prose">
+  <ApiConstructor signature="interface HttpSyncProviderConfig">
+    <ApiParam
+      name="url"
+      type="string"
+      description="HTTP URL of the TopGun server (e.g., 'https://api.example.com')."
+    />
+    <ApiParam
+      name="clientId"
+      type="string"
+      description="Client identifier for request construction."
+    />
+    <ApiParam
+      name="hlc"
+      type="HLC"
+      description="Hybrid Logical Clock instance for causality tracking."
+    />
+    <ApiParam
+      name="authToken?"
+      type="string"
+      description="JWT auth token for the Authorization header."
+    />
+    <ApiParam
+      name="pollIntervalMs?"
+      type="number"
+      description="Polling interval in milliseconds. Default: 5000"
+    />
+    <ApiParam
+      name="requestTimeoutMs?"
+      type="number"
+      description="HTTP request timeout in milliseconds. Default: 30000"
+    />
+    <ApiParam
+      name="syncMaps?"
+      type="string[]"
+      description="Map names to sync deltas for on each poll."
+    />
+    <ApiParam
+      name="fetchImpl?"
+      type="typeof fetch"
+      description="Custom fetch implementation for testing or platform compatibility."
+    />
+  </ApiConstructor>
+</div>
+
+### Auto Connection Mode
+
+`AutoConnectionProvider` automatically tries WebSocket first and falls back to HTTP sync when WebSocket connections fail. Like `HttpSyncProvider`, it implements the `IConnectionProvider` interface and is used with `SyncEngine` directly -- not with `TopGunClient`.
+
+<div className="not-prose">
+  <CodeBlock language="typescript" code={autoConnectionModeCode} />
+</div>
+
+#### AutoConnectionProviderConfig
+
+<div className="not-prose">
+  <ApiConstructor signature="interface AutoConnectionProviderConfig">
+    <ApiParam
+      name="url"
+      type="string"
+      description="Server URL (ws:// or http://)."
+    />
+    <ApiParam
+      name="clientId"
+      type="string"
+      description="Client identifier."
+    />
+    <ApiParam
+      name="hlc"
+      type="HLC"
+      description="Hybrid Logical Clock instance."
+    />
+    <ApiParam
+      name="maxWsAttempts?"
+      type="number"
+      description="Maximum WebSocket connection attempts before falling back to HTTP. Default: 3"
+    />
+    <ApiParam
+      name="authToken?"
+      type="string"
+      description="JWT auth token."
+    />
+    <ApiParam
+      name="httpOnly?"
+      type="boolean"
+      description="Skip WebSocket and use HTTP-only mode. Default: false"
+    />
+    <ApiParam
+      name="httpPollIntervalMs?"
+      type="number"
+      description="HTTP polling interval in milliseconds. Default: 5000"
+    />
+    <ApiParam
+      name="syncMaps?"
+      type="string[]"
+      description="Map names to sync via HTTP."
+    />
+    <ApiParam
+      name="fetchImpl?"
+      type="typeof fetch"
+      description="Custom fetch implementation for HTTP mode."
+    />
+  </ApiConstructor>
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 my-6 not-prose">
+  <div className="flex items-center gap-2 mb-2">
+    <Network className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+    <h4 className="font-semibold text-blue-800 dark:text-blue-300">HTTP Mode Limitations</h4>
+  </div>
+  <span className="text-blue-700 dark:text-blue-400">
+    HTTP sync mode supports batch operations and one-shot queries only. It does not support live query subscriptions,
+    Merkle tree synchronization, or real-time topic messages. For real-time features, use WebSocket mode or
+    <code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">AutoConnectionProvider</code>
+    which will use WebSocket when available.
+  </span>
 </div>
 
 ## Core Methods
