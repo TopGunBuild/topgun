@@ -340,8 +340,6 @@ export class ServerCoordinator {
         // Final startup log
         const actualPort = (this.httpServer.address() as any)?.port || config.port;
         this._actualPort = actualPort;
-        this._actualClusterPort = config.clusterPort || 0;
-
         logger.info({
             port: actualPort,
             nodeId: this._nodeId,
@@ -359,14 +357,22 @@ export class ServerCoordinator {
             });
         }
 
-        this._readyResolve(); // Mark as ready
     }
 
     // NOTE: backfillSearchIndexes moved to LifecycleManager
 
-    /** Wait for server to be fully ready (ports assigned) */
+    /** Wait for server to be fully ready (ports assigned, cluster started) */
     public ready(): Promise<void> {
         return this._readyPromise;
+    }
+
+    /**
+     * Complete server startup after cluster WebSocket server is listening.
+     * Called by ServerFactory once cluster.start() resolves.
+     */
+    public completeStartup(actualClusterPort: number): void {
+        this._actualClusterPort = actualClusterPort;
+        this._readyResolve();
     }
 
     /**

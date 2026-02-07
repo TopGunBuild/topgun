@@ -382,6 +382,15 @@ export class ServerFactory {
 
         // DEFERRED STARTUP - now safe to listen
         network.start();
+
+        // Start cluster WebSocket server (restored from pre-sf-011b)
+        cluster.start().then((actualClusterPort) => {
+            coordinator.completeStartup(actualClusterPort);
+        }).catch((err) => {
+            logger.error({ err }, 'Failed to start cluster');
+            coordinator.completeStartup(config.clusterPort ?? 0);
+        });
+
         if (metricsServer && config.metricsPort) {
             metricsServer.listen(config.metricsPort, () => {
                 logger.info({ port: config.metricsPort }, 'Metrics server listening');
