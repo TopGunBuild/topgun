@@ -1,6 +1,6 @@
 import { ServerCoordinator, ServerFactory } from '../';
 import { ChaosProxy } from './utils/ChaosProxy';
-import { SyncEngine } from '@topgunbuild/client';
+import { SyncEngine, SingleServerProvider } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
 import { waitForAuthReady, waitForCluster, pollUntil } from './utils/test-helpers';
 import { LWWMap } from '@topgunbuild/core';
@@ -88,7 +88,7 @@ describe('Chaos Testing', () => {
         // 2. Write to A
         const clientA = new SyncEngine({
             nodeId: 'client-a',
-            serverUrl: `ws://localhost:${nodeA.port}`,
+            connectionProvider: new SingleServerProvider({ url: `ws://localhost:${nodeA.port}` }),
             storageAdapter: new MemoryStorageAdapter()
         });
         await waitForAuthReady(clientA);
@@ -102,7 +102,7 @@ describe('Chaos Testing', () => {
         // 3. Write to B
         const clientB = new SyncEngine({
             nodeId: 'client-b',
-            serverUrl: `ws://localhost:${nodeB.port}`,
+            connectionProvider: new SingleServerProvider({ url: `ws://localhost:${nodeB.port}` }),
             storageAdapter: new MemoryStorageAdapter()
         });
         await waitForAuthReady(clientB);
@@ -179,7 +179,7 @@ describe('Chaos Testing', () => {
         storage = new MemoryStorageAdapter();
         client = new SyncEngine({
             nodeId: 'client-flake',
-            serverUrl: `ws://localhost:${proxyPort}`,
+            connectionProvider: new SingleServerProvider({ url: `ws://localhost:${proxyPort}` }),
             storageAdapter: storage,
             reconnectInterval: 100
         });
@@ -246,7 +246,7 @@ describe('Chaos Testing', () => {
         const storage = new MemoryStorageAdapter();
         const producer = new SyncEngine({
             nodeId: 'producer',
-            serverUrl: `ws://localhost:${port}`,
+            connectionProvider: new SingleServerProvider({ url: `ws://localhost:${port}` }),
             storageAdapter: storage
         });
         await waitForAuthReady(producer);
@@ -311,7 +311,7 @@ describe('Chaos Testing', () => {
         
         const checkClient = new SyncEngine({
             nodeId: 'check-client',
-            serverUrl: `ws://localhost:${port}`,
+            connectionProvider: new SingleServerProvider({ url: `ws://localhost:${port}` }),
             storageAdapter: new MemoryStorageAdapter()
         });
         await waitForAuthReady(checkClient);

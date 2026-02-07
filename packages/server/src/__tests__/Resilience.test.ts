@@ -1,6 +1,6 @@
 import { ServerCoordinator, ServerFactory } from '../';
 import { ChaosProxy } from './utils/ChaosProxy';
-import { SyncEngine } from '@topgunbuild/client';
+import { SyncEngine, SingleServerProvider } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
 import { waitForAuthReady, waitForConvergence } from './utils/test-helpers';
 import { LWWMap } from '@topgunbuild/core';
@@ -78,14 +78,14 @@ describe('Resilience & Chaos Testing', () => {
 
     clientA = new SyncEngine({
         nodeId: 'client-A',
-        serverUrl: `ws://localhost:${proxyPort}`,
+        connectionProvider: new SingleServerProvider({ url: `ws://localhost:${proxyPort}` }),
         storageAdapter: storageA,
         reconnectInterval: 100
     });
 
     clientB = new SyncEngine({
         nodeId: 'client-B',
-        serverUrl: `ws://localhost:${proxyPort}`,
+        connectionProvider: new SingleServerProvider({ url: `ws://localhost:${proxyPort}` }),
         storageAdapter: storageB,
         reconnectInterval: 100
     });

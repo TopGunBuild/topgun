@@ -1,5 +1,5 @@
 import { ServerCoordinator, ServerFactory } from '../';
-import { SyncEngine } from '@topgunbuild/client';
+import { SyncEngine, SingleServerProvider } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
 import { waitForAuthReady, pollUntil } from './utils/test-helpers';
 import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
@@ -63,7 +63,7 @@ describe('Garbage Collection & Zombie Protection', () => {
     storageA = new MemoryStorageAdapter();
     clientA = new SyncEngine({
         nodeId: 'client-A',
-        serverUrl: `ws://localhost:${serverPort}`,
+        connectionProvider: new SingleServerProvider({ url: `ws://localhost:${serverPort}` }),
         storageAdapter: storageA
     });
 
@@ -118,7 +118,7 @@ describe('Garbage Collection & Zombie Protection', () => {
 
     clientB = new SyncEngine({
         nodeId: 'client-B',
-        serverUrl: `ws://localhost:${serverPort}`,
+        connectionProvider: new SingleServerProvider({ url: `ws://localhost:${serverPort}` }),
         storageAdapter: storageB,
         reconnectInterval: 100
     });
@@ -244,8 +244,8 @@ describe('TTL Expiration with ReplicationPipeline', () => {
     for (let i = 0; i < 100; i++) {
       const candidateKey = `ttl-key-${i}`;
       const partitionId = partitionService.getPartitionId(candidateKey);
-      const dist = partitionService.partitions.get(partitionId);
-      if (dist && dist.owner === 'ttl-node-b' && dist.backups.includes('ttl-node-a')) {
+      const info = partitionService.getPartitionInfo(partitionId);
+      if (info && info.ownerNodeId === 'ttl-node-b' && info.backupNodeIds.includes('ttl-node-a')) {
         testKey = candidateKey;
         break;
       }
@@ -384,7 +384,7 @@ describe('TTL Expiration with ReplicationPipeline', () => {
     // Spy on cluster.send to verify CLUSTER_EVENT is not used
     const clusterSendCalls: any[] = [];
     const originalSend = harness1.cluster.send.bind(harness1.cluster);
-    harness1.cluster.send = (nodeId: string, type: string, payload: any) => {
+    harness1.cluster.send = (nodeId: string, type: any, payload: any) => {
       clusterSendCalls.push({ nodeId, type, payload });
       return originalSend(nodeId, type, payload);
     };
