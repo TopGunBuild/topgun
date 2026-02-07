@@ -12,6 +12,91 @@ export const readyCode = `const server = new ServerCoordinator(config);
 await server.ready();
 console.log(\`Server running on port \${server.port}\`);`;
 
+export const httpSyncRequestExample = `// POST /sync
+// Content-Type: application/json
+// Authorization: Bearer <your-jwt-token>
+
+{
+  "clientId": "client-1",
+  "clientHlc": {
+    "millis": 1706000000000,
+    "counter": 0,
+    "nodeId": "client-1"
+  },
+  "operations": [
+    {
+      "mapName": "todos",
+      "key": "t1",
+      "record": {
+        "value": { "text": "Buy milk" },
+        "timestamp": {
+          "millis": 1706000000000,
+          "counter": 1,
+          "nodeId": "client-1"
+        }
+      }
+    }
+  ],
+  "syncMaps": [
+    {
+      "mapName": "todos",
+      "lastSyncTimestamp": {
+        "millis": 1705999000000,
+        "counter": 0,
+        "nodeId": ""
+      }
+    }
+  ]
+}`;
+
+export const httpSyncResponseExample = `// 200 OK
+// Content-Type: application/json
+
+{
+  "serverHlc": {
+    "millis": 1706000001000,
+    "counter": 1,
+    "nodeId": "server-1"
+  },
+  "ack": {
+    "lastId": "http-op-0",
+    "results": [
+      {
+        "opId": "http-op-0",
+        "success": true,
+        "achievedLevel": "MEMORY"
+      }
+    ]
+  },
+  "deltas": [
+    {
+      "mapName": "todos",
+      "records": [
+        {
+          "key": "t2",
+          "record": {
+            "value": { "text": "Walk the dog" },
+            "timestamp": {
+              "millis": 1706000000500,
+              "counter": 0,
+              "nodeId": "client-2"
+            }
+          },
+          "eventType": "PUT"
+        }
+      ],
+      "serverSyncTimestamp": {
+        "millis": 1706000001000,
+        "counter": 2,
+        "nodeId": "server-1"
+      }
+    }
+  ],
+  "queryResults": [],
+  "searchResults": [],
+  "errors": []
+}`;
+
 <div className="flex items-center gap-3 mb-6 not-prose">
   <Server className="w-10 h-10 text-blue-600 dark:text-blue-400" />
   <h1 className="text-4xl font-bold text-foreground">Server API</h1>
@@ -314,6 +399,159 @@ synchronization logic, clustering, and security enforcement.
 <div className="flex items-center gap-2 mb-3 not-prose">
   <Shield className="w-5 h-5 text-red-500" />
   <span className="text-neutral-600 dark:text-neutral-300">Gracefully shuts down the server, closing all client connections, stopping the cluster, and closing storage.</span>
+</div>
+
+## POST /sync Endpoint
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Network className="w-6 h-6 text-blue-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Stateless HTTP sync endpoint for serverless environments. Accepts batched operations, returns deltas and query results in a single request-response cycle.</span>
+</div>
+
+<div className="p-4 bg-neutral-100 dark:bg-neutral-900 rounded-lg mb-6 not-prose">
+  <div className="space-y-2 text-sm">
+    <div className="flex gap-2">
+      <span className="font-semibold text-foreground">URL:</span>
+      <code>POST /sync</code>
+    </div>
+    <div className="flex gap-2">
+      <span className="font-semibold text-foreground">Authentication:</span>
+      <code>Authorization: Bearer &lt;token&gt;</code> (required)
+    </div>
+    <div className="flex gap-2">
+      <span className="font-semibold text-foreground">Content Types:</span>
+      <span className="text-neutral-600 dark:text-neutral-300"><code>application/x-msgpack</code> (default), <code>application/json</code> (fallback)</span>
+    </div>
+    <div className="flex gap-2">
+      <span className="font-semibold text-foreground">Response Format:</span>
+      <span className="text-neutral-600 dark:text-neutral-300">Matches request content type</span>
+    </div>
+  </div>
+</div>
+
+### Request Schema (HttpSyncRequest)
+
+<div className="not-prose">
+  <ApiConstructor signature="interface HttpSyncRequest">
+    <ApiParam
+      name="clientId"
+      type="string"
+      description="Client identifier. Required."
+    />
+    <ApiParam
+      name="clientHlc"
+      type="Timestamp"
+      description="Client's current Hybrid Logical Clock as an object: { millis: number, counter: number, nodeId: string }. Required."
+    />
+    <ApiParam
+      name="operations?"
+      type="ClientOp[]"
+      description="Batch of operations to push to the server. Each operation contains mapName, key, and record with value and timestamp."
+    />
+    <ApiParam
+      name="syncMaps?"
+      type="SyncMapEntry[]"
+      description="Maps to pull deltas for. Each entry contains mapName (string) and lastSyncTimestamp (Timestamp) indicating the last known server state for that map."
+    />
+    <ApiParam
+      name="queries?"
+      type="HttpQueryRequest[]"
+      description="One-shot queries to execute. Each query contains queryId (string), mapName (string), filter (object), and optional limit (number) and offset (number)."
+    />
+    <ApiParam
+      name="searches?"
+      type="HttpSearchRequest[]"
+      description="One-shot search requests to execute."
+    />
+  </ApiConstructor>
+</div>
+
+### Response Schema (HttpSyncResponse)
+
+<div className="not-prose">
+  <ApiConstructor signature="interface HttpSyncResponse">
+    <ApiParam
+      name="serverHlc"
+      type="Timestamp"
+      description="Server's current HLC timestamp as an object: { millis: number, counter: number, nodeId: string }."
+    />
+    <ApiParam
+      name="ack"
+      type="{ lastId: string, results?: AckResult[] }"
+      description="Acknowledgment of processed operations. lastId is the ID of the last processed operation. results contains per-operation success/failure details with achievedLevel."
+    />
+    <ApiParam
+      name="deltas"
+      type="MapDelta[]"
+      description="Delta records for requested maps. Each MapDelta contains mapName (string), records (DeltaRecord[] with key, record: LWWRecord, eventType: 'PUT' | 'REMOVE'), and serverSyncTimestamp (Timestamp)."
+    />
+    <ApiParam
+      name="queryResults"
+      type="HttpQueryResult[]"
+      description="Results for one-shot queries, matching the queryId from the request."
+    />
+    <ApiParam
+      name="searchResults"
+      type="HttpSearchResult[]"
+      description="Results for one-shot search requests."
+    />
+    <ApiParam
+      name="errors"
+      type="HttpSyncError[]"
+      description="Errors for individual operations. Each error contains code (string), message (string), and context (object) identifying the failed operation."
+    />
+  </ApiConstructor>
+</div>
+
+### HTTP Status Codes
+
+<div className="overflow-x-auto mb-6 not-prose">
+  <table className="w-full text-sm border-collapse">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="text-left py-3 px-4 font-semibold text-foreground">Status</th>
+        <th className="text-left py-3 px-4 font-semibold text-foreground">Meaning</th>
+      </tr>
+    </thead>
+    <tbody className="text-neutral-600 dark:text-neutral-300">
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-mono">200</td>
+        <td className="py-3 px-4">Success. Response body contains <code>HttpSyncResponse</code>.</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-mono">400</td>
+        <td className="py-3 px-4">Invalid request body. Zod schema validation failure.</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-mono">401</td>
+        <td className="py-3 px-4">Missing or invalid <code>Authorization</code> header. JWT verification failed.</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-mono">403</td>
+        <td className="py-3 px-4">Permission denied for specific operations. Individual errors appear in the response <code>errors</code> array.</td>
+      </tr>
+      <tr>
+        <td className="py-3 px-4 font-mono">500</td>
+        <td className="py-3 px-4">Internal server error.</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+### Example Request
+
+<div className="not-prose mb-4">
+  <CodeBlock language="json" code={httpSyncRequestExample} />
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-4 mb-6 not-prose">
+  <span className="text-sm text-blue-700 dark:text-blue-400">The example above uses JSON for readability. In production, the default wire format is <code>application/x-msgpack</code> (msgpackr binary) for smaller payloads and faster serialization. Set <code>Content-Type: application/json</code> to use JSON instead.</span>
+</div>
+
+### Example Response
+
+<div className="not-prose">
+  <CodeBlock language="json" code={httpSyncResponseExample} />
 </div>
 
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
