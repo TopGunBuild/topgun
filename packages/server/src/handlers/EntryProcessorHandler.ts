@@ -33,9 +33,53 @@ export class EntryProcessorHandler {
   private sandbox: ProcessorSandbox;
   private hlc: HLC;
 
+  // Per-key operation queue to serialize concurrent read-modify-write sequences
+  private readonly keyQueues = new WeakMap<
+    LWWMap<any, any>,
+    Map<string, Promise<void>>
+  >();
+
   constructor(config: EntryProcessorHandlerConfig) {
     this.hlc = config.hlc;
     this.sandbox = new ProcessorSandbox(config.sandboxConfig);
+  }
+
+  /**
+   * Serialize async operations per key to prevent concurrent read-modify-write races.
+   * Each key gets its own promise chain; operations on different keys run concurrently.
+   */
+  private withKeyLock<T>(
+    map: LWWMap<any, any>,
+    key: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    let queues = this.keyQueues.get(map);
+    if (!queues) {
+      queues = new Map();
+      this.keyQueues.set(map, queues);
+    }
+
+    const prev = queues.get(key) ?? Promise.resolve();
+
+    let resolveDone!: () => void;
+    const done = new Promise<void>((r) => {
+      resolveDone = r;
+    });
+    queues.set(key, done);
+
+    const execute = async (): Promise<T> => {
+      await prev;
+      try {
+        return await fn();
+      } finally {
+        resolveDone();
+        if (queues!.get(key) === done) {
+          queues!.delete(key);
+        }
+      }
+    };
+
+    return execute();
   }
 
   /**
@@ -68,56 +112,59 @@ export class EntryProcessorHandler {
 
     const processor = parseResult.data as EntryProcessorDef<V, R>;
 
-    // Get current value
-    const currentValue = map.get(key);
-
-    logger.debug(
-      { key, processor: processor.name, hasValue: currentValue !== undefined },
-      'Executing entry processor',
-    );
-
-    // Execute in sandbox
-    const sandboxResult = await this.sandbox.execute(
-      processor,
-      currentValue,
-      key,
-    );
-
-    if (!sandboxResult.success) {
-      logger.warn(
-        { key, processor: processor.name, error: sandboxResult.error },
-        'Processor execution failed',
-      );
-      return { result: sandboxResult };
-    }
-
-    // Apply the change if value changed
-    let timestamp: Timestamp | undefined;
-
-    if (sandboxResult.newValue !== undefined) {
-      // Set new value - map.set() generates timestamp internally
-      const record = map.set(key, sandboxResult.newValue as V);
-      timestamp = record.timestamp;
+    // Serialize read-modify-write per key to prevent concurrent races
+    return this.withKeyLock(map, key, async () => {
+      // Get current value
+      const currentValue = map.get(key);
 
       logger.debug(
-        { key, processor: processor.name, timestamp },
-        'Processor updated value',
+        { key, processor: processor.name, hasValue: currentValue !== undefined },
+        'Executing entry processor',
       );
-    } else if (currentValue !== undefined) {
-      // undefined newValue means delete
-      const tombstone = map.remove(key);
-      timestamp = tombstone.timestamp;
 
-      logger.debug(
-        { key, processor: processor.name, timestamp },
-        'Processor deleted value',
+      // Execute in sandbox
+      const sandboxResult = await this.sandbox.execute(
+        processor,
+        currentValue,
+        key,
       );
-    }
 
-    return {
-      result: sandboxResult,
-      timestamp,
-    };
+      if (!sandboxResult.success) {
+        logger.warn(
+          { key, processor: processor.name, error: sandboxResult.error },
+          'Processor execution failed',
+        );
+        return { result: sandboxResult };
+      }
+
+      // Apply the change if value changed
+      let timestamp: Timestamp | undefined;
+
+      if (sandboxResult.newValue !== undefined) {
+        // Set new value - map.set() generates timestamp internally
+        const record = map.set(key, sandboxResult.newValue as V);
+        timestamp = record.timestamp;
+
+        logger.debug(
+          { key, processor: processor.name, timestamp },
+          'Processor updated value',
+        );
+      } else if (currentValue !== undefined) {
+        // undefined newValue means delete
+        const tombstone = map.remove(key);
+        timestamp = tombstone.timestamp;
+
+        logger.debug(
+          { key, processor: processor.name, timestamp },
+          'Processor deleted value',
+        );
+      }
+
+      return {
+        result: sandboxResult,
+        timestamp,
+      };
+    });
   }
 
   /**
