@@ -213,8 +213,18 @@ let handler: HttpSyncHandler | null = null;
 
 function getHandler(): HttpSyncHandler {
   if (!handler) {
-    const hlc = new HLC('vercel-edge-1');
-    handler = new HttpSyncHandler(hlc);
+    // HttpSyncHandler requires server dependencies via HttpSyncHandlerConfig:
+    // authHandler, operationHandler, storageManager,
+    // queryConversionHandler, searchCoordinator, hlc, securityManager
+    handler = new HttpSyncHandler({
+      hlc: new HLC('vercel-edge-1'),
+      authHandler,        // IAuthHandler -- verify JWT tokens
+      operationHandler,   // IOperationHandler -- apply CRDT operations
+      storageManager,     // IStorageManager -- access LWWMap data
+      queryConversionHandler, // IQueryConversionHandler
+      searchCoordinator,  // search interface
+      securityManager,    // permission checks
+    });
   }
   return handler;
 }
@@ -240,8 +250,11 @@ let handler: HttpSyncHandler | null = null;
 
 function getHandler(): HttpSyncHandler {
   if (!handler) {
-    const hlc = new HLC('lambda-1');
-    handler = new HttpSyncHandler(hlc);
+    handler = new HttpSyncHandler({
+      hlc: new HLC('lambda-1'),
+      authHandler, operationHandler, storageManager,
+      queryConversionHandler, searchCoordinator, securityManager,
+    });
   }
   return handler;
 }
@@ -267,8 +280,11 @@ let handler: HttpSyncHandler | null = null;
 
 function getHandler(): HttpSyncHandler {
   if (!handler) {
-    const hlc = new HLC('cf-worker-1');
-    handler = new HttpSyncHandler(hlc);
+    handler = new HttpSyncHandler({
+      hlc: new HLC('cf-worker-1'),
+      authHandler, operationHandler, storageManager,
+      queryConversionHandler, searchCoordinator, securityManager,
+    });
   }
   return handler;
 }
