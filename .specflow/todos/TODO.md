@@ -1,6 +1,6 @@
 # To-Do List
 
-**Last updated:** 2026-02-06 (added TODO-046, TODO-047 for docs/blog)
+**Last updated:** 2026-02-07 (TODO-046 converted to SPEC-037)
 **Source:** Migrated from PROMPTS directory, reordered by technical dependencies and business impact
 
 ---
@@ -139,27 +139,6 @@
 
 *Goal: Document public APIs when convenient*
 
-### TODO-046: HTTP Sync & Serverless Documentation
-- **Priority:** 🟡 Medium
-- **Complexity:** Medium
-- **Context:** Implements SPEC-036 (completed 2026-02-06)
-- **Summary:** Document HTTP Sync Protocol and serverless deployment in official docs
-- **Why:** Major user-facing feature (HttpSyncProvider, AutoConnectionProvider, POST /sync) with no documentation
-- **Files to update:**
-  - `apps/docs-astro/src/content/docs/concepts/sync-protocol.mdx` — Add "HTTP Sync" section alongside existing WebSocket/Merkle content
-  - `apps/docs-astro/src/content/docs/guides/deployment.mdx` — Add "Serverless Deployment" section (Vercel Edge, AWS Lambda, Cloudflare Workers)
-  - `apps/docs-astro/src/content/docs/reference/client.mdx` — Add HttpSyncProvider, AutoConnectionProvider API reference
-  - `apps/docs-astro/src/content/docs/reference/server.mdx` — Add POST /sync endpoint documentation
-- **Contents:**
-  - HttpSyncProvider config (url, clientId, hlc, pollIntervalMs, requestTimeoutMs, syncMaps, fetchImpl)
-  - AutoConnectionProvider config (url, clientId, hlc, maxWsAttempts, httpOnly, httpPollIntervalMs, syncMaps)
-  - POST /sync request/response schema (HttpSyncRequest, HttpSyncResponse)
-  - Serverless deployment examples (Vercel Edge Function, AWS Lambda handler, Cloudflare Worker)
-  - When to use HTTP sync vs WebSocket (decision guide)
-- **Effort:** 1-2 days
-
----
-
 ### TODO-047: Blog Post — "TopGun Goes Serverless"
 - **Priority:** 🟡 Medium
 - **Complexity:** Low
@@ -278,7 +257,7 @@
 | 1. Market Expansion | 2 | ~2 weeks | Cluster utilization |
 | 2. Core Infrastructure | 2 | ~7 weeks | Storage + DAG |
 | 3. Advanced Features | 3 | ~10 weeks | Vector + WASM + Extensions |
-| 4. Documentation | 3 | ~3-4 days | HTTP Sync docs + Blog + DST docs |
+| 4. Documentation | 2 | ~1.5-2 days | Blog + DST docs |
 | 5. Enterprise | 5 | ~20+ weeks | Tenancy + S3 + Time-travel |
 
 ### Execution Order
@@ -292,14 +271,13 @@
 | 5 | TODO-039 | 3 | 4 weeks | 🟡 Medium |
 | 6 | TODO-034 | 3 | 4-6 weeks | 🟡 Medium |
 | 7 | TODO-036 | 3 | 2-3 weeks | 🟢 Low |
-| 8 | TODO-046 | 4 | 1-2 days | 🟡 Medium |
-| 9 | TODO-047 | 4 | 0.5-1 day | 🟡 Medium |
-| 10 | TODO-045 | 4 | 0.5-1 day | 🟢 Low |
-| 11 | TODO-041 | 5 | Large | 🔵 Deferred |
-| 12 | TODO-043 | 5 | 6-8 weeks | 🔵 Deferred |
-| 13 | TODO-044 | 5 | 4-6 weeks | 🔵 Deferred |
-| 14 | TODO-040 | 5 | Large | 🔵 Deferred |
-| 15 | TODO-042 | 5 | Very Large | ⚠️ Risk |
+| 8 | TODO-047 | 4 | 0.5-1 day | 🟡 Medium |
+| 9 | TODO-045 | 4 | 0.5-1 day | 🟢 Low |
+| 10 | TODO-041 | 5 | Large | 🔵 Deferred |
+| 11 | TODO-043 | 5 | 6-8 weeks | 🔵 Deferred |
+| 12 | TODO-044 | 5 | 4-6 weeks | 🔵 Deferred |
+| 13 | TODO-040 | 5 | Large | 🔵 Deferred |
+| 14 | TODO-042 | 5 | Very Large | ⚠️ Risk |
 
 ### Context Files
 
