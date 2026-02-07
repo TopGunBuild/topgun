@@ -1,0 +1,292 @@
+---
+title: "TopGun Goes Serverless"
+excerpt: "WebSockets don't survive in serverless. TopGun v0.11.0 introduces a stateless HTTP sync protocol that brings CRDT synchronization to Vercel Edge, AWS Lambda, and Cloudflare Workers."
+date: "Feb 07, 2026"
+readTime: "7 min read"
+author: "Ivan Kalashnik"
+role: "Creator"
+category: "Engineering"
+image: "/images/blog-serverless-sync.png"
+avatar: "/images/ivan-avatar.jpeg"
+---
+
+We built TopGun around WebSockets. Persistent connections. Bidirectional streaming. Real-time push.
+
+Then someone tried to deploy it on Vercel.
+
+The function cold-started in 200ms, opened a WebSocket, synced 3 messages, and got killed. The next request cold-started again, opened another WebSocket, synced the same 3 messages, and got killed again. Each invocation burned through the handshake, accomplished almost nothing, and cost money doing it.
+
+WebSockets assume a long-lived process. Serverless gives you a short-lived function. These two models are fundamentally incompatible.
+
+Today we're releasing the **HTTP Sync Protocol**—a stateless alternative that brings TopGun's CRDT synchronization to any platform that can handle an HTTP POST.
+
+## Why WebSockets Fail in Serverless
+
+The mismatch isn't subtle. It's architectural:
+
+| | Long-Lived Server | Serverless Function |
+|---|---|---|
+| **Lifetime** | Hours to days | Seconds to minutes |
+| **State** | In-memory, persistent | Gone between invocations |
+| **Connections** | Thousands, concurrent | One request at a time |
+| **Cost model** | Per-hour | Per-invocation |
+| **WebSocket support** | Native | Not supported or severely limited |
+
+WebSocket connections need a process that stays alive. Serverless functions exist to die. Every cold start means a new TCP handshake, a new WebSocket upgrade, and a new authentication exchange—all for a connection that will be torn down moments later.
+
+Even platforms that technically support WebSockets (like AWS API Gateway) impose timeouts (10 minutes max) and charge per-message. The economics don't work for sync protocols that keep connections open indefinitely.
+
+We needed a different approach.
+
+## The Solution: Stateless HTTP Sync
+
+The HTTP Sync Protocol reduces synchronization to a single endpoint:
+
+```
+POST /sync
+Content-Type: application/x-msgpack
+Authorization: Bearer <jwt>
+```
+
+Every request is self-contained. The client sends its current state. The server computes what changed. The response contains exactly the deltas the client needs. No session. No connection state. No memory of previous requests.
+
+```
+┌─────────────────┐                    ┌─────────────────┐
+│     Client      │                    │  Serverless Fn  │
+│                 │                    │                 │
+│  LWWMap (local) │   POST /sync       │  HttpSyncHandler│
+│  HLC clock      │──────────────────→ │                 │
+│  Pending ops    │   {                │  1. Verify JWT  │
+│                 │     clientHlc,     │  2. Apply ops   │
+│                 │     operations,    │  3. Compute Δ   │
+│                 │     syncMaps: [{   │  4. Return Δ    │
+│                 │       mapName,     │                 │
+│                 │       lastSync     │                 │
+│                 │     }]             │                 │
+│                 │   }                │                 │
+│                 │                    │                 │
+│  Apply deltas   │ ← ─ ─ ─ ─ ─ ─ ─ ─│                 │
+│  Update HLC     │   {                │                 │
+│  Merge via CRDT │     serverHlc,     │                 │
+│                 │     ack,           │                 │
+│                 │     deltas: [{     │                 │
+│                 │       records,     │                 │
+│                 │       syncTs       │                 │
+│                 │     }]             │                 │
+│                 │   }                │                 │
+└─────────────────┘                    └─────────────────┘
+```
+
+The key insight: **the client tracks causality, not the server.** Each request includes the client's Hybrid Logical Clock timestamp and the last sync point per map. The server uses these to filter records without maintaining any per-client state.
+
+## How Delta Computation Works
+
+This is the core of the protocol. When a client requests deltas for a map, the server iterates every record and filters by HLC timestamp:
+
+```typescript
+for (const key of map.allKeys()) {
+  const record = map.getRecord(key);
+
+  // Include only records newer than the client's last sync
+  if (HLC.compare(record.timestamp, lastSyncTimestamp) > 0) {
+    deltas.push({
+      key,
+      record,
+      eventType: record.value === null ? 'REMOVE' : 'PUT',
+    });
+  }
+}
+```
+
+`HLC.compare()` provides total ordering across all nodes. It compares milliseconds first, then the logical counter, then the node ID as a tiebreaker. Because every write increments the HLC monotonically, we can determine exactly which records are newer than the client's last sync point.
+
+This is simpler than the Merkle tree approach used by WebSocket sync. Merkle trees are efficient for detecting differences in large datasets, but they require multiple round-trips. HTTP sync trades that for a single-pass iteration—one request, one response, all deltas included.
+
+For a map with 10,000 records where 50 changed since last sync, the server reads all 10,000 timestamps but only serializes 50 records. The comparison is a few integer comparisons per record. On modern hardware, this takes under a millisecond.
+
+## HttpSyncProvider: Same Interface, Different Transport
+
+On the client side, `HttpSyncProvider` implements the same `IConnectionProvider` interface as the WebSocket provider. The SyncEngine doesn't know or care which transport it's using.
+
+```typescript
+import { HttpSyncProvider } from '@topgunbuild/client';
+import { HLC } from '@topgunbuild/core';
+
+const provider = new HttpSyncProvider({
+  url: 'https://your-api.vercel.app/api/sync',
+  clientId: 'client-1',
+  hlc: new HLC('client-1'),
+  authToken: 'your-jwt-token',
+  syncMaps: ['todos', 'messages'],
+  pollIntervalMs: 5000,  // Check for updates every 5 seconds
+});
+```
+
+Under the hood, `HttpSyncProvider` runs a polling loop. Every `pollIntervalMs` milliseconds, it:
+
+1. Collects all queued operations (local writes waiting to be pushed)
+2. Builds a sync request with the current HLC and per-map timestamps
+3. Sends a single `POST /sync` request
+4. Processes the response: updates the HLC, applies deltas via synthetic `SERVER_EVENT` messages, handles operation acknowledgments
+
+If a request fails, pending operations are re-queued for the next poll. The provider tracks connection state and emits the same `connected`, `disconnected`, and `reconnected` events as the WebSocket provider—so reconnection UI works identically.
+
+## AutoConnectionProvider: Transparent Fallback
+
+Most apps don't want to choose their transport explicitly. `AutoConnectionProvider` handles this automatically:
+
+```typescript
+import { AutoConnectionProvider } from '@topgunbuild/client';
+
+const provider = new AutoConnectionProvider({
+  url: 'https://your-app.vercel.app',
+  clientId: 'client-1',
+  hlc: new HLC('client-1'),
+  authToken: 'your-jwt-token',
+  syncMaps: ['todos'],
+  maxWsAttempts: 3,  // Try WebSocket 3 times before falling back
+});
+```
+
+The logic is straightforward:
+
+1. Try to connect via WebSocket (converts `https://` to `wss://`)
+2. If WebSocket fails, retry up to `maxWsAttempts` times
+3. If all WebSocket attempts fail, switch to `HttpSyncProvider`
+4. Proxy all events from the active provider transparently
+
+This means a single codebase works everywhere. Deploy your TopGun backend on a traditional server and clients get real-time WebSocket push. Deploy on a serverless platform and clients automatically fall back to HTTP polling. No configuration changes. No conditional logic.
+
+You can also force HTTP mode with `httpOnly: true` if you know your backend is serverless.
+
+## Deploying on Serverless Platforms
+
+The server-side setup is minimal. `HttpSyncHandler` is a lightweight, stateless class that processes sync requests:
+
+### Vercel Edge Functions
+
+```typescript
+// app/api/sync/route.ts
+import { HttpSyncHandler } from '@topgunbuild/server/coordinator';
+import { HLC } from '@topgunbuild/core';
+
+let handler: HttpSyncHandler | null = null;
+
+function getHandler(): HttpSyncHandler {
+  if (!handler) {
+    handler = new HttpSyncHandler({
+      hlc: new HLC('vercel-edge-1'),
+      authHandler,
+      operationHandler,
+      storageManager,
+      queryConversionHandler,
+      searchCoordinator,
+      securityManager,
+    });
+  }
+  return handler;
+}
+
+export async function POST(request: Request) {
+  const authToken = request.headers
+    .get('authorization')?.replace('Bearer ', '') ?? '';
+  const body = await request.json();
+  const result = await getHandler().handleSyncRequest(body, authToken);
+
+  return new Response(JSON.stringify(result), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+```
+
+### AWS Lambda
+
+```typescript
+export const syncHandler = async (event: any) => {
+  const authToken = (event.headers?.authorization ?? '')
+    .replace('Bearer ', '');
+  const body = JSON.parse(event.body ?? '{}');
+  const result = await getHandler().handleSyncRequest(body, authToken);
+
+  return {
+    statusCode: 200,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(result),
+  };
+};
+```
+
+### Cloudflare Workers
+
+```typescript
+export default {
+  async fetch(request: Request): Promise<Response> {
+    if (request.method !== 'POST') {
+      return new Response('Method not allowed', { status: 405 });
+    }
+
+    const authToken = (request.headers.get('authorization') ?? '')
+      .replace('Bearer ', '');
+    const body = await request.json();
+    const result = await getHandler().handleSyncRequest(body, authToken);
+
+    return new Response(JSON.stringify(result), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  },
+};
+```
+
+The pattern is identical across platforms: extract the auth token, parse the body, call `handleSyncRequest()`, return the response. The handler does the heavy lifting—JWT verification, permission checks, CRDT operation application, delta computation, and error handling.
+
+## Polling Interval Tradeoffs
+
+The `pollIntervalMs` parameter controls how frequently the client checks for updates. This is the central tradeoff of HTTP sync:
+
+| Interval | Latency | Requests/min | Best For |
+|----------|---------|-------------|----------|
+| 1000ms | ~1s | 60 | Near-real-time dashboards |
+| 5000ms | ~5s | 12 | Collaborative editing |
+| 15000ms | ~15s | 4 | Background sync |
+| 60000ms | ~60s | 1 | Offline-first with occasional sync |
+
+At 5 seconds (the default), a client makes 12 requests per minute. Each request is a small msgpack payload—typically under 1KB for the request, with response size proportional to changes since last sync. For most apps, this is negligible in terms of both bandwidth and serverless invocation costs.
+
+The important thing to understand: **writes are always instant.** The polling interval only affects how quickly *remote* changes appear locally. Your local writes still happen at memory speed, persist to IndexedDB immediately, and queue for the next sync. The offline-first model doesn't change—HTTP sync just changes how and when queued data reaches the server.
+
+## What We Deliberately Left Out
+
+HTTP sync doesn't support everything that WebSocket sync does. By design:
+
+- **No live subscriptions.** WebSocket push enables `searchSubscribe()` and `query().subscribe()` with instant server-initiated updates. HTTP polling means updates arrive on the next poll, not instantly.
+- **No ORMap sync.** The delta computation currently only supports `LWWMap`. ORMap's observed-remove semantics require tracking causal history that doesn't fit cleanly into a stateless request/response model.
+- **No Merkle tree reconciliation.** WebSocket sync uses Merkle trees for efficient initial sync of large datasets. HTTP sync iterates all keys, which is fine for maps under ~100K records but doesn't scale the same way.
+
+These aren't permanent limitations—they're scope decisions. HTTP sync solves the 80% case: LWWMap synchronization with efficient deltas, which covers most application data models.
+
+## What Could Come Next
+
+Two directions we're thinking about, though neither is committed yet:
+
+**Server-Sent Events (SSE) for real-time push.** SSE is a unidirectional protocol that works in serverless environments with streaming responses. Clients would POST writes to `/sync` and receive real-time updates via GET `/events`. This could eliminate polling for platforms that support streaming.
+
+**Cluster-aware HTTP routing.** Today, `HttpSyncHandler` runs standalone against a single node's data. A future version could participate in the cluster protocol, routing sync requests to partition owners for access to the full distributed dataset.
+
+## Try It
+
+TopGun v0.11.0 is available now:
+
+```bash
+npm install @topgunbuild/core @topgunbuild/client @topgunbuild/server
+```
+
+If you're already using TopGun with WebSockets, switching to HTTP sync requires no changes to your data model or query code—just swap the connection provider.
+
+Check out the updated documentation:
+- [Deployment Guide](/docs/guides/deployment) — Serverless platform examples
+- [HttpSyncProvider API](/docs/api/client#httpsyncprovider) — Client configuration
+- [AutoConnectionProvider API](/docs/api/client#autoconnectionprovider) — Automatic fallback
+
+WebSockets are great when you have them. Now you don't need them.
