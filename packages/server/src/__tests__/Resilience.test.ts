@@ -2,7 +2,7 @@ import { ServerCoordinator, ServerFactory } from '../';
 import { ChaosProxy } from './utils/ChaosProxy';
 import { SyncEngine, SingleServerProvider } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
-import { waitForAuthReady, waitForConvergence } from './utils/test-helpers';
+import { waitForAuthReady, waitForConvergence, pollUntil } from './utils/test-helpers';
 import { LWWMap } from '@topgunbuild/core';
 import * as jwt from 'jsonwebtoken';
 
@@ -104,8 +104,17 @@ describe('Resilience & Chaos Testing', () => {
     clientA.registerMap('shared-data', mapA);
     clientB.registerMap('shared-data', mapB);
 
-    // Wait a bit for any connection attempts (will be silently dropped)
-    await new Promise(r => setTimeout(r, 200));
+    // Wait for both clients to reach AUTHENTICATING state (WS open, AUTH sent, but
+    // AUTH_ACK silently dropped by proxy so they stay stuck in AUTHENTICATING)
+    await pollUntil(
+      () => {
+        const stateA = clientA.getConnectionState();
+        const stateB = clientB.getConnectionState();
+        return stateA !== 'INITIAL' && stateA !== 'DISCONNECTED' &&
+               stateB !== 'INITIAL' && stateB !== 'DISCONNECTED';
+      },
+      { timeoutMs: 5000, intervalMs: 50, description: 'clients to reach authenticating state through silent proxy' }
+    );
 
     // 2. Conflicting Writes while "offline" (silent mode)
     console.log('--- PERFORMING OFFLINE WRITES ---');
@@ -141,12 +150,17 @@ describe('Resilience & Chaos Testing', () => {
     // Force reconnect - clients may be connected but stuck waiting for AUTH_ACK
     // that was silently dropped. Disconnecting forces a fresh handshake.
     proxy.disconnectAll();
-    // Give clients time to reconnect and sync
-    await new Promise(r => setTimeout(r, 500));
+    // Wait for clients to reconnect and complete auth handshake
+    await pollUntil(
+      () => clientA.getConnectionState() === 'CONNECTED' && clientB.getConnectionState() === 'CONNECTED',
+      { timeoutMs: 10000, intervalMs: 100, description: 'clients to reconnect after proxy restored' }
+    );
 
-    // 4. Wait for Convergence
+    // 4. Wait for Convergence on all keys
     console.log('--- WAITING FOR CONVERGENCE ---');
     await waitForConvergence(mapA, mapB, 'key1', 'ValueB', 10000);
+    await waitForConvergence(mapA, mapB, 'keyA', 'OnlyA', 10000);
+    await waitForConvergence(mapA, mapB, 'keyB', 'OnlyB', 10000);
 
     // 5. Assertions
     expect(mapA.get('key1')).toBe('ValueB'); // B was later
