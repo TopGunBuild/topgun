@@ -437,6 +437,9 @@ export class ServerFactory {
 
         Promise.all([networkReady, clusterReady]).then(([actualPort, actualClusterPort]) => {
             coordinator.completeStartup(actualPort, actualClusterPort);
+        }).catch((err) => {
+            logger.error({ err }, 'Server startup failed');
+            coordinator.failStartup(err instanceof Error ? err : new Error(String(err)));
         });
 
         if (metricsServer && config.metricsPort) {

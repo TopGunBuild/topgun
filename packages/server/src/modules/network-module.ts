@@ -92,8 +92,18 @@ export function createNetworkModule(
     rateLimitedLogger,
     // DEFERRED STARTUP - call this AFTER ServerCoordinator assembly
     start: () => {
-      return new Promise<number>((resolve) => {
+      return new Promise<number>((resolve, reject) => {
+        // Register a one-time error listener for startup failures
+        // (e.g., EADDRINUSE, EACCES). Removed after successful listen
+        // to avoid interfering with the runtime error handler in
+        // ServerCoordinator.
+        const onStartupError = (err: Error) => {
+          reject(err);
+        };
+        httpServer.on('error', onStartupError);
+
         httpServer.listen(config.port, () => {
+          httpServer.removeListener('error', onStartupError);
           const actualPort = (httpServer.address() as any).port;
           logger.info({ port: actualPort }, 'Server Coordinator listening');
           resolve(actualPort);

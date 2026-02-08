@@ -200,13 +200,15 @@ export class ServerCoordinator {
     private _actualClusterPort: number = 0;
     private _readyPromise: Promise<void>;
     private _readyResolve!: () => void;
+    private _readyReject!: (err: Error) => void;
 
     constructor(
         config: ServerCoordinatorConfig,
         dependencies: ServerDependencies
     ) {
-        this._readyPromise = new Promise((resolve) => {
+        this._readyPromise = new Promise((resolve, reject) => {
             this._readyResolve = resolve;
+            this._readyReject = reject;
         });
 
         this._nodeId = config.nodeId;
@@ -362,6 +364,15 @@ export class ServerCoordinator {
     /** Wait for server to be fully ready (ports assigned, cluster started) */
     public ready(): Promise<void> {
         return this._readyPromise;
+    }
+
+    /**
+     * Signal that server startup failed so that ready() rejects with the error.
+     * Called by ServerFactory when network.start() or cluster.start() fails.
+     */
+    public failStartup(err: Error): void {
+        logger.error({ err }, 'Server failed to start');
+        this._readyReject(err);
     }
 
     /**
