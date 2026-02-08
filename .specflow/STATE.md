@@ -4,7 +4,7 @@
 
 - **Active Specification:** none
 - **Status:** idle
-- **TODO Items:** 14
+- **TODO Items:** 16
 - **Next Step:** /sf:new or /sf:next
 
 ## Queue
@@ -16,11 +16,10 @@
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-08 | SPEC-038 | COMPLETED: Fix WebSocket Client Auth Handshake After ServerFactory Modular Refactoring. Modified 4 files, 1 commit, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-038.md |
+| 2026-02-08 | SPEC-038 | REVIEWED v1: APPROVED. All 9 acceptance criteria verified against source. No critical or major issues. 1 minor pre-existing pattern limitation (network.start() Promise never rejects). Clean minimal fix. |
+| 2026-02-08 | SPEC-038 | EXECUTED: Fix WebSocket Client Auth Handshake. Modified 4 files, 1 commit. All 9 acceptance criteria met. No deviations. |
 | 2026-02-07 | SPEC-037 | COMPLETED: Document HTTP Sync Protocol and Serverless Deployment. Modified 4 files (sync-protocol.mdx, server.mdx, client.mdx, deployment.mdx). 6 commits, 4 audit cycles, 2 review cycles. Archived to .specflow/archive/SPEC-037.md |
-| 2026-02-07 | SPEC-037 | REVIEWED v2: APPROVED. All 3 fixes from Review v1 verified as correctly applied. All 14 acceptance criteria satisfied, all constraints respected, no new issues found. Ready for finalization. |
-| 2026-02-07 | SPEC-037 | FIXED v1: Applied all 3 review issues. (1) Major: corrected HttpSyncError field types -- code is number not string, context is string not object. (2) Minor: added ? optionality markers to 5 optional HttpSyncResponse fields. (3) Minor: updated HttpSyncHandler constructor in all 3 serverless examples to use HttpSyncHandlerConfig with 7 dependencies. 2 commits. Ready for re-review. |
-| 2026-02-07 | SPEC-037 | REVIEWED v1: CHANGES_REQUESTED. 1 major issue: HttpSyncError field types in server.mdx describe code as (string) and context as (object) but actual Zod schema has code: z.number() and context: z.string().optional() -- AC9 violation. 2 minor issues. 13/14 acceptance criteria pass. |
-| 2026-02-07 | SPEC-037 | EXECUTED: Document HTTP Sync Protocol and Serverless Deployment. Modified 4 files. 4 commits across 2 waves. All 14 acceptance criteria met. No deviations. |
 | 2026-02-06 | SPEC-036 | COMPLETED: HTTP Sync Protocol for Serverless Environments. Created 9 files, modified 7 files. 9 commits, 3 audit cycles, 2 review cycles. Archived to .specflow/archive/SPEC-036.md |
 
 ## Project Patterns
@@ -49,4 +48,4 @@
 (none)
 
 ---
-*Last updated: 2026-02-07 (SPEC-037 completed and archived)*
+*Last updated: 2026-02-08 (SPEC-038 completed and archived)*
