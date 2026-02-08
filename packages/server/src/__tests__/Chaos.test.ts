@@ -3,6 +3,7 @@ import { ChaosProxy } from './utils/ChaosProxy';
 import { SyncEngine, SingleServerProvider } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
 import { waitForAuthReady, waitForCluster, pollUntil } from './utils/test-helpers';
+import { createTestHarness } from './utils/ServerTestHarness';
 import { LWWMap } from '@topgunbuild/core';
 import * as jwt from 'jsonwebtoken';
 import { WebSocket } from 'ws';
@@ -82,8 +83,15 @@ describe('Chaos Testing', () => {
             memberA.socket.close(); // Trigger close/rebalance on B
         }
 
-        // Wait for rebalance
-        await new Promise(r => setTimeout(r, 1000));
+        // Wait for rebalance after A-B disconnect
+        await pollUntil(
+            () => {
+                const membersA = clusterA.getMembers();
+                const membersB = clusterB.getMembers();
+                return !membersA.includes('node-b') && !membersB.includes('node-a');
+            },
+            { timeoutMs: 5000, intervalMs: 100, description: 'cluster rebalance after A-B disconnect' }
+        );
 
         // 2. Write to A
         const clientA = new SyncEngine({
@@ -269,10 +277,12 @@ describe('Chaos Testing', () => {
             });
         });
 
-        // Subscribe the slow consumer
-        // We need to wait for AUTH_ACK first ideally, but let's just send subscription
-        // Wait a bit for auth to process
-        await new Promise(r => setTimeout(r, 200));
+        // Wait for auth to be processed by polling server's connection count
+        const harness = createTestHarness(server);
+        await pollUntil(
+            () => harness.getClients().size >= 2,
+            { timeoutMs: 5000, intervalMs: 50, description: 'slow consumer auth processed by server' }
+        );
 
         const subMsg = {
             type: 'QUERY_SUB',
@@ -292,6 +302,7 @@ describe('Chaos Testing', () => {
         for (let i = 0; i < ITEM_COUNT; i++) {
             const record = map.set(`stream-${i}`, 'large-payload-'.repeat(100)); // ~1.4KB per msg
             producer.recordOperation('stream-data', 'PUT', `stream-${i}`, { record, timestamp: record.timestamp });
+            // WHY: Yield to event loop every 100 ops to prevent starving I/O during burst production
             if (i % 100 === 0) await new Promise(r => setTimeout(r, 10));
         }
         console.log('Finished production');
