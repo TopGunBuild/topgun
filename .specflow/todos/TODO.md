@@ -1,6 +1,6 @@
 # To-Do List
 
-**Last updated:** 2026-02-08 (TODO-056 added — network.start() Promise reject path)
+**Last updated:** 2026-02-08 (TODO-053 converted to SPEC-041)
 **Source:** Migrated from PROMPTS directory, reordered by technical dependencies
 
 ---
@@ -14,50 +14,13 @@
 
 ---
 
-### TODO-052: Verify interceptor pipeline and TLS setup work in production after modular refactoring
-- **Priority:** 🔴 P1
-- **Complexity:** Medium
-- **Summary:** 5 tests expose potential production regressions introduced during sf-011b. Ключевой вопрос для каждого: **работает ли тестируемая функциональность в production?** Если нет — чинить production code, если да — адаптировать тест под новый API.
-- **Affected Tests (5 failures):**
-  - InterceptorIntegration.test.ts (3/5): `TypeError: serverWithInterceptor.processLocalOp is not a function`
-  - tls.test.ts (1/2): `server.port` returns 0
-  - tls.test.ts (1/2): `validateJwtSecret` throws — missing JWT_SECRET
-- **Investigation questions (production-first):**
-  1. **Interceptor pipeline**: `processLocalOp` убран из публичного API `ServerCoordinator`. Но interceptors задекларированы в `ServerCoordinatorConfig.interceptors` и должны вызываться при каждой операции. **Вопрос: interceptor pipeline вообще ещё подключён к потоку операций в `ServerFactory`?** Если `createHandlersModule()` не прокидывает interceptors в `OperationHandler` — это production баг, а не проблема теста. Нужно проверить: (a) передаются ли `config.interceptors` в `OperationHandler`, (b) вызывается ли `onBeforeOp`/`onAfterOp` при реальных операциях через WS.
-  2. **TLS server port**: `server.port` возвращал 0 потому что порт назначался async, а getter читал config. **Уже исправлено** — `network.start()` теперь возвращает `Promise<number>`, `completeStartup(actualPort, actualClusterPort)` сохраняет оба. Тест должен вызвать `await server.ready()` перед проверкой порта.
-  3. **TLS without JWT**: Тест не передаёт `jwtSecret` в config → `validateJwtSecret` бросает ошибку. Это тестовый конфиг, не production баг.
-- **Approach:**
-  - **Сначала** проверить production code: interceptors wiring в `ServerFactory` → `createHandlersModule()` → `OperationHandler`
-  - **Если interceptors подключены**: тест нужно адаптировать (вызывать через ServerTestHarness или реальный WS клиент, а не через удалённый метод)
-  - **Если interceptors НЕ подключены**: починить production wiring, затем тест пройдёт как есть
-  - tls.test.ts: добавить `await server.ready()` и `jwtSecret` — это действительно тестовые правки
-- **Key Files:**
-  - `packages/server/src/ServerFactory.ts:~240` — как `config.interceptors` передаются в handlers module
-  - `packages/server/src/modules/handlers-module.ts` — создание OperationHandler, проверить наличие interceptors
-  - `packages/server/src/coordinator/operation-handler.ts` — вызов interceptor pipeline
-  - `packages/server/src/__tests__/InterceptorIntegration.test.ts` — тест, проверяющий функциональность
-  - `packages/server/src/__tests__/tls.test.ts` — TLS + port тесты
-- **Verification:** `cd packages/server && npx jest --forceExit --testPathPattern="(InterceptorIntegration|tls\.test)" --verbose`
-- **Dependencies:** Частично пересекается с TODO-051 (2 из 5 InterceptorIntegration тестов падают на auth, 3 — на API)
+### ~~TODO-052: Verify interceptor pipeline and TLS setup work in production after modular refactoring~~ → SPEC-040
+- **Status:** Converted to [SPEC-040](.specflow/specs/SPEC-040.md)
 
 ---
 
-### TODO-053: Fix DistributedSearch cluster event routing and GC broadcast gap
-- **Priority:** 🟡 P1
-- **Complexity:** Medium
-- **Summary:** 7 tests fail because ClusterEventHandler drops events without `key` field, but search and GC events use different routing. All DistributedSearch.e2e tests fail with empty AggregateError; 1 GC test fails because TTL expiration doesn't emit SERVER_EVENT broadcast.
-- **Affected Tests (7 failures):**
-  - DistributedSearch.e2e.test.ts (6/6): All tests fail with `AggregateError` — cluster forms correctly, nodes see each other, but search queries fail. Log shows WARNING: "Received cluster event with undefined key, ignoring"
-  - GC.test.ts (1/6): "TTL expiration notifies query subscriptions via processChange" — `expect(serverEvents.length).toBeGreaterThan(0)` fails, actual: 0
-- **Root Cause:** The `ClusterEventHandler` (packages/server/src/cluster/ClusterEventHandler.ts) validates incoming cluster events and drops messages where `key` is undefined. However, distributed search events (CLUSTER_SEARCH_REQUEST, CLUSTER_SEARCH_RESPONSE) and GC broadcast events don't use per-key routing — they are aggregate operations. The handler's key validation is too strict for these event types.
-- **Why this is NOT trivial:** The fix isn't just "remove the key check". Search events need their own routing path that bypasses key-based partition validation. The `ClusterEventHandler.setupListeners()` method registers handlers for various cluster message types — search events may need separate registration or the key check needs to be type-aware.
-- **Key Files:**
-  - `packages/server/src/cluster/ClusterEventHandler.ts` — the `setupListeners()` method and key validation
-  - `packages/server/src/__tests__/DistributedSearch.e2e.test.ts` — all 6 tests
-  - `packages/server/src/__tests__/GC.test.ts:~320` — "TTL expiration notifies query subscriptions"
-  - `packages/server/src/search/ClusterSearchCoordinator.ts` — how search requests are sent/received
-  - `packages/server/src/coordinator/broadcast-handler.ts` — SERVER_EVENT broadcast for GC
-- **Verification:** `cd packages/server && npx jest --forceExit --testPathPattern="(DistributedSearch.e2e|GC\.test)" --verbose`
+### ~~TODO-053: Fix DistributedSearch cluster event routing and GC broadcast gap~~ → SPEC-041 ✅
+- **Status:** Completed via [SPEC-041](.specflow/archive/SPEC-041.md)
 
 ---
 
@@ -102,18 +65,8 @@
 
 ---
 
-### TODO-056: Add reject path to network.start() Promise for listen failure handling
-- **Priority:** 🔴 P1
-- **Complexity:** Low
-- **Summary:** `network.start()` in `packages/server/src/modules/network-module.ts:95` creates a `new Promise<number>((resolve) => {...})` with no `reject` path. If `httpServer.listen()` encounters an error (e.g., EADDRINUSE), the listen callback never fires, the Promise never resolves, and `server.ready()` hangs indefinitely. This is a pre-existing pattern limitation discovered during SPEC-038 review.
-- **Root Cause:** The Promise only has a `resolve` callback. Listen errors go to `httpServer.on('error')` in ServerCoordinator, but that handler doesn't unblock the startup Promise chain.
-- **Fix:** Add `httpServer.on('error', reject)` inside the Promise constructor in `network.start()`, so listen failures propagate through the `Promise.all` startup chain in `ServerFactory.create()`. The ServerCoordinator should then catch the rejection from `ready()` and log/handle gracefully.
-- **Key Files:**
-  - `packages/server/src/modules/network-module.ts:95` — Promise needs reject path
-  - `packages/server/src/ServerFactory.ts:438` — `Promise.all([networkReady, clusterReady])` will propagate rejection
-  - `packages/server/src/ServerCoordinator.ts` — `ready()` caller should handle rejection
-- **Verification:** Start server with a port already in use → should reject `ready()` with EADDRINUSE error instead of hanging
-- **Dependencies:** SPEC-038 (port capture fix — now complete)
+### ~~TODO-056: Add reject path to network.start() Promise for listen failure handling~~ → SPEC-039
+- **Status:** Converted to [SPEC-039](.specflow/specs/SPEC-039.md)
 
 ---
 
@@ -451,10 +404,10 @@ TODO-023 (Client Cluster)          TODO-033 (AsyncStorage)
 | # | TODO | Wave | Effort | Unlocks | Priority |
 |---|------|------|--------|---------|----------|
 | ★ | ~~TODO-051~~ → SPEC-038 | -1 | 1-2 days | TODO-052, TODO-053 | 🔴 P0 |
-| ★ | TODO-052 | -1 | 0.5 day | — | 🔴 P1 |
-| ★ | TODO-053 | -1 | 1 day | — | 🟡 P1 |
+| ★ | ~~TODO-052~~ → SPEC-040 | -1 | 0.5 day | — | 🔴 P1 |
+| ★ | ~~TODO-053~~ → SPEC-041 | -1 | 1 day | — | 🟡 P1 |
 | ★ | TODO-055 | -1 | 1 day | — | 🟡 P1 |
-| ★ | TODO-056 | -1 | 2 hours | — | 🔴 P1 |
+| ★ | ~~TODO-056~~ → SPEC-039 | -1 | 2 hours | — | 🔴 P1 |
 | ★ | TODO-054 | -1 | 1 day | — | 🟡 P2 |
 | 1 | TODO-050 | 0 | 4-6 hours | TODO-048, TODO-049 | 🔴 High |
 | 2 | TODO-029 | 1 | 1 week | TODO-025, TODO-049 | 🟡 Medium |
