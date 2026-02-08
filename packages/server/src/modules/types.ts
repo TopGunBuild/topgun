@@ -181,7 +181,7 @@ export interface NetworkModule {
   wss: WebSocketServer;
   rateLimiter: ConnectionRateLimiter;
   rateLimitedLogger: RateLimitedLogger;
-  start: () => void;  // DEFERRED startup - call AFTER assembly
+  start: () => Promise<number>;  // DEFERRED startup - resolves with actual port after listen
   setHttpRequestHandler?: (handler: (req: any, res: any) => void) => void;
 }
 

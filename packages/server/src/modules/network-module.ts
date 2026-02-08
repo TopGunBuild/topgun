@@ -92,8 +92,12 @@ export function createNetworkModule(
     rateLimitedLogger,
     // DEFERRED STARTUP - call this AFTER ServerCoordinator assembly
     start: () => {
-      httpServer.listen(config.port, () => {
-        logger.info({ port: config.port }, 'Server Coordinator listening');
+      return new Promise<number>((resolve) => {
+        httpServer.listen(config.port, () => {
+          const actualPort = (httpServer.address() as any).port;
+          logger.info({ port: actualPort }, 'Server Coordinator listening');
+          resolve(actualPort);
+        });
       });
     },
     // Deferred wiring: allows ServerFactory to inject the /sync handler

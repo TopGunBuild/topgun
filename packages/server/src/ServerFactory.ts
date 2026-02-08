@@ -425,15 +425,18 @@ export class ServerFactory {
             lifecycleManager: lifecycle.lifecycleManager,
         });
 
-        // DEFERRED STARTUP - now safe to listen
-        network.start();
-
-        // Start cluster WebSocket server (restored from pre-sf-011b)
-        cluster.start().then((actualClusterPort) => {
-            coordinator.completeStartup(actualClusterPort);
-        }).catch((err) => {
+        // DEFERRED STARTUP - now safe to listen.
+        // Chain on both network and cluster startup so ready() gates on
+        // the HTTP server actually listening (capturing the real port) AND
+        // the cluster WebSocket server being up.
+        const networkReady = network.start();
+        const clusterReady = cluster.start().catch((err) => {
             logger.error({ err }, 'Failed to start cluster');
-            coordinator.completeStartup(config.clusterPort ?? 0);
+            return config.clusterPort ?? 0;
+        });
+
+        Promise.all([networkReady, clusterReady]).then(([actualPort, actualClusterPort]) => {
+            coordinator.completeStartup(actualPort, actualClusterPort);
         });
 
         if (metricsServer && config.metricsPort) {

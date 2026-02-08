@@ -342,14 +342,7 @@ export class ServerCoordinator {
             logger.error({ err }, 'HTTP Server error');
         });
 
-        // Final startup log
-        const actualPort = (this.httpServer.address() as any)?.port || config.port;
-        this._actualPort = actualPort;
-        logger.info({
-            port: actualPort,
-            nodeId: this._nodeId,
-            mode: 'CLUSTERED'
-        }, 'Server Coordinator Initialized via Factory');
+        // Port is set later by completeStartup() once the HTTP server is listening
 
         // Initialize storage and backfill FTS if needed
         if (this.storage) {
@@ -372,11 +365,17 @@ export class ServerCoordinator {
     }
 
     /**
-     * Complete server startup after cluster WebSocket server is listening.
-     * Called by ServerFactory once cluster.start() resolves.
+     * Complete server startup after both HTTP and cluster servers are listening.
+     * Called by ServerFactory once network.start() and cluster.start() resolve.
      */
-    public completeStartup(actualClusterPort: number): void {
+    public completeStartup(actualPort: number, actualClusterPort: number): void {
+        this._actualPort = actualPort;
         this._actualClusterPort = actualClusterPort;
+        logger.info({
+            port: actualPort,
+            nodeId: this._nodeId,
+            mode: 'CLUSTERED'
+        }, 'Server Coordinator Initialized via Factory');
         this._readyResolve();
     }
 
