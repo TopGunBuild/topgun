@@ -278,6 +278,135 @@ export async function waitForConvergence(
 }
 
 /**
+ * Wait for a server map to contain an expected value at a specific key.
+ *
+ * Polls server.getMap(mapName).get(key) until it equals the expected value.
+ * Useful for replacing fixed setTimeout delays in tests that wait for
+ * operations to be applied to a server's in-memory CRDT map.
+ *
+ * @param server The ServerCoordinator instance
+ * @param mapName Name of the map to poll
+ * @param key Key within the map to check
+ * @param expected Expected value at the key
+ * @param opts Poll options (default timeout: 5000ms, interval: 100ms)
+ */
+export async function waitForMapValue(
+  server: ServerCoordinator,
+  mapName: string,
+  key: string,
+  expected: any,
+  opts: PollOptions = {}
+): Promise<void> {
+  const startTime = Date.now();
+
+  await pollUntil(
+    () => {
+      const map = server.getMap(mapName);
+      return map.get(key) === expected;
+    },
+    {
+      timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      intervalMs: opts.intervalMs ?? DEFAULT_INTERVAL_MS,
+      maxIterations: opts.maxIterations,
+      description:
+        opts.description ??
+        `map "${mapName}" key "${key}" to equal ${JSON.stringify(expected)}`,
+    }
+  ).catch(() => {
+    const map = server.getMap(mapName);
+    const current = map.get(key);
+    throw new Error(
+      `waitForMapValue failed after ${Date.now() - startTime}ms. ` +
+        `Map: "${mapName}", Key: "${key}", ` +
+        `Expected: ${JSON.stringify(expected)}, ` +
+        `Current: ${JSON.stringify(current)}`
+    );
+  });
+}
+
+/**
+ * Wait for all nodes to replicate a specific map value.
+ *
+ * Polls each node's getMap(mapName).get(key) until all nodes have the expected value.
+ * Useful for replacing fixed setTimeout delays in cluster replication tests.
+ *
+ * @param nodes Array of ServerCoordinator instances to check
+ * @param mapName Name of the map to poll
+ * @param key Key within the map to check
+ * @param expected Expected value at the key
+ * @param opts Poll options (default timeout: 10000ms, interval: 200ms)
+ */
+export async function waitForReplication(
+  nodes: ServerCoordinator[],
+  mapName: string,
+  key: string,
+  expected: any,
+  opts: PollOptions = {}
+): Promise<void> {
+  const startTime = Date.now();
+
+  await pollUntil(
+    () => {
+      for (const node of nodes) {
+        const map = node.getMap(mapName);
+        if (map.get(key) !== expected) {
+          return false;
+        }
+      }
+      return true;
+    },
+    {
+      timeoutMs: opts.timeoutMs ?? 10000,
+      intervalMs: opts.intervalMs ?? 200,
+      maxIterations: opts.maxIterations,
+      description:
+        opts.description ??
+        `replication of "${mapName}" key "${key}" to ${JSON.stringify(expected)} across ${nodes.length} nodes`,
+    }
+  ).catch(() => {
+    const currentValues = nodes.map((node, i) => {
+      const map = node.getMap(mapName);
+      return `node[${i}]=${JSON.stringify(map.get(key))}`;
+    });
+    throw new Error(
+      `waitForReplication failed after ${Date.now() - startTime}ms. ` +
+        `Map: "${mapName}", Key: "${key}", ` +
+        `Expected: ${JSON.stringify(expected)}, ` +
+        `Current: ${currentValues.join(', ')}`
+    );
+  });
+}
+
+/**
+ * Wait for a Jest spy to have been called a minimum number of times.
+ *
+ * Polls the spy's mock.calls array length until it reaches the expected count.
+ * Useful for replacing fixed setTimeout delays in tests that wait for
+ * async callbacks, broadcasts, or event handlers to fire.
+ *
+ * @param spy Object with mock.calls array (Jest spy-compatible)
+ * @param opts Poll options with optional callCount (default: 1, timeout: 5000ms, interval: 50ms)
+ */
+export async function waitForSpyCall(
+  spy: { mock: { calls: any[][] } },
+  opts: PollOptions & { callCount?: number } = {}
+): Promise<void> {
+  const expectedCount = opts.callCount ?? 1;
+
+  await pollUntil(
+    () => spy.mock.calls.length >= expectedCount,
+    {
+      timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      intervalMs: opts.intervalMs ?? 50,
+      maxIterations: opts.maxIterations,
+      description:
+        opts.description ??
+        `spy to be called at least ${expectedCount} time(s) (current: ${spy.mock.calls.length})`,
+    }
+  );
+}
+
+/**
  * Re-export waitForAuthReady for backward compatibility.
  * The existing import path should continue to work.
  */
