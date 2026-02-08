@@ -41,6 +41,7 @@ describe('TLS Configuration', () => {
             port: 0,
             metricsPort: 0, // Random port to avoid conflict
             nodeId: 'test-node-tls',
+            jwtSecret: 'test-secret-for-tls',
             tls: {
                 enabled: true,
                 certPath: CERT_PATH,
@@ -78,6 +79,7 @@ describe('TLS Configuration', () => {
             port: 0,
             metricsPort: 0,
             nodeId: 'test-node-no-tls',
+            jwtSecret: 'test-secret-for-tls',
             // No TLS config
         });
 
