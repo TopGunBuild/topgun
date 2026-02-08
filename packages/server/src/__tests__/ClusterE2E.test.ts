@@ -12,7 +12,7 @@
 import { ServerCoordinator, ServerFactory } from '../';
 import { WebSocket } from 'ws';
 import { LWWMap, ConsistencyLevel, deserialize } from '@topgunbuild/core';
-import { waitForCluster } from './utils/test-helpers';
+import { waitForCluster, pollUntil } from './utils/test-helpers';
 import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
 
 describe('Cluster E2E Replication', () => {
@@ -89,6 +89,7 @@ describe('Cluster E2E Replication', () => {
         node2?.shutdown(),
         node3?.shutdown(),
       ]);
+      // WHY: Allow pending cluster WebSocket close events to drain before Jest tears down
       await new Promise(resolve => setTimeout(resolve, 300));
     });
 
@@ -155,8 +156,18 @@ describe('Cluster E2E Replication', () => {
         payload: op
       });
 
-      // Wait for replication (EVENTUAL is async)
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // Wait for replication to at least one backup node
+      await pollUntil(
+        () => {
+          const map1 = node1.getMap('e2e-test') as LWWMap<string, any>;
+          if (map1.get(testKey)?.data !== 'replicated-value') return false;
+          const map2 = node2.getMap('e2e-test') as LWWMap<string, any>;
+          const map3 = node3.getMap('e2e-test') as LWWMap<string, any>;
+          return map2.get(testKey)?.data === 'replicated-value' ||
+                 map3.get(testKey)?.data === 'replicated-value';
+        },
+        { timeoutMs: 10000, intervalMs: 100, description: 'e2e-test replication to backup nodes' }
+      );
 
       // Verify on owner
       const map1 = node1.getMap('e2e-test') as LWWMap<string, any>;
@@ -196,8 +207,18 @@ describe('Cluster E2E Replication', () => {
         payload: op
       });
 
-      // Wait for replication to backup nodes
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // Wait for replication to at least one backup node
+      await pollUntil(
+        () => {
+          const m1 = node1.getMap('events-test') as LWWMap<string, any>;
+          const m2 = node2.getMap('events-test') as LWWMap<string, any>;
+          const m3 = node3.getMap('events-test') as LWWMap<string, any>;
+          return (m1.get('event-key-1')?.message === 'hello-cluster') ||
+                 (m2.get('event-key-1')?.message === 'hello-cluster') ||
+                 (m3.get('event-key-1')?.message === 'hello-cluster');
+        },
+        { timeoutMs: 10000, intervalMs: 100, description: 'events-test replication to backup nodes' }
+      );
 
       // Verify data is replicated - at least one other node should have it
       const map1 = node1.getMap('events-test') as LWWMap<string, any>;
@@ -248,8 +269,22 @@ describe('Cluster E2E Replication', () => {
 
       await Promise.all(promises);
 
-      // Wait for propagation
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // Wait for all keys to propagate to at least 2 nodes each
+      await pollUntil(
+        () => {
+          for (let i = 0; i < keys.length; i++) {
+            const key = keys[i];
+            let foundCount = 0;
+            for (const node of [node1, node2, node3]) {
+              const map = node.getMap('concurrent-test') as LWWMap<string, any>;
+              if (map.get(key)?.index === i) foundCount++;
+            }
+            if (foundCount < 2) return false;
+          }
+          return true;
+        },
+        { timeoutMs: 10000, intervalMs: 200, description: 'concurrent writes replicated to 2+ nodes' }
+      );
 
       // Verify all keys exist on at least owner + 1 backup
       for (let i = 0; i < keys.length; i++) {
@@ -300,6 +335,7 @@ describe('Cluster E2E Replication', () => {
 
     afterAll(async () => {
       await localNode?.shutdown();
+      // WHY: Allow pending WebSocket close events to drain before Jest tears down
       await new Promise(resolve => setTimeout(resolve, 200));
     });
 
@@ -338,7 +374,14 @@ describe('Cluster E2E Replication', () => {
         payload: op
       });
 
-      await new Promise(resolve => setTimeout(resolve, 100));
+      // Wait for the operation to be applied
+      await pollUntil(
+        () => {
+          const map = localNode.getMap('single-test') as LWWMap<string, any>;
+          return map.get('single-key')?.single === true;
+        },
+        { timeoutMs: 5000, intervalMs: 50, description: 'single-node write applied' }
+      );
 
       const map = localNode.getMap('single-test') as LWWMap<string, any>;
       expect(map.get('single-key')?.single).toBe(true);

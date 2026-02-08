@@ -5,6 +5,7 @@
 
 import { ClusterCoordinator, ClusterCoordinatorConfig } from '../cluster/ClusterCoordinator';
 import { ConsistencyLevel, PARTITION_COUNT } from '@topgunbuild/core';
+import { pollUntil } from './utils/test-helpers';
 
 describe('ClusterCoordinator', () => {
   let coordinator: ClusterCoordinator;
@@ -504,8 +505,11 @@ describe('ClusterCoordinator', () => {
 
       await coordinator.start();
 
-      // Give time for events to fire
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      // Poll for coordinator to be started (events may fire during startup)
+      await pollUntil(
+        () => coordinator.isStarted(),
+        { timeoutMs: 5000, intervalMs: 50, description: 'coordinator started' }
+      );
 
       // The initial rebalance happens in PartitionService constructor
       // before we can attach event listeners, so this may or may not fire
@@ -558,8 +562,11 @@ describe('ClusterCoordinator multi-node', () => {
     await coordinator1.start();
     await coordinator2.start();
 
-    // Wait for connection
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // Wait for both nodes to see each other
+    await pollUntil(
+      () => coordinator1.getMembers().length === 2 && coordinator2.getMembers().length === 2,
+      { timeoutMs: 5000, intervalMs: 50, description: 'two-node cluster formation' }
+    );
 
     // Both should see each other
     const members1 = coordinator1.getMembers();
@@ -606,8 +613,17 @@ describe('ClusterCoordinator multi-node', () => {
     await coordinator1.start();
     await coordinator2.start();
 
-    // Wait for cluster to stabilize
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    // Wait for cluster to stabilize with partitions distributed
+    await pollUntil(
+      () => {
+        const m1 = coordinator1.getPartitionMap();
+        const m2 = coordinator2.getPartitionMap();
+        return m1.version > 0 && m2.version > 0 &&
+               coordinator1.getMembers().length === 2 &&
+               coordinator2.getMembers().length === 2;
+      },
+      { timeoutMs: 5000, intervalMs: 50, description: 'partition distribution across two nodes' }
+    );
 
     const map1 = coordinator1.getPartitionMap();
     const map2 = coordinator2.getPartitionMap();
@@ -659,8 +675,11 @@ describe('ClusterCoordinator multi-node', () => {
     await coordinator1.start();
     await coordinator2.start();
 
-    // Wait for connection
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // Wait for both nodes to see each other
+    await pollUntil(
+      () => coordinator1.getMembers().length === 2 && coordinator2.getMembers().length === 2,
+      { timeoutMs: 5000, intervalMs: 50, description: 'broadcast test cluster formation' }
+    );
 
     let messageReceived = false;
     coordinator2.getClusterManager().on('message', (msg) => {
@@ -671,7 +690,10 @@ describe('ClusterCoordinator multi-node', () => {
 
     coordinator1.broadcast({ test: 'broadcast' });
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await pollUntil(
+      () => messageReceived,
+      { timeoutMs: 5000, intervalMs: 50, description: 'broadcast message received by node-2' }
+    );
     expect(messageReceived).toBe(true);
   });
 });

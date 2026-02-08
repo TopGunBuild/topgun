@@ -58,7 +58,7 @@ describe('Cluster Integration', () => {
   afterAll(async () => {
     await node1.shutdown();
     await node2.shutdown();
-    // Give it a moment to release ports
+    // WHY: Allow pending cluster WebSocket close events to drain before Jest tears down
     await new Promise(resolve => setTimeout(resolve, 200));
   });
 
@@ -106,8 +106,15 @@ describe('Cluster Integration', () => {
       payload: op
     });
 
-    // Wait for propagation
-    await new Promise(resolve => setTimeout(resolve, 500));
+    // Wait for data to replicate to node2
+    await pollUntil(
+      () => {
+        const map2 = node2.getMap('users') as LWWMap<string, any>;
+        const val = map2.getRecord(key);
+        return val?.value?.name === 'Iceman';
+      },
+      { timeoutMs: 10000, intervalMs: 100, description: 'user:100 replicated to node2' }
+    );
 
     // 2. Check Node 2's internal state
     const map2 = node2.getMap('users') as LWWMap<string, any>;
@@ -141,8 +148,14 @@ describe('Cluster Integration', () => {
         payload: { queryId: 'q-local', mapName: 'users', query: {} }
     });
 
-    // Wait for subscription to be registered (distributed subscription needs more time)
-    await new Promise(resolve => setTimeout(resolve, 500));
+    // Wait for subscription acknowledgement (server sends back a response)
+    await pollUntil(
+      () => sendMock.mock.calls.length > 0,
+      { timeoutMs: 5000, intervalMs: 50, description: 'subscription acknowledgement received' }
+    );
+
+    // Reset calls so we only look for QUERY_UPDATE from the write
+    sendMock.mockClear();
 
     // Write on same Node 1
     const op = {
@@ -160,7 +173,11 @@ describe('Cluster Integration', () => {
         payload: op
     });
 
-    await new Promise(resolve => setTimeout(resolve, 500));
+    // Wait for client to receive the QUERY_UPDATE notification
+    await pollUntil(
+      () => sendMock.mock.calls.length > 0,
+      { timeoutMs: 5000, intervalMs: 50, description: 'client to receive QUERY_UPDATE notification' }
+    );
 
     // Check if client received update
     const calls = sendMock.mock.calls;
