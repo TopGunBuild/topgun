@@ -299,10 +299,16 @@ export async function waitForMapValue(
 ): Promise<void> {
   const startTime = Date.now();
 
+  // Use JSON comparison for deep equality of objects
+  const expectedJson = JSON.stringify(expected);
+
   await pollUntil(
     () => {
       const map = server.getMap(mapName);
-      return map.get(key) === expected;
+      const current = map.get(key);
+      return typeof expected === 'object' && expected !== null
+        ? JSON.stringify(current) === expectedJson
+        : current === expected;
     },
     {
       timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -345,11 +351,19 @@ export async function waitForReplication(
 ): Promise<void> {
   const startTime = Date.now();
 
+  // Use JSON comparison for deep equality of objects
+  const expectedJson = JSON.stringify(expected);
+  const isObject = typeof expected === 'object' && expected !== null;
+
   await pollUntil(
     () => {
       for (const node of nodes) {
         const map = node.getMap(mapName);
-        if (map.get(key) !== expected) {
+        const current = map.get(key);
+        const matches = isObject
+          ? JSON.stringify(current) === expectedJson
+          : current === expected;
+        if (!matches) {
           return false;
         }
       }

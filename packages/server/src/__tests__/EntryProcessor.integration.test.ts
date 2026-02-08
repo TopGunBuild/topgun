@@ -12,7 +12,7 @@ import { ServerCoordinator, ServerFactory, ServerCoordinatorConfig } from '../';
 import { TopGunClient } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
 import { BuiltInProcessors } from '@topgunbuild/core';
-import { waitForConnection } from './utils/test-helpers';
+import { waitForConnection, waitForMapValue, pollUntil } from './utils/test-helpers';
 
 const TEST_PORT_BASE = 12100;
 
@@ -59,8 +59,8 @@ describe('Entry Processor Integration', () => {
       const map = client.getMap<string, number>('counters');
       map.set('views', 100);
 
-      // Wait for sync
-      await new Promise((r) => setTimeout(r, 200));
+      // Wait for sync to server
+      await waitForMapValue(server, 'counters', 'views', 100);
 
       // Execute processor
       const result = await client.executeOnKey('counters', 'views', BuiltInProcessors.INCREMENT(5));
@@ -86,7 +86,7 @@ describe('Entry Processor Integration', () => {
       const map = client.getMap<string, number>('inventory');
       map.set('stock', 3);
 
-      await new Promise((r) => setTimeout(r, 200));
+      await waitForMapValue(server, 'inventory', 'stock', 3);
 
       const result = await client.executeOnKey(
         'inventory',
@@ -115,7 +115,7 @@ describe('Entry Processor Integration', () => {
       const map = client.getMap<string, object>('users');
       map.set('user1', { name: 'Existing' });
 
-      await new Promise((r) => setTimeout(r, 200));
+      await waitForMapValue(server, 'users', 'user1', { name: 'Existing' });
 
       const result = await client.executeOnKey(
         'users',
@@ -132,7 +132,7 @@ describe('Entry Processor Integration', () => {
       const map = client.getMap<string, string>('cache');
       map.set('key1', 'value1');
 
-      await new Promise((r) => setTimeout(r, 200));
+      await waitForMapValue(server, 'cache', 'key1', 'value1');
 
       const result = await client.executeOnKey(
         'cache',
@@ -149,7 +149,7 @@ describe('Entry Processor Integration', () => {
       const map = client.getMap<string, number>('scores');
       map.set('player1', 100);
 
-      await new Promise((r) => setTimeout(r, 200));
+      await waitForMapValue(server, 'scores', 'player1', 100);
 
       const result = await client.executeOnKey('scores', 'player1', {
         name: 'custom_multiply',
@@ -199,7 +199,8 @@ describe('Entry Processor Integration', () => {
       map.set('b', 20);
       map.set('c', 30);
 
-      await new Promise((r) => setTimeout(r, 200));
+      // Wait for all three values to sync
+      await waitForMapValue(server, 'counters', 'c', 30);
 
       const results = await client.executeOnKeys(
         'counters',
@@ -227,7 +228,8 @@ describe('Entry Processor Integration', () => {
       map.set('valid', 10);
       map.set('invalid', 'not a number');
 
-      await new Promise((r) => setTimeout(r, 200));
+      // Wait for both values to sync
+      await waitForMapValue(server, 'mixed', 'invalid', 'not a number');
 
       const results = await client.executeOnKeys('mixed', ['valid', 'invalid', 'missing'], {
         name: 'double',
@@ -287,7 +289,7 @@ describe('Entry Processor Integration', () => {
       const map = client.getMap<string, { data: string; version: number }>('versioned');
       map.set('doc', { data: 'initial', version: 1 });
 
-      await new Promise((r) => setTimeout(r, 200));
+      await waitForMapValue(server, 'versioned', 'doc', { data: 'initial', version: 1 });
 
       // Try to update with version check
       const result1 = await client.executeOnKey('versioned', 'doc', {

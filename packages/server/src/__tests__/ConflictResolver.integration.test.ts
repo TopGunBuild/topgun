@@ -12,6 +12,7 @@ import { ServerCoordinator, ServerFactory, ServerCoordinatorConfig } from '../';
 import { TopGunClient } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
 import { MergeRejection } from '@topgunbuild/core';
+import { pollUntil, waitForMapValue, waitForConnection } from './utils/test-helpers';
 
 const TEST_PORT_BASE = 12200;
 
@@ -160,15 +161,18 @@ describe('Conflict Resolver Integration', () => {
       const map1 = client1.getMap<string, { user: string; time: string }>('bookings');
       map1.set('slot-1', { user: 'user-1', time: '10:00' });
 
-      // Wait for sync
-      await new Promise(r => setTimeout(r, 300));
+      // Wait for sync to server
+      await waitForMapValue(server, 'bookings', 'slot-1', { user: 'user-1', time: '10:00' });
 
       // Client2 tries to book the same slot
       const map2 = client2.getMap<string, { user: string; time: string }>('bookings');
       map2.set('slot-1', { user: 'user-2', time: '10:00' });
 
       // Wait for rejection notification
-      await new Promise(r => setTimeout(r, 500));
+      await pollUntil(
+        () => rejections.length >= 1,
+        { timeoutMs: 5000, intervalMs: 50, description: 'merge rejection notification received' }
+      );
 
       unsubscribe();
 
@@ -200,11 +204,14 @@ describe('Conflict Resolver Integration', () => {
 
       // First write should succeed
       map.set('app-config', { value: 1 });
-      await new Promise(r => setTimeout(r, 300));
+      await waitForMapValue(server, 'configs', 'app-config', { value: 1 });
 
       // Second write should be rejected
       map.set('app-config', { value: 2 });
-      await new Promise(r => setTimeout(r, 500));
+      await pollUntil(
+        () => rejections.length >= 1,
+        { timeoutMs: 5000, intervalMs: 50, description: 'immutable rejection notification' }
+      );
 
       expect(rejections.length).toBe(1);
       expect(rejections[0].reason).toContain('immutable');
@@ -232,11 +239,14 @@ describe('Conflict Resolver Integration', () => {
 
       // Valid positive value
       map.set('account-1', 100);
-      await new Promise(r => setTimeout(r, 300));
+      await waitForMapValue(server, 'balances', 'account-1', 100);
 
       // Invalid negative value
       map.set('account-2', -50);
-      await new Promise(r => setTimeout(r, 500));
+      await pollUntil(
+        () => rejections.length >= 1,
+        { timeoutMs: 5000, intervalMs: 50, description: 'non-negative rejection notification' }
+      );
 
       expect(rejections.length).toBe(1);
       expect(rejections[0].key).toBe('account-2');
@@ -269,15 +279,18 @@ describe('Conflict Resolver Integration', () => {
 
       // Create user:123 from client1
       map1.set('user:123', { name: 'Alice' });
-      await new Promise(r => setTimeout(r, 300));
+      await waitForMapValue(server, 'data', 'user:123', { name: 'Alice' });
 
       // Client2 tries to overwrite user:123 - should be rejected
       map2.set('user:123', { name: 'Bob' });
-      await new Promise(r => setTimeout(r, 500));
+      await pollUntil(
+        () => rejections.length >= 1,
+        { timeoutMs: 5000, intervalMs: 50, description: 'key pattern rejection notification' }
+      );
 
       // Client2 writes to post:123 - should succeed (no pattern match)
       map2.set('post:123', { title: 'Hello' });
-      await new Promise(r => setTimeout(r, 300));
+      await waitForMapValue(server, 'data', 'post:123', { title: 'Hello' });
 
       // Only user:123 should be rejected
       expect(rejections.length).toBe(1);
@@ -315,7 +328,10 @@ describe('Conflict Resolver Integration', () => {
 
       // Should be rejected by high priority resolver
       map.set('key1', 'blocked');
-      await new Promise(r => setTimeout(r, 500));
+      await pollUntil(
+        () => rejections.length >= 1,
+        { timeoutMs: 5000, intervalMs: 50, description: 'priority rejection notification' }
+      );
 
       expect(rejections.length).toBe(1);
       expect(rejections[0].reason).toBe('Value is blocked');
@@ -346,13 +362,16 @@ describe('Conflict Resolver Integration', () => {
 
       // First write should succeed
       map.set('config', { data: 'initial' });
-      await new Promise(r => setTimeout(r, 300));
+      await waitForMapValue(server, 'immutable-data', 'config', { data: 'initial' });
 
       expect(rejections.length).toBe(0);
 
       // Deletion should be rejected
       map.remove('config');
-      await new Promise(r => setTimeout(r, 500));
+      await pollUntil(
+        () => rejections.length >= 1,
+        { timeoutMs: 5000, intervalMs: 50, description: 'immutable deletion rejection notification' }
+      );
 
       expect(rejections.length).toBe(1);
       expect(rejections[0].key).toBe('config');
@@ -367,11 +386,17 @@ describe('Conflict Resolver Integration', () => {
 
       // Create entry
       map1.set('item1', { value: 100 });
-      await new Promise(r => setTimeout(r, 300));
+      await waitForMapValue(server, 'deletable-data', 'item1', { value: 100 });
 
       // Delete should succeed (no resolver to block it)
       map1.remove('item1');
-      await new Promise(r => setTimeout(r, 300));
+      await pollUntil(
+        () => {
+          const val = map1.get('item1');
+          return val === undefined || val === null;
+        },
+        { timeoutMs: 5000, intervalMs: 50, description: 'deletion propagated to client' }
+      );
 
       // Verify deletion propagated
       const value = map1.get('item1');
@@ -405,12 +430,15 @@ describe('Conflict Resolver Integration', () => {
       // Client1 creates owned entry
       const map1 = client1.getMap<string, { ownerId: string; data: string }>('owned-data');
       map1.set('doc1', { ownerId: 'user-1', data: 'secret' });
-      await new Promise(r => setTimeout(r, 300));
+      await waitForMapValue(server, 'owned-data', 'doc1', { ownerId: 'user-1', data: 'secret' });
 
       // Client2 tries to delete - should be rejected
       const map2 = client2.getMap<string, { ownerId: string; data: string }>('owned-data');
       map2.remove('doc1');
-      await new Promise(r => setTimeout(r, 500));
+      await pollUntil(
+        () => rejections.length >= 1,
+        { timeoutMs: 5000, intervalMs: 50, description: 'owner-only deletion rejection notification' }
+      );
 
       expect(rejections.length).toBe(1);
       expect(rejections[0].reason).toContain('owner');
@@ -418,18 +446,4 @@ describe('Conflict Resolver Integration', () => {
   });
 });
 
-// Helper functions
-
-async function waitForConnection(client: TopGunClient): Promise<void> {
-  return new Promise<void>((resolve) => {
-    const checkConnection = () => {
-      if (client.getConnectionState() === 'CONNECTED') {
-        resolve();
-      } else {
-        setTimeout(checkConnection, 50);
-      }
-    };
-    checkConnection();
-  });
-}
 
