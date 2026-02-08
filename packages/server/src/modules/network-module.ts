@@ -46,6 +46,10 @@ export function createNetworkModule(
     httpServer = createHttpsServer(buildTLSOptions(config.tls), requestDispatcher);
   } else {
     httpServer = createHttpServer(requestDispatcher);
+
+    if (process.env.NODE_ENV === 'production') {
+      logger.warn('TLS is disabled! Client connections are NOT encrypted.');
+    }
   }
 
   // Configure server limits
