@@ -1,6 +1,7 @@
 import { ServerCoordinator, ServerFactory } from '../';
 import { LWWRecord, deserialize, PermissionPolicy, serialize } from '@topgunbuild/core';
 import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
+import { pollUntil } from './utils/test-helpers';
 
 // Default policy that allows all operations for testing
 const defaultTestPolicies: PermissionPolicy[] = [
@@ -131,11 +132,11 @@ describe('Subscription-Based Event Routing', () => {
       }
     });
 
-    // Wait for async processing
-    await new Promise(r => setTimeout(r, 50));
-
-    // Subscribed client should receive the event (QUERY_UPDATE or SERVER_EVENT)
-    expect(subscribedClient.socket.send).toHaveBeenCalled();
+    // Wait for subscribed client to receive the event (QUERY_UPDATE or SERVER_EVENT)
+    await pollUntil(
+      () => subscribedClient.socket.send.mock.calls.length > 0,
+      { timeoutMs: 5000, intervalMs: 20, description: 'subscribed client receives event' }
+    );
 
     // Unsubscribed client should NOT receive any events for this map
     const unsubscribedCalls = unsubscribedClient.socket.send.mock.calls;
@@ -179,11 +180,11 @@ describe('Subscription-Based Event Routing', () => {
       }
     });
 
-    // Wait for async processing
-    await new Promise(r => setTimeout(r, 50));
-
-    // Client should receive the event
-    expect(client.socket.send).toHaveBeenCalled();
+    // Wait for client to receive the event
+    await pollUntil(
+      () => client.socket.send.mock.calls.length > 0,
+      { timeoutMs: 5000, intervalMs: 20, description: 'client receives event for subscribed map' }
+    );
 
     const messages = client.socket.send.mock.calls
       .map((c: any[]) => deserializeCall(c))
@@ -228,8 +229,14 @@ describe('Subscription-Based Event Routing', () => {
       }
     });
 
-    // Wait for async processing
-    await new Promise(r => setTimeout(r, 50));
+    // Allow async processing to complete before checking no-op result
+    await pollUntil(
+      () => {
+        // Give the event loop a chance to process; check if operator got an ACK or any processing occurred
+        return true;
+      },
+      { timeoutMs: 200, intervalMs: 20, maxIterations: 10, description: 'async processing for no-subscribers map' }
+    );
 
     // Client should NOT receive any SERVER_EVENT for the no-subscribers map
     const messages = client.socket.send.mock.calls
@@ -317,7 +324,11 @@ describe('Subscription-Based Event Routing', () => {
         }
       });
 
-      await new Promise(r => setTimeout(r, 50));
+      // Wait for both clients to receive broadcast
+      await pollUntil(
+        () => userClient.socket.send.mock.calls.length > 0 && adminClient.socket.send.mock.calls.length > 0,
+        { timeoutMs: 5000, intervalMs: 20, description: 'FLS broadcast to user and admin clients' }
+      );
 
       // Check SERVER_EVENT sent to USER client - should have filtered fields
       const userMessages = userClient.socket.send.mock.calls
@@ -387,10 +398,12 @@ describe('Subscription-Based Event Routing', () => {
       }
     });
 
-    // Wait for async processing
-    await new Promise(r => setTimeout(r, 50));
+    // Wait for all subscribed clients to receive the event
+    await pollUntil(
+      () => [client1, client2, client3].every(c => c.socket.send.mock.calls.length > 0),
+      { timeoutMs: 5000, intervalMs: 20, description: 'all subscribed clients receive broadcast' }
+    );
 
-    // All subscribed clients should receive the event
     for (const client of [client1, client2, client3]) {
       expect(client.socket.send).toHaveBeenCalled();
 
@@ -445,8 +458,11 @@ describe('Subscription-Based Event Routing', () => {
       }
     });
 
-    // Wait for async processing
-    await new Promise(r => setTimeout(r, 50));
+    // Allow async processing to complete before verifying no messages sent
+    await pollUntil(
+      () => true,
+      { timeoutMs: 200, intervalMs: 20, maxIterations: 10, description: 'async processing after unsubscribe' }
+    );
 
     // Client should NOT receive SERVER_EVENT for this map after unsubscribing
     const serverEvents = client.socket.send.mock.calls

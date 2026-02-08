@@ -1,6 +1,7 @@
 import { ServerCoordinator, ServerFactory } from '../';
 import { LWWRecord, deserialize, PermissionPolicy, serialize } from '@topgunbuild/core';
 import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
+import { pollUntil } from './utils/test-helpers';
 
 // Mock WebSocket
 class MockWebSocket {
@@ -211,11 +212,11 @@ describe('Field-Level Security (RBAC)', () => {
           }
       });
 
-      // Wait for async processing
-      await new Promise(r => setTimeout(r, 50));
-
-      // Verify Broadcast to USER (via SERVER_EVENT with FLS filtering)
-      expect(userSocket.send).toHaveBeenCalled();
+      // Wait for broadcast to reach the USER client
+      await pollUntil(
+        () => userSocket.send.mock.calls.length > 0,
+        { timeoutMs: 5000, intervalMs: 20, description: 'FLS-filtered broadcast to USER client' }
+      );
       // Find the SERVER_EVENT message (not QUERY_UPDATE)
       const userMessages = userSocket.send.mock.calls.map((c: any[]) => {
           try { return deserialize(c[0]) as any; } catch { return null; }

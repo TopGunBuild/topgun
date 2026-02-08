@@ -14,7 +14,7 @@ import { ServerCoordinator, ServerFactory } from '../';
 import { WebSocket } from 'ws';
 import jwt from 'jsonwebtoken';
 import { serialize, deserialize } from '@topgunbuild/core';
-import { waitForCluster } from './utils/test-helpers';
+import { waitForCluster, pollUntil } from './utils/test-helpers';
 import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
 
 const JWT_SECRET = 'test-secret-for-e2e-tests';
@@ -138,8 +138,15 @@ describe('Distributed Search E2E', () => {
       // Wait for cluster formation
       await waitForCluster([node1, node2], 2, 10000);
 
-      // Give some time for cluster stabilization
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // Verify cluster stabilization by checking partition service is available
+      await pollUntil(
+        () => {
+          const h1 = createTestHarness(node1);
+          const h2 = createTestHarness(node2);
+          return h1.partitionService !== undefined && h2.partitionService !== undefined;
+        },
+        { timeoutMs: 5000, intervalMs: 100, description: 'cluster stabilization after formation' }
+      );
     }, 30000);
 
     afterAll(async () => {
@@ -147,6 +154,7 @@ describe('Distributed Search E2E', () => {
         node1?.shutdown(),
         node2?.shutdown(),
       ]);
+      // WHY: Allow pending cluster WebSocket close events to drain before Jest tears down
       await new Promise(resolve => setTimeout(resolve, 300));
     });
 
@@ -171,8 +179,18 @@ describe('Distributed Search E2E', () => {
         content: 'Data science combines statistics and machine learning.',
       });
 
-      // Wait for index updates
-      await new Promise(resolve => setTimeout(resolve, 100));
+      // Wait for FTS indexes to process the inserted documents
+      await pollUntil(
+        () => {
+          const h1 = createTestHarness(node1);
+          const h2 = createTestHarness(node2);
+          // Check that search coordinators have indexed the data
+          const r1 = h1.searchCoordinator?.search('articles', 'machine learning', { limit: 10 });
+          const r2 = h2.searchCoordinator?.search('articles', 'machine learning', { limit: 10 });
+          return (r1?.results?.length ?? 0) > 0 && (r2?.results?.length ?? 0) > 0;
+        },
+        { timeoutMs: 5000, intervalMs: 50, description: 'FTS index updates on both nodes' }
+      );
 
       // Search from node1 - should find results from both nodes
       const result = await search(node1, 'articles', 'machine learning');
@@ -252,11 +270,20 @@ describe('Distributed Search E2E', () => {
         body: 'JavaScript is a dynamic programming language.',
       });
 
-      await new Promise(resolve => setTimeout(resolve, 100));
+      // Wait for FTS index to process documents
+      await pollUntil(
+        () => {
+          const h = createTestHarness(singleNode);
+          const r = h.searchCoordinator?.search('docs', 'typescript', { limit: 10 });
+          return (r?.results?.length ?? 0) > 0;
+        },
+        { timeoutMs: 5000, intervalMs: 50, description: 'single-node FTS index update' }
+      );
     }, 10000);
 
     afterAll(async () => {
       await singleNode?.shutdown();
+      // WHY: Allow pending WebSocket close events to drain before Jest tears down
       await new Promise(resolve => setTimeout(resolve, 300));
     });
 

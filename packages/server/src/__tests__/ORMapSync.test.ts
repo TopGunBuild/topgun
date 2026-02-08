@@ -1,6 +1,7 @@
 import { ServerCoordinator, ServerFactory } from '../';
 import { HLC, ORMap, serialize, deserialize, ORMapRecord } from '@topgunbuild/core';
 import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
+import { pollUntil } from './utils/test-helpers';
 
 const createMockWriter = (socket: any) => ({
   write: jest.fn((message: any, _urgent?: boolean) => {
@@ -247,8 +248,11 @@ describe('ORMap Merkle Tree Sync Integration', () => {
         payload: { queryId: 'sub-or-broadcast', mapName: 'or:broadcast-test', query: {} }
       });
 
-      // Wait for subscription to be processed
-      await new Promise(r => setTimeout(r, 10));
+      // Wait for subscription response to arrive before clearing
+      await pollUntil(
+        () => responses2.length > 0,
+        { timeoutMs: 2000, intervalMs: 10, description: 'QUERY_SUB response received' }
+      );
       responses2.length = 0; // Clear subscription response
 
       const record: ORMapRecord<string> = {
@@ -269,8 +273,11 @@ describe('ORMap Merkle Tree Sync Integration', () => {
         }
       });
 
-      // Wait for async broadcast
-      await new Promise(r => setTimeout(r, 10));
+      // Wait for Client 2 to receive the broadcast
+      await pollUntil(
+        () => responses2.some((r: any) => r.type === 'SERVER_EVENT'),
+        { timeoutMs: 5000, intervalMs: 10, description: 'SERVER_EVENT broadcast received by client 2' }
+      );
 
       // Client 2 should receive broadcast (now that it's subscribed)
       const broadcastMsg = responses2.find((r: any) => r.type === 'SERVER_EVENT');

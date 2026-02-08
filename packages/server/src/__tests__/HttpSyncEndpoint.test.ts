@@ -215,7 +215,12 @@ describe('HttpSyncEndpoint', () => {
     const bodyData = Buffer.from(serialize({ clientId: 'c1', clientHlc: hlc.now() }));
     req.write(bodyData);
     req.end();
-    await new Promise((r) => setTimeout(r, 100));
+    // Wait for server to process the unauthenticated request
+    await new Promise<void>((resolve) => {
+      req.on('response', (res: any) => { res.resume(); resolve(); });
+      // Fallback timeout in case no response event fires
+      setTimeout(resolve, 500);
+    });
   });
 
   it('POST /sync with invalid body returns 400', async () => {

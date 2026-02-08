@@ -4,6 +4,7 @@ import { createServer } from 'http';
 import { IInterceptor, ServerOp, OpContext, ConnectionContext } from '../interceptor/IInterceptor';
 import { serialize, deserialize } from '@topgunbuild/core';
 import * as crypto from 'crypto';
+import { pollUntil } from './utils/test-helpers';
 
 // Mock Storage
 const mockStorage: any = {
@@ -81,10 +82,11 @@ describe('ServerCoordinator Interceptor Integration', () => {
 
     test('should call onConnection when client connects', async () => {
         clientWs = await connectClient();
-        // Give server a moment to process
-        await new Promise(r => setTimeout(r, 100));
-        
-        expect(mockInterceptor.onConnection).toHaveBeenCalled();
+        // Wait for server to process the connection and call the interceptor
+        await pollUntil(
+          () => (mockInterceptor.onConnection as jest.Mock).mock.calls.length > 0,
+          { timeoutMs: 5000, intervalMs: 20, description: 'onConnection interceptor called' }
+        );
         const context = (mockInterceptor.onConnection as jest.Mock).mock.calls[0][0] as ConnectionContext;
         expect(context.clientId).toBeDefined();
         expect(context.socket).toBeDefined();

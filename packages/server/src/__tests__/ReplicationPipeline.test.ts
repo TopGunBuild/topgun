@@ -267,7 +267,7 @@ describe('ReplicationPipeline', () => {
         { consistency: ConsistencyLevel.STRONG }
       );
 
-      // Wait for messages to be sent
+      // WHY: Yield to event loop so the async replicate() call can enqueue messages before we simulate acks
       await new Promise((r) => setTimeout(r, 10));
 
       // Simulate acks from all backups
@@ -324,7 +324,7 @@ describe('ReplicationPipeline', () => {
         { consistency: ConsistencyLevel.QUORUM }
       );
 
-      // Wait for messages to be sent
+      // WHY: Yield to event loop so the async replicate() call can enqueue messages before we simulate acks
       await new Promise((r) => setTimeout(r, 10));
 
       // Simulate ack from only one backup (majority of 2 backups is 2, but we need quorum)
@@ -537,7 +537,7 @@ describe('ReplicationPipeline', () => {
         { consistency: ConsistencyLevel.STRONG }
       );
 
-      // Don't wait for acks, just close
+      // WHY: Yield to event loop so replicate() can register its ack promise before we close the pipeline
       await new Promise((r) => setTimeout(r, 10));
       closePipeline.close();
 

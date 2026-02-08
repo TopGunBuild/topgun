@@ -1,5 +1,6 @@
 import { ServerCoordinator, ServerFactory } from '../';
 import * as path from 'path';
+import { pollUntil } from './utils/test-helpers';
 
 describe('TLS Integration', () => {
     const FIXTURES_DIR = path.resolve(__dirname, '../../test/fixtures');
@@ -74,8 +75,17 @@ describe('TLS Integration', () => {
         });
 
         it('should establish secure cluster connection', async () => {
-            // Wait for cluster formation (backoff might trigger)
-            await new Promise(r => setTimeout(r, 2000));
+            // Wait for cluster formation with TLS (backoff might trigger)
+            await pollUntil(
+              () => {
+                const cluster1 = (server1 as any).cluster;
+                const cluster2 = (server2 as any).cluster;
+                const members1 = cluster1.getMembers();
+                const members2 = cluster2.getMembers();
+                return members1.includes('node-2') && members2.includes('node-1');
+              },
+              { timeoutMs: 10000, intervalMs: 200, description: 'TLS cluster formation between node-1 and node-2' }
+            );
 
             const cluster1 = (server1 as any).cluster;
             const members1 = cluster1.getMembers();
@@ -148,8 +158,19 @@ describe('TLS Integration', () => {
         });
 
         it('should NOT establish connection when certificates are mismatched', async () => {
-            // Wait for connection attempts
-            await new Promise(r => setTimeout(r, 3000));
+            // Wait long enough for connection attempts to fail and backoff to stabilize
+            await pollUntil(
+              () => {
+                // After several connection attempts with bad certs, the mTLS server
+                // should still only have itself in its member list
+                const clusterMTLS = (serverWithMTLS as any).cluster;
+                const membersMTLS = clusterMTLS.getMembers();
+                // We wait until at least some time has passed (the node with bad certs
+                // would have attempted connection by now)
+                return membersMTLS.length === 1 && membersMTLS.includes('mtls-server');
+              },
+              { timeoutMs: 10000, intervalMs: 500, description: 'mismatched cert connection rejection stabilized' }
+            );
 
             const clusterMTLS = (serverWithMTLS as any).cluster;
             const membersMTLS = clusterMTLS.getMembers();

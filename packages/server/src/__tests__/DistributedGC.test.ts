@@ -47,7 +47,10 @@ describe('Distributed Garbage Collection Consensus', () => {
     harness2.reportLocalHlc();
     harness3.reportLocalHlc();
 
-    // Give time for messages to exchange and commit to happen
+    // WHY: Allow time for GC consensus protocol messages to propagate between cluster nodes.
+    // The consensus protocol requires each node to send its local min-HLC report,
+    // then the leader computes and broadcasts the safe GC time, then nodes prune.
+    // This is a multi-round protocol with no single observable condition to poll.
     await new Promise(resolve => setTimeout(resolve, 500));
   }
 
@@ -112,7 +115,7 @@ describe('Distributed Garbage Collection Consensus', () => {
     await node2.shutdown();
     await node3.shutdown();
     Date.now = originalDateNow;
-    // Cleanup ports
+    // WHY: Allow pending cluster WebSocket close events to drain before Jest tears down
     await new Promise(r => setTimeout(r, 200));
   });
 

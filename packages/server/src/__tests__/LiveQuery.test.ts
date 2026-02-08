@@ -1,6 +1,7 @@
 import { ServerCoordinator, ServerFactory } from '../';
 import { LWWRecord, deserialize, Predicates, serialize } from '@topgunbuild/core';
 import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
+import { pollUntil } from './utils/test-helpers';
 
 const createMockWriter = (socket: any) => ({
   write: jest.fn((message: any, _urgent?: boolean) => {
@@ -189,11 +190,11 @@ describe('Live Query Sliding Window Integration', () => {
       }
     });
 
-    // Wait for async query update propagation
-    await new Promise(r => setTimeout(r, 200));
-
-    // Expect UPDATE for u1
-    expect(clientSocket.send).toHaveBeenCalled();
+    // Wait for query update to propagate to the client
+    await pollUntil(
+      () => clientSocket.send.mock.calls.length > 0,
+      { timeoutMs: 5000, intervalMs: 20, description: 'live query update for u1 propagated' }
+    );
     const updateMsg = deserialize(clientSocket.send.mock.calls[0][0] as Uint8Array) as any;
     expect(updateMsg.type).toBe('QUERY_UPDATE');
     expect(updateMsg.payload.type).toBe('UPDATE');

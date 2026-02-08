@@ -8,6 +8,7 @@ import { PartitionService, PartitionDistribution } from '../cluster/PartitionSer
 import { ClusterManager } from '../cluster/ClusterManager';
 import { PartitionState, PARTITION_COUNT, DEFAULT_MIGRATION_CONFIG } from '@topgunbuild/core';
 import { EventEmitter } from 'events';
+import { pollUntil } from './utils/test-helpers';
 
 // Mock ClusterManager
 class MockClusterManager extends EventEmitter {
@@ -252,8 +253,11 @@ describe('MigrationManager', () => {
 
       migrationManager.planMigration(oldDistribution, newDistribution);
 
-      // Wait a bit for batch to start
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      // Wait for migration to become active before cancelling
+      await pollUntil(
+        () => migrationManager.getStatus().inProgress,
+        { timeoutMs: 2000, intervalMs: 10, description: 'migration batch started' }
+      );
 
       await migrationManager.cancelAll();
 
@@ -279,8 +283,11 @@ describe('MigrationManager', () => {
 
       migrationManager.planMigration(oldDistribution, newDistribution);
 
-      // Wait for migration to start
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      // Wait for data collector to be invoked
+      await pollUntil(
+        () => collectorCalled,
+        { timeoutMs: 2000, intervalMs: 10, description: 'data collector invoked during migration' }
+      );
 
       expect(collectorCalled).toBe(true);
     });

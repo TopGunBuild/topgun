@@ -4,6 +4,7 @@ import { register } from 'prom-client';
 import * as http from 'http';
 import * as jwt from 'jsonwebtoken';
 import { serialize } from '@topgunbuild/core';
+import { pollUntil } from './utils/test-helpers';
 
 describe('Metrics Integration', () => {
   let server: ServerCoordinator;
@@ -63,14 +64,28 @@ describe('Metrics Integration', () => {
     const ws = new WebSocket(`ws://localhost:${server.port}`);
     await new Promise<void>(resolve => ws.on('open', () => resolve()));
 
-    // Allow async metric update to propagate
-    await new Promise(resolve => setTimeout(resolve, 100));
+    // Wait for connected_clients metric to show 1
+    await pollUntil(
+      async () => {
+        const m = await fetchMetrics();
+        return m.includes('topgun_connected_clients 1');
+      },
+      { timeoutMs: 5000, intervalMs: 50, description: 'connected_clients metric updated to 1' }
+    );
 
     metrics = await fetchMetrics();
     expect(metrics).toContain('topgun_connected_clients 1');
 
     ws.close();
-    await new Promise(resolve => setTimeout(resolve, 100));
+
+    // Wait for connected_clients metric to return to 0
+    await pollUntil(
+      async () => {
+        const m = await fetchMetrics();
+        return m.includes('topgun_connected_clients 0');
+      },
+      { timeoutMs: 5000, intervalMs: 50, description: 'connected_clients metric updated to 0' }
+    );
 
     metrics = await fetchMetrics();
     expect(metrics).toContain('topgun_connected_clients 0');
@@ -110,8 +125,14 @@ describe('Metrics Integration', () => {
         payload: op
     }));
 
-    // Wait for processing
-    await new Promise(resolve => setTimeout(resolve, 200));
+    // Wait for PUT operation metric to appear
+    await pollUntil(
+      async () => {
+        const m = await fetchMetrics();
+        return m.includes('topgun_ops_total{type="PUT",map="metrics-test"} 1');
+      },
+      { timeoutMs: 5000, intervalMs: 50, description: 'PUT operation metric recorded' }
+    );
 
     // 3. Verify Metrics
     const metrics = await fetchMetrics();
@@ -127,8 +148,15 @@ describe('Metrics Integration', () => {
         }
     }));
 
-    await new Promise(resolve => setTimeout(resolve, 200));
-    
+    // Wait for SUBSCRIBE operation metric to appear
+    await pollUntil(
+      async () => {
+        const m = await fetchMetrics();
+        return m.includes('topgun_ops_total{type="SUBSCRIBE",map="metrics-test"} 1');
+      },
+      { timeoutMs: 5000, intervalMs: 50, description: 'SUBSCRIBE operation metric recorded' }
+    );
+
     const metrics2 = await fetchMetrics();
     expect(metrics2).toContain('topgun_ops_total{type="SUBSCRIBE",map="metrics-test"} 1');
 
