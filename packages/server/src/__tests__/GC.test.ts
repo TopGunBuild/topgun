@@ -1,7 +1,7 @@
 import { ServerCoordinator, ServerFactory } from '../';
 import { SyncEngine, SingleServerProvider } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
-import { waitForAuthReady, pollUntil } from './utils/test-helpers';
+import { waitForAuthReady, pollUntil, waitForMapValue, waitForSpyCall } from './utils/test-helpers';
 import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
 import { LWWMap, ORMap } from '@topgunbuild/core';
 import * as jwt from 'jsonwebtoken';
@@ -73,22 +73,34 @@ describe('Garbage Collection & Zombie Protection', () => {
     const mapA = new LWWMap(clientA.getHLC());
     clientA.registerMap('gc-test-map', mapA);
 
-    // Wait for connect
-    await new Promise(r => setTimeout(r, 200));
+    // Wait for client to be connected
+    await pollUntil(
+      () => clientA.getConnectionState() === 'CONNECTED',
+      { timeoutMs: 5000, intervalMs: 50, description: 'clientA to reach CONNECTED state' }
+    );
 
     // Create and sync data
     const rec = mapA.set('key1', 'val1');
     await clientA.recordOperation('gc-test-map', 'PUT', 'key1', { record: rec, timestamp: rec.timestamp });
 
-    // Wait for sync
-    await new Promise(r => setTimeout(r, 200));
+    // Wait for sync to server
+    await waitForMapValue(server, 'gc-test-map', 'key1', 'val1', {
+      description: 'key1=val1 synced to server',
+    });
 
     // 2. Delete data (create tombstone)
     const tombstone = mapA.remove('key1');
     await clientA.recordOperation('gc-test-map', 'REMOVE', 'key1', { record: tombstone, timestamp: tombstone.timestamp });
 
-    // Wait for sync of tombstone
-    await new Promise(r => setTimeout(r, 200));
+    // Wait for tombstone to sync to server
+    await pollUntil(
+      () => {
+        const serverMap = server.getMap('gc-test-map');
+        const serverRec = (serverMap as LWWMap<any, any>).getRecord('key1');
+        return serverRec?.value === null;
+      },
+      { timeoutMs: 5000, intervalMs: 50, description: 'tombstone for key1 synced to server' }
+    );
 
     // Verify on server
     const serverMap = server.getMap('gc-test-map');
@@ -132,8 +144,11 @@ describe('Garbage Collection & Zombie Protection', () => {
     // Spy on resetMap to verify it gets called
     const resetSpy = jest.spyOn((clientB as any), 'resetMap');
 
-    // Wait for connection and handshake
-    await new Promise(r => setTimeout(r, 1000));
+    // Wait for resetMap to be called (triggered by SYNC_RESET_REQUIRED during handshake)
+    await waitForSpyCall(resetSpy, {
+      timeoutMs: 5000,
+      description: 'resetMap called on clientB after SYNC_RESET_REQUIRED',
+    });
 
     // Expect resetMap to have been called
     expect(resetSpy).toHaveBeenCalledWith('gc-test-map');
@@ -225,6 +240,8 @@ describe('TTL Expiration with ReplicationPipeline', () => {
     await node1.shutdown();
     await node2.shutdown();
     Date.now = originalDateNow;
+    // WHY: Allow pending cluster WebSocket close events to drain before Jest tears down,
+    // preventing "Jest did not exit" warnings from dangling async operations
     await new Promise(resolve => setTimeout(resolve, 200));
   });
 
@@ -278,12 +295,18 @@ describe('TTL Expiration with ReplicationPipeline', () => {
     const olderThan = { millis: now, counter: 0, nodeId: 'ttl-node-b' };
     node1.performGarbageCollection(olderThan);
 
-    // Wait for replication via pipeline (increased for batch processing)
-    await new Promise(resolve => setTimeout(resolve, 300));
-
-    // Verify node1 has tombstone
+    // Verify node1 has tombstone (synchronous -- GC runs locally)
     const record1 = map1.getRecord(testKey);
     expect(record1?.value).toBeNull();
+
+    // Wait for node2 to receive tombstone via ReplicationPipeline
+    await pollUntil(
+      () => {
+        const rec = map2.getRecord(testKey);
+        return rec?.value === null;
+      },
+      { timeoutMs: 10000, intervalMs: 100, description: 'node2 to receive TTL tombstone via replication' }
+    );
 
     // Verify node2 received tombstone via ReplicationPipeline
     const record2 = map2.getRecord(testKey);
@@ -371,11 +394,17 @@ describe('TTL Expiration with ReplicationPipeline', () => {
     const olderThan = { millis: now, counter: 0, nodeId: 'ttl-node-b' };
     node1.performGarbageCollection(olderThan);
 
-    // Wait for replication
-    await new Promise(resolve => setTimeout(resolve, 500));
-
-    // Verify node1 removed the record
+    // Verify node1 removed the record (synchronous -- GC runs locally)
     expect(map1.get('orKey')).toEqual([]);
+
+    // Wait for node2 to receive the removal via replication
+    await pollUntil(
+      () => {
+        const vals = map2.get('orKey');
+        return Array.isArray(vals) && vals.length === 0;
+      },
+      { timeoutMs: 10000, intervalMs: 100, description: 'node2 ORMap orKey to be empty via replication' }
+    );
 
     // Verify node2 also has the record removed via replication
     expect(map2.get('orKey')).toEqual([]);
@@ -411,8 +440,13 @@ describe('TTL Expiration with ReplicationPipeline', () => {
     const olderThan = { millis: now, counter: 0, nodeId: 'ttl-node-b' };
     node1.performGarbageCollection(olderThan);
 
-    // Wait for replication
-    await new Promise(resolve => setTimeout(resolve, 300));
+    // Wait for replication pipeline to process (poll for OP_FORWARD or short timeout)
+    await pollUntil(
+      () => clusterSendCalls.length > 0,
+      { timeoutMs: 2000, intervalMs: 50, description: 'cluster send calls after GC' }
+    ).catch(() => {
+      // No cluster sends is also valid -- means no backups for this partition
+    });
 
     // Verify NO CLUSTER_EVENT was sent (we use ReplicationPipeline now)
     const clusterEvents = clusterSendCalls.filter(c => c.type === 'CLUSTER_EVENT');
