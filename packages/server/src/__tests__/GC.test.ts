@@ -296,13 +296,15 @@ describe('TTL Expiration with ReplicationPipeline', () => {
     const now = originalDateNow();
     Date.now = jest.fn(() => now);
 
-    // Track broadcast calls for verification
+    // Spy on the actual broadcast path: GCHandler.broadcastFn -> ServerCoordinator.broadcast -> broadcastHandler.broadcast
+    // The harness.broadcast method is a proxy that doesn't intercept the GCHandler's late-bound broadcastFn
     const broadcastCalls: any[] = [];
-    const originalBroadcast = harness1.broadcast.bind(node1);
-    harness1.broadcast = (msg: any, ...args: any[]) => {
+    const broadcastHandler = harness1.broadcastHandler;
+    const originalBroadcast = broadcastHandler.broadcast.bind(broadcastHandler);
+    jest.spyOn(broadcastHandler, 'broadcast').mockImplementation((msg: any, ...args: any[]) => {
       broadcastCalls.push(msg);
       return originalBroadcast(msg, ...args);
-    };
+    });
 
     // Create data with TTL
     const map = node1.getMap(mapName) as LWWMap<string, string>;
@@ -332,6 +334,9 @@ describe('TTL Expiration with ReplicationPipeline', () => {
     );
     expect(expiredEvent).toBeDefined();
     expect(expiredEvent.payload.record.value).toBeNull();
+
+    // Restore the spy to avoid affecting subsequent tests
+    jest.restoreAllMocks();
   });
 
   test('ORMap TTL expiration replicates tombstone to backup nodes', async () => {
