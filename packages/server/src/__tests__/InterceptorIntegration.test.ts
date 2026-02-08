@@ -151,17 +151,17 @@ describe('ServerCoordinator Interceptor Integration', () => {
         await serverWithInterceptor.ready();
 
         // Access private method
-        await (serverWithInterceptor as any).processLocalOp(op, false, 'client-1');
+        await (serverWithInterceptor as any).operationHandler.processLocalOp(op, false, 'client-1');
 
         expect(modifyingInterceptor.onBeforeOp).toHaveBeenCalledTimes(1);
-        
+
         // Verify storage was called with modified value
         expect(mockStorage.store).toHaveBeenCalledWith(
-            'test-map', 
-            'k1', 
+            'test-map',
+            'k1',
             expect.objectContaining({ value: 'MODIFIED' })
         );
-        
+
         await serverWithInterceptor.shutdown();
     });
 
@@ -189,7 +189,7 @@ describe('ServerCoordinator Interceptor Integration', () => {
 
         // Access private method and expect rejection
         await expect(
-            (serverWithInterceptor as any).processLocalOp(op, false, 'client-1')
+            (serverWithInterceptor as any).operationHandler.processLocalOp(op, false, 'client-1')
         ).rejects.toThrow('Block this!');
 
         // Verify storage was NOT called
@@ -221,7 +221,7 @@ describe('ServerCoordinator Interceptor Integration', () => {
         await serverWithInterceptor.ready();
 
         // Access private method - should resolve without error
-        await (serverWithInterceptor as any).processLocalOp(op, false, 'client-1');
+        await (serverWithInterceptor as any).operationHandler.processLocalOp(op, false, 'client-1');
 
         // Verify storage was NOT called
         expect(mockStorage.store).not.toHaveBeenCalled();
