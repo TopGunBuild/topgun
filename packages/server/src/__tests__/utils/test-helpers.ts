@@ -330,66 +330,6 @@ export async function waitForMapValue(
   });
 }
 
-/**
- * Wait for all nodes to replicate a specific map value.
- *
- * Polls each node's getMap(mapName).get(key) until all nodes have the expected value.
- * Useful for replacing fixed setTimeout delays in cluster replication tests.
- *
- * @param nodes Array of ServerCoordinator instances to check
- * @param mapName Name of the map to poll
- * @param key Key within the map to check
- * @param expected Expected value at the key
- * @param opts Poll options (default timeout: 10000ms, interval: 200ms)
- */
-export async function waitForReplication(
-  nodes: ServerCoordinator[],
-  mapName: string,
-  key: string,
-  expected: any,
-  opts: PollOptions = {}
-): Promise<void> {
-  const startTime = Date.now();
-
-  // Use JSON comparison for deep equality of objects
-  const expectedJson = JSON.stringify(expected);
-  const isObject = typeof expected === 'object' && expected !== null;
-
-  await pollUntil(
-    () => {
-      for (const node of nodes) {
-        const map = node.getMap(mapName);
-        const current = map.get(key);
-        const matches = isObject
-          ? JSON.stringify(current) === expectedJson
-          : current === expected;
-        if (!matches) {
-          return false;
-        }
-      }
-      return true;
-    },
-    {
-      timeoutMs: opts.timeoutMs ?? 10000,
-      intervalMs: opts.intervalMs ?? 200,
-      maxIterations: opts.maxIterations,
-      description:
-        opts.description ??
-        `replication of "${mapName}" key "${key}" to ${JSON.stringify(expected)} across ${nodes.length} nodes`,
-    }
-  ).catch(() => {
-    const currentValues = nodes.map((node, i) => {
-      const map = node.getMap(mapName);
-      return `node[${i}]=${JSON.stringify(map.get(key))}`;
-    });
-    throw new Error(
-      `waitForReplication failed after ${Date.now() - startTime}ms. ` +
-        `Map: "${mapName}", Key: "${key}", ` +
-        `Expected: ${JSON.stringify(expected)}, ` +
-        `Current: ${currentValues.join(', ')}`
-    );
-  });
-}
 
 /**
  * Wait for a Jest spy to have been called a minimum number of times.

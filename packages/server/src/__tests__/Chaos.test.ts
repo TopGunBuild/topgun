@@ -219,7 +219,7 @@ describe('Chaos Testing', () => {
                 return true;
             },
             {
-                timeoutMs: 20000,
+                timeoutMs: 15000,
                 intervalMs: 200,
                 description: 'all items synced to server despite packet loss',
             }
