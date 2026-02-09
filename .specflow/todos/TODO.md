@@ -1,6 +1,6 @@
 # To-Do List
 
-**Last updated:** 2026-02-08 (TODO-053 converted to SPEC-041)
+**Last updated:** 2026-02-09 (TODO-057 converted to SPEC-043)
 **Source:** Migrated from PROMPTS directory, reordered by technical dependencies
 
 ---
@@ -8,6 +8,25 @@
 ## Wave -1: Post-Release Test Stability (v0.11.0 regression fixes)
 
 *Goal: All server test suites pass — zero ignored failures*
+
+### TODO-058: Rewrite or remove Resilience.test.ts split-brain recovery test
+- **Priority:** 🟡 P2
+- **Complexity:** Low-Medium
+- **Summary:** The "Split-Brain Recovery: Eventual Consistency after Network Isolation" test fails consistently (3/3 runs). The test's offline-state detection via ChaosProxy silent mode is fundamentally flawed. `pollUntil` (lines ~109-117) checks that clients are NOT in INITIAL/DISCONNECTED states, but this doesn't guarantee silent mode is active. Clients reach AUTHENTICATING state (AUTH message blackholed by proxy), but the test proceeds to write before the state stabilizes. After `proxy.disconnectAll()` + reconnect, a race condition during Merkle sync causes convergence failure.
+- **Root Cause:** Production code (SyncEngine, ChaosProxy, state machine) works correctly — the test incorrectly models the offline scenario. This is a test-only issue, not a production bug.
+- **Fix Options:**
+  1. Rewrite with proper offline detection — verify clients are stuck in AUTHENTICATING and remain there for stable duration before writing
+  2. Use explicit `client.close()` instead of silent proxy for offline simulation
+  3. Remove the test if split-brain recovery is already covered by other test suites
+- **Files:** `packages/server/src/__tests__/Resilience.test.ts`, `packages/server/src/__tests__/utils/ChaosProxy.ts`
+- **Verification:** `cd packages/server && npx jest --forceExit --testPathPattern="Resilience" --verbose` — should pass 3 consecutive runs
+
+---
+
+### ~~TODO-057: Fix SearchCoordinator batched LEAVE notification bug~~ → SPEC-043
+- **Status:** Converted to [SPEC-043](.specflow/specs/SPEC-043.md)
+
+---
 
 ### ~~TODO-051: Fix WebSocket client auth handshake after ServerFactory modular refactoring~~ → SPEC-038
 - **Status:** Converted to [SPEC-038](.specflow/specs/SPEC-038.md)
@@ -43,25 +62,8 @@
 
 ---
 
-### TODO-055: Harden timing-sensitive server tests — replace setTimeout with polling
-- **Priority:** 🟡 P1
-- **Complexity:** Medium
-- **Summary:** Multiple server tests use fixed `setTimeout` delays for synchronization, causing intermittent failures. Replace with bounded polling from existing `test-helpers.ts` utilities (`pollUntil`, `waitForCluster`, etc.). Goal: eliminate flaky timing-dependent failures without masking real bugs.
-- **Affected Tests:**
-  - Resilience.test.ts: "Split-Brain Recovery" — `await new Promise(r => setTimeout(r, 500))` before convergence check is too short; `mapB.get('keyA')` returns `undefined` after 10s. Fix: replace fixed 500ms delay with polling or increase convergence timeout. The `waitForConvergence()` helper already uses polling but the pre-wait is the bottleneck.
-  - Chaos.test.ts: Lines 86, 145, 155, 282 use fixed `setTimeout` delays for cluster sync, packet loss recovery, and backpressure. Also accesses private cluster internals via `(nodeA as any).cluster` — fragile but lower priority to fix.
-  - Other tests across server package that use raw `setTimeout` for synchronization waits (audit needed — many test files still use this pattern instead of centralized polling helpers)
-- **Approach:**
-  1. Audit all `setTimeout` usage in server test files — identify which are sync waits vs intentional delays
-  2. Replace sync waits with `pollUntil()` or `waitForCluster()` from `test-helpers.ts`
-  3. For convergence tests: ensure `waitForConvergence()` is used consistently with adequate timeouts
-  4. Keep intentional delays (e.g., TTL expiration waits) but make them explicit with comments
-- **Key Files:**
-  - `packages/server/src/__tests__/Resilience.test.ts` — split-brain recovery timing
-  - `packages/server/src/__tests__/Chaos.test.ts` — cluster chaos simulation timing
-  - `packages/server/src/__tests__/utils/test-helpers.ts` — existing hardened polling utilities
-- **Verification:** `cd packages/server && npx jest --forceExit --testPathPattern="(Resilience|Chaos)" --verbose` — should pass consistently across 3+ consecutive runs
-- **Dependencies:** TODO-051/SPEC-038 (port capture fix — now complete), TODO-052 (interceptor pipeline fix — independent but same wave)
+### ~~TODO-055: Harden timing-sensitive server tests — replace setTimeout with polling~~ → SPEC-042
+- **Status:** Converted to [SPEC-042](.specflow/specs/SPEC-042.md)
 
 ---
 
@@ -406,8 +408,10 @@ TODO-023 (Client Cluster)          TODO-033 (AsyncStorage)
 | ★ | ~~TODO-051~~ → SPEC-038 | -1 | 1-2 days | TODO-052, TODO-053 | 🔴 P0 |
 | ★ | ~~TODO-052~~ → SPEC-040 | -1 | 0.5 day | — | 🔴 P1 |
 | ★ | ~~TODO-053~~ → SPEC-041 | -1 | 1 day | — | 🟡 P1 |
-| ★ | TODO-055 | -1 | 1 day | — | 🟡 P1 |
+| ★ | ~~TODO-055~~ → SPEC-042 | -1 | 1 day | — | 🟡 P1 |
 | ★ | ~~TODO-056~~ → SPEC-039 | -1 | 2 hours | — | 🔴 P1 |
+| ★ | ~~TODO-057~~ → SPEC-043 | -1 | 0.5 day | — | 🔴 P1 |
+| ★ | TODO-058 | -1 | 0.5 day | — | 🟡 P2 |
 | ★ | TODO-054 | -1 | 1 day | — | 🟡 P2 |
 | 1 | TODO-050 | 0 | 4-6 hours | TODO-048, TODO-049 | 🔴 High |
 | 2 | TODO-029 | 1 | 1 week | TODO-025, TODO-049 | 🟡 Medium |
