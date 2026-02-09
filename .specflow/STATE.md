@@ -16,6 +16,7 @@
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-09 | SPEC-044 | COMPLETED: Fix Flaky Split-Brain Recovery Test in Resilience.test.ts. Modified 1 file, 1 commit, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-044.md |
 | 2026-02-09 | SPEC-042 | COMPLETED: Replace Fixed setTimeout Delays with Bounded Polling in Server Tests. Modified 21 files, 8 commits, 2 audit cycles, 2 review cycles. Archived to .specflow/archive/SPEC-042.md |
 | 2026-02-09 | SPEC-043 | COMPLETED: Fix SearchCoordinator Batched LEAVE Notification Bug. Modified 1 file, 1 commit, 1 audit cycle, 1 review cycle. Archived to .specflow/archive/SPEC-043.md |
 | 2026-02-08 | SPEC-041 | COMPLETED: Fix DistributedSearch and GC Broadcast Test Failures. Modified 1 file, 1 commit, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-041.md |
@@ -51,4 +52,4 @@
 (none)
 
 ---
-*Last updated: 2026-02-09 (SPEC-042 completed)*
+*Last updated: 2026-02-09 (SPEC-044 completed and archived)*
