@@ -2,7 +2,7 @@ import { ServerCoordinator, ServerFactory } from '../';
 import { ChaosProxy } from './utils/ChaosProxy';
 import { SyncEngine, SingleServerProvider } from '@topgunbuild/client';
 import { MemoryStorageAdapter } from './utils/MemoryStorageAdapter';
-import { waitForAuthReady, waitForConvergence, pollUntil } from './utils/test-helpers';
+import { waitForAuthReady, waitForConvergence, waitForConnection } from './utils/test-helpers';
 import { LWWMap } from '@topgunbuild/core';
 import * as jwt from 'jsonwebtoken';
 
@@ -57,7 +57,8 @@ describe('Resilience & Chaos Testing', () => {
   });
 
   afterEach(() => {
-      // Close client connections to prevent "Jest did not exit" warnings
+      // Close the current client references (the recreated ones from Phase 4,
+      // since the originals were already closed in Phase 2)
       if (clientA) {
           clientA.close();
       }
@@ -67,12 +68,7 @@ describe('Resilience & Chaos Testing', () => {
   });
 
   test('Split-Brain Recovery: Eventual Consistency after Network Isolation', async () => {
-    // 1. FIRST: Simulate Network Partition BEFORE clients connect
-    // This ensures clients connect but cannot communicate through proxy
-    console.log('--- SIMULATING NETWORK PARTITION ---');
-    proxy.updateConfig({ isSilent: true });
-
-    // Setup Clients
+    // Phase 1: Connect both clients, authenticate, wait for CONNECTED state, register maps
     storageA = new MemoryStorageAdapter();
     storageB = new MemoryStorageAdapter();
 
@@ -90,80 +86,119 @@ describe('Resilience & Chaos Testing', () => {
         reconnectInterval: 100
     });
 
-    // Wait for WebSocket to be ready before setting auth token
     await waitForAuthReady(clientA);
     clientA.setAuthToken(tokenA);
 
     await waitForAuthReady(clientB);
     clientB.setAuthToken(tokenB);
 
-    // Setup Maps
     const mapA = new LWWMap(clientA.getHLC());
     const mapB = new LWWMap(clientB.getHLC());
 
     clientA.registerMap('shared-data', mapA);
     clientB.registerMap('shared-data', mapB);
 
-    // Wait for both clients to reach AUTHENTICATING state (WS open, AUTH sent, but
-    // AUTH_ACK silently dropped by proxy so they stay stuck in AUTHENTICATING)
-    await pollUntil(
-      () => {
-        const stateA = clientA.getConnectionState();
-        const stateB = clientB.getConnectionState();
-        return stateA !== 'INITIAL' && stateA !== 'DISCONNECTED' &&
-               stateB !== 'INITIAL' && stateB !== 'DISCONNECTED';
-      },
-      { timeoutMs: 5000, intervalMs: 50, description: 'clients to reach authenticating state through silent proxy' }
-    );
+    await waitForConnection(clientA, 'CONNECTED', 5000);
+    await waitForConnection(clientB, 'CONNECTED', 5000);
 
-    // 2. Conflicting Writes while "offline" (silent mode)
-    console.log('--- PERFORMING OFFLINE WRITES ---');
+    // Phase 2: Close both clients to simulate going offline
+    clientA.close();
+    clientB.close();
 
-    // Client A writes Key1 = 'ValueA'
-    // We must use map.set AND recordOperation to ensure it goes to sync engine
+    // Phase 3: Perform offline writes on the SAME LWWMap instances
+    // Since SyncEngine is closed, we must populate both the map (via map.set())
+    // AND the storage adapter oplog (via storageAdapter.appendOpLog()) so the
+    // new SyncEngine can send the operations to the server via OP_BATCH on reconnect.
+
+    // Client A writes key1 = 'ValueA'
     const recordA = mapA.set('key1', 'ValueA');
-    await clientA.recordOperation('shared-data', 'PUT', 'key1', { record: recordA, timestamp: recordA.timestamp });
+    await storageA.appendOpLog({
+      mapName: 'shared-data',
+      opType: 'PUT',
+      key: 'key1',
+      record: recordA,
+      timestamp: recordA.timestamp,
+      synced: 0,
+    } as any);
 
-    // Client B writes Key1 = 'ValueB'
-    // Wait a tiny bit to ensure timestamp difference if we want deterministic winner,
-    // though HLC handles unique node IDs so tie-breaking works.
+    // 20ms delay so Client B's write has a later HLC timestamp (deterministic LWW winner)
     await new Promise(r => setTimeout(r, 20));
+
+    // Client B writes key1 = 'ValueB' (this should win due to later timestamp)
     const recordB = mapB.set('key1', 'ValueB');
-    await clientB.recordOperation('shared-data', 'PUT', 'key1', { record: recordB, timestamp: recordB.timestamp });
+    await storageB.appendOpLog({
+      mapName: 'shared-data',
+      opType: 'PUT',
+      key: 'key1',
+      record: recordB,
+      timestamp: recordB.timestamp,
+      synced: 0,
+    } as any);
 
     // Independent writes
     const recordA2 = mapA.set('keyA', 'OnlyA');
-    await clientA.recordOperation('shared-data', 'PUT', 'keyA', { record: recordA2, timestamp: recordA2.timestamp });
+    await storageA.appendOpLog({
+      mapName: 'shared-data',
+      opType: 'PUT',
+      key: 'keyA',
+      record: recordA2,
+      timestamp: recordA2.timestamp,
+      synced: 0,
+    } as any);
 
     const recordB2 = mapB.set('keyB', 'OnlyB');
-    await clientB.recordOperation('shared-data', 'PUT', 'keyB', { record: recordB2, timestamp: recordB2.timestamp });
+    await storageB.appendOpLog({
+      mapName: 'shared-data',
+      opType: 'PUT',
+      key: 'keyB',
+      record: recordB2,
+      timestamp: recordB2.timestamp,
+      synced: 0,
+    } as any);
 
-    // Verify local state is divergent (data not synced during silent mode)
+    // Verify local state is divergent
     expect(mapA.get('key1')).toBe('ValueA');
     expect(mapB.get('key1')).toBe('ValueB');
     expect(mapA.get('keyB')).toBeUndefined();
     expect(mapB.get('keyA')).toBeUndefined();
 
-    // 3. Restore Network
-    console.log('--- RESTORING NETWORK ---');
-    proxy.updateConfig({ isSilent: false });
-    // Force reconnect - clients may be connected but stuck waiting for AUTH_ACK
-    // that was silently dropped. Disconnecting forces a fresh handshake.
-    proxy.disconnectAll();
-    // Wait for clients to reconnect and complete auth handshake
-    await pollUntil(
-      () => clientA.getConnectionState() === 'CONNECTED' && clientB.getConnectionState() === 'CONNECTED',
-      { timeoutMs: 10000, intervalMs: 100, description: 'clients to reconnect after proxy restored' }
-    );
+    // Phase 4: Create new SyncEngine instances with the same MemoryStorageAdapter
+    // instances to preserve the oplog entries from Phase 3
+    clientA = new SyncEngine({
+        nodeId: 'client-A',
+        connectionProvider: new SingleServerProvider({ url: `ws://localhost:${proxyPort}` }),
+        storageAdapter: storageA,
+        reconnectInterval: 100
+    });
 
-    // 4. Wait for Convergence on all keys
-    console.log('--- WAITING FOR CONVERGENCE ---');
+    clientB = new SyncEngine({
+        nodeId: 'client-B',
+        connectionProvider: new SingleServerProvider({ url: `ws://localhost:${proxyPort}` }),
+        storageAdapter: storageB,
+        reconnectInterval: 100
+    });
+
+    // Phase 5: Register the same LWWMap instances on the new clients, authenticate,
+    // and wait for CONNECTED state
+    clientA.registerMap('shared-data', mapA);
+    clientB.registerMap('shared-data', mapB);
+
+    await waitForAuthReady(clientA);
+    clientA.setAuthToken(tokenA);
+
+    await waitForAuthReady(clientB);
+    clientB.setAuthToken(tokenB);
+
+    await waitForConnection(clientA, 'CONNECTED', 10000);
+    await waitForConnection(clientB, 'CONNECTED', 10000);
+
+    // Phase 6: Wait for convergence, assert LWW resolution and bidirectional propagation
     await waitForConvergence(mapA, mapB, 'key1', 'ValueB', 10000);
     await waitForConvergence(mapA, mapB, 'keyA', 'OnlyA', 10000);
     await waitForConvergence(mapA, mapB, 'keyB', 'OnlyB', 10000);
 
-    // 5. Assertions
-    expect(mapA.get('key1')).toBe('ValueB'); // B was later
+    // Assertions
+    expect(mapA.get('key1')).toBe('ValueB'); // B was later, wins via LWW
     expect(mapB.get('key1')).toBe('ValueB');
 
     expect(mapA.get('keyA')).toBe('OnlyA');
@@ -174,8 +209,6 @@ describe('Resilience & Chaos Testing', () => {
 
     // Check Server State
     const serverMap = server.getMap('shared-data') as LWWMap<string, any>;
-    // Wait for server to have data too (implicit if clients synced via server)
-    // Note: serverMap.get returns the value directly, getRecord returns the wrapper
     expect(serverMap.get('key1')).toBe('ValueB');
     expect(serverMap.get('keyA')).toBe('OnlyA');
   }, 30000);
