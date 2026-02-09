@@ -796,19 +796,30 @@ export class SearchCoordinator extends EventEmitter {
       // Determine update type
       let updateType: SearchUpdateType | null = null;
 
+      // Only mutate currentResults when a delivery path can actually consume the update.
+      // Without this guard, the batched path in computeSubscriptionUpdate() sees stale
+      // state because the immediate path already consumed it without delivering.
+      const canDeliver = !!(sub.isDistributed && sub.coordinatorNodeId) || !!this.sendUpdate;
+
       if (!wasInResults && isInResults) {
         updateType = 'ENTER';
-        sub.currentResults.set(key, { score: newScore, matchedTerms });
+        if (canDeliver) {
+          sub.currentResults.set(key, { score: newScore, matchedTerms });
+        }
       } else if (wasInResults && !isInResults) {
         updateType = 'LEAVE';
-        sub.currentResults.delete(key);
+        if (canDeliver) {
+          sub.currentResults.delete(key);
+        }
       } else if (wasInResults && isInResults) {
         const old = sub.currentResults.get(key)!;
         // Send UPDATE if score changed OR if this is an update change type
         // (client should know document content changed even if score is same)
         if (Math.abs(old.score - newScore) > 0.0001 || changeType === 'update') {
           updateType = 'UPDATE';
-          sub.currentResults.set(key, { score: newScore, matchedTerms });
+          if (canDeliver) {
+            sub.currentResults.set(key, { score: newScore, matchedTerms });
+          }
         }
       }
 
