@@ -1,6 +1,7 @@
 import type { HLC } from '@topgunbuild/core';
 import type {
   IConnectionProvider,
+  IConnection,
   ConnectionProviderEvent,
   ConnectionEventHandler,
 } from '../types';
@@ -129,14 +130,14 @@ export class AutoConnectionProvider implements IConnectionProvider {
     logger.info({ url: httpUrl }, 'AutoConnectionProvider: HTTP connected');
   }
 
-  getConnection(key: string): WebSocket {
+  getConnection(key: string): IConnection {
     if (!this.activeProvider) {
       throw new Error('Not connected');
     }
     return this.activeProvider.getConnection(key);
   }
 
-  getAnyConnection(): WebSocket {
+  getAnyConnection(): IConnection {
     if (!this.activeProvider) {
       throw new Error('Not connected');
     }
