@@ -89,7 +89,17 @@ export class QueryHandler implements IQueryHandler {
             // Single-node fallback: use existing logic
             // Identify all relevant nodes
             const allMembers = this.config.cluster.getMembers();
-            let remoteMembers = allMembers.filter(id => !this.config.cluster.isLocal(id));
+            let remoteMembers: string[];
+
+            // Partition pruning: narrow the node set to only nodes owning relevant partitions
+            const partitionIds = this.config.partitionService?.getRelevantPartitions(query) ?? null;
+            if (partitionIds !== null && this.config.partitionService) {
+                const targetNodes = this.config.partitionService.getOwnerNodesForPartitions(partitionIds);
+                remoteMembers = targetNodes.filter(id => !this.config.cluster.isLocal(id));
+                logger.debug({ queryId, partitionCount: partitionIds.length, targetNodeCount: targetNodes.length, remoteCount: remoteMembers.length }, 'Partition pruning applied to query');
+            } else {
+                remoteMembers = allMembers.filter(id => !this.config.cluster.isLocal(id));
+            }
 
             // Read-from-Replica Optimization
             // If query targets a specific key, we can optimize by routing to a specific replica
