@@ -18,6 +18,7 @@ import {
   PARTITION_COUNT,
   hashString,
 } from '@topgunbuild/core';
+import type { IConnection } from '../types';
 import { ConnectionPool } from './ConnectionPool';
 import { logger } from '../utils/logger';
 
@@ -150,7 +151,7 @@ export class PartitionRouter {
   /**
    * Route a key and get the WebSocket connection to use
    */
-  public routeToConnection(key: string): { nodeId: string; socket: WebSocket } | null {
+  public routeToConnection(key: string): { nodeId: string; connection: IConnection } | null {
     const routing = this.route(key);
 
     if (!routing) {
@@ -165,19 +166,19 @@ export class PartitionRouter {
     }
 
     // Try to get connection to owner
-    const socket = this.connectionPool.getConnection(routing.nodeId);
-    if (socket) {
-      return { nodeId: routing.nodeId, socket };
+    const connection = this.connectionPool.getConnection(routing.nodeId);
+    if (connection) {
+      return { nodeId: routing.nodeId, connection };
     }
 
     // Owner not available, try backup
     const partition = this.partitionMap!.partitions.find(p => p.partitionId === routing.partitionId);
     if (partition) {
       for (const backupId of partition.backupNodeIds) {
-        const backupSocket = this.connectionPool.getConnection(backupId);
-        if (backupSocket) {
+        const backupConnection = this.connectionPool.getConnection(backupId);
+        if (backupConnection) {
           logger.debug({ key, owner: routing.nodeId, backup: backupId }, 'Using backup node');
-          return { nodeId: backupId, socket: backupSocket };
+          return { nodeId: backupId, connection: backupConnection };
         }
       }
     }
