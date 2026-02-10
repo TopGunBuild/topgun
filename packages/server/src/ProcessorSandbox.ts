@@ -3,6 +3,7 @@ import {
   EntryProcessorResult,
   validateProcessorCode,
 } from '@topgunbuild/core';
+import * as vm from 'node:vm';
 import { logger } from './utils/logger';
 
 // Types for isolated-vm (optional dependency)
@@ -91,7 +92,7 @@ export class ProcessorSandbox {
   private config: ProcessorSandboxConfig;
   private isolateCache: Map<string, IsolatedVmIsolate> = new Map();
   private scriptCache: Map<string, IsolatedVmScript> = new Map();
-  private fallbackScriptCache: Map<string, (value: unknown, key: string, args: unknown) => unknown> = new Map();
+  private fallbackScriptCache: Map<string, vm.Script> = new Map();
   private disposed = false;
 
   constructor(config: Partial<ProcessorSandboxConfig> = {}) {
@@ -219,38 +220,41 @@ export class ProcessorSandbox {
 
   /**
    * Execute processor in fallback VM (less secure, for development).
+   * Uses Node.js vm module with timeout option, which can interrupt
+   * synchronous infinite loops via V8's TerminateExecution.
    */
-  private async executeInFallback<V, R>(
+  private executeInFallback<V, R>(
     processor: EntryProcessorDef<V, R>,
     value: V | undefined,
     key: string,
-  ): Promise<EntryProcessorResult<R>> {
+  ): EntryProcessorResult<R> {
     try {
       // Skip caching for resolvers - they embed context in the code string
       const isResolver = processor.name.startsWith('resolver:');
-      let fn = isResolver ? undefined : this.fallbackScriptCache.get(processor.name);
+      let script = isResolver ? undefined : this.fallbackScriptCache.get(processor.name);
 
-      if (!fn) {
-        // Create function from code
+      if (!script) {
+        // Wrap user code in an IIFE that receives value, key, args from the sandbox context
         const wrappedCode = `
-          return (function(value, key, args) {
+          (function(value, key, args) {
             ${processor.code}
-          })
+          })(value, key, args)
         `;
-        fn = new Function(wrappedCode)() as (value: unknown, key: string, args: unknown) => unknown;
+        script = new vm.Script(wrappedCode);
         if (!isResolver) {
-          this.fallbackScriptCache.set(processor.name, fn);
+          this.fallbackScriptCache.set(processor.name, script);
         }
       }
 
-      // Execute with timeout using Promise.race
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('Processor execution timed out')), this.config.timeoutMs);
-      });
-
-      const executionPromise = Promise.resolve().then(() => fn(value, key, processor.args));
-
-      const result = await Promise.race([executionPromise, timeoutPromise]) as { value: V | undefined; result?: R };
+      // Execute in a new context with timeout to interrupt synchronous infinite loops
+      const sandbox = {
+        value: JSON.parse(JSON.stringify(value ?? null)),
+        key,
+        args: JSON.parse(JSON.stringify(processor.args ?? null)),
+      };
+      const result = script.runInNewContext(sandbox, {
+        timeout: this.config.timeoutMs,
+      }) as { value: V | undefined; result?: R };
 
       // Validate result format
       if (typeof result !== 'object' || result === null) {
@@ -267,6 +271,15 @@ export class ProcessorSandbox {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+
+      // Normalize vm timeout error to match existing test expectations
+      if (message.includes('Script execution timed out')) {
+        return {
+          success: false,
+          error: 'Processor execution timed out',
+        };
+      }
+
       return {
         success: false,
         error: message,
