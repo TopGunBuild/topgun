@@ -315,6 +315,15 @@ describe('PartitionPruning', () => {
     });
   });
 
+  // ---- $eq operator on non-key attribute ----
+
+  describe('getRelevantPartitions – non-key $eq operator', () => {
+    it('should return null when $eq is on a non-key attribute', () => {
+      const result = ps.getRelevantPartitions({ where: { status: { $eq: 'active' } } });
+      expect(result).toBeNull();
+    });
+  });
+
   // ---- checkAcksComplete with targetedNodes (R4a fix) ----
 
   describe('checkAcksComplete with targetedNodes', () => {
@@ -454,5 +463,192 @@ describe('PartitionPruning', () => {
       const result = await resultPromise;
       expect(result.registeredNodes.sort()).toEqual(['node-1', 'node-2', 'node-3']);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration Test: Reduced Fan-out in a 2-node Cluster
+// ---------------------------------------------------------------------------
+
+import { ServerCoordinator, ServerFactory } from '../';
+import { pollUntil } from './utils/test-helpers';
+import { createTestHarness, ServerTestHarness } from './utils/ServerTestHarness';
+
+describe('PartitionPruning Integration – Reduced Fan-out', () => {
+  let nodeA: ServerCoordinator;
+  let nodeB: ServerCoordinator;
+  let harnessA: ServerTestHarness;
+  let harnessB: ServerTestHarness;
+
+  beforeAll(async () => {
+    // Start Node B first (higher ID, receives connection)
+    nodeB = ServerFactory.create({
+      port: 0,
+      nodeId: 'prune-node-b',
+      host: 'localhost',
+      clusterPort: 0,
+      peers: [],
+    });
+    await nodeB.ready();
+    harnessB = createTestHarness(nodeB);
+
+    // Start Node A (lower ID, initiates connection to B)
+    nodeA = ServerFactory.create({
+      port: 0,
+      nodeId: 'prune-node-a',
+      host: 'localhost',
+      clusterPort: 0,
+      peers: [`localhost:${nodeB.clusterPort}`],
+    });
+    await nodeA.ready();
+    harnessA = createTestHarness(nodeA);
+
+    // Wait for cluster to stabilize
+    await pollUntil(
+      () => {
+        const mA = harnessA.cluster.getMembers();
+        const mB = harnessB.cluster.getMembers();
+        return mA.includes('prune-node-b') && mB.includes('prune-node-a');
+      },
+      {
+        timeoutMs: 10000,
+        intervalMs: 100,
+        description: 'partition pruning cluster formation',
+      }
+    );
+  }, 20000);
+
+  afterAll(async () => {
+    await nodeA?.shutdown();
+    await nodeB?.shutdown();
+    // WHY: Allow pending cluster WebSocket close events to drain before Jest tears down
+    await new Promise(resolve => setTimeout(resolve, 300));
+  });
+
+  function findKeyOwnedBy(ps: PartitionService, targetNodeId: string): string {
+    for (let i = 0; i < 1000; i++) {
+      const key = `prune-test-key-${i}`;
+      const pid = ps.getPartitionId(key);
+      const owner = ps.getPartitionOwner(pid);
+      if (owner === targetNodeId) {
+        return key;
+      }
+    }
+    throw new Error(`Could not find key owned by ${targetNodeId}`);
+  }
+
+  test('query with _key targeting local partition does NOT send CLUSTER_SUB_REGISTER to remote node', async () => {
+    const psA = harnessA.partitionService;
+    const localKey = findKeyOwnedBy(psA, 'prune-node-a');
+
+    // Spy on ClusterManager.send on Node A
+    // WHY: In a 2-node cluster with distributedSubCoordinator, the distributed subscription
+    // path is used (CLUSTER_SUB_REGISTER), not the legacy scatter-gather path (CLUSTER_QUERY_EXEC)
+    const sendSpy = jest.spyOn(harnessA.cluster, 'send');
+
+    // Create a mock client to send query through Node A
+    const mockClient = {
+      id: 'client-prune-local',
+      socket: { send: jest.fn(), readyState: WebSocket.OPEN, close: jest.fn() } as any,
+      writer: { write: jest.fn(), close: jest.fn() },
+      isAuthenticated: true,
+      subscriptions: new Set<string>(),
+      principal: { userId: 'test', roles: ['ADMIN'] },
+      lastActiveHlc: { millis: Date.now(), counter: 0, nodeId: 'client' },
+      lastPingReceived: Date.now(),
+    };
+
+    // Send QUERY_SUB via the harness
+    await harnessA.handleMessage(mockClient, {
+      type: 'QUERY_SUB',
+      payload: {
+        queryId: 'q-local-prune',
+        mapName: 'prune-test',
+        query: { where: { _key: localKey } },
+      },
+    });
+
+    // Verify: CLUSTER_SUB_REGISTER should NOT have been sent to prune-node-b
+    // because the key is owned locally, so no remote subscription is needed
+    const subRegisterCalls = sendSpy.mock.calls.filter(
+      ([_nodeId, type]) => type === 'CLUSTER_SUB_REGISTER'
+    );
+    expect(subRegisterCalls.length).toBe(0);
+
+    sendSpy.mockRestore();
+  });
+
+  test('query with _key targeting remote partition sends CLUSTER_SUB_REGISTER to only the owner node', async () => {
+    const psA = harnessA.partitionService;
+    const remoteKey = findKeyOwnedBy(psA, 'prune-node-b');
+
+    // Spy on ClusterManager.send on Node A
+    const sendSpy = jest.spyOn(harnessA.cluster, 'send');
+
+    const mockClient = {
+      id: 'client-prune-remote',
+      socket: { send: jest.fn(), readyState: WebSocket.OPEN, close: jest.fn() } as any,
+      writer: { write: jest.fn(), close: jest.fn() },
+      isAuthenticated: true,
+      subscriptions: new Set<string>(),
+      principal: { userId: 'test', roles: ['ADMIN'] },
+      lastActiveHlc: { millis: Date.now(), counter: 0, nodeId: 'client' },
+      lastPingReceived: Date.now(),
+    };
+
+    // Send QUERY_SUB with _key owned by remote node
+    await harnessA.handleMessage(mockClient, {
+      type: 'QUERY_SUB',
+      payload: {
+        queryId: 'q-remote-prune',
+        mapName: 'prune-test',
+        query: { where: { _key: remoteKey } },
+      },
+    });
+
+    // Verify: CLUSTER_SUB_REGISTER should have been sent to ONLY prune-node-b
+    const subRegisterCalls = sendSpy.mock.calls.filter(
+      ([_nodeId, type]) => type === 'CLUSTER_SUB_REGISTER'
+    );
+    expect(subRegisterCalls.length).toBe(1);
+    expect(subRegisterCalls[0][0]).toBe('prune-node-b');
+
+    sendSpy.mockRestore();
+  });
+
+  test('query without _key predicate fans out to all remote nodes (no regression)', async () => {
+    // Spy on ClusterManager.send on Node A
+    const sendSpy = jest.spyOn(harnessA.cluster, 'send');
+
+    const mockClient = {
+      id: 'client-prune-all',
+      socket: { send: jest.fn(), readyState: WebSocket.OPEN, close: jest.fn() } as any,
+      writer: { write: jest.fn(), close: jest.fn() },
+      isAuthenticated: true,
+      subscriptions: new Set<string>(),
+      principal: { userId: 'test', roles: ['ADMIN'] },
+      lastActiveHlc: { millis: Date.now(), counter: 0, nodeId: 'client' },
+      lastPingReceived: Date.now(),
+    };
+
+    // Send QUERY_SUB without _key predicate
+    await harnessA.handleMessage(mockClient, {
+      type: 'QUERY_SUB',
+      payload: {
+        queryId: 'q-all-nodes',
+        mapName: 'prune-test',
+        query: { where: { status: 'active' } },
+      },
+    });
+
+    // Verify: CLUSTER_SUB_REGISTER should have been sent to prune-node-b (the only remote)
+    // because without a _key predicate, all nodes must be contacted
+    const subRegisterCalls = sendSpy.mock.calls.filter(
+      ([_nodeId, type]) => type === 'CLUSTER_SUB_REGISTER'
+    );
+    expect(subRegisterCalls.length).toBe(1);
+    expect(subRegisterCalls[0][0]).toBe('prune-node-b');
+
+    sendSpy.mockRestore();
   });
 });
