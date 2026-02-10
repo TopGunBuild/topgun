@@ -53,6 +53,8 @@ export interface DistributedSubscription {
   createdAt: number;
   /** Current merged result set (for delta computation) */
   currentResults: Map<string, { value: unknown; score?: number; sourceNode: string }>;
+  /** Nodes targeted by this subscription (for pruned queries). When absent, all cluster members are expected. */
+  targetedNodes?: Set<string>;
 }
 
 /**
@@ -364,8 +366,9 @@ export abstract class DistributedSubscriptionBase extends EventEmitter {
 
     if (!subscription || !acks || !pendingAck) return;
 
-    const allNodes = new Set(this.clusterManager.getMembers());
-    if (acks.size >= allNodes.size) {
+    // Use per-subscription targeted nodes when available to avoid requiring acks from non-targeted nodes
+    const expectedNodes = subscription.targetedNodes ?? new Set(this.clusterManager.getMembers());
+    if (acks.size >= expectedNodes.size) {
       clearTimeout(pendingAck.timeoutHandle);
       this.pendingAcks.delete(subscriptionId);
 
