@@ -158,10 +158,10 @@ describe('PartitionRouter', () => {
 
   describe('routeToConnection', () => {
     it('should fall back to any healthy connection when no partition map', () => {
-      const mockSocket = { send: jest.fn() } as any;
+      const mockConnection = { send: jest.fn(), close: jest.fn(), readyState: 1 } as any;
       connectionPool.getAnyHealthyConnection = jest.fn().mockReturnValue({
         nodeId: 'fallback-node',
-        socket: mockSocket,
+        connection: mockConnection,
       });
 
       const result = router.routeToConnection('any-key');

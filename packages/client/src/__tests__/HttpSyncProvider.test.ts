@@ -294,11 +294,51 @@ describe('HttpSyncProvider', () => {
     expect(provider.isConnected()).toBe(false);
   });
 
-  it('getConnection() throws descriptive error', () => {
-    expect(() => provider.getConnection('key')).toThrow('HTTP mode does not support direct WebSocket access');
+  it('getConnection() returns a valid IConnection', () => {
+    const conn = provider.getConnection('key');
+    expect(conn).toBeDefined();
+    expect(typeof conn.send).toBe('function');
+    expect(typeof conn.close).toBe('function');
+    expect(typeof conn.readyState).toBe('number');
   });
 
-  it('getAnyConnection() throws descriptive error', () => {
-    expect(() => provider.getAnyConnection()).toThrow('HTTP mode does not support direct WebSocket access');
+  it('getAnyConnection() returns a valid IConnection', () => {
+    const conn = provider.getAnyConnection();
+    expect(conn).toBeDefined();
+    expect(typeof conn.send).toBe('function');
+    expect(typeof conn.close).toBe('function');
+    expect(typeof conn.readyState).toBe('number');
+  });
+
+  it('getConnection() readyState reflects connected state', async () => {
+    // Before connect: should be CLOSED
+    const connBefore = provider.getConnection('key');
+    expect(connBefore.readyState).toBe(3); // CLOSED
+
+    await provider.connect();
+
+    // After connect: should be OPEN
+    const connAfter = provider.getConnection('key');
+    expect(connAfter.readyState).toBe(1); // OPEN
+  });
+
+  it('getConnection().send() queues operations like provider.send()', async () => {
+    await provider.connect();
+
+    const conn = provider.getConnection('key');
+    const opBatchMsg = serialize({
+      type: 'CLIENT_OP',
+      payload: { mapName: 'users', key: 'user-x', record: { value: { name: 'Test' }, timestamp: hlc.now() } },
+    });
+    conn.send(opBatchMsg);
+
+    // Wait for poll cycle to flush
+    await new Promise((r) => setTimeout(r, 150));
+
+    // The poll call should include the queued operation
+    const lastCallBody = mockFetch.mock.calls[mockFetch.mock.calls.length - 1][1].body;
+    const parsed = deserialize<any>(new Uint8Array(lastCallBody));
+    expect(parsed.operations).toBeDefined();
+    expect(parsed.operations.length).toBe(1);
   });
 });
