@@ -144,7 +144,8 @@ function createInternalManagers(
     deps.storage.queryRegistry,
     searchCoordinator,
     undefined,
-    deps.core.metricsService
+    deps.core.metricsService,
+    deps.cluster.partitionService
   );
 
   // Shared state maps
@@ -484,6 +485,7 @@ function createQueryHandlers(
     pendingClusterQueries: internal.pendingClusterQueries,
     readReplicaHandler: deps.cluster.readReplicaHandler,
     ConsistencyLevel: { EVENTUAL: ConsistencyLevel.EVENTUAL },
+    partitionService: deps.cluster.partitionService,
   });
 
   return { queryHandler, queryConversionHandler };
