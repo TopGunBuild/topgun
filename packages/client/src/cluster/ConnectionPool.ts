@@ -15,6 +15,8 @@ import {
   NodeHealth,
 } from '@topgunbuild/core';
 import { serialize, deserialize } from '@topgunbuild/core';
+import type { IConnection } from '../types';
+import { WebSocketConnection } from '../connection/WebSocketConnection';
 import { logger } from '../utils/logger';
 
 export type ConnectionPoolEventType =
@@ -186,18 +188,18 @@ export class ConnectionPool {
   /**
    * Get connection for a specific node
    */
-  public getConnection(nodeId: string): WebSocket | null {
+  public getConnection(nodeId: string): IConnection | null {
     const connection = this.connections.get(nodeId);
-    if (!connection || connection.state !== 'AUTHENTICATED') {
+    if (!connection || connection.state !== 'AUTHENTICATED' || !connection.socket) {
       return null;
     }
-    return connection.socket;
+    return new WebSocketConnection(connection.socket);
   }
 
   /**
    * Get primary connection (first/seed node)
    */
-  public getPrimaryConnection(): WebSocket | null {
+  public getPrimaryConnection(): IConnection | null {
     if (!this.primaryNodeId) return null;
     return this.getConnection(this.primaryNodeId);
   }
@@ -205,10 +207,10 @@ export class ConnectionPool {
   /**
    * Get any healthy connection
    */
-  public getAnyHealthyConnection(): { nodeId: string; socket: WebSocket } | null {
+  public getAnyHealthyConnection(): { nodeId: string; connection: IConnection } | null {
     for (const [nodeId, conn] of this.connections) {
       if (conn.state === 'AUTHENTICATED' && conn.socket) {
-        return { nodeId, socket: conn.socket };
+        return { nodeId, connection: new WebSocketConnection(conn.socket) };
       }
     }
     return null;
