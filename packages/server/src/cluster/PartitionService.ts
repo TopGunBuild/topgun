@@ -129,6 +129,121 @@ export class PartitionService extends EventEmitter {
   }
 
   // ============================================
+  // Partition Pruning Methods
+  // ============================================
+
+  /**
+   * Determine which partitions a query touches based on key equality filters.
+   * Returns partition IDs when pruning is possible, null when the query
+   * cannot be narrowed (e.g. OR/NOT predicates, missing key filter).
+   */
+  public getRelevantPartitions(query: { where?: Record<string, any>; predicate?: any }): number[] | null {
+    const keys = this.extractKeysFromQuery(query);
+    if (keys === null || keys.length === 0) return null;
+
+    const seen = new Set<number>();
+    for (const key of keys) {
+      seen.add(this.getPartitionId(String(key)));
+    }
+    return Array.from(seen);
+  }
+
+  /**
+   * Map partition IDs to their owning nodes.
+   * Returns a deduplicated array of node IDs, excluding unassigned partitions.
+   */
+  public getOwnerNodesForPartitions(partitionIds: number[]): string[] {
+    const seen = new Set<string>();
+    for (const pid of partitionIds) {
+      const owner = this.getPartitionOwner(pid);
+      if (owner !== null) {
+        seen.add(owner);
+      }
+    }
+    return Array.from(seen);
+  }
+
+  // ============================================
+  // Key extraction helpers (private)
+  // ============================================
+
+  private static readonly KEY_ATTRIBUTES = new Set(['_key', 'key', 'id', '_id']);
+
+  /**
+   * Extract concrete key values from a query object.
+   * Returns an array of key values when deterministic, null otherwise.
+   */
+  private extractKeysFromQuery(query: { where?: Record<string, any>; predicate?: any }): any[] | null {
+    // Try structured `where` clause first
+    if (query.where) {
+      const result = this.extractKeysFromWhere(query.where);
+      if (result !== null) return result;
+    }
+
+    // Try predicate-based extraction
+    if (query.predicate) {
+      return this.extractKeysFromPredicate(query.predicate);
+    }
+
+    return null;
+  }
+
+  private extractKeysFromWhere(where: Record<string, any>): any[] | null {
+    for (const attr of PartitionService.KEY_ATTRIBUTES) {
+      const value = where[attr];
+      if (value === undefined) continue;
+
+      // Simple equality: { _key: "abc" }
+      if (typeof value === 'string' || typeof value === 'number') {
+        return [value];
+      }
+
+      // Array of keys (implicit IN): { _key: ["a", "b"] }
+      if (Array.isArray(value)) {
+        return value;
+      }
+
+      // Operator form: { _key: { $eq: "abc" } }
+      if (value !== null && typeof value === 'object') {
+        if ('$eq' in value) {
+          return [value.$eq];
+        }
+        if ('$in' in value && Array.isArray(value.$in)) {
+          return value.$in;
+        }
+      }
+    }
+    return null;
+  }
+
+  private extractKeysFromPredicate(predicate: any): any[] | null {
+    if (!predicate || typeof predicate !== 'object') return null;
+
+    const { op } = predicate;
+
+    // Direct equality predicate: { op: "eq", attribute: "_key", value: "x" }
+    if (op === 'eq' && PartitionService.KEY_ATTRIBUTES.has(predicate.attribute)) {
+      return [predicate.value];
+    }
+
+    // AND predicate: check children for a key equality clause
+    if (op === 'and' && Array.isArray(predicate.children)) {
+      for (const child of predicate.children) {
+        if (child.op === 'eq' && PartitionService.KEY_ATTRIBUTES.has(child.attribute)) {
+          return [child.value];
+        }
+      }
+    }
+
+    // OR / NOT predicates cannot be pruned
+    if (op === 'or' || op === 'not') {
+      return null;
+    }
+
+    return null;
+  }
+
+  // ============================================
   // Partition Map Methods
   // ============================================
 
