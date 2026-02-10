@@ -21,7 +21,7 @@ import {
 import { ConnectionPool } from './ConnectionPool';
 import { PartitionRouter } from './PartitionRouter';
 import { logger } from '../utils/logger';
-import type { IConnectionProvider, ConnectionProviderEvent, ConnectionEventHandler } from '../types';
+import type { IConnectionProvider, IConnection, ConnectionProviderEvent, ConnectionEventHandler } from '../types';
 
 export interface ClusterClientEvents {
   'connected': () => void;
@@ -169,7 +169,7 @@ export class ClusterClient implements IConnectionProvider {
    * Routes to partition owner based on key hash when smart routing is enabled.
    * @throws Error if not connected
    */
-  public getConnection(key: string): WebSocket {
+  public getConnection(key: string): IConnection {
     if (!this.isConnected()) {
       throw new Error('ClusterClient not connected');
     }
@@ -204,27 +204,27 @@ export class ClusterClient implements IConnectionProvider {
     }
 
     // Get connection to owner
-    const socket = this.connectionPool.getConnection(owner);
-    if (!socket) {
+    const connection = this.connectionPool.getConnection(owner);
+    if (!connection) {
       this.routingMetrics.fallbackRoutes++;
       logger.debug({ key, owner }, 'Could not get connection to owner, using fallback');
       return this.getFallbackConnection();
     }
 
     this.routingMetrics.directRoutes++;
-    return socket;
+    return connection;
   }
 
   /**
    * Get fallback connection when owner is unavailable.
    * @throws Error if no connection available
    */
-  private getFallbackConnection(): WebSocket {
+  private getFallbackConnection(): IConnection {
     const conn = this.connectionPool.getAnyHealthyConnection();
-    if (!conn?.socket) {
+    if (!conn?.connection) {
       throw new Error('No healthy connection available');
     }
-    return conn.socket;
+    return conn.connection;
   }
 
   /**
@@ -480,8 +480,8 @@ export class ClusterClient implements IConnectionProvider {
    * Send directly to partition owner
    */
   public sendDirect(key: string, message: any): boolean {
-    const connection = this.partitionRouter.routeToConnection(key);
-    if (!connection) {
+    const route = this.partitionRouter.routeToConnection(key);
+    if (!route) {
       logger.warn({ key }, 'No route available for key');
       return false;
     }
@@ -495,7 +495,7 @@ export class ClusterClient implements IConnectionProvider {
       },
     };
 
-    connection.socket.send(serialize(routedMessage));
+    route.connection.send(serialize(routedMessage));
     return true;
   }
 
@@ -650,24 +650,24 @@ export class ClusterClient implements IConnectionProvider {
   }
 
   /**
-   * Get any healthy WebSocket connection (IConnectionProvider interface).
+   * Get any healthy connection (IConnectionProvider interface).
    * @throws Error if not connected
    */
-  public getAnyConnection(): WebSocket {
+  public getAnyConnection(): IConnection {
     const conn = this.connectionPool.getAnyHealthyConnection();
-    if (!conn?.socket) {
+    if (!conn?.connection) {
       throw new Error('No healthy connection available');
     }
-    return conn.socket;
+    return conn.connection;
   }
 
   /**
-   * Get any healthy WebSocket connection, or null if none available.
+   * Get any healthy connection, or null if none available.
    * Use this for optional connection checks.
    */
-  public getAnyConnectionOrNull(): WebSocket | null {
+  public getAnyConnectionOrNull(): IConnection | null {
     const conn = this.connectionPool.getAnyHealthyConnection();
-    return conn?.socket ?? null;
+    return conn?.connection ?? null;
   }
 
   // ============================================
