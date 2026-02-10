@@ -1,9 +1,11 @@
 import type {
   IConnectionProvider,
+  IConnection,
   ConnectionProviderEvent,
   ConnectionEventHandler,
   SingleServerProviderConfig,
 } from '../types';
+import { WebSocketConnection } from './WebSocketConnection';
 import { logger } from '../utils/logger';
 
 /**
@@ -110,17 +112,17 @@ export class SingleServerProvider implements IConnectionProvider {
    * Get connection for a specific key.
    * In single-server mode, key is ignored.
    */
-  getConnection(_key: string): WebSocket {
+  getConnection(_key: string): IConnection {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error('Not connected');
     }
-    return this.ws;
+    return new WebSocketConnection(this.ws);
   }
 
   /**
    * Get any available connection.
    */
-  getAnyConnection(): WebSocket {
+  getAnyConnection(): IConnection {
     return this.getConnection('');
   }
 
