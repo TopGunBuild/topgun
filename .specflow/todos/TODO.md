@@ -1,6 +1,6 @@
 # To-Do List
 
-**Last updated:** 2026-02-09 (TODO-058 converted to SPEC-044)
+**Last updated:** 2026-02-09 (TODO-054 converted to SPEC-045)
 **Source:** Migrated from PROMPTS directory, reordered by technical dependencies
 
 ---
@@ -34,22 +34,8 @@
 
 ---
 
-### TODO-054: Fix ProcessorSandbox test hang + update 12 docs files with ServerFactory.create()
-- **Priority:** 🟡 P2
-- **Complexity:** Low (docs) + Unknown (sandbox)
-- **Summary:** Two unrelated issues grouped as P2: (1) ProcessorSandbox.test.ts hangs indefinitely, even with `--forceExit`; (2) 12 documentation files in `apps/docs-astro` show `new ServerCoordinator(config)` which no longer works — constructor changed to `(config, dependencies)`, only `ServerFactory.create(config)` is the public API.
-- **ProcessorSandbox hang:**
-  - `packages/server/src/__tests__/ProcessorSandbox.test.ts` — hangs entire Jest process
-  - Likely cause: `isolated-vm` sandbox creation fails silently or creates an unresolved Promise
-  - Log shows `WARN: isolated-vm not available, falling back to less secure VM` — the fallback VM may have infinite loop or deadlock
-  - **Investigation needed:** Run with `--detectOpenHandles`, check if the fallback `vm` module's `runInNewContext` hangs
-- **Documentation (12 files with wrong server instantiation):**
-  - reference/server.mdx, reference/adapter.mdx, guides/cluster-replication.mdx (8 examples), guides/full-text-search.mdx (2), guides/performance.mdx (3), guides/deployment.mdx, guides/security.mdx, guides/authentication.mdx, guides/event-journal.mdx, guides/rbac.mdx, guides/interceptors.mdx (3), blog/full-text-search-offline-first.mdx
-  - All show `new ServerCoordinator({...})` → must be `ServerFactory.create({...})`
-  - Note: `serverUrl` in client examples is CORRECT — `TopGunClient` still accepts `serverUrl` and wraps with `SingleServerProvider` internally (confirmed in TopGunClient.ts:155-156)
-- **Verification:**
-  - Sandbox: `cd packages/server && npx jest --forceExit --testPathPattern="ProcessorSandbox" --detectOpenHandles`
-  - Docs: `grep -r "new ServerCoordinator" apps/docs-astro/` should return 0 results after fix
+### ~~TODO-054: Fix ProcessorSandbox test hang + update 12 docs files with ServerFactory.create()~~ → SPEC-045
+- **Status:** Converted to [SPEC-045](.specflow/specs/SPEC-045.md)
 
 ---
 
@@ -346,16 +332,10 @@
 
 ---
 
-### TODO-042: DBSP Incremental Views
-- **Priority:** ⚠️ High Risk — Deferred
-- **Complexity:** Very Large
-- **Context:** [reference/TURSO_INSIGHTS.md](../reference/TURSO_INSIGHTS.md) (Section 4)
-- **Summary:** Implement DBSP (Database Stream Processing) for delta-based query updates
-- **Problem:** LiveQueryManager recomputes queries on every change
-- **Solution:** Compile queries to streaming operators, maintain incremental state
-- **Warning:** High risk — could become 6-month compiler project
-- **Alternative:** Start with "React Signals" style fine-grained reactivity
-- **Reference:** Turso `/core/incremental/`, Materialize, differential-dataflow
+### ~~TODO-042: DBSP Incremental Views~~ ELIMINATED
+- **Status:** Removed from roadmap (2026-02-10)
+- **Reason:** Not needed for TopGun's model. Existing StandingQueryRegistry (O(1) affected query detection) and ReverseQueryIndex (field-based candidate filtering) already provide incremental query notification for supported query types (filter + sort + limit). DBSP adds value only for complex aggregations (GROUP BY, SUM, AVG, JOIN) which TopGun explicitly doesn't support. If aggregations needed, DAG Executor (TODO-025) handles them via streaming processors. Origin was Turso, not Hazelcast.
+- **Reference:** [RUST_SERVER_MIGRATION_RESEARCH.md](../reference/RUST_SERVER_MIGRATION_RESEARCH.md) (Section 13)
 
 ---
 
@@ -390,7 +370,7 @@ TODO-023 (Client Cluster)          TODO-033 (AsyncStorage)
 | 3. Storage | 2 | ~7 weeks | Write-behind, DAG |
 | 4. Advanced | 3 | ~10 weeks | Vector, WASM, extensions |
 | 5. Documentation | 1 | 0.5-1 day | DST docs (TODO-047 done) |
-| 6. Enterprise | 5 | ~20+ weeks | Tenancy, S3, time-travel |
+| 6. Enterprise | 4 | ~20+ weeks | Tenancy, S3, time-travel (DBSP eliminated) |
 
 ### Execution Order (by technical dependency)
 
@@ -403,7 +383,7 @@ TODO-023 (Client Cluster)          TODO-033 (AsyncStorage)
 | ★ | ~~TODO-056~~ → SPEC-039 | -1 | 2 hours | — | 🔴 P1 |
 | ★ | ~~TODO-057~~ → SPEC-043 | -1 | 0.5 day | — | 🔴 P1 |
 | ★ | ~~TODO-058~~ → SPEC-044 | -1 | 0.5 day | — | 🟡 P2 |
-| ★ | TODO-054 | -1 | 1 day | — | 🟡 P2 |
+| ★ | ~~TODO-054~~ → SPEC-045 | -1 | 1 day | — | 🟡 P2 |
 | 1 | TODO-050 | 0 | 4-6 hours | TODO-048, TODO-049 | 🔴 High |
 | 2 | TODO-029 | 1 | 1 week | TODO-025, TODO-049 | 🟡 Medium |
 | 3 | TODO-023 | 1 | ~16 hours | — (independent) | 🟡 Medium |
@@ -419,7 +399,7 @@ TODO-023 (Client Cluster)          TODO-033 (AsyncStorage)
 | 13 | TODO-043 | 6 | 6-8 weeks | TODO-044 | 🔵 Deferred |
 | 14 | TODO-044 | 6 | 4-6 weeks | — | 🔵 Deferred |
 | 15 | TODO-040 | 6 | Large | — | 🔵 Deferred |
-| 16 | TODO-042 | 6 | Very Large | — | ⚠️ Risk |
+| ~~16~~ | ~~TODO-042~~ | ~~6~~ | ~~Eliminated~~ | — | Removed (2026-02-10) |
 
 ### Context Files
 
@@ -436,8 +416,19 @@ TODO-023 (Client Cluster)          TODO-033 (AsyncStorage)
 | TODO-043 | TURSO_INSIGHTS.md (Section 7) | 482 |
 | TODO-044 | TURSO_INSIGHTS.md (Section 8) | 482 |
 | TODO-040 | topgun-rocksdb.md | 650+ |
-| TODO-042 | TURSO_INSIGHTS.md (Section 4) | 482 |
+| ~~TODO-042~~ | ~~TURSO_INSIGHTS.md (Section 4)~~ | Eliminated |
 
 ---
 
-*Reordered by technical dependencies on 2026-02-07. Wave -1 added on 2026-02-08 for post-release test stability fixes.*
+### Rust Server Migration
+
+Full migration research completed 2026-02-10. See [RUST_SERVER_MIGRATION_RESEARCH.md](../reference/RUST_SERVER_MIGRATION_RESEARCH.md) for:
+- Architecture mapping (TypeScript → Rust)
+- TODO impact analysis (which TODOs to implement in TS vs Rust)
+- 5 key trait abstractions to prevent rework
+- Timeline estimates (12-18 weeks with AI agents)
+- Strategy: Complete Wave 0-2 in TS → DAG prototype in TS → Rust server rewrite
+
+---
+
+*Reordered by technical dependencies on 2026-02-07. Wave -1 added on 2026-02-08 for post-release test stability fixes. TODO-042 eliminated and Rust migration reference added on 2026-02-10.*
