@@ -84,14 +84,14 @@ const adapter = new PostgresAdapter(
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PostgresAdapter(pool, { tableName: 'my_app_data' });`;
 
-export const postgresServerCode = `import { ServerCoordinator } from '@topgunbuild/server';
+export const postgresServerCode = `import { ServerFactory } from '@topgunbuild/server';
 import { PostgresAdapter } from '@topgunbuild/server';
 
 const storage = new PostgresAdapter({
   connectionString: process.env.DATABASE_URL
 });
 
-const server = new ServerCoordinator({
+const server = ServerFactory.create({
   port: 8765,
   storage
 });

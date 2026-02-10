@@ -7,10 +7,10 @@ order: 17
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Database, RefreshCw, Shield, Zap, Server, Copy } from 'lucide-react';
 
-export const clusterSetupCode = `import { ServerCoordinator } from '@topgunbuild/server';
+export const clusterSetupCode = `import { ServerFactory } from '@topgunbuild/server';
 
 // Node 1 (seed node)
-const node1 = new ServerCoordinator({
+const node1 = ServerFactory.create({
   port: 8080,
   nodeId: 'node-1',
   host: 'localhost',
@@ -24,7 +24,7 @@ const node1 = new ServerCoordinator({
 await node1.ready();
 
 // Node 2 (joins via seed)
-const node2 = new ServerCoordinator({
+const node2 = ServerFactory.create({
   port: 8081,
   nodeId: 'node-2',
   host: 'localhost',
@@ -39,7 +39,7 @@ await node2.ready();`;
 
 export const consistencyLevelsCode = `// EVENTUAL - Fire-and-forget replication (default)
 // Best for: High throughput, tolerance for brief inconsistency
-const eventualServer = new ServerCoordinator({
+const eventualServer = ServerFactory.create({
   defaultConsistency: 'EVENTUAL',
   replicationConfig: {
     batchIntervalMs: 50,   // Batch replication every 50ms
@@ -50,7 +50,7 @@ const eventualServer = new ServerCoordinator({
 
 // QUORUM - Wait for majority of replicas
 // Best for: Balance of consistency and availability
-const quorumServer = new ServerCoordinator({
+const quorumServer = ServerFactory.create({
   defaultConsistency: 'QUORUM',
   replicationConfig: {
     ackTimeoutMs: 5000,  // Wait up to 5s for acks
@@ -59,7 +59,7 @@ const quorumServer = new ServerCoordinator({
 
 // STRONG - Wait for all replicas
 // Best for: Critical data requiring full consistency
-const strongServer = new ServerCoordinator({
+const strongServer = ServerFactory.create({
   defaultConsistency: 'STRONG',
   replicationConfig: {
     ackTimeoutMs: 10000, // Longer timeout for all replicas
@@ -82,7 +82,7 @@ export const partitioningCode = `// TopGun uses consistent hashing with 271 part
 // Total: Each piece of data exists on 2 nodes (owner + 1 backup)`;
 
 export const antiEntropyCode = `// Anti-entropy repair runs automatically
-const server = new ServerCoordinator({
+const server = ServerFactory.create({
   replicationEnabled: true,
   // RepairScheduler configuration (defaults shown)
   repairConfig: {
@@ -104,7 +104,7 @@ const server = new ServerCoordinator({
 export const gossipProtocolCode = `// Cluster membership uses gossip protocol
 // Nodes automatically discover each other
 
-const server = new ServerCoordinator({
+const server = ServerFactory.create({
   clusterPort: 9000,
   peers: ['node1:9000'],  // Just one seed is enough
 });
@@ -121,7 +121,7 @@ const server = new ServerCoordinator({
 export const failoverCode = `// Automatic failover on node failure
 // FailureDetector uses Phi Accrual algorithm
 
-const server = new ServerCoordinator({
+const server = ServerFactory.create({
   // FailureDetector config (defaults shown)
   failureDetector: {
     heartbeatIntervalMs: 1000,
@@ -141,7 +141,7 @@ const server = new ServerCoordinator({
 // 5. Clients receive updated partition map`;
 
 export const readReplicaCode = `// Read from replicas for lower latency
-const server = new ServerCoordinator({
+const server = ServerFactory.create({
   replicationEnabled: true,
   // ReadReplicaHandler is automatically enabled
 });

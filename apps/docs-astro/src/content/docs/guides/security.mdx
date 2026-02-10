@@ -8,9 +8,9 @@ import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Shield, Lock, Key, Server, AlertTriangle, CheckCircle, Database, HardDrive } from 'lucide-react';
 import { ApiParam, ApiConstructor } from '../../../components/docs/ApiMethod';
 
-export const tlsConfigCode = `import { ServerCoordinator } from '@topgunbuild/server';
+export const tlsConfigCode = `import { ServerFactory } from '@topgunbuild/server';
 
-const server = new ServerCoordinator({
+const server = ServerFactory.create({
   port: 443,
   clusterPort: 9443,
   nodeId: 'prod-node-1',

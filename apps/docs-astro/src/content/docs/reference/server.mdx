@@ -1,6 +1,6 @@
 ---
 title: Server API
-description: The ServerCoordinator is the core of the TopGun backend managing client connections, synchronization, clustering, and security.
+description: The Server API manages the TopGun backend including client connections, synchronization, clustering, and security.
 order: 22
 ---
 
@@ -8,7 +8,7 @@ import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Server, Settings, Shield, Network, Lock, Gauge, Zap, Timer } from 'lucide-react';
 import { ApiParam, ApiConstructor } from '../../../components/docs/ApiMethod';
 
-export const readyCode = `const server = new ServerCoordinator(config);
+export const readyCode = `const server = ServerFactory.create(config);
 await server.ready();
 console.log(\`Server running on port \${server.port}\`);`;
 
@@ -102,7 +102,7 @@ export const httpSyncResponseExample = `// 200 OK
   <h1 className="text-4xl font-bold text-foreground">Server API</h1>
 </div>
 
-The `ServerCoordinator` is the core of the TopGun backend. It manages client connections,
+The `ServerFactory.create()` method creates a server instance that manages the TopGun backend. It handles client connections,
 synchronization logic, clustering, and security enforcement.
 
 ## Configuration
@@ -376,7 +376,7 @@ synchronization logic, clustering, and security enforcement.
 
 ## Methods
 
-### constructor(config)
+### ServerFactory.create(config)
 
 <div className="flex items-center gap-2 mb-3 not-prose">
   <Settings className="w-5 h-5 text-neutral-500" />

@@ -8,7 +8,7 @@ import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Shield, Lock, UserCheck, AlertTriangle } from 'lucide-react';
 import { FeatureCard } from '../../../components/docs/FeatureCard';
 
-export const configCode = `import { ServerCoordinator } from '@topgunbuild/server';
+export const configCode = `import { ServerFactory } from '@topgunbuild/server';
 import { PermissionPolicy } from '@topgunbuild/core';
 
 const policies: PermissionPolicy[] = [
@@ -32,7 +32,7 @@ const policies: PermissionPolicy[] = [
   }
 ];
 
-const server = new ServerCoordinator({
+const server = ServerFactory.create({
   port: 8765,
   securityPolicies: policies
 });`;
@@ -89,7 +89,7 @@ You can define fine-grained access control rules for your data maps, controlling
 
 ## Configuration
 
-Policies are passed to the `ServerCoordinator` constructor.
+Policies are passed to `ServerFactory.create()`.
 
 <div className="not-prose">
   <CodeBlock title="server.ts" language="typescript" code={configCode} />

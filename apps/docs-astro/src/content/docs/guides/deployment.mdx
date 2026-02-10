@@ -102,10 +102,10 @@ services:
 volumes:
   postgres_data:`;
 
-export const productionPerfCode = `import { ServerCoordinator } from '@topgunbuild/server';
+export const productionPerfCode = `import { ServerFactory } from '@topgunbuild/server';
 import { PostgresAdapter } from '@topgunbuild/server/storage';
 
-const server = new ServerCoordinator({
+const server = ServerFactory.create({
   port: 8080,
   nodeId: process.env.NODE_ID || 'prod-node-1',
   storage: new PostgresAdapter(process.env.DATABASE_URL),

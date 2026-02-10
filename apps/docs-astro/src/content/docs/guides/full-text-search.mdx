@@ -299,9 +299,9 @@ ftsIndex.load(saved);
 // Index is ready to use immediately
 const results = articles.search('machine learning');`;
 
-export const serverSearchSetupCode = `import { ServerCoordinator } from '@topgunbuild/server';
+export const serverSearchSetupCode = `import { ServerFactory } from '@topgunbuild/server';
 
-const server = new ServerCoordinator({
+const server = ServerFactory.create({
   port: 8080,
   // Enable full-text search for specific maps
   fullTextSearch: {
@@ -591,7 +591,7 @@ const unsubscribe = handle.subscribe((results) => {
 unsubscribe();`;
 
 export const serverSearchPermissionsCode = `// Server security configuration
-const server = new ServerCoordinator({
+const server = ServerFactory.create({
   port: 8080,
   fullTextSearch: {
     articles: { fields: ['title', 'body'] }
