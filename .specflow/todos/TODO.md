@@ -1,6 +1,6 @@
 # To-Do List
 
-**Last updated:** 2026-02-09 (TODO-054 converted to SPEC-045)
+**Last updated:** 2026-02-10 (TODO-050 converted to SPEC-046)
 **Source:** Migrated from PROMPTS directory, reordered by technical dependencies
 
 ---
@@ -49,36 +49,12 @@
 
 ---
 
-## Wave 0: Foundation Refactoring
+## ~~Wave 0: Foundation Refactoring~~ → SPEC-046
 
 *Goal: Fix abstraction leaks that block transport evolution*
 
-### TODO-050: IConnection Abstraction
-- **Priority:** 🔴 High
-- **Complexity:** Low
-- **Summary:** Replace `WebSocket` return type in `IConnectionProvider` with abstract `IConnection` interface
-- **Why:** `HttpSyncProvider` throws runtime errors on `getConnection()`/`getAnyConnection()` because the interface forces `WebSocket` return type. `AutoConnectionProvider` inherits the same type-safety hole. Any new transport (SSE, QUIC) will hit the same problem. This is technical debt blocking TODO-048 and TODO-049.
-- **Current Problem:**
-  - `IConnectionProvider.getConnection()` returns `WebSocket` (types.ts:46)
-  - `HttpSyncProvider` throws on these methods (cannot return WebSocket)
-  - `AutoConnectionProvider` can throw at runtime in HTTP mode
-  - 90% of callers only need `send()` — not raw WebSocket access
-- **Proposed Interface:**
-  ```
-  IConnection { send(data): void; isOpen(): boolean; close(): void }
-  IConnectionProvider { getConnection(key): IConnection; getAnyConnection(): IConnection; ... }
-  ```
-- **Blast Radius:**
-  - `types.ts` — define `IConnection`, update `IConnectionProvider`
-  - `SingleServerProvider.ts` — wrap WebSocket in IConnection adapter
-  - `ConnectionPool.ts` — wrap WebSocket in IConnection adapter
-  - `ClusterClient.ts` — update 3 call sites (all just call `.send()`)
-  - `PartitionRouter.ts` — update 2 call sites
-  - `HttpSyncProvider.ts` — return null-transport or no-op IConnection instead of throwing
-  - Tests — update mock types
-- **Effort:** 4-6 hours (~100-150 lines changed)
-- **Dependencies:** None (pure refactoring)
-- **Unlocks:** TODO-048 (SSE), TODO-049 (Cluster HTTP)
+### ~~TODO-050: IConnection Abstraction~~ → SPEC-046
+- **Status:** Converted to [SPEC-046](.specflow/specs/SPEC-046.md)
 
 ---
 
@@ -116,13 +92,14 @@
 
 ---
 
-## Wave 2: Transport Evolution
+## Wave 2: Transport Evolution → DEFERRED TO RUST
 
 *Goal: Close the real-time gap for serverless, enable cluster HTTP*
+*Decision (2026-02-10): Entire wave deferred to Rust server rewrite. SSE is ~50 lines in axum; Cluster HTTP routing benefits from Rust's async model. See [RUST_SERVER_MIGRATION_RESEARCH.md](../reference/RUST_SERVER_MIGRATION_RESEARCH.md)*
 
-### TODO-048: SSE Push for HTTP Sync
-- **Priority:** 🟡 Medium
-- **Complexity:** Medium
+### TODO-048: SSE Push for HTTP Sync → DEFERRED TO RUST
+- **Priority:** 🔵 Deferred to Rust
+- **Complexity:** Medium (trivial in Rust: ~50 lines in axum)
 - **Context:** Extends SPEC-036 (HTTP Sync Protocol)
 - **Summary:** Add Server-Sent Events transport for real-time push in serverless environments
 - **Why:** HTTP polling introduces latency proportional to `pollIntervalMs`. SSE enables server-initiated push without WebSocket, closing the real-time gap for serverless deployments.
@@ -132,13 +109,13 @@
   - New `SsePushProvider` implements `IConnectionProvider`
   - `AutoConnectionProvider` gains a third tier: WS → SSE → HTTP polling
 - **Platform Support:** Vercel Edge (streaming), Cloudflare Workers (with Durable Objects), AWS Lambda (response streaming)
-- **Effort:** 2-3 weeks
+- **Effort:** 2-3 days in Rust (vs 2-3 weeks in TS)
 - **Dependencies:** TODO-050 (IConnection abstraction)
 
 ---
 
-### TODO-049: Cluster-Aware HTTP Routing
-- **Priority:** 🟡 Medium
+### TODO-049: Cluster-Aware HTTP Routing → DEFERRED TO RUST
+- **Priority:** 🔵 Deferred to Rust
 - **Complexity:** Medium
 - **Context:** Extends SPEC-036 (HTTP Sync Protocol), relates to TODO-023 (Client Cluster Smart Routing)
 - **Summary:** Enable `HttpSyncHandler` to route sync requests to partition owners in a cluster
@@ -147,17 +124,18 @@
   - `HttpSyncHandler` queries `PartitionService` to find partition owner per map key
   - Forwards delta computation to owner node via internal cluster protocol
   - Merges responses from multiple partition owners into single HTTP response
-- **Effort:** 2-3 weeks
+- **Effort:** 1-2 weeks in Rust
 - **Dependencies:** TODO-050 (IConnection abstraction), TODO-029 (Partition Pruning — recommended)
 
 ---
 
-## Wave 3: Storage Infrastructure
+## Wave 3: Storage Infrastructure → DEFERRED TO RUST
 
 *Goal: Enable slow backends, unlock distributed query processing*
+*Decision (2026-02-10): Both items deferred to Rust server rewrite. See [RUST_SERVER_MIGRATION_RESEARCH.md](../reference/RUST_SERVER_MIGRATION_RESEARCH.md)*
 
-### TODO-033: AsyncStorageWrapper (Write-Behind)
-- **Priority:** 🟡 Medium
+### TODO-033: AsyncStorageWrapper (Write-Behind) → DEFERRED TO RUST
+- **Priority:** 🔵 Deferred to Rust
 - **Complexity:** Medium
 - **Context:** [reference/topgun-rocksdb.md](../reference/topgun-rocksdb.md)
 - **Summary:** Implement Hazelcast-style Write-Behind pattern for slow storage backends
@@ -172,19 +150,20 @@
 
 ---
 
-### TODO-025: DAG Executor for Distributed Queries
-- **Priority:** 🟡 Medium
+### TODO-025: DAG Executor for Distributed Queries → DEFERRED TO RUST
+- **Priority:** 🔵 Deferred to Rust
 - **Complexity:** Large
 - **Context:** [reference/HAZELCAST_DAG_EXECUTOR_SPEC.md](../reference/HAZELCAST_DAG_EXECUTOR_SPEC.md)
 - **Additional:** [reference/HAZELCAST_ARCHITECTURE_COMPARISON.md](../reference/HAZELCAST_ARCHITECTURE_COMPARISON.md)
 - **Summary:** Implement Hazelcast-style DAG executor for distributed query processing
+- **Why deferred:** HAZELCAST_DAG_EXECUTOR_SPEC.md (700+ lines) provides complete interfaces. Hazelcast Java source available as reference. Rust `Future::poll()` maps naturally to Cooperative Tasklet model. TS prototype would be discarded after Rust rewrite.
 - **Key Features:**
   - DAG structure with Vertex/Edge graph
   - 3-tier processor model: Source → Transform → Sink
   - Partition-aware execution
   - Backpressure handling
 - **Architecture Pattern:** Processors exchange data via Outbox/Inbox queues
-- **Effort:** 4-6 weeks
+- **Effort:** 2-3 weeks in Rust (vs 4-6 weeks in TS)
 - **Dependencies:** TODO-029 (Partition Pruning)
 
 ---
@@ -209,24 +188,9 @@
 
 ---
 
-### TODO-034: Rust/WASM Hot Path Migration
-- **Priority:** 🟡 Medium
-- **Complexity:** Large
-- **Context:** [reference/RUST_WASM_ANALYSIS.md](../reference/RUST_WASM_ANALYSIS.md)
-- **Summary:** Migrate CPU-intensive hot paths to Rust/WASM
-- **Why:** Benefits from having DAG Executor (TODO-025) as a prime WASM candidate
-- **Candidates (by priority):**
-  1. MerkleTree Hash/Diff → 50-60% speedup
-  2. CRDT Batch Merge → 30-40% speedup
-  3. DAG Executor → 2-5x speedup
-  4. SQL Parser (sqlparser-rs) → new feature
-- **Package Structure:**
-  ```
-  packages/core-rust/   # Rust crate
-  packages/core-wasm/   # TS wrapper with fallback
-  ```
-- **Strategy:** Conditional loading (browser=JS, server=WASM)
-- **Effort:** 4-6 weeks total
+### ~~TODO-034: Rust/WASM Hot Path Migration~~ SUPERSEDED
+- **Status:** Superseded by full Rust server migration (2026-02-10)
+- **Reason:** Full Rust server rewrite makes partial WASM hot-path approach obsolete. All CPU-intensive operations will be native Rust. See [RUST_SERVER_MIGRATION_RESEARCH.md](../reference/RUST_SERVER_MIGRATION_RESEARCH.md).
 
 ---
 
@@ -366,11 +330,11 @@ TODO-023 (Client Cluster)          TODO-033 (AsyncStorage)
 | -1. Stability | 6 | ~4-5 days | Post-v0.11.0 test regression fixes |
 | 0. Foundation | 1 | 4-6 hours | Fix IConnection abstraction |
 | 1. Cluster | 2 | ~3 weeks | Partition pruning, client routing |
-| 2. Transport | 2 | ~4-6 weeks | SSE, cluster HTTP |
-| 3. Storage | 2 | ~7 weeks | Write-behind, DAG |
-| 4. Advanced | 3 | ~10 weeks | Vector, WASM, extensions |
+| 2. Transport | 2 | Deferred to Rust | SSE, cluster HTTP |
+| 3. Storage + DAG | 2 | Deferred to Rust | Write-behind, DAG |
+| 4. Advanced | 3 | Deferred to Rust | Vector, extensions (WASM superseded) |
 | 5. Documentation | 1 | 0.5-1 day | DST docs (TODO-047 done) |
-| 6. Enterprise | 4 | ~20+ weeks | Tenancy, S3, time-travel (DBSP eliminated) |
+| 6. Enterprise | 4 | Deferred to Rust | Tenancy, S3, time-travel (DBSP eliminated) |
 
 ### Execution Order (by technical dependency)
 
@@ -384,16 +348,16 @@ TODO-023 (Client Cluster)          TODO-033 (AsyncStorage)
 | ★ | ~~TODO-057~~ → SPEC-043 | -1 | 0.5 day | — | 🔴 P1 |
 | ★ | ~~TODO-058~~ → SPEC-044 | -1 | 0.5 day | — | 🟡 P2 |
 | ★ | ~~TODO-054~~ → SPEC-045 | -1 | 1 day | — | 🟡 P2 |
-| 1 | TODO-050 | 0 | 4-6 hours | TODO-048, TODO-049 | 🔴 High |
+| 1 | ~~TODO-050~~ → SPEC-046 | 0 | 4-6 hours | TODO-048, TODO-049 | 🔴 High |
 | 2 | TODO-029 | 1 | 1 week | TODO-025, TODO-049 | 🟡 Medium |
 | 3 | TODO-023 | 1 | ~16 hours | — (independent) | 🟡 Medium |
-| 4 | TODO-048 | 2 | 2-3 weeks | — | 🟡 Medium |
-| 5 | TODO-049 | 2 | 2-3 weeks | — | 🟡 Medium |
-| 6 | TODO-033 | 3 | 2-3 weeks | TODO-043, TODO-040 | 🟡 Medium |
-| 7 | TODO-025 | 3 | 4-6 weeks | TODO-034 | 🟡 Medium |
-| 8 | TODO-039 | 4 | 4 weeks | — | 🟡 Medium |
-| 9 | TODO-034 | 4 | 4-6 weeks | — | 🟡 Medium |
-| 10 | TODO-036 | 4 | 2-3 weeks | — | 🟢 Low |
+| 4 | TODO-048 | 2 | Rust phase | — | 🔵 Deferred to Rust |
+| 5 | TODO-049 | 2 | Rust phase | — | 🔵 Deferred to Rust |
+| 6 | TODO-033 | 3 | Rust phase | TODO-043, TODO-040 | 🔵 Deferred to Rust |
+| 7 | TODO-025 | 3 | Rust phase | — | 🔵 Deferred to Rust |
+| 8 | TODO-039 | 4 | Rust phase | — | 🔵 Deferred to Rust |
+| ~~9~~ | ~~TODO-034~~ | ~~4~~ | ~~Superseded~~ | — | Superseded (2026-02-10) |
+| 10 | TODO-036 | 4 | Rust phase | — | 🔵 Deferred to Rust |
 | 11 | TODO-045 | 5 | 0.5-1 day | — | 🟢 Low |
 | 12 | TODO-041 | 6 | Large | — | 🔵 Deferred |
 | 13 | TODO-043 | 6 | 6-8 weeks | TODO-044 | 🔵 Deferred |
@@ -426,9 +390,9 @@ Full migration research completed 2026-02-10. See [RUST_SERVER_MIGRATION_RESEARC
 - Architecture mapping (TypeScript → Rust)
 - TODO impact analysis (which TODOs to implement in TS vs Rust)
 - 5 key trait abstractions to prevent rework
-- Timeline estimates (12-18 weeks with AI agents)
-- Strategy: Complete Wave 0-2 in TS → DAG prototype in TS → Rust server rewrite
+- Timeline estimates (14-20 weeks Rust rewrite with AI agents)
+- Strategy: Complete Wave 0-1 in TS (3-4 weeks) → Rust server rewrite (includes DAG, SSE, Cluster HTTP, all remaining TODOs)
 
 ---
 
-*Reordered by technical dependencies on 2026-02-07. Wave -1 added on 2026-02-08 for post-release test stability fixes. TODO-042 eliminated and Rust migration reference added on 2026-02-10.*
+*Reordered by technical dependencies on 2026-02-07. Wave -1 added on 2026-02-08 for post-release test stability fixes. TODO-042 eliminated and Rust migration reference added on 2026-02-10. TODO-050 converted to SPEC-046 on 2026-02-10. Waves 2-4 deferred to Rust, TODO-034 superseded, strategy revised to Wave 0-1 only in TS on 2026-02-10.*

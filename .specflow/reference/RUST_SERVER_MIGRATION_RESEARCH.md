@@ -14,8 +14,8 @@
 | **Was TypeScript a mistake?** | No — enabled rapid prototyping (45 specs in ~5 days). Correct for current stage. |
 | **Can Node.js be world-class?** | No — GC pauses, single-threaded event loop, V8 heap limits cap at ~50K ops/sec/node |
 | **Is current architecture portable to Rust?** | Yes — modular DI, clean interfaces, 70% direct mapping |
-| **What's the recommended approach?** | Hybrid: finish TS Wave 0-2, then rewrite server in Rust using TS as spec |
-| **Estimated timeline with AI agents?** | 12-18 weeks for Rust server |
+| **What's the recommended approach?** | Finish TS Wave 0-1 only (3-4 weeks), then rewrite server in Rust using TS as spec |
+| **Estimated timeline with AI agents?** | 14-20 weeks for Rust server (includes DAG, SSE, Cluster HTTP) |
 | **Risk of double-rework?** | Manageable — 5 trait abstractions prevent 95% of rework |
 
 ---
@@ -176,7 +176,7 @@
 | TODO | Type | Breaks Interfaces? | Requires Rust Rework? | Risk | Recommendation |
 |------|------|--------------------|-----------------------|------|----------------|
 | TODO-033 AsyncStorage | Wrapper/decorator | No | No | **Low** | Implement in Rust directly |
-| TODO-025 DAG Executor | New subsystem | Partially (new messages) | Partially | **Medium** | Prototype in TS first |
+| TODO-025 DAG Executor | New subsystem | Partially (new messages) | Partially | **Medium** | Implement in Rust directly (spec + Hazelcast ref sufficient) |
 | TODO-043 S3 Bottomless | New IServerStorage impl | No | No | **Low** | Implement in Rust directly |
 | TODO-040 Tiered Storage | StorageManager internals | Partially | Partially | **Medium** | Design trait upfront |
 | TODO-042 DBSP | Write path change | Yes | Yes | **Eliminated** | Not needed (see below) |
@@ -208,7 +208,7 @@ Adds Hazelcast-style DAG engine for distributed queries. New subsystem with:
 3. **New cluster messages** — extending protocol, not changing existing types
 4. **Hazelcast audit confirms**: "Rust Future::poll() perfectly matches Cooperative Tasklet model"
 
-**What to do**: Prototype DAG in TypeScript (4-6 weeks) to stabilize Processor trait and routing policies. Then port to Rust with high confidence.
+**What to do**: Implement directly in Rust. The HAZELCAST_DAG_EXECUTOR_SPEC.md (700+ lines) provides complete interfaces, and the Hazelcast Java source is available as reference. TS prototype adds cost (4-6 weeks) without proportional value — the spec and Hazelcast reference are sufficient to design the Processor trait in Rust directly.
 
 **Beyond current plans**: Future extensions (window functions, checkpointing, streaming mode) won't break base DAG architecture if Processor trait is designed with async + cooperative flag.
 
@@ -267,27 +267,19 @@ Simple in-memory impl first, tiered impl later — same trait.
 
 ## 6. Migration Strategy
 
-### Phase 1: Complete TypeScript Wave 0-2 (~6-8 weeks)
+### Phase 1: Complete TypeScript Wave 0-1 Only (~3-4 weeks)
 
-Stabilize protocols and client API before starting Rust work.
+Stabilize core abstractions and cluster infrastructure before starting Rust work. Wave 2 (Transport) deferred to Rust — SSE is trivial in axum, Cluster HTTP routing benefits from Rust's async model.
 
 | TODO | Wave | Effort | Value for Rust Migration |
 |------|------|--------|--------------------------|
 | TODO-050 IConnection | 0 | 4-6 hours | Stabilizes transport abstraction |
 | TODO-029 Partition Pruning | 1 | 1 week | Clarifies partition query protocol |
 | TODO-023 Client Cluster | 1 | ~16 hours | Stabilizes client-server contract |
-| TODO-048 SSE Push | 2 | 2-3 weeks | Defines HTTP push protocol |
-| TODO-049 Cluster HTTP | 2 | 2-3 weeks | Defines cluster HTTP routing |
 
-### Phase 2: DAG Executor Prototype in TypeScript (~4-6 weeks, can overlap)
+### Phase 2: Rust Server Rewrite (~14-20 weeks)
 
-- Implement TODO-025 in TypeScript
-- Stabilize: Processor interface, routing policies, cluster messages
-- This becomes the behavioral spec for Rust DAG
-
-### Phase 3: Rust Server Rewrite (~12-18 weeks)
-
-Rewrite (not port) using TypeScript server as executable specification:
+Rewrite (not port) using TypeScript server as executable specification. Includes features previously planned for TS Waves 2-3.
 
 | Component | Effort | Source |
 |-----------|--------|--------|
@@ -295,12 +287,14 @@ Rewrite (not port) using TypeScript server as executable specification:
 | Cluster protocol + partitions | 2-3 weeks | packages/server/src/cluster/ |
 | Message handlers (26) | 2-3 weeks | packages/server/src/coordinator/ |
 | Storage + PostgreSQL | 1 week | packages/server/src/storage/ |
-| Networking (WS + HTTP + SSE) | 1-2 weeks | packages/server/src/modules/network-module.ts |
+| Networking (WS + HTTP) | 1-2 weeks | packages/server/src/modules/network-module.ts |
+| SSE Push (TODO-048) | 2-3 days | ~50 lines in axum (trivial) |
+| Cluster HTTP routing (TODO-049) | 1-2 weeks | Better with Rust async model |
 | Search (tantivy integration) | 1-2 weeks | packages/server/src/search/ |
-| DAG Executor | 2-3 weeks | From Phase 2 TS prototype |
+| DAG Executor (TODO-025) | 2-3 weeks | HAZELCAST_DAG_EXECUTOR_SPEC.md + Hazelcast Java source |
 | Testing + integration | 3-4 weeks | packages/server/src/__tests__/ |
 
-### Phase 4: Rust-native Features (post-migration)
+### Phase 3: Rust-native Features (post-migration)
 
 Implement directly in Rust (no TS prototype needed):
 - TODO-033 AsyncStorageWrapper
@@ -443,11 +437,10 @@ Cargo workspace + pnpm workspace in same repo. Standard practice (Turso, Deno, S
 
 | Phase | Duration | Prerequisites |
 |-------|----------|---------------|
-| TS Wave 0-2 completion | 6-8 weeks | Current codebase |
-| DAG Executor TS prototype | 4-6 weeks | Can overlap with above |
-| Rust server rewrite | 12-18 weeks | TS spec complete |
+| TS Wave 0-1 completion | 3-4 weeks | Current codebase |
+| Rust server rewrite (incl. DAG, SSE, Cluster HTTP) | 14-20 weeks | TS Wave 0-1 complete |
 | Rust-native features | 8-12 weeks | Post-migration |
-| **Total to Rust server launch** | **~22-32 weeks** | |
+| **Total to Rust server launch** | **~17-24 weeks** | |
 
 ### Without AI
 
@@ -479,7 +472,7 @@ Multiply by 2.5-3x (~55-90 weeks).
 | TODO | Risk of Rework | Why |
 |------|---------------|-----|
 | TODO-033 AsyncStorage | None | Pure decorator, interface stable |
-| TODO-025 DAG Executor | Low (with TS prototype) | TS prototype validates design |
+| TODO-025 DAG Executor | Low | Spec + Hazelcast Java ref sufficient; Rust Future::poll() = Cooperative Tasklet |
 | TODO-043 S3 Bottomless | None | Behind ServerStorage trait |
 | TODO-040 Tiered Storage | Low (with async MapProvider trait) | Internal change only |
 | TODO-042 DBSP | Eliminated | Not needed for TopGun's model |
@@ -501,13 +494,13 @@ DAG ScanProcessor reads data -> data may be in cold tier -> async promotion need
 
 **Rationale**: Rust idioms (ownership, lifetimes, trait objects) are fundamentally different from TypeScript patterns (closures, late binding, prototypes). Line-by-line porting produces non-idiomatic Rust. Rewriting with TS as spec produces better architecture.
 
-### Decision 2: Finish Wave 0-2 in TypeScript First
+### Decision 2: Finish Wave 0-1 Only in TypeScript
 
-**Rationale**: Wave 0-2 stabilizes protocols (IConnection, partition pruning, SSE, cluster HTTP). These protocol decisions are language-agnostic. Cheaper to iterate in TS, then implement final version in Rust.
+**Rationale**: Only Wave 0 (IConnection abstraction) and Wave 1 (partition pruning, client cluster) need TS implementation. Wave 2 (SSE, Cluster HTTP) deferred to Rust — SSE is ~50 lines in axum, and Cluster HTTP routing benefits from Rust's native async model. This reduces the TS phase from 8-10 weeks to 3-4 weeks.
 
-### Decision 3: DAG Executor Gets TS Prototype
+### Decision 3: DAG Executor Goes Straight to Rust (Revised)
 
-**Rationale**: Only architecturally risky TODO. New subsystem with new abstractions (Processor, routing policies). TS prototype at ~1/3 the cost validates design before committing to Rust.
+**Rationale**: Originally planned as TS prototype. Revised because: (a) HAZELCAST_DAG_EXECUTOR_SPEC.md has 700+ lines of complete interfaces, (b) Hazelcast Java source is available at `/Users/koristuvac/Projects/hazelcast/` as reference, (c) Rust `Future::poll()` maps naturally to Cooperative Tasklet model, (d) TS prototype would be discarded after Rust rewrite. Spec + reference code are sufficient to design the Processor trait directly in Rust.
 
 ### Decision 4: S3, AsyncStorage, Tiered Storage Go Straight to Rust
 
@@ -544,18 +537,23 @@ DAG ScanProcessor reads data -> data may be in cold tier -> async promotion need
 
 ## Appendix A: Updated Roadmap Summary
 
-### Pre-Migration (TypeScript)
+### Pre-Migration (TypeScript) — Wave 0-1 Only (~3-4 weeks)
 
 | # | TODO | Wave | Effort | Purpose |
 |---|------|------|--------|---------|
 | 1 | TODO-050 IConnection | 0 | 4-6 hours | Transport abstraction |
 | 2 | TODO-029 Partition Pruning | 1 | 1 week | Query optimization |
 | 3 | TODO-023 Client Cluster | 1 | ~16 hours | Client smart routing |
-| 4 | TODO-048 SSE Push | 2 | 2-3 weeks | Serverless push |
-| 5 | TODO-049 Cluster HTTP | 2 | 2-3 weeks | Cluster HTTP routing |
-| 6 | TODO-025 DAG Executor | 3 | 4-6 weeks | Distributed queries (TS prototype) |
 
-### Post-Migration (Rust)
+### Rust Server Rewrite — Includes Deferred TODOs (~14-20 weeks)
+
+| # | TODO | Effort | Notes |
+|---|------|--------|-------|
+| 4 | TODO-048 SSE Push | 2-3 days | ~50 lines in axum, trivial |
+| 5 | TODO-049 Cluster HTTP | 1-2 weeks | Benefits from Rust async model |
+| 6 | TODO-025 DAG Executor | 2-3 weeks | Spec + Hazelcast Java ref sufficient |
+
+### Post-Migration (Rust-native Features)
 
 | # | TODO | Effort | Notes |
 |---|------|--------|-------|

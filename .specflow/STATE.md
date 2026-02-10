@@ -2,21 +2,23 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
+- **Active Specification:** SPEC-046
+- **Status:** auditing
 - **TODO Items:** 15
-- **Next Step:** `/sf:new` or `/sf:next`
+- **Next Step:** `/sf:audit`
 
 ## Queue
 
 | Position | Spec | Title | Status |
 |----------|------|-------|--------|
-| (empty) | | | |
+| 1 | SPEC-046 | Replace WebSocket Return Type in IConnectionProvider with IConnection Interface | auditing |
 
 ## Decisions
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-10 | SPEC-046 | REVISED: Applied all 4 recommendations from Audit v1. Added missing ClusterClient methods, ConnectionPool.getPrimaryConnection note, explicit test file list, barrel re-export. |
+| 2026-02-10 | SPEC-046 | AUDITED v1: APPROVED with 4 recommendations. Context ~40%. Ready for implementation or optional revision. |
 | 2026-02-10 | SPEC-045 | COMPLETED: Fix ProcessorSandbox Test Hang and Update Documentation Server Instantiation. Modified 13 files, 3 commits, 4 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-045.md |
 | 2026-02-09 | SPEC-044 | COMPLETED: Fix Flaky Split-Brain Recovery Test in Resilience.test.ts. Modified 1 file, 1 commit, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-044.md |
 | 2026-02-09 | SPEC-042 | COMPLETED: Replace Fixed setTimeout Delays with Bounded Polling in Server Tests. Modified 21 files, 8 commits, 2 audit cycles, 2 review cycles. Archived to .specflow/archive/SPEC-042.md |
@@ -55,4 +57,4 @@
 (none)
 
 ---
-*Last updated: 2026-02-10 (SPEC-045 completed and archived)*
+*Last updated: 2026-02-10 (SPEC-046 revised, pending re-audit)*
