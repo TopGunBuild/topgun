@@ -577,6 +577,10 @@ export interface QueryHandlerConfig {
     readReplicaHandler?: {
         selectReadNode: (req: any) => string | null;
     };
+    partitionService?: {
+        getRelevantPartitions: (query: any) => number[] | null;
+        getOwnerNodesForPartitions: (partitionIds: number[]) => string[];
+    };
     ConsistencyLevel: { EVENTUAL: any };
 }
 
