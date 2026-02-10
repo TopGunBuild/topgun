@@ -2,10 +2,40 @@ import type { Timestamp } from '@topgunbuild/core';
 import { HLC, serialize, deserialize } from '@topgunbuild/core';
 import type {
   IConnectionProvider,
+  IConnection,
   ConnectionProviderEvent,
   ConnectionEventHandler,
 } from '../types';
+import { ConnectionReadyState } from './WebSocketConnection';
 import { logger } from '../utils/logger';
+
+/**
+ * No-op IConnection for HTTP mode. Delegates send() to the provider's
+ * internal queue so operations are flushed on the next HTTP poll cycle.
+ */
+class HttpConnection implements IConnection {
+  constructor(private readonly provider: HttpSyncProvider) {}
+
+  send(data: ArrayBuffer | Uint8Array | string): void {
+    if (typeof data === 'string') {
+      // Convert string to Uint8Array for the provider's send() method
+      const encoder = new TextEncoder();
+      this.provider.send(encoder.encode(data));
+    } else {
+      this.provider.send(data instanceof ArrayBuffer ? new Uint8Array(data) : data);
+    }
+  }
+
+  close(): void {
+    // HTTP connections are stateless; close is a no-op
+  }
+
+  get readyState(): number {
+    return this.provider.isConnected()
+      ? ConnectionReadyState.OPEN
+      : ConnectionReadyState.CLOSED;
+  }
+}
 
 /**
  * Configuration for HttpSyncProvider.
@@ -97,18 +127,18 @@ export class HttpSyncProvider implements IConnectionProvider {
 
   /**
    * Get connection for a specific key.
-   * HTTP mode does not expose raw WebSocket connections.
+   * Returns an HttpConnection that queues operations for the next poll cycle.
    */
-  getConnection(_key: string): WebSocket {
-    throw new Error('HTTP mode does not support direct WebSocket access');
+  getConnection(_key: string): IConnection {
+    return new HttpConnection(this);
   }
 
   /**
    * Get any available connection.
-   * HTTP mode does not expose raw WebSocket connections.
+   * Returns an HttpConnection that queues operations for the next poll cycle.
    */
-  getAnyConnection(): WebSocket {
-    throw new Error('HTTP mode does not support direct WebSocket access');
+  getAnyConnection(): IConnection {
+    return new HttpConnection(this);
   }
 
   /**
