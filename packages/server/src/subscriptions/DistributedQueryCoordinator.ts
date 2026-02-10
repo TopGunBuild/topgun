@@ -48,16 +48,25 @@ import {
  */
 export class DistributedQueryCoordinator extends DistributedSubscriptionBase {
   private readonly localQueryRegistry: QueryRegistry;
+  private readonly partitionService?: {
+    getRelevantPartitions: (query: any) => number[] | null;
+    getOwnerNodesForPartitions: (partitionIds: number[]) => string[];
+  };
 
   constructor(
     clusterManager: ClusterManager,
     queryRegistry: QueryRegistry,
     config?: DistributedSubscriptionConfig,
     metricsService?: MetricsService,
-    options?: { registerMemberLeftListener?: boolean }
+    options?: { registerMemberLeftListener?: boolean },
+    partitionService?: {
+      getRelevantPartitions: (query: any) => number[] | null;
+      getOwnerNodesForPartitions: (partitionIds: number[]) => string[];
+    }
   ) {
     super(clusterManager, config, metricsService, options);
     this.localQueryRegistry = queryRegistry;
+    this.partitionService = partitionService;
 
     logger.debug('DistributedQueryCoordinator initialized');
   }
@@ -85,10 +94,25 @@ export class DistributedQueryCoordinator extends DistributedSubscriptionBase {
     query: Query
   ): Promise<DistributedSubscriptionResult> {
     const myNodeId = this.clusterManager.config.nodeId;
-    const allNodes = new Set(this.clusterManager.getMembers());
+
+    // Determine target nodes: use partition pruning when available to avoid querying irrelevant nodes
+    let targetNodes: Set<string>;
+    if (this.partitionService) {
+      const relevantPartitions = this.partitionService.getRelevantPartitions(query);
+      if (relevantPartitions !== null) {
+        const ownerNodes = this.partitionService.getOwnerNodesForPartitions(relevantPartitions);
+        targetNodes = new Set(ownerNodes);
+        // Always include self since we register locally regardless of partition ownership
+        targetNodes.add(myNodeId);
+      } else {
+        targetNodes = new Set(this.clusterManager.getMembers());
+      }
+    } else {
+      targetNodes = new Set(this.clusterManager.getMembers());
+    }
 
     logger.debug(
-      { subscriptionId, mapName, nodes: Array.from(allNodes) },
+      { subscriptionId, mapName, nodes: Array.from(targetNodes) },
       'Creating distributed query subscription'
     );
 
@@ -104,6 +128,7 @@ export class DistributedQueryCoordinator extends DistributedSubscriptionBase {
       pendingResults: new Map(),
       createdAt: Date.now(),
       currentResults: new Map(),
+      targetedNodes: targetNodes,
     };
 
     this.subscriptions.set(subscriptionId, subscription);
@@ -122,15 +147,15 @@ export class DistributedQueryCoordinator extends DistributedSubscriptionBase {
     const localResults = this.registerLocalQuerySubscription(subscription);
     this.handleLocalAck(subscriptionId, myNodeId, { results: localResults, totalHits: localResults.length });
 
-    // Register on remote nodes
-    for (const nodeId of allNodes) {
+    // Register on targeted remote nodes only
+    for (const nodeId of targetNodes) {
       if (nodeId !== myNodeId) {
         this.clusterManager.send(nodeId, 'CLUSTER_SUB_REGISTER', registerPayload);
       }
     }
 
-    // Wait for all nodes to acknowledge (with timeout)
-    return this.waitForAcks(subscriptionId, allNodes);
+    // Wait for targeted nodes to acknowledge (with timeout)
+    return this.waitForAcks(subscriptionId, targetNodes);
   }
 
   /**
@@ -241,8 +266,9 @@ export class DistributedQueryCoordinator extends DistributedSubscriptionBase {
    * Merge initial results from all nodes (simple dedupe by key).
    */
   mergeInitialResults(subscription: DistributedSubscription): DistributedSubscriptionResult {
-    const allNodes = new Set(this.clusterManager.getMembers());
-    const failedNodes = Array.from(allNodes).filter(n => !subscription.registeredNodes.has(n));
+    // Use per-subscription targeted nodes to avoid marking non-targeted nodes as failed
+    const expectedNodes = subscription.targetedNodes ?? new Set(this.clusterManager.getMembers());
+    const failedNodes = Array.from(expectedNodes).filter(n => !subscription.registeredNodes.has(n));
 
     const resultMap = new Map<string, { key: string; value: unknown }>();
 

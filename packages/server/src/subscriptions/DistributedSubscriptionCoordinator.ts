@@ -80,7 +80,11 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
     queryRegistry: QueryRegistry,
     searchCoordinator: SearchCoordinator,
     config?: DistributedSubscriptionConfig,
-    metricsService?: MetricsService
+    metricsService?: MetricsService,
+    partitionService?: {
+      getRelevantPartitions: (query: any) => number[] | null;
+      getOwnerNodesForPartitions: (partitionIds: number[]) => string[];
+    }
   ) {
     super();
     this.clusterManager = clusterManager;
@@ -103,7 +107,8 @@ export class DistributedSubscriptionCoordinator extends EventEmitter {
       queryRegistry,
       config,
       metricsService,
-      { registerMemberLeftListener: false }
+      { registerMemberLeftListener: false },
+      partitionService
     );
 
     // Listen for cluster messages
