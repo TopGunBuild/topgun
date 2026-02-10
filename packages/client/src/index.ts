@@ -16,7 +16,7 @@ import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 import { ConnectionPool, PartitionRouter, ClusterClient } from './cluster';
 
 // Connection provider imports
-import { SingleServerProvider, HttpSyncProvider, AutoConnectionProvider } from './connection';
+import { SingleServerProvider, HttpSyncProvider, AutoConnectionProvider, WebSocketConnection, ConnectionReadyState } from './connection';
 
 // Type imports
 import type { IStorageAdapter, OpLogEntry } from './IStorageAdapter';
@@ -78,8 +78,9 @@ export type {
 } from './cluster';
 
 // Connection provider exports
-export { SingleServerProvider, HttpSyncProvider, AutoConnectionProvider };
+export { SingleServerProvider, HttpSyncProvider, AutoConnectionProvider, WebSocketConnection, ConnectionReadyState };
 export type {
+  IConnection,
   IConnectionProvider,
   ConnectionProviderEvent,
   ConnectionEventHandler,
