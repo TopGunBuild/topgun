@@ -1,9 +1,19 @@
 /**
  * Connection Provider Types
  *
- * IConnectionProvider abstracts WebSocket connection handling to support
- * both single-server and cluster modes.
+ * IConnectionProvider abstracts connection handling to support
+ * both single-server and cluster modes across WebSocket and HTTP transports.
  */
+
+/**
+ * Minimal connection interface capturing the actual usage pattern.
+ * Allows transport-agnostic code without depending on the WebSocket global.
+ */
+export interface IConnection {
+  send(data: ArrayBuffer | Uint8Array | string): void;
+  close(): void;
+  readonly readyState: number;
+}
 
 /**
  * Events emitted by IConnectionProvider.
@@ -22,11 +32,13 @@ export type ConnectionProviderEvent =
 export type ConnectionEventHandler = (...args: any[]) => void;
 
 /**
- * Abstract interface for WebSocket connection providers.
+ * Abstract interface for connection providers.
  *
  * Implementations:
  * - SingleServerProvider: Direct connection to a single server
  * - ClusterClient: Multi-node connection pool with partition routing
+ * - HttpSyncProvider: HTTP polling for serverless environments
+ * - AutoConnectionProvider: WebSocket-to-HTTP fallback
  */
 export interface IConnectionProvider {
   /**
@@ -43,7 +55,7 @@ export interface IConnectionProvider {
    * @param key - The key to route (used for partition-aware routing)
    * @throws Error if not connected
    */
-  getConnection(key: string): WebSocket;
+  getConnection(key: string): IConnection;
 
   /**
    * Get any available connection.
@@ -51,7 +63,7 @@ export interface IConnectionProvider {
    *
    * @throws Error if not connected
    */
-  getAnyConnection(): WebSocket;
+  getAnyConnection(): IConnection;
 
   /**
    * Check if at least one connection is active and ready.
