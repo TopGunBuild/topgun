@@ -2,23 +2,21 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-046
-- **Status:** auditing
+- **Active Specification:** none
+- **Status:** idle
 - **TODO Items:** 15
-- **Next Step:** `/sf:audit`
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | Position | Spec | Title | Status |
 |----------|------|-------|--------|
-| 1 | SPEC-046 | Replace WebSocket Return Type in IConnectionProvider with IConnection Interface | auditing |
 
 ## Decisions
 
 | Date | Specification | Decision |
 |------|---------------|----------|
-| 2026-02-10 | SPEC-046 | REVISED: Applied all 4 recommendations from Audit v1. Added missing ClusterClient methods, ConnectionPool.getPrimaryConnection note, explicit test file list, barrel re-export. |
-| 2026-02-10 | SPEC-046 | AUDITED v1: APPROVED with 4 recommendations. Context ~40%. Ready for implementation or optional revision. |
+| 2026-02-10 | SPEC-046 | COMPLETED: Replace WebSocket Return Type in IConnectionProvider with IConnection Interface. Created 1 file, modified 10 files. 9 commits, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-046.md |
 | 2026-02-10 | SPEC-045 | COMPLETED: Fix ProcessorSandbox Test Hang and Update Documentation Server Instantiation. Modified 13 files, 3 commits, 4 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-045.md |
 | 2026-02-09 | SPEC-044 | COMPLETED: Fix Flaky Split-Brain Recovery Test in Resilience.test.ts. Modified 1 file, 1 commit, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-044.md |
 | 2026-02-09 | SPEC-042 | COMPLETED: Replace Fixed setTimeout Delays with Bounded Polling in Server Tests. Modified 21 files, 8 commits, 2 audit cycles, 2 review cycles. Archived to .specflow/archive/SPEC-042.md |
@@ -51,10 +49,11 @@
 - DST infrastructure pattern: VirtualClock/SeededRNG/VirtualNetwork for deterministic simulation testing; injectable ClockSource via HLC for reproducible time
 - HTTP sync transport pattern: HttpSyncProvider implements IConnectionProvider via message type routing in send(); AutoConnectionProvider provides WS-to-HTTP fallback; server uses setHttpRequestHandler() deferred wiring for POST /sync
 - VM sandbox pattern: ProcessorSandbox fallback uses vm.Script + runInNewContext({ timeout }) for synchronous code interruption; isolated-vm primary path unchanged
+- IConnection adapter pattern: IConnectionProvider returns IConnection interface (send/close/readyState) instead of concrete WebSocket; WebSocketConnection wraps WS, HttpConnection wraps HTTP queue; ConnectionReadyState constants avoid WebSocket global dependency
 
 ## Warnings
 
 (none)
 
 ---
-*Last updated: 2026-02-10 (SPEC-046 revised, pending re-audit)*
+*Last updated: 2026-02-10 (SPEC-046 completed and archived)*
