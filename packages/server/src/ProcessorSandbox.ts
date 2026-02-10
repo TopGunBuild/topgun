@@ -246,11 +246,13 @@ export class ProcessorSandbox {
         }
       }
 
-      // Execute in a new context with timeout to interrupt synchronous infinite loops
+      // Execute in a new context with timeout to interrupt synchronous infinite loops.
+      // Pass values directly -- vm contexts accept JS values without serialization,
+      // and we must preserve undefined (not convert to null) for processors that check it.
       const sandbox = {
-        value: JSON.parse(JSON.stringify(value ?? null)),
+        value,
         key,
-        args: JSON.parse(JSON.stringify(processor.args ?? null)),
+        args: processor.args,
       };
       const result = script.runInNewContext(sandbox, {
         timeout: this.config.timeoutMs,
