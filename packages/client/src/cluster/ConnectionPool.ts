@@ -40,6 +40,7 @@ interface NodeConnection {
   nodeId: string;
   endpoint: string;
   socket: WebSocket | null;
+  cachedConnection: WebSocketConnection | null;
   state: ConnectionState;
   lastSeen: number;
   latencyMs: number;
@@ -135,6 +136,7 @@ export class ConnectionPool {
       nodeId,
       endpoint,
       socket: null,
+      cachedConnection: null,
       state: 'DISCONNECTED',
       lastSeen: 0,
       latencyMs: 0,
@@ -193,7 +195,10 @@ export class ConnectionPool {
     if (!connection || connection.state !== 'AUTHENTICATED' || !connection.socket) {
       return null;
     }
-    return new WebSocketConnection(connection.socket);
+    if (!connection.cachedConnection) {
+      connection.cachedConnection = new WebSocketConnection(connection.socket);
+    }
+    return connection.cachedConnection;
   }
 
   /**
@@ -210,7 +215,10 @@ export class ConnectionPool {
   public getAnyHealthyConnection(): { nodeId: string; connection: IConnection } | null {
     for (const [nodeId, conn] of this.connections) {
       if (conn.state === 'AUTHENTICATED' && conn.socket) {
-        return { nodeId, connection: new WebSocketConnection(conn.socket) };
+        if (!conn.cachedConnection) {
+          conn.cachedConnection = new WebSocketConnection(conn.socket);
+        }
+        return { nodeId, connection: conn.cachedConnection };
       }
     }
     return null;
@@ -388,6 +396,7 @@ export class ConnectionPool {
         const wasConnected = connection.state === 'AUTHENTICATED';
         connection.state = 'DISCONNECTED';
         connection.socket = null;
+        connection.cachedConnection = null;
 
         if (wasConnected) {
           this.emit('node:disconnected', nodeId, 'Connection closed');
