@@ -24,6 +24,7 @@ export type ConnectionPoolEventType =
   | 'node:disconnected'
   | 'node:healthy'
   | 'node:unhealthy'
+  | 'node:remapped'
   | 'message'
   | 'error';
 
@@ -32,6 +33,7 @@ export interface ConnectionPoolEvents {
   'node:disconnected': (nodeId: string, reason: string) => void;
   'node:healthy': (nodeId: string) => void;
   'node:unhealthy': (nodeId: string, reason: string) => void;
+  'node:remapped': (oldId: string, newId: string) => void;
   'message': (nodeId: string, message: any) => void;
   'error': (nodeId: string, error: Error) => void;
 }
@@ -132,6 +134,15 @@ export class ConnectionPool {
       }
     }
 
+    // Check if an existing connection has the same endpoint under a different ID
+    // (e.g., seed-0 needs to be remapped to the server-assigned node ID)
+    for (const [existingId, existingConn] of this.connections) {
+      if (existingConn.endpoint === endpoint && existingId !== nodeId) {
+        this.remapNodeId(existingId, nodeId);
+        return;
+      }
+    }
+
     const connection: NodeConnection = {
       nodeId,
       endpoint,
@@ -185,6 +196,28 @@ export class ConnectionPool {
     }
 
     logger.info({ nodeId }, 'Node removed from connection pool');
+  }
+
+  /**
+   * Remap a node from one ID to another, preserving the existing connection.
+   * Used when the server-assigned node ID differs from the temporary seed ID.
+   */
+  public remapNodeId(oldId: string, newId: string): void {
+    const connection = this.connections.get(oldId);
+    if (!connection) return;
+
+    // Transfer the entry under the new key
+    connection.nodeId = newId;
+    this.connections.delete(oldId);
+    this.connections.set(newId, connection);
+
+    // Update primary if the remapped node was primary
+    if (this.primaryNodeId === oldId) {
+      this.primaryNodeId = newId;
+    }
+
+    logger.info({ oldId, newId }, 'Node ID remapped');
+    this.emit('node:remapped', oldId, newId);
   }
 
   /**
