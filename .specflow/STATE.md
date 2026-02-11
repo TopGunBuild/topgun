@@ -5,7 +5,7 @@
 - **Active Specification:** none
 - **Status:** idle
 - **TODO Items:** 15
-- **Next Step:** /sf:new or /sf:next
+- **Next Step:** `/sf:new` or `/sf:next`
 
 ## Queue
 
@@ -16,17 +16,11 @@
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-11 | SPEC-047 | COMPLETED: Partition Pruning for Distributed Queries. Created 1 file, modified 7 files. 10 commits, 3 audit cycles, 3 review cycles. Archived to .specflow/archive/SPEC-047.md |
+| 2026-02-11 | SPEC-047 | Review v3: APPROVED. Critical fix from Review v2 (restoring targetNodes.add(myNodeId)) verified correct. All 12 acceptance criteria met. All 24 new tests pass. All existing tests pass (1 pre-existing flaky EntryProcessor test unrelated). No critical or major issues. |
+| 2026-02-10 | SPEC-047 | Audit v3: APPROVED with 2 recommendations. All 10 dimensions passed. All line numbers and code references verified against source. Assumptions are low-risk and conservative. Recommend /sf:run --parallel due to ~56% total context with 3-wave execution plan. |
 | 2026-02-10 | SPEC-046 | COMPLETED: Replace WebSocket Return Type in IConnectionProvider with IConnection Interface. Created 1 file, modified 10 files. 9 commits, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-046.md |
 | 2026-02-10 | SPEC-045 | COMPLETED: Fix ProcessorSandbox Test Hang and Update Documentation Server Instantiation. Modified 13 files, 3 commits, 4 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-045.md |
-| 2026-02-09 | SPEC-044 | COMPLETED: Fix Flaky Split-Brain Recovery Test in Resilience.test.ts. Modified 1 file, 1 commit, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-044.md |
-| 2026-02-09 | SPEC-042 | COMPLETED: Replace Fixed setTimeout Delays with Bounded Polling in Server Tests. Modified 21 files, 8 commits, 2 audit cycles, 2 review cycles. Archived to .specflow/archive/SPEC-042.md |
-| 2026-02-09 | SPEC-043 | COMPLETED: Fix SearchCoordinator Batched LEAVE Notification Bug. Modified 1 file, 1 commit, 1 audit cycle, 1 review cycle. Archived to .specflow/archive/SPEC-043.md |
-| 2026-02-08 | SPEC-041 | COMPLETED: Fix DistributedSearch and GC Broadcast Test Failures. Modified 1 file, 1 commit, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-041.md |
-| 2026-02-08 | SPEC-040 | COMPLETED: Fix Interceptor Integration and TLS Test Failures After Modular Refactoring. Modified 3 files, 3 commits, 1 audit cycle, 1 review cycle. Archived to .specflow/archive/SPEC-040.md |
-| 2026-02-08 | SPEC-039 | COMPLETED: Add Reject Path to network.start() Promise. Modified 3 files, 1 commit, 1 audit cycle, 1 review cycle. Archived to .specflow/archive/SPEC-039.md |
-| 2026-02-08 | SPEC-038 | COMPLETED: Fix WebSocket Client Auth Handshake After ServerFactory Modular Refactoring. Modified 4 files, 1 commit, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-038.md |
-| 2026-02-07 | SPEC-037 | COMPLETED: Document HTTP Sync Protocol and Serverless Deployment. Modified 4 files (sync-protocol.mdx, server.mdx, client.mdx, deployment.mdx). 6 commits, 4 audit cycles, 2 review cycles. Archived to .specflow/archive/SPEC-037.md |
-| 2026-02-06 | SPEC-036 | COMPLETED: HTTP Sync Protocol for Serverless Environments. Created 9 files, modified 7 files. 9 commits, 3 audit cycles, 2 review cycles. Archived to .specflow/archive/SPEC-036.md |
 
 ## Project Patterns
 
@@ -50,10 +44,11 @@
 - HTTP sync transport pattern: HttpSyncProvider implements IConnectionProvider via message type routing in send(); AutoConnectionProvider provides WS-to-HTTP fallback; server uses setHttpRequestHandler() deferred wiring for POST /sync
 - VM sandbox pattern: ProcessorSandbox fallback uses vm.Script + runInNewContext({ timeout }) for synchronous code interruption; isolated-vm primary path unchanged
 - IConnection adapter pattern: IConnectionProvider returns IConnection interface (send/close/readyState) instead of concrete WebSocket; WebSocketConnection wraps WS, HttpConnection wraps HTTP queue; ConnectionReadyState constants avoid WebSocket global dependency
+- Partition pruning pattern: PartitionService.getRelevantPartitions extracts key predicates (_key, key, id, _id) from queries to prune distributed fan-out; targetedNodes on DistributedSubscription keeps checkAcksComplete consistent with pruned node sets
 
 ## Warnings
 
 (none)
 
 ---
-*Last updated: 2026-02-10 (SPEC-046 completed and archived)*
+*Last updated: 2026-02-11 (SPEC-047 completed and archived)*

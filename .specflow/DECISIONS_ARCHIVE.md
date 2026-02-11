@@ -6,6 +6,21 @@ Historical decisions rotated from STATE.md to maintain compactness.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-11 | SPEC-047 | Review v2: CHANGES_REQUESTED. 1 critical issue: Fix #1 from Review v1 (removing unconditional self-addition to targetedNodes) introduced ACK count mismatch causing pruned subscriptions targeting remote-only partitions to resolve prematurely. Fix: revert targetNodes.add(myNodeId) removal. Fix #2 (port changes) is correct. |
+| 2026-02-11 | SPEC-047 | Review v1: APPROVED with 2 minor findings (unconditional self-addition to targetedNodes, OS-assigned ports). All 12 acceptance criteria met. All 85 test suites (1211 tests) pass. 24 new tests pass. No critical or major issues. |
+| 2026-02-10 | SPEC-047 | Response v2: Applied all items from Audit v2. Added R4a requirement for checkAcksComplete base-class fix with targetedNodes field on DistributedSubscription interface. |
+| 2026-02-10 | SPEC-047 | Audit v2: NEEDS_REVISION. 1 critical issue: checkAcksComplete in DistributedSubscriptionBase uses getMembers() not targeted node set, causing pruned subscriptions to always timeout. |
+| 2026-02-10 | SPEC-047 | Response v1: Applied all 3 critical issues and 4 recommendations from Audit v1. R4/R5 rewritten for facade wiring, R3 branch label corrected, context estimates reduced, _id added, mergeInitialResults failedNodes fix added. |
+| 2026-02-10 | SPEC-047 | Audit v1: NEEDS_REVISION. 3 critical issues: (1) R4/R5 missing DistributedSubscriptionCoordinator facade wiring, (2) R3 mislabels else branch, (3) G1 context estimate inflated. 4 recommendations. |
+| 2026-02-09 | SPEC-044 | COMPLETED: Fix Flaky Split-Brain Recovery Test in Resilience.test.ts. Modified 1 file, 1 commit, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-044.md |
+| 2026-02-09 | SPEC-042 | COMPLETED: Replace Fixed setTimeout Delays with Bounded Polling in Server Tests. Modified 21 files, 8 commits, 2 audit cycles, 2 review cycles. Archived to .specflow/archive/SPEC-042.md |
+| 2026-02-09 | SPEC-043 | COMPLETED: Fix SearchCoordinator Batched LEAVE Notification Bug. Modified 1 file, 1 commit, 1 audit cycle, 1 review cycle. Archived to .specflow/archive/SPEC-043.md |
+| 2026-02-08 | SPEC-041 | COMPLETED: Fix DistributedSearch and GC Broadcast Test Failures. Modified 1 file, 1 commit, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-041.md |
+| 2026-02-08 | SPEC-040 | COMPLETED: Fix Interceptor Integration and TLS Test Failures After Modular Refactoring. Modified 3 files, 3 commits, 1 audit cycle, 1 review cycle. Archived to .specflow/archive/SPEC-040.md |
+| 2026-02-08 | SPEC-039 | COMPLETED: Add Reject Path to network.start() Promise. Modified 3 files, 1 commit, 1 audit cycle, 1 review cycle. Archived to .specflow/archive/SPEC-039.md |
+| 2026-02-08 | SPEC-038 | COMPLETED: Fix WebSocket Client Auth Handshake After ServerFactory Modular Refactoring. Modified 4 files, 1 commit, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-038.md |
+| 2026-02-07 | SPEC-037 | COMPLETED: Document HTTP Sync Protocol and Serverless Deployment. Modified 4 files. 6 commits, 4 audit cycles, 2 review cycles. Archived to .specflow/archive/SPEC-037.md |
+| 2026-02-06 | SPEC-036 | COMPLETED: HTTP Sync Protocol for Serverless Environments. Created 9 files, modified 7 files. 9 commits, 3 audit cycles, 2 review cycles. Archived to .specflow/archive/SPEC-036.md |
 | 2026-01-30 | SPEC-011a | COMPLETED: Module infrastructure created (types.ts, core-module.ts, workers-module.ts). ServerFactory.create() refactored. 22 lines removed. Archived to .specflow/archive/SPEC-011a.md |
 | 2026-01-30 | SPEC-011b | COMPLETED: Cluster + Storage modules extracted. ServerFactory.ts reduced 62 lines. Archived to .specflow/archive/SPEC-011b.md |
 | 2026-01-30 | SPEC-011c | COMPLETED: Network Module with deferred startup. ServerFactory.ts reduced 38 lines. Archived to .specflow/archive/SPEC-011c.md |

@@ -1,6 +1,6 @@
 # To-Do List
 
-**Last updated:** 2026-02-10 (TODO-050 converted to SPEC-046)
+**Last updated:** 2026-02-10 (TODO-029 converted to SPEC-047)
 **Source:** Migrated from PROMPTS directory, reordered by technical dependencies
 
 ---
@@ -62,16 +62,8 @@
 
 *Goal: Efficient distributed queries, partition-aware routing*
 
-### TODO-029: Partition Pruning
-- **Priority:** 🟡 Medium
-- **Complexity:** Medium
-- **Context:** [reference/HAZELCAST_QUICK_WINS.md](../reference/HAZELCAST_QUICK_WINS.md)
-- **Summary:** Skip partitions that can't contain matching records
-- **Why:** Required for efficient distributed queries at scale; prerequisite for TODO-025 (DAG Executor) and recommended for TODO-049 (Cluster HTTP Routing)
-- **Current:** Distributed queries scan all partitions
-- **Solution:** Use partition key to determine relevant partitions
-- **Example:** Query `tenantId = 'abc'` → only scan partitions where hash('abc') maps
-- **Effort:** 1 week
+### ~~TODO-029: Partition Pruning~~ → SPEC-047
+- **Status:** Converted to [SPEC-047](.specflow/specs/SPEC-047.md)
 
 ---
 
@@ -349,7 +341,7 @@ TODO-023 (Client Cluster)          TODO-033 (AsyncStorage)
 | ★ | ~~TODO-058~~ → SPEC-044 | -1 | 0.5 day | — | 🟡 P2 |
 | ★ | ~~TODO-054~~ → SPEC-045 | -1 | 1 day | — | 🟡 P2 |
 | 1 | ~~TODO-050~~ → SPEC-046 | 0 | 4-6 hours | TODO-048, TODO-049 | 🔴 High |
-| 2 | TODO-029 | 1 | 1 week | TODO-025, TODO-049 | 🟡 Medium |
+| 2 | ~~TODO-029~~ → SPEC-047 | 1 | 1 week | TODO-025, TODO-049 | 🟡 Medium |
 | 3 | TODO-023 | 1 | ~16 hours | — (independent) | 🟡 Medium |
 | 4 | TODO-048 | 2 | Rust phase | — | 🔵 Deferred to Rust |
 | 5 | TODO-049 | 2 | Rust phase | — | 🔵 Deferred to Rust |

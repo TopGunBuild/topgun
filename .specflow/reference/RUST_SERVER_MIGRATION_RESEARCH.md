@@ -277,6 +277,8 @@ Stabilize core abstractions and cluster infrastructure before starting Rust work
 | TODO-029 Partition Pruning | 1 | 1 week | Clarifies partition query protocol |
 | TODO-023 Client Cluster | 1 | ~16 hours | Stabilizes client-server contract |
 
+**SpecFlow transition:** Before starting Phase 2, replace the `## Language Profile` section in `.specflow/PROJECT.md` with the Rust profile (specflow-cc v1.12.0+). This enables compilation gates, trait-first enforcement, and Rust idiom checks across all agents.
+
 ### Phase 2: Rust Server Rewrite (~14-20 weeks)
 
 Rewrite (not port) using TypeScript server as executable specification. Includes features previously planned for TS Waves 2-3.
