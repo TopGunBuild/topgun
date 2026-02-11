@@ -225,7 +225,11 @@ export class ConnectionPool {
    */
   public getConnection(nodeId: string): IConnection | null {
     const connection = this.connections.get(nodeId);
-    if (!connection || connection.state !== 'AUTHENTICATED' || !connection.socket) {
+    if (
+      !connection ||
+      (connection.state !== 'CONNECTED' && connection.state !== 'AUTHENTICATED') ||
+      !connection.socket
+    ) {
       return null;
     }
     if (!connection.cachedConnection) {
@@ -247,7 +251,7 @@ export class ConnectionPool {
    */
   public getAnyHealthyConnection(): { nodeId: string; connection: IConnection } | null {
     for (const [nodeId, conn] of this.connections) {
-      if (conn.state === 'AUTHENTICATED' && conn.socket) {
+      if ((conn.state === 'CONNECTED' || conn.state === 'AUTHENTICATED') && conn.socket) {
         if (!conn.cachedConnection) {
           conn.cachedConnection = new WebSocketConnection(conn.socket);
         }
@@ -317,7 +321,7 @@ export class ConnectionPool {
    */
   public getConnectedNodes(): string[] {
     return Array.from(this.connections.entries())
-      .filter(([_, conn]) => conn.state === 'AUTHENTICATED')
+      .filter(([_, conn]) => conn.state === 'CONNECTED' || conn.state === 'AUTHENTICATED')
       .map(([nodeId]) => nodeId);
   }
 
@@ -329,11 +333,11 @@ export class ConnectionPool {
   }
 
   /**
-   * Check if node is connected and authenticated
+   * Check if node has an open WebSocket connection
    */
   public isNodeConnected(nodeId: string): boolean {
     const conn = this.connections.get(nodeId);
-    return conn?.state === 'AUTHENTICATED';
+    return conn?.state === 'CONNECTED' || conn?.state === 'AUTHENTICATED';
   }
 
   /**
@@ -471,45 +475,33 @@ export class ConnectionPool {
       return;
     }
 
-    // Handle auth response
+    // Handle auth-related side effects (state tracking and pending message flush)
     if (message.type === 'AUTH_ACK') {
       connection.state = 'AUTHENTICATED';
       logger.info({ nodeId }, 'Authenticated with node');
       this.emit('node:healthy', nodeId);
-
-      // Flush pending messages
       this.flushPendingMessages(connection);
-      return;
     }
 
     if (message.type === 'AUTH_REQUIRED') {
       if (this.authToken) {
         this.sendAuth(connection);
       }
-      return;
     }
 
     if (message.type === 'AUTH_FAIL') {
       logger.error({ nodeId, error: message.error }, 'Authentication failed');
       connection.state = 'FAILED';
-      return;
     }
 
     if (message.type === 'PONG') {
-      // Update latency
       if (message.timestamp) {
         connection.latencyMs = Date.now() - message.timestamp;
       }
       return;
     }
 
-    // Handle partition map updates
-    if (message.type === 'PARTITION_MAP' || message.type === 'PARTITION_MAP_DELTA') {
-      this.emit('message', nodeId, message);
-      return;
-    }
-
-    // Emit other messages
+    // Forward all messages (including auth messages) to listeners
     this.emit('message', nodeId, message);
   }
 
