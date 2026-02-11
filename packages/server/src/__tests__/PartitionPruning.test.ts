@@ -483,10 +483,10 @@ describe('PartitionPruning Integration – Reduced Fan-out', () => {
   beforeAll(async () => {
     // Start Node B first (higher ID, receives connection)
     nodeB = ServerFactory.create({
-      port: 0,
+      port: 12010,
       nodeId: 'prune-node-b',
       host: 'localhost',
-      clusterPort: 0,
+      clusterPort: 12011,
       peers: [],
     });
     await nodeB.ready();
@@ -494,11 +494,11 @@ describe('PartitionPruning Integration – Reduced Fan-out', () => {
 
     // Start Node A (lower ID, initiates connection to B)
     nodeA = ServerFactory.create({
-      port: 0,
+      port: 12012,
       nodeId: 'prune-node-a',
       host: 'localhost',
-      clusterPort: 0,
-      peers: [`localhost:${nodeB.clusterPort}`],
+      clusterPort: 12013,
+      peers: [`localhost:12011`],
     });
     await nodeA.ready();
     harnessA = createTestHarness(nodeA);

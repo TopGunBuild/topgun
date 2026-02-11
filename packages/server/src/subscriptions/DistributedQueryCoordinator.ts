@@ -102,8 +102,6 @@ export class DistributedQueryCoordinator extends DistributedSubscriptionBase {
       if (relevantPartitions !== null) {
         const ownerNodes = this.partitionService.getOwnerNodesForPartitions(relevantPartitions);
         targetNodes = new Set(ownerNodes);
-        // Always include self since we register locally regardless of partition ownership
-        targetNodes.add(myNodeId);
       } else {
         targetNodes = new Set(this.clusterManager.getMembers());
       }
