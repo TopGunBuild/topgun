@@ -5,22 +5,24 @@
 - **Active Specification:** none
 - **Status:** idle
 - **TODO Items:** 15
-- **Next Step:** `/sf:new` or `/sf:next`
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | Position | Spec | Title | Status |
 |----------|------|-------|--------|
+| 1 | SPEC-048b | Routing Logic and Error Recovery | draft |
+| 2 | SPEC-048c | End-to-End Cluster Integration Test | draft |
 
 ## Decisions
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-11 | SPEC-048a | COMPLETED: ConnectionPool Foundation Fixes. Modified 1 file, 3 commits, 3 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-048a.md |
+| 2026-02-11 | SPEC-048a | Review v1: APPROVED. All 8 acceptance criteria verified. All 5 constraints honored. Build succeeds. 497 tests pass. +55/-21 lines in single file. No critical or major issues. |
+| 2026-02-11 | SPEC-048a | Audit v3: APPROVED. All 10 dimensions passed. Source code verified: NodeConnection.endpoint exists for matching, addNode() receives both nodeId and endpoint, handleMessage return statements are only barrier to forwarding. No critical issues. No recommendations. |
+| 2026-02-11 | SPEC-048 | SPLIT into 3 parts: SPEC-048a (ConnectionPool Foundation Fixes), SPEC-048b (Routing Logic and Error Recovery), SPEC-048c (End-to-End Cluster Integration Test). Parent archived to .specflow/archive/SPEC-048.md |
 | 2026-02-11 | SPEC-047 | COMPLETED: Partition Pruning for Distributed Queries. Created 1 file, modified 7 files. 10 commits, 3 audit cycles, 3 review cycles. Archived to .specflow/archive/SPEC-047.md |
-| 2026-02-11 | SPEC-047 | Review v3: APPROVED. Critical fix from Review v2 (restoring targetNodes.add(myNodeId)) verified correct. All 12 acceptance criteria met. All 24 new tests pass. All existing tests pass (1 pre-existing flaky EntryProcessor test unrelated). No critical or major issues. |
-| 2026-02-10 | SPEC-047 | Audit v3: APPROVED with 2 recommendations. All 10 dimensions passed. All line numbers and code references verified against source. Assumptions are low-risk and conservative. Recommend /sf:run --parallel due to ~56% total context with 3-wave execution plan. |
-| 2026-02-10 | SPEC-046 | COMPLETED: Replace WebSocket Return Type in IConnectionProvider with IConnection Interface. Created 1 file, modified 10 files. 9 commits, 2 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-046.md |
-| 2026-02-10 | SPEC-045 | COMPLETED: Fix ProcessorSandbox Test Hang and Update Documentation Server Instantiation. Modified 13 files, 3 commits, 4 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-045.md |
 
 ## Project Patterns
 
@@ -45,10 +47,11 @@
 - VM sandbox pattern: ProcessorSandbox fallback uses vm.Script + runInNewContext({ timeout }) for synchronous code interruption; isolated-vm primary path unchanged
 - IConnection adapter pattern: IConnectionProvider returns IConnection interface (send/close/readyState) instead of concrete WebSocket; WebSocketConnection wraps WS, HttpConnection wraps HTTP queue; ConnectionReadyState constants avoid WebSocket global dependency
 - Partition pruning pattern: PartitionService.getRelevantPartitions extracts key predicates (_key, key, id, _id) from queries to prune distributed fan-out; targetedNodes on DistributedSubscription keeps checkAcksComplete consistent with pruned node sets
+- Node ID reconciliation pattern: ConnectionPool.addNode() matches incoming server-assigned nodeId against existing seed connections by endpoint; remapNodeId() transfers NodeConnection entry preserving WebSocket/state/pending; node:remapped event notifies ClusterClient and PartitionRouter
 
 ## Warnings
 
 (none)
 
 ---
-*Last updated: 2026-02-11 (SPEC-047 completed and archived)*
+*Last updated: 2026-02-11 (SPEC-048a completed and archived)*
