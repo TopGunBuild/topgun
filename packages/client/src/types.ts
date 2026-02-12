@@ -105,6 +105,17 @@ export interface IConnectionProvider {
   send(data: ArrayBuffer | Uint8Array, key?: string): void;
 
   /**
+   * Send a batch of keyed operations with per-key routing.
+   * Optional -- when implemented (e.g. by ClusterClient), SyncEngine delegates
+   * batch sending here so each operation is routed to the correct partition owner.
+   * When absent, SyncEngine falls back to sending all ops in a single OP_BATCH.
+   *
+   * @param operations - Array of { key, message } pairs where key is the routing key
+   * @returns Map of key -> success boolean
+   */
+  sendBatch?(operations: Array<{ key: string; message: any }>): Map<string, boolean>;
+
+  /**
    * Close all connections gracefully.
    */
   close(): Promise<void>;

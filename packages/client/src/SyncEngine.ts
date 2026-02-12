@@ -501,6 +501,16 @@ export class SyncEngine {
 
     logger.info({ count: pending.length }, 'Syncing pending operations');
 
+    // Delegate to connection provider's sendBatch when available (cluster mode).
+    // This allows ClusterClient to group operations by target partition owner
+    // and send separate OP_BATCH messages per node.
+    const connectionProvider = this.webSocketManager.getConnectionProvider();
+    if (connectionProvider.sendBatch) {
+      connectionProvider.sendBatch(pending.map(op => ({ key: op.key, message: op })));
+      return;
+    }
+
+    // Fallback: send all ops in a single OP_BATCH (single-server mode)
     this.sendMessage({
       type: 'OP_BATCH',
       payload: {
