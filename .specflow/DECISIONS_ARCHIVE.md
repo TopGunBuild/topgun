@@ -6,6 +6,24 @@ Historical decisions rotated from STATE.md to maintain compactness.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-12 | SPEC-048c | Audit v1: NEEDS_REVISION. 1 critical issue (getRoutingMetrics() not exposed on TopGunClient), 5 recommendations (auth details, storage adapter, WS polyfill, port convention, read-back ambiguity). |
+| 2026-02-12 | SPEC-048b | COMPLETED: Routing Logic — Batch Delegation and Reconnect Map Refresh. Modified 3 files, 3 commits, 3 audit cycles, 2 review cycles. Archived to .specflow/archive/SPEC-048b.md |
+| 2026-02-12 | SPEC-048b | Review v2: APPROVED with no issues. Fix Response v1 verified (sendBatch return value handling + 3 new unit tests). 500 tests pass. |
+| 2026-02-12 | SPEC-048b | Fix Response v1: Applied 2 minor fixes (sendBatch return value logging, 3 new unit tests). 500 tests pass. |
+| 2026-02-12 | SPEC-048b | Review v1: APPROVED with 2 minor issues. All 9 AC satisfied, all 5 constraints honored. Build succeeds, 497 tests pass. |
+| 2026-02-12 | SPEC-048b | EXECUTED: 2 commits, 3 files modified, all 497 tests pass. G1 (reconnect map refresh) and G2 (sendBatch delegation) both complete. |
+| 2026-02-12 | SPEC-048b | Audit v3: APPROVED with no issues. Fresh-eyes source code verification confirmed all claims. Spec is implementation-ready. |
+| 2026-02-12 | SPEC-048b | Revision v2: Applied 3 audit v2 recommendations. Clarified sendBatch message field contents, annotated AC-1/AC-2 as verified by SPEC-048c, added connection provider access path to R1. |
+| 2026-02-12 | SPEC-048b | Audit v2: APPROVED with 3 recommendations. Source code verified. Delegation approach via optional IConnectionProvider.sendBatch is clean and correct. Reconnect map refresh fix well-scoped. |
+| 2026-02-12 | SPEC-048b | Revision v1: Removed R2 (NOT_OWNER handling) — server doesn't send these. Restructured R1 to delegate to ClusterClient.sendBatch() via optional IConnectionProvider.sendBatch. Reduced complexity to small. Ready for re-audit. |
+| 2026-02-12 | SPEC-048b | Audit v1: NEEDS_REVISION. 3 critical issues: (1) Server does not actually send NOT_OWNER messages — R2 based on false premise, (2) NotOwnerError uses `code` not `type` field, (3) Significant duplication with existing ClusterClient.sendWithRetry/sendBatch/PartitionRouter.handleNotOwnerError. |
+| 2026-02-12 | Roadmap | RESTRUCTURED: Replaced wave-based TODO.md with phase-based Rust migration roadmap. Added TODO-059 through TODO-072 for Rust-specific work. Product positioning decisions integrated (schema, shapes, WASM). |
+| 2026-02-12 | Architecture | 6th upfront trait added: SchemaProvider (schema validation + partial replication shapes). TypeScript-first schema strategy decided. Selective WASM strategy decided. |
+| 2026-02-11 | SPEC-048a | COMPLETED: ConnectionPool Foundation Fixes. Modified 1 file, 3 commits, 3 audit cycles, 1 review cycle. Archived to .specflow/archive/SPEC-048a.md |
+| 2026-02-11 | SPEC-048a | Review v1: APPROVED. All 8 acceptance criteria verified. All 5 constraints honored. Build succeeds. 497 tests pass. +55/-21 lines in single file. No critical or major issues. |
+| 2026-02-11 | SPEC-048a | Audit v3: APPROVED. All 10 dimensions passed. Source code verified: NodeConnection.endpoint exists for matching, addNode() receives both nodeId and endpoint, handleMessage return statements are only barrier to forwarding. No critical issues. No recommendations. |
+| 2026-02-11 | SPEC-048 | SPLIT into 3 parts: SPEC-048a (ConnectionPool Foundation Fixes), SPEC-048b (Routing Logic and Error Recovery), SPEC-048c (End-to-End Cluster Integration Test). Parent archived to .specflow/archive/SPEC-048.md |
+| 2026-02-11 | SPEC-047 | COMPLETED: Partition Pruning for Distributed Queries. Created 1 file, modified 7 files. 10 commits, 3 audit cycles, 3 review cycles. Archived to .specflow/archive/SPEC-047.md |
 | 2026-02-11 | SPEC-048a | Audit v2: APPROVED with 3 recommendations. All 10 dimensions passed. R2 PARTITION_MAP endpoint-matching verified sound. R3 dual-behavior (retain auth state + forward all messages) enables SyncEngine auth in cluster mode. Sequential 3-wave plan appropriate. |
 | 2026-02-11 | SPEC-048a | Audit v1: NEEDS_REVISION. 4 critical issues: (1) R2 primary mechanism inoperable -- server sends no nodeId in AUTH_ACK/WELCOME, (2) R3 self-contradictory -- "track auth state" vs "remove internal handling", (3) R3 incomplete scope -- send/getConnectedNodes/isNodeConnected/isConnected also gate on AUTHENTICATED, (4) G2 and G3 cannot safely run in parallel -- both modify handleMessage in same file. 4 recommendations. |
 | 2026-02-11 | SPEC-047 | Review v3: APPROVED. Critical fix from Review v2 (restoring targetNodes.add(myNodeId)) verified correct. All 12 acceptance criteria met. All 24 new tests pass. All existing tests pass (1 pre-existing flaky EntryProcessor test unrelated). No critical or major issues. |
