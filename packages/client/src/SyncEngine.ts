@@ -506,7 +506,11 @@ export class SyncEngine {
     // and send separate OP_BATCH messages per node.
     const connectionProvider = this.webSocketManager.getConnectionProvider();
     if (connectionProvider.sendBatch) {
-      connectionProvider.sendBatch(pending.map(op => ({ key: op.key, message: op })));
+      const results = connectionProvider.sendBatch(pending.map(op => ({ key: op.key, message: op })));
+      const failedKeys = [...results.entries()].filter(([, success]) => !success).map(([key]) => key);
+      if (failedKeys.length > 0) {
+        logger.warn({ failedKeys, count: failedKeys.length }, 'Some batch operations failed to send');
+      }
       return;
     }
 

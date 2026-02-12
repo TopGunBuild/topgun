@@ -974,4 +974,149 @@ describe('SyncEngine', () => {
       expect(topicPubs[1].payload.data).toEqual({ message: 'queued2' });
     });
   });
+
+  describe('Batch delegation (sendBatch)', () => {
+    // Mock IConnectionProvider with optional sendBatch (simulates cluster mode)
+    function createMockClusterProvider() {
+      const handlers = new Map<string, Set<(...args: any[]) => void>>();
+
+      const mockConnection = {
+        send: jest.fn(),
+        close: jest.fn(),
+        readyState: 1,
+      };
+
+      const provider = {
+        connect: jest.fn().mockImplementation(async () => {
+          // Trigger connected event after microtask
+          setTimeout(() => {
+            const set = handlers.get('connected');
+            if (set) set.forEach(h => h('mock-node'));
+          }, 0);
+        }),
+        getConnection: jest.fn().mockReturnValue(mockConnection),
+        getAnyConnection: jest.fn().mockReturnValue(mockConnection),
+        isConnected: jest.fn().mockReturnValue(true),
+        getConnectedNodes: jest.fn().mockReturnValue(['mock-node']),
+        on: jest.fn().mockImplementation((event: string, handler: (...args: any[]) => void) => {
+          if (!handlers.has(event)) handlers.set(event, new Set());
+          handlers.get(event)!.add(handler);
+        }),
+        off: jest.fn(),
+        send: jest.fn(),
+        sendBatch: jest.fn().mockImplementation((ops: Array<{ key: string; message: any }>) => {
+          const results = new Map<string, boolean>();
+          for (const op of ops) results.set(op.key, true);
+          return results;
+        }),
+        close: jest.fn().mockResolvedValue(undefined),
+        _handlers: handlers,
+      };
+
+      return provider;
+    }
+
+    function simulateProviderMessage(provider: ReturnType<typeof createMockClusterProvider>, message: any) {
+      const set = provider._handlers.get('message');
+      if (set) {
+        const data = serialize(message);
+        const buf = new Uint8Array(data).buffer;
+        set.forEach(h => h('mock-node', buf));
+      }
+    }
+
+    test('should delegate to sendBatch when provider implements it', async () => {
+      const clusterProvider = createMockClusterProvider();
+
+      const pendingOps: OpLogEntry[] = [
+        { id: '1', mapName: 'users', opType: 'PUT', key: 'user1', synced: false, timestamp: { millis: 1000, counter: 0, nodeId: 'test' } },
+        { id: '2', mapName: 'users', opType: 'PUT', key: 'user2', synced: false, timestamp: { millis: 1001, counter: 0, nodeId: 'test' } },
+      ];
+      mockStorage.getPendingOps.mockResolvedValue(pendingOps as any);
+
+      syncEngine = new SyncEngine({
+        ...config,
+        connectionProvider: clusterProvider as any,
+      });
+      syncEngine.setAuthToken('test-token');
+      await jest.runAllTimersAsync();
+
+      // Simulate AUTH_ACK to trigger syncPendingOperations
+      simulateProviderMessage(clusterProvider, { type: 'AUTH_ACK' });
+      await jest.runAllTimersAsync();
+
+      // sendBatch should have been called with pending ops
+      expect(clusterProvider.sendBatch).toHaveBeenCalledTimes(1);
+      const callArgs = clusterProvider.sendBatch.mock.calls[0][0];
+      expect(callArgs).toHaveLength(2);
+      expect(callArgs[0].key).toBe('user1');
+      expect(callArgs[1].key).toBe('user2');
+      // Each message is the full OpLogEntry
+      expect(callArgs[0].message.mapName).toBe('users');
+      expect(callArgs[1].message.mapName).toBe('users');
+    });
+
+    test('should fall back to single OP_BATCH when provider lacks sendBatch', async () => {
+      // SingleServerProvider does not implement sendBatch
+      const pendingOps = [
+        { id: '1', mapName: 'users', opType: 'PUT', key: 'user1', synced: false, timestamp: { millis: 1000, counter: 0, nodeId: 'test' } },
+      ];
+      mockStorage.getPendingOps.mockResolvedValue(pendingOps as any);
+
+      syncEngine = new SyncEngine(config); // uses SingleServerProvider (no sendBatch)
+      syncEngine.setAuthToken('test-token');
+      await jest.runAllTimersAsync();
+
+      const ws = MockWebSocket.getLastInstance()!;
+      ws.sentMessages = [];
+
+      ws.simulateMessage({ type: 'AUTH_ACK' });
+      await jest.runAllTimersAsync();
+
+      const opBatch = ws.sentMessages.find((m: any) => m.type === 'OP_BATCH');
+      expect(opBatch).toBeDefined();
+      expect(opBatch?.payload?.ops).toHaveLength(1);
+    });
+
+    test('should log warning when sendBatch reports failed keys', async () => {
+      const clusterProvider = createMockClusterProvider();
+
+      // Override sendBatch to report a failure for user2
+      clusterProvider.sendBatch.mockImplementation((ops: Array<{ key: string; message: any }>) => {
+        const results = new Map<string, boolean>();
+        for (const op of ops) results.set(op.key, op.key !== 'user2');
+        return results;
+      });
+
+      const pendingOps: OpLogEntry[] = [
+        { id: '1', mapName: 'users', opType: 'PUT', key: 'user1', synced: false, timestamp: { millis: 1000, counter: 0, nodeId: 'test' } },
+        { id: '2', mapName: 'users', opType: 'PUT', key: 'user2', synced: false, timestamp: { millis: 1001, counter: 0, nodeId: 'test' } },
+      ];
+      mockStorage.getPendingOps.mockResolvedValue(pendingOps as any);
+
+      // Spy on logger.warn before creating the engine
+      const loggerModule = require('../utils/logger');
+      const warnSpy = jest.spyOn(loggerModule.logger, 'warn');
+
+      syncEngine = new SyncEngine({
+        ...config,
+        connectionProvider: clusterProvider as any,
+      });
+      syncEngine.setAuthToken('test-token');
+      await jest.runAllTimersAsync();
+
+      simulateProviderMessage(clusterProvider, { type: 'AUTH_ACK' });
+      await jest.runAllTimersAsync();
+
+      expect(clusterProvider.sendBatch).toHaveBeenCalledTimes(1);
+
+      // Warning should include the failed key
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ failedKeys: ['user2'], count: 1 }),
+        'Some batch operations failed to send'
+      );
+
+      warnSpy.mockRestore();
+    });
+  });
 });
