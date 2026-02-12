@@ -308,7 +308,9 @@ Implement directly in Rust (no TS prototype needed):
 
 ## 7. Trait Abstractions to Design Upfront
 
-These 5 traits prevent 95% of future rework. ~100 lines of Rust that gate architectural flexibility:
+These 6 traits prevent 95% of future rework. ~150 lines of Rust that gate architectural flexibility:
+
+> **Update (2026-02-12):** Added 6th trait `SchemaProvider` based on product positioning research. See [PRODUCT_POSITIONING_RESEARCH.md](PRODUCT_POSITIONING_RESEARCH.md) Part 7 for rationale (partial replication/shapes, TypeScript-first schema strategy).
 
 ### 1. ServerStorage Trait (for TODO-033, TODO-043)
 
@@ -380,6 +382,41 @@ pub struct RequestContext {
 ```
 
 Adding `tenant_id: Option<String>` costs nothing now, prevents pervasive refactoring later.
+
+### 6. SchemaProvider Trait (for partial replication / shapes)
+
+> Added 2026-02-12 based on [PRODUCT_POSITIONING_RESEARCH.md](PRODUCT_POSITIONING_RESEARCH.md) Part 7.5. Partial replication is becoming table stakes (ElectricSQL Shapes, PowerSync Sync Rules, Ditto Subscriptions).
+
+```rust
+/// Sync shape defines what subset of data a client receives
+pub struct SyncShape {
+    pub map_name: String,
+    pub filter: Option<Predicate>,      // row-level filtering
+    pub fields: Option<Vec<String>>,     // field-level projection
+    pub limit: Option<usize>,
+}
+
+#[async_trait]
+pub trait SchemaProvider: Send + Sync {
+    /// Get current schema for a map
+    async fn get_schema(&self, map_name: &str) -> Option<MapSchema>;
+
+    /// Register/update schema version
+    async fn register_schema(&self, map_name: &str, schema: MapSchema) -> Result<()>;
+
+    /// Validate a value against the map's schema
+    fn validate(&self, map_name: &str, value: &Value) -> ValidationResult;
+
+    /// Compute sync shape for a client connection
+    async fn get_shape(
+        &self,
+        map_name: &str,
+        client_ctx: &RequestContext,
+    ) -> Option<SyncShape>;
+}
+```
+
+**Schema strategy decision:** TypeScript-first (not Rust-first). Developers define schemas in familiar Zod/TS, build step generates Rust validation code. See PRODUCT_POSITIONING_RESEARCH.md Section 7.4 for full rationale.
 
 ---
 
@@ -539,31 +576,66 @@ DAG ScanProcessor reads data -> data may be in cold tier -> async promotion need
 
 ## Appendix A: Updated Roadmap Summary
 
-### Pre-Migration (TypeScript) — Wave 0-1 Only (~3-4 weeks)
+> **Updated 2026-02-12:** Restructured into phases. Full roadmap with all TODO details in [TODO.md](../todos/TODO.md). Product positioning decisions integrated.
 
-| # | TODO | Wave | Effort | Purpose |
-|---|------|------|--------|---------|
-| 1 | TODO-050 IConnection | 0 | 4-6 hours | Transport abstraction |
-| 2 | TODO-029 Partition Pruning | 1 | 1 week | Query optimization |
-| 3 | TODO-023 Client Cluster | 1 | ~16 hours | Client smart routing |
+### Phase 0: TypeScript Completion (~3-4 days)
 
-### Rust Server Rewrite — Includes Deferred TODOs (~14-20 weeks)
+| # | Item | Status | Effort |
+|---|------|--------|--------|
+| 1 | ~~TODO-050~~ → SPEC-046 IConnection | Done | 4-6 hours |
+| 2 | ~~TODO-029~~ → SPEC-047 Partition Pruning | Done | 1 week |
+| 3 | ~~TODO-023~~ → SPEC-048/a Client Cluster (part 1) | Done | ~16 hours |
+| 4 | SPEC-048b Routing Logic | Draft | ~16-20 hours |
+| 5 | SPEC-048c E2E Integration Test | Draft | ~8-12 hours |
+
+### Phase 1: Bridge TS → Rust (~1-2 days)
+
+| # | TODO | Effort | Purpose |
+|---|------|--------|---------|
+| 6 | TODO-059 Rust Project Bootstrap | 0.5-1 day | Cargo workspace, CI, toolchain |
+| 7 | TODO-060 Upfront Trait Definitions | 0.5 day | 6 foundational traits (~150 LOC) |
+
+### Phase 2: Rust Core (~3-4 weeks)
+
+| # | TODO | Effort | Purpose |
+|---|------|--------|---------|
+| 8 | TODO-061 Core CRDTs | 1-2 weeks | LWWMap, ORMap, HLC, MerkleTree |
+| 9 | TODO-062 Message Compatibility | 1-2 weeks | MsgPack wire format verification |
+| 10 | TODO-063 Partition Service | 2-3 days | 271 partitions, consistent hashing |
+
+### Phase 3: Rust Server Core (~6-8 weeks)
+
+| # | TODO | Effort | Purpose |
+|---|------|--------|---------|
+| 11 | TODO-064 Networking (axum) | 1-2 weeks | HTTP + WebSocket server |
+| 12 | TODO-065 Message Handlers | 2-3 weeks | 26 handlers, 8 domains |
+| 13 | TODO-066 Cluster Protocol | 2-3 weeks | Inter-node mesh, rebalancing |
+| 14 | TODO-067 PostgreSQL Storage | 1 week | sqlx-based ServerStorage impl |
+| 15 | TODO-068 Integration Tests | 3-4 weeks | TS server as behavioral oracle |
+
+### Phase 4: Rust Features (~4-6 weeks)
 
 | # | TODO | Effort | Notes |
 |---|------|--------|-------|
-| 4 | TODO-048 SSE Push | 2-3 days | ~50 lines in axum, trivial |
-| 5 | TODO-049 Cluster HTTP | 1-2 weeks | Benefits from Rust async model |
-| 6 | TODO-025 DAG Executor | 2-3 weeks | Spec + Hazelcast Java ref sufficient |
+| 16 | TODO-069 Schema System | 2-3 weeks | NEW: TypeScript-first schema + validation |
+| 17 | TODO-070 Partial Replication | 2-3 weeks | NEW: Shapes (table stakes for market) |
+| 18 | TODO-048 SSE Push | 2-3 days | ~50 lines in axum, trivial |
+| 19 | TODO-049 Cluster HTTP | 1-2 weeks | Benefits from Rust async model |
+| 20 | TODO-025 DAG Executor | 2-3 weeks | Spec + Hazelcast Java ref sufficient |
+| 21 | TODO-071 Tantivy Search | 1-2 weeks | Replaces custom BM25 |
 
-### Post-Migration (Rust-native Features)
+### Phase 5: Post-Migration (~8-12 weeks)
 
 | # | TODO | Effort | Notes |
 |---|------|--------|-------|
-| 7 | TODO-033 AsyncStorage | 2-3 weeks | Implement directly in Rust |
-| 8 | TODO-043 S3 Bottomless | 6-8 weeks | Implement directly in Rust |
-| 9 | TODO-040 Tiered Storage | 4-6 weeks | Implement directly in Rust |
-| 10 | TODO-039 Vector Search | 4 weeks | Implement directly in Rust (usearch) |
-| 11 | TODO-036 Extensions | 2-3 weeks | Implement directly in Rust |
+| 22 | TODO-033 AsyncStorage | 2-3 weeks | Write-Behind pattern |
+| 23 | TODO-043 S3 Bottomless | 6-8 weeks | Append-only log in S3 |
+| 24 | TODO-040 Tiered Storage | 4-6 weeks | Hot/cold transparent migration |
+| 25 | TODO-039 Vector Search | 4 weeks | usearch Rust bindings |
+| 26 | TODO-036 Extensions | 2-3 weeks | Pluggable extension system |
+| 27 | TODO-041 Multi-Tenancy | 4-6 weeks | Per-tenant isolation |
+| 28 | TODO-044 Bi-Temporal | 4-6 weeks | Time-travel queries |
+| 29 | TODO-072 WASM Modules | 2-3 weeks | Selective: DAG, tantivy, processors |
 
 ### Eliminated
 
@@ -596,4 +668,4 @@ DAG ScanProcessor reads data -> data may be in cold tier -> async promotion need
 
 ---
 
-*This document captures the complete migration research as of 2026-02-10. Use as foundation for future migration planning.*
+*This document captures the complete migration research. Original research 2026-02-10. Updated 2026-02-12 with 6th trait (SchemaProvider), product positioning cross-references, and phase-based roadmap. Full task details in [TODO.md](../todos/TODO.md).*
