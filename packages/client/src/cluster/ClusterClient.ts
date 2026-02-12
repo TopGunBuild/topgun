@@ -84,6 +84,10 @@ export class ClusterClient implements IConnectionProvider {
   private readonly circuits: Map<string, CircuitState> = new Map();
   private readonly circuitBreakerConfig: CircuitBreakerConfig;
 
+  // Debounce timer for partition map requests on reconnect
+  private partitionMapRequestTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly PARTITION_MAP_REQUEST_DEBOUNCE_MS = 500;
+
   constructor(config: ClusterClientConfig) {
     this.config = config;
 
@@ -238,8 +242,23 @@ export class ClusterClient implements IConnectionProvider {
   }
 
   /**
+   * Debounce partition map requests to prevent flooding when multiple nodes
+   * reconnect simultaneously. Coalesces rapid requests into a single request
+   * sent to the most recently connected node.
+   */
+  private debouncedPartitionMapRequest(nodeId: string): void {
+    if (this.partitionMapRequestTimer) {
+      clearTimeout(this.partitionMapRequestTimer);
+    }
+    this.partitionMapRequestTimer = setTimeout(() => {
+      this.partitionMapRequestTimer = null;
+      this.requestPartitionMapFromNode(nodeId);
+    }, ClusterClient.PARTITION_MAP_REQUEST_DEBOUNCE_MS);
+  }
+
+  /**
    * Request partition map from a specific node.
-   * Called on first node connection.
+   * Called on node connection via debounced handler.
    */
   private requestPartitionMapFromNode(nodeId: string): void {
     const socket = this.connectionPool.getConnection(nodeId);
@@ -624,6 +643,10 @@ export class ClusterClient implements IConnectionProvider {
    * Shutdown cluster client (IConnectionProvider interface).
    */
   public async close(): Promise<void> {
+    if (this.partitionMapRequestTimer) {
+      clearTimeout(this.partitionMapRequestTimer);
+      this.partitionMapRequestTimer = null;
+    }
     this.partitionRouter.close();
     this.connectionPool.close();
     this.initialized = false;
@@ -778,10 +801,9 @@ export class ClusterClient implements IConnectionProvider {
     this.connectionPool.on('node:connected', (nodeId: string) => {
       logger.debug({ nodeId }, 'Node connected');
 
-      // Request partition map on first connection if not already received
-      if (this.partitionRouter.getMapVersion() === 0) {
-        this.requestPartitionMapFromNode(nodeId);
-      }
+      // Always request partition map on node connection (may be stale after reconnect).
+      // Debounce to prevent flooding when multiple nodes reconnect simultaneously.
+      this.debouncedPartitionMapRequest(nodeId);
 
       if (this.connectionPool.getConnectedNodes().length === 1) {
         this.emit('connected');
