@@ -2,18 +2,18 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
+- **Active Specification:** SPEC-048c — End-to-End Cluster Integration Test
+- **Status:** review
 - **Project Phase:** Phase 0 (TypeScript Completion) — 1 spec remaining
 - **TODO Items:** 23 (1 TS spec + 8 new Rust bridge/core + 14 existing deferred)
-- **Next Step:** `/sf:next` or `/sf:new "task"`
+- **Next Step:** /sf:review
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
 ## Queue
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-048c | End-to-End Cluster Integration Test | draft | Phase 0 (TS) |
+| 1 | SPEC-048c | End-to-End Cluster Integration Test | review | Phase 0 (TS) |
 
 ## Migration Roadmap (high-level)
 
@@ -40,6 +40,12 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-12 | SPEC-048c | EXECUTED: 1 commit, 1 file created. Test passes (4.5s). All 501 client tests + 1211 server tests pass. 4 Rule 2 deviations (inlined pollUntil, patched updateConnectionPool, key ownership selection, dual auth). 3 pre-existing bugs documented. |
+| 2026-02-12 | SPEC-048c | Audit v3: APPROVED with no issues. Fresh-eyes source verification confirmed all API references, patterns, and assumptions. Spec is implementation-ready. |
+| 2026-02-12 | SPEC-048c | Response v2: Applied all 3 Audit v2 recommendations (verified no duplicate prerequisites, added pollUntil import path, clarified LWWMap.get() assertion pattern). |
+| 2026-02-12 | SPEC-048c | Audit v2: APPROVED with 3 recommendations (duplicate prerequisites heading, pollUntil import path, LWWMap.get() return shape). All v1 critical issues resolved. |
+| 2026-02-12 | SPEC-048c | Response v1: Applied all 6 items (1 critical + 5 recommendations). Rewrote AC-5 to use public TopGunClient API, added auth/storage/WS polyfill prerequisites, changed to port:0, specified server-side inspection. |
+| 2026-02-12 | SPEC-048c | Audit v1: NEEDS_REVISION. 1 critical issue (getRoutingMetrics() not exposed on TopGunClient), 5 recommendations (auth details, storage adapter, WS polyfill, port convention, read-back ambiguity). |
 | 2026-02-12 | SPEC-048b | COMPLETED: Routing Logic — Batch Delegation and Reconnect Map Refresh. Modified 3 files, 3 commits, 3 audit cycles, 2 review cycles. Archived to .specflow/archive/SPEC-048b.md |
 | 2026-02-12 | SPEC-048b | Review v2: APPROVED with no issues. Fix Response v1 verified (sendBatch return value handling + 3 new unit tests). 500 tests pass. |
 | 2026-02-12 | SPEC-048b | Fix Response v1: Applied 2 minor fixes (sendBatch return value logging, 3 new unit tests). 500 tests pass. |
@@ -89,4 +95,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-12 (SPEC-048b COMPLETED)*
+*Last updated: 2026-02-12 (SPEC-048c executed)*
