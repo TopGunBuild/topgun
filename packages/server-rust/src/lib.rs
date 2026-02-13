@@ -1,4 +1,4 @@
-//! TopGun Server — WebSocket server with clustering, partitioning, and PostgreSQL storage.
+//! `TopGun` Server — `WebSocket` server with clustering, partitioning, and `PostgreSQL` storage.
 
 #[cfg(test)]
 mod tests {

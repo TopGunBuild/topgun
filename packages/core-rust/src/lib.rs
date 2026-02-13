@@ -1,4 +1,4 @@
-//! TopGun Core — CRDTs, Hybrid Logical Clock, MerkleTree, and message schemas.
+//! `TopGun` Core — CRDTs, Hybrid Logical Clock, `MerkleTree`, and message schemas.
 
 #[cfg(test)]
 mod tests {
