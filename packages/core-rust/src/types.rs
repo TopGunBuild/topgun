@@ -16,7 +16,7 @@ pub struct StorageValue {
 /// concrete value type in `LWWMap<Value>` and `ORMap<Value>`, and
 /// referenced by `SchemaProvider::validate` for schema validation.
 ///
-/// Serializes to MsgPack via `rmp-serde` for cross-language compatibility
+/// Serializes to `MsgPack` via `rmp-serde` for cross-language compatibility
 /// with the TypeScript client.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {

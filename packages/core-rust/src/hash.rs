@@ -1,8 +1,8 @@
-//! FNV-1a hash utilities for MerkleTree bucket routing.
+//! FNV-1a hash utilities for `MerkleTree` bucket routing.
 //!
 //! Provides a 32-bit FNV-1a hash that iterates over UTF-16 code units to match
 //! the TypeScript `String.charCodeAt()` behavior, ensuring identical hashes
-//! across Rust and TypeScript for cross-language MerkleTree synchronization.
+//! across Rust and TypeScript for cross-language `MerkleTree` synchronization.
 //!
 //! # Cross-language compatibility
 //!
@@ -30,6 +30,7 @@ const FNV_PRIME: u32 = 0x0100_0193;
 /// assert_eq!(fnv1a_hash("hello"), 1_335_831_723);
 /// assert_eq!(fnv1a_hash(""), 2_166_136_261); // FNV offset basis
 /// ```
+#[must_use] 
 pub fn fnv1a_hash(s: &str) -> u32 {
     let mut hash = FNV_OFFSET_BASIS;
     for code_unit in s.encode_utf16() {
@@ -55,6 +56,7 @@ pub fn fnv1a_hash(s: &str) -> u32 {
 /// let b = combine_hashes(&[30, 10, 20]);
 /// assert_eq!(a, b);
 /// ```
+#[must_use] 
 pub fn combine_hashes(hashes: &[u32]) -> u32 {
     let mut result: u32 = 0;
     for &h in hashes {

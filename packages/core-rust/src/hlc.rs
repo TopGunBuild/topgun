@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 /// A hybrid logical timestamp combining physical time, logical counter, and node identity.
 ///
-/// Ordering is defined as: millis first, then counter, then node_id (lexicographic byte order).
+/// Ordering is defined as: millis first, then counter, then `node_id` (lexicographic byte order).
 /// This matches the TypeScript `HLC.compare()` behavior for ASCII-only node IDs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Timestamp {
@@ -65,7 +65,10 @@ pub trait ClockSource: Send + Sync {
 pub struct SystemClock;
 
 impl ClockSource for SystemClock {
+    #[allow(clippy::cast_possible_truncation)]
     fn now(&self) -> u64 {
+        // Truncation from u128 to u64 is intentional: milliseconds since epoch
+        // will not exceed u64::MAX until approximately year 584 million CE.
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock is before Unix epoch")
@@ -108,6 +111,7 @@ impl HLC {
     /// Creates a new HLC with the given node ID and clock source.
     ///
     /// Uses default options: non-strict mode, 60-second max drift.
+    #[must_use] 
     pub fn new(node_id: String, clock_source: Box<dyn ClockSource>) -> Self {
         Self {
             last_millis: 0,
@@ -120,6 +124,7 @@ impl HLC {
     }
 
     /// Creates a new HLC with explicit strict mode and max drift configuration.
+    #[must_use] 
     pub fn with_options(
         node_id: String,
         clock_source: Box<dyn ClockSource>,
@@ -137,16 +142,19 @@ impl HLC {
     }
 
     /// Returns the node ID of this HLC instance.
+    #[must_use] 
     pub fn node_id(&self) -> &str {
         &self.node_id
     }
 
     /// Returns whether strict mode is enabled.
+    #[must_use] 
     pub fn strict_mode(&self) -> bool {
         self.strict_mode
     }
 
     /// Returns the maximum allowed clock drift in milliseconds.
+    #[must_use] 
     pub fn max_drift_ms(&self) -> u64 {
         self.max_drift_ms
     }
@@ -154,6 +162,7 @@ impl HLC {
     /// Returns a reference to the clock source used by this HLC.
     ///
     /// Useful for LWWMap/ORMap to access the same clock for TTL checks.
+    #[must_use] 
     pub fn clock_source(&self) -> &dyn ClockSource {
         &*self.clock_source
     }
@@ -240,12 +249,14 @@ impl HLC {
     /// Returns `Ordering::Less` if `a < b`, `Ordering::Greater` if `a > b`,
     /// `Ordering::Equal` if they are identical.
     ///
-    /// Comparison order: millis first, then counter, then node_id (byte-order).
+    /// Comparison order: millis first, then counter, then `node_id` (byte-order).
+    #[must_use] 
     pub fn compare(a: &Timestamp, b: &Timestamp) -> Ordering {
         a.cmp(b)
     }
 
     /// Serializes a timestamp to the wire format `"millis:counter:nodeId"`.
+    #[must_use] 
     pub fn to_string(ts: &Timestamp) -> String {
         ts.to_string()
     }
@@ -302,7 +313,7 @@ pub struct LWWRecord<V> {
 
 /// An Observed-Remove Map record associating a value with a unique tag.
 ///
-/// Each concurrent addition to an ORMap entry gets a unique `tag` (typically
+/// Each concurrent addition to an `ORMap` entry gets a unique `tag` (typically
 /// `"millis:counter:nodeId"`). Removals target specific tags, allowing concurrent
 /// adds and removes to be resolved without lost updates.
 #[derive(Debug, Clone, Serialize, Deserialize)]

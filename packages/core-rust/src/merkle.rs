@@ -1,4 +1,4 @@
-//! MerkleTree and `ORMapMerkleTree` for efficient delta synchronization.
+//! `MerkleTree` and `ORMapMerkleTree` for efficient delta synchronization.
 //!
 //! Both trees use a prefix trie structure keyed by hex digits of the FNV-1a hash
 //! of entry keys. The trie depth (default 3) determines bucket granularity.
@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use crate::hash::fnv1a_hash;
 
-/// A node in the MerkleTree prefix trie.
+/// A node in the `MerkleTree` prefix trie.
 ///
 /// Internal nodes have `children` (keyed by hex digit). Leaf nodes have `entries`
 /// (keyed by the original string key, mapping to the content hash). The `hash`
@@ -40,7 +40,7 @@ fn key_to_path(key: &str) -> String {
     format!("{:08x}", fnv1a_hash(key))
 }
 
-/// A MerkleTree for efficient delta synchronization of LWW-Maps.
+/// A `MerkleTree` for efficient delta synchronization of LWW-Maps.
 ///
 /// Uses a prefix trie structure where keys are routed to buckets based on the
 /// hex digits of their FNV-1a hash. The tree has a configurable depth (default 3),
@@ -74,6 +74,7 @@ impl MerkleTree {
     ///
     /// The depth determines how many hex digits of the key hash are used for
     /// bucket routing. Default is 3, giving 4096 possible leaf buckets.
+    #[must_use] 
     pub fn new(depth: usize) -> Self {
         Self {
             root: MerkleNode::new(),
@@ -82,6 +83,7 @@ impl MerkleTree {
     }
 
     /// Creates a new `MerkleTree` with the default depth of 3.
+    #[must_use] 
     pub fn default_depth() -> Self {
         Self::new(3)
     }
@@ -105,6 +107,7 @@ impl MerkleTree {
     /// Returns the root hash for quick comparison with a remote tree.
     ///
     /// If the root hashes match, the trees contain identical data (with high probability).
+    #[must_use] 
     pub fn get_root_hash(&self) -> u32 {
         self.root.hash
     }
@@ -113,6 +116,7 @@ impl MerkleTree {
     ///
     /// Pass an empty string to get root-level children. Each entry maps a hex digit
     /// to the aggregated hash of that subtree.
+    #[must_use] 
     pub fn get_buckets(&self, path: &str) -> HashMap<char, u32> {
         match self.get_node(path) {
             Some(node) => node.children.iter().map(|(&k, v)| (k, v.hash)).collect(),
@@ -124,6 +128,7 @@ impl MerkleTree {
     ///
     /// Used to identify specific keys that need synchronization after bucket
     /// comparison identifies a differing subtree.
+    #[must_use] 
     pub fn get_keys_in_bucket(&self, path: &str) -> Vec<String> {
         match self.get_node(path) {
             Some(node) => node.entries.keys().cloned().collect(),
@@ -134,6 +139,7 @@ impl MerkleTree {
     /// Returns the node at the given path, or `None` if the path does not exist.
     ///
     /// The path is a string of hex digits navigating down the trie.
+    #[must_use] 
     pub fn get_node(&self, path: &str) -> Option<&MerkleNode> {
         let mut current = &self.root;
         for ch in path.chars() {
@@ -218,9 +224,9 @@ impl MerkleTree {
     }
 }
 
-/// A MerkleTree for efficient delta synchronization of OR-Maps.
+/// A `MerkleTree` for efficient delta synchronization of OR-Maps.
 ///
-/// Similar to [`MerkleTree`] but designed for ORMap where each key can have
+/// Similar to [`MerkleTree`] but designed for `ORMap` where each key can have
 /// multiple records (tags). The entry hash represents the combined hash of all
 /// records for a key. Methods like [`ORMapMerkleTree::find_diff_keys`] enable
 /// efficient identification of keys that differ between local and remote trees.
@@ -231,6 +237,7 @@ pub struct ORMapMerkleTree {
 
 impl ORMapMerkleTree {
     /// Creates a new empty `ORMapMerkleTree` with the given depth.
+    #[must_use] 
     pub fn new(depth: usize) -> Self {
         Self {
             root: MerkleNode::new(),
@@ -239,6 +246,7 @@ impl ORMapMerkleTree {
     }
 
     /// Creates a new `ORMapMerkleTree` with the default depth of 3.
+    #[must_use] 
     pub fn default_depth() -> Self {
         Self::new(3)
     }
@@ -259,11 +267,13 @@ impl ORMapMerkleTree {
     }
 
     /// Returns the root hash for quick comparison with a remote tree.
+    #[must_use] 
     pub fn get_root_hash(&self) -> u32 {
         self.root.hash
     }
 
     /// Returns child hashes at the given path for bucket comparison.
+    #[must_use] 
     pub fn get_buckets(&self, path: &str) -> HashMap<char, u32> {
         match self.get_node(path) {
             Some(node) => node.children.iter().map(|(&k, v)| (k, v.hash)).collect(),
@@ -272,6 +282,7 @@ impl ORMapMerkleTree {
     }
 
     /// Returns the keys stored in a leaf bucket at the given path.
+    #[must_use] 
     pub fn get_keys_in_bucket(&self, path: &str) -> Vec<String> {
         match self.get_node(path) {
             Some(node) => node.entries.keys().cloned().collect(),
@@ -280,6 +291,7 @@ impl ORMapMerkleTree {
     }
 
     /// Returns the node at the given path, or `None` if the path does not exist.
+    #[must_use] 
     pub fn get_node(&self, path: &str) -> Option<&MerkleNode> {
         let mut current = &self.root;
         for ch in path.chars() {
@@ -297,6 +309,7 @@ impl ORMapMerkleTree {
     /// - Exist locally but have a different hash on remote
     /// - Exist on remote but not locally
     /// - Exist locally but not on remote
+    #[must_use] 
     pub fn find_diff_keys(&self, path: &str, remote_entries: &HashMap<String, u32>) -> Vec<String> {
         let local_entries = match self.get_node(path) {
             Some(node) => &node.entries,
@@ -329,6 +342,7 @@ impl ORMapMerkleTree {
     /// Returns all entry hashes at a leaf path.
     ///
     /// Used when sending bucket details to a remote node for comparison.
+    #[must_use] 
     pub fn get_entry_hashes(&self, path: &str) -> HashMap<String, u32> {
         match self.get_node(path) {
             Some(node) => node.entries.clone(),
@@ -337,6 +351,7 @@ impl ORMapMerkleTree {
     }
 
     /// Checks if a path leads to a leaf node (a node with entries).
+    #[must_use] 
     pub fn is_leaf(&self, path: &str) -> bool {
         match self.get_node(path) {
             Some(node) => !node.entries.is_empty(),
