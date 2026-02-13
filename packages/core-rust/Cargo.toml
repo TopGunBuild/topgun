@@ -9,5 +9,8 @@ description = "TopGun core: CRDTs, HLC, MerkleTree, message schemas"
 workspace = true
 
 [dependencies]
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"
 
 [dev-dependencies]
