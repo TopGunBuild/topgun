@@ -10,5 +10,7 @@ workspace = true
 
 [dependencies]
 topgun-core = { path = "../core-rust" }
+async-trait = "0.1"
+anyhow = "1"
 
 [dev-dependencies]
