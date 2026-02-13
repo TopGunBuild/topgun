@@ -421,12 +421,14 @@ export class ConnectionPool {
 
       socket.onmessage = (event) => {
         connection.lastSeen = Date.now();
-        this.handleMessage(nodeId, event);
+        // Use connection.nodeId (mutable) instead of captured nodeId parameter,
+        // so messages route correctly after remapNodeId() updates the ID
+        this.handleMessage(connection.nodeId, event);
       };
 
       socket.onerror = (error) => {
-        logger.error({ nodeId, error }, 'WebSocket error');
-        this.emit('error', nodeId, error instanceof Error ? error : new Error('WebSocket error'));
+        logger.error({ nodeId: connection.nodeId, error }, 'WebSocket error');
+        this.emit('error', connection.nodeId, error instanceof Error ? error : new Error('WebSocket error'));
       };
 
       socket.onclose = () => {
@@ -436,17 +438,17 @@ export class ConnectionPool {
         connection.cachedConnection = null;
 
         if (wasConnected) {
-          this.emit('node:disconnected', nodeId, 'Connection closed');
+          this.emit('node:disconnected', connection.nodeId, 'Connection closed');
         }
 
         // Schedule reconnect
-        this.scheduleReconnect(nodeId);
+        this.scheduleReconnect(connection.nodeId);
       };
 
     } catch (error) {
       connection.state = 'FAILED';
-      logger.error({ nodeId, error }, 'Failed to connect');
-      this.scheduleReconnect(nodeId);
+      logger.error({ nodeId: connection.nodeId, error }, 'Failed to connect');
+      this.scheduleReconnect(connection.nodeId);
     }
   }
 
