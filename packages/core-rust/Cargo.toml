@@ -12,5 +12,8 @@ workspace = true
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 anyhow = "1"
+rmp-serde = "1"
+tracing = "0.1"
 
 [dev-dependencies]
+proptest = "1"

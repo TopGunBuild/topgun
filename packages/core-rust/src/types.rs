@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Opaque serialized CRDT record stored in persistence.
@@ -9,12 +11,32 @@ pub struct StorageValue {
 }
 
 /// Generic runtime value type for CRDT map entries.
-/// Placeholder: will become a proper enum (Null, Bool, Int, Float, String, Bytes, Array, Map)
-/// when message schemas are ported.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Value {
-    /// Raw bytes of the serialized value.
-    pub data: Vec<u8>,
+///
+/// Supports all JSON-compatible types plus binary data. Used as the
+/// concrete value type in `LWWMap<Value>` and `ORMap<Value>`, and
+/// referenced by `SchemaProvider::validate` for schema validation.
+///
+/// Serializes to MsgPack via `rmp-serde` for cross-language compatibility
+/// with the TypeScript client.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Value {
+    /// JSON null.
+    Null,
+    /// JSON boolean.
+    Bool(bool),
+    /// JSON integer (signed 64-bit).
+    Int(i64),
+    /// JSON floating-point (64-bit IEEE 754).
+    Float(f64),
+    /// JSON string (UTF-8).
+    String(String),
+    /// Binary data (not directly representable in JSON).
+    Bytes(Vec<u8>),
+    /// JSON array (ordered sequence of values).
+    Array(Vec<Value>),
+    /// JSON object (ordered map of string keys to values).
+    /// Uses `BTreeMap` for deterministic serialization order.
+    Map(BTreeMap<String, Value>),
 }
 
 /// Discriminant for CRDT map types (LWW vs OR).

@@ -1,6 +1,9 @@
 //! `TopGun` Core — CRDTs, Hybrid Logical Clock, `MerkleTree`, and message schemas.
 
 pub mod context;
+pub mod hash;
+pub mod hlc;
+pub mod merkle;
 pub mod schema;
 pub mod traits;
 pub mod types;
