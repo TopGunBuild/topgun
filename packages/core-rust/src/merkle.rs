@@ -40,6 +40,78 @@ fn key_to_path(key: &str) -> String {
     format!("{:08x}", fnv1a_hash(key))
 }
 
+/// Recursively updates a node in the trie (shared by both tree types).
+fn trie_update_node(
+    node: &mut MerkleNode,
+    key: &str,
+    item_hash: u32,
+    path: &str,
+    level: usize,
+    depth: usize,
+) {
+    if level >= depth {
+        // Leaf node: store entry and recalculate hash
+        node.entries.insert(key.to_string(), item_hash);
+        node.hash = recalc_leaf_hash(&node.entries);
+        return;
+    }
+
+    // Internal node: route to child
+    let bucket_char = path.as_bytes()[level] as char;
+    let child = node
+        .children
+        .entry(bucket_char)
+        .or_insert_with(MerkleNode::new);
+
+    trie_update_node(child, key, item_hash, path, level + 1, depth);
+
+    // Recalculate this node's hash from children
+    node.hash = recalc_internal_hash(&node.children);
+}
+
+/// Recursively removes a key from the trie (shared by both tree types).
+fn trie_remove_node(
+    node: &mut MerkleNode,
+    key: &str,
+    path: &str,
+    level: usize,
+    depth: usize,
+) {
+    if level >= depth {
+        // Leaf node: remove entry and recalculate hash
+        node.entries.remove(key);
+        node.hash = recalc_leaf_hash(&node.entries);
+        return;
+    }
+
+    // Internal node: route to child
+    let bucket_char = path.as_bytes()[level] as char;
+    if let Some(child) = node.children.get_mut(&bucket_char) {
+        trie_remove_node(child, key, path, level + 1, depth);
+    }
+
+    // Recalculate this node's hash from children
+    node.hash = recalc_internal_hash(&node.children);
+}
+
+/// Recalculates a leaf node's hash from its entries (wrapping sum).
+fn recalc_leaf_hash(entries: &HashMap<String, u32>) -> u32 {
+    let mut h: u32 = 0;
+    for &val in entries.values() {
+        h = h.wrapping_add(val);
+    }
+    h
+}
+
+/// Recalculates an internal node's hash from its children (wrapping sum).
+fn recalc_internal_hash(children: &HashMap<char, MerkleNode>) -> u32 {
+    let mut h: u32 = 0;
+    for child in children.values() {
+        h = h.wrapping_add(child.hash);
+    }
+    h
+}
+
 /// A `MerkleTree` for efficient delta synchronization of LWW-Maps.
 ///
 /// Uses a prefix trie structure where keys are routed to buckets based on the
@@ -95,13 +167,13 @@ impl MerkleTree {
     /// `fnv1a_hash(format!("{}:{}:{}:{}", key, timestamp.millis, timestamp.counter, timestamp.node_id))`.
     pub fn update(&mut self, key: &str, item_hash: u32) {
         let path = key_to_path(key);
-        Self::update_node(&mut self.root, key, item_hash, &path, 0, self.depth);
+        trie_update_node(&mut self.root, key, item_hash, &path, 0, self.depth);
     }
 
     /// Removes a key from the tree, recalculating hashes up the trie.
     pub fn remove(&mut self, key: &str) {
         let path = key_to_path(key);
-        Self::remove_node(&mut self.root, key, &path, 0, self.depth);
+        trie_remove_node(&mut self.root, key, &path, 0, self.depth);
     }
 
     /// Returns the root hash for quick comparison with a remote tree.
@@ -151,77 +223,6 @@ impl MerkleTree {
         Some(current)
     }
 
-    /// Recursively updates a node in the trie.
-    fn update_node(
-        node: &mut MerkleNode,
-        key: &str,
-        item_hash: u32,
-        path: &str,
-        level: usize,
-        depth: usize,
-    ) {
-        if level >= depth {
-            // Leaf node: store entry and recalculate hash
-            node.entries.insert(key.to_string(), item_hash);
-            node.hash = Self::recalc_leaf_hash(&node.entries);
-            return;
-        }
-
-        // Internal node: route to child
-        let bucket_char = path.as_bytes()[level] as char;
-        let child = node
-            .children
-            .entry(bucket_char)
-            .or_insert_with(MerkleNode::new);
-
-        Self::update_node(child, key, item_hash, path, level + 1, depth);
-
-        // Recalculate this node's hash from children
-        node.hash = Self::recalc_internal_hash(&node.children);
-    }
-
-    /// Recursively removes a key from the trie.
-    fn remove_node(
-        node: &mut MerkleNode,
-        key: &str,
-        path: &str,
-        level: usize,
-        depth: usize,
-    ) {
-        if level >= depth {
-            // Leaf node: remove entry and recalculate hash
-            node.entries.remove(key);
-            node.hash = Self::recalc_leaf_hash(&node.entries);
-            return;
-        }
-
-        // Internal node: route to child
-        let bucket_char = path.as_bytes()[level] as char;
-        if let Some(child) = node.children.get_mut(&bucket_char) {
-            Self::remove_node(child, key, path, level + 1, depth);
-        }
-
-        // Recalculate this node's hash from children
-        node.hash = Self::recalc_internal_hash(&node.children);
-    }
-
-    /// Recalculates a leaf node's hash from its entries.
-    fn recalc_leaf_hash(entries: &HashMap<String, u32>) -> u32 {
-        let mut h: u32 = 0;
-        for &val in entries.values() {
-            h = h.wrapping_add(val);
-        }
-        h
-    }
-
-    /// Recalculates an internal node's hash from its children.
-    fn recalc_internal_hash(children: &HashMap<char, MerkleNode>) -> u32 {
-        let mut h: u32 = 0;
-        for child in children.values() {
-            h = h.wrapping_add(child.hash);
-        }
-        h
-    }
 }
 
 /// A `MerkleTree` for efficient delta synchronization of OR-Maps.
@@ -257,13 +258,13 @@ impl ORMapMerkleTree {
     /// (e.g., using `hashORMapEntry` logic: sorted tags, deterministic string representation).
     pub fn update(&mut self, key: &str, entry_hash: u32) {
         let path = key_to_path(key);
-        Self::update_node(&mut self.root, key, entry_hash, &path, 0, self.depth);
+        trie_update_node(&mut self.root, key, entry_hash, &path, 0, self.depth);
     }
 
     /// Removes a key from the tree.
     pub fn remove(&mut self, key: &str) {
         let path = key_to_path(key);
-        Self::remove_node(&mut self.root, key, &path, 0, self.depth);
+        trie_remove_node(&mut self.root, key, &path, 0, self.depth);
     }
 
     /// Returns the root hash for quick comparison with a remote tree.
@@ -359,70 +360,6 @@ impl ORMapMerkleTree {
         }
     }
 
-    /// Recursively updates a node in the trie.
-    fn update_node(
-        node: &mut MerkleNode,
-        key: &str,
-        entry_hash: u32,
-        path: &str,
-        level: usize,
-        depth: usize,
-    ) {
-        if level >= depth {
-            node.entries.insert(key.to_string(), entry_hash);
-            node.hash = Self::recalc_leaf_hash(&node.entries);
-            return;
-        }
-
-        let bucket_char = path.as_bytes()[level] as char;
-        let child = node
-            .children
-            .entry(bucket_char)
-            .or_insert_with(MerkleNode::new);
-
-        Self::update_node(child, key, entry_hash, path, level + 1, depth);
-        node.hash = Self::recalc_internal_hash(&node.children);
-    }
-
-    /// Recursively removes a key from the trie.
-    fn remove_node(
-        node: &mut MerkleNode,
-        key: &str,
-        path: &str,
-        level: usize,
-        depth: usize,
-    ) {
-        if level >= depth {
-            node.entries.remove(key);
-            node.hash = Self::recalc_leaf_hash(&node.entries);
-            return;
-        }
-
-        let bucket_char = path.as_bytes()[level] as char;
-        if let Some(child) = node.children.get_mut(&bucket_char) {
-            Self::remove_node(child, key, path, level + 1, depth);
-        }
-
-        node.hash = Self::recalc_internal_hash(&node.children);
-    }
-
-    /// Recalculates a leaf node's hash from its entries.
-    fn recalc_leaf_hash(entries: &HashMap<String, u32>) -> u32 {
-        let mut h: u32 = 0;
-        for &val in entries.values() {
-            h = h.wrapping_add(val);
-        }
-        h
-    }
-
-    /// Recalculates an internal node's hash from its children.
-    fn recalc_internal_hash(children: &HashMap<char, MerkleNode>) -> u32 {
-        let mut h: u32 = 0;
-        for child in children.values() {
-            h = h.wrapping_add(child.hash);
-        }
-        h
-    }
 }
 
 #[cfg(test)]

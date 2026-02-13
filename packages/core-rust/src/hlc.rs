@@ -297,7 +297,7 @@ impl HLC {
 ///
 /// Generic over `V` so that any serializable type can be stored, not just [`Value`](crate::Value).
 /// The `ttl_ms` field enables time-to-live expiration checked against the HLC clock source.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound(
     serialize = "V: Serialize",
     deserialize = "V: serde::de::DeserializeOwned"
@@ -316,7 +316,7 @@ pub struct LWWRecord<V> {
 /// Each concurrent addition to an `ORMap` entry gets a unique `tag` (typically
 /// `"millis:counter:nodeId"`). Removals target specific tags, allowing concurrent
 /// adds and removes to be resolved without lost updates.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(bound(
     serialize = "V: Serialize",
     deserialize = "V: serde::de::DeserializeOwned"
