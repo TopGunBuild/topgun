@@ -13,6 +13,7 @@
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
+| (empty) | | | | |
 
 ## Migration Roadmap (high-level)
 
@@ -39,11 +40,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-13 | SPEC-050 | COMPLETED: Define 6 Foundational Rust Traits. 15 public types in topgun-core + 3 server traits in topgun-server. All 10 AC passed (build/clippy/test/doc zero warnings). Cross-crate wiring verified. Phase 1 Bridge traits complete. |
 | 2026-02-13 | SPEC-049 | COMPLETED: Rust Project Bootstrap. Cargo workspace with 2 skeleton crates (topgun-core, topgun-server), CI pipeline (fmt/clippy/test), rust-toolchain.toml (stable), Language Profile added to PROJECT.md. All 11 AC passed. Phase 1 unblocked. |
 | 2026-02-12 | SPEC-048c | COMPLETED: Phase 0 (TypeScript Completion) finished. SPEC-048a/b/c series done. Client cluster integration validated E2E. 3 pre-existing bugs documented for future fix. |
 | 2026-02-12 | SPEC-048c | REVIEW v1: APPROVED with 3 minor items (AC-4 deviation documented, duplicated helpers, forceExit). Test passes in ~4.5s. All acceptance criteria met. |
 | 2026-02-12 | SPEC-048c | EXECUTED: 1 commit, 1 file created. Test passes (4.5s). All 501 client tests + 1211 server tests pass. 4 Rule 2 deviations (inlined pollUntil, patched updateConnectionPool, key ownership selection, dual auth). 3 pre-existing bugs documented. |
-| 2026-02-12 | SPEC-048c | Audit v3: APPROVED with no issues. Fresh-eyes source verification confirmed all API references, patterns, and assumptions. Spec is implementation-ready. |
 
 ## Project Patterns
 
@@ -76,4 +77,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-13 (SPEC-049 completed and archived)*
+*Last updated: 2026-02-13 (SPEC-050 completed and archived)*

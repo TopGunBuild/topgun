@@ -70,9 +70,10 @@ Each Rust spec should reference TWO sources:
 - **Context:** [RUST_SERVER_MIGRATION_RESEARCH.md](../reference/RUST_SERVER_MIGRATION_RESEARCH.md) Section 8 (Monorepo Structure)
 - **Effort:** 0.5-1 day
 
-### TODO-060: Upfront Trait Definitions
+### TODO-060: Upfront Trait Definitions → SPEC-050 ✅
 - **Priority:** P0 (blocks all Rust feature work)
 - **Complexity:** Low (design only, ~150 lines of Rust)
+- **Status:** DONE (SPEC-050 completed 2026-02-13)
 - **Summary:** Define the 6 foundational traits that gate all Rust architecture decisions
 - **Deliverables:**
   - `ServerStorage` trait (pluggable persistence)
