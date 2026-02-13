@@ -4,7 +4,7 @@
 
 - **Active Specification:** none
 - **Status:** idle
-- **Project Phase:** Phase 0 (TypeScript Completion) — Complete
+- **Project Phase:** Phase 1 (Bridge TS to Rust)
 - **TODO Items:** 23 (1 client bug fix + 8 Rust bridge/core + 14 existing deferred)
 - **Next Step:** /sf:new or /sf:next
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
@@ -13,14 +13,13 @@
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| (empty) | | | | |
 
 ## Migration Roadmap (high-level)
 
 | Phase | Description | Status |
 |-------|-------------|--------|
 | **0. TypeScript Completion** | SPEC-048a/b/c (client cluster integration) | Complete |
-| **1. Bridge** | Cargo workspace, CI, 6 upfront traits | Not Started |
+| **1. Bridge** | Cargo workspace, CI, 6 upfront traits | In Progress |
 | **2. Rust Core** | CRDTs, message schemas, partitions | Not Started |
 | **3. Rust Server** | Network, handlers, cluster, storage, tests | Not Started |
 | **4. Rust Features** | Schema system, shapes, SSE, DAG, tantivy | Not Started |
@@ -40,11 +39,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-13 | SPEC-049 | COMPLETED: Rust Project Bootstrap. Cargo workspace with 2 skeleton crates (topgun-core, topgun-server), CI pipeline (fmt/clippy/test), rust-toolchain.toml (stable), Language Profile added to PROJECT.md. All 11 AC passed. Phase 1 unblocked. |
 | 2026-02-12 | SPEC-048c | COMPLETED: Phase 0 (TypeScript Completion) finished. SPEC-048a/b/c series done. Client cluster integration validated E2E. 3 pre-existing bugs documented for future fix. |
 | 2026-02-12 | SPEC-048c | REVIEW v1: APPROVED with 3 minor items (AC-4 deviation documented, duplicated helpers, forceExit). Test passes in ~4.5s. All acceptance criteria met. |
 | 2026-02-12 | SPEC-048c | EXECUTED: 1 commit, 1 file created. Test passes (4.5s). All 501 client tests + 1211 server tests pass. 4 Rule 2 deviations (inlined pollUntil, patched updateConnectionPool, key ownership selection, dual auth). 3 pre-existing bugs documented. |
 | 2026-02-12 | SPEC-048c | Audit v3: APPROVED with no issues. Fresh-eyes source verification confirmed all API references, patterns, and assumptions. Spec is implementation-ready. |
-| 2026-02-12 | SPEC-048c | Response v2: Applied all 3 Audit v2 recommendations (verified no duplicate prerequisites, added pollUntil import path, clarified LWWMap.get() assertion pattern). |
 
 ## Project Patterns
 
@@ -77,4 +76,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-12 (SPEC-048c completed, Phase 0 finished)*
+*Last updated: 2026-02-13 (SPEC-049 completed and archived)*
