@@ -6,6 +6,18 @@ Historical decisions rotated from STATE.md to maintain compactness.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-13 | SPEC-051a | REVIEW v2: APPROVED. All 3 fixes from Review v1 verified. No new issues. All 9 AC pass. 87+4 tests pass. |
+| 2026-02-13 | SPEC-051a | FIX v1: Applied all 3 minor items from Review v1. Extracted shared trie logic (-63 lines), added PartialEq to records, verified splitn(3) no-op. 87+4 tests pass. |
+| 2026-02-13 | SPEC-051a | REVIEW v1: APPROVED with 3 minor items (duplicated merkle methods, missing PartialEq on records, splitn vs split). All 9 AC verified by toolchain. 87 tests + 4 doc-tests pass. |
+| 2026-02-13 | SPEC-051a | AUDIT v3: APPROVED. Fresh-eyes audit confirms spec is implementation-ready. All 10 dimensions pass. No critical issues. Cross-crate Value type impact verified. |
+| 2026-02-13 | SPEC-051a | REVISION v2: Applied all 3 Audit v2 recommendations. (1) Added wrapping_mul note to hash.rs requirement, (2) Added BTreeMap import note to types.rs requirement, (3) Added concrete hash values to AC-5 and Behavioral Equivalence Requirements. |
+| 2026-02-13 | SPEC-051a | AUDIT v2: APPROVED with 3 recommendations. No critical issues. All v1 issues resolved. Context estimate ~55%. Ready for implementation. |
+| 2026-02-13 | SPEC-051a | REVISION v1: Applied all 6 audit items (2 critical, 4 recommendations). File count clarified (5 source files + 1 manifest). Record types moved to hlc.rs. Node ID constraints added. ASCII-only assumption documented. |
+| 2026-02-13 | SPEC-051a | AUDIT v1: NEEDS_REVISION. 2 critical issues: (1) file count 6 exceeds Language Profile limit of 5, (2) AC-9 references server traits but verifies via core-only test. 4 recommendations. |
+| 2026-02-13 | SPEC-049 | COMPLETED: Rust Project Bootstrap. Cargo workspace with 2 skeleton crates (topgun-core, topgun-server), CI pipeline (fmt/clippy/test), rust-toolchain.toml (stable), Language Profile added to PROJECT.md. All 11 AC passed. Phase 1 unblocked. |
+| 2026-02-12 | SPEC-048c | COMPLETED: Phase 0 (TypeScript Completion) finished. SPEC-048a/b/c series done. Client cluster integration validated E2E. 3 pre-existing bugs documented for future fix. |
+| 2026-02-12 | SPEC-048c | REVIEW v1: APPROVED with 3 minor items (AC-4 deviation documented, duplicated helpers, forceExit). Test passes in ~4.5s. All acceptance criteria met. |
+| 2026-02-12 | SPEC-048c | EXECUTED: 1 commit, 1 file created. Test passes (4.5s). All 501 client tests + 1211 server tests pass. 4 Rule 2 deviations (inlined pollUntil, patched updateConnectionPool, key ownership selection, dual auth). 3 pre-existing bugs documented. |
 | 2026-02-12 | SPEC-048c | Audit v2: APPROVED with 3 recommendations (duplicate prerequisites heading, pollUntil import path, LWWMap.get() return shape). All v1 critical issues resolved. |
 | 2026-02-12 | SPEC-048c | Response v1: Applied all 6 items (1 critical + 5 recommendations). Rewrote AC-5 to use public TopGunClient API, added auth/storage/WS polyfill prerequisites, changed to port:0, specified server-side inspection. |
 | 2026-02-12 | SPEC-048c | Audit v1: NEEDS_REVISION. 1 critical issue (getRoutingMetrics() not exposed on TopGunClient), 5 recommendations (auth details, storage adapter, WS polyfill, port convention, read-back ambiguity). |

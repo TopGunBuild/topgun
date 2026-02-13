@@ -93,9 +93,9 @@ Each Rust spec should reference TWO sources:
 
 *Goal: Port foundational types and prove client-server binary compatibility.*
 
-### TODO-061: Core CRDTs in Rust
+### TODO-061: Core CRDTs in Rust → SPEC-051
 - **Priority:** P0 (foundation for everything)
-- **Complexity:** Medium
+- **Complexity:** Medium (spec: large — needs /sf:split)
 - **Summary:** Port LWWMap, ORMap, HLC, and MerkleTree to Rust
 - **Key decisions:**
   - Custom CRDT implementation (not yrs/crdts crate) for full control
@@ -343,19 +343,39 @@ Each Rust spec should reference TWO sources:
 
 ---
 
+## Execution Order (parallel waves)
+
+Items within the same wave can run in parallel. Each wave starts when its blockers from previous waves complete.
+
+| Wave | Items | Blocked by | Phase |
+|------|-------|------------|-------|
+| **1** | TODO-061 (CRDTs) · TODO-062 (Messages) · TODO-063 (Partitions) | — (all unblocked) | 2 |
+| **2** | TODO-064 (Network) · TODO-067 (PostgreSQL) | 062 · 060✓ | 3 |
+| **3** | TODO-065 (Handlers) · TODO-066 (Cluster) · TODO-068 (Tests, incremental) | 061+062+064 · 063+064 · 064 | 3 |
+| **4** | TODO-069 (Schema) · TODO-048 (SSE) · TODO-025 (DAG) · TODO-071 (Tantivy) | — · — · 063 · — | 4 |
+| **5** | TODO-070 (Shapes) · TODO-049 (Cluster HTTP) | 069 · 066+063 | 4 |
+| **6** | TODO-033 (AsyncStorage) · TODO-039 (Vector) · TODO-036 (Extensions) · TODO-041 (Multi-tenancy) · TODO-072 (WASM) | — | 5 |
+| **7** | TODO-043 (S3) · TODO-040 (Tiered) | 033 · 033 | 5 |
+| **8** | TODO-044 (Time-Travel) | 043 | 5 |
+
+**Current position:** Wave 1 — start TODO-061, TODO-062, TODO-063 in parallel.
+
+---
+
 ## Dependency Graph
 
 ```
 Phase 0 (TypeScript)            Phase 1 (Bridge)
 SPEC-048b ──→ SPEC-048c         TODO-059 (Cargo) ──→ TODO-060 (Traits)
+          [DONE]                       [DONE]              [DONE]
                                     │
                                     ↓
-                            Phase 2 (Rust Core)
+                            Phase 2 (Rust Core) — WAVE 1
                     TODO-061 (CRDTs)    TODO-062 (Messages)    TODO-063 (Partitions)
                         │                    │                      │
                         └────────┬───────────┘                      │
                                  ↓                                  │
-                            Phase 3 (Server)                        │
+                            Phase 3 (Server) — WAVES 2-3             │
                     TODO-064 (Network) ──→ TODO-065 (Handlers)      │
                         │                                           │
                         └──→ TODO-066 (Cluster) ←───────────────────┘
@@ -365,7 +385,7 @@ SPEC-048b ──→ SPEC-048c         TODO-059 (Cargo) ──→ TODO-060 (Trait
                         └──→ TODO-068 (Integration Tests)
                                  │
                                  ↓
-                            Phase 4 (Features)
+                            Phase 4 (Features) — WAVES 4-5
             TODO-069 (Schema) ──→ TODO-070 (Shapes)
             TODO-048 (SSE)
             TODO-049 (Cluster HTTP)
@@ -373,7 +393,7 @@ SPEC-048b ──→ SPEC-048c         TODO-059 (Cargo) ──→ TODO-060 (Trait
             TODO-071 (Tantivy Search)
                                  │
                                  ↓
-                            Phase 5 (Post-Migration)
+                            Phase 5 (Post-Migration) — WAVES 6-8
             TODO-033 (AsyncStorage) ──→ TODO-043 (S3) ──→ TODO-044 (Time-Travel)
                                    └──→ TODO-040 (Tiered Storage)
             TODO-039 (Vector Search)
