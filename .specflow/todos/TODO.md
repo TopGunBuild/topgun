@@ -29,23 +29,21 @@ Each Rust spec should reference TWO sources:
 
 ---
 
-## Phase 0: TypeScript Completion (~3-4 days remaining)
+## Phase 0: TypeScript Completion — COMPLETE
 
 *Goal: Finish client cluster integration. After this, no new TypeScript server work.*
 
-### SPEC-048b: Routing Logic and Error Recovery
-- **Status:** draft (in SpecFlow queue position 1)
+### SPEC-048b: Routing Logic and Error Recovery — DONE
+- **Status:** Complete (archived to .specflow/archive/SPEC-048b.md)
 - **Summary:** Per-key batch routing in SyncEngine, NOT_OWNER error handling, partition map re-request on reconnect
-- **Depends on:** SPEC-048a (complete)
-- **Effort:** ~16-20 hours
-- **Acceptance:** 11 criteria defined in spec
 
-### SPEC-048c: End-to-End Cluster Integration Test
-- **Status:** draft (in SpecFlow queue position 2)
-- **Depends on:** SPEC-048b
-- **Summary:** Integration test: 3-node cluster startup, auth, write routing to partition owner, owner failover, routing metrics
-- **Effort:** ~8-12 hours
-- **Acceptance:** 7 criteria defined in spec
+### SPEC-048c: End-to-End Cluster Integration Test — DONE
+- **Status:** Complete (archived to .specflow/archive/SPEC-048c.md)
+- **Summary:** Integration test: 3-node cluster startup, auth, write routing to partition owner, failover, cluster stats
+
+### TODO-073: Fix ConnectionPool.remapNodeId Closure Bug — DONE
+- **Status:** Complete (d6b490b, 2026-02-13, via `/sf:quick`)
+- **Summary:** Changed socket event closures to use `connection.nodeId` (mutable) instead of captured `nodeId` parameter
 
 ### TODO-045: DST Documentation
 - **Priority:** Low (optional, do between heavy tasks)
@@ -153,6 +151,7 @@ Each Rust spec should reference TWO sources:
 - **Priority:** P0
 - **Complexity:** Large
 - **Summary:** Port all 26 message handlers organized by domain
+- **Known TS bug (covered by rewrite):** `BatchProcessingHandler.processBatchAsync` nests inter-node forwarded messages in an extra `{type: 'CLIENT_OP', payload: {...}}` layer, causing `handleOpForward` to fail. Single-op path is correct. (Discovered by SPEC-048c)
 - **Domains:**
   - CRDT (merge, conflict resolution)
   - Sync (delta sync, MerkleTree reconciliation)
@@ -170,6 +169,7 @@ Each Rust spec should reference TWO sources:
 - **Priority:** P1
 - **Complexity:** Medium
 - **Summary:** ClusterManager, inter-node WebSocket mesh, partition ownership, rebalancing
+- **Known TS bug (covered by rewrite):** `PartitionService.getPartitionMap()` returns cluster inter-node port instead of client WS port, and `host:'unknown'` for non-self nodes. Clients cannot use the partition map to connect to correct endpoints. (Discovered by SPEC-048c)
 - **TS Source:** `packages/server/src/cluster/`
 - **HC Reference:** `hazelcast/cluster/` — membership protocol, split-brain detection, heartbeat, cluster state machine
 - **Key:** 26 cluster message types, partition table, node discovery

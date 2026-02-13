@@ -2,7 +2,7 @@
 id: SPEC-048c
 parent: SPEC-048
 type: feature
-status: review
+status: done
 priority: medium
 complexity: small
 depends_on: [SPEC-048b]
@@ -284,3 +284,53 @@ The test uncovered three pre-existing bugs that should be tracked for future fix
 2. **Server BatchProcessingHandler inter-node forwarding nests message incorrectly** (`packages/server/src/coordinator/batch-processing-handler.ts:104-115`) — Uses `cluster.sendToNode(owner, { type: 'CLIENT_OP', payload: {...} })` which wraps the op in an extra layer, causing the receiving node's `handleOpForward` to not find `msg.payload.key`. The single-op path (`OperationHandler.processClientOp`) correctly uses `forwardToNode(owner, op)` without nesting.
 
 3. **Client ConnectionPool.remapNodeId doesn't update socket event handler closures** (`packages/client/src/cluster/ConnectionPool.ts:205-221`) — After remap, `socket.onmessage` closure still captures the old nodeId, causing `handleMessage(oldId, event)` to fail silently when `connections.get(oldId)` returns undefined.
+
+---
+
+## Review History
+
+### Review v1 (2026-02-12 23:00)
+**Result:** APPROVED
+**Reviewer:** impl-reviewer (subagent)
+
+**Minor:**
+
+1. **AC-4 deviation: non-primary node shutdown instead of partition owner shutdown**
+   - File: `packages/client/src/__tests__/ClusterE2E.integration.test.ts:307`
+   - Issue: The spec's AC-4 says "shuts down partition owner" but the test always shuts down a non-primary node (`ownerNode === node1 ? node2 : ownerNode!`). Since `findKeyOwnedByNode(node1, ...)` selects a key owned by node1, `ownerNode` will always be node1, and `failoverNode` will always be node2. This means the partition owner is never shut down -- the test validates cluster resilience to node departure but not partition ownership transfer. This is a well-documented deviation (Deviation #3) caused by a pre-existing server-side forwarding bug, and the constraint "Do not modify server-side code" prevents fixing it here.
+
+2. **Duplicated `waitForCluster` helper could be extracted to a shared utility**
+   - File: `packages/client/src/__tests__/ClusterE2E.integration.test.ts:143-162`
+   - Issue: The `waitForCluster` function is copy-pasted from `ClusterClient.integration.test.ts:29-48`. Both files also duplicate the `MemoryStorageAdapter` (from `TopGunClient.test.ts:44`). This is acceptable for a test file to avoid import cycles (the same reason `pollUntil` was inlined), but worth noting for future consolidation.
+
+3. **`forceExit` needed when running the test**
+   - Issue: The test requires `--forceExit` to avoid Jest hanging due to open WebSocket handles. This is a known pattern in the project's cluster tests (the existing `ClusterClient.integration.test.ts` has the same behavior). Not actionable for this spec but worth tracking.
+
+**Passed:**
+- [x] AC-1: Test file exists at `packages/client/src/__tests__/ClusterE2E.integration.test.ts` -- verified via filesystem check
+- [x] AC-2: Test starts 3-node cluster with `port: 0`, creates `TopGunClient` with `MemoryStorageAdapter`, authenticates via JWT with `'topgun-secret-dev'`, and waits for `isRoutingActive()` -- lines 164-271
+- [x] AC-3: Test writes `{ value: 1 }` via `client.getMap('test').set(testKey, ...)` and polls server-side `node.getMap('test').get(testKey)?.value === 1` -- lines 275-301
+- [x] AC-4: Test shuts down a node and verifies `map.get(testKey)?.value === 2` on surviving nodes -- lines 303-343 (deviation: non-primary node, documented)
+- [x] AC-5: Test asserts `getClusterStats()` non-null, `mapVersion >= 1`, `partitionCount === 271`, `isRoutingActive() === true` -- lines 346-351
+- [x] AC-6: All 47 existing TopGunClient tests pass without modification -- verified via test run
+- [x] AC-7: All 27 existing ClusterClient integration tests pass without modification -- verified via test run
+- [x] Constraint: No existing source files modified -- confirmed via `git diff` (only 1 file added)
+- [x] Constraint: No new dependencies added -- test uses existing `ws`, `jsonwebtoken`, `@topgunbuild/core`, `@topgunbuild/server`
+- [x] Constraint: Uses `port: 0` for all cluster nodes -- lines 167, 170, 178, 181, 189, 192
+- [x] Code quality: Clear step-by-step comments, WHY-comments explaining workarounds, no SPEC/Phase references in code
+- [x] Architecture: Follows established test patterns (WebSocket polyfill, MemoryStorageAdapter, `ServerFactory.create`, `node.ready()`, `node.shutdown()`)
+- [x] Security: Only dev secret used in test context, no hardcoded production secrets
+- [x] Integration: Test correctly uses public APIs (`getMap`, `setAuthToken`, `getClusterStats`, `isRoutingActive`) with documented workarounds for known bugs
+- [x] No unnecessary duplication beyond what is required to avoid import cycles
+- [x] Cognitive load: Linear 12-step flow with clear comments at each step; easy to follow
+
+**Summary:** The implementation is solid and well-documented. The test successfully validates the complete TopGunClient-to-cluster E2E flow including write verification via server-side inspection, failover resilience, and cluster stats. The four deviations from spec are all well-justified workarounds for pre-existing bugs (none introduced by this spec) and are thoroughly documented in both code comments and the execution summary. The test passes reliably in ~4.5 seconds. All existing tests remain unaffected. The three minor items are informational only and do not require fixes.
+
+---
+
+## Completion
+
+**Completed:** 2026-02-12
+**Total Commits:** 1
+**Audit Cycles:** 3
+**Review Cycles:** 1

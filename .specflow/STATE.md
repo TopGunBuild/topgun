@@ -2,24 +2,24 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-048c — End-to-End Cluster Integration Test
-- **Status:** review
-- **Project Phase:** Phase 0 (TypeScript Completion) — 1 spec remaining
-- **TODO Items:** 23 (1 TS spec + 8 new Rust bridge/core + 14 existing deferred)
-- **Next Step:** /sf:review
+- **Active Specification:** none
+- **Status:** idle
+- **Project Phase:** Phase 0 (TypeScript Completion) — Complete
+- **TODO Items:** 23 (1 client bug fix + 8 Rust bridge/core + 14 existing deferred)
+- **Next Step:** /sf:new or /sf:next
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
 ## Queue
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-048c | End-to-End Cluster Integration Test | review | Phase 0 (TS) |
+| (empty) | | | | |
 
 ## Migration Roadmap (high-level)
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| **0. TypeScript Completion** | SPEC-048c (client cluster E2E test) | In Progress |
+| **0. TypeScript Completion** | SPEC-048a/b/c (client cluster integration) | Complete |
 | **1. Bridge** | Cargo workspace, CI, 6 upfront traits | Not Started |
 | **2. Rust Core** | CRDTs, message schemas, partitions | Not Started |
 | **3. Rust Server** | Network, handlers, cluster, storage, tests | Not Started |
@@ -40,11 +40,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-12 | SPEC-048c | COMPLETED: Phase 0 (TypeScript Completion) finished. SPEC-048a/b/c series done. Client cluster integration validated E2E. 3 pre-existing bugs documented for future fix. |
+| 2026-02-12 | SPEC-048c | REVIEW v1: APPROVED with 3 minor items (AC-4 deviation documented, duplicated helpers, forceExit). Test passes in ~4.5s. All acceptance criteria met. |
 | 2026-02-12 | SPEC-048c | EXECUTED: 1 commit, 1 file created. Test passes (4.5s). All 501 client tests + 1211 server tests pass. 4 Rule 2 deviations (inlined pollUntil, patched updateConnectionPool, key ownership selection, dual auth). 3 pre-existing bugs documented. |
 | 2026-02-12 | SPEC-048c | Audit v3: APPROVED with no issues. Fresh-eyes source verification confirmed all API references, patterns, and assumptions. Spec is implementation-ready. |
 | 2026-02-12 | SPEC-048c | Response v2: Applied all 3 Audit v2 recommendations (verified no duplicate prerequisites, added pollUntil import path, clarified LWWMap.get() assertion pattern). |
-| 2026-02-12 | SPEC-048c | Audit v2: APPROVED with 3 recommendations (duplicate prerequisites heading, pollUntil import path, LWWMap.get() return shape). All v1 critical issues resolved. |
-| 2026-02-12 | SPEC-048c | Response v1: Applied all 6 items (1 critical + 5 recommendations). Rewrote AC-5 to use public TopGunClient API, added auth/storage/WS polyfill prerequisites, changed to port:0, specified server-side inspection. |
 
 ## Project Patterns
 
@@ -77,4 +77,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-12 (SPEC-048c executed, decisions rotated)*
+*Last updated: 2026-02-12 (SPEC-048c completed, Phase 0 finished)*

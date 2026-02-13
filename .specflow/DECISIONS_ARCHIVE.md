@@ -6,6 +6,8 @@ Historical decisions rotated from STATE.md to maintain compactness.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-12 | SPEC-048c | Audit v2: APPROVED with 3 recommendations (duplicate prerequisites heading, pollUntil import path, LWWMap.get() return shape). All v1 critical issues resolved. |
+| 2026-02-12 | SPEC-048c | Response v1: Applied all 6 items (1 critical + 5 recommendations). Rewrote AC-5 to use public TopGunClient API, added auth/storage/WS polyfill prerequisites, changed to port:0, specified server-side inspection. |
 | 2026-02-12 | SPEC-048c | Audit v1: NEEDS_REVISION. 1 critical issue (getRoutingMetrics() not exposed on TopGunClient), 5 recommendations (auth details, storage adapter, WS polyfill, port convention, read-back ambiguity). |
 | 2026-02-12 | SPEC-048b | COMPLETED: Routing Logic — Batch Delegation and Reconnect Map Refresh. Modified 3 files, 3 commits, 3 audit cycles, 2 review cycles. Archived to .specflow/archive/SPEC-048b.md |
 | 2026-02-12 | SPEC-048b | Review v2: APPROVED with no issues. Fix Response v1 verified (sendBatch return value handling + 3 new unit tests). 500 tests pass. |
