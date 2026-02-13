@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "packages/core-rust",
+    "packages/server-rust",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "BSL-1.1"
+repository = "https://github.com/topgunbuild/topgun"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

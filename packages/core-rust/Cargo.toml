@@ -1,0 +1,13 @@
+[package]
+name = "topgun-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TopGun core: CRDTs, HLC, MerkleTree, message schemas"
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
