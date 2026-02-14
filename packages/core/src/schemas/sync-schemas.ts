@@ -13,6 +13,7 @@ export const ClientOpMessageSchema = z.object({
   type: z.literal('CLIENT_OP'),
   payload: ClientOpSchema,
 });
+export type ClientOpMessage = z.infer<typeof ClientOpMessageSchema>;
 
 export const OpBatchMessageSchema = z.object({
   type: z.literal('OP_BATCH'),
@@ -22,6 +23,7 @@ export const OpBatchMessageSchema = z.object({
     timeout: z.number().optional(),
   }),
 });
+export type OpBatchMessage = z.infer<typeof OpBatchMessageSchema>;
 
 // --- LWWMap Sync Messages ---
 export const SyncInitMessageSchema = z.object({
@@ -29,6 +31,7 @@ export const SyncInitMessageSchema = z.object({
   mapName: z.string(),
   lastSyncTimestamp: z.number().optional(),
 });
+export type SyncInitMessage = z.infer<typeof SyncInitMessageSchema>;
 
 export const SyncRespRootMessageSchema = z.object({
   type: z.literal('SYNC_RESP_ROOT'),
@@ -38,6 +41,7 @@ export const SyncRespRootMessageSchema = z.object({
     timestamp: TimestampSchema,
   }),
 });
+export type SyncRespRootMessage = z.infer<typeof SyncRespRootMessageSchema>;
 
 export const SyncRespBucketsMessageSchema = z.object({
   type: z.literal('SYNC_RESP_BUCKETS'),
@@ -47,6 +51,7 @@ export const SyncRespBucketsMessageSchema = z.object({
     buckets: z.record(z.string(), z.number()),
   }),
 });
+export type SyncRespBucketsMessage = z.infer<typeof SyncRespBucketsMessageSchema>;
 
 export const SyncRespLeafMessageSchema = z.object({
   type: z.literal('SYNC_RESP_LEAF'),
@@ -59,6 +64,7 @@ export const SyncRespLeafMessageSchema = z.object({
     })),
   }),
 });
+export type SyncRespLeafMessage = z.infer<typeof SyncRespLeafMessageSchema>;
 
 export const MerkleReqBucketMessageSchema = z.object({
   type: z.literal('MERKLE_REQ_BUCKET'),
@@ -67,6 +73,20 @@ export const MerkleReqBucketMessageSchema = z.object({
     path: z.string(),
   }),
 });
+export type MerkleReqBucketMessage = z.infer<typeof MerkleReqBucketMessageSchema>;
+
+// --- ORMap Shared Types ---
+
+/**
+ * Shared entry shape for ORMap sync messages.
+ * Used in ORMap leaf responses, diff responses, and push diffs.
+ */
+export const ORMapEntrySchema = z.object({
+  key: z.string(),
+  records: z.array(ORMapRecordSchema),
+  tombstones: z.array(z.string()),
+});
+export type ORMapEntry = z.infer<typeof ORMapEntrySchema>;
 
 // --- ORMap Sync Messages ---
 
@@ -81,6 +101,7 @@ export const ORMapSyncInitSchema = z.object({
   bucketHashes: z.record(z.string(), z.number()),
   lastSyncTimestamp: z.number().optional(),
 });
+export type ORMapSyncInit = z.infer<typeof ORMapSyncInitSchema>;
 
 export const ORMapSyncRespRootSchema = z.object({
   type: z.literal('ORMAP_SYNC_RESP_ROOT'),
@@ -90,6 +111,7 @@ export const ORMapSyncRespRootSchema = z.object({
     timestamp: TimestampSchema,
   }),
 });
+export type ORMapSyncRespRoot = z.infer<typeof ORMapSyncRespRootSchema>;
 
 export const ORMapSyncRespBucketsSchema = z.object({
   type: z.literal('ORMAP_SYNC_RESP_BUCKETS'),
@@ -99,6 +121,7 @@ export const ORMapSyncRespBucketsSchema = z.object({
     buckets: z.record(z.string(), z.number()),
   }),
 });
+export type ORMapSyncRespBuckets = z.infer<typeof ORMapSyncRespBucketsSchema>;
 
 export const ORMapMerkleReqBucketSchema = z.object({
   type: z.literal('ORMAP_MERKLE_REQ_BUCKET'),
@@ -107,19 +130,17 @@ export const ORMapMerkleReqBucketSchema = z.object({
     path: z.string(),
   }),
 });
+export type ORMapMerkleReqBucket = z.infer<typeof ORMapMerkleReqBucketSchema>;
 
 export const ORMapSyncRespLeafSchema = z.object({
   type: z.literal('ORMAP_SYNC_RESP_LEAF'),
   payload: z.object({
     mapName: z.string(),
     path: z.string(),
-    entries: z.array(z.object({
-      key: z.string(),
-      records: z.array(ORMapRecordSchema),
-      tombstones: z.array(z.string()),
-    })),
+    entries: z.array(ORMapEntrySchema),
   }),
 });
+export type ORMapSyncRespLeaf = z.infer<typeof ORMapSyncRespLeafSchema>;
 
 export const ORMapDiffRequestSchema = z.object({
   type: z.literal('ORMAP_DIFF_REQUEST'),
@@ -128,30 +149,25 @@ export const ORMapDiffRequestSchema = z.object({
     keys: z.array(z.string()),
   }),
 });
+export type ORMapDiffRequest = z.infer<typeof ORMapDiffRequestSchema>;
 
 export const ORMapDiffResponseSchema = z.object({
   type: z.literal('ORMAP_DIFF_RESPONSE'),
   payload: z.object({
     mapName: z.string(),
-    entries: z.array(z.object({
-      key: z.string(),
-      records: z.array(ORMapRecordSchema),
-      tombstones: z.array(z.string()),
-    })),
+    entries: z.array(ORMapEntrySchema),
   }),
 });
+export type ORMapDiffResponse = z.infer<typeof ORMapDiffResponseSchema>;
 
 export const ORMapPushDiffSchema = z.object({
   type: z.literal('ORMAP_PUSH_DIFF'),
   payload: z.object({
     mapName: z.string(),
-    entries: z.array(z.object({
-      key: z.string(),
-      records: z.array(ORMapRecordSchema),
-      tombstones: z.array(z.string()),
-    })),
+    entries: z.array(ORMapEntrySchema),
   }),
 });
+export type ORMapPushDiff = z.infer<typeof ORMapPushDiffSchema>;
 
 // --- Write Concern Response Schemas ---
 export const OpResultSchema = z.object({
