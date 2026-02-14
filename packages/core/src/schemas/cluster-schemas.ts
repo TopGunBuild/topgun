@@ -15,20 +15,21 @@ export type PartitionMapRequest = z.infer<typeof PartitionMapRequestSchema>;
 // --- Partition Map Message ---
 
 export const NodeInfoSchema = z.object({
-  id: z.string(),
-  endpoint: z.string(),
-  status: z.enum(['active', 'joining', 'leaving', 'down']),
-  weight: z.number().optional(),
+  nodeId: z.string(),
+  endpoints: z.object({
+    websocket: z.string(),
+    http: z.string().optional(),
+  }),
+  status: z.enum(['ACTIVE', 'JOINING', 'LEAVING', 'SUSPECTED', 'FAILED']),
 });
-export type NodeInfo = z.infer<typeof NodeInfoSchema>;
+export type NodeInfoZod = z.infer<typeof NodeInfoSchema>;
 
 export const PartitionInfoSchema = z.object({
-  id: z.number(),
-  owner: z.string(),
-  replicas: z.array(z.string()),
-  status: z.enum(['active', 'migrating', 'recovering']),
+  partitionId: z.number(),
+  ownerNodeId: z.string(),
+  backupNodeIds: z.array(z.string()),
 });
-export type PartitionInfo = z.infer<typeof PartitionInfoSchema>;
+export type PartitionInfoZod = z.infer<typeof PartitionInfoSchema>;
 
 export const PartitionMapPayloadSchema = z.object({
   version: z.number(),
