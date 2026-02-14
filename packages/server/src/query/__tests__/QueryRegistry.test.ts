@@ -69,14 +69,14 @@ describe('QueryRegistry', () => {
     // My implementation iterates 'removed' then 'added'.
     
     // Check removed
-    const removedMsg = [call1, call2].find(m => m.payload.type === 'REMOVE');
+    const removedMsg = [call1, call2].find(m => m.payload.changeType === 'LEAVE');
     expect(removedMsg).toBeDefined();
     expect(removedMsg.payload.key).toBe('C');
 
     // Check updated
     const updatedMsg = [call1, call2].find(m => m.payload.key === 'D');
     expect(updatedMsg).toBeDefined();
-    expect(updatedMsg.payload.type).toBe('UPDATE');
+    expect(updatedMsg.payload.changeType).toBe('UPDATE');
     expect(updatedMsg.payload.value.score).toBe(95);
 
     // Verify internal state
@@ -117,13 +117,13 @@ describe('QueryRegistry', () => {
     const call1 = deserialize((socket.send as jest.Mock).mock.calls[0][0] as Uint8Array) as any;
     const call2 = deserialize((socket.send as jest.Mock).mock.calls[1][0] as Uint8Array) as any;
 
-    const removedMsg = [call1, call2].find(m => m.payload.type === 'REMOVE');
+    const removedMsg = [call1, call2].find(m => m.payload.changeType === 'LEAVE');
     expect(removedMsg).toBeDefined();
     expect(removedMsg.payload.key).toBe('A');
 
     const addedMsg = [call1, call2].find(m => m.payload.key === 'C');
     expect(addedMsg).toBeDefined();
-    expect(addedMsg.payload.type).toBe('UPDATE');
+    expect(addedMsg.payload.changeType).toBe('ENTER');
   });
 });
 

@@ -46,7 +46,7 @@ describe('Live Query Sliding Window Integration', () => {
     timestamp: { millis: Date.now(), counter: 0, nodeId: 'test-node' }
   });
 
-  test('Should handle sliding window updates (REMOVE/UPDATE)', async () => {
+  test('Should handle sliding window updates (LEAVE/UPDATE)', async () => {
     // 1. Seed Data: A=100, B=90, C=80
     const map = server.getMap('scores') as any;
     map.merge('A', createRecord({ score: 100 }));
@@ -118,8 +118,8 @@ describe('Live Query Sliding Window Integration', () => {
     expect(clientSocket.send).toHaveBeenCalled();
     const msgs = clientSocket.send.mock.calls.map(c => deserialize(c[0] as Uint8Array) as any);
 
-    const removeMsg = msgs.find(m => m.type === 'QUERY_UPDATE' && m.payload.type === 'REMOVE');
-    const updateMsg = msgs.find(m => m.type === 'QUERY_UPDATE' && m.payload.type === 'UPDATE');
+    const removeMsg = msgs.find(m => m.type === 'QUERY_UPDATE' && m.payload.changeType === 'LEAVE');
+    const updateMsg = msgs.find(m => m.type === 'QUERY_UPDATE' && m.payload.changeType === 'UPDATE');
 
     expect(removeMsg).toBeDefined();
     expect(removeMsg.payload.key).toBe('B');
@@ -197,7 +197,7 @@ describe('Live Query Sliding Window Integration', () => {
     );
     const updateMsg = deserialize(clientSocket.send.mock.calls[0][0] as Uint8Array) as any;
     expect(updateMsg.type).toBe('QUERY_UPDATE');
-    expect(updateMsg.payload.type).toBe('UPDATE');
+    expect(updateMsg.payload.changeType).toBe('UPDATE');
     expect(updateMsg.payload.key).toBe('u1');
   });
 });

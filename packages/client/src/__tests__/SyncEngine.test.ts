@@ -439,7 +439,7 @@ describe('SyncEngine', () => {
       expect(mockQuery.onUpdate).toHaveBeenCalledWith('user1', { name: 'Bob' });
     });
 
-    test('should handle QUERY_UPDATE with REMOVE type', async () => {
+    test('should handle QUERY_UPDATE with LEAVE type', async () => {
       syncEngine = new SyncEngine(config);
       await jest.runAllTimersAsync();
 
@@ -460,7 +460,7 @@ describe('SyncEngine', () => {
           queryId: 'query-1',
           key: 'user1',
           value: null,
-          type: 'REMOVE',
+          changeType: 'LEAVE',
         },
       });
       await jest.runAllTimersAsync();

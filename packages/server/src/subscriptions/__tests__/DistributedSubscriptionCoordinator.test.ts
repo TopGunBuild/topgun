@@ -285,7 +285,7 @@ describe('DistributedSubscriptionCoordinator', () => {
       const updateMsg = sent.find((m: any) => m.type === 'SEARCH_UPDATE');
       expect(updateMsg).toBeDefined();
       expect(updateMsg.payload.key).toBe('new-doc');
-      expect(updateMsg.payload.type).toBe('ENTER');
+      expect(updateMsg.payload.changeType).toBe('ENTER');
     });
   });
 
@@ -788,7 +788,7 @@ describe('DistributedSubscriptionCoordinator', () => {
       const updateMsg = sent.find((m: any) => m.type === 'QUERY_UPDATE');
       expect(updateMsg).toBeDefined();
       expect(updateMsg.payload.key).toBe('order-123');
-      expect(updateMsg.payload.type).toBe('ENTER');
+      expect(updateMsg.payload.changeType).toBe('ENTER');
     });
 
     it('should forward LEAVE updates when record no longer matches query', async () => {
@@ -834,7 +834,7 @@ describe('DistributedSubscriptionCoordinator', () => {
 
       const sent = (socket as any)._sent;
       const leaveMsg = sent.find((m: any) =>
-        m.type === 'QUERY_UPDATE' && m.payload.type === 'LEAVE'
+        m.type === 'QUERY_UPDATE' && m.payload.changeType === 'LEAVE'
       );
       expect(leaveMsg).toBeDefined();
       expect(leaveMsg.payload.key).toBe('order-456');
@@ -882,7 +882,7 @@ describe('DistributedSubscriptionCoordinator', () => {
 
       const sent = (socket as any)._sent;
       const updateMsg = sent.find((m: any) =>
-        m.type === 'QUERY_UPDATE' && m.payload.type === 'UPDATE'
+        m.type === 'QUERY_UPDATE' && m.payload.changeType === 'UPDATE'
       );
       expect(updateMsg).toBeDefined();
       expect(updateMsg.payload.value.email).toBe('new@test.com');

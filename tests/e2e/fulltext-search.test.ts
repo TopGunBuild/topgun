@@ -327,7 +327,7 @@ describe('E2E: Full-Text Search', () => {
       const update = client.messages.find((m) => m.type === 'SEARCH_UPDATE');
       expect(update).toBeDefined();
       expect(update.payload.subscriptionId).toBe('sub-enter');
-      expect(update.payload.type).toBe('ENTER');
+      expect(update.payload.changeType).toBe('ENTER');
       expect(update.payload.key).toBe('prod-wireless');
       expect(update.payload.value.name).toBe('Wireless Mouse');
       expect(update.payload.score).toBeGreaterThan(0);
@@ -395,7 +395,7 @@ describe('E2E: Full-Text Search', () => {
 
       const update = client.messages.find((m) => m.type === 'SEARCH_UPDATE');
       expect(update).toBeDefined();
-      expect(update.payload.type).toBe('UPDATE');
+      expect(update.payload.changeType).toBe('UPDATE');
       expect(update.payload.value.name).toBe('Gaming Keyboard');
     });
 
@@ -454,13 +454,13 @@ describe('E2E: Full-Text Search', () => {
       // Wait for LEAVE update
       await waitUntil(
         () => client.messages.some(
-          (m) => m.type === 'SEARCH_UPDATE' && m.payload.type === 'LEAVE'
+          (m) => m.type === 'SEARCH_UPDATE' && m.payload.changeType === 'LEAVE'
         ),
         5000
       );
 
       const update = client.messages.find(
-        (m) => m.type === 'SEARCH_UPDATE' && m.payload.type === 'LEAVE'
+        (m) => m.type === 'SEARCH_UPDATE' && m.payload.changeType === 'LEAVE'
       );
       expect(update).toBeDefined();
       expect(update.payload.key).toBe('prod-leave');
@@ -789,13 +789,13 @@ describe('E2E: Full-Text Search', () => {
       // Should receive LEAVE
       await waitUntil(
         () => client.messages.some(
-          (m) => m.type === 'SEARCH_UPDATE' && m.payload.type === 'LEAVE'
+          (m) => m.type === 'SEARCH_UPDATE' && m.payload.changeType === 'LEAVE'
         ),
         5000
       );
 
       const leave = client.messages.find(
-        (m) => m.type === 'SEARCH_UPDATE' && m.payload.type === 'LEAVE'
+        (m) => m.type === 'SEARCH_UPDATE' && m.payload.changeType === 'LEAVE'
       );
       expect(leave).toBeDefined();
       expect(leave.payload.key).toBe('to-delete');

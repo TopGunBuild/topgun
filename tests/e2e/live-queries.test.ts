@@ -204,13 +204,13 @@ describe('E2E: Live Queries', () => {
       // Wait for removal update
       await waitUntil(
         () => client.messages.some(
-          (m) => m.type === 'QUERY_UPDATE' && m.payload.type === 'REMOVE'
+          (m) => m.type === 'QUERY_UPDATE' && m.payload.changeType === 'LEAVE'
         ),
         3000
       );
 
       const removeUpdate = client.messages.find(
-        (m) => m.type === 'QUERY_UPDATE' && m.payload.type === 'REMOVE'
+        (m) => m.type === 'QUERY_UPDATE' && m.payload.changeType === 'LEAVE'
       );
       expect(removeUpdate).toBeDefined();
       expect(removeUpdate.payload.key).toBe('task-1');
@@ -943,13 +943,13 @@ describe('E2E: Live Queries', () => {
 
       await waitUntil(
         () => client.messages.some(
-          (m) => m.type === 'QUERY_UPDATE' && m.payload.type === 'REMOVE'
+          (m) => m.type === 'QUERY_UPDATE' && m.payload.changeType === 'LEAVE'
         ),
         3000
       );
 
       const removeUpdate = client.messages.find(
-        (m) => m.type === 'QUERY_UPDATE' && m.payload.type === 'REMOVE'
+        (m) => m.type === 'QUERY_UPDATE' && m.payload.changeType === 'LEAVE'
       );
       expect(removeUpdate).toBeDefined();
       expect(removeUpdate.payload.key).toBe('d1');
