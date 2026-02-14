@@ -42,17 +42,11 @@ export interface PartitionMap {
 // Partition Map Protocol Messages
 // ============================================
 
-export interface PartitionMapMessage {
-  type: 'PARTITION_MAP';
-  payload: PartitionMap;
-}
-
-export interface PartitionMapRequestMessage {
-  type: 'PARTITION_MAP_REQUEST';
-  payload?: {
-    currentVersion?: number;
-  };
-}
+// PartitionMapMessage and PartitionMapRequestMessage are now defined as Zod
+// schemas in cluster-schemas.ts. Re-export the Zod-inferred types here so
+// existing import sites (core/index.ts, PartitionRouter.ts) continue to work.
+export type { PartitionMapMessage } from '../schemas/cluster-schemas';
+export type { PartitionMapRequest as PartitionMapRequestMessage } from '../schemas/cluster-schemas';
 
 export interface PartitionChange {
   partitionId: number;
