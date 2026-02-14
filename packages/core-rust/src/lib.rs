@@ -16,6 +16,7 @@ pub mod hash;
 pub mod hlc;
 pub mod lww_map;
 pub mod merkle;
+pub mod or_map;
 pub mod schema;
 pub mod traits;
 pub mod types;
