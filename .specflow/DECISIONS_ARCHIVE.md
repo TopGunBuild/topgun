@@ -6,6 +6,19 @@ Historical decisions rotated from STATE.md to maintain compactness.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-14 | SPEC-053 | AUDIT v3: NEEDS_REVISION. 1 critical issue (wave assignment error: G8 in Wave 2 but depends on G7 also in Wave 2). 1 recommendation (G12 should depend on G9). Corrected waves: G8=3, G9=4, G12=5. |
+| 2026-02-14 | SPEC-053 | AUDIT v2: NEEDS_DECOMPOSITION. No critical issues. 3 recommendations applied in Response v2. All source claims verified. |
+| 2026-02-14 | SPEC-053 | REVISED v2: Applied all 3 audit v2 recommendations (Approach "13" to "19", QueryRegistry.test.ts 3 to 4 sites, G10 ENTER/UPDATE discrimination note). Ready for re-audit. |
+| 2026-02-14 | SPEC-053 | REVISED v1: Applied all 5 audit recommendations (query-schemas.ts coverage, count fix 53/19/77, G8 re-export naming, .extend() override detail, complexity large). Ready for re-audit. |
+| 2026-02-14 | SPEC-053 | AUDIT v1: NEEDS_DECOMPOSITION. No critical issues. 5 recommendations (missing query-schemas.ts, inaccurate counts, re-export naming, extend() override, complexity label). 21 files across 12 groups -- use /sf:run --parallel. |
+| 2026-02-14 | SPEC-052 | REVISED v1: Applied all 10 audit items. Corrected counts (54 union, 18 non-union, 80+ total). Added Message enum design decision, Timestamp/LWWRecord assumptions. Ready for re-audit or split. |
+| 2026-02-14 | SPEC-052 | AUDIT v1: NEEDS_REVISION. 3 critical issues: incorrect variant count (44 vs 54), QUERY_RESP not in TS union, Timestamp numeric encoding assumption. 7 recommendations. |
+| 2026-02-14 | SPEC-052 | DRAFTED: Message Schema Compatibility -- Rust serde structs for all 59+ message types. Complexity: large. Needs /sf:split (13 files, max 5 per sub-spec). |
+| 2026-02-14 | SPEC-051c | COMPLETED: ORMap Implementation and CrdtMap Wrapper. 3 commits, 1 file created, 4 modified. 173 tests. 3 audit cycles, 2 review cycles. All 7 AC pass. |
+| 2026-02-14 | SPEC-051c | REVIEW v2: APPROVED. Post-fix verification confirms issue #2 fix applied correctly. All 173 tests pass. No regressions. |
+| 2026-02-14 | SPEC-051c | FIX v1: Applied issue #2 (unwrap_or_default → .expect()). Skipped #1, #3 as positive deviations. |
+| 2026-02-14 | SPEC-051c | REVIEW v1: APPROVED. All 7 ACs verified independently. 3 minor issues (positive signature deviation, silent unwrap_or_default, HLC update scope divergence). None block approval. |
+| 2026-02-14 | SPEC-051c | EXECUTED: Implementation complete. 2 commits, 173 tests pass, all 7 ACs met. |
 | 2026-02-14 | SPEC-051c | AUDIT v3: APPROVED. Fresh-eyes re-audit confirms spec ready for implementation. No critical issues. All prior fixes verified against codebase and TS reference. |
 | 2026-02-14 | SPEC-051c | REVISED v2: Applied audit v2 recommendation #1 by documenting serde_json tagged-enum hash divergence as assumption #7 (future Phase 3+ concern). Implementation approach unchanged. |
 | 2026-02-14 | SPEC-051c | AUDIT v2: APPROVED with 1 recommendation (serde_json tagged-enum hash divergence for future cross-language sync). All v1 fixes verified. |

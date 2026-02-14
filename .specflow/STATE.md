@@ -2,18 +2,18 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-052
-- **Status:** drafting
+- **Active Specification:** none
+- **Status:** idle
 - **Project Phase:** Phase 2 (Rust Core)
 - **TODO Items:** 23 (1 client bug fix + 8 Rust bridge/core + 14 existing deferred)
-- **Next Step:** /sf:audit
+- **Next Step:** /sf:new or /sf:next
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
 ## Queue
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-052 | Message Schema Compatibility -- Rust Serde Structs for MsgPack Wire Protocol | draft | Phase 2 |
+| 1 | SPEC-052 | Message Schema Compatibility -- Rust Serde Structs for MsgPack Wire Protocol | revised | Phase 2 |
 
 ## Migration Roadmap (high-level)
 
@@ -40,12 +40,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
-| 2026-02-14 | SPEC-052 | DRAFTED: Message Schema Compatibility -- Rust serde structs for all 59+ message types. Complexity: large. Needs /sf:split (13 files, max 5 per sub-spec). |
-| 2026-02-14 | SPEC-051c | COMPLETED: ORMap Implementation and CrdtMap Wrapper. 3 commits, 1 file created, 4 modified. 173 tests. 3 audit cycles, 2 review cycles. All 7 AC pass. |
-| 2026-02-14 | SPEC-051c | REVIEW v2: APPROVED. Post-fix verification confirms issue #2 fix applied correctly. All 173 tests pass. No regressions. |
-| 2026-02-14 | SPEC-051c | FIX v1: Applied issue #2 (unwrap_or_default → .expect()). Skipped #1, #3 as positive deviations. |
-| 2026-02-14 | SPEC-051c | REVIEW v1: APPROVED. All 7 ACs verified independently. 3 minor issues (positive signature deviation, silent unwrap_or_default, HLC update scope divergence). None block approval. |
-| 2026-02-14 | SPEC-051c | EXECUTED: Implementation complete. 2 commits, 173 tests pass, all 7 ACs met. |
+| 2026-02-14 | SPEC-053 | COMPLETED: Protocol Schema Cleanup. 16 commits, 25 files modified. 4 audit cycles, 1 review cycle. All 12 AC pass. |
+| 2026-02-14 | SPEC-053 | REVIEW v1: APPROVED. All 12 acceptance criteria met. No critical or major issues. 1 minor (PredicateOp/PredicateNode type export omission -- justified). |
+| 2026-02-14 | SPEC-053 | EXECUTED: All 12 groups across 5 waves complete. 16 commits, 25 files modified. All tests pass (core: 1982, client: 501, server: 1211). Build succeeds. |
+| 2026-02-14 | SPEC-053 | AUDIT v4: NEEDS_DECOMPOSITION. No critical issues. All previous audit items resolved. Spec is well-decomposed into 12 groups across 5 waves, each group 3-15% context. Ready for /sf:run --parallel. |
+| 2026-02-14 | SPEC-053 | REVISED v3: Confirmed both audit v3 items (wave assignment fix + G12 dependency on G9). Pre-applied by auditor. Ready for re-audit. |
 
 ## Project Patterns
 
@@ -78,4 +77,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-14 (SPEC-052 drafted)*
+*Last updated: 2026-02-14 (SPEC-053 completed and archived)*
