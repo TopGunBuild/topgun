@@ -13,7 +13,6 @@
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-051c | ORMap Implementation and CrdtMap Wrapper | draft | Phase 2 |
 
 ## Migration Roadmap (high-level)
 
@@ -40,11 +39,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
-| 2026-02-14 | SPEC-051b | COMPLETED: LWWMap Implementation. 2 commits, 1 file created, 1 modified. 137 tests. 2 audit cycles, 1 review cycle. All 6 AC pass. |
-| 2026-02-14 | SPEC-051b | REVIEW v1: APPROVED. All 6 AC independently verified. No critical/major/minor issues. |
-| 2026-02-14 | SPEC-051b | EXECUTED: 2 commits, 1 file created, 1 modified. 132+5 tests. All 6 AC pass. |
-| 2026-02-13 | SPEC-051b | AUDITED v2: APPROVED. Fresh re-audit confirms all v1 recommendations addressed. Codebase-verified API compatibility. No critical issues. |
-| 2026-02-13 | SPEC-051a | COMPLETED: HLC, Hash, MerkleTree foundation. 5 commits, 3 files created, 3 modified. 87+4 tests. 3 audit cycles, 2 review cycles. All 9 AC pass. |
+| 2026-02-14 | SPEC-051c | COMPLETED: ORMap Implementation and CrdtMap Wrapper. 3 commits, 1 file created, 4 modified. 173 tests. 3 audit cycles, 2 review cycles. All 7 AC pass. |
+| 2026-02-14 | SPEC-051c | REVIEW v2: APPROVED. Post-fix verification confirms issue #2 fix applied correctly. All 173 tests pass. No regressions. |
+| 2026-02-14 | SPEC-051c | FIX v1: Applied issue #2 (unwrap_or_default → .expect()). Skipped #1, #3 as positive deviations. |
+| 2026-02-14 | SPEC-051c | REVIEW v1: APPROVED. All 7 ACs verified independently. 3 minor issues (positive signature deviation, silent unwrap_or_default, HLC update scope divergence). None block approval. |
+| 2026-02-14 | SPEC-051c | EXECUTED: Implementation complete. 2 commits, 173 tests pass, all 7 ACs met. |
 
 ## Project Patterns
 
@@ -77,4 +76,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-14 (SPEC-051b completed and archived)*
+*Last updated: 2026-02-14 (SPEC-051c completed and archived)*

@@ -6,6 +6,16 @@ Historical decisions rotated from STATE.md to maintain compactness.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-14 | SPEC-051c | AUDIT v3: APPROVED. Fresh-eyes re-audit confirms spec ready for implementation. No critical issues. All prior fixes verified against codebase and TS reference. |
+| 2026-02-14 | SPEC-051c | REVISED v2: Applied audit v2 recommendation #1 by documenting serde_json tagged-enum hash divergence as assumption #7 (future Phase 3+ concern). Implementation approach unchanged. |
+| 2026-02-14 | SPEC-051c | AUDIT v2: APPROVED with 1 recommendation (serde_json tagged-enum hash divergence for future cross-language sync). All v1 fixes verified. |
+| 2026-02-14 | SPEC-051c | REVISED v1: All 6 audit items addressed. Complexity small->medium, serde_json dependency explicit in Files to Modify and G3 tasks. 3 critical fixes confirmed, 3 recommendations applied. |
+| 2026-02-14 | SPEC-051c | AUDIT v1: NEEDS_REVISION. 3 critical issues (entry hash TTL omission, missing HLC updates in merge/merge_key, unspecified value stringification). All fixed inline during audit. Author review requested. |
+| 2026-02-14 | SPEC-051b | COMPLETED: LWWMap Implementation. 2 commits, 1 file created, 1 modified. 137 tests. 2 audit cycles, 1 review cycle. All 6 AC pass. |
+| 2026-02-14 | SPEC-051b | REVIEW v1: APPROVED. All 6 AC independently verified. No critical/major/minor issues. |
+| 2026-02-14 | SPEC-051b | EXECUTED: 2 commits, 1 file created, 1 modified. 132+5 tests. All 6 AC pass. |
+| 2026-02-13 | SPEC-051b | AUDITED v2: APPROVED. Fresh re-audit confirms all v1 recommendations addressed. Codebase-verified API compatibility. No critical issues. |
+| 2026-02-13 | SPEC-051a | COMPLETED: HLC, Hash, MerkleTree foundation. 5 commits, 3 files created, 3 modified. 87+4 tests. 3 audit cycles, 2 review cycles. All 9 AC pass. |
 | 2026-02-13 | SPEC-051b | AUDITED v1: APPROVED with 3 recommendations. Context estimate ~45%. No critical issues. |
 | 2026-02-13 | SPEC-051a | REVIEW v2: APPROVED. All 3 fixes from Review v1 verified. No new issues. All 9 AC pass. 87+4 tests pass. |
 | 2026-02-13 | SPEC-051a | EXECUTED: 4 commits, 3 files created, 3 files modified. 87 tests + 4 doc-tests pass. All 9 AC met. cargo clippy/doc/build --workspace clean. |
