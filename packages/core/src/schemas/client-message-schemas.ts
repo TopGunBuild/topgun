@@ -4,9 +4,8 @@ import {
   TimestampSchema,
   LWWRecordSchema,
   Timestamp,
-} from './base-schemas';
-import {
   ORMapRecordSchema,
+  ChangeEventTypeSchema,
 } from './base-schemas';
 import {
   SyncRespRootMessageSchema,
@@ -17,7 +16,6 @@ import {
   ORMapSyncRespLeafSchema,
   ORMapDiffResponseSchema,
 } from './sync-schemas';
-import { PNCounterStateObjectSchema } from './messaging-schemas';
 
 // --- Server Event Messages ---
 
@@ -51,7 +49,7 @@ export const QueryUpdatePayloadSchema = z.object({
   queryId: z.string(),
   key: z.string(),
   value: z.unknown(),
-  type: z.enum(['ENTER', 'UPDATE', 'REMOVE']),
+  changeType: ChangeEventTypeSchema,
 });
 export type QueryUpdatePayload = z.infer<typeof QueryUpdatePayloadSchema>;
 
@@ -117,6 +115,20 @@ export const LockReleasedPayloadSchema = z.object({
 });
 export type LockReleasedPayload = z.infer<typeof LockReleasedPayloadSchema>;
 
+// --- Lock Message Wrappers ---
+
+export const LockGrantedMessageSchema = z.object({
+  type: z.literal('LOCK_GRANTED'),
+  payload: LockGrantedPayloadSchema,
+});
+export type LockGrantedMessage = z.infer<typeof LockGrantedMessageSchema>;
+
+export const LockReleasedMessageSchema = z.object({
+  type: z.literal('LOCK_RELEASED'),
+  payload: LockReleasedPayloadSchema,
+});
+export type LockReleasedMessage = z.infer<typeof LockReleasedMessageSchema>;
+
 // --- Sync Reset Message ---
 
 export const SyncResetRequiredPayloadSchema = z.object({
@@ -124,6 +136,12 @@ export const SyncResetRequiredPayloadSchema = z.object({
   reason: z.string(),
 });
 export type SyncResetRequiredPayload = z.infer<typeof SyncResetRequiredPayloadSchema>;
+
+export const SyncResetRequiredMessageSchema = z.object({
+  type: z.literal('SYNC_RESET_REQUIRED'),
+  payload: SyncResetRequiredPayloadSchema,
+});
+export type SyncResetRequiredMessage = z.infer<typeof SyncResetRequiredMessageSchema>;
 
 // --- Payload Types from Existing Sync Schemas ---
 
@@ -136,6 +154,3 @@ export type ORMapSyncRespBucketsPayload = z.infer<typeof ORMapSyncRespBucketsSch
 export type ORMapSyncRespLeafPayload = z.infer<typeof ORMapSyncRespLeafSchema>['payload'];
 export type ORMapDiffResponsePayload = z.infer<typeof ORMapDiffResponseSchema>['payload'];
 
-// --- Export PNCounterStateObject Type ---
-
-export type PNCounterStateObject = z.infer<typeof PNCounterStateObjectSchema>;
