@@ -11,6 +11,8 @@ Each Rust spec should reference TWO sources:
 1. **TopGun TS Server** (`packages/server/`) — behavioral specification (what the system does, test vectors, wire protocol)
 2. **Hazelcast Java** (`/Users/koristuvac/Projects/hazelcast/`) — architectural reference (how a mature IMDG handles the same domain)
 
+**Fix-on-port rule:** Before porting a domain, audit the TS source. Fix bugs/dead code in TS first, then port the corrected version. See PROJECT.md "Rust Migration Principles".
+
 | Rust TODO | TopGun TS Source | Hazelcast Java Reference |
 |---|---|---|
 | TODO-063 Partitions | `server/src/cluster/PartitionService.ts` | `hazelcast/partition/` |

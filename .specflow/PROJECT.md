@@ -62,6 +62,12 @@ tests/
 **Technical research:** [RUST_SERVER_MIGRATION_RESEARCH.md](.specflow/reference/RUST_SERVER_MIGRATION_RESEARCH.md)
 **Product positioning:** [PRODUCT_POSITIONING_RESEARCH.md](.specflow/reference/PRODUCT_POSITIONING_RESEARCH.md)
 
+## Rust Migration Principles
+
+- **Fix-on-port, don't copy bugs:** When migrating TS code to Rust, fix discovered issues rather than reproducing them. No active clients means breaking changes are free. Known TS bugs are tagged "covered by rewrite" in TODO.md.
+- **TS as executable spec, not gospel:** The TS implementation defines *what* the system does (behavior, wire protocol, test vectors), but not necessarily *how* it should be done. Rust should improve architecture where the TS design was expedient.
+- **Audit before implementing:** Before porting a domain to Rust, audit the TS source for bugs, dead code, and inconsistencies. Fix them in TS first (so the TS test suite validates the fix), then port the corrected version.
+
 ## Patterns & Conventions
 
 - Monorepo with package hierarchy: core -> client/server -> adapters/react
