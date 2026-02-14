@@ -1,5 +1,6 @@
 // packages/core/src/schemas/search-schemas.ts
 import { z } from 'zod';
+import { ChangeEventTypeSchema } from './base-schemas';
 
 // --- Search Options ---
 export const SearchOptionsSchema = z.object({
@@ -44,7 +45,7 @@ export const SearchRespMessageSchema = z.object({
 export type SearchRespMessage = z.infer<typeof SearchRespMessageSchema>;
 
 // --- Live Search Subscriptions ---
-export const SearchUpdateTypeSchema = z.enum(['ENTER', 'UPDATE', 'LEAVE']);
+export const SearchUpdateTypeSchema = ChangeEventTypeSchema;
 export type SearchUpdateType = z.infer<typeof SearchUpdateTypeSchema>;
 
 export const SearchSubPayloadSchema = z.object({
@@ -67,7 +68,7 @@ export const SearchUpdatePayloadSchema = z.object({
   value: z.unknown(),
   score: z.number(),
   matchedTerms: z.array(z.string()),
-  type: SearchUpdateTypeSchema,
+  changeType: SearchUpdateTypeSchema,
 });
 export type SearchUpdatePayload = z.infer<typeof SearchUpdatePayloadSchema>;
 
