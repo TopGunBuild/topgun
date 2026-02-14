@@ -411,7 +411,7 @@ describe('Distributed Subscriptions E2E', () => {
       expect(updates.length).toBeGreaterThan(0);
 
       const enterUpdate = updates.find(
-        (m) => m.payload?.type === 'ENTER' && m.payload?.key === 'breaking-1'
+        (m) => m.payload?.changeType === 'ENTER' && m.payload?.key === 'breaking-1'
       );
       expect(enterUpdate).toBeDefined();
 

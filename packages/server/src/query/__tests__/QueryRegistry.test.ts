@@ -76,7 +76,7 @@ describe('QueryRegistry', () => {
     // Check updated
     const updatedMsg = [call1, call2].find(m => m.payload.key === 'D');
     expect(updatedMsg).toBeDefined();
-    expect(updatedMsg.payload.changeType).toBe('UPDATE');
+    expect(updatedMsg.payload.changeType).toBe('ENTER');
     expect(updatedMsg.payload.value.score).toBe(95);
 
     // Verify internal state

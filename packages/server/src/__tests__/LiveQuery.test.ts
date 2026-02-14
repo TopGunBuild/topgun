@@ -119,14 +119,14 @@ describe('Live Query Sliding Window Integration', () => {
     const msgs = clientSocket.send.mock.calls.map(c => deserialize(c[0] as Uint8Array) as any);
 
     const removeMsg = msgs.find(m => m.type === 'QUERY_UPDATE' && m.payload.changeType === 'LEAVE');
-    const updateMsg = msgs.find(m => m.type === 'QUERY_UPDATE' && m.payload.changeType === 'UPDATE');
+    const enterMsg = msgs.find(m => m.type === 'QUERY_UPDATE' && m.payload.changeType === 'ENTER');
 
     expect(removeMsg).toBeDefined();
     expect(removeMsg.payload.key).toBe('B');
 
-    expect(updateMsg).toBeDefined();
-    expect(updateMsg.payload.key).toBe('D');
-    expect(updateMsg.payload.value.score).toBe(95);
+    expect(enterMsg).toBeDefined();
+    expect(enterMsg.payload.key).toBe('D');
+    expect(enterMsg.payload.value.score).toBe(95);
   });
 
   test('Should handle Predicate filtering', async () => {
@@ -197,7 +197,7 @@ describe('Live Query Sliding Window Integration', () => {
     );
     const updateMsg = deserialize(clientSocket.send.mock.calls[0][0] as Uint8Array) as any;
     expect(updateMsg.type).toBe('QUERY_UPDATE');
-    expect(updateMsg.payload.changeType).toBe('UPDATE');
+    expect(updateMsg.payload.changeType).toBe('ENTER');
     expect(updateMsg.payload.key).toBe('u1');
   });
 });
