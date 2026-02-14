@@ -861,4 +861,309 @@ mod tests {
         assert_eq!(map.merkle_tree().get_root_hash(), hash_after_first);
         assert_eq!(map.get("key"), Some(&Value::Int(42)));
     }
+
+    // ---- MsgPack round-trip for LWWRecord<Value> ----
+
+    #[test]
+    fn lww_record_value_msgpack_roundtrip() {
+        let record = LWWRecord {
+            value: Some(Value::String("hello".to_string())),
+            timestamp: Timestamp {
+                millis: 1_700_000_000_000,
+                counter: 42,
+                node_id: "node-abc-123".to_string(),
+            },
+            ttl_ms: Some(5000),
+        };
+        let bytes = rmp_serde::to_vec(&record).expect("serialize LWWRecord<Value>");
+        let decoded: LWWRecord<Value> =
+            rmp_serde::from_slice(&bytes).expect("deserialize LWWRecord<Value>");
+        assert_eq!(record, decoded);
+    }
+
+    #[test]
+    fn lww_record_tombstone_msgpack_roundtrip() {
+        let record: LWWRecord<Value> = LWWRecord {
+            value: None,
+            timestamp: Timestamp {
+                millis: 999,
+                counter: 0,
+                node_id: "tomb".to_string(),
+            },
+            ttl_ms: None,
+        };
+        let bytes = rmp_serde::to_vec(&record).expect("serialize");
+        let decoded: LWWRecord<Value> = rmp_serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(record, decoded);
+    }
+
+    #[test]
+    fn lww_record_all_value_variants_roundtrip() {
+        let variants: Vec<LWWRecord<Value>> = vec![
+            LWWRecord {
+                value: Some(Value::Null),
+                timestamp: Timestamp { millis: 1, counter: 0, node_id: "n".to_string() },
+                ttl_ms: None,
+            },
+            LWWRecord {
+                value: Some(Value::Bool(true)),
+                timestamp: Timestamp { millis: 2, counter: 0, node_id: "n".to_string() },
+                ttl_ms: None,
+            },
+            LWWRecord {
+                value: Some(Value::Int(-42)),
+                timestamp: Timestamp { millis: 3, counter: 0, node_id: "n".to_string() },
+                ttl_ms: Some(1000),
+            },
+            LWWRecord {
+                value: Some(Value::Float(3.14)),
+                timestamp: Timestamp { millis: 4, counter: 0, node_id: "n".to_string() },
+                ttl_ms: None,
+            },
+            LWWRecord {
+                value: Some(Value::Bytes(vec![0xDE, 0xAD])),
+                timestamp: Timestamp { millis: 5, counter: 0, node_id: "n".to_string() },
+                ttl_ms: None,
+            },
+        ];
+
+        for record in variants {
+            let bytes = rmp_serde::to_vec(&record).expect("serialize");
+            let decoded: LWWRecord<Value> = rmp_serde::from_slice(&bytes).expect("deserialize");
+            assert_eq!(record, decoded);
+        }
+    }
+}
+
+/// Property-based tests using `proptest` for CRDT correctness verification.
+#[cfg(test)]
+mod proptests {
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::sync::Arc;
+
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::hlc::ClockSource;
+    use crate::Value;
+
+    /// Deterministic clock source for proptest.
+    struct FixedClock {
+        time: Arc<AtomicU64>,
+    }
+
+    impl FixedClock {
+        fn new(initial: u64) -> (Self, Arc<AtomicU64>) {
+            let time = Arc::new(AtomicU64::new(initial));
+            (Self { time: time.clone() }, time)
+        }
+    }
+
+    impl ClockSource for FixedClock {
+        fn now(&self) -> u64 {
+            self.time.load(AtomicOrdering::Relaxed)
+        }
+    }
+
+    /// Creates an `LWWMap<Value>` with a high fixed clock to avoid drift errors
+    /// when merging records with arbitrary timestamps.
+    fn make_proptest_map() -> LWWMap<Value> {
+        let (clock, _) = FixedClock::new(u64::MAX / 2);
+        let hlc = HLC::new("proptest-node".to_string(), Box::new(clock));
+        LWWMap::new(hlc)
+    }
+
+    /// Strategy for generating arbitrary `Timestamp` values.
+    fn arb_timestamp() -> impl Strategy<Value = Timestamp> {
+        (1_u64..1_000_000_000_u64, 0_u32..1000_u32, "[a-z]{1,8}")
+            .prop_map(|(millis, counter, node_id)| Timestamp {
+                millis,
+                counter,
+                node_id,
+            })
+    }
+
+    /// Strategy for generating arbitrary `Value` variants (non-recursive for simplicity).
+    fn arb_value() -> impl Strategy<Value = Value> {
+        prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(Value::Int),
+            any::<f64>().prop_map(Value::Float),
+            "[a-zA-Z0-9 ]{0,20}".prop_map(|s| Value::String(s)),
+            proptest::collection::vec(any::<u8>(), 0..16).prop_map(Value::Bytes),
+        ]
+    }
+
+    /// Strategy for generating `LWWRecord<Value>` (non-tombstone).
+    fn arb_lww_record() -> impl Strategy<Value = LWWRecord<Value>> {
+        (arb_value(), arb_timestamp()).prop_map(|(value, timestamp)| LWWRecord {
+            value: Some(value),
+            timestamp,
+            ttl_ms: None,
+        })
+    }
+
+    /// Strategy for generating `LWWRecord<Value>` that may be a tombstone.
+    fn arb_lww_record_maybe_tombstone() -> impl Strategy<Value = LWWRecord<Value>> {
+        (prop::option::of(arb_value()), arb_timestamp()).prop_map(|(value, timestamp)| {
+            LWWRecord {
+                value,
+                timestamp,
+                ttl_ms: None,
+            }
+        })
+    }
+
+    proptest! {
+        /// Commutativity: merging R1 then R2 produces the same state as
+        /// merging R2 then R1 for any two records on the same key.
+        #[test]
+        fn merge_is_commutative(
+            r1 in arb_lww_record_maybe_tombstone(),
+            r2 in arb_lww_record_maybe_tombstone(),
+        ) {
+            // Order 1: R1 then R2
+            let mut map1 = make_proptest_map();
+            map1.merge("k", r1.clone());
+            map1.merge("k", r2.clone());
+
+            // Order 2: R2 then R1
+            let mut map2 = make_proptest_map();
+            map2.merge("k", r2);
+            map2.merge("k", r1);
+
+            // Both maps should have the same record for key "k"
+            let rec1 = map1.get_record("k");
+            let rec2 = map2.get_record("k");
+            prop_assert_eq!(rec1, rec2);
+        }
+
+        /// Idempotence: merging the same record twice does not change state.
+        #[test]
+        fn merge_is_idempotent(
+            r in arb_lww_record_maybe_tombstone(),
+        ) {
+            let mut map = make_proptest_map();
+
+            // First merge
+            map.merge("k", r.clone());
+            let record_after_first = map.get_record("k").cloned();
+            let hash_after_first = map.merkle_tree().get_root_hash();
+
+            // Second merge (same record)
+            let changed = map.merge("k", r);
+            let record_after_second = map.get_record("k").cloned();
+            let hash_after_second = map.merkle_tree().get_root_hash();
+
+            prop_assert!(!changed, "Second merge should not change state");
+            prop_assert_eq!(record_after_first, record_after_second);
+            prop_assert_eq!(hash_after_first, hash_after_second);
+        }
+
+        /// Convergence: merging multiple records in any order on the same key
+        /// produces the same final state (tests 3 records in all 6 permutations).
+        #[test]
+        fn merge_convergence_three_records(
+            r1 in arb_lww_record(),
+            r2 in arb_lww_record(),
+            r3 in arb_lww_record(),
+        ) {
+            let orders: Vec<Vec<LWWRecord<Value>>> = vec![
+                vec![r1.clone(), r2.clone(), r3.clone()],
+                vec![r1.clone(), r3.clone(), r2.clone()],
+                vec![r2.clone(), r1.clone(), r3.clone()],
+                vec![r2.clone(), r3.clone(), r1.clone()],
+                vec![r3.clone(), r1.clone(), r2.clone()],
+                vec![r3.clone(), r2.clone(), r1.clone()],
+            ];
+
+            let mut results = Vec::new();
+            for order in &orders {
+                let mut map = make_proptest_map();
+                for record in order {
+                    map.merge("k", record.clone());
+                }
+                results.push(map.get_record("k").cloned());
+            }
+
+            // All permutations should produce the same final record
+            for (i, result) in results.iter().enumerate().skip(1) {
+                prop_assert_eq!(
+                    &results[0], result,
+                    "Permutation {} diverged from permutation 0",
+                    i
+                );
+            }
+        }
+
+        /// `LWWRecord<Value>` round-trip through MsgPack preserves data.
+        #[test]
+        fn lww_record_msgpack_roundtrip_proptest(
+            r in arb_lww_record_maybe_tombstone(),
+        ) {
+            let bytes = rmp_serde::to_vec(&r).expect("serialize");
+            let decoded: LWWRecord<Value> = rmp_serde::from_slice(&bytes).expect("deserialize");
+            prop_assert_eq!(r, decoded);
+        }
+
+        /// The winner of merge is always the record with the highest timestamp.
+        #[test]
+        fn merge_winner_has_highest_timestamp(
+            r1 in arb_lww_record(),
+            r2 in arb_lww_record(),
+        ) {
+            let mut map = make_proptest_map();
+            map.merge("k", r1.clone());
+            map.merge("k", r2.clone());
+
+            let winner = map.get_record("k").expect("must have record");
+            let expected_winner = if r1.timestamp >= r2.timestamp { &r1 } else { &r2 };
+            prop_assert_eq!(winner, expected_winner);
+        }
+
+        /// Convergence for multiple keys: merging records for different keys
+        /// in different orders produces identical maps.
+        #[test]
+        fn multi_key_convergence(
+            records in proptest::collection::vec(
+                ("[a-z]{1,4}", arb_lww_record()),
+                1..5
+            ),
+        ) {
+            // Group records by key for comparison
+            let mut expected: BTreeMap<String, &LWWRecord<Value>> = BTreeMap::new();
+            for (key, record) in &records {
+                match expected.get(key.as_str()) {
+                    None => { expected.insert(key.clone(), record); },
+                    Some(existing) => {
+                        if record.timestamp > existing.timestamp {
+                            expected.insert(key.clone(), record);
+                        }
+                    }
+                }
+            }
+
+            // Forward order
+            let mut map1 = make_proptest_map();
+            for (key, record) in &records {
+                map1.merge(key.clone(), record.clone());
+            }
+
+            // Reverse order
+            let mut map2 = make_proptest_map();
+            for (key, record) in records.iter().rev() {
+                map2.merge(key.clone(), record.clone());
+            }
+
+            // Both should have the same records for all keys
+            for (key, expected_rec) in &expected {
+                let rec1 = map1.get_record(key);
+                let rec2 = map2.get_record(key);
+                prop_assert_eq!(rec1, Some(*expected_rec), "Key {} mismatch in map1", key);
+                prop_assert_eq!(rec2, Some(*expected_rec), "Key {} mismatch in map2", key);
+            }
+        }
+    }
 }

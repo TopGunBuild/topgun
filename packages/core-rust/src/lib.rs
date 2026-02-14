@@ -5,6 +5,7 @@
 //! - **HLC** ([`hlc`]): Hybrid Logical Clock for distributed causality tracking
 //! - **Hash** ([`hash`]): FNV-1a hash utilities for `MerkleTree` bucket routing
 //! - **`MerkleTree`** ([`merkle`]): Prefix trie for efficient delta synchronization
+//! - **`LWWMap`** ([`lww_map`]): Last-Write-Wins Map CRDT with `MerkleTree` integration
 //! - **Types** ([`types`]): `Value` enum, `StorageValue`, `MapType`, `CrdtMap`, `Principal`
 //! - **Traits** ([`traits`]): `Processor`, `QueryNotifier` for DAG execution and live queries
 //! - **Schema** ([`schema`]): `MapSchema`, `SyncShape`, `Predicate` for validation and shapes
@@ -39,6 +40,9 @@ pub use hash::{combine_hashes, fnv1a_hash};
 
 // Merkle
 pub use merkle::{MerkleNode, MerkleTree, ORMapMerkleTree};
+
+// LWWMap
+pub use lww_map::LWWMap;
 
 #[cfg(test)]
 mod tests {
@@ -180,6 +184,10 @@ mod tests {
         // Merkle types
         let _tree = MerkleTree::new(3);
         let _or_tree = ORMapMerkleTree::new(3);
+
+        // LWWMap
+        let hlc = HLC::new("test".to_string(), Box::new(SystemClock));
+        let _lww: LWWMap<Value> = LWWMap::new(hlc);
 
         // Value enum
         let _ = Value::Null;
