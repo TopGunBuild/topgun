@@ -78,4 +78,5 @@ export type ClientOp = z.infer<typeof ClientOpSchema>;
 export const AuthMessageSchema = z.object({
   type: z.literal('AUTH'),
   token: z.string(),
+  protocolVersion: z.number().optional(),
 });

@@ -4,13 +4,13 @@ import type { LWWRecord, ORMapRecord, Timestamp } from '@topgunbuild/core';
 import type {
   AuthFailMessage,
   OpAckMessage,
+  OpRejectedMessage,
+  ErrorMessage,
   QueryRespMessage,
   QueryUpdateMessage,
   ServerEventMessage,
   ServerBatchEventMessage,
   GcPruneMessage,
-  HybridQueryRespPayload,
-  HybridQueryDeltaPayload,
   BatchMessage,
 } from '@topgunbuild/core';
 import type { IStorageAdapter } from './IStorageAdapter';
@@ -299,8 +299,8 @@ export class SyncEngine {
         handleServerEvent: (msg) => this.handleServerEvent(msg),
         handleServerBatchEvent: (msg) => this.handleServerBatchEvent(msg),
         handleGcPrune: (msg) => this.handleGcPrune(msg),
-        handleHybridQueryResponse: (payload) => this.handleHybridQueryResponse(payload),
-        handleHybridQueryDelta: (payload) => this.handleHybridQueryDelta(payload),
+        handleOpRejected: (msg) => this.handleOpRejected(msg),
+        handleError: (msg) => this.handleError(msg),
       },
       {
         topicManager: this.topicManager,
@@ -1300,31 +1300,26 @@ export class SyncEngine {
   }
 
   /**
-   * Handle hybrid query response from server.
+   * Handle operation rejected by server (permission denied, validation failure, etc.).
    */
-  public handleHybridQueryResponse(payload: HybridQueryRespPayload): void {
-    const query = this.queryManager.getHybridQuery(payload.subscriptionId);
-    if (query) {
-      query.onResult(payload.results as any, 'server');
-      query.updatePaginationInfo({
-        nextCursor: payload.nextCursor,
-        hasMore: payload.hasMore,
-        cursorStatus: payload.cursorStatus,
-      });
-    }
+  private handleOpRejected(message: OpRejectedMessage): void {
+    const { opId, reason, code } = message.payload;
+    logger.warn({ opId, reason, code }, 'Operation rejected by server');
+
+    // Reject pending write concern promise if exists
+    this.writeConcernManager.resolveWriteConcernPromise(opId, {
+      opId,
+      success: false,
+      achievedLevel: 'FIRE_AND_FORGET' as any,
+      error: reason,
+    });
   }
 
   /**
-   * Handle hybrid query delta update from server.
+   * Handle generic error message from server.
    */
-  public handleHybridQueryDelta(payload: HybridQueryDeltaPayload): void {
-    const query = this.queryManager.getHybridQuery(payload.subscriptionId);
-    if (query) {
-      if (payload.type === 'LEAVE') {
-        query.onUpdate(payload.key, null);
-      } else {
-        query.onUpdate(payload.key, payload.value, payload.score, payload.matchedTerms);
-      }
-    }
+  private handleError(message: ErrorMessage): void {
+    const { code, message: errorMessage, details } = message.payload;
+    logger.error({ code, message: errorMessage, details }, 'Server error received');
   }
 }

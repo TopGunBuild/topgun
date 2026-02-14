@@ -17,11 +17,7 @@ export const ClusterSubRegisterPayloadSchema = z.object({
   mapName: z.string(),
   type: z.enum(['SEARCH', 'QUERY']),
   searchQuery: z.string().optional(),
-  searchOptions: z.object({
-    limit: z.number().int().positive().optional(),
-    minScore: z.number().optional(),
-    boost: z.record(z.string(), z.number()).optional(),
-  }).optional(),
+  searchOptions: SearchOptionsSchema.optional(),
   queryPredicate: z.any().optional(),
   querySort: z.record(z.string(), z.enum(['asc', 'desc'])).optional(),
 });

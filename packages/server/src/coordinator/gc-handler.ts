@@ -246,7 +246,7 @@ export class GCHandler implements IGCHandler {
             const eventPayload = {
                 mapName: mapName,
                 key: key,
-                eventType: 'UPDATED',
+                eventType: 'PUT',
                 record: tombstone
             };
 

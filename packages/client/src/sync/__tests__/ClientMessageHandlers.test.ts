@@ -17,8 +17,8 @@ describe('ClientMessageHandlers', () => {
         handleServerEvent: jest.fn(),
         handleServerBatchEvent: jest.fn(),
         handleGcPrune: jest.fn(),
-        handleHybridQueryResponse: jest.fn(),
-        handleHybridQueryDelta: jest.fn(),
+        handleOpRejected: jest.fn(),
+        handleError: jest.fn(),
       };
 
       // Create mock managers
@@ -58,8 +58,8 @@ describe('ClientMessageHandlers', () => {
         handleServerEvent: jest.fn(),
         handleServerBatchEvent: jest.fn(),
         handleGcPrune: jest.fn(),
-        handleHybridQueryResponse: jest.fn(),
-        handleHybridQueryDelta: jest.fn(),
+        handleOpRejected: jest.fn(),
+        handleError: jest.fn(),
       };
 
       const mockManagers = {
@@ -93,8 +93,8 @@ describe('ClientMessageHandlers', () => {
         handleServerEvent: jest.fn(),
         handleServerBatchEvent: jest.fn(),
         handleGcPrune: jest.fn(),
-        handleHybridQueryResponse: jest.fn(),
-        handleHybridQueryDelta: jest.fn(),
+        handleOpRejected: jest.fn(),
+        handleError: jest.fn(),
       };
 
       const mockManagers = {
@@ -127,8 +127,8 @@ describe('ClientMessageHandlers', () => {
         handleServerEvent: jest.fn(),
         handleServerBatchEvent: jest.fn(),
         handleGcPrune: jest.fn(),
-        handleHybridQueryResponse: jest.fn(),
-        handleHybridQueryDelta: jest.fn(),
+        handleOpRejected: jest.fn(),
+        handleError: jest.fn(),
       };
 
       const mockManagers = {

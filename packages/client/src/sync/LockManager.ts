@@ -121,7 +121,7 @@ export class LockManager implements ILockManager {
   /**
    * Handle lock granted message from server.
    */
-  public handleLockGranted(requestId: string, fencingToken: number): void {
+  public handleLockGranted(requestId: string, _name: string, fencingToken: number): void {
     const req = this.pendingLockRequests.get(requestId);
     if (req) {
       clearTimeout(req.timer);
@@ -133,7 +133,7 @@ export class LockManager implements ILockManager {
   /**
    * Handle lock released message from server.
    */
-  public handleLockReleased(requestId: string, success: boolean): void {
+  public handleLockReleased(requestId: string, _name: string, success: boolean): void {
     const req = this.pendingLockRequests.get(requestId);
     if (req) {
       clearTimeout(req.timer);

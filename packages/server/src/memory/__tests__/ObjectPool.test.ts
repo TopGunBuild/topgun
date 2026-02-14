@@ -486,7 +486,7 @@ describe('EventPayloadPool', () => {
 
         payload.mapName = 'users';
         payload.key = 'user-1';
-        payload.eventType = 'UPDATED';
+        payload.eventType = 'PUT';
         payload.record = { value: 'data', timestamp: null };
 
         pool.release(payload);

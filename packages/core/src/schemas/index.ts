@@ -18,7 +18,7 @@ export * from './cluster-schemas';
 // Messaging schemas (topics, counters, locks, journal, processors, resolvers)
 export * from './messaging-schemas';
 
-// Client message schemas (server events, query updates, GC, auth, hybrid queries, locks)
+// Client message schemas (server events, query updates, GC, auth, errors, locks)
 export * from './client-message-schemas';
 
 // HTTP sync schemas (stateless request/response for serverless environments)

@@ -440,14 +440,15 @@ export interface ILockManager {
    * @param requestId - Request ID
    * @param fencingToken - Fencing token
    */
-  handleLockGranted(requestId: string, fencingToken: number): void;
+  handleLockGranted(requestId: string, name: string, fencingToken: number): void;
 
   /**
    * Handle lock released message from server.
    * @param requestId - Request ID
+   * @param name - Lock name
    * @param success - Release success status
    */
-  handleLockReleased(requestId: string, success: boolean): void;
+  handleLockReleased(requestId: string, name: string, success: boolean): void;
 }
 
 /**

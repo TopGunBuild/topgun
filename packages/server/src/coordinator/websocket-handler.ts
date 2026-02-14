@@ -162,7 +162,7 @@ export class WebSocketHandler implements IWebSocketHandler {
                 const token = message.token;
                 const result = await this.config.authHandler.handleAuth(client, token);
                 if (result.success) {
-                    client.writer.write({ type: 'AUTH_ACK' }, true); // urgent: bypass batching
+                    client.writer.write({ type: 'AUTH_ACK', protocolVersion: 1 }, true); // urgent: bypass batching
                 } else {
                     client.writer.write({ type: 'AUTH_FAIL', error: result.error || 'Invalid token' }, true); // urgent
                     client.socket.close(4001, 'Unauthorized');

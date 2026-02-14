@@ -198,12 +198,12 @@ export class OperationHandler implements IOperationHandler {
                 }
 
                 recordToStore = mergeResult.record;
-                eventPayload.eventType = 'UPDATED';
+                eventPayload.eventType = 'PUT';
                 eventPayload.record = mergeResult.record;
             } else {
                 map.merge(op.key, op.record);
                 recordToStore = op.record;
-                eventPayload.eventType = 'UPDATED';
+                eventPayload.eventType = 'PUT';
                 eventPayload.record = op.record;
             }
         } else if (map instanceof ORMap) {

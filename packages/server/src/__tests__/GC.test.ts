@@ -353,7 +353,7 @@ describe('TTL Expiration with ReplicationPipeline', () => {
     const expiredEvent = serverEvents.find(e =>
       e.payload.mapName === mapName &&
       e.payload.key === 'queryKey' &&
-      e.payload.eventType === 'UPDATED'
+      e.payload.eventType === 'PUT'
     );
     expect(expiredEvent).toBeDefined();
     expect(expiredEvent.payload.record.value).toBeNull();

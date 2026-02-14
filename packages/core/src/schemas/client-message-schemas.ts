@@ -8,7 +8,6 @@ import {
 import {
   ORMapRecordSchema,
 } from './base-schemas';
-import { CursorStatusSchema } from './query-schemas';
 import {
   SyncRespRootMessageSchema,
   SyncRespBucketsMessageSchema,
@@ -75,7 +74,13 @@ export const GcPruneMessageSchema = z.object({
 });
 export type GcPruneMessage = z.infer<typeof GcPruneMessageSchema>;
 
-// --- Auth Fail Message ---
+// --- Auth Messages ---
+
+export const AuthAckMessageSchema = z.object({
+  type: z.literal('AUTH_ACK'),
+  protocolVersion: z.number().optional(),
+});
+export type AuthAckMessage = z.infer<typeof AuthAckMessageSchema>;
 
 export const AuthFailMessageSchema = z.object({
   type: z.literal('AUTH_FAIL'),
@@ -84,42 +89,30 @@ export const AuthFailMessageSchema = z.object({
 });
 export type AuthFailMessage = z.infer<typeof AuthFailMessageSchema>;
 
-// --- Hybrid Query Messages ---
+// --- Error Message ---
 
-export const HybridQueryRespPayloadSchema = z.object({
-  subscriptionId: z.string(),
-  results: z.array(z.object({
-    key: z.string(),
-    value: z.unknown(),
-    score: z.number(),
-    matchedTerms: z.array(z.string()),
-  })),
-  nextCursor: z.string().optional(),
-  hasMore: z.boolean().optional(),
-  cursorStatus: CursorStatusSchema.optional(),
+export const ErrorMessageSchema = z.object({
+  type: z.literal('ERROR'),
+  payload: z.object({
+    code: z.number(),
+    message: z.string(),
+    details: z.unknown().optional(),
+  }),
 });
-export type HybridQueryRespPayload = z.infer<typeof HybridQueryRespPayloadSchema>;
-
-export const HybridQueryDeltaPayloadSchema = z.object({
-  subscriptionId: z.string(),
-  key: z.string(),
-  value: z.unknown().nullable(),
-  score: z.number().optional(),
-  matchedTerms: z.array(z.string()).optional(),
-  type: z.enum(['ENTER', 'UPDATE', 'LEAVE']),
-});
-export type HybridQueryDeltaPayload = z.infer<typeof HybridQueryDeltaPayloadSchema>;
+export type ErrorMessage = z.infer<typeof ErrorMessageSchema>;
 
 // --- Lock Messages ---
 
 export const LockGrantedPayloadSchema = z.object({
   requestId: z.string(),
+  name: z.string(),
   fencingToken: z.number(),
 });
 export type LockGrantedPayload = z.infer<typeof LockGrantedPayloadSchema>;
 
 export const LockReleasedPayloadSchema = z.object({
   requestId: z.string(),
+  name: z.string(),
   success: z.boolean(),
 });
 export type LockReleasedPayload = z.infer<typeof LockReleasedPayloadSchema>;

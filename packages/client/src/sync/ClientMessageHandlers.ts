@@ -7,13 +7,13 @@ import type { IMessageRouter } from './types';
 import type {
   AuthFailMessage,
   OpAckMessage,
+  OpRejectedMessage,
+  ErrorMessage,
   QueryRespMessage,
   QueryUpdateMessage,
   ServerEventMessage,
   ServerBatchEventMessage,
   GcPruneMessage,
-  HybridQueryRespPayload,
-  HybridQueryDeltaPayload,
   SearchRespPayload,
   SyncRespRootPayload,
   SyncRespBucketsPayload,
@@ -40,13 +40,13 @@ export interface MessageHandlerDelegates {
   handleAuthAck(): void;
   handleAuthFail(message: AuthFailMessage): void;
   handleOpAck(message: OpAckMessage): void;
+  handleOpRejected(message: OpRejectedMessage): void;
+  handleError(message: ErrorMessage): void;
   handleQueryResp(message: QueryRespMessage): void;
   handleQueryUpdate(message: QueryUpdateMessage): void;
   handleServerEvent(message: ServerEventMessage): Promise<void>;
   handleServerBatchEvent(message: ServerBatchEventMessage): Promise<void>;
   handleGcPrune(message: GcPruneMessage): Promise<void>;
-  handleHybridQueryResponse(payload: HybridQueryRespPayload): void;
-  handleHybridQueryDelta(payload: HybridQueryDeltaPayload): void;
 }
 
 /**
@@ -57,8 +57,8 @@ export interface ManagerDelegates {
     handleTopicMessage(topic: string, data: unknown, publisherId: string, timestamp: number): void;
   };
   lockManager: {
-    handleLockGranted(requestId: string, fencingToken: number): void;
-    handleLockReleased(requestId: string, success: boolean): void;
+    handleLockGranted(requestId: string, name: string, fencingToken: number): void;
+    handleLockReleased(requestId: string, name: string, success: boolean): void;
   };
   counterManager: {
     handleCounterUpdate(name: string, state: { positive: Record<string, number>; negative: Record<string, number> }): void;
@@ -97,7 +97,7 @@ export interface ManagerDelegates {
 export const CLIENT_MESSAGE_TYPES = [
   'AUTH_REQUIRED', 'AUTH_ACK', 'AUTH_FAIL',
   'PONG',
-  'OP_ACK',
+  'OP_ACK', 'OP_REJECTED', 'ERROR',
   'SYNC_RESP_ROOT', 'SYNC_RESP_BUCKETS', 'SYNC_RESP_LEAF', 'SYNC_RESET_REQUIRED',
   'ORMAP_SYNC_RESP_ROOT', 'ORMAP_SYNC_RESP_BUCKETS', 'ORMAP_SYNC_RESP_LEAF', 'ORMAP_DIFF_RESPONSE',
   'QUERY_RESP', 'QUERY_UPDATE',
@@ -109,7 +109,6 @@ export const CLIENT_MESSAGE_TYPES = [
   'ENTRY_PROCESS_RESPONSE', 'ENTRY_PROCESS_BATCH_RESPONSE',
   'REGISTER_RESOLVER_RESPONSE', 'UNREGISTER_RESOLVER_RESPONSE', 'LIST_RESOLVERS_RESPONSE', 'MERGE_REJECTED',
   'SEARCH_RESP', 'SEARCH_UPDATE',
-  'HYBRID_QUERY_RESP', 'HYBRID_QUERY_DELTA',
 ] as const;
 
 /**
@@ -135,6 +134,8 @@ export function registerClientMessageHandlers(
 
     // SYNC handlers
     'OP_ACK': (msg) => delegates.handleOpAck(msg),
+    'OP_REJECTED': (msg) => delegates.handleOpRejected(msg),
+    'ERROR': (msg) => delegates.handleError(msg),
     'SYNC_RESP_ROOT': (msg) => managers.merkleSyncHandler.handleSyncRespRoot(msg.payload),
     'SYNC_RESP_BUCKETS': (msg) => managers.merkleSyncHandler.handleSyncRespBuckets(msg.payload),
     'SYNC_RESP_LEAF': (msg) => managers.merkleSyncHandler.handleSyncRespLeaf(msg.payload),
@@ -162,12 +163,12 @@ export function registerClientMessageHandlers(
 
     // LOCK handlers
     'LOCK_GRANTED': (msg) => {
-      const { requestId, fencingToken } = msg.payload;
-      managers.lockManager.handleLockGranted(requestId, fencingToken);
+      const { requestId, name, fencingToken } = msg.payload;
+      managers.lockManager.handleLockGranted(requestId, name, fencingToken);
     },
     'LOCK_RELEASED': (msg) => {
-      const { requestId, success } = msg.payload;
-      managers.lockManager.handleLockReleased(requestId, success);
+      const { requestId, name, success } = msg.payload;
+      managers.lockManager.handleLockReleased(requestId, name, success);
     },
 
     // GC handler
@@ -212,9 +213,5 @@ export function registerClientMessageHandlers(
     'SEARCH_UPDATE': () => {
       // SEARCH_UPDATE is handled by SearchHandle via emitMessage, no-op here
     },
-
-    // HYBRID handlers
-    'HYBRID_QUERY_RESP': (msg) => delegates.handleHybridQueryResponse(msg.payload),
-    'HYBRID_QUERY_DELTA': (msg) => delegates.handleHybridQueryDelta(msg.payload),
   });
 }
