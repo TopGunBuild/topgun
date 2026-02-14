@@ -105,10 +105,11 @@ Each Rust spec should reference TWO sources:
 - **Verification:** Run same test vectors as TS to confirm behavioral equivalence
 - **Effort:** 1-2 weeks
 
-### TODO-062: Message Schema Compatibility
+### TODO-062: Message Schema Compatibility → SPEC-052
 - **Priority:** P0 (client-server contract)
-- **Complexity:** Medium
-- **Summary:** Ensure Rust server can serialize/deserialize all 26 message types compatible with TS client
+- **Complexity:** Large (needs /sf:split — 53+ message types across 8 domains)
+- **Status:** Spec created (SPEC-052, 2026-02-14)
+- **Summary:** Ensure Rust server can serialize/deserialize all message types compatible with TS client
 - **Key decisions:**
   - MsgPack wire format stays (cross-language compatibility)
   - Zod schemas in `packages/core/src/schemas/` are the source of truth

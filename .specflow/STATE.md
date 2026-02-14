@@ -2,17 +2,18 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
+- **Active Specification:** SPEC-052
+- **Status:** drafting
 - **Project Phase:** Phase 2 (Rust Core)
 - **TODO Items:** 23 (1 client bug fix + 8 Rust bridge/core + 14 existing deferred)
-- **Next Step:** /sf:new or /sf:next
+- **Next Step:** /sf:audit
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
 ## Queue
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
+| 1 | SPEC-052 | Message Schema Compatibility -- Rust Serde Structs for MsgPack Wire Protocol | draft | Phase 2 |
 
 ## Migration Roadmap (high-level)
 
@@ -39,6 +40,7 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-14 | SPEC-052 | DRAFTED: Message Schema Compatibility -- Rust serde structs for all 59+ message types. Complexity: large. Needs /sf:split (13 files, max 5 per sub-spec). |
 | 2026-02-14 | SPEC-051c | COMPLETED: ORMap Implementation and CrdtMap Wrapper. 3 commits, 1 file created, 4 modified. 173 tests. 3 audit cycles, 2 review cycles. All 7 AC pass. |
 | 2026-02-14 | SPEC-051c | REVIEW v2: APPROVED. Post-fix verification confirms issue #2 fix applied correctly. All 173 tests pass. No regressions. |
 | 2026-02-14 | SPEC-051c | FIX v1: Applied issue #2 (unwrap_or_default → .expect()). Skipped #1, #3 as positive deviations. |
@@ -76,4 +78,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-14 (SPEC-051c completed and archived)*
+*Last updated: 2026-02-14 (SPEC-052 drafted)*
