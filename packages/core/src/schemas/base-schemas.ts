@@ -38,10 +38,20 @@ export const ORMapRecordSchema = z.object({
 });
 export type ORMapRecord<V = any> = z.infer<typeof ORMapRecordSchema>;
 
+// --- Change Event Types ---
+
+/**
+ * Unified change event type used across query updates, search updates,
+ * and cluster subscription updates.
+ */
+export const ChangeEventTypeSchema = z.enum(['ENTER', 'UPDATE', 'LEAVE']);
+export type ChangeEventType = z.infer<typeof ChangeEventTypeSchema>;
+
 // --- Predicate Types ---
 export const PredicateOpSchema = z.enum([
   'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'like', 'regex', 'and', 'or', 'not'
 ]);
+export type PredicateOp = z.infer<typeof PredicateOpSchema>;
 
 export const PredicateNodeSchema: z.ZodType<any> = z.lazy(() => z.object({
   op: PredicateOpSchema,
@@ -49,6 +59,7 @@ export const PredicateNodeSchema: z.ZodType<any> = z.lazy(() => z.object({
   value: z.any().optional(),
   children: z.array(PredicateNodeSchema).optional(),
 }));
+export type PredicateNode = z.infer<typeof PredicateNodeSchema>;
 
 // --- Query Types ---
 export const QuerySchema = z.object({
@@ -80,3 +91,12 @@ export const AuthMessageSchema = z.object({
   token: z.string(),
   protocolVersion: z.number().optional(),
 });
+export type AuthMessage = z.infer<typeof AuthMessageSchema>;
+
+/**
+ * AUTH_REQUIRED: Server tells client that authentication is needed.
+ */
+export const AuthRequiredMessageSchema = z.object({
+  type: z.literal('AUTH_REQUIRED'),
+});
+export type AuthRequiredMessage = z.infer<typeof AuthRequiredMessageSchema>;
