@@ -292,7 +292,7 @@ export class ServerCoordinator {
             return map.get(key);
         });
 
-        this.searchCoordinator.setSendUpdateCallback((clientId, subscriptionId, key, value, score, matchedTerms, type) => {
+        this.searchCoordinator.setSendUpdateCallback((clientId, subscriptionId, key, value, score, matchedTerms, changeType) => {
             const client = this.connectionManager.getClient(clientId);
             if (client) {
                 client.writer.write({
@@ -303,7 +303,7 @@ export class ServerCoordinator {
                         value,
                         score,
                         matchedTerms,
-                        type,
+                        changeType,
                     }
                 });
             }

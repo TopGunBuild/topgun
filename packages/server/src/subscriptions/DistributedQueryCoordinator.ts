@@ -310,7 +310,7 @@ export class DistributedQueryCoordinator extends DistributedSubscriptionBase {
         queryId: payload.subscriptionId,
         key: payload.key,
         value: payload.value,
-        type: payload.changeType,
+        changeType: payload.changeType,
       },
     };
   }

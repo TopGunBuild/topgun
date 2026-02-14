@@ -374,7 +374,7 @@ export class DistributedSearchCoordinator extends DistributedSubscriptionBase {
         value: payload.value,
         score: payload.score,
         matchedTerms: payload.matchedTerms,
-        type: payload.changeType,
+        changeType: payload.changeType,
       },
     };
   }

@@ -405,7 +405,7 @@ export class QueryRegistry {
         // 1. Removed
         for (const key of sub.previousResultKeys) {
             if (!newResultKeys.has(key)) {
-                this.sendUpdate(sub, key, null, 'REMOVE');
+                this.sendUpdate(sub, key, null, 'LEAVE');
             }
         }
 
@@ -537,7 +537,7 @@ export class QueryRegistry {
         this.sendUpdate(sub, changeKey, newVal, 'UPDATE');
       } else if (change === 'removed') {
         sub.previousResultKeys.delete(changeKey);
-        this.sendUpdate(sub, changeKey, null, 'REMOVE');
+        this.sendUpdate(sub, changeKey, null, 'LEAVE');
       } else if (change === 'updated') {
         this.sendUpdate(sub, changeKey, newVal, 'UPDATE');
       }
@@ -596,7 +596,7 @@ export class QueryRegistry {
       // 1. Removed
       for (const key of sub.previousResultKeys) {
         if (!newResultKeys.has(key)) {
-          this.sendUpdate(sub, key, null, 'REMOVE');
+          this.sendUpdate(sub, key, null, 'LEAVE');
         }
       }
 
@@ -637,7 +637,7 @@ export class QueryRegistry {
       this.sendUpdate(sub, changeKey, newVal, 'UPDATE');
     } else if (!isMatch && wasInResult) {
       sub.previousResultKeys.delete(changeKey);
-      this.sendUpdate(sub, changeKey, null, 'REMOVE');
+      this.sendUpdate(sub, changeKey, null, 'LEAVE');
     } else if (isMatch && wasInResult) {
       this.sendUpdate(sub, changeKey, newVal, 'UPDATE');
     }
@@ -742,20 +742,25 @@ export class QueryRegistry {
       return record.value;
   }
 
-  private sendUpdate(sub: Subscription, key: string, value: any, type: 'UPDATE' | 'REMOVE') {
+  private sendUpdate(sub: Subscription, key: string, value: any, type: 'UPDATE' | 'LEAVE') {
     // Route based on subscription type
     if (sub.isDistributed && sub.coordinatorNodeId && this.clusterManager) {
       // Distributed subscription: send to coordinator via cluster
       this.sendDistributedUpdate(sub, key, value, type);
     } else if (sub.socket.readyState === WebSocket.OPEN) {
       // Local subscription: send to client via socket
+      // Discriminate ENTER vs UPDATE the same way distributed mode does
+      const changeType = type === 'UPDATE'
+        ? (sub.previousResultKeys.has(key) ? 'UPDATE' : 'ENTER')
+        : 'LEAVE';
+
       sub.socket.send(serialize({
         type: 'QUERY_UPDATE',
         payload: {
           queryId: sub.id,
           key,
           value,
-          type
+          changeType
         }
       }));
     }
@@ -768,7 +773,7 @@ export class QueryRegistry {
     sub: Subscription,
     key: string,
     value: any,
-    type: 'UPDATE' | 'REMOVE'
+    type: 'UPDATE' | 'LEAVE'
   ): void {
     if (!this.clusterManager || !sub.coordinatorNodeId) return;
 
