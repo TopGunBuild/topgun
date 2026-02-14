@@ -349,7 +349,7 @@ describe('Client Search', () => {
           value: { title: 'New Document' },
           score: 1.5,
           matchedTerms: ['test'],
-          type: 'ENTER',
+          changeType: 'ENTER',
         },
       });
 
@@ -376,7 +376,7 @@ describe('Client Search', () => {
           value: { title: 'Original' },
           score: 1.0,
           matchedTerms: ['test'],
-          type: 'ENTER',
+          changeType: 'ENTER',
         },
       });
 
@@ -389,7 +389,7 @@ describe('Client Search', () => {
           value: { title: 'Updated' },
           score: 2.0,
           matchedTerms: ['test'],
-          type: 'UPDATE',
+          changeType: 'UPDATE',
         },
       });
 
@@ -417,7 +417,7 @@ describe('Client Search', () => {
           value: { title: 'Test' },
           score: 1.0,
           matchedTerms: ['test'],
-          type: 'ENTER',
+          changeType: 'ENTER',
         },
       });
 
@@ -432,7 +432,7 @@ describe('Client Search', () => {
           value: null,
           score: 0,
           matchedTerms: [],
-          type: 'LEAVE',
+          changeType: 'LEAVE',
         },
       });
 
@@ -504,7 +504,7 @@ describe('Client Search', () => {
           value: { title: 'Test' },
           score: 1.0,
           matchedTerms: ['test'],
-          type: 'ENTER',
+          changeType: 'ENTER',
         },
       });
 
@@ -542,7 +542,7 @@ describe('Client Search', () => {
           value: { title: 'Test' },
           score: 1.0,
           matchedTerms: ['test'],
-          type: 'ENTER',
+          changeType: 'ENTER',
         },
       });
 
@@ -561,7 +561,7 @@ describe('Client Search', () => {
           value: { title: 'Test 2' },
           score: 1.0,
           matchedTerms: ['test'],
-          type: 'ENTER',
+          changeType: 'ENTER',
         },
       });
 
@@ -587,7 +587,7 @@ describe('Client Search', () => {
           value: { title: 'Low' },
           score: 1.0,
           matchedTerms: ['test'],
-          type: 'ENTER',
+          changeType: 'ENTER',
         },
       });
 
@@ -599,7 +599,7 @@ describe('Client Search', () => {
           value: { title: 'High' },
           score: 3.0,
           matchedTerms: ['test'],
-          type: 'ENTER',
+          changeType: 'ENTER',
         },
       });
 
@@ -611,7 +611,7 @@ describe('Client Search', () => {
           value: { title: 'Medium' },
           score: 2.0,
           matchedTerms: ['test'],
-          type: 'ENTER',
+          changeType: 'ENTER',
         },
       });
 
