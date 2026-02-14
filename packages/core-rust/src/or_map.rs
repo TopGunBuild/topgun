@@ -1062,3 +1062,295 @@ mod tests {
         assert!(!map.all_keys().contains(&&"key1".to_string()));
     }
 }
+
+/// Property-based tests using `proptest` for ORMap CRDT correctness verification.
+#[cfg(test)]
+mod proptests {
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::sync::Arc;
+
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::hlc::ClockSource;
+    use crate::Value;
+
+    /// Deterministic clock source for proptest.
+    struct FixedClock {
+        time: Arc<AtomicU64>,
+    }
+
+    impl FixedClock {
+        fn new(initial: u64) -> (Self, Arc<AtomicU64>) {
+            let time = Arc::new(AtomicU64::new(initial));
+            (Self { time: time.clone() }, time)
+        }
+    }
+
+    impl ClockSource for FixedClock {
+        fn now(&self) -> u64 {
+            self.time.load(AtomicOrdering::Relaxed)
+        }
+    }
+
+    /// Creates an `ORMap<Value>` with a high fixed clock to avoid drift errors.
+    fn make_proptest_map(node_id: &str) -> ORMap<Value> {
+        let (clock, _) = FixedClock::new(u64::MAX / 2);
+        let hlc = HLC::new(node_id.to_string(), Box::new(clock));
+        ORMap::new(hlc)
+    }
+
+    /// Strategy for generating arbitrary `Value` variants (non-recursive for simplicity).
+    fn arb_value() -> impl Strategy<Value = Value> {
+        prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(Value::Int),
+            "[a-zA-Z0-9 ]{0,20}".prop_map(|s| Value::String(s)),
+        ]
+    }
+
+    /// Strategy for generating a key string.
+    fn arb_key() -> impl Strategy<Value = String> {
+        "[a-z]{1,4}"
+    }
+
+    /// ORMap operation to apply to a replica.
+    #[derive(Debug, Clone)]
+    enum OrMapOp {
+        Add(String, Value),
+        Remove(String, Value),
+    }
+
+    /// Strategy for generating a sequence of ORMap operations.
+    fn arb_ops(max_ops: usize) -> impl Strategy<Value = Vec<OrMapOp>> {
+        proptest::collection::vec(
+            prop_oneof![
+                (arb_key(), arb_value()).prop_map(|(k, v)| OrMapOp::Add(k, v)),
+                (arb_key(), arb_value()).prop_map(|(k, v)| OrMapOp::Remove(k, v)),
+            ],
+            1..=max_ops,
+        )
+    }
+
+    /// Apply operations to an ORMap. Returns tags/tombstones produced.
+    fn apply_ops(map: &mut ORMap<Value>, ops: &[OrMapOp]) {
+        for op in ops {
+            match op {
+                OrMapOp::Add(key, value) => {
+                    map.add(key.clone(), value.clone(), None);
+                }
+                OrMapOp::Remove(key, value) => {
+                    map.remove(key, value);
+                }
+            }
+        }
+    }
+
+    /// Collect all records and tombstones from an ORMap for merging into another.
+    fn collect_state(map: &ORMap<Value>) -> (Vec<(String, ORMapRecord<Value>)>, Vec<String>) {
+        let mut records = Vec::new();
+        for key in map.all_keys() {
+            if let Some(key_map) = map.items.get(key) {
+                for (_, record) in key_map {
+                    records.push((key.clone(), record.clone()));
+                }
+            }
+        }
+        let tombstones: Vec<String> = map.tombstones.iter().cloned().collect();
+        (records, tombstones)
+    }
+
+    /// Get a deterministic sorted snapshot of all active values across all keys.
+    fn snapshot(map: &ORMap<Value>) -> Vec<(String, Vec<String>)> {
+        let mut result: Vec<(String, Vec<String>)> = Vec::new();
+        let mut keys: Vec<&String> = map.all_keys();
+        keys.sort();
+
+        for key in keys {
+            let mut vals: Vec<String> = map
+                .get(key)
+                .iter()
+                .map(|v| format!("{v:?}"))
+                .collect();
+            vals.sort();
+            result.push((key.clone(), vals));
+        }
+        result
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(30))]
+
+        /// Convergence: N replicas receiving the same operations in different orders
+        /// converge to identical state after full-map merge.
+        /// This is the core CRDT property for ORMap.
+        #[test]
+        fn ormap_convergence_n_replicas(
+            ops in arb_ops(6),
+        ) {
+            // Create 3 replicas
+            let mut replica_a = make_proptest_map("node-A");
+            let mut replica_b = make_proptest_map("node-B");
+            let mut replica_c = make_proptest_map("node-C");
+
+            // Each replica applies the same operations
+            apply_ops(&mut replica_a, &ops);
+            apply_ops(&mut replica_b, &ops);
+            apply_ops(&mut replica_c, &ops);
+
+            // After applying same ops independently, each replica has identical state
+            // (same node starts, same clock, same ops => same tags and tombstones)
+            // Now simulate cross-replica merge in different orders:
+
+            // Create "convergence" replicas that receive all state
+            let mut conv_ab = make_proptest_map("conv-AB");
+            let mut conv_ba = make_proptest_map("conv-BA");
+
+            // Merge A's state then B's state into conv_ab
+            let (a_records, a_tombstones) = collect_state(&replica_a);
+            let (b_records, b_tombstones) = collect_state(&replica_b);
+
+            for (key, record) in &a_records {
+                conv_ab.apply(key.clone(), record.clone());
+            }
+            for tag in &a_tombstones {
+                conv_ab.apply_tombstone(tag);
+            }
+            for (key, record) in &b_records {
+                conv_ab.apply(key.clone(), record.clone());
+            }
+            for tag in &b_tombstones {
+                conv_ab.apply_tombstone(tag);
+            }
+
+            // Merge B's state then A's state into conv_ba (reverse order)
+            for (key, record) in &b_records {
+                conv_ba.apply(key.clone(), record.clone());
+            }
+            for tag in &b_tombstones {
+                conv_ba.apply_tombstone(tag);
+            }
+            for (key, record) in &a_records {
+                conv_ba.apply(key.clone(), record.clone());
+            }
+            for tag in &a_tombstones {
+                conv_ba.apply_tombstone(tag);
+            }
+
+            // Both convergence replicas should have identical visible state
+            let snap_ab = snapshot(&conv_ab);
+            let snap_ba = snapshot(&conv_ba);
+            prop_assert_eq!(
+                snap_ab,
+                snap_ba,
+                "Convergence failed: merge order should not matter"
+            );
+        }
+
+        /// Commutativity: merge(A, B) == merge(B, A) for any two ORMaps.
+        #[test]
+        fn ormap_merge_commutative(
+            ops_a in arb_ops(4),
+            ops_b in arb_ops(4),
+        ) {
+            let mut map_a = make_proptest_map("node-A");
+            let mut map_b = make_proptest_map("node-B");
+
+            apply_ops(&mut map_a, &ops_a);
+            apply_ops(&mut map_b, &ops_b);
+
+            // Order 1: merge B into A
+            let mut merged_ab = make_proptest_map("node-AB");
+            // First copy A's state
+            let (a_records, a_tombstones) = collect_state(&map_a);
+            for (key, record) in &a_records {
+                merged_ab.apply(key.clone(), record.clone());
+            }
+            for tag in &a_tombstones {
+                merged_ab.apply_tombstone(tag);
+            }
+            // Then merge B
+            let (b_records, b_tombstones) = collect_state(&map_b);
+            for (key, record) in &b_records {
+                merged_ab.apply(key.clone(), record.clone());
+            }
+            for tag in &b_tombstones {
+                merged_ab.apply_tombstone(tag);
+            }
+
+            // Order 2: merge A into B
+            let mut merged_ba = make_proptest_map("node-BA");
+            for (key, record) in &b_records {
+                merged_ba.apply(key.clone(), record.clone());
+            }
+            for tag in &b_tombstones {
+                merged_ba.apply_tombstone(tag);
+            }
+            for (key, record) in &a_records {
+                merged_ba.apply(key.clone(), record.clone());
+            }
+            for tag in &a_tombstones {
+                merged_ba.apply_tombstone(tag);
+            }
+
+            let snap_ab = snapshot(&merged_ab);
+            let snap_ba = snapshot(&merged_ba);
+            prop_assert_eq!(snap_ab, snap_ba, "Merge should be commutative");
+        }
+
+        /// Idempotence: merging the same state twice does not change the result.
+        #[test]
+        fn ormap_merge_idempotent(
+            ops in arb_ops(5),
+        ) {
+            let mut source = make_proptest_map("node-src");
+            apply_ops(&mut source, &ops);
+
+            let mut target = make_proptest_map("node-tgt");
+
+            // Merge source into target
+            let (records, tombstones) = collect_state(&source);
+            for (key, record) in &records {
+                target.apply(key.clone(), record.clone());
+            }
+            for tag in &tombstones {
+                target.apply_tombstone(tag);
+            }
+
+            let snap_first = snapshot(&target);
+
+            // Merge source into target AGAIN
+            for (key, record) in &records {
+                target.apply(key.clone(), record.clone());
+            }
+            for tag in &tombstones {
+                target.apply_tombstone(tag);
+            }
+
+            let snap_second = snapshot(&target);
+            prop_assert_eq!(snap_first, snap_second, "Merge should be idempotent");
+        }
+
+        /// `ORMapRecord<Value>` round-trip through MsgPack preserves data.
+        #[test]
+        fn ormap_record_msgpack_roundtrip(
+            value in arb_value(),
+            millis in 1_u64..1_000_000_000_u64,
+            counter in 0_u32..1000_u32,
+            node_id in "[a-z]{1,8}",
+        ) {
+            let record = ORMapRecord {
+                value,
+                timestamp: Timestamp { millis, counter, node_id: node_id.clone() },
+                tag: format!("{millis}:{counter}:{node_id}"),
+                ttl_ms: None,
+            };
+
+            let bytes = rmp_serde::to_vec(&record).expect("serialize ORMapRecord<Value>");
+            let decoded: ORMapRecord<Value> =
+                rmp_serde::from_slice(&bytes).expect("deserialize ORMapRecord<Value>");
+            prop_assert_eq!(record, decoded);
+        }
+    }
+}
