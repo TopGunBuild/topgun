@@ -788,10 +788,10 @@ export class SyncEngine {
   }
 
   private handleQueryUpdate(message: QueryUpdateMessage): void {
-    const { queryId, key, value, type } = message.payload;
+    const { queryId, key, value, changeType } = message.payload;
     const query = this.queryManager.getQueries().get(queryId);
     if (query) {
-      query.onUpdate(key, type === 'REMOVE' ? null : value);
+      query.onUpdate(key, changeType === 'LEAVE' ? null : value);
     }
   }
 

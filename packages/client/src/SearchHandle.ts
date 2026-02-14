@@ -299,9 +299,9 @@ export class SearchHandle<T = unknown> {
     if (message.type !== 'SEARCH_UPDATE') return;
     if (message.payload?.subscriptionId !== this.subscriptionId) return;
 
-    const { key, value, score, matchedTerms, type } = message.payload;
+    const { key, value, score, matchedTerms, changeType } = message.payload;
 
-    switch (type as SearchUpdateType) {
+    switch (changeType as SearchUpdateType) {
       case 'ENTER':
         // Document entered result set
         this.results.set(key, {
