@@ -18,6 +18,7 @@ export const SyncMapEntrySchema = z.object({
   mapName: z.string(),
   lastSyncTimestamp: TimestampSchema,
 });
+export type SyncMapEntry = z.infer<typeof SyncMapEntrySchema>;
 
 /**
  * Schema for one-shot query requests over HTTP.
@@ -29,6 +30,7 @@ export const HttpQueryRequestSchema = z.object({
   limit: z.number().optional(),
   offset: z.number().optional(),
 });
+export type HttpQueryRequest = z.infer<typeof HttpQueryRequestSchema>;
 
 /**
  * Schema for one-shot search requests over HTTP.
@@ -39,6 +41,7 @@ export const HttpSearchRequestSchema = z.object({
   query: z.string(),
   options: z.any().optional(),
 });
+export type HttpSearchRequest = z.infer<typeof HttpSearchRequestSchema>;
 
 /**
  * HTTP sync request body sent by the client as POST /sync.
@@ -72,6 +75,7 @@ export const DeltaRecordSchema = z.object({
   record: LWWRecordSchema,
   eventType: z.enum(['PUT', 'REMOVE']),
 });
+export type DeltaRecord = z.infer<typeof DeltaRecordSchema>;
 
 /**
  * Delta records for a specific map, containing all new/changed records
@@ -82,6 +86,7 @@ export const MapDeltaSchema = z.object({
   records: z.array(DeltaRecordSchema),
   serverSyncTimestamp: TimestampSchema,
 });
+export type MapDelta = z.infer<typeof MapDeltaSchema>;
 
 /**
  * Query result for a one-shot HTTP query.
@@ -92,6 +97,7 @@ export const HttpQueryResultSchema = z.object({
   hasMore: z.boolean().optional(),
   nextCursor: z.string().optional(),
 });
+export type HttpQueryResult = z.infer<typeof HttpQueryResultSchema>;
 
 /**
  * Search result for a one-shot HTTP search.
@@ -101,6 +107,7 @@ export const HttpSearchResultSchema = z.object({
   results: z.array(z.any()),
   totalCount: z.number().optional(),
 });
+export type HttpSearchResult = z.infer<typeof HttpSearchResultSchema>;
 
 /**
  * Error entry for individual operation failures.
@@ -110,6 +117,7 @@ export const HttpSyncErrorSchema = z.object({
   message: z.string(),
   context: z.string().optional(),
 });
+export type HttpSyncError = z.infer<typeof HttpSyncErrorSchema>;
 
 /**
  * HTTP sync response returned by the server for POST /sync.

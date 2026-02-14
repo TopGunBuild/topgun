@@ -11,6 +11,7 @@ export const QuerySubMessageSchema = z.object({
     query: QuerySchema,
   }),
 });
+export type QuerySubMessage = z.infer<typeof QuerySubMessageSchema>;
 
 export const QueryUnsubMessageSchema = z.object({
   type: z.literal('QUERY_UNSUB'),
@@ -18,6 +19,7 @@ export const QueryUnsubMessageSchema = z.object({
     queryId: z.string(),
   }),
 });
+export type QueryUnsubMessage = z.infer<typeof QueryUnsubMessageSchema>;
 
 // --- Query Response Types ---
 export const CursorStatusSchema = z.enum(['valid', 'expired', 'invalid', 'none']);
