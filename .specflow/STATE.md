@@ -13,8 +13,7 @@
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-051b | LWWMap Implementation | draft | Phase 2 |
-| 2 | SPEC-051c | ORMap Implementation and CrdtMap Wrapper | draft | Phase 2 |
+| 1 | SPEC-051c | ORMap Implementation and CrdtMap Wrapper | draft | Phase 2 |
 
 ## Migration Roadmap (high-level)
 
@@ -41,11 +40,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-14 | SPEC-051b | COMPLETED: LWWMap Implementation. 2 commits, 1 file created, 1 modified. 137 tests. 2 audit cycles, 1 review cycle. All 6 AC pass. |
+| 2026-02-14 | SPEC-051b | REVIEW v1: APPROVED. All 6 AC independently verified. No critical/major/minor issues. |
+| 2026-02-14 | SPEC-051b | EXECUTED: 2 commits, 1 file created, 1 modified. 132+5 tests. All 6 AC pass. |
+| 2026-02-13 | SPEC-051b | AUDITED v2: APPROVED. Fresh re-audit confirms all v1 recommendations addressed. Codebase-verified API compatibility. No critical issues. |
 | 2026-02-13 | SPEC-051a | COMPLETED: HLC, Hash, MerkleTree foundation. 5 commits, 3 files created, 3 modified. 87+4 tests. 3 audit cycles, 2 review cycles. All 9 AC pass. |
-| 2026-02-13 | SPEC-051a | REVIEW v2: APPROVED. All 3 fixes from Review v1 verified. No new issues. All 9 AC pass. 87+4 tests pass. |
-| 2026-02-13 | SPEC-051a | EXECUTED: 4 commits, 3 files created, 3 files modified. 87 tests + 4 doc-tests pass. All 9 AC met. cargo clippy/doc/build --workspace clean. |
-| 2026-02-13 | SPEC-051 | SPLIT: Decomposed into 3 sub-specs: SPEC-051a (HLC + Hash + MerkleTree foundation), SPEC-051b (LWWMap), SPEC-051c (ORMap + CrdtMap). 051b and 051c can run in parallel after 051a. Parent archived. |
-| 2026-02-13 | SPEC-050 | COMPLETED: Define 6 Foundational Rust Traits. 15 public types in topgun-core + 3 server traits in topgun-server. All 10 AC passed (build/clippy/test/doc zero warnings). Cross-crate wiring verified. Phase 1 Bridge traits complete. |
 
 ## Project Patterns
 
@@ -78,4 +77,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-13 (SPEC-051a completed and archived)*
+*Last updated: 2026-02-14 (SPEC-051b completed and archived)*

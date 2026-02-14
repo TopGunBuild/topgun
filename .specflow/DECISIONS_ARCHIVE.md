@@ -6,6 +6,11 @@ Historical decisions rotated from STATE.md to maintain compactness.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-13 | SPEC-051b | AUDITED v1: APPROVED with 3 recommendations. Context estimate ~45%. No critical issues. |
+| 2026-02-13 | SPEC-051a | REVIEW v2: APPROVED. All 3 fixes from Review v1 verified. No new issues. All 9 AC pass. 87+4 tests pass. |
+| 2026-02-13 | SPEC-051a | EXECUTED: 4 commits, 3 files created, 3 files modified. 87 tests + 4 doc-tests pass. All 9 AC met. cargo clippy/doc/build --workspace clean. |
+| 2026-02-13 | SPEC-051 | SPLIT: Decomposed into 3 sub-specs: SPEC-051a (HLC + Hash + MerkleTree foundation), SPEC-051b (LWWMap), SPEC-051c (ORMap + CrdtMap). 051b and 051c can run in parallel after 051a. Parent archived. |
+| 2026-02-13 | SPEC-050 | COMPLETED: Define 6 Foundational Rust Traits. 15 public types in topgun-core + 3 server traits in topgun-server. All 10 AC passed (build/clippy/test/doc zero warnings). Cross-crate wiring verified. Phase 1 Bridge traits complete. |
 | 2026-02-13 | SPEC-051a | REVIEW v2: APPROVED. All 3 fixes from Review v1 verified. No new issues. All 9 AC pass. 87+4 tests pass. |
 | 2026-02-13 | SPEC-051a | FIX v1: Applied all 3 minor items from Review v1. Extracted shared trie logic (-63 lines), added PartialEq to records, verified splitn(3) no-op. 87+4 tests pass. |
 | 2026-02-13 | SPEC-051a | REVIEW v1: APPROVED with 3 minor items (duplicated merkle methods, missing PartialEq on records, splitn vs split). All 9 AC verified by toolchain. 87 tests + 4 doc-tests pass. |
