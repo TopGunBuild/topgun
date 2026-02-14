@@ -469,7 +469,8 @@ where
 
         for tag in sorted_tags {
             let record = &records[tag];
-            let value_str = serde_json::to_string(&record.value).unwrap_or_default();
+            let value_str =
+                serde_json::to_string(&record.value).expect("V: Serialize must be JSON-serializable");
             let ts_str = format!(
                 "{}:{}:{}",
                 record.timestamp.millis, record.timestamp.counter, record.timestamp.node_id
