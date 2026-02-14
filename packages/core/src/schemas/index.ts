@@ -26,7 +26,7 @@ export * from './http-sync-schemas';
 
 // Union MessageSchema (combines all message types)
 import { z } from 'zod';
-import { AuthMessageSchema } from './base-schemas';
+import { AuthMessageSchema, AuthRequiredMessageSchema } from './base-schemas';
 import {
   ClientOpMessageSchema,
   OpBatchMessageSchema,
@@ -43,8 +43,15 @@ import {
   ORMapDiffRequestSchema,
   ORMapDiffResponseSchema,
   ORMapPushDiffSchema,
+  OpAckMessageSchema,
+  OpRejectedMessageSchema,
+  BatchMessageSchema,
 } from './sync-schemas';
-import { QuerySubMessageSchema, QueryUnsubMessageSchema } from './query-schemas';
+import {
+  QuerySubMessageSchema,
+  QueryUnsubMessageSchema,
+  QueryRespMessageSchema,
+} from './query-schemas';
 import {
   SearchMessageSchema,
   SearchRespMessageSchema,
@@ -54,19 +61,28 @@ import {
 } from './search-schemas';
 import {
   PartitionMapRequestSchema,
+  PartitionMapMessageSchema,
   ClusterSubRegisterMessageSchema,
   ClusterSubAckMessageSchema,
   ClusterSubUpdateMessageSchema,
   ClusterSubUnregisterMessageSchema,
+  ClusterSearchReqMessageSchema,
+  ClusterSearchRespMessageSchema,
+  ClusterSearchSubscribeMessageSchema,
+  ClusterSearchUnsubscribeMessageSchema,
+  ClusterSearchUpdateMessageSchema,
 } from './cluster-schemas';
 import {
   TopicSubSchema,
   TopicUnsubSchema,
   TopicPubSchema,
+  TopicMessageEventSchema,
   LockRequestSchema,
   LockReleaseSchema,
   CounterRequestSchema,
   CounterSyncSchema,
+  CounterResponseSchema,
+  CounterUpdateSchema,
   PingMessageSchema,
   PongMessageSchema,
   EntryProcessRequestSchema,
@@ -86,11 +102,24 @@ import {
   ListResolversRequestSchema,
   ListResolversResponseSchema,
 } from './messaging-schemas';
+import {
+  ServerEventMessageSchema,
+  ServerBatchEventMessageSchema,
+  QueryUpdateMessageSchema,
+  GcPruneMessageSchema,
+  AuthAckMessageSchema,
+  AuthFailMessageSchema,
+  ErrorMessageSchema,
+  LockGrantedMessageSchema,
+  LockReleasedMessageSchema,
+  SyncResetRequiredMessageSchema,
+} from './client-message-schemas';
 
 export const MessageSchema = z.discriminatedUnion('type', [
+  // --- Base ---
   AuthMessageSchema,
-  QuerySubMessageSchema,
-  QueryUnsubMessageSchema,
+  AuthRequiredMessageSchema,
+  // --- Sync ---
   ClientOpMessageSchema,
   OpBatchMessageSchema,
   SyncInitMessageSchema,
@@ -98,13 +127,10 @@ export const MessageSchema = z.discriminatedUnion('type', [
   SyncRespBucketsMessageSchema,
   SyncRespLeafMessageSchema,
   MerkleReqBucketMessageSchema,
-  LockRequestSchema,
-  LockReleaseSchema,
-  TopicSubSchema,
-  TopicUnsubSchema,
-  TopicPubSchema,
-  PingMessageSchema,
-  PongMessageSchema,
+  OpAckMessageSchema,
+  OpRejectedMessageSchema,
+  BatchMessageSchema,
+  // --- ORMap Sync ---
   ORMapSyncInitSchema,
   ORMapSyncRespRootSchema,
   ORMapSyncRespBucketsSchema,
@@ -113,18 +139,54 @@ export const MessageSchema = z.discriminatedUnion('type', [
   ORMapDiffRequestSchema,
   ORMapDiffResponseSchema,
   ORMapPushDiffSchema,
+  // --- Query ---
+  QuerySubMessageSchema,
+  QueryUnsubMessageSchema,
+  QueryRespMessageSchema,
+  QueryUpdateMessageSchema,
+  // --- Search ---
+  SearchMessageSchema,
+  SearchRespMessageSchema,
+  SearchSubMessageSchema,
+  SearchUpdateMessageSchema,
+  SearchUnsubMessageSchema,
+  // --- Cluster ---
   PartitionMapRequestSchema,
+  PartitionMapMessageSchema,
+  ClusterSubRegisterMessageSchema,
+  ClusterSubAckMessageSchema,
+  ClusterSubUpdateMessageSchema,
+  ClusterSubUnregisterMessageSchema,
+  ClusterSearchReqMessageSchema,
+  ClusterSearchRespMessageSchema,
+  ClusterSearchSubscribeMessageSchema,
+  ClusterSearchUnsubscribeMessageSchema,
+  ClusterSearchUpdateMessageSchema,
+  // --- Messaging ---
+  TopicSubSchema,
+  TopicUnsubSchema,
+  TopicPubSchema,
+  TopicMessageEventSchema,
+  LockRequestSchema,
+  LockReleaseSchema,
   CounterRequestSchema,
   CounterSyncSchema,
+  CounterResponseSchema,
+  CounterUpdateSchema,
+  PingMessageSchema,
+  PongMessageSchema,
+  // --- Entry Processor ---
   EntryProcessRequestSchema,
   EntryProcessBatchRequestSchema,
   EntryProcessResponseSchema,
   EntryProcessBatchResponseSchema,
+  // --- Journal ---
   JournalSubscribeRequestSchema,
   JournalUnsubscribeRequestSchema,
   JournalEventMessageSchema,
   JournalReadRequestSchema,
   JournalReadResponseSchema,
+  // --- Conflict Resolver ---
   RegisterResolverRequestSchema,
   RegisterResolverResponseSchema,
   UnregisterResolverRequestSchema,
@@ -132,15 +194,16 @@ export const MessageSchema = z.discriminatedUnion('type', [
   MergeRejectedMessageSchema,
   ListResolversRequestSchema,
   ListResolversResponseSchema,
-  SearchMessageSchema,
-  SearchRespMessageSchema,
-  SearchSubMessageSchema,
-  SearchUpdateMessageSchema,
-  SearchUnsubMessageSchema,
-  ClusterSubRegisterMessageSchema,
-  ClusterSubAckMessageSchema,
-  ClusterSubUpdateMessageSchema,
-  ClusterSubUnregisterMessageSchema,
+  // --- Server-to-Client ---
+  ServerEventMessageSchema,
+  ServerBatchEventMessageSchema,
+  GcPruneMessageSchema,
+  AuthAckMessageSchema,
+  AuthFailMessageSchema,
+  ErrorMessageSchema,
+  LockGrantedMessageSchema,
+  LockReleasedMessageSchema,
+  SyncResetRequiredMessageSchema,
 ]);
 
 export type Message = z.infer<typeof MessageSchema>;
