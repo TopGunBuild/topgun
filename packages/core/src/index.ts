@@ -95,7 +95,7 @@ export type {
   NodeInfo,
   PartitionInfo,
   PartitionMap,
-  PartitionMapMessage,
+  // PartitionMapMessage comes from schemas barrel (cluster-schemas.ts)
   PartitionMapRequestMessage,
   PartitionChange,
   PartitionMapDeltaMessage,
