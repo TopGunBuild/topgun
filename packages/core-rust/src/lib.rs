@@ -13,6 +13,7 @@
 pub mod context;
 pub mod hash;
 pub mod hlc;
+pub mod lww_map;
 pub mod merkle;
 pub mod schema;
 pub mod traits;
