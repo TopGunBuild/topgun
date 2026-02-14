@@ -7,11 +7,13 @@ export const TopicSubSchema = z.object({
   type: z.literal('TOPIC_SUB'),
   payload: z.object({ topic: z.string() }),
 });
+export type TopicSub = z.infer<typeof TopicSubSchema>;
 
 export const TopicUnsubSchema = z.object({
   type: z.literal('TOPIC_UNSUB'),
   payload: z.object({ topic: z.string() }),
 });
+export type TopicUnsub = z.infer<typeof TopicUnsubSchema>;
 
 export const TopicPubSchema = z.object({
   type: z.literal('TOPIC_PUB'),
@@ -20,6 +22,7 @@ export const TopicPubSchema = z.object({
     data: z.any(),
   }),
 });
+export type TopicPub = z.infer<typeof TopicPubSchema>;
 
 export const TopicMessageEventSchema = z.object({
   type: z.literal('TOPIC_MESSAGE'),
@@ -30,6 +33,7 @@ export const TopicMessageEventSchema = z.object({
     timestamp: z.number(),
   }),
 });
+export type TopicMessageEvent = z.infer<typeof TopicMessageEventSchema>;
 
 // --- Lock Messages ---
 export const LockRequestSchema = z.object({
@@ -40,6 +44,7 @@ export const LockRequestSchema = z.object({
     ttl: z.number().optional(),
   }),
 });
+export type LockRequest = z.infer<typeof LockRequestSchema>;
 
 export const LockReleaseSchema = z.object({
   type: z.literal('LOCK_RELEASE'),
@@ -49,17 +54,20 @@ export const LockReleaseSchema = z.object({
     fencingToken: z.number(),
   }),
 });
+export type LockRelease = z.infer<typeof LockReleaseSchema>;
 
 // --- PN Counter Messages ---
 export const PNCounterStateObjectSchema = z.object({
   p: z.record(z.string(), z.number()),
   n: z.record(z.string(), z.number()),
 });
+export type PNCounterStateObject = z.infer<typeof PNCounterStateObjectSchema>;
 
 export const CounterRequestSchema = z.object({
   type: z.literal('COUNTER_REQUEST'),
   payload: z.object({ name: z.string() }),
 });
+export type CounterRequest = z.infer<typeof CounterRequestSchema>;
 
 export const CounterSyncSchema = z.object({
   type: z.literal('COUNTER_SYNC'),
@@ -68,6 +76,7 @@ export const CounterSyncSchema = z.object({
     state: PNCounterStateObjectSchema,
   }),
 });
+export type CounterSync = z.infer<typeof CounterSyncSchema>;
 
 export const CounterResponseSchema = z.object({
   type: z.literal('COUNTER_RESPONSE'),
@@ -76,6 +85,7 @@ export const CounterResponseSchema = z.object({
     state: PNCounterStateObjectSchema,
   }),
 });
+export type CounterResponse = z.infer<typeof CounterResponseSchema>;
 
 export const CounterUpdateSchema = z.object({
   type: z.literal('COUNTER_UPDATE'),
@@ -84,6 +94,7 @@ export const CounterUpdateSchema = z.object({
     state: PNCounterStateObjectSchema,
   }),
 });
+export type CounterUpdate = z.infer<typeof CounterUpdateSchema>;
 
 // --- Heartbeat Messages ---
 export const PingMessageSchema = z.object({
@@ -105,6 +116,7 @@ export const EntryProcessorSchema = z.object({
   code: z.string().min(1).max(10000),
   args: z.unknown().optional(),
 });
+export type EntryProcessor = z.infer<typeof EntryProcessorSchema>;
 
 export const EntryProcessRequestSchema = z.object({
   type: z.literal('ENTRY_PROCESS'),
