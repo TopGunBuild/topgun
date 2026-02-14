@@ -1,6 +1,7 @@
 // packages/core/src/schemas/cluster-schemas.ts
 import { z } from 'zod';
-import { SearchOptionsSchema, SearchUpdateTypeSchema } from './search-schemas';
+import { ChangeEventTypeSchema } from './base-schemas';
+import { SearchOptionsSchema } from './search-schemas';
 
 // --- Partition Map ---
 export const PartitionMapRequestSchema = z.object({
@@ -9,6 +10,40 @@ export const PartitionMapRequestSchema = z.object({
     currentVersion: z.number().optional(),
   }).optional(),
 });
+export type PartitionMapRequest = z.infer<typeof PartitionMapRequestSchema>;
+
+// --- Partition Map Message ---
+
+export const NodeInfoSchema = z.object({
+  id: z.string(),
+  endpoint: z.string(),
+  status: z.enum(['active', 'joining', 'leaving', 'down']),
+  weight: z.number().optional(),
+});
+export type NodeInfo = z.infer<typeof NodeInfoSchema>;
+
+export const PartitionInfoSchema = z.object({
+  id: z.number(),
+  owner: z.string(),
+  replicas: z.array(z.string()),
+  status: z.enum(['active', 'migrating', 'recovering']),
+});
+export type PartitionInfo = z.infer<typeof PartitionInfoSchema>;
+
+export const PartitionMapPayloadSchema = z.object({
+  version: z.number(),
+  partitionCount: z.number(),
+  nodes: z.array(NodeInfoSchema),
+  partitions: z.array(PartitionInfoSchema),
+  generatedAt: z.number(),
+});
+export type PartitionMapPayload = z.infer<typeof PartitionMapPayloadSchema>;
+
+export const PartitionMapMessageSchema = z.object({
+  type: z.literal('PARTITION_MAP'),
+  payload: PartitionMapPayloadSchema,
+});
+export type PartitionMapMessage = z.infer<typeof PartitionMapMessageSchema>;
 
 // --- Distributed Live Subscriptions ---
 export const ClusterSubRegisterPayloadSchema = z.object({
@@ -57,7 +92,7 @@ export const ClusterSubUpdatePayloadSchema = z.object({
   value: z.unknown(),
   score: z.number().optional(),
   matchedTerms: z.array(z.string()).optional(),
-  changeType: z.enum(['ENTER', 'UPDATE', 'LEAVE']),
+  changeType: ChangeEventTypeSchema,
   timestamp: z.number(),
 });
 export type ClusterSubUpdatePayload = z.infer<typeof ClusterSubUpdatePayloadSchema>;
@@ -84,10 +119,8 @@ export const ClusterSearchReqPayloadSchema = z.object({
   requestId: z.string(),
   mapName: z.string(),
   query: z.string(),
-  options: z.object({
+  options: SearchOptionsSchema.extend({
     limit: z.number().int().positive().max(1000),
-    minScore: z.number().optional(),
-    boost: z.record(z.string(), z.number()).optional(),
     includeMatchedTerms: z.boolean().optional(),
     afterScore: z.number().optional(),
     afterKey: z.string().optional(),
@@ -155,7 +188,7 @@ export const ClusterSearchUpdatePayloadSchema = z.object({
   value: z.unknown(),
   score: z.number(),
   matchedTerms: z.array(z.string()).optional(),
-  type: SearchUpdateTypeSchema,
+  changeType: ChangeEventTypeSchema,
 });
 export type ClusterSearchUpdatePayload = z.infer<typeof ClusterSearchUpdatePayloadSchema>;
 
