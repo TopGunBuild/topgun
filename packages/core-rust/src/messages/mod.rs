@@ -1,7 +1,7 @@
-//! Wire-compatible message schemas for the TopGun protocol.
+//! Wire-compatible message schemas for the `TopGun` protocol.
 //!
 //! Each submodule corresponds to a domain of messages defined in the TypeScript
-//! Zod schemas (`packages/core/src/schemas/`). All types use named MsgPack
+//! Zod schemas (`packages/core/src/schemas/`). All types use named `MsgPack`
 //! serialization (`rmp_serde::to_vec_named()`) with camelCase field names to
 //! match the TypeScript wire format.
 

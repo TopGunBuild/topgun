@@ -3,7 +3,7 @@
 //! These types correspond to the TypeScript Zod schemas in
 //! `packages/core/src/schemas/base-schemas.ts`. All structs use
 //! `#[serde(rename_all = "camelCase")]` to produce wire-compatible
-//! MsgPack output via `rmp_serde::to_vec_named()`.
+//! `MsgPack` output via `rmp_serde::to_vec_named()`.
 
 use std::collections::HashMap;
 
@@ -24,6 +24,7 @@ use crate::hlc::{LWWRecord, ORMapRecord};
 ///
 /// Without this, serde collapses `null` into the outer `None`, losing the
 /// distinction between "field absent" and "field explicitly null".
+#[allow(clippy::option_option)]
 fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     T: Deserialize<'de>,
@@ -39,7 +40,7 @@ where
 /// Write concern level defining when an operation is considered acknowledged.
 ///
 /// Maps to `WriteConcernSchema` in `base-schemas.ts`.
-/// Variant names use SCREAMING_CASE to match TS wire format exactly.
+/// Variant names use `SCREAMING_CASE` to match TS wire format exactly.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[allow(non_camel_case_types)]
 pub enum WriteConcern {
@@ -135,6 +136,7 @@ pub struct Query {
 /// Maps to `ClientOpSchema` in `base-schemas.ts`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(clippy::option_option)]
 pub struct ClientOp {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub id: Option<String>,
@@ -186,7 +188,7 @@ pub struct AuthMessage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthRequiredMessage {
-    /// Always "AUTH_REQUIRED". Uses raw identifier since `type` is a Rust keyword.
+    /// Always `AUTH_REQUIRED`. Uses raw identifier since `type` is a Rust keyword.
     #[serde(rename = "type")]
     pub r#type: String,
 }
