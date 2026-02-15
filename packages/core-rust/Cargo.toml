@@ -13,7 +13,7 @@ async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 anyhow = "1"
 rmp-serde = "1"
-rmpv = "1"
+rmpv = { version = "1", features = ["with-serde"] }
 serde_json = "1"
 tracing = "0.1"
 

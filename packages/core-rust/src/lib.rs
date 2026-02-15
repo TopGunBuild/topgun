@@ -17,6 +17,7 @@ pub mod hash;
 pub mod hlc;
 pub mod lww_map;
 pub mod merkle;
+pub mod messages;
 pub mod or_map;
 pub mod schema;
 pub mod traits;
@@ -45,6 +46,12 @@ pub use merkle::{MerkleNode, MerkleTree, ORMapMerkleTree};
 
 // LWWMap
 pub use lww_map::LWWMap;
+
+// Messages
+pub use messages::{
+    AuthMessage, AuthRequiredMessage, ChangeEventType, ClientOp, PredicateNode, PredicateOp,
+    Query, SortDirection, WriteConcern,
+};
 
 // ORMap
 pub use or_map::ORMap;
