@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 /// Ordering is defined as: millis first, then counter, then `node_id` (lexicographic byte order).
 /// This matches the TypeScript `HLC.compare()` behavior for ASCII-only node IDs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Timestamp {
     /// Physical wall-clock milliseconds since Unix epoch.
     pub millis: u64,
@@ -298,6 +299,7 @@ impl HLC {
 /// Generic over `V` so that any serializable type can be stored, not just [`Value`](crate::Value).
 /// The `ttl_ms` field enables time-to-live expiration checked against the HLC clock source.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[serde(bound(
     serialize = "V: Serialize",
     deserialize = "V: serde::de::DeserializeOwned"
@@ -317,6 +319,7 @@ pub struct LWWRecord<V> {
 /// `"millis:counter:nodeId"`). Removals target specific tags, allowing concurrent
 /// adds and removes to be resolved without lost updates.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[serde(bound(
     serialize = "V: Serialize",
     deserialize = "V: serde::de::DeserializeOwned"
