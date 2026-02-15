@@ -6,6 +6,19 @@ Historical decisions rotated from STATE.md to maintain compactness.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-15 | SPEC-052a | AUDIT v3: APPROVED. No issues. All type definitions independently verified against TS and Rust source. Ready for /sf:run. |
+| 2026-02-15 | SPEC-052a | REVISED v2: Applied all 2 audit v2 recommendations (type keyword handling pattern added, heading count fixed). Ready for re-audit. |
+| 2026-02-15 | SPEC-052a | AUDIT v2: APPROVED with 2 recommendations (type keyword handling, heading count). All type definitions verified against TS source. Ready for /sf:run. |
+| 2026-02-15 | SPEC-052a | REVISED v1: Applied all 6 audit items (3 critical + 3 recommendations). ClientOp fields corrected to match TS (9 fields), Query offset removed, Query where field added with Rust keyword handling, PredicateNode children changed to Option<Vec> without Box, SortDirection enum added, LWWRecord<rmpv::Value> round-trip test added. Ready for re-audit. |
+| 2026-02-15 | SPEC-052a | AUDIT v1: NEEDS_REVISION. 3 critical issues: ClientOp field list wrong (6 fields vs actual 9), Query includes non-existent offset field, Query omits where field (Rust keyword). 3 recommendations. |
+| 2026-02-15 | SPEC-052 | SPLIT into 5 parts: SPEC-052a (Foundation), SPEC-052b (Sync+Query), SPEC-052c (Search+Cluster), SPEC-052d (Messaging+ClientEvents), SPEC-052e (HTTP Sync+Union+Tests). Parent archived. |
+| 2026-02-14 | SPEC-052 | REVISED v3: Applied all 4 recommendations from Audit v3. ServerEventType enum added, ClusterSearchOptions superset noted, NodeEndpoints struct named, file count arithmetic fixed. Ready for re-audit. |
+| 2026-02-14 | SPEC-052 | AUDIT v3: NEEDS_DECOMPOSITION. No critical issues. All previous audit items resolved. 77-variant count independently verified. 4 minor recommendations. Ready for /sf:split. |
+| 2026-02-14 | SPEC-053 | COMPLETED: Protocol Schema Cleanup. 16 commits, 25 files modified. 4 audit cycles, 1 review cycle. All 12 AC pass. |
+| 2026-02-14 | SPEC-053 | REVIEW v1: APPROVED. All 12 acceptance criteria met. No critical or major issues. 1 minor (PredicateOp/PredicateNode type export omission -- justified). |
+| 2026-02-14 | SPEC-053 | EXECUTED: All 12 groups across 5 waves complete. 16 commits, 25 files modified. All tests pass (core: 1982, client: 501, server: 1211). Build succeeds. |
+| 2026-02-14 | SPEC-053 | AUDIT v4: NEEDS_DECOMPOSITION. No critical issues. All previous audit items resolved. Spec is well-decomposed into 12 groups across 5 waves, each group 3-15% context. Ready for /sf:run --parallel. |
+| 2026-02-14 | SPEC-053 | REVISED v3: Confirmed both audit v3 items (wave assignment fix + G12 dependency on G9). Pre-applied by auditor. Ready for re-audit. |
 | 2026-02-14 | SPEC-053 | AUDIT v3: NEEDS_REVISION. 1 critical issue (wave assignment error: G8 in Wave 2 but depends on G7 also in Wave 2). 1 recommendation (G12 should depend on G9). Corrected waves: G8=3, G9=4, G12=5. |
 | 2026-02-14 | SPEC-053 | AUDIT v2: NEEDS_DECOMPOSITION. No critical issues. 3 recommendations applied in Response v2. All source claims verified. |
 | 2026-02-14 | SPEC-053 | REVISED v2: Applied all 3 audit v2 recommendations (Approach "13" to "19", QueryRegistry.test.ts 3 to 4 sites, G10 ENTER/UPDATE discrimination note). Ready for re-audit. |

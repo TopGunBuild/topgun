@@ -6,14 +6,17 @@
 - **Status:** idle
 - **Project Phase:** Phase 2 (Rust Core)
 - **TODO Items:** 23 (1 client bug fix + 8 Rust bridge/core + 14 existing deferred)
-- **Next Step:** /sf:new or /sf:next
+- **Next Step:** /sf:next or /sf:new
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
 ## Queue
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-052 | Message Schema Compatibility -- Rust Serde Structs for MsgPack Wire Protocol | revised | Phase 2 |
+| 1 | SPEC-052b | Message Schema -- Sync and Query Domain Structs | ready | Phase 2 |
+| 2 | SPEC-052c | Message Schema -- Search and Cluster Domain Structs | ready | Phase 2 |
+| 3 | SPEC-052d | Message Schema -- Messaging and Client Events Domain Structs | ready | Phase 2 |
+| 4 | SPEC-052e | Message Schema -- HTTP Sync, Message Union, and Cross-Language Tests | blocked (SPEC-052b, 052c, 052d) | Phase 2 |
 
 ## Migration Roadmap (high-level)
 
@@ -40,11 +43,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
-| 2026-02-14 | SPEC-053 | COMPLETED: Protocol Schema Cleanup. 16 commits, 25 files modified. 4 audit cycles, 1 review cycle. All 12 AC pass. |
-| 2026-02-14 | SPEC-053 | REVIEW v1: APPROVED. All 12 acceptance criteria met. No critical or major issues. 1 minor (PredicateOp/PredicateNode type export omission -- justified). |
-| 2026-02-14 | SPEC-053 | EXECUTED: All 12 groups across 5 waves complete. 16 commits, 25 files modified. All tests pass (core: 1982, client: 501, server: 1211). Build succeeds. |
-| 2026-02-14 | SPEC-053 | AUDIT v4: NEEDS_DECOMPOSITION. No critical issues. All previous audit items resolved. Spec is well-decomposed into 12 groups across 5 waves, each group 3-15% context. Ready for /sf:run --parallel. |
-| 2026-02-14 | SPEC-053 | REVISED v3: Confirmed both audit v3 items (wave assignment fix + G12 dependency on G9). Pre-applied by auditor. Ready for re-audit. |
+| 2026-02-15 | SPEC-052a | COMPLETED: Message Schema Foundation. 3 commits, 5 files (2 created + 3 modified). 3 audit cycles, 2 review cycles. All 5 AC pass. |
+| 2026-02-15 | SPEC-052a | REVIEW v2: APPROVED. All 5 AC pass. All Review v1 fixes verified. Build, clippy, and test all pass with zero warnings. All 9 types match TS wire format exactly. |
+| 2026-02-15 | SPEC-052a | FIX v1: Applied all Review v1 fixes. 6 clippy pedantic lints resolved (5 doc_markdown + 1 option_option). Commit 063a7f1. |
+| 2026-02-15 | SPEC-052a | REVIEW v1: CHANGES_REQUESTED. 1 major issue: clippy pedantic fails (6 errors: 5 doc_markdown + 1 option_option). All 5 AC pass. All 9 types match TS source. |
+| 2026-02-15 | SPEC-052a | EXECUTED: 2 commits, 5 files (2 created + 3 modified). 199 tests pass (173 existing + 26 new). 3 deviations (rmpv serde feature, double-option deserialization, non_camel_case allow). |
 
 ## Project Patterns
 
@@ -71,10 +74,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 - Partition pruning pattern: PartitionService.getRelevantPartitions extracts key predicates (_key, key, id, _id) from queries to prune distributed fan-out; targetedNodes on DistributedSubscription keeps checkAcksComplete consistent with pruned node sets
 - Node ID reconciliation pattern: ConnectionPool.addNode() matches incoming server-assigned nodeId against existing seed connections by endpoint; remapNodeId() transfers NodeConnection entry preserving WebSocket/state/pending; node:remapped event notifies ClusterClient and PartitionRouter
 - Batch delegation pattern: IConnectionProvider.sendBatch is optional; SyncEngine delegates to it when available (cluster mode) for per-key partition routing; falls back to single OP_BATCH in single-server mode
+- Double-option deserialization pattern: For Rust fields matching TS `.nullable().optional()`, use `Option<Option<T>>` with custom `deserialize_double_option` to distinguish absent (None) from explicitly-null (Some(None))
 
 ## Warnings
 
 (none)
 
 ---
-*Last updated: 2026-02-14 (SPEC-053 completed and archived)*
+*Last updated: 2026-02-15 (SPEC-052a completed and archived)*
