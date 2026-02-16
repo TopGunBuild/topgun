@@ -21,3 +21,19 @@ pub use base::{
     AuthMessage, AuthRequiredMessage, ChangeEventType, ClientOp, PredicateNode, PredicateOp,
     Query, SortDirection, WriteConcern,
 };
+
+pub use query::{
+    CursorStatus, QueryRespMessage, QueryRespPayload, QueryResultEntry, QuerySubMessage,
+    QuerySubPayload, QueryUnsubMessage, QueryUnsubPayload,
+};
+
+pub use sync::{
+    BatchMessage, ClientOpMessage, MerkleReqBucketMessage, MerkleReqBucketPayload, OpAckMessage,
+    OpAckPayload, OpBatchMessage, OpBatchPayload, OpRejectedMessage, OpRejectedPayload, OpResult,
+    ORMapDiffRequest, ORMapDiffRequestPayload, ORMapDiffResponse, ORMapDiffResponsePayload,
+    ORMapEntry, ORMapMerkleReqBucket, ORMapMerkleReqBucketPayload, ORMapPushDiff,
+    ORMapPushDiffPayload, ORMapSyncInit, ORMapSyncRespBuckets, ORMapSyncRespBucketsPayload,
+    ORMapSyncRespLeaf, ORMapSyncRespLeafPayload, ORMapSyncRespRoot, ORMapSyncRespRootPayload,
+    SyncInitMessage, SyncLeafRecord, SyncRespBucketsMessage, SyncRespBucketsPayload,
+    SyncRespLeafMessage, SyncRespLeafPayload, SyncRespRootMessage, SyncRespRootPayload,
+};
