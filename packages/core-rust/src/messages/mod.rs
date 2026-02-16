@@ -7,9 +7,10 @@
 
 pub mod base;
 
-// Future submodules (SPEC-052b through SPEC-052e):
-// pub mod sync;
-// pub mod query;
+pub mod query;
+pub mod sync;
+
+// Future submodules (SPEC-052c through SPEC-052e):
 // pub mod search;
 // pub mod cluster;
 // pub mod messaging;
