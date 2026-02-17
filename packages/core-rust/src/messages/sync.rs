@@ -24,9 +24,6 @@ use super::base::{ClientOp, WriteConcern};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientOpMessage {
-    /// Always `"CLIENT_OP"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// The wrapped client operation.
     pub payload: ClientOp,
 }
@@ -34,7 +31,7 @@ pub struct ClientOpMessage {
 /// Payload for a batch of client operations.
 ///
 /// Maps to the `payload` of `OpBatchMessageSchema` in `sync-schemas.ts`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpBatchPayload {
     /// The batch of operations to apply.
@@ -44,7 +41,7 @@ pub struct OpBatchPayload {
     pub write_concern: Option<WriteConcern>,
     /// Optional timeout in milliseconds.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub timeout: Option<f64>,
+    pub timeout: Option<u64>,
 }
 
 /// A batch of client operations wrapped in a typed message envelope.
@@ -54,9 +51,6 @@ pub struct OpBatchPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpBatchMessage {
-    /// Always `"OP_BATCH"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// The batch payload containing operations.
     pub payload: OpBatchPayload,
 }
@@ -72,14 +66,11 @@ pub struct OpBatchMessage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncInitMessage {
-    /// Always `"SYNC_INIT"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// Name of the map to synchronize.
     pub map_name: String,
     /// Optional timestamp of last successful sync for delta optimization.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub last_sync_timestamp: Option<f64>,
+    pub last_sync_timestamp: Option<u64>,
 }
 
 /// Payload for sync root hash response.
@@ -91,7 +82,7 @@ pub struct SyncRespRootPayload {
     /// Name of the map being synchronized.
     pub map_name: String,
     /// Root hash of the merkle tree.
-    pub root_hash: f64,
+    pub root_hash: u32,
     /// Server timestamp at time of response.
     pub timestamp: Timestamp,
 }
@@ -103,9 +94,6 @@ pub struct SyncRespRootPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncRespRootMessage {
-    /// Always `"SYNC_RESP_ROOT"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// The root hash payload.
     pub payload: SyncRespRootPayload,
 }
@@ -121,7 +109,7 @@ pub struct SyncRespBucketsPayload {
     /// Merkle tree path to this bucket level.
     pub path: String,
     /// Map of bucket index to bucket hash.
-    pub buckets: HashMap<String, f64>,
+    pub buckets: HashMap<String, u32>,
 }
 
 /// Sync response containing bucket hashes at a specific tree level.
@@ -131,9 +119,6 @@ pub struct SyncRespBucketsPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncRespBucketsMessage {
-    /// Always `"SYNC_RESP_BUCKETS"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// The bucket hashes payload.
     pub payload: SyncRespBucketsPayload,
 }
@@ -171,9 +156,6 @@ pub struct SyncRespLeafPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncRespLeafMessage {
-    /// Always `"SYNC_RESP_LEAF"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// The leaf records payload.
     pub payload: SyncRespLeafPayload,
 }
@@ -197,9 +179,6 @@ pub struct MerkleReqBucketPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MerkleReqBucketMessage {
-    /// Always `"MERKLE_REQ_BUCKET"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// The bucket request payload.
     pub payload: MerkleReqBucketPayload,
 }
@@ -234,18 +213,15 @@ pub struct ORMapEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ORMapSyncInit {
-    /// Always `"ORMAP_SYNC_INIT"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// Name of the `ORMap` to synchronize.
     pub map_name: String,
     /// Root hash of the client's merkle tree.
-    pub root_hash: f64,
+    pub root_hash: u32,
     /// Map of bucket index to bucket hash for delta detection.
-    pub bucket_hashes: HashMap<String, f64>,
+    pub bucket_hashes: HashMap<String, u32>,
     /// Optional timestamp of last successful sync for delta optimization.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub last_sync_timestamp: Option<f64>,
+    pub last_sync_timestamp: Option<u64>,
 }
 
 /// Payload for `ORMap` sync root hash response.
@@ -258,7 +234,7 @@ pub struct ORMapSyncRespRootPayload {
     /// Name of the `ORMap` being synchronized.
     pub map_name: String,
     /// Root hash of the merkle tree.
-    pub root_hash: f64,
+    pub root_hash: u32,
     /// Server timestamp at time of response.
     pub timestamp: Timestamp,
 }
@@ -270,9 +246,6 @@ pub struct ORMapSyncRespRootPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ORMapSyncRespRoot {
-    /// Always `"ORMAP_SYNC_RESP_ROOT"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// The root hash payload.
     pub payload: ORMapSyncRespRootPayload,
 }
@@ -289,7 +262,7 @@ pub struct ORMapSyncRespBucketsPayload {
     /// Merkle tree path to this bucket level.
     pub path: String,
     /// Map of bucket index to bucket hash.
-    pub buckets: HashMap<String, f64>,
+    pub buckets: HashMap<String, u32>,
 }
 
 /// `ORMap` sync response containing bucket hashes.
@@ -299,9 +272,6 @@ pub struct ORMapSyncRespBucketsPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ORMapSyncRespBuckets {
-    /// Always `"ORMAP_SYNC_RESP_BUCKETS"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// The bucket hashes payload.
     pub payload: ORMapSyncRespBucketsPayload,
 }
@@ -326,9 +296,6 @@ pub struct ORMapMerkleReqBucketPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ORMapMerkleReqBucket {
-    /// Always `"ORMAP_MERKLE_REQ_BUCKET"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// The bucket request payload.
     pub payload: ORMapMerkleReqBucketPayload,
 }
@@ -355,9 +322,6 @@ pub struct ORMapSyncRespLeafPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ORMapSyncRespLeaf {
-    /// Always `"ORMAP_SYNC_RESP_LEAF"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// The leaf entries payload.
     pub payload: ORMapSyncRespLeafPayload,
 }
@@ -381,9 +345,6 @@ pub struct ORMapDiffRequestPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ORMapDiffRequest {
-    /// Always `"ORMAP_DIFF_REQUEST"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// The diff request payload.
     pub payload: ORMapDiffRequestPayload,
 }
@@ -407,9 +368,6 @@ pub struct ORMapDiffResponsePayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ORMapDiffResponse {
-    /// Always `"ORMAP_DIFF_RESPONSE"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// The diff response payload.
     pub payload: ORMapDiffResponsePayload,
 }
@@ -433,9 +391,6 @@ pub struct ORMapPushDiffPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ORMapPushDiff {
-    /// Always `"ORMAP_PUSH_DIFF"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// The push diff payload.
     pub payload: ORMapPushDiffPayload,
 }
@@ -464,7 +419,7 @@ pub struct OpResult {
 /// Payload for an operation acknowledgement message.
 ///
 /// Maps to the `payload` of `OpAckMessageSchema` in `sync-schemas.ts`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpAckPayload {
     /// Identifier of the last operation in the acknowledged batch.
@@ -484,9 +439,6 @@ pub struct OpAckPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpAckMessage {
-    /// Always `"OP_ACK"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// The acknowledgement payload.
     pub payload: OpAckPayload,
 }
@@ -503,7 +455,7 @@ pub struct OpRejectedPayload {
     pub reason: String,
     /// Optional machine-readable error code.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub code: Option<f64>,
+    pub code: Option<u32>,
 }
 
 /// Operation rejection message.
@@ -513,9 +465,6 @@ pub struct OpRejectedPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpRejectedMessage {
-    /// Always `"OP_REJECTED"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// The rejection payload.
     pub payload: OpRejectedPayload,
 }
@@ -532,11 +481,8 @@ pub struct OpRejectedMessage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchMessage {
-    /// Always `"BATCH"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// Number of individual messages in the batch.
-    pub count: f64,
+    pub count: u32,
     /// Binary payload containing length-prefixed messages.
     #[serde(with = "serde_bytes")]
     pub data: Vec<u8>,
@@ -566,7 +512,6 @@ mod tests {
     #[test]
     fn client_op_message_roundtrip() {
         let msg = ClientOpMessage {
-            r#type: "CLIENT_OP".to_string(),
             payload: ClientOp {
                 id: Some("op-1".to_string()),
                 map_name: "users".to_string(),
@@ -585,7 +530,6 @@ mod tests {
     #[test]
     fn op_batch_message_roundtrip() {
         let msg = OpBatchMessage {
-            r#type: "OP_BATCH".to_string(),
             payload: OpBatchPayload {
                 ops: vec![
                     ClientOp {
@@ -601,7 +545,7 @@ mod tests {
                     },
                 ],
                 write_concern: Some(WriteConcern::PERSISTED),
-                timeout: Some(5000.0),
+                timeout: Some(5000),
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
@@ -612,9 +556,8 @@ mod tests {
     #[test]
     fn sync_init_message_roundtrip() {
         let msg = SyncInitMessage {
-            r#type: "SYNC_INIT".to_string(),
             map_name: "users".to_string(),
-            last_sync_timestamp: Some(1_700_000_000_000.0),
+            last_sync_timestamp: Some(1_700_000_000_000),
         };
         assert_eq!(roundtrip_named(&msg), msg);
     }
@@ -622,7 +565,6 @@ mod tests {
     #[test]
     fn sync_init_message_without_timestamp_roundtrip() {
         let msg = SyncInitMessage {
-            r#type: "SYNC_INIT".to_string(),
             map_name: "events".to_string(),
             last_sync_timestamp: None,
         };
@@ -632,10 +574,9 @@ mod tests {
     #[test]
     fn sync_resp_root_message_roundtrip() {
         let msg = SyncRespRootMessage {
-            r#type: "SYNC_RESP_ROOT".to_string(),
             payload: SyncRespRootPayload {
                 map_name: "users".to_string(),
-                root_hash: 12345.0,
+                root_hash: 12345,
                 timestamp: Timestamp {
                     millis: 1_700_000_000_000,
                     counter: 1,
@@ -649,12 +590,11 @@ mod tests {
     #[test]
     fn sync_resp_buckets_message_roundtrip() {
         let mut buckets = HashMap::new();
-        buckets.insert("0".to_string(), 111.0);
-        buckets.insert("1".to_string(), 222.0);
-        buckets.insert("2".to_string(), 333.0);
+        buckets.insert("0".to_string(), 111);
+        buckets.insert("1".to_string(), 222);
+        buckets.insert("2".to_string(), 333);
 
         let msg = SyncRespBucketsMessage {
-            r#type: "SYNC_RESP_BUCKETS".to_string(),
             payload: SyncRespBucketsPayload {
                 map_name: "users".to_string(),
                 path: "0".to_string(),
@@ -667,7 +607,6 @@ mod tests {
     #[test]
     fn sync_resp_leaf_message_roundtrip() {
         let msg = SyncRespLeafMessage {
-            r#type: "SYNC_RESP_LEAF".to_string(),
             payload: SyncRespLeafPayload {
                 map_name: "users".to_string(),
                 path: "0/1".to_string(),
@@ -693,7 +632,6 @@ mod tests {
     #[test]
     fn merkle_req_bucket_message_roundtrip() {
         let msg = MerkleReqBucketMessage {
-            r#type: "MERKLE_REQ_BUCKET".to_string(),
             payload: MerkleReqBucketPayload {
                 map_name: "users".to_string(),
                 path: "0/1/2".to_string(),
@@ -707,15 +645,14 @@ mod tests {
     #[test]
     fn ormap_sync_init_roundtrip() {
         let mut bucket_hashes = HashMap::new();
-        bucket_hashes.insert("0".to_string(), 111.0);
-        bucket_hashes.insert("1".to_string(), 222.0);
+        bucket_hashes.insert("0".to_string(), 111);
+        bucket_hashes.insert("1".to_string(), 222);
 
         let msg = ORMapSyncInit {
-            r#type: "ORMAP_SYNC_INIT".to_string(),
             map_name: "tags".to_string(),
-            root_hash: 999.0,
+            root_hash: 999,
             bucket_hashes,
-            last_sync_timestamp: Some(1_700_000_000_000.0),
+            last_sync_timestamp: Some(1_700_000_000_000),
         };
         assert_eq!(roundtrip_named(&msg), msg);
     }
@@ -723,10 +660,9 @@ mod tests {
     #[test]
     fn ormap_sync_resp_root_roundtrip() {
         let msg = ORMapSyncRespRoot {
-            r#type: "ORMAP_SYNC_RESP_ROOT".to_string(),
             payload: ORMapSyncRespRootPayload {
                 map_name: "tags".to_string(),
-                root_hash: 42.0,
+                root_hash: 42,
                 timestamp: Timestamp {
                     millis: 1_700_000_000_000,
                     counter: 0,
@@ -740,10 +676,9 @@ mod tests {
     #[test]
     fn ormap_sync_resp_buckets_roundtrip() {
         let mut buckets = HashMap::new();
-        buckets.insert("0".to_string(), 100.0);
+        buckets.insert("0".to_string(), 100);
 
         let msg = ORMapSyncRespBuckets {
-            r#type: "ORMAP_SYNC_RESP_BUCKETS".to_string(),
             payload: ORMapSyncRespBucketsPayload {
                 map_name: "tags".to_string(),
                 path: "0".to_string(),
@@ -756,7 +691,6 @@ mod tests {
     #[test]
     fn ormap_merkle_req_bucket_roundtrip() {
         let msg = ORMapMerkleReqBucket {
-            r#type: "ORMAP_MERKLE_REQ_BUCKET".to_string(),
             payload: ORMapMerkleReqBucketPayload {
                 map_name: "tags".to_string(),
                 path: "0/1".to_string(),
@@ -768,7 +702,6 @@ mod tests {
     #[test]
     fn ormap_sync_resp_leaf_roundtrip() {
         let msg = ORMapSyncRespLeaf {
-            r#type: "ORMAP_SYNC_RESP_LEAF".to_string(),
             payload: ORMapSyncRespLeafPayload {
                 map_name: "tags".to_string(),
                 path: "0/1".to_string(),
@@ -798,7 +731,6 @@ mod tests {
     #[test]
     fn ormap_diff_request_roundtrip() {
         let msg = ORMapDiffRequest {
-            r#type: "ORMAP_DIFF_REQUEST".to_string(),
             payload: ORMapDiffRequestPayload {
                 map_name: "tags".to_string(),
                 keys: vec!["key-1".to_string(), "key-2".to_string()],
@@ -810,7 +742,6 @@ mod tests {
     #[test]
     fn ormap_diff_response_roundtrip() {
         let msg = ORMapDiffResponse {
-            r#type: "ORMAP_DIFF_RESPONSE".to_string(),
             payload: ORMapDiffResponsePayload {
                 map_name: "tags".to_string(),
                 entries: vec![
@@ -828,7 +759,6 @@ mod tests {
     #[test]
     fn ormap_push_diff_roundtrip() {
         let msg = ORMapPushDiff {
-            r#type: "ORMAP_PUSH_DIFF".to_string(),
             payload: ORMapPushDiffPayload {
                 map_name: "tags".to_string(),
                 entries: vec![
@@ -859,7 +789,6 @@ mod tests {
     #[test]
     fn op_ack_message_roundtrip() {
         let msg = OpAckMessage {
-            r#type: "OP_ACK".to_string(),
             payload: OpAckPayload {
                 last_id: "op-batch-1".to_string(),
                 achieved_level: Some(WriteConcern::REPLICATED),
@@ -885,7 +814,6 @@ mod tests {
     #[test]
     fn op_ack_message_minimal_roundtrip() {
         let msg = OpAckMessage {
-            r#type: "OP_ACK".to_string(),
             payload: OpAckPayload {
                 last_id: "op-1".to_string(),
                 achieved_level: None,
@@ -898,11 +826,10 @@ mod tests {
     #[test]
     fn op_rejected_message_roundtrip() {
         let msg = OpRejectedMessage {
-            r#type: "OP_REJECTED".to_string(),
             payload: OpRejectedPayload {
                 op_id: "op-1".to_string(),
                 reason: "permission denied".to_string(),
-                code: Some(403.0),
+                code: Some(403),
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
@@ -911,7 +838,6 @@ mod tests {
     #[test]
     fn op_rejected_message_without_code_roundtrip() {
         let msg = OpRejectedMessage {
-            r#type: "OP_REJECTED".to_string(),
             payload: OpRejectedPayload {
                 op_id: "op-2".to_string(),
                 reason: "unknown error".to_string(),
@@ -926,20 +852,17 @@ mod tests {
     #[test]
     fn batch_message_roundtrip() {
         let msg = BatchMessage {
-            r#type: "BATCH".to_string(),
-            count: 3.0,
+            count: 3,
             data: vec![0x00, 0x01, 0x02, 0xFF, 0xFE],
         };
         assert_eq!(roundtrip_named(&msg), msg);
     }
 
-    // ---- AC-4: Optional field omission (byte inspection) ----
+    // ---- Optional field omission (byte inspection) ----
 
     #[test]
     fn sync_init_optional_field_omitted_when_none() {
-        // AC-4: When lastSyncTimestamp is None, the key should not appear in serialized output
         let msg = SyncInitMessage {
-            r#type: "SYNC_INIT".to_string(),
             map_name: "users".to_string(),
             last_sync_timestamp: None,
         };
@@ -958,9 +881,7 @@ mod tests {
 
     #[test]
     fn op_ack_optional_fields_omitted_when_none() {
-        // AC-4: When achievedLevel and results are None, those keys should not appear
         let msg = OpAckMessage {
-            r#type: "OP_ACK".to_string(),
             payload: OpAckPayload {
                 last_id: "op-1".to_string(),
                 achieved_level: None,
@@ -998,16 +919,14 @@ mod tests {
     #[test]
     fn sync_init_camel_case_field_names() {
         let msg = SyncInitMessage {
-            r#type: "SYNC_INIT".to_string(),
             map_name: "test".to_string(),
-            last_sync_timestamp: Some(100.0),
+            last_sync_timestamp: Some(100),
         };
         let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
         let val: rmpv::Value = rmp_serde::from_slice(&bytes).expect("deserialize");
         let map = val.as_map().expect("should be a map");
 
         let keys: Vec<&str> = map.iter().filter_map(|(k, _)| k.as_str()).collect();
-        assert!(keys.contains(&"type"), "expected 'type' field");
         assert!(keys.contains(&"mapName"), "expected camelCase 'mapName'");
         assert!(
             keys.contains(&"lastSyncTimestamp"),
@@ -1019,8 +938,7 @@ mod tests {
     fn batch_message_data_serializes_as_binary() {
         // Verify that data field is serialized as MsgPack bin, not as array of integers
         let msg = BatchMessage {
-            r#type: "BATCH".to_string(),
-            count: 2.0,
+            count: 2,
             data: vec![0xDE, 0xAD, 0xBE, 0xEF],
         };
         let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
@@ -1043,5 +961,23 @@ mod tests {
             Some(&[0xDE, 0xAD, 0xBE, 0xEF][..]),
             "binary data should match"
         );
+    }
+
+    // ---- Default derive tests ----
+
+    #[test]
+    fn op_batch_payload_default_constructs() {
+        let p = OpBatchPayload::default();
+        assert!(p.ops.is_empty());
+        assert_eq!(p.write_concern, None);
+        assert_eq!(p.timeout, None);
+    }
+
+    #[test]
+    fn op_ack_payload_default_constructs() {
+        let p = OpAckPayload::default();
+        assert_eq!(p.last_id, "");
+        assert_eq!(p.achieved_level, None);
+        assert_eq!(p.results, None);
     }
 }
