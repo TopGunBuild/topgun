@@ -55,9 +55,6 @@ pub struct QuerySubPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuerySubMessage {
-    /// Always `"QUERY_SUB"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// The subscription payload.
     pub payload: QuerySubPayload,
 }
@@ -79,9 +76,6 @@ pub struct QueryUnsubPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryUnsubMessage {
-    /// Always `"QUERY_UNSUB"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// The unsubscription payload.
     pub payload: QueryUnsubPayload,
 }
@@ -105,7 +99,7 @@ pub struct QueryResultEntry {
 /// Payload for a query response message.
 ///
 /// Maps to `QueryRespPayloadSchema` in `query-schemas.ts`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryRespPayload {
     /// Identifier of the subscription this response is for.
@@ -130,9 +124,6 @@ pub struct QueryRespPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryRespMessage {
-    /// Always `"QUERY_RESP"`.
-    #[serde(rename = "type")]
-    pub r#type: String,
     /// The query response payload.
     pub payload: QueryRespPayload,
 }
@@ -191,7 +182,6 @@ mod tests {
         where_clause.insert("status".to_string(), rmpv::Value::String("active".into()));
 
         let msg = QuerySubMessage {
-            r#type: "QUERY_SUB".to_string(),
             payload: QuerySubPayload {
                 query_id: "q-1".to_string(),
                 map_name: "users".to_string(),
@@ -219,7 +209,6 @@ mod tests {
     #[test]
     fn query_unsub_message_roundtrip() {
         let msg = QueryUnsubMessage {
-            r#type: "QUERY_UNSUB".to_string(),
             payload: QueryUnsubPayload {
                 query_id: "q-1".to_string(),
             },
@@ -230,7 +219,6 @@ mod tests {
     #[test]
     fn query_resp_message_full_roundtrip() {
         let msg = QueryRespMessage {
-            r#type: "QUERY_RESP".to_string(),
             payload: QueryRespPayload {
                 query_id: "q-1".to_string(),
                 results: vec![
@@ -264,7 +252,6 @@ mod tests {
     #[test]
     fn query_resp_message_minimal_roundtrip() {
         let msg = QueryRespMessage {
-            r#type: "QUERY_RESP".to_string(),
             payload: QueryRespPayload {
                 query_id: "q-2".to_string(),
                 results: vec![],
@@ -276,13 +263,11 @@ mod tests {
         assert_eq!(roundtrip_named(&msg), msg);
     }
 
-    // ---- AC-4: Optional field omission (byte inspection) ----
+    // ---- Optional field omission (byte inspection) ----
 
     #[test]
     fn query_resp_optional_fields_omitted_when_none() {
-        // AC-4: When nextCursor, hasMore, cursorStatus are None, keys should not appear
         let msg = QueryRespMessage {
-            r#type: "QUERY_RESP".to_string(),
             payload: QueryRespPayload {
                 query_id: "q-1".to_string(),
                 results: vec![],
@@ -329,7 +314,6 @@ mod tests {
     #[test]
     fn query_sub_camel_case_field_names() {
         let msg = QuerySubMessage {
-            r#type: "QUERY_SUB".to_string(),
             payload: QuerySubPayload {
                 query_id: "q-1".to_string(),
                 map_name: "test".to_string(),
@@ -359,5 +343,17 @@ mod tests {
             .collect();
         assert!(keys.contains(&"queryId"), "expected camelCase 'queryId'");
         assert!(keys.contains(&"mapName"), "expected camelCase 'mapName'");
+    }
+
+    // ---- Default derive tests ----
+
+    #[test]
+    fn query_resp_payload_default_constructs() {
+        let p = QueryRespPayload::default();
+        assert_eq!(p.query_id, "");
+        assert!(p.results.is_empty());
+        assert_eq!(p.next_cursor, None);
+        assert_eq!(p.has_more, None);
+        assert_eq!(p.cursor_status, None);
     }
 }
