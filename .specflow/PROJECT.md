@@ -62,11 +62,75 @@ tests/
 **Technical research:** [RUST_SERVER_MIGRATION_RESEARCH.md](.specflow/reference/RUST_SERVER_MIGRATION_RESEARCH.md)
 **Product positioning:** [PRODUCT_POSITIONING_RESEARCH.md](.specflow/reference/PRODUCT_POSITIONING_RESEARCH.md)
 
+### Reference Implementation: Hazelcast
+
+**Path:** `/Users/koristuvac/Projects/hazelcast`
+
+Hazelcast is an enterprise-grade in-memory data grid (Java). It serves as an **architectural reference** for server-side components that have no equivalent in the TopGun TypeScript implementation. When designing Rust server architecture, consult Hazelcast's patterns for:
+
+| TopGun component | Hazelcast reference package | What to learn |
+|------------------|-----------------------------|---------------|
+| ClusterManager | `cluster/`, `internal/cluster/` | Cluster membership, heartbeat, split-brain detection |
+| PartitionService | `partition/`, `internal/partition/` | Partition ownership, migration, rebalancing strategies |
+| Distributed Map | `map/`, `replicatedmap/` | IMap lifecycle, near-cache invalidation, entry processing |
+| Query engine | `query/`, `sql/`, `jet/` | Predicate indexing, DAG execution, query optimization |
+| Pub/sub topics | `topic/` | Reliable topic delivery, ordering guarantees |
+| Persistence | `persistence/`, `hotrestart/` | Snapshot strategies, WAL, hot restart |
+| Security | `security/` | Authentication, authorization, TLS setup |
+| Near Cache | `nearcache/` | Client-side caching with invalidation (analogous to TopGun client replicas) |
+| Split-brain | `splitbrainprotection/` | Quorum policies, merge strategies |
+| Networking | `nio/` | Non-blocking I/O, connection management |
+
+**Existing analysis:** `HAZELCAST_SQL_ARCHITECTURE_AUDIT.md` (SQL/DAG subsystem audit)
+
+**Usage rule:** When a spec involves server-side architecture (clustering, partitioning, persistence, query execution), the spec creator and auditor SHOULD review the corresponding Hazelcast package for proven patterns before finalizing the design. The goal is not to copy Java code, but to learn from Hazelcast's battle-tested architecture decisions and adapt them idiomatically for Rust.
+
 ## Rust Migration Principles
 
 - **Fix-on-port, don't copy bugs:** When migrating TS code to Rust, fix discovered issues rather than reproducing them. No active clients means breaking changes are free. Known TS bugs are tagged "covered by rewrite" in TODO.md.
 - **TS as executable spec, not gospel:** The TS implementation defines *what* the system does (behavior, wire protocol, test vectors), but not necessarily *how* it should be done. Rust should improve architecture where the TS design was expedient.
 - **Audit before implementing:** Before porting a domain to Rust, audit the TS source for bugs, dead code, and inconsistencies. Fix them in TS first (so the TS test suite validates the fix), then port the corrected version.
+- **No JS-isms in Rust:** Do not reproduce JavaScript language limitations in Rust. Every Rust struct/field must be evaluated: "Is this the best Rust representation, or am I copying a JS constraint?" Specific rules below.
+
+### Rust Type Mapping Rules (mandatory for all Rust specs)
+
+These rules apply to every spec that creates or modifies Rust structs in `packages/core-rust/` or `packages/server-rust/`.
+
+**1. Integer types, not f64:**
+JS has no integer type, so TS uses `z.number()` for everything. Rust MUST use proper integer types:
+
+| Semantic meaning | JS/TS type | Rust type | Rationale |
+|------------------|------------|-----------|-----------|
+| Hash value | `number` | `u64` | Hashes are unsigned integers |
+| Count, length | `number` | `u32` or `u64` | Counts are non-negative integers |
+| Error code | `number` | `u32` | HTTP-style codes are integers |
+| Timeout (ms) | `number` | `u64` | Milliseconds are non-negative integers |
+| Timestamp (ms since epoch) | `number` | `i64` | Already correct in `Timestamp.millis` |
+| Score, weight, ratio | `number` | `f64` | Genuinely fractional values stay as f64 |
+| Page size, offset, limit | `number` | `u32` or `u64` | Pagination values are non-negative integers |
+
+This produces **better** wire compatibility: TS `msgpackr` encodes whole numbers as MsgPack integers. Rust `u64` decodes them directly. Using `f64` forces coercion on read and emits MsgPack float64 on write — a different binary format.
+
+**2. No `type` field in message structs:**
+The `Message` enum uses `#[serde(tag = "type")]` — serde owns the `type` discriminant. Inner structs MUST NOT have a `type` / `r#type` field. Having both produces duplicate keys on serialization (undefined behavior in MsgPack).
+
+**3. Default derives for payload structs:**
+Payload structs with 2+ optional fields should derive `Default` for ergonomic construction.
+
+**4. Enums over strings for known value sets:**
+If TS uses `z.literal('X')` or `z.enum([...])`, Rust should use an enum, not `String`.
+
+### Auditor Checklist for Rust Specs
+
+When auditing a Rust spec, verify each of these. Flag violations as **critical**:
+
+- [ ] No `f64` for integer-semantic fields (see type mapping table above)
+- [ ] No `r#type: String` on message structs (enum owns the tag)
+- [ ] `Default` derived on payload structs with 2+ optional fields
+- [ ] Enums used for known value sets (not raw `String`)
+- [ ] Wire compatibility: uses `rmp_serde::to_vec_named()`, not `to_vec()`
+- [ ] `#[serde(rename_all = "camelCase")]` on every struct
+- [ ] `#[serde(skip_serializing_if = "Option::is_none", default)]` on every `Option<T>`
 
 ## Patterns & Conventions
 

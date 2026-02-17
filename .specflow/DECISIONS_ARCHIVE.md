@@ -6,6 +6,14 @@ Historical decisions rotated from STATE.md to maintain compactness.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-16 | SPEC-054 | AUDITED v1: APPROVED with 3 recommendations. All 10 audit dimensions pass. Rust auditor checklist fully compliant. Source code verified: 23 r#type fields, all f64 fields, 232 tests match spec claims exactly. Ready for /sf:run or /sf:revise. |
+| 2026-02-16 | SPEC-054 | DRAFTED: Message Schema Architecture Fix-on-Port. Removes r#type:String from 23 structs, replaces f64 with proper integer types, adds Default derives, prototypes #[serde(tag="type")] enum. P0 blocker for 052c/d/e. |
+| 2026-02-16 | TODO-079 | CREATED: Rust Message Schema Architecture (Fix-on-Port). Post-execution review found 052a/b copy JS limitations: r#type:String conflicts with serde(tag="type") Message enum, f64 for integer fields, no Default. TODO-079 blocks 052c/d/e -- must fix architecture before continuing. |
+| 2026-02-16 | SPEC-052b | EXECUTED: 2 commits, 5 files (2 created + 3 modified). 232 tests pass (199 existing + 33 new). 1 deviation (serde_bytes for BatchMessage). All 4 AC pass. |
+| 2026-02-16 | SPEC-052b | AUDIT v4: APPROVED with 1 recommendation (query domain heading type count). All fields verified against TS source with zero discrepancies. Ready for implementation. |
+| 2026-02-16 | SPEC-052b | REVISION v3: Applied Audit v3 recommendation 1 (ORMap variant fields). Expanded single aggregate row into 8 individual rows with per-variant field details verified against sync-schemas.ts. Ready for re-audit. |
+| 2026-02-16 | SPEC-052b | AUDIT v3: APPROVED with 1 recommendation (ORMap variant fields not individually documented). All fields verified against TS source. Ready for implementation. |
+| 2026-02-15 | SPEC-052a | COMPLETED: Message Schema Foundation. 3 commits, 5 files (2 created + 3 modified). 3 audit cycles, 2 review cycles. All 5 AC pass. |
 | 2026-02-15 | SPEC-052a | AUDIT v3: APPROVED. No issues. All type definitions independently verified against TS and Rust source. Ready for /sf:run. |
 | 2026-02-15 | SPEC-052a | REVISED v2: Applied all 2 audit v2 recommendations (type keyword handling pattern added, heading count fixed). Ready for re-audit. |
 | 2026-02-15 | SPEC-052a | AUDIT v2: APPROVED with 2 recommendations (type keyword handling, heading count). All type definitions verified against TS source. Ready for /sf:run. |

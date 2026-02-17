@@ -5,18 +5,18 @@
 - **Active Specification:** none
 - **Status:** idle
 - **Project Phase:** Phase 2 (Rust Core)
-- **TODO Items:** 23 (1 client bug fix + 8 Rust bridge/core + 14 existing deferred)
-- **Next Step:** /sf:next or /sf:new
+- **TODO Items:** 29 (1 client bug fix + 9 Rust bridge/core + 5 audit findings + 14 existing deferred)
+- **Next Step:** `/sf:new` or `/sf:next`
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
 ## Queue
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-052b | Message Schema -- Sync and Query Domain Structs | ready | Phase 2 |
+| 1 | SPEC-052b | Message Schema -- Sync and Query Domain Structs | review | Phase 2 |
 | 2 | SPEC-052c | Message Schema -- Search and Cluster Domain Structs | ready | Phase 2 |
 | 3 | SPEC-052d | Message Schema -- Messaging and Client Events Domain Structs | ready | Phase 2 |
-| 4 | SPEC-052e | Message Schema -- HTTP Sync, Message Union, and Cross-Language Tests | blocked (SPEC-052b, 052c, 052d) | Phase 2 |
+| 4 | SPEC-052e | Message Schema -- HTTP Sync, Message Union, and Cross-Language Tests | blocked (052c, 052d) | Phase 2 |
 
 ## Migration Roadmap (high-level)
 
@@ -43,11 +43,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
-| 2026-02-15 | SPEC-052a | COMPLETED: Message Schema Foundation. 3 commits, 5 files (2 created + 3 modified). 3 audit cycles, 2 review cycles. All 5 AC pass. |
-| 2026-02-15 | SPEC-052a | REVIEW v2: APPROVED. All 5 AC pass. All Review v1 fixes verified. Build, clippy, and test all pass with zero warnings. All 9 types match TS wire format exactly. |
-| 2026-02-15 | SPEC-052a | FIX v1: Applied all Review v1 fixes. 6 clippy pedantic lints resolved (5 doc_markdown + 1 option_option). Commit 063a7f1. |
-| 2026-02-15 | SPEC-052a | REVIEW v1: CHANGES_REQUESTED. 1 major issue: clippy pedantic fails (6 errors: 5 doc_markdown + 1 option_option). All 5 AC pass. All 9 types match TS source. |
-| 2026-02-15 | SPEC-052a | EXECUTED: 2 commits, 5 files (2 created + 3 modified). 199 tests pass (173 existing + 26 new). 3 deviations (rmpv serde feature, double-option deserialization, non_camel_case allow). |
+| 2026-02-17 | SPEC-054 | COMPLETED: Message Schema Architecture Fix-on-Port. 4 commits, 4 files modified. 2 audit cycles, 1 review cycle. All 6 AC pass. 246 tests. Unblocks SPEC-052c/d/e. |
+| 2026-02-17 | SPEC-054 | REVIEWED v1: APPROVED. All 6 acceptance criteria verified against source code. 246 tests pass, zero clippy warnings. No critical, major, or minor issues found. |
+| 2026-02-17 | SPEC-054 | EXECUTED: 4 commits, 246 tests passing, all 6 acceptance criteria met. Removed 23 r#type fields, replaced 14 f64 with integer types, added Default to 5 structs, prototyped tagged enum. |
+| 2026-02-17 | SPEC-054 | AUDITED v2: APPROVED with no new issues. Fresh re-audit confirms all Audit v1 recommendations applied. Source code verified: 23 r#type fields, 14 f64 fields, 232 tests. All 10 audit dimensions pass. Ready for /sf:run --parallel. |
+| 2026-02-16 | SPEC-054 | REVISED v1: Applied all 3 Audit v1 recommendations. Removed OpRejectedPayload from Default list (only 1 optional field), added ClientOp doc comment note, verified SyncInitMessage already removed. Ready for re-audit. |
 
 ## Project Patterns
 
@@ -81,4 +81,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-15 (SPEC-052a completed and archived)*
+*Last updated: 2026-02-17 (SPEC-054 completed and archived)*

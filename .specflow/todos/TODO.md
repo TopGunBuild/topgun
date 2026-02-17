@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-02-12
+**Last updated:** 2026-02-15
 **Strategy:** Complete TypeScript Wave 1 → Bridge to Rust → Rust server rewrite
 **Product positioning:** "The reactive data grid that extends the cluster into the browser" ([PRODUCT_POSITIONING_RESEARCH.md](../reference/PRODUCT_POSITIONING_RESEARCH.md))
 
@@ -132,6 +132,84 @@ Each Rust spec should reference TWO sources:
 - **Depends on:** TODO-059
 - **Effort:** 2-3 days
 
+### TODO-074: HLC Node ID Colon Validation (TS + Rust)
+- **Priority:** P2 (hardening, theoretical risk)
+- **Complexity:** Trivial
+- **Summary:** Add validation in HLC constructor to reject node IDs containing `:`. The string format `millis:counter:nodeId` uses `:` as delimiter — an unvalidated colon in nodeId breaks `HLC.parse()` in TS (`split(':')` expects exactly 3 parts). Rust `splitn(3, ':')` survives but returns a corrupted nodeId. Currently safe by accident (`crypto.randomUUID()` produces dashes), but no guard against custom IDs.
+- **Changes:**
+  - `packages/core/src/HLC.ts` — add `if (nodeId.includes(':')) throw` in constructor
+  - `packages/core-rust/src/hlc.rs` — add `assert!(!node_id.contains(':'))` in `HLC::new()`
+  - Add test cases for rejection in both
+- **Depends on:** —
+- **Effort:** 1-2 hours
+- **Source:** External audit finding (Audit 1, Section 2)
+
+### TODO-075: Fix Rust ORMap Merkle Hash Determinism
+- **Priority:** P1 (bug — cross-language sync broken)
+- **Complexity:** Low
+- **Summary:** `hash_entry()` in `packages/core-rust/src/or_map.rs:472` uses `serde_json::to_string(&record.value)` which does NOT sort object keys. TS version sorts keys via `JSON.stringify(value, Object.keys(value).sort())`. Result: different hashes for identical data, Merkle sync diverges. Merkle hashes are sent over the wire (`SYNC_RESP_ROOT`, `SYNC_RESP_BUCKETS`), so cross-language compatibility is mandatory.
+- **Fix:** Replace `serde_json::to_string()` with a recursive key-sorting serializer (convert to `serde_json::Value`, sort `Map` keys recursively, then serialize).
+- **Changes:**
+  - `packages/core-rust/src/or_map.rs` — implement `canonical_json()` helper, use in `hash_entry()`
+  - Add test: known object `{z:1, a:2}` hashes identically to sorted `{a:2, z:1}`
+  - Add cross-language test vector: TS `stringifyValue({z:1, a:2})` === Rust `canonical_json({z:1, a:2})`
+- **Depends on:** TODO-061 (CRDTs)
+- **Effort:** 0.5 day
+- **Source:** External audit finding (Audit 1, Section 1) + deep analysis confirmed bug
+
+### TODO-078: Fix TS Hash Function Inconsistency (xxHash64 vs FNV-1a)
+- **Priority:** P2 (pre-existing TS bug)
+- **Complexity:** Trivial
+- **Summary:** `packages/core/src/utils/hash.ts` has a runtime fallback: if `@topgunbuild/native` loads → xxHash64 (truncated to 32-bit), otherwise → FNV-1a. These produce DIFFERENT hashes for the same input. In a cluster where some nodes load the native module and others don't, Merkle hashes diverge → false sync cycles. Since TS server is being deprecated, simplest fix is to force FNV-1a unconditionally (matches Rust `fnv1a_hash()`).
+- **Changes:**
+  - `packages/core/src/utils/hash.ts` — remove native xxHash64 path, use FNV-1a only
+  - OR: force one algorithm globally at startup
+- **Depends on:** —
+- **Effort:** 1-2 hours
+- **Source:** Discovered during audit analysis (not in either external audit)
+
+### TODO-079: Rust Message Schema Architecture (Fix-on-Port) → SPEC-054
+- **Priority:** P0 (blocks all remaining message schema work)
+- **Complexity:** Medium
+- **Summary:** The current Rust message structs (SPEC-052a/b) copy JS limitations instead of leveraging Rust's type system. Three architectural issues must be resolved before implementing SPEC-052c/d/e:
+  1. **`r#type: String` conflicts with Message enum.** SPEC-052e plans `#[serde(tag = "type")]` Message enum, but inner structs already have `r#type: String`. On serialization, serde produces duplicate `type` keys -- undefined behavior. Inner structs must NOT have a `type` field; the enum owns the tag.
+  2. **`f64` for integer fields copies JS limitation.** JS has no integer type; Rust does. Fields like `root_hash`, `count`, `code`, `timeout` should use `u64`/`u32`/`i64`. This also produces **better** wire compatibility: TS `msgpackr` encodes integers as MsgPack integers, and Rust `u64` decodes them directly (no coercion), while `f64` causes rmp_serde to emit MsgPack float64 on re-serialization -- different binary format.
+  3. **No `Default` derives** for payload structs with many optional fields.
+- **Deliverables:**
+  1. Prototype `#[serde(tag = "type")]` Message enum with 3 representative variants (payload-wrapped, flat, flat+binary) to verify serde behavior with rmp_serde
+  2. Define integer type policy with MsgPack compatibility verification
+  3. Establish struct pattern: inner structs WITHOUT `type` field, Message enum owns the tag
+  4. Retroactively fix SPEC-052a structs (base.rs): remove `r#type: String` from AuthMessage, AuthRequiredMessage
+  5. Retroactively fix SPEC-052b structs (sync.rs, query.rs): remove `r#type: String` from all message structs, replace `f64` with proper integer types where appropriate
+  6. Add `Default` derives to payload structs
+  7. Update all tests, verify `cargo test` + `cargo clippy` pass
+- **Key type decisions to prototype:**
+  - `root_hash`: `f64` → likely `u64` (FNV-1a returns 32-bit, but stored as `z.number()`)
+  - `count` (BatchMessage): `f64` → likely `u32`
+  - `code` (OpRejectedPayload): `f64` → likely `u32`
+  - `timeout`: `f64` → likely `u64` (milliseconds)
+  - `last_sync_timestamp`: `f64` → evaluate (JS timestamp, integer ms since epoch)
+  - `Timestamp.millis`: already `i64` in hlc.rs -- correct, no change needed
+- **Depends on:** SPEC-052b (complete -- provides structs to rework)
+- **Blocks:** SPEC-052c, SPEC-052d, SPEC-052e (must not continue with broken pattern)
+- **Effort:** 0.5-1 day
+- **Source:** Post-execution architectural review of SPEC-052b
+
+### TODO-077: Protocol Drift CI Check
+- **Priority:** P2
+- **Complexity:** Low
+- **Summary:** After SPEC-052e completes (golden-file cross-language tests), add a CI step to `.github/workflows/rust.yml` that runs the TS fixture generator and Rust integration tests together. Prevents silent protocol drift when TS Zod schemas change without updating Rust serde structs.
+- **CI step:**
+  ```yaml
+  - name: Cross-language protocol validation
+    run: |
+      pnpm --filter @topgunbuild/core test -- cross-lang-fixtures
+      cargo test --test cross_lang_compat
+  ```
+- **Depends on:** TODO-062 (all sub-specs, especially SPEC-052e)
+- **Effort:** 0.5 day
+- **Source:** External audit finding (Audit 2, Section 3.2)
+
 ---
 
 ## Phase 3: Rust Server Core (~6-8 weeks)
@@ -188,6 +266,18 @@ Each Rust spec should reference TWO sources:
 - **Crates:** sqlx (compile-time checked queries), tokio-postgres
 - **Depends on:** TODO-060 (ServerStorage trait)
 - **Effort:** 1 week
+
+### TODO-076: Evaluate MsgPack-Based Merkle Hashing
+- **Priority:** P2 (performance optimization)
+- **Complexity:** Medium (design decision + implementation in both TS and Rust)
+- **Summary:** Current Merkle hashing converts values to JSON string then FNV-1a hashes the string. Alternative: hash MsgPack bytes directly (`hash(rmp_serde::to_vec_named(&value))`). MsgPack with named keys is already the wire format — reusing it avoids JSON serialization overhead (~30-50% faster per hash). Requires deterministic key ordering in MsgPack (use `BTreeMap` or sorted struct fields). Breaking change to Merkle hashes — requires simultaneous rollout to both TS and Rust, acceptable since backward compat is not required.
+- **Evaluation criteria:**
+  - Benchmark: JSON stringify + FNV-1a vs MsgPack + FNV-1a on typical ORMap entries
+  - Verify MsgPack determinism: `rmp_serde::to_vec_named()` with sorted keys produces identical bytes in TS (msgpackr) and Rust
+  - If perf gain < 20%, keep JSON approach (simpler debugging)
+- **Depends on:** TODO-075 (fix current hashing first, then evaluate optimization)
+- **Effort:** 1 day (evaluation) + 2-3 days (implementation if approved)
+- **Source:** Deep analysis during audit review
 
 ### TODO-068: Integration Test Suite
 - **Priority:** P0
@@ -352,8 +442,11 @@ Items within the same wave can run in parallel. Each wave starts when its blocke
 
 | Wave | Items | Blocked by | Phase |
 |------|-------|------------|-------|
-| **1** | TODO-061 (CRDTs) · TODO-062 (Messages) · TODO-063 (Partitions) | — (all unblocked) | 2 |
-| **2** | TODO-064 (Network) · TODO-067 (PostgreSQL) | 062 · 060✓ | 3 |
+| **1** | TODO-061 (CRDTs) · TODO-062 starts (052a+052b) · TODO-063 (Partitions) · TODO-074 (HLC validation) · TODO-078 (TS hash fix) | — (all unblocked) | 2 |
+| **1a** | **TODO-079 (Schema arch + fix 052a/b)** | 052b complete | 2 |
+| **1b** | TODO-062 continues (052c+052d+052e) · TODO-075 (ORMap hash fix) | **079** · 061 | 2 |
+| **1c** | TODO-077 (CI drift check) | 062 (all sub-specs incl. 052e) | 2 |
+| **2** | TODO-064 (Network) · TODO-067 (PostgreSQL) · TODO-076 (MsgPack hash eval) | 062 · 060✓ · 075 | 3 |
 | **3** | TODO-065 (Handlers) · TODO-066 (Cluster) · TODO-068 (Tests, incremental) | 061+062+064 · 063+064 · 064 | 3 |
 | **4** | TODO-069 (Schema) · TODO-048 (SSE) · TODO-025 (DAG) · TODO-071 (Tantivy) | — · — · 063 · — | 4 |
 | **5** | TODO-070 (Shapes) · TODO-049 (Cluster HTTP) | 069 · 066+063 | 4 |
@@ -361,7 +454,7 @@ Items within the same wave can run in parallel. Each wave starts when its blocke
 | **7** | TODO-043 (S3) · TODO-040 (Tiered) | 033 · 033 | 5 |
 | **8** | TODO-044 (Time-Travel) | 043 | 5 |
 
-**Current position:** Wave 1 — start TODO-061, TODO-062, TODO-063 in parallel.
+**Current position:** Wave 1a — SPEC-052b executed, TODO-079 → SPEC-054 (Schema architecture) is next. Must complete before continuing 052c/d/e.
 
 ---
 
@@ -374,18 +467,32 @@ SPEC-048b ──→ SPEC-048c         TODO-059 (Cargo) ──→ TODO-060 (Trait
                                     │
                                     ↓
                             Phase 2 (Rust Core) — WAVE 1
-                    TODO-061 (CRDTs)    TODO-062 (Messages)    TODO-063 (Partitions)
-                        │                    │                      │
-                        └────────┬───────────┘                      │
-                                 ↓                                  │
-                            Phase 3 (Server) — WAVES 2-3             │
-                    TODO-064 (Network) ──→ TODO-065 (Handlers)      │
-                        │                                           │
-                        └──→ TODO-066 (Cluster) ←───────────────────┘
+                    TODO-061 (CRDTs)    TODO-062 starts      TODO-063 (Partitions)
+                    TODO-074 (HLC ✓)    (052a+052b done)
+                    TODO-078 (TS hash)       │
+                        │                    ↓
+                        │         ★ TODO-079 (Schema arch)  ←── WAVE 1a
+                        │         fix 052a/b: remove type:String,
+                        │         f64→integers, Message enum pattern
+                        │                    │
+                        ↓                    ↓
+                    TODO-075          TODO-062 continues     ←── WAVE 1b
+                    (ORMap hash)      (052c → 052d → 052e)
+                        │                    │
+                        │              TODO-077 (CI drift)   ←── WAVE 1c
+                        │                    │
+                        └────────┬───────────┘
+                                 ↓
+                            Phase 3 (Server) — WAVES 2-3
+                    TODO-064 (Network) ──→ TODO-065 (Handlers)
+                        │                                     │
+                        └──→ TODO-066 (Cluster) ←─────────────┘←── TODO-063
                         │
                         └──→ TODO-067 (PostgreSQL)
                         │
                         └──→ TODO-068 (Integration Tests)
+                        │
+                    TODO-076 (MsgPack hash eval) ←── TODO-075
                                  │
                                  ↓
                             Phase 4 (Features) — WAVES 4-5
@@ -460,3 +567,4 @@ All items below are completed and archived in `.specflow/archive/`:
 ---
 
 *Restructured 2026-02-12: Replaced wave-based organization with phase-based Rust migration roadmap. Added TODO-059 through TODO-072 for Rust-specific work. Product positioning decisions (schema, shapes, WASM) integrated as concrete TODOs.*
+*Updated 2026-02-15: Added TODO-074 through TODO-078 from external audit analysis. HLC validation, ORMap hash determinism bug, TS hash inconsistency, protocol drift CI, MsgPack hash evaluation.*
