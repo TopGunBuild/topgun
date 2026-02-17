@@ -6,16 +6,15 @@
 - **Status:** idle
 - **Project Phase:** Phase 2 (Rust Core)
 - **TODO Items:** 29 (1 client bug fix + 9 Rust bridge/core + 5 audit findings + 14 existing deferred)
-- **Next Step:** `/sf:new` or `/sf:next`
+- **Next Step:** /sf:new or /sf:next
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
 ## Queue
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-052c | Message Schema -- Search and Cluster Domain Structs | ready (needs audit for SPEC-054 rules) | Phase 2 |
-| 2 | SPEC-052d | Message Schema -- Messaging and Client Events Domain Structs | ready (needs audit for SPEC-054 rules) | Phase 2 |
-| 3 | SPEC-052e | Message Schema -- HTTP Sync, Message Union, and Cross-Language Tests | blocked (052c, 052d) | Phase 2 |
+| 1 | SPEC-052d | Message Schema -- Messaging and Client Events Domain Structs | ready (needs audit for SPEC-054 rules) | Phase 2 |
+| 2 | SPEC-052e | Message Schema -- HTTP Sync, Message Union, and Cross-Language Tests | blocked (052d) | Phase 2 |
 
 ## Migration Roadmap (high-level)
 
@@ -42,12 +41,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-17 | SPEC-052c | COMPLETED: Message Schema -- Search and Cluster Domain Structs. 4 commits. 3 audit cycles, 1 review cycle. 26 types (7 search + 19 cluster). 281 tests. All 4 AC pass. |
+| 2026-02-17 | SPEC-052c | REVIEWED v1: APPROVED. All 4 acceptance criteria verified. 281 tests pass, zero clippy warnings. 26 types field-accurate against TS source. No critical, major, or minor issues found. |
 | 2026-02-17 | SPEC-052b | COMPLETED: Message Schema -- Sync and Query Domain Structs. 2+4 commits (exec + SPEC-054 fix). 4 audit cycles. 28 sync + 8 query structs. Code improved by SPEC-054 (r#type removed, f64→integers, Default derives). 246 tests. |
 | 2026-02-17 | SPEC-054 | COMPLETED: Message Schema Architecture Fix-on-Port. 4 commits, 4 files modified. 2 audit cycles, 1 review cycle. All 6 AC pass. 246 tests. Unblocks SPEC-052c/d/e. |
 | 2026-02-17 | SPEC-054 | REVIEWED v1: APPROVED. All 6 acceptance criteria verified against source code. 246 tests pass, zero clippy warnings. No critical, major, or minor issues found. |
-| 2026-02-17 | SPEC-054 | EXECUTED: 4 commits, 246 tests passing, all 6 acceptance criteria met. Removed 23 r#type fields, replaced 14 f64 with integer types, added Default to 5 structs, prototyped tagged enum. |
-| 2026-02-17 | SPEC-054 | AUDITED v2: APPROVED with no new issues. Fresh re-audit confirms all Audit v1 recommendations applied. Source code verified: 23 r#type fields, 14 f64 fields, 232 tests. All 10 audit dimensions pass. Ready for /sf:run --parallel. |
-| 2026-02-16 | SPEC-054 | REVISED v1: Applied all 3 Audit v1 recommendations. Removed OpRejectedPayload from Default list (only 1 optional field), added ClientOp doc comment note, verified SyncInitMessage already removed. Ready for re-audit. |
 
 ## Project Patterns
 
@@ -81,4 +79,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-17 (SPEC-052b completed and archived)*
+*Last updated: 2026-02-17 (SPEC-052c completed)*

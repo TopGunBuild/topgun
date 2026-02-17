@@ -6,6 +6,9 @@ Historical decisions rotated from STATE.md to maintain compactness.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-17 | SPEC-054 | EXECUTED: 4 commits, 246 tests passing, all 6 acceptance criteria met. Removed 23 r#type fields, replaced 14 f64 with integer types, added Default to 5 structs, prototyped tagged enum. |
+| 2026-02-17 | SPEC-054 | AUDITED v2: APPROVED with no new issues. Fresh re-audit confirms all Audit v1 recommendations applied. Source code verified: 23 r#type fields, 14 f64 fields, 232 tests. All 10 audit dimensions pass. Ready for /sf:run --parallel. |
+| 2026-02-16 | SPEC-054 | REVISED v1: Applied all 3 Audit v1 recommendations. Removed OpRejectedPayload from Default list (only 1 optional field), added ClientOp doc comment note, verified SyncInitMessage already removed. Ready for re-audit. |
 | 2026-02-16 | SPEC-054 | AUDITED v1: APPROVED with 3 recommendations. All 10 audit dimensions pass. Rust auditor checklist fully compliant. Source code verified: 23 r#type fields, all f64 fields, 232 tests match spec claims exactly. Ready for /sf:run or /sf:revise. |
 | 2026-02-16 | SPEC-054 | DRAFTED: Message Schema Architecture Fix-on-Port. Removes r#type:String from 23 structs, replaces f64 with proper integer types, adds Default derives, prototypes #[serde(tag="type")] enum. P0 blocker for 052c/d/e. |
 | 2026-02-16 | TODO-079 | CREATED: Rust Message Schema Architecture (Fix-on-Port). Post-execution review found 052a/b copy JS limitations: r#type:String conflicts with serde(tag="type") Message enum, f64 for integer fields, no Default. TODO-079 blocks 052c/d/e -- must fix architecture before continuing. |
