@@ -208,7 +208,7 @@ mod tests {
                         s.insert("name".to_string(), SortDirection::Asc);
                         s
                     }),
-                    limit: Some(100.0),
+                    limit: Some(100),
                     cursor: None,
                 },
             },

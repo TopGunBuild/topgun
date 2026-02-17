@@ -114,7 +114,7 @@ pub struct PredicateNode {
 /// Query parameters for filtering, sorting, and pagination.
 ///
 /// Maps to `QuerySchema` in `base-schemas.ts`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Query {
     /// Key-value filter conditions. `where` is a Rust keyword, so we use raw identifier syntax.
@@ -126,7 +126,7 @@ pub struct Query {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub sort: Option<HashMap<String, SortDirection>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub limit: Option<f64>,
+    pub limit: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cursor: Option<String>,
 }
@@ -134,7 +134,9 @@ pub struct Query {
 /// A client operation message containing CRDT data.
 ///
 /// Maps to `ClientOpSchema` in `base-schemas.ts`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Note: `Default` produces empty `map_name`/`key` -- for test convenience only.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(clippy::option_option)]
 pub struct ClientOp {
@@ -165,7 +167,7 @@ pub struct ClientOp {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub write_concern: Option<WriteConcern>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub timeout: Option<f64>,
+    pub timeout: Option<u64>,
 }
 
 /// Authentication message sent by client to server.
@@ -174,24 +176,17 @@ pub struct ClientOp {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthMessage {
-    /// Always "AUTH". Uses raw identifier since `type` is a Rust keyword.
-    #[serde(rename = "type")]
-    pub r#type: String,
     pub token: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub protocol_version: Option<f64>,
+    pub protocol_version: Option<u32>,
 }
 
 /// Authentication required message sent by server to client.
 ///
 /// Maps to `AuthRequiredMessageSchema` in `base-schemas.ts`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AuthRequiredMessage {
-    /// Always `AUTH_REQUIRED`. Uses raw identifier since `type` is a Rust keyword.
-    #[serde(rename = "type")]
-    pub r#type: String,
-}
+pub struct AuthRequiredMessage {}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -202,7 +197,7 @@ mod tests {
     use super::*;
     use crate::hlc::Timestamp;
 
-    /// Helper: round-trip a value through named MsgPack serialization.
+    /// Helper: round-trip a value through named `MsgPack` serialization.
     fn roundtrip_named<T>(val: &T) -> T
     where
         T: Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
@@ -361,7 +356,7 @@ mod tests {
                 children: None,
             }),
             sort: Some(sort),
-            limit: Some(50.0),
+            limit: Some(50),
             cursor: Some("abc123".to_string()),
         };
         assert_eq!(roundtrip_named(&query), query);
@@ -403,7 +398,7 @@ mod tests {
             or_record: None,
             or_tag: Some(Some("1700000000000:1:node-1".to_string())),
             write_concern: Some(WriteConcern::APPLIED),
-            timeout: Some(5000.0),
+            timeout: Some(5000),
         };
         assert_eq!(roundtrip_named(&op), op);
     }
@@ -444,9 +439,8 @@ mod tests {
     #[test]
     fn auth_message_roundtrip() {
         let msg = AuthMessage {
-            r#type: "AUTH".to_string(),
             token: "jwt-token-here".to_string(),
-            protocol_version: Some(1.0),
+            protocol_version: Some(1),
         };
         assert_eq!(roundtrip_named(&msg), msg);
     }
@@ -454,7 +448,6 @@ mod tests {
     #[test]
     fn auth_message_without_version_roundtrip() {
         let msg = AuthMessage {
-            r#type: "AUTH".to_string(),
             token: "some-token".to_string(),
             protocol_version: None,
         };
@@ -463,19 +456,17 @@ mod tests {
 
     #[test]
     fn auth_required_message_roundtrip() {
-        let msg = AuthRequiredMessage {
-            r#type: "AUTH_REQUIRED".to_string(),
-        };
+        let msg = AuthRequiredMessage {};
         assert_eq!(roundtrip_named(&msg), msg);
     }
 
     // ---- camelCase field name verification ----
 
     #[test]
-    fn auth_message_type_field_serializes_as_type() {
-        // Verify the "type" field name appears in the named MsgPack output
+    fn auth_message_no_type_field() {
+        // The type discriminator is owned by the Message enum, not by inner structs.
+        // Verify AuthMessage no longer serializes a "type" key.
         let msg = AuthMessage {
-            r#type: "AUTH".to_string(),
             token: "t".to_string(),
             protocol_version: None,
         };
@@ -484,7 +475,7 @@ mod tests {
         let map = val.as_map().expect("should be a map");
 
         let has_type_key = map.iter().any(|(k, _)| k.as_str() == Some("type"));
-        assert!(has_type_key, "expected 'type' field key in serialized output");
+        assert!(!has_type_key, "inner struct must not have a 'type' field");
     }
 
     #[test]
@@ -651,5 +642,26 @@ mod tests {
         let bytes = rmp_serde::to_vec_named(&record).unwrap();
         let decoded: LWWRecord<rmpv::Value> = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(record, decoded);
+    }
+
+    // ---- Default derive tests ----
+
+    #[test]
+    fn query_default_constructs_all_none() {
+        let q = Query::default();
+        assert_eq!(q.r#where, None);
+        assert_eq!(q.predicate, None);
+        assert_eq!(q.sort, None);
+        assert_eq!(q.limit, None);
+        assert_eq!(q.cursor, None);
+    }
+
+    #[test]
+    fn client_op_default_constructs_with_empty_required_fields() {
+        let op = ClientOp::default();
+        assert_eq!(op.map_name, "");
+        assert_eq!(op.key, "");
+        assert_eq!(op.timeout, None);
+        assert_eq!(op.write_concern, None);
     }
 }
