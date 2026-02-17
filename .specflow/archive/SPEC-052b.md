@@ -3,7 +3,7 @@
 ---
 id: SPEC-052b
 type: feature
-status: audited
+status: done
 priority: P0
 complexity: small
 created: 2026-02-15
@@ -412,3 +412,13 @@ All assumptions are reasonable. A1 is verified (SPEC-052a is completed). A2/A3/A
 1. Added `serde_bytes` dependency (0.11) to ensure `BatchMessage.data` (Vec<u8>) serializes as MsgPack bin format instead of array of integers. This matches TS `Uint8Array` wire behavior.
 2. Created separate ORMap payload structs (e.g., `ORMapSyncRespRootPayload`) rather than reusing LWW payload structs, for clarity and future-proofing even though shapes are identical.
 3. Module declarations in `mod.rs` were added in Wave 1 (needed for compilation verification) rather than Wave 2 as planned. Re-exports and tests were added in Wave 2 as planned.
+
+---
+
+## Completion
+
+**Completed:** 2026-02-17
+**Total Commits:** 2 (execution) + 4 (SPEC-054 fix-on-port)
+**Audit Cycles:** 4
+**Review Cycles:** 0 (code verified and improved by SPEC-054)
+**Note:** SPEC-054 retroactively fixed r#type:String → removed, f64 → integer types, added Default derives. Final state: 246 tests passing.
