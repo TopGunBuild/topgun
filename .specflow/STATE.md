@@ -13,8 +13,7 @@
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-052d | Message Schema -- Messaging and Client Events Domain Structs | ready (needs audit for SPEC-054 rules) | Phase 2 |
-| 2 | SPEC-052e | Message Schema -- HTTP Sync, Message Union, and Cross-Language Tests | blocked (052d) | Phase 2 |
+| 1 | SPEC-052e | Message Schema -- HTTP Sync, Message Union, and Cross-Language Tests | ready | Phase 2 |
 
 ## Migration Roadmap (high-level)
 
@@ -41,6 +40,8 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-18 | SPEC-052d | COMPLETED: Message Schema -- Messaging and Client Events Domain Structs. 2 commits. 4 audit cycles, 1 review cycle. 44 types (33 messaging + 11 client events). 353 tests. All 7 AC pass. |
+| 2026-02-18 | SPEC-052d | REVIEWED v1: APPROVED. All 7 acceptance criteria verified. 353 tests pass (72 new + 281 existing), zero clippy warnings. 44 types field-accurate against TS source. No critical, major, or minor issues found. |
 | 2026-02-17 | SPEC-052c | COMPLETED: Message Schema -- Search and Cluster Domain Structs. 4 commits. 3 audit cycles, 1 review cycle. 26 types (7 search + 19 cluster). 281 tests. All 4 AC pass. |
 | 2026-02-17 | SPEC-052c | REVIEWED v1: APPROVED. All 4 acceptance criteria verified. 281 tests pass, zero clippy warnings. 26 types field-accurate against TS source. No critical, major, or minor issues found. |
 | 2026-02-17 | SPEC-052b | COMPLETED: Message Schema -- Sync and Query Domain Structs. 2+4 commits (exec + SPEC-054 fix). 4 audit cycles. 28 sync + 8 query structs. Code improved by SPEC-054 (r#type removed, f64→integers, Default derives). 246 tests. |
@@ -79,4 +80,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-17 (SPEC-052c completed)*
+*Last updated: 2026-02-18 (SPEC-052d completed and archived)*
