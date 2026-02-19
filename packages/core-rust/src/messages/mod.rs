@@ -5,6 +5,8 @@
 //! serialization (`rmp_serde::to_vec_named()`) with camelCase field names to
 //! match the TypeScript wire format.
 
+use serde::{Deserialize, Serialize};
+
 pub mod base;
 
 pub mod cluster;
@@ -13,10 +15,8 @@ pub mod search;
 pub mod sync;
 
 pub mod client_events;
+pub mod http_sync;
 pub mod messaging;
-
-// Future submodules (SPEC-052e):
-// pub mod http_sync;
 
 pub use base::{
     AuthMessage, AuthRequiredMessage, ChangeEventType, ClientOp, PredicateNode, PredicateOp,
@@ -69,6 +69,386 @@ pub use messaging::{
     RegisterResolverResponseData, ResolverInfo, TopicMessageEventPayload, TopicPubPayload,
     TopicSubPayload, TopicUnsubPayload, UnregisterResolverData, UnregisterResolverResponseData,
 };
+
+pub use http_sync::{
+    DeltaRecord, DeltaRecordEventType, HttpQueryRequest, HttpQueryResult, HttpSearchRequest,
+    HttpSearchResult, HttpSyncAck, HttpSyncError, HttpSyncRequest, HttpSyncResponse, MapDelta,
+    SyncMapEntry,
+};
+
+// ---------------------------------------------------------------------------
+// Message union
+// ---------------------------------------------------------------------------
+
+/// Discriminated union of all 77 message types in the `TopGun` protocol.
+///
+/// Uses `#[serde(tag = "type")]` for internally-tagged representation matching
+/// the TypeScript `z.discriminatedUnion('type', [...])` pattern. Each variant's
+/// `#[serde(rename = "...")]` matches the TS type string exactly.
+///
+/// Variant forms:
+/// - **Newtype** `Variant(Inner)`: inner struct fields merge into the top-level map
+///   alongside the `type` tag. Used for flat messages and sync wrapper structs that
+///   already contain a `payload` field.
+/// - **Struct** `Variant { payload: Inner }`: adds a `payload` key wrapping the
+///   inner struct. Used when TS wraps the payload under a `payload:` key.
+/// - **Optional struct** `Variant { payload: Option<Inner> }`: optional payload
+///   with `skip_serializing_if` / `default`.
+/// - **Event struct** `Variant { event: Inner }`: uses `event:` key instead of `payload:`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Message {
+    // --- base domain (2 variants) ---
+
+    /// Authentication message from client to server.
+    #[serde(rename = "AUTH")]
+    Auth(AuthMessage),
+
+    /// Server requests authentication from client.
+    #[serde(rename = "AUTH_REQUIRED")]
+    AuthRequired(AuthRequiredMessage),
+
+    // --- sync domain (20 variants) ---
+
+    /// Single client operation.
+    #[serde(rename = "CLIENT_OP")]
+    ClientOp(ClientOpMessage),
+
+    /// Batch of client operations.
+    #[serde(rename = "OP_BATCH")]
+    OpBatch(OpBatchMessage),
+
+    /// Client initiates LWW sync with merkle tree root.
+    #[serde(rename = "SYNC_INIT")]
+    SyncInit(SyncInitMessage),
+
+    /// Server responds with merkle root comparison.
+    #[serde(rename = "SYNC_RESP_ROOT")]
+    SyncRespRoot(SyncRespRootMessage),
+
+    /// Server responds with bucket-level hashes.
+    #[serde(rename = "SYNC_RESP_BUCKETS")]
+    SyncRespBuckets(SyncRespBucketsMessage),
+
+    /// Server responds with leaf records for a bucket.
+    #[serde(rename = "SYNC_RESP_LEAF")]
+    SyncRespLeaf(SyncRespLeafMessage),
+
+    /// Client requests a specific merkle bucket.
+    #[serde(rename = "MERKLE_REQ_BUCKET")]
+    MerkleReqBucket(MerkleReqBucketMessage),
+
+    /// Server acknowledges operations.
+    #[serde(rename = "OP_ACK")]
+    OpAck(OpAckMessage),
+
+    /// Server rejects an operation.
+    #[serde(rename = "OP_REJECTED")]
+    OpRejected(OpRejectedMessage),
+
+    /// Binary batch message with packed data.
+    #[serde(rename = "BATCH")]
+    Batch(BatchMessage),
+
+    /// Client initiates `ORMap` sync.
+    #[serde(rename = "ORMAP_SYNC_INIT")]
+    ORMapSyncInit(ORMapSyncInit),
+
+    /// Server responds with `ORMap` merkle root.
+    #[serde(rename = "ORMAP_SYNC_RESP_ROOT")]
+    ORMapSyncRespRoot(ORMapSyncRespRoot),
+
+    /// Server responds with `ORMap` bucket hashes.
+    #[serde(rename = "ORMAP_SYNC_RESP_BUCKETS")]
+    ORMapSyncRespBuckets(ORMapSyncRespBuckets),
+
+    /// Client requests a specific `ORMap` merkle bucket.
+    #[serde(rename = "ORMAP_MERKLE_REQ_BUCKET")]
+    ORMapMerkleReqBucket(ORMapMerkleReqBucket),
+
+    /// Server responds with `ORMap` leaf records.
+    #[serde(rename = "ORMAP_SYNC_RESP_LEAF")]
+    ORMapSyncRespLeaf(ORMapSyncRespLeaf),
+
+    /// Client requests `ORMap` diff entries.
+    #[serde(rename = "ORMAP_DIFF_REQUEST")]
+    ORMapDiffRequest(ORMapDiffRequest),
+
+    /// Server responds with `ORMap` diff entries.
+    #[serde(rename = "ORMAP_DIFF_RESPONSE")]
+    ORMapDiffResponse(ORMapDiffResponse),
+
+    /// Server pushes `ORMap` diff to client.
+    #[serde(rename = "ORMAP_PUSH_DIFF")]
+    ORMapPushDiff(ORMapPushDiff),
+
+    // --- query domain (3 variants) ---
+
+    /// Client subscribes to a live query.
+    #[serde(rename = "QUERY_SUB")]
+    QuerySub(QuerySubMessage),
+
+    /// Client unsubscribes from a live query.
+    #[serde(rename = "QUERY_UNSUB")]
+    QueryUnsub(QueryUnsubMessage),
+
+    /// Server responds with query results.
+    #[serde(rename = "QUERY_RESP")]
+    QueryResp(QueryRespMessage),
+
+    // --- client_events domain (query update) ---
+
+    /// Server pushes a query result update to client.
+    #[serde(rename = "QUERY_UPDATE")]
+    QueryUpdate { payload: QueryUpdatePayload },
+
+    // --- search domain (5 variants) ---
+
+    /// Client sends a search request.
+    #[serde(rename = "SEARCH")]
+    Search { payload: SearchPayload },
+
+    /// Server responds with search results.
+    #[serde(rename = "SEARCH_RESP")]
+    SearchResp { payload: SearchRespPayload },
+
+    /// Client subscribes to live search results.
+    #[serde(rename = "SEARCH_SUB")]
+    SearchSub { payload: SearchSubPayload },
+
+    /// Server pushes a search result update.
+    #[serde(rename = "SEARCH_UPDATE")]
+    SearchUpdate { payload: SearchUpdatePayload },
+
+    /// Client unsubscribes from live search.
+    #[serde(rename = "SEARCH_UNSUB")]
+    SearchUnsub { payload: SearchUnsubPayload },
+
+    // --- cluster domain (11 variants) ---
+
+    /// Client requests the partition map (optional payload).
+    #[serde(rename = "PARTITION_MAP_REQUEST")]
+    PartitionMapRequest {
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        payload: Option<PartitionMapRequestPayload>,
+    },
+
+    /// Server sends the partition map.
+    #[serde(rename = "PARTITION_MAP")]
+    PartitionMap { payload: PartitionMapPayload },
+
+    /// Node registers a cluster subscription.
+    #[serde(rename = "CLUSTER_SUB_REGISTER")]
+    ClusterSubRegister {
+        payload: ClusterSubRegisterPayload,
+    },
+
+    /// Node acknowledges a cluster subscription.
+    #[serde(rename = "CLUSTER_SUB_ACK")]
+    ClusterSubAck { payload: ClusterSubAckPayload },
+
+    /// Node pushes a cluster subscription update.
+    #[serde(rename = "CLUSTER_SUB_UPDATE")]
+    ClusterSubUpdate {
+        payload: ClusterSubUpdatePayload,
+    },
+
+    /// Node unregisters a cluster subscription.
+    #[serde(rename = "CLUSTER_SUB_UNREGISTER")]
+    ClusterSubUnregister {
+        payload: ClusterSubUnregisterPayload,
+    },
+
+    /// Node sends a cluster search request.
+    #[serde(rename = "CLUSTER_SEARCH_REQ")]
+    ClusterSearchReq {
+        payload: ClusterSearchReqPayload,
+    },
+
+    /// Node responds with cluster search results.
+    #[serde(rename = "CLUSTER_SEARCH_RESP")]
+    ClusterSearchResp {
+        payload: ClusterSearchRespPayload,
+    },
+
+    /// Node subscribes to cluster search updates.
+    #[serde(rename = "CLUSTER_SEARCH_SUBSCRIBE")]
+    ClusterSearchSubscribe {
+        payload: ClusterSearchSubscribePayload,
+    },
+
+    /// Node unsubscribes from cluster search updates.
+    #[serde(rename = "CLUSTER_SEARCH_UNSUBSCRIBE")]
+    ClusterSearchUnsubscribe {
+        payload: ClusterSearchUnsubscribePayload,
+    },
+
+    /// Node pushes a cluster search update.
+    #[serde(rename = "CLUSTER_SEARCH_UPDATE")]
+    ClusterSearchUpdate {
+        payload: ClusterSearchUpdatePayload,
+    },
+
+    // --- messaging domain (28 variants) ---
+
+    /// Client subscribes to a topic.
+    #[serde(rename = "TOPIC_SUB")]
+    TopicSub { payload: TopicSubPayload },
+
+    /// Client unsubscribes from a topic.
+    #[serde(rename = "TOPIC_UNSUB")]
+    TopicUnsub { payload: TopicUnsubPayload },
+
+    /// Client publishes to a topic.
+    #[serde(rename = "TOPIC_PUB")]
+    TopicPub { payload: TopicPubPayload },
+
+    /// Server delivers a topic message.
+    #[serde(rename = "TOPIC_MESSAGE")]
+    TopicMessage {
+        payload: TopicMessageEventPayload,
+    },
+
+    /// Client requests a distributed lock.
+    #[serde(rename = "LOCK_REQUEST")]
+    LockRequest { payload: LockRequestPayload },
+
+    /// Client releases a distributed lock.
+    #[serde(rename = "LOCK_RELEASE")]
+    LockRelease { payload: LockReleasePayload },
+
+    /// Client requests counter state.
+    #[serde(rename = "COUNTER_REQUEST")]
+    CounterRequest {
+        payload: CounterRequestPayload,
+    },
+
+    /// Server syncs counter state.
+    #[serde(rename = "COUNTER_SYNC")]
+    CounterSync { payload: CounterStatePayload },
+
+    /// Server responds with counter state.
+    #[serde(rename = "COUNTER_RESPONSE")]
+    CounterResponse { payload: CounterStatePayload },
+
+    /// Server pushes counter update.
+    #[serde(rename = "COUNTER_UPDATE")]
+    CounterUpdate { payload: CounterStatePayload },
+
+    /// Client sends heartbeat ping.
+    #[serde(rename = "PING")]
+    Ping(PingData),
+
+    /// Server responds with heartbeat pong.
+    #[serde(rename = "PONG")]
+    Pong(PongData),
+
+    /// Client requests entry processing for a single key.
+    #[serde(rename = "ENTRY_PROCESS")]
+    EntryProcess(EntryProcessData),
+
+    /// Client requests batch entry processing.
+    #[serde(rename = "ENTRY_PROCESS_BATCH")]
+    EntryProcessBatch(EntryProcessBatchData),
+
+    /// Server responds with entry processing result.
+    #[serde(rename = "ENTRY_PROCESS_RESPONSE")]
+    EntryProcessResponse(EntryProcessResponseData),
+
+    /// Server responds with batch entry processing results.
+    #[serde(rename = "ENTRY_PROCESS_BATCH_RESPONSE")]
+    EntryProcessBatchResponse(EntryProcessBatchResponseData),
+
+    /// Client subscribes to journal events.
+    #[serde(rename = "JOURNAL_SUBSCRIBE")]
+    JournalSubscribe(JournalSubscribeData),
+
+    /// Client unsubscribes from journal events.
+    #[serde(rename = "JOURNAL_UNSUBSCRIBE")]
+    JournalUnsubscribe(JournalUnsubscribeData),
+
+    /// Server delivers a journal event (uses `event` key, not `payload`).
+    #[serde(rename = "JOURNAL_EVENT")]
+    JournalEvent { event: JournalEventMessageData },
+
+    /// Client reads journal entries.
+    #[serde(rename = "JOURNAL_READ")]
+    JournalRead(JournalReadData),
+
+    /// Server responds with journal entries.
+    #[serde(rename = "JOURNAL_READ_RESPONSE")]
+    JournalReadResponse(JournalReadResponseData),
+
+    /// Client registers a conflict resolver.
+    #[serde(rename = "REGISTER_RESOLVER")]
+    RegisterResolver(RegisterResolverData),
+
+    /// Server responds to resolver registration.
+    #[serde(rename = "REGISTER_RESOLVER_RESPONSE")]
+    RegisterResolverResponse(RegisterResolverResponseData),
+
+    /// Client unregisters a conflict resolver.
+    #[serde(rename = "UNREGISTER_RESOLVER")]
+    UnregisterResolver(UnregisterResolverData),
+
+    /// Server responds to resolver unregistration.
+    #[serde(rename = "UNREGISTER_RESOLVER_RESPONSE")]
+    UnregisterResolverResponse(UnregisterResolverResponseData),
+
+    /// Server notifies client of a rejected merge.
+    #[serde(rename = "MERGE_REJECTED")]
+    MergeRejected(MergeRejectedData),
+
+    /// Client lists conflict resolvers.
+    #[serde(rename = "LIST_RESOLVERS")]
+    ListResolvers(ListResolversData),
+
+    /// Server responds with resolver list.
+    #[serde(rename = "LIST_RESOLVERS_RESPONSE")]
+    ListResolversResponse(ListResolversResponseData),
+
+    // --- client_events domain (9 variants) ---
+
+    /// Server pushes a data event to client.
+    #[serde(rename = "SERVER_EVENT")]
+    ServerEvent { payload: ServerEventPayload },
+
+    /// Server pushes a batch of data events.
+    #[serde(rename = "SERVER_BATCH_EVENT")]
+    ServerBatchEvent {
+        payload: ServerBatchEventPayload,
+    },
+
+    /// Server requests garbage collection pruning.
+    #[serde(rename = "GC_PRUNE")]
+    GcPrune { payload: GcPrunePayload },
+
+    /// Server acknowledges authentication.
+    #[serde(rename = "AUTH_ACK")]
+    AuthAck(AuthAckData),
+
+    /// Server rejects authentication.
+    #[serde(rename = "AUTH_FAIL")]
+    AuthFail(AuthFailData),
+
+    /// Server sends an error to client.
+    #[serde(rename = "ERROR")]
+    Error { payload: ErrorPayload },
+
+    /// Server grants a distributed lock.
+    #[serde(rename = "LOCK_GRANTED")]
+    LockGranted { payload: LockGrantedPayload },
+
+    /// Server confirms lock release.
+    #[serde(rename = "LOCK_RELEASED")]
+    LockReleased { payload: LockReleasedPayload },
+
+    /// Server requires sync reset for a map.
+    #[serde(rename = "SYNC_RESET_REQUIRED")]
+    SyncResetRequired {
+        payload: SyncResetRequiredPayload,
+    },
+}
 
 #[cfg(test)]
 mod prototype_tests {
