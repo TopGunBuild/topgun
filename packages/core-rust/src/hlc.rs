@@ -250,8 +250,16 @@ impl HLC {
     /// Creates a new HLC with the given node ID and clock source.
     ///
     /// Uses default options: non-strict mode, 60-second max drift.
-    #[must_use] 
+    /// # Panics
+    ///
+    /// Panics if `node_id` contains the `:` character, which is used as the
+    /// delimiter in the `"millis:counter:nodeId"` wire format.
+    #[must_use]
     pub fn new(node_id: String, clock_source: Box<dyn ClockSource>) -> Self {
+        assert!(
+            !node_id.contains(':'),
+            "Node ID must not contain ':' (used as delimiter in timestamp format)"
+        );
         Self {
             last_millis: 0,
             last_counter: 0,
@@ -263,13 +271,21 @@ impl HLC {
     }
 
     /// Creates a new HLC with explicit strict mode and max drift configuration.
-    #[must_use] 
+    ///
+    /// # Panics
+    ///
+    /// Panics if `node_id` contains the `:` character.
+    #[must_use]
     pub fn with_options(
         node_id: String,
         clock_source: Box<dyn ClockSource>,
         strict_mode: bool,
         max_drift_ms: u64,
     ) -> Self {
+        assert!(
+            !node_id.contains(':'),
+            "Node ID must not contain ':' (used as delimiter in timestamp format)"
+        );
         Self {
             last_millis: 0,
             last_counter: 0,
@@ -1024,6 +1040,36 @@ mod tests {
         assert_eq!(hlc.clock_source().now(), 42_000);
         time.store(99_000, AtomicOrdering::Relaxed);
         assert_eq!(hlc.clock_source().now(), 99_000);
+    }
+
+    // ---- Node ID validation tests ----
+
+    #[test]
+    #[should_panic(expected = "must not contain ':'")]
+    fn new_rejects_node_id_with_colon() {
+        let (clock, _) = FixedClock::new(0);
+        HLC::new("node:with:colons".to_string(), Box::new(clock));
+    }
+
+    #[test]
+    #[should_panic(expected = "must not contain ':'")]
+    fn with_options_rejects_node_id_with_colon() {
+        let (clock, _) = FixedClock::new(0);
+        HLC::with_options("bad:id".to_string(), Box::new(clock), false, 60_000);
+    }
+
+    #[test]
+    fn accepts_node_id_with_dashes_and_underscores() {
+        let (clock, _) = FixedClock::new(0);
+        let hlc = HLC::new("valid-node_id".to_string(), Box::new(clock));
+        assert_eq!(hlc.node_id(), "valid-node_id");
+    }
+
+    #[test]
+    fn accepts_uuid_node_id() {
+        let (clock, _) = FixedClock::new(0);
+        let hlc = HLC::new("550e8400-e29b-41d4-a716-446655440000".to_string(), Box::new(clock));
+        assert_eq!(hlc.node_id(), "550e8400-e29b-41d4-a716-446655440000");
     }
 
     // ---- Display impl test ----

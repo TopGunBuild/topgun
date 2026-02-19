@@ -221,6 +221,26 @@ describe('HLC (Hybrid Logical Clock)', () => {
     });
   });
 
+  describe('Node ID Validation', () => {
+    test('should reject node ID containing colon', () => {
+      expect(() => new HLC('node:with:colons')).toThrow(
+        'Node ID must not contain ":" (used as delimiter in timestamp format)'
+      );
+    });
+
+    test('should reject node ID with single colon', () => {
+      expect(() => new HLC('bad:id')).toThrow('Node ID must not contain ":"');
+    });
+
+    test('should accept node ID with dashes and underscores', () => {
+      expect(() => new HLC('valid-node_id')).not.toThrow();
+    });
+
+    test('should accept UUID-style node ID', () => {
+      expect(() => new HLC('550e8400-e29b-41d4-a716-446655440000')).not.toThrow();
+    });
+  });
+
   describe('Edge Cases', () => {
     test('should handle same wall-clock time across multiple calls', () => {
       const fixedTime = 1000000;

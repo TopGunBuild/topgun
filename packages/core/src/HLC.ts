@@ -47,6 +47,9 @@ export class HLC {
   private readonly clockSource: ClockSource;
 
   constructor(nodeId: string, options: HLCOptions = {}) {
+    if (nodeId.includes(':')) {
+      throw new Error('Node ID must not contain ":" (used as delimiter in timestamp format)');
+    }
     this.nodeId = nodeId;
     this.strictMode = options.strictMode ?? false;
     this.maxDriftMs = options.maxDriftMs ?? 60000;
