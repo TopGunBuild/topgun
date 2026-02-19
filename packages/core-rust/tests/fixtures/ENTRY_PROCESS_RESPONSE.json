@@ -1,0 +1,7 @@
+{
+  "type": "ENTRY_PROCESS_RESPONSE",
+  "requestId": "ep-1",
+  "success": true,
+  "result": 42,
+  "newValue": 42
+}

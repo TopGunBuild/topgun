@@ -1,0 +1,7 @@
+{
+  "type": "MERKLE_REQ_BUCKET",
+  "payload": {
+    "mapName": "users",
+    "bucketIndex": 42
+  }
+}

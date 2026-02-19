@@ -1,0 +1,13 @@
+{
+  "type": "CLUSTER_SEARCH_REQ",
+  "payload": {
+    "requestId": "csearch-001",
+    "mapName": "products",
+    "query": "laptop",
+    "options": {
+      "limit": 25,
+      "includeMatchedTerms": true
+    },
+    "timeoutMs": 5000
+  }
+}

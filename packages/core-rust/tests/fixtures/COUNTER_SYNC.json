@@ -1,0 +1,12 @@
+{
+  "type": "COUNTER_SYNC",
+  "payload": {
+    "name": "page-views",
+    "state": {
+      "p": {
+        "node-1": 10
+      },
+      "n": {}
+    }
+  }
+}

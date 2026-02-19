@@ -1,0 +1,17 @@
+{
+  "type": "CLUSTER_SUB_UPDATE",
+  "payload": {
+    "subscriptionId": "csub-001",
+    "sourceNodeId": "node-2",
+    "key": "doc-5",
+    "value": {
+      "title": "updated"
+    },
+    "score": 0.8,
+    "matchedTerms": [
+      "rust"
+    ],
+    "changeType": "ENTER",
+    "timestamp": 1700000000001
+  }
+}

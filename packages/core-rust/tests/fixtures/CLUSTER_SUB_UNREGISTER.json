@@ -1,0 +1,6 @@
+{
+  "type": "CLUSTER_SUB_UNREGISTER",
+  "payload": {
+    "subscriptionId": "csub-001"
+  }
+}

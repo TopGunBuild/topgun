@@ -1,0 +1,18 @@
+{
+  "type": "SERVER_EVENT",
+  "payload": {
+    "mapName": "users",
+    "eventType": "PUT",
+    "key": "user-1",
+    "record": {
+      "value": {
+        "name": "Alice"
+      },
+      "timestamp": {
+        "millis": 1700000000000,
+        "counter": 1,
+        "nodeId": "node-1"
+      }
+    }
+  }
+}

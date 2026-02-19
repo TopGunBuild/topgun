@@ -1,0 +1,23 @@
+{
+  "type": "QUERY_RESP",
+  "payload": {
+    "queryId": "q-001",
+    "results": [
+      {
+        "key": "user-1",
+        "value": {
+          "name": "Alice"
+        }
+      },
+      {
+        "key": "user-2",
+        "value": {
+          "name": "Bob"
+        }
+      }
+    ],
+    "totalCount": 100,
+    "cursorStatus": "hasMore",
+    "nextCursor": "cursor-abc"
+  }
+}

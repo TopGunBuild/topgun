@@ -1,0 +1,6 @@
+{
+  "type": "QUERY_UNSUB",
+  "payload": {
+    "queryId": "q-001"
+  }
+}

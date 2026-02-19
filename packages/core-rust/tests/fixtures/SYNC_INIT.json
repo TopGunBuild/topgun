@@ -1,0 +1,11 @@
+{
+  "type": "SYNC_INIT",
+  "mapName": "users",
+  "rootHash": 12345,
+  "bucketHashes": {
+    "0": 111,
+    "1": 222,
+    "2": 333
+  },
+  "lastSyncTimestamp": 1700000000000
+}

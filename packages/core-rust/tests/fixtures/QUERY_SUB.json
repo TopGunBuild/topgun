@@ -1,0 +1,18 @@
+{
+  "type": "QUERY_SUB",
+  "payload": {
+    "queryId": "q-001",
+    "mapName": "users",
+    "query": {
+      "where": {
+        "age": {
+          "$gt": 18
+        }
+      },
+      "sort": {
+        "createdAt": "desc"
+      },
+      "limit": 50
+    }
+  }
+}

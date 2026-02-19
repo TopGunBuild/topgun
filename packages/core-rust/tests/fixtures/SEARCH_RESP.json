@@ -1,0 +1,20 @@
+{
+  "type": "SEARCH_RESP",
+  "payload": {
+    "requestId": "sr-001",
+    "results": [
+      {
+        "key": "article-1",
+        "value": {
+          "title": "Async Rust"
+        },
+        "score": 0.95,
+        "matchedTerms": [
+          "rust",
+          "async"
+        ]
+      }
+    ],
+    "totalCount": 42
+  }
+}

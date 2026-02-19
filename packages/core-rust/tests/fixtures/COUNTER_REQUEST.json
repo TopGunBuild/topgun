@@ -1,0 +1,6 @@
+{
+  "type": "COUNTER_REQUEST",
+  "payload": {
+    "name": "page-views"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "type": "PARTITION_MAP_REQUEST",
+  "payload": {
+    "currentVersion": 5
+  }
+}

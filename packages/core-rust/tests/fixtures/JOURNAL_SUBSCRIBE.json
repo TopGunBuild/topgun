@@ -1,0 +1,10 @@
+{
+  "type": "JOURNAL_SUBSCRIBE",
+  "requestId": "jsub-1",
+  "fromSequence": "seq-100",
+  "mapName": "users",
+  "types": [
+    "PUT",
+    "DELETE"
+  ]
+}

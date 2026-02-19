@@ -1,0 +1,14 @@
+{
+  "type": "CLUSTER_SEARCH_UPDATE",
+  "payload": {
+    "subscriptionId": "css-001",
+    "nodeId": "node-2",
+    "key": "prod-99",
+    "value": "Updated Monitor",
+    "score": 0.85,
+    "matchedTerms": [
+      "monitor"
+    ],
+    "changeType": "UPDATE"
+  }
+}

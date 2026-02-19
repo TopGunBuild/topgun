@@ -1,0 +1,16 @@
+{
+  "type": "SEARCH_UPDATE",
+  "payload": {
+    "subscriptionId": "ss-001",
+    "key": "article-99",
+    "value": {
+      "title": "New ML Paper"
+    },
+    "score": 0.88,
+    "matchedTerms": [
+      "machine",
+      "learning"
+    ],
+    "changeType": "ENTER"
+  }
+}

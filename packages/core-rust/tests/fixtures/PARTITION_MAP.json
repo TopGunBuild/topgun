@@ -1,0 +1,27 @@
+{
+  "type": "PARTITION_MAP",
+  "payload": {
+    "version": 7,
+    "partitionCount": 271,
+    "nodes": [
+      {
+        "nodeId": "node-1",
+        "endpoints": {
+          "websocket": "ws://10.0.0.1:8080",
+          "http": "http://10.0.0.1:3000"
+        },
+        "status": "ACTIVE"
+      }
+    ],
+    "partitions": [
+      {
+        "partitionId": 0,
+        "ownerNodeId": "node-1",
+        "backupNodeIds": [
+          "node-2"
+        ]
+      }
+    ],
+    "generatedAt": 1700000000000
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "type": "SYNC_RESP_ROOT",
+  "payload": {
+    "mapName": "users",
+    "rootHash": 12345,
+    "inSync": false
+  }
+}

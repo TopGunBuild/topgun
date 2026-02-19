@@ -1,0 +1,11 @@
+{
+  "type": "TOPIC_MESSAGE",
+  "payload": {
+    "topic": "chat/room-1",
+    "data": {
+      "text": "Hi there"
+    },
+    "publisherId": "user-42",
+    "timestamp": 1700000000000
+  }
+}

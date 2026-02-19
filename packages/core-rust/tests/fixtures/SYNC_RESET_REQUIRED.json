@@ -1,0 +1,7 @@
+{
+  "type": "SYNC_RESET_REQUIRED",
+  "payload": {
+    "mapName": "users",
+    "reason": "partition ownership changed"
+  }
+}

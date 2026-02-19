@@ -1,0 +1,13 @@
+{
+  "type": "BATCH",
+  "count": 3,
+  "data": {
+    "type": "Buffer",
+    "data": [
+      222,
+      173,
+      190,
+      239
+    ]
+  }
+}

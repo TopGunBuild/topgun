@@ -1,0 +1,19 @@
+{
+  "type": "CLUSTER_SUB_ACK",
+  "payload": {
+    "subscriptionId": "csub-001",
+    "nodeId": "node-2",
+    "success": true,
+    "initialResults": [
+      {
+        "key": "doc-1",
+        "value": "content",
+        "score": 0.9,
+        "matchedTerms": [
+          "rust"
+        ]
+      }
+    ],
+    "totalHits": 42
+  }
+}

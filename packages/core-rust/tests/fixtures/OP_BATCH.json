@@ -1,0 +1,35 @@
+{
+  "type": "OP_BATCH",
+  "payload": {
+    "ops": [
+      {
+        "id": "op-1",
+        "mapName": "users",
+        "key": "user-1",
+        "record": {
+          "value": "Alice",
+          "timestamp": {
+            "millis": 1700000000000,
+            "counter": 1,
+            "nodeId": "node-1"
+          }
+        }
+      },
+      {
+        "id": "op-2",
+        "mapName": "users",
+        "key": "user-2",
+        "record": {
+          "value": "Bob",
+          "timestamp": {
+            "millis": 1700000000001,
+            "counter": 0,
+            "nodeId": "node-2"
+          }
+        }
+      }
+    ],
+    "writeConcern": "MEMORY",
+    "timeout": 5000
+  }
+}

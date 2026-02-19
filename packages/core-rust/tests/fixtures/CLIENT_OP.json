@@ -1,0 +1,21 @@
+{
+  "type": "CLIENT_OP",
+  "payload": {
+    "id": "op-1",
+    "mapName": "users",
+    "key": "user-1",
+    "opType": "PUT",
+    "record": {
+      "value": {
+        "name": "Alice",
+        "age": 30
+      },
+      "timestamp": {
+        "millis": 1700000000000,
+        "counter": 1,
+        "nodeId": "node-1"
+      },
+      "ttlMs": 60000
+    }
+  }
+}

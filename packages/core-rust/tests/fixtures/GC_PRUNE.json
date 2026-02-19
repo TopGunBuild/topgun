@@ -1,0 +1,10 @@
+{
+  "type": "GC_PRUNE",
+  "payload": {
+    "olderThan": {
+      "millis": 1700000000000,
+      "counter": 1,
+      "nodeId": "node-1"
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "type": "QUERY_UPDATE",
+  "payload": {
+    "queryId": "q-001",
+    "key": "user-3",
+    "value": {
+      "name": "Charlie"
+    },
+    "changeType": "ENTER"
+  }
+}

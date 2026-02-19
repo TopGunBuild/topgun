@@ -1,0 +1,17 @@
+{
+  "type": "LIST_RESOLVERS_RESPONSE",
+  "requestId": "lr-1",
+  "resolvers": [
+    {
+      "mapName": "users",
+      "name": "merge-a",
+      "priority": 10
+    },
+    {
+      "mapName": "users",
+      "name": "merge-b",
+      "priority": 20,
+      "keyPattern": "admin-*"
+    }
+  ]
+}

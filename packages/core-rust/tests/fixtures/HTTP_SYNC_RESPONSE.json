@@ -1,0 +1,34 @@
+{
+  "serverHlc": {
+    "millis": 1700000000000,
+    "counter": 1,
+    "nodeId": "node-1"
+  },
+  "ack": {
+    "lastId": "op-1"
+  },
+  "deltas": [
+    {
+      "mapName": "users",
+      "records": [
+        {
+          "key": "user-1",
+          "record": {
+            "value": "Alice",
+            "timestamp": {
+              "millis": 1700000000000,
+              "counter": 1,
+              "nodeId": "node-1"
+            }
+          },
+          "eventType": "PUT"
+        }
+      ],
+      "serverSyncTimestamp": {
+        "millis": 1700000000000,
+        "counter": 1,
+        "nodeId": "node-1"
+      }
+    }
+  ]
+}

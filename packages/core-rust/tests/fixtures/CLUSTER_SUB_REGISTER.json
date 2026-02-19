@@ -1,0 +1,13 @@
+{
+  "type": "CLUSTER_SUB_REGISTER",
+  "payload": {
+    "subscriptionId": "csub-001",
+    "coordinatorNodeId": "node-1",
+    "mapName": "articles",
+    "type": "SEARCH",
+    "searchQuery": "rust",
+    "searchOptions": {
+      "limit": 10
+    }
+  }
+}

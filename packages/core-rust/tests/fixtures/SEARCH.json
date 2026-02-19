@@ -1,0 +1,12 @@
+{
+  "type": "SEARCH",
+  "payload": {
+    "requestId": "sr-001",
+    "mapName": "articles",
+    "query": "rust async programming",
+    "options": {
+      "limit": 10,
+      "minScore": 0.5
+    }
+  }
+}

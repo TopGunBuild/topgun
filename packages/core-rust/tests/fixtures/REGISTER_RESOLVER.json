@@ -1,0 +1,11 @@
+{
+  "type": "REGISTER_RESOLVER",
+  "requestId": "rr-1",
+  "mapName": "users",
+  "resolver": {
+    "name": "custom-merge",
+    "code": "if (a > b) return a; else return b;",
+    "priority": 50,
+    "keyPattern": "user-*"
+  }
+}

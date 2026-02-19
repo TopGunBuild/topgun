@@ -1,0 +1,33 @@
+{
+  "clientId": "client-1",
+  "clientHlc": {
+    "millis": 1700000000000,
+    "counter": 1,
+    "nodeId": "node-1"
+  },
+  "operations": [
+    {
+      "id": "op-1",
+      "mapName": "users",
+      "key": "user-1",
+      "record": {
+        "value": "Alice",
+        "timestamp": {
+          "millis": 1700000000000,
+          "counter": 1,
+          "nodeId": "node-1"
+        }
+      }
+    }
+  ],
+  "syncMaps": [
+    {
+      "mapName": "users",
+      "lastSyncTimestamp": {
+        "millis": 1700000000000,
+        "counter": 1,
+        "nodeId": "node-1"
+      }
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "type": "ENTRY_PROCESS",
+  "requestId": "ep-1",
+  "mapName": "counters",
+  "key": "counter-1",
+  "processor": {
+    "name": "increment",
+    "code": "return value + 1",
+    "args": 1
+  }
+}

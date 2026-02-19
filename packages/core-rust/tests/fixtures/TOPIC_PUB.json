@@ -1,0 +1,9 @@
+{
+  "type": "TOPIC_PUB",
+  "payload": {
+    "topic": "notifications",
+    "data": {
+      "text": "hello world"
+    }
+  }
+}

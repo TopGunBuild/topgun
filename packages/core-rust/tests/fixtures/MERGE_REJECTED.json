@@ -1,0 +1,12 @@
+{
+  "type": "MERGE_REJECTED",
+  "mapName": "users",
+  "key": "user-1",
+  "attemptedValue": "bad-value",
+  "reason": "resolver rejected",
+  "timestamp": {
+    "millis": 1700000000000,
+    "counter": 1,
+    "nodeId": "node-1"
+  }
+}

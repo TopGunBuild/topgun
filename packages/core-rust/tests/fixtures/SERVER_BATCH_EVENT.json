@@ -1,0 +1,25 @@
+{
+  "type": "SERVER_BATCH_EVENT",
+  "payload": {
+    "events": [
+      {
+        "mapName": "users",
+        "eventType": "PUT",
+        "key": "user-1",
+        "record": {
+          "value": "v1",
+          "timestamp": {
+            "millis": 1700000000000,
+            "counter": 1,
+            "nodeId": "node-1"
+          }
+        }
+      },
+      {
+        "mapName": "users",
+        "eventType": "REMOVE",
+        "key": "user-2"
+      }
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "type": "CLUSTER_SEARCH_RESP",
+  "payload": {
+    "requestId": "csearch-001",
+    "nodeId": "node-3",
+    "results": [
+      {
+        "key": "prod-1",
+        "value": "Laptop Pro",
+        "score": 0.92,
+        "matchedTerms": [
+          "laptop"
+        ]
+      }
+    ],
+    "totalHits": 150,
+    "executionTimeMs": 23
+  }
+}

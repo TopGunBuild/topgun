@@ -1,0 +1,17 @@
+{
+  "type": "JOURNAL_EVENT",
+  "event": {
+    "sequence": "seq-050",
+    "type": "UPDATE",
+    "mapName": "orders",
+    "key": "order-7",
+    "value": "shipped",
+    "previousValue": "pending",
+    "timestamp": {
+      "millis": 1700000000000,
+      "counter": 1,
+      "nodeId": "node-1"
+    },
+    "nodeId": "node-1"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "type": "OP_ACK",
+  "payload": {
+    "lastId": "op-1",
+    "achievedLevel": "MEMORY",
+    "results": [
+      {
+        "opId": "op-1",
+        "success": true,
+        "achievedLevel": "MEMORY"
+      }
+    ]
+  }
+}

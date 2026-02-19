@@ -1,0 +1,5 @@
+{
+  "type": "AUTH_FAIL",
+  "error": "invalid token",
+  "code": 401
+}

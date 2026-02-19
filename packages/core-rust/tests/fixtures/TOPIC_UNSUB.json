@@ -1,0 +1,6 @@
+{
+  "type": "TOPIC_UNSUB",
+  "payload": {
+    "topic": "chat/room-1"
+  }
+}

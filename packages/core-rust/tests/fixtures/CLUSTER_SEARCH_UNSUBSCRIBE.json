@@ -1,0 +1,6 @@
+{
+  "type": "CLUSTER_SEARCH_UNSUBSCRIBE",
+  "payload": {
+    "subscriptionId": "css-001"
+  }
+}

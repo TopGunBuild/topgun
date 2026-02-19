@@ -1,0 +1,8 @@
+{
+  "type": "LOCK_GRANTED",
+  "payload": {
+    "requestId": "lock-1",
+    "name": "my-lock",
+    "fencingToken": 42
+  }
+}

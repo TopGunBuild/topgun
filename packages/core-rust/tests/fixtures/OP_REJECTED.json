@@ -1,0 +1,8 @@
+{
+  "type": "OP_REJECTED",
+  "payload": {
+    "lastId": "op-bad",
+    "reason": "schema validation failed",
+    "code": 400
+  }
+}

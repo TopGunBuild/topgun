@@ -1,0 +1,6 @@
+{
+  "type": "SEARCH_UNSUB",
+  "payload": {
+    "subscriptionId": "ss-001"
+  }
+}

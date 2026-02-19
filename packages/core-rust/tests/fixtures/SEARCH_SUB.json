@@ -1,0 +1,12 @@
+{
+  "type": "SEARCH_SUB",
+  "payload": {
+    "subscriptionId": "ss-001",
+    "mapName": "articles",
+    "query": "machine learning",
+    "options": {
+      "limit": 20,
+      "minScore": 0.3
+    }
+  }
+}

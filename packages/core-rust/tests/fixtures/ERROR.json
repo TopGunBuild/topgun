@@ -1,0 +1,8 @@
+{
+  "type": "ERROR",
+  "payload": {
+    "code": 500,
+    "message": "internal server error",
+    "details": "stack trace here"
+  }
+}

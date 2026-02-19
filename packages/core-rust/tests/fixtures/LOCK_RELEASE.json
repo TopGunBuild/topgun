@@ -1,0 +1,8 @@
+{
+  "type": "LOCK_RELEASE",
+  "payload": {
+    "requestId": "lock-req-1",
+    "name": "my-lock",
+    "fencingToken": 7
+  }
+}

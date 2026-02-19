@@ -1,0 +1,9 @@
+{
+  "type": "ORMAP_SYNC_INIT",
+  "mapName": "tags",
+  "rootHash": 99999,
+  "bucketHashes": {
+    "0": 444,
+    "5": 555
+  }
+}

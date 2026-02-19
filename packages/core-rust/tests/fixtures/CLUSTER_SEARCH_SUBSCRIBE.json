@@ -1,0 +1,11 @@
+{
+  "type": "CLUSTER_SEARCH_SUBSCRIBE",
+  "payload": {
+    "subscriptionId": "css-001",
+    "mapName": "products",
+    "query": "monitor",
+    "options": {
+      "limit": 5
+    }
+  }
+}
