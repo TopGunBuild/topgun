@@ -2,6 +2,6 @@
   "type": "MERKLE_REQ_BUCKET",
   "payload": {
     "mapName": "users",
-    "bucketIndex": 42
+    "path": "0/1/2"
   }
 }

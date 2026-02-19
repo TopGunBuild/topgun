@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::hlc::{LWWRecord, ORMapRecord};
+use crate::hlc::{serde_number, LWWRecord, ORMapRecord};
 
 // ---------------------------------------------------------------------------
 // Double-Option helper for nullable + optional fields
@@ -166,7 +166,7 @@ pub struct ClientOp {
     pub or_tag: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub write_concern: Option<WriteConcern>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(skip_serializing_if = "Option::is_none", default, deserialize_with = "serde_number::deserialize_option_u64")]
     pub timeout: Option<u64>,
 }
 

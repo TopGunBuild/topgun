@@ -124,7 +124,7 @@ describe('Cross-language fixture generation', () => {
       payload: {
         mapName: 'users',
         rootHash: 12345,
-        inSync: false,
+        timestamp,
       },
     });
   });
@@ -150,7 +150,7 @@ describe('Cross-language fixture generation', () => {
     writeFixture('OP_REJECTED', {
       type: 'OP_REJECTED',
       payload: {
-        lastId: 'op-bad',
+        opId: 'op-bad',
         reason: 'schema validation failed',
         code: 400,
       },
@@ -179,7 +179,7 @@ describe('Cross-language fixture generation', () => {
       type: 'MERKLE_REQ_BUCKET',
       payload: {
         mapName: 'users',
-        bucketIndex: 42,
+        path: '0/1/2',
       },
     });
   });
@@ -189,8 +189,8 @@ describe('Cross-language fixture generation', () => {
       type: 'SYNC_RESP_BUCKETS',
       payload: {
         mapName: 'users',
-        bucketIndex: 0,
-        bucketHashes: { 'sub-0': 111, 'sub-1': 222 },
+        path: '0',
+        buckets: { '0': 111, '1': 222, '2': 333 },
       },
     });
   });
@@ -232,8 +232,8 @@ describe('Cross-language fixture generation', () => {
           { key: 'user-1', value: { name: 'Alice' } },
           { key: 'user-2', value: { name: 'Bob' } },
         ],
-        totalCount: 100,
-        cursorStatus: 'hasMore',
+        hasMore: true,
+        cursorStatus: 'valid',
         nextCursor: 'cursor-abc',
       },
     });
@@ -597,14 +597,16 @@ describe('Cross-language fixture generation', () => {
     writeFixture('JOURNAL_EVENT', {
       type: 'JOURNAL_EVENT',
       event: {
-        sequence: 'seq-050',
-        type: 'UPDATE',
-        mapName: 'orders',
-        key: 'order-7',
-        value: 'shipped',
-        previousValue: 'pending',
-        timestamp,
-        nodeId: 'node-1',
+        event: {
+          sequence: 'seq-050',
+          type: 'UPDATE',
+          mapName: 'orders',
+          key: 'order-7',
+          value: 'shipped',
+          previousValue: 'pending',
+          timestamp,
+          nodeId: 'node-1',
+        },
       },
     });
   });

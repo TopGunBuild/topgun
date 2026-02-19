@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::hlc::serde_number;
 use super::base::{ChangeEventType, SortDirection};
 use super::search::SearchOptions;
 
@@ -104,6 +105,7 @@ pub struct PartitionMapPayload {
     pub partitions: Vec<PartitionInfo>,
 
     /// Timestamp (ms since epoch) when this map was generated.
+    #[serde(deserialize_with = "serde_number::deserialize_i64")]
     pub generated_at: i64,
 }
 
@@ -234,7 +236,7 @@ pub struct ClusterSubAckPayload {
     pub initial_results: Option<Vec<ClusterSubAckResultEntry>>,
 
     /// Total number of matching records on this node.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(skip_serializing_if = "Option::is_none", default, deserialize_with = "serde_number::deserialize_option_u64")]
     pub total_hits: Option<u64>,
 }
 
@@ -269,6 +271,7 @@ pub struct ClusterSubUpdatePayload {
     pub change_type: ChangeEventType,
 
     /// HLC timestamp of the change.
+    #[serde(deserialize_with = "serde_number::deserialize_u64")]
     pub timestamp: u64,
 }
 
@@ -352,7 +355,7 @@ pub struct ClusterSearchReqPayload {
     pub options: ClusterSearchReqOptions,
 
     /// Maximum time (ms) to wait for results from each node.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(skip_serializing_if = "Option::is_none", default, deserialize_with = "serde_number::deserialize_option_u64")]
     pub timeout_ms: Option<u64>,
 }
 
@@ -393,9 +396,11 @@ pub struct ClusterSearchRespPayload {
     pub results: Vec<ClusterSearchResultEntry>,
 
     /// Total number of matching records on this node.
+    #[serde(deserialize_with = "serde_number::deserialize_u64")]
     pub total_hits: u64,
 
     /// Time (ms) this node spent executing the search.
+    #[serde(deserialize_with = "serde_number::deserialize_u64")]
     pub execution_time_ms: u64,
 
     /// Error message if the search failed on this node.

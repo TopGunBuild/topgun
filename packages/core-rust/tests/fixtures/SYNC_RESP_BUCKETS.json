@@ -2,10 +2,11 @@
   "type": "SYNC_RESP_BUCKETS",
   "payload": {
     "mapName": "users",
-    "bucketIndex": 0,
-    "bucketHashes": {
-      "sub-0": 111,
-      "sub-1": 222
+    "path": "0",
+    "buckets": {
+      "0": 111,
+      "1": 222,
+      "2": 333
     }
   }
 }

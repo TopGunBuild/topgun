@@ -16,8 +16,8 @@
         }
       }
     ],
-    "totalCount": 100,
-    "cursorStatus": "hasMore",
+    "hasMore": true,
+    "cursorStatus": "valid",
     "nextCursor": "cursor-abc"
   }
 }

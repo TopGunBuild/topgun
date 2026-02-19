@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::hlc::Timestamp;
+use crate::hlc::{serde_number, Timestamp};
 
 // ---------------------------------------------------------------------------
 // Topic Payloads
@@ -66,6 +66,7 @@ pub struct TopicMessageEventPayload {
     pub publisher_id: Option<String>,
 
     /// Timestamp in milliseconds.
+    #[serde(deserialize_with = "serde_number::deserialize_u64")]
     pub timestamp: u64,
 }
 
@@ -86,7 +87,7 @@ pub struct LockRequestPayload {
     pub name: String,
 
     /// Optional timeout in milliseconds.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(skip_serializing_if = "Option::is_none", default, deserialize_with = "serde_number::deserialize_option_u64")]
     pub ttl: Option<u64>,
 }
 
@@ -104,6 +105,7 @@ pub struct LockReleasePayload {
     pub name: String,
 
     /// Monotonic counter fencing token.
+    #[serde(deserialize_with = "serde_number::deserialize_u64")]
     pub fencing_token: u64,
 }
 
@@ -161,6 +163,7 @@ pub struct CounterStatePayload {
 #[serde(rename_all = "camelCase")]
 pub struct PingData {
     /// Milliseconds since epoch.
+    #[serde(deserialize_with = "serde_number::deserialize_u64")]
     pub timestamp: u64,
 }
 
@@ -171,9 +174,11 @@ pub struct PingData {
 #[serde(rename_all = "camelCase")]
 pub struct PongData {
     /// Client-sent timestamp (echo), milliseconds since epoch.
+    #[serde(deserialize_with = "serde_number::deserialize_u64")]
     pub timestamp: u64,
 
     /// Server time, milliseconds since epoch.
+    #[serde(deserialize_with = "serde_number::deserialize_u64")]
     pub server_time: u64,
 }
 

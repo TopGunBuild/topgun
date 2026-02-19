@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::base::ChangeEventType;
-use crate::hlc::{LWWRecord, ORMapRecord, Timestamp};
+use crate::hlc::{serde_number, LWWRecord, ORMapRecord, Timestamp};
 
 // ---------------------------------------------------------------------------
 // Server Event
@@ -178,6 +178,7 @@ pub struct LockGrantedPayload {
     pub name: String,
 
     /// Monotonic fencing token for the granted lock.
+    #[serde(deserialize_with = "serde_number::deserialize_u64")]
     pub fencing_token: u64,
 }
 

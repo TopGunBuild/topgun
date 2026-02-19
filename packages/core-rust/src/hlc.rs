@@ -16,6 +16,142 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+// ---------------------------------------------------------------------------
+// Cross-language numeric deserialization helpers
+// ---------------------------------------------------------------------------
+
+/// Helpers for deserializing numbers that may arrive as `MsgPack` float64.
+///
+/// JavaScript's `msgpackr` encodes numbers > 2^31 as float64 (`MsgPack` `0xcb`
+/// format), but Rust's `u64`/`u32`/`i64` deserializers reject float64 input.
+/// These helpers accept both integer and float64 `MsgPack` wire values, making
+/// Rust interoperable with real TypeScript clients.
+#[allow(clippy::missing_errors_doc)]
+pub mod serde_number {
+    use serde::{self, Deserialize, Deserializer};
+
+    /// Checks whether a float64 value represents a whole number (no fractional part).
+    fn is_whole(v: f64) -> bool {
+        // Using `fract()` avoids strict float equality (`v == v.trunc()`) that
+        // clippy warns about. A value with zero fractional part is integral.
+        v.fract() == 0.0
+    }
+
+    /// Deserializes a `u64` that may arrive as `MsgPack` float64 from JavaScript.
+    pub fn deserialize_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum NumericU64 {
+            U64(u64),
+            F64(f64),
+        }
+        match NumericU64::deserialize(deserializer)? {
+            NumericU64::U64(v) => Ok(v),
+            NumericU64::F64(v) => {
+                if (0.0..18_446_744_073_709_551_616.0).contains(&v) && is_whole(v) {
+                    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                    Ok(v as u64)
+                } else {
+                    Err(serde::de::Error::custom(format!(
+                        "float64 value {v} cannot be losslessly converted to u64"
+                    )))
+                }
+            }
+        }
+    }
+
+    /// Deserializes a `u32` that may arrive as `MsgPack` float64 from JavaScript.
+    pub fn deserialize_u32<'de, D>(deserializer: D) -> Result<u32, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum NumericU32 {
+            U64(u64),
+            F64(f64),
+        }
+        match NumericU32::deserialize(deserializer)? {
+            NumericU32::U64(v) => {
+                u32::try_from(v).map_err(|_| {
+                    serde::de::Error::custom(format!("u64 value {v} overflows u32"))
+                })
+            }
+            NumericU32::F64(v) => {
+                if v >= 0.0 && v <= f64::from(u32::MAX) && is_whole(v) {
+                    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                    Ok(v as u32)
+                } else {
+                    Err(serde::de::Error::custom(format!(
+                        "float64 value {v} cannot be losslessly converted to u32"
+                    )))
+                }
+            }
+        }
+    }
+
+    /// Deserializes an `i64` that may arrive as `MsgPack` float64 from JavaScript.
+    pub fn deserialize_i64<'de, D>(deserializer: D) -> Result<i64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum NumericI64 {
+            I64(i64),
+            F64(f64),
+        }
+        match NumericI64::deserialize(deserializer)? {
+            NumericI64::I64(v) => Ok(v),
+            NumericI64::F64(v) => {
+                // i64 range is approximately -9.2e18 to 9.2e18; safe integer
+                // range for f64 is 2^53, well within i64 bounds.
+                if (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&v)
+                    && is_whole(v)
+                {
+                    #[allow(clippy::cast_possible_truncation)]
+                    Ok(v as i64)
+                } else {
+                    Err(serde::de::Error::custom(format!(
+                        "float64 value {v} cannot be losslessly converted to i64"
+                    )))
+                }
+            }
+        }
+    }
+
+    /// Deserializes an `Option<u64>` that may arrive as `MsgPack` float64.
+    pub fn deserialize_option_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum MaybeNumeric {
+            Null,
+            U64(u64),
+            F64(f64),
+        }
+        match Option::<MaybeNumeric>::deserialize(deserializer)? {
+            None | Some(MaybeNumeric::Null) => Ok(None),
+            Some(MaybeNumeric::U64(v)) => Ok(Some(v)),
+            Some(MaybeNumeric::F64(v)) => {
+                if (0.0..18_446_744_073_709_551_616.0).contains(&v) && is_whole(v) {
+                    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                    Ok(Some(v as u64))
+                } else {
+                    Err(serde::de::Error::custom(format!(
+                        "float64 value {v} cannot be losslessly converted to u64"
+                    )))
+                }
+            }
+        }
+    }
+}
+
 /// A hybrid logical timestamp combining physical time, logical counter, and node identity.
 ///
 /// Ordering is defined as: millis first, then counter, then `node_id` (lexicographic byte order).
@@ -24,8 +160,10 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct Timestamp {
     /// Physical wall-clock milliseconds since Unix epoch.
+    #[serde(deserialize_with = "serde_number::deserialize_u64")]
     pub millis: u64,
     /// Logical counter for events within the same millisecond.
+    #[serde(deserialize_with = "serde_number::deserialize_u32")]
     pub counter: u32,
     /// Unique identifier of the node that generated this timestamp.
     pub node_id: String,
@@ -310,6 +448,7 @@ pub struct LWWRecord<V> {
     /// Causal timestamp assigned by the writing node's HLC.
     pub timestamp: Timestamp,
     /// Optional time-to-live in milliseconds. Checked against `HLC::clock_source().now()`.
+    #[serde(default, deserialize_with = "serde_number::deserialize_option_u64")]
     pub ttl_ms: Option<u64>,
 }
 
@@ -332,6 +471,7 @@ pub struct ORMapRecord<V> {
     /// Unique tag identifying this particular addition (typically `"millis:counter:nodeId"`).
     pub tag: String,
     /// Optional time-to-live in milliseconds.
+    #[serde(default, deserialize_with = "serde_number::deserialize_option_u64")]
     pub ttl_ms: Option<u64>,
 }
 

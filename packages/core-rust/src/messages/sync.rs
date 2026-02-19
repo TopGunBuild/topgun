@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::hlc::{LWWRecord, ORMapRecord, Timestamp};
+use crate::hlc::{serde_number, LWWRecord, ORMapRecord, Timestamp};
 
 use super::base::{ClientOp, WriteConcern};
 
@@ -40,7 +40,7 @@ pub struct OpBatchPayload {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub write_concern: Option<WriteConcern>,
     /// Optional timeout in milliseconds.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(skip_serializing_if = "Option::is_none", default, deserialize_with = "serde_number::deserialize_option_u64")]
     pub timeout: Option<u64>,
 }
 
@@ -69,7 +69,7 @@ pub struct SyncInitMessage {
     /// Name of the map to synchronize.
     pub map_name: String,
     /// Optional timestamp of last successful sync for delta optimization.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(skip_serializing_if = "Option::is_none", default, deserialize_with = "serde_number::deserialize_option_u64")]
     pub last_sync_timestamp: Option<u64>,
 }
 
@@ -220,7 +220,7 @@ pub struct ORMapSyncInit {
     /// Map of bucket index to bucket hash for delta detection.
     pub bucket_hashes: HashMap<String, u32>,
     /// Optional timestamp of last successful sync for delta optimization.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(skip_serializing_if = "Option::is_none", default, deserialize_with = "serde_number::deserialize_option_u64")]
     pub last_sync_timestamp: Option<u64>,
 }
 
