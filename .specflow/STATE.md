@@ -6,14 +6,13 @@
 - **Status:** idle
 - **Project Phase:** Phase 2 (Rust Core)
 - **TODO Items:** 29 (1 client bug fix + 9 Rust bridge/core + 5 audit findings + 14 existing deferred)
-- **Next Step:** `/sf:new` or `/sf:next`
+- **Next Step:** /sf:new or /sf:next
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
 ## Queue
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| (empty) | | | | |
 
 ## Migration Roadmap (high-level)
 
@@ -40,6 +39,8 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-19 | SPEC-055 | COMPLETED: Fix Rust ORMap Merkle Hash Determinism. 2 commits. 2 audit cycles, 1 review cycle. `canonical_json` + `sort_json_value` private helpers replace `serde_json::to_string` in `hash_entry()`. 385 tests + 10 integration tests pass. Zero clippy warnings. |
+| 2026-02-19 | SPEC-055 | REVIEWED v1: APPROVED. All 6 acceptance criteria verified. 385 unit tests + 10 integration tests + 6 doc tests pass. Zero clippy warnings. `canonical_json` + `sort_json_value` private helpers fix hash determinism for generic V. |
 | 2026-02-19 | SPEC-052e | COMPLETED: Message Schema -- HTTP Sync, Message Union, and Cross-Language Tests. 5 commits. 4 audit cycles, 1 review cycle. 12 HTTP sync types, 77-variant Message enum, 61 golden fixtures, 9 integration tests. float64 deserialization fix for JS interop. 393 Rust tests + 62 TS tests. Zero clippy warnings. |
 | 2026-02-19 | SPEC-052e | REVIEWED v1: APPROVED. All 8 acceptance criteria verified. 393 Rust tests + 62 TS tests pass, zero clippy warnings. 77-variant Message enum, 12 HTTP sync types, 61 golden fixtures. 3 minor findings -- all well-documented and non-blocking. |
 | 2026-02-19 | SPEC-052e | EXECUTED: Message Schema -- HTTP Sync, Message Union, and Cross-Language Tests. 5 commits (3 waves). 12 HTTP sync types, 77-variant Message enum, 61 golden fixtures, 9 integration tests. float64 deserialization fix for JS interop. 393 Rust tests + 62 TS tests. Zero clippy warnings. |
@@ -79,4 +80,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-19 (SPEC-052e completed and archived)*
+*Last updated: 2026-02-19 (SPEC-055 completed and archived)*

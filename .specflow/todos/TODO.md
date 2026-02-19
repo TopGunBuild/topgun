@@ -120,18 +120,12 @@ Each Rust spec should reference up to THREE sources:
 - **Effort:** 1-2 hours
 - **Source:** External audit finding (Audit 1, Section 2)
 
-### TODO-075: Fix Rust ORMap Merkle Hash Determinism
+### TODO-075: Fix Rust ORMap Merkle Hash Determinism → SPEC-055
 - **Priority:** P1 (bug — cross-language sync broken)
-- **Complexity:** Low
-- **Summary:** `hash_entry()` in `packages/core-rust/src/or_map.rs:472` uses `serde_json::to_string(&record.value)` which does NOT sort object keys. TS version sorts keys via `JSON.stringify(value, Object.keys(value).sort())`. Result: different hashes for identical data, Merkle sync diverges. Merkle hashes are sent over the wire (`SYNC_RESP_ROOT`, `SYNC_RESP_BUCKETS`), so cross-language compatibility is mandatory.
-- **Fix:** Replace `serde_json::to_string()` with a recursive key-sorting serializer (convert to `serde_json::Value`, sort `Map` keys recursively, then serialize).
-- **Changes:**
-  - `packages/core-rust/src/or_map.rs` — implement `canonical_json()` helper, use in `hash_entry()`
-  - Add test: known object `{z:1, a:2}` hashes identically to sorted `{a:2, z:1}`
-  - Add cross-language test vector: TS `stringifyValue({z:1, a:2})` === Rust `canonical_json({z:1, a:2})`
+- **Status:** Spec created (SPEC-055), pending audit
+- **Summary:** `hash_entry()` uses unsorted `serde_json::to_string()` — breaks cross-language Merkle sync
 - **Depends on:** TODO-061 ✅
 - **Effort:** 0.5 day
-- **Source:** External audit finding (Audit 1, Section 1) + deep analysis confirmed bug
 
 ### TODO-078: ~~Fix TS Hash Function Inconsistency (xxHash64 vs FNV-1a)~~ DONE
 - **Status:** Completed 2026-02-19
