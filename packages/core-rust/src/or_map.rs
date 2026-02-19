@@ -25,7 +25,7 @@
 //! from [`ORMap::get`] and [`ORMap::get_records`] but remain in storage until
 //! explicitly removed or pruned.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -33,6 +33,39 @@ use serde::Serialize;
 use crate::hash::fnv1a_hash;
 use crate::hlc::{MergeKeyResult, ORMapRecord, Timestamp, HLC};
 use crate::merkle::ORMapMerkleTree;
+
+/// Produces a deterministic JSON string with recursively sorted object keys.
+///
+/// Serializes `value` to `serde_json::Value`, recursively sorts all object
+/// keys in lexicographic order, then serializes back to a JSON string. This
+/// ensures identical output regardless of the internal iteration order of
+/// the original type (e.g., `HashMap`-based structs).
+fn canonical_json<V: Serialize>(value: &V) -> String {
+    let json_value = serde_json::to_value(value).expect("V: Serialize must convert to serde_json::Value");
+    let sorted = sort_json_value(json_value);
+    serde_json::to_string(&sorted).expect("sorted serde_json::Value must serialize to string")
+}
+
+/// Recursively sorts object keys in a `serde_json::Value`.
+///
+/// - `Object`: collects entries into a `BTreeMap` (sorted by key), recursing into values
+/// - `Array`: recurses into each element
+/// - Primitives (`Null`, `Bool`, `Number`, `String`): returned unchanged
+fn sort_json_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let sorted: BTreeMap<String, serde_json::Value> = map
+                .into_iter()
+                .map(|(k, v)| (k, sort_json_value(v)))
+                .collect();
+            serde_json::Value::Object(sorted.into_iter().collect())
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(sort_json_value).collect())
+        }
+        other => other,
+    }
+}
 
 /// An Observed-Remove Map providing conflict-free convergence with add-wins semantics.
 ///
@@ -456,9 +489,9 @@ where
     ///
     /// Records are sorted by tag for deterministic ordering. The hash string
     /// format is: `"key:{key}|{tag}:{value_str}:{ts_str}[|...]"` where
-    /// `value_str` is `serde_json::to_string()` output and `ts_str` is
-    /// `"millis:counter:nodeId"`. When a record has a TTL, `:ttl={ttl_ms}`
-    /// is appended to that record's segment.
+    /// `value_str` is the canonical JSON output (recursively sorted object keys)
+    /// and `ts_str` is `"millis:counter:nodeId"`. When a record has a TTL,
+    /// `:ttl={ttl_ms}` is appended to that record's segment.
     fn hash_entry(key: &str, records: &HashMap<String, ORMapRecord<V>>) -> u32 {
         // Sort records by tag for deterministic ordering
         let mut sorted_tags: Vec<&String> = records.keys().collect();
@@ -469,8 +502,7 @@ where
 
         for tag in sorted_tags {
             let record = &records[tag];
-            let value_str =
-                serde_json::to_string(&record.value).expect("V: Serialize must be JSON-serializable");
+            let value_str = canonical_json(&record.value);
             let ts_str = format!(
                 "{}:{}:{}",
                 record.timestamp.millis, record.timestamp.counter, record.timestamp.node_id
@@ -1061,6 +1093,134 @@ mod tests {
 
         assert!(map.get("key1").is_empty());
         assert!(!map.all_keys().contains(&&"key1".to_string()));
+    }
+
+    // ---- canonical_json determinism tests ----
+
+    #[test]
+    fn hash_entry_deterministic_regardless_of_key_order() {
+        // Build two HashMaps with identical records but different insertion order.
+        // HashMap iteration order is non-deterministic, so hash_entry must
+        // produce the same result regardless.
+        let ts = Timestamp {
+            millis: 1_000_000,
+            counter: 0,
+            node_id: "node-1".to_string(),
+        };
+
+        let record_a = ORMapRecord {
+            value: Value::String("alice".to_string()),
+            timestamp: ts.clone(),
+            tag: "1000000:0:node-1".to_string(),
+            ttl_ms: None,
+        };
+
+        let ts2 = Timestamp {
+            millis: 1_000_001,
+            counter: 0,
+            node_id: "node-1".to_string(),
+        };
+
+        let record_b = ORMapRecord {
+            value: Value::String("bob".to_string()),
+            timestamp: ts2.clone(),
+            tag: "1000001:0:node-1".to_string(),
+            ttl_ms: None,
+        };
+
+        // Order 1: insert a then b
+        let mut map1: HashMap<String, ORMapRecord<Value>> = HashMap::new();
+        map1.insert(record_a.tag.clone(), record_a.clone());
+        map1.insert(record_b.tag.clone(), record_b.clone());
+
+        // Order 2: insert b then a
+        let mut map2: HashMap<String, ORMapRecord<Value>> = HashMap::new();
+        map2.insert(record_b.tag.clone(), record_b);
+        map2.insert(record_a.tag.clone(), record_a);
+
+        let hash1 = ORMap::<Value>::hash_entry("user:1", &map1);
+        let hash2 = ORMap::<Value>::hash_entry("user:1", &map2);
+
+        assert_eq!(hash1, hash2, "hash_entry must be deterministic regardless of insertion order");
+    }
+
+    #[test]
+    fn canonical_json_sorts_nested_keys() {
+        // Build a Value::Map with keys {z: 1, a: {c: 3, b: 2}}.
+        // Because Value uses BTreeMap, the top-level keys are already sorted
+        // in the Value itself, but canonical_json must also work for the
+        // serde_json::Value intermediate (which uses serde_json::Map, an
+        // insertion-order map by default). We verify the output has keys in
+        // sorted order at all nesting levels.
+        let mut inner = std::collections::BTreeMap::new();
+        inner.insert("c".to_string(), Value::Int(3));
+        inner.insert("b".to_string(), Value::Int(2));
+
+        let mut outer = std::collections::BTreeMap::new();
+        outer.insert("z".to_string(), Value::Int(1));
+        outer.insert("a".to_string(), Value::Map(inner));
+
+        let value = Value::Map(outer);
+
+        let json_str = canonical_json(&value);
+
+        // The output includes serde enum variant tags because Value is
+        // externally tagged. Verify keys are sorted at all levels by
+        // checking that "a" appears before "z" in the output, and
+        // "b" appears before "c" in the nested map.
+        let a_pos = json_str.find("\"a\"").expect("should contain key 'a'");
+        let z_pos = json_str.find("\"z\"").expect("should contain key 'z'");
+        assert!(a_pos < z_pos, "'a' must appear before 'z' in sorted output: {json_str}");
+
+        let b_pos = json_str.find("\"b\"").expect("should contain key 'b'");
+        let c_pos = json_str.find("\"c\"").expect("should contain key 'c'");
+        assert!(b_pos < c_pos, "'b' must appear before 'c' in sorted output: {json_str}");
+
+        // Verify the output is valid JSON that round-trips through serde_json
+        let parsed: serde_json::Value = serde_json::from_str(&json_str)
+            .expect("canonical_json output must be valid JSON");
+        let re_serialized = serde_json::to_string(&parsed).unwrap();
+        assert_eq!(json_str, re_serialized, "canonical_json output must be stable");
+    }
+
+    #[test]
+    fn canonical_json_handles_all_value_types() {
+        // Test each Value variant produces valid, deterministic JSON
+        let test_cases: Vec<(Value, &str)> = vec![
+            (Value::Null, "Null"),
+            (Value::Bool(true), "Bool"),
+            (Value::Int(42), "Int"),
+            (Value::Float(3.14), "Float"),
+            (Value::String("hello".to_string()), "String"),
+            (
+                Value::Array(vec![Value::Int(1), Value::String("two".to_string())]),
+                "Array",
+            ),
+            (
+                Value::Map({
+                    let mut m = std::collections::BTreeMap::new();
+                    m.insert("key".to_string(), Value::Bool(false));
+                    m
+                }),
+                "Map",
+            ),
+        ];
+
+        for (value, label) in &test_cases {
+            let json1 = canonical_json(value);
+            let json2 = canonical_json(value);
+
+            // Must be deterministic
+            assert_eq!(json1, json2, "canonical_json must be deterministic for {label}");
+
+            // Must be valid JSON
+            let parsed: serde_json::Value = serde_json::from_str(&json1)
+                .unwrap_or_else(|e| panic!("canonical_json output for {label} must be valid JSON: {e}"));
+
+            // Must round-trip through serde_json
+            let re_serialized = serde_json::to_string(&parsed).unwrap();
+            assert_eq!(json1, re_serialized, "canonical_json for {label} must be stable through serde_json round-trip");
+        }
     }
 }
 
