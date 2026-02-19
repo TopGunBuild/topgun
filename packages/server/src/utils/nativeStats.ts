@@ -2,11 +2,8 @@
  * Native Module Statistics
  *
  * Provides information about available native optimizations.
- *
- * Integration
  */
 
-import { isUsingNativeHash } from '@topgunbuild/core';
 import {
   SharedMemoryManager,
   type SharedMemoryStats,
@@ -17,8 +14,6 @@ import { logger } from './logger';
  * Native module availability status
  */
 export interface NativeModuleStatus {
-  /** Native xxHash64 is available and being used */
-  nativeHash: boolean;
   /** SharedArrayBuffer is available */
   sharedArrayBuffer: boolean;
 }
@@ -40,7 +35,6 @@ export interface NativeStats {
  */
 export function getNativeModuleStatus(): NativeModuleStatus {
   return {
-    nativeHash: isUsingNativeHash(),
     sharedArrayBuffer: SharedMemoryManager.isAvailable(),
   };
 }
@@ -57,11 +51,7 @@ export function getNativeStats(
 
   const summaryParts: string[] = [];
 
-  if (modules.nativeHash) {
-    summaryParts.push('native xxHash64');
-  } else {
-    summaryParts.push('FNV-1a (JS fallback)');
-  }
+  summaryParts.push('FNV-1a hash');
 
   if (modules.sharedArrayBuffer) {
     summaryParts.push('SharedArrayBuffer available');
@@ -83,7 +73,6 @@ export function logNativeStatus(): void {
   const status = getNativeModuleStatus();
 
   logger.info({
-    nativeHash: status.nativeHash,
     sharedArrayBuffer: status.sharedArrayBuffer
   }, 'Native module status');
 }

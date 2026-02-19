@@ -11,28 +11,33 @@
 3. **No tech debt forward:** Every trait boundary must account for Phase 4-5 requirements (tiered storage, S3, multi-tenancy). Do not design for "just PostgreSQL" when the roadmap includes S3 and hot/cold tiers.
 4. **Research before design:** Complex server subsystems (storage, cluster, operations) require research sprints before implementation specs.
 
-### Dual Reference Protocol
+### Triple Reference Protocol (updated 2026-02-19)
 
-Each Rust spec should reference TWO sources:
+Each Rust spec should reference up to THREE sources:
 
 1. **TopGun TS Server** (`packages/server/`) — behavioral specification (wire protocol, test vectors, message formats)
-2. **Hazelcast Java** (`/Users/koristuvac/Projects/hazelcast/`) — **primary** architectural reference (how a mature IMDG handles the same domain)
+2. **Hazelcast Java** (`/Users/koristuvac/Projects/hazelcast/`) — **conceptual architecture** (WHAT to build: layer responsibilities, protocols, data flow)
+3. **Rust OSS Projects** — **implementation patterns** (HOW to build in Rust: ownership, concurrency, async composition)
+   - **TiKV** (`/Users/koristuvac/Projects/rust/tikv/`) — storage traits, per-partition FSM, DashMap, batch system
+   - **Quickwit** (`/Users/koristuvac/Projects/rust/quickwit/`) — chitchat gossip, actor framework, Tower layers, service composition
+   - **Databend** (`/Users/koristuvac/Projects/rust/databend/`) — OpenDAL object storage, GlobalServices singleton, pipeline DAG
 
 **Fix-on-port rule:** Before porting a domain, audit the TS source. Fix bugs/dead code in TS first, then port the corrected version. See PROJECT.md "Rust Migration Principles".
 
-| Rust TODO | TopGun TS Source | Hazelcast Java Reference |
-|---|---|---|
-| TODO-063 Partitions (basic) | `server/src/cluster/PartitionService.ts` | `hazelcast/internal/partition/` |
-| TODO-064 Network | `server/src/modules/network-module.ts` | `hazelcast/internal/networking/` |
-| TODO-065 Operation Routing | `server/src/coordinator/`, `server/src/modules/handlers-module.ts` | `hazelcast/spi/`, `hazelcast/internal/partition/operation/` |
-| TODO-066 Cluster | `server/src/cluster/` | `hazelcast/internal/cluster/impl/` |
-| TODO-067 Storage | `server/src/storage/` | `hazelcast/map/impl/recordstore/`, `map/impl/mapstore/` |
-| TODO-025 DAG | [HAZELCAST_DAG_EXECUTOR_SPEC.md](../reference/HAZELCAST_DAG_EXECUTOR_SPEC.md) | `hazelcast/jet/core/`, `jet/impl/execution/` |
-| TODO-033 AsyncStorage | — | `hazelcast/map/impl/mapstore/` (Write-Behind) |
-| TODO-040 Tiered | — | `hazelcast/map/impl/eviction/`, `map/impl/record/` |
-| TODO-041 Multi-tenancy | — | `hazelcast/security/`, `access/` |
-| TODO-036 Extensions | — | `hazelcast/spi/` (Service Provider Interface) |
-| TODO-071 Search | `server/src/search/` | `hazelcast/query/`, `map/impl/query/` |
+| Rust TODO | TopGun TS Source | Hazelcast (WHAT) | Rust OSS (HOW) |
+|---|---|---|---|
+| TODO-063 Partitions | `server/src/cluster/PartitionService.ts` | `internal/partition/` | TiKV: `DashMap`, `RegionState` enum |
+| TODO-064 Network | `server/src/modules/network-module.ts` | `internal/networking/` | Quickwit: Tower layers, axum |
+| TODO-065 Operations | `server/src/coordinator/` | `spi/`, `internal/partition/operation/` | Quickwit: Actor+Tower; TiKV: Worker/Scheduler |
+| TODO-066 Cluster | `server/src/cluster/` | `internal/cluster/impl/` | Quickwit: chitchat; TiKV: FSM batch system |
+| TODO-067 Storage | `server/src/storage/` | `map/impl/recordstore/`, `mapstore/` | TiKV: `engine_traits`; Databend: OpenDAL |
+| TODO-025 DAG | [DAG spec](../reference/HAZELCAST_DAG_EXECUTOR_SPEC.md) | `jet/core/`, `jet/impl/execution/` | Databend: pipeline `StableGraph` |
+| TODO-033 AsyncStorage | — | `map/impl/mapstore/` (Write-Behind) | TiKV: `Scheduler<T>` async flush |
+| TODO-040 Tiered | — | `map/impl/eviction/`, `map/impl/record/` | TiKV: `in_memory_engine` hot/cold |
+| TODO-041 Multi-tenancy | — | `security/`, `access/` | — |
+| TODO-036 Extensions | — | `spi/` (SPI) | Databend: `GlobalInstance` registry |
+| TODO-071 Search | `server/src/search/` | `query/`, `map/impl/query/` | Quickwit: tantivy integration, SearchService trait |
+| TODO-043 S3 Storage | — | — | Databend: OpenDAL `Operator` + layer stack |
 
 **Not relevant from Hazelcast:** `sql/` (Calcite), `cp/` (Raft), `transaction/`, `wan/`, `cache/` (JCache), Spring modules.
 
@@ -128,23 +133,9 @@ Each Rust spec should reference TWO sources:
 - **Effort:** 0.5 day
 - **Source:** External audit finding (Audit 1, Section 1) + deep analysis confirmed bug
 
-### TODO-078: Fix TS Hash Function Inconsistency (xxHash64 vs FNV-1a)
-- **Priority:** P1 (upgraded from P2 — affects client-server compatibility)
-- **Complexity:** Trivial
-- **Summary:** `packages/core/src/utils/hash.ts` has a runtime fallback: if `@topgunbuild/native` loads → xxHash64 (truncated to 32-bit), otherwise → FNV-1a. These produce DIFFERENT hashes for the same input.
-- **Impact analysis (2026-02-18):** `hashString()` is used by:
-  1. **TS Client PartitionRouter** (`packages/client/src/cluster/PartitionRouter.ts:124`) — `hashString(key) % PARTITION_COUNT` for partition routing
-  2. **Core MerkleTree** (`packages/core/src/MerkleTree.ts:39,42`) — Merkle path + item hash
-  3. **Core ORMapMerkleTree** (`packages/core/src/ORMapMerkleTree.ts:51,62,78`) — OR-Map Merkle hashing
-  - `@topgunbuild/native` is `optionalDependencies` in `packages/core/package.json` — Node.js SSR clients may load it
-  - Rust server uses FNV-1a (`packages/core-rust/src/hash.rs`)
-  - **If Node.js client loads native module:** partition routing and Merkle hashes become incompatible with Rust server
-- **Fix:** Remove native xxHash64 path, force FNV-1a unconditionally (matches Rust `fnv1a_hash()`)
-- **Changes:**
-  - `packages/core/src/utils/hash.ts` — remove `@topgunbuild/native` loading, export only `fnv1aHash`
-- **Depends on:** —
-- **Effort:** 1-2 hours
-- **Source:** Discovered during audit analysis; impact confirmed 2026-02-18
+### TODO-078: ~~Fix TS Hash Function Inconsistency (xxHash64 vs FNV-1a)~~ DONE
+- **Status:** Completed 2026-02-19
+- **Resolution:** Removed native xxHash64 path from `hash.ts`, forced FNV-1a unconditionally. Removed `@topgunbuild/native` from core optionalDependencies. Updated server nativeStats and integration tests.
 
 ### TODO-077: Protocol Drift CI Check
 - **Priority:** P2
@@ -179,12 +170,19 @@ Each Rust spec should reference TWO sources:
   - Hazelcast `MapDataStore<K,V>` — write-through vs write-behind, soft/hard flush
   - Hazelcast `DefaultRecordStore` — CompositeMutationObserver pattern (event publishers, index managers)
   - Caller provenance tracking (`CallerOrigin` enum)
+  - **TiKV `engine_traits` crate** — storage abstraction WITHOUT concrete engine dependency; extension traits (`Peekable`, `Iterable`, `WriteBatchExt`); `Arc<DB>` wrapping for cheap cloning
+  - **Databend OpenDAL** — pluggable object storage (S3, GCS, Azure) via single `Operator` trait; layer composition (Timeout → Retry → Metrics)
 - **Deliverable:** Design document with:
   - Rust trait hierarchy (3 layers minimum)
   - Record metadata struct design
   - How PostgreSQL, S3, in-memory, and tiered backends fit the same traits
   - Migration path from Phase 3 (PostgreSQL only) to Phase 5 (S3 + tiered)
+  - Concrete Rust patterns: `Arc<DB>` wrapping (TiKV), OpenDAL for object stores (Databend)
 - **HC Reference:** `hazelcast/map/impl/recordstore/Storage.java`, `RecordStore.java`, `mapstore/MapDataStore.java`, `DefaultRecordStore.java`
+- **Rust Reference:**
+  - TiKV `engine_traits`: `/Users/koristuvac/Projects/rust/tikv/components/engine_traits/src/` — trait hierarchy, extension traits, `KvEngine` composition
+  - TiKV `engine_rocks`: `/Users/koristuvac/Projects/rust/tikv/components/engine_rocks/src/` — concrete `Arc<RocksDB>` implementation
+  - Databend OpenDAL: `/Users/koristuvac/Projects/rust/databend/src/common/storage/src/operator.rs` — `Operator` + layer composition
 - **Effort:** 3-5 days
 - **Output:** `.specflow/reference/RUST_STORAGE_ARCHITECTURE.md`
 
@@ -200,12 +198,20 @@ Each Rust spec should reference TWO sources:
   - Hazelcast `MigrationPlanner` + `MigrationInfo` — 3-phase migration (prepare, replicate, finalize)
   - Hazelcast `PartitionRuntimeState` — compact binary partition table, version tracking, replica deduplication
   - Partition state machine: REPLICA → BACKUP → MIGRATING → LOST
+  - **Quickwit chitchat** — UDP gossip-based membership + failure detection; `ClusterChangeStream` for reactive node join/leave; lightweight alternative to TCP mesh
+  - **TiKV per-partition FSM + Batch System** — `BasicMailbox<Fsm>` per partition, batch scheduler pools 271 partitions across few threads; `DashMap<u32, PartitionMetadata>` for lock-free ownership lookup; `RegionState` enum (Pending/Loading/Active/Evicting)
 - **Deliverable:** Design document with:
   - Cluster state machine (node lifecycle, partition lifecycle)
   - Membership protocol design (versioned views, heartbeat, failure detection)
   - Migration lifecycle (3-phase commit between master/source/destination)
   - How basic PartitionTable (TODO-063) evolves into full partition system
+  - Concrete Rust concurrency: per-partition FSM vs shared state (TiKV), gossip vs mesh (Quickwit)
 - **HC Reference:** `hazelcast/internal/cluster/impl/`, `hazelcast/internal/partition/`
+- **Rust Reference:**
+  - Quickwit chitchat: `/Users/koristuvac/Projects/rust/quickwit/quickwit/quickwit-cluster/src/` — gossip membership, `ClusterChangeStream`, graceful shutdown
+  - TiKV batch system: `/Users/koristuvac/Projects/rust/tikv/components/batch-system/src/` — FSM trait, `BasicMailbox`, batch scheduler
+  - TiKV raftstore: `/Users/koristuvac/Projects/rust/tikv/components/raftstore/src/store/` — `StoreMeta` (Arc<Mutex>), `PeerFsm`, region state machine
+  - TiKV in-memory engine: `/Users/koristuvac/Projects/rust/tikv/components/in_memory_engine/src/` — `RegionState` enum, `DashMap` usage
 - **Effort:** 3-5 days
 - **Output:** `.specflow/reference/RUST_CLUSTER_ARCHITECTURE.md`
 
@@ -220,12 +226,24 @@ Each Rust spec should reference TWO sources:
   - Hazelcast `AbstractPartitionOperation` — partition-routable operations
   - Hazelcast inbound/outbound handler pipeline — composable middleware
   - How tower middleware maps to Hazelcast's handler pipeline
+  - **Quickwit Actor framework** — custom actor system with `Actor` + `Handler<M>` traits, typed mailboxes, `ActorContext`, observable state for testing; `Universe` for lifecycle management; backpressure-aware messaging
+  - **Quickwit Tower layers** — `TimeoutLayer`, `RetryLayer`, `LoadShedLayer`, `MetricsLayer`, `EventListenerLayer`; composable via `ServiceBuilder`
+  - **TiKV Worker/Scheduler pattern** — `Scheduler<T>` with bounded channel + backpressure, `LazyWorker` with `Runnable` trait, specialized workers per subsystem (GC, CDC, PD)
+  - **Databend GlobalServices** — `OnceCell` + `TypeMap` singleton registry, explicit initialization order, `GlobalInstance::set/get` pattern
 - **Deliverable:** Design document with:
   - Rust ServiceRegistry trait and lifecycle hooks
   - Operation trait (partition-routable, with provenance)
   - Handler pipeline design (tower-compatible)
   - How 26 TS handlers map to Rust operations
+  - Concrete Rust patterns: Actor vs Worker vs direct async (decision matrix)
 - **HC Reference:** `hazelcast/spi/impl/`, `hazelcast/internal/partition/operation/`
+- **Rust Reference:**
+  - Quickwit actors: `/Users/koristuvac/Projects/rust/quickwit/quickwit/quickwit-actors/src/` — Actor/Handler traits, Universe, mailbox, observable state
+  - Quickwit tower: `/Users/koristuvac/Projects/rust/quickwit/quickwit/quickwit-common/src/tower/` — custom tower layers
+  - Quickwit serve: `/Users/koristuvac/Projects/rust/quickwit/quickwit/quickwit-serve/src/lib.rs` — service composition startup (~lines 428-600)
+  - TiKV workers: `/Users/koristuvac/Projects/rust/tikv/components/tikv_util/src/worker/` — Scheduler, LazyWorker, Runnable trait
+  - TiKV server init: `/Users/koristuvac/Projects/rust/tikv/src/server/` — layered initialization, `TikvServer` struct assembly
+  - Databend global services: `/Users/koristuvac/Projects/rust/databend/src/query/service/src/global_services.rs` — initialization order (~lines 66-218)
 - **Effort:** 2-3 days
 - **Output:** `.specflow/reference/RUST_SERVICE_ARCHITECTURE.md`
 
@@ -624,3 +642,4 @@ All items below are completed and archived in `.specflow/archive/`:
 *Restructured 2026-02-12: Replaced wave-based organization with phase-based Rust migration roadmap. Added TODO-059 through TODO-072 for Rust-specific work. Product positioning decisions (schema, shapes, WASM) integrated as concrete TODOs.*
 *Updated 2026-02-15: Added TODO-074 through TODO-078 from external audit analysis. HLC validation, ORMap hash determinism bug, TS hash inconsistency, protocol drift CI, MsgPack hash evaluation.*
 *Updated 2026-02-18: Strategic audit. Added Phase 2.5 (Architecture Research Sprint: TODO-080, 081, 082). Redesigned Phase 3 items (TODO-063/065/066/067) from "TS port" to "Hazelcast-informed design". Upgraded TODO-078 to P1 (client-server hash compatibility confirmed). Deferred TODO-076 to Phase 4. Eliminated TODO-045. Marked completed Phase 2 items.*
+*Updated 2026-02-19: Added Triple Reference Protocol. Rust OSS projects (TiKV, Quickwit, Databend) added as implementation pattern references alongside Hazelcast conceptual architecture. Research tasks TODO-080/081/082 updated with concrete Rust file paths. Rationale: Java→Rust translation has real friction (ownership, no inheritance, no GC) — Rust-native patterns needed for storage traits (TiKV engine_traits), cluster concurrency (TiKV FSM+DashMap), service composition (Quickwit actors+Tower), object storage (Databend OpenDAL).*

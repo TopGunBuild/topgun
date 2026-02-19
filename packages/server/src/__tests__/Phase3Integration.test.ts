@@ -1,10 +1,9 @@
 /**
  * Integration Tests
  *
- * Tests for native module integration:
- * - Native hash (xxHash64) in core
+ * Tests for module integration:
+ * - Hash utilities (FNV-1a)
  * - SharedArrayBuffer for worker communication
- * - Graceful fallback when native unavailable
  *
  * Integration
  */
@@ -17,9 +16,6 @@ import {
 import {
   hashString,
   combineHashes,
-  isUsingNativeHash,
-  disableNativeHash,
-  resetNativeHash,
 } from '@topgunbuild/core';
 import {
   getNativeStats,
@@ -28,18 +24,11 @@ import {
 } from '../utils/nativeStats';
 
 describe('Integration Tests', () => {
-  describe('Native Module Detection', () => {
-    afterEach(() => {
-      // Reset native module state for next test
-      resetNativeHash();
-    });
-
+  describe('Module Detection', () => {
     it('should report native module status correctly', () => {
       const status = getNativeModuleStatus();
 
-      expect(status).toHaveProperty('nativeHash');
       expect(status).toHaveProperty('sharedArrayBuffer');
-      expect(typeof status.nativeHash).toBe('boolean');
       expect(typeof status.sharedArrayBuffer).toBe('boolean');
     });
 
@@ -50,19 +39,13 @@ describe('Integration Tests', () => {
       expect(isAvailable).toBe(true);
     });
 
-    it('should detect hash module status', () => {
-      const isNative = isUsingNativeHash();
-      expect(typeof isNative).toBe('boolean');
-      // In test environment, native hash might or might not be available
-    });
-
     it('should get native stats', () => {
       const stats = getNativeStats();
 
       expect(stats).toHaveProperty('modules');
       expect(stats).toHaveProperty('sharedMemory');
       expect(stats).toHaveProperty('summary');
-      expect(typeof stats.modules.nativeHash).toBe('boolean');
+      expect(typeof stats.modules.sharedArrayBuffer).toBe('boolean');
     });
 
     it('should log native status without throwing', () => {
@@ -71,10 +54,6 @@ describe('Integration Tests', () => {
   });
 
   describe('Hash Module Integration', () => {
-    afterEach(() => {
-      resetNativeHash();
-    });
-
     it('should hash strings consistently', () => {
       const str = 'test-string';
       const hash1 = hashString(str);
@@ -106,22 +85,6 @@ describe('Integration Tests', () => {
 
       expect(combined1).toBe(combined2);
       expect(combined2).toBe(combined3);
-    });
-
-    it('should work with JS fallback when native is disabled', () => {
-      // Disable native hash
-      disableNativeHash();
-
-      expect(isUsingNativeHash()).toBe(false);
-
-      // Should still work
-      const hash = hashString('test');
-      expect(typeof hash).toBe('number');
-      expect(hash).toBeGreaterThanOrEqual(0);
-
-      // Should be consistent
-      const hash2 = hashString('test');
-      expect(hash).toBe(hash2);
     });
 
     it('should handle typical Merkle tree keys', () => {
@@ -312,53 +275,19 @@ describe('Integration Tests', () => {
     });
   });
 
-  describe('Graceful Degradation', () => {
-    afterEach(() => {
-      resetNativeHash();
-    });
-
-    it('should work without native hash module', () => {
-      disableNativeHash();
-
-      // All operations should still work
-      const hash = hashString('test-without-native');
-      expect(typeof hash).toBe('number');
-
-      const combined = combineHashes([hash, hash, hash]);
-      expect(typeof combined).toBe('number');
-    });
-
-    it('should report fallback status when native unavailable', () => {
-      disableNativeHash();
-
+  describe('Hash Determinism', () => {
+    it('should always use FNV-1a', () => {
       const stats = getNativeStats();
-      expect(stats.modules.nativeHash).toBe(false);
       expect(stats.summary).toContain('FNV-1a');
     });
 
-    it('should maintain hash consistency across implementation switch', () => {
-      // Get hash with whatever implementation is available
+    it('should produce consistent hashes across calls', () => {
       const hash1 = hashString('consistent-test');
-
-      // Force fallback
-      disableNativeHash();
       const hash2 = hashString('consistent-test');
-
-      // Reset and get hash again
-      resetNativeHash();
       const hash3 = hashString('consistent-test');
 
-      // Hash1 and hash3 should match (same implementation)
-      // Hash2 might be different (FNV-1a fallback)
-      // But all should be valid numbers
-      expect(typeof hash1).toBe('number');
-      expect(typeof hash2).toBe('number');
-      expect(typeof hash3).toBe('number');
-
-      // If native was available initially, hash1 === hash3
-      if (isUsingNativeHash()) {
-        expect(hash1).toBe(hash3);
-      }
+      expect(hash1).toBe(hash2);
+      expect(hash2).toBe(hash3);
     });
   });
 
