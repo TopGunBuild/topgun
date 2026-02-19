@@ -6,14 +6,14 @@
 - **Status:** idle
 - **Project Phase:** Phase 2 (Rust Core)
 - **TODO Items:** 29 (1 client bug fix + 9 Rust bridge/core + 5 audit findings + 14 existing deferred)
-- **Next Step:** /sf:new or /sf:next
+- **Next Step:** `/sf:new` or `/sf:next`
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
 ## Queue
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-052e | Message Schema -- HTTP Sync, Message Union, and Cross-Language Tests | ready | Phase 2 |
+| (empty) | | | | |
 
 ## Migration Roadmap (high-level)
 
@@ -40,13 +40,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-19 | SPEC-052e | COMPLETED: Message Schema -- HTTP Sync, Message Union, and Cross-Language Tests. 5 commits. 4 audit cycles, 1 review cycle. 12 HTTP sync types, 77-variant Message enum, 61 golden fixtures, 9 integration tests. float64 deserialization fix for JS interop. 393 Rust tests + 62 TS tests. Zero clippy warnings. |
+| 2026-02-19 | SPEC-052e | REVIEWED v1: APPROVED. All 8 acceptance criteria verified. 393 Rust tests + 62 TS tests pass, zero clippy warnings. 77-variant Message enum, 12 HTTP sync types, 61 golden fixtures. 3 minor findings -- all well-documented and non-blocking. |
+| 2026-02-19 | SPEC-052e | EXECUTED: Message Schema -- HTTP Sync, Message Union, and Cross-Language Tests. 5 commits (3 waves). 12 HTTP sync types, 77-variant Message enum, 61 golden fixtures, 9 integration tests. float64 deserialization fix for JS interop. 393 Rust tests + 62 TS tests. Zero clippy warnings. |
 | 2026-02-18 | SPEC-052d | COMPLETED: Message Schema -- Messaging and Client Events Domain Structs. 2 commits. 4 audit cycles, 1 review cycle. 44 types (33 messaging + 11 client events). 353 tests. All 7 AC pass. |
 | 2026-02-18 | SPEC-052d | REVIEWED v1: APPROVED. All 7 acceptance criteria verified. 353 tests pass (72 new + 281 existing), zero clippy warnings. 44 types field-accurate against TS source. No critical, major, or minor issues found. |
-| 2026-02-17 | SPEC-052c | COMPLETED: Message Schema -- Search and Cluster Domain Structs. 4 commits. 3 audit cycles, 1 review cycle. 26 types (7 search + 19 cluster). 281 tests. All 4 AC pass. |
-| 2026-02-17 | SPEC-052c | REVIEWED v1: APPROVED. All 4 acceptance criteria verified. 281 tests pass, zero clippy warnings. 26 types field-accurate against TS source. No critical, major, or minor issues found. |
-| 2026-02-17 | SPEC-052b | COMPLETED: Message Schema -- Sync and Query Domain Structs. 2+4 commits (exec + SPEC-054 fix). 4 audit cycles. 28 sync + 8 query structs. Code improved by SPEC-054 (r#type removed, f64→integers, Default derives). 246 tests. |
-| 2026-02-17 | SPEC-054 | COMPLETED: Message Schema Architecture Fix-on-Port. 4 commits, 4 files modified. 2 audit cycles, 1 review cycle. All 6 AC pass. 246 tests. Unblocks SPEC-052c/d/e. |
-| 2026-02-17 | SPEC-054 | REVIEWED v1: APPROVED. All 6 acceptance criteria verified against source code. 246 tests pass, zero clippy warnings. No critical, major, or minor issues found. |
 
 ## Project Patterns
 
@@ -74,10 +72,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 - Node ID reconciliation pattern: ConnectionPool.addNode() matches incoming server-assigned nodeId against existing seed connections by endpoint; remapNodeId() transfers NodeConnection entry preserving WebSocket/state/pending; node:remapped event notifies ClusterClient and PartitionRouter
 - Batch delegation pattern: IConnectionProvider.sendBatch is optional; SyncEngine delegates to it when available (cluster mode) for per-key partition routing; falls back to single OP_BATCH in single-server mode
 - Double-option deserialization pattern: For Rust fields matching TS `.nullable().optional()`, use `Option<Option<T>>` with custom `deserialize_double_option` to distinguish absent (None) from explicitly-null (Some(None))
+- Float64 numeric interop pattern: JavaScript's msgpackr encodes numbers > 2^32 as float64; use `serde_number::deserialize_u64` (from `hlc::serde_number`) on Rust u64/i64 fields to accept both integer and float64 MsgPack wire values
 
 ## Warnings
 
 (none)
 
 ---
-*Last updated: 2026-02-18 (SPEC-052d completed and archived)*
+*Last updated: 2026-02-19 (SPEC-052e completed and archived)*

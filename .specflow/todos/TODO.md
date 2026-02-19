@@ -1,25 +1,32 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-02-15
-**Strategy:** Complete TypeScript Wave 1 → Bridge to Rust → Rust server rewrite
+**Last updated:** 2026-02-18
+**Strategy:** Rust-first IMDG design informed by Hazelcast architecture, not a TypeScript port
 **Product positioning:** "The reactive data grid that extends the cluster into the browser" ([PRODUCT_POSITIONING_RESEARCH.md](../reference/PRODUCT_POSITIONING_RESEARCH.md))
+
+### Design Philosophy (updated 2026-02-18)
+
+1. **Rust-first:** Maximize Rust's type system, ownership model, and async runtime. Do not replicate TypeScript limitations.
+2. **Hazelcast-informed:** Use Hazelcast (`/Users/koristuvac/Projects/hazelcast/`) as primary architectural reference for server-side components. TS server is behavioral reference only (wire protocol, test vectors).
+3. **No tech debt forward:** Every trait boundary must account for Phase 4-5 requirements (tiered storage, S3, multi-tenancy). Do not design for "just PostgreSQL" when the roadmap includes S3 and hot/cold tiers.
+4. **Research before design:** Complex server subsystems (storage, cluster, operations) require research sprints before implementation specs.
 
 ### Dual Reference Protocol
 
 Each Rust spec should reference TWO sources:
 
-1. **TopGun TS Server** (`packages/server/`) — behavioral specification (what the system does, test vectors, wire protocol)
-2. **Hazelcast Java** (`/Users/koristuvac/Projects/hazelcast/`) — architectural reference (how a mature IMDG handles the same domain)
+1. **TopGun TS Server** (`packages/server/`) — behavioral specification (wire protocol, test vectors, message formats)
+2. **Hazelcast Java** (`/Users/koristuvac/Projects/hazelcast/`) — **primary** architectural reference (how a mature IMDG handles the same domain)
 
 **Fix-on-port rule:** Before porting a domain, audit the TS source. Fix bugs/dead code in TS first, then port the corrected version. See PROJECT.md "Rust Migration Principles".
 
 | Rust TODO | TopGun TS Source | Hazelcast Java Reference |
 |---|---|---|
-| TODO-063 Partitions | `server/src/cluster/PartitionService.ts` | `hazelcast/partition/` |
+| TODO-063 Partitions (basic) | `server/src/cluster/PartitionService.ts` | `hazelcast/internal/partition/` |
 | TODO-064 Network | `server/src/modules/network-module.ts` | `hazelcast/internal/networking/` |
-| TODO-065 Handlers | `server/src/coordinator/`, `server/src/modules/handlers-module.ts` | `hazelcast/map/impl/operation/` |
-| TODO-066 Cluster | `server/src/cluster/` | `hazelcast/cluster/` |
-| TODO-067 Storage | `server/src/storage/` | `hazelcast/map/impl/mapstore/` |
+| TODO-065 Operation Routing | `server/src/coordinator/`, `server/src/modules/handlers-module.ts` | `hazelcast/spi/`, `hazelcast/internal/partition/operation/` |
+| TODO-066 Cluster | `server/src/cluster/` | `hazelcast/internal/cluster/impl/` |
+| TODO-067 Storage | `server/src/storage/` | `hazelcast/map/impl/recordstore/`, `map/impl/mapstore/` |
 | TODO-025 DAG | [HAZELCAST_DAG_EXECUTOR_SPEC.md](../reference/HAZELCAST_DAG_EXECUTOR_SPEC.md) | `hazelcast/jet/core/`, `jet/impl/execution/` |
 | TODO-033 AsyncStorage | — | `hazelcast/map/impl/mapstore/` (Write-Behind) |
 | TODO-040 Tiered | — | `hazelcast/map/impl/eviction/`, `map/impl/record/` |
@@ -47,47 +54,19 @@ Each Rust spec should reference TWO sources:
 - **Status:** Complete (d6b490b, 2026-02-13, via `/sf:quick`)
 - **Summary:** Changed socket event closures to use `connection.nodeId` (mutable) instead of captured `nodeId` parameter
 
-### TODO-045: DST Documentation
-- **Priority:** Low (optional, do between heavy tasks)
-- **Summary:** Document VirtualClock, SeededRNG, ScenarioRunner in official docs
-- **Location:** `apps/docs-astro/src/content/docs/reference/testing.mdx`
-- **Effort:** 0.5-1 day
-
 ---
 
-## Phase 1: Bridge TS to Rust (~1-2 days)
+## Phase 1: Bridge TS to Rust — COMPLETE
 
 *Goal: Set up Rust infrastructure so the first Rust spec can be executed immediately.*
 
-### TODO-059: Rust Project Bootstrap
-- **Priority:** P0 (blocks all Rust work)
-- **Complexity:** Medium
-- **Summary:** Create Cargo workspace, CI pipeline, and project structure for Rust server
-- **Deliverables:**
-  - `Cargo.toml` workspace root with `packages/core-rust/` and `packages/server-rust/`
-  - CI pipeline: `cargo check`, `cargo test`, `cargo clippy`, `cargo fmt`
-  - Rust toolchain config: `rust-toolchain.toml` (stable channel)
-  - pnpm + Cargo coexistence verified (both build systems work)
-  - `.specflow/PROJECT.md` updated with Rust Language Profile (enables SpecFlow Rust checks)
-- **Context:** [RUST_SERVER_MIGRATION_RESEARCH.md](../reference/RUST_SERVER_MIGRATION_RESEARCH.md) Section 8 (Monorepo Structure)
-- **Effort:** 0.5-1 day
+### TODO-059: Rust Project Bootstrap — DONE
+- **Status:** Complete
+- **Summary:** Cargo workspace, CI pipeline, Rust toolchain, pnpm + Cargo coexistence
 
-### TODO-060: Upfront Trait Definitions → SPEC-050 ✅
-- **Priority:** P0 (blocks all Rust feature work)
-- **Complexity:** Low (design only, ~150 lines of Rust)
-- **Status:** DONE (SPEC-050 completed 2026-02-13)
-- **Summary:** Define the 6 foundational traits that gate all Rust architecture decisions
-- **Deliverables:**
-  - `ServerStorage` trait (pluggable persistence)
-  - `MapProvider` trait (async map access, tiered storage ready)
-  - `QueryNotifier` trait (write-path notifications)
-  - `Processor` trait (DAG executor vertices)
-  - `RequestContext` struct (multi-tenancy, auth, tracing)
-  - `SchemaProvider` trait (schema validation + partial replication shapes)
-- **Context:**
-  - Traits 1-5: [RUST_SERVER_MIGRATION_RESEARCH.md](../reference/RUST_SERVER_MIGRATION_RESEARCH.md) Section 7
-  - Trait 6: [PRODUCT_POSITIONING_RESEARCH.md](../reference/PRODUCT_POSITIONING_RESEARCH.md) Section 7.5
-- **Effort:** 0.5 day
+### TODO-060: Upfront Trait Definitions → SPEC-050 — DONE
+- **Status:** Complete (SPEC-050 completed 2026-02-13)
+- **Summary:** 6 foundational traits: ServerStorage, MapProvider, QueryNotifier, Processor, RequestContext, SchemaProvider
 
 ---
 
@@ -95,42 +74,34 @@ Each Rust spec should reference TWO sources:
 
 *Goal: Port foundational types and prove client-server binary compatibility.*
 
-### TODO-061: Core CRDTs in Rust → SPEC-051
-- **Priority:** P0 (foundation for everything)
-- **Complexity:** Medium (spec: large — needs /sf:split)
-- **Summary:** Port LWWMap, ORMap, HLC, and MerkleTree to Rust
-- **Key decisions:**
-  - Custom CRDT implementation (not yrs/crdts crate) for full control
-  - `serde` + `rmp-serde` for MsgPack compatibility with existing TS client
-  - Property-based testing with `proptest` for CRDT correctness
-- **Source:** `packages/core/src/crdt/`, `packages/core/src/hlc/`, `packages/core/src/merkle/`
-- **Verification:** Run same test vectors as TS to confirm behavioral equivalence
-- **Effort:** 1-2 weeks
+### TODO-061: Core CRDTs in Rust → SPEC-051 — DONE
+- **Status:** Complete (LWWMap, ORMap, HLC, MerkleTree — all with proptest)
+- **Summary:** Custom CRDT implementations with `serde` + `rmp-serde` for MsgPack compatibility
+- **Test coverage:** 280+ tests including proptest commutativity/convergence
 
-### TODO-062: Message Schema Compatibility → SPEC-052
+### TODO-062: Message Schema Compatibility → SPEC-052 — DONE
 - **Priority:** P0 (client-server contract)
-- **Complexity:** Large (needs /sf:split — 53+ message types across 8 domains)
-- **Status:** Spec created (SPEC-052, 2026-02-14)
-- **Summary:** Ensure Rust server can serialize/deserialize all message types compatible with TS client
-- **Key decisions:**
-  - MsgPack wire format stays (cross-language compatibility)
-  - Zod schemas in `packages/core/src/schemas/` are the source of truth
-  - Rust serde structs must produce identical bytes as TS msgpackr
-- **Approach:**
-  - Generate Rust structs from Zod schema definitions (build step or manual)
-  - Integration test: TS client sends message → Rust deserializes → Rust serializes → TS verifies
-- **Depends on:** TODO-059 (project bootstrap)
-- **Effort:** 1-2 weeks
+- **Status:** Complete (SPEC-052a through 052e all done, 2026-02-19). 77-variant Message enum, 12 HTTP sync types, 100+ domain types, 393 Rust tests + 62 TS tests, 61 golden fixtures.
+- **Summary:** Rust server can serialize/deserialize all message types compatible with TS client
+- **Depends on:** TODO-059 ✅
 
-### TODO-063: Partition Service in Rust
+### TODO-079: Rust Message Schema Architecture (Fix-on-Port) → SPEC-054 — DONE
+- **Status:** Complete (SPEC-054 completed 2026-02-17)
+- **Summary:** Removed `r#type: String` from inner structs, replaced `f64` with proper integer types, added `Default` derives
+
+### TODO-063: Basic Partition Hash and Lookup
 - **Priority:** P1
 - **Complexity:** Low
-- **Summary:** Port PartitionService (271 partitions, consistent hashing, partition pruning) to Rust
-- **TS Source:** `packages/server/src/cluster/PartitionService.ts`
-- **HC Reference:** `hazelcast/partition/` — partition table protocol, rebalancing algorithm
-- **Note:** Pure logic, no I/O — straightforward port
-- **Depends on:** TODO-059
-- **Effort:** 2-3 days
+- **Summary:** Implement basic partition hash function (`fnv1a(key) % 271`) and partition table lookup in Rust. This is the **client-compatible subset** — same modulo hash used by `PartitionRouter` in TS client. Full partition state machine, migration lifecycle, and fault-domain awareness are Phase 3 concerns (after TODO-081 research).
+- **Scope:**
+  - `hash_to_partition(key) -> u32` (matches TS `hashString(key) % PARTITION_COUNT`)
+  - `PartitionTable` struct: partition ID → owner node mapping
+  - Partition pruning for query optimization
+- **NOT in scope:** rebalancing, migration, state machine, backup assignment (→ Phase 3)
+- **TS Source:** `packages/server/src/cluster/PartitionService.ts` (basic hash + table)
+- **HC Reference:** `hazelcast/internal/partition/IPartitionService.java` (interface only)
+- **Depends on:** TODO-059 ✅
+- **Effort:** 1-2 days
 
 ### TODO-074: HLC Node ID Colon Validation (TS + Rust)
 - **Priority:** P2 (hardening, theoretical risk)
@@ -153,47 +124,27 @@ Each Rust spec should reference TWO sources:
   - `packages/core-rust/src/or_map.rs` — implement `canonical_json()` helper, use in `hash_entry()`
   - Add test: known object `{z:1, a:2}` hashes identically to sorted `{a:2, z:1}`
   - Add cross-language test vector: TS `stringifyValue({z:1, a:2})` === Rust `canonical_json({z:1, a:2})`
-- **Depends on:** TODO-061 (CRDTs)
+- **Depends on:** TODO-061 ✅
 - **Effort:** 0.5 day
 - **Source:** External audit finding (Audit 1, Section 1) + deep analysis confirmed bug
 
 ### TODO-078: Fix TS Hash Function Inconsistency (xxHash64 vs FNV-1a)
-- **Priority:** P2 (pre-existing TS bug)
+- **Priority:** P1 (upgraded from P2 — affects client-server compatibility)
 - **Complexity:** Trivial
-- **Summary:** `packages/core/src/utils/hash.ts` has a runtime fallback: if `@topgunbuild/native` loads → xxHash64 (truncated to 32-bit), otherwise → FNV-1a. These produce DIFFERENT hashes for the same input. In a cluster where some nodes load the native module and others don't, Merkle hashes diverge → false sync cycles. Since TS server is being deprecated, simplest fix is to force FNV-1a unconditionally (matches Rust `fnv1a_hash()`).
+- **Summary:** `packages/core/src/utils/hash.ts` has a runtime fallback: if `@topgunbuild/native` loads → xxHash64 (truncated to 32-bit), otherwise → FNV-1a. These produce DIFFERENT hashes for the same input.
+- **Impact analysis (2026-02-18):** `hashString()` is used by:
+  1. **TS Client PartitionRouter** (`packages/client/src/cluster/PartitionRouter.ts:124`) — `hashString(key) % PARTITION_COUNT` for partition routing
+  2. **Core MerkleTree** (`packages/core/src/MerkleTree.ts:39,42`) — Merkle path + item hash
+  3. **Core ORMapMerkleTree** (`packages/core/src/ORMapMerkleTree.ts:51,62,78`) — OR-Map Merkle hashing
+  - `@topgunbuild/native` is `optionalDependencies` in `packages/core/package.json` — Node.js SSR clients may load it
+  - Rust server uses FNV-1a (`packages/core-rust/src/hash.rs`)
+  - **If Node.js client loads native module:** partition routing and Merkle hashes become incompatible with Rust server
+- **Fix:** Remove native xxHash64 path, force FNV-1a unconditionally (matches Rust `fnv1a_hash()`)
 - **Changes:**
-  - `packages/core/src/utils/hash.ts` — remove native xxHash64 path, use FNV-1a only
-  - OR: force one algorithm globally at startup
+  - `packages/core/src/utils/hash.ts` — remove `@topgunbuild/native` loading, export only `fnv1aHash`
 - **Depends on:** —
 - **Effort:** 1-2 hours
-- **Source:** Discovered during audit analysis (not in either external audit)
-
-### TODO-079: Rust Message Schema Architecture (Fix-on-Port) → SPEC-054
-- **Priority:** P0 (blocks all remaining message schema work)
-- **Complexity:** Medium
-- **Summary:** The current Rust message structs (SPEC-052a/b) copy JS limitations instead of leveraging Rust's type system. Three architectural issues must be resolved before implementing SPEC-052c/d/e:
-  1. **`r#type: String` conflicts with Message enum.** SPEC-052e plans `#[serde(tag = "type")]` Message enum, but inner structs already have `r#type: String`. On serialization, serde produces duplicate `type` keys -- undefined behavior. Inner structs must NOT have a `type` field; the enum owns the tag.
-  2. **`f64` for integer fields copies JS limitation.** JS has no integer type; Rust does. Fields like `root_hash`, `count`, `code`, `timeout` should use `u64`/`u32`/`i64`. This also produces **better** wire compatibility: TS `msgpackr` encodes integers as MsgPack integers, and Rust `u64` decodes them directly (no coercion), while `f64` causes rmp_serde to emit MsgPack float64 on re-serialization -- different binary format.
-  3. **No `Default` derives** for payload structs with many optional fields.
-- **Deliverables:**
-  1. Prototype `#[serde(tag = "type")]` Message enum with 3 representative variants (payload-wrapped, flat, flat+binary) to verify serde behavior with rmp_serde
-  2. Define integer type policy with MsgPack compatibility verification
-  3. Establish struct pattern: inner structs WITHOUT `type` field, Message enum owns the tag
-  4. Retroactively fix SPEC-052a structs (base.rs): remove `r#type: String` from AuthMessage, AuthRequiredMessage
-  5. Retroactively fix SPEC-052b structs (sync.rs, query.rs): remove `r#type: String` from all message structs, replace `f64` with proper integer types where appropriate
-  6. Add `Default` derives to payload structs
-  7. Update all tests, verify `cargo test` + `cargo clippy` pass
-- **Key type decisions to prototype:**
-  - `root_hash`: `f64` → likely `u64` (FNV-1a returns 32-bit, but stored as `z.number()`)
-  - `count` (BatchMessage): `f64` → likely `u32`
-  - `code` (OpRejectedPayload): `f64` → likely `u32`
-  - `timeout`: `f64` → likely `u64` (milliseconds)
-  - `last_sync_timestamp`: `f64` → evaluate (JS timestamp, integer ms since epoch)
-  - `Timestamp.millis`: already `i64` in hlc.rs -- correct, no change needed
-- **Depends on:** SPEC-052b (complete -- provides structs to rework)
-- **Blocks:** SPEC-052c, SPEC-052d, SPEC-052e (must not continue with broken pattern)
-- **Effort:** 0.5-1 day
-- **Source:** Post-execution architectural review of SPEC-052b
+- **Source:** Discovered during audit analysis; impact confirmed 2026-02-18
 
 ### TODO-077: Protocol Drift CI Check
 - **Priority:** P2
@@ -206,15 +157,83 @@ Each Rust spec should reference TWO sources:
       pnpm --filter @topgunbuild/core test -- cross-lang-fixtures
       cargo test --test cross_lang_compat
   ```
-- **Depends on:** TODO-062 (all sub-specs, especially SPEC-052e)
+- **Depends on:** TODO-062 ✅
 - **Effort:** 0.5 day
 - **Source:** External audit finding (Audit 2, Section 3.2)
 
 ---
 
-## Phase 3: Rust Server Core (~6-8 weeks)
+## Phase 2.5: Architecture Research Sprint (~1-2 weeks) — NEW
 
-*Goal: Working Rust server that passes existing TS integration tests.*
+*Goal: Design Hazelcast-informed server architecture BEFORE writing implementation specs. Each research task produces a design document with trait hierarchies, data flow diagrams, and validation against Phase 4-5 requirements.*
+
+**Rationale (2026-02-18):** Phase 3 items were originally formulated as "port from TS". Audit revealed the TS server is architecturally simplistic compared to Hazelcast in storage layering, partition management, cluster protocol, and operation routing. Implementing Phase 3 without research would embed TS limitations into the Rust codebase — exactly the tech debt we want to avoid.
+
+### TODO-080: Storage Architecture Research
+- **Priority:** P0 (blocks TODO-067)
+- **Complexity:** Medium (research + design)
+- **Summary:** Design multi-layer storage architecture informed by Hazelcast's Storage → RecordStore → MapDataStore hierarchy. Must account for Phase 5 requirements (S3, tiered hot/cold, write-behind) from day 1.
+- **Research scope:**
+  - Hazelcast `Storage<K,R>` interface — cursor-based iteration, mutation-tolerant iterators
+  - Hazelcast `RecordStore<R>` — TTL/expiry, eviction, record metadata (version, timestamps, hit count)
+  - Hazelcast `MapDataStore<K,V>` — write-through vs write-behind, soft/hard flush
+  - Hazelcast `DefaultRecordStore` — CompositeMutationObserver pattern (event publishers, index managers)
+  - Caller provenance tracking (`CallerOrigin` enum)
+- **Deliverable:** Design document with:
+  - Rust trait hierarchy (3 layers minimum)
+  - Record metadata struct design
+  - How PostgreSQL, S3, in-memory, and tiered backends fit the same traits
+  - Migration path from Phase 3 (PostgreSQL only) to Phase 5 (S3 + tiered)
+- **HC Reference:** `hazelcast/map/impl/recordstore/Storage.java`, `RecordStore.java`, `mapstore/MapDataStore.java`, `DefaultRecordStore.java`
+- **Effort:** 3-5 days
+- **Output:** `.specflow/reference/RUST_STORAGE_ARCHITECTURE.md`
+
+### TODO-081: Cluster Protocol Research
+- **Priority:** P0 (blocks TODO-063 advanced, TODO-066)
+- **Complexity:** Medium (research + design)
+- **Summary:** Design Hazelcast-informed cluster protocol for Rust. TS ClusterManager lacks membership versioning, explicit join ceremony, split-brain recovery, and 3-phase migration lifecycle.
+- **Research scope:**
+  - Hazelcast `MembershipManager` — versioned MembersView, membership change propagation
+  - Hazelcast `ClusterHeartbeatManager` — pluggable failure detectors (deadline, phi-accrual, ICMP)
+  - Hazelcast `SplitBrainHandler` — master-centric merge detection
+  - Hazelcast `ClusterJoinManager` — discovery + handshake ceremony
+  - Hazelcast `MigrationPlanner` + `MigrationInfo` — 3-phase migration (prepare, replicate, finalize)
+  - Hazelcast `PartitionRuntimeState` — compact binary partition table, version tracking, replica deduplication
+  - Partition state machine: REPLICA → BACKUP → MIGRATING → LOST
+- **Deliverable:** Design document with:
+  - Cluster state machine (node lifecycle, partition lifecycle)
+  - Membership protocol design (versioned views, heartbeat, failure detection)
+  - Migration lifecycle (3-phase commit between master/source/destination)
+  - How basic PartitionTable (TODO-063) evolves into full partition system
+- **HC Reference:** `hazelcast/internal/cluster/impl/`, `hazelcast/internal/partition/`
+- **Effort:** 3-5 days
+- **Output:** `.specflow/reference/RUST_CLUSTER_ARCHITECTURE.md`
+
+### TODO-082: Service & Operation Architecture Research
+- **Priority:** P1 (blocks TODO-065)
+- **Complexity:** Medium (research + design)
+- **Summary:** Design Rust service registry and operation execution model. TS uses stateless message handlers; Hazelcast uses partition-routable operations with execution barriers, provenance tracking, and service lifecycle hooks.
+- **Research scope:**
+  - Hazelcast `ServiceManager` — dynamic service registration, interface-based discovery
+  - Hazelcast `ManagedService` — lifecycle (init, reset, shutdown)
+  - Hazelcast `MigrationAwareService` — migration hooks (prepare, commit, rollback)
+  - Hazelcast `AbstractPartitionOperation` — partition-routable operations
+  - Hazelcast inbound/outbound handler pipeline — composable middleware
+  - How tower middleware maps to Hazelcast's handler pipeline
+- **Deliverable:** Design document with:
+  - Rust ServiceRegistry trait and lifecycle hooks
+  - Operation trait (partition-routable, with provenance)
+  - Handler pipeline design (tower-compatible)
+  - How 26 TS handlers map to Rust operations
+- **HC Reference:** `hazelcast/spi/impl/`, `hazelcast/internal/partition/operation/`
+- **Effort:** 2-3 days
+- **Output:** `.specflow/reference/RUST_SERVICE_ARCHITECTURE.md`
+
+---
+
+## Phase 3: Rust Server Core (~8-10 weeks)
+
+*Goal: Working Rust server that passes existing TS integration tests. Architecture informed by Phase 2.5 research, not by TS server structure.*
 
 ### TODO-064: Networking Layer (axum + WebSocket)
 - **Priority:** P0
@@ -224,60 +243,60 @@ Each Rust spec should reference TWO sources:
   - `GET /health`, `POST /sync` (HTTP sync, existing protocol)
   - WebSocket upgrade for real-time sync
   - TLS support (rustls)
-  - IConnection adapter pattern preserved
+  - Channel abstraction (Hazelcast-style, protocol-agnostic)
+  - Tower middleware pipeline for handler composition
 - **Crates:** axum, tokio-tungstenite, tower, rustls
-- **Depends on:** TODO-059, TODO-062
+- **Depends on:** TODO-059 ✅, TODO-062 ✅
 - **Effort:** 1-2 weeks
 
-### TODO-065: Message Handlers (26 handlers, 8 domains)
+### TODO-067: Multi-Layer Storage System
 - **Priority:** P0
-- **Complexity:** Large
-- **Summary:** Port all 26 message handlers organized by domain
-- **Known TS bug (covered by rewrite):** `BatchProcessingHandler.processBatchAsync` nests inter-node forwarded messages in an extra `{type: 'CLIENT_OP', payload: {...}}` layer, causing `handleOpForward` to fail. Single-op path is correct. (Discovered by SPEC-048c)
-- **Domains:**
-  - CRDT (merge, conflict resolution)
-  - Sync (delta sync, MerkleTree reconciliation)
-  - Query (live queries, standing query registry)
-  - Messaging (pub/sub topics)
-  - Coordination (cluster protocol)
-  - Search (BM25, distributed search)
-  - Persistence (PostgreSQL operations)
-  - Client/Server (auth, connection management)
-- **Source:** `packages/server/src/coordinator/` and `packages/server/src/modules/handlers-module.ts`
-- **Depends on:** TODO-061, TODO-062, TODO-064
+- **Complexity:** Medium-Large (redesigned — was "PostgreSQL adapter")
+- **Summary:** Implement Hazelcast-informed multi-layer storage architecture per TODO-080 research.
+- **Architecture (expected from research):**
+  - **Layer 1: Storage trait** — low-level key-value with cursor-based iteration, mutation-tolerant iterators
+  - **Layer 2: RecordStore trait** — adds TTL/expiry, eviction, record metadata (version, timestamps, hit count)
+  - **Layer 3: MapDataStore trait** — persistence bridge (write-through / write-behind), soft/hard flush
+  - **Concrete implementations:** InMemoryStorage, PostgresMapDataStore
+  - **Record metadata as first-class:** enables LWW conflict resolution, eviction policies, replication lag tracking
+- **Key constraint:** Trait boundaries must support future S3 (TODO-043), tiered storage (TODO-040), and write-behind (TODO-033) without trait redesign.
+- **Crates:** sqlx (compile-time checked queries)
+- **Depends on:** TODO-060 ✅ (ServerStorage trait — will be expanded), **TODO-080 (research)**
 - **Effort:** 2-3 weeks
+
+### TODO-065: Operation Routing and Execution
+- **Priority:** P0
+- **Complexity:** Large (redesigned — was "Port 26 handlers")
+- **Summary:** Implement Hazelcast-informed operation execution model per TODO-082 research. Not a port of TS stateless handlers.
+- **Architecture (expected from research):**
+  - **Operation trait** — partition-routable with provenance tracking (local, backup, WAN, client)
+  - **ServiceRegistry** — dynamic service registration with lifecycle hooks (init, reset, shutdown)
+  - **MigrationAwareService** — services can hook into migration lifecycle (prepare, commit, rollback)
+  - **Execution barriers** — partition migration blocks operations on that partition
+  - **Handler pipeline** — tower-compatible middleware composition
+- **Domains:** CRDT, Sync, Query, Messaging, Coordination, Search, Persistence, Client/Server
+- **Known TS bugs (covered by redesign):**
+  - `BatchProcessingHandler.processBatchAsync` nests inter-node forwarded messages incorrectly
+  - `PartitionService.getPartitionMap()` returns wrong ports
+- **Depends on:** TODO-061 ✅, TODO-062 ✅, TODO-064, **TODO-082 (research)**
+- **Effort:** 3-4 weeks
 
 ### TODO-066: Cluster Protocol
 - **Priority:** P1
-- **Complexity:** Medium
-- **Summary:** ClusterManager, inter-node WebSocket mesh, partition ownership, rebalancing
-- **Known TS bug (covered by rewrite):** `PartitionService.getPartitionMap()` returns cluster inter-node port instead of client WS port, and `host:'unknown'` for non-self nodes. Clients cannot use the partition map to connect to correct endpoints. (Discovered by SPEC-048c)
-- **TS Source:** `packages/server/src/cluster/`
-- **HC Reference:** `hazelcast/cluster/` — membership protocol, split-brain detection, heartbeat, cluster state machine
-- **Key:** 26 cluster message types, partition table, node discovery
-- **Depends on:** TODO-063, TODO-064
-- **Effort:** 2-3 weeks
-
-### TODO-067: Storage Layer (PostgreSQL)
-- **Priority:** P1
-- **Complexity:** Low-Medium
-- **Summary:** ServerStorage trait implementation for PostgreSQL using sqlx
-- **Source:** `packages/server/src/storage/`
-- **Crates:** sqlx (compile-time checked queries), tokio-postgres
-- **Depends on:** TODO-060 (ServerStorage trait)
-- **Effort:** 1 week
-
-### TODO-076: Evaluate MsgPack-Based Merkle Hashing
-- **Priority:** P2 (performance optimization)
-- **Complexity:** Medium (design decision + implementation in both TS and Rust)
-- **Summary:** Current Merkle hashing converts values to JSON string then FNV-1a hashes the string. Alternative: hash MsgPack bytes directly (`hash(rmp_serde::to_vec_named(&value))`). MsgPack with named keys is already the wire format — reusing it avoids JSON serialization overhead (~30-50% faster per hash). Requires deterministic key ordering in MsgPack (use `BTreeMap` or sorted struct fields). Breaking change to Merkle hashes — requires simultaneous rollout to both TS and Rust, acceptable since backward compat is not required.
-- **Evaluation criteria:**
-  - Benchmark: JSON stringify + FNV-1a vs MsgPack + FNV-1a on typical ORMap entries
-  - Verify MsgPack determinism: `rmp_serde::to_vec_named()` with sorted keys produces identical bytes in TS (msgpackr) and Rust
-  - If perf gain < 20%, keep JSON approach (simpler debugging)
-- **Depends on:** TODO-075 (fix current hashing first, then evaluate optimization)
-- **Effort:** 1 day (evaluation) + 2-3 days (implementation if approved)
-- **Source:** Deep analysis during audit review
+- **Complexity:** Large (redesigned — was "ClusterManager + WebSocket mesh")
+- **Summary:** Implement Hazelcast-informed cluster protocol per TODO-081 research. Not a port of TS ClusterManager.
+- **Architecture (expected from research):**
+  - **Versioned MembersView** — clients detect stale membership without full state comparison
+  - **Master-centric coordination** — master decides partition assignment, initiates migrations
+  - **Explicit join ceremony** — discovery → handshake → state sync (not automatic mesh)
+  - **3-phase migration lifecycle** — prepare (lock source) → replicate → finalize (release source)
+  - **Full partition state machine** — extends TODO-063 basic table with REPLICA/BACKUP/MIGRATING/LOST states
+  - **Pluggable failure detection** — phi-accrual (portable from TS — one of few well-designed TS components)
+  - **Split-brain detection** — master-centric, not peer-to-peer consensus
+- **TS Source:** `packages/server/src/cluster/` (behavioral reference only)
+- **HC Reference:** `hazelcast/internal/cluster/impl/` (primary architectural source)
+- **Depends on:** TODO-063, TODO-064, **TODO-081 (research)**
+- **Effort:** 3-4 weeks
 
 ### TODO-068: Integration Test Suite
 - **Priority:** P0
@@ -340,7 +359,7 @@ Each Rust spec should reference TWO sources:
 - **Priority:** P2
 - **Complexity:** Medium
 - **Summary:** HttpSyncHandler routes to partition owners in cluster
-- **Depends on:** TODO-066 (Cluster Protocol), TODO-063 (Partition Service)
+- **Depends on:** TODO-066 (Cluster Protocol), TODO-063
 - **Effort:** 1-2 weeks
 
 ### TODO-025: DAG Executor for Distributed Queries
@@ -351,7 +370,7 @@ Each Rust spec should reference TWO sources:
 - **Context:** [HAZELCAST_DAG_EXECUTOR_SPEC.md](../reference/HAZELCAST_DAG_EXECUTOR_SPEC.md) (700+ lines)
 - **HC Reference:** `hazelcast/jet/core/` (Processor, Inbox, Outbox), `jet/impl/execution/` (TaskletTracker, CooperativeWorker, StoreSnapshotTasklet)
 - **Key insight:** Rust `Future::poll()` maps naturally to Cooperative Tasklet model
-- **Depends on:** TODO-060 (Processor trait), TODO-063 (Partition Service)
+- **Depends on:** TODO-060 ✅ (Processor trait), TODO-063
 - **Effort:** 2-3 weeks
 
 ### TODO-071: Search with Tantivy
@@ -362,6 +381,13 @@ Each Rust spec should reference TWO sources:
 - **Crate:** tantivy
 - **Source:** `packages/server/src/search/`
 - **Effort:** 1-2 weeks
+
+### TODO-076: Evaluate MsgPack-Based Merkle Hashing
+- **Priority:** P3 (deferred from P2 — premature optimization)
+- **Complexity:** Medium (design decision + implementation in both TS and Rust)
+- **Summary:** Current Merkle hashing converts values to JSON string then FNV-1a hashes the string. Alternative: hash MsgPack bytes directly. Evaluate after Rust server is functional.
+- **Depends on:** TODO-075 (fix current hashing first), working Rust server
+- **Effort:** 1 day (evaluation) + 2-3 days (implementation if approved)
 
 ---
 
@@ -375,7 +401,8 @@ Each Rust spec should reference TWO sources:
 - **Summary:** Hazelcast-style Write-Behind pattern: staging area, write coalescing, batch flush, retry queue
 - **Context:** [topgun-rocksdb.md](../reference/topgun-rocksdb.md)
 - **HC Reference:** `hazelcast/map/impl/mapstore/` — WriteBehindStore, StoreWorker, coalescing logic, retry with backoff
-- **Depends on:** TODO-060 (ServerStorage trait)
+- **Note:** TODO-067 (Multi-Layer Storage) should provide MapDataStore trait that this plugs into seamlessly
+- **Depends on:** TODO-067 (MapDataStore trait)
 - **Effort:** 2-3 weeks
 
 ### TODO-043: S3 Bottomless Storage
@@ -384,6 +411,7 @@ Each Rust spec should reference TWO sources:
 - **Summary:** Append-only log in S3/R2/GCS. Immutable log segments, replay on startup, Merkle checkpoints
 - **Context:** [TURSO_INSIGHTS.md](../reference/TURSO_INSIGHTS.md) Section 7
 - **Crates:** aws-sdk-s3, opendal
+- **Note:** TODO-067 (Multi-Layer Storage) should provide Storage trait that S3 implements without trait redesign
 - **Depends on:** TODO-033 (AsyncStorageWrapper)
 - **Effort:** 6-8 weeks
 
@@ -392,7 +420,8 @@ Each Rust spec should reference TWO sources:
 - **Complexity:** Large
 - **Summary:** Hot data in memory, cold data in S3/cheap storage with transparent migration
 - **Context:** [topgun-rocksdb.md](../reference/topgun-rocksdb.md)
-- **Depends on:** TODO-033 (AsyncStorageWrapper), TODO-060 (MapProvider trait)
+- **Note:** TODO-067 (Multi-Layer Storage) RecordStore trait with record metadata (hit count, access time) enables eviction policies
+- **Depends on:** TODO-033 (AsyncStorageWrapper), TODO-067 (RecordStore trait)
 - **Effort:** 4-6 weeks
 
 ### TODO-039: Vector Search
@@ -408,6 +437,7 @@ Each Rust spec should reference TWO sources:
 - **Complexity:** Medium
 - **Summary:** Modular extension system for community contributions (crypto, compression, audit, geo)
 - **Context:** [TURSO_INSIGHTS.md](../reference/TURSO_INSIGHTS.md) Section 5
+- **Note:** TODO-082 (Service Architecture Research) should design ServiceRegistry trait that this builds on
 - **Effort:** 2-3 weeks
 
 ### TODO-041: Multi-Tenancy
@@ -415,7 +445,7 @@ Each Rust spec should reference TWO sources:
 - **Complexity:** Large
 - **Summary:** Per-tenant isolation, quotas, billing, tenant-aware partitioning
 - **Context:** [PHASE_5_MULTI_TENANCY_SPEC.md](../reference/PHASE_5_MULTI_TENANCY_SPEC.md)
-- **Depends on:** TODO-060 (RequestContext.tenant_id)
+- **Depends on:** TODO-060 ✅ (RequestContext.tenant_id)
 - **Effort:** 4-6 weeks
 
 ### TODO-044: Bi-Temporal Queries (Time-Travel)
@@ -442,88 +472,97 @@ Items within the same wave can run in parallel. Each wave starts when its blocke
 
 | Wave | Items | Blocked by | Phase |
 |------|-------|------------|-------|
-| **1** | TODO-061 (CRDTs) · TODO-062 starts (052a+052b) · TODO-063 (Partitions) · TODO-074 (HLC validation) · TODO-078 (TS hash fix) | — (all unblocked) | 2 |
-| **1a** | **TODO-079 (Schema arch + fix 052a/b)** | 052b complete | 2 |
-| **1b** | TODO-062 continues (052c+052d+052e) · TODO-075 (ORMap hash fix) | **079** · 061 | 2 |
-| **1c** | TODO-077 (CI drift check) | 062 (all sub-specs incl. 052e) | 2 |
-| **2** | TODO-064 (Network) · TODO-067 (PostgreSQL) · TODO-076 (MsgPack hash eval) | 062 · 060✓ · 075 | 3 |
-| **3** | TODO-065 (Handlers) · TODO-066 (Cluster) · TODO-068 (Tests, incremental) | 061+062+064 · 063+064 · 064 | 3 |
-| **4** | TODO-069 (Schema) · TODO-048 (SSE) · TODO-025 (DAG) · TODO-071 (Tantivy) | — · — · 063 · — | 4 |
-| **5** | TODO-070 (Shapes) · TODO-049 (Cluster HTTP) | 069 · 066+063 | 4 |
-| **6** | TODO-033 (AsyncStorage) · TODO-039 (Vector) · TODO-036 (Extensions) · TODO-041 (Multi-tenancy) · TODO-072 (WASM) | — | 5 |
-| **7** | TODO-043 (S3) · TODO-040 (Tiered) | 033 · 033 | 5 |
-| **8** | TODO-044 (Time-Travel) | 043 | 5 |
+| **1** | SPEC-052e (Message union) · TODO-074 (HLC ✓) · TODO-078 (TS hash fix) · TODO-075 (ORMap hash) | — | 2 |
+| **1a** | TODO-077 (CI drift check) · TODO-063 (Basic partitions) | 052e · — | 2 |
+| **2** | **TODO-080 (Storage research)** · **TODO-081 (Cluster research)** · **TODO-082 (Service research)** | — (can start parallel to Wave 1) | 2.5 |
+| **3** | TODO-064 (Network) · TODO-067 (Multi-Layer Storage) | 062 · **080** | 3 |
+| **4** | TODO-065 (Operation Routing) · TODO-066 (Cluster) · TODO-068 (Tests, incremental) | 064+**082** · 063+064+**081** · 064 | 3 |
+| **5** | TODO-069 (Schema) · TODO-048 (SSE) · TODO-025 (DAG) · TODO-071 (Tantivy) | — · — · 063 · — | 4 |
+| **6** | TODO-070 (Shapes) · TODO-049 (Cluster HTTP) · TODO-076 (MsgPack hash eval) | 069 · 066+063 · 075 | 4 |
+| **7** | TODO-033 (AsyncStorage) · TODO-039 (Vector) · TODO-036 (Extensions) · TODO-041 (Multi-tenancy) · TODO-072 (WASM) | 067 · — · — · — · — | 5 |
+| **8** | TODO-043 (S3) · TODO-040 (Tiered) | 033 · 033+067 | 5 |
+| **9** | TODO-044 (Time-Travel) | 043 | 5 |
 
-**Current position:** Wave 1a — SPEC-052b executed, TODO-079 → SPEC-054 (Schema architecture) is next. Must complete before continuing 052c/d/e.
+**Current position:** Wave 1 — SPEC-052e is next (all dependencies met). TODO-080 (Storage research) can start in parallel.
 
 ---
 
 ## Dependency Graph
 
 ```
-Phase 0 (TypeScript)            Phase 1 (Bridge)
-SPEC-048b ──→ SPEC-048c         TODO-059 (Cargo) ──→ TODO-060 (Traits)
-          [DONE]                       [DONE]              [DONE]
+Phase 0 (TypeScript) [DONE]     Phase 1 (Bridge) [DONE]
+SPEC-048b ──→ SPEC-048c          TODO-059 (Cargo) ──→ TODO-060 (Traits)
                                     │
                                     ↓
-                            Phase 2 (Rust Core) — WAVE 1
-                    TODO-061 (CRDTs)    TODO-062 starts      TODO-063 (Partitions)
-                    TODO-074 (HLC ✓)    (052a+052b done)
-                    TODO-078 (TS hash)       │
-                        │                    ↓
-                        │         ★ TODO-079 (Schema arch)  ←── WAVE 1a
-                        │         fix 052a/b: remove type:String,
-                        │         f64→integers, Message enum pattern
-                        │                    │
-                        ↓                    ↓
-                    TODO-075          TODO-062 continues     ←── WAVE 1b
-                    (ORMap hash)      (052c → 052d → 052e)
-                        │                    │
-                        │              TODO-077 (CI drift)   ←── WAVE 1c
-                        │                    │
-                        └────────┬───────────┘
-                                 ↓
-                            Phase 3 (Server) — WAVES 2-3
-                    TODO-064 (Network) ──→ TODO-065 (Handlers)
-                        │                                     │
-                        └──→ TODO-066 (Cluster) ←─────────────┘←── TODO-063
-                        │
-                        └──→ TODO-067 (PostgreSQL)
-                        │
-                        └──→ TODO-068 (Integration Tests)
-                        │
-                    TODO-076 (MsgPack hash eval) ←── TODO-075
-                                 │
-                                 ↓
-                            Phase 4 (Features) — WAVES 4-5
-            TODO-069 (Schema) ──→ TODO-070 (Shapes)
-            TODO-048 (SSE)
-            TODO-049 (Cluster HTTP)
-            TODO-025 (DAG Executor)
-            TODO-071 (Tantivy Search)
-                                 │
-                                 ↓
-                            Phase 5 (Post-Migration) — WAVES 6-8
-            TODO-033 (AsyncStorage) ──→ TODO-043 (S3) ──→ TODO-044 (Time-Travel)
-                                   └──→ TODO-040 (Tiered Storage)
-            TODO-039 (Vector Search)
-            TODO-036 (Extensions)
-            TODO-041 (Multi-Tenancy)
-            TODO-072 (WASM Modules)
+                         Phase 2 (Rust Core)
+              TODO-061 (CRDTs) [DONE]     TODO-079 (Schema arch) [DONE]
+                    │
+                    ↓
+              TODO-062 (Message Schema) [DONE] ─── 052a-e complete
+                    │
+                    ↓
+    │         │
+    │   TODO-074 (HLC ✓) · TODO-078 (TS hash P1) · TODO-075 (ORMap hash)
+    │         │
+    │   TODO-077 (CI drift) · TODO-063 (Basic partitions)  ←── WAVE 1a
+    │         │
+    │         ↓
+    │  Phase 2.5 (Research Sprint)  ←── WAVE 2
+    │  ┌──────────────────────────────────────────┐
+    │  │ TODO-080        TODO-081        TODO-082  │
+    │  │ Storage arch    Cluster proto   Service   │
+    │  │ research        research        arch      │
+    │  └──────┬──────────────┬──────────────┬──────┘
+    │         │              │              │
+    └─────────┼──────────────┼──────────────┘
+              ↓              ↓
+         Phase 3 (Rust Server)  ←── WAVES 3-4
+    TODO-064 (Network)
+        │
+        ├──→ TODO-067* (Multi-Layer Storage) ←── TODO-080
+        │
+        ├──→ TODO-065* (Operation Routing) ←── TODO-082
+        │
+        ├──→ TODO-066* (Cluster Protocol) ←── TODO-081 + TODO-063
+        │
+        └──→ TODO-068 (Integration Tests)
+              │
+              ↓
+         Phase 4 (Features)  ←── WAVES 5-6
+  TODO-069 (Schema) ──→ TODO-070 (Shapes)
+  TODO-048 (SSE)
+  TODO-049 (Cluster HTTP)
+  TODO-025 (DAG Executor)
+  TODO-071 (Tantivy Search)
+  TODO-076 (MsgPack hash eval — deferred)
+              │
+              ↓
+         Phase 5 (Post-Migration)  ←── WAVES 7-9
+  TODO-033 (AsyncStorage) ──→ TODO-043 (S3) ──→ TODO-044 (Time-Travel)
+                          └──→ TODO-040 (Tiered Storage)
+  TODO-039 (Vector Search)
+  TODO-036 (Extensions)
+  TODO-041 (Multi-Tenancy)
+  TODO-072 (WASM Modules)
+
+  * = redesigned after research (not TS port)
 ```
+
+---
 
 ## Timeline Summary
 
 | Phase | Effort | Prerequisites |
 |-------|--------|---------------|
-| **0. TypeScript Completion** | 3-4 days | Current codebase |
-| **1. Bridge** | 1-2 days | Phase 0 complete |
-| **2. Rust Core** | 3-4 weeks | Phase 1 complete |
-| **3. Rust Server** | 6-8 weeks | Phase 2 complete |
+| **0. TypeScript Completion** | 3-4 days | ~~Current codebase~~ DONE |
+| **1. Bridge** | 1-2 days | ~~Phase 0 complete~~ DONE |
+| **2. Rust Core** | 3-4 weeks | ~~Phase 1 complete~~ IN PROGRESS (052e + bug fixes remaining) |
+| **2.5 Research Sprint** | 1-2 weeks | Can start parallel to Phase 2 completion |
+| **3. Rust Server** | 8-10 weeks | Phase 2 + 2.5 complete |
 | **4. Rust Features** | 4-6 weeks | Phase 3 complete (some items parallelizable) |
 | **5. Post-Migration** | 8-12 weeks | Phase 4 complete (independent items) |
-| **Total to Rust server launch (Phases 0-3)** | **~11-15 weeks** | |
-| **Total with features (Phases 0-4)** | **~15-21 weeks** | |
+| **Total to Rust server launch (Phases 0-3)** | **~14-18 weeks** | |
+| **Total with features (Phases 0-4)** | **~18-24 weeks** | |
 
 ## Eliminated Items
 
@@ -531,8 +570,21 @@ SPEC-048b ──→ SPEC-048c         TODO-059 (Cargo) ──→ TODO-060 (Trait
 |------|--------|------|
 | TODO-042 (DBSP) | Not needed; StandingQueryRegistry + ReverseQueryIndex sufficient | 2026-02-10 |
 | TODO-034 (Rust/WASM hot paths) | Superseded by full Rust migration | 2026-02-10 |
+| TODO-045 (DST Documentation) | TS testing infrastructure documentation for deprecated system | 2026-02-18 |
 
-## Completed TypeScript Items (archived)
+## Completed Items (archived)
+
+### Phase 2 Rust Items
+
+| TODO | Spec | Completed |
+|------|------|-----------|
+| TODO-059 → bootstrap | Cargo workspace + CI | 2026-02-13 |
+| TODO-060 → SPEC-050 | 6 foundational traits | 2026-02-13 |
+| TODO-061 → SPEC-051 | Core CRDTs (LWWMap, ORMap, HLC, MerkleTree) | 2026-02-14 |
+| TODO-079 → SPEC-054 | Message schema architecture fix-on-port | 2026-02-17 |
+| TODO-062 → SPEC-052a-e | Message schema all 8 domains + union + cross-lang tests (393 Rust + 62 TS tests) | 2026-02-19 |
+
+### Phase 0 TypeScript Items
 
 All items below are completed and archived in `.specflow/archive/`:
 
@@ -563,8 +615,12 @@ All items below are completed and archived in `.specflow/archive/`:
 | TODO-043 | [TURSO_INSIGHTS.md](../reference/TURSO_INSIGHTS.md) Section 7 |
 | TODO-044 | [TURSO_INSIGHTS.md](../reference/TURSO_INSIGHTS.md) Section 8 |
 | TODO-059-072 | [RUST_SERVER_MIGRATION_RESEARCH.md](../reference/RUST_SERVER_MIGRATION_RESEARCH.md), [PRODUCT_POSITIONING_RESEARCH.md](../reference/PRODUCT_POSITIONING_RESEARCH.md) |
+| TODO-080 | Output: `.specflow/reference/RUST_STORAGE_ARCHITECTURE.md` |
+| TODO-081 | Output: `.specflow/reference/RUST_CLUSTER_ARCHITECTURE.md` |
+| TODO-082 | Output: `.specflow/reference/RUST_SERVICE_ARCHITECTURE.md` |
 
 ---
 
 *Restructured 2026-02-12: Replaced wave-based organization with phase-based Rust migration roadmap. Added TODO-059 through TODO-072 for Rust-specific work. Product positioning decisions (schema, shapes, WASM) integrated as concrete TODOs.*
 *Updated 2026-02-15: Added TODO-074 through TODO-078 from external audit analysis. HLC validation, ORMap hash determinism bug, TS hash inconsistency, protocol drift CI, MsgPack hash evaluation.*
+*Updated 2026-02-18: Strategic audit. Added Phase 2.5 (Architecture Research Sprint: TODO-080, 081, 082). Redesigned Phase 3 items (TODO-063/065/066/067) from "TS port" to "Hazelcast-informed design". Upgraded TODO-078 to P1 (client-server hash compatibility confirmed). Deferred TODO-076 to Phase 4. Eliminated TODO-045. Marked completed Phase 2 items.*
