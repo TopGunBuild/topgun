@@ -19,6 +19,7 @@ pub mod lww_map;
 pub mod merkle;
 pub mod messages;
 pub mod or_map;
+pub mod partition;
 pub mod schema;
 pub mod traits;
 pub mod types;
@@ -55,6 +56,11 @@ pub use messages::{
 
 // ORMap
 pub use or_map::ORMap;
+
+// Partition
+pub use partition::{
+    get_relevant_partitions, hash_to_partition, PartitionLookup, PartitionTable, PARTITION_COUNT,
+};
 
 #[cfg(test)]
 mod tests {
