@@ -39,6 +39,9 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-20 | SPEC-056 | COMPLETED: Implement Partition Hash and Partition Table in Rust. 1 commit. 3 audit cycles, 1 review cycle. `hash_to_partition`, `PartitionLookup` trait, `PartitionTable`, partition pruning. 33 new tests, 431 total passing. Zero clippy warnings. |
+| 2026-02-20 | SPEC-056 | REVIEWED v1: APPROVED. All 11 acceptance criteria verified. 431 tests pass (414 unit + 10 integration + 7 doc-tests). Zero clippy warnings in partition.rs. 2 minor findings (informational only). |
+| 2026-02-20 | SPEC-056 | EXECUTED: Implement Partition Hash and Partition Table in Rust. 1 commit (3 waves, single atomic). hash_to_partition, PartitionLookup trait, PartitionTable, partition pruning. 33 new tests, 431 total passing. Zero clippy warnings. |
 | 2026-02-19 | SPEC-055 | COMPLETED: Fix Rust ORMap Merkle Hash Determinism. 2 commits. 2 audit cycles, 1 review cycle. `canonical_json` + `sort_json_value` private helpers replace `serde_json::to_string` in `hash_entry()`. 385 tests + 10 integration tests pass. Zero clippy warnings. |
 | 2026-02-19 | SPEC-055 | REVIEWED v1: APPROVED. All 6 acceptance criteria verified. 385 unit tests + 10 integration tests + 6 doc tests pass. Zero clippy warnings. `canonical_json` + `sort_json_value` private helpers fix hash determinism for generic V. |
 | 2026-02-19 | SPEC-052e | COMPLETED: Message Schema -- HTTP Sync, Message Union, and Cross-Language Tests. 5 commits. 4 audit cycles, 1 review cycle. 12 HTTP sync types, 77-variant Message enum, 61 golden fixtures, 9 integration tests. float64 deserialization fix for JS interop. 393 Rust tests + 62 TS tests. Zero clippy warnings. |
@@ -80,4 +83,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-19 (SPEC-055 completed and archived)*
+*Last updated: 2026-02-20 (SPEC-056 completed and archived)*

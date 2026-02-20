@@ -94,7 +94,7 @@ Each Rust spec should reference up to THREE sources:
 - **Status:** Complete (SPEC-054 completed 2026-02-17)
 - **Summary:** Removed `r#type: String` from inner structs, replaced `f64` with proper integer types, added `Default` derives
 
-### TODO-063: Basic Partition Hash and Lookup
+### TODO-063: Basic Partition Hash and Lookup → SPEC-056
 - **Priority:** P1
 - **Complexity:** Low
 - **Summary:** Implement basic partition hash function (`fnv1a(key) % 271`) and partition table lookup in Rust. This is the **client-compatible subset** — same modulo hash used by `PartitionRouter` in TS client. Full partition state machine, migration lifecycle, and fault-domain awareness are Phase 3 concerns (after TODO-081 research).
