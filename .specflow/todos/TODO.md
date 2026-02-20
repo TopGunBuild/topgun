@@ -131,20 +131,9 @@ Each Rust spec should reference up to THREE sources:
 - **Status:** Completed 2026-02-19
 - **Resolution:** Removed native xxHash64 path from `hash.ts`, forced FNV-1a unconditionally. Removed `@topgunbuild/native` from core optionalDependencies. Updated server nativeStats and integration tests.
 
-### TODO-077: Protocol Drift CI Check
-- **Priority:** P2
-- **Complexity:** Low
-- **Summary:** After SPEC-052e completes (golden-file cross-language tests), add a CI step to `.github/workflows/rust.yml` that runs the TS fixture generator and Rust integration tests together. Prevents silent protocol drift when TS Zod schemas change without updating Rust serde structs.
-- **CI step:**
-  ```yaml
-  - name: Cross-language protocol validation
-    run: |
-      pnpm --filter @topgunbuild/core test -- cross-lang-fixtures
-      cargo test --test cross_lang_compat
-  ```
-- **Depends on:** TODO-062 ✅
-- **Effort:** 0.5 day
-- **Source:** External audit finding (Audit 2, Section 3.2)
+### TODO-077: ~~Protocol Drift CI Check~~ DONE
+- **Status:** Completed 2026-02-20
+- **Resolution:** Added `cross-lang` job to `.github/workflows/rust.yml`. Triggers on TS schema changes (`packages/core/src/schemas/**`). Runs TS fixture generator then Rust `cross_lang_compat` test to catch protocol drift.
 
 ---
 
