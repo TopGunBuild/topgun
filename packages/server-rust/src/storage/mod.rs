@@ -14,6 +14,7 @@
 pub mod datastores;
 pub mod engine;
 pub mod engines;
+pub mod impls;
 pub mod map_data_store;
 pub mod mutation_observer;
 pub mod record;
@@ -22,6 +23,7 @@ pub mod record_store;
 pub use datastores::*;
 pub use engine::*;
 pub use engines::*;
+pub use impls::*;
 pub use map_data_store::*;
 pub use mutation_observer::*;
 pub use record::*;
