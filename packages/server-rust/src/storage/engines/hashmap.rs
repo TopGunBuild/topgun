@@ -344,6 +344,40 @@ mod tests {
     }
 
     #[test]
+    fn fetch_keys_cursor_past_end() {
+        let storage = HashMapStorage::new();
+        storage.put("a", make_record(1));
+        storage.put("b", make_record(2));
+
+        // Create a cursor with offset well beyond storage size
+        let past_end = IterationCursor {
+            state: encode_cursor_offset(100),
+            finished: false,
+        };
+
+        let result = storage.fetch_keys(&past_end, 10);
+        assert!(result.items.is_empty());
+        assert!(result.next_cursor.finished);
+    }
+
+    #[test]
+    fn fetch_entries_cursor_past_end() {
+        let storage = HashMapStorage::new();
+        storage.put("a", make_record(1));
+        storage.put("b", make_record(2));
+
+        // Create a cursor with offset well beyond storage size
+        let past_end = IterationCursor {
+            state: encode_cursor_offset(100),
+            finished: false,
+        };
+
+        let result = storage.fetch_entries(&past_end, 10);
+        assert!(result.items.is_empty());
+        assert!(result.next_cursor.finished);
+    }
+
+    #[test]
     fn estimated_cost_sums_all_records() {
         let storage = HashMapStorage::new();
 
