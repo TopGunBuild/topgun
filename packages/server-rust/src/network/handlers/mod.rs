@@ -1,4 +1,4 @@
-//! HTTP and WebSocket handler definitions for the TopGun server.
+//! HTTP and WebSocket handler definitions for the `TopGun` server.
 //!
 //! This module defines `AppState` (the shared state carried through axum
 //! extractors) and re-exports all handler functions for convenient access
@@ -20,8 +20,8 @@ use super::{ConnectionRegistry, NetworkConfig, ShutdownController};
 /// Shared application state passed to all axum handlers via `State` extraction.
 ///
 /// Holds `Arc` references to shared resources so cloning is cheap.
-/// This struct will grow as future modules add fields (e.g., OperationService,
-/// ClusterState).
+/// This struct will grow as future modules add fields (e.g., `OperationService`,
+/// `ClusterState`).
 #[derive(Clone)]
 pub struct AppState {
     /// Registry of all active WebSocket and cluster peer connections.
