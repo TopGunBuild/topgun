@@ -27,6 +27,7 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 bytes = "1"
 http = "1"
+rand = "0.9"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util", "time"] }
