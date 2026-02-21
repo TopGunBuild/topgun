@@ -17,6 +17,7 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors", "timeout", "request-id", "compression-gzip"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 dashmap = "6"
 arc-swap = "1"
 serde = { version = "1", features = ["derive"] }
