@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-02-18
+**Last updated:** 2026-02-20
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture, not a TypeScript port
 **Product positioning:** "The reactive data grid that extends the cluster into the browser" ([PRODUCT_POSITIONING_RESEARCH.md](../reference/PRODUCT_POSITIONING_RESEARCH.md))
 
@@ -27,14 +27,14 @@ Each Rust spec should reference up to THREE sources:
 | Rust TODO | TopGun TS Source | Hazelcast (WHAT) | Rust OSS (HOW) |
 |---|---|---|---|
 | TODO-063 Partitions | `server/src/cluster/PartitionService.ts` | `internal/partition/` | TiKV: `DashMap`, `RegionState` enum |
-| TODO-064 Network | `server/src/modules/network-module.ts` | `internal/networking/` | Quickwit: Tower layers, axum |
+| TODO-064 Network | `server/src/modules/network-module.ts` | `internal/networking/` | SurrealDB: WS lifecycle; Grafbase: middleware; Quickwit: Tower |
 | TODO-065 Operations | `server/src/coordinator/` | `spi/`, `internal/partition/operation/` | Quickwit: Actor+Tower; TiKV: Worker/Scheduler |
 | TODO-066 Cluster | `server/src/cluster/` | `internal/cluster/impl/` | Quickwit: chitchat; TiKV: FSM batch system |
 | TODO-067 Storage | `server/src/storage/` | `map/impl/recordstore/`, `mapstore/` | TiKV: `engine_traits`; Databend: OpenDAL |
 | TODO-025 DAG | [DAG spec](../reference/HAZELCAST_DAG_EXECUTOR_SPEC.md) | `jet/core/`, `jet/impl/execution/` | Databend: pipeline `StableGraph` |
 | TODO-033 AsyncStorage | — | `map/impl/mapstore/` (Write-Behind) | TiKV: `Scheduler<T>` async flush |
 | TODO-040 Tiered | — | `map/impl/eviction/`, `map/impl/record/` | TiKV: `in_memory_engine` hot/cold |
-| TODO-041 Multi-tenancy | — | `security/`, `access/` | — |
+| TODO-041 Multi-tenancy | — | `security/`, `access/` | SurrealDB: `Namespace→Database→Table` hierarchy |
 | TODO-036 Extensions | — | `spi/` (SPI) | Databend: `GlobalInstance` registry |
 | TODO-071 Search | `server/src/search/` | `query/`, `map/impl/query/` | Quickwit: tantivy integration, SearchService trait |
 | TODO-043 S3 Storage | — | — | Databend: OpenDAL `Operator` + layer stack |
@@ -230,6 +230,30 @@ Each Rust spec should reference up to THREE sources:
 - **Effort:** 2-3 days
 - **Output:** `.specflow/reference/RUST_SERVICE_ARCHITECTURE.md`
 
+### ~~TODO-083: Networking Layer Research (Light)~~ ✅
+- **Priority:** P1 (blocks TODO-064)
+- **Complexity:** Low (targeted research, 1-2 days)
+- **Status:** COMPLETE (2026-02-20, RES-006)
+- **Summary:** Targeted research on Rust networking patterns for IMDG server. Not a full architecture sprint — axum + tower are already chosen. Focus on questions that could cause costly retrofits: connection abstraction (WebSocket-only → gRPC/QUIC later?), per-connection state management at 10K+ scale, backpressure strategy, middleware ordering.
+- **Research scope:**
+  - **SurrealDB** — WebSocket connection lifecycle, multi-protocol support (HTTP REST + WS + potentially gRPC), connection authentication flow, per-connection state management
+  - **Grafbase** — edge deployment patterns, middleware composition, protocol negotiation, gateway architecture
+  - **Quickwit** — Tower layer stacking (already partially studied in TODO-082), service composition startup, gRPC + REST coexistence
+  - Connection abstraction: should TopGun have a protocol-agnostic Channel trait (like Hazelcast) or is axum's extractors + tower sufficient?
+  - Backpressure: per-connection flow control, slow client handling, message queue bounds
+  - Graceful shutdown: draining connections, health check transitions
+- **Deliverable:** Short design document (~2-3 pages) with:
+  - Connection trait design (or decision to not abstract)
+  - Middleware stack ordering recommendation
+  - Backpressure strategy
+  - Patterns to adopt from each reference project
+- **Rust Reference:**
+  - SurrealDB: `/Users/koristuvac/Projects/rust/surrealdb/` — WebSocket server, connection management, RPC layer
+  - Grafbase: `/Users/koristuvac/Projects/rust/grafbase/` — gateway architecture, middleware, protocol handling
+  - Quickwit serve: `/Users/koristuvac/Projects/rust/quickwit/quickwit/quickwit-serve/src/` — Tower layers, gRPC + REST startup
+- **Effort:** 1-2 days
+- **Output:** `.specflow/reference/RUST_NETWORKING_PATTERNS.md`
+
 ---
 
 ## Phase 3: Rust Server Core (~8-10 weeks)
@@ -239,15 +263,16 @@ Each Rust spec should reference up to THREE sources:
 ### TODO-064: Networking Layer (axum + WebSocket)
 - **Priority:** P0
 - **Complexity:** Medium
-- **Summary:** HTTP + WebSocket server using axum, with deferred startup pattern
+- **Summary:** HTTP + WebSocket server using axum, with deferred startup pattern. Design informed by TODO-083 research. Spec to be created after research.
 - **Key features:**
   - `GET /health`, `POST /sync` (HTTP sync, existing protocol)
   - WebSocket upgrade for real-time sync
   - TLS support (rustls)
-  - Channel abstraction (Hazelcast-style, protocol-agnostic)
+  - Connection abstraction (informed by TODO-083 research — protocol-agnostic Channel or axum-native)
   - Tower middleware pipeline for handler composition
+  - Backpressure + graceful shutdown (informed by TODO-083 research)
 - **Crates:** axum, tokio-tungstenite, tower, rustls
-- **Depends on:** TODO-059 ✅, TODO-062 ✅
+- **Depends on:** TODO-059 ✅, TODO-062 ✅, **TODO-083 (research)**
 - **Effort:** 1-2 weeks
 
 ### TODO-067: Multi-Layer Storage System
@@ -473,10 +498,10 @@ Items within the same wave can run in parallel. Each wave starts when its blocke
 
 | Wave | Items | Blocked by | Phase |
 |------|-------|------------|-------|
-| **1** | SPEC-052e (Message union) · TODO-074 (HLC ✓) · TODO-078 (TS hash fix) · TODO-075 (ORMap hash) | — | 2 |
-| **1a** | TODO-077 (CI drift check) · TODO-063 (Basic partitions) | 052e · — | 2 |
-| **2** | **TODO-080 (Storage research)** · **TODO-081 (Cluster research)** · **TODO-082 (Service research)** | — (can start parallel to Wave 1) | 2.5 |
-| **3** | TODO-064 (Network) · TODO-067 (Multi-Layer Storage) | 062 · **080** | 3 |
+| **1** | ~~SPEC-052e~~ ✅ · ~~TODO-074~~ ✅ · ~~TODO-078~~ ✅ · ~~TODO-075~~ ✅ | — | 2 |
+| **1a** | ~~TODO-077~~ ✅ · ~~TODO-063~~ ✅ | — | 2 |
+| **2** | ~~TODO-080~~ ✅ · ~~TODO-081~~ ✅ · ~~TODO-082~~ ✅ · ~~TODO-083~~ ✅ | — | 2.5 |
+| **3** | TODO-064 (Network) · TODO-067 (Multi-Layer Storage) | **083** · **080** | 3 |
 | **4** | TODO-065 (Operation Routing) · TODO-066 (Cluster) · TODO-068 (Tests, incremental) | 064+**082** · 063+064+**081** · 064 | 3 |
 | **5** | TODO-069 (Schema) · TODO-048 (SSE) · TODO-025 (DAG) · TODO-071 (Tantivy) | — · — · 063 · — | 4 |
 | **6** | TODO-070 (Shapes) · TODO-049 (Cluster HTTP) · TODO-076 (MsgPack hash eval) | 069 · 066+063 · 075 | 4 |
@@ -484,7 +509,7 @@ Items within the same wave can run in parallel. Each wave starts when its blocke
 | **8** | TODO-043 (S3) · TODO-040 (Tiered) | 033 · 033+067 | 5 |
 | **9** | TODO-044 (Time-Travel) | 043 | 5 |
 
-**Current position:** Wave 1 — SPEC-052e is next (all dependencies met). TODO-080 (Storage research) can start in parallel.
+**Current position:** Wave 2 complete. Wave 3 unlocked: TODO-064 (Networking Layer) + TODO-067 (Multi-Layer Storage) can proceed in parallel.
 
 ---
 
@@ -619,6 +644,7 @@ All items below are completed and archived in `.specflow/archive/`:
 | TODO-080 | Output: `.specflow/reference/RUST_STORAGE_ARCHITECTURE.md` |
 | TODO-081 | Output: `.specflow/reference/RUST_CLUSTER_ARCHITECTURE.md` |
 | TODO-082 | Output: `.specflow/reference/RUST_SERVICE_ARCHITECTURE.md` |
+| TODO-083 | Output: `.specflow/reference/RUST_NETWORKING_PATTERNS.md` |
 
 ---
 
@@ -626,3 +652,4 @@ All items below are completed and archived in `.specflow/archive/`:
 *Updated 2026-02-15: Added TODO-074 through TODO-078 from external audit analysis. HLC validation, ORMap hash determinism bug, TS hash inconsistency, protocol drift CI, MsgPack hash evaluation.*
 *Updated 2026-02-18: Strategic audit. Added Phase 2.5 (Architecture Research Sprint: TODO-080, 081, 082). Redesigned Phase 3 items (TODO-063/065/066/067) from "TS port" to "Hazelcast-informed design". Upgraded TODO-078 to P1 (client-server hash compatibility confirmed). Deferred TODO-076 to Phase 4. Eliminated TODO-045. Marked completed Phase 2 items.*
 *Updated 2026-02-19: Added Triple Reference Protocol. Rust OSS projects (TiKV, Quickwit, Databend) added as implementation pattern references alongside Hazelcast conceptual architecture. Research tasks TODO-080/081/082 updated with concrete Rust file paths. Rationale: Java→Rust translation has real friction (ownership, no inheritance, no GC) — Rust-native patterns needed for storage traits (TiKV engine_traits), cluster concurrency (TiKV FSM+DashMap), service composition (Quickwit actors+Tower), object storage (Databend OpenDAL).*
+*Updated 2026-02-20: Added TODO-083 (Networking Layer Research — light, 1-2 days). Focus: SurrealDB, Grafbase, Quickwit for connection abstraction, backpressure, middleware ordering. TODO-064 now depends on 083. Existing SPEC-057 to be recreated after research.*

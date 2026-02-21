@@ -6,6 +6,19 @@ Historical decisions rotated from STATE.md to maintain compactness.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-21 | SPEC-057b | REVISION v1: Applied all 4 audit recommendations (G2 dependency, axum WS config API note, futures_util note, HealthState Display guidance). Status → auditing. |
+| 2026-02-21 | SPEC-057b | AUDIT v1: APPROVED. No critical issues. 4 recommendations (G2 dependency, axum WS config API, futures_util dependency, HealthState Display). |
+| 2026-02-21 | SPEC-057a | REVIEW v1: APPROVED. All 7 acceptance criteria met. 31/31 tests pass. Build and clippy clean. |
+| 2026-02-20 | SPEC-057a | EXECUTED: 2 commits, 31 tests, all 7 acceptance criteria met. Sequential fallback used (subagent CLI unavailable). |
+| 2026-02-20 | SPEC-057a | AUDIT v4: APPROVED. No critical issues. 2 recommendations: (1) add explicit derive annotations to config.rs structs for spec consistency, (2) note ConnectionRegistry::iter() may need Vec return in practice. |
+| 2026-02-20 | SPEC-057a | AUDIT v2: APPROVED. No critical issues. 2 recommendations: (1) add Debug derives to ConnectionHandle/ConnectionRegistry, (2) optional Default impl for ConnectionMetadata. |
+| 2026-02-20 | SPEC-057a | REVISED v1: Applied all 6 items (2 critical + 4 recommendations). lib.rs added, HealthState::Stopped reachable via wait_for_drain, derives added, metadata defaults documented, estimates deflated, trait-first deviation noted. |
+| 2026-02-20 | SPEC-057a | AUDIT v1: NEEDS_REVISION. 2 critical issues: (1) missing `pub mod network` in lib.rs, (2) HealthState::Stopped never transitions. 4 recommendations. |
+| 2026-02-20 | SPEC-057 | SPLIT: Decomposed into SPEC-057a (types, config, abstractions), SPEC-057b (HTTP + WS handlers), SPEC-057c (middleware, NetworkModule, integration). Strictly sequential dependency chain. |
+| 2026-02-20 | SPEC-057 | DRAFTED: Implement Rust Networking Layer (axum + WebSocket). Large spec (12 files), recommends /sf:split into SPEC-057a/b/c. Types+config (Wave 1), handlers (Wave 2), module+middleware (Wave 3). |
+| 2026-02-20 | TODO-083 | RESEARCH COMPLETE (RES-006): Networking Layer Patterns. axum-native + ConnectionHandle (no Channel trait), bounded mpsc backpressure (256 cap), Tower ordering Metrics>LoadShed>Auth>Timeout>PartitionRouting, Quickwit-style graceful shutdown. Unblocks TODO-064. |
+| 2026-02-20 | SPEC-057 | DELETED: Networking spec created before TODO-083 research. Will be recreated after research completes. |
+| 2026-02-20 | SPEC-056 | COMPLETED: Implement Partition Hash and Partition Table in Rust. 1 commit. 3 audit cycles, 1 review cycle. `hash_to_partition`, `PartitionLookup` trait, `PartitionTable`, partition pruning. 33 new tests, 431 total passing. Zero clippy warnings. |
 | 2026-02-17 | SPEC-052c | COMPLETED: Message Schema -- Search and Cluster Domain Structs. 4 commits. 3 audit cycles, 1 review cycle. 26 types (7 search + 19 cluster). 281 tests. All 4 AC pass. |
 | 2026-02-17 | SPEC-052c | REVIEWED v1: APPROVED. All 4 acceptance criteria verified. 281 tests pass, zero clippy warnings. 26 types field-accurate against TS source. No critical, major, or minor issues found. |
 | 2026-02-17 | SPEC-052b | COMPLETED: Message Schema -- Sync and Query Domain Structs. 2+4 commits (exec + SPEC-054 fix). 4 audit cycles. 28 sync + 8 query structs. Code improved by SPEC-054 (r#type removed, f64->integers, Default derives). 246 tests. |

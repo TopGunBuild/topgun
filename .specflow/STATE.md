@@ -13,8 +13,7 @@
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-057b | Networking HTTP and WebSocket Handlers | draft | 3 |
-| 2 | SPEC-057c | Networking Middleware, NetworkModule, and Integration | draft | 3 |
+| 1 | SPEC-057c | Networking Middleware, NetworkModule, and Integration | draft | 3 |
 
 ## Migration Roadmap (high-level)
 
@@ -46,10 +45,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-21 | SPEC-057b | COMPLETED: Networking HTTP and WebSocket Handlers. 4 files created, 3 modified, 12 tests, 4 commits. |
+| 2026-02-21 | SPEC-057b | REVIEW v1: APPROVED. All 6 acceptance criteria met. 43/43 tests pass. Build and clippy clean. No critical or major issues. |
+| 2026-02-21 | SPEC-057b | EXECUTED: 4 commits, 12 new tests (43 total), all 6 acceptance criteria met. Sequential fallback (subagent CLI unavailable). |
+| 2026-02-21 | SPEC-057b | AUDIT v2: APPROVED. No critical issues. All SPEC-057a types verified against source. Previous 4 recommendations confirmed applied. |
 | 2026-02-21 | SPEC-057a | COMPLETED: Networking types, config, and core abstractions. 4 files created, 2 modified, 31 tests, 2 commits. |
-| 2026-02-21 | SPEC-057a | REVIEW v1: APPROVED. All 7 acceptance criteria met. 31/31 tests pass. Build and clippy clean. |
-| 2026-02-20 | SPEC-057a | EXECUTED: 2 commits, 31 tests, all 7 acceptance criteria met. Sequential fallback used (subagent CLI unavailable). |
-| 2026-02-20 | SPEC-057a | AUDIT v4: APPROVED. No critical issues. 2 recommendations: (1) add explicit derive annotations to config.rs structs for spec consistency, (2) note ConnectionRegistry::iter() may need Vec return in practice. |
 
 ## Project Patterns
 
@@ -84,4 +84,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-21 (SPEC-057a completed and archived)*
+*Last updated: 2026-02-21 (SPEC-057b completed and archived)*
