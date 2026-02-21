@@ -25,6 +25,27 @@ pub enum HealthState {
     Stopped,
 }
 
+impl HealthState {
+    /// Returns the lowercase string representation of the health state.
+    ///
+    /// Used by the health endpoint to serialize the state into JSON.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Ready => "ready",
+            Self::Draining => "draining",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
+impl std::fmt::Display for HealthState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Controls graceful shutdown with health state management and in-flight tracking.
 ///
 /// The controller coordinates shutdown across the server:
