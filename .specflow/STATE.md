@@ -4,8 +4,8 @@
 
 - **Active Specification:** none
 - **Status:** idle
-- **Project Phase:** Phase 2 (Rust Core)
-- **TODO Items:** 29 (1 client bug fix + 9 Rust bridge/core + 5 audit findings + 14 existing deferred)
+- **Project Phase:** Phase 2.5 complete → Phase 3 (Rust Server)
+- **TODO Items:** 28 (1 client bug fix + 8 Rust bridge/core + 5 audit findings + 14 existing deferred)
 - **Next Step:** /sf:new or /sf:next
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
@@ -13,6 +13,8 @@
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
+| 1 | SPEC-057b | Networking HTTP and WebSocket Handlers | draft | 3 |
+| 2 | SPEC-057c | Networking Middleware, NetworkModule, and Integration | draft | 3 |
 
 ## Migration Roadmap (high-level)
 
@@ -20,8 +22,9 @@
 |-------|-------------|--------|
 | **0. TypeScript Completion** | SPEC-048a/b/c (client cluster integration) | Complete |
 | **1. Bridge** | Cargo workspace, CI, 6 upfront traits | Complete |
-| **2. Rust Core** | CRDTs, message schemas, partitions | In Progress |
-| **3. Rust Server** | Network, handlers, cluster, storage, tests | Not Started |
+| **2. Rust Core** | CRDTs, message schemas, partitions | Complete |
+| **2.5 Research Sprint** | Storage, Cluster, Service, Networking architecture | **Complete** |
+| **3. Rust Server** | Network, handlers, cluster, storage, tests | In Progress |
 | **4. Rust Features** | Schema system, shapes, SSE, DAG, tantivy | Not Started |
 | **5. Post-Migration** | AsyncStorage, S3, tiered, vector, extensions | Not Started |
 
@@ -34,21 +37,19 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 | [TODO.md](todos/TODO.md) | Phase-based roadmap with all tasks and dependencies |
 | [RUST_SERVER_MIGRATION_RESEARCH.md](reference/RUST_SERVER_MIGRATION_RESEARCH.md) | Technical migration strategy, 6 upfront traits |
 | [PRODUCT_POSITIONING_RESEARCH.md](reference/PRODUCT_POSITIONING_RESEARCH.md) | Competitive analysis, schema strategy, partial replication |
+| [RUST_STORAGE_ARCHITECTURE.md](reference/RUST_STORAGE_ARCHITECTURE.md) | Multi-layer storage design (TODO-080) |
+| [RUST_CLUSTER_ARCHITECTURE.md](reference/RUST_CLUSTER_ARCHITECTURE.md) | Cluster protocol design (TODO-081) |
+| [RUST_SERVICE_ARCHITECTURE.md](reference/RUST_SERVICE_ARCHITECTURE.md) | Service & operation routing design (TODO-082) |
+| [RUST_NETWORKING_PATTERNS.md](reference/RUST_NETWORKING_PATTERNS.md) | Networking layer patterns (TODO-083) |
 
 ## Decisions
 
 | Date | Specification | Decision |
 |------|---------------|----------|
-| 2026-02-20 | SPEC-056 | COMPLETED: Implement Partition Hash and Partition Table in Rust. 1 commit. 3 audit cycles, 1 review cycle. `hash_to_partition`, `PartitionLookup` trait, `PartitionTable`, partition pruning. 33 new tests, 431 total passing. Zero clippy warnings. |
-| 2026-02-20 | SPEC-056 | REVIEWED v1: APPROVED. All 11 acceptance criteria verified. 431 tests pass (414 unit + 10 integration + 7 doc-tests). Zero clippy warnings in partition.rs. 2 minor findings (informational only). |
-| 2026-02-20 | SPEC-056 | EXECUTED: Implement Partition Hash and Partition Table in Rust. 1 commit (3 waves, single atomic). hash_to_partition, PartitionLookup trait, PartitionTable, partition pruning. 33 new tests, 431 total passing. Zero clippy warnings. |
-| 2026-02-19 | SPEC-055 | COMPLETED: Fix Rust ORMap Merkle Hash Determinism. 2 commits. 2 audit cycles, 1 review cycle. `canonical_json` + `sort_json_value` private helpers replace `serde_json::to_string` in `hash_entry()`. 385 tests + 10 integration tests pass. Zero clippy warnings. |
-| 2026-02-19 | SPEC-055 | REVIEWED v1: APPROVED. All 6 acceptance criteria verified. 385 unit tests + 10 integration tests + 6 doc tests pass. Zero clippy warnings. `canonical_json` + `sort_json_value` private helpers fix hash determinism for generic V. |
-| 2026-02-19 | SPEC-052e | COMPLETED: Message Schema -- HTTP Sync, Message Union, and Cross-Language Tests. 5 commits. 4 audit cycles, 1 review cycle. 12 HTTP sync types, 77-variant Message enum, 61 golden fixtures, 9 integration tests. float64 deserialization fix for JS interop. 393 Rust tests + 62 TS tests. Zero clippy warnings. |
-| 2026-02-19 | SPEC-052e | REVIEWED v1: APPROVED. All 8 acceptance criteria verified. 393 Rust tests + 62 TS tests pass, zero clippy warnings. 77-variant Message enum, 12 HTTP sync types, 61 golden fixtures. 3 minor findings -- all well-documented and non-blocking. |
-| 2026-02-19 | SPEC-052e | EXECUTED: Message Schema -- HTTP Sync, Message Union, and Cross-Language Tests. 5 commits (3 waves). 12 HTTP sync types, 77-variant Message enum, 61 golden fixtures, 9 integration tests. float64 deserialization fix for JS interop. 393 Rust tests + 62 TS tests. Zero clippy warnings. |
-| 2026-02-18 | SPEC-052d | COMPLETED: Message Schema -- Messaging and Client Events Domain Structs. 2 commits. 4 audit cycles, 1 review cycle. 44 types (33 messaging + 11 client events). 353 tests. All 7 AC pass. |
-| 2026-02-18 | SPEC-052d | REVIEWED v1: APPROVED. All 7 acceptance criteria verified. 353 tests pass (72 new + 281 existing), zero clippy warnings. 44 types field-accurate against TS source. No critical, major, or minor issues found. |
+| 2026-02-21 | SPEC-057a | COMPLETED: Networking types, config, and core abstractions. 4 files created, 2 modified, 31 tests, 2 commits. |
+| 2026-02-21 | SPEC-057a | REVIEW v1: APPROVED. All 7 acceptance criteria met. 31/31 tests pass. Build and clippy clean. |
+| 2026-02-20 | SPEC-057a | EXECUTED: 2 commits, 31 tests, all 7 acceptance criteria met. Sequential fallback used (subagent CLI unavailable). |
+| 2026-02-20 | SPEC-057a | AUDIT v4: APPROVED. No critical issues. 2 recommendations: (1) add explicit derive annotations to config.rs structs for spec consistency, (2) note ConnectionRegistry::iter() may need Vec return in practice. |
 
 ## Project Patterns
 
@@ -83,4 +84,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-20 (SPEC-056 completed and archived)*
+*Last updated: 2026-02-21 (SPEC-057a completed and archived)*
