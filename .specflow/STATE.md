@@ -13,8 +13,7 @@
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-058b | Storage In-Memory Implementations (HashMapStorage + NullDataStore) | draft | Phase 3 |
-| 2 | SPEC-058c | DefaultRecordStore, RecordStoreFactory, and Integration | draft | Phase 3 |
+| 1 | SPEC-058c | DefaultRecordStore, RecordStoreFactory, and Integration | draft | Phase 3 |
 
 ## Migration Roadmap (high-level)
 
@@ -46,11 +45,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-21 | SPEC-058b | COMPLETED: HashMapStorage + NullDataStore. 4 files created, 2 modified, 25 tests, 5 commits. 2 audit cycles, 2 review cycles. |
+| 2026-02-21 | SPEC-058b | REVIEW v2: APPROVED. Both fixes from Review v1 verified. 99/99 tests pass. Build and clippy clean. No new issues. |
+| 2026-02-21 | SPEC-058b | FIX v1: Applied both minor items. Added 2 cursor past-end tests, corrected test counts (99 total, 25 new). |
+| 2026-02-21 | SPEC-058b | REVIEW v1: APPROVED. All 5 acceptance criteria met. 97/97 tests pass. Build and clippy clean. 2 minor items (doc discrepancy, missing cursor-past-end test). |
 | 2026-02-21 | SPEC-058a | COMPLETED: Storage Traits, Types, and MutationObserver. 6 files created, 1 modified, 15 tests, 2 commits. 1 audit cycle, 1 review cycle. |
-| 2026-02-21 | SPEC-058a | REVIEW v1: APPROVED. All 8 acceptance criteria met. 74/74 tests pass. Build and clippy clean. No issues found. |
-| 2026-02-21 | SPEC-058a | EXECUTED: Orchestrated execution complete. 2 waves, 2 commits, 6 files created, 1 modified, 15 new tests (74 total). |
-| 2026-02-21 | SPEC-058a | AUDITED: Audit v1 APPROVED with 1 recommendation. RecordStore and MapDataStore trait bodies added inline during audit. |
-| 2026-02-21 | SPEC-058 | SPLIT: Decomposed into 3 parts -- SPEC-058a (traits/types), SPEC-058b (HashMapStorage + NullDataStore), SPEC-058c (DefaultRecordStore + factory). Parent archived. |
 
 ## Project Patterns
 
@@ -85,4 +84,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-21 (SPEC-058a COMPLETED)*
+*Last updated: 2026-02-21 (SPEC-058b completed and archived)*

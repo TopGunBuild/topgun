@@ -6,6 +6,14 @@ Historical decisions rotated from STATE.md to maintain compactness.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-21 | SPEC-058b | EXECUTED: Orchestrated execution complete. 1 wave, 4 commits, 4 files created, 2 modified, 22 new tests (97 total). |
+| 2026-02-21 | SPEC-058b | AUDIT v2: APPROVED with 1 recommendation (rand 0.9 API note). All v1 critical issues verified resolved. |
+| 2026-02-21 | SPEC-058b | REVISION v1: Applied all 3 audit items. Fixed storage/mod.rs ownership annotations, updated rand 0.8->0.9, acknowledged file count. |
+| 2026-02-21 | SPEC-058b | AUDIT v1: NEEDS_REVISION. 1 critical (parallel write conflict on storage/mod.rs), 2 recommendations (file count, rand version). |
+| 2026-02-21 | SPEC-058a | REVIEW v1: APPROVED. All 8 acceptance criteria met. 74/74 tests pass. Build and clippy clean. No issues found. |
+| 2026-02-21 | SPEC-058a | EXECUTED: Orchestrated execution complete. 2 waves, 2 commits, 6 files created, 1 modified, 15 new tests (74 total). |
+| 2026-02-21 | SPEC-058a | AUDITED: Audit v1 APPROVED with 1 recommendation. RecordStore and MapDataStore trait bodies added inline during audit. |
+| 2026-02-21 | SPEC-058 | SPLIT: Decomposed into 3 parts -- SPEC-058a (traits/types), SPEC-058b (HashMapStorage + NullDataStore), SPEC-058c (DefaultRecordStore + factory). Parent archived. |
 | 2026-02-21 | SPEC-058 | CREATED: Multi-Layer Storage System. 14 files total (13 new + 1 modified). Flagged for /sf:split due to exceeding 5-file Rust limit. |
 | 2026-02-21 | SPEC-057c | COMPLETED: Networking Middleware, NetworkModule, and Integration. 2 files created, 2 modified, 59 tests, 3 commits. 2 audit cycles, 2 review cycles. |
 | 2026-02-21 | SPEC-057c | REVIEW v2: APPROVED. All 3 Review v1 fixes verified. No new issues. 59/59 tests pass. Build and clippy clean. |
