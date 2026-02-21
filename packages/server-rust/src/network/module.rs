@@ -80,23 +80,11 @@ impl NetworkModule {
     /// - `GET /ws` -- WebSocket upgrade
     /// - `POST /sync` -- HTTP sync endpoint (`MsgPack`)
     pub fn build_router(&self) -> Router {
-        let state = AppState {
-            registry: Arc::clone(&self.registry),
-            shutdown: Arc::clone(&self.shutdown),
-            config: Arc::new(self.config.clone()),
-            start_time: Instant::now(),
-        };
-
-        let layers = build_http_layers(&self.config);
-
-        Router::new()
-            .route("/health", get(health_handler))
-            .route("/health/live", get(liveness_handler))
-            .route("/health/ready", get(readiness_handler))
-            .route("/ws", get(ws_upgrade_handler))
-            .route("/sync", post(http_sync_handler))
-            .layer(layers)
-            .with_state(state)
+        build_app(
+            self.config.clone(),
+            Arc::clone(&self.registry),
+            Arc::clone(&self.shutdown),
+        )
     }
 
     /// Binds the TCP listener to the configured host and port.
@@ -145,37 +133,51 @@ impl NetworkModule {
             .expect("start() must be called before serve()");
         let registry = self.registry;
         let shutdown_ctrl = self.shutdown;
-        let config = self.config;
+        let mut config = self.config;
 
-        // Build the router after extracting all fields from self to avoid
-        // partial move issues.
-        let state = AppState {
-            registry: Arc::clone(&registry),
-            shutdown: Arc::clone(&shutdown_ctrl),
-            config: Arc::new(config.clone()),
-            start_time: Instant::now(),
-        };
+        // Extract TLS config before consuming config into the router,
+        // since build_app takes ownership of config.
+        let tls = config.tls.take();
 
-        let layers = build_http_layers(&config);
-
-        let router = Router::new()
-            .route("/health", get(health_handler))
-            .route("/health/live", get(liveness_handler))
-            .route("/health/ready", get(readiness_handler))
-            .route("/ws", get(ws_upgrade_handler))
-            .route("/sync", post(http_sync_handler))
-            .layer(layers)
-            .with_state(state);
+        let router = build_app(config, Arc::clone(&registry), Arc::clone(&shutdown_ctrl));
 
         // Transition to Ready so readiness probes pass.
         shutdown_ctrl.set_ready();
 
-        if let Some(ref tls_config) = config.tls {
+        if let Some(ref tls_config) = tls {
             serve_tls(listener, router, tls_config, registry, shutdown_ctrl, shutdown).await
         } else {
             serve_plain(listener, router, registry, shutdown_ctrl, shutdown).await
         }
     }
+}
+
+/// Builds the complete application router with all routes and middleware.
+///
+/// Takes ownership of `config` to avoid an extra clone: `build_http_layers`
+/// borrows it first, then it is moved into `Arc` for the `AppState`.
+fn build_app(
+    config: NetworkConfig,
+    registry: Arc<ConnectionRegistry>,
+    shutdown: Arc<ShutdownController>,
+) -> Router {
+    let layers = build_http_layers(&config);
+
+    let state = AppState {
+        registry,
+        shutdown,
+        config: Arc::new(config),
+        start_time: Instant::now(),
+    };
+
+    Router::new()
+        .route("/health", get(health_handler))
+        .route("/health/live", get(liveness_handler))
+        .route("/health/ready", get(readiness_handler))
+        .route("/ws", get(ws_upgrade_handler))
+        .route("/sync", post(http_sync_handler))
+        .layer(layers)
+        .with_state(state)
 }
 
 /// Serves plain HTTP/WS connections using axum's built-in server.
@@ -273,13 +275,15 @@ mod tests {
     // ── Test helper ───────────────────────────────────────────────────
 
     /// Starts a server on an OS-assigned port and returns the port,
-    /// shared registry, shared shutdown controller, and a oneshot sender
-    /// that triggers graceful shutdown when sent or dropped.
+    /// shared registry, shared shutdown controller, a oneshot sender
+    /// that triggers graceful shutdown when sent or dropped, and a
+    /// `JoinHandle` for the serve task so callers can verify completion.
     async fn start_server() -> (
         u16,
         Arc<ConnectionRegistry>,
         Arc<ShutdownController>,
         tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
     ) {
         let mut module = NetworkModule::new(NetworkConfig::default());
         let registry = module.registry();
@@ -288,7 +292,7 @@ mod tests {
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-        tokio::spawn(async move {
+        let serve_handle = tokio::spawn(async move {
             module
                 .serve(async move {
                     let _ = shutdown_rx.await;
@@ -300,7 +304,7 @@ mod tests {
         // Give the server a moment to transition to Ready.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        (port, registry, shutdown_ctrl, shutdown_tx)
+        (port, registry, shutdown_ctrl, shutdown_tx, serve_handle)
     }
 
     // ── Unit tests ────────────────────────────────────────────────────
@@ -352,7 +356,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_endpoint_responds_with_ready() {
-        let (port, _registry, _shutdown_ctrl, shutdown_tx) = start_server().await;
+        let (port, _registry, _shutdown_ctrl, shutdown_tx, _handle) = start_server().await;
 
         let resp = reqwest::get(format!("http://127.0.0.1:{port}/health"))
             .await
@@ -368,7 +372,7 @@ mod tests {
 
     #[tokio::test]
     async fn liveness_and_readiness_endpoints() {
-        let (port, _registry, _shutdown_ctrl, shutdown_tx) = start_server().await;
+        let (port, _registry, _shutdown_ctrl, shutdown_tx, _handle) = start_server().await;
 
         let live_resp = reqwest::get(format!("http://127.0.0.1:{port}/health/live"))
             .await
@@ -385,7 +389,7 @@ mod tests {
 
     #[tokio::test]
     async fn websocket_upgrade_and_registry_tracking() {
-        let (port, registry, _shutdown_ctrl, shutdown_tx) = start_server().await;
+        let (port, registry, _shutdown_ctrl, shutdown_tx, _handle) = start_server().await;
 
         assert_eq!(registry.count(), 0, "no connections initially");
 
@@ -421,7 +425,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_sync_returns_msgpack() {
-        let (port, _registry, _shutdown_ctrl, shutdown_tx) = start_server().await;
+        let (port, _registry, _shutdown_ctrl, shutdown_tx, _handle) = start_server().await;
 
         let client = reqwest::Client::new();
         let resp = client
@@ -451,7 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn graceful_shutdown_drains_and_stops() {
-        let (port, _registry, shutdown_ctrl, shutdown_tx) = start_server().await;
+        let (port, _registry, shutdown_ctrl, shutdown_tx, serve_handle) = start_server().await;
 
         assert_eq!(shutdown_ctrl.health_state(), HealthState::Ready);
 
@@ -464,24 +468,23 @@ mod tests {
         // Trigger shutdown.
         drop(shutdown_tx);
 
-        // Wait for the shutdown controller to transition away from Ready.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let state = shutdown_ctrl.health_state();
-            if state == HealthState::Draining || state == HealthState::Stopped {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "health state did not transition from Ready within 5s, current: {state:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        // Verify that the serve task completes within a reasonable timeout.
+        tokio::time::timeout(Duration::from_secs(5), serve_handle)
+            .await
+            .expect("serve task should complete within 5s")
+            .expect("serve task should not panic");
+
+        // After serve completes, health state should be Draining or Stopped.
+        let state = shutdown_ctrl.health_state();
+        assert!(
+            state == HealthState::Draining || state == HealthState::Stopped,
+            "expected Draining or Stopped after serve completes, got {state:?}"
+        );
     }
 
     #[tokio::test]
     async fn request_id_header_is_present_in_response() {
-        let (port, _registry, _shutdown_ctrl, shutdown_tx) = start_server().await;
+        let (port, _registry, _shutdown_ctrl, shutdown_tx, _handle) = start_server().await;
 
         let resp = reqwest::get(format!("http://127.0.0.1:{port}/health"))
             .await
