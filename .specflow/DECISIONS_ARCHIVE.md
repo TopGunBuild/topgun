@@ -6,6 +6,12 @@ Historical decisions rotated from STATE.md to maintain compactness.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-21 | SPEC-058 | CREATED: Multi-Layer Storage System. 14 files total (13 new + 1 modified). Flagged for /sf:split due to exceeding 5-file Rust limit. |
+| 2026-02-21 | SPEC-057c | COMPLETED: Networking Middleware, NetworkModule, and Integration. 2 files created, 2 modified, 59 tests, 3 commits. 2 audit cycles, 2 review cycles. |
+| 2026-02-21 | SPEC-057c | REVIEW v2: APPROVED. All 3 Review v1 fixes verified. No new issues. 59/59 tests pass. Build and clippy clean. |
+| 2026-02-21 | SPEC-057c | FIX v1: Applied all 3 minor review findings (router dedup, clone removal, serve completion test). 59/59 tests pass. |
+| 2026-02-21 | SPEC-057c | REVIEW v1: APPROVED. All 6 acceptance criteria met. 59/59 tests pass. Build and clippy clean. 3 minor findings (router duplication, avoidable clone, shutdown test completeness). |
+| 2026-02-21 | SPEC-057b | COMPLETED: Networking HTTP and WebSocket Handlers. 4 files created, 3 modified, 12 tests, 4 commits. |
 | 2026-02-21 | SPEC-057c | AUDIT v2: APPROVED with 1 recommendation. 2 minor corrections applied (mod.rs duplicate re-export, Assumption 2 wording). Source-verified against codebase. |
 | 2026-02-21 | SPEC-057c | REVISED: Applied both audit recommendations (TLS path clarification, test helper extraction). |
 | 2026-02-21 | SPEC-057c | AUDIT v1: APPROVED with recommendations. 8 corrections applied inline (stale lib.rs ref, file count, context estimates). 2 optional recommendations. |

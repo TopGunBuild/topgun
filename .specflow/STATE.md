@@ -13,6 +13,8 @@
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
+| 1 | SPEC-058b | Storage In-Memory Implementations (HashMapStorage + NullDataStore) | draft | Phase 3 |
+| 2 | SPEC-058c | DefaultRecordStore, RecordStoreFactory, and Integration | draft | Phase 3 |
 
 ## Migration Roadmap (high-level)
 
@@ -44,11 +46,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
-| 2026-02-21 | SPEC-057c | COMPLETED: Networking Middleware, NetworkModule, and Integration. 2 files created, 2 modified, 59 tests, 3 commits. 2 audit cycles, 2 review cycles. |
-| 2026-02-21 | SPEC-057c | REVIEW v2: APPROVED. All 3 Review v1 fixes verified. No new issues. 59/59 tests pass. Build and clippy clean. |
-| 2026-02-21 | SPEC-057c | FIX v1: Applied all 3 minor review findings (router dedup, clone removal, serve completion test). 59/59 tests pass. |
-| 2026-02-21 | SPEC-057c | REVIEW v1: APPROVED. All 6 acceptance criteria met. 59/59 tests pass. Build and clippy clean. 3 minor findings (router duplication, avoidable clone, shutdown test completeness). |
-| 2026-02-21 | SPEC-057b | COMPLETED: Networking HTTP and WebSocket Handlers. 4 files created, 3 modified, 12 tests, 4 commits. |
+| 2026-02-21 | SPEC-058a | COMPLETED: Storage Traits, Types, and MutationObserver. 6 files created, 1 modified, 15 tests, 2 commits. 1 audit cycle, 1 review cycle. |
+| 2026-02-21 | SPEC-058a | REVIEW v1: APPROVED. All 8 acceptance criteria met. 74/74 tests pass. Build and clippy clean. No issues found. |
+| 2026-02-21 | SPEC-058a | EXECUTED: Orchestrated execution complete. 2 waves, 2 commits, 6 files created, 1 modified, 15 new tests (74 total). |
+| 2026-02-21 | SPEC-058a | AUDITED: Audit v1 APPROVED with 1 recommendation. RecordStore and MapDataStore trait bodies added inline during audit. |
+| 2026-02-21 | SPEC-058 | SPLIT: Decomposed into 3 parts -- SPEC-058a (traits/types), SPEC-058b (HashMapStorage + NullDataStore), SPEC-058c (DefaultRecordStore + factory). Parent archived. |
 
 ## Project Patterns
 
@@ -83,4 +85,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-21 (SPEC-057c COMPLETED)*
+*Last updated: 2026-02-21 (SPEC-058a COMPLETED)*
