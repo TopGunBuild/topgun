@@ -268,6 +268,42 @@ async fn drain_connections(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::HealthState;
+
+    // ── Test helper ───────────────────────────────────────────────────
+
+    /// Starts a server on an OS-assigned port and returns the port,
+    /// shared registry, shared shutdown controller, and a oneshot sender
+    /// that triggers graceful shutdown when sent or dropped.
+    async fn start_server() -> (
+        u16,
+        Arc<ConnectionRegistry>,
+        Arc<ShutdownController>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let mut module = NetworkModule::new(NetworkConfig::default());
+        let registry = module.registry();
+        let shutdown_ctrl = module.shutdown_controller();
+        let port = module.start().await.expect("start should succeed");
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+        tokio::spawn(async move {
+            module
+                .serve(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve should not fail");
+        });
+
+        // Give the server a moment to transition to Ready.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        (port, registry, shutdown_ctrl, shutdown_tx)
+    }
+
+    // ── Unit tests ────────────────────────────────────────────────────
 
     #[test]
     fn new_creates_module_without_binding() {
@@ -310,5 +346,166 @@ mod tests {
     async fn serve_panics_without_start() {
         let module = NetworkModule::new(NetworkConfig::default());
         let _ = module.serve(std::future::pending::<()>()).await;
+    }
+
+    // ── Integration tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn health_endpoint_responds_with_ready() {
+        let (port, _registry, _shutdown_ctrl, shutdown_tx) = start_server().await;
+
+        let resp = reqwest::get(format!("http://127.0.0.1:{port}/health"))
+            .await
+            .expect("health request should succeed");
+
+        assert_eq!(resp.status(), 200);
+
+        let body: serde_json::Value = resp.json().await.expect("body should be JSON");
+        assert_eq!(body["state"], "ready");
+
+        drop(shutdown_tx);
+    }
+
+    #[tokio::test]
+    async fn liveness_and_readiness_endpoints() {
+        let (port, _registry, _shutdown_ctrl, shutdown_tx) = start_server().await;
+
+        let live_resp = reqwest::get(format!("http://127.0.0.1:{port}/health/live"))
+            .await
+            .expect("liveness request should succeed");
+        assert_eq!(live_resp.status(), 200);
+
+        let ready_resp = reqwest::get(format!("http://127.0.0.1:{port}/health/ready"))
+            .await
+            .expect("readiness request should succeed");
+        assert_eq!(ready_resp.status(), 200);
+
+        drop(shutdown_tx);
+    }
+
+    #[tokio::test]
+    async fn websocket_upgrade_and_registry_tracking() {
+        let (port, registry, _shutdown_ctrl, shutdown_tx) = start_server().await;
+
+        assert_eq!(registry.count(), 0, "no connections initially");
+
+        let (ws_stream, _response) = tokio_tungstenite::connect_async(
+            format!("ws://127.0.0.1:{port}/ws"),
+        )
+        .await
+        .expect("WS connect should succeed");
+
+        // Wait for the server to register the connection.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(registry.count(), 1, "one WS connection registered");
+
+        // Drop the WS stream to trigger disconnect.
+        drop(ws_stream);
+
+        // Poll until the server deregisters the connection.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if registry.count() == 0 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "registry.count() did not reach 0 within 2s, current: {}",
+                registry.count()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        drop(shutdown_tx);
+    }
+
+    #[tokio::test]
+    async fn post_sync_returns_msgpack() {
+        let (port, _registry, _shutdown_ctrl, shutdown_tx) = start_server().await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/sync"))
+            .body(vec![0x90_u8]) // empty MsgPack array
+            .send()
+            .await
+            .expect("POST /sync should succeed");
+
+        assert_eq!(resp.status(), 200);
+
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .expect("content-type header should be present")
+            .to_str()
+            .expect("content-type should be valid UTF-8");
+        assert_eq!(content_type, "application/msgpack");
+
+        let body = resp.bytes().await.expect("body read should succeed");
+        let decoded: Vec<()> =
+            rmp_serde::from_slice(&body).expect("response body should be valid MsgPack");
+        assert!(decoded.is_empty());
+
+        drop(shutdown_tx);
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_drains_and_stops() {
+        let (port, _registry, shutdown_ctrl, shutdown_tx) = start_server().await;
+
+        assert_eq!(shutdown_ctrl.health_state(), HealthState::Ready);
+
+        // Verify the server is accepting requests.
+        let resp = reqwest::get(format!("http://127.0.0.1:{port}/health"))
+            .await
+            .expect("health request should succeed before shutdown");
+        assert_eq!(resp.status(), 200);
+
+        // Trigger shutdown.
+        drop(shutdown_tx);
+
+        // Wait for the shutdown controller to transition away from Ready.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let state = shutdown_ctrl.health_state();
+            if state == HealthState::Draining || state == HealthState::Stopped {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "health state did not transition from Ready within 5s, current: {state:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn request_id_header_is_present_in_response() {
+        let (port, _registry, _shutdown_ctrl, shutdown_tx) = start_server().await;
+
+        let resp = reqwest::get(format!("http://127.0.0.1:{port}/health"))
+            .await
+            .expect("health request should succeed");
+
+        let request_id = resp
+            .headers()
+            .get("x-request-id")
+            .expect("X-Request-Id header should be present in response");
+
+        // UUID v4 format: 8-4-4-4-12 hex characters
+        let id_str = request_id
+            .to_str()
+            .expect("X-Request-Id should be valid UTF-8");
+        assert!(
+            !id_str.is_empty(),
+            "X-Request-Id should not be empty"
+        );
+        assert_eq!(
+            id_str.len(),
+            36,
+            "X-Request-Id should be a UUID (36 chars): {id_str}"
+        );
+
+        drop(shutdown_tx);
     }
 }
