@@ -6,6 +6,13 @@ Historical decisions rotated from STATE.md to maintain compactness.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-21 | SPEC-057c | AUDIT v2: APPROVED with 1 recommendation. 2 minor corrections applied (mod.rs duplicate re-export, Assumption 2 wording). Source-verified against codebase. |
+| 2026-02-21 | SPEC-057c | REVISED: Applied both audit recommendations (TLS path clarification, test helper extraction). |
+| 2026-02-21 | SPEC-057c | AUDIT v1: APPROVED with recommendations. 8 corrections applied inline (stale lib.rs ref, file count, context estimates). 2 optional recommendations. |
+| 2026-02-21 | SPEC-057b | REVIEW v1: APPROVED. All 6 acceptance criteria met. 43/43 tests pass. Build and clippy clean. No critical or major issues. |
+| 2026-02-21 | SPEC-057b | EXECUTED: 4 commits, 12 new tests (43 total), all 6 acceptance criteria met. Sequential fallback (subagent CLI unavailable). |
+| 2026-02-21 | SPEC-057b | AUDIT v2: APPROVED. No critical issues. All SPEC-057a types verified against source. Previous 4 recommendations confirmed applied. |
+| 2026-02-21 | SPEC-057a | COMPLETED: Networking types, config, and core abstractions. 4 files created, 2 modified, 31 tests, 2 commits. |
 | 2026-02-21 | SPEC-057b | REVISION v1: Applied all 4 audit recommendations (G2 dependency, axum WS config API note, futures_util note, HealthState Display guidance). Status → auditing. |
 | 2026-02-21 | SPEC-057b | AUDIT v1: APPROVED. No critical issues. 4 recommendations (G2 dependency, axum WS config API, futures_util dependency, HealthState Display). |
 | 2026-02-21 | SPEC-057a | REVIEW v1: APPROVED. All 7 acceptance criteria met. 31/31 tests pass. Build and clippy clean. |

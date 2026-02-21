@@ -4,7 +4,7 @@
 
 - **Active Specification:** none
 - **Status:** idle
-- **Project Phase:** Phase 2.5 complete → Phase 3 (Rust Server)
+- **Project Phase:** Phase 2.5 complete -> Phase 3 (Rust Server)
 - **TODO Items:** 28 (1 client bug fix + 8 Rust bridge/core + 5 audit findings + 14 existing deferred)
 - **Next Step:** /sf:new or /sf:next
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
@@ -13,7 +13,6 @@
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-057c | Networking Middleware, NetworkModule, and Integration | draft | 3 |
 
 ## Migration Roadmap (high-level)
 
@@ -45,11 +44,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-21 | SPEC-057c | COMPLETED: Networking Middleware, NetworkModule, and Integration. 2 files created, 2 modified, 59 tests, 3 commits. 2 audit cycles, 2 review cycles. |
+| 2026-02-21 | SPEC-057c | REVIEW v2: APPROVED. All 3 Review v1 fixes verified. No new issues. 59/59 tests pass. Build and clippy clean. |
+| 2026-02-21 | SPEC-057c | FIX v1: Applied all 3 minor review findings (router dedup, clone removal, serve completion test). 59/59 tests pass. |
+| 2026-02-21 | SPEC-057c | REVIEW v1: APPROVED. All 6 acceptance criteria met. 59/59 tests pass. Build and clippy clean. 3 minor findings (router duplication, avoidable clone, shutdown test completeness). |
 | 2026-02-21 | SPEC-057b | COMPLETED: Networking HTTP and WebSocket Handlers. 4 files created, 3 modified, 12 tests, 4 commits. |
-| 2026-02-21 | SPEC-057b | REVIEW v1: APPROVED. All 6 acceptance criteria met. 43/43 tests pass. Build and clippy clean. No critical or major issues. |
-| 2026-02-21 | SPEC-057b | EXECUTED: 4 commits, 12 new tests (43 total), all 6 acceptance criteria met. Sequential fallback (subagent CLI unavailable). |
-| 2026-02-21 | SPEC-057b | AUDIT v2: APPROVED. No critical issues. All SPEC-057a types verified against source. Previous 4 recommendations confirmed applied. |
-| 2026-02-21 | SPEC-057a | COMPLETED: Networking types, config, and core abstractions. 4 files created, 2 modified, 31 tests, 2 commits. |
 
 ## Project Patterns
 
@@ -84,4 +83,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-21 (SPEC-057b completed and archived)*
+*Last updated: 2026-02-21 (SPEC-057c COMPLETED)*
