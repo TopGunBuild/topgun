@@ -125,6 +125,8 @@ impl StorageEngine for HashMapStorage {
     fn fetch_keys(&self, cursor: &IterationCursor, size: usize) -> FetchResult<String> {
         let snapshot = self.snapshot_iter();
         let total = snapshot.len();
+        // Cursor offsets are always small (bounded by storage size), so truncation is safe.
+        #[allow(clippy::cast_possible_truncation)]
         let offset = decode_cursor_offset(cursor) as usize;
 
         let items: Vec<String> = snapshot
@@ -153,6 +155,8 @@ impl StorageEngine for HashMapStorage {
     ) -> FetchResult<(String, Record)> {
         let snapshot = self.snapshot_iter();
         let total = snapshot.len();
+        // Cursor offsets are always small (bounded by storage size), so truncation is safe.
+        #[allow(clippy::cast_possible_truncation)]
         let offset = decode_cursor_offset(cursor) as usize;
 
         let items: Vec<(String, Record)> =
@@ -185,7 +189,7 @@ mod tests {
                 timestamp: Timestamp {
                     millis: 0,
                     counter: 0,
-                    node_id: 0,
+                    node_id: String::new(),
                 },
             },
             metadata: RecordMetadata::new(0, cost),
