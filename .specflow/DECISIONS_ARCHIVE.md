@@ -6,6 +6,11 @@ Historical decisions rotated from STATE.md to maintain compactness.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-21 | SPEC-058c | REVISION v1: Applied recommendations 1 and 2. put() step 2 clarified; evict() steps now describe approach (c) only. |
+| 2026-02-21 | SPEC-058c | AUDIT v1: APPROVED with 4 recommendations. ~27% context est. No critical issues. |
+| 2026-02-21 | SPEC-058b | REVIEW v2: APPROVED. Both fixes from Review v1 verified. 99/99 tests pass. Build and clippy clean. No new issues. |
+| 2026-02-21 | SPEC-058b | FIX v1: Applied both minor items. Added 2 cursor past-end tests, corrected test counts (99 total, 25 new). |
+| 2026-02-21 | SPEC-058b | REVIEW v1: APPROVED. All 5 acceptance criteria met. 97/97 tests pass. Build and clippy clean. 2 minor items (doc discrepancy, missing cursor-past-end test). |
 | 2026-02-21 | SPEC-058b | EXECUTED: Orchestrated execution complete. 1 wave, 4 commits, 4 files created, 2 modified, 22 new tests (97 total). |
 | 2026-02-21 | SPEC-058b | AUDIT v2: APPROVED with 1 recommendation (rand 0.9 API note). All v1 critical issues verified resolved. |
 | 2026-02-21 | SPEC-058b | REVISION v1: Applied all 3 audit items. Fixed storage/mod.rs ownership annotations, updated rand 0.8->0.9, acknowledged file count. |
