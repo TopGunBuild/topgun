@@ -73,6 +73,7 @@ pub struct PhiAccrualFailureDetector {
 
 impl PhiAccrualFailureDetector {
     /// Creates a new phi-accrual failure detector with the given configuration.
+    #[must_use]
     pub fn new(config: PhiAccrualConfig) -> Self {
         Self {
             config,
@@ -120,11 +121,11 @@ impl FailureDetector for PhiAccrualFailureDetector {
         states.get(node_id).map(|s| s.last_heartbeat_ms)
     }
 
+    #[allow(clippy::cast_precision_loss)]
     fn suspicion_level(&self, node_id: &str, timestamp_ms: u64) -> f64 {
         let states = self.states.read();
-        let state = match states.get(node_id) {
-            Some(s) => s,
-            None => return 0.0,
+        let Some(state) = states.get(node_id) else {
+            return 0.0;
         };
 
         let elapsed = timestamp_ms.saturating_sub(state.last_heartbeat_ms) as f64;
@@ -158,8 +159,10 @@ impl FailureDetector for PhiAccrualFailureDetector {
         let cdf = 0.5 * erfc(y);
 
         // phi = -log10(1 - CDF(elapsed))
-        // When CDF is very close to 1, (1 - CDF) approaches 0, phi goes to infinity.
-        let phi = -((1.0 - cdf).log10());
+        // Clamp (1 - CDF) to a small epsilon to prevent infinity when CDF
+        // approaches 1.0. This bounds phi to a finite maximum (~308).
+        let one_minus_cdf = (1.0 - cdf).max(f64::MIN_POSITIVE);
+        let phi = -(one_minus_cdf.log10());
 
         // Clamp to non-negative (phi should never be negative).
         phi.max(0.0)
@@ -190,6 +193,7 @@ pub struct DeadlineFailureDetector {
 
 impl DeadlineFailureDetector {
     /// Creates a new deadline failure detector with the given timeout.
+    #[must_use]
     pub fn new(max_no_heartbeat_ms: u64) -> Self {
         Self {
             max_no_heartbeat_ms,
@@ -218,6 +222,7 @@ impl FailureDetector for DeadlineFailureDetector {
         self.states.read().get(node_id).copied()
     }
 
+    #[allow(clippy::cast_precision_loss)]
     fn suspicion_level(&self, node_id: &str, timestamp_ms: u64) -> f64 {
         let states = self.states.read();
         match states.get(node_id) {
@@ -251,13 +256,13 @@ fn erfc(x: f64) -> f64 {
     // For negative arguments: erfc(-x) = 2 - erfc(x)
     let (z, negate) = if x < 0.0 { (-x, true) } else { (x, false) };
 
-    let t = 1.0 / (1.0 + 0.3275911 * z);
+    let t = 1.0 / (1.0 + 0.327_591_1 * z);
 
     // Horner's form of the polynomial coefficients
     let poly = t
-        * (0.254829592
-            + t * (-0.284496736
-                + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+        * (0.254_829_592
+            + t * (-0.284_496_736
+                + t * (1.421_413_741 + t * (-1.453_152_027 + t * 1.061_405_429))));
 
     let result = poly * (-z * z).exp();
 
@@ -336,26 +341,32 @@ mod tests {
         let fd = PhiAccrualFailureDetector::new(PhiAccrualConfig::default());
 
         // Record enough heartbeats for statistical mode (>= 3 intervals).
-        for i in 0..5 {
-            fd.heartbeat("node-1", 1000 + i * 1000);
-        }
+        // Use varied intervals to produce a meaningful standard deviation,
+        // preventing premature saturation at the float precision ceiling.
+        fd.heartbeat("node-1", 1000);
+        fd.heartbeat("node-1", 2200);
+        fd.heartbeat("node-1", 3100);
+        fd.heartbeat("node-1", 4500);
+        fd.heartbeat("node-1", 5300);
 
-        let phi_at_6s = fd.suspicion_level("node-1", 6000);
-        let phi_at_7s = fd.suspicion_level("node-1", 7000);
-        let phi_at_8s = fd.suspicion_level("node-1", 8000);
-        let phi_at_10s = fd.suspicion_level("node-1", 10_000);
+        // Test at points close enough to the last heartbeat to stay within
+        // the meaningful range of the CDF (avoid deep saturation).
+        let phi_at_5500 = fd.suspicion_level("node-1", 5500);
+        let phi_at_6000 = fd.suspicion_level("node-1", 6000);
+        let phi_at_6500 = fd.suspicion_level("node-1", 6500);
+        let phi_at_7000 = fd.suspicion_level("node-1", 7000);
 
         assert!(
-            phi_at_7s > phi_at_6s,
-            "phi should increase: phi(7s)={phi_at_7s} > phi(6s)={phi_at_6s}"
+            phi_at_6000 > phi_at_5500,
+            "phi should increase: phi(6.0s)={phi_at_6000} > phi(5.5s)={phi_at_5500}"
         );
         assert!(
-            phi_at_8s > phi_at_7s,
-            "phi should increase: phi(8s)={phi_at_8s} > phi(7s)={phi_at_7s}"
+            phi_at_6500 > phi_at_6000,
+            "phi should increase: phi(6.5s)={phi_at_6500} > phi(6.0s)={phi_at_6000}"
         );
         assert!(
-            phi_at_10s > phi_at_8s,
-            "phi should increase: phi(10s)={phi_at_10s} > phi(8s)={phi_at_8s}"
+            phi_at_7000 > phi_at_6500,
+            "phi should increase: phi(7.0s)={phi_at_7000} > phi(6.5s)={phi_at_6500}"
         );
     }
 

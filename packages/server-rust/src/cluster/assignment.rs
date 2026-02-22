@@ -15,6 +15,7 @@ use super::types::{MemberInfo, MigrationTask, NodeState, PartitionAssignment};
 /// `backup_count` members after the owner (wrapping around).
 ///
 /// Returns an empty Vec if no active members exist.
+#[must_use]
 pub fn compute_assignment(
     members: &[MemberInfo],
     partition_count: u32,
@@ -67,7 +68,8 @@ pub fn compute_assignment(
 /// via `apply_assignments()` directly, not through migration (there is no
 /// source node to migrate from).
 ///
-/// Returns migrations sorted by partition_id for deterministic ordering.
+/// Returns migrations sorted by `partition_id` for deterministic ordering.
+#[must_use]
 pub fn plan_rebalance(
     current: &ClusterPartitionTable,
     target: &[PartitionAssignment],
@@ -76,9 +78,8 @@ pub fn plan_rebalance(
 
     for assignment in target {
         // Skip partitions with no current entry -- no source to migrate from.
-        let current_meta = match current.get_partition(assignment.partition_id) {
-            Some(meta) => meta,
-            None => continue,
+        let Some(current_meta) = current.get_partition(assignment.partition_id) else {
+            continue;
         };
 
         // Only create a migration if the owner is changing.
@@ -102,7 +103,7 @@ pub fn plan_rebalance(
 /// Sorts migrations to minimize data loss risk:
 /// 1. Backup promotions first (destination is already a backup of the partition)
 /// 2. Partitions with fewer total replicas migrate first (most at risk)
-pub fn order_migrations(tasks: &mut Vec<MigrationTask>, partition_table: &ClusterPartitionTable) {
+pub fn order_migrations(tasks: &mut [MigrationTask], partition_table: &ClusterPartitionTable) {
     tasks.sort_by(|a, b| {
         let a_is_promotion = is_backup_promotion(a, partition_table);
         let b_is_promotion = is_backup_promotion(b, partition_table);
@@ -128,16 +129,14 @@ pub fn order_migrations(tasks: &mut Vec<MigrationTask>, partition_table: &Cluste
 fn is_backup_promotion(task: &MigrationTask, table: &ClusterPartitionTable) -> bool {
     table
         .get_partition(task.partition_id)
-        .map(|meta| meta.backups.contains(&task.destination))
-        .unwrap_or(false)
+        .is_some_and(|meta| meta.backups.contains(&task.destination))
 }
 
 /// Returns the total replica count (owner + backups) for a partition.
 fn replica_count(partition_id: u32, table: &ClusterPartitionTable) -> usize {
     table
         .get_partition(partition_id)
-        .map(|meta| 1 + meta.backups.len())
-        .unwrap_or(0)
+        .map_or(0, |meta| 1 + meta.backups.len())
 }
 
 // ---------------------------------------------------------------------------

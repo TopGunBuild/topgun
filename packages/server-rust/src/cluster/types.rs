@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// This exists alongside `NodeStatus` in core-rust (`topgun_core::messages::cluster`)
 /// because they serve different purposes:
-/// - `NodeStatus` is the **client-facing** wire type with SCREAMING_CASE variants
+/// - `NodeStatus` is the **client-facing** wire type with `SCREAMING_CASE` variants
 ///   (ACTIVE, JOINING, LEAVING, SUSPECTED, FAILED) to match the TypeScript SDK.
 /// - `NodeState` is the **internal cluster** FSM state with Rust-idiomatic naming
 ///   and two additional lifecycle variants (`Dead`, `Removed`) that clients never see.
@@ -82,6 +82,7 @@ impl MembersView {
     /// Returns the current master: the Active member with the lowest `join_version`.
     /// Ties are broken by lexicographic `node_id`. Returns `None` for empty views
     /// or views with no Active members.
+    #[must_use]
     pub fn master(&self) -> Option<&MemberInfo> {
         self.members
             .iter()
@@ -94,12 +95,14 @@ impl MembersView {
     }
 
     /// Returns `true` only if the given `node_id` matches the computed master.
+    #[must_use]
     pub fn is_master(&self, node_id: &str) -> bool {
         self.master()
-            .map_or(false, |master| master.node_id == node_id)
+            .is_some_and(|master| master.node_id == node_id)
     }
 
     /// Returns all members with `state == NodeState::Active`.
+    #[must_use]
     pub fn active_members(&self) -> Vec<&MemberInfo> {
         self.members
             .iter()
@@ -108,6 +111,7 @@ impl MembersView {
     }
 
     /// Finds a member by `node_id`.
+    #[must_use]
     pub fn get_member(&self, node_id: &str) -> Option<&MemberInfo> {
         self.members.iter().find(|m| m.node_id == node_id)
     }

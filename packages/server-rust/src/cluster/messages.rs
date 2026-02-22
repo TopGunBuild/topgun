@@ -2,7 +2,7 @@
 //!
 //! These messages are exchanged between cluster nodes over dedicated inter-node
 //! connections, separate from the client `Message` enum. They use the same
-//! MsgPack serialization format (`rmp_serde::to_vec_named()`).
+//! `MsgPack` serialization format (`rmp_serde::to_vec_named()`).
 
 use serde::{Deserialize, Serialize};
 

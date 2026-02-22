@@ -54,6 +54,7 @@ impl fmt::Debug for ClusterPartitionTable {
 
 impl ClusterPartitionTable {
     /// Creates an empty partition table with the given total partition count.
+    #[must_use]
     pub fn new(partition_count: u32) -> Self {
         Self {
             partitions: DashMap::new(),
@@ -63,6 +64,7 @@ impl ClusterPartitionTable {
     }
 
     /// Returns a clone of the metadata for the given partition, if it exists.
+    #[must_use]
     pub fn get_partition(&self, partition_id: u32) -> Option<PartitionMeta> {
         self.partitions.get(&partition_id).map(|r| r.clone())
     }
@@ -100,6 +102,7 @@ impl ClusterPartitionTable {
     ///
     /// Uses `Acquire` ordering to synchronize with `Release` writes,
     /// ensuring all partition mutations before the version bump are visible.
+    #[must_use]
     pub fn version(&self) -> u64 {
         self.version.load(Ordering::Acquire)
     }
@@ -108,6 +111,7 @@ impl ClusterPartitionTable {
     ///
     /// Uses `Release` ordering so that all prior partition mutations are
     /// visible to readers that observe the new version via `Acquire`.
+    #[must_use]
     pub fn increment_version(&self) -> u64 {
         self.version.fetch_add(1, Ordering::Release) + 1
     }
@@ -117,13 +121,14 @@ impl ClusterPartitionTable {
         for a in assignments {
             self.set_owner(a.partition_id, a.owner.clone(), a.backups.clone());
         }
-        self.increment_version();
+        let _ = self.increment_version();
     }
 
     /// Converts the partition table to a client-facing `PartitionMapPayload`.
     ///
     /// Maps internal `NodeState` to wire `NodeStatus` and constructs
     /// `NodeEndpoints` from member host/port information.
+    #[must_use]
     pub fn to_partition_map(&self, members: &MembersView) -> PartitionMapPayload {
         let nodes: Vec<NodeInfo> = members
             .members
@@ -145,7 +150,7 @@ impl ClusterPartitionTable {
             .collect();
 
         let mut partitions: Vec<PartitionInfo> = Vec::new();
-        for entry in self.partitions.iter() {
+        for entry in &self.partitions {
             let meta = entry.value();
             partitions.push(PartitionInfo {
                 partition_id: meta.partition_id,
@@ -156,13 +161,17 @@ impl ClusterPartitionTable {
         // Sort by partition_id for deterministic output.
         partitions.sort_by_key(|p| p.partition_id);
 
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let generated_at = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
 
+        #[allow(clippy::cast_possible_truncation)]
+        let version = self.version() as u32;
+
         PartitionMapPayload {
-            version: self.version() as u32,
+            version,
             partition_count: self.partition_count,
             nodes,
             partitions,
@@ -171,6 +180,7 @@ impl ClusterPartitionTable {
     }
 
     /// Returns all partition IDs owned by the given node.
+    #[must_use]
     pub fn partitions_for_node(&self, node_id: &str) -> Vec<u32> {
         self.partitions
             .iter()
@@ -180,6 +190,7 @@ impl ClusterPartitionTable {
     }
 
     /// Returns the total partition count.
+    #[must_use]
     pub fn partition_count(&self) -> u32 {
         self.partition_count
     }
@@ -253,6 +264,7 @@ impl ClusterState {
     /// Creates a new cluster state and returns the change event receiver.
     ///
     /// The initial membership view is empty (version 0, no members).
+    #[must_use]
     pub fn new(
         config: Arc<ClusterConfig>,
         local_node_id: String,
@@ -276,6 +288,7 @@ impl ClusterState {
     }
 
     /// Returns the current membership view via lock-free `ArcSwap` load.
+    #[must_use]
     pub fn current_view(&self) -> Arc<MembersView> {
         self.membership.load_full()
     }
@@ -286,6 +299,7 @@ impl ClusterState {
     }
 
     /// Returns `true` if the local node is the current cluster master.
+    #[must_use]
     pub fn is_master(&self) -> bool {
         let view = self.membership.load();
         view.is_master(&self.local_node_id)
@@ -294,6 +308,7 @@ impl ClusterState {
     /// Returns a reference to the change event sender.
     ///
     /// Used by cluster subsystems to emit change notifications.
+    #[must_use]
     pub fn change_sender(&self) -> &mpsc::UnboundedSender<ClusterChange> {
         &self.change_tx
     }
@@ -325,6 +340,7 @@ impl ClusterChannels {
     /// The `buffer_size` parameter controls the bounded channels
     /// (`migration_commands` and `inbound_messages`). The `membership_changes`
     /// watch channel is initialized with an empty `MembersView` (version 0).
+    #[must_use]
     pub fn new(buffer_size: usize) -> (Self, ClusterChannelReceivers) {
         let initial_view = Arc::new(MembersView {
             version: 0,
@@ -458,7 +474,7 @@ mod tests {
     fn partition_table_to_partition_map() {
         let table = ClusterPartitionTable::new(271);
         table.set_owner(0, "node-1".to_string(), vec!["node-2".to_string()]);
-        table.increment_version();
+        let _ = table.increment_version();
 
         let members = MembersView {
             version: 1,
