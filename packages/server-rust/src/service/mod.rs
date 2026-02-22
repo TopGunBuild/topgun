@@ -21,7 +21,8 @@ pub mod worker;
 pub use classify::OperationService;
 pub use config::ServerConfig;
 pub use operation::{
-    CallerOrigin, ClassifyError, Operation, OperationContext, OperationError, OperationResponse,
+    service_names, CallerOrigin, ClassifyError, Operation, OperationContext, OperationError,
+    OperationResponse,
 };
 pub use registry::{ManagedService, ServiceContext, ServiceRegistry};
 pub use router::OperationRouter;
