@@ -6,6 +6,12 @@ Historical decisions rotated from STATE.md to maintain compactness.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-21 | SPEC-059 | REVISION v1: All 4 critical issues + 8 recommendations addressed. Added umbrella notice, ClassifyError enum, thiserror dependency, ServiceContext definition, domain stubs combined, Ping routed to CoordinationService, CounterSync/ORMapPushDiff verified bidirectional, serde exemption for internal types. |
+| 2026-02-21 | SPEC-059 | AUDIT v1: NEEDS_REVISION. 4 critical issues (Language Profile file limit, thiserror contradiction, unclassifiable Message behavior, sub-spec 059d file limit). 8 recommendations. |
+| 2026-02-21 | SPEC-058c | COMPLETED: DefaultRecordStore, RecordStoreFactory, and Integration. 3 files created, 1 modified, 25 tests, 2 commits. 2 audit cycles, 1 review cycle. |
+| 2026-02-21 | SPEC-058c | AUDIT v2: APPROVED with 2 recommendations. ~35% context est. No critical issues. Post-revision spec clean. |
+| 2026-02-21 | SPEC-058b | COMPLETED: HashMapStorage + NullDataStore. 4 files created, 2 modified, 25 tests, 5 commits. 2 audit cycles, 2 review cycles. |
+| 2026-02-21 | SPEC-058a | COMPLETED: Storage Traits, Types, and MutationObserver. 6 files created, 1 modified, 15 tests, 2 commits. 1 audit cycle, 1 review cycle. |
 | 2026-02-21 | SPEC-058c | REVISION v1: Applied recommendations 1 and 2. put() step 2 clarified; evict() steps now describe approach (c) only. |
 | 2026-02-21 | SPEC-058c | AUDIT v1: APPROVED with 4 recommendations. ~27% context est. No critical issues. |
 | 2026-02-21 | SPEC-058b | REVIEW v2: APPROVED. Both fixes from Review v1 verified. 99/99 tests pass. Build and clippy clean. No new issues. |

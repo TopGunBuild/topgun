@@ -44,11 +44,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
-| 2026-02-21 | SPEC-058c | COMPLETED: DefaultRecordStore, RecordStoreFactory, and Integration. 3 files created, 1 modified, 25 tests, 2 commits. 2 audit cycles, 1 review cycle. |
-| 2026-02-21 | SPEC-058c | REVIEW v1: APPROVED. All 6 acceptance criteria met. 126/126 tests pass. Build and clippy clean. 1 minor item (Phase 3 comment reference). |
-| 2026-02-21 | SPEC-058c | AUDIT v2: APPROVED with 2 recommendations. ~35% context est. No critical issues. Post-revision spec clean. |
-| 2026-02-21 | SPEC-058b | COMPLETED: HashMapStorage + NullDataStore. 4 files created, 2 modified, 25 tests, 5 commits. 2 audit cycles, 2 review cycles. |
-| 2026-02-21 | SPEC-058a | COMPLETED: Storage Traits, Types, and MutationObserver. 6 files created, 1 modified, 15 tests, 2 commits. 1 audit cycle, 1 review cycle. |
+| 2026-02-22 | SPEC-059 | COMPLETED: Operation Routing and Execution Framework. 13 files created, 2 modified, 6 commits, 50 new tests (183 total). 3 audit cycles, 1 review cycle. |
+| 2026-02-22 | SPEC-059 | REVIEW v1: APPROVED. All 13 acceptance criteria met. 1 minor issue (phase reference in code comment). 183 tests pass, clippy clean. |
+| 2026-02-22 | SPEC-059 | EXECUTED: Orchestrated implementation complete. 6 commits, 13 files created, 2 modified, 50 new tests (183 total). 4 waves, all acceptance criteria met. |
+| 2026-02-21 | SPEC-059 | AUDIT v3: NEEDS_DECOMPOSITION. No critical issues. 2 recommendations (G4 Wave optimization, ClassifyError::ClusterInternal variant). All v1/v2 issues confirmed resolved via codebase verification. |
+| 2026-02-21 | SPEC-059 | REVISION v2: All 4 items addressed. Arc<HLC> -> Arc<Mutex<HLC>>, TopicMessage added, AC#4 updated to 30 variants, partition_count documented as configurable. |
 
 ## Project Patterns
 
@@ -77,10 +77,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 - Batch delegation pattern: IConnectionProvider.sendBatch is optional; SyncEngine delegates to it when available (cluster mode) for per-key partition routing; falls back to single OP_BATCH in single-server mode
 - Double-option deserialization pattern: For Rust fields matching TS `.nullable().optional()`, use `Option<Option<T>>` with custom `deserialize_double_option` to distinguish absent (None) from explicitly-null (Some(None))
 - Float64 numeric interop pattern: JavaScript's msgpackr encodes numbers > 2^32 as float64; use `serde_number::deserialize_u64` (from `hlc::serde_number`) on Rust u64/i64 fields to accept both integer and float64 MsgPack wire values
+- Operation routing pattern: ServiceRegistry with ManagedService trait for lifecycle; Operation enum classifies all client-to-server Messages; OperationRouter dispatches by service_name; Tower middleware pipeline (LoadShed -> Timeout -> Metrics) wraps routing; domain_stub! macro generates stub services
 
 ## Warnings
 
 (none)
 
 ---
-*Last updated: 2026-02-21 (SPEC-058c completed)*
+*Last updated: 2026-02-22 (SPEC-059 completed and archived)*
