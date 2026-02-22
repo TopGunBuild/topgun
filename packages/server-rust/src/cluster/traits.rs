@@ -12,21 +12,10 @@ use topgun_core::messages::cluster::PartitionMapPayload;
 
 use crate::service::registry::ManagedService;
 use super::messages::MigrateDataPayload;
+use super::state::{ClusterChange, ClusterPartitionTable};
 use super::types::{
     ClusterHealth, MemberInfo, MembersView, MigrationTask, PartitionAssignment, PartitionState,
 };
-
-// ---------------------------------------------------------------------------
-// Placeholder types -- replaced by state.rs in SPEC-060b
-// ---------------------------------------------------------------------------
-
-/// Partition table tracking per-partition ownership and state.
-/// Placeholder: real implementation lives in `state.rs` (SPEC-060b).
-pub struct ClusterPartitionTable;
-
-/// Events emitted when cluster state changes.
-/// Placeholder: real implementation lives in `state.rs` (SPEC-060b).
-pub enum ClusterChange {}
 
 // ---------------------------------------------------------------------------
 // ClusterService
