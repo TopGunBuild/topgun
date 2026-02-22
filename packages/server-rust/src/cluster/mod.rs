@@ -370,7 +370,7 @@ mod integration_tests {
     }
 
     #[test]
-    fn reexports_messages_accessible() {
+    fn reexports_messages_core_types() {
         let _msg = ClusterMessage::FetchPartitionTable;
         let _map_type = MapType::Lww;
         let _chunk = MapStateChunk {
@@ -383,6 +383,10 @@ mod integration_tests {
             key: "k".to_string(),
             entry: vec![],
         };
+    }
+
+    #[test]
+    fn reexports_messages_membership_payloads() {
         let _join_req = JoinRequestPayload {
             node_id: "n".to_string(),
             host: "h".to_string(),
@@ -404,6 +408,10 @@ mod integration_tests {
             node_id: "n".to_string(),
             reason: None,
         };
+    }
+
+    #[test]
+    fn reexports_messages_heartbeat_payloads() {
         let _hb = HeartbeatPayload {
             sender_id: "n".to_string(),
             timestamp_ms: 0,
@@ -421,6 +429,10 @@ mod integration_tests {
             reason: "r".to_string(),
             master_view_version: 0,
         };
+    }
+
+    #[test]
+    fn reexports_messages_partition_migration_payloads() {
         let _ptu = PartitionTableUpdatePayload {
             assignments: vec![],
             version: 0,
@@ -452,6 +464,10 @@ mod integration_tests {
             partition_id: 0,
             reason: "r".to_string(),
         };
+    }
+
+    #[test]
+    fn reexports_messages_split_brain_and_forward_payloads() {
         let _sbp = SplitBrainProbePayload {
             sender_cluster_id: "c".to_string(),
             sender_master_id: "m".to_string(),
