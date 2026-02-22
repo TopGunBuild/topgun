@@ -13,6 +13,10 @@
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
+| 1 | SPEC-060b | Cluster Protocol -- Failure Detector, Shared State, and Partition Assignment | draft (depends: 060a) | Phase 3 |
+| 2 | SPEC-060c | Cluster Protocol -- Module Wiring and Integration Tests | draft (depends: 060b) | Phase 3 |
+| 3 | SPEC-060d | Cluster Protocol -- Migration Service (Wave 2) | deferred (depends: 060c, TODO-064) | Phase 3 |
+| 4 | SPEC-060e | Cluster Protocol -- Resilience (Wave 3) | deferred (depends: 060d, TODO-064) | Phase 3 |
 
 ## Migration Roadmap (high-level)
 
@@ -44,11 +48,13 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
-| 2026-02-22 | SPEC-059 | COMPLETED: Operation Routing and Execution Framework. 13 files created, 2 modified, 6 commits, 50 new tests (183 total). 3 audit cycles, 1 review cycle. |
-| 2026-02-22 | SPEC-059 | REVIEW v1: APPROVED. All 13 acceptance criteria met. 1 minor issue (phase reference in code comment). 183 tests pass, clippy clean. |
-| 2026-02-22 | SPEC-059 | EXECUTED: Orchestrated implementation complete. 6 commits, 13 files created, 2 modified, 50 new tests (183 total). 4 waves, all acceptance criteria met. |
-| 2026-02-21 | SPEC-059 | AUDIT v3: NEEDS_DECOMPOSITION. No critical issues. 2 recommendations (G4 Wave optimization, ClassifyError::ClusterInternal variant). All v1/v2 issues confirmed resolved via codebase verification. |
-| 2026-02-21 | SPEC-059 | REVISION v2: All 4 items addressed. Arc<HLC> -> Arc<Mutex<HLC>>, TopicMessage added, AC#4 updated to 30 variants, partition_count documented as configurable. |
+| 2026-02-22 | SPEC-060a | COMPLETED: Cluster domain types, 5 service traits, and 18-variant ClusterMessage wire protocol established in Rust. 3 files, 3 commits, 2 audit cycles, 1 review cycle. |
+| 2026-02-22 | SPEC-060a | REVIEW v1: APPROVED. All 14 acceptance criteria verified. cargo test 183 passed, clippy clean with -D warnings. Implementation faithful to spec with no deviations. |
+| 2026-02-22 | SPEC-060a | EXECUTED: Orchestrated implementation complete. 3 commits, 3 files created, 0 modified. 2 waves, all 14 acceptance criteria met. 183 existing tests pass, clippy clean. |
+| 2026-02-22 | SPEC-060a | AUDIT v2: APPROVED. No critical issues. All v1 revisions verified. Rust auditor checklist fully satisfied. Context estimate ~47% (GOOD range). Ready for /sf:run. |
+| 2026-02-22 | SPEC-060a | REVISION v1: All 5 items addressed. MapType enum added (Lww/Or), AC #11 clarified to no-regression scope, G2 dependency note clarified as logical ordering, subscribe_changes annotated with tokio::sync::mpsc. Goal Analysis skipped (sub-spec, parent carries context). |
+| 2026-02-22 | SPEC-060a | AUDIT v1: NEEDS_REVISION. 2 critical issues: MapStateChunk.map_type uses String for known value set (violates Rule #4), AC #11 contradicts Constraint #7 (cargo test/clippy vs no mod.rs). 3 recommendations. |
+| 2026-02-22 | SPEC-060 | SPLIT: Decomposed into 5 sub-specs (060a-060e). 060a-060c are implementable (Wave 1). 060d-060e are deferred (Waves 2-3, depend on TODO-064). Audit recommendations addressed: master() filters Active, payload fields enumerated, assignment functions are free functions, arc-swap already present. |
 
 ## Project Patterns
 
@@ -84,4 +90,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-22 (SPEC-059 completed and archived)*
+*Last updated: 2026-02-22 (SPEC-060a completed and archived)*

@@ -6,6 +6,13 @@ Historical decisions rotated from STATE.md to maintain compactness.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-22 | SPEC-060 | AUDIT v1: NEEDS_DECOMPOSITION. No critical issues. 5 recommendations. 9 files exceeds 5-file Rust limit; split guidance already provided for 060a-060e. |
+| 2026-02-22 | SPEC-060 | CREATED: Cluster Protocol parent spec. Large complexity, flagged for /sf:split into 5 sub-specs (060a-060e). Based on RUST_CLUSTER_ARCHITECTURE.md research (TODO-081). |
+| 2026-02-22 | SPEC-059 | COMPLETED: Operation Routing and Execution Framework. 13 files created, 2 modified, 6 commits, 50 new tests (183 total). 3 audit cycles, 1 review cycle. |
+| 2026-02-22 | SPEC-059 | REVIEW v1: APPROVED. All 13 acceptance criteria met. 1 minor issue (phase reference in code comment). 183 tests pass, clippy clean. |
+| 2026-02-22 | SPEC-059 | EXECUTED: Orchestrated implementation complete. 6 commits, 13 files created, 2 modified, 50 new tests (183 total). 4 waves, all acceptance criteria met. |
+| 2026-02-21 | SPEC-059 | AUDIT v3: NEEDS_DECOMPOSITION. No critical issues. 2 recommendations (G4 Wave optimization, ClassifyError::ClusterInternal variant). All v1/v2 issues confirmed resolved via codebase verification. |
+| 2026-02-21 | SPEC-059 | REVISION v2: All 4 items addressed. Arc<HLC> -> Arc<Mutex<HLC>>, TopicMessage added, AC#4 updated to 30 variants, partition_count documented as configurable. |
 | 2026-02-21 | SPEC-059 | REVISION v1: All 4 critical issues + 8 recommendations addressed. Added umbrella notice, ClassifyError enum, thiserror dependency, ServiceContext definition, domain stubs combined, Ping routed to CoordinationService, CounterSync/ORMapPushDiff verified bidirectional, serde exemption for internal types. |
 | 2026-02-21 | SPEC-059 | AUDIT v1: NEEDS_REVISION. 4 critical issues (Language Profile file limit, thiserror contradiction, unclassifiable Message behavior, sub-spec 059d file limit). 8 recommendations. |
 | 2026-02-21 | SPEC-058c | COMPLETED: DefaultRecordStore, RecordStoreFactory, and Integration. 3 files created, 1 modified, 25 tests, 2 commits. 2 audit cycles, 1 review cycle. |

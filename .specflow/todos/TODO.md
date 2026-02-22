@@ -307,9 +307,10 @@ Each Rust spec should reference up to THREE sources:
 - **Depends on:** TODO-061 ✅, TODO-062 ✅, TODO-064, **TODO-082 (research)**
 - **Effort:** 3-4 weeks
 
-### TODO-066: Cluster Protocol
+### TODO-066: Cluster Protocol → SPEC-060
 - **Priority:** P1
 - **Complexity:** Large (redesigned — was "ClusterManager + WebSocket mesh")
+- **Status:** Spec created (SPEC-060), pending audit + split
 - **Summary:** Implement Hazelcast-informed cluster protocol per TODO-081 research. Not a port of TS ClusterManager.
 - **Architecture (expected from research):**
   - **Versioned MembersView** — clients detect stale membership without full state comparison
