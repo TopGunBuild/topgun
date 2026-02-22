@@ -13,9 +13,8 @@
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-060c | Cluster Protocol -- Module Wiring and Integration Tests | draft (depends: 060b) | Phase 3 |
-| 2 | SPEC-060d | Cluster Protocol -- Migration Service (Wave 2) | deferred (depends: 060c, TODO-064) | Phase 3 |
-| 3 | SPEC-060e | Cluster Protocol -- Resilience (Wave 3) | deferred (depends: 060d, TODO-064) | Phase 3 |
+| 1 | SPEC-060d | Cluster Protocol -- Migration Service (Wave 2) | deferred (depends: 060c, TODO-064) | Phase 3 |
+| 2 | SPEC-060e | Cluster Protocol -- Resilience (Wave 3) | deferred (depends: 060d, TODO-064) | Phase 3 |
 
 ## Migration Roadmap (high-level)
 
@@ -47,9 +46,8 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-22 | SPEC-060c | COMPLETED: Module wiring + integration tests. 4 commits, 1 file created, 6 modified. 29 integration tests (19 serde round-trip + 10 re-export accessibility). 258 total tests, clippy clean. 3 audit cycles, 1 review cycle. |
 | 2026-02-22 | SPEC-060b | COMPLETED: Phi-accrual failure detector, ClusterState (ArcSwap+DashMap), partition assignment algorithms. 3 files created, 1 modified, 4 commits, 2 audit cycles, 1 review cycle. 40 unit tests. |
-| 2026-02-22 | SPEC-060b | REVIEW v1: APPROVED. All 15 acceptance criteria verified (AC #14 partial -- files not compiled yet per constraint #8, but cargo test/clippy clean on workspace). 40 unit tests across 3 files. No critical or major issues. 2 minor findings. |
-| 2026-02-22 | SPEC-060b | EXECUTED: Orchestrated implementation complete. 4 commits, 3 files created, 1 modified. 2 waves, 14/15 acceptance criteria met (AC #14 deferred to SPEC-060c mod.rs wiring). |
 | 2026-02-22 | SPEC-060a | COMPLETED: Cluster domain types, 5 service traits, and 18-variant ClusterMessage wire protocol established in Rust. 3 files, 3 commits, 2 audit cycles, 1 review cycle. |
 | 2026-02-22 | SPEC-060 | SPLIT: Decomposed into 5 sub-specs (060a-060e). 060a-060c are implementable (Wave 1). 060d-060e are deferred (Waves 2-3, depend on TODO-064). Audit recommendations addressed: master() filters Active, payload fields enumerated, assignment functions are free functions, arc-swap already present. |
 
@@ -87,4 +85,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-22 (SPEC-060b completed and archived)*
+*Last updated: 2026-02-22 (SPEC-060c completed and archived)*
