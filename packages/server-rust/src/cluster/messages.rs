@@ -21,7 +21,7 @@ pub enum MapType {
 }
 
 /// A chunk of serialized map state transferred during migration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MapStateChunk {
     pub map_name: String,
@@ -30,7 +30,7 @@ pub struct MapStateChunk {
 }
 
 /// A single delta operation transferred during migration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeltaOp {
     pub map_name: String,
@@ -47,7 +47,7 @@ pub struct DeltaOp {
 /// Internally tagged on `"type"` with `SCREAMING_SNAKE_CASE` variant names.
 /// Covers membership (4), heartbeat (3), partition (2), migration (5),
 /// split-brain (3), and forwarding (1).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ClusterMessage {
     // -- Membership (4) ----------------------------------------------------
@@ -86,7 +86,7 @@ pub enum ClusterMessage {
 // ---------------------------------------------------------------------------
 
 /// Payload for a node requesting to join the cluster.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JoinRequestPayload {
     pub node_id: String,
@@ -100,7 +100,7 @@ pub struct JoinRequestPayload {
 }
 
 /// Payload for the master's response to a join request.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JoinResponsePayload {
     pub accepted: bool,
@@ -113,7 +113,7 @@ pub struct JoinResponsePayload {
 }
 
 /// Payload broadcasting an updated members view to all nodes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MembersUpdatePayload {
     pub view: MembersView,
@@ -121,7 +121,7 @@ pub struct MembersUpdatePayload {
 }
 
 /// Payload for a node requesting to leave the cluster gracefully.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LeaveRequestPayload {
     pub node_id: String,
@@ -134,7 +134,7 @@ pub struct LeaveRequestPayload {
 // ---------------------------------------------------------------------------
 
 /// Periodic heartbeat sent between cluster nodes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HeartbeatPayload {
     pub sender_id: String,
@@ -144,7 +144,7 @@ pub struct HeartbeatPayload {
 }
 
 /// Complaint from a node that suspects another node has failed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HeartbeatComplaintPayload {
     pub complainer_id: String,
@@ -154,7 +154,7 @@ pub struct HeartbeatComplaintPayload {
 }
 
 /// Master-originated explicit suspicion declaration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExplicitSuspicionPayload {
     pub suspect_id: String,
@@ -167,7 +167,7 @@ pub struct ExplicitSuspicionPayload {
 // ---------------------------------------------------------------------------
 
 /// Payload broadcasting updated partition assignments to all nodes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PartitionTableUpdatePayload {
     pub assignments: Vec<PartitionAssignment>,
@@ -182,7 +182,7 @@ pub struct PartitionTableUpdatePayload {
 // ---------------------------------------------------------------------------
 
 /// Initiates a partition migration to a destination node.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MigrateStartPayload {
     pub migration_id: String,
@@ -191,7 +191,7 @@ pub struct MigrateStartPayload {
 }
 
 /// Carries partition data (map state and delta ops) during migration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MigrateDataPayload {
     pub partition_id: u32,
@@ -201,7 +201,7 @@ pub struct MigrateDataPayload {
 }
 
 /// Signals that the destination has received all migration data and is ready.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MigrateReadyPayload {
     pub migration_id: String,
@@ -210,7 +210,7 @@ pub struct MigrateReadyPayload {
 }
 
 /// Finalizes a migration, transferring ownership to the new owner.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MigrateFinalizePayload {
     pub migration_id: String,
@@ -219,7 +219,7 @@ pub struct MigrateFinalizePayload {
 }
 
 /// Cancels an in-progress migration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MigrateCancelPayload {
     pub migration_id: String,
@@ -232,7 +232,7 @@ pub struct MigrateCancelPayload {
 // ---------------------------------------------------------------------------
 
 /// Probe sent to detect split-brain scenarios.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SplitBrainProbePayload {
     pub sender_cluster_id: String,
@@ -242,7 +242,7 @@ pub struct SplitBrainProbePayload {
 }
 
 /// Response to a split-brain probe with local cluster state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SplitBrainProbeResponsePayload {
     pub responder_cluster_id: String,
@@ -253,7 +253,7 @@ pub struct SplitBrainProbeResponsePayload {
 }
 
 /// Request to merge a minority partition back into the majority cluster.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeRequestPayload {
     pub source_cluster_id: String,
@@ -266,7 +266,7 @@ pub struct MergeRequestPayload {
 // ---------------------------------------------------------------------------
 
 /// Forwards a client operation to the partition owner node.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpForwardPayload {
     pub source_node_id: String,
