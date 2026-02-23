@@ -247,18 +247,18 @@ impl HeartbeatComplaintProcessor {
         let view = self.state.current_view();
         let mut new_members = view.members.clone();
 
-        let mut found = false;
+        let mut updated_member: Option<MemberInfo> = None;
         for member in &mut new_members {
             if member.node_id == suspect_id && member.state == NodeState::Active {
                 member.state = NodeState::Suspect;
-                found = true;
+                updated_member = Some(member.clone());
                 break;
             }
         }
 
-        if !found {
+        let Some(member_info) = updated_member else {
             return;
-        }
+        };
 
         let new_view = MembersView {
             version: view.version + 1,
@@ -275,16 +275,10 @@ impl HeartbeatComplaintProcessor {
 
         broadcast_cluster_message(&self.registry, &suspicion_msg);
 
-        let _ = self.state.change_sender().send(ClusterChange::MemberUpdated(
-            MemberInfo {
-                node_id: suspect_id.to_string(),
-                host: String::new(),
-                client_port: 0,
-                cluster_port: 0,
-                state: NodeState::Suspect,
-                join_version: 0,
-            },
-        ));
+        let _ = self
+            .state
+            .change_sender()
+            .send(ClusterChange::MemberUpdated(member_info));
     }
 
     /// Transitions a `Suspect` node to `Dead` if the suspicion timeout has
@@ -316,9 +310,11 @@ impl HeartbeatComplaintProcessor {
         }
 
         let mut new_members = view.members.clone();
+        let mut updated_member: Option<MemberInfo> = None;
         for m in &mut new_members {
             if m.node_id == suspect_id {
                 m.state = NodeState::Dead;
+                updated_member = Some(m.clone());
                 break;
             }
         }
@@ -336,16 +332,12 @@ impl HeartbeatComplaintProcessor {
         });
         broadcast_cluster_message(&self.registry, &update_msg);
 
-        let _ = self.state.change_sender().send(ClusterChange::MemberUpdated(
-            MemberInfo {
-                node_id: suspect_id.to_string(),
-                host: String::new(),
-                client_port: 0,
-                cluster_port: 0,
-                state: NodeState::Dead,
-                join_version: 0,
-            },
-        ));
+        if let Some(info) = updated_member {
+            let _ = self
+                .state
+                .change_sender()
+                .send(ClusterChange::MemberUpdated(info));
+        }
     }
 
     /// Removes complaints older than `suspicion_timeout_ms`.
@@ -555,6 +547,7 @@ pub struct MastershipClaimProcessor {
     state: Arc<ClusterState>,
     registry: Arc<ConnectionRegistry>,
     failure_detector: Arc<dyn FailureDetector>,
+    migration_tx: mpsc::Sender<MigrationCommand>,
 }
 
 impl MastershipClaimProcessor {
@@ -564,11 +557,13 @@ impl MastershipClaimProcessor {
         state: Arc<ClusterState>,
         registry: Arc<ConnectionRegistry>,
         failure_detector: Arc<dyn FailureDetector>,
+        migration_tx: mpsc::Sender<MigrationCommand>,
     ) -> Self {
         Self {
             state,
             registry,
             failure_detector,
+            migration_tx,
         }
     }
 
@@ -602,7 +597,7 @@ impl MastershipClaimProcessor {
         // Identify the dead master.
         let Some(current_master) = view.master() else {
             // No master at all; compute candidate from active members.
-            return self.try_claim_as_candidate(&view).await;
+            return self.try_claim_as_candidate(&view, None).await;
         };
 
         let master_id = current_master.node_id.clone();
@@ -613,11 +608,19 @@ impl MastershipClaimProcessor {
             return Ok(false);
         }
 
-        self.try_claim_as_candidate(&view).await
+        self.try_claim_as_candidate(&view, Some(&master_id)).await
     }
 
     /// Computes the candidate master and claims if this node is the candidate.
-    async fn try_claim_as_candidate(&self, view: &MembersView) -> anyhow::Result<bool> {
+    ///
+    /// `dead_master_id` identifies the specific node to mark as `Dead`. Only
+    /// this node is transitioned -- other temporarily unreachable nodes are
+    /// left untouched to avoid false positives during network partitions.
+    async fn try_claim_as_candidate(
+        &self,
+        view: &MembersView,
+        dead_master_id: Option<&str>,
+    ) -> anyhow::Result<bool> {
         // Compute candidate: oldest active member (excluding the dead master).
         // The oldest member is determined by lowest join_version, tie-broken
         // by lexicographic node_id -- same as MembersView::master().
@@ -670,17 +673,16 @@ impl MastershipClaimProcessor {
             return Ok(false);
         }
 
-        // Majority agrees: update the view.
+        // Majority agrees: mark only the dead master as Dead.
         let mut new_members = view.members.clone();
-        for member in &mut new_members {
-            // Mark the dead master (any non-Active member that was the master).
-            if member.state == NodeState::Active {
-                let now_ms = current_unix_ms();
-                if !self.failure_detector.is_alive(&member.node_id, now_ms)
-                    && member.node_id != self.state.local_node_id
-                {
-                    // This is likely the dead master.
+        let mut dead_member_info: Option<MemberInfo> = None;
+
+        if let Some(dead_id) = dead_master_id {
+            for member in &mut new_members {
+                if member.node_id == dead_id {
                     member.state = NodeState::Dead;
+                    dead_member_info = Some(member.clone());
+                    break;
                 }
             }
         }
@@ -698,6 +700,14 @@ impl MastershipClaimProcessor {
         });
         broadcast_cluster_message(&self.registry, &update_msg);
 
+        // Emit ClusterChange::MemberUpdated for the dead master.
+        if let Some(info) = dead_member_info {
+            let _ = self
+                .state
+                .change_sender()
+                .send(ClusterChange::MemberUpdated(info));
+        }
+
         // Trigger partition rebalancing for the dead master's partitions.
         let current_view = self.state.current_view();
         let active_members: Vec<MemberInfo> = current_view
@@ -709,7 +719,16 @@ impl MastershipClaimProcessor {
 
         let partition_count = self.state.partition_table.partition_count();
         let backup_count = self.state.config.backup_count;
-        let _assignments = compute_assignment(&active_members, partition_count, backup_count);
+        let target_assignments =
+            compute_assignment(&active_members, partition_count, backup_count);
+
+        let tasks = plan_rebalance(&self.state.partition_table, &target_assignments);
+        for task in tasks {
+            let _ = self
+                .migration_tx
+                .send(MigrationCommand::Start(task))
+                .await;
+        }
 
         Ok(true)
     }
