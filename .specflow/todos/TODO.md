@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-02-20
+**Last updated:** 2026-02-22
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture, not a TypeScript port
 **Product positioning:** "The reactive data grid that extends the cluster into the browser" ([PRODUCT_POSITIONING_RESEARCH.md](../reference/PRODUCT_POSITIONING_RESEARCH.md))
 
@@ -260,57 +260,25 @@ Each Rust spec should reference up to THREE sources:
 
 *Goal: Working Rust server that passes existing TS integration tests. Architecture informed by Phase 2.5 research, not by TS server structure.*
 
-### TODO-064: Networking Layer (axum + WebSocket)
-- **Priority:** P0
-- **Complexity:** Medium
-- **Summary:** HTTP + WebSocket server using axum, with deferred startup pattern. Design informed by TODO-083 research. Spec to be created after research.
-- **Key features:**
-  - `GET /health`, `POST /sync` (HTTP sync, existing protocol)
-  - WebSocket upgrade for real-time sync
-  - TLS support (rustls)
-  - Connection abstraction (informed by TODO-083 research — protocol-agnostic Channel or axum-native)
-  - Tower middleware pipeline for handler composition
-  - Backpressure + graceful shutdown (informed by TODO-083 research)
-- **Crates:** axum, tokio-tungstenite, tower, rustls
-- **Depends on:** TODO-059 ✅, TODO-062 ✅, **TODO-083 (research)**
-- **Effort:** 1-2 weeks
+### TODO-064: Networking Layer (axum + WebSocket) → SPEC-057 — DONE
+- **Status:** Complete (SPEC-057 split into 057a/b/c, all archived)
+- **Summary:** axum HTTP + WebSocket server with ConnectionHandle, bounded mpsc backpressure, Tower middleware (LoadShed → Timeout → Metrics), graceful shutdown, health/sync/WS handlers, NetworkModule assembly
+- **Rust code:** `packages/server-rust/src/network/` (config, connection, shutdown, handlers/, middleware, module)
 
-### TODO-067: Multi-Layer Storage System
-- **Priority:** P0
-- **Complexity:** Medium-Large (redesigned — was "PostgreSQL adapter")
-- **Summary:** Implement Hazelcast-informed multi-layer storage architecture per TODO-080 research.
-- **Architecture (expected from research):**
-  - **Layer 1: Storage trait** — low-level key-value with cursor-based iteration, mutation-tolerant iterators
-  - **Layer 2: RecordStore trait** — adds TTL/expiry, eviction, record metadata (version, timestamps, hit count)
-  - **Layer 3: MapDataStore trait** — persistence bridge (write-through / write-behind), soft/hard flush
-  - **Concrete implementations:** InMemoryStorage, PostgresMapDataStore
-  - **Record metadata as first-class:** enables LWW conflict resolution, eviction policies, replication lag tracking
-- **Key constraint:** Trait boundaries must support future S3 (TODO-043), tiered storage (TODO-040), and write-behind (TODO-033) without trait redesign.
-- **Crates:** sqlx (compile-time checked queries)
-- **Depends on:** TODO-060 ✅ (ServerStorage trait — will be expanded), **TODO-080 (research)**
-- **Effort:** 2-3 weeks
+### TODO-067: Multi-Layer Storage System → SPEC-058 — DONE
+- **Status:** Complete (SPEC-058 split into 058a/b/c, all archived)
+- **Summary:** Hazelcast-informed 3-layer storage: StorageEngine trait (L1), RecordStore trait with TTL/expiry/eviction/metadata (L2), MapDataStore trait for persistence (L3). HashMapStorage + NullDataStore + DefaultRecordStore + RecordStoreFactory. MutationObserver for index/Merkle hooks.
+- **Rust code:** `packages/server-rust/src/storage/` (engine, record, record_store, map_data_store, mutation_observer, engines/, datastores/, impls/, factory)
 
-### TODO-065: Operation Routing and Execution
-- **Priority:** P0
-- **Complexity:** Large (redesigned — was "Port 26 handlers")
-- **Summary:** Implement Hazelcast-informed operation execution model per TODO-082 research. Not a port of TS stateless handlers.
-- **Architecture (expected from research):**
-  - **Operation trait** — partition-routable with provenance tracking (local, backup, WAN, client)
-  - **ServiceRegistry** — dynamic service registration with lifecycle hooks (init, reset, shutdown)
-  - **MigrationAwareService** — services can hook into migration lifecycle (prepare, commit, rollback)
-  - **Execution barriers** — partition migration blocks operations on that partition
-  - **Handler pipeline** — tower-compatible middleware composition
-- **Domains:** CRDT, Sync, Query, Messaging, Coordination, Search, Persistence, Client/Server
-- **Known TS bugs (covered by redesign):**
-  - `BatchProcessingHandler.processBatchAsync` nests inter-node forwarded messages incorrectly
-  - `PartitionService.getPartitionMap()` returns wrong ports
-- **Depends on:** TODO-061 ✅, TODO-062 ✅, TODO-064, **TODO-082 (research)**
-- **Effort:** 3-4 weeks
+### TODO-065: Operation Routing and Execution → SPEC-059 — DONE
+- **Status:** Complete (SPEC-059, archived)
+- **Summary:** Hazelcast-informed operation routing: ServiceRegistry with ManagedService lifecycle, Operation enum with CallerOrigin provenance, OperationRouter dispatching to 7 domain services, Tower middleware pipeline (LoadShed → Timeout → Metrics), BackgroundWorker for periodic tasks, domain_stub! macro for stub services
+- **Rust code:** `packages/server-rust/src/service/` (config, registry, operation, classify, router, middleware/, worker, domain/)
 
 ### TODO-066: Cluster Protocol → SPEC-060
 - **Priority:** P1
 - **Complexity:** Large (redesigned — was "ClusterManager + WebSocket mesh")
-- **Status:** Spec created (SPEC-060), pending audit + split
+- **Status:** In progress (SPEC-060 split into 060a-e; 060a/b/c done, 060d/e deferred)
 - **Summary:** Implement Hazelcast-informed cluster protocol per TODO-081 research. Not a port of TS ClusterManager.
 - **Architecture (expected from research):**
   - **Versioned MembersView** — clients detect stale membership without full state comparison
@@ -502,15 +470,15 @@ Items within the same wave can run in parallel. Each wave starts when its blocke
 | **1** | ~~SPEC-052e~~ ✅ · ~~TODO-074~~ ✅ · ~~TODO-078~~ ✅ · ~~TODO-075~~ ✅ | — | 2 |
 | **1a** | ~~TODO-077~~ ✅ · ~~TODO-063~~ ✅ | — | 2 |
 | **2** | ~~TODO-080~~ ✅ · ~~TODO-081~~ ✅ · ~~TODO-082~~ ✅ · ~~TODO-083~~ ✅ | — | 2.5 |
-| **3** | TODO-064 (Network) · TODO-067 (Multi-Layer Storage) | **083** · **080** | 3 |
-| **4** | TODO-065 (Operation Routing) · TODO-066 (Cluster) · TODO-068 (Tests, incremental) | 064+**082** · 063+064+**081** · 064 | 3 |
+| **3** | ~~TODO-064~~ ✅ (Network) · ~~TODO-067~~ ✅ (Multi-Layer Storage) | **083** · **080** | 3 |
+| **4** | ~~TODO-065~~ ✅ (Operation Routing) · TODO-066 (Cluster, in progress) · TODO-068 (Tests, incremental) | 064+**082** · 063+064+**081** · 064 | 3 |
 | **5** | TODO-069 (Schema) · TODO-048 (SSE) · TODO-025 (DAG) · TODO-071 (Tantivy) | — · — · 063 · — | 4 |
 | **6** | TODO-070 (Shapes) · TODO-049 (Cluster HTTP) · TODO-076 (MsgPack hash eval) | 069 · 066+063 · 075 | 4 |
 | **7** | TODO-033 (AsyncStorage) · TODO-039 (Vector) · TODO-036 (Extensions) · TODO-041 (Multi-tenancy) · TODO-072 (WASM) | 067 · — · — · — · — | 5 |
 | **8** | TODO-043 (S3) · TODO-040 (Tiered) | 033 · 033+067 | 5 |
 | **9** | TODO-044 (Time-Travel) | 043 | 5 |
 
-**Current position:** Wave 2 complete. Wave 3 unlocked: TODO-064 (Networking Layer) + TODO-067 (Multi-Layer Storage) can proceed in parallel.
+**Current position:** Waves 2-3 complete, Wave 4 in progress. TODO-066 (Cluster Protocol) executing — 060a/b/c done, 060d/e remaining.
 
 ---
 
@@ -601,6 +569,14 @@ SPEC-048b ──→ SPEC-048c          TODO-059 (Cargo) ──→ TODO-060 (Trai
 
 ## Completed Items (archived)
 
+### Phase 3 Rust Server Items
+
+| TODO | Spec | Completed |
+|------|------|-----------|
+| TODO-064 → SPEC-057a-c | Networking Layer: axum HTTP/WS, ConnectionHandle, Tower middleware, graceful shutdown | 2026-02-21 |
+| TODO-067 → SPEC-058a-c | Multi-Layer Storage: 3-layer traits, HashMapStorage, DefaultRecordStore, MutationObserver | 2026-02-21 |
+| TODO-065 → SPEC-059 | Operation Routing: ServiceRegistry, Operation enum, OperationRouter, Tower pipeline, domain stubs | 2026-02-22 |
+
 ### Phase 2 Rust Items
 
 | TODO | Spec | Completed |
@@ -654,3 +630,4 @@ All items below are completed and archived in `.specflow/archive/`:
 *Updated 2026-02-18: Strategic audit. Added Phase 2.5 (Architecture Research Sprint: TODO-080, 081, 082). Redesigned Phase 3 items (TODO-063/065/066/067) from "TS port" to "Hazelcast-informed design". Upgraded TODO-078 to P1 (client-server hash compatibility confirmed). Deferred TODO-076 to Phase 4. Eliminated TODO-045. Marked completed Phase 2 items.*
 *Updated 2026-02-19: Added Triple Reference Protocol. Rust OSS projects (TiKV, Quickwit, Databend) added as implementation pattern references alongside Hazelcast conceptual architecture. Research tasks TODO-080/081/082 updated with concrete Rust file paths. Rationale: Java→Rust translation has real friction (ownership, no inheritance, no GC) — Rust-native patterns needed for storage traits (TiKV engine_traits), cluster concurrency (TiKV FSM+DashMap), service composition (Quickwit actors+Tower), object storage (Databend OpenDAL).*
 *Updated 2026-02-20: Added TODO-083 (Networking Layer Research — light, 1-2 days). Focus: SurrealDB, Grafbase, Quickwit for connection abstraction, backpressure, middleware ordering. TODO-064 now depends on 083. Existing SPEC-057 to be recreated after research.*
+*Updated 2026-02-22: Marked TODO-064, TODO-067, TODO-065 as DONE. Waves 3-4 progress: 064 (SPEC-057a-c), 067 (SPEC-058a-c), 065 (SPEC-059) all archived. TODO-066 in progress (060a-c done, 060d-e remaining). 689 total Rust tests (431 core + 258 server), 0 failures.*

@@ -4,7 +4,7 @@
 
 - **Active Specification:** none
 - **Status:** idle
-- **Project Phase:** Phase 2.5 complete -> Phase 3 (Rust Server)
+- **Project Phase:** Phase 3 (Rust Server) — Wave 4
 - **TODO Items:** 28 (1 client bug fix + 8 Rust bridge/core + 5 audit findings + 14 existing deferred)
 - **Next Step:** /sf:new or /sf:next
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
@@ -13,8 +13,7 @@
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-060d | Cluster Protocol -- Migration Service (Wave 2) | deferred (depends: 060c, TODO-064) | Phase 3 |
-| 2 | SPEC-060e | Cluster Protocol -- Resilience (Wave 3) | deferred (depends: 060d, TODO-064) | Phase 3 |
+| 1 | SPEC-060e | Cluster Protocol -- Resilience (Wave 3) | deferred (depends: 060d) | Phase 3 |
 
 ## Migration Roadmap (high-level)
 
@@ -46,6 +45,7 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-23 | SPEC-060d | COMPLETED: MigrationCoordinator, MapProvider trait, RebalanceTrigger, not_owner_response/broadcast_partition_map free functions. 1 file created, 2 modified, 3 commits, 4 audit cycles, 1 review cycle. 14 new migration tests (272 total), clippy clean. |
 | 2026-02-22 | SPEC-060c | COMPLETED: Module wiring + integration tests. 4 commits, 1 file created, 6 modified. 29 integration tests (19 serde round-trip + 10 re-export accessibility). 258 total tests, clippy clean. 3 audit cycles, 1 review cycle. |
 | 2026-02-22 | SPEC-060b | COMPLETED: Phi-accrual failure detector, ClusterState (ArcSwap+DashMap), partition assignment algorithms. 3 files created, 1 modified, 4 commits, 2 audit cycles, 1 review cycle. 40 unit tests. |
 | 2026-02-22 | SPEC-060a | COMPLETED: Cluster domain types, 5 service traits, and 18-variant ClusterMessage wire protocol established in Rust. 3 files, 3 commits, 2 audit cycles, 1 review cycle. |
@@ -79,10 +79,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 - Double-option deserialization pattern: For Rust fields matching TS `.nullable().optional()`, use `Option<Option<T>>` with custom `deserialize_double_option` to distinguish absent (None) from explicitly-null (Some(None))
 - Float64 numeric interop pattern: JavaScript's msgpackr encodes numbers > 2^32 as float64; use `serde_number::deserialize_u64` (from `hlc::serde_number`) on Rust u64/i64 fields to accept both integer and float64 MsgPack wire values
 - Operation routing pattern: ServiceRegistry with ManagedService trait for lifecycle; Operation enum classifies all client-to-server Messages; OperationRouter dispatches by service_name; Tower middleware pipeline (LoadShed -> Timeout -> Metrics) wraps routing; domain_stub! macro generates stub services
+- Migration trait seam pattern: MapProvider trait abstracts storage access for partition migration; NoOpMapProvider (pub(crate)) enables unit testing without full storage layer; concrete wiring deferred to storage module spec
 
 ## Warnings
 
 (none)
 
 ---
-*Last updated: 2026-02-22 (SPEC-060c completed and archived)*
+*Last updated: 2026-02-23 (SPEC-060d completed and archived)*
