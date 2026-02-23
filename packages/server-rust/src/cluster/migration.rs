@@ -430,8 +430,9 @@ pub fn broadcast_partition_map(
     registry: &ConnectionRegistry,
 ) {
     let map = table.to_partition_map(members);
-    if let Ok(bytes) = rmp_serde::to_vec_named(&map) {
-        registry.broadcast(&bytes, ConnectionKind::Client);
+    match rmp_serde::to_vec_named(&map) {
+        Ok(bytes) => registry.broadcast(&bytes, ConnectionKind::Client),
+        Err(e) => tracing::warn!("Failed to serialize partition map for broadcast: {e}"),
     }
 }
 
