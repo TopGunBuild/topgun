@@ -8,6 +8,7 @@ pub mod assignment;
 pub mod failure_detector;
 pub mod messages;
 pub mod migration;
+pub mod resilience;
 pub mod state;
 pub mod traits;
 pub mod types;
@@ -53,6 +54,12 @@ pub use assignment::{compute_assignment, order_migrations, plan_rebalance};
 pub use migration::{
     broadcast_partition_map, not_owner_response, MapProvider, MigrationCoordinator,
     RebalanceTrigger,
+};
+
+// resilience
+pub use resilience::{
+    decide_merge, ComplaintRecord, GracefulLeaveProcessor, HeartbeatComplaintProcessor,
+    MastershipClaimProcessor, RemoteClusterInfo, SplitBrainHandler, SplitBrainMergeDecision,
 };
 
 // ---------------------------------------------------------------------------
