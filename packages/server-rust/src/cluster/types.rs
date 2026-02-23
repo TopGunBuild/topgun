@@ -157,6 +157,7 @@ pub struct ActiveMigration {
     pub destination: String,
     pub state: MigrationPhase,
     pub started_at_ms: u64,
+    pub new_backups: Vec<String>,
 }
 
 /// Summary of cluster health for diagnostics.

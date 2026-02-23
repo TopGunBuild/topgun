@@ -364,6 +364,7 @@ mod integration_tests {
             destination: "n2".to_string(),
             state: MigrationPhase::Replicating,
             started_at_ms: 0,
+            new_backups: vec![],
         };
         let _health = ClusterHealth::default();
         let _config = ClusterConfig::default();
