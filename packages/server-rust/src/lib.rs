@@ -43,7 +43,10 @@ mod integration_tests {
     use crate::service::operation::{service_names, CallerOrigin, OperationResponse};
     use crate::service::registry::{ServiceContext, ServiceRegistry};
     use crate::service::router::OperationRouter;
-    use crate::service::{OperationService, ClassifyError};
+    use crate::service::{ClassifyError, OperationService};
+    use crate::storage::datastores::NullDataStore;
+    use crate::storage::factory::RecordStoreFactory;
+    use crate::storage::impls::StorageConfig;
 
     fn setup() -> (OperationService, OperationRouter, ServerConfig) {
         let config = ServerConfig {
@@ -68,8 +71,20 @@ mod integration_tests {
         let cluster_state = Arc::new(cluster_state);
         let connection_registry = Arc::new(ConnectionRegistry::new());
 
+        let record_store_factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::new(NullDataStore),
+            Vec::new(),
+        ));
+
         let mut router = OperationRouter::new();
-        router.register(service_names::CRDT, Arc::new(CrdtService));
+        router.register(
+            service_names::CRDT,
+            Arc::new(CrdtService::new(
+                record_store_factory,
+                Arc::clone(&connection_registry),
+            )),
+        );
         router.register(service_names::SYNC, Arc::new(SyncService));
         router.register(service_names::QUERY, Arc::new(QueryService));
         router.register(service_names::MESSAGING, Arc::new(MessagingService));
@@ -118,13 +133,13 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn full_pipeline_client_op_to_not_implemented() {
+    async fn full_pipeline_client_op_to_op_ack() {
         let (classify_svc, router, config) = setup();
         let mut pipeline = build_operation_pipeline(router, &config);
 
         let msg = Message::ClientOp(topgun_core::messages::sync::ClientOpMessage {
             payload: topgun_core::ClientOp {
-                id: None,
+                id: Some("op-1".to_string()),
                 map_name: "users".to_string(),
                 key: "alice".to_string(),
                 op_type: None,
@@ -149,13 +164,10 @@ mod integration_tests {
             .await
             .unwrap();
 
-        assert!(matches!(
-            resp,
-            OperationResponse::NotImplemented {
-                service_name: "crdt",
-                ..
-            }
-        ));
+        assert!(
+            matches!(resp, OperationResponse::Message(ref msg) if matches!(**msg, Message::OpAck(_))),
+            "expected OpAck, got {resp:?}"
+        );
     }
 
     #[tokio::test]
@@ -217,8 +229,18 @@ mod integration_tests {
         let cluster_state = Arc::new(cluster_state);
         let connection_registry = Arc::new(ConnectionRegistry::new());
 
+        let connection_registry_for_crdt = Arc::new(ConnectionRegistry::new());
+        let record_store_factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::new(NullDataStore),
+            Vec::new(),
+        ));
+
         let registry = ServiceRegistry::new();
-        registry.register(CrdtService);
+        registry.register(CrdtService::new(
+            record_store_factory,
+            connection_registry_for_crdt,
+        ));
         registry.register(SyncService);
         registry.register(QueryService);
         registry.register(MessagingService);
