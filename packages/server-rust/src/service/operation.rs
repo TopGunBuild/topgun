@@ -6,6 +6,8 @@
 use topgun_core::messages;
 use topgun_core::Timestamp;
 
+use crate::network::connection::ConnectionId;
+
 // ---------------------------------------------------------------------------
 // Service name constants
 // ---------------------------------------------------------------------------
@@ -49,7 +51,8 @@ pub enum CallerOrigin {
 ///
 /// Does not derive `Default` because `call_id`, `service_name`, and `timestamp`
 /// are required fields with no sensible defaults. Use `OperationContext::new()`
-/// to construct with required fields, then set optional fields as needed.
+/// to construct with required fields, then set optional fields
+/// (`partition_id`, `client_id`, `caller_node_id`, `connection_id`) as needed.
 #[derive(Debug, Clone)]
 pub struct OperationContext {
     /// Unique identifier for this operation invocation.
@@ -64,6 +67,10 @@ pub struct OperationContext {
     pub client_id: Option<String>,
     /// Node identifier of the caller, if forwarded from another node.
     pub caller_node_id: Option<String>,
+    /// Connection identifier for the caller, set by the WebSocket handler.
+    /// Used by services (e.g., CoordinationService) to look up the
+    /// ConnectionHandle for side-effects such as heartbeat updates.
+    pub connection_id: Option<ConnectionId>,
     /// HLC timestamp for this operation.
     pub timestamp: Timestamp,
     /// Timeout for this operation in milliseconds.
@@ -87,6 +94,7 @@ impl OperationContext {
             caller_origin: CallerOrigin::Client,
             client_id: None,
             caller_node_id: None,
+            connection_id: None,
             timestamp,
             call_timeout_ms: default_timeout_ms,
         }
@@ -425,6 +433,7 @@ mod tests {
         assert!(ctx.partition_id.is_none());
         assert!(ctx.client_id.is_none());
         assert!(ctx.caller_node_id.is_none());
+        assert!(ctx.connection_id.is_none());
         assert_eq!(ctx.call_timeout_ms, 30_000);
     }
 
