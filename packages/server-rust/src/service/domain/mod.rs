@@ -1,8 +1,11 @@
-//! Domain service stubs.
+//! Domain service implementations and stubs.
 //!
 //! Each service implements both `ManagedService` (lifecycle) and `tower::Service<Operation>`
-//! (request handling). All stubs return `OperationResponse::NotImplemented` -- actual
-//! business logic will be implemented in per-domain specs.
+//! (request handling). Stubs return `OperationResponse::NotImplemented` -- actual
+//! business logic is implemented in per-domain modules as they are developed.
+
+pub mod coordination;
+pub use coordination::CoordinationService;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -98,11 +101,6 @@ domain_stub!(
 );
 
 domain_stub!(
-    /// Coordination domain service (locks, partition map, heartbeat).
-    CoordinationService, service_names::COORDINATION
-);
-
-domain_stub!(
     /// Search domain service (full-text search).
     SearchService, service_names::SEARCH
 );
@@ -184,19 +182,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coordination_service_returns_not_implemented() {
-        let svc = Arc::new(CoordinationService);
-        let resp = svc
-            .oneshot(make_op(service_names::COORDINATION))
-            .await
-            .unwrap();
-        assert!(matches!(
-            resp,
-            OperationResponse::NotImplemented { service_name: "coordination", .. }
-        ));
-    }
-
-    #[tokio::test]
     async fn search_service_returns_not_implemented() {
         let svc = Arc::new(SearchService);
         let resp = svc
@@ -224,12 +209,13 @@ mod tests {
 
     #[tokio::test]
     async fn all_stubs_implement_managed_service() {
+        // CoordinationService is excluded: it requires constructor args
+        // and has a dedicated registration test in coordination.rs / integration_tests.
         let registry = ServiceRegistry::new();
         registry.register(CrdtService);
         registry.register(SyncService);
         registry.register(QueryService);
         registry.register(MessagingService);
-        registry.register(CoordinationService);
         registry.register(SearchService);
         registry.register(PersistenceService);
 
@@ -239,12 +225,11 @@ mod tests {
         registry.init_all(&ctx).await.unwrap();
         registry.shutdown_all(false).await.unwrap();
 
-        // All services accessible by name.
+        // All stub services accessible by name.
         assert!(registry.get_by_name("crdt").is_some());
         assert!(registry.get_by_name("sync").is_some());
         assert!(registry.get_by_name("query").is_some());
         assert!(registry.get_by_name("messaging").is_some());
-        assert!(registry.get_by_name("coordination").is_some());
         assert!(registry.get_by_name("search").is_some());
         assert!(registry.get_by_name("persistence").is_some());
     }
