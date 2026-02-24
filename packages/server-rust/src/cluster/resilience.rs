@@ -460,17 +460,13 @@ impl GracefulLeaveProcessor {
         }
 
         // Step 5: Compute new assignment excluding the leaving node.
+        // The leaving node is now `Leaving`, so compute_assignment's internal
+        // Active filter will automatically exclude it.
         let current_view = self.state.current_view();
-        let active_members: Vec<MemberInfo> = current_view
-            .members
-            .iter()
-            .filter(|m| m.state == NodeState::Active)
-            .cloned()
-            .collect();
-
         let partition_count = self.state.partition_table.partition_count();
         let backup_count = self.state.config.backup_count;
-        let target_assignments = compute_assignment(&active_members, partition_count, backup_count);
+        let target_assignments =
+            compute_assignment(&current_view.members, partition_count, backup_count);
 
         // Step 6: Plan and execute migrations.
         let tasks = plan_rebalance(&self.state.partition_table, &target_assignments);
@@ -627,7 +623,10 @@ impl MastershipClaimProcessor {
         let candidate = view
             .members
             .iter()
-            .filter(|m| m.state == NodeState::Active)
+            .filter(|m| {
+                m.state == NodeState::Active
+                    && dead_master_id.is_none_or(|id| m.node_id != id)
+            })
             .min_by(|a, b| {
                 a.join_version
                     .cmp(&b.join_version)
@@ -931,6 +930,8 @@ fn broadcast_cluster_message(registry: &ConnectionRegistry, msg: &ClusterMessage
 mod tests {
     use super::*;
     use crate::cluster::types::{ClusterConfig, MemberInfo, NodeState};
+    use crate::network::config::ConnectionConfig;
+    use crate::network::connection::ConnectionKind;
 
     fn make_member(node_id: &str, join_version: u64) -> MemberInfo {
         MemberInfo {
@@ -1264,6 +1265,149 @@ mod tests {
             complaints.get("suspect-1").is_none(),
             "stale complaint should have been cleaned up"
         );
+    }
+
+    // -- MastershipClaimProcessor tests --
+
+    #[test]
+    fn mastership_claim_excludes_dead_master_from_candidate() {
+        // Scenario: master-1 (join_version=1) is the current master and dies.
+        // node-2 (join_version=2) should become the candidate, not master-1.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let config = Arc::new(ClusterConfig::default());
+            // local_node_id = "node-2" so this node IS the expected candidate.
+            let (state, _change_rx) = ClusterState::new(config, "node-2".to_string());
+            let state = Arc::new(state);
+
+            state.update_view(MembersView {
+                version: 1,
+                members: vec![
+                    MemberInfo {
+                        node_id: "master-1".to_string(),
+                        host: "127.0.0.1".to_string(),
+                        client_port: 8080,
+                        cluster_port: 9090,
+                        state: NodeState::Active,
+                        join_version: 1,
+                    },
+                    MemberInfo {
+                        node_id: "node-2".to_string(),
+                        host: "127.0.0.2".to_string(),
+                        client_port: 8080,
+                        cluster_port: 9090,
+                        state: NodeState::Active,
+                        join_version: 2,
+                    },
+                ],
+            });
+
+            let fd = Arc::new(
+                crate::cluster::failure_detector::DeadlineFailureDetector::new(5000),
+            );
+            // Record an old heartbeat for master-1 so failure detector considers it dead.
+            fd.heartbeat("master-1", 0);
+
+            let registry = Arc::new(ConnectionRegistry::new());
+            // Register a cluster peer connection so majority can be reached.
+            // With 2 active members, majority = 2 (self + 1 peer).
+            let conn_config = ConnectionConfig::default();
+            let (handle, _rx) =
+                registry.register(ConnectionKind::ClusterPeer, &conn_config);
+            {
+                let mut meta = handle.metadata.write().await;
+                meta.peer_node_id = Some("master-1".to_string());
+            }
+
+            let (migration_tx, _migration_rx) = mpsc::channel(16);
+
+            let processor = MastershipClaimProcessor::new(
+                Arc::clone(&state),
+                registry,
+                fd,
+                migration_tx,
+            );
+
+            // attempt_claim should detect master-1 is dead and compute node-2
+            // as the candidate (excluding dead master-1 from the filter).
+            // With 2 active members, majority = 2: self(1) + peer(1) = 2.
+            let result = processor.attempt_claim().await.unwrap();
+            assert!(result, "node-2 should successfully claim mastership");
+
+            // Verify master-1 is now marked Dead.
+            let view = state.current_view();
+            let master1 = view.get_member("master-1").unwrap();
+            assert_eq!(master1.state, NodeState::Dead);
+
+            // Verify version was incremented.
+            assert!(view.version > 1);
+        });
+    }
+
+    #[test]
+    fn mastership_claim_non_candidate_does_not_proceed() {
+        // Scenario: master-1 dies, but this node (node-3, join_version=3) is
+        // NOT the next candidate — node-2 (join_version=2) is.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let config = Arc::new(ClusterConfig::default());
+            // local_node_id = "node-3", NOT the candidate.
+            let (state, _change_rx) = ClusterState::new(config, "node-3".to_string());
+            let state = Arc::new(state);
+
+            state.update_view(MembersView {
+                version: 1,
+                members: vec![
+                    MemberInfo {
+                        node_id: "master-1".to_string(),
+                        host: "127.0.0.1".to_string(),
+                        client_port: 8080,
+                        cluster_port: 9090,
+                        state: NodeState::Active,
+                        join_version: 1,
+                    },
+                    MemberInfo {
+                        node_id: "node-2".to_string(),
+                        host: "127.0.0.2".to_string(),
+                        client_port: 8080,
+                        cluster_port: 9090,
+                        state: NodeState::Active,
+                        join_version: 2,
+                    },
+                    MemberInfo {
+                        node_id: "node-3".to_string(),
+                        host: "127.0.0.3".to_string(),
+                        client_port: 8080,
+                        cluster_port: 9090,
+                        state: NodeState::Active,
+                        join_version: 3,
+                    },
+                ],
+            });
+
+            let fd = Arc::new(
+                crate::cluster::failure_detector::DeadlineFailureDetector::new(5000),
+            );
+            fd.heartbeat("master-1", 0);
+
+            let registry = Arc::new(ConnectionRegistry::new());
+            let (migration_tx, _migration_rx) = mpsc::channel(16);
+
+            let processor = MastershipClaimProcessor::new(
+                Arc::clone(&state),
+                registry,
+                fd,
+                migration_tx,
+            );
+
+            // node-3 is not the candidate (node-2 is), so it should not proceed.
+            let result = processor.attempt_claim().await.unwrap();
+            assert!(!result, "node-3 should not claim mastership when node-2 is the candidate");
+
+            // View should be unchanged.
+            let view = state.current_view();
+            assert_eq!(view.version, 1);
+        });
     }
 
     // -- GracefulLeaveProcessor tests --
