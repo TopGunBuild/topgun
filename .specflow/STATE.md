@@ -44,6 +44,7 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-24 | SPEC-061 | COMPLETED: CoordinationService (Ping/PartitionMap/Heartbeat) — first real domain service replacing domain_stub! macro. 1 file created, 4 modified, 4 commits, 4 audit cycles, 1 review cycle. 296 total tests (9 new), clippy clean for spec files. |
 | 2026-02-24 | SPEC-060e | COMPLETED: Cluster resilience module — 4 processors (SplitBrainHandler, HeartbeatComplaintProcessor, MastershipClaimProcessor, GracefulLeaveProcessor), decide_merge() with 3-step deadlock-free tie-break, ComplaintRecord/RemoteClusterInfo types. 1 file created, 1 modified, 3 commits, 4 audit cycles, 3 review cycles. 16 new resilience tests (288 total), clippy clean. |
 | 2026-02-23 | SPEC-060d | COMPLETED: MigrationCoordinator, MapProvider trait, RebalanceTrigger, not_owner_response/broadcast_partition_map free functions. 1 file created, 2 modified, 3 commits, 4 audit cycles, 1 review cycle. 14 new migration tests (272 total), clippy clean. |
 | 2026-02-22 | SPEC-060c | COMPLETED: Module wiring + integration tests. 4 commits, 1 file created, 6 modified. 29 integration tests (19 serde round-trip + 10 re-export accessibility). 258 total tests, clippy clean. 3 audit cycles, 1 review cycle. |
@@ -80,10 +81,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 - Float64 numeric interop pattern: JavaScript's msgpackr encodes numbers > 2^32 as float64; use `serde_number::deserialize_u64` (from `hlc::serde_number`) on Rust u64/i64 fields to accept both integer and float64 MsgPack wire values
 - Operation routing pattern: ServiceRegistry with ManagedService trait for lifecycle; Operation enum classifies all client-to-server Messages; OperationRouter dispatches by service_name; Tower middleware pipeline (LoadShed -> Timeout -> Metrics) wraps routing; domain_stub! macro generates stub services
 - Migration trait seam pattern: MapProvider trait abstracts storage access for partition migration; NoOpMapProvider (pub(crate)) enables unit testing without full storage layer; concrete wiring deferred to storage module spec
+- Domain service replacement pattern: replace `domain_stub!` macro services one-at-a-time with real `tower::Service<Operation>` implementations; each real service takes `Arc` dependencies via constructor; heartbeat side-effects use `OperationContext.connection_id` for `ConnectionRegistry` lookup
 
 ## Warnings
 
 (none)
 
 ---
-*Last updated: 2026-02-24 (SPEC-060e completed and archived)*
+*Last updated: 2026-02-24 (SPEC-061 completed and archived)*
