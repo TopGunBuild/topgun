@@ -7,6 +7,9 @@
 pub mod coordination;
 pub use coordination::CoordinationService;
 
+pub mod crdt;
+pub use crdt::CrdtService;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -81,11 +84,6 @@ macro_rules! domain_stub {
 // ---------------------------------------------------------------------------
 
 domain_stub!(
-    /// CRDT domain service (LWW-Map and OR-Map operations).
-    CrdtService, service_names::CRDT
-);
-
-domain_stub!(
     /// Sync domain service (Merkle tree synchronization).
     SyncService, service_names::SYNC
 );
@@ -136,16 +134,6 @@ mod tests {
             5000,
         );
         Operation::GarbageCollect { ctx }
-    }
-
-    #[tokio::test]
-    async fn crdt_service_returns_not_implemented() {
-        let svc = Arc::new(CrdtService);
-        let resp = svc.oneshot(make_op(service_names::CRDT)).await.unwrap();
-        assert!(matches!(
-            resp,
-            OperationResponse::NotImplemented { service_name: "crdt", .. }
-        ));
     }
 
     #[tokio::test]
@@ -209,10 +197,9 @@ mod tests {
 
     #[tokio::test]
     async fn all_stubs_implement_managed_service() {
-        // CoordinationService is excluded: it requires constructor args
-        // and has a dedicated registration test in coordination.rs / integration_tests.
+        // CoordinationService and CrdtService are excluded: they require constructor
+        // args and have dedicated registration tests in their own modules.
         let registry = ServiceRegistry::new();
-        registry.register(CrdtService);
         registry.register(SyncService);
         registry.register(QueryService);
         registry.register(MessagingService);
@@ -225,8 +212,7 @@ mod tests {
         registry.init_all(&ctx).await.unwrap();
         registry.shutdown_all(false).await.unwrap();
 
-        // All stub services accessible by name.
-        assert!(registry.get_by_name("crdt").is_some());
+        // Stub services accessible by name.
         assert!(registry.get_by_name("sync").is_some());
         assert!(registry.get_by_name("query").is_some());
         assert!(registry.get_by_name("messaging").is_some());
