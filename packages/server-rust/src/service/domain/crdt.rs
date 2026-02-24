@@ -1,0 +1,726 @@
+//! CRDT domain service handling `ClientOp` and `OpBatch` operations.
+//!
+//! Merges LWW-Map and OR-Map data into the `RecordStore` and broadcasts
+//! `ServerEvent` messages to subscribed client connections.
+
+use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+
+use async_trait::async_trait;
+use tower::Service;
+
+use topgun_core::messages::{
+    ClientOp, ClientOpMessage, Message, OpAckMessage, OpAckPayload,
+    OpBatchMessage, ServerEventPayload, ServerEventType,
+};
+use topgun_core::types::Value;
+use topgun_core::{LWWRecord, ORMapRecord};
+
+use crate::network::connection::{ConnectionKind, ConnectionRegistry};
+use crate::service::operation::{
+    service_names, Operation, OperationContext, OperationError, OperationResponse,
+};
+use crate::service::registry::{ManagedService, ServiceContext};
+use crate::storage::record::{OrMapEntry, RecordValue};
+use crate::storage::{CallerProvenance, ExpiryPolicy, RecordStoreFactory};
+
+// ---------------------------------------------------------------------------
+// CrdtService
+// ---------------------------------------------------------------------------
+
+/// Real CRDT domain service handling `ClientOp` and `OpBatch` operations.
+///
+/// Replaces the `domain_stub!(CrdtService, ...)` macro-generated stub.
+/// Merges LWW and OR-Map data into the `RecordStore` and broadcasts
+/// `ServerEvent` messages to connected clients.
+pub struct CrdtService {
+    record_store_factory: Arc<RecordStoreFactory>,
+    connection_registry: Arc<ConnectionRegistry>,
+}
+
+impl CrdtService {
+    /// Creates a new `CrdtService` with its required dependencies.
+    #[must_use]
+    pub fn new(
+        record_store_factory: Arc<RecordStoreFactory>,
+        connection_registry: Arc<ConnectionRegistry>,
+    ) -> Self {
+        Self {
+            record_store_factory,
+            connection_registry,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ManagedService implementation
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl ManagedService for CrdtService {
+    fn name(&self) -> &'static str {
+        service_names::CRDT
+    }
+
+    async fn init(&self, _ctx: &ServiceContext) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn reset(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn shutdown(&self, _terminate: bool) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tower::Service<Operation> implementation
+// ---------------------------------------------------------------------------
+
+impl Service<Operation> for Arc<CrdtService> {
+    type Response = OperationResponse;
+    type Error = OperationError;
+    type Future =
+        Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, op: Operation) -> Self::Future {
+        let svc = Arc::clone(self);
+        Box::pin(async move {
+            match op {
+                Operation::ClientOp { ctx, payload } => {
+                    svc.handle_client_op(&ctx, payload).await
+                }
+                Operation::OpBatch { ctx, payload } => {
+                    svc.handle_op_batch(&ctx, payload).await
+                }
+                _ => Err(OperationError::WrongService),
+            }
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handler implementations
+// ---------------------------------------------------------------------------
+
+impl CrdtService {
+    /// Handles a single `ClientOp` message: applies CRDT merge and broadcasts event.
+    async fn handle_client_op(
+        &self,
+        ctx: &OperationContext,
+        msg: ClientOpMessage,
+    ) -> Result<OperationResponse, OperationError> {
+        let op = &msg.payload;
+        let partition_id = ctx.partition_id.unwrap_or(0);
+        let event_payload = self.apply_single_op(op, partition_id).await?;
+
+        self.broadcast_event(&event_payload)?;
+
+        let last_id = op.id.clone().unwrap_or_else(|| "unknown".to_string());
+        Ok(OperationResponse::Message(Box::new(Message::OpAck(
+            OpAckMessage {
+                payload: OpAckPayload {
+                    last_id,
+                    achieved_level: None,
+                    results: None,
+                },
+            },
+        ))))
+    }
+
+    /// Handles an `OpBatch` message: applies each op sequentially and returns a single `OpAck`.
+    async fn handle_op_batch(
+        &self,
+        ctx: &OperationContext,
+        msg: OpBatchMessage,
+    ) -> Result<OperationResponse, OperationError> {
+        let ops = &msg.payload.ops;
+
+        if ops.is_empty() {
+            return Ok(OperationResponse::Ack {
+                call_id: ctx.call_id,
+            });
+        }
+
+        let partition_id = ctx.partition_id.unwrap_or(0);
+        let mut last_id = "unknown".to_string();
+
+        for op in ops {
+            let event_payload = self.apply_single_op(op, partition_id).await?;
+            self.broadcast_event(&event_payload)?;
+            if let Some(id) = &op.id {
+                last_id = id.clone();
+            }
+        }
+
+        Ok(OperationResponse::Message(Box::new(Message::OpAck(
+            OpAckMessage {
+                payload: OpAckPayload {
+                    last_id,
+                    achieved_level: None,
+                    results: None,
+                },
+            },
+        ))))
+    }
+
+    /// Applies a single `ClientOp` to the `RecordStore` and returns the `ServerEventPayload`
+    /// to broadcast. Called by both `handle_client_op` and `handle_op_batch`.
+    async fn apply_single_op(
+        &self,
+        op: &ClientOp,
+        partition_id: u32,
+    ) -> Result<ServerEventPayload, OperationError> {
+        let store = self
+            .record_store_factory
+            .create(&op.map_name, partition_id);
+
+        // Determine the operation type and build the event payload.
+        // Priority: explicit op_type REMOVE / tombstone -> REMOVE
+        //           or_record present   -> OR_ADD
+        //           or_tag present      -> OR_REMOVE
+        //           otherwise           -> LWW PUT
+
+        let is_remove = op.op_type.as_deref() == Some("REMOVE")
+            || matches!(&op.record, Some(None));
+
+        let is_or_add = matches!(&op.or_record, Some(Some(_)));
+        let is_or_remove = matches!(&op.or_tag, Some(Some(_))) && op.or_record.is_none();
+
+        if is_remove {
+            store
+                .remove(&op.key, CallerProvenance::CrdtMerge)
+                .await
+                .map_err(OperationError::Internal)?;
+
+            Ok(ServerEventPayload {
+                map_name: op.map_name.clone(),
+                event_type: ServerEventType::REMOVE,
+                key: op.key.clone(),
+                record: None,
+                or_record: None,
+                or_tag: None,
+            })
+        } else if is_or_add {
+            // Safe: matched Some(Some(_)) above
+            let or_rec = op
+                .or_record
+                .as_ref()
+                .and_then(|o| o.as_ref())
+                .expect("or_record is Some(Some(_))");
+
+            let record_value = or_record_to_record_value(or_rec);
+            store
+                .put(&op.key, record_value, ExpiryPolicy::NONE, CallerProvenance::CrdtMerge)
+                .await
+                .map_err(OperationError::Internal)?;
+
+            Ok(ServerEventPayload {
+                map_name: op.map_name.clone(),
+                event_type: ServerEventType::OR_ADD,
+                key: op.key.clone(),
+                record: None,
+                or_record: Some(or_rec.clone()),
+                or_tag: Some(or_rec.tag.clone()),
+            })
+        } else if is_or_remove {
+            // Safe: matched Some(Some(_)) above
+            let tag = op
+                .or_tag
+                .as_ref()
+                .and_then(|o| o.as_ref())
+                .expect("or_tag is Some(Some(_))");
+
+            let record_value = RecordValue::OrTombstones {
+                tags: vec![tag.clone()],
+            };
+            store
+                .put(&op.key, record_value, ExpiryPolicy::NONE, CallerProvenance::CrdtMerge)
+                .await
+                .map_err(OperationError::Internal)?;
+
+            Ok(ServerEventPayload {
+                map_name: op.map_name.clone(),
+                event_type: ServerEventType::OR_REMOVE,
+                key: op.key.clone(),
+                record: None,
+                or_record: None,
+                or_tag: Some(tag.clone()),
+            })
+        } else {
+            // LWW PUT: record may be None (no-op put with no value) or Some(Some(rec))
+            let lww_rec = op.record.as_ref().and_then(|o| o.as_ref());
+
+            if let Some(rec) = lww_rec {
+                let record_value = lww_record_to_record_value(rec);
+                store
+                    .put(&op.key, record_value, ExpiryPolicy::NONE, CallerProvenance::CrdtMerge)
+                    .await
+                    .map_err(OperationError::Internal)?;
+            }
+
+            Ok(ServerEventPayload {
+                map_name: op.map_name.clone(),
+                event_type: ServerEventType::PUT,
+                key: op.key.clone(),
+                record: op.record.as_ref().and_then(Option::clone),
+                or_record: None,
+                or_tag: None,
+            })
+        }
+    }
+
+    /// Serializes a `ServerEventPayload` as `MsgPack` and broadcasts to all client connections.
+    fn broadcast_event(&self, payload: &ServerEventPayload) -> Result<(), OperationError> {
+        let msg = Message::ServerEvent {
+            payload: payload.clone(),
+        };
+        let bytes = rmp_serde::to_vec_named(&msg)
+            .map_err(|e| OperationError::Internal(anyhow::anyhow!("serialize error: {e}")))?;
+        self.connection_registry
+            .broadcast(&bytes, ConnectionKind::Client);
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Conversion helpers
+// ---------------------------------------------------------------------------
+
+/// Recursively converts an `rmpv::Value` (wire format) into a `topgun_core::types::Value`
+/// (storage format).
+///
+/// No `From<rmpv::Value>` conversion exists between these types, so this
+/// manual recursive conversion is required.
+fn rmpv_to_value(v: &rmpv::Value) -> Value {
+    match v {
+        rmpv::Value::Boolean(b) => Value::Bool(*b),
+        rmpv::Value::Integer(i) => {
+            // Try signed first; fall back to unsigned (values exceeding i64::MAX).
+            let n = if let Some(s) = i.as_i64() {
+                s
+            } else {
+                // Intentional wrap: values > i64::MAX map to negative i64.
+                #[allow(clippy::cast_possible_wrap)]
+                let u = i.as_u64().unwrap_or(0) as i64;
+                u
+            };
+            Value::Int(n)
+        }
+        rmpv::Value::F32(f) => Value::Float(f64::from(*f)),
+        rmpv::Value::F64(f) => Value::Float(*f),
+        rmpv::Value::String(s) => Value::String(s.as_str().unwrap_or("").to_string()),
+        rmpv::Value::Binary(b) => Value::Bytes(b.clone()),
+        rmpv::Value::Array(arr) => Value::Array(arr.iter().map(rmpv_to_value).collect()),
+        rmpv::Value::Map(map) => {
+            let btree: BTreeMap<String, Value> = map
+                .iter()
+                .map(|(k, v): &(rmpv::Value, rmpv::Value)| {
+                    (k.to_string(), rmpv_to_value(v))
+                })
+                .collect();
+            Value::Map(btree)
+        }
+        // Nil and Extension types are not represented in topgun_core::types::Value;
+        // fall back to Null rather than panicking.
+        rmpv::Value::Nil | rmpv::Value::Ext(_, _) => Value::Null,
+    }
+}
+
+/// Converts a wire-format `LWWRecord<rmpv::Value>` into a storage `RecordValue::Lww`.
+fn lww_record_to_record_value(record: &LWWRecord<rmpv::Value>) -> RecordValue {
+    let value = record
+        .value
+        .as_ref()
+        .map_or(Value::Null, rmpv_to_value);
+    RecordValue::Lww {
+        value,
+        timestamp: record.timestamp.clone(),
+    }
+}
+
+/// Converts a wire-format `ORMapRecord<rmpv::Value>` into a storage `RecordValue::OrMap`
+/// containing a single entry.
+fn or_record_to_record_value(record: &ORMapRecord<rmpv::Value>) -> RecordValue {
+    RecordValue::OrMap {
+        records: vec![OrMapEntry {
+            value: rmpv_to_value(&record.value),
+            tag: record.tag.clone(),
+            timestamp: record.timestamp.clone(),
+        }],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use topgun_core::messages::Message;
+    use topgun_core::Timestamp;
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::network::connection::ConnectionRegistry;
+    use crate::service::operation::{service_names, OperationContext, OperationResponse};
+    use crate::storage::datastores::NullDataStore;
+    use crate::storage::factory::RecordStoreFactory;
+    use crate::storage::impls::StorageConfig;
+
+    fn make_factory() -> Arc<RecordStoreFactory> {
+        Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::new(NullDataStore),
+            Vec::new(),
+        ))
+    }
+
+    fn make_service() -> Arc<CrdtService> {
+        let factory = make_factory();
+        let registry = Arc::new(ConnectionRegistry::new());
+        Arc::new(CrdtService::new(factory, registry))
+    }
+
+    fn make_timestamp() -> Timestamp {
+        Timestamp {
+            millis: 1_700_000_000_000,
+            counter: 1,
+            node_id: "test-node".to_string(),
+        }
+    }
+
+    fn make_ctx() -> OperationContext {
+        OperationContext::new(1, service_names::CRDT, make_timestamp(), 5000)
+    }
+
+    // -- AC7: ManagedService name is "crdt" --
+
+    #[test]
+    fn managed_service_name() {
+        let factory = make_factory();
+        let registry = Arc::new(ConnectionRegistry::new());
+        let svc = CrdtService::new(factory, registry);
+        assert_eq!(svc.name(), "crdt");
+    }
+
+    // -- AC1: LWW PUT --
+
+    #[tokio::test]
+    async fn lww_put_returns_op_ack() {
+        let svc = make_service();
+        let record = topgun_core::LWWRecord {
+            value: Some(rmpv::Value::String("Alice".into())),
+            timestamp: make_timestamp(),
+            ttl_ms: None,
+        };
+        let op = Operation::ClientOp {
+            ctx: make_ctx(),
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("op-1".to_string()),
+                    map_name: "users".to_string(),
+                    key: "user-1".to_string(),
+                    op_type: None,
+                    record: Some(Some(record)),
+                    or_record: None,
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+
+        let resp = svc.oneshot(op).await.unwrap();
+        assert!(
+            matches!(resp, OperationResponse::Message(ref msg) if matches!(**msg, Message::OpAck(_))),
+            "expected OpAck, got {resp:?}"
+        );
+    }
+
+    // -- AC2: LWW REMOVE (tombstone) --
+
+    #[tokio::test]
+    async fn lww_remove_via_tombstone_returns_op_ack() {
+        let svc = make_service();
+        let op = Operation::ClientOp {
+            ctx: make_ctx(),
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("op-remove".to_string()),
+                    map_name: "users".to_string(),
+                    key: "user-1".to_string(),
+                    op_type: None,
+                    record: Some(None), // tombstone
+                    or_record: None,
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+
+        let resp = svc.oneshot(op).await.unwrap();
+        assert!(
+            matches!(resp, OperationResponse::Message(ref msg) if matches!(**msg, Message::OpAck(_))),
+            "expected OpAck, got {resp:?}"
+        );
+    }
+
+    // -- AC2: LWW REMOVE (op_type) --
+
+    #[tokio::test]
+    async fn lww_remove_via_op_type_returns_op_ack() {
+        let svc = make_service();
+        let op = Operation::ClientOp {
+            ctx: make_ctx(),
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("op-remove-2".to_string()),
+                    map_name: "users".to_string(),
+                    key: "user-2".to_string(),
+                    op_type: Some("REMOVE".to_string()),
+                    record: None,
+                    or_record: None,
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+
+        let resp = svc.oneshot(op).await.unwrap();
+        assert!(
+            matches!(resp, OperationResponse::Message(ref msg) if matches!(**msg, Message::OpAck(_))),
+            "expected OpAck, got {resp:?}"
+        );
+    }
+
+    // -- AC3: OR_ADD --
+
+    #[tokio::test]
+    async fn or_add_returns_op_ack() {
+        let svc = make_service();
+        let or_rec = topgun_core::ORMapRecord {
+            value: rmpv::Value::String("important".into()),
+            timestamp: make_timestamp(),
+            tag: "1700000000000:1:test-node".to_string(),
+            ttl_ms: None,
+        };
+        let op = Operation::ClientOp {
+            ctx: make_ctx(),
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("op-or-add".to_string()),
+                    map_name: "tags".to_string(),
+                    key: "item-1".to_string(),
+                    op_type: None,
+                    record: None,
+                    or_record: Some(Some(or_rec)),
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+
+        let resp = svc.oneshot(op).await.unwrap();
+        assert!(
+            matches!(resp, OperationResponse::Message(ref msg) if matches!(**msg, Message::OpAck(_))),
+            "expected OpAck, got {resp:?}"
+        );
+    }
+
+    // -- AC4: OR_REMOVE --
+
+    #[tokio::test]
+    async fn or_remove_returns_op_ack() {
+        let svc = make_service();
+        let op = Operation::ClientOp {
+            ctx: make_ctx(),
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("op-or-remove".to_string()),
+                    map_name: "tags".to_string(),
+                    key: "item-1".to_string(),
+                    op_type: None,
+                    record: None,
+                    or_record: None,
+                    or_tag: Some(Some("1700000000000:1:test-node".to_string())),
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+
+        let resp = svc.oneshot(op).await.unwrap();
+        assert!(
+            matches!(resp, OperationResponse::Message(ref msg) if matches!(**msg, Message::OpAck(_))),
+            "expected OpAck, got {resp:?}"
+        );
+    }
+
+    // -- AC5: OpBatch with multiple ops --
+
+    #[tokio::test]
+    async fn op_batch_processes_all_ops_and_returns_single_ack() {
+        let svc = make_service();
+        let ops = vec![
+            topgun_core::messages::base::ClientOp {
+                id: Some("op-1".to_string()),
+                map_name: "users".to_string(),
+                key: "user-1".to_string(),
+                op_type: None,
+                record: None,
+                or_record: None,
+                or_tag: None,
+                write_concern: None,
+                timeout: None,
+            },
+            topgun_core::messages::base::ClientOp {
+                id: Some("op-2".to_string()),
+                map_name: "users".to_string(),
+                key: "user-2".to_string(),
+                op_type: None,
+                record: None,
+                or_record: None,
+                or_tag: None,
+                write_concern: None,
+                timeout: None,
+            },
+            topgun_core::messages::base::ClientOp {
+                id: Some("op-3".to_string()),
+                map_name: "users".to_string(),
+                key: "user-3".to_string(),
+                op_type: None,
+                record: None,
+                or_record: None,
+                or_tag: None,
+                write_concern: None,
+                timeout: None,
+            },
+        ];
+
+        let op = Operation::OpBatch {
+            ctx: make_ctx(),
+            payload: topgun_core::messages::sync::OpBatchMessage {
+                payload: topgun_core::messages::sync::OpBatchPayload {
+                    ops,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+
+        let resp = svc.oneshot(op).await.unwrap();
+        match resp {
+            OperationResponse::Message(msg) => match *msg {
+                Message::OpAck(ack) => {
+                    assert_eq!(ack.payload.last_id, "op-3", "last_id should be op-3");
+                }
+                other => panic!("expected OpAck, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    // -- AC6: Wrong service returns WrongService error --
+
+    #[tokio::test]
+    async fn wrong_service_returns_error() {
+        let svc = make_service();
+        let op = Operation::GarbageCollect {
+            ctx: make_ctx(),
+        };
+
+        let result = svc.oneshot(op).await;
+        assert!(
+            matches!(result, Err(OperationError::WrongService)),
+            "expected WrongService, got {result:?}"
+        );
+    }
+
+    // -- AC9: OpBatch with empty ops returns Ack --
+
+    #[tokio::test]
+    async fn op_batch_empty_returns_ack() {
+        let svc = make_service();
+        let mut ctx = make_ctx();
+        ctx.call_id = 42;
+        let op = Operation::OpBatch {
+            ctx,
+            payload: topgun_core::messages::sync::OpBatchMessage {
+                payload: topgun_core::messages::sync::OpBatchPayload {
+                    ops: vec![],
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+
+        let resp = svc.oneshot(op).await.unwrap();
+        assert!(
+            matches!(resp, OperationResponse::Ack { call_id: 42 }),
+            "expected Ack with call_id=42, got {resp:?}"
+        );
+    }
+
+    // -- rmpv_to_value conversion tests --
+
+    #[test]
+    fn rmpv_to_value_nil_is_null() {
+        assert_eq!(rmpv_to_value(&rmpv::Value::Nil), Value::Null);
+    }
+
+    #[test]
+    fn rmpv_to_value_bool() {
+        assert_eq!(rmpv_to_value(&rmpv::Value::Boolean(true)), Value::Bool(true));
+        assert_eq!(rmpv_to_value(&rmpv::Value::Boolean(false)), Value::Bool(false));
+    }
+
+    #[test]
+    fn rmpv_to_value_integer_signed() {
+        assert_eq!(
+            rmpv_to_value(&rmpv::Value::Integer((-42i64).into())),
+            Value::Int(-42)
+        );
+    }
+
+    #[test]
+    fn rmpv_to_value_integer_unsigned_large() {
+        // Value larger than i64::MAX should fall back to as_u64() -> cast to i64.
+        let large: u64 = u64::MAX;
+        let v = rmpv::Value::Integer(large.into());
+        // as_i64() returns None for u64::MAX; as_u64() as i64 = -1.
+        assert_eq!(rmpv_to_value(&v), Value::Int(-1i64));
+    }
+
+    #[test]
+    fn rmpv_to_value_string() {
+        let v = rmpv::Value::String("hello".into());
+        assert_eq!(rmpv_to_value(&v), Value::String("hello".to_string()));
+    }
+
+    #[test]
+    fn rmpv_to_value_array() {
+        let v = rmpv::Value::Array(vec![
+            rmpv::Value::Integer(1i64.into()),
+            rmpv::Value::Boolean(true),
+        ]);
+        assert_eq!(
+            rmpv_to_value(&v),
+            Value::Array(vec![Value::Int(1), Value::Bool(true)])
+        );
+    }
+}
