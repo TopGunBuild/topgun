@@ -6,6 +6,9 @@ Historical decisions rotated from STATE.md to maintain compactness.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-22 | SPEC-060b | COMPLETED: Phi-accrual failure detector, ClusterState (ArcSwap+DashMap), partition assignment algorithms. 3 files created, 1 modified, 4 commits, 2 audit cycles, 1 review cycle. 40 unit tests. |
+| 2026-02-22 | SPEC-060a | COMPLETED: Cluster domain types, 5 service traits, and 18-variant ClusterMessage wire protocol established in Rust. 3 files, 3 commits, 2 audit cycles, 1 review cycle. |
+| 2026-02-22 | SPEC-060 | SPLIT: Decomposed into 5 sub-specs (060a-060e). 060a-060c are implementable (Wave 1). 060d-060e are deferred (Waves 2-3, depend on TODO-064). Audit recommendations addressed: master() filters Active, payload fields enumerated, assignment functions are free functions, arc-swap already present. |
 | 2026-02-22 | SPEC-060 | AUDIT v1: NEEDS_DECOMPOSITION. No critical issues. 5 recommendations. 9 files exceeds 5-file Rust limit; split guidance already provided for 060a-060e. |
 | 2026-02-22 | SPEC-060 | CREATED: Cluster Protocol parent spec. Large complexity, flagged for /sf:split into 5 sub-specs (060a-060e). Based on RUST_CLUSTER_ARCHITECTURE.md research (TODO-081). |
 | 2026-02-22 | SPEC-059 | COMPLETED: Operation Routing and Execution Framework. 13 files created, 2 modified, 6 commits, 50 new tests (183 total). 3 audit cycles, 1 review cycle. |

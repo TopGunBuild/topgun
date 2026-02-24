@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-02-22
+**Last updated:** 2026-02-24
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture, not a TypeScript port
 **Product positioning:** "The reactive data grid that extends the cluster into the browser" ([PRODUCT_POSITIONING_RESEARCH.md](../reference/PRODUCT_POSITIONING_RESEARCH.md))
 
@@ -275,23 +275,95 @@ Each Rust spec should reference up to THREE sources:
 - **Summary:** Hazelcast-informed operation routing: ServiceRegistry with ManagedService lifecycle, Operation enum with CallerOrigin provenance, OperationRouter dispatching to 7 domain services, Tower middleware pipeline (LoadShed → Timeout → Metrics), BackgroundWorker for periodic tasks, domain_stub! macro for stub services
 - **Rust code:** `packages/server-rust/src/service/` (config, registry, operation, classify, router, middleware/, worker, domain/)
 
-### TODO-066: Cluster Protocol → SPEC-060
-- **Priority:** P1
-- **Complexity:** Large (redesigned — was "ClusterManager + WebSocket mesh")
-- **Status:** In progress (SPEC-060 split into 060a-e; 060a/b/c done, 060d/e deferred)
-- **Summary:** Implement Hazelcast-informed cluster protocol per TODO-081 research. Not a port of TS ClusterManager.
-- **Architecture (expected from research):**
-  - **Versioned MembersView** — clients detect stale membership without full state comparison
-  - **Master-centric coordination** — master decides partition assignment, initiates migrations
-  - **Explicit join ceremony** — discovery → handshake → state sync (not automatic mesh)
-  - **3-phase migration lifecycle** — prepare (lock source) → replicate → finalize (release source)
-  - **Full partition state machine** — extends TODO-063 basic table with REPLICA/BACKUP/MIGRATING/LOST states
-  - **Pluggable failure detection** — phi-accrual (portable from TS — one of few well-designed TS components)
-  - **Split-brain detection** — master-centric, not peer-to-peer consensus
-- **TS Source:** `packages/server/src/cluster/` (behavioral reference only)
-- **HC Reference:** `hazelcast/internal/cluster/impl/` (primary architectural source)
-- **Depends on:** TODO-063, TODO-064, **TODO-081 (research)**
-- **Effort:** 3-4 weeks
+### TODO-066: Cluster Protocol → SPEC-060 — DONE
+- **Status:** Complete (SPEC-060 split into 060a-e, all archived). 288 server-rust tests, 0 failures.
+- **Summary:** Hazelcast-informed cluster protocol: 5 service traits, 18-variant ClusterMessage, versioned MembersView (ArcSwap), DashMap partition table, phi-accrual + deadline failure detectors, partition assignment + rebalancing algorithms, MigrationCoordinator with 3-phase lifecycle, 4 resilience processors (SplitBrain, HeartbeatComplaint, MastershipClaim, GracefulLeave), `decide_merge()` deterministic split-brain resolution
+- **Rust code:** `packages/server-rust/src/cluster/` (traits, types, messages, state, assignment, migration, resilience)
+
+### Phase 3b: Domain Service Implementations
+
+*Goal: Replace stubs with working domain logic. After this, TS client can connect to Rust server and perform real operations.*
+
+### TODO-084: CoordinationService (Ping + PartitionMap + Heartbeat) → SPEC-061
+- **Priority:** P0 (validates full pipeline end-to-end)
+- **Complexity:** Small
+- **Summary:** First real domain service. Handles Ping → Pong, PartitionMapRequest → PartitionMap, HeartbeatAck. Validates the complete path: WS message → deserialize → classify → route → domain service → serialize → WS response.
+- **Scope:**
+  - `Ping` → respond with `Pong` (timestamp echo)
+  - `PartitionMapRequest` → respond with `PartitionMap` from `ClusterPartitionTable`
+  - `HeartbeatAck` → update failure detector
+  - Wire `CoordinationService` to `ClusterState` + `ConnectionRegistry`
+- **TS Source:** `packages/server/src/coordinator/handlers/` (PingHandler, PartitionMapHandler)
+- **Depends on:** TODO-065 ✅ (OperationRouter), TODO-066 ✅ (ClusterState)
+- **Effort:** 2-3 days
+
+### TODO-085: CrdtService (LWWMap + ORMap Operations) → SPEC-062
+- **Priority:** P0 (core data path)
+- **Complexity:** Medium
+- **Summary:** Process client write operations through CRDT merge into RecordStore. This is the core data path: client sends `ClientOp` / `OpBatch`, server merges via LWW/OR rules, persists to RecordStore, broadcasts to subscribers.
+- **Scope:**
+  - `ClientOp` (single put/remove) → CRDT merge → RecordStore.put() with CallerProvenance::CrdtMerge
+  - `OpBatch` → batch processing with per-key partition routing
+  - `ServerEvent` broadcast to subscribed connections via ConnectionRegistry
+  - Wire `CrdtService` to `RecordStoreFactory` + `ConnectionRegistry`
+  - ORMap operations: add/remove with tag tracking
+- **TS Source:** `packages/server/src/coordinator/handlers/` (ClientOpHandler, OpBatchHandler, CrdtMergeHandler)
+- **Depends on:** TODO-084 ✅ (pipeline validated), TODO-067 ✅ (RecordStore)
+- **Effort:** 1-2 weeks
+
+### TODO-086: SyncService (Merkle Delta Sync)
+- **Priority:** P0 (offline-first requires sync)
+- **Complexity:** Medium
+- **Summary:** Merkle tree synchronization protocol. Client sends MerkleRoot or MerkleRange, server computes delta, responds with missing records. This is the protocol that enables offline-first: clients reconnecting after offline period get efficient delta sync instead of full dataset transfer.
+- **Scope:**
+  - `SyncRequest` → compare client MerkleRoot with server MerkleTree → respond with delta records
+  - `MerkleRangeRequest` → drill into subtree differences for efficient narrowing
+  - `SyncAck` → mark synced entries, update client sync state
+  - Wire `SyncService` to `RecordStore` + `MerkleTree` (from core-rust)
+  - MutationObserver integration: RecordStore mutations automatically update MerkleTree
+- **TS Source:** `packages/server/src/coordinator/handlers/` (SyncHandler, MerkleSyncHandler)
+- **Depends on:** TODO-085 (CrdtService — data must exist to sync)
+- **Effort:** 1-2 weeks
+
+### TODO-087: MessagingService (Topic Pub/Sub)
+- **Priority:** P1 (real-time features)
+- **Complexity:** Small-Medium
+- **Summary:** Topic-based publish/subscribe for real-time messaging. Clients subscribe to topics, receive messages published by other clients. Independent of CRDT data path — purely ephemeral messaging.
+- **Scope:**
+  - `TopicSubscribe` / `TopicUnsubscribe` → manage per-topic subscriber sets
+  - `TopicPublish` → fan-out to all subscribers via ConnectionRegistry.broadcast()
+  - `TopicMessage` → deliver to subscribed connections
+  - Topic lifecycle: auto-remove when last subscriber disconnects
+- **TS Source:** `packages/server/src/coordinator/handlers/` (TopicSubscribeHandler, TopicPublishHandler)
+- **Depends on:** TODO-084 ✅ (pipeline validated)
+- **Effort:** 3-5 days
+
+### TODO-088: QueryService (Live Queries)
+- **Priority:** P1 (reactive UI)
+- **Complexity:** Medium-Large
+- **Summary:** Live query subscriptions. Client subscribes to a query, server evaluates it against current data, then pushes incremental updates as data changes. Critical for reactive UI patterns.
+- **Scope:**
+  - `QuerySubscribe` → evaluate query, return initial results, register standing query
+  - `QueryUnsubscribe` → remove standing query
+  - Standing query re-evaluation on RecordStore mutations (via MutationObserver)
+  - `QueryUpdate` push to subscribed connections
+  - Query filter evaluation (key prefix, field match, range)
+- **TS Source:** `packages/server/src/coordinator/handlers/` (QuerySubscribeHandler, QueryResultHandler)
+- **Depends on:** TODO-085 (data path must work), TODO-067 ✅ (MutationObserver)
+- **Effort:** 1-2 weeks
+
+### TODO-089: PersistenceService (Counters + Entry Processing)
+- **Priority:** P2 (advanced features)
+- **Complexity:** Medium
+- **Summary:** Server-side counters, entry processing (user-defined transforms), and journal subscriptions. These are specialized server-side computation features.
+- **Scope:**
+  - `CounterRequest` (increment/decrement/get) → atomic counter operations
+  - `EntryProcessRequest` → execute user-defined transform on a record (read-modify-write)
+  - `JournalSubscribe` → stream of all mutations for audit/CDC
+  - `ResolverRequest` → server-side conflict resolution
+- **TS Source:** `packages/server/src/coordinator/handlers/` (CounterHandler, EntryProcessHandler)
+- **Depends on:** TODO-085 (data path), TODO-067 ✅ (RecordStore)
+- **Effort:** 1-2 weeks
 
 ### TODO-068: Integration Test Suite
 - **Priority:** P0
@@ -301,9 +373,10 @@ Each Rust spec should reference up to THREE sources:
   - Run identical test scenarios against TS server and Rust server
   - Compare behavior for: CRDT merge, sync protocol, cluster operations, query results
   - Client-server tests: TS client connects to Rust server
+  - **Incremental:** Start after TODO-084 (Ping e2e), expand as each domain service lands
 - **Source:** `packages/server/src/__tests__/`, `tests/e2e/`
-- **Depends on:** TODO-064, TODO-065
-- **Effort:** 3-4 weeks (concurrent with other Phase 3 work)
+- **Depends on:** TODO-084+ (incremental — each domain service adds testable surface)
+- **Effort:** 3-4 weeks (concurrent with domain service work)
 
 ---
 
@@ -471,14 +544,17 @@ Items within the same wave can run in parallel. Each wave starts when its blocke
 | **1a** | ~~TODO-077~~ ✅ · ~~TODO-063~~ ✅ | — | 2 |
 | **2** | ~~TODO-080~~ ✅ · ~~TODO-081~~ ✅ · ~~TODO-082~~ ✅ · ~~TODO-083~~ ✅ | — | 2.5 |
 | **3** | ~~TODO-064~~ ✅ (Network) · ~~TODO-067~~ ✅ (Multi-Layer Storage) | **083** · **080** | 3 |
-| **4** | ~~TODO-065~~ ✅ (Operation Routing) · TODO-066 (Cluster, in progress) · TODO-068 (Tests, incremental) | 064+**082** · 063+064+**081** · 064 | 3 |
+| **4** | ~~TODO-065~~ ✅ (Operation Routing) · ~~TODO-066~~ ✅ (Cluster) | 064+**082** · 063+064+**081** | 3 |
+| **4a** | TODO-084 → SPEC-061 (Coordination) · TODO-087 (Messaging) | 065+066 · 084 | 3b |
+| **4b** | TODO-085 (CRDT) · TODO-068 (Tests, incremental from 084+) | 084 · 084+ | 3b |
+| **4c** | TODO-086 (Sync) · TODO-088 (Query) · TODO-089 (Persistence) | 085 · 085 · 085 | 3b |
 | **5** | TODO-069 (Schema) · TODO-048 (SSE) · TODO-025 (DAG) · TODO-071 (Tantivy) | — · — · 063 · — | 4 |
 | **6** | TODO-070 (Shapes) · TODO-049 (Cluster HTTP) · TODO-076 (MsgPack hash eval) | 069 · 066+063 · 075 | 4 |
 | **7** | TODO-033 (AsyncStorage) · TODO-039 (Vector) · TODO-036 (Extensions) · TODO-041 (Multi-tenancy) · TODO-072 (WASM) | 067 · — · — · — · — | 5 |
 | **8** | TODO-043 (S3) · TODO-040 (Tiered) | 033 · 033+067 | 5 |
 | **9** | TODO-044 (Time-Travel) | 043 | 5 |
 
-**Current position:** Waves 2-3 complete, Wave 4 in progress. TODO-066 (Cluster Protocol) executing — 060a/b/c done, 060d/e remaining.
+**Current position:** Waves 2-4 complete. Phase 3 framework done. Wave 4a next: TODO-084 (CoordinationService) — first real domain service, validates full pipeline.
 
 ---
 
@@ -576,6 +652,7 @@ SPEC-048b ──→ SPEC-048c          TODO-059 (Cargo) ──→ TODO-060 (Trai
 | TODO-064 → SPEC-057a-c | Networking Layer: axum HTTP/WS, ConnectionHandle, Tower middleware, graceful shutdown | 2026-02-21 |
 | TODO-067 → SPEC-058a-c | Multi-Layer Storage: 3-layer traits, HashMapStorage, DefaultRecordStore, MutationObserver | 2026-02-21 |
 | TODO-065 → SPEC-059 | Operation Routing: ServiceRegistry, Operation enum, OperationRouter, Tower pipeline, domain stubs | 2026-02-22 |
+| TODO-066 → SPEC-060a-e | Cluster Protocol: 5 traits, 18-msg wire protocol, phi-accrual FD, partition assignment, migration coordinator, 4 resilience processors | 2026-02-24 |
 
 ### Phase 2 Rust Items
 
@@ -630,4 +707,5 @@ All items below are completed and archived in `.specflow/archive/`:
 *Updated 2026-02-18: Strategic audit. Added Phase 2.5 (Architecture Research Sprint: TODO-080, 081, 082). Redesigned Phase 3 items (TODO-063/065/066/067) from "TS port" to "Hazelcast-informed design". Upgraded TODO-078 to P1 (client-server hash compatibility confirmed). Deferred TODO-076 to Phase 4. Eliminated TODO-045. Marked completed Phase 2 items.*
 *Updated 2026-02-19: Added Triple Reference Protocol. Rust OSS projects (TiKV, Quickwit, Databend) added as implementation pattern references alongside Hazelcast conceptual architecture. Research tasks TODO-080/081/082 updated with concrete Rust file paths. Rationale: Java→Rust translation has real friction (ownership, no inheritance, no GC) — Rust-native patterns needed for storage traits (TiKV engine_traits), cluster concurrency (TiKV FSM+DashMap), service composition (Quickwit actors+Tower), object storage (Databend OpenDAL).*
 *Updated 2026-02-20: Added TODO-083 (Networking Layer Research — light, 1-2 days). Focus: SurrealDB, Grafbase, Quickwit for connection abstraction, backpressure, middleware ordering. TODO-064 now depends on 083. Existing SPEC-057 to be recreated after research.*
-*Updated 2026-02-22: Marked TODO-064, TODO-067, TODO-065 as DONE. Waves 3-4 progress: 064 (SPEC-057a-c), 067 (SPEC-058a-c), 065 (SPEC-059) all archived. TODO-066 in progress (060a-c done, 060d-e remaining). 689 total Rust tests (431 core + 258 server), 0 failures.*
+*Updated 2026-02-22: Marked TODO-064, TODO-067, TODO-065 as DONE. Waves 3-4 progress: 064 (SPEC-057a-c), 067 (SPEC-058a-c), 065 (SPEC-059) all archived.*
+*Updated 2026-02-24: Marked TODO-066 as DONE (SPEC-060a-e all archived, 288 server tests). Phase 3 FRAMEWORK complete. Added Phase 3b (Domain Service Implementations): TODO-084 (Coordination), TODO-085 (CRDT), TODO-086 (Sync), TODO-087 (Messaging), TODO-088 (Query), TODO-089 (Persistence). Updated TODO-068 to incremental approach starting from TODO-084. Execution order: 084 → 085 → 086/087/088/089 (parallel) → 068 (incremental throughout).*

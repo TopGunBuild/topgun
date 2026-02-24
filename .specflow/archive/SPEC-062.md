@@ -3,7 +3,7 @@
 ```yaml
 id: SPEC-062
 type: feature
-status: running
+status: done
 priority: P0
 complexity: medium
 created: 2026-02-24
@@ -464,3 +464,52 @@ Given an `OpBatch` with zero operations, returns `OperationResponse::Ack` or `Op
 
 - `rmpv` added to topgun-server Cargo.toml as direct dependency (the spec did not mention this, but rmpv is required in crdt.rs for type matching and is not re-exported from topgun-core)
 - All G1/G2/G3/G4 tasks implemented in a single commit for crdt.rs; subsequent commits handled mod.rs and lib.rs changes (commit strategy matches spec intent)
+
+---
+
+## Review History
+
+### Review v1 (2026-02-24)
+**Result:** APPROVED
+**Reviewer:** impl-reviewer (subagent)
+
+**Findings:**
+
+**Passed:**
+- [✓] AC1 (LWW PUT) — `apply_single_op` correctly calls `record_store.put()` with `RecordValue::Lww` and `CallerProvenance::CrdtMerge`, broadcasts `ServerEvent(PUT)`, returns `OpAck`
+- [✓] AC2 (LWW REMOVE via tombstone) — `record: Some(None)` detected by `matches!(&op.record, Some(None))`, calls `record_store.remove()`, broadcasts `ServerEvent(REMOVE)`
+- [✓] AC2 (LWW REMOVE via op_type) — `op.op_type.as_deref() == Some("REMOVE")` correctly handles the op_type string check
+- [✓] AC3 (OR_ADD) — `or_record: Some(Some(_))` pattern matched, calls `record_store.put()` with `RecordValue::OrMap`, broadcasts `ServerEvent(OR_ADD)` with `or_record` and `or_tag` fields
+- [✓] AC4 (OR_REMOVE) — `or_tag: Some(Some(_))` pattern matched when `or_record` absent, calls `record_store.put()` with `RecordValue::OrTombstones { tags: vec![tag.clone()] }`, broadcasts `ServerEvent(OR_REMOVE)`
+- [✓] AC5 (OpBatch) — iterates all ops, `last_id` tracks last op's id, returns single `OpAck` with `last_id: "op-3"`; unit test at line 577 verifies `ack.payload.last_id == "op-3"` explicitly
+- [✓] AC6 (WrongService) — `_ => Err(OperationError::WrongService)` catch-all in tower::Service dispatch; unit test at line 640 verifies `GarbageCollect` returns `Err(OperationError::WrongService)`
+- [✓] AC7 (ManagedService name) — `name()` returns `service_names::CRDT` which is `"crdt"`; unit test at line 411 verifies
+- [✓] AC8 (Integration test) — `full_pipeline_client_op_to_op_ack` in lib.rs (line 136) renamed correctly, asserts `OperationResponse::Message(msg) if matches!(**msg, Message::OpAck(_))`
+- [✓] AC9 (Empty OpBatch) — early return `OperationResponse::Ack { call_id: ctx.call_id }` when `ops.is_empty()`; unit test at line 657 sets `ctx.call_id = 42` and asserts `Ack { call_id: 42 }`
+- [✓] domain_stub!(CrdtService) removed — grep confirms no match in codebase
+- [✓] crdt_service_returns_not_implemented test removed — grep confirms no match
+- [✓] all_stubs_implement_managed_service updated — CrdtService removed from registry call; comment explains why
+- [✓] lib.rs setup() wires real CrdtService::new() — uses `RecordStoreFactory` with `NullDataStore` and `connection_registry`
+- [✓] service_registry_lifecycle updated — uses `CrdtService::new(record_store_factory, connection_registry_for_crdt)` with separate `ConnectionRegistry` instance
+- [✓] rmpv_to_value handles all rmpv::Value variants including F32, F64, Nil, Ext
+- [✓] Integer fallback: tries `as_i64()` first, falls back to `as_u64().unwrap_or(0) as i64` with `#[allow(clippy::cast_possible_wrap)]`
+- [✓] Map key coercion: `k.to_string()` used for all key types as specified
+- [✓] CoordinationService pattern followed exactly — struct layout, Arc wrapping, `#[must_use]` constructor, ManagedService no-ops
+- [✓] No spec/phase references in code comments — WHY-comments used throughout
+- [✓] No constraints violated — no partition routing, no conflict resolvers, no Merkle updates, no search index, etc.
+- [✓] `cargo check` passes with zero errors
+- [✓] `cargo clippy` passes with zero warnings
+
+**Minor:**
+1. AC5 test uses `record: None` on all three ops in the OpBatch test — these fall through to the LWW PUT branch with `lww_rec = None`, which skips the `store.put()` call. The spec AC5 says "RecordStore calls made for each" but the test only verifies `last_id` in the response, not storage interaction. This is a test coverage gap: no unit test verifies that `store.put()` is actually called with data for batched operations. Not a functional defect — the logic is correct, but a test with `record: Some(Some(lww_record))` for each batch op would provide stronger AC5 coverage.
+
+**Summary:** The implementation is complete, correct, and follows established patterns precisely. All 9 acceptance criteria are implemented and tested. The code is clean, clippy-compliant, and integrates naturally into the existing service routing framework. The single minor finding (AC5 test uses no-op PUTs) is a test coverage improvement that does not affect correctness.
+
+---
+
+## Completion
+
+**Completed:** 2026-02-24
+**Total Commits:** 3
+**Audit Cycles:** 2
+**Review Cycles:** 1
