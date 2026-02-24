@@ -31,6 +31,9 @@ mod integration_tests {
     use topgun_core::{SystemClock, HLC};
     use tower::{Service, ServiceExt};
 
+    use crate::cluster::state::ClusterState;
+    use crate::cluster::types::ClusterConfig;
+    use crate::network::connection::ConnectionRegistry;
     use crate::service::config::ServerConfig;
     use crate::service::domain::{
         CoordinationService, CrdtService, MessagingService, PersistenceService, QueryService,
@@ -58,12 +61,22 @@ mod integration_tests {
 
         let classify_svc = OperationService::new(hlc, Arc::new(config.clone()));
 
+        // CoordinationService requires real dependencies.
+        let cluster_config = Arc::new(ClusterConfig::default());
+        let (cluster_state, _rx) =
+            ClusterState::new(cluster_config, "integration-test-node".to_string());
+        let cluster_state = Arc::new(cluster_state);
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+
         let mut router = OperationRouter::new();
         router.register(service_names::CRDT, Arc::new(CrdtService));
         router.register(service_names::SYNC, Arc::new(SyncService));
         router.register(service_names::QUERY, Arc::new(QueryService));
         router.register(service_names::MESSAGING, Arc::new(MessagingService));
-        router.register(service_names::COORDINATION, Arc::new(CoordinationService));
+        router.register(
+            service_names::COORDINATION,
+            Arc::new(CoordinationService::new(cluster_state, connection_registry)),
+        );
         router.register(service_names::SEARCH, Arc::new(SearchService));
         router.register(service_names::PERSISTENCE, Arc::new(PersistenceService));
 
@@ -71,7 +84,7 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn full_pipeline_ping_to_not_implemented() {
+    async fn full_pipeline_ping_returns_pong() {
         let (classify_svc, router, config) = setup();
         let mut pipeline = build_operation_pipeline(router, &config);
 
@@ -85,7 +98,7 @@ mod integration_tests {
 
         assert_eq!(op.ctx().service_name, service_names::COORDINATION);
 
-        // Route through the full pipeline.
+        // Route through the full pipeline — real CoordinationService returns Pong.
         let resp = ServiceExt::ready(&mut pipeline)
             .await
             .unwrap()
@@ -93,13 +106,15 @@ mod integration_tests {
             .await
             .unwrap();
 
-        assert!(matches!(
-            resp,
-            OperationResponse::NotImplemented {
-                service_name: "coordination",
-                ..
+        match resp {
+            OperationResponse::Message(msg) => {
+                assert!(
+                    matches!(*msg, Message::Pong(ref pong) if pong.timestamp == 1_700_000_000_000),
+                    "expected Pong with echoed timestamp, got {msg:?}"
+                );
             }
-        ));
+            other => panic!("expected Message(Pong), got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -194,12 +209,20 @@ mod integration_tests {
 
     #[tokio::test]
     async fn service_registry_lifecycle() {
+        // CoordinationService requires constructor args, so it is registered
+        // separately from the unit-struct stubs.
+        let cluster_config = Arc::new(ClusterConfig::default());
+        let (cluster_state, _rx) =
+            ClusterState::new(cluster_config, "registry-test-node".to_string());
+        let cluster_state = Arc::new(cluster_state);
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+
         let registry = ServiceRegistry::new();
         registry.register(CrdtService);
         registry.register(SyncService);
         registry.register(QueryService);
         registry.register(MessagingService);
-        registry.register(CoordinationService);
+        registry.register(CoordinationService::new(cluster_state, connection_registry));
         registry.register(SearchService);
         registry.register(PersistenceService);
 
@@ -219,6 +242,9 @@ mod integration_tests {
         assert!(registry.get::<CoordinationService>().is_some());
         assert!(registry.get::<SearchService>().is_some());
         assert!(registry.get::<PersistenceService>().is_some());
+
+        // Also accessible by name.
+        assert!(registry.get_by_name("coordination").is_some());
 
         // Shutdown all in reverse order.
         registry.shutdown_all(false).await.unwrap();

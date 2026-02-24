@@ -110,6 +110,7 @@ mod tests {
             caller_origin: crate::service::CallerOrigin::Client,
             client_id: None,
             caller_node_id: None,
+            connection_id: None,
             timestamp: Timestamp {
                 millis: 0,
                 counter: 0,
