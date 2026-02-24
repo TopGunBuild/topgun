@@ -13,7 +13,6 @@
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-060e | Cluster Protocol -- Resilience (Wave 3) | deferred (depends: 060d) | Phase 3 |
 
 ## Migration Roadmap (high-level)
 
@@ -45,6 +44,7 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-24 | SPEC-060e | COMPLETED: Cluster resilience module — 4 processors (SplitBrainHandler, HeartbeatComplaintProcessor, MastershipClaimProcessor, GracefulLeaveProcessor), decide_merge() with 3-step deadlock-free tie-break, ComplaintRecord/RemoteClusterInfo types. 1 file created, 1 modified, 3 commits, 4 audit cycles, 3 review cycles. 16 new resilience tests (288 total), clippy clean. |
 | 2026-02-23 | SPEC-060d | COMPLETED: MigrationCoordinator, MapProvider trait, RebalanceTrigger, not_owner_response/broadcast_partition_map free functions. 1 file created, 2 modified, 3 commits, 4 audit cycles, 1 review cycle. 14 new migration tests (272 total), clippy clean. |
 | 2026-02-22 | SPEC-060c | COMPLETED: Module wiring + integration tests. 4 commits, 1 file created, 6 modified. 29 integration tests (19 serde round-trip + 10 re-export accessibility). 258 total tests, clippy clean. 3 audit cycles, 1 review cycle. |
 | 2026-02-22 | SPEC-060b | COMPLETED: Phi-accrual failure detector, ClusterState (ArcSwap+DashMap), partition assignment algorithms. 3 files created, 1 modified, 4 commits, 2 audit cycles, 1 review cycle. 40 unit tests. |
@@ -86,4 +86,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-23 (SPEC-060d completed and archived)*
+*Last updated: 2026-02-24 (SPEC-060e completed and archived)*
