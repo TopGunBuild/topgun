@@ -3,7 +3,7 @@
 ---
 id: SPEC-064
 type: feature
-status: auditing
+status: done
 priority: P1
 complexity: small
 created: 2026-02-25
@@ -272,3 +272,96 @@ Replace the `domain_stub!(MessagingService, ...)` macro invocation with a real `
 
 **Recommendations:**
 1. [Clarity] Files to Modify item 3, second bullet says "Update `ServiceRegistry` registration in the `setup()` helper" but the `setup()` function only uses `OperationRouter`, not `ServiceRegistry`. The `ServiceRegistry` usage is in the `service_registry_lifecycle` test (covered by the third bullet). This is a minor wording imprecision that will not cause implementation errors since the implementer will see the actual code, but could be cleaned up for consistency.
+
+## Execution Summary
+
+**Executed:** 2026-02-25
+**Mode:** orchestrated (single-pass due to small spec size)
+**Commits:** 1
+
+### Execution Waves
+
+| Wave | Groups | Status |
+|------|--------|--------|
+| 1 | G1 | complete |
+| 2 | G2, G3 | complete |
+| 3 | G4 | complete |
+
+### Files Created
+- `packages/server-rust/src/service/domain/messaging.rs` -- MessagingService, TopicRegistry, TopicError, ManagedService + Service<Operation> impl, 20 unit tests
+
+### Files Modified
+- `packages/server-rust/src/service/domain/mod.rs` -- removed domain_stub!(MessagingService, ...), added pub mod messaging + pub use, updated stub tests
+- `packages/server-rust/src/lib.rs` -- wired MessagingService with constructor args in setup() and service_registry_lifecycle, renamed integration test
+
+### Acceptance Criteria Status
+- [x] AC1: TopicSubscribe adds connection to topic registry and connection metadata
+- [x] AC2: TopicUnsubscribe removes connection from topic registry and connection metadata
+- [x] AC3: TopicPublish delivers TOPIC_MESSAGE to subscribers (excluding publisher)
+- [x] AC4: TopicPublish to topic with no subscribers returns Empty (no error)
+- [x] AC5: Invalid topic name rejected
+- [x] AC6: Topic auto-removed when last subscriber unsubscribes
+- [x] AC7: Missing connection_id on TopicSubscribe returns error
+- [x] AC8: Wrong service returns WrongService error
+- [x] AC9: ManagedService name is "messaging"
+- [x] AC10: Integration test wiring compiles and routes messaging operations
+- [x] AC11: unsubscribe_all removes connection from all topics and cleans up empty entries
+- [x] AC12: Missing connection_id on TopicPublish returns error
+
+### Test Results
+- **Total tests:** 360 (20 new messaging tests + 340 pre-existing)
+- **Failures:** 0
+- **Clippy:** clean for spec files (0 warnings from messaging.rs, mod.rs, or lib.rs changes)
+
+### Deviations
+- `handle_topic_publish` is synchronous (not async) since it only uses `try_send` (non-blocking) and does not need `.await`. Clippy flagged `unused_async` and the method was made `fn` instead of `async fn`.
+- All 4 task groups (G1-G4) were implemented in a single pass rather than 3 separate waves, since the spec is small (~45% total context) and tightly coupled.
+
+---
+
+## Review History
+
+### Review v1 (2026-02-25)
+**Result:** APPROVED
+**Reviewer:** impl-reviewer (subagent)
+
+**Findings:**
+
+**Passed:**
+- [✓] AC1: TopicSubscribe adds conn_id to topic registry and `ConnectionMetadata.topics` — verified in `ac1_topic_subscribe_adds_to_registry_and_metadata` test, both assertions present
+- [✓] AC2: TopicUnsubscribe removes conn_id from topic registry and `ConnectionMetadata.topics` — verified in `ac2_topic_unsubscribe_removes_from_registry_and_metadata` test
+- [✓] AC3: TopicPublish fan-out to B and C, skips publisher A, verifies payload (topic, data, publisher_id, timestamp within 1s) — `ac3_topic_publish_delivers_to_subscribers_excludes_publisher` test deserializes and asserts all fields
+- [✓] AC4: Publish to empty topic returns `OperationResponse::Empty` — verified in `ac4_publish_to_empty_topic_returns_empty`
+- [✓] AC5: Invalid topic names (empty, spaces+special chars, >256 chars) return `OperationError::Internal` — three sub-cases all covered in `ac5_invalid_topic_name_rejected_on_subscribe`; valid name boundary cases (`a`, `x*256`) also tested in `topic_registry_valid_names`
+- [✓] AC6: Topic entry auto-deleted when last subscriber unsubscribes — `ac6_topic_auto_removed_when_last_subscriber_leaves` and `topic_registry_auto_removes_empty_topic` both verify `topic_count() == 0`
+- [✓] AC7: Missing `connection_id` on TopicSubscribe returns `OperationError::Internal` — `ac7_missing_connection_id_on_subscribe_returns_error` matches `Err(OperationError::Internal(_))`
+- [✓] AC8: Non-messaging operation returns `Err(OperationError::WrongService)` — `ac8_wrong_service_returns_error` uses `GarbageCollect`
+- [✓] AC9: `ManagedService::name()` returns `"messaging"` — `ac9_managed_service_name` asserts equality
+- [✓] AC10: `full_pipeline_topic_subscribe_returns_empty` test exists, constructs `MessagingService::new(Arc::clone(&connection_registry))`, registers in router, asserts `OperationResponse::Empty`
+- [✓] AC11: `unsubscribe_all` removes conn from all 3 topics, preserves topics with remaining subscribers, cleans empty entries — `ac11_unsubscribe_all_removes_connection_from_all_topics` verifies `topic_count() == 1` (topic-a survives, topic-b and topic-c removed)
+- [✓] AC12: Missing `connection_id` on TopicPublish returns `OperationError::Internal` — `ac12_missing_connection_id_on_publish_returns_error`
+- [✓] Files created: `packages/server-rust/src/service/domain/messaging.rs` exists
+- [✓] Stub removed: `domain_stub!(MessagingService, ...)` gone from `mod.rs`; `messaging_service_returns_not_implemented` test removed
+- [✓] `all_stubs_implement_managed_service` test no longer references `MessagingService` as a unit struct; comment explains the exclusion
+- [✓] `full_pipeline_topic_subscribe_to_not_implemented` test renamed to `full_pipeline_topic_subscribe_returns_empty`
+- [✓] `service_registry_lifecycle` test uses `MessagingService::new(Arc::clone(&connection_registry))`
+- [✓] `DashMap<String, DashSet<ConnectionId>>` used — consistent with `ConnectionRegistry` pattern
+- [✓] `unsubscribe` uses `remove_if` to re-check emptiness under the write lock, preventing TOCTOU race where two concurrent unsubscribes could both observe an empty set and only one performs the remove
+- [✓] `handle_topic_publish` is `fn` (not `async fn`) — correct since `try_send` is non-blocking; deviation documented in Execution Summary
+- [✓] Timestamp uses `SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64` — uses `unwrap_or_default()` instead of `unwrap()` which is slightly more robust
+- [✓] `TopicUnsubscribe` also guards against missing `connection_id` (returns `OperationError::Internal`) — not required by spec but is good defensive behavior
+- [✓] Build check: `cargo check` exits 0
+- [✓] Lint check: `cargo clippy -- -D warnings` exits 0 (no warnings)
+- [✓] Test check: `cargo test` — 360 tests, 0 failures
+- [✓] Rust idiom: no `.unwrap()` in production code paths; `?` operator used throughout; no `unsafe` blocks; no unnecessary clones
+
+**Summary:** The implementation is complete, correct, and clean. All 12 acceptance criteria are satisfied with dedicated tests. The code follows established patterns (`DashMap`, `Arc`, Tower `Service<Operation>` on `Arc<T>`), handles all error cases defensively, and passes the full build/lint/test pipeline with 0 failures and 0 clippy warnings. The TOCTOU-safe `remove_if` pattern in `unsubscribe` is a noteworthy quality improvement over a naive implementation.
+
+---
+
+## Completion
+
+**Completed:** 2026-02-25
+**Total Commits:** 1
+**Audit Cycles:** 3
+**Review Cycles:** 1

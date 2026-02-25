@@ -2,24 +2,17 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-064
-- **Status:** running
+- **Active Specification:** none
+- **Status:** idle
 - **Project Phase:** Phase 3 (Rust Server) — Wave 4
 - **TODO Items:** 28 (1 client bug fix + 8 Rust bridge/core + 5 audit findings + 14 existing deferred)
-- **Next Step:** (in progress)
-
-## Execution Status
-
-| Spec | Mode | Progress | Last Updated |
-|------|------|----------|--------------|
-| SPEC-064 | orchestrated | Wave 0/3 (0%) | 2026-02-25 |
+- **Next Step:** /sf:new or /sf:next
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
 ## Queue
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-064 | Implement MessagingService (Topic Pub/Sub) | running | Phase 3 |
 
 ## Migration Roadmap (high-level)
 
@@ -51,6 +44,7 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-25 | SPEC-064 | COMPLETED: MessagingService (Topic Pub/Sub) — fourth real domain service replacing domain_stub! macro. 1 file created, 2 modified, 1 commit, 3 audit cycles, 1 review cycle. All 12 ACs implemented. 360 total tests (0 failures), clippy clean. APPROVED by impl-reviewer v1. |
 | 2026-02-25 | SPEC-063 | COMPLETED: SyncService (Merkle Delta Sync Protocol) — third real domain service replacing domain_stub! macro. 2 files created, 4 modified, 5 commits, 3 audit cycles, 2 review cycles + 1 fix cycle. All 14 ACs implemented. 341 total tests (0 failures), clippy clean. APPROVED by impl-reviewer v2. |
 | 2026-02-24 | SPEC-062 | COMPLETED: CrdtService (LWW-Map and OR-Map Operations) — second real domain service replacing domain_stub! macro. 1 file created, 3 modified, 3 commits, 2 audit cycles, 1 review cycle. All 9 ACs implemented (LWW PUT/REMOVE, OR_ADD/OR_REMOVE, OpBatch, WrongService, ManagedService name, integration test, empty batch). rmpv added as direct dependency for wire value conversion. Clippy clean. |
 | 2026-02-24 | SPEC-061 | COMPLETED: CoordinationService (Ping/PartitionMap/Heartbeat) — first real domain service replacing domain_stub! macro. 1 file created, 4 modified, 4 commits, 4 audit cycles, 1 review cycle. 296 total tests (9 new), clippy clean for spec files. |
@@ -94,4 +88,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-25 (SPEC-064 execution started)*
+*Last updated: 2026-02-25 (SPEC-064 completed and archived)*
