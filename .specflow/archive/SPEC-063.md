@@ -3,7 +3,7 @@
 ```yaml
 id: SPEC-063
 type: feature
-status: running
+status: done
 priority: P0
 complexity: large
 created: 2026-02-24
@@ -661,3 +661,130 @@ None.
 - `f70e323` — feat(sf-063): implement MerkleSyncManager, MerkleMutationObserver, LWW handlers, and value_to_rmpv
 - `7b94ba0` — feat(sf-063): implement OR-Map handlers and complete sync service dispatch
 - `78bc4d5` — feat(sf-063): wire SyncService in integration tests and fix clippy warnings
+
+---
+
+## Review History
+
+### Review v1 (2026-02-25)
+**Result:** APPROVED
+**Reviewer:** impl-reviewer (subagent)
+
+**Findings:**
+
+**Passed:**
+- [✓] AC1: SyncInit returns SyncRespRoot with correct root hash — verified via unit test with pre-populated tree
+- [✓] AC2: MerkleReqBucket returns SyncRespBuckets for internal nodes — verified with hex char bucket key assertions
+- [✓] AC3: MerkleReqBucket returns SyncRespLeaf for leaf nodes — verified with NullDataStore path drilldown
+- [✓] AC4: ORMapSyncInit returns ORMapSyncRespRoot — verified with pre-populated OR-Map tree
+- [✓] AC5: ORMapMerkleReqBucket returns leaf or bucket response — two tests covering both branches
+- [✓] AC6: ORMapDiffRequest returns entries for requested keys — handles missing keys gracefully (empty entries), handles multiple keys
+- [✓] AC7: ORMapPushDiff merges entries and returns Ack — verified with both non-empty and empty entry lists
+- [✓] AC8: MerkleMutationObserver updates LWW tree on put/remove — backup guard verified
+- [✓] AC9: MerkleMutationObserver updates OR-Map tree on put/remove — correct variant dispatch
+- [✓] AC10: clear_partition resets both trees — lazy re-creation confirmed
+- [✓] AC11: WrongService returns OperationError::WrongService — tested with GarbageCollect operation
+- [✓] AC12: ManagedService name is "sync" — directly asserted
+- [✓] AC13: Integration test — SyncService replaces stub in full pipeline — SyncInit through full pipeline returns SyncRespRoot (not NotImplemented)
+- [✓] AC14: value_to_rmpv round-trips with rmpv_to_value — comprehensive test over all Value variants including edge cases (i64::MAX, i64::MIN, empty bytes/array)
+- [✓] Build check: `cargo check` exits 0
+- [✓] Lint check: `cargo clippy -- -D warnings` exits 0 — clean, all clippy warnings resolved
+- [✓] Test check: `cargo test` exits 0, 341 tests pass, 0 fail
+- [✓] SyncService stub removed from domain/mod.rs — no lingering domain_stub!(SyncService) reference
+- [✓] crdt.rs visibility change applied — `pub(crate) fn rmpv_to_value` confirmed at line 304
+- [✓] storage/mod.rs updated — `pub mod merkle_sync` and `pub use merkle_sync::*` present
+- [✓] domain/mod.rs updated — `pub mod sync` and `pub use sync::SyncService` present
+- [✓] lib.rs wired — MerkleSyncManager constructed and passed to SyncService in both setup() and service_registry_lifecycle()
+- [✓] Mutex-across-await prevented — all data extracted inside closures before any .await; async RecordStore fetches happen after closure returns
+- [✓] DashMap+Mutex locking strategy implemented as specified — individual tree locks do not block unrelated partitions
+- [✓] Lazy tree creation on first access working correctly via DashMap entry API
+- [✓] on_update uses new_value parameter (not record.value) — additional test verifies hash changes on timestamp update
+- [✓] on_remove and on_evict call BOTH remove_lww and remove_ormap — consistent with spec
+- [✓] on_replication_put updates tree without is_backup check — consistent with spec
+- [✓] value_to_rmpv is pub(crate) with TODO comment for future extraction to conversion.rs
+- [✓] LwwNodeData/ORMapNodeData enums extracted to module level to satisfy clippy
+- [✓] No f64 for integer-semantic fields (u32 for hashes, partition_id, depth)
+- [✓] No r#type field on structs — not applicable, no new wire structs created
+- [✓] rmp_serde::to_vec_named() used for ORMapPushDiff broadcast serialization
+- [✓] Domain service replacement pattern followed exactly — same structure as CrdtService
+
+**Minor:**
+1. `LwwNodeData` and `ORMapNodeData` enums are structurally identical. Could be unified into a single `NodeData` enum.
+   - File: `packages/server-rust/src/service/domain/sync.rs:28-38`
+   - These were separated to satisfy clippy; unification would require a different placement strategy.
+2. AC10 test verifies LWW hash is non-zero before clear but does not verify the OR-Map hash is non-zero before clear. The post-clear assertions correctly check both trees.
+   - File: `packages/server-rust/src/storage/merkle_sync.rs:422-454`
+3. AC7 test verifies the Ack response but does not verify the broadcast or the RecordStore put occurred. This matches the CrdtService test pattern and is acceptable given the empty ConnectionRegistry.
+   - File: `packages/server-rust/src/service/domain/sync.rs` (ac7 tests)
+
+**Summary:** Implementation fully meets all 14 acceptance criteria. Build, lint, and all 341 tests pass. The code is clean, idiomatic Rust, correctly addresses all critical issues identified in 3 audit cycles, and follows established project patterns (CrdtService, MutationObserver, DashMap+Mutex). Minor issues are optional improvements that do not affect correctness or production readiness.
+
+### Fix Response v1 (2026-02-25)
+**Applied:** All 3 minor issues from Review v1
+
+**Fixes:**
+1. [✓] Unified `LwwNodeData` and `ORMapNodeData` into single `NodeData` enum — eliminated structural duplication
+   - Commit: `181362b`
+2. [✓] Added OR-Map pre-clear assertion in AC10 test — both LWW and OR-Map hashes now verified non-zero before `clear_partition`
+   - Commit: `181362b`
+3. [✓] AC7 test now verifies RecordStore put fired — wired `MerkleMutationObserver` into test factory; after push diff, asserts OR-Map merkle tree root hash is non-zero (proves `store.put()` executed and observer fired)
+   - Commit: `181362b`
+
+**Verification:** `cargo check` ✓, `cargo clippy -- -D warnings` ✓, `cargo test` 341 passed / 0 failed ✓
+
+
+---
+
+### Review v2 (2026-02-25)
+**Result:** APPROVED
+**Reviewer:** impl-reviewer (subagent)
+
+**Findings:**
+
+**Passed:**
+- [✓] AC1: SyncInit returns SyncRespRoot with correct root hash — two tests: non-zero pre-populated tree and zero empty tree; root_hash and timestamp echoed correctly
+- [✓] AC2: MerkleReqBucket returns SyncRespBuckets for internal nodes — 10-key tree at root path; all bucket keys verified as single hex character strings
+- [✓] AC3: MerkleReqBucket returns SyncRespLeaf for leaf nodes — dynamic leaf-path discovery via drill-down; map_name and path echoed; NullDataStore empty records accepted per spec
+- [✓] AC4: ORMapSyncInit returns ORMapSyncRespRoot — two tests: non-zero pre-populated OR-Map tree and zero empty tree; root_hash matches expected value
+- [✓] AC5: ORMapMerkleReqBucket returns ORMapSyncRespBuckets or ORMapSyncRespLeaf — both branches covered with two separate tests
+- [✓] AC6: ORMapDiffRequest handles missing keys gracefully (empty entry returned, not panicked); multiple-key response tested with two keys
+- [✓] AC7: ORMapPushDiff stores entries and returns Ack; store.put verified via MerkleMutationObserver OR-Map hash change (proves put fired); empty entries also returns Ack
+- [✓] AC8: MerkleMutationObserver updates LWW tree on put/remove — backup guard verified (is_backup=true skips both put and remove)
+- [✓] AC9: MerkleMutationObserver updates OR-Map tree on put/remove — correct RecordValue variant dispatch
+- [✓] AC10: clear_partition resets both trees — both LWW and OR-Map hashes verified non-zero BEFORE clear, both verified zero AFTER clear (fix from Review v1 applied)
+- [✓] AC11: WrongService returns OperationError::WrongService — tested with GarbageCollect operation
+- [✓] AC12: ManagedService name is "sync" — directly asserted via name() call
+- [✓] AC13: Integration test — full pipeline SyncInit returns SyncRespRoot (not NotImplemented); SyncService confirmed in both setup() and service_registry_lifecycle()
+- [✓] AC14: value_to_rmpv round-trips with rmpv_to_value — all 8 Value variants covered individually plus comprehensive round-trip test with i64::MAX, i64::MIN, empty bytes/array; both functions are pub(crate) with TODO comment
+- [✓] Build check: cargo check exits 0
+- [✓] Lint check: cargo clippy -- -D warnings exits 0 — clippy-clean
+- [✓] Test check: cargo test — 341 passed / 0 failed
+- [✓] Files created: merkle_sync.rs and sync.rs exist at specified paths
+- [✓] SyncService stub removed from domain/mod.rs — no domain_stub!(SyncService) reference
+- [✓] sync_service_returns_not_implemented test removed — no reference found
+- [✓] all_stubs_implement_managed_service test updated — SyncService not registered there; comment explains it requires constructor args
+- [✓] domain/mod.rs updated — pub mod sync and pub use sync::SyncService present
+- [✓] storage/mod.rs updated — pub mod merkle_sync and pub use merkle_sync::* present
+- [✓] crdt.rs visibility change applied — pub(crate) fn rmpv_to_value confirmed at line 304
+- [✓] lib.rs wired — MerkleSyncManager constructed in both setup() and service_registry_lifecycle()
+- [✓] Mutex-across-await prevented — NodeData enum extracted to module level; all tree data obtained inside closure; async RecordStore fetches happen after closure returns
+- [✓] DashMap+Mutex locking strategy implemented — NodeData enum unified into single enum (minor fix from Review v1 applied)
+- [✓] is_backup guard on on_remove and on_evict — both confirmed in merkle_sync.rs
+- [✓] on_update uses new_value parameter — verified with dedicated test asserting hash changes on timestamp update
+- [✓] on_replication_put updates tree without is_backup check — consistent with spec
+- [✓] value_to_rmpv correctly converts all 8 Value variants — Null, Bool, Int, Float, String, Bytes, Array, Map
+- [✓] No f64 for integer-semantic fields (u32 for hashes, partition_id, depth)
+- [✓] rmp_serde::to_vec_named() used for ORMapPushDiff broadcast serialization
+- [✓] LWW hash format matches spec — key:millis:counter:node_id via fnv1a_hash
+- [✓] OR-Map hash format — sorted tags joined with pipe character prefix key:key format via fnv1a_hash
+
+**Summary:** All 14 acceptance criteria are fully implemented and verified. Build, clippy, and all 341 tests pass. All three minor issues from Review v1 were correctly addressed in commit 181362b (unified NodeData enum, OR-Map pre-clear assertion, AC7 store.put verification). The implementation is clean, idiomatic Rust following established project patterns. No new issues found.
+
+---
+
+## Completion
+
+**Completed:** 2026-02-25
+**Total Commits:** 5 (4 implementation + 1 fix)
+**Audit Cycles:** 4
+**Review Cycles:** 2 (+ 1 fix cycle)

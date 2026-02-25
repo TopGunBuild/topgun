@@ -21,6 +21,8 @@ Each Rust spec should reference up to THREE sources:
    - **TiKV** (`/Users/koristuvac/Projects/rust/tikv/`) — storage traits, per-partition FSM, DashMap, batch system
    - **Quickwit** (`/Users/koristuvac/Projects/rust/quickwit/`) — chitchat gossip, actor framework, Tower layers, service composition
    - **Databend** (`/Users/koristuvac/Projects/rust/databend/`) — OpenDAL object storage, GlobalServices singleton, pipeline DAG
+   - **Arroyo** (`/Users/koristuvac/Projects/rust/arroyo/`) — distributed stream DAG (petgraph), DataFusion SQL planning (target_partitions=1 + custom distribution), barrier checkpointing, partial→final aggregation, connector traits, operator chaining
+   - **ArkFlow** (`/Users/koristuvac/Projects/rust/arkflow/`) — DataFusion SessionContext integration, MsgPack→Arrow codec patterns, Input/Output/Codec connector traits
 
 **Fix-on-port rule:** Before porting a domain, audit the TS source. Fix bugs/dead code in TS first, then port the corrected version. See PROJECT.md "Rust Migration Principles".
 
@@ -31,7 +33,8 @@ Each Rust spec should reference up to THREE sources:
 | TODO-065 Operations | `server/src/coordinator/` | `spi/`, `internal/partition/operation/` | Quickwit: Actor+Tower; TiKV: Worker/Scheduler |
 | TODO-066 Cluster | `server/src/cluster/` | `internal/cluster/impl/` | Quickwit: chitchat; TiKV: FSM batch system |
 | TODO-067 Storage | `server/src/storage/` | `map/impl/recordstore/`, `mapstore/` | TiKV: `engine_traits`; Databend: OpenDAL |
-| TODO-025 DAG | [DAG spec](../reference/HAZELCAST_DAG_EXECUTOR_SPEC.md) | `jet/core/`, `jet/impl/execution/` | Databend: pipeline `StableGraph` |
+| TODO-025 DAG | [DAG spec](../reference/HAZELCAST_DAG_EXECUTOR_SPEC.md) | `jet/core/`, `jet/impl/execution/` | **Arroyo**: petgraph DAG, operator chaining, barrier checkpoints, shuffle edges; Databend: pipeline `StableGraph` |
+| TODO-088 Query | `server/src/coordinator/handlers/` | `map/impl/query/` | **Arroyo**: DataFusion `target_partitions=1` + custom distribution, partial→final agg; **ArkFlow**: SessionContext, MsgPack→Arrow codec |
 | TODO-033 AsyncStorage | — | `map/impl/mapstore/` (Write-Behind) | TiKV: `Scheduler<T>` async flush |
 | TODO-040 Tiered | — | `map/impl/eviction/`, `map/impl/record/` | TiKV: `in_memory_engine` hot/cold |
 | TODO-041 Multi-tenancy | — | `security/`, `access/` | SurrealDB: `Namespace→Database→Table` hierarchy |
@@ -39,7 +42,7 @@ Each Rust spec should reference up to THREE sources:
 | TODO-071 Search | `server/src/search/` | `query/`, `map/impl/query/` | Quickwit: tantivy integration, SearchService trait |
 | TODO-043 S3 Storage | — | — | Databend: OpenDAL `Operator` + layer stack |
 
-**Not relevant from Hazelcast:** `sql/` (Calcite), `cp/` (Raft), `transaction/`, `wan/`, `cache/` (JCache), Spring modules.
+**Not relevant from Hazelcast:** `cp/` (Raft), `transaction/`, `wan/`, `cache/` (JCache), Spring modules. *(Note: `sql/` (Calcite) — conceptually relevant for distributed SQL planning, but TopGun uses DataFusion instead of Calcite.)*
 
 ---
 
@@ -348,6 +351,23 @@ Each Rust spec should reference up to THREE sources:
   - Standing query re-evaluation on RecordStore mutations (via MutationObserver)
   - `QueryUpdate` push to subscribed connections
   - Query filter evaluation (key prefix, field match, range)
+- **Architecture (DataFusion-ready):**
+  - **Dual format:** MsgPack stays for wire protocol/CRDT/replication. Arrow only inside query engine (lazy cache).
+  - Define `QueryBackend` trait abstracting query execution (`execute_query(&self, map, predicate, projection, limit) → Stream<QueryResult>`)
+  - **PredicateEngine** (Phase 3b, default backend — no SQL overhead):
+    - L1: Eq, Gt, Lt, In, Exists, Prefix — single field filters
+    - L2: AND/OR/NOT combinators, ORDER BY, LIMIT/OFFSET — covers ~80% CRUD apps
+    - L3: Nested field access, simple aggregations (count/min/max/sum), distinct, projection — covers ~90% single-Map queries
+  - `RecordStore::scan()` must return `Stream<Item = (Key, Record)>` — compatible with DataFusion TableProvider scan
+  - `Record::to_value_map() → BTreeMap<String, Value>` for predicate evaluation
+  - Accept `Query::Predicate(..) | Query::Sql(String)` — dual API, SQL variant reserved for DataFusion
+  - **Arrow cache layer:** lazy MsgPack → Arrow RecordBatch conversion on first SQL query per Map, invalidated on mutation via MutationObserver
+  - **Future SQL (Phase 4-5, feature-gated):**
+    - `#[cfg(feature = "sql")] DataFusionBackend` — TopGunTableProvider implements DataFusion's TableProvider trait
+    - Server: DataFusion plans with `target_partitions=1`, TopGun distributes via partition owners + shuffle edges (Arroyo pattern — no Ballista needed)
+    - Partial→Final aggregation: partial aggregate per partition, merge on coordinator (Arroyo's proven approach)
+    - Client: DataFusion WASM for offline SQL (same dialect server & client)
+    - Ref: Arroyo (`arroyo-planner/builder.rs`, `arroyo-datastream/logical.rs`), ArkFlow (SessionContext, MsgPack→Arrow codec)
 - **TS Source:** `packages/server/src/coordinator/handlers/` (QuerySubscribeHandler, QueryResultHandler)
 - **Depends on:** TODO-085 (data path must work), TODO-067 ✅ (MutationObserver)
 - **Effort:** 1-2 weeks
