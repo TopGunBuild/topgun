@@ -2,17 +2,18 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
+- **Active Specification:** SPEC-063
+- **Status:** review
 - **Project Phase:** Phase 3 (Rust Server) — Wave 4
 - **TODO Items:** 28 (1 client bug fix + 8 Rust bridge/core + 5 audit findings + 14 existing deferred)
-- **Next Step:** /sf:new or /sf:next
+- **Next Step:** /sf:review
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
 ## Queue
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
+| 1 | SPEC-063 | SyncService (Merkle Delta Sync Protocol) | review | Phase 3 |
 
 ## Migration Roadmap (high-level)
 
@@ -44,6 +45,7 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-25 | SPEC-063 | IMPLEMENTED: SyncService (Merkle Delta Sync Protocol) — third real domain service replacing domain_stub! macro. 2 files created, 4 modified, 4 commits, 3 audit cycles. All 14 ACs implemented (LWW sync init/bucket, OR-Map sync init/bucket/diff/push, MerkleMutationObserver, integration test AC13). 341 total tests (0 failures), clippy clean. |
 | 2026-02-24 | SPEC-062 | COMPLETED: CrdtService (LWW-Map and OR-Map Operations) — second real domain service replacing domain_stub! macro. 1 file created, 3 modified, 3 commits, 2 audit cycles, 1 review cycle. All 9 ACs implemented (LWW PUT/REMOVE, OR_ADD/OR_REMOVE, OpBatch, WrongService, ManagedService name, integration test, empty batch). rmpv added as direct dependency for wire value conversion. Clippy clean. |
 | 2026-02-24 | SPEC-061 | COMPLETED: CoordinationService (Ping/PartitionMap/Heartbeat) — first real domain service replacing domain_stub! macro. 1 file created, 4 modified, 4 commits, 4 audit cycles, 1 review cycle. 296 total tests (9 new), clippy clean for spec files. |
 | 2026-02-24 | SPEC-060e | COMPLETED: Cluster resilience module — 4 processors (SplitBrainHandler, HeartbeatComplaintProcessor, MastershipClaimProcessor, GracefulLeaveProcessor), decide_merge() with 3-step deadlock-free tie-break, ComplaintRecord/RemoteClusterInfo types. 1 file created, 1 modified, 3 commits, 4 audit cycles, 3 review cycles. 16 new resilience tests (288 total), clippy clean. |
@@ -86,4 +88,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-24 (SPEC-062 completed and archived)*
+*Last updated: 2026-02-25 (SPEC-063 implementation complete — ready for review)*
