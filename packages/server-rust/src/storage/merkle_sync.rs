@@ -439,9 +439,11 @@ mod tests {
         );
         ormap_observer.on_put("tag-1", &ormap_record, None, false);
 
-        // Verify both trees have non-zero hashes.
+        // Verify both trees have non-zero hashes before clearing.
         let lww_hash = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
         assert_ne!(lww_hash, 0, "LWW tree should have non-zero hash before clear");
+        let ormap_hash = manager.with_ormap_tree("users", 0, |tree| tree.get_root_hash());
+        assert_ne!(ormap_hash, 0, "OR-Map tree should have non-zero hash before clear");
 
         // Clear the partition.
         manager.clear_partition("users", 0);

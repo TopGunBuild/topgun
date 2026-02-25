@@ -23,15 +23,9 @@ use topgun_core::messages::{
 use topgun_core::types::Value;
 use topgun_core::{LWWRecord, ORMapRecord};
 
-// Helper enums for Merkle tree node classification (extracted to module level
+// Helper enum for Merkle tree node classification (extracted to module level
 // to avoid "adding items after statements" clippy warning).
-enum LwwNodeData {
-    Leaf(Vec<String>),
-    Internal(HashMap<char, u32>),
-    Missing,
-}
-
-enum ORMapNodeData {
+enum NodeData {
     Leaf(Vec<String>),
     Internal(HashMap<char, u32>),
     Missing,
@@ -161,19 +155,19 @@ impl SyncService {
                 Some(node) if !node.entries.is_empty() => {
                     // Leaf node: extract keys as owned Vec<String>.
                     let keys: Vec<String> = node.entries.keys().cloned().collect();
-                    LwwNodeData::Leaf(keys)
+                    NodeData::Leaf(keys)
                 }
                 Some(_) => {
                     // Internal node: extract bucket hashes as owned HashMap.
                     let buckets = tree.get_buckets(&path);
-                    LwwNodeData::Internal(buckets)
+                    NodeData::Internal(buckets)
                 }
-                None => LwwNodeData::Missing,
+                None => NodeData::Missing,
             }
         });
 
         match node_data {
-            LwwNodeData::Leaf(keys) => {
+            NodeData::Leaf(keys) => {
                 // Mutex released — now safe to do async RecordStore fetches.
                 let store = self.record_store_factory.create(&map_name, partition_id);
                 let mut records = Vec::new();
@@ -201,7 +195,7 @@ impl SyncService {
                     },
                 ))))
             }
-            LwwNodeData::Internal(buckets) => {
+            NodeData::Internal(buckets) => {
                 // Convert HashMap<char, u32> to HashMap<String, u32>.
                 let buckets: HashMap<String, u32> =
                     buckets.into_iter().map(|(c, h)| (c.to_string(), h)).collect();
@@ -215,7 +209,7 @@ impl SyncService {
                     }),
                 )))
             }
-            LwwNodeData::Missing => Ok(OperationResponse::Empty),
+            NodeData::Missing => Ok(OperationResponse::Empty),
         }
     }
 
@@ -269,18 +263,18 @@ impl SyncService {
             match tree.get_node(&path) {
                 Some(node) if !node.entries.is_empty() => {
                     let keys: Vec<String> = node.entries.keys().cloned().collect();
-                    ORMapNodeData::Leaf(keys)
+                    NodeData::Leaf(keys)
                 }
                 Some(_) => {
                     let buckets = tree.get_buckets(&path);
-                    ORMapNodeData::Internal(buckets)
+                    NodeData::Internal(buckets)
                 }
-                None => ORMapNodeData::Missing,
+                None => NodeData::Missing,
             }
         });
 
         match node_data {
-            ORMapNodeData::Leaf(keys) => {
+            NodeData::Leaf(keys) => {
                 // Mutex released — now safe to do async RecordStore fetches.
                 let store = self.record_store_factory.create(&map_name, partition_id);
                 let mut entries = Vec::new();
@@ -325,7 +319,7 @@ impl SyncService {
                     },
                 ))))
             }
-            ORMapNodeData::Internal(buckets) => {
+            NodeData::Internal(buckets) => {
                 let buckets: HashMap<String, u32> =
                     buckets.into_iter().map(|(c, h)| (c.to_string(), h)).collect();
                 Ok(OperationResponse::Message(Box::new(Message::ORMapSyncRespBuckets(
@@ -338,7 +332,7 @@ impl SyncService {
                     },
                 ))))
             }
-            ORMapNodeData::Missing => Ok(OperationResponse::Empty),
+            NodeData::Missing => Ok(OperationResponse::Empty),
         }
     }
 
@@ -1148,12 +1142,35 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[tokio::test]
-    async fn ac7_ormap_push_diff_returns_ack() {
+    async fn ac7_ormap_push_diff_returns_ack_and_stores_data() {
         use topgun_core::hlc::Timestamp;
         use topgun_core::messages::{ORMapEntry, ORMapPushDiff, ORMapPushDiffPayload};
         use topgun_core::ORMapRecord;
+        use crate::storage::merkle_sync::MerkleMutationObserver;
 
-        let svc = make_sync_service();
+        // Wire a MerkleMutationObserver into the factory so we can verify the
+        // RecordStore put fires (the observer updates the merkle tree on put).
+        let merkle_manager = Arc::new(MerkleSyncManager::default());
+        let observer = Arc::new(MerkleMutationObserver::new(
+            Arc::clone(&merkle_manager),
+            "tags".to_string(),
+            0,
+        ));
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::new(NullDataStore),
+            vec![observer as Arc<dyn crate::storage::mutation_observer::MutationObserver>],
+        ));
+        let connection_registry = Arc::new(ConnectionRegistry::new());
+        let svc = Arc::new(SyncService::new(
+            Arc::clone(&merkle_manager),
+            factory,
+            connection_registry,
+        ));
+
+        // Precondition: OR-Map tree for ("tags", 0) should have root_hash = 0.
+        let hash_before = merkle_manager.with_ormap_tree("tags", 0, |tree| tree.get_root_hash());
+        assert_eq!(hash_before, 0, "precondition: tree should be empty before push");
 
         let op = Operation::ORMapPushDiff {
             ctx: make_ctx(service_names::SYNC),
@@ -1183,6 +1200,11 @@ mod tests {
             matches!(resp, OperationResponse::Ack { call_id: 1 }),
             "expected Ack response, got {resp:?}"
         );
+
+        // Verify the RecordStore put fired: the MerkleMutationObserver should
+        // have updated the OR-Map merkle tree to a non-zero root hash.
+        let hash_after = merkle_manager.with_ormap_tree("tags", 0, |tree| tree.get_root_hash());
+        assert_ne!(hash_after, 0, "OR-Map tree should have non-zero hash after push (proves store.put fired)");
     }
 
     #[tokio::test]
