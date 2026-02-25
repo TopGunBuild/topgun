@@ -10,6 +10,9 @@ pub use coordination::CoordinationService;
 pub mod crdt;
 pub use crdt::CrdtService;
 
+pub mod sync;
+pub use sync::SyncService;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -84,11 +87,6 @@ macro_rules! domain_stub {
 // ---------------------------------------------------------------------------
 
 domain_stub!(
-    /// Sync domain service (Merkle tree synchronization).
-    SyncService, service_names::SYNC
-);
-
-domain_stub!(
     /// Query domain service (live query subscriptions).
     QueryService, service_names::QUERY
 );
@@ -134,16 +132,6 @@ mod tests {
             5000,
         );
         Operation::GarbageCollect { ctx }
-    }
-
-    #[tokio::test]
-    async fn sync_service_returns_not_implemented() {
-        let svc = Arc::new(SyncService);
-        let resp = svc.oneshot(make_op(service_names::SYNC)).await.unwrap();
-        assert!(matches!(
-            resp,
-            OperationResponse::NotImplemented { service_name: "sync", .. }
-        ));
     }
 
     #[tokio::test]
@@ -197,10 +185,9 @@ mod tests {
 
     #[tokio::test]
     async fn all_stubs_implement_managed_service() {
-        // CoordinationService and CrdtService are excluded: they require constructor
-        // args and have dedicated registration tests in their own modules.
+        // CoordinationService, CrdtService, and SyncService are excluded: they require
+        // constructor args and have dedicated registration tests in their own modules.
         let registry = ServiceRegistry::new();
-        registry.register(SyncService);
         registry.register(QueryService);
         registry.register(MessagingService);
         registry.register(SearchService);
@@ -213,7 +200,6 @@ mod tests {
         registry.shutdown_all(false).await.unwrap();
 
         // Stub services accessible by name.
-        assert!(registry.get_by_name("sync").is_some());
         assert!(registry.get_by_name("query").is_some());
         assert!(registry.get_by_name("messaging").is_some());
         assert!(registry.get_by_name("search").is_some());

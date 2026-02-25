@@ -8,9 +8,11 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use parking_lot::Mutex;
+use topgun_core::hash::fnv1a_hash;
 use topgun_core::merkle::{MerkleTree, ORMapMerkleTree};
 
 use super::mutation_observer::MutationObserver;
+use super::record::{Record, RecordValue};
 
 // ---------------------------------------------------------------------------
 // MerkleSyncManager
@@ -60,7 +62,7 @@ impl MerkleSyncManager {
         f: impl FnOnce(&mut MerkleTree) -> R,
     ) -> R {
         let key = (map_name.to_string(), partition_id);
-        // Entry API: insert lazily if absent, then lock and invoke closure.
+        // Entry API: lazily insert if absent, then lock and invoke closure.
         let entry = self
             .lww_trees
             .entry(key)
@@ -137,6 +139,28 @@ impl Default for MerkleSyncManager {
 }
 
 // ---------------------------------------------------------------------------
+// Hash computation helpers
+// ---------------------------------------------------------------------------
+
+/// Computes the item hash for a LWW record, matching the TS MerkleTree.update pattern.
+///
+/// Uses `fnv1a_hash` on `"key:millis:counter:node_id"` to produce a hash that
+/// is consistent across Rust and TypeScript clients.
+fn compute_lww_hash(key: &str, millis: u64, counter: u32, node_id: &str) -> u32 {
+    fnv1a_hash(&format!("{key}:{millis}:{counter}:{node_id}"))
+}
+
+/// Computes the entry hash for an OR-Map record.
+///
+/// Sorts tags for determinism, then hashes `"key:tag1|tag2|..."`.
+fn compute_ormap_hash(key: &str, records: &[super::record::OrMapEntry]) -> u32 {
+    let mut tags: Vec<&str> = records.iter().map(|r| r.tag.as_str()).collect();
+    tags.sort_unstable();
+    let joined = tags.join("|");
+    fnv1a_hash(&format!("key:{key}|{joined}"))
+}
+
+// ---------------------------------------------------------------------------
 // MerkleMutationObserver
 // ---------------------------------------------------------------------------
 
@@ -162,60 +186,368 @@ impl MerkleMutationObserver {
             partition_id,
         }
     }
+
+    /// Updates the appropriate Merkle tree based on the `RecordValue` variant.
+    fn update_tree(&self, key: &str, value: &RecordValue) {
+        match value {
+            RecordValue::Lww { timestamp, .. } => {
+                let hash =
+                    compute_lww_hash(key, timestamp.millis, timestamp.counter, &timestamp.node_id);
+                self.manager
+                    .update_lww(&self.map_name, self.partition_id, key, hash);
+            }
+            RecordValue::OrMap { records } => {
+                let hash = compute_ormap_hash(key, records);
+                self.manager
+                    .update_ormap(&self.map_name, self.partition_id, key, hash);
+            }
+            RecordValue::OrTombstones { .. } => {
+                // Tombstones represent deletions — remove from OR-Map tree.
+                self.manager
+                    .remove_ormap(&self.map_name, self.partition_id, key);
+            }
+        }
+    }
 }
 
 impl MutationObserver for MerkleMutationObserver {
-    fn on_put(
-        &self,
-        _key: &str,
-        _record: &super::record::Record,
-        _old_value: Option<&super::record::RecordValue>,
-        _is_backup: bool,
-    ) {
-        // Implemented in G2
+    fn on_put(&self, key: &str, record: &Record, _old_value: Option<&RecordValue>, is_backup: bool) {
+        // Backup partitions do not participate in client sync.
+        if is_backup {
+            return;
+        }
+        self.update_tree(key, &record.value);
     }
 
     fn on_update(
         &self,
-        _key: &str,
-        _record: &super::record::Record,
-        _old_value: &super::record::RecordValue,
-        _new_value: &super::record::RecordValue,
-        _is_backup: bool,
+        key: &str,
+        _record: &Record,
+        _old_value: &RecordValue,
+        new_value: &RecordValue,
+        is_backup: bool,
     ) {
-        // Implemented in G2
+        // Use new_value (not record.value) since the in-place update may not
+        // have been committed to the record yet at observer call time.
+        if is_backup {
+            return;
+        }
+        self.update_tree(key, new_value);
     }
 
-    fn on_remove(&self, _key: &str, _record: &super::record::Record, _is_backup: bool) {
-        // Implemented in G2
+    fn on_remove(&self, key: &str, _record: &Record, is_backup: bool) {
+        // Backup keys were never added to the tree.
+        if is_backup {
+            return;
+        }
+        // Call both removes: removing a non-existent key is a harmless no-op,
+        // and this avoids inspecting record.value to determine the original tree type.
+        self.manager
+            .remove_lww(&self.map_name, self.partition_id, key);
+        self.manager
+            .remove_ormap(&self.map_name, self.partition_id, key);
     }
 
-    fn on_evict(&self, _key: &str, _record: &super::record::Record, _is_backup: bool) {
-        // Implemented in G2
+    fn on_evict(&self, key: &str, _record: &Record, is_backup: bool) {
+        // Backup keys were never added to the tree.
+        if is_backup {
+            return;
+        }
+        // Same double-remove approach as on_remove for consistency.
+        self.manager
+            .remove_lww(&self.map_name, self.partition_id, key);
+        self.manager
+            .remove_ormap(&self.map_name, self.partition_id, key);
     }
 
-    fn on_load(&self, _key: &str, _record: &super::record::Record, _is_backup: bool) {
-        // Implemented in G2
+    fn on_load(&self, key: &str, record: &Record, is_backup: bool) {
+        // Loading from storage should update the tree, same as on_put.
+        if is_backup {
+            return;
+        }
+        self.update_tree(key, &record.value);
     }
 
-    fn on_replication_put(
-        &self,
-        _key: &str,
-        _record: &super::record::Record,
-        _populate_index: bool,
-    ) {
-        // Implemented in G2
+    fn on_replication_put(&self, key: &str, record: &Record, _populate_index: bool) {
+        // Replication data should be reflected in sync state.
+        self.update_tree(key, &record.value);
     }
 
     fn on_clear(&self) {
-        // Implemented in G2
+        self.manager
+            .clear_partition(&self.map_name, self.partition_id);
     }
 
     fn on_reset(&self) {
-        // Implemented in G2
+        self.manager
+            .clear_partition(&self.map_name, self.partition_id);
     }
 
     fn on_destroy(&self, _is_shutdown: bool) {
-        // Implemented in G2
+        self.manager
+            .clear_partition(&self.map_name, self.partition_id);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use topgun_core::hlc::Timestamp;
+    use topgun_core::types::Value;
+
+    use super::*;
+    use crate::storage::record::{OrMapEntry, Record, RecordMetadata, RecordValue};
+
+    fn make_lww_record(key: &str, millis: u64, counter: u32, node_id: &str) -> Record {
+        Record {
+            value: RecordValue::Lww {
+                value: Value::String(key.to_string()),
+                timestamp: Timestamp {
+                    millis,
+                    counter,
+                    node_id: node_id.to_string(),
+                },
+            },
+            #[allow(clippy::cast_possible_wrap)]
+            metadata: RecordMetadata::new(millis as i64, 64),
+        }
+    }
+
+    fn make_ormap_record(key: &str, tag: &str, millis: u64) -> Record {
+        Record {
+            value: RecordValue::OrMap {
+                records: vec![OrMapEntry {
+                    value: Value::String(key.to_string()),
+                    tag: tag.to_string(),
+                    timestamp: Timestamp {
+                        millis,
+                        counter: 0,
+                        node_id: "node-1".to_string(),
+                    },
+                }],
+            },
+            #[allow(clippy::cast_possible_wrap)]
+            metadata: RecordMetadata::new(millis as i64, 64),
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC8: MerkleMutationObserver updates LWW tree on put/remove
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn ac8_lww_tree_updates_on_put() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        let observer = MerkleMutationObserver::new(
+            Arc::clone(&manager),
+            "users".to_string(),
+            0,
+        );
+
+        // Initially the root hash is zero (empty tree).
+        let initial_hash = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+        assert_eq!(initial_hash, 0, "empty tree should have root_hash = 0");
+
+        // After on_put with an LWW record, root hash should be non-zero.
+        let record = make_lww_record("user-1", 1_700_000_000_000, 0, "node-1");
+        observer.on_put("user-1", &record, None, false);
+        let hash_after_put = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+        assert_ne!(hash_after_put, 0, "root hash should be non-zero after put");
+
+        // After on_remove, root hash should return to zero.
+        observer.on_remove("user-1", &record, false);
+        let hash_after_remove = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+        assert_eq!(hash_after_remove, 0, "root hash should return to 0 after remove");
+    }
+
+    #[test]
+    fn ac8_backup_mutations_do_not_update_tree() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        let observer = MerkleMutationObserver::new(
+            Arc::clone(&manager),
+            "users".to_string(),
+            0,
+        );
+
+        let record = make_lww_record("user-1", 1_700_000_000_000, 0, "node-1");
+
+        // Backup puts should NOT update the tree.
+        observer.on_put("user-1", &record, None, true);
+        let hash = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+        assert_eq!(hash, 0, "backup put should not update the tree");
+
+        // Backup removes should also be no-ops.
+        observer.on_remove("user-1", &record, true);
+        let hash = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+        assert_eq!(hash, 0, "backup remove should not affect tree");
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC9: MerkleMutationObserver updates OR-Map tree on put/remove
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn ac9_ormap_tree_updates_on_put() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        let observer = MerkleMutationObserver::new(
+            Arc::clone(&manager),
+            "tags".to_string(),
+            0,
+        );
+
+        // Initially the OR-Map root hash is zero.
+        let initial_hash = manager.with_ormap_tree("tags", 0, |tree| tree.get_root_hash());
+        assert_eq!(initial_hash, 0, "empty OR-Map tree should have root_hash = 0");
+
+        // After on_put with an OR-Map record, root hash should be non-zero.
+        let record = make_ormap_record("tag-1", "1700000000000:0:node-1", 1_700_000_000_000);
+        observer.on_put("tag-1", &record, None, false);
+        let hash_after_put = manager.with_ormap_tree("tags", 0, |tree| tree.get_root_hash());
+        assert_ne!(hash_after_put, 0, "OR-Map root hash should be non-zero after put");
+
+        // After on_remove, OR-Map root hash should return to zero.
+        observer.on_remove("tag-1", &record, false);
+        let hash_after_remove = manager.with_ormap_tree("tags", 0, |tree| tree.get_root_hash());
+        assert_eq!(hash_after_remove, 0, "OR-Map root hash should return to 0 after remove");
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC10: MerkleSyncManager clear_partition resets trees
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn ac10_clear_partition_resets_both_trees() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        let observer = MerkleMutationObserver::new(
+            Arc::clone(&manager),
+            "users".to_string(),
+            0,
+        );
+
+        // Populate both trees.
+        let lww_record = make_lww_record("user-1", 1_700_000_000_000, 0, "node-1");
+        observer.on_put("user-1", &lww_record, None, false);
+
+        let ormap_record = make_ormap_record("tag-1", "1700000000000:0:node-1", 1_700_000_000_000);
+        let ormap_observer = MerkleMutationObserver::new(
+            Arc::clone(&manager),
+            "users".to_string(),
+            0,
+        );
+        ormap_observer.on_put("tag-1", &ormap_record, None, false);
+
+        // Verify both trees have non-zero hashes.
+        let lww_hash = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+        assert_ne!(lww_hash, 0, "LWW tree should have non-zero hash before clear");
+
+        // Clear the partition.
+        manager.clear_partition("users", 0);
+
+        // After clearing, both trees should return hash = 0 (new empty trees on next access).
+        let lww_hash_after = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+        let ormap_hash_after = manager.with_ormap_tree("users", 0, |tree| tree.get_root_hash());
+        assert_eq!(lww_hash_after, 0, "LWW tree should have root_hash = 0 after clear_partition");
+        assert_eq!(ormap_hash_after, 0, "OR-Map tree should have root_hash = 0 after clear_partition");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Additional: on_update uses new_value
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn on_update_uses_new_value_not_record_value() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        let observer = MerkleMutationObserver::new(
+            Arc::clone(&manager),
+            "users".to_string(),
+            0,
+        );
+
+        // Put initial value.
+        let old_record = make_lww_record("user-1", 1_000, 0, "node-1");
+        observer.on_put("user-1", &old_record, None, false);
+        let hash_v1 = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+
+        // Update with a new timestamp -- tree should reflect the new_value hash.
+        let new_value = RecordValue::Lww {
+            value: Value::String("updated".to_string()),
+            timestamp: Timestamp {
+                millis: 2_000,
+                counter: 1,
+                node_id: "node-1".to_string(),
+            },
+        };
+        observer.on_update("user-1", &old_record, &old_record.value, &new_value, false);
+        let hash_v2 = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+
+        // Hash should change because the timestamp changed.
+        assert_ne!(hash_v1, hash_v2, "hash should change after update with new timestamp");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Additional: on_clear and on_reset
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn on_clear_clears_partition() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        let observer = MerkleMutationObserver::new(
+            Arc::clone(&manager),
+            "users".to_string(),
+            0,
+        );
+
+        let record = make_lww_record("user-1", 1_000, 0, "node-1");
+        observer.on_put("user-1", &record, None, false);
+
+        observer.on_clear();
+
+        let hash = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+        assert_eq!(hash, 0, "on_clear should reset the partition");
+    }
+
+    #[test]
+    fn on_reset_clears_partition() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        let observer = MerkleMutationObserver::new(
+            Arc::clone(&manager),
+            "users".to_string(),
+            0,
+        );
+
+        let record = make_lww_record("user-1", 1_000, 0, "node-1");
+        observer.on_put("user-1", &record, None, false);
+
+        observer.on_reset();
+
+        let hash = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+        assert_eq!(hash, 0, "on_reset should reset the partition");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Additional: clear_all
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn clear_all_removes_all_partitions() {
+        let manager = Arc::new(MerkleSyncManager::default());
+
+        // Populate two different partitions.
+        manager.update_lww("users", 0, "u1", 111);
+        manager.update_lww("users", 1, "u2", 222);
+        manager.update_ormap("tags", 0, "t1", 333);
+
+        manager.clear_all();
+
+        // All partitions should have hash = 0 after clear_all.
+        let h1 = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+        let h2 = manager.with_lww_tree("users", 1, |tree| tree.get_root_hash());
+        let h3 = manager.with_ormap_tree("tags", 0, |tree| tree.get_root_hash());
+        assert_eq!(h1, 0, "partition (users, 0) should be cleared");
+        assert_eq!(h2, 0, "partition (users, 1) should be cleared");
+        assert_eq!(h3, 0, "partition (tags, 0) should be cleared");
     }
 }

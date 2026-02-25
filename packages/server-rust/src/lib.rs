@@ -47,6 +47,7 @@ mod integration_tests {
     use crate::storage::datastores::NullDataStore;
     use crate::storage::factory::RecordStoreFactory;
     use crate::storage::impls::StorageConfig;
+    use crate::storage::merkle_sync::MerkleSyncManager;
 
     fn setup() -> (OperationService, OperationRouter, ServerConfig) {
         let config = ServerConfig {
@@ -76,16 +77,24 @@ mod integration_tests {
             Arc::new(NullDataStore),
             Vec::new(),
         ));
+        let merkle_manager = Arc::new(MerkleSyncManager::default());
 
         let mut router = OperationRouter::new();
         router.register(
             service_names::CRDT,
             Arc::new(CrdtService::new(
-                record_store_factory,
+                Arc::clone(&record_store_factory),
                 Arc::clone(&connection_registry),
             )),
         );
-        router.register(service_names::SYNC, Arc::new(SyncService));
+        router.register(
+            service_names::SYNC,
+            Arc::new(SyncService::new(
+                merkle_manager,
+                Arc::clone(&record_store_factory),
+                Arc::clone(&connection_registry),
+            )),
+        );
         router.register(service_names::QUERY, Arc::new(QueryService));
         router.register(service_names::MESSAGING, Arc::new(MessagingService));
         router.register(
@@ -235,13 +244,19 @@ mod integration_tests {
             Arc::new(NullDataStore),
             Vec::new(),
         ));
+        let merkle_manager_for_sync = Arc::new(MerkleSyncManager::default());
+        let connection_registry_for_sync = Arc::new(ConnectionRegistry::new());
 
         let registry = ServiceRegistry::new();
         registry.register(CrdtService::new(
-            record_store_factory,
+            Arc::clone(&record_store_factory),
             connection_registry_for_crdt,
         ));
-        registry.register(SyncService);
+        registry.register(SyncService::new(
+            merkle_manager_for_sync,
+            Arc::clone(&record_store_factory),
+            connection_registry_for_sync,
+        ));
         registry.register(QueryService);
         registry.register(MessagingService);
         registry.register(CoordinationService::new(cluster_state, connection_registry));

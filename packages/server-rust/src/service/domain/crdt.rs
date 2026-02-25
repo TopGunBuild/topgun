@@ -301,7 +301,7 @@ impl CrdtService {
 ///
 /// No `From<rmpv::Value>` conversion exists between these types, so this
 /// manual recursive conversion is required.
-fn rmpv_to_value(v: &rmpv::Value) -> Value {
+pub(crate) fn rmpv_to_value(v: &rmpv::Value) -> Value {
     match v {
         rmpv::Value::Boolean(b) => Value::Bool(*b),
         rmpv::Value::Integer(i) => {
