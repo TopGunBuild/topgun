@@ -14,28 +14,37 @@ use async_trait::async_trait;
 use tower::Service;
 
 use topgun_core::messages::{
-    self, Message, SyncLeafRecord, SyncRespBucketsMessage, SyncRespBucketsPayload,
+    self, Message, ORMapDiffResponse, ORMapDiffResponsePayload, ORMapEntry,
+    ORMapSyncRespBuckets, ORMapSyncRespBucketsPayload, ORMapSyncRespLeaf,
+    ORMapSyncRespLeafPayload, ORMapSyncRespRoot, ORMapSyncRespRootPayload,
+    SyncLeafRecord, SyncRespBucketsMessage, SyncRespBucketsPayload,
     SyncRespLeafMessage, SyncRespLeafPayload, SyncRespRootMessage, SyncRespRootPayload,
 };
+use topgun_core::types::Value;
+use topgun_core::{LWWRecord, ORMapRecord};
 
-// Helper enum for Merkle tree node classification (extracted to module level
+// Helper enums for Merkle tree node classification (extracted to module level
 // to avoid "adding items after statements" clippy warning).
 enum LwwNodeData {
     Leaf(Vec<String>),
     Internal(HashMap<char, u32>),
     Missing,
 }
-use topgun_core::types::Value;
-use topgun_core::LWWRecord;
 
-use crate::network::connection::ConnectionRegistry;
+enum ORMapNodeData {
+    Leaf(Vec<String>),
+    Internal(HashMap<char, u32>),
+    Missing,
+}
+
+use crate::network::connection::{ConnectionKind, ConnectionRegistry};
 use crate::service::operation::{
     service_names, Operation, OperationError, OperationResponse,
 };
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::storage::merkle_sync::MerkleSyncManager;
 use crate::storage::record::RecordValue;
-use crate::storage::RecordStoreFactory;
+use crate::storage::{CallerProvenance, ExpiryPolicy, RecordStoreFactory};
 
 // ---------------------------------------------------------------------------
 // value_to_rmpv conversion helper
@@ -80,8 +89,6 @@ pub(crate) fn value_to_rmpv(v: &Value) -> rmpv::Value {
 pub struct SyncService {
     merkle_manager: Arc<MerkleSyncManager>,
     record_store_factory: Arc<RecordStoreFactory>,
-    // Used in G4 by handle_ormap_push_diff for broadcasting changes to clients.
-    #[allow(dead_code)]
     connection_registry: Arc<ConnectionRegistry>,
 }
 
@@ -212,39 +219,260 @@ impl SyncService {
     }
 
     // -----------------------------------------------------------------------
-    // OR-Map handlers (implemented in G4)
+    // OR-Map handlers
     // -----------------------------------------------------------------------
 
+    /// Handles `ORMapSyncInit` — returns the server's OR-Map Merkle tree root hash.
+    ///
+    /// `ORMapSyncInit` is a FLAT message: `map_name` is directly on the struct.
     async fn handle_ormap_sync_init(
         &self,
-        _ctx: &crate::service::operation::OperationContext,
-        _payload: messages::ORMapSyncInit,
+        ctx: &crate::service::operation::OperationContext,
+        payload: messages::ORMapSyncInit,
     ) -> Result<OperationResponse, OperationError> {
-        todo!("implemented in G4")
+        let map_name = payload.map_name;
+        let partition_id = ctx.partition_id.unwrap_or(0);
+
+        let root_hash = self.merkle_manager.with_ormap_tree(&map_name, partition_id, |tree| {
+            tree.get_root_hash()
+        });
+
+        Ok(OperationResponse::Message(Box::new(Message::ORMapSyncRespRoot(
+            ORMapSyncRespRoot {
+                payload: ORMapSyncRespRootPayload {
+                    map_name,
+                    root_hash,
+                    timestamp: ctx.timestamp.clone(),
+                },
+            },
+        ))))
     }
 
+    /// Handles `ORMapMerkleReqBucket` — returns OR-Map bucket hashes (internal) or entries (leaf).
+    ///
+    /// `ORMapMerkleReqBucket` is a WRAPPED message: `map_name` and `path` live in a
+    /// nested `.payload` field.
     async fn handle_ormap_merkle_req_bucket(
         &self,
-        _ctx: &crate::service::operation::OperationContext,
-        _payload: messages::ORMapMerkleReqBucket,
+        ctx: &crate::service::operation::OperationContext,
+        payload: messages::ORMapMerkleReqBucket,
     ) -> Result<OperationResponse, OperationError> {
-        todo!("implemented in G4")
+        let map_name = payload.payload.map_name;
+        let path = payload.payload.path;
+        let partition_id = ctx.partition_id.unwrap_or(0);
+
+        // Extract all needed data within the closure so the Mutex is released
+        // before any async operations.
+        let node_data = self.merkle_manager.with_ormap_tree(&map_name, partition_id, |tree| {
+            match tree.get_node(&path) {
+                Some(node) if !node.entries.is_empty() => {
+                    let keys: Vec<String> = node.entries.keys().cloned().collect();
+                    ORMapNodeData::Leaf(keys)
+                }
+                Some(_) => {
+                    let buckets = tree.get_buckets(&path);
+                    ORMapNodeData::Internal(buckets)
+                }
+                None => ORMapNodeData::Missing,
+            }
+        });
+
+        match node_data {
+            ORMapNodeData::Leaf(keys) => {
+                // Mutex released — now safe to do async RecordStore fetches.
+                let store = self.record_store_factory.create(&map_name, partition_id);
+                let mut entries = Vec::new();
+                for key in keys {
+                    if let Ok(Some(record)) = store.get(&key, false).await {
+                        match record.value {
+                            RecordValue::OrMap { records } => {
+                                let wire_records: Vec<ORMapRecord<rmpv::Value>> = records
+                                    .into_iter()
+                                    .map(|r| ORMapRecord {
+                                        value: value_to_rmpv(&r.value),
+                                        timestamp: r.timestamp,
+                                        tag: r.tag,
+                                        ttl_ms: None,
+                                    })
+                                    .collect();
+                                entries.push(ORMapEntry {
+                                    key,
+                                    records: wire_records,
+                                    tombstones: Vec::new(),
+                                });
+                            }
+                            RecordValue::OrTombstones { tags } => {
+                                entries.push(ORMapEntry {
+                                    key,
+                                    records: Vec::new(),
+                                    tombstones: tags,
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(OperationResponse::Message(Box::new(Message::ORMapSyncRespLeaf(
+                    ORMapSyncRespLeaf {
+                        payload: ORMapSyncRespLeafPayload {
+                            map_name,
+                            path,
+                            entries,
+                        },
+                    },
+                ))))
+            }
+            ORMapNodeData::Internal(buckets) => {
+                let buckets: HashMap<String, u32> =
+                    buckets.into_iter().map(|(c, h)| (c.to_string(), h)).collect();
+                Ok(OperationResponse::Message(Box::new(Message::ORMapSyncRespBuckets(
+                    ORMapSyncRespBuckets {
+                        payload: ORMapSyncRespBucketsPayload {
+                            map_name,
+                            path,
+                            buckets,
+                        },
+                    },
+                ))))
+            }
+            ORMapNodeData::Missing => Ok(OperationResponse::Empty),
+        }
     }
 
+    /// Handles `ORMapDiffRequest` — returns OR-Map entries for the requested keys.
+    ///
+    /// `ORMapDiffRequest` is a WRAPPED message: `map_name` and `keys` live in a
+    /// nested `.payload` field.
     async fn handle_ormap_diff_request(
         &self,
-        _ctx: &crate::service::operation::OperationContext,
-        _payload: messages::ORMapDiffRequest,
+        ctx: &crate::service::operation::OperationContext,
+        payload: messages::ORMapDiffRequest,
     ) -> Result<OperationResponse, OperationError> {
-        todo!("implemented in G4")
+        let map_name = payload.payload.map_name;
+        let keys = payload.payload.keys;
+        let partition_id = ctx.partition_id.unwrap_or(0);
+
+        let store = self.record_store_factory.create(&map_name, partition_id);
+        let mut entries = Vec::new();
+
+        for key in keys {
+            match store.get(&key, false).await {
+                Ok(Some(record)) => match record.value {
+                    RecordValue::OrMap { records } => {
+                        let wire_records: Vec<ORMapRecord<rmpv::Value>> = records
+                            .into_iter()
+                            .map(|r| ORMapRecord {
+                                value: value_to_rmpv(&r.value),
+                                timestamp: r.timestamp,
+                                tag: r.tag,
+                                ttl_ms: None,
+                            })
+                            .collect();
+                        entries.push(ORMapEntry {
+                            key,
+                            records: wire_records,
+                            tombstones: Vec::new(),
+                        });
+                    }
+                    RecordValue::OrTombstones { tags } => {
+                        entries.push(ORMapEntry {
+                            key,
+                            records: Vec::new(),
+                            tombstones: tags,
+                        });
+                    }
+                    _ => {
+                        // Key exists but is a different type — return empty entry.
+                        entries.push(ORMapEntry {
+                            key,
+                            records: Vec::new(),
+                            tombstones: Vec::new(),
+                        });
+                    }
+                },
+                Ok(None) => {
+                    // Key not found — return empty entry (not an error, client handles missing keys).
+                    entries.push(ORMapEntry {
+                        key,
+                        records: Vec::new(),
+                        tombstones: Vec::new(),
+                    });
+                }
+                Err(_) => {
+                    // Store error — return empty entry and continue.
+                    entries.push(ORMapEntry {
+                        key,
+                        records: Vec::new(),
+                        tombstones: Vec::new(),
+                    });
+                }
+            }
+        }
+
+        Ok(OperationResponse::Message(Box::new(Message::ORMapDiffResponse(
+            ORMapDiffResponse {
+                payload: ORMapDiffResponsePayload { map_name, entries },
+            },
+        ))))
     }
 
+    /// Handles `ORMapPushDiff` — merges incoming OR-Map entries and broadcasts changes.
+    ///
+    /// `ORMapPushDiff` is a WRAPPED message: `map_name` and `entries` live in a
+    /// nested `.payload` field.
     async fn handle_ormap_push_diff(
         &self,
-        _ctx: &crate::service::operation::OperationContext,
-        _payload: messages::ORMapPushDiff,
+        ctx: &crate::service::operation::OperationContext,
+        payload: messages::ORMapPushDiff,
     ) -> Result<OperationResponse, OperationError> {
-        todo!("implemented in G4")
+        use topgun_core::messages::{ServerEventPayload, ServerEventType};
+
+        let map_name = payload.payload.map_name;
+        let entries = payload.payload.entries;
+        let partition_id = ctx.partition_id.unwrap_or(0);
+
+        let store = self.record_store_factory.create(&map_name, partition_id);
+
+        for entry in &entries {
+            // Convert wire-format ORMapRecords to storage OrMapEntries.
+            let storage_records: Vec<crate::storage::record::OrMapEntry> = entry
+                .records
+                .iter()
+                .map(|r| crate::storage::record::OrMapEntry {
+                    value: crate::service::domain::crdt::rmpv_to_value(&r.value),
+                    tag: r.tag.clone(),
+                    timestamp: r.timestamp.clone(),
+                })
+                .collect();
+
+            store
+                .put(
+                    &entry.key,
+                    RecordValue::OrMap { records: storage_records },
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::CrdtMerge,
+                )
+                .await
+                .map_err(|e| OperationError::Internal(anyhow::anyhow!("{e}")))?;
+
+            // Broadcast OR_ADD event for each entry.
+            for record in &entry.records {
+                let event_payload = ServerEventPayload {
+                    map_name: map_name.clone(),
+                    key: entry.key.clone(),
+                    event_type: ServerEventType::OR_ADD,
+                    record: None,
+                    or_record: Some(record.clone()),
+                    or_tag: Some(record.tag.clone()),
+                };
+                let msg = Message::ServerEvent { payload: event_payload };
+                let bytes = rmp_serde::to_vec_named(&msg)
+                    .map_err(|e| OperationError::Internal(anyhow::anyhow!("serialize: {e}")))?;
+                self.connection_registry.broadcast(&bytes, ConnectionKind::Client);
+            }
+        }
+
+        Ok(OperationResponse::Ack { call_id: ctx.call_id })
     }
 }
 
@@ -657,5 +885,343 @@ mod tests {
     fn ac12_managed_service_name_is_sync() {
         let svc = make_sync_service();
         assert_eq!(svc.name(), "sync");
+    }
+
+    // -------------------------------------------------------------------------
+    // AC4: ORMapSyncInit returns ORMapSyncRespRoot
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn ac4_ormap_sync_init_returns_ormap_sync_resp_root() {
+        let merkle_manager = Arc::new(MerkleSyncManager::default());
+        // Pre-populate the OR-Map tree so root hash is non-zero.
+        merkle_manager.update_ormap("tags", 0, "tag-1", 99999);
+
+        let svc = Arc::new(SyncService::new(
+            Arc::clone(&merkle_manager),
+            make_factory(),
+            Arc::new(ConnectionRegistry::new()),
+        ));
+
+        let expected_root = merkle_manager.with_ormap_tree("tags", 0, |tree| tree.get_root_hash());
+        assert_ne!(expected_root, 0, "precondition: OR-Map tree must have non-zero hash");
+
+        use topgun_core::messages::ORMapSyncInit;
+        let op = Operation::ORMapSyncInit {
+            ctx: make_ctx(service_names::SYNC),
+            payload: ORMapSyncInit {
+                map_name: "tags".to_string(),
+                root_hash: 0,
+                bucket_hashes: Default::default(),
+                last_sync_timestamp: None,
+            },
+        };
+
+        let resp = svc.oneshot(op).await.unwrap();
+        match resp {
+            OperationResponse::Message(msg) => {
+                if let Message::ORMapSyncRespRoot(m) = *msg {
+                    assert_eq!(m.payload.map_name, "tags");
+                    assert_eq!(m.payload.root_hash, expected_root);
+                } else {
+                    panic!("expected ORMapSyncRespRoot, got different Message variant");
+                }
+            }
+            other => panic!("expected OperationResponse::Message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ac4_ormap_sync_init_empty_tree_returns_zero_root_hash() {
+        let svc = make_sync_service();
+
+        use topgun_core::messages::ORMapSyncInit;
+        let op = Operation::ORMapSyncInit {
+            ctx: make_ctx(service_names::SYNC),
+            payload: ORMapSyncInit {
+                map_name: "tags".to_string(),
+                root_hash: 0,
+                bucket_hashes: Default::default(),
+                last_sync_timestamp: None,
+            },
+        };
+
+        let resp = svc.oneshot(op).await.unwrap();
+        match resp {
+            OperationResponse::Message(msg) => {
+                if let Message::ORMapSyncRespRoot(m) = *msg {
+                    assert_eq!(m.payload.root_hash, 0, "empty OR-Map tree should have root_hash = 0");
+                } else {
+                    panic!("expected ORMapSyncRespRoot");
+                }
+            }
+            other => panic!("expected Message response, got {other:?}"),
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // AC5: ORMapMerkleReqBucket returns leaf or bucket response
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn ac5_ormap_merkle_req_bucket_returns_buckets_for_internal_node() {
+        let merkle_manager = Arc::new(MerkleSyncManager::default());
+        // Insert several OR-Map keys to ensure root is an internal node.
+        for i in 0..10 {
+            let key = format!("tag-{i}");
+            merkle_manager.update_ormap("tags", 0, &key, i * 100 + 1);
+        }
+
+        let svc = Arc::new(SyncService::new(
+            Arc::clone(&merkle_manager),
+            make_factory(),
+            Arc::new(ConnectionRegistry::new()),
+        ));
+
+        use topgun_core::messages::ORMapMerkleReqBucket;
+        use topgun_core::messages::ORMapMerkleReqBucketPayload;
+        let op = Operation::ORMapMerkleReqBucket {
+            ctx: make_ctx(service_names::SYNC),
+            payload: ORMapMerkleReqBucket {
+                payload: ORMapMerkleReqBucketPayload {
+                    map_name: "tags".to_string(),
+                    path: "".to_string(),
+                },
+            },
+        };
+
+        let resp = svc.oneshot(op).await.unwrap();
+        match resp {
+            OperationResponse::Message(msg) => {
+                if let Message::ORMapSyncRespBuckets(m) = *msg {
+                    assert_eq!(m.payload.map_name, "tags");
+                    assert_eq!(m.payload.path, "");
+                    assert!(!m.payload.buckets.is_empty(), "internal node should have non-empty buckets");
+                    for key in m.payload.buckets.keys() {
+                        assert_eq!(key.len(), 1, "bucket key should be single char, got: {key}");
+                    }
+                } else {
+                    panic!("expected ORMapSyncRespBuckets, got different Message variant");
+                }
+            }
+            other => panic!("expected Message response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ac5_ormap_merkle_req_bucket_returns_leaf_for_leaf_node() {
+        let merkle_manager = Arc::new(MerkleSyncManager::default());
+        merkle_manager.update_ormap("tags", 0, "tag-1", 99999);
+
+        // Find the leaf path by drilling down.
+        let leaf_path = merkle_manager.with_ormap_tree("tags", 0, |tree| {
+            let root_buckets = tree.get_buckets("");
+            let first_char = root_buckets.keys().next().cloned().unwrap();
+            let level1_path = first_char.to_string();
+            let level1_buckets = tree.get_buckets(&level1_path);
+            if level1_buckets.is_empty() {
+                return level1_path;
+            }
+            let second_char = level1_buckets.keys().next().cloned().unwrap();
+            let level2_path = format!("{level1_path}{second_char}");
+            let level2_buckets = tree.get_buckets(&level2_path);
+            if level2_buckets.is_empty() {
+                return level2_path;
+            }
+            let third_char = level2_buckets.keys().next().cloned().unwrap();
+            format!("{level2_path}{third_char}")
+        });
+
+        let svc = Arc::new(SyncService::new(
+            Arc::clone(&merkle_manager),
+            make_factory(),
+            Arc::new(ConnectionRegistry::new()),
+        ));
+
+        use topgun_core::messages::ORMapMerkleReqBucket;
+        use topgun_core::messages::ORMapMerkleReqBucketPayload;
+        let op = Operation::ORMapMerkleReqBucket {
+            ctx: make_ctx(service_names::SYNC),
+            payload: ORMapMerkleReqBucket {
+                payload: ORMapMerkleReqBucketPayload {
+                    map_name: "tags".to_string(),
+                    path: leaf_path.clone(),
+                },
+            },
+        };
+
+        let resp = svc.oneshot(op).await.unwrap();
+        match resp {
+            OperationResponse::Message(msg) => {
+                if let Message::ORMapSyncRespLeaf(m) = *msg {
+                    assert_eq!(m.payload.map_name, "tags");
+                    assert_eq!(m.payload.path, leaf_path);
+                    // With NullDataStore, entries may be empty (no real data in store).
+                } else {
+                    panic!("expected ORMapSyncRespLeaf, got different Message variant");
+                }
+            }
+            OperationResponse::Empty => {
+                // Acceptable if path has no node.
+            }
+            other => panic!("expected Message or Empty response, got {other:?}"),
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // AC6: ORMapDiffRequest returns entries for requested keys
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn ac6_ormap_diff_request_handles_missing_keys_gracefully() {
+        // With NullDataStore, the key won't be found — test that the handler
+        // returns an empty entry rather than panicking or erroring.
+        let svc = make_sync_service();
+
+        use topgun_core::messages::ORMapDiffRequest;
+        use topgun_core::messages::ORMapDiffRequestPayload;
+        let op = Operation::ORMapDiffRequest {
+            ctx: make_ctx(service_names::SYNC),
+            payload: ORMapDiffRequest {
+                payload: ORMapDiffRequestPayload {
+                    map_name: "tags".to_string(),
+                    keys: vec!["key-1".to_string()],
+                },
+            },
+        };
+
+        let resp = svc.oneshot(op).await.unwrap();
+        match resp {
+            OperationResponse::Message(msg) => {
+                if let Message::ORMapDiffResponse(m) = *msg {
+                    assert_eq!(m.payload.map_name, "tags");
+                    // With NullDataStore, key-1 is not found — response should
+                    // contain an empty entry for key-1 (not an error).
+                    assert_eq!(m.payload.entries.len(), 1, "should have one entry for key-1");
+                    assert_eq!(m.payload.entries[0].key, "key-1");
+                    assert!(m.payload.entries[0].records.is_empty(), "NullDataStore returns no records");
+                    assert!(m.payload.entries[0].tombstones.is_empty(), "no tombstones for missing key");
+                } else {
+                    panic!("expected ORMapDiffResponse, got different Message variant");
+                }
+            }
+            other => panic!("expected OperationResponse::Message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ac6_ormap_diff_request_returns_ormap_diff_response() {
+        let svc = make_sync_service();
+
+        use topgun_core::messages::ORMapDiffRequest;
+        use topgun_core::messages::ORMapDiffRequestPayload;
+        let op = Operation::ORMapDiffRequest {
+            ctx: make_ctx(service_names::SYNC),
+            payload: ORMapDiffRequest {
+                payload: ORMapDiffRequestPayload {
+                    map_name: "tags".to_string(),
+                    keys: vec!["key-1".to_string(), "key-2".to_string()],
+                },
+            },
+        };
+
+        let resp = svc.oneshot(op).await.unwrap();
+        match resp {
+            OperationResponse::Message(msg) => {
+                if let Message::ORMapDiffResponse(m) = *msg {
+                    assert_eq!(m.payload.map_name, "tags");
+                    // Two keys requested, two entries returned (both empty with NullDataStore).
+                    assert_eq!(m.payload.entries.len(), 2, "should have entries for all requested keys");
+                } else {
+                    panic!("expected ORMapDiffResponse");
+                }
+            }
+            other => panic!("expected Message response, got {other:?}"),
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // AC7: ORMapPushDiff merges entries and broadcasts
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn ac7_ormap_push_diff_returns_ack() {
+        use topgun_core::hlc::Timestamp;
+        use topgun_core::messages::{ORMapEntry, ORMapPushDiff, ORMapPushDiffPayload};
+        use topgun_core::ORMapRecord;
+
+        let svc = make_sync_service();
+
+        let op = Operation::ORMapPushDiff {
+            ctx: make_ctx(service_names::SYNC),
+            payload: ORMapPushDiff {
+                payload: ORMapPushDiffPayload {
+                    map_name: "tags".to_string(),
+                    entries: vec![ORMapEntry {
+                        key: "tag-1".to_string(),
+                        records: vec![ORMapRecord {
+                            value: rmpv::Value::String("important".into()),
+                            timestamp: Timestamp {
+                                millis: 1_700_000_000_000,
+                                counter: 0,
+                                node_id: "node-1".to_string(),
+                            },
+                            tag: "1700000000000:0:node-1".to_string(),
+                            ttl_ms: None,
+                        }],
+                        tombstones: Vec::new(),
+                    }],
+                },
+            },
+        };
+
+        let resp = svc.oneshot(op).await.unwrap();
+        assert!(
+            matches!(resp, OperationResponse::Ack { call_id: 1 }),
+            "expected Ack response, got {resp:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ac7_ormap_push_diff_empty_entries_returns_ack() {
+        use topgun_core::messages::{ORMapPushDiff, ORMapPushDiffPayload};
+
+        let svc = make_sync_service();
+
+        let op = Operation::ORMapPushDiff {
+            ctx: make_ctx(service_names::SYNC),
+            payload: ORMapPushDiff {
+                payload: ORMapPushDiffPayload {
+                    map_name: "tags".to_string(),
+                    entries: Vec::new(),
+                },
+            },
+        };
+
+        let resp = svc.oneshot(op).await.unwrap();
+        assert!(
+            matches!(resp, OperationResponse::Ack { .. }),
+            "empty push diff should still return Ack, got {resp:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // AC11: Wrong service returns WrongService error
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn ac11_wrong_service_returns_wrong_service_error() {
+        let svc = make_sync_service();
+
+        // GarbageCollect is not a sync operation.
+        let op = Operation::GarbageCollect {
+            ctx: make_ctx(service_names::SYNC),
+        };
+
+        let result = svc.oneshot(op).await;
+        assert!(
+            matches!(result, Err(OperationError::WrongService)),
+            "expected WrongService error, got {result:?}"
+        );
     }
 }
