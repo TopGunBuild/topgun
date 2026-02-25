@@ -96,7 +96,10 @@ mod integration_tests {
             )),
         );
         router.register(service_names::QUERY, Arc::new(QueryService));
-        router.register(service_names::MESSAGING, Arc::new(MessagingService));
+        router.register(
+            service_names::MESSAGING,
+            Arc::new(MessagingService::new(Arc::clone(&connection_registry))),
+        );
         router.register(
             service_names::COORDINATION,
             Arc::new(CoordinationService::new(cluster_state, connection_registry)),
@@ -180,7 +183,7 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn full_pipeline_topic_subscribe_to_not_implemented() {
+    async fn full_pipeline_topic_subscribe_returns_empty() {
         let (classify_svc, router, config) = setup();
         let mut pipeline = build_operation_pipeline(router, &config);
 
@@ -189,11 +192,24 @@ mod integration_tests {
                 topic: "chat.general".to_string(),
             },
         };
-        let op = classify_svc
+        let mut op = classify_svc
             .classify(msg, None, CallerOrigin::Client)
             .unwrap();
 
         assert_eq!(op.ctx().service_name, service_names::MESSAGING);
+
+        // MessagingService requires a connection_id; set one that exists in the registry.
+        // Since we don't have a real connection registered here, we expect an Internal error
+        // when connection_id is None. Instead, just test that the routing works by providing
+        // a connection_id -- the service will handle it gracefully even if the connection
+        // doesn't exist in the registry.
+        op = match op {
+            crate::service::operation::Operation::TopicSubscribe { mut ctx, payload } => {
+                ctx.connection_id = Some(crate::network::connection::ConnectionId(999));
+                crate::service::operation::Operation::TopicSubscribe { ctx, payload }
+            }
+            other => other,
+        };
 
         let resp = ServiceExt::ready(&mut pipeline)
             .await
@@ -202,13 +218,10 @@ mod integration_tests {
             .await
             .unwrap();
 
-        assert!(matches!(
-            resp,
-            OperationResponse::NotImplemented {
-                service_name: "messaging",
-                ..
-            }
-        ));
+        assert!(
+            matches!(resp, OperationResponse::Empty),
+            "expected Empty from real MessagingService, got {resp:?}"
+        );
     }
 
     /// AC13: SyncService replaces stub in full pipeline — SyncInit returns SyncRespRoot.
@@ -287,7 +300,7 @@ mod integration_tests {
             connection_registry_for_sync,
         ));
         registry.register(QueryService);
-        registry.register(MessagingService);
+        registry.register(MessagingService::new(Arc::clone(&connection_registry)));
         registry.register(CoordinationService::new(cluster_state, connection_registry));
         registry.register(SearchService);
         registry.register(PersistenceService);

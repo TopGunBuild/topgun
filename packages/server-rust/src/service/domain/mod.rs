@@ -13,6 +13,9 @@ pub use crdt::CrdtService;
 pub mod sync;
 pub use sync::SyncService;
 
+pub mod messaging;
+pub use messaging::MessagingService;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -92,11 +95,6 @@ domain_stub!(
 );
 
 domain_stub!(
-    /// Messaging domain service (topic pub/sub).
-    MessagingService, service_names::MESSAGING
-);
-
-domain_stub!(
     /// Search domain service (full-text search).
     SearchService, service_names::SEARCH
 );
@@ -145,19 +143,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn messaging_service_returns_not_implemented() {
-        let svc = Arc::new(MessagingService);
-        let resp = svc
-            .oneshot(make_op(service_names::MESSAGING))
-            .await
-            .unwrap();
-        assert!(matches!(
-            resp,
-            OperationResponse::NotImplemented { service_name: "messaging", .. }
-        ));
-    }
-
-    #[tokio::test]
     async fn search_service_returns_not_implemented() {
         let svc = Arc::new(SearchService);
         let resp = svc
@@ -189,7 +174,6 @@ mod tests {
         // constructor args and have dedicated registration tests in their own modules.
         let registry = ServiceRegistry::new();
         registry.register(QueryService);
-        registry.register(MessagingService);
         registry.register(SearchService);
         registry.register(PersistenceService);
 
@@ -200,8 +184,9 @@ mod tests {
         registry.shutdown_all(false).await.unwrap();
 
         // Stub services accessible by name.
+        // MessagingService is excluded: it requires constructor args and has
+        // dedicated registration tests in its own module.
         assert!(registry.get_by_name("query").is_some());
-        assert!(registry.get_by_name("messaging").is_some());
         assert!(registry.get_by_name("search").is_some());
         assert!(registry.get_by_name("persistence").is_some());
     }

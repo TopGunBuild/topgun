@@ -2,18 +2,24 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
+- **Active Specification:** SPEC-064
+- **Status:** running
 - **Project Phase:** Phase 3 (Rust Server) — Wave 4
 - **TODO Items:** 28 (1 client bug fix + 8 Rust bridge/core + 5 audit findings + 14 existing deferred)
-- **Next Step:** /sf:new or /sf:next
+- **Next Step:** (in progress)
+
+## Execution Status
+
+| Spec | Mode | Progress | Last Updated |
+|------|------|----------|--------------|
+| SPEC-064 | orchestrated | Wave 0/3 (0%) | 2026-02-25 |
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
 ## Queue
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| *(empty)* | | | | |
+| 1 | SPEC-064 | Implement MessagingService (Topic Pub/Sub) | running | Phase 3 |
 
 ## Migration Roadmap (high-level)
 
@@ -88,4 +94,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-25 (SPEC-063 completed and archived)*
+*Last updated: 2026-02-25 (SPEC-064 execution started)*
