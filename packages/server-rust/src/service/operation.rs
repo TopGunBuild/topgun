@@ -68,8 +68,8 @@ pub struct OperationContext {
     /// Node identifier of the caller, if forwarded from another node.
     pub caller_node_id: Option<String>,
     /// Connection identifier for the caller, set by the WebSocket handler.
-    /// Used by services (e.g., CoordinationService) to look up the
-    /// ConnectionHandle for side-effects such as heartbeat updates.
+    /// Used by services (e.g., `CoordinationService`) to look up the
+    /// `ConnectionHandle` for side-effects such as heartbeat updates.
     pub connection_id: Option<ConnectionId>,
     /// HLC timestamp for this operation.
     pub timestamp: Timestamp,

@@ -1029,6 +1029,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "parking_lot"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
+dependencies = [
+ "lock_api",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "parking_lot_core"
 version = "0.9.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1754,11 +1764,14 @@ dependencies = [
  "dashmap",
  "futures-util",
  "http",
+ "parking_lot",
  "rand",
  "reqwest",
  "rmp-serde",
+ "rmpv",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "topgun-core",

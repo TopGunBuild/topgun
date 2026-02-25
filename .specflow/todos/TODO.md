@@ -328,7 +328,7 @@ Each Rust spec should reference up to THREE sources:
 - **Depends on:** TODO-085 (CrdtService — data must exist to sync)
 - **Effort:** 1-2 weeks
 
-### TODO-087: MessagingService (Topic Pub/Sub)
+### TODO-087: MessagingService (Topic Pub/Sub) → SPEC-064
 - **Priority:** P1 (real-time features)
 - **Complexity:** Small-Medium
 - **Summary:** Topic-based publish/subscribe for real-time messaging. Clients subscribe to topics, receive messages published by other clients. Independent of CRDT data path — purely ephemeral messaging.
