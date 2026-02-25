@@ -211,6 +211,35 @@ mod integration_tests {
         ));
     }
 
+    /// AC13: SyncService replaces stub in full pipeline — SyncInit returns SyncRespRoot.
+    #[tokio::test]
+    async fn full_pipeline_sync_init_returns_sync_resp_root() {
+        let (classify_svc, router, config) = setup();
+        let mut pipeline = build_operation_pipeline(router, &config);
+
+        let msg = Message::SyncInit(topgun_core::messages::SyncInitMessage {
+            map_name: "users".to_string(),
+            last_sync_timestamp: None,
+        });
+        let op = classify_svc
+            .classify(msg, Some("client-sync".to_string()), CallerOrigin::Client)
+            .unwrap();
+
+        assert_eq!(op.ctx().service_name, service_names::SYNC);
+
+        let resp = ServiceExt::ready(&mut pipeline)
+            .await
+            .unwrap()
+            .call(op)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(resp, OperationResponse::Message(ref msg) if matches!(**msg, Message::SyncRespRoot(_))),
+            "expected SyncRespRoot from full pipeline, got {resp:?}"
+        );
+    }
+
     #[tokio::test]
     async fn classify_rejects_server_to_client_message() {
         let (classify_svc, _, _) = setup();

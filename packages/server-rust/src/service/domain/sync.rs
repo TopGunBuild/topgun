@@ -115,6 +115,7 @@ impl SyncService {
     ///
     /// `SyncInitMessage` is a FLAT message: `map_name` is directly on the payload struct,
     /// not nested in a `.payload` sub-field (contrast with `MerkleReqBucketMessage`).
+    #[allow(clippy::unused_async)] // declared async for uniformity with other handlers
     async fn handle_sync_init(
         &self,
         ctx: &crate::service::operation::OperationContext,
@@ -225,6 +226,7 @@ impl SyncService {
     /// Handles `ORMapSyncInit` — returns the server's OR-Map Merkle tree root hash.
     ///
     /// `ORMapSyncInit` is a FLAT message: `map_name` is directly on the struct.
+    #[allow(clippy::unused_async)] // declared async for uniformity with other handlers
     async fn handle_ormap_sync_init(
         &self,
         ctx: &crate::service::operation::OperationContext,
@@ -308,7 +310,8 @@ impl SyncService {
                                     tombstones: tags,
                                 });
                             }
-                            _ => {}
+                            // LWW records in an OR-Map leaf bucket are unexpected; skip silently.
+                            RecordValue::Lww { .. } => {}
                         }
                     }
                 }
@@ -381,8 +384,8 @@ impl SyncService {
                             tombstones: tags,
                         });
                     }
-                    _ => {
-                        // Key exists but is a different type — return empty entry.
+                    // Key exists as an LWW record — wrong type for this OR-Map context; return empty entry.
+                    RecordValue::Lww { .. } => {
                         entries.push(ORMapEntry {
                             key,
                             records: Vec::new(),

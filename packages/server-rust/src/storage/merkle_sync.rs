@@ -24,13 +24,13 @@ use super::record::{Record, RecordValue};
 /// per `(map_name, partition_id)` pair. Trees are lazily created on first access.
 ///
 /// All access goes through the `with_lww_tree` / `with_ormap_tree` closure API,
-/// which locks only the specific tree's `Mutex` without holding the DashMap shard
+/// which locks only the specific tree's `Mutex` without holding the `DashMap` shard
 /// lock across tree operations. This allows concurrent access to different
 /// partitions while serializing mutations on each individual tree.
 pub struct MerkleSyncManager {
-    /// Key: (map_name, partition_id) -> LWW MerkleTree
+    /// Key: (`map_name`, `partition_id`) -> LWW `MerkleTree`
     lww_trees: DashMap<(String, u32), Mutex<MerkleTree>>,
-    /// Key: (map_name, partition_id) -> OR-Map MerkleTree
+    /// Key: (`map_name`, `partition_id`) -> OR-Map `MerkleTree`
     ormap_trees: DashMap<(String, u32), Mutex<ORMapMerkleTree>>,
     /// Default tree depth (3 = 4096 leaf buckets).
     depth: usize,
