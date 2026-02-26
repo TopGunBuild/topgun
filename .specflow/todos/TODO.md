@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-02-24
+**Last updated:** 2026-02-25
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture, not a TypeScript port
 **Product positioning:** "The reactive data grid that extends the cluster into the browser" ([PRODUCT_POSITIONING_RESEARCH.md](../reference/PRODUCT_POSITIONING_RESEARCH.md))
 
@@ -41,6 +41,9 @@ Each Rust spec should reference up to THREE sources:
 | TODO-036 Extensions | — | `spi/` (SPI) | Databend: `GlobalInstance` registry |
 | TODO-071 Search | `server/src/search/` | `query/`, `map/impl/query/` | Quickwit: tantivy integration, SearchService trait |
 | TODO-043 S3 Storage | — | — | Databend: OpenDAL `Operator` + layer stack |
+| TODO-090 PostgreSQL | `server/src/storage/PostgreSQLAdapter.ts` | `map/impl/mapstore/` (write-through) | sqlx PgPool |
+| TODO-091 DataFusion SQL | — | `sql/` (Calcite — conceptual) | **Arroyo**: `target_partitions=1` + shuffle; **ArkFlow**: SessionContext |
+| TODO-092 Connectors | — | — | **Arroyo**: connector traits, SourceOperator/ArrowOperator; **ArkFlow**: Input/Output/Codec |
 
 **Not relevant from Hazelcast:** `cp/` (Raft), `transaction/`, `wan/`, `cache/` (JCache), Spring modules. *(Note: `sql/` (Calcite) — conceptually relevant for distributed SQL planning, but TopGun uses DataFusion instead of Calcite.)*
 
@@ -97,19 +100,9 @@ Each Rust spec should reference up to THREE sources:
 - **Status:** Complete (SPEC-054 completed 2026-02-17)
 - **Summary:** Removed `r#type: String` from inner structs, replaced `f64` with proper integer types, added `Default` derives
 
-### TODO-063: Basic Partition Hash and Lookup → SPEC-056
-- **Priority:** P1
-- **Complexity:** Low
-- **Summary:** Implement basic partition hash function (`fnv1a(key) % 271`) and partition table lookup in Rust. This is the **client-compatible subset** — same modulo hash used by `PartitionRouter` in TS client. Full partition state machine, migration lifecycle, and fault-domain awareness are Phase 3 concerns (after TODO-081 research).
-- **Scope:**
-  - `hash_to_partition(key) -> u32` (matches TS `hashString(key) % PARTITION_COUNT`)
-  - `PartitionTable` struct: partition ID → owner node mapping
-  - Partition pruning for query optimization
-- **NOT in scope:** rebalancing, migration, state machine, backup assignment (→ Phase 3)
-- **TS Source:** `packages/server/src/cluster/PartitionService.ts` (basic hash + table)
-- **HC Reference:** `hazelcast/internal/partition/IPartitionService.java` (interface only)
-- **Depends on:** TODO-059 ✅
-- **Effort:** 1-2 days
+### TODO-063: Basic Partition Hash and Lookup → SPEC-056 — DONE
+- **Status:** Complete (partition hash + PartitionTable implemented as part of cluster protocol work)
+- **Summary:** `hash_to_partition(key) -> u32` (FNV-1a % 271), `PartitionTable` struct, partition pruning. Subsumed by TODO-066 (SPEC-060a-e).
 
 ### TODO-074: HLC Node ID Colon Validation (TS + Rust)
 - **Priority:** P2 (hardening, theoretical risk)
@@ -285,7 +278,7 @@ Each Rust spec should reference up to THREE sources:
 
 ### Phase 3b: Domain Service Implementations
 
-*Goal: Replace stubs with working domain logic. After this, TS client can connect to Rust server and perform real operations.*
+*Goal: Replace stubs with working domain logic. After this, TS client can connect to Rust server and perform real operations. Part of Milestone 1 (v1.0).*
 
 ### TODO-084: CoordinationService (Ping + PartitionMap + Heartbeat) → SPEC-061
 - **Priority:** P0 (validates full pipeline end-to-end)
@@ -314,32 +307,13 @@ Each Rust spec should reference up to THREE sources:
 - **Depends on:** TODO-084 ✅ (pipeline validated), TODO-067 ✅ (RecordStore)
 - **Effort:** 1-2 weeks
 
-### TODO-086: SyncService (Merkle Delta Sync)
-- **Priority:** P0 (offline-first requires sync)
-- **Complexity:** Medium
-- **Summary:** Merkle tree synchronization protocol. Client sends MerkleRoot or MerkleRange, server computes delta, responds with missing records. This is the protocol that enables offline-first: clients reconnecting after offline period get efficient delta sync instead of full dataset transfer.
-- **Scope:**
-  - `SyncRequest` → compare client MerkleRoot with server MerkleTree → respond with delta records
-  - `MerkleRangeRequest` → drill into subtree differences for efficient narrowing
-  - `SyncAck` → mark synced entries, update client sync state
-  - Wire `SyncService` to `RecordStore` + `MerkleTree` (from core-rust)
-  - MutationObserver integration: RecordStore mutations automatically update MerkleTree
-- **TS Source:** `packages/server/src/coordinator/handlers/` (SyncHandler, MerkleSyncHandler)
-- **Depends on:** TODO-085 (CrdtService — data must exist to sync)
-- **Effort:** 1-2 weeks
+### TODO-086: SyncService (Merkle Delta Sync) → SPEC-063 — DONE
+- **Status:** Complete (SPEC-063 completed 2026-02-25)
+- **Summary:** Merkle delta sync protocol: MerkleSyncManager, MerkleMutationObserver, LWW/OR-Map handlers, SyncService dispatch. Efficient delta sync for offline-first clients.
 
-### TODO-087: MessagingService (Topic Pub/Sub) → SPEC-064
-- **Priority:** P1 (real-time features)
-- **Complexity:** Small-Medium
-- **Summary:** Topic-based publish/subscribe for real-time messaging. Clients subscribe to topics, receive messages published by other clients. Independent of CRDT data path — purely ephemeral messaging.
-- **Scope:**
-  - `TopicSubscribe` / `TopicUnsubscribe` → manage per-topic subscriber sets
-  - `TopicPublish` → fan-out to all subscribers via ConnectionRegistry.broadcast()
-  - `TopicMessage` → deliver to subscribed connections
-  - Topic lifecycle: auto-remove when last subscriber disconnects
-- **TS Source:** `packages/server/src/coordinator/handlers/` (TopicSubscribeHandler, TopicPublishHandler)
-- **Depends on:** TODO-084 ✅ (pipeline validated)
-- **Effort:** 3-5 days
+### TODO-087: MessagingService (Topic Pub/Sub) → SPEC-064 — DONE
+- **Status:** Complete (SPEC-064 completed 2026-02-25, 360 tests, clippy clean)
+- **Summary:** Topic pub/sub: TopicSubscribe/Unsubscribe, TopicPublish fan-out via ConnectionRegistry, topic lifecycle auto-cleanup. Fourth domain service replacing stub.
 
 ### TODO-088: QueryService (Live Queries)
 - **Priority:** P1 (reactive UI)
@@ -400,9 +374,66 @@ Each Rust spec should reference up to THREE sources:
 
 ---
 
-## Phase 4: Rust Feature Completion (~4-6 weeks)
+## Milestone 1: Working IMDG (v1.0)
 
-*Goal: Features that differentiate TopGun, including new product-positioning features.*
+*Goal: TopGun Rust server replaces TS server. Clients connect, write/read data, sync offline, search, query. PostgreSQL persistence for durability. Production-usable.*
+
+### TODO-090: PostgreSQL MapDataStore Adapter — NEW
+- **Priority:** P0 (v1.0 requires durable persistence)
+- **Complexity:** Medium
+- **Summary:** First real persistence backend. Implements `MapDataStore` trait for PostgreSQL using sqlx. Write-through mode: every RecordStore mutation persists synchronously. Load-all-keys on startup for cache warm-up.
+- **Scope:**
+  - `PostgresDataStore` implements `MapDataStore` trait (load, store, delete, load_all_keys)
+  - Connection pooling via sqlx `PgPool`
+  - Schema migration (CREATE TABLE for map data)
+  - Bulk load on server startup (warm cache from PostgreSQL)
+  - Integration with `RecordStoreFactory` — configurable per-map data store
+- **Architecture:** Pure adapter — no coupling to PostgreSQL internals. Same `MapDataStore` trait works for MySQL, SQLite, DynamoDB via different impls.
+- **TS Source:** `packages/server/src/storage/PostgreSQLAdapter.ts`
+- **HC Reference:** `hazelcast/map/impl/mapstore/` — MapStoreWrapper (write-through path)
+- **Depends on:** TODO-067 ✅ (MapDataStore trait)
+- **Effort:** 1 week
+
+### TODO-071: Search with Tantivy
+- **Priority:** P1 (table stakes for real-time apps)
+- **Complexity:** Medium
+- **Summary:** Replace custom BM25 search with tantivy full-text search engine
+- **Benefits:** Orders of magnitude faster, built-in tokenization, fuzzy search, phrase queries
+- **Crate:** tantivy
+- **Source:** `packages/server/src/search/`
+- **Effort:** 1-2 weeks
+
+### TODO-074: HLC Node ID Colon Validation (TS + Rust)
+- **Priority:** P2 (hardening)
+- **Complexity:** Trivial
+- **Summary:** Reject node IDs containing `:` in HLC constructor (breaks `HLC.parse()`)
+- **Effort:** 1-2 hours
+
+### TODO-075: Fix Rust ORMap Merkle Hash Determinism → SPEC-055
+- **Priority:** P1 (bug — cross-language sync broken)
+- **Status:** Spec created (SPEC-055), pending audit
+- **Summary:** `hash_entry()` uses unsorted `serde_json::to_string()` — breaks cross-language Merkle sync
+- **Depends on:** TODO-061 ✅
+- **Effort:** 0.5 day
+
+### TODO-068: Integration Test Suite
+- **Priority:** P0 (gates v1.0 release)
+- **Complexity:** Large
+- **Summary:** Port critical test scenarios, use TS server as behavioral oracle
+- **Approach:**
+  - Run identical test scenarios against TS server and Rust server
+  - Compare behavior for: CRDT merge, sync protocol, cluster operations, query results
+  - Client-server tests: TS client connects to Rust server
+  - **Incremental:** Start after TODO-084 (Ping e2e), expand as each domain service lands
+- **Source:** `packages/server/src/__tests__/`, `tests/e2e/`
+- **Depends on:** TODO-084+ (incremental — each domain service adds testable surface)
+- **Effort:** 3-4 weeks (concurrent with domain service work)
+
+---
+
+## Milestone 2: Data Platform (v2.0)
+
+*Goal: SQL queries, stream processing, schema validation, connectors — competitive with Hazelcast feature set.*
 
 ### TODO-069: Schema System
 - **Priority:** P1 (product differentiator)
@@ -432,8 +463,75 @@ Each Rust spec should reference up to THREE sources:
 - **Depends on:** TODO-069 (Schema System)
 - **Effort:** 2-3 weeks
 
-### TODO-048: SSE Push for HTTP Sync
+### TODO-091: DataFusion SQL Integration — NEW
+- **Priority:** P1 (distributed SQL — Hazelcast-level queries)
+- **Complexity:** Large
+- **Summary:** Integrate Apache DataFusion as SQL query engine. Server-side distributed queries across partitions + client-side WASM for offline SQL (same dialect everywhere).
+- **Scope:**
+  - `DataFusionBackend` implements `QueryBackend` trait (feature-gated: `#[cfg(feature = "sql")]`)
+  - `TopGunTableProvider` implements DataFusion's `TableProvider` trait — wraps RecordStore
+  - Arrow cache layer: lazy MsgPack → Arrow RecordBatch conversion, invalidated on mutation via MutationObserver
+  - Distributed execution: DataFusion plans with `target_partitions=1`, TopGun distributes via partition owners + shuffle edges (Arroyo pattern)
+  - Partial→Final aggregation: partial aggregate per partition, merge on coordinator
+  - `Query::Sql(String)` variant activates DataFusion path
+- **Ref:** Arroyo (`arroyo-planner/builder.rs`, `arroyo-datastream/logical.rs`), ArkFlow (SessionContext, MsgPack→Arrow codec)
+- **Depends on:** TODO-088 ✅ (QueryBackend trait), TODO-067 ✅ (RecordStore)
+- **Effort:** 2-3 weeks
+
+### TODO-025: DAG Executor for Stream Processing
+- **Priority:** P1 (Hazelcast Jet equivalent)
+- **Complexity:** Large
+- **Summary:** Distributed stream processing DAG. SQL-defined pipelines compiled to operator graphs with windowed aggregation, stateful processing, and checkpointing.
+- **Architecture:** petgraph DiGraph, operator chaining, barrier-based checkpointing, shuffle edges for hash-based repartitioning, partial→final aggregation split
+- **Context:** [HAZELCAST_DAG_EXECUTOR_SPEC.md](../reference/HAZELCAST_DAG_EXECUTOR_SPEC.md) (700+ lines)
+- **HC Reference:** `hazelcast/jet/core/` (Processor, Inbox, Outbox), `jet/impl/execution/` (TaskletTracker, CooperativeWorker)
+- **Rust Reference:** Arroyo (petgraph DAG, operator chaining, barrier checkpoints, shuffle edges)
+- **Key insight:** Rust `Future::poll()` maps naturally to Cooperative Tasklet model
+- **Depends on:** TODO-091 (DataFusion for SQL pipeline compilation)
+- **Effort:** 3-4 weeks
+
+### TODO-092: Connector Framework — NEW
+- **Priority:** P2 (extensible data ingestion/egress)
+- **Complexity:** Medium
+- **Summary:** Trait-based connector system for external data sources and sinks. Enables stream processing pipelines to read from/write to Kafka, S3, databases, webhooks.
+- **Scope:**
+  - `ConnectorSource` trait: connect, read → RecordBatch stream, close
+  - `ConnectorSink` trait: connect, write RecordBatch, close
+  - `Codec` trait: encode/decode between wire format and Arrow
+  - Connector registry for dynamic discovery
+  - Initial connectors: Kafka source/sink, S3 sink, PostgreSQL CDC source
+- **Ref:** Arroyo connector traits, ArkFlow Input/Output/Codec pattern
+- **Depends on:** TODO-025 (DAG executor for pipeline integration)
+- **Effort:** 2 weeks
+
+### TODO-033: AsyncStorageWrapper (Write-Behind)
 - **Priority:** P2
+- **Complexity:** Medium
+- **Summary:** Hazelcast-style Write-Behind pattern: staging area, write coalescing, batch flush, retry queue
+- **Context:** [topgun-rocksdb.md](../reference/topgun-rocksdb.md)
+- **HC Reference:** `hazelcast/map/impl/mapstore/` — WriteBehindStore, StoreWorker, coalescing logic, retry with backoff
+- **Depends on:** TODO-067 ✅ (MapDataStore trait), TODO-090 (PostgreSQL adapter for testing)
+- **Effort:** 2-3 weeks
+
+### TODO-036: Pluggable Extension System
+- **Priority:** P2
+- **Complexity:** Medium
+- **Summary:** Modular extension system for community contributions (crypto, compression, audit, geo)
+- **Context:** [TURSO_INSIGHTS.md](../reference/TURSO_INSIGHTS.md) Section 5
+- **Depends on:** TODO-082 ✅ (ServiceRegistry trait)
+- **Effort:** 2-3 weeks
+
+### TODO-072: Selective WASM Modules for Client
+- **Priority:** P2
+- **Complexity:** Medium
+- **Summary:** Compile DataFusion SQL engine, tantivy search, and Entry Processors to WASM for browser use. DataFusion WASM enables same SQL dialect offline (client) and online (server).
+- **Key constraint:** NOT for basic CRDT ops (sync JS is faster due to WASM boundary cost)
+- **Context:** [PRODUCT_POSITIONING_RESEARCH.md](../reference/PRODUCT_POSITIONING_RESEARCH.md) Section 7.6
+- **Depends on:** TODO-091 (DataFusion), TODO-071 ✅ (tantivy)
+- **Effort:** 2-3 weeks
+
+### TODO-048: SSE Push for HTTP Sync
+- **Priority:** P3
 - **Complexity:** Low (trivial in Rust)
 - **Summary:** Server-Sent Events transport for real-time push in serverless
 - **Architecture:**
@@ -444,72 +542,48 @@ Each Rust spec should reference up to THREE sources:
 - **Effort:** 2-3 days
 
 ### TODO-049: Cluster-Aware HTTP Routing
-- **Priority:** P2
+- **Priority:** P3
 - **Complexity:** Medium
 - **Summary:** HttpSyncHandler routes to partition owners in cluster
-- **Depends on:** TODO-066 (Cluster Protocol), TODO-063
-- **Effort:** 1-2 weeks
-
-### TODO-025: DAG Executor for Distributed Queries
-- **Priority:** P2
-- **Complexity:** Large
-- **Summary:** Hazelcast-style DAG executor for distributed query processing
-- **Architecture:** 3-tier processor model (Source → Transform → Sink), partition-aware, backpressure via tokio channels
-- **Context:** [HAZELCAST_DAG_EXECUTOR_SPEC.md](../reference/HAZELCAST_DAG_EXECUTOR_SPEC.md) (700+ lines)
-- **HC Reference:** `hazelcast/jet/core/` (Processor, Inbox, Outbox), `jet/impl/execution/` (TaskletTracker, CooperativeWorker, StoreSnapshotTasklet)
-- **Key insight:** Rust `Future::poll()` maps naturally to Cooperative Tasklet model
-- **Depends on:** TODO-060 ✅ (Processor trait), TODO-063
-- **Effort:** 2-3 weeks
-
-### TODO-071: Search with Tantivy
-- **Priority:** P2
-- **Complexity:** Medium
-- **Summary:** Replace custom BM25 search with tantivy full-text search engine
-- **Benefits:** Orders of magnitude faster, built-in tokenization, fuzzy search, phrase queries
-- **Crate:** tantivy
-- **Source:** `packages/server/src/search/`
+- **Depends on:** TODO-066 ✅ (Cluster Protocol)
 - **Effort:** 1-2 weeks
 
 ### TODO-076: Evaluate MsgPack-Based Merkle Hashing
-- **Priority:** P3 (deferred from P2 — premature optimization)
-- **Complexity:** Medium (design decision + implementation in both TS and Rust)
-- **Summary:** Current Merkle hashing converts values to JSON string then FNV-1a hashes the string. Alternative: hash MsgPack bytes directly. Evaluate after Rust server is functional.
-- **Depends on:** TODO-075 (fix current hashing first), working Rust server
+- **Priority:** P3 (deferred optimization)
+- **Complexity:** Medium
+- **Summary:** Hash MsgPack bytes directly instead of JSON string → FNV-1a. Evaluate after Rust server is functional.
+- **Depends on:** TODO-075 (fix current hashing first)
 - **Effort:** 1 day (evaluation) + 2-3 days (implementation if approved)
 
 ---
 
-## Phase 5: Post-Migration Features (~8-12 weeks, after Rust server launch)
+## Milestone 3: Enterprise (v3.0+)
 
-*Goal: Enterprise and advanced features built natively in Rust.*
+*Goal: Enterprise-grade features for large-scale deployments. Multi-tenancy, tiered storage, advanced analytics.*
 
-### TODO-033: AsyncStorageWrapper (Write-Behind)
-- **Priority:** P2
-- **Complexity:** Medium
-- **Summary:** Hazelcast-style Write-Behind pattern: staging area, write coalescing, batch flush, retry queue
-- **Context:** [topgun-rocksdb.md](../reference/topgun-rocksdb.md)
-- **HC Reference:** `hazelcast/map/impl/mapstore/` — WriteBehindStore, StoreWorker, coalescing logic, retry with backoff
-- **Note:** TODO-067 (Multi-Layer Storage) should provide MapDataStore trait that this plugs into seamlessly
-- **Depends on:** TODO-067 (MapDataStore trait)
-- **Effort:** 2-3 weeks
+### TODO-041: Multi-Tenancy
+- **Priority:** P1 (enterprise requirement)
+- **Complexity:** Large
+- **Summary:** Per-tenant isolation, quotas, billing, tenant-aware partitioning
+- **Context:** [PHASE_5_MULTI_TENANCY_SPEC.md](../reference/PHASE_5_MULTI_TENANCY_SPEC.md)
+- **Depends on:** TODO-060 ✅ (RequestContext.tenant_id)
+- **Effort:** 4-6 weeks
 
 ### TODO-043: S3 Bottomless Storage
-- **Priority:** P3
+- **Priority:** P2
 - **Complexity:** Very Large
 - **Summary:** Append-only log in S3/R2/GCS. Immutable log segments, replay on startup, Merkle checkpoints
 - **Context:** [TURSO_INSIGHTS.md](../reference/TURSO_INSIGHTS.md) Section 7
 - **Crates:** aws-sdk-s3, opendal
-- **Note:** TODO-067 (Multi-Layer Storage) should provide Storage trait that S3 implements without trait redesign
 - **Depends on:** TODO-033 (AsyncStorageWrapper)
 - **Effort:** 6-8 weeks
 
 ### TODO-040: Tiered Storage (Hot/Cold)
-- **Priority:** P3
+- **Priority:** P2
 - **Complexity:** Large
-- **Summary:** Hot data in memory, cold data in S3/cheap storage with transparent migration
+- **Summary:** Hot data in memory, cold data in S3/cheap storage with transparent migration. RecordStore metadata (hit_count, last_access_time) enables eviction policies.
 - **Context:** [topgun-rocksdb.md](../reference/topgun-rocksdb.md)
-- **Note:** TODO-067 (Multi-Layer Storage) RecordStore trait with record metadata (hit count, access time) enables eviction policies
-- **Depends on:** TODO-033 (AsyncStorageWrapper), TODO-067 (RecordStore trait)
+- **Depends on:** TODO-033 (AsyncStorageWrapper), TODO-043 (S3)
 - **Effort:** 4-6 weeks
 
 ### TODO-039: Vector Search
@@ -520,140 +594,114 @@ Each Rust spec should reference up to THREE sources:
 - **Crate:** usearch (Rust bindings)
 - **Effort:** 4 weeks
 
-### TODO-036: Pluggable Extension System
-- **Priority:** P3
-- **Complexity:** Medium
-- **Summary:** Modular extension system for community contributions (crypto, compression, audit, geo)
-- **Context:** [TURSO_INSIGHTS.md](../reference/TURSO_INSIGHTS.md) Section 5
-- **Note:** TODO-082 (Service Architecture Research) should design ServiceRegistry trait that this builds on
-- **Effort:** 2-3 weeks
-
-### TODO-041: Multi-Tenancy
-- **Priority:** P4
-- **Complexity:** Large
-- **Summary:** Per-tenant isolation, quotas, billing, tenant-aware partitioning
-- **Context:** [PHASE_5_MULTI_TENANCY_SPEC.md](../reference/PHASE_5_MULTI_TENANCY_SPEC.md)
-- **Depends on:** TODO-060 ✅ (RequestContext.tenant_id)
-- **Effort:** 4-6 weeks
-
 ### TODO-044: Bi-Temporal Queries (Time-Travel)
-- **Priority:** P4
+- **Priority:** P3
 - **Complexity:** Large
 - **Summary:** Query historical state with valid time + transaction time
 - **Context:** [TURSO_INSIGHTS.md](../reference/TURSO_INSIGHTS.md) Section 8
 - **Depends on:** TODO-043 (S3 Bottomless Storage)
 - **Effort:** 4-6 weeks
 
-### TODO-072: Selective WASM Modules for Client
-- **Priority:** P4
-- **Complexity:** Medium
-- **Summary:** Compile DAG Executor, tantivy search, and Entry Processors to WASM for browser use
-- **Key constraint:** NOT for basic CRDT ops (sync JS is faster due to WASM boundary cost)
-- **Context:** [PRODUCT_POSITIONING_RESEARCH.md](../reference/PRODUCT_POSITIONING_RESEARCH.md) Section 7.6
-- **Effort:** 2-3 weeks
-
 ---
 
-## Execution Order (parallel waves)
+## Execution Order (milestone-driven)
 
 Items within the same wave can run in parallel. Each wave starts when its blockers from previous waves complete.
 
-| Wave | Items | Blocked by | Phase |
-|------|-------|------------|-------|
-| **1** | ~~SPEC-052e~~ ✅ · ~~TODO-074~~ ✅ · ~~TODO-078~~ ✅ · ~~TODO-075~~ ✅ | — | 2 |
-| **1a** | ~~TODO-077~~ ✅ · ~~TODO-063~~ ✅ | — | 2 |
-| **2** | ~~TODO-080~~ ✅ · ~~TODO-081~~ ✅ · ~~TODO-082~~ ✅ · ~~TODO-083~~ ✅ | — | 2.5 |
-| **3** | ~~TODO-064~~ ✅ (Network) · ~~TODO-067~~ ✅ (Multi-Layer Storage) | **083** · **080** | 3 |
-| **4** | ~~TODO-065~~ ✅ (Operation Routing) · ~~TODO-066~~ ✅ (Cluster) | 064+**082** · 063+064+**081** | 3 |
-| **4a** | TODO-084 → SPEC-061 (Coordination) · TODO-087 (Messaging) | 065+066 · 084 | 3b |
-| **4b** | TODO-085 (CRDT) · TODO-068 (Tests, incremental from 084+) | 084 · 084+ | 3b |
-| **4c** | TODO-086 (Sync) · TODO-088 (Query) · TODO-089 (Persistence) | 085 · 085 · 085 | 3b |
-| **5** | TODO-069 (Schema) · TODO-048 (SSE) · TODO-025 (DAG) · TODO-071 (Tantivy) | — · — · 063 · — | 4 |
-| **6** | TODO-070 (Shapes) · TODO-049 (Cluster HTTP) · TODO-076 (MsgPack hash eval) | 069 · 066+063 · 075 | 4 |
-| **7** | TODO-033 (AsyncStorage) · TODO-039 (Vector) · TODO-036 (Extensions) · TODO-041 (Multi-tenancy) · TODO-072 (WASM) | 067 · — · — · — · — | 5 |
-| **8** | TODO-043 (S3) · TODO-040 (Tiered) | 033 · 033+067 | 5 |
-| **9** | TODO-044 (Time-Travel) | 043 | 5 |
+### Milestone 1 — v1.0 (Working IMDG)
 
-**Current position:** Waves 2-4 complete. Phase 3 framework done. Wave 4a next: TODO-084 (CoordinationService) — first real domain service, validates full pipeline.
+| Wave | Items | Blocked by | Status |
+|------|-------|------------|--------|
+| **1-4** | Phases 0-2.5, Phase 3 framework | — | ✅ All complete |
+| **5a** | ~~TODO-084~~ ✅ (Coordination) | 065+066 | Done |
+| **5b** | ~~TODO-085~~ ✅ (CRDT) · ~~TODO-087~~ ✅ (Messaging) | 084 · 084 | Done |
+| **5c** | ~~TODO-086~~ ✅ (Sync) · TODO-088 (Query) · TODO-089 (Persistence) | 085 · 085 · 085 | 086 done |
+| **5d** | TODO-090 (PostgreSQL) · TODO-071 (Search) | 067 · — | Parallel |
+| **5e** | TODO-074 (HLC fix) · TODO-075 (ORMap hash fix) | — · — | Trivial, parallel |
+| **5f** | TODO-068 (Integration Tests) | 084+ incremental | Gates v1.0 release |
+
+### Milestone 2 — v2.0 (Data Platform)
+
+| Wave | Items | Blocked by |
+|------|-------|------------|
+| **6a** | TODO-069 (Schema) · TODO-091 (DataFusion SQL) | — · 088 |
+| **6b** | TODO-070 (Shapes) · TODO-025 (DAG Executor) | 069 · 091 |
+| **6c** | TODO-092 (Connectors) · TODO-033 (Write-Behind) · TODO-036 (Extensions) | 025 · 090 · — |
+| **6d** | TODO-072 (WASM) · TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt) | 091+071 · — · — · 075 |
+
+### Milestone 3 — v3.0+ (Enterprise)
+
+| Wave | Items | Blocked by |
+|------|-------|------------|
+| **7a** | TODO-041 (Multi-Tenancy) · TODO-043 (S3 Bottomless) | — · 033 |
+| **7b** | TODO-040 (Tiered Storage) · TODO-039 (Vector Search) | 043 · — |
+| **7c** | TODO-044 (Bi-Temporal) | 043 |
+
+**Current position:** Wave 5c — TODO-088 (QueryService) + TODO-089 (PersistenceService) next. 4 of 7 domain services done. v1.0 critical path: 088/089 → 090/071 → 074/075 → 068.
 
 ---
 
 ## Dependency Graph
 
 ```
-Phase 0 (TypeScript) [DONE]     Phase 1 (Bridge) [DONE]
-SPEC-048b ──→ SPEC-048c          TODO-059 (Cargo) ──→ TODO-060 (Traits)
-                                    │
-                                    ↓
-                         Phase 2 (Rust Core)
-              TODO-061 (CRDTs) [DONE]     TODO-079 (Schema arch) [DONE]
-                    │
-                    ↓
-              TODO-062 (Message Schema) [DONE] ─── 052a-e complete
-                    │
-                    ↓
-    │         │
-    │   TODO-074 (HLC ✓) · TODO-078 (TS hash P1) · TODO-075 (ORMap hash)
-    │         │
-    │   TODO-077 (CI drift) · TODO-063 (Basic partitions)  ←── WAVE 1a
-    │         │
-    │         ↓
-    │  Phase 2.5 (Research Sprint)  ←── WAVE 2
-    │  ┌──────────────────────────────────────────┐
-    │  │ TODO-080        TODO-081        TODO-082  │
-    │  │ Storage arch    Cluster proto   Service   │
-    │  │ research        research        arch      │
-    │  └──────┬──────────────┬──────────────┬──────┘
-    │         │              │              │
-    └─────────┼──────────────┼──────────────┘
-              ↓              ↓
-         Phase 3 (Rust Server)  ←── WAVES 3-4
-    TODO-064 (Network)
-        │
-        ├──→ TODO-067* (Multi-Layer Storage) ←── TODO-080
-        │
-        ├──→ TODO-065* (Operation Routing) ←── TODO-082
-        │
-        ├──→ TODO-066* (Cluster Protocol) ←── TODO-081 + TODO-063
-        │
-        └──→ TODO-068 (Integration Tests)
-              │
+Phases 0-2.5 [ALL DONE]
+  TypeScript completion → Bridge → Rust Core → Research Sprint
               ↓
-         Phase 4 (Features)  ←── WAVES 5-6
-  TODO-069 (Schema) ──→ TODO-070 (Shapes)
-  TODO-048 (SSE)
-  TODO-049 (Cluster HTTP)
-  TODO-025 (DAG Executor)
-  TODO-071 (Tantivy Search)
-  TODO-076 (MsgPack hash eval — deferred)
-              │
+Phase 3 Framework [ALL DONE]
+  TODO-064 (Network) · TODO-067 (Storage) · TODO-065 (Routing) · TODO-066 (Cluster)
               ↓
-         Phase 5 (Post-Migration)  ←── WAVES 7-9
-  TODO-033 (AsyncStorage) ──→ TODO-043 (S3) ──→ TODO-044 (Time-Travel)
-                          └──→ TODO-040 (Tiered Storage)
-  TODO-039 (Vector Search)
-  TODO-036 (Extensions)
-  TODO-041 (Multi-Tenancy)
-  TODO-072 (WASM Modules)
+═══════════════════════════════════════════════════════════════
+MILESTONE 1: Working IMDG (v1.0)
+═══════════════════════════════════════════════════════════════
 
-  * = redesigned after research (not TS port)
+Phase 3b (Domain Services):
+  TODO-084 ✅ (Coordination)
+       │
+       ├──→ TODO-085 ✅ (CRDT) ──→ TODO-086 ✅ (Sync)
+       │         │
+       │         ├──→ TODO-088 (Query, PredicateEngine L1-L3)
+       │         └──→ TODO-089 (Persistence, Counters)
+       │
+       └──→ TODO-087 ✅ (Messaging)
+
+  TODO-090 (PostgreSQL adapter) ← parallel, depends on 067 only
+  TODO-071 (Tantivy Search) ← parallel, no deps
+  TODO-074 · TODO-075 (bug fixes) ← parallel, trivial
+
+  TODO-068 (Integration Tests) ← gates v1.0, incremental from 084+
+
+═══════════════════════════════════════════════════════════════
+MILESTONE 2: Data Platform (v2.0)
+═══════════════════════════════════════════════════════════════
+
+  TODO-069 (Schema) ──→ TODO-070 (Shapes)
+
+  TODO-091 (DataFusion SQL) ──→ TODO-025 (DAG Stream Processing)
+       │                              │
+       └──→ TODO-072 (WASM)          └──→ TODO-092 (Connectors)
+
+  TODO-033 (Write-Behind) ← depends on 090
+  TODO-036 (Extensions)
+  TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt)
+
+═══════════════════════════════════════════════════════════════
+MILESTONE 3: Enterprise (v3.0+)
+═══════════════════════════════════════════════════════════════
+
+  TODO-041 (Multi-Tenancy)
+  TODO-043 (S3 Bottomless) ──→ TODO-040 (Tiered) ──→ TODO-044 (Time-Travel)
+  TODO-039 (Vector Search)
 ```
 
 ---
 
 ## Timeline Summary
 
-| Phase | Effort | Prerequisites |
-|-------|--------|---------------|
-| **0. TypeScript Completion** | 3-4 days | ~~Current codebase~~ DONE |
-| **1. Bridge** | 1-2 days | ~~Phase 0 complete~~ DONE |
-| **2. Rust Core** | 3-4 weeks | ~~Phase 1 complete~~ IN PROGRESS (052e + bug fixes remaining) |
-| **2.5 Research Sprint** | 1-2 weeks | Can start parallel to Phase 2 completion |
-| **3. Rust Server** | 8-10 weeks | Phase 2 + 2.5 complete |
-| **4. Rust Features** | 4-6 weeks | Phase 3 complete (some items parallelizable) |
-| **5. Post-Migration** | 8-12 weeks | Phase 4 complete (independent items) |
-| **Total to Rust server launch (Phases 0-3)** | **~14-18 weeks** | |
-| **Total with features (Phases 0-4)** | **~18-24 weeks** | |
+| Milestone | Remaining Items | Effort | Status |
+|-----------|----------------|--------|--------|
+| **v1.0 Working IMDG** | 087, 088, 089, 090, 071, 074, 075, 068 | ~6-8 weeks | **In progress** (3/7 services done) |
+| **v2.0 Data Platform** | 069, 070, 091, 025, 092, 033, 036, 072, 048, 049, 076 | ~12-16 weeks | After v1.0 |
+| **v3.0 Enterprise** | 041, 043, 040, 039, 044 | ~16-24 weeks | After v2.0 |
 
 ## Eliminated Items
 
@@ -673,6 +721,11 @@ SPEC-048b ──→ SPEC-048c          TODO-059 (Cargo) ──→ TODO-060 (Trai
 | TODO-067 → SPEC-058a-c | Multi-Layer Storage: 3-layer traits, HashMapStorage, DefaultRecordStore, MutationObserver | 2026-02-21 |
 | TODO-065 → SPEC-059 | Operation Routing: ServiceRegistry, Operation enum, OperationRouter, Tower pipeline, domain stubs | 2026-02-22 |
 | TODO-066 → SPEC-060a-e | Cluster Protocol: 5 traits, 18-msg wire protocol, phi-accrual FD, partition assignment, migration coordinator, 4 resilience processors | 2026-02-24 |
+| TODO-063 → SPEC-056 | Basic Partition Hash: FNV-1a % 271, PartitionTable (subsumed by TODO-066) | 2026-02-24 |
+| TODO-084 → SPEC-061 | CoordinationService: Ping/Pong, PartitionMap, HeartbeatAck | 2026-02-24 |
+| TODO-085 → SPEC-062 | CrdtService: LWW/OR-Map write path, ClientOp/OpBatch, ServerEvent broadcast | 2026-02-25 |
+| TODO-086 → SPEC-063 | SyncService: Merkle delta sync, MerkleSyncManager, MutationObserver integration | 2026-02-25 |
+| TODO-087 → SPEC-064 | MessagingService: Topic pub/sub, fan-out broadcast, topic lifecycle | 2026-02-25 |
 
 ### Phase 2 Rust Items
 
@@ -719,6 +772,9 @@ All items below are completed and archived in `.specflow/archive/`:
 | TODO-081 | Output: `.specflow/reference/RUST_CLUSTER_ARCHITECTURE.md` |
 | TODO-082 | Output: `.specflow/reference/RUST_SERVICE_ARCHITECTURE.md` |
 | TODO-083 | Output: `.specflow/reference/RUST_NETWORKING_PATTERNS.md` |
+| TODO-090 | TS ref: `packages/server/src/storage/PostgreSQLAdapter.ts` |
+| TODO-091 | Arroyo: `arroyo-planner/builder.rs`, `arroyo-datastream/logical.rs`; ArkFlow: `arkflow-plugin/src/processor/sql.rs` |
+| TODO-092 | Arroyo: `arroyo-connector/src/`; ArkFlow: `arkflow-core/src/input/`, `arkflow-core/src/codec/` |
 
 ---
 
@@ -729,3 +785,4 @@ All items below are completed and archived in `.specflow/archive/`:
 *Updated 2026-02-20: Added TODO-083 (Networking Layer Research — light, 1-2 days). Focus: SurrealDB, Grafbase, Quickwit for connection abstraction, backpressure, middleware ordering. TODO-064 now depends on 083. Existing SPEC-057 to be recreated after research.*
 *Updated 2026-02-22: Marked TODO-064, TODO-067, TODO-065 as DONE. Waves 3-4 progress: 064 (SPEC-057a-c), 067 (SPEC-058a-c), 065 (SPEC-059) all archived.*
 *Updated 2026-02-24: Marked TODO-066 as DONE (SPEC-060a-e all archived, 288 server tests). Phase 3 FRAMEWORK complete. Added Phase 3b (Domain Service Implementations): TODO-084 (Coordination), TODO-085 (CRDT), TODO-086 (Sync), TODO-087 (Messaging), TODO-088 (Query), TODO-089 (Persistence). Updated TODO-068 to incremental approach starting from TODO-084. Execution order: 084 → 085 → 086/087/088/089 (parallel) → 068 (incremental throughout).*
+*Updated 2026-02-25: Major restructuring — milestone-driven roadmap. Replaced Phase 4/5 with Milestone 1 (v1.0 Working IMDG), Milestone 2 (v2.0 Data Platform), Milestone 3 (v3.0+ Enterprise). Added TODO-090 (PostgreSQL MapDataStore), TODO-091 (DataFusion SQL), TODO-092 (Connector Framework). Marked TODO-063, TODO-086 as DONE. Moved TODO-048/049/076 from Phase 4 to Milestone 2 (v2.0). Added Arroyo + ArkFlow to Triple Reference Protocol. Updated dependency graph, execution order, timeline. Product vision: TopGun = Hazelcast (IMDG) + DataFusion (SQL) + Arroyo-informed streaming + offline-first clients.*

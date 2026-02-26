@@ -2,24 +2,17 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-065
-- **Status:** running
+- **Active Specification:** none
+- **Status:** idle
 - **Project Phase:** Phase 3 (Rust Server) — Wave 4
 - **TODO Items:** 28 (1 client bug fix + 8 Rust bridge/core + 5 audit findings + 14 existing deferred)
-- **Next Step:** (in progress)
+- **Next Step:** /sf:new or /sf:next
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
-
-## Execution Status
-
-| Spec | Mode | Progress | Last Update |
-|------|------|----------|-------------|
-| SPEC-065 | orchestrated | Wave 0/3 (0%) | 2026-02-26 |
 
 ## Queue
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-065 | QueryService -- Live Query Subscriptions | running | Phase 3 |
 
 ## Migration Roadmap (high-level)
 
@@ -51,13 +44,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-26 | SPEC-065 | COMPLETED: QueryService (Live Query Subscriptions) — fifth real domain service replacing domain_stub! macro. 2 files created, 2 modified, 2 commits, 3 audit cycles, 2 review cycles + 1 fix cycle. All 16 ACs implemented. PredicateEngine (predicate.rs) + QueryRegistry/QueryMutationObserver/QueryService (query.rs). 60 new tests (419 total, 0 failures), clippy clean for spec files. APPROVED by impl-reviewer v2. |
 | 2026-02-25 | SPEC-064 | COMPLETED: MessagingService (Topic Pub/Sub) — fourth real domain service replacing domain_stub! macro. 1 file created, 2 modified, 1 commit, 3 audit cycles, 1 review cycle. All 12 ACs implemented. 360 total tests (0 failures), clippy clean. APPROVED by impl-reviewer v1. |
 | 2026-02-25 | SPEC-063 | COMPLETED: SyncService (Merkle Delta Sync Protocol) — third real domain service replacing domain_stub! macro. 2 files created, 4 modified, 5 commits, 3 audit cycles, 2 review cycles + 1 fix cycle. All 14 ACs implemented. 341 total tests (0 failures), clippy clean. APPROVED by impl-reviewer v2. |
 | 2026-02-24 | SPEC-062 | COMPLETED: CrdtService (LWW-Map and OR-Map Operations) — second real domain service replacing domain_stub! macro. 1 file created, 3 modified, 3 commits, 2 audit cycles, 1 review cycle. All 9 ACs implemented (LWW PUT/REMOVE, OR_ADD/OR_REMOVE, OpBatch, WrongService, ManagedService name, integration test, empty batch). rmpv added as direct dependency for wire value conversion. Clippy clean. |
 | 2026-02-24 | SPEC-061 | COMPLETED: CoordinationService (Ping/PartitionMap/Heartbeat) — first real domain service replacing domain_stub! macro. 1 file created, 4 modified, 4 commits, 4 audit cycles, 1 review cycle. 296 total tests (9 new), clippy clean for spec files. |
-| 2026-02-24 | SPEC-060e | COMPLETED: Cluster resilience module — 4 processors (SplitBrainHandler, HeartbeatComplaintProcessor, MastershipClaimProcessor, GracefulLeaveProcessor), decide_merge() with 3-step deadlock-free tie-break, ComplaintRecord/RemoteClusterInfo types. 1 file created, 1 modified, 3 commits, 4 audit cycles, 3 review cycles. 16 new resilience tests (288 total), clippy clean. |
-| 2026-02-23 | SPEC-060d | COMPLETED: MigrationCoordinator, MapProvider trait, RebalanceTrigger, not_owner_response/broadcast_partition_map free functions. 1 file created, 2 modified, 3 commits, 4 audit cycles, 1 review cycle. 14 new migration tests (272 total), clippy clean. |
-| 2026-02-22 | SPEC-060c | COMPLETED: Module wiring + integration tests. 4 commits, 1 file created, 6 modified. 29 integration tests (19 serde round-trip + 10 re-export accessibility). 258 total tests, clippy clean. 3 audit cycles, 1 review cycle. |
 
 ## Project Patterns
 
@@ -95,4 +86,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-26 (SPEC-065 execution started)*
+*Last updated: 2026-02-26 (SPEC-065 completed and archived)*
