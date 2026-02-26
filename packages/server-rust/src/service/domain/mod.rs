@@ -16,6 +16,11 @@ pub use sync::SyncService;
 pub mod messaging;
 pub use messaging::MessagingService;
 
+pub mod predicate;
+
+pub mod query;
+pub use query::QueryService;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -90,11 +95,6 @@ macro_rules! domain_stub {
 // ---------------------------------------------------------------------------
 
 domain_stub!(
-    /// Query domain service (live query subscriptions).
-    QueryService, service_names::QUERY
-);
-
-domain_stub!(
     /// Search domain service (full-text search).
     SearchService, service_names::SEARCH
 );
@@ -133,16 +133,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_service_returns_not_implemented() {
-        let svc = Arc::new(QueryService);
-        let resp = svc.oneshot(make_op(service_names::QUERY)).await.unwrap();
-        assert!(matches!(
-            resp,
-            OperationResponse::NotImplemented { service_name: "query", .. }
-        ));
-    }
-
-    #[tokio::test]
     async fn search_service_returns_not_implemented() {
         let svc = Arc::new(SearchService);
         let resp = svc
@@ -170,10 +160,10 @@ mod tests {
 
     #[tokio::test]
     async fn all_stubs_implement_managed_service() {
-        // CoordinationService, CrdtService, and SyncService are excluded: they require
-        // constructor args and have dedicated registration tests in their own modules.
+        // CoordinationService, CrdtService, SyncService, MessagingService, and
+        // QueryService are excluded: they require constructor args and have
+        // dedicated registration tests in their own modules.
         let registry = ServiceRegistry::new();
-        registry.register(QueryService);
         registry.register(SearchService);
         registry.register(PersistenceService);
 
@@ -184,9 +174,6 @@ mod tests {
         registry.shutdown_all(false).await.unwrap();
 
         // Stub services accessible by name.
-        // MessagingService is excluded: it requires constructor args and has
-        // dedicated registration tests in its own module.
-        assert!(registry.get_by_name("query").is_some());
         assert!(registry.get_by_name("search").is_some());
         assert!(registry.get_by_name("persistence").is_some());
     }

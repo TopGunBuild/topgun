@@ -39,6 +39,7 @@ mod integration_tests {
         CoordinationService, CrdtService, MessagingService, PersistenceService, QueryService,
         SearchService, SyncService,
     };
+    use crate::service::domain::query::QueryRegistry;
     use crate::service::middleware::build_operation_pipeline;
     use crate::service::operation::{service_names, CallerOrigin, OperationResponse};
     use crate::service::registry::{ServiceContext, ServiceRegistry};
@@ -95,7 +96,15 @@ mod integration_tests {
                 Arc::clone(&connection_registry),
             )),
         );
-        router.register(service_names::QUERY, Arc::new(QueryService));
+        let query_registry = Arc::new(QueryRegistry::new());
+        router.register(
+            service_names::QUERY,
+            Arc::new(QueryService::new(
+                Arc::clone(&query_registry),
+                Arc::clone(&record_store_factory),
+                Arc::clone(&connection_registry),
+            )),
+        );
         router.register(
             service_names::MESSAGING,
             Arc::new(MessagingService::new(Arc::clone(&connection_registry))),
@@ -299,7 +308,12 @@ mod integration_tests {
             Arc::clone(&record_store_factory),
             connection_registry_for_sync,
         ));
-        registry.register(QueryService);
+        let query_registry = Arc::new(QueryRegistry::new());
+        registry.register(QueryService::new(
+            query_registry,
+            Arc::clone(&record_store_factory),
+            Arc::new(ConnectionRegistry::new()),
+        ));
         registry.register(MessagingService::new(Arc::clone(&connection_registry)));
         registry.register(CoordinationService::new(cluster_state, connection_registry));
         registry.register(SearchService);
