@@ -540,7 +540,6 @@ mod tests {
     use crate::storage::datastores::NullDataStore;
     use crate::storage::impls::StorageConfig;
     use crate::storage::record::{Record, RecordMetadata, RecordValue};
-    use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
     use crate::storage::RecordStoreFactory;
 
     fn make_timestamp() -> Timestamp {
@@ -764,7 +763,7 @@ mod tests {
                     _ => panic!("expected QueryUpdate message"),
                 }
             }
-            _ => panic!("expected Binary message"),
+            OutboundMessage::Close(_) => panic!("expected Binary message"),
         }
 
         // Key should now be in previous_result_keys
@@ -825,7 +824,7 @@ mod tests {
                     _ => panic!("expected QueryUpdate"),
                 }
             }
-            _ => panic!("expected Binary"),
+            OutboundMessage::Close(_) => panic!("expected Binary"),
         }
     }
 
@@ -879,7 +878,7 @@ mod tests {
                     _ => panic!("expected QueryUpdate"),
                 }
             }
-            _ => panic!("expected Binary"),
+            OutboundMessage::Close(_) => panic!("expected Binary"),
         }
 
         // Key should have been removed from previous_result_keys
@@ -926,7 +925,7 @@ mod tests {
                     _ => panic!("expected QueryUpdate"),
                 }
             }
-            _ => panic!("expected Binary"),
+            OutboundMessage::Close(_) => panic!("expected Binary"),
         }
     }
 
@@ -973,7 +972,7 @@ mod tests {
                         _ => panic!("expected QueryUpdate"),
                     }
                 }
-                _ => panic!("expected Binary"),
+                OutboundMessage::Close(_) => panic!("expected Binary"),
             }
         }
         assert_eq!(leave_count, 2);
@@ -1106,17 +1105,16 @@ mod tests {
         assert_eq!(registry.subscription_count(), 1);
     }
 
-    /// AC1: QuerySubscribe returns QUERY_RESP with initial matching results.
+    /// AC1: `QuerySubscribe` returns `QUERY_RESP` with initial matching results.
     ///
-    /// Since RecordStoreFactory::create() returns independent stores per call
-    /// (each with its own HashMapStorage), this test verifies the subscribe
+    /// Since `RecordStoreFactory::create()` returns independent stores per call
+    /// (each with its own `HashMapStorage`), this test verifies the subscribe
     /// handler by putting data into the factory-created store and then testing
-    /// execute_query directly. The end-to-end integration with a shared backing
+    /// `execute_query` directly. The end-to-end integration with a shared backing
     /// store is tested at a higher integration level.
     #[test]
     fn query_subscribe_execute_query_returns_matching_results() {
         use super::super::predicate::execute_query;
-        use std::collections::HashMap;
 
         // Simulate entries as (key, rmpv::Value) that would come from for_each_boxed
         let entries = vec![

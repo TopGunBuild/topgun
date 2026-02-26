@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn value_to_rmpv_float() {
-        assert_eq!(value_to_rmpv(&Value::Float(3.14)), rmpv::Value::F64(3.14));
+        assert_eq!(value_to_rmpv(&Value::Float(2.72)), rmpv::Value::F64(2.72));
     }
 
     #[test]
