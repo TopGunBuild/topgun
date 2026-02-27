@@ -8,6 +8,10 @@ description = "TopGun server: axum, tokio, clustering, storage"
 [lints]
 workspace = true
 
+[features]
+default = []
+postgres = ["dep:sqlx"]
+
 [dependencies]
 topgun-core = { path = "../core-rust" }
 async-trait = "0.1"
@@ -31,6 +35,7 @@ uuid = { version = "1", features = ["v4"] }
 bytes = "1"
 http = "1"
 rand = "0.9"
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util", "time"] }
