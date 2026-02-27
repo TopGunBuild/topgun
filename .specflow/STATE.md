@@ -13,6 +13,7 @@
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
+| (empty) | | | | |
 
 ## Migration Roadmap (high-level)
 
@@ -44,6 +45,7 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-27 | SPEC-066 | COMPLETED: PersistenceService (Counters, Journal, Resolver/EntryProcess Stubs) — sixth real domain service replacing domain_stub! macro. 3 files created, 2 modified, 2 commits, 3 audit cycles, 1 review cycle. All 22 ACs implemented. CounterRegistry (counter.rs) + JournalStore (journal.rs) + PersistenceService (persistence.rs). 446 total tests (27 new, 0 failures), clippy clean. APPROVED by impl-reviewer v1. |
 | 2026-02-26 | SPEC-065 | COMPLETED: QueryService (Live Query Subscriptions) — fifth real domain service replacing domain_stub! macro. 2 files created, 2 modified, 2 commits, 3 audit cycles, 2 review cycles + 1 fix cycle. All 16 ACs implemented. PredicateEngine (predicate.rs) + QueryRegistry/QueryMutationObserver/QueryService (query.rs). 60 new tests (419 total, 0 failures), clippy clean for spec files. APPROVED by impl-reviewer v2. |
 | 2026-02-25 | SPEC-064 | COMPLETED: MessagingService (Topic Pub/Sub) — fourth real domain service replacing domain_stub! macro. 1 file created, 2 modified, 1 commit, 3 audit cycles, 1 review cycle. All 12 ACs implemented. 360 total tests (0 failures), clippy clean. APPROVED by impl-reviewer v1. |
 | 2026-02-25 | SPEC-063 | COMPLETED: SyncService (Merkle Delta Sync Protocol) — third real domain service replacing domain_stub! macro. 2 files created, 4 modified, 5 commits, 3 audit cycles, 2 review cycles + 1 fix cycle. All 14 ACs implemented. 341 total tests (0 failures), clippy clean. APPROVED by impl-reviewer v2. |
@@ -86,4 +88,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-26 (SPEC-065 completed and archived)*
+*Last updated: 2026-02-27 (SPEC-066 completed and archived)*

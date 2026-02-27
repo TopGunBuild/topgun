@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-02-25
+**Last updated:** 2026-02-27
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture, not a TypeScript port
 **Product positioning:** "The reactive data grid that extends the cluster into the browser" ([PRODUCT_POSITIONING_RESEARCH.md](../reference/PRODUCT_POSITIONING_RESEARCH.md))
 
@@ -44,6 +44,7 @@ Each Rust spec should reference up to THREE sources:
 | TODO-090 PostgreSQL | `server/src/storage/PostgreSQLAdapter.ts` | `map/impl/mapstore/` (write-through) | sqlx PgPool |
 | TODO-091 DataFusion SQL | — | `sql/` (Calcite — conceptual) | **Arroyo**: `target_partitions=1` + shuffle; **ArkFlow**: SessionContext |
 | TODO-092 Connectors | — | — | **Arroyo**: connector traits, SourceOperator/ArrowOperator; **ArkFlow**: Input/Output/Codec |
+| TODO-093 Admin Dashboard | `apps/admin-dashboard/` | Management Center (commercial) | **Arroyo**: OpenAPI codegen, ReactFlow+Dagre DAG viz, SWR data fetching, live metric coloring |
 
 **Not relevant from Hazelcast:** `cp/` (Raft), `transaction/`, `wan/`, `cache/` (JCache), Spring modules. *(Note: `sql/` (Calcite) — conceptually relevant for distributed SQL planning, but TopGun uses DataFusion instead of Calcite.)*
 
@@ -315,10 +316,9 @@ Each Rust spec should reference up to THREE sources:
 - **Status:** Complete (SPEC-064 completed 2026-02-25, 360 tests, clippy clean)
 - **Summary:** Topic pub/sub: TopicSubscribe/Unsubscribe, TopicPublish fan-out via ConnectionRegistry, topic lifecycle auto-cleanup. Fourth domain service replacing stub.
 
-### TODO-088: QueryService (Live Queries)
-- **Priority:** P1 (reactive UI)
-- **Complexity:** Medium-Large
-- **Summary:** Live query subscriptions. Client subscribes to a query, server evaluates it against current data, then pushes incremental updates as data changes. Critical for reactive UI patterns.
+### TODO-088: QueryService (Live Queries) → SPEC-065 — DONE
+- **Status:** Complete (SPEC-065 completed 2026-02-26)
+- **Summary:** Live query subscriptions. Client subscribes to a query, server evaluates it against current data, then pushes incremental updates as data changes. Fifth domain service replacing stub.
 - **Scope:**
   - `QuerySubscribe` → evaluate query, return initial results, register standing query
   - `QueryUnsubscribe` → remove standing query
@@ -415,6 +415,44 @@ Each Rust spec should reference up to THREE sources:
 - **Summary:** `hash_entry()` uses unsorted `serde_json::to_string()` — breaks cross-language Merkle sync
 - **Depends on:** TODO-061 ✅
 - **Effort:** 0.5 day
+
+### TODO-093: Admin Dashboard — NEW
+- **Priority:** P1 (v1.0 deliverable — product differentiator vs Hazelcast Management Center)
+- **Complexity:** Medium (foundation exists, needs Rust server adaptation)
+- **Summary:** Adapt existing React admin dashboard (`apps/admin-dashboard/`) to work with Rust server. Phased: v1.0 foundation → v2.0 data platform features → v3.0 enterprise views.
+- **Existing state:** ~85% functional React 19 + Vite app with: cluster topology (SVG partition ring), data explorer (CRUD + Monaco JSON editor), query playground, settings management, JWT auth, command palette (Cmd+K), dark mode.
+- **Scope (v1.0 — Rust Server Adaptation):**
+  - Rust admin API: expose OpenAPI spec via `utoipa` crate on axum endpoints
+  - OpenAPI codegen: `openapi-typescript` generates type-safe API client (zero manual type sync)
+  - Admin API endpoints on Rust server:
+    - `GET /api/admin/cluster/status` — cluster topology, node health
+    - `GET /api/admin/maps` — list maps, entry counts, replication info
+    - `GET/PUT /api/admin/settings` — server configuration
+    - `POST /api/setup` — initial bootstrap wizard
+    - `POST /api/setup/test-connection` — database connection testing
+  - System maps: `$sys/stats`, `$sys/cluster`, `$sys/maps` — live data via TopGun client
+  - SWR migration: replace manual fetch+useState with SWR for live metrics (`refreshInterval: 1000ms`)
+  - Verify all existing pages work against Rust server
+- **Scope (v2.0 — Data Platform Features):**
+  - **Pipeline visualization:** ReactFlow + Dagre for DAG stream processing graphs
+  - **Live metric coloring:** node/partition coloring by backpressure/load thresholds (Arroyo pattern)
+  - **SQL playground upgrade:** DataFusion query validation in real-time (POST `/validate_query`)
+  - **Connector wizard:** multi-step creation flow (choose → configure → test → schema → confirm)
+  - **Schema browser:** view registered schemas, validation status
+- **Scope (v3.0 — Enterprise Features):**
+  - **Multi-tenant admin:** tenant list, per-tenant quotas/usage, tenant isolation controls
+  - **Tiered storage monitor:** hot/warm/cold distribution visualization, migration status
+  - **Vector search admin:** index status, embedding model config
+- **Existing source:** `apps/admin-dashboard/`
+- **Rust Reference:** **Arroyo** WebUI (`/Users/koristuvac/Projects/rust/arroyo/webui/`):
+  - OpenAPI codegen: `openapi-typescript` CLI → `/gen/api-types.ts` → type-safe `openapi-fetch`
+  - SWR: keyed fetchers with `refreshInterval`, `useSWRInfinite` for pagination
+  - ReactFlow + Dagre: auto-layout DAG, click-to-detail sidebar, backpressure coloring
+  - SSE streaming: `text/event-stream` for live connection testing
+  - Multi-step wizard: ConnectionProfile creation (5 steps)
+- **HC Reference:** Hazelcast Management Center (commercial) — conceptual feature parity
+- **Depends on:** TODO-064 ✅ (Network — axum endpoints), TODO-090 (admin needs working storage for system maps)
+- **Effort:** v1.0: 1-2 weeks · v2.0: 2-3 weeks · v3.0: 1-2 weeks
 
 ### TODO-068: Integration Test Suite
 - **Priority:** P0 (gates v1.0 release)
@@ -615,10 +653,11 @@ Items within the same wave can run in parallel. Each wave starts when its blocke
 | **1-4** | Phases 0-2.5, Phase 3 framework | — | ✅ All complete |
 | **5a** | ~~TODO-084~~ ✅ (Coordination) | 065+066 | Done |
 | **5b** | ~~TODO-085~~ ✅ (CRDT) · ~~TODO-087~~ ✅ (Messaging) | 084 · 084 | Done |
-| **5c** | ~~TODO-086~~ ✅ (Sync) · TODO-088 (Query) · TODO-089 (Persistence) | 085 · 085 · 085 | 086 done |
+| **5c** | ~~TODO-086~~ ✅ (Sync) · ~~TODO-088~~ ✅ (Query) · TODO-089 (Persistence) | 085 · 085 · 085 | 086+088 done |
 | **5d** | TODO-090 (PostgreSQL) · TODO-071 (Search) | 067 · — | Parallel |
 | **5e** | TODO-074 (HLC fix) · TODO-075 (ORMap hash fix) | — · — | Trivial, parallel |
-| **5f** | TODO-068 (Integration Tests) | 084+ incremental | Gates v1.0 release |
+| **5f** | TODO-093 (Admin Dashboard v1.0) | 064 · 090 | Parallel with 068 |
+| **5g** | TODO-068 (Integration Tests) | 084+ incremental | Gates v1.0 release |
 
 ### Milestone 2 — v2.0 (Data Platform)
 
@@ -628,6 +667,7 @@ Items within the same wave can run in parallel. Each wave starts when its blocke
 | **6b** | TODO-070 (Shapes) · TODO-025 (DAG Executor) | 069 · 091 |
 | **6c** | TODO-092 (Connectors) · TODO-033 (Write-Behind) · TODO-036 (Extensions) | 025 · 090 · — |
 | **6d** | TODO-072 (WASM) · TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt) | 091+071 · — · — · 075 |
+| **6e** | TODO-093 v2.0 (Pipeline viz, SQL playground, connector wizard) | 025+091+092 |
 
 ### Milestone 3 — v3.0+ (Enterprise)
 
@@ -636,8 +676,9 @@ Items within the same wave can run in parallel. Each wave starts when its blocke
 | **7a** | TODO-041 (Multi-Tenancy) · TODO-043 (S3 Bottomless) | — · 033 |
 | **7b** | TODO-040 (Tiered Storage) · TODO-039 (Vector Search) | 043 · — |
 | **7c** | TODO-044 (Bi-Temporal) | 043 |
+| **7d** | TODO-093 v3.0 (Tenant admin, tiered storage monitor) | 041+040 |
 
-**Current position:** Wave 5c — TODO-088 (QueryService) + TODO-089 (PersistenceService) next. 4 of 7 domain services done. v1.0 critical path: 088/089 → 090/071 → 074/075 → 068.
+**Current position:** Wave 5c — TODO-089 (PersistenceService) next. 5 of 7 domain services done. v1.0 critical path: 089 → 090/071 → 074/075 → 093/068.
 
 ---
 
@@ -659,7 +700,7 @@ Phase 3b (Domain Services):
        │
        ├──→ TODO-085 ✅ (CRDT) ──→ TODO-086 ✅ (Sync)
        │         │
-       │         ├──→ TODO-088 (Query, PredicateEngine L1-L3)
+       │         ├──→ TODO-088 ✅ (Query, PredicateEngine L1-L3)
        │         └──→ TODO-089 (Persistence, Counters)
        │
        └──→ TODO-087 ✅ (Messaging)
@@ -667,6 +708,7 @@ Phase 3b (Domain Services):
   TODO-090 (PostgreSQL adapter) ← parallel, depends on 067 only
   TODO-071 (Tantivy Search) ← parallel, no deps
   TODO-074 · TODO-075 (bug fixes) ← parallel, trivial
+  TODO-093 v1.0 (Admin Dashboard — Rust API, OpenAPI codegen, SWR) ← depends on 064+090
 
   TODO-068 (Integration Tests) ← gates v1.0, incremental from 084+
 
@@ -683,6 +725,7 @@ MILESTONE 2: Data Platform (v2.0)
   TODO-033 (Write-Behind) ← depends on 090
   TODO-036 (Extensions)
   TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt)
+  TODO-093 v2.0 (Pipeline viz, SQL playground, connector wizard) ← depends on 025+091+092
 
 ═══════════════════════════════════════════════════════════════
 MILESTONE 3: Enterprise (v3.0+)
@@ -691,6 +734,7 @@ MILESTONE 3: Enterprise (v3.0+)
   TODO-041 (Multi-Tenancy)
   TODO-043 (S3 Bottomless) ──→ TODO-040 (Tiered) ──→ TODO-044 (Time-Travel)
   TODO-039 (Vector Search)
+  TODO-093 v3.0 (Tenant admin, tiered storage monitor) ← depends on 041+040
 ```
 
 ---
@@ -699,9 +743,9 @@ MILESTONE 3: Enterprise (v3.0+)
 
 | Milestone | Remaining Items | Effort | Status |
 |-----------|----------------|--------|--------|
-| **v1.0 Working IMDG** | 087, 088, 089, 090, 071, 074, 075, 068 | ~6-8 weeks | **In progress** (3/7 services done) |
-| **v2.0 Data Platform** | 069, 070, 091, 025, 092, 033, 036, 072, 048, 049, 076 | ~12-16 weeks | After v1.0 |
-| **v3.0 Enterprise** | 041, 043, 040, 039, 044 | ~16-24 weeks | After v2.0 |
+| **v1.0 Working IMDG** | 089, 090, 071, 074, 075, 093 v1.0, 068 | ~6-8 weeks | **In progress** (5/7 services done) |
+| **v2.0 Data Platform** | 069, 070, 091, 025, 092, 033, 036, 072, 048, 049, 076, 093 v2.0 | ~14-18 weeks | After v1.0 |
+| **v3.0 Enterprise** | 041, 043, 040, 039, 044, 093 v3.0 | ~18-26 weeks | After v2.0 |
 
 ## Eliminated Items
 
@@ -726,6 +770,7 @@ MILESTONE 3: Enterprise (v3.0+)
 | TODO-085 → SPEC-062 | CrdtService: LWW/OR-Map write path, ClientOp/OpBatch, ServerEvent broadcast | 2026-02-25 |
 | TODO-086 → SPEC-063 | SyncService: Merkle delta sync, MerkleSyncManager, MutationObserver integration | 2026-02-25 |
 | TODO-087 → SPEC-064 | MessagingService: Topic pub/sub, fan-out broadcast, topic lifecycle | 2026-02-25 |
+| TODO-088 → SPEC-065 | QueryService: Live queries, PredicateEngine, standing query re-evaluation | 2026-02-26 |
 
 ### Phase 2 Rust Items
 
@@ -775,6 +820,7 @@ All items below are completed and archived in `.specflow/archive/`:
 | TODO-090 | TS ref: `packages/server/src/storage/PostgreSQLAdapter.ts` |
 | TODO-091 | Arroyo: `arroyo-planner/builder.rs`, `arroyo-datastream/logical.rs`; ArkFlow: `arkflow-plugin/src/processor/sql.rs` |
 | TODO-092 | Arroyo: `arroyo-connector/src/`; ArkFlow: `arkflow-core/src/input/`, `arkflow-core/src/codec/` |
+| TODO-093 | Existing: `apps/admin-dashboard/`; Arroyo WebUI: `/Users/koristuvac/Projects/rust/arroyo/webui/` (OpenAPI codegen, ReactFlow+Dagre, SWR, live metric coloring) |
 
 ---
 
@@ -786,3 +832,5 @@ All items below are completed and archived in `.specflow/archive/`:
 *Updated 2026-02-22: Marked TODO-064, TODO-067, TODO-065 as DONE. Waves 3-4 progress: 064 (SPEC-057a-c), 067 (SPEC-058a-c), 065 (SPEC-059) all archived.*
 *Updated 2026-02-24: Marked TODO-066 as DONE (SPEC-060a-e all archived, 288 server tests). Phase 3 FRAMEWORK complete. Added Phase 3b (Domain Service Implementations): TODO-084 (Coordination), TODO-085 (CRDT), TODO-086 (Sync), TODO-087 (Messaging), TODO-088 (Query), TODO-089 (Persistence). Updated TODO-068 to incremental approach starting from TODO-084. Execution order: 084 → 085 → 086/087/088/089 (parallel) → 068 (incremental throughout).*
 *Updated 2026-02-25: Major restructuring — milestone-driven roadmap. Replaced Phase 4/5 with Milestone 1 (v1.0 Working IMDG), Milestone 2 (v2.0 Data Platform), Milestone 3 (v3.0+ Enterprise). Added TODO-090 (PostgreSQL MapDataStore), TODO-091 (DataFusion SQL), TODO-092 (Connector Framework). Marked TODO-063, TODO-086 as DONE. Moved TODO-048/049/076 from Phase 4 to Milestone 2 (v2.0). Added Arroyo + ArkFlow to Triple Reference Protocol. Updated dependency graph, execution order, timeline. Product vision: TopGun = Hazelcast (IMDG) + DataFusion (SQL) + Arroyo-informed streaming + offline-first clients.*
+*Updated 2026-02-27: Marked TODO-088 as DONE (SPEC-065 completed, 419 server tests). 5 of 7 domain services complete. Created PRODUCT_CAPABILITIES.md — end-product capabilities document covering v1.0/v2.0/v3.0 feature sets, competitive comparison, positioning.*
+*Updated 2026-02-27: Added TODO-093 (Admin Dashboard) — phased across v1.0/v2.0/v3.0. v1.0: Rust admin API (utoipa OpenAPI), OpenAPI codegen, SWR migration. v2.0: ReactFlow+Dagre pipeline viz, DataFusion SQL playground, connector wizard. v3.0: multi-tenant admin, tiered storage monitor. Reference: Arroyo WebUI patterns. Updated execution order (waves 5f, 6e, 7d), dependency graph, timeline.*
