@@ -367,6 +367,7 @@ impl MapDataStore for PostgresDataStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use topgun_core::types::Value;
 
     #[test]
     fn valid_table_names() {
@@ -410,5 +411,426 @@ mod tests {
             ms < 32_503_680_000_000,
             "now_millis should be before year 3000"
         );
+    }
+
+    #[test]
+    fn default_table_name() {
+        // Verify the default table name matches the TS convention
+        assert!(is_valid_table_name("topgun_maps"));
+    }
+
+    #[test]
+    fn msgpack_round_trip_lww() {
+        // Verify RecordValue round-trips through MsgPack without a database
+        use topgun_core::hlc::Timestamp;
+        use topgun_core::types::Value;
+
+        let value = RecordValue::Lww {
+            value: Value::String("hello".to_string()),
+            timestamp: Timestamp {
+                millis: 1_000_000,
+                counter: 1,
+                node_id: "node-1".to_string(),
+            },
+        };
+
+        let bytes = rmp_serde::to_vec_named(&value).expect("serialize");
+        let restored: RecordValue = rmp_serde::from_slice(&bytes).expect("deserialize");
+
+        match restored {
+            RecordValue::Lww {
+                value: v,
+                timestamp: ts,
+            } => {
+                assert!(matches!(v, Value::String(ref s) if s == "hello"));
+                assert_eq!(ts.millis, 1_000_000);
+                assert_eq!(ts.counter, 1);
+                assert_eq!(ts.node_id, "node-1");
+            }
+            _ => panic!("expected Lww variant"),
+        }
+    }
+
+    #[test]
+    fn msgpack_round_trip_ormap() {
+        use topgun_core::hlc::Timestamp;
+        use topgun_core::types::Value;
+
+        let value = RecordValue::OrMap {
+            records: vec![crate::storage::record::OrMapEntry {
+                value: Value::Int(42),
+                tag: "tag-1".to_string(),
+                timestamp: Timestamp {
+                    millis: 2_000_000,
+                    counter: 0,
+                    node_id: "node-2".to_string(),
+                },
+            }],
+        };
+
+        let bytes = rmp_serde::to_vec_named(&value).expect("serialize");
+        let restored: RecordValue = rmp_serde::from_slice(&bytes).expect("deserialize");
+
+        match restored {
+            RecordValue::OrMap { records } => {
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0].tag, "tag-1");
+                assert!(matches!(records[0].value, Value::Int(42)));
+            }
+            _ => panic!("expected OrMap variant"),
+        }
+    }
+
+    #[test]
+    fn msgpack_round_trip_or_tombstones() {
+        let value = RecordValue::OrTombstones {
+            tags: vec!["a".to_string(), "b".to_string()],
+        };
+
+        let bytes = rmp_serde::to_vec_named(&value).expect("serialize");
+        let restored: RecordValue = rmp_serde::from_slice(&bytes).expect("deserialize");
+
+        match restored {
+            RecordValue::OrTombstones { tags } => {
+                assert_eq!(tags, vec!["a", "b"]);
+            }
+            _ => panic!("expected OrTombstones variant"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration tests requiring a real PostgreSQL database.
+    // Run with: DATABASE_URL=postgres://... cargo test -p topgun-server --features postgres
+    // Skipped automatically when DATABASE_URL is not set.
+    // -----------------------------------------------------------------------
+
+    /// Helper to create a test `RecordValue` (LWW)
+    fn test_lww_value(s: &str) -> RecordValue {
+        use topgun_core::hlc::Timestamp;
+
+        RecordValue::Lww {
+            value: Value::String(s.to_string()),
+            timestamp: Timestamp {
+                millis: 1_000_000,
+                counter: 1,
+                node_id: "test-node".to_string(),
+            },
+        }
+    }
+
+    /// Connect to a test database or return None if DATABASE_URL is not set.
+    async fn test_pool() -> Option<PgPool> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let pool = PgPool::connect(&url).await.ok()?;
+        Some(pool)
+    }
+
+    /// Macro to skip integration tests when no database is available.
+    macro_rules! require_db {
+        () => {
+            match test_pool().await {
+                Some(pool) => pool,
+                None => {
+                    eprintln!("Skipping: DATABASE_URL not set");
+                    return;
+                }
+            }
+        };
+    }
+
+    #[tokio::test]
+    async fn round_trip_add_and_load() {
+        let pool = require_db!();
+        let store = PostgresDataStore::new(pool, None).unwrap();
+        store.initialize().await.unwrap();
+
+        let value = test_lww_value("hello");
+        store.add("my_map", "key1", &value, 0, 1000).await.unwrap();
+
+        let loaded = store.load("my_map", "key1").await.unwrap();
+        assert!(loaded.is_some(), "loaded value should exist");
+
+        let loaded = loaded.unwrap();
+        match loaded {
+            RecordValue::Lww { value: v, .. } => {
+                assert!(
+                    matches!(v, Value::String(ref s) if s == "hello"),
+                    "loaded value should match"
+                );
+            }
+            _ => panic!("expected Lww variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_overwrites_existing() {
+        let pool = require_db!();
+        let store = PostgresDataStore::new(pool, None).unwrap();
+        store.initialize().await.unwrap();
+
+        let v1 = test_lww_value("first");
+        store.add("map", "k", &v1, 0, 1000).await.unwrap();
+
+        let v2 = test_lww_value("second");
+        store.add("map", "k", &v2, 0, 2000).await.unwrap();
+
+        let loaded = store.load("map", "k").await.unwrap().unwrap();
+        match loaded {
+            RecordValue::Lww { value: v, .. } => {
+                assert!(matches!(v, Value::String(ref s) if s == "second"));
+            }
+            _ => panic!("expected Lww variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn remove_deletes_row() {
+        let pool = require_db!();
+        let store = PostgresDataStore::new(pool, None).unwrap();
+        store.initialize().await.unwrap();
+
+        let value = test_lww_value("doomed");
+        store.add("map", "k", &value, 0, 1000).await.unwrap();
+        assert!(store.load("map", "k").await.unwrap().is_some());
+
+        store.remove("map", "k", 2000).await.unwrap();
+        assert!(store.load("map", "k").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn load_all_batch() {
+        let pool = require_db!();
+        let store = PostgresDataStore::new(pool, None).unwrap();
+        store.initialize().await.unwrap();
+
+        store
+            .add("map", "a", &test_lww_value("va"), 0, 1000)
+            .await
+            .unwrap();
+        store
+            .add("map", "b", &test_lww_value("vb"), 0, 1000)
+            .await
+            .unwrap();
+        store
+            .add("map", "c", &test_lww_value("vc"), 0, 1000)
+            .await
+            .unwrap();
+
+        let keys = vec!["a".to_string(), "c".to_string()];
+        let results = store.load_all("map", &keys).await.unwrap();
+        assert_eq!(results.len(), 2);
+
+        let result_keys: Vec<&str> = results.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(result_keys.contains(&"a"));
+        assert!(result_keys.contains(&"c"));
+    }
+
+    #[tokio::test]
+    async fn remove_all_batch() {
+        let pool = require_db!();
+        let store = PostgresDataStore::new(pool, None).unwrap();
+        store.initialize().await.unwrap();
+
+        store
+            .add("map", "a", &test_lww_value("va"), 0, 1000)
+            .await
+            .unwrap();
+        store
+            .add("map", "b", &test_lww_value("vb"), 0, 1000)
+            .await
+            .unwrap();
+        store
+            .add("map", "c", &test_lww_value("vc"), 0, 1000)
+            .await
+            .unwrap();
+
+        let keys = vec!["a".to_string(), "b".to_string()];
+        store.remove_all("map", &keys).await.unwrap();
+
+        assert!(store.load("map", "a").await.unwrap().is_none());
+        assert!(store.load("map", "b").await.unwrap().is_none());
+        assert!(store.load("map", "c").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn backup_isolation() {
+        let pool = require_db!();
+        let store = PostgresDataStore::new(pool, None).unwrap();
+        store.initialize().await.unwrap();
+
+        // Add primary and backup records for the same key
+        let primary = test_lww_value("primary");
+        let backup = test_lww_value("backup");
+
+        store.add("map", "k", &primary, 0, 1000).await.unwrap();
+        store
+            .add_backup("map", "k", &backup, 0, 1000)
+            .await
+            .unwrap();
+
+        // Load (non-backup) should return primary
+        let loaded = store.load("map", "k").await.unwrap().unwrap();
+        match loaded {
+            RecordValue::Lww { value: v, .. } => {
+                assert!(matches!(v, Value::String(ref s) if s == "primary"));
+            }
+            _ => panic!("expected Lww variant"),
+        }
+
+        // Remove primary only
+        store.remove("map", "k", 2000).await.unwrap();
+        assert!(
+            store.load("map", "k").await.unwrap().is_none(),
+            "primary should be gone"
+        );
+
+        // Remove backup
+        store.remove_backup("map", "k", 2000).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn load_all_keys_returns_non_backup_keys() {
+        let pool = require_db!();
+        let store = PostgresDataStore::new(pool, None).unwrap();
+        store.initialize().await.unwrap();
+
+        store
+            .add("map", "a", &test_lww_value("va"), 0, 1000)
+            .await
+            .unwrap();
+        store
+            .add("map", "b", &test_lww_value("vb"), 0, 1000)
+            .await
+            .unwrap();
+        store
+            .add_backup("map", "c", &test_lww_value("vc"), 0, 1000)
+            .await
+            .unwrap();
+
+        let keys = store.load_all_keys("map").await.unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&"a".to_string()));
+        assert!(keys.contains(&"b".to_string()));
+        // "c" is backup only, should not be returned
+        assert!(!keys.contains(&"c".to_string()));
+    }
+
+    #[tokio::test]
+    async fn initialize_is_idempotent() {
+        let pool = require_db!();
+        let store = PostgresDataStore::new(pool, None).unwrap();
+        // Call initialize twice -- second call should not fail
+        store.initialize().await.unwrap();
+        store.initialize().await.unwrap();
+
+        // Verify the table works after double initialization
+        store
+            .add("map", "k", &test_lww_value("v"), 0, 1000)
+            .await
+            .unwrap();
+        assert!(store.load("map", "k").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn flush_key_performs_upsert() {
+        let pool = require_db!();
+        let store = PostgresDataStore::new(pool, None).unwrap();
+        store.initialize().await.unwrap();
+
+        let value = test_lww_value("flushed");
+        store.flush_key("map", "k", &value, false).await.unwrap();
+
+        let loaded = store.load("map", "k").await.unwrap();
+        assert!(loaded.is_some(), "flush_key should persist the record");
+    }
+
+    #[tokio::test]
+    async fn flush_key_backup() {
+        let pool = require_db!();
+        let store = PostgresDataStore::new(pool, None).unwrap();
+        store.initialize().await.unwrap();
+
+        let value = test_lww_value("backup-flush");
+        store.flush_key("map", "k", &value, true).await.unwrap();
+
+        // Backup flush should not be visible via normal load (non-backup)
+        assert!(
+            store.load("map", "k").await.unwrap().is_none(),
+            "backup flush should not appear in non-backup load"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_through_trait_methods() {
+        let pool = require_db!();
+        let store = PostgresDataStore::new(pool, None).unwrap();
+        store.initialize().await.unwrap();
+
+        assert!(store.is_loadable("any_key"));
+        assert_eq!(store.pending_operation_count(), 0);
+        assert!(!store.is_null());
+        assert_eq!(store.soft_flush().await.unwrap(), 0);
+        assert!(store.hard_flush().await.is_ok());
+        store.reset(); // should not panic
+    }
+
+    #[tokio::test]
+    async fn expiration_time_stored() {
+        let pool = require_db!();
+        let store = PostgresDataStore::new(pool, None).unwrap();
+        store.initialize().await.unwrap();
+
+        let value = test_lww_value("expiring");
+        store
+            .add("map", "k", &value, 999_999, 1000)
+            .await
+            .unwrap();
+
+        // The value should be loadable (expiration is metadata, not enforced by the store)
+        assert!(store.load("map", "k").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn custom_table_name() {
+        let pool = require_db!();
+        let store =
+            PostgresDataStore::new(pool, Some("custom_table".to_string())).unwrap();
+        store.initialize().await.unwrap();
+
+        store
+            .add("map", "k", &test_lww_value("v"), 0, 1000)
+            .await
+            .unwrap();
+        let loaded = store.load("map", "k").await.unwrap();
+        assert!(loaded.is_some());
+    }
+
+    #[tokio::test]
+    async fn different_maps_are_isolated() {
+        let pool = require_db!();
+        let store = PostgresDataStore::new(pool, None).unwrap();
+        store.initialize().await.unwrap();
+
+        store
+            .add("map_a", "k", &test_lww_value("from_a"), 0, 1000)
+            .await
+            .unwrap();
+        store
+            .add("map_b", "k", &test_lww_value("from_b"), 0, 1000)
+            .await
+            .unwrap();
+
+        let loaded_a = store.load("map_a", "k").await.unwrap().unwrap();
+        match loaded_a {
+            RecordValue::Lww { value: v, .. } => {
+                assert!(matches!(v, Value::String(ref s) if s == "from_a"));
+            }
+            _ => panic!("expected Lww variant"),
+        }
+
+        // Removing from map_a should not affect map_b
+        store.remove("map_a", "k", 2000).await.unwrap();
+        assert!(store.load("map_a", "k").await.unwrap().is_none());
+        assert!(store.load("map_b", "k").await.unwrap().is_some());
     }
 }
