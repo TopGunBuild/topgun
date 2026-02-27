@@ -72,6 +72,10 @@ impl JournalStore {
     /// If the buffer is at capacity, the oldest event is evicted.
     ///
     /// Returns the assigned sequence number.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned.
     pub fn append(&self, mut event: JournalEventData) -> u64 {
         let seq = self.next_sequence.fetch_add(1, Ordering::Relaxed);
         event.sequence = seq.to_string();
@@ -105,6 +109,10 @@ impl JournalStore {
     ///
     /// Returns a tuple of `(events, has_more)` where `has_more` indicates
     /// whether additional events exist beyond the requested page.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned.
     #[must_use]
     pub fn read(
         &self,
@@ -139,5 +147,209 @@ impl JournalStore {
         let result = filtered.into_iter().take(limit_usize).collect();
 
         (result, has_more)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use topgun_core::Timestamp;
+
+    use super::*;
+
+    fn make_event(map_name: &str, key: &str, event_type: JournalEventType) -> JournalEventData {
+        JournalEventData {
+            sequence: String::new(), // will be set by append()
+            event_type,
+            map_name: map_name.to_string(),
+            key: key.to_string(),
+            value: None,
+            previous_value: None,
+            timestamp: Timestamp {
+                millis: 1_700_000_000_000,
+                counter: 0,
+                node_id: "test".to_string(),
+            },
+            node_id: "test".to_string(),
+            metadata: None,
+        }
+    }
+
+    // --- append ---
+
+    #[test]
+    fn append_assigns_monotonic_sequences() {
+        let store = JournalStore::new(100);
+        let s1 = store.append(make_event("m1", "k1", JournalEventType::PUT));
+        let s2 = store.append(make_event("m1", "k2", JournalEventType::UPDATE));
+        let s3 = store.append(make_event("m2", "k1", JournalEventType::DELETE));
+
+        assert_eq!(s1, 1);
+        assert_eq!(s2, 2);
+        assert_eq!(s3, 3);
+    }
+
+    #[test]
+    fn append_sets_sequence_string_on_event() {
+        let store = JournalStore::new(100);
+        store.append(make_event("m1", "k1", JournalEventType::PUT));
+
+        let (events, _) = store.read(1, 100, None);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].sequence, "1");
+    }
+
+    #[test]
+    fn append_evicts_oldest_when_at_capacity() {
+        let store = JournalStore::new(3);
+        store.append(make_event("m1", "k1", JournalEventType::PUT));
+        store.append(make_event("m1", "k2", JournalEventType::PUT));
+        store.append(make_event("m1", "k3", JournalEventType::PUT));
+        store.append(make_event("m1", "k4", JournalEventType::PUT)); // evicts seq 1
+
+        let (events, _) = store.read(1, 100, None);
+        // Only seq 2, 3, 4 remain; seq 1 evicted.
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].sequence, "2");
+        assert_eq!(events[2].sequence, "4");
+    }
+
+    // --- read ---
+
+    #[test]
+    fn read_from_sequence_filters_earlier_events() {
+        let store = JournalStore::new(100);
+        store.append(make_event("m1", "k1", JournalEventType::PUT));
+        store.append(make_event("m1", "k2", JournalEventType::PUT));
+        store.append(make_event("m1", "k3", JournalEventType::PUT));
+
+        let (events, has_more) = store.read(2, 100, None);
+        assert_eq!(events.len(), 2); // seq 2 and 3
+        assert!(!has_more);
+        assert_eq!(events[0].sequence, "2");
+    }
+
+    #[test]
+    fn read_with_limit_returns_has_more() {
+        let store = JournalStore::new(100);
+        store.append(make_event("m1", "k1", JournalEventType::PUT));
+        store.append(make_event("m1", "k2", JournalEventType::PUT));
+        store.append(make_event("m1", "k3", JournalEventType::PUT));
+
+        let (events, has_more) = store.read(1, 2, None);
+        assert_eq!(events.len(), 2);
+        assert!(has_more);
+    }
+
+    #[test]
+    fn read_with_map_name_filter() {
+        let store = JournalStore::new(100);
+        store.append(make_event("users", "k1", JournalEventType::PUT));
+        store.append(make_event("orders", "k1", JournalEventType::PUT));
+        store.append(make_event("users", "k2", JournalEventType::UPDATE));
+
+        let (events, _) = store.read(1, 100, Some("users"));
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|e| e.map_name == "users"));
+    }
+
+    #[test]
+    fn read_empty_store_returns_empty() {
+        let store = JournalStore::new(100);
+        let (events, has_more) = store.read(1, 100, None);
+        assert!(events.is_empty());
+        assert!(!has_more);
+    }
+
+    #[test]
+    fn read_from_beyond_last_sequence_returns_empty() {
+        let store = JournalStore::new(100);
+        store.append(make_event("m1", "k1", JournalEventType::PUT));
+
+        let (events, has_more) = store.read(999, 100, None);
+        assert!(events.is_empty());
+        assert!(!has_more);
+    }
+
+    // --- subscribe / unsubscribe ---
+
+    #[test]
+    fn subscribe_and_unsubscribe() {
+        let store = JournalStore::new(100);
+        let sub = JournalSubscription {
+            connection_id: ConnectionId(1),
+            map_name: Some("users".to_string()),
+            types: None,
+        };
+        store.subscribe("sub-1".to_string(), sub);
+
+        // Verify subscription exists.
+        assert!(store.subscriptions.contains_key("sub-1"));
+
+        store.unsubscribe("sub-1");
+        assert!(!store.subscriptions.contains_key("sub-1"));
+    }
+
+    #[test]
+    fn unsubscribe_nonexistent_is_no_op() {
+        let store = JournalStore::new(100);
+        // Should not panic.
+        store.unsubscribe("nonexistent");
+    }
+
+    #[test]
+    fn unsubscribe_by_connection_removes_all_for_that_connection() {
+        let store = JournalStore::new(100);
+        store.subscribe(
+            "sub-1".to_string(),
+            JournalSubscription {
+                connection_id: ConnectionId(1),
+                map_name: None,
+                types: None,
+            },
+        );
+        store.subscribe(
+            "sub-2".to_string(),
+            JournalSubscription {
+                connection_id: ConnectionId(1),
+                map_name: None,
+                types: None,
+            },
+        );
+        store.subscribe(
+            "sub-3".to_string(),
+            JournalSubscription {
+                connection_id: ConnectionId(2),
+                map_name: None,
+                types: None,
+            },
+        );
+
+        store.unsubscribe_by_connection(ConnectionId(1));
+
+        assert!(!store.subscriptions.contains_key("sub-1"));
+        assert!(!store.subscriptions.contains_key("sub-2"));
+        assert!(store.subscriptions.contains_key("sub-3"));
+    }
+
+    #[test]
+    fn subscribe_with_filters() {
+        let store = JournalStore::new(100);
+        let sub = JournalSubscription {
+            connection_id: ConnectionId(1),
+            map_name: Some("users".to_string()),
+            types: Some(vec![JournalEventType::PUT, JournalEventType::DELETE]),
+        };
+        store.subscribe("filtered-sub".to_string(), sub);
+
+        let entry = store.subscriptions.get("filtered-sub").unwrap();
+        assert_eq!(entry.map_name, Some("users".to_string()));
+        assert_eq!(
+            entry.types,
+            Some(vec![JournalEventType::PUT, JournalEventType::DELETE])
+        );
     }
 }

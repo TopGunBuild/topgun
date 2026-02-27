@@ -23,6 +23,8 @@ pub use query::QueryService;
 
 pub mod counter;
 pub mod journal;
+pub mod persistence;
+pub use persistence::PersistenceService;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -102,11 +104,6 @@ domain_stub!(
     SearchService, service_names::SEARCH
 );
 
-domain_stub!(
-    /// Persistence domain service (counters, entry processing, journal, resolvers).
-    PersistenceService, service_names::PERSISTENCE
-);
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -117,6 +114,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::network::connection::ConnectionRegistry;
     use crate::service::config::ServerConfig;
     use crate::service::operation::OperationContext;
     use crate::service::registry::ServiceRegistry;
@@ -149,26 +147,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persistence_service_returns_not_implemented() {
-        let svc = Arc::new(PersistenceService);
-        let resp = svc
+    async fn persistence_service_returns_wrong_service_for_non_persistence_ops() {
+        let conn_reg = Arc::new(ConnectionRegistry::new());
+        let svc = Arc::new(PersistenceService::new(conn_reg, "test-node".to_string()));
+        let err = svc
             .oneshot(make_op(service_names::PERSISTENCE))
             .await
-            .unwrap();
-        assert!(matches!(
-            resp,
-            OperationResponse::NotImplemented { service_name: "persistence", .. }
-        ));
+            .unwrap_err();
+        assert!(matches!(err, OperationError::WrongService));
     }
 
     #[tokio::test]
     async fn all_stubs_implement_managed_service() {
-        // CoordinationService, CrdtService, SyncService, MessagingService, and
-        // QueryService are excluded: they require constructor args and have
-        // dedicated registration tests in their own modules.
+        // CoordinationService, CrdtService, SyncService, MessagingService,
+        // QueryService, and PersistenceService are excluded: they require
+        // constructor args and have dedicated tests in their own modules.
         let registry = ServiceRegistry::new();
         registry.register(SearchService);
-        registry.register(PersistenceService);
 
         let ctx = ServiceContext {
             config: Arc::new(ServerConfig::default()),
@@ -178,6 +173,5 @@ mod tests {
 
         // Stub services accessible by name.
         assert!(registry.get_by_name("search").is_some());
-        assert!(registry.get_by_name("persistence").is_some());
     }
 }

@@ -111,10 +111,19 @@ mod integration_tests {
         );
         router.register(
             service_names::COORDINATION,
-            Arc::new(CoordinationService::new(cluster_state, connection_registry)),
+            Arc::new(CoordinationService::new(
+                cluster_state,
+                Arc::clone(&connection_registry),
+            )),
         );
         router.register(service_names::SEARCH, Arc::new(SearchService));
-        router.register(service_names::PERSISTENCE, Arc::new(PersistenceService));
+        router.register(
+            service_names::PERSISTENCE,
+            Arc::new(PersistenceService::new(
+                connection_registry,
+                "integration-test-node".to_string(),
+            )),
+        );
 
         (classify_svc, router, config)
     }
@@ -315,9 +324,15 @@ mod integration_tests {
             Arc::new(ConnectionRegistry::new()),
         ));
         registry.register(MessagingService::new(Arc::clone(&connection_registry)));
-        registry.register(CoordinationService::new(cluster_state, connection_registry));
+        registry.register(CoordinationService::new(
+            cluster_state,
+            Arc::clone(&connection_registry),
+        ));
         registry.register(SearchService);
-        registry.register(PersistenceService);
+        registry.register(PersistenceService::new(
+            connection_registry,
+            "test-node".to_string(),
+        ));
 
         let config = ServerConfig::default();
         let ctx = ServiceContext {
