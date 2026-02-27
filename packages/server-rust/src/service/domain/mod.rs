@@ -21,6 +21,9 @@ pub mod predicate;
 pub mod query;
 pub use query::QueryService;
 
+pub mod counter;
+pub mod journal;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
