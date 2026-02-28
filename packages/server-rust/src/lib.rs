@@ -39,6 +39,7 @@ mod integration_tests {
         CoordinationService, CrdtService, MessagingService, PersistenceService, QueryService,
         SearchService, SyncService,
     };
+    use crate::service::domain::search::SearchRegistry;
     use crate::service::domain::query::QueryRegistry;
     use crate::service::middleware::build_operation_pipeline;
     use crate::service::operation::{service_names, CallerOrigin, OperationResponse};
@@ -116,7 +117,15 @@ mod integration_tests {
                 Arc::clone(&connection_registry),
             )),
         );
-        router.register(service_names::SEARCH, Arc::new(SearchService));
+        router.register(
+            service_names::SEARCH,
+            Arc::new(SearchService::new(
+                Arc::new(SearchRegistry::new()),
+                Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
+                Arc::clone(&record_store_factory),
+                Arc::clone(&connection_registry),
+            )),
+        );
         router.register(
             service_names::PERSISTENCE,
             Arc::new(PersistenceService::new(
@@ -328,7 +337,12 @@ mod integration_tests {
             cluster_state,
             Arc::clone(&connection_registry),
         ));
-        registry.register(SearchService);
+        registry.register(SearchService::new(
+            Arc::new(SearchRegistry::new()),
+            Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
+            Arc::clone(&record_store_factory),
+            Arc::clone(&connection_registry),
+        ));
         registry.register(PersistenceService::new(
             connection_registry,
             "test-node".to_string(),
