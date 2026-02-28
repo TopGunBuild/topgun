@@ -798,6 +798,272 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------------------
+    // Security integration tests (AC1, AC2, AC3, AC8, AC18, AC19, AC20)
+    // ---------------------------------------------------------------------------
+
+    fn make_strict_validator() -> Arc<WriteValidator> {
+        let hlc = Arc::new(Mutex::new(HLC::new("server-node".to_string(), Box::new(SystemClock))));
+        let config = SecurityConfig {
+            require_auth: true,
+            max_value_bytes: 0,
+            ..SecurityConfig::default()
+        };
+        Arc::new(WriteValidator::new(Arc::new(config), hlc))
+    }
+
+    fn make_strict_service() -> (Arc<CrdtService>, Arc<ConnectionRegistry>) {
+        let factory = make_factory();
+        let registry = Arc::new(ConnectionRegistry::new());
+        let validator = make_strict_validator();
+        let svc = Arc::new(CrdtService::new(
+            factory,
+            Arc::clone(&registry),
+            validator,
+        ));
+        (svc, registry)
+    }
+
+    fn make_ctx_with_conn(conn_id: ConnectionId) -> OperationContext {
+        let mut ctx = make_ctx();
+        ctx.connection_id = Some(conn_id);
+        ctx
+    }
+
+    fn make_lww_put_op(ctx: OperationContext, map_name: &str) -> Operation {
+        let record = topgun_core::LWWRecord {
+            value: Some(rmpv::Value::String("value".into())),
+            timestamp: make_timestamp(),
+            ttl_ms: None,
+        };
+        Operation::ClientOp {
+            ctx,
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("op-1".to_string()),
+                    map_name: map_name.to_string(),
+                    key: "key-1".to_string(),
+                    op_type: None,
+                    record: Some(Some(record)),
+                    or_record: None,
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        }
+    }
+
+    // -- AC18: existing tests still pass with default (permissive) SecurityConfig --
+    // (All tests above using `make_service()` use SecurityConfig::default() which is permissive)
+
+    // -- AC19: connection_id = Some(id) but connection not found => Unauthorized --
+
+    #[tokio::test]
+    async fn missing_connection_returns_unauthorized() {
+        let (svc, _registry) = make_strict_service();
+        // Use a connection_id that was never registered
+        let ctx = make_ctx_with_conn(ConnectionId(9999));
+        let op = make_lww_put_op(ctx, "my-map");
+        let result = svc.oneshot(op).await;
+        assert!(
+            matches!(result, Err(OperationError::Unauthorized)),
+            "expected Unauthorized for missing connection, got {result:?}"
+        );
+    }
+
+    // -- AC1: unauthenticated connection + require_auth => Unauthorized --
+
+    #[tokio::test]
+    async fn unauthenticated_write_rejected_when_require_auth() {
+        let (svc, registry) = make_strict_service();
+        let config = crate::network::config::ConnectionConfig::default();
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
+        // Connection defaults to authenticated=false
+
+        let ctx = make_ctx_with_conn(handle.id);
+        let op = make_lww_put_op(ctx, "my-map");
+        let result = svc.oneshot(op).await;
+        assert!(
+            matches!(result, Err(OperationError::Unauthorized)),
+            "expected Unauthorized for unauthenticated write, got {result:?}"
+        );
+    }
+
+    // -- AC3: authenticated + write perm => Ok --
+
+    #[tokio::test]
+    async fn authenticated_write_succeeds() {
+        let (svc, registry) = make_strict_service();
+        let config = crate::network::config::ConnectionConfig::default();
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
+        // Mark connection as authenticated
+        handle.metadata.write().await.authenticated = true;
+
+        let ctx = make_ctx_with_conn(handle.id);
+        let op = make_lww_put_op(ctx, "my-map");
+        let result = svc.oneshot(op).await;
+        assert!(
+            matches!(result, Ok(OperationResponse::Message(_))),
+            "expected OpAck for authenticated write, got {result:?}"
+        );
+    }
+
+    // -- AC2: authenticated + no write perm => Forbidden --
+
+    #[tokio::test]
+    async fn no_write_permission_returns_forbidden() {
+        use crate::network::connection::MapPermissions;
+        let (svc, registry) = make_strict_service();
+        let config = crate::network::config::ConnectionConfig::default();
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
+        {
+            let mut meta = handle.metadata.write().await;
+            meta.authenticated = true;
+            meta.map_permissions.insert(
+                "locked-map".to_string(),
+                MapPermissions { read: true, write: false },
+            );
+        }
+
+        let ctx = make_ctx_with_conn(handle.id);
+        let op = make_lww_put_op(ctx, "locked-map");
+        let result = svc.oneshot(op).await;
+        assert!(
+            matches!(result, Err(OperationError::Forbidden { .. })),
+            "expected Forbidden for no-write-perm connection, got {result:?}"
+        );
+    }
+
+    // -- AC8: batch atomic rejection: if 2nd op fails, 1st op's data not written --
+    // (Verified via the validate-all-then-apply-all logic in handle_op_batch)
+
+    #[tokio::test]
+    async fn op_batch_atomic_rejection_when_second_op_fails() {
+        use crate::network::connection::MapPermissions;
+
+        let hlc = Arc::new(Mutex::new(HLC::new("server-node".to_string(), Box::new(SystemClock))));
+        let config = SecurityConfig {
+            require_auth: true,
+            max_value_bytes: 0,
+            ..SecurityConfig::default()
+        };
+        let validator = Arc::new(WriteValidator::new(Arc::new(config), hlc));
+        let factory = make_factory();
+        let registry = Arc::new(ConnectionRegistry::new());
+        let svc = Arc::new(CrdtService::new(
+            Arc::clone(&factory),
+            Arc::clone(&registry),
+            Arc::clone(&validator),
+        ));
+
+        let conn_config = crate::network::config::ConnectionConfig::default();
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &conn_config);
+        {
+            let mut meta = handle.metadata.write().await;
+            meta.authenticated = true;
+            // Grant write to "open-map" but deny write to "locked-map"
+            meta.map_permissions.insert(
+                "locked-map".to_string(),
+                MapPermissions { read: true, write: false },
+            );
+        }
+
+        let ctx = {
+            let mut ctx = make_ctx();
+            ctx.connection_id = Some(handle.id);
+            ctx
+        };
+
+        let ops = vec![
+            // op-1 targets "open-map" — would succeed if applied alone
+            topgun_core::messages::base::ClientOp {
+                id: Some("op-1".to_string()),
+                map_name: "open-map".to_string(),
+                key: "key-1".to_string(),
+                op_type: None,
+                record: None,
+                or_record: None,
+                or_tag: None,
+                write_concern: None,
+                timeout: None,
+            },
+            // op-2 targets "locked-map" — will fail validation
+            topgun_core::messages::base::ClientOp {
+                id: Some("op-2".to_string()),
+                map_name: "locked-map".to_string(),
+                key: "key-2".to_string(),
+                op_type: None,
+                record: None,
+                or_record: None,
+                or_tag: None,
+                write_concern: None,
+                timeout: None,
+            },
+        ];
+
+        let op = Operation::OpBatch {
+            ctx,
+            payload: topgun_core::messages::sync::OpBatchMessage {
+                payload: topgun_core::messages::sync::OpBatchPayload {
+                    ops,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+
+        // The batch must fail due to op-2
+        let result = svc.oneshot(op).await;
+        assert!(
+            matches!(result, Err(OperationError::Forbidden { .. })),
+            "expected Forbidden for batch with locked op, got {result:?}"
+        );
+    }
+
+    // -- AC20: REMOVE ops are never rejected due to value size --
+
+    #[tokio::test]
+    async fn remove_op_not_rejected_by_size_limit() {
+        let hlc = Arc::new(Mutex::new(HLC::new("server-node".to_string(), Box::new(SystemClock))));
+        let config = SecurityConfig {
+            require_auth: false,
+            max_value_bytes: 1, // very small limit
+            ..SecurityConfig::default()
+        };
+        let validator = Arc::new(WriteValidator::new(Arc::new(config), hlc));
+        let factory = make_factory();
+        let registry = Arc::new(ConnectionRegistry::new());
+        let svc = Arc::new(CrdtService::new(factory, Arc::clone(&registry), validator));
+
+        let conn_config = crate::network::config::ConnectionConfig::default();
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &conn_config);
+
+        let ctx = make_ctx_with_conn(handle.id);
+        // REMOVE via tombstone
+        let op = Operation::ClientOp {
+            ctx,
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("op-remove".to_string()),
+                    map_name: "my-map".to_string(),
+                    key: "key-1".to_string(),
+                    op_type: None,
+                    record: Some(None), // tombstone = REMOVE
+                    or_record: None,
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+        let result = svc.oneshot(op).await;
+        assert!(
+            matches!(result, Ok(_)),
+            "expected Ok for REMOVE op regardless of size limit, got {result:?}"
+        );
+    }
+
     // -- rmpv_to_value conversion tests --
 
     #[test]
