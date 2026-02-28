@@ -3,9 +3,6 @@ import { TopGunClient } from '@topgunbuild/client';
 import { IDBAdapter } from '@topgunbuild/adapters';
 import { TopGunProvider, useQuery, useMutation } from '@topgunbuild/react';
 
-// Generated with: jwt.sign({ sub: "user-1" }, "topgun-secret-dev")
-const VALID_DEV_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyLTEiLCJpYXQiOjE3NjM5MjYzNDJ9.CPJXaYYh0Otk-6gqxAtqiUkTaaoY4TtJ9zFgcPKEqZY";
-
 interface TodoItem {
   id: string;
   text: string;
@@ -16,12 +13,17 @@ interface TodoItem {
 // Initialize Client Singleton
 const adapter = new IDBAdapter();
 const tgClient = new TopGunClient({
-  serverUrl: 'ws://localhost:8080',
+  serverUrl: import.meta.env.VITE_TOPGUN_SERVER_URL || 'ws://localhost:8080',
   storage: adapter
 });
 
-// Set auth token immediately (in real app, after login)
-tgClient.setAuthToken(VALID_DEV_TOKEN);
+// Set auth token from environment (in real app, after login)
+const authToken = import.meta.env.VITE_TOPGUN_AUTH_TOKEN;
+if (authToken) {
+  tgClient.setAuthToken(authToken);
+} else {
+  console.warn('No VITE_TOPGUN_AUTH_TOKEN configured. Auth-protected operations will fail.');
+}
 
 export default function App() {
   const [isReady, setIsReady] = useState(false);
