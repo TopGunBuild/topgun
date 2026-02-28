@@ -335,26 +335,31 @@ impl CrdtService {
             // LWW PUT: record may be None (no-op put with no value) or Some(Some(rec))
             let lww_rec = op.record.as_ref().and_then(|o| o.as_ref());
 
-            if let Some(rec) = lww_rec {
+            let broadcast_rec = if let Some(rec) = lww_rec {
                 // Replace client timestamp with sanitized server timestamp if provided.
-                let record_value = if let Some(ts) = sanitized_ts {
+                let (record_value, stored_rec) = if let Some(ts) = sanitized_ts {
                     let mut sanitized_rec = rec.clone();
                     sanitized_rec.timestamp = ts.clone();
-                    lww_record_to_record_value(&sanitized_rec)
+                    let rv = lww_record_to_record_value(&sanitized_rec);
+                    (rv, sanitized_rec)
                 } else {
-                    lww_record_to_record_value(rec)
+                    (lww_record_to_record_value(rec), rec.clone())
                 };
                 store
                     .put(&op.key, record_value, ExpiryPolicy::NONE, CallerProvenance::CrdtMerge)
                     .await
                     .map_err(OperationError::Internal)?;
-            }
+                Some(stored_rec)
+            } else {
+                None
+            };
 
             Ok(ServerEventPayload {
                 map_name: op.map_name.clone(),
                 event_type: ServerEventType::PUT,
                 key: op.key.clone(),
-                record: op.record.as_ref().and_then(Option::clone),
+                // Broadcast the sanitized record (with server timestamp), not the original client record
+                record: broadcast_rec,
                 or_record: None,
                 or_tag: None,
             })
@@ -537,7 +542,7 @@ mod tests {
         assert_eq!(svc.name(), "crdt");
     }
 
-    // -- AC1: LWW PUT --
+    // -- LWW PUT --
 
     #[tokio::test]
     async fn lww_put_returns_op_ack() {
@@ -571,7 +576,7 @@ mod tests {
         );
     }
 
-    // -- AC2: LWW REMOVE (tombstone) --
+    // -- LWW REMOVE (tombstone) --
 
     #[tokio::test]
     async fn lww_remove_via_tombstone_returns_op_ack() {
@@ -600,7 +605,7 @@ mod tests {
         );
     }
 
-    // -- AC2: LWW REMOVE (op_type) --
+    // -- LWW REMOVE (op_type) --
 
     #[tokio::test]
     async fn lww_remove_via_op_type_returns_op_ack() {
@@ -629,7 +634,7 @@ mod tests {
         );
     }
 
-    // -- AC3: OR_ADD --
+    // -- OR_ADD --
 
     #[tokio::test]
     async fn or_add_returns_op_ack() {
@@ -664,7 +669,7 @@ mod tests {
         );
     }
 
-    // -- AC4: OR_REMOVE --
+    // -- OR_REMOVE --
 
     #[tokio::test]
     async fn or_remove_returns_op_ack() {
@@ -693,7 +698,7 @@ mod tests {
         );
     }
 
-    // -- AC5: OpBatch with multiple ops --
+    // -- OpBatch with multiple ops --
 
     #[tokio::test]
     async fn op_batch_processes_all_ops_and_returns_single_ack() {
@@ -757,7 +762,7 @@ mod tests {
         }
     }
 
-    // -- AC6: Wrong service returns WrongService error --
+    // -- Wrong service returns WrongService error --
 
     #[tokio::test]
     async fn wrong_service_returns_error() {
@@ -773,7 +778,7 @@ mod tests {
         );
     }
 
-    // -- AC9: OpBatch with empty ops returns Ack --
+    // -- OpBatch with empty ops returns Ack --
 
     #[tokio::test]
     async fn op_batch_empty_returns_ack() {
