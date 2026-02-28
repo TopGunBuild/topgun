@@ -15,6 +15,7 @@ pub mod middleware;
 pub mod operation;
 pub mod registry;
 pub mod router;
+pub mod security;
 pub mod worker;
 
 // Re-export key types for convenient access.
@@ -26,4 +27,5 @@ pub use operation::{
 };
 pub use registry::{ManagedService, ServiceContext, ServiceRegistry};
 pub use router::OperationRouter;
+pub use security::{SecurityConfig, WriteValidator};
 pub use worker::{BackgroundRunnable, BackgroundWorker};

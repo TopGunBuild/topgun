@@ -4,7 +4,7 @@
 //! lock-free concurrent connection tracking via `DashMap`, and
 //! metadata storage for authentication and subscription state.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,6 +14,32 @@ use tokio::sync::{mpsc, RwLock};
 use topgun_core::{Principal, Timestamp};
 
 use super::config::ConnectionConfig;
+
+// ---------------------------------------------------------------------------
+// MapPermissions
+// ---------------------------------------------------------------------------
+
+/// Per-map read/write access permissions for a connection.
+///
+/// Defined here (not in `service/security.rs`) to avoid a circular module
+/// dependency: `service` imports from `network`, so placing `MapPermissions`
+/// in `service` would require `network` to import from `service`, creating a cycle.
+/// As a plain data struct with no service logic, it belongs here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapPermissions {
+    /// Whether this connection may read from the map.
+    pub read: bool,
+    /// Whether this connection may write to the map.
+    pub write: bool,
+}
+
+impl Default for MapPermissions {
+    fn default() -> Self {
+        Self { read: true, write: true }
+    }
+}
 
 /// Unique identifier for a connection, assigned by the registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -109,7 +135,10 @@ impl ConnectionHandle {
 ///
 /// Protected by an `RwLock` to allow concurrent reads (e.g., broadcast
 /// filtering) while serializing writes (e.g., authentication updates).
-#[derive(Debug)]
+///
+/// Derives `Clone` so the write validator can snapshot metadata once and
+/// release the read guard before any async storage calls.
+#[derive(Debug, Clone)]
 pub struct ConnectionMetadata {
     /// Whether this connection has completed authentication.
     pub authenticated: bool,
@@ -125,6 +154,9 @@ pub struct ConnectionMetadata {
     pub last_hlc: Option<Timestamp>,
     /// For cluster peer connections, the remote node's ID.
     pub peer_node_id: Option<String>,
+    /// Per-map access permissions for this connection.
+    /// Maps not present here fall back to `SecurityConfig.default_permissions`.
+    pub map_permissions: HashMap<String, MapPermissions>,
 }
 
 impl Default for ConnectionMetadata {
@@ -137,6 +169,7 @@ impl Default for ConnectionMetadata {
             last_heartbeat: Instant::now(),
             last_hlc: None,
             peer_node_id: None,
+            map_permissions: HashMap::new(),
         }
     }
 }

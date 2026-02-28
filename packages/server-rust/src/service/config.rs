@@ -1,5 +1,7 @@
 use topgun_core::PARTITION_COUNT;
 
+use super::security::SecurityConfig;
+
 /// Server-level configuration for the operation routing framework.
 ///
 /// Controls operation timeouts, concurrency limits, and background task intervals.
@@ -16,6 +18,8 @@ pub struct ServerConfig {
     /// Number of partitions. Configurable for testing; defaults to
     /// `topgun_core::PARTITION_COUNT` (271) in production.
     pub partition_count: u32,
+    /// Security configuration for write validation.
+    pub security: SecurityConfig,
 }
 
 impl Default for ServerConfig {
@@ -26,6 +30,7 @@ impl Default for ServerConfig {
             max_concurrent_operations: 1000,
             gc_interval_ms: 60_000,
             partition_count: PARTITION_COUNT,
+            security: SecurityConfig::default(),
         }
     }
 }

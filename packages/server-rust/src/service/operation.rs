@@ -388,6 +388,12 @@ pub enum OperationError {
     WrongService,
     #[error("internal error: {0}")]
     Internal(#[from] anyhow::Error),
+    #[error("authentication required")]
+    Unauthorized,
+    #[error("write access denied for map: {map_name}")]
+    Forbidden { map_name: String },
+    #[error("value size {size} bytes exceeds maximum {max} bytes")]
+    ValueTooLarge { size: u64, max: u64 },
 }
 
 // ---------------------------------------------------------------------------
