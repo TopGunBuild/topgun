@@ -25,7 +25,7 @@ use crate::service::operation::{CallerOrigin, OperationContext, OperationError};
 /// Default is intentionally permissive (`require_auth: false`, unlimited size,
 /// default read+write permissions) to preserve backward compatibility for
 /// deployments without security configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecurityConfig {
@@ -38,16 +38,6 @@ pub struct SecurityConfig {
     pub max_value_bytes: u64,
     /// Default permissions for maps not explicitly configured per-connection.
     pub default_permissions: MapPermissions,
-}
-
-impl Default for SecurityConfig {
-    fn default() -> Self {
-        Self {
-            require_auth: false,
-            max_value_bytes: 0,
-            default_permissions: MapPermissions::default(),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -83,7 +73,7 @@ impl WriteValidator {
     /// - `ctx` — operation context, used for caller origin check
     /// - `metadata` — snapshot of the connection's metadata (auth state, map permissions)
     /// - `map_name` — target map for the write
-    /// - `value_size` — serialized byte length of the record payload; pass `0` for REMOVE/OR_REMOVE ops
+    /// - `value_size` — serialized byte length of the record payload; pass `0` for `REMOVE`/`OR_REMOVE` ops
     ///
     /// # Errors
     ///
@@ -135,6 +125,7 @@ impl WriteValidator {
     ///
     /// This timestamp replaces the client-provided timestamp in stored records,
     /// preventing clients from manipulating HLC values to win future LWW conflicts.
+    #[must_use]
     pub fn sanitize_hlc(&self) -> Timestamp {
         self.hlc.lock().now()
     }

@@ -235,7 +235,7 @@ impl CrdtService {
     /// to broadcast. Called by both `handle_client_op` and `handle_op_batch`.
     ///
     /// `sanitized_ts` — when `Some`, replaces client-provided timestamps in stored records.
-    /// When `None` (internal/test calls with no connection_id), the client timestamp is used as-is.
+    /// When `None` (internal/test calls with no `connection_id`), the client timestamp is used as-is.
     async fn apply_single_op(
         &self,
         op: &ClientOp,
@@ -381,7 +381,7 @@ impl CrdtService {
 /// Estimates the serialized byte length of the record payload in a `ClientOp`.
 ///
 /// Uses `rmp_serde::to_vec_named()` on the `record` or `or_record` field.
-/// For REMOVE and OR_REMOVE operations, returns 0 (removes are never rejected on size).
+/// For REMOVE and `OR_REMOVE` operations, returns 0 (removes are never rejected on size).
 /// If serialization fails, returns `u64::MAX` so the op is rejected by size check.
 fn estimate_value_size(op: &ClientOp) -> u64 {
     let is_remove = op.op_type.as_deref() == Some("REMOVE") || matches!(&op.record, Some(None));
