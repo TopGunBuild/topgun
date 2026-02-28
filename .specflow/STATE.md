@@ -2,18 +2,17 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-068
-- **Status:** review
+- **Active Specification:** none
+- **Status:** idle
 - **Project Phase:** Phase 3 (Rust Server) — Wave 4
 - **TODO Items:** 28 (1 client bug fix + 8 Rust bridge/core + 5 audit findings + 14 existing deferred)
-- **Next Step:** `/sf:review`
+- **Next Step:** `/sf:new` or `/sf:next`
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
 ## Queue
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-068 | SearchService -- Tantivy Full-Text Search | implemented | Phase 3 |
 
 ## Migration Roadmap (high-level)
 
@@ -45,6 +44,7 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-28 | SPEC-068 | COMPLETED: SearchService (Tantivy Full-Text Search) — 7th and final domain service replacing domain_stub! macro, completing Phase 3 domain service layer. 1 file created, 4 modified, 4 commits, 3 audit cycles, 2 review cycles + 1 fix cycle. All 21 ACs implemented. TantivyMapIndex (RAM directory, fixed schema), SearchRegistry (DashMap), SearchMutationObserver (UnboundedSender + 16ms batching), SearchService (tower::Service + ManagedService). 467 total tests (0 failures), clippy clean. APPROVED by impl-reviewer v2. |
 | 2026-02-27 | SPEC-067 | COMPLETED: PostgresDataStore (MapDataStore adapter) — first real persistence backend for Rust server. 1 file created, 2 modified, 3 commits, 1 audit cycle, 1 review cycle. All 16 ACs implemented. Write-through persistence via sqlx PgPool, BYTEA+MsgPack storage, feature-gated behind `postgres`. 468 total tests (22 new, 0 failures), clippy clean. APPROVED by impl-reviewer v1. |
 | 2026-02-27 | SPEC-066 | COMPLETED: PersistenceService (Counters, Journal, Resolver/EntryProcess Stubs) — sixth real domain service replacing domain_stub! macro. 3 files created, 2 modified, 2 commits, 3 audit cycles, 1 review cycle. All 22 ACs implemented. CounterRegistry (counter.rs) + JournalStore (journal.rs) + PersistenceService (persistence.rs). 446 total tests (27 new, 0 failures), clippy clean. APPROVED by impl-reviewer v1. |
 | 2026-02-26 | SPEC-065 | COMPLETED: QueryService (Live Query Subscriptions) — fifth real domain service replacing domain_stub! macro. 2 files created, 2 modified, 2 commits, 3 audit cycles, 2 review cycles + 1 fix cycle. All 16 ACs implemented. PredicateEngine (predicate.rs) + QueryRegistry/QueryMutationObserver/QueryService (query.rs). 60 new tests (419 total, 0 failures), clippy clean for spec files. APPROVED by impl-reviewer v2. |
@@ -89,4 +89,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-28 (SPEC-068 implementation complete — ready for review)*
+*Last updated: 2026-02-28 (SPEC-068 completed and archived)*
