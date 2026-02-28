@@ -89,7 +89,7 @@ export function PushNotificationToggle({ userId, darkMode, compact = false }: Pu
 
     if (state === 'denied') {
       return (
-        <div className={`p-2 ${theme.bg} rounded-lg cursor-not-allowed`} title="Уведомления заблокированы в браузере">
+        <div className={`p-2 ${theme.bg} rounded-lg cursor-not-allowed`} title="Notifications blocked in browser">
           <BellOff size={20} className="text-red-400" />
         </div>
       );
@@ -100,7 +100,7 @@ export function PushNotificationToggle({ userId, darkMode, compact = false }: Pu
         onClick={handleToggle}
         disabled={isProcessing}
         className={`p-2 ${state === 'subscribed' ? theme.bgActive : theme.bg} ${theme.hover} rounded-lg transition-colors`}
-        title={state === 'subscribed' ? 'Отключить уведомления' : 'Включить уведомления'}
+        title={state === 'subscribed' ? 'Disable notifications' : 'Enable notifications'}
       >
         {isProcessing ? (
           <Loader2 size={20} className="text-white animate-spin" />
@@ -118,7 +118,7 @@ export function PushNotificationToggle({ userId, darkMode, compact = false }: Pu
     return (
       <div className={`flex items-center gap-3 p-3 ${theme.bg} rounded-lg`}>
         <Loader2 size={20} className={`${theme.textSecondary} animate-spin`} />
-        <span className={`text-sm ${theme.textSecondary}`}>Загрузка...</span>
+        <span className={`text-sm ${theme.textSecondary}`}>Loading...</span>
       </div>
     );
   }
@@ -128,7 +128,7 @@ export function PushNotificationToggle({ userId, darkMode, compact = false }: Pu
       <div className={`flex items-center gap-3 p-3 ${theme.bg} rounded-lg`}>
         <BellOff size={20} className={theme.textSecondary} />
         <span className={`text-sm ${theme.textSecondary}`}>
-          Уведомления не поддерживаются
+          Notifications not supported
         </span>
       </div>
     );
@@ -139,9 +139,9 @@ export function PushNotificationToggle({ userId, darkMode, compact = false }: Pu
       <div className={`flex items-center gap-3 p-3 ${theme.bg} rounded-lg`}>
         <BellOff size={20} className="text-red-400" />
         <div className="flex flex-col">
-          <span className={`text-sm ${theme.text}`}>Уведомления заблокированы</span>
+          <span className={`text-sm ${theme.text}`}>Notifications blocked</span>
           <span className={`text-xs ${theme.textSecondary}`}>
-            Разрешите в настройках браузера
+            Allow in browser settings
           </span>
         </div>
       </div>
@@ -165,10 +165,10 @@ export function PushNotificationToggle({ userId, darkMode, compact = false }: Pu
       )}
       <div className="flex flex-col items-start">
         <span className={`text-sm font-medium ${state === 'subscribed' ? 'text-white' : theme.text}`}>
-          {state === 'subscribed' ? 'Уведомления включены' : 'Включить уведомления'}
+          {state === 'subscribed' ? 'Notifications enabled' : 'Enable notifications'}
         </span>
         <span className={`text-xs ${state === 'subscribed' ? 'text-blue-100' : theme.textSecondary}`}>
-          {state === 'subscribed' ? 'Нажмите, чтобы отключить' : 'Напоминания о заметках'}
+          {state === 'subscribed' ? 'Click to disable' : 'Note reminders'}
         </span>
       </div>
     </button>
