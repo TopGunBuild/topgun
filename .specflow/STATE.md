@@ -6,7 +6,7 @@
 - **Status:** idle
 - **Project Phase:** Phase 3 (Rust Server) — Wave 4
 - **TODO Items:** 28 (1 client bug fix + 8 Rust bridge/core + 5 audit findings + 14 existing deferred)
-- **Next Step:** `/sf:new` or `/sf:next`
+- **Next Step:** /sf:new or /sf:next
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
 ## Queue
@@ -44,14 +44,12 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-02-28 | SPEC-069 | COMPLETED: Replace BSL 1.1 License with Apache 2.0 — switched project license from BSL-1.1 to Apache-2.0. 13 files modified (LICENSE, NOTICE, Cargo.toml, root + 7 package.json files, CONTRIBUTING.md, mcp-server README), 3 commits, 2 audit cycles, 1 review cycle. All 7 ACs met. APPROVED by impl-reviewer v1. |
 | 2026-02-28 | SPEC-068 | COMPLETED: SearchService (Tantivy Full-Text Search) — 7th and final domain service replacing domain_stub! macro, completing Phase 3 domain service layer. 1 file created, 4 modified, 4 commits, 3 audit cycles, 2 review cycles + 1 fix cycle. All 21 ACs implemented. TantivyMapIndex (RAM directory, fixed schema), SearchRegistry (DashMap), SearchMutationObserver (UnboundedSender + 16ms batching), SearchService (tower::Service + ManagedService). 467 total tests (0 failures), clippy clean. APPROVED by impl-reviewer v2. |
 | 2026-02-27 | SPEC-067 | COMPLETED: PostgresDataStore (MapDataStore adapter) — first real persistence backend for Rust server. 1 file created, 2 modified, 3 commits, 1 audit cycle, 1 review cycle. All 16 ACs implemented. Write-through persistence via sqlx PgPool, BYTEA+MsgPack storage, feature-gated behind `postgres`. 468 total tests (22 new, 0 failures), clippy clean. APPROVED by impl-reviewer v1. |
 | 2026-02-27 | SPEC-066 | COMPLETED: PersistenceService (Counters, Journal, Resolver/EntryProcess Stubs) — sixth real domain service replacing domain_stub! macro. 3 files created, 2 modified, 2 commits, 3 audit cycles, 1 review cycle. All 22 ACs implemented. CounterRegistry (counter.rs) + JournalStore (journal.rs) + PersistenceService (persistence.rs). 446 total tests (27 new, 0 failures), clippy clean. APPROVED by impl-reviewer v1. |
 | 2026-02-26 | SPEC-065 | COMPLETED: QueryService (Live Query Subscriptions) — fifth real domain service replacing domain_stub! macro. 2 files created, 2 modified, 2 commits, 3 audit cycles, 2 review cycles + 1 fix cycle. All 16 ACs implemented. PredicateEngine (predicate.rs) + QueryRegistry/QueryMutationObserver/QueryService (query.rs). 60 new tests (419 total, 0 failures), clippy clean for spec files. APPROVED by impl-reviewer v2. |
 | 2026-02-25 | SPEC-064 | COMPLETED: MessagingService (Topic Pub/Sub) — fourth real domain service replacing domain_stub! macro. 1 file created, 2 modified, 1 commit, 3 audit cycles, 1 review cycle. All 12 ACs implemented. 360 total tests (0 failures), clippy clean. APPROVED by impl-reviewer v1. |
-| 2026-02-25 | SPEC-063 | COMPLETED: SyncService (Merkle Delta Sync Protocol) — third real domain service replacing domain_stub! macro. 2 files created, 4 modified, 5 commits, 3 audit cycles, 2 review cycles + 1 fix cycle. All 14 ACs implemented. 341 total tests (0 failures), clippy clean. APPROVED by impl-reviewer v2. |
-| 2026-02-24 | SPEC-062 | COMPLETED: CrdtService (LWW-Map and OR-Map Operations) — second real domain service replacing domain_stub! macro. 1 file created, 3 modified, 3 commits, 2 audit cycles, 1 review cycle. All 9 ACs implemented (LWW PUT/REMOVE, OR_ADD/OR_REMOVE, OpBatch, WrongService, ManagedService name, integration test, empty batch). rmpv added as direct dependency for wire value conversion. Clippy clean. |
-| 2026-02-24 | SPEC-061 | COMPLETED: CoordinationService (Ping/PartitionMap/Heartbeat) — first real domain service replacing domain_stub! macro. 1 file created, 4 modified, 4 commits, 4 audit cycles, 1 review cycle. 296 total tests (9 new), clippy clean for spec files. |
 
 ## Project Patterns
 
@@ -89,4 +87,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-28 (SPEC-068 completed and archived)*
+*Last updated: 2026-02-28 (SPEC-069 completed and archived)*

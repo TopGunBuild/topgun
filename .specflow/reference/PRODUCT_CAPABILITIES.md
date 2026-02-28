@@ -74,6 +74,77 @@ Developers and teams building high-performance, interactive, data-intensive appl
 | Collaborative rich text editing | Liveblocks, Yjs | Sequence CRDTs are a different domain |
 | Backend-as-a-service | Convex, Supabase | TopGun is self-hosted infrastructure |
 | P2P mesh without internet | Ditto | TopGun is server-mediated |
+| Edge-native serverless state | Cloudflare Durable Objects + D1 | Different trust model (vendor-hosted edge) |
+| Server-authoritative mutations (no CRDTs) | Replicache / Zero | Different trade-off: server authority (simpler security) vs CRDTs (automatic merge) |
+
+---
+
+## Adoption Path
+
+TopGun doesn't require replacing your existing stack. Three tiers of adoption, from lightweight to full platform:
+
+### Tier 1: Real-Time Layer (Recommended starting point)
+
+Add collaborative/real-time features to an existing application. Keep your current database and API.
+
+**Example:** A project management app keeps all data in Postgres. But the Kanban board state (card positions, assignments, comments) flows through TopGun for instant collaborative updates. The rest of the app (user management, billing, reports) stays on the existing Postgres + REST API stack.
+
+```typescript
+// Your existing Express app stays unchanged
+// TopGun handles ONLY the real-time collaborative features
+const topgun = new TopGunClient({ serverUrl: 'ws://localhost:8080' });
+const board = topgun.getMap('kanban-board-42');
+
+// Instant local writes + automatic sync to all connected clients
+board.set('card-7', { column: 'done', assignee: 'alice', updatedAt: Date.now() });
+```
+
+### Tier 2: Cache + Sync
+
+Use TopGun as an in-memory cache in front of an existing database. This is the Hazelcast use case.
+
+- `PostgresDataStore` loads data from your existing Postgres tables on startup
+- Reads come from in-memory (0ms)
+- Writes go through to Postgres (write-through)
+- TopGun adds CRDT sync, live queries, and offline support on top
+- **No schema migration required** — point at existing tables
+
+### Tier 3: Full Platform
+
+Greenfield applications or full platform replacement. TopGun is the primary data store, compute layer, and sync engine.
+
+| Tier | What you keep | What TopGun adds | Effort |
+|------|--------------|-----------------|--------|
+| **Tier 1** | Existing DB, API, auth | Real-time sync + offline for specific features | Hours |
+| **Tier 2** | Existing DB (Postgres) | In-memory cache, CRDT sync, live queries | Days |
+| **Tier 3** | Nothing | Everything: storage, compute, sync, search, streaming | Weeks |
+
+---
+
+## Security Model
+
+### Trust Boundary
+
+Clients are **untrusted**. The server is **authoritative**. "Client as Replica" is an architectural concept for data availability — it does not mean clients have unrestricted write access.
+
+### Security Pipeline
+
+Every write passes through the security pipeline before reaching CRDT merge:
+
+```
+Client write → Auth check → Map ACL check → HLC sanitization → CRDT merge → Persist
+```
+
+| Layer | What it does |
+|-------|-------------|
+| **Authentication** | JWT-based. Clients must authenticate before any operations |
+| **Map-level ACL** | Per-connection, per-map read/write permissions. Simple allow/deny |
+| **HLC sanitization** | Server replaces client-provided HLC timestamps with server-generated ones. Prevents future-timestamp attacks that would "win" all LWW conflicts |
+| **Value size limits** | Server enforces maximum value size per write |
+
+### What This Means for CRDTs
+
+The CRDT merge semantics remain unchanged. The security layer sits BEFORE the merge — it's the same approach used by Ditto and Firebase. CRDTs handle conflict resolution; the security layer handles authorization.
 
 ---
 
@@ -284,6 +355,7 @@ TopGun ships with a built-in web admin UI (React 19 + Vite). No separate commerc
 | **Tiered storage** | Memory → PostgreSQL → S3 | Hot restart only | N/A | N/A | Managed | Managed | N/A |
 | **Multi-tenancy** | Built-in | Enterprise license | Per-project | Per-project | Per-project | Per-project | N/A |
 | **Vector search** | Tri-hybrid (exact+BM25+semantic) | None | None | None | Extensions | None | None |
+| **Works alongside existing DB** | Yes (Tier 1-2 adoption) | Yes (cache layer) | Yes (Postgres sync) | Yes (Postgres sync) | No (proprietary) | No (own DB) | Yes (CouchDB) |
 | **Admin UI** | Built-in (open source) | Management Center (commercial) | Cloud dashboard | None | Console | Dashboard | None |
 | **Self-hosted** | Yes | Yes (open-core) | Yes | Yes | No | Yes (OSS) | Yes |
 | **License** | Open Source | Apache + Commercial | Apache 2.0 | Apache 2.0 | Proprietary | BSL | Apache 2.0 |

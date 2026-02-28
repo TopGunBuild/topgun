@@ -1,8 +1,9 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-02-27
+**Last updated:** 2026-02-28
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture, not a TypeScript port
-**Product positioning:** "The reactive data grid that extends the cluster into the browser" ([PRODUCT_POSITIONING_RESEARCH.md](../reference/PRODUCT_POSITIONING_RESEARCH.md))
+**Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
+**v1.0 positioning:** "The reactive data grid that extends the cluster into the browser" ([PRODUCT_POSITIONING_RESEARCH.md](../reference/PRODUCT_POSITIONING_RESEARCH.md))
 
 ### Design Philosophy (updated 2026-02-18)
 
@@ -117,12 +118,9 @@ Each Rust spec should reference up to THREE sources:
 - **Effort:** 1-2 hours
 - **Source:** External audit finding (Audit 1, Section 2)
 
-### TODO-075: Fix Rust ORMap Merkle Hash Determinism → SPEC-055
-- **Priority:** P1 (bug — cross-language sync broken)
-- **Status:** Spec created (SPEC-055), pending audit
-- **Summary:** `hash_entry()` uses unsorted `serde_json::to_string()` — breaks cross-language Merkle sync
-- **Depends on:** TODO-061 ✅
-- **Effort:** 0.5 day
+### TODO-075: Fix Rust ORMap Merkle Hash Determinism → SPEC-055 — DONE
+- **Status:** Complete (SPEC-055 completed 2026-02-19)
+- **Summary:** Replaced `serde_json::to_string()` with `canonical_json()` (recursive key sorting) in `hash_entry()`. 3 unit tests + 1 integration test. Zero deviations.
 
 ### TODO-078: ~~Fix TS Hash Function Inconsistency (xxHash64 vs FNV-1a)~~ DONE
 - **Status:** Completed 2026-02-19
@@ -346,18 +344,9 @@ Each Rust spec should reference up to THREE sources:
 - **Depends on:** TODO-085 (data path must work), TODO-067 ✅ (MutationObserver)
 - **Effort:** 1-2 weeks
 
-### TODO-089: PersistenceService (Counters + Entry Processing)
-- **Priority:** P2 (advanced features)
-- **Complexity:** Medium
-- **Summary:** Server-side counters, entry processing (user-defined transforms), and journal subscriptions. These are specialized server-side computation features.
-- **Scope:**
-  - `CounterRequest` (increment/decrement/get) → atomic counter operations
-  - `EntryProcessRequest` → execute user-defined transform on a record (read-modify-write)
-  - `JournalSubscribe` → stream of all mutations for audit/CDC
-  - `ResolverRequest` → server-side conflict resolution
-- **TS Source:** `packages/server/src/coordinator/handlers/` (CounterHandler, EntryProcessHandler)
-- **Depends on:** TODO-085 (data path), TODO-067 ✅ (RecordStore)
-- **Effort:** 1-2 weeks
+### TODO-089: PersistenceService (Counters + Entry Processing) → SPEC-066 — DONE
+- **Status:** Complete (SPEC-066 completed 2026-02-27)
+- **Summary:** Server-side counters, entry processing, journal subscriptions, resolver requests. Sixth domain service replacing stub.
 
 ### TODO-068: Integration Test Suite
 - **Priority:** P0
@@ -378,30 +367,13 @@ Each Rust spec should reference up to THREE sources:
 
 *Goal: TopGun Rust server replaces TS server. Clients connect, write/read data, sync offline, search, query. PostgreSQL persistence for durability. Production-usable.*
 
-### TODO-090: PostgreSQL MapDataStore Adapter — NEW
-- **Priority:** P0 (v1.0 requires durable persistence)
-- **Complexity:** Medium
-- **Summary:** First real persistence backend. Implements `MapDataStore` trait for PostgreSQL using sqlx. Write-through mode: every RecordStore mutation persists synchronously. Load-all-keys on startup for cache warm-up.
-- **Scope:**
-  - `PostgresDataStore` implements `MapDataStore` trait (load, store, delete, load_all_keys)
-  - Connection pooling via sqlx `PgPool`
-  - Schema migration (CREATE TABLE for map data)
-  - Bulk load on server startup (warm cache from PostgreSQL)
-  - Integration with `RecordStoreFactory` — configurable per-map data store
-- **Architecture:** Pure adapter — no coupling to PostgreSQL internals. Same `MapDataStore` trait works for MySQL, SQLite, DynamoDB via different impls.
-- **TS Source:** `packages/server/src/storage/PostgreSQLAdapter.ts`
-- **HC Reference:** `hazelcast/map/impl/mapstore/` — MapStoreWrapper (write-through path)
-- **Depends on:** TODO-067 ✅ (MapDataStore trait)
-- **Effort:** 1 week
+### TODO-090: PostgreSQL MapDataStore Adapter → SPEC-067 — DONE
+- **Status:** Complete (SPEC-067 completed 2026-02-27)
+- **Summary:** Write-through MapDataStore adapter via sqlx PgPool, BYTEA+MsgPack, feature-gated `postgres`.
 
-### TODO-071: Search with Tantivy
-- **Priority:** P1 (table stakes for real-time apps)
-- **Complexity:** Medium
-- **Summary:** Replace custom BM25 search with tantivy full-text search engine
-- **Benefits:** Orders of magnitude faster, built-in tokenization, fuzzy search, phrase queries
-- **Crate:** tantivy
-- **Source:** `packages/server/src/search/`
-- **Effort:** 1-2 weeks
+### TODO-071: SearchService (Tantivy) → SPEC-068 — DONE
+- **Status:** Complete (SPEC-068 completed 2026-02-28)
+- **Summary:** Full-text search via tantivy: tokenization, fuzzy matching, phrase queries. Seventh and final domain service — `domain_stub!` macro fully removed.
 
 ### TODO-074: HLC Node ID Colon Validation (TS + Rust)
 - **Priority:** P2 (hardening)
@@ -409,14 +381,88 @@ Each Rust spec should reference up to THREE sources:
 - **Summary:** Reject node IDs containing `:` in HLC constructor (breaks `HLC.parse()`)
 - **Effort:** 1-2 hours
 
-### TODO-075: Fix Rust ORMap Merkle Hash Determinism → SPEC-055
-- **Priority:** P1 (bug — cross-language sync broken)
-- **Status:** Spec created (SPEC-055), pending audit
-- **Summary:** `hash_entry()` uses unsorted `serde_json::to_string()` — breaks cross-language Merkle sync
-- **Depends on:** TODO-061 ✅
-- **Effort:** 0.5 day
+### TODO-075: Fix Rust ORMap Merkle Hash Determinism → SPEC-055 — DONE
+- **Status:** Complete (SPEC-055 completed 2026-02-19)
+- **Summary:** Replaced `serde_json::to_string()` with `canonical_json()` (recursive key sorting) in `hash_entry()`. 3 unit tests + 1 integration test.
 
-### TODO-093: Admin Dashboard — NEW
+### TODO-094: Change LICENSE to Apache 2.0 — NEW
+- **Priority:** P1 (blocks community adoption)
+- **Complexity:** Trivial
+- **Summary:** Replace BSL 1.1 LICENSE with Apache 2.0. Update Cargo.toml `[workspace.package]` license field. Add NOTICE file. Enterprise features (v3.0) will have separate BSL LICENSE in `enterprise/` directory when that work starts.
+- **Effort:** 30 minutes
+
+### TODO-097: Server-Side Write Validation + HLC Sanitization — NEW
+- **Priority:** P0 (blocks production use)
+- **Complexity:** Medium
+- **Summary:** Without server-side validation, any client can overwrite any key in any map and set HLC timestamps in the future to "win" all LWW conflicts. Minimum viable security for production use.
+- **Scope:**
+  - **HLC sanitization:** Server replaces client-provided HLC timestamps with server-generated ones in CrdtService. Client HLC for local ordering only; server HLC authoritative for merge decisions
+  - **Map-level ACL:** `MapPermissions { read: bool, write: bool }` per connection per map. Simple allow/deny, not field-level or row-level
+  - **Write validation middleware:** pipeline `Auth check → Map ACL check → HLC sanitization → CRDT merge → Persist`
+  - Reject unauthenticated writes (currently all clients can write without auth)
+  - Value size limit enforcement
+- **Pipeline:** Sits BEFORE CRDT merge — CRDTs handle conflict resolution, security handles authorization
+- **Depends on:** TODO-085 ✅ (CrdtService)
+- **Effort:** 1 week
+
+### TODO-099: Structured Tracing + Metrics Endpoint — NEW
+- **Priority:** P1 (operational necessity)
+- **Complexity:** Medium
+- **Summary:** `tracing` is already a dependency but not systematically used. Add `#[instrument]` spans to all domain service handlers and a Prometheus `/metrics` endpoint for external monitoring.
+- **Scope:**
+  - Add `#[instrument(skip(self), fields(map_name, key, caller_origin))]` to all domain service handlers
+  - Add Prometheus `/metrics` endpoint via `metrics` crate + axum handler
+  - Export: operation count, latency histograms, active connections, map sizes, sync operations
+  - Correlate client request → server operation via trace IDs
+- **Depends on:** TODO-064 ✅ (Network module)
+- **Effort:** 3-5 days
+
+### TODO-096: Adoption Path Documentation + Security Model — NEW
+- **Priority:** P1 (critical for first users and trust signal)
+- **Complexity:** Medium
+- **Summary:** PRODUCT_CAPABILITIES.md currently only describes the "replace everything" model (Tier 3). Add 3-tier adoption path + security model documentation. Includes Tier 1 example app.
+- **Scope:**
+  - **Adoption Path section** in PRODUCT_CAPABILITIES.md:
+    - Tier 1 (Real-Time Layer): Add collaborative features to existing app, keep existing DB
+    - Tier 2 (Cache + Sync): Accelerate reads with in-memory cache, add offline support
+    - Tier 3 (Full Platform): Greenfield, TopGun as primary data platform
+  - **Security Model section** in PRODUCT_CAPABILITIES.md:
+    - Trust boundary: clients are untrusted, server is authoritative
+    - HLC sanitization, map-level ACL, write validation pipeline
+    - Authentication flow (JWT, integration with existing auth)
+  - **Tier 1 example app:** existing Express+Postgres app + TopGun for one collaborative feature
+  - Document how to use PostgresDataStore with existing tables (no migration required)
+  - Add "Works alongside existing DB: Yes" to competitive comparison table
+- **Depends on:** TODO-097 (security must be implemented before documenting it)
+- **Effort:** 1 week
+
+### TODO-104: Fix Demo App + Blog Issues — NEW
+- **Priority:** P2 (quality)
+- **Complexity:** Low
+- **Summary:** Quick fixes across existing demo apps, docs site, and blog.
+- **Scope:**
+  - `examples/todo-app/`: fix `vite.config.ts` aliases (missing `@topgunbuild/react`, `@topgunbuild/adapters`), remove hardcoded JWT token, add `.env.example`
+  - `examples/notes-app/`: localize Russian strings to English (`"Уведомления включены"` → `"Notifications enabled"`), add `.env.example`
+  - `apps/docs-astro/`: remove Mongo references from `intro.mdx` and `comparison.mdx`, add orphaned `guides/rbac.mdx` to guides index or remove
+  - **Delete `serverless-http-sync.mdx` blog post** — describes deploying TopGun server on Vercel/Lambda/Workers, which contradicts the Rust IMDG architecture (stateful in-memory cluster ≠ stateless serverless function). HTTP sync as a client transport (TODO-048/049) remains valid but with different framing.
+- **Effort:** 1-2 days
+
+### TODO-105: Sync Showcase Demo App — NEW
+- **Priority:** P1 (marketing — "Show, Don't Tell")
+- **Complexity:** Medium
+- **Summary:** Neither existing demo shows TopGun's core differentiator (offline → reconnect → automatic conflict resolution). Create a "Collaborative Board" demo that makes the value proposition instantly visible.
+- **Scope:**
+  - New example: collaborative board (Kanban or shared list)
+  - **Zero external deps** — no Clerk, no R2, no push notifications. `pnpm install && pnpm dev` starts in 30 seconds
+  - Visual sync status indicator (online / offline / pending ops count)
+  - "Simulate Offline" button — disconnects WebSocket, shows pending queue
+  - Multi-tab awareness: banner prompting to open another tab for live sync
+  - Split-screen conflict demo: two "devices" editing same data while "offline", click "Reconnect" to see automatic LWW merge with visual highlight of which version won
+  - Designed to be embeddable as iframe on docs homepage (replacing mock TacticalDemo)
+- **Depends on:** Working Rust server (all domain services done) or can use TS server for initial version
+- **Effort:** 1 week
+
+### TODO-093: Admin Dashboard
 - **Priority:** P1 (v1.0 deliverable — product differentiator vs Hazelcast Management Center)
 - **Complexity:** Medium (foundation exists, needs Rust server adaptation)
 - **Summary:** Adapt existing React admin dashboard (`apps/admin-dashboard/`) to work with Rust server. Phased: v1.0 foundation → v2.0 data platform features → v3.0 enterprise views.
@@ -433,6 +479,7 @@ Each Rust spec should reference up to THREE sources:
   - System maps: `$sys/stats`, `$sys/cluster`, `$sys/maps` — live data via TopGun client
   - SWR migration: replace manual fetch+useState with SWR for live metrics (`refreshInterval: 1000ms`)
   - Verify all existing pages work against Rust server
+  - **CRDT Debug tab** in Data Explorer: HLC state per map, merge history, Merkle tree summary, conflict inspector (absorbs TODO-100 scope)
 - **Scope (v2.0 — Data Platform Features):**
   - **Pipeline visualization:** ReactFlow + Dagre for DAG stream processing graphs
   - **Live metric coloring:** node/partition coloring by backpressure/load thresholds (Arroyo pattern)
@@ -466,6 +513,37 @@ Each Rust spec should reference up to THREE sources:
 - **Source:** `packages/server/src/__tests__/`, `tests/e2e/`
 - **Depends on:** TODO-084+ (incremental — each domain service adds testable surface)
 - **Effort:** 3-4 weeks (concurrent with domain service work)
+
+### TODO-106: Update Documentation Content for Rust Server — NEW
+- **Priority:** P2 (post-migration docs sync)
+- **Complexity:** Medium
+- **Summary:** Update docs site content for Rust server. Finalize after API surface is stable.
+- **Scope:**
+  - Update `reference/server.mdx` for Rust server API
+  - Update `reference/cli.mdx` for new CLI commands
+  - Update `reference/protocol.mdx` if wire format changed
+  - Add Security Model section (from TODO-096 content)
+  - Add Adoption Path section (from TODO-096 content)
+  - Update `comparison.mdx`: add Replicache/Zero, Cloudflare Durable Objects
+  - Verify all code snippets work with current SDK
+- **Depends on:** TODO-096 (Adoption Path + Security docs), TODO-068 (API surface finalized)
+- **Effort:** 1 week
+
+### TODO-103: Remove Legacy TS Server Code — NEW
+- **Priority:** P2 (cleanup — final v1.0 step)
+- **Complexity:** Low
+- **Summary:** Remove replaced TypeScript server packages after integration tests prove behavioral equivalence.
+- **Scope:**
+  - Remove `packages/server/` entirely (replaced by `packages/server-rust/`)
+  - Remove `packages/native/` entirely (xxHash64 native addon — Rust handles hashing)
+  - Evaluate `packages/mcp-server/` — keep if it wraps TS client, not TS server
+  - Update pnpm workspace config
+  - Update CI workflows (remove TS server test jobs)
+  - Update CLAUDE.md package hierarchy
+  - Update `examples/` to use Rust server
+- **Keep:** `packages/core/`, `packages/client/`, `packages/react/`, `packages/adapters/`, `packages/adapter-better-auth/`
+- **Depends on:** TODO-068 (Integration Tests — proves behavioral equivalence)
+- **Effort:** 1-2 days
 
 ---
 
@@ -593,6 +671,32 @@ Each Rust spec should reference up to THREE sources:
 - **Depends on:** TODO-075 (fix current hashing first)
 - **Effort:** 1 day (evaluation) + 2-3 days (implementation if approved)
 
+### TODO-101: Client DevTools — NEW
+- **Priority:** P2 (DX differentiator)
+- **Complexity:** Medium-Large
+- **Summary:** Browser DevTools panel (Chrome extension) or in-app debug overlay showing local replica state, pending sync queue, HLC timeline, connection status, CRDT merge history. Competitive with Ditto/PowerSync/ElectricSQL developer tools.
+- **Scope:**
+  - Chrome DevTools panel or standalone debug overlay
+  - Local replica state viewer (per-map entries, sizes, last update)
+  - Pending sync queue inspector (pending ops, retry state)
+  - HLC timeline visualization
+  - Connection status (online/offline/reconnecting)
+  - CRDT merge visualization (what merged, which timestamp won, conflict count)
+- **Depends on:** Client SDK stabilization
+- **Effort:** 4-6 weeks
+
+### TODO-102: Rust CLI (clap) — NEW
+- **Priority:** P3 (not blocking)
+- **Complexity:** Medium
+- **Summary:** Rewrite CLI from JavaScript (commander) to Rust (clap). Merge with server binary for single entry point: `topgun serve`, `topgun status`, `topgun debug crdt`, `topgun sql`.
+- **Scope:**
+  - Rewrite CLI in Rust using clap
+  - Merge with server binary: single `topgun` binary
+  - Drop Node.js dependency for server operation
+  - Keep JS CLI tools for TS client development
+- **Depends on:** v1.0 completion (CLI shape depends on final server API)
+- **Effort:** 1-2 weeks
+
 ---
 
 ## Milestone 3: Enterprise (v3.0+)
@@ -640,6 +744,54 @@ Each Rust spec should reference up to THREE sources:
 - **Depends on:** TODO-043 (S3 Bottomless Storage)
 - **Effort:** 4-6 weeks
 
+### TODO-095: Enterprise Directory Structure — NEW
+- **Priority:** P3 (not needed until v3.0 crates exist)
+- **Complexity:** Low
+- **Summary:** Create `enterprise/` directory with BSL 1.1 LICENSE file. Move v3.0 crates (multi-tenancy, tiered-storage, vector-search, bi-temporal) there when implemented. Feature-gated: `[features] enterprise = [...]` in topgun-server Cargo.toml.
+- **Depends on:** First enterprise crate implementation
+- **Effort:** 1 day
+
+---
+
+## Release & Merge Strategy
+
+**Current state:** Branch `rust-migration` is 66 commits ahead of `main` (v0.11.0). `main` has 0 commits not in `rust-migration`.
+
+**Versioning policy:** Continue v0.x until first production deployment + 3 months API stability. v1.0.0 is a trust signal, not a feature milestone — premature v1.0 without real users creates SemVer debt (every breaking fix burns a major version).
+
+### Git Branch Strategy
+
+| Event | Trigger | Git Action |
+|-------|---------|------------|
+| **Merge to main** | After TODO-068 (Integration Tests) passes — proves TS client ↔ Rust server equivalence | `git merge rust-migration` into `main` |
+| **TS server deprecation** | Same merge — add `@deprecated` to `packages/server/package.json`, console warning on import | Part of the merge PR |
+| **TS server removal** | TODO-103 — after 1 release cycle of deprecation notice | Remove `packages/server/`, `packages/native/` |
+
+### npm Release Plan
+
+| Version | Trigger | Packages | Notes |
+|---------|---------|----------|-------|
+| **v0.12.0-rc.1** | After TODO-097 (Security) + TODO-099 (Tracing) + TODO-068 first pass | `@topgunbuild/core`, `@topgunbuild/client`, `@topgunbuild/react`, `@topgunbuild/adapters` | Client packages unchanged; Rust server binary separate |
+| **v0.12.0** | After TODO-068 complete + merge to `main` | All client packages | First release with Rust server |
+| **topgun-server** (cargo/binary) | Same as v0.12.0 | GitHub Release with prebuilt binaries (linux-x64, darwin-arm64, darwin-x64) | `cargo install topgun-server` or download from Releases |
+| **v0.13.0** | After TODO-093 (Admin Dashboard) + TODO-105 (Sync Showcase) | Client packages + Admin Dashboard | Polish release |
+| **v0.14.0+** | Iterations based on first-user feedback | As needed | API stabilization |
+| **v1.0.0** | ≥1 production deployment + 3 months stable API | All packages | Commitment to backward compatibility |
+
+### GitHub Release Plan
+
+| Release | Contents | Tag |
+|---------|----------|-----|
+| **v0.12.0-rc.1** | npm packages + Rust server binary (pre-release) | `v0.12.0-rc.1` |
+| **v0.12.0** | npm packages + Rust server binary + migration guide + changelog | `v0.12.0` |
+| **v1.0.0** | Stability milestone — after production validation | `v1.0.0` |
+
+### Deprecation Timeline
+
+1. **v0.12.0-rc.1:** `packages/server/` marked `@deprecated` in package.json, console.warn on first import
+2. **v0.12.0:** Deprecation notice in npm (`npm deprecate @topgunbuild/server "Use topgun-server binary instead"`)
+3. **v0.13.0:** `packages/server/` and `packages/native/` removed (TODO-103)
+
 ---
 
 ## Execution Order (milestone-driven)
@@ -651,13 +803,15 @@ Items within the same wave can run in parallel. Each wave starts when its blocke
 | Wave | Items | Blocked by | Status |
 |------|-------|------------|--------|
 | **1-4** | Phases 0-2.5, Phase 3 framework | — | ✅ All complete |
-| **5a** | ~~TODO-084~~ ✅ (Coordination) | 065+066 | Done |
-| **5b** | ~~TODO-085~~ ✅ (CRDT) · ~~TODO-087~~ ✅ (Messaging) | 084 · 084 | Done |
-| **5c** | ~~TODO-086~~ ✅ (Sync) · ~~TODO-088~~ ✅ (Query) · TODO-089 (Persistence) | 085 · 085 · 085 | 086+088 done |
-| **5d** | TODO-090 (PostgreSQL) · TODO-071 (Search) | 067 · — | Parallel |
-| **5e** | TODO-074 (HLC fix) · TODO-075 (ORMap hash fix) | — · — | Trivial, parallel |
-| **5f** | TODO-093 (Admin Dashboard v1.0) | 064 · 090 | Parallel with 068 |
-| **5g** | TODO-068 (Integration Tests) | 084+ incremental | Gates v1.0 release |
+| **5a** | ~~TODO-084~~ ✅ · ~~TODO-085~~ ✅ · ~~TODO-086~~ ✅ · ~~TODO-087~~ ✅ · ~~TODO-088~~ ✅ · ~~TODO-089~~ ✅ · ~~TODO-090~~ ✅ · ~~TODO-071~~ ✅ | — | ✅ All 7 services + PostgreSQL + Search done |
+| **5b** | TODO-074 (HLC fix) · ~~TODO-075~~ ✅ · TODO-094 (LICENSE) · TODO-104 (Fix demos/blog) | — | Trivial, parallel |
+| **5c** | TODO-097 (Security: HLC sanitize + ACL) · TODO-099 (Tracing + /metrics) | 085 | **Critical path** |
+| **5d** | TODO-093 (Admin Dashboard v1.0) · TODO-096 (Adoption Path + Security docs) · TODO-105 (Sync Showcase Demo) | 097 · 097 · — | Parallel |
+| **5e** | TODO-068 (Integration Tests) — gates v1.0 | All services | **Gates release** |
+| — | **v0.12.0-rc.1** — npm pre-release + Rust server binary | 068 first pass | 🏷️ Tag + GitHub Release |
+| **5f** | TODO-106 (Update Docs) · TODO-103 (Remove Legacy TS) | 068 · 068 | Final cleanup |
+| — | **Merge `rust-migration` → `main`** · Deprecate TS server | 068 complete | 🔀 Merge |
+| — | **v0.12.0** — first Rust server release | merge + 106 + 103 | 🏷️ Tag + GitHub Release + npm publish |
 
 ### Milestone 2 — v2.0 (Data Platform)
 
@@ -667,7 +821,7 @@ Items within the same wave can run in parallel. Each wave starts when its blocke
 | **6b** | TODO-070 (Shapes) · TODO-025 (DAG Executor) | 069 · 091 |
 | **6c** | TODO-092 (Connectors) · TODO-033 (Write-Behind) · TODO-036 (Extensions) | 025 · 090 · — |
 | **6d** | TODO-072 (WASM) · TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt) | 091+071 · — · — · 075 |
-| **6e** | TODO-093 v2.0 (Pipeline viz, SQL playground, connector wizard) | 025+091+092 |
+| **6e** | TODO-093 v2.0 (Pipeline viz, SQL playground, connector wizard) · TODO-101 (Client DevTools) · TODO-102 (Rust CLI) | 025+091+092 · — · — |
 
 ### Milestone 3 — v3.0+ (Enterprise)
 
@@ -676,9 +830,9 @@ Items within the same wave can run in parallel. Each wave starts when its blocke
 | **7a** | TODO-041 (Multi-Tenancy) · TODO-043 (S3 Bottomless) | — · 033 |
 | **7b** | TODO-040 (Tiered Storage) · TODO-039 (Vector Search) | 043 · — |
 | **7c** | TODO-044 (Bi-Temporal) | 043 |
-| **7d** | TODO-093 v3.0 (Tenant admin, tiered storage monitor) | 041+040 |
+| **7d** | TODO-095 (Enterprise dir structure) · TODO-093 v3.0 (Tenant admin, tiered storage monitor) | — · 041+040 |
 
-**Current position:** Wave 5c — TODO-089 (PersistenceService) next. 5 of 7 domain services done. v1.0 critical path: 089 → 090/071 → 074/075 → 093/068.
+**Current position:** Wave 5b — all domain services + PostgreSQL + Search + ORMap hash fix DONE. Next: HLC fix (074) + LICENSE (094) + demo/blog fixes (104) in parallel, then Security (097) + Tracing (099) on critical path. Critical path: 097 (Security) → 093 (Admin) / 096 (Docs) / 105 (Demo) → 068 (Integration Tests) → v0.12.0-rc.1 → 106 (Docs) + 103 (Legacy removal) → merge to main → v0.12.0.
 
 ---
 
@@ -689,28 +843,31 @@ Phases 0-2.5 [ALL DONE]
   TypeScript completion → Bridge → Rust Core → Research Sprint
               ↓
 Phase 3 Framework [ALL DONE]
-  TODO-064 (Network) · TODO-067 (Storage) · TODO-065 (Routing) · TODO-066 (Cluster)
+  TODO-064 ✅ (Network) · TODO-067 ✅ (Storage) · TODO-065 ✅ (Routing) · TODO-066 ✅ (Cluster)
               ↓
+Phase 3b Domain Services [ALL DONE]
+  TODO-084 ✅ · 085 ✅ · 086 ✅ · 087 ✅ · 088 ✅ · 089 ✅ (all 7 services)
+  TODO-090 ✅ (PostgreSQL) · TODO-071 ✅ (Search/Tantivy)
+
 ═══════════════════════════════════════════════════════════════
-MILESTONE 1: Working IMDG (v1.0)
+MILESTONE 1: Working IMDG (v1.0) — remaining work
 ═══════════════════════════════════════════════════════════════
 
-Phase 3b (Domain Services):
-  TODO-084 ✅ (Coordination)
-       │
-       ├──→ TODO-085 ✅ (CRDT) ──→ TODO-086 ✅ (Sync)
-       │         │
-       │         ├──→ TODO-088 ✅ (Query, PredicateEngine L1-L3)
-       │         └──→ TODO-089 (Persistence, Counters)
-       │
-       └──→ TODO-087 ✅ (Messaging)
-
-  TODO-090 (PostgreSQL adapter) ← parallel, depends on 067 only
-  TODO-071 (Tantivy Search) ← parallel, no deps
-  TODO-074 · TODO-075 (bug fixes) ← parallel, trivial
-  TODO-093 v1.0 (Admin Dashboard — Rust API, OpenAPI codegen, SWR) ← depends on 064+090
-
-  TODO-068 (Integration Tests) ← gates v1.0, incremental from 084+
+  TODO-074 · ~~TODO-075 ✅~~ (bug fixes, trivial, parallel)
+  TODO-094 (LICENSE → Apache 2.0, trivial)
+  TODO-104 (Fix demo apps, trivial)
+       ↓
+  TODO-097 (Security: HLC sanitize + Map ACL) ← CRITICAL PATH
+  TODO-099 (Structured Tracing + /metrics) ← parallel with 097
+       ↓
+  TODO-093 v1.0 (Admin Dashboard — Rust API, OpenAPI, CRDT debug)
+  TODO-096 (Adoption Path docs + Security docs) ← depends on 097
+  TODO-105 (Sync Showcase Demo) ← parallel
+       ↓
+  TODO-068 (Integration Tests) ← GATES v1.0 RELEASE
+       ↓
+  TODO-106 (Update docs for Rust server) ← after API finalized
+  TODO-103 (Remove legacy TS server) ← after 068 proves equivalence
 
 ═══════════════════════════════════════════════════════════════
 MILESTONE 2: Data Platform (v2.0)
@@ -722,15 +879,17 @@ MILESTONE 2: Data Platform (v2.0)
        │                              │
        └──→ TODO-072 (WASM)          └──→ TODO-092 (Connectors)
 
-  TODO-033 (Write-Behind) ← depends on 090
+  TODO-033 (Write-Behind) ← depends on 090 ✅
   TODO-036 (Extensions)
   TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt)
+  TODO-101 (Client DevTools) · TODO-102 (Rust CLI)
   TODO-093 v2.0 (Pipeline viz, SQL playground, connector wizard) ← depends on 025+091+092
 
 ═══════════════════════════════════════════════════════════════
 MILESTONE 3: Enterprise (v3.0+)
 ═══════════════════════════════════════════════════════════════
 
+  TODO-095 (Enterprise dir structure — BSL LICENSE)
   TODO-041 (Multi-Tenancy)
   TODO-043 (S3 Bottomless) ──→ TODO-040 (Tiered) ──→ TODO-044 (Time-Travel)
   TODO-039 (Vector Search)
@@ -743,9 +902,12 @@ MILESTONE 3: Enterprise (v3.0+)
 
 | Milestone | Remaining Items | Effort | Status |
 |-----------|----------------|--------|--------|
-| **v1.0 Working IMDG** | 089, 090, 071, 074, 075, 093 v1.0, 068 | ~6-8 weeks | **In progress** (5/7 services done) |
-| **v2.0 Data Platform** | 069, 070, 091, 025, 092, 033, 036, 072, 048, 049, 076, 093 v2.0 | ~14-18 weeks | After v1.0 |
-| **v3.0 Enterprise** | 041, 043, 040, 039, 044, 093 v3.0 | ~18-26 weeks | After v2.0 |
+| **v1.0 Working IMDG** | 074, 094, 097, 099, 093 v1.0, 096, 104, 105, 068, 106, 103 | ~6-8 weeks | **In progress** (all services done, security + polish phase) |
+| — v1.0.0-rc.1 tag | After 068 first pass | — | Pre-release: npm + Rust binary |
+| — Merge to main | After 068 complete | — | Deprecate TS server |
+| — v1.0.0 stable | After merge + 106 + 103 | — | npm publish + GitHub Release |
+| **v2.0 Data Platform** | 069, 070, 091, 025, 092, 033, 036, 072, 048, 049, 076, 101, 102, 093 v2.0 | ~14-18 weeks | After v1.0 |
+| **v3.0 Enterprise** | 041, 043, 040, 039, 044, 095, 093 v3.0 | ~18-26 weeks | After v2.0 |
 
 ## Eliminated Items
 
@@ -771,6 +933,10 @@ MILESTONE 3: Enterprise (v3.0+)
 | TODO-086 → SPEC-063 | SyncService: Merkle delta sync, MerkleSyncManager, MutationObserver integration | 2026-02-25 |
 | TODO-087 → SPEC-064 | MessagingService: Topic pub/sub, fan-out broadcast, topic lifecycle | 2026-02-25 |
 | TODO-088 → SPEC-065 | QueryService: Live queries, PredicateEngine, standing query re-evaluation | 2026-02-26 |
+| TODO-089 → SPEC-066 | PersistenceService: Counters, entry processing, journal subscriptions, resolver | 2026-02-27 |
+| TODO-090 → SPEC-067 | PostgresDataStore: write-through MapDataStore adapter, sqlx PgPool, BYTEA+MsgPack | 2026-02-27 |
+| TODO-071 → SPEC-068 | SearchService: Tantivy full-text search, final domain service, `domain_stub!` removed | 2026-02-28 |
+| TODO-075 → SPEC-055 | ORMap Merkle hash determinism: `canonical_json()` with recursive key sorting | 2026-02-19 |
 
 ### Phase 2 Rust Items
 
@@ -821,6 +987,9 @@ All items below are completed and archived in `.specflow/archive/`:
 | TODO-091 | Arroyo: `arroyo-planner/builder.rs`, `arroyo-datastream/logical.rs`; ArkFlow: `arkflow-plugin/src/processor/sql.rs` |
 | TODO-092 | Arroyo: `arroyo-connector/src/`; ArkFlow: `arkflow-core/src/input/`, `arkflow-core/src/codec/` |
 | TODO-093 | Existing: `apps/admin-dashboard/`; Arroyo WebUI: `/Users/koristuvac/Projects/rust/arroyo/webui/` (OpenAPI codegen, ReactFlow+Dagre, SWR, live metric coloring) |
+| TODO-096 | [PRODUCT_CAPABILITIES.md](../reference/PRODUCT_CAPABILITIES.md), [STRATEGIC_RECOMMENDATIONS.md](../reference/STRATEGIC_RECOMMENDATIONS.md) Section 4+5 |
+| TODO-097 | [STRATEGIC_RECOMMENDATIONS.md](../reference/STRATEGIC_RECOMMENDATIONS.md) Section 5 (Security Model) |
+| TODO-105 | [STRATEGIC_RECOMMENDATIONS.md](../reference/STRATEGIC_RECOMMENDATIONS.md) Section 12.4 (Sync Showcase spec) |
 
 ---
 
@@ -834,3 +1003,4 @@ All items below are completed and archived in `.specflow/archive/`:
 *Updated 2026-02-25: Major restructuring — milestone-driven roadmap. Replaced Phase 4/5 with Milestone 1 (v1.0 Working IMDG), Milestone 2 (v2.0 Data Platform), Milestone 3 (v3.0+ Enterprise). Added TODO-090 (PostgreSQL MapDataStore), TODO-091 (DataFusion SQL), TODO-092 (Connector Framework). Marked TODO-063, TODO-086 as DONE. Moved TODO-048/049/076 from Phase 4 to Milestone 2 (v2.0). Added Arroyo + ArkFlow to Triple Reference Protocol. Updated dependency graph, execution order, timeline. Product vision: TopGun = Hazelcast (IMDG) + DataFusion (SQL) + Arroyo-informed streaming + offline-first clients.*
 *Updated 2026-02-27: Marked TODO-088 as DONE (SPEC-065 completed, 419 server tests). 5 of 7 domain services complete. Created PRODUCT_CAPABILITIES.md — end-product capabilities document covering v1.0/v2.0/v3.0 feature sets, competitive comparison, positioning.*
 *Updated 2026-02-27: Added TODO-093 (Admin Dashboard) — phased across v1.0/v2.0/v3.0. v1.0: Rust admin API (utoipa OpenAPI), OpenAPI codegen, SWR migration. v2.0: ReactFlow+Dagre pipeline viz, DataFusion SQL playground, connector wizard. v3.0: multi-tenant admin, tiered storage monitor. Reference: Arroyo WebUI patterns. Updated execution order (waves 5f, 6e, 7d), dependency graph, timeline.*
+*Updated 2026-02-28: Strategic audit applied (STRATEGIC_RECOMMENDATIONS.md). Marked TODO-089 (SPEC-066), TODO-071 (SPEC-068), TODO-090 (SPEC-067) as DONE — ALL 7 domain services complete, `domain_stub!` removed, PostgreSQL done. Added 12 new TODOs from strategic audit: TODO-094 (Apache 2.0 LICENSE), TODO-095 (Enterprise dir v3.0), TODO-096 (Adoption Path + Security docs), TODO-097 (P0: HLC sanitization + Map ACL — blocks production), TODO-099 (Structured tracing + /metrics), TODO-101 (Client DevTools v2.0), TODO-102 (Rust CLI v2.0), TODO-103 (Remove legacy TS), TODO-104 (Fix demo apps), TODO-105 (Sync Showcase Demo), TODO-106 (Update docs for Rust). Merged TODO-098 into TODO-096, TODO-100 into TODO-093. Updated positioning to dual-level (vision + v1.0). Rewrote execution order: security (097) on critical path, then admin/docs/demo, then integration tests gate release. v1.0 effort unchanged (~6-8 weeks) but focus shifts from domain services (done) to security + polish.*
