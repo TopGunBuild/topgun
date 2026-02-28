@@ -39,5 +39,5 @@
   "engines": {
     "node": ">=18"
   },
-  "license": "BSL-1.1"
+  "license": "Apache-2.0"
 }
