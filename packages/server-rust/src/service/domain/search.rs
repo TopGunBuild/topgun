@@ -998,6 +998,7 @@ impl ManagedService for SearchService {
             index.clear();
         }
         indexes.clear();
+        self.registry.subscriptions.clear();
         Ok(())
     }
 
