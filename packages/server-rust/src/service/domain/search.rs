@@ -524,6 +524,13 @@ impl SearchMutationObserver {
         }
     }
 
+    /// Returns a clone of the shutdown signal sender, so that `SearchService`
+    /// can register it and flush all observer background tasks on shutdown.
+    #[must_use]
+    pub fn shutdown_signal(&self) -> Arc<tokio::sync::watch::Sender<bool>> {
+        Arc::clone(&self.shutdown_tx)
+    }
+
     /// Sends a shutdown signal to allow the background task to drain pending events.
     pub async fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
@@ -833,7 +840,14 @@ pub struct SearchService {
     /// Retained for future full-record-value hydration in search results.
     #[allow(dead_code)]
     record_store_factory: Arc<RecordStoreFactory>,
+    /// Retained for future subscription-aware push (currently unused after
+    /// switching to `OperationResponse::Message` for request-response ops).
+    #[allow(dead_code)]
     connection_registry: Arc<ConnectionRegistry>,
+    /// Shutdown signals collected from registered `SearchMutationObserver`s.
+    /// Sending `true` on each channel tells the background batch processor to
+    /// drain pending events and exit.
+    observer_shutdown_signals: RwLock<Vec<Arc<tokio::sync::watch::Sender<bool>>>>,
 }
 
 impl SearchService {
@@ -850,7 +864,17 @@ impl SearchService {
             indexes,
             record_store_factory,
             connection_registry,
+            observer_shutdown_signals: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Registers an observer's shutdown signal so that `ManagedService::shutdown()`
+    /// can flush all background batch processors.
+    pub fn register_observer_shutdown(
+        &self,
+        signal: Arc<tokio::sync::watch::Sender<bool>>,
+    ) {
+        self.observer_shutdown_signals.write().push(signal);
     }
 
     /// Creates or retrieves the tantivy index for a map (lazy creation).
@@ -890,12 +914,7 @@ impl SearchService {
 
     fn handle(&self, op: Operation) -> Result<OperationResponse, OperationError> {
         match op {
-            Operation::Search { ctx, payload } => {
-                let connection_id = ctx.connection_id.ok_or_else(|| {
-                    OperationError::Internal(anyhow::anyhow!(
-                        "Search requires connection_id in OperationContext"
-                    ))
-                })?;
+            Operation::Search { ctx: _, payload } => {
                 let options = payload.options.unwrap_or_default();
                 let results = self.execute_search(&payload.map_name, &payload.query, &options);
                 let total_count = u32::try_from(results.len()).unwrap_or(u32::MAX);
@@ -905,9 +924,9 @@ impl SearchService {
                     total_count,
                     error: None,
                 };
-                let msg = Message::SearchResp { payload: resp_payload };
-                send_to_connection(&self.connection_registry, connection_id, &msg);
-                Ok(OperationResponse::Ack { call_id: ctx.call_id })
+                Ok(OperationResponse::Message(Box::new(
+                    Message::SearchResp { payload: resp_payload },
+                )))
             }
 
             Operation::SearchSubscribe { ctx, payload } => {
@@ -947,9 +966,9 @@ impl SearchService {
                     total_count,
                     error: None,
                 };
-                let msg = Message::SearchResp { payload: resp_payload };
-                send_to_connection(&self.connection_registry, connection_id, &msg);
-                Ok(OperationResponse::Ack { call_id: ctx.call_id })
+                Ok(OperationResponse::Message(Box::new(
+                    Message::SearchResp { payload: resp_payload },
+                )))
             }
 
             Operation::SearchUnsubscribe { ctx, payload } => {
@@ -983,8 +1002,19 @@ impl ManagedService for SearchService {
     }
 
     async fn shutdown(&self, _terminate: bool) -> anyhow::Result<()> {
-        // Indexes are in-memory only — no persistent flush needed.
-        // Background observer tasks have their own shutdown signals.
+        // Signal all registered observer background tasks to drain pending
+        // events and exit. Indexes are in-memory only — no persistent flush.
+        let has_signals = {
+            let signals = self.observer_shutdown_signals.read();
+            for signal in signals.iter() {
+                let _ = signal.send(true);
+            }
+            !signals.is_empty()
+        }; // guard dropped before await
+        // Brief yield to allow background tasks to drain.
+        if has_signals {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         Ok(())
     }
 }
@@ -1017,7 +1047,6 @@ mod tests {
     use parking_lot::RwLock;
     use topgun_core::hlc::Timestamp;
     use topgun_core::messages::search::{SearchOptions, SearchPayload, SearchSubPayload, SearchUnsubPayload};
-    use topgun_core::types::Value;
     use tower::ServiceExt;
 
     use super::*;
@@ -1025,26 +1054,7 @@ mod tests {
     use crate::service::operation::{service_names, OperationContext, OperationError, Operation};
     use crate::storage::datastores::NullDataStore;
     use crate::storage::impls::StorageConfig;
-    use crate::storage::record::{Record, RecordMetadata, RecordValue};
     use crate::storage::RecordStoreFactory;
-
-    fn make_ts() -> Timestamp {
-        Timestamp {
-            millis: 1_000_000,
-            counter: 0,
-            node_id: "node-1".to_string(),
-        }
-    }
-
-    fn make_record(s: &str) -> Record {
-        Record {
-            value: RecordValue::Lww {
-                value: Value::String(s.to_string()),
-                timestamp: make_ts(),
-            },
-            metadata: RecordMetadata::new(1_000_000, 64),
-        }
-    }
 
     fn make_rmpv_map(pairs: &[(&str, &str)]) -> rmpv::Value {
         rmpv::Value::Map(
@@ -1352,19 +1362,25 @@ mod tests {
     // --- SearchService tests ---
 
     #[tokio::test]
-    async fn search_service_returns_ack_for_search_op() {
+    async fn search_service_returns_message_for_search_op() {
         let svc = make_service();
         let op = make_search_op("my-map", "hello");
         let resp = svc.oneshot(op).await.unwrap();
-        assert!(matches!(resp, OperationResponse::Ack { .. }));
+        assert!(
+            matches!(resp, OperationResponse::Message(ref msg) if matches!(**msg, Message::SearchResp { .. })),
+            "expected OperationResponse::Message(SearchResp), got {resp:?}"
+        );
     }
 
     #[tokio::test]
-    async fn search_service_returns_ack_for_subscribe_op() {
+    async fn search_service_returns_message_for_subscribe_op() {
         let svc = make_service();
         let op = make_subscribe_op("my-map", "hello");
         let resp = svc.oneshot(op).await.unwrap();
-        assert!(matches!(resp, OperationResponse::Ack { .. }));
+        assert!(
+            matches!(resp, OperationResponse::Message(ref msg) if matches!(**msg, Message::SearchResp { .. })),
+            "expected OperationResponse::Message(SearchResp), got {resp:?}"
+        );
     }
 
     #[tokio::test]
