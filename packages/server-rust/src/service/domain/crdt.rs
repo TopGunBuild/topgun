@@ -17,13 +17,14 @@ use topgun_core::messages::{
     OpBatchMessage, ServerEventPayload, ServerEventType,
 };
 use topgun_core::types::Value;
-use topgun_core::{LWWRecord, ORMapRecord};
+use topgun_core::{LWWRecord, ORMapRecord, Timestamp};
 
-use crate::network::connection::{ConnectionKind, ConnectionRegistry};
+use crate::network::connection::{ConnectionId, ConnectionKind, ConnectionMetadata, ConnectionRegistry};
 use crate::service::operation::{
     service_names, Operation, OperationContext, OperationError, OperationResponse,
 };
 use crate::service::registry::{ManagedService, ServiceContext};
+use crate::service::security::WriteValidator;
 use crate::storage::record::{OrMapEntry, RecordValue};
 use crate::storage::{CallerProvenance, ExpiryPolicy, RecordStoreFactory};
 
@@ -36,9 +37,12 @@ use crate::storage::{CallerProvenance, ExpiryPolicy, RecordStoreFactory};
 /// Replaces the `domain_stub!(CrdtService, ...)` macro-generated stub.
 /// Merges LWW and OR-Map data into the `RecordStore` and broadcasts
 /// `ServerEvent` messages to connected clients.
+///
+/// Security validation runs BEFORE any CRDT merge: unauthorized writes never reach storage.
 pub struct CrdtService {
     record_store_factory: Arc<RecordStoreFactory>,
     connection_registry: Arc<ConnectionRegistry>,
+    write_validator: Arc<WriteValidator>,
 }
 
 impl CrdtService {
@@ -47,10 +51,12 @@ impl CrdtService {
     pub fn new(
         record_store_factory: Arc<RecordStoreFactory>,
         connection_registry: Arc<ConnectionRegistry>,
+        write_validator: Arc<WriteValidator>,
     ) -> Self {
         Self {
             record_store_factory,
             connection_registry,
+            write_validator,
         }
     }
 }
@@ -113,7 +119,7 @@ impl Service<Operation> for Arc<CrdtService> {
 // ---------------------------------------------------------------------------
 
 impl CrdtService {
-    /// Handles a single `ClientOp` message: applies CRDT merge and broadcasts event.
+    /// Handles a single `ClientOp` message: validates, applies CRDT merge, and broadcasts event.
     async fn handle_client_op(
         &self,
         ctx: &OperationContext,
@@ -121,7 +127,19 @@ impl CrdtService {
     ) -> Result<OperationResponse, OperationError> {
         let op = &msg.payload;
         let partition_id = ctx.partition_id.unwrap_or(0);
-        let event_payload = self.apply_single_op(op, partition_id).await?;
+
+        // Acquire metadata snapshot if a connection_id is present.
+        // None means internal/system call -- skip validation to maintain test compatibility.
+        let sanitized_ts = if let Some(conn_id) = ctx.connection_id {
+            let metadata_snapshot = self.snapshot_metadata(conn_id).await?;
+            let value_size = estimate_value_size(op);
+            self.write_validator.validate_write(ctx, &metadata_snapshot, &op.map_name, value_size)?;
+            Some(self.write_validator.sanitize_hlc())
+        } else {
+            None
+        };
+
+        let event_payload = self.apply_single_op(op, partition_id, sanitized_ts.as_ref()).await?;
 
         self.broadcast_event(&event_payload)?;
 
@@ -137,7 +155,10 @@ impl CrdtService {
         ))))
     }
 
-    /// Handles an `OpBatch` message: applies each op sequentially and returns a single `OpAck`.
+    /// Handles an `OpBatch` message: validates all ops atomically, then applies each sequentially.
+    ///
+    /// Atomic rejection: if any op fails validation, no ops are applied.
+    /// Each op gets its own sanitized HLC timestamp (monotonically increasing via successive calls).
     async fn handle_op_batch(
         &self,
         ctx: &OperationContext,
@@ -154,11 +175,31 @@ impl CrdtService {
         let partition_id = ctx.partition_id.unwrap_or(0);
         let mut last_id = "unknown".to_string();
 
-        for op in ops {
-            let event_payload = self.apply_single_op(op, partition_id).await?;
-            self.broadcast_event(&event_payload)?;
-            if let Some(id) = &op.id {
-                last_id = id.clone();
+        // Validate all ops before applying any (atomic batch rejection).
+        // Snapshot metadata once at batch start to avoid per-op lock acquisition.
+        if let Some(conn_id) = ctx.connection_id {
+            let metadata_snapshot = self.snapshot_metadata(conn_id).await?;
+            for op in ops {
+                let value_size = estimate_value_size(op);
+                self.write_validator.validate_write(ctx, &metadata_snapshot, &op.map_name, value_size)?;
+            }
+            // All ops validated — apply them sequentially with sanitized timestamps.
+            for op in ops {
+                let sanitized_ts = self.write_validator.sanitize_hlc();
+                let event_payload = self.apply_single_op(op, partition_id, Some(&sanitized_ts)).await?;
+                self.broadcast_event(&event_payload)?;
+                if let Some(id) = &op.id {
+                    last_id = id.clone();
+                }
+            }
+        } else {
+            // Internal/system call (no connection_id) — skip validation.
+            for op in ops {
+                let event_payload = self.apply_single_op(op, partition_id, None).await?;
+                self.broadcast_event(&event_payload)?;
+                if let Some(id) = &op.id {
+                    last_id = id.clone();
+                }
             }
         }
 
@@ -173,12 +214,33 @@ impl CrdtService {
         ))))
     }
 
+    /// Snapshots connection metadata by ID, releasing the read lock immediately.
+    ///
+    /// Returns `Err(OperationError::Unauthorized)` if the connection is not found
+    /// (e.g., disconnected between routing and handling).
+    async fn snapshot_metadata(
+        &self,
+        conn_id: ConnectionId,
+    ) -> Result<ConnectionMetadata, OperationError> {
+        let handle = self
+            .connection_registry
+            .get(conn_id)
+            .ok_or(OperationError::Unauthorized)?;
+        // Clone out of the lock immediately so we don't hold the read guard across async ops.
+        let snapshot = handle.metadata.read().await.clone();
+        Ok(snapshot)
+    }
+
     /// Applies a single `ClientOp` to the `RecordStore` and returns the `ServerEventPayload`
     /// to broadcast. Called by both `handle_client_op` and `handle_op_batch`.
+    ///
+    /// `sanitized_ts` — when `Some`, replaces client-provided timestamps in stored records.
+    /// When `None` (internal/test calls with no connection_id), the client timestamp is used as-is.
     async fn apply_single_op(
         &self,
         op: &ClientOp,
         partition_id: u32,
+        sanitized_ts: Option<&Timestamp>,
     ) -> Result<ServerEventPayload, OperationError> {
         let store = self
             .record_store_factory
@@ -197,6 +259,7 @@ impl CrdtService {
         let is_or_remove = matches!(&op.or_tag, Some(Some(_))) && op.or_record.is_none();
 
         if is_remove {
+            // REMOVE/OR_REMOVE: no timestamp sanitization needed (removes are idempotent)
             store
                 .remove(&op.key, CallerProvenance::CrdtMerge)
                 .await
@@ -218,7 +281,18 @@ impl CrdtService {
                 .and_then(|o| o.as_ref())
                 .expect("or_record is Some(Some(_))");
 
-            let record_value = or_record_to_record_value(or_rec);
+            // Replace client timestamp with sanitized server timestamp if provided.
+            let (record_value, stored_or_rec) = if let Some(ts) = sanitized_ts {
+                let mut sanitized_rec = or_rec.clone();
+                sanitized_rec.timestamp = ts.clone();
+                // Regenerate tag from sanitized timestamp: "{millis}:{counter}:{node_id}"
+                sanitized_rec.tag = format!("{}:{}:{}", ts.millis, ts.counter, ts.node_id);
+                let rv = or_record_to_record_value(&sanitized_rec);
+                (rv, sanitized_rec)
+            } else {
+                (or_record_to_record_value(or_rec), or_rec.clone())
+            };
+
             store
                 .put(&op.key, record_value, ExpiryPolicy::NONE, CallerProvenance::CrdtMerge)
                 .await
@@ -229,8 +303,8 @@ impl CrdtService {
                 event_type: ServerEventType::OR_ADD,
                 key: op.key.clone(),
                 record: None,
-                or_record: Some(or_rec.clone()),
-                or_tag: Some(or_rec.tag.clone()),
+                or_record: Some(stored_or_rec.clone()),
+                or_tag: Some(stored_or_rec.tag.clone()),
             })
         } else if is_or_remove {
             // Safe: matched Some(Some(_)) above
@@ -240,6 +314,7 @@ impl CrdtService {
                 .and_then(|o| o.as_ref())
                 .expect("or_tag is Some(Some(_))");
 
+            // OR_REMOVE is tag-based; no timestamp sanitization needed
             let record_value = RecordValue::OrTombstones {
                 tags: vec![tag.clone()],
             };
@@ -261,7 +336,14 @@ impl CrdtService {
             let lww_rec = op.record.as_ref().and_then(|o| o.as_ref());
 
             if let Some(rec) = lww_rec {
-                let record_value = lww_record_to_record_value(rec);
+                // Replace client timestamp with sanitized server timestamp if provided.
+                let record_value = if let Some(ts) = sanitized_ts {
+                    let mut sanitized_rec = rec.clone();
+                    sanitized_rec.timestamp = ts.clone();
+                    lww_record_to_record_value(&sanitized_rec)
+                } else {
+                    lww_record_to_record_value(rec)
+                };
                 store
                     .put(&op.key, record_value, ExpiryPolicy::NONE, CallerProvenance::CrdtMerge)
                     .await
@@ -290,6 +372,39 @@ impl CrdtService {
             .broadcast(&bytes, ConnectionKind::Client);
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Value size estimation
+// ---------------------------------------------------------------------------
+
+/// Estimates the serialized byte length of the record payload in a `ClientOp`.
+///
+/// Uses `rmp_serde::to_vec_named()` on the `record` or `or_record` field.
+/// For REMOVE and OR_REMOVE operations, returns 0 (removes are never rejected on size).
+/// If serialization fails, returns `u64::MAX` so the op is rejected by size check.
+fn estimate_value_size(op: &ClientOp) -> u64 {
+    let is_remove = op.op_type.as_deref() == Some("REMOVE") || matches!(&op.record, Some(None));
+    let is_or_remove = matches!(&op.or_tag, Some(Some(_))) && op.or_record.is_none();
+
+    if is_remove || is_or_remove {
+        return 0;
+    }
+
+    if let Some(Some(or_rec)) = &op.or_record {
+        return rmp_serde::to_vec_named(or_rec)
+            .map(|v| v.len() as u64)
+            .unwrap_or(u64::MAX);
+    }
+
+    if let Some(Some(rec)) = &op.record {
+        return rmp_serde::to_vec_named(rec)
+            .map(|v| v.len() as u64)
+            .unwrap_or(u64::MAX);
+    }
+
+    // No record payload (e.g., LWW PUT with no value)
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -368,13 +483,15 @@ fn or_record_to_record_value(record: &ORMapRecord<rmpv::Value>) -> RecordValue {
 mod tests {
     use std::sync::Arc;
 
+    use parking_lot::Mutex;
     use topgun_core::messages::Message;
-    use topgun_core::Timestamp;
+    use topgun_core::{HLC, SystemClock, Timestamp};
     use tower::ServiceExt;
 
     use super::*;
     use crate::network::connection::ConnectionRegistry;
     use crate::service::operation::{service_names, OperationContext, OperationResponse};
+    use crate::service::security::{SecurityConfig, WriteValidator};
     use crate::storage::datastores::NullDataStore;
     use crate::storage::factory::RecordStoreFactory;
     use crate::storage::impls::StorageConfig;
@@ -387,10 +504,15 @@ mod tests {
         ))
     }
 
+    fn make_validator() -> Arc<WriteValidator> {
+        let hlc = Arc::new(Mutex::new(HLC::new("test-node".to_string(), Box::new(SystemClock))));
+        Arc::new(WriteValidator::new(Arc::new(SecurityConfig::default()), hlc))
+    }
+
     fn make_service() -> Arc<CrdtService> {
         let factory = make_factory();
         let registry = Arc::new(ConnectionRegistry::new());
-        Arc::new(CrdtService::new(factory, registry))
+        Arc::new(CrdtService::new(factory, registry, make_validator()))
     }
 
     fn make_timestamp() -> Timestamp {
@@ -405,13 +527,13 @@ mod tests {
         OperationContext::new(1, service_names::CRDT, make_timestamp(), 5000)
     }
 
-    // -- AC7: ManagedService name is "crdt" --
+    // -- AC17: ManagedService name is "crdt" --
 
     #[test]
     fn managed_service_name() {
         let factory = make_factory();
         let registry = Arc::new(ConnectionRegistry::new());
-        let svc = CrdtService::new(factory, registry);
+        let svc = CrdtService::new(factory, registry, make_validator());
         assert_eq!(svc.name(), "crdt");
     }
 

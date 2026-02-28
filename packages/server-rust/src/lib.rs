@@ -45,11 +45,20 @@ mod integration_tests {
     use crate::service::operation::{service_names, CallerOrigin, OperationResponse};
     use crate::service::registry::{ServiceContext, ServiceRegistry};
     use crate::service::router::OperationRouter;
+    use crate::service::security::{SecurityConfig, WriteValidator};
     use crate::service::{ClassifyError, OperationService};
     use crate::storage::datastores::NullDataStore;
     use crate::storage::factory::RecordStoreFactory;
     use crate::storage::impls::StorageConfig;
     use crate::storage::merkle_sync::MerkleSyncManager;
+
+    fn make_write_validator(node_id: &str) -> Arc<WriteValidator> {
+        let hlc = Arc::new(parking_lot::Mutex::new(HLC::new(
+            node_id.to_string(),
+            Box::new(topgun_core::SystemClock),
+        )));
+        Arc::new(WriteValidator::new(Arc::new(SecurityConfig::default()), hlc))
+    }
 
     fn setup() -> (OperationService, OperationRouter, ServerConfig) {
         let config = ServerConfig {
@@ -87,6 +96,7 @@ mod integration_tests {
             Arc::new(CrdtService::new(
                 Arc::clone(&record_store_factory),
                 Arc::clone(&connection_registry),
+                make_write_validator(&config.node_id),
             )),
         );
         router.register(
@@ -320,6 +330,7 @@ mod integration_tests {
         registry.register(CrdtService::new(
             Arc::clone(&record_store_factory),
             connection_registry_for_crdt,
+            make_write_validator("registry-test-node"),
         ));
         registry.register(SyncService::new(
             merkle_manager_for_sync,

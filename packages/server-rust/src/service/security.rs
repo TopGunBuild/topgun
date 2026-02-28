@@ -151,14 +151,14 @@ mod tests {
     use std::time::Instant;
 
     use parking_lot::Mutex;
-    use topgun_core::HLC;
+    use topgun_core::{HLC, SystemClock};
 
     use super::*;
     use crate::network::connection::MapPermissions;
     use crate::service::operation::{CallerOrigin, OperationContext, service_names};
 
     fn make_hlc() -> Arc<Mutex<HLC>> {
-        Arc::new(Mutex::new(HLC::new("test-node".to_string())))
+        Arc::new(Mutex::new(HLC::new("test-node".to_string(), Box::new(SystemClock))))
     }
 
     fn make_timestamp() -> topgun_core::Timestamp {
@@ -357,7 +357,7 @@ mod tests {
 
     #[test]
     fn sanitize_hlc_returns_server_node_id() {
-        let hlc = Arc::new(Mutex::new(HLC::new("server-node".to_string())));
+        let hlc = Arc::new(Mutex::new(HLC::new("server-node".to_string(), Box::new(SystemClock))));
         let validator = WriteValidator::new(Arc::new(SecurityConfig::default()), hlc);
         let ts = validator.sanitize_hlc();
         assert_eq!(ts.node_id, "server-node");
