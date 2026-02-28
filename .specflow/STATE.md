@@ -2,17 +2,18 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
+- **Active Specification:** SPEC-068
+- **Status:** review
 - **Project Phase:** Phase 3 (Rust Server) — Wave 4
 - **TODO Items:** 28 (1 client bug fix + 8 Rust bridge/core + 5 audit findings + 14 existing deferred)
-- **Next Step:** /sf:new or /sf:next
+- **Next Step:** `/sf:review`
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
 ## Queue
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
+| 1 | SPEC-068 | SearchService -- Tantivy Full-Text Search | implemented | Phase 3 |
 
 ## Migration Roadmap (high-level)
 
@@ -72,7 +73,7 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 - Schema domain splitting pattern: organize schemas by domain (base, sync, query, search, cluster, messaging) with barrel re-exports
 - DST infrastructure pattern: VirtualClock/SeededRNG/VirtualNetwork for deterministic simulation testing; injectable ClockSource via HLC for reproducible time
 - HTTP sync transport pattern: HttpSyncProvider implements IConnectionProvider via message type routing in send(); AutoConnectionProvider provides WS-to-HTTP fallback; server uses setHttpRequestHandler() deferred wiring for POST /sync
-- VM sandbox pattern: ProcessorSandbox fallback uses vm.Script + runInNewContext({ timeout }) for synchronous code interruption; isolated-vm primary path unchanged
+- VM sandbox pattern: ProcessorSandbox fallback uses vm.Script + runInNewContext({ timeout }) for synchronous code retrieval; isolated-vm primary path unchanged
 - IConnection adapter pattern: IConnectionProvider returns IConnection interface (send/close/readyState) instead of concrete WebSocket; WebSocketConnection wraps WS, HttpConnection wraps HTTP queue; ConnectionReadyState constants avoid WebSocket global dependency
 - Partition pruning pattern: PartitionService.getRelevantPartitions extracts key predicates (_key, key, id, _id) from queries to prune distributed fan-out; targetedNodes on DistributedSubscription keeps checkAcksComplete consistent with pruned node sets
 - Node ID reconciliation pattern: ConnectionPool.addNode() matches incoming server-assigned nodeId against existing seed connections by endpoint; remapNodeId() transfers NodeConnection entry preserving WebSocket/state/pending; node:remapped event notifies ClusterClient and PartitionRouter
@@ -88,4 +89,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-02-27 (SPEC-067 completed and archived)*
+*Last updated: 2026-02-28 (SPEC-068 implementation complete — ready for review)*
