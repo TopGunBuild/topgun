@@ -241,4 +241,4 @@ All packages use `tsup` for building. Each package outputs:
 
 ## License
 
-By contributing to TopGun, you agree that your contributions will be licensed under the BSL-1.1 license.
+By contributing to TopGun, you agree that your contributions will be licensed under the Apache License 2.0.
