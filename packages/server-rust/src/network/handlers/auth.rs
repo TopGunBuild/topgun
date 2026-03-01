@@ -1,6 +1,6 @@
 //! Authentication handshake handler for WebSocket connections.
 //!
-//! Implements the AUTH_REQUIRED -> AUTH -> AUTH_ACK/AUTH_FAIL flow.
+//! Implements the `AUTH_REQUIRED` -> `AUTH` -> `AUTH_ACK`/`AUTH_FAIL` flow.
 //! Uses a two-phase approach:
 //!   - `send_auth_required`: sends on the raw `axum::extract::ws::WebSocket` before split
 //!   - `handle_auth`: sends via `mpsc::Sender<OutboundMessage>` after split
@@ -31,7 +31,7 @@ pub enum AuthError {
 
 /// JWT claims extracted from the authentication token.
 ///
-/// Only `userId` (aliased as `sub` for standard JWT or `userId` for TopGun tokens)
+/// Only `userId` (aliased as `sub` for standard JWT or `userId` for `TopGun` tokens)
 /// is required. Additional claims are ignored.
 #[derive(Debug, Deserialize)]
 struct JwtClaims {
@@ -54,11 +54,15 @@ impl AuthHandler {
         Self { jwt_secret }
     }
 
-    /// Send AUTH_REQUIRED message to the client.
+    /// Send `AUTH_REQUIRED` message to the client.
     ///
     /// Called immediately on WebSocket connect, BEFORE the socket is split,
-    /// so it takes the raw axum WebSocket directly. Serializes the message
+    /// so it takes the raw axum `WebSocket` directly. Serializes the message
     /// via `rmp_serde::to_vec_named()` and sends as a binary frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization or WebSocket send fails.
     pub async fn send_auth_required(
         &self,
         socket: &mut WebSocket,
@@ -68,7 +72,7 @@ impl AuthHandler {
         socket
             .send(axum::extract::ws::Message::Binary(bytes.into()))
             .await
-            .map_err(|e| anyhow::anyhow!("failed to send AUTH_REQUIRED: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("failed to send AUTH_REQUIRED: {e}"))?;
         debug!("sent AUTH_REQUIRED to client");
         Ok(())
     }
@@ -76,10 +80,16 @@ impl AuthHandler {
     /// Process an incoming AUTH message.
     ///
     /// Returns `Ok(Principal)` on success so the caller can update
-    /// `ConnectionMetadata` and send AUTH_ACK with the user's identity.
+    /// `ConnectionMetadata` and send `AUTH_ACK` with the user's identity.
     ///
-    /// On failure, sends AUTH_FAIL via the outbound channel and returns
+    /// On failure, sends `AUTH_FAIL` via the outbound channel and returns
     /// `Err(AuthError)`. The caller should close the connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AuthError::InvalidToken` if the JWT is invalid or expired.
+    /// Returns `AuthError::SendFailed` if the outbound channel is closed.
+    /// Returns `AuthError::Serialization` if message encoding fails.
     pub async fn handle_auth(
         &self,
         auth_msg: &AuthMessage,
@@ -107,7 +117,7 @@ impl AuthHandler {
                 })
             }
             Err(e) => {
-                let reason = format!("{}", e);
+                let reason = format!("{e}");
                 warn!(error = %reason, "JWT verification failed");
 
                 // Send AUTH_FAIL with error description via outbound channel

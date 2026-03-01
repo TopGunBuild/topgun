@@ -49,7 +49,7 @@ pub struct AppState {
     ///
     /// `None` in network-only tests that do not wire the service layer.
     pub operation_service: Option<Arc<OperationService>>,
-    /// Full Tower middleware pipeline (LoadShed -> Timeout -> Metrics -> Router).
+    /// Full Tower middleware pipeline (`LoadShed` -> `Timeout` -> `Metrics` -> `Router`).
     /// Wrapped in `Mutex` because `Service::call()` requires `&mut self`.
     ///
     /// `None` in network-only tests that do not wire the service layer.

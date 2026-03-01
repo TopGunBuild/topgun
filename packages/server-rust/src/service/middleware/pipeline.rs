@@ -6,6 +6,9 @@ use super::load_shed::LoadShedLayer;
 use super::metrics::MetricsLayer;
 use super::timeout::TimeoutLayer;
 use crate::service::config::ServerConfig;
+use crate::service::operation::OperationPipeline;
+// Imported for use by the test module (via `super::*`).
+#[cfg(test)]
 use crate::service::operation::{Operation, OperationError, OperationResponse};
 use crate::service::router::OperationRouter;
 
@@ -16,17 +19,19 @@ use crate::service::router::OperationRouter;
 /// 2. `TimeoutLayer` -- enforce per-operation timeouts
 /// 3. `MetricsLayer` -- record timing and outcome (closest to the actual handler)
 ///
-/// The returned service implements `tower::Service<Operation>`.
+/// Returns a `BoxService` to erase the unnameable composed type, making the
+/// pipeline storable in `AppState` via `Arc<Mutex<OperationPipeline>>`.
 #[must_use]
 pub fn build_operation_pipeline(
     router: OperationRouter,
     config: &ServerConfig,
-) -> impl tower::Service<Operation, Response = OperationResponse, Error = OperationError> {
-    ServiceBuilder::new()
+) -> OperationPipeline {
+    let svc = ServiceBuilder::new()
         .layer(LoadShedLayer::new(config.max_concurrent_operations))
         .layer(TimeoutLayer)
         .layer(MetricsLayer)
-        .service(router)
+        .service(router);
+    OperationPipeline::new(svc)
 }
 
 // ---------------------------------------------------------------------------

@@ -48,12 +48,13 @@ pub async fn ws_upgrade_handler(
 /// Processes a connected WebSocket: registers it, runs message loops, and
 /// cleans up on disconnect.
 ///
-/// The function sends AUTH_REQUIRED before splitting, then splits the socket
+/// The function sends `AUTH_REQUIRED` before splitting, then splits the socket
 /// into sender/receiver halves, spawns an outbound task for writes, and
 /// runs the inbound loop in the current task. Unauthenticated connections
 /// can only send AUTH messages; all others are dropped. When the inbound
 /// loop exits (client disconnect or error), the connection is removed from
 /// the registry.
+#[allow(clippy::too_many_lines)]
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
     let (handle, rx) = state
         .registry
@@ -104,62 +105,60 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     meta.authenticated
                 };
 
-                if !is_authenticated {
-                    // Only AUTH messages are allowed before authentication
-                    if let TopGunMessage::Auth(ref auth_msg) = tg_msg {
-                        if let Some(ref secret) = state.jwt_secret {
-                            let auth_handler = AuthHandler::new(secret.clone());
-                            match auth_handler.handle_auth(auth_msg, &handle.tx).await {
-                                Ok(principal) => {
-                                    // Update connection metadata with auth state
-                                    {
-                                        let mut meta = handle.metadata.write().await;
-                                        meta.authenticated = true;
-                                        meta.principal = Some(principal.clone());
-                                    }
-
-                                    // Send AUTH_ACK with userId via the outbound channel
-                                    let ack_msg = TopGunMessage::AuthAck(AuthAckData {
-                                        user_id: Some(principal.id.clone()),
-                                        ..Default::default()
-                                    });
-                                    if let Ok(bytes) = rmp_serde::to_vec_named(&ack_msg) {
-                                        let _ = handle.tx.send(OutboundMessage::Binary(bytes)).await;
-                                    }
-
-                                    debug!(
-                                        user_id = %principal.id,
-                                        "connection {:?} authenticated",
-                                        conn_id
-                                    );
-                                }
-                                Err(e) => {
-                                    // AUTH_FAIL already sent by handle_auth; close connection
-                                    debug!(
-                                        "auth failed for {:?}: {}",
-                                        conn_id, e
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-                    } else {
-                        // Drop non-AUTH messages from unauthenticated connections
-                        debug!(
-                            "dropping message from unauthenticated connection {:?}",
-                            conn_id
-                        );
-                    }
-                } else {
+                if is_authenticated {
                     // Authenticated: dispatch through operation pipeline
                     dispatch_message(
                         tg_msg,
                         conn_id,
-                        &state.operation_service,
-                        &state.operation_pipeline,
+                        state.operation_service.as_ref(),
+                        state.operation_pipeline.as_ref(),
                         &handle.tx,
                     )
                     .await;
+                } else if let TopGunMessage::Auth(ref auth_msg) = tg_msg {
+                    // Only AUTH messages are allowed before authentication
+                    if let Some(ref secret) = state.jwt_secret {
+                        let auth_handler = AuthHandler::new(secret.clone());
+                        match auth_handler.handle_auth(auth_msg, &handle.tx).await {
+                            Ok(principal) => {
+                                // Update connection metadata with auth state
+                                {
+                                    let mut meta = handle.metadata.write().await;
+                                    meta.authenticated = true;
+                                    meta.principal = Some(principal.clone());
+                                }
+
+                                // Send AUTH_ACK with userId via the outbound channel
+                                let ack_msg = TopGunMessage::AuthAck(AuthAckData {
+                                    user_id: Some(principal.id.clone()),
+                                    ..Default::default()
+                                });
+                                if let Ok(bytes) = rmp_serde::to_vec_named(&ack_msg) {
+                                    let _ = handle.tx.send(OutboundMessage::Binary(bytes)).await;
+                                }
+
+                                debug!(
+                                    user_id = %principal.id,
+                                    "connection {:?} authenticated",
+                                    conn_id
+                                );
+                            }
+                            Err(e) => {
+                                // AUTH_FAIL already sent by handle_auth; close connection
+                                debug!(
+                                    "auth failed for {:?}: {}",
+                                    conn_id, e
+                                );
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    // Drop non-AUTH messages from unauthenticated connections
+                    debug!(
+                        "dropping message from unauthenticated connection {:?}",
+                        conn_id
+                    );
                 }
             }
             Ok(Message::Close(_)) => {
@@ -201,8 +200,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 async fn dispatch_message(
     tg_msg: TopGunMessage,
     conn_id: ConnectionId,
-    operation_service: &Option<Arc<OperationService>>,
-    operation_pipeline: &Option<Arc<tokio::sync::Mutex<OperationPipeline>>>,
+    operation_service: Option<&Arc<OperationService>>,
+    operation_pipeline: Option<&Arc<tokio::sync::Mutex<OperationPipeline>>>,
     tx: &mpsc::Sender<OutboundMessage>,
 ) {
     let (Some(classify_svc), Some(pipeline)) = (operation_service, operation_pipeline) else {
@@ -357,8 +356,8 @@ async fn unpack_and_dispatch_batch(
 /// - `Message` -> serialize and send as binary frame
 /// - `Messages` -> serialize each individually and send as separate frames
 /// - `Empty` -> no response
-/// - `Ack` -> construct OpAck with call_id.to_string() as last_id
-/// - `NotImplemented` -> construct Error with code 501
+/// - `Ack` -> construct `OpAck` with `call_id.to_string()` as `last_id`
+/// - `NotImplemented` -> construct `Error` with code 501
 async fn send_operation_response(
     resp: OperationResponse,
     tx: &mpsc::Sender<OutboundMessage>,
@@ -397,7 +396,7 @@ async fn send_operation_response(
             let err_msg = TopGunMessage::Error {
                 payload: ErrorPayload {
                     code: 501,
-                    message: format!("not implemented: {}", service_name),
+                    message: format!("not implemented: {service_name}"),
                     details: None,
                 },
             };
