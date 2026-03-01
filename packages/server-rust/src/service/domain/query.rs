@@ -19,6 +19,8 @@ use topgun_core::messages::client_events::QueryUpdatePayload;
 use topgun_core::messages::query::{QueryRespMessage, QueryRespPayload};
 use topgun_core::messages::Message;
 
+use tracing::Instrument;
+
 use crate::network::connection::{ConnectionId, ConnectionRegistry, OutboundMessage};
 use crate::service::domain::predicate::{
     evaluate_predicate, evaluate_where, execute_query, value_to_rmpv,
@@ -397,17 +399,31 @@ impl Service<Operation> for Arc<QueryService> {
 
     fn call(&mut self, op: Operation) -> Self::Future {
         let svc = Arc::clone(self);
-        Box::pin(async move {
-            match op {
-                Operation::QuerySubscribe { ctx, payload } => {
-                    svc.handle_query_subscribe(&ctx, &payload)
+        let service_name = op.ctx().service_name;
+        let call_id = op.ctx().call_id;
+        let caller_origin = format!("{:?}", op.ctx().caller_origin);
+
+        let span = tracing::info_span!(
+            "domain_op",
+            service = service_name,
+            call_id = call_id,
+            caller_origin = %caller_origin,
+        );
+
+        Box::pin(
+            async move {
+                match op {
+                    Operation::QuerySubscribe { ctx, payload } => {
+                        svc.handle_query_subscribe(&ctx, &payload)
+                    }
+                    Operation::QueryUnsubscribe { ctx, payload } => {
+                        svc.handle_query_unsubscribe(&ctx, &payload)
+                    }
+                    _ => Err(OperationError::WrongService),
                 }
-                Operation::QueryUnsubscribe { ctx, payload } => {
-                    svc.handle_query_unsubscribe(&ctx, &payload)
-                }
-                _ => Err(OperationError::WrongService),
             }
-        })
+            .instrument(span),
+        )
     }
 }
 

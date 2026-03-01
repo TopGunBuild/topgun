@@ -16,6 +16,8 @@ use tower::Service;
 
 use topgun_core::messages::{Message, TopicMessageEventPayload};
 
+use tracing::Instrument;
+
 use crate::network::connection::{ConnectionId, ConnectionRegistry, OutboundMessage};
 use crate::service::operation::{
     service_names, Operation, OperationContext, OperationError, OperationResponse,
@@ -211,20 +213,34 @@ impl Service<Operation> for Arc<MessagingService> {
 
     fn call(&mut self, op: Operation) -> Self::Future {
         let svc = Arc::clone(self);
-        Box::pin(async move {
-            match op {
-                Operation::TopicSubscribe { ctx, payload } => {
-                    svc.handle_topic_subscribe(&ctx, &payload.topic).await
+        let service_name = op.ctx().service_name;
+        let call_id = op.ctx().call_id;
+        let caller_origin = format!("{:?}", op.ctx().caller_origin);
+
+        let span = tracing::info_span!(
+            "domain_op",
+            service = service_name,
+            call_id = call_id,
+            caller_origin = %caller_origin,
+        );
+
+        Box::pin(
+            async move {
+                match op {
+                    Operation::TopicSubscribe { ctx, payload } => {
+                        svc.handle_topic_subscribe(&ctx, &payload.topic).await
+                    }
+                    Operation::TopicUnsubscribe { ctx, payload } => {
+                        svc.handle_topic_unsubscribe(&ctx, &payload.topic).await
+                    }
+                    Operation::TopicPublish { ctx, payload } => {
+                        svc.handle_topic_publish(&ctx, &payload.topic, payload.data)
+                    }
+                    _ => Err(OperationError::WrongService),
                 }
-                Operation::TopicUnsubscribe { ctx, payload } => {
-                    svc.handle_topic_unsubscribe(&ctx, &payload.topic).await
-                }
-                Operation::TopicPublish { ctx, payload } => {
-                    svc.handle_topic_publish(&ctx, &payload.topic, payload.data)
-                }
-                _ => Err(OperationError::WrongService),
             }
-        })
+            .instrument(span),
+        )
     }
 }
 

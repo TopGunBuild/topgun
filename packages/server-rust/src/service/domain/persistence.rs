@@ -25,6 +25,8 @@ use topgun_core::messages::{
     UnregisterResolverResponseData,
 };
 
+use tracing::Instrument;
+
 use crate::network::connection::{ConnectionRegistry, OutboundMessage};
 use crate::service::domain::counter::CounterRegistry;
 use crate::service::domain::journal::{JournalStore, JournalSubscription};
@@ -117,50 +119,64 @@ impl Service<Operation> for Arc<PersistenceService> {
 
     fn call(&mut self, op: Operation) -> Self::Future {
         let svc = Arc::clone(self);
-        Box::pin(async move {
-            match op {
-                // Counter operations
-                Operation::CounterRequest { ctx, payload } => {
-                    svc.handle_counter_request(&ctx, &payload)
-                }
-                Operation::CounterSync { ctx, payload } => {
-                    svc.handle_counter_sync(&ctx, &payload)
-                }
+        let service_name = op.ctx().service_name;
+        let call_id = op.ctx().call_id;
+        let caller_origin = format!("{:?}", op.ctx().caller_origin);
 
-                // Journal operations
-                Operation::JournalSubscribe { ctx, payload } => {
-                    svc.handle_journal_subscribe(&ctx, &payload)
-                }
-                Operation::JournalUnsubscribe { ctx: _, payload } => {
-                    svc.handle_journal_unsubscribe(&payload)
-                }
-                Operation::JournalRead { ctx: _, payload } => {
-                    svc.handle_journal_read(&payload)
-                }
+        let span = tracing::info_span!(
+            "domain_op",
+            service = service_name,
+            call_id = call_id,
+            caller_origin = %caller_origin,
+        );
 
-                // Entry processing stubs (WASM sandbox required)
-                Operation::EntryProcess { ctx: _, payload } => {
-                    svc.handle_entry_process(&payload)
-                }
-                Operation::EntryProcessBatch { ctx: _, payload } => {
-                    svc.handle_entry_process_batch(&payload)
-                }
+        Box::pin(
+            async move {
+                match op {
+                    // Counter operations
+                    Operation::CounterRequest { ctx, payload } => {
+                        svc.handle_counter_request(&ctx, &payload)
+                    }
+                    Operation::CounterSync { ctx, payload } => {
+                        svc.handle_counter_sync(&ctx, &payload)
+                    }
 
-                // Conflict resolver stubs (WASM sandbox required)
-                Operation::RegisterResolver { ctx: _, payload } => {
-                    svc.handle_register_resolver(&payload)
-                }
-                Operation::UnregisterResolver { ctx: _, payload } => {
-                    svc.handle_unregister_resolver(&payload)
-                }
-                Operation::ListResolvers { ctx: _, payload } => {
-                    svc.handle_list_resolvers(&payload)
-                }
+                    // Journal operations
+                    Operation::JournalSubscribe { ctx, payload } => {
+                        svc.handle_journal_subscribe(&ctx, &payload)
+                    }
+                    Operation::JournalUnsubscribe { ctx: _, payload } => {
+                        svc.handle_journal_unsubscribe(&payload)
+                    }
+                    Operation::JournalRead { ctx: _, payload } => {
+                        svc.handle_journal_read(&payload)
+                    }
 
-                // Not a persistence operation
-                _ => Err(OperationError::WrongService),
+                    // Entry processing stubs (WASM sandbox required)
+                    Operation::EntryProcess { ctx: _, payload } => {
+                        svc.handle_entry_process(&payload)
+                    }
+                    Operation::EntryProcessBatch { ctx: _, payload } => {
+                        svc.handle_entry_process_batch(&payload)
+                    }
+
+                    // Conflict resolver stubs (WASM sandbox required)
+                    Operation::RegisterResolver { ctx: _, payload } => {
+                        svc.handle_register_resolver(&payload)
+                    }
+                    Operation::UnregisterResolver { ctx: _, payload } => {
+                        svc.handle_unregister_resolver(&payload)
+                    }
+                    Operation::ListResolvers { ctx: _, payload } => {
+                        svc.handle_list_resolvers(&payload)
+                    }
+
+                    // Not a persistence operation
+                    _ => Err(OperationError::WrongService),
+                }
             }
-        })
+            .instrument(span),
+        )
     }
 }
 

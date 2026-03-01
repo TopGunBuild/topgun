@@ -28,7 +28,11 @@ const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8"
 pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
     // Update the active-connections gauge on every scrape (pull model).
     // This avoids needing to hook into every connect/disconnect event.
-    metrics::gauge!("topgun_active_connections").set(state.registry.count() as f64);
+    // The cast from usize to f64 may lose precision for counts > 2^53, which
+    // is not a concern for active connection counts.
+    #[allow(clippy::cast_precision_loss)]
+    let connection_count = state.registry.count() as f64;
+    metrics::gauge!("topgun_active_connections").set(connection_count);
 
     match &state.observability {
         Some(handle) => {

@@ -12,6 +12,7 @@
 use std::sync::{Arc, OnceLock};
 
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use tracing_subscriber::EnvFilter;
 
 // ---------------------------------------------------------------------------
 // Static initialisation guard
@@ -69,6 +70,13 @@ impl ObservabilityHandle {
 /// Installs `metrics-exporter-prometheus` as the global [`metrics`] recorder.
 /// All `metrics::counter!`, `metrics::histogram!`, and `metrics::gauge!` calls
 /// throughout the codebase will report to this recorder.
+///
+/// # Panics
+///
+/// Panics if the Prometheus recorder cannot be installed on the first call.
+/// This can only happen if a recorder from a different library was already
+/// installed globally before `init_observability` was first called.
+/// Subsequent calls never panic.
 pub fn init_observability() -> ObservabilityHandle {
     // Initialise the Prometheus recorder exactly once.  If a second call races
     // with the first the `OnceLock::get_or_init` closure is only executed once.
@@ -86,10 +94,8 @@ pub fn init_observability() -> ObservabilityHandle {
     // silently ignore that error because the subscriber from the first call is
     // still active.
     let use_json = std::env::var("TOPGUN_LOG_FORMAT")
-        .map(|v| v.to_ascii_lowercase() == "json")
+        .map(|v| v.eq_ignore_ascii_case("json"))
         .unwrap_or(false);
-
-    use tracing_subscriber::EnvFilter;
 
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info"));

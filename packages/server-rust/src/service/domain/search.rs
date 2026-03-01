@@ -25,6 +25,8 @@ use topgun_core::messages::search::{
 };
 use topgun_core::messages::Message;
 
+use tracing::Instrument;
+
 use crate::network::connection::{ConnectionId, ConnectionRegistry, OutboundMessage};
 use crate::service::domain::predicate::value_to_rmpv;
 use crate::service::operation::{
@@ -1032,7 +1034,18 @@ impl Service<Operation> for Arc<SearchService> {
 
     fn call(&mut self, op: Operation) -> Self::Future {
         let svc = Arc::clone(self);
-        Box::pin(async move { svc.handle(op) })
+        let service_name = op.ctx().service_name;
+        let call_id = op.ctx().call_id;
+        let caller_origin = format!("{:?}", op.ctx().caller_origin);
+
+        let span = tracing::info_span!(
+            "domain_op",
+            service = service_name,
+            call_id = call_id,
+            caller_origin = %caller_origin,
+        );
+
+        Box::pin(async move { svc.handle(op) }.instrument(span))
     }
 }
 

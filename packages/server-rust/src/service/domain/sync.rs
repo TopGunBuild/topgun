@@ -31,6 +31,8 @@ enum NodeData {
     Missing,
 }
 
+use tracing::Instrument;
+
 use crate::network::connection::{ConnectionKind, ConnectionRegistry};
 use crate::service::operation::{
     service_names, Operation, OperationError, OperationResponse,
@@ -512,29 +514,43 @@ impl Service<Operation> for Arc<SyncService> {
 
     fn call(&mut self, op: Operation) -> Self::Future {
         let svc = Arc::clone(self);
-        Box::pin(async move {
-            match op {
-                Operation::SyncInit { ctx, payload } => {
-                    svc.handle_sync_init(&ctx, payload).await
+        let service_name = op.ctx().service_name;
+        let call_id = op.ctx().call_id;
+        let caller_origin = format!("{:?}", op.ctx().caller_origin);
+
+        let span = tracing::info_span!(
+            "domain_op",
+            service = service_name,
+            call_id = call_id,
+            caller_origin = %caller_origin,
+        );
+
+        Box::pin(
+            async move {
+                match op {
+                    Operation::SyncInit { ctx, payload } => {
+                        svc.handle_sync_init(&ctx, payload).await
+                    }
+                    Operation::MerkleReqBucket { ctx, payload } => {
+                        svc.handle_merkle_req_bucket(&ctx, payload).await
+                    }
+                    Operation::ORMapSyncInit { ctx, payload } => {
+                        svc.handle_ormap_sync_init(&ctx, payload).await
+                    }
+                    Operation::ORMapMerkleReqBucket { ctx, payload } => {
+                        svc.handle_ormap_merkle_req_bucket(&ctx, payload).await
+                    }
+                    Operation::ORMapDiffRequest { ctx, payload } => {
+                        svc.handle_ormap_diff_request(&ctx, payload).await
+                    }
+                    Operation::ORMapPushDiff { ctx, payload } => {
+                        svc.handle_ormap_push_diff(&ctx, payload).await
+                    }
+                    _ => Err(OperationError::WrongService),
                 }
-                Operation::MerkleReqBucket { ctx, payload } => {
-                    svc.handle_merkle_req_bucket(&ctx, payload).await
-                }
-                Operation::ORMapSyncInit { ctx, payload } => {
-                    svc.handle_ormap_sync_init(&ctx, payload).await
-                }
-                Operation::ORMapMerkleReqBucket { ctx, payload } => {
-                    svc.handle_ormap_merkle_req_bucket(&ctx, payload).await
-                }
-                Operation::ORMapDiffRequest { ctx, payload } => {
-                    svc.handle_ormap_diff_request(&ctx, payload).await
-                }
-                Operation::ORMapPushDiff { ctx, payload } => {
-                    svc.handle_ormap_push_diff(&ctx, payload).await
-                }
-                _ => Err(OperationError::WrongService),
             }
-        })
+            .instrument(span),
+        )
     }
 }
 

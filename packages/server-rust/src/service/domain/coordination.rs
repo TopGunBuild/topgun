@@ -14,6 +14,8 @@ use tower::Service;
 
 use topgun_core::messages::{self, Message};
 
+use tracing::Instrument;
+
 use crate::cluster::state::ClusterState;
 use crate::network::connection::ConnectionRegistry;
 use crate::service::operation::{
@@ -86,24 +88,38 @@ impl Service<Operation> for Arc<CoordinationService> {
 
     fn call(&mut self, op: Operation) -> Self::Future {
         let svc = Arc::clone(self);
-        Box::pin(async move {
-            match op {
-                Operation::Ping { ctx, payload } => {
-                    svc.handle_ping(&ctx, payload).await
+        let service_name = op.ctx().service_name;
+        let call_id = op.ctx().call_id;
+        let caller_origin = format!("{:?}", op.ctx().caller_origin);
+
+        let span = tracing::info_span!(
+            "domain_op",
+            service = service_name,
+            call_id = call_id,
+            caller_origin = %caller_origin,
+        );
+
+        Box::pin(
+            async move {
+                match op {
+                    Operation::Ping { ctx, payload } => {
+                        svc.handle_ping(&ctx, payload).await
+                    }
+                    Operation::PartitionMapRequest { payload, .. } => {
+                        Ok(svc.handle_partition_map_request(payload.as_ref()))
+                    }
+                    Operation::LockRequest { ctx, .. }
+                    | Operation::LockRelease { ctx, .. } => {
+                        Ok(OperationResponse::NotImplemented {
+                            service_name: service_names::COORDINATION,
+                            call_id: ctx.call_id,
+                        })
+                    }
+                    _ => Err(OperationError::WrongService),
                 }
-                Operation::PartitionMapRequest { payload, .. } => {
-                    Ok(svc.handle_partition_map_request(payload.as_ref()))
-                }
-                Operation::LockRequest { ctx, .. }
-                | Operation::LockRelease { ctx, .. } => {
-                    Ok(OperationResponse::NotImplemented {
-                        service_name: service_names::COORDINATION,
-                        call_id: ctx.call_id,
-                    })
-                }
-                _ => Err(OperationError::WrongService),
             }
-        })
+            .instrument(span),
+        )
     }
 }
 

@@ -19,6 +19,8 @@ use topgun_core::messages::{
 use topgun_core::types::Value;
 use topgun_core::{LWWRecord, ORMapRecord, Timestamp};
 
+use tracing::Instrument;
+
 use crate::network::connection::{ConnectionId, ConnectionKind, ConnectionMetadata, ConnectionRegistry};
 use crate::service::operation::{
     service_names, Operation, OperationContext, OperationError, OperationResponse,
@@ -100,17 +102,31 @@ impl Service<Operation> for Arc<CrdtService> {
 
     fn call(&mut self, op: Operation) -> Self::Future {
         let svc = Arc::clone(self);
-        Box::pin(async move {
-            match op {
-                Operation::ClientOp { ctx, payload } => {
-                    svc.handle_client_op(&ctx, payload).await
+        let service_name = op.ctx().service_name;
+        let call_id = op.ctx().call_id;
+        let caller_origin = format!("{:?}", op.ctx().caller_origin);
+
+        let span = tracing::info_span!(
+            "domain_op",
+            service = service_name,
+            call_id = call_id,
+            caller_origin = %caller_origin,
+        );
+
+        Box::pin(
+            async move {
+                match op {
+                    Operation::ClientOp { ctx, payload } => {
+                        svc.handle_client_op(&ctx, payload).await
+                    }
+                    Operation::OpBatch { ctx, payload } => {
+                        svc.handle_op_batch(&ctx, payload).await
+                    }
+                    _ => Err(OperationError::WrongService),
                 }
-                Operation::OpBatch { ctx, payload } => {
-                    svc.handle_op_batch(&ctx, payload).await
-                }
-                _ => Err(OperationError::WrongService),
             }
-        })
+            .instrument(span),
+        )
     }
 }
 
