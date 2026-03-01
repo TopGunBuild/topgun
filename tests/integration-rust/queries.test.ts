@@ -967,4 +967,143 @@ describe('Integration: Queries (Rust Server)', () => {
       writer2.close();
     });
   });
+
+  // ========================================
+  // Multiple Queries with Different Filters (G5)
+  // ========================================
+  describe('Multiple queries on same collection with different filters', () => {
+    test('two queries with different where filters both receive correct updates', async () => {
+      const mapName = `multi-query-${Date.now()}`;
+
+      const subscriber = await createRustTestClient(port, {
+        nodeId: 'mq-sub-1',
+        userId: 'mq-sub-user-1',
+        roles: ['ADMIN'],
+      });
+      await subscriber.waitForMessage('AUTH_ACK');
+
+      const writer = await createRustTestClient(port, {
+        nodeId: 'mq-writer-1',
+        userId: 'mq-writer-user-1',
+        roles: ['ADMIN'],
+      });
+      await writer.waitForMessage('AUTH_ACK');
+
+      // Subscribe to two queries with different filters on the same map
+      // Query A: status = 'active'
+      subscriber.messages.length = 0;
+      subscriber.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'mq-active',
+          mapName,
+          query: {
+            where: { status: 'active' },
+          },
+        },
+      });
+      await subscriber.waitForMessage('QUERY_RESP');
+
+      // Query B: status = 'archived'
+      subscriber.messages.length = 0;
+      subscriber.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'mq-archived',
+          mapName,
+          query: {
+            where: { status: 'archived' },
+          },
+        },
+      });
+      await subscriber.waitForMessage('QUERY_RESP');
+
+      await waitForSync(200);
+      subscriber.messages.length = 0;
+
+      // Writer adds an 'active' record
+      writer.messages.length = 0;
+      writer.send({
+        type: 'CLIENT_OP',
+        payload: {
+          id: 'mq-put-active',
+          mapName,
+          opType: 'PUT',
+          key: 'task-1',
+          record: createLWWRecord({ status: 'active', title: 'Active Task' }),
+        },
+      });
+
+      // Wait for QUERY_UPDATE on the 'active' query
+      await waitUntil(
+        () =>
+          subscriber.messages.some(
+            (m) =>
+              m.type === 'QUERY_UPDATE' &&
+              m.payload?.queryId === 'mq-active' &&
+              m.payload?.key === 'task-1'
+          ),
+        5000
+      );
+
+      // Verify the active query got an ENTER
+      const activeUpdate = subscriber.messages.find(
+        (m) =>
+          m.type === 'QUERY_UPDATE' &&
+          m.payload?.queryId === 'mq-active' &&
+          m.payload?.key === 'task-1'
+      );
+      expect(activeUpdate).toBeDefined();
+      expect(activeUpdate.payload.changeType).toBe('ENTER');
+
+      await waitForSync(300);
+
+      // Writer adds an 'archived' record
+      subscriber.messages.length = 0;
+      writer.messages.length = 0;
+      writer.send({
+        type: 'CLIENT_OP',
+        payload: {
+          id: 'mq-put-archived',
+          mapName,
+          opType: 'PUT',
+          key: 'task-2',
+          record: createLWWRecord({ status: 'archived', title: 'Old Task' }),
+        },
+      });
+
+      // Wait for QUERY_UPDATE on the 'archived' query
+      await waitUntil(
+        () =>
+          subscriber.messages.some(
+            (m) =>
+              m.type === 'QUERY_UPDATE' &&
+              m.payload?.queryId === 'mq-archived' &&
+              m.payload?.key === 'task-2'
+          ),
+        5000
+      );
+
+      const archivedUpdate = subscriber.messages.find(
+        (m) =>
+          m.type === 'QUERY_UPDATE' &&
+          m.payload?.queryId === 'mq-archived' &&
+          m.payload?.key === 'task-2'
+      );
+      expect(archivedUpdate).toBeDefined();
+      expect(archivedUpdate.payload.changeType).toBe('ENTER');
+
+      // The archived record should NOT trigger an update on the active query
+      const activeUpdatesForTask2 = subscriber.messages.filter(
+        (m) =>
+          m.type === 'QUERY_UPDATE' &&
+          m.payload?.queryId === 'mq-active' &&
+          m.payload?.key === 'task-2'
+      );
+      expect(activeUpdatesForTask2.length).toBe(0);
+
+      subscriber.close();
+      writer.close();
+    });
+  });
 });
