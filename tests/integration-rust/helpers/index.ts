@@ -280,4 +280,10 @@ function makeCleanup(proc: child_process.ChildProcess): () => Promise<void> {
 }
 
 export { TestClient } from './test-client';
-export { createTestToken, waitForSync, waitUntil } from './test-client';
+export {
+  createTestToken,
+  waitForSync,
+  waitUntil,
+  createLWWRecord,
+  createORRecord,
+} from './test-client';

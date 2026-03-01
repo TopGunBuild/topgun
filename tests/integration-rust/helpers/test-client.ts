@@ -213,3 +213,37 @@ export async function waitUntil(
   }
   throw new Error('waitUntil timeout');
 }
+
+/**
+ * Creates an LWW record for testing. Mirrors the e2e helper pattern.
+ * The record contains a value, an HLC timestamp, and implicitly uses
+ * the LWW (Last-Write-Wins) merge strategy.
+ */
+export function createLWWRecord<T>(value: T, nodeId = 'test-node'): any {
+  return {
+    value,
+    timestamp: {
+      millis: Date.now(),
+      counter: 0,
+      nodeId,
+    },
+  };
+}
+
+/**
+ * Creates an OR record for testing. Mirrors the e2e helper pattern.
+ * The record contains a value, an HLC timestamp, and a unique tag
+ * used for Observed-Remove semantics (OR_ADD / OR_REMOVE).
+ */
+export function createORRecord<T>(value: T, nodeId = 'test-node'): any {
+  const ts = Date.now();
+  return {
+    value,
+    timestamp: {
+      millis: ts,
+      counter: 0,
+      nodeId,
+    },
+    tag: `${nodeId}-${ts}-0`,
+  };
+}
