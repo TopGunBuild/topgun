@@ -361,4 +361,244 @@ describe('Integration: Pub/Sub (Rust Server)', () => {
       publisher.close();
     });
   });
+
+  // ========================================
+  // Topic Isolation Tests (AC34)
+  // ========================================
+  describe('Topic isolation', () => {
+    test('messages to topic A are not delivered to subscriber of topic B', async () => {
+      const topicA = `topic-iso-A-${Date.now()}`;
+      const topicB = `topic-iso-B-${Date.now()}`;
+
+      const subA = await createRustTestClient(port, {
+        nodeId: 'iso-subA-1',
+        userId: 'iso-subA-user-1',
+        roles: ['ADMIN'],
+      });
+      await subA.waitForMessage('AUTH_ACK');
+
+      const subB = await createRustTestClient(port, {
+        nodeId: 'iso-subB-1',
+        userId: 'iso-subB-user-1',
+        roles: ['ADMIN'],
+      });
+      await subB.waitForMessage('AUTH_ACK');
+
+      const publisher = await createRustTestClient(port, {
+        nodeId: 'iso-pub-1',
+        userId: 'iso-pub-user-1',
+        roles: ['ADMIN'],
+      });
+      await publisher.waitForMessage('AUTH_ACK');
+
+      // Subscribe to different topics
+      subA.send({
+        type: 'TOPIC_SUB',
+        payload: { topic: topicA },
+      });
+      subB.send({
+        type: 'TOPIC_SUB',
+        payload: { topic: topicB },
+      });
+
+      await waitForSync(200);
+
+      // Clear messages
+      subA.messages.length = 0;
+      subB.messages.length = 0;
+
+      // Publish to topic A only
+      publisher.send({
+        type: 'TOPIC_PUB',
+        payload: {
+          topic: topicA,
+          data: { target: 'A only' },
+        },
+      });
+
+      // subA should receive the message
+      await waitUntil(
+        () =>
+          subA.messages.some(
+            (m) =>
+              m.type === 'TOPIC_MESSAGE' &&
+              m.payload?.topic === topicA
+          ),
+        5000
+      );
+
+      const msgA = subA.messages.find(
+        (m) =>
+          m.type === 'TOPIC_MESSAGE' &&
+          m.payload?.topic === topicA
+      );
+      expect(msgA).toBeDefined();
+      expect(msgA.payload.data).toEqual({ target: 'A only' });
+
+      // Give extra time for subB to potentially receive
+      await waitForSync(500);
+
+      // subB should NOT have received the message
+      const bMessages = subB.messages.filter(
+        (m) => m.type === 'TOPIC_MESSAGE'
+      );
+      expect(bMessages.length).toBe(0);
+
+      subA.close();
+      subB.close();
+      publisher.close();
+    });
+  });
+
+  // ========================================
+  // Message Ordering Tests (AC35)
+  // ========================================
+  describe('Message ordering', () => {
+    test('10 sequential messages maintain publishing order', async () => {
+      const topic = `topic-order-${Date.now()}`;
+
+      const subscriber = await createRustTestClient(port, {
+        nodeId: 'order-sub-1',
+        userId: 'order-sub-user-1',
+        roles: ['ADMIN'],
+      });
+      await subscriber.waitForMessage('AUTH_ACK');
+
+      const publisher = await createRustTestClient(port, {
+        nodeId: 'order-pub-1',
+        userId: 'order-pub-user-1',
+        roles: ['ADMIN'],
+      });
+      await publisher.waitForMessage('AUTH_ACK');
+
+      subscriber.send({
+        type: 'TOPIC_SUB',
+        payload: { topic },
+      });
+
+      await waitForSync(200);
+
+      // Clear subscriber messages
+      subscriber.messages.length = 0;
+
+      // Send 10 messages sequentially
+      for (let i = 0; i < 10; i++) {
+        publisher.send({
+          type: 'TOPIC_PUB',
+          payload: {
+            topic,
+            data: { seq: i },
+          },
+        });
+        // Small delay between sends to ensure sequential processing
+        await waitForSync(50);
+      }
+
+      // Wait for all 10 messages to arrive
+      await waitUntil(
+        () =>
+          subscriber.messages.filter(
+            (m) =>
+              m.type === 'TOPIC_MESSAGE' &&
+              m.payload?.topic === topic
+          ).length >= 10,
+        10000
+      );
+
+      const receivedMessages = subscriber.messages.filter(
+        (m) =>
+          m.type === 'TOPIC_MESSAGE' &&
+          m.payload?.topic === topic
+      );
+      expect(receivedMessages.length).toBe(10);
+
+      // Verify ordering
+      const sequences = receivedMessages.map(
+        (m: any) => m.payload.data.seq
+      );
+      expect(sequences).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+
+      subscriber.close();
+      publisher.close();
+    });
+  });
+
+  // ========================================
+  // Various Data Types
+  // ========================================
+  describe('Various data types in messages', () => {
+    test('string, number, boolean, object, array, null payloads', async () => {
+      const topic = `topic-types-${Date.now()}`;
+
+      const subscriber = await createRustTestClient(port, {
+        nodeId: 'types-sub-1',
+        userId: 'types-sub-user-1',
+        roles: ['ADMIN'],
+      });
+      await subscriber.waitForMessage('AUTH_ACK');
+
+      const publisher = await createRustTestClient(port, {
+        nodeId: 'types-pub-1',
+        userId: 'types-pub-user-1',
+        roles: ['ADMIN'],
+      });
+      await publisher.waitForMessage('AUTH_ACK');
+
+      subscriber.send({
+        type: 'TOPIC_SUB',
+        payload: { topic },
+      });
+
+      await waitForSync(200);
+
+      const testPayloads = [
+        { type: 'string', data: 'hello' },
+        { type: 'number', data: 42 },
+        { type: 'boolean', data: true },
+        { type: 'object', data: { nested: { deep: 'value' } } },
+        { type: 'array', data: [1, 'two', 3] },
+        { type: 'null', data: null },
+      ];
+
+      subscriber.messages.length = 0;
+
+      // Send each payload type sequentially
+      for (const payload of testPayloads) {
+        publisher.send({
+          type: 'TOPIC_PUB',
+          payload: {
+            topic,
+            data: payload,
+          },
+        });
+        await waitForSync(50);
+      }
+
+      // Wait for all messages to arrive
+      await waitUntil(
+        () =>
+          subscriber.messages.filter(
+            (m) =>
+              m.type === 'TOPIC_MESSAGE' &&
+              m.payload?.topic === topic
+          ).length >= testPayloads.length,
+        10000
+      );
+
+      const received = subscriber.messages.filter(
+        (m) =>
+          m.type === 'TOPIC_MESSAGE' &&
+          m.payload?.topic === topic
+      );
+      expect(received.length).toBe(testPayloads.length);
+
+      // Verify each payload arrived correctly
+      for (let i = 0; i < testPayloads.length; i++) {
+        expect(received[i].payload.data).toEqual(testPayloads[i]);
+      }
+
+      subscriber.close();
+      publisher.close();
+    });
+  });
 });

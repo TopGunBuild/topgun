@@ -508,4 +508,463 @@ describe('Integration: Queries (Rust Server)', () => {
       client.close();
     });
   });
+
+  // ========================================
+  // Live Update: ENTER (AC27)
+  // ========================================
+  describe('QUERY_UPDATE with changeType ENTER', () => {
+    test('new record matching filter triggers QUERY_UPDATE with ENTER', async () => {
+      const mapName = `live-enter-${Date.now()}`;
+
+      const subscriber = await createRustTestClient(port, {
+        nodeId: 'live-sub-1',
+        userId: 'live-sub-user-1',
+        roles: ['ADMIN'],
+      });
+      await subscriber.waitForMessage('AUTH_ACK');
+
+      const writer = await createRustTestClient(port, {
+        nodeId: 'live-writer-1',
+        userId: 'live-writer-user-1',
+        roles: ['ADMIN'],
+      });
+      await writer.waitForMessage('AUTH_ACK');
+
+      // Subscribe to the map (empty at this point)
+      subscriber.messages.length = 0;
+      subscriber.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'live-q-enter',
+          mapName,
+          query: {},
+        },
+      });
+
+      // Wait for initial QUERY_RESP (empty snapshot)
+      await subscriber.waitForMessage('QUERY_RESP');
+      await waitForSync(200);
+
+      // Clear messages to isolate QUERY_UPDATE
+      subscriber.messages.length = 0;
+
+      // Writer adds a new record
+      writer.send({
+        type: 'CLIENT_OP',
+        payload: {
+          id: 'live-enter-op',
+          mapName,
+          opType: 'PUT',
+          key: 'new-item',
+          record: createLWWRecord({ name: 'New Item', status: 'active' }),
+        },
+      });
+
+      // Wait for subscriber to receive QUERY_UPDATE
+      await waitUntil(
+        () =>
+          subscriber.messages.some(
+            (m) =>
+              m.type === 'QUERY_UPDATE' &&
+              m.payload?.queryId === 'live-q-enter'
+          ),
+        5000
+      );
+
+      const update = subscriber.messages.find(
+        (m) =>
+          m.type === 'QUERY_UPDATE' &&
+          m.payload?.queryId === 'live-q-enter'
+      );
+      expect(update).toBeDefined();
+      expect(update.payload.key).toBe('new-item');
+      expect(update.payload.changeType).toBe('ENTER');
+      expect(update.payload.value).toEqual({ name: 'New Item', status: 'active' });
+
+      subscriber.close();
+      writer.close();
+    });
+  });
+
+  // ========================================
+  // Live Update: UPDATE (AC36)
+  // ========================================
+  describe('QUERY_UPDATE with changeType UPDATE', () => {
+    test('modified record still matching filter triggers UPDATE', async () => {
+      const mapName = `live-update-${Date.now()}`;
+
+      const subscriber = await createRustTestClient(port, {
+        nodeId: 'live-upd-sub-1',
+        userId: 'live-upd-sub-user-1',
+        roles: ['ADMIN'],
+      });
+      await subscriber.waitForMessage('AUTH_ACK');
+
+      const writer = await createRustTestClient(port, {
+        nodeId: 'live-upd-writer-1',
+        userId: 'live-upd-writer-user-1',
+        roles: ['ADMIN'],
+      });
+      await writer.waitForMessage('AUTH_ACK');
+
+      // Write an initial record
+      writer.messages.length = 0;
+      writer.send({
+        type: 'CLIENT_OP',
+        payload: {
+          id: 'live-upd-put-1',
+          mapName,
+          opType: 'PUT',
+          key: 'upd-item',
+          record: createLWWRecord({ name: 'Original', count: 1 }),
+        },
+      });
+      await writer.waitForMessage('OP_ACK');
+      await waitForSync(200);
+
+      // Subscribe (should get initial snapshot with the record)
+      subscriber.messages.length = 0;
+      subscriber.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'live-q-update',
+          mapName,
+          query: {},
+        },
+      });
+      await subscriber.waitForMessage('QUERY_RESP');
+      await waitForSync(200);
+
+      // Clear messages to isolate QUERY_UPDATE
+      subscriber.messages.length = 0;
+
+      // Writer modifies the record (still matches the unfiltered query)
+      writer.messages.length = 0;
+      writer.send({
+        type: 'CLIENT_OP',
+        payload: {
+          id: 'live-upd-put-2',
+          mapName,
+          opType: 'PUT',
+          key: 'upd-item',
+          record: createLWWRecord({ name: 'Updated', count: 2 }),
+        },
+      });
+
+      // Wait for subscriber to receive QUERY_UPDATE with UPDATE changeType
+      await waitUntil(
+        () =>
+          subscriber.messages.some(
+            (m) =>
+              m.type === 'QUERY_UPDATE' &&
+              m.payload?.queryId === 'live-q-update' &&
+              m.payload?.changeType === 'UPDATE'
+          ),
+        5000
+      );
+
+      const update = subscriber.messages.find(
+        (m) =>
+          m.type === 'QUERY_UPDATE' &&
+          m.payload?.queryId === 'live-q-update' &&
+          m.payload?.changeType === 'UPDATE'
+      );
+      expect(update).toBeDefined();
+      expect(update.payload.key).toBe('upd-item');
+      expect(update.payload.value).toEqual({ name: 'Updated', count: 2 });
+
+      subscriber.close();
+      writer.close();
+    });
+  });
+
+  // ========================================
+  // Live Update: LEAVE (AC29)
+  // ========================================
+  describe('QUERY_UPDATE with changeType LEAVE', () => {
+    test('record no longer matching filter triggers LEAVE', async () => {
+      const mapName = `live-leave-${Date.now()}`;
+
+      const subscriber = await createRustTestClient(port, {
+        nodeId: 'live-leave-sub-1',
+        userId: 'live-leave-sub-user-1',
+        roles: ['ADMIN'],
+      });
+      await subscriber.waitForMessage('AUTH_ACK');
+
+      const writer = await createRustTestClient(port, {
+        nodeId: 'live-leave-writer-1',
+        userId: 'live-leave-writer-user-1',
+        roles: ['ADMIN'],
+      });
+      await writer.waitForMessage('AUTH_ACK');
+
+      // Write records: one matches filter, one does not
+      writer.messages.length = 0;
+      writer.send({
+        type: 'CLIENT_OP',
+        payload: {
+          id: 'live-leave-put-1',
+          mapName,
+          opType: 'PUT',
+          key: 'leave-item',
+          record: createLWWRecord({ status: 'active', name: 'Item A' }),
+        },
+      });
+      await writer.waitForMessage('OP_ACK');
+      await waitForSync(200);
+
+      // Subscribe with a where filter for status = 'active'
+      subscriber.messages.length = 0;
+      subscriber.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'live-q-leave',
+          mapName,
+          query: {
+            where: { status: 'active' },
+          },
+        },
+      });
+
+      const resp = await subscriber.waitForMessage('QUERY_RESP');
+      expect(resp.payload.results.length).toBe(1);
+      await waitForSync(200);
+
+      // Clear to isolate QUERY_UPDATE
+      subscriber.messages.length = 0;
+
+      // Writer updates the record so it no longer matches the filter
+      writer.messages.length = 0;
+      writer.send({
+        type: 'CLIENT_OP',
+        payload: {
+          id: 'live-leave-put-2',
+          mapName,
+          opType: 'PUT',
+          key: 'leave-item',
+          record: createLWWRecord({ status: 'archived', name: 'Item A' }),
+        },
+      });
+
+      // Wait for LEAVE notification
+      await waitUntil(
+        () =>
+          subscriber.messages.some(
+            (m) =>
+              m.type === 'QUERY_UPDATE' &&
+              m.payload?.queryId === 'live-q-leave' &&
+              m.payload?.changeType === 'LEAVE'
+          ),
+        5000
+      );
+
+      const leaveUpdate = subscriber.messages.find(
+        (m) =>
+          m.type === 'QUERY_UPDATE' &&
+          m.payload?.queryId === 'live-q-leave' &&
+          m.payload?.changeType === 'LEAVE'
+      );
+      expect(leaveUpdate).toBeDefined();
+      expect(leaveUpdate.payload.key).toBe('leave-item');
+
+      subscriber.close();
+      writer.close();
+    });
+  });
+
+  // ========================================
+  // QUERY_UNSUB (AC28)
+  // ========================================
+  describe('QUERY_UNSUB stops delivery', () => {
+    test('after QUERY_UNSUB, no more QUERY_UPDATE messages', async () => {
+      const mapName = `live-unsub-${Date.now()}`;
+
+      const subscriber = await createRustTestClient(port, {
+        nodeId: 'live-unsub-sub-1',
+        userId: 'live-unsub-sub-user-1',
+        roles: ['ADMIN'],
+      });
+      await subscriber.waitForMessage('AUTH_ACK');
+
+      const writer = await createRustTestClient(port, {
+        nodeId: 'live-unsub-writer-1',
+        userId: 'live-unsub-writer-user-1',
+        roles: ['ADMIN'],
+      });
+      await writer.waitForMessage('AUTH_ACK');
+
+      // Subscribe
+      subscriber.messages.length = 0;
+      subscriber.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'live-q-unsub',
+          mapName,
+          query: {},
+        },
+      });
+      await subscriber.waitForMessage('QUERY_RESP');
+      await waitForSync(200);
+
+      // Clear messages and verify we get updates before unsubscribing
+      subscriber.messages.length = 0;
+
+      writer.messages.length = 0;
+      writer.send({
+        type: 'CLIENT_OP',
+        payload: {
+          id: 'unsub-verify-put',
+          mapName,
+          opType: 'PUT',
+          key: 'verify-item',
+          record: createLWWRecord({ check: true }),
+        },
+      });
+
+      // Wait for QUERY_UPDATE proving subscription works
+      await waitUntil(
+        () =>
+          subscriber.messages.some(
+            (m) => m.type === 'QUERY_UPDATE'
+          ),
+        5000
+      );
+
+      // Now unsubscribe
+      subscriber.send({
+        type: 'QUERY_UNSUB',
+        payload: {
+          queryId: 'live-q-unsub',
+        },
+      });
+
+      await waitForSync(300);
+
+      // Clear messages
+      subscriber.messages.length = 0;
+
+      // Writer adds another record
+      writer.messages.length = 0;
+      writer.send({
+        type: 'CLIENT_OP',
+        payload: {
+          id: 'unsub-post-put',
+          mapName,
+          opType: 'PUT',
+          key: 'post-unsub-item',
+          record: createLWWRecord({ afterUnsub: true }),
+        },
+      });
+
+      await writer.waitForMessage('OP_ACK');
+
+      // Wait to ensure no QUERY_UPDATE arrives
+      await waitForSync(1000);
+
+      const postUnsubUpdates = subscriber.messages.filter(
+        (m) => m.type === 'QUERY_UPDATE'
+      );
+      expect(postUnsubUpdates.length).toBe(0);
+
+      subscriber.close();
+      writer.close();
+    });
+  });
+
+  // ========================================
+  // Multi-Client Live Updates
+  // ========================================
+  describe('Multi-client live updates', () => {
+    test('subscriber receives updates from another client\'s writes', async () => {
+      const mapName = `live-multi-${Date.now()}`;
+
+      const subscriber = await createRustTestClient(port, {
+        nodeId: 'multi-live-sub',
+        userId: 'multi-live-sub-user',
+        roles: ['ADMIN'],
+      });
+      await subscriber.waitForMessage('AUTH_ACK');
+
+      // Subscribe first, then writers add data
+      subscriber.messages.length = 0;
+      subscriber.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'multi-live-q',
+          mapName,
+          query: {},
+        },
+      });
+      await subscriber.waitForMessage('QUERY_RESP');
+      await waitForSync(200);
+
+      subscriber.messages.length = 0;
+
+      // Two different writers add records
+      const writer1 = await createRustTestClient(port, {
+        nodeId: 'multi-writer-1',
+        userId: 'multi-writer-user-1',
+        roles: ['ADMIN'],
+      });
+      await writer1.waitForMessage('AUTH_ACK');
+
+      const writer2 = await createRustTestClient(port, {
+        nodeId: 'multi-writer-2',
+        userId: 'multi-writer-user-2',
+        roles: ['ADMIN'],
+      });
+      await writer2.waitForMessage('AUTH_ACK');
+
+      writer1.send({
+        type: 'CLIENT_OP',
+        payload: {
+          id: 'multi-w1-put',
+          mapName,
+          opType: 'PUT',
+          key: 'from-writer-1',
+          record: createLWWRecord({ author: 'writer1' }),
+        },
+      });
+
+      await waitForSync(200);
+
+      writer2.send({
+        type: 'CLIENT_OP',
+        payload: {
+          id: 'multi-w2-put',
+          mapName,
+          opType: 'PUT',
+          key: 'from-writer-2',
+          record: createLWWRecord({ author: 'writer2' }),
+        },
+      });
+
+      // Wait for both QUERY_UPDATE messages
+      await waitUntil(
+        () =>
+          subscriber.messages.filter(
+            (m) =>
+              m.type === 'QUERY_UPDATE' &&
+              m.payload?.queryId === 'multi-live-q'
+          ).length >= 2,
+        5000
+      );
+
+      const updates = subscriber.messages.filter(
+        (m) =>
+          m.type === 'QUERY_UPDATE' &&
+          m.payload?.queryId === 'multi-live-q'
+      );
+      expect(updates.length).toBeGreaterThanOrEqual(2);
+
+      const updateKeys = updates.map((u: any) => u.payload.key).sort();
+      expect(updateKeys).toContain('from-writer-1');
+      expect(updateKeys).toContain('from-writer-2');
+
+      subscriber.close();
+      writer1.close();
+      writer2.close();
+    });
+  });
 });
