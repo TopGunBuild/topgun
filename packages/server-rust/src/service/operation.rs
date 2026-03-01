@@ -9,6 +9,17 @@ use topgun_core::Timestamp;
 use crate::network::connection::ConnectionId;
 
 // ---------------------------------------------------------------------------
+// OperationPipeline type alias
+// ---------------------------------------------------------------------------
+
+/// Concrete type for the composed Tower middleware pipeline that wraps
+/// `OperationRouter`. Uses `BoxService` to erase the unnameable future type
+/// produced by `build_operation_pipeline()`. Stored in `AppState` behind
+/// `Arc<tokio::sync::Mutex<OperationPipeline>>` because `Service::call()`
+/// requires `&mut self`.
+pub type OperationPipeline = tower::util::BoxService<Operation, OperationResponse, OperationError>;
+
+// ---------------------------------------------------------------------------
 // Service name constants
 // ---------------------------------------------------------------------------
 
@@ -345,6 +356,59 @@ impl Operation {
             | Self::JournalRead { ctx, .. }
             // System
             | Self::GarbageCollect { ctx } => ctx,
+        }
+    }
+
+    /// Sets the `connection_id` on this operation's `OperationContext`.
+    ///
+    /// Called by the WebSocket handler before dispatching through the pipeline
+    /// so domain services can look up the `ConnectionHandle` for side-effects
+    /// (e.g., heartbeat updates, subscription tracking).
+    ///
+    /// Mirrors the `ctx()` pattern but with `&mut self` and mutable bindings.
+    pub fn set_connection_id(&mut self, id: ConnectionId) {
+        match self {
+            // CRDT
+            Self::ClientOp { ctx, .. }
+            | Self::OpBatch { ctx, .. }
+            // Sync
+            | Self::SyncInit { ctx, .. }
+            | Self::MerkleReqBucket { ctx, .. }
+            | Self::ORMapSyncInit { ctx, .. }
+            | Self::ORMapMerkleReqBucket { ctx, .. }
+            | Self::ORMapDiffRequest { ctx, .. }
+            | Self::ORMapPushDiff { ctx, .. }
+            // Query
+            | Self::QuerySubscribe { ctx, .. }
+            | Self::QueryUnsubscribe { ctx, .. }
+            // Messaging
+            | Self::TopicSubscribe { ctx, .. }
+            | Self::TopicUnsubscribe { ctx, .. }
+            | Self::TopicPublish { ctx, .. }
+            // Coordination
+            | Self::LockRequest { ctx, .. }
+            | Self::LockRelease { ctx, .. }
+            | Self::PartitionMapRequest { ctx, .. }
+            | Self::Ping { ctx, .. }
+            // Search
+            | Self::Search { ctx, .. }
+            | Self::SearchSubscribe { ctx, .. }
+            | Self::SearchUnsubscribe { ctx, .. }
+            // Persistence
+            | Self::CounterRequest { ctx, .. }
+            | Self::CounterSync { ctx, .. }
+            | Self::EntryProcess { ctx, .. }
+            | Self::EntryProcessBatch { ctx, .. }
+            | Self::RegisterResolver { ctx, .. }
+            | Self::UnregisterResolver { ctx, .. }
+            | Self::ListResolvers { ctx, .. }
+            | Self::JournalSubscribe { ctx, .. }
+            | Self::JournalUnsubscribe { ctx, .. }
+            | Self::JournalRead { ctx, .. }
+            // System
+            | Self::GarbageCollect { ctx } => {
+                ctx.connection_id = Some(id);
+            }
         }
     }
 }

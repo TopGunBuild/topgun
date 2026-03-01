@@ -117,12 +117,15 @@ pub struct GcPrunePayload {
 /// Flat fields for `AUTH_ACK` message (minus the `type` discriminant).
 ///
 /// Maps to `AuthAckMessageSchema` in `client-message-schemas.ts`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthAckData {
     /// Optional protocol version negotiated.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub protocol_version: Option<u32>,
+    /// Authenticated user identifier from JWT claims.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub user_id: Option<String>,
 }
 
 /// Flat fields for `AUTH_FAIL` message (minus the `type` discriminant).

@@ -23,7 +23,7 @@ pub use classify::OperationService;
 pub use config::ServerConfig;
 pub use operation::{
     service_names, CallerOrigin, ClassifyError, Operation, OperationContext, OperationError,
-    OperationResponse,
+    OperationPipeline, OperationResponse,
 };
 pub use registry::{ManagedService, ServiceContext, ServiceRegistry};
 pub use router::OperationRouter;

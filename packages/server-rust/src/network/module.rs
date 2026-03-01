@@ -185,6 +185,9 @@ fn build_app(
         config: Arc::new(config),
         start_time: Instant::now(),
         observability,
+        operation_service: None,
+        operation_pipeline: None,
+        jwt_secret: None,
     };
 
     Router::new()

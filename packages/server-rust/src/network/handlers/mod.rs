@@ -4,6 +4,7 @@
 //! extractors) and re-exports all handler functions for convenient access
 //! when building the router.
 
+pub mod auth;
 pub mod health;
 pub mod http_sync;
 pub mod metrics_endpoint;
@@ -17,8 +18,12 @@ pub use websocket::ws_upgrade_handler;
 use std::sync::Arc;
 use std::time::Instant;
 
+use tokio::sync::Mutex;
+
 use super::{ConnectionRegistry, NetworkConfig, ShutdownController};
+use crate::service::classify::OperationService;
 use crate::service::middleware::ObservabilityHandle;
+use crate::service::operation::OperationPipeline;
 
 /// Shared application state passed to all axum handlers via `State` extraction.
 ///
@@ -40,4 +45,17 @@ pub struct AppState {
     /// `None` in test environments that do not call `init_observability()`,
     /// ensuring existing tests compile without modification.
     pub observability: Option<Arc<ObservabilityHandle>>,
+    /// Operation classifier that converts `Message` into typed `Operation` values.
+    ///
+    /// `None` in network-only tests that do not wire the service layer.
+    pub operation_service: Option<Arc<OperationService>>,
+    /// Full Tower middleware pipeline (LoadShed -> Timeout -> Metrics -> Router).
+    /// Wrapped in `Mutex` because `Service::call()` requires `&mut self`.
+    ///
+    /// `None` in network-only tests that do not wire the service layer.
+    pub operation_pipeline: Option<Arc<Mutex<OperationPipeline>>>,
+    /// JWT secret for verifying authentication tokens.
+    ///
+    /// `None` when auth is not configured (existing network tests).
+    pub jwt_secret: Option<String>,
 }

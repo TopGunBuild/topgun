@@ -79,6 +79,9 @@ mod tests {
             config: Arc::new(NetworkConfig::default()),
             start_time: Instant::now(),
             observability: None,
+            operation_service: None,
+            operation_pipeline: None,
+            jwt_secret: None,
         }
     }
 
