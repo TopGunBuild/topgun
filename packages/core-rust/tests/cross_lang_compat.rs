@@ -201,6 +201,7 @@ fn optional_fields_omitted_in_auth_ack() {
     // Re-encode with None values by constructing a new instance
     let msg_no_optional = Message::AuthAck(topgun_core::messages::AuthAckData {
         protocol_version: None,
+        ..Default::default()
     });
 
     let re_bytes = rmp_serde::to_vec_named(&msg_no_optional).expect("re-encode");
