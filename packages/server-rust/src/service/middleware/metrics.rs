@@ -70,7 +70,9 @@ where
             async move {
                 let start = Instant::now();
                 let result = fut.await;
-                let duration_ms = start.elapsed().as_millis();
+                let elapsed = start.elapsed();
+                let duration_ms = elapsed.as_millis();
+                let duration_secs = elapsed.as_secs_f64();
 
                 let outcome = match &result {
                     Ok(_) => "ok",
@@ -92,7 +94,7 @@ where
 
                 // Record to Prometheus-compatible metrics registry.
                 metrics::counter!("topgun_operations_total", "service" => service_name, "outcome" => outcome.to_string()).increment(1);
-                metrics::histogram!("topgun_operation_duration_seconds", "service" => service_name).record(start.elapsed().as_secs_f64());
+                metrics::histogram!("topgun_operation_duration_seconds", "service" => service_name).record(duration_secs);
 
                 if let Err(ref e) = result {
                     let error_kind = match e {

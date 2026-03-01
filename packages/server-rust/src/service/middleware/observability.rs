@@ -144,7 +144,7 @@ mod tests {
     fn render_metrics_returns_string() {
         let handle = init_observability();
         let output = handle.render_metrics();
-        // Prometheus text format is always valid UTF-8.
-        assert!(output.is_ascii() || output.is_empty() || !output.is_empty());
+        // Prometheus text format is always valid ASCII UTF-8.
+        assert!(output.contains("# EOF") || output.is_empty());
     }
 }
