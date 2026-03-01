@@ -18,11 +18,12 @@ use tracing::{info, warn};
 use super::config::NetworkConfig;
 use super::connection::{ConnectionRegistry, OutboundMessage};
 use super::handlers::{
-    health_handler, http_sync_handler, liveness_handler, readiness_handler, ws_upgrade_handler,
-    AppState,
+    health_handler, http_sync_handler, liveness_handler, metrics_handler, readiness_handler,
+    ws_upgrade_handler, AppState,
 };
 use super::middleware::build_http_layers;
 use super::shutdown::ShutdownController;
+use crate::service::middleware::ObservabilityHandle;
 
 /// Manages the full HTTP/WebSocket server lifecycle.
 ///
@@ -38,6 +39,7 @@ pub struct NetworkModule {
     listener: Option<TcpListener>,
     registry: Arc<ConnectionRegistry>,
     shutdown: Arc<ShutdownController>,
+    observability: Option<Arc<ObservabilityHandle>>,
 }
 
 impl NetworkModule {
@@ -52,7 +54,17 @@ impl NetworkModule {
             listener: None,
             registry: Arc::new(ConnectionRegistry::new()),
             shutdown: Arc::new(ShutdownController::new()),
+            observability: None,
         }
+    }
+
+    /// Configures the observability handle for the `/metrics` endpoint.
+    ///
+    /// Call this after `new()` and before `start()` to enable Prometheus metrics
+    /// scraping at `GET /metrics`.  When not called, the `/metrics` endpoint
+    /// returns an empty 200 response (graceful degradation).
+    pub fn set_observability(&mut self, handle: Arc<ObservabilityHandle>) {
+        self.observability = Some(handle);
     }
 
     /// Returns a shared reference to the connection registry.
@@ -79,11 +91,13 @@ impl NetworkModule {
     /// - `GET /health/ready` -- Kubernetes readiness probe
     /// - `GET /ws` -- WebSocket upgrade
     /// - `POST /sync` -- HTTP sync endpoint (`MsgPack`)
+    /// - `GET /metrics` -- Prometheus metrics endpoint
     pub fn build_router(&self) -> Router {
         build_app(
             self.config.clone(),
             Arc::clone(&self.registry),
             Arc::clone(&self.shutdown),
+            self.observability.clone(),
         )
     }
 
@@ -138,8 +152,9 @@ impl NetworkModule {
         // Extract TLS config before consuming config into the router,
         // since build_app takes ownership of config.
         let tls = config.tls.take();
+        let observability = self.observability.clone();
 
-        let router = build_app(config, Arc::clone(&registry), Arc::clone(&shutdown_ctrl));
+        let router = build_app(config, Arc::clone(&registry), Arc::clone(&shutdown_ctrl), observability);
 
         // Transition to Ready so readiness probes pass.
         shutdown_ctrl.set_ready();
@@ -160,6 +175,7 @@ fn build_app(
     config: NetworkConfig,
     registry: Arc<ConnectionRegistry>,
     shutdown: Arc<ShutdownController>,
+    observability: Option<Arc<ObservabilityHandle>>,
 ) -> Router {
     let layers = build_http_layers(&config);
 
@@ -168,6 +184,7 @@ fn build_app(
         shutdown,
         config: Arc::new(config),
         start_time: Instant::now(),
+        observability,
     };
 
     Router::new()
@@ -176,6 +193,7 @@ fn build_app(
         .route("/health/ready", get(readiness_handler))
         .route("/ws", get(ws_upgrade_handler))
         .route("/sync", post(http_sync_handler))
+        .route("/metrics", get(metrics_handler))
         .layer(layers)
         .with_state(state)
 }

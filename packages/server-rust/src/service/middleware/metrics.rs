@@ -1,7 +1,7 @@
 //! Metrics middleware for operations.
 //!
-//! Records operation duration and increments counters using `tracing` spans,
-//! not a full metrics crate. Future enhancement: add prometheus/metrics crate.
+//! Records operation duration and increments counters using both `tracing` spans
+//! and the `metrics` crate (Prometheus-compatible counters and histograms).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -89,6 +89,24 @@ where
                     outcome = outcome,
                     "operation complete"
                 );
+
+                // Record to Prometheus-compatible metrics registry.
+                metrics::counter!("topgun_operations_total", "service" => service_name, "outcome" => outcome.to_string()).increment(1);
+                metrics::histogram!("topgun_operation_duration_seconds", "service" => service_name).record(start.elapsed().as_secs_f64());
+
+                if let Err(ref e) = result {
+                    let error_kind = match e {
+                        OperationError::Timeout { .. } => "timeout",
+                        OperationError::Overloaded => "overloaded",
+                        OperationError::WrongService => "wrong_service",
+                        OperationError::Internal(_) => "internal",
+                        OperationError::UnknownService { .. } => "unknown_service",
+                        OperationError::Unauthorized => "unauthorized",
+                        OperationError::Forbidden { .. } => "forbidden",
+                        OperationError::ValueTooLarge { .. } => "value_too_large",
+                    };
+                    metrics::counter!("topgun_operation_errors_total", "service" => service_name, "error" => error_kind).increment(1);
+                }
 
                 result
             }

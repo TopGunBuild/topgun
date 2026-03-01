@@ -6,16 +6,19 @@
 
 pub mod health;
 pub mod http_sync;
+pub mod metrics_endpoint;
 pub mod websocket;
 
 pub use health::{health_handler, liveness_handler, readiness_handler};
 pub use http_sync::http_sync_handler;
+pub use metrics_endpoint::metrics_handler;
 pub use websocket::ws_upgrade_handler;
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use super::{ConnectionRegistry, NetworkConfig, ShutdownController};
+use crate::service::middleware::ObservabilityHandle;
 
 /// Shared application state passed to all axum handlers via `State` extraction.
 ///
@@ -32,4 +35,9 @@ pub struct AppState {
     pub config: Arc<NetworkConfig>,
     /// Server process start time, used for uptime calculation.
     pub start_time: Instant,
+    /// Prometheus metrics handle for the `/metrics` endpoint.
+    ///
+    /// `None` in test environments that do not call `init_observability()`,
+    /// ensuring existing tests compile without modification.
+    pub observability: Option<Arc<ObservabilityHandle>>,
 }

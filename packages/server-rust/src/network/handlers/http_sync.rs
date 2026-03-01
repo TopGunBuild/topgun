@@ -49,6 +49,7 @@ mod tests {
             shutdown: Arc::new(ShutdownController::new()),
             config: Arc::new(NetworkConfig::default()),
             start_time: Instant::now(),
+            observability: None,
         }
     }
 
