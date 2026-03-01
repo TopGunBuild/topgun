@@ -1,0 +1,511 @@
+import {
+  createRustTestClient,
+  spawnRustServer,
+  createLWWRecord,
+  waitForSync,
+  waitUntil,
+  TestClient,
+} from './helpers';
+
+describe('Integration: Queries (Rust Server)', () => {
+  let cleanup: () => Promise<void>;
+  let port: number;
+
+  beforeAll(async () => {
+    const server = await spawnRustServer();
+    port = server.port;
+    cleanup = server.cleanup;
+  });
+
+  afterAll(async () => {
+    await cleanup();
+  });
+
+  // ========================================
+  // Snapshot Tests (AC22)
+  // ========================================
+  describe('QUERY_SUB snapshot', () => {
+    test('QUERY_SUB on populated map returns QUERY_RESP with all records', async () => {
+      const mapName = `snap-map-${Date.now()}`;
+      const client = await createRustTestClient(port, {
+        nodeId: 'snap-client-1',
+        userId: 'snap-user-1',
+        roles: ['ADMIN'],
+      });
+      await client.waitForMessage('AUTH_ACK');
+
+      // Populate the map with multiple records
+      const records = [
+        { key: 'rec-1', value: { name: 'Alice', age: 30 } },
+        { key: 'rec-2', value: { name: 'Bob', age: 25 } },
+        { key: 'rec-3', value: { name: 'Charlie', age: 35 } },
+      ];
+
+      for (const rec of records) {
+        client.messages.length = 0;
+        client.send({
+          type: 'CLIENT_OP',
+          payload: {
+            id: `snap-put-${rec.key}`,
+            mapName,
+            opType: 'PUT',
+            key: rec.key,
+            record: createLWWRecord(rec.value),
+          },
+        });
+        await client.waitForMessage('OP_ACK');
+      }
+
+      await waitForSync(200);
+
+      // Subscribe to query all records
+      client.messages.length = 0;
+      client.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'snap-q-1',
+          mapName,
+          query: {},
+        },
+      });
+
+      const response = await client.waitForMessage('QUERY_RESP');
+      expect(response).toBeDefined();
+      expect(response.payload.queryId).toBe('snap-q-1');
+      expect(response.payload.results).toBeDefined();
+      expect(Array.isArray(response.payload.results)).toBe(true);
+
+      // All 3 records should be in the results
+      expect(response.payload.results.length).toBe(3);
+
+      // Each result should be { key, value } format
+      for (const rec of records) {
+        const found = response.payload.results.find(
+          (r: any) => r.key === rec.key
+        );
+        expect(found).toBeDefined();
+        expect(found.value).toEqual(rec.value);
+      }
+
+      client.close();
+    });
+  });
+
+  // ========================================
+  // Where Filter Tests (AC23)
+  // ========================================
+  describe('QUERY_SUB with where filter (exact equality)', () => {
+    test('where filter returns only matching records', async () => {
+      const mapName = `where-map-${Date.now()}`;
+      const client = await createRustTestClient(port, {
+        nodeId: 'where-client-1',
+        userId: 'where-user-1',
+        roles: ['ADMIN'],
+      });
+      await client.waitForMessage('AUTH_ACK');
+
+      // Populate with records of different categories
+      const records = [
+        { key: 'item-1', value: { category: 'electronics', name: 'Phone' } },
+        { key: 'item-2', value: { category: 'books', name: 'Novel' } },
+        { key: 'item-3', value: { category: 'electronics', name: 'Laptop' } },
+        { key: 'item-4', value: { category: 'books', name: 'Guide' } },
+      ];
+
+      for (const rec of records) {
+        client.messages.length = 0;
+        client.send({
+          type: 'CLIENT_OP',
+          payload: {
+            id: `where-put-${rec.key}`,
+            mapName,
+            opType: 'PUT',
+            key: rec.key,
+            record: createLWWRecord(rec.value),
+          },
+        });
+        await client.waitForMessage('OP_ACK');
+      }
+
+      await waitForSync(200);
+
+      // Query with where filter for exact equality
+      client.messages.length = 0;
+      client.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'where-q-1',
+          mapName,
+          query: {
+            where: { category: 'electronics' },
+          },
+        },
+      });
+
+      const response = await client.waitForMessage('QUERY_RESP');
+      expect(response).toBeDefined();
+      expect(response.payload.queryId).toBe('where-q-1');
+
+      // Only electronics records should be returned
+      expect(response.payload.results.length).toBe(2);
+
+      const keys = response.payload.results.map((r: any) => r.key).sort();
+      expect(keys).toEqual(['item-1', 'item-3']);
+
+      for (const result of response.payload.results) {
+        expect(result.value.category).toBe('electronics');
+      }
+
+      client.close();
+    });
+  });
+
+  // ========================================
+  // Predicate Comparison Tests (AC24)
+  // ========================================
+  describe('QUERY_SUB with predicate (comparison operators)', () => {
+    let predClient: TestClient;
+    const predMapName = `pred-map-${Date.now()}`;
+
+    beforeAll(async () => {
+      predClient = await createRustTestClient(port, {
+        nodeId: 'pred-client-1',
+        userId: 'pred-user-1',
+        roles: ['ADMIN'],
+      });
+      await predClient.waitForMessage('AUTH_ACK');
+
+      // Populate with products at different prices
+      const products = [
+        { key: 'p-1', value: { name: 'Cheap', price: 10 } },
+        { key: 'p-2', value: { name: 'Mid', price: 50 } },
+        { key: 'p-3', value: { name: 'MidHigh', price: 100 } },
+        { key: 'p-4', value: { name: 'Expensive', price: 200 } },
+        { key: 'p-5', value: { name: 'Premium', price: 500 } },
+      ];
+
+      for (const prod of products) {
+        predClient.messages.length = 0;
+        predClient.send({
+          type: 'CLIENT_OP',
+          payload: {
+            id: `pred-put-${prod.key}`,
+            mapName: predMapName,
+            opType: 'PUT',
+            key: prod.key,
+            record: createLWWRecord(prod.value),
+          },
+        });
+        await predClient.waitForMessage('OP_ACK');
+      }
+
+      await waitForSync(200);
+    });
+
+    afterAll(() => {
+      predClient.close();
+    });
+
+    test('predicate gt: returns records with price > 100', async () => {
+      predClient.messages.length = 0;
+      predClient.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'pred-gt-q',
+          mapName: predMapName,
+          query: {
+            predicate: {
+              op: 'gt',
+              attribute: 'price',
+              value: 100,
+            },
+          },
+        },
+      });
+
+      const response = await predClient.waitForMessage('QUERY_RESP');
+      expect(response.payload.queryId).toBe('pred-gt-q');
+
+      // price > 100: p-4 (200), p-5 (500)
+      expect(response.payload.results.length).toBe(2);
+      const keys = response.payload.results.map((r: any) => r.key).sort();
+      expect(keys).toEqual(['p-4', 'p-5']);
+    });
+
+    test('predicate lt: returns records with price < 50', async () => {
+      predClient.messages.length = 0;
+      predClient.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'pred-lt-q',
+          mapName: predMapName,
+          query: {
+            predicate: {
+              op: 'lt',
+              attribute: 'price',
+              value: 50,
+            },
+          },
+        },
+      });
+
+      const response = await predClient.waitForMessage('QUERY_RESP');
+      expect(response.payload.queryId).toBe('pred-lt-q');
+
+      // price < 50: p-1 (10)
+      expect(response.payload.results.length).toBe(1);
+      expect(response.payload.results[0].key).toBe('p-1');
+    });
+
+    test('predicate gte: returns records with price >= 100', async () => {
+      predClient.messages.length = 0;
+      predClient.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'pred-gte-q',
+          mapName: predMapName,
+          query: {
+            predicate: {
+              op: 'gte',
+              attribute: 'price',
+              value: 100,
+            },
+          },
+        },
+      });
+
+      const response = await predClient.waitForMessage('QUERY_RESP');
+      expect(response.payload.queryId).toBe('pred-gte-q');
+
+      // price >= 100: p-3 (100), p-4 (200), p-5 (500)
+      expect(response.payload.results.length).toBe(3);
+      const keys = response.payload.results.map((r: any) => r.key).sort();
+      expect(keys).toEqual(['p-3', 'p-4', 'p-5']);
+    });
+
+    test('predicate lte: returns records with price <= 50', async () => {
+      predClient.messages.length = 0;
+      predClient.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'pred-lte-q',
+          mapName: predMapName,
+          query: {
+            predicate: {
+              op: 'lte',
+              attribute: 'price',
+              value: 50,
+            },
+          },
+        },
+      });
+
+      const response = await predClient.waitForMessage('QUERY_RESP');
+      expect(response.payload.queryId).toBe('pred-lte-q');
+
+      // price <= 50: p-1 (10), p-2 (50)
+      expect(response.payload.results.length).toBe(2);
+      const keys = response.payload.results.map((r: any) => r.key).sort();
+      expect(keys).toEqual(['p-1', 'p-2']);
+    });
+
+    test('predicate neq: returns records with price != 100', async () => {
+      predClient.messages.length = 0;
+      predClient.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'pred-neq-q',
+          mapName: predMapName,
+          query: {
+            predicate: {
+              op: 'neq',
+              attribute: 'price',
+              value: 100,
+            },
+          },
+        },
+      });
+
+      const response = await predClient.waitForMessage('QUERY_RESP');
+      expect(response.payload.queryId).toBe('pred-neq-q');
+
+      // price != 100: p-1 (10), p-2 (50), p-4 (200), p-5 (500)
+      expect(response.payload.results.length).toBe(4);
+      const keys = response.payload.results.map((r: any) => r.key).sort();
+      expect(keys).toEqual(['p-1', 'p-2', 'p-4', 'p-5']);
+    });
+  });
+
+  // ========================================
+  // Sort Tests (AC25)
+  // ========================================
+  describe('QUERY_SUB with sort', () => {
+    test('sort ascending by price returns results in order', async () => {
+      const mapName = `sort-map-${Date.now()}`;
+      const client = await createRustTestClient(port, {
+        nodeId: 'sort-client-1',
+        userId: 'sort-user-1',
+        roles: ['ADMIN'],
+      });
+      await client.waitForMessage('AUTH_ACK');
+
+      // Populate records in non-sorted order
+      const products = [
+        { key: 's-3', value: { name: 'C', price: 300 } },
+        { key: 's-1', value: { name: 'A', price: 100 } },
+        { key: 's-2', value: { name: 'B', price: 200 } },
+      ];
+
+      for (const prod of products) {
+        client.messages.length = 0;
+        client.send({
+          type: 'CLIENT_OP',
+          payload: {
+            id: `sort-put-${prod.key}`,
+            mapName,
+            opType: 'PUT',
+            key: prod.key,
+            record: createLWWRecord(prod.value),
+          },
+        });
+        await client.waitForMessage('OP_ACK');
+      }
+
+      await waitForSync(200);
+
+      // Query with ascending sort
+      client.messages.length = 0;
+      client.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'sort-asc-q',
+          mapName,
+          query: {
+            sort: { price: 'asc' },
+          },
+        },
+      });
+
+      const response = await client.waitForMessage('QUERY_RESP');
+      expect(response.payload.queryId).toBe('sort-asc-q');
+      expect(response.payload.results.length).toBe(3);
+
+      // Verify ascending order
+      const prices = response.payload.results.map(
+        (r: any) => r.value.price
+      );
+      expect(prices).toEqual([100, 200, 300]);
+
+      client.close();
+    });
+
+    test('sort descending by price returns results in reverse order', async () => {
+      const mapName = `sortdesc-map-${Date.now()}`;
+      const client = await createRustTestClient(port, {
+        nodeId: 'sortdesc-client-1',
+        userId: 'sortdesc-user-1',
+        roles: ['ADMIN'],
+      });
+      await client.waitForMessage('AUTH_ACK');
+
+      const products = [
+        { key: 'sd-1', value: { name: 'A', price: 100 } },
+        { key: 'sd-2', value: { name: 'B', price: 200 } },
+        { key: 'sd-3', value: { name: 'C', price: 300 } },
+      ];
+
+      for (const prod of products) {
+        client.messages.length = 0;
+        client.send({
+          type: 'CLIENT_OP',
+          payload: {
+            id: `sortdesc-put-${prod.key}`,
+            mapName,
+            opType: 'PUT',
+            key: prod.key,
+            record: createLWWRecord(prod.value),
+          },
+        });
+        await client.waitForMessage('OP_ACK');
+      }
+
+      await waitForSync(200);
+
+      client.messages.length = 0;
+      client.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'sort-desc-q',
+          mapName,
+          query: {
+            sort: { price: 'desc' },
+          },
+        },
+      });
+
+      const response = await client.waitForMessage('QUERY_RESP');
+      expect(response.payload.queryId).toBe('sort-desc-q');
+      expect(response.payload.results.length).toBe(3);
+
+      // Verify descending order
+      const prices = response.payload.results.map(
+        (r: any) => r.value.price
+      );
+      expect(prices).toEqual([300, 200, 100]);
+
+      client.close();
+    });
+  });
+
+  // ========================================
+  // Limit Tests (AC26)
+  // ========================================
+  describe('QUERY_SUB with limit', () => {
+    test('limit returns at most N results', async () => {
+      const mapName = `limit-map-${Date.now()}`;
+      const client = await createRustTestClient(port, {
+        nodeId: 'limit-client-1',
+        userId: 'limit-user-1',
+        roles: ['ADMIN'],
+      });
+      await client.waitForMessage('AUTH_ACK');
+
+      // Write 5 records
+      for (let i = 1; i <= 5; i++) {
+        client.messages.length = 0;
+        client.send({
+          type: 'CLIENT_OP',
+          payload: {
+            id: `limit-put-${i}`,
+            mapName,
+            opType: 'PUT',
+            key: `lim-${i}`,
+            record: createLWWRecord({ index: i, name: `Item ${i}` }),
+          },
+        });
+        await client.waitForMessage('OP_ACK');
+      }
+
+      await waitForSync(200);
+
+      // Query with limit of 3
+      client.messages.length = 0;
+      client.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'limit-q-1',
+          mapName,
+          query: {
+            limit: 3,
+          },
+        },
+      });
+
+      const response = await client.waitForMessage('QUERY_RESP');
+      expect(response.payload.queryId).toBe('limit-q-1');
+      expect(response.payload.results.length).toBeLessThanOrEqual(3);
+
+      client.close();
+    });
+  });
+});
