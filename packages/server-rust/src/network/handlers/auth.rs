@@ -5,9 +5,13 @@
 //!   - `send_auth_required`: sends on the raw `axum::extract::ws::WebSocket` before split
 //!   - `handle_auth`: sends via `mpsc::Sender<OutboundMessage>` after split
 
+use axum::extract::ws::WebSocket;
+use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use serde::Deserialize;
 use tokio::sync::mpsc;
-use topgun_core::messages::AuthMessage;
+use topgun_core::messages::{AuthFailData, AuthMessage, AuthRequiredMessage, Message};
 use topgun_core::Principal;
+use tracing::{debug, warn};
 
 use crate::network::OutboundMessage;
 
@@ -23,6 +27,17 @@ pub enum AuthError {
     /// Serialization error when encoding auth messages.
     #[error("serialization error: {0}")]
     Serialization(#[from] rmp_serde::encode::Error),
+}
+
+/// JWT claims extracted from the authentication token.
+///
+/// Only `userId` (aliased as `sub` for standard JWT or `userId` for TopGun tokens)
+/// is required. Additional claims are ignored.
+#[derive(Debug, Deserialize)]
+struct JwtClaims {
+    /// User identifier -- accepts both standard `sub` and TopGun-specific `userId`.
+    #[serde(alias = "sub", alias = "userId")]
+    user_id: Option<String>,
 }
 
 /// Handles the authentication handshake for WebSocket connections.
@@ -42,12 +57,20 @@ impl AuthHandler {
     /// Send AUTH_REQUIRED message to the client.
     ///
     /// Called immediately on WebSocket connect, BEFORE the socket is split,
-    /// so it takes the raw axum WebSocket directly.
+    /// so it takes the raw axum WebSocket directly. Serializes the message
+    /// via `rmp_serde::to_vec_named()` and sends as a binary frame.
     pub async fn send_auth_required(
         &self,
-        _socket: &mut axum::extract::ws::WebSocket,
+        socket: &mut WebSocket,
     ) -> Result<(), anyhow::Error> {
-        todo!()
+        let msg = Message::AuthRequired(AuthRequiredMessage {});
+        let bytes = rmp_serde::to_vec_named(&msg)?;
+        socket
+            .send(axum::extract::ws::Message::Binary(bytes.into()))
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to send AUTH_REQUIRED: {}", e))?;
+        debug!("sent AUTH_REQUIRED to client");
+        Ok(())
     }
 
     /// Process an incoming AUTH message.
@@ -59,9 +82,50 @@ impl AuthHandler {
     /// `Err(AuthError)`. The caller should close the connection.
     pub async fn handle_auth(
         &self,
-        _auth_msg: &AuthMessage,
-        _tx: &mpsc::Sender<OutboundMessage>,
+        auth_msg: &AuthMessage,
+        tx: &mpsc::Sender<OutboundMessage>,
     ) -> Result<Principal, AuthError> {
-        todo!()
+        let mut validation = Validation::new(Algorithm::HS256);
+        // Disable audience/issuer checks since TopGun tokens do not use them
+        validation.validate_aud = false;
+        validation.required_spec_claims.clear();
+
+        let key = DecodingKey::from_secret(self.jwt_secret.as_bytes());
+
+        match jsonwebtoken::decode::<JwtClaims>(&auth_msg.token, &key, &validation) {
+            Ok(token_data) => {
+                let user_id = token_data
+                    .claims
+                    .user_id
+                    .unwrap_or_else(|| "anonymous".to_string());
+
+                debug!(user_id = %user_id, "JWT verified successfully");
+
+                Ok(Principal {
+                    id: user_id,
+                    roles: vec![],
+                })
+            }
+            Err(e) => {
+                let reason = format!("{}", e);
+                warn!(error = %reason, "JWT verification failed");
+
+                // Send AUTH_FAIL with error description via outbound channel
+                let fail_msg = Message::AuthFail(AuthFailData {
+                    error: Some(reason.clone()),
+                    ..Default::default()
+                });
+                let bytes = rmp_serde::to_vec_named(&fail_msg)?;
+                tx.send(OutboundMessage::Binary(bytes)).await?;
+
+                // Send Close frame to disconnect the client
+                tx.send(OutboundMessage::Close(Some(
+                    "authentication failed".to_string(),
+                )))
+                .await?;
+
+                Err(AuthError::InvalidToken { reason })
+            }
+        }
     }
 }
