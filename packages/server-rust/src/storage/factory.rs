@@ -13,6 +13,21 @@ use crate::storage::map_data_store::MapDataStore;
 use crate::storage::mutation_observer::{CompositeMutationObserver, MutationObserver};
 use crate::storage::record_store::RecordStore;
 
+/// Factory that creates per-map mutation observers at store-creation time.
+///
+/// Enables domain services (e.g., search indexing) to inject observers
+/// that are wired with map-specific context when a [`RecordStore`] is created.
+pub trait ObserverFactory: Send + Sync {
+    /// Creates an observer for the given `(map_name, partition_id)` pair.
+    ///
+    /// Returns `None` if this factory does not need to observe the given map.
+    fn create_observer(
+        &self,
+        map_name: &str,
+        partition_id: u32,
+    ) -> Option<Arc<dyn MutationObserver>>;
+}
+
 /// Factory for creating fully-wired [`RecordStore`] instances.
 ///
 /// Holds shared configuration, the persistence backend, and a list of
@@ -22,10 +37,14 @@ pub struct RecordStoreFactory {
     config: StorageConfig,
     data_store: Arc<dyn MapDataStore>,
     observers: Vec<Arc<dyn MutationObserver>>,
+    observer_factories: Vec<Arc<dyn ObserverFactory>>,
 }
 
 impl RecordStoreFactory {
     /// Creates a new factory with the given configuration.
+    ///
+    /// Signature preserved for backward compatibility. For observer factory
+    /// support, use [`with_observer_factories()`](RecordStoreFactory::with_observer_factories).
     #[must_use]
     pub fn new(
         config: StorageConfig,
@@ -36,20 +55,46 @@ impl RecordStoreFactory {
             config,
             data_store,
             observers,
+            observer_factories: Vec::new(),
         }
+    }
+
+    /// Builder method that adds per-map observer factories.
+    ///
+    /// Each factory's [`create_observer()`](ObserverFactory::create_observer) is
+    /// called on every [`create()`](RecordStoreFactory::create) invocation, and
+    /// the returned observers are added to the per-store `CompositeMutationObserver`
+    /// alongside the shared static observers from `new()`.
+    #[must_use]
+    pub fn with_observer_factories(
+        mut self,
+        factories: Vec<Arc<dyn ObserverFactory>>,
+    ) -> Self {
+        self.observer_factories = factories;
+        self
     }
 
     /// Creates a [`RecordStore`] for the given map and partition.
     ///
     /// Assembles a fresh [`HashMapStorage`] engine, clones the shared
     /// [`MapDataStore`] reference, and builds a [`CompositeMutationObserver`]
-    /// from the registered observer list.
+    /// from both the static observer list and any per-map observers returned
+    /// by registered [`ObserverFactory`] instances.
     #[must_use]
     pub fn create(&self, map_name: &str, partition_id: u32) -> Box<dyn RecordStore> {
         let engine = Box::new(HashMapStorage::new());
-        let observer = Arc::new(CompositeMutationObserver::new(
-            self.observers.clone(),
-        ));
+
+        // Start with the shared static observers.
+        let mut all_observers = self.observers.clone();
+
+        // Ask each factory for a per-map observer.
+        for factory in &self.observer_factories {
+            if let Some(obs) = factory.create_observer(map_name, partition_id) {
+                all_observers.push(obs);
+            }
+        }
+
+        let observer = Arc::new(CompositeMutationObserver::new(all_observers));
         let record_store = DefaultRecordStore::new(
             map_name.to_string(),
             partition_id,
