@@ -6,10 +6,12 @@
 //! Uses `NullDataStore` (no `PostgreSQL` dependency) and JWT secret `test-e2e-secret`
 //! to match the TS test helpers.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use axum::routing::get;
+use parking_lot::RwLock;
 use tokio::net::TcpListener;
 use tokio::signal;
 use topgun_core::{SystemClock, HLC};
@@ -26,7 +28,9 @@ use topgun_server::service::domain::crdt::CrdtService;
 use topgun_server::service::domain::messaging::MessagingService;
 use topgun_server::service::domain::persistence::PersistenceService;
 use topgun_server::service::domain::query::{QueryRegistry, QueryService};
-use topgun_server::service::domain::search::{SearchRegistry, SearchService};
+use topgun_server::service::domain::search::{
+    SearchMutationObserver, SearchRegistry, SearchService, TantivyMapIndex,
+};
 use topgun_server::service::domain::sync::SyncService;
 use topgun_server::service::middleware::build_operation_pipeline;
 use topgun_server::service::operation::{service_names, OperationPipeline};
@@ -34,9 +38,10 @@ use topgun_server::service::router::OperationRouter;
 use topgun_server::service::security::{SecurityConfig, WriteValidator};
 use topgun_server::service::OperationService;
 use topgun_server::storage::datastores::NullDataStore;
-use topgun_server::storage::factory::RecordStoreFactory;
+use topgun_server::storage::factory::{ObserverFactory, RecordStoreFactory};
 use topgun_server::storage::impls::StorageConfig;
 use topgun_server::storage::merkle_sync::MerkleSyncManager;
+use topgun_server::storage::mutation_observer::MutationObserver;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -91,10 +96,39 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Observer factory that creates a `SearchMutationObserver` for every map.
+///
+/// Shares the same `indexes` and `search_registry` with `SearchService` so that
+/// writes indexed by the observer are immediately visible to search queries and
+/// live subscriptions.
+struct SearchObserverFactory {
+    search_registry: Arc<SearchRegistry>,
+    indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
+    connection_registry: Arc<ConnectionRegistry>,
+}
+
+impl ObserverFactory for SearchObserverFactory {
+    fn create_observer(
+        &self,
+        map_name: &str,
+        _partition_id: u32,
+    ) -> Option<Arc<dyn MutationObserver>> {
+        let observer = SearchMutationObserver::new(
+            map_name.to_string(),
+            Arc::clone(&self.search_registry),
+            Arc::clone(&self.indexes),
+            Arc::clone(&self.connection_registry),
+            16, // 16ms batch interval — fast enough for tests
+        );
+        Some(Arc::new(observer))
+    }
+}
+
 /// Wires all 7 domain services and builds the operation pipeline.
 ///
 /// Follows the `setup()` pattern from `packages/server-rust/src/lib.rs:63-148`.
 /// Returns the classifier, the boxed pipeline, and the connection registry.
+#[allow(clippy::too_many_lines)]
 fn build_services() -> (
     Arc<OperationService>,
     OperationPipeline,
@@ -124,11 +158,27 @@ fn build_services() -> (
     let cluster_state = Arc::new(cluster_state);
     let connection_registry = Arc::new(ConnectionRegistry::new());
 
-    let record_store_factory = Arc::new(RecordStoreFactory::new(
-        StorageConfig::default(),
-        Arc::new(NullDataStore),
-        Vec::new(),
-    ));
+    // Shared search state: indexes and registry are shared between the
+    // SearchObserverFactory (write path) and SearchService (query path).
+    let search_registry = Arc::new(SearchRegistry::new());
+    let search_indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+
+    let search_observer_factory: Arc<dyn ObserverFactory> =
+        Arc::new(SearchObserverFactory {
+            search_registry: Arc::clone(&search_registry),
+            indexes: Arc::clone(&search_indexes),
+            connection_registry: Arc::clone(&connection_registry),
+        });
+
+    let record_store_factory = Arc::new(
+        RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::new(NullDataStore),
+            Vec::new(),
+        )
+        .with_observer_factories(vec![search_observer_factory]),
+    );
     let merkle_manager = Arc::new(MerkleSyncManager::default());
 
     let write_validator = {
@@ -182,8 +232,8 @@ fn build_services() -> (
     router.register(
         service_names::SEARCH,
         Arc::new(SearchService::new(
-            Arc::new(SearchRegistry::new()),
-            Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
+            search_registry,
+            search_indexes,
             Arc::clone(&record_store_factory),
             Arc::clone(&connection_registry),
         )),
