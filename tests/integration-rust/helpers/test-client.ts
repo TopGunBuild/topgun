@@ -33,7 +33,7 @@ export interface TestClient {
  */
 export function createTestToken(userId: string, roles: string[] = ['USER']): string {
   return jwt.sign(
-    { userId, roles, sub: userId },
+    { sub: userId, roles },
     JWT_SECRET,
     { expiresIn: '1h' }
   );
