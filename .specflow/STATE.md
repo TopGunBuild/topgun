@@ -5,7 +5,7 @@
 - **Active Specification:** none
 - **Status:** idle
 - **Project Phase:** Phase 3 (Rust Server) — Wave 4
-- **TODO Items:** 28 (1 client bug fix + 8 Rust bridge/core + 5 audit findings + 14 existing deferred)
+- **TODO Items:** 29 (1 client bug fix + 8 Rust bridge/core + 5 audit findings + 14 existing deferred + 1 QueryObserverFactory)
 - **Next Step:** /sf:new or /sf:next
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
@@ -44,6 +44,7 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-03-03 | SPEC-074 | COMPLETED: Fix RecordStoreFactory Ephemeral Stores, Partition Mismatch, AUTH_FAIL Race — DashMap store cache with get_or_create()/get_all_for_map() in factory.rs, Arc<dyn RecordStore> return type, multi-partition scan in QueryService, Close frame removal + WebSocket outbound drain for AUTH_FAIL, rmpv_to_value Map key quoting fix. 7 files modified, 6 commits, 3 audit cycles, 1 review cycle. All 8 ACs met. Integration tests: 44/50 passing (up from 31/50), 6 remaining are expected QueryObserverFactory failures. APPROVED by impl-reviewer v1. |
 | 2026-03-02 | SPEC-073e | COMPLETED: Search Integration Tests — ObserverFactory trait added to RecordStoreFactory (factory.rs), SearchObserverFactory wired in test_server.rs sharing indexes/search_registry with SearchService, search.test.ts (11 test cases: one-shot SEARCH with BM25 ranking, limit, minScore, boost acceptance, unseen map 0 results, SEARCH_SUB initial + ENTER, UPDATE, LEAVE, UNSUB, multi-client). 1 file created, 2 modified, 3 commits, 2 audit cycles, 1 review cycle. All 5 ACs met. APPROVED by impl-reviewer v1. |
 | 2026-03-01 | SPEC-073d | COMPLETED: Query and Pub/Sub Integration Tests — queries.test.ts (QUERY_SUB snapshot, where filter, predicate comparison ops gt/lt/gte/lte/neq, sort, limit, live ENTER/UPDATE/LEAVE, QUERY_UNSUB, multi-query), pubsub.test.ts (TOPIC_SUB/PUB delivery, publisher exclusion, multi-subscriber, TOPIC_UNSUB, topic isolation, 10-message ordering, data types). 2 files created, 3 commits, 2 audit cycles, 1 review cycle. All 15 ACs met. APPROVED by impl-reviewer v1. |
 | 2026-03-01 | SPEC-073c | COMPLETED: Core Integration Tests: Connection, Auth, LWW CRDT, ORMap — connection-auth.test.ts (connect, AUTH_REQUIRED, AUTH_ACK, AUTH_FAIL), crdt-lww.test.ts (PUT/OP_ACK, QUERY_SUB read-back, OP_BATCH, conflict resolution, tombstone, deterministic winner), crdt-ormap.test.ts (OR_ADD/OR_REMOVE via CLIENT_OP with SERVER_EVENT verification). 3 files created, 2 modified, 3 commits, 2 audit cycles, 1 review cycle. All 11 ACs met. APPROVED by impl-reviewer v1. |
@@ -85,11 +86,16 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 - Observability pattern: `init_observability()` with `OnceLock` idempotency guard installs `tracing-subscriber` (EnvFilter + optional JSON) and `metrics-exporter-prometheus` recorder; `ObservabilityHandle` threaded via `AppState`; `/metrics` endpoint renders Prometheus text format on scrape; `metrics::counter!/histogram!/gauge!` macros in Tower middleware; manual `info_span!` + `.instrument()` on domain service `call()` methods
 - WebSocket dispatch pattern: Two-phase auth (pre-split AUTH_REQUIRED on raw socket, post-split AUTH_ACK/FAIL via mpsc channel); inbound binary -> `rmp_serde::from_slice` -> auth gate -> `OperationService.classify()` -> `set_connection_id()` -> `OperationPipeline` (BoxService) dispatch; BATCH unpacking via 4-byte BE u32 length-prefixed inner messages; `OperationResponse` variant mapping (Message/Messages/Empty/Ack/NotImplemented); `Option<Arc<...>>` AppState fields with None defaults for backward-compatible test compilation
 - Rust integration test harness pattern: `spawnRustServer()` spawns test binary (RUST_SERVER_BINARY or cargo run), captures PORT= from stdout via readline, returns cleanup (process-group SIGTERM/SIGKILL); standalone `TestClient` in test-client.ts (no @topgunbuild/server dep) sends individual MsgPack frames (no BATCH)
-- Observer factory pattern: `ObserverFactory` trait enables per-map mutation observer creation at `RecordStore` creation time; `RecordStoreFactory.with_observer_factories()` builder wires factories; `create()` calls each factory and merges returned observers into `CompositeMutationObserver`
+- Observer factory pattern: `ObserverFactory` trait enables per-map mutation observer creation at `RecordStore` creation time; `RecordStoreFactory.with_observer_factories()` builder wires factories; `get_or_create()` calls each factory on cache miss and merges returned observers into `CompositeMutationObserver`; `get_all_for_map()` returns all cached stores across partitions for cross-partition aggregation
+
+## Execution Status
+
+| Spec | Mode | Progress | Last Updated |
+|------|------|----------|--------------|
 
 ## Warnings
 
 (none)
 
 ---
-*Last updated: 2026-03-02 (SPEC-073e completed and archived — 1 file created, 2 modified, 3 commits, all 5 ACs met)*
+*Last updated: 2026-03-03 (SPEC-074 completed and archived)*
