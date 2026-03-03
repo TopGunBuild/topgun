@@ -27,7 +27,7 @@ use topgun_server::service::domain::coordination::CoordinationService;
 use topgun_server::service::domain::crdt::CrdtService;
 use topgun_server::service::domain::messaging::MessagingService;
 use topgun_server::service::domain::persistence::PersistenceService;
-use topgun_server::service::domain::query::{QueryRegistry, QueryService};
+use topgun_server::service::domain::query::{QueryMutationObserver, QueryRegistry, QueryService};
 use topgun_server::service::domain::search::{
     SearchMutationObserver, SearchRegistry, SearchService, TantivyMapIndex,
 };
@@ -124,6 +124,31 @@ impl ObserverFactory for SearchObserverFactory {
     }
 }
 
+/// Observer factory that creates a `QueryMutationObserver` for every map.
+///
+/// Shares the same `QueryRegistry` and `ConnectionRegistry` with `QueryService`
+/// so that writes trigger live QUERY_UPDATE messages for active subscriptions.
+struct QueryObserverFactory {
+    query_registry: Arc<QueryRegistry>,
+    connection_registry: Arc<ConnectionRegistry>,
+}
+
+impl ObserverFactory for QueryObserverFactory {
+    fn create_observer(
+        &self,
+        map_name: &str,
+        partition_id: u32,
+    ) -> Option<Arc<dyn MutationObserver>> {
+        let observer = QueryMutationObserver::new(
+            Arc::clone(&self.query_registry),
+            Arc::clone(&self.connection_registry),
+            map_name.to_string(),
+            partition_id,
+        );
+        Some(Arc::new(observer))
+    }
+}
+
 /// Wires all 7 domain services and builds the operation pipeline.
 ///
 /// Follows the `setup()` pattern from `packages/server-rust/src/lib.rs:63-148`.
@@ -171,13 +196,23 @@ fn build_services() -> (
             connection_registry: Arc::clone(&connection_registry),
         });
 
+    // Create query_registry early so it can be shared with both
+    // QueryObserverFactory (write path) and QueryService (query path).
+    let query_registry = Arc::new(QueryRegistry::new());
+
+    let query_observer_factory: Arc<dyn ObserverFactory> =
+        Arc::new(QueryObserverFactory {
+            query_registry: Arc::clone(&query_registry),
+            connection_registry: Arc::clone(&connection_registry),
+        });
+
     let record_store_factory = Arc::new(
         RecordStoreFactory::new(
             StorageConfig::default(),
             Arc::new(NullDataStore),
             Vec::new(),
         )
-        .with_observer_factories(vec![search_observer_factory]),
+        .with_observer_factories(vec![search_observer_factory, query_observer_factory]),
     );
     let merkle_manager = Arc::new(MerkleSyncManager::default());
 
@@ -209,11 +244,10 @@ fn build_services() -> (
             Arc::clone(&connection_registry),
         )),
     );
-    let query_registry = Arc::new(QueryRegistry::new());
     router.register(
         service_names::QUERY,
         Arc::new(QueryService::new(
-            query_registry,
+            Arc::clone(&query_registry),
             Arc::clone(&record_store_factory),
             Arc::clone(&connection_registry),
         )),
