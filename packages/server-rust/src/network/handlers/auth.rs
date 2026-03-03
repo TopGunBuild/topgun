@@ -31,13 +31,11 @@ pub enum AuthError {
 
 /// JWT claims extracted from the authentication token.
 ///
-/// Only `userId` (aliased as `sub` for standard JWT or `userId` for `TopGun` tokens)
-/// is required. Additional claims are ignored.
+/// Uses the standard `sub` (subject) claim for user identification per RFC 7519.
 #[derive(Debug, Deserialize)]
 struct JwtClaims {
-    /// User identifier -- accepts both standard `sub` and TopGun-specific `userId`.
-    #[serde(alias = "sub", alias = "userId")]
-    user_id: Option<String>,
+    /// User identifier — standard JWT `sub` (subject) claim.
+    sub: Option<String>,
 }
 
 /// Handles the authentication handshake for WebSocket connections.
@@ -106,7 +104,7 @@ impl AuthHandler {
             Ok(token_data) => {
                 let user_id = token_data
                     .claims
-                    .user_id
+                    .sub
                     .unwrap_or_else(|| "anonymous".to_string());
 
                 debug!(user_id = %user_id, "JWT verified successfully");
@@ -128,12 +126,10 @@ impl AuthHandler {
                 let bytes = rmp_serde::to_vec_named(&fail_msg)?;
                 tx.send(OutboundMessage::Binary(bytes)).await?;
 
-                // Send Close frame to disconnect the client
-                tx.send(OutboundMessage::Close(Some(
-                    "authentication failed".to_string(),
-                )))
-                .await?;
-
+                // No Close frame sent here: the caller (ws_handler) breaks out of the
+                // message loop on Err(AuthError::InvalidToken), dropping the sender half
+                // of the mpsc channel. This causes the writer task to shut down and close
+                // the socket, giving the client time to process AUTH_FAIL first.
                 Err(AuthError::InvalidToken { reason })
             }
         }
