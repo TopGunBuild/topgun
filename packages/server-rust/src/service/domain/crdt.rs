@@ -260,7 +260,7 @@ impl CrdtService {
     ) -> Result<ServerEventPayload, OperationError> {
         let store = self
             .record_store_factory
-            .create(&op.map_name, partition_id);
+            .get_or_create(&op.map_name, partition_id);
 
         // Determine the operation type and build the event payload.
         // Priority: explicit op_type REMOVE / tombstone -> REMOVE

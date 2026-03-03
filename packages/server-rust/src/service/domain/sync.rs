@@ -171,7 +171,7 @@ impl SyncService {
         match node_data {
             NodeData::Leaf(keys) => {
                 // Mutex released — now safe to do async RecordStore fetches.
-                let store = self.record_store_factory.create(&map_name, partition_id);
+                let store = self.record_store_factory.get_or_create(&map_name, partition_id);
                 let mut records = Vec::new();
                 for key in keys {
                     if let Ok(Some(record)) = store.get(&key, false).await {
@@ -278,7 +278,7 @@ impl SyncService {
         match node_data {
             NodeData::Leaf(keys) => {
                 // Mutex released — now safe to do async RecordStore fetches.
-                let store = self.record_store_factory.create(&map_name, partition_id);
+                let store = self.record_store_factory.get_or_create(&map_name, partition_id);
                 let mut entries = Vec::new();
                 for key in keys {
                     if let Ok(Some(record)) = store.get(&key, false).await {
@@ -351,7 +351,7 @@ impl SyncService {
         let keys = payload.payload.keys;
         let partition_id = ctx.partition_id.unwrap_or(0);
 
-        let store = self.record_store_factory.create(&map_name, partition_id);
+        let store = self.record_store_factory.get_or_create(&map_name, partition_id);
         let mut entries = Vec::new();
 
         for key in keys {
@@ -430,7 +430,7 @@ impl SyncService {
         let entries = payload.payload.entries;
         let partition_id = ctx.partition_id.unwrap_or(0);
 
-        let store = self.record_store_factory.create(&map_name, partition_id);
+        let store = self.record_store_factory.get_or_create(&map_name, partition_id);
 
         for entry in &entries {
             // Convert wire-format ORMapRecords to storage OrMapEntries.
