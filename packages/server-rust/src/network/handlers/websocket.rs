@@ -185,8 +185,20 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         }
     }
 
-    // Clean up: abort the outbound task and remove from registry.
-    outbound_handle.abort();
+    // Clean up: drop the connection handle (which drops the mpsc sender),
+    // allowing the outbound task to drain any pending messages and exit
+    // gracefully. This ensures messages like AUTH_FAIL are flushed to the
+    // WebSocket before the connection is closed.
+    drop(handle);
+
+    // Wait for the outbound task to finish flushing, with a timeout to
+    // prevent hanging if the writer is stuck.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        outbound_handle,
+    )
+    .await;
+
     state.registry.remove(conn_id);
     debug!("WebSocket disconnected: {:?}", conn_id);
 }
