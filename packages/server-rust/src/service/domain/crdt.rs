@@ -461,7 +461,15 @@ pub(crate) fn rmpv_to_value(v: &rmpv::Value) -> Value {
             let btree: BTreeMap<String, Value> = map
                 .iter()
                 .map(|(k, v): &(rmpv::Value, rmpv::Value)| {
-                    (k.to_string(), rmpv_to_value(v))
+                    // Extract the raw string from rmpv::Value::String to avoid
+                    // the Display impl which wraps strings in quotes.
+                    let key = match k {
+                        rmpv::Value::String(s) => {
+                            s.as_str().unwrap_or("").to_string()
+                        }
+                        other => other.to_string(),
+                    };
+                    (key, rmpv_to_value(v))
                 })
                 .collect();
             Value::Map(btree)
