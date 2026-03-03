@@ -451,27 +451,27 @@ impl QueryService {
             ))
         })?;
 
-        let partition_id = ctx.partition_id.unwrap_or(0);
         let query_id = payload.payload.query_id.clone();
         let map_name = payload.payload.map_name.clone();
         let query = payload.payload.query.clone();
 
-        // Get or create RecordStore for this map+partition
-        let store = self
-            .record_store_factory
-            .create(&map_name, partition_id);
+        // Scan ALL partitions for this map to aggregate entries across the full key space.
+        // Keys are deterministically mapped to partitions via hash_to_partition,
+        // so there is no risk of duplicates across partitions.
+        let stores = self.record_store_factory.get_all_for_map(&map_name);
 
-        // Collect all entries as (key, rmpv::Value)
         let mut entries: Vec<(String, rmpv::Value)> = Vec::new();
-        store.for_each_boxed(
-            &mut |key, record| {
-                if let RecordValue::Lww { ref value, .. } = record.value {
-                    entries.push((key.to_string(), value_to_rmpv(value)));
-                }
-                // Skip OrMap/OrTombstones records for query evaluation
-            },
-            false, // not backup
-        );
+        for store in &stores {
+            store.for_each_boxed(
+                &mut |key, record| {
+                    if let RecordValue::Lww { ref value, .. } = record.value {
+                        entries.push((key.to_string(), value_to_rmpv(value)));
+                    }
+                    // Skip OrMap/OrTombstones records for query evaluation
+                },
+                false, // not backup
+            );
+        }
 
         // Execute query (filter, sort, limit)
         let results = execute_query(entries, &query);
