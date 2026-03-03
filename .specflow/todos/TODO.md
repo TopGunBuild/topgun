@@ -508,6 +508,36 @@ Each Rust spec should reference up to THREE sources:
 - **Depends on:** TODO-068 (Integration Tests — proves behavioral equivalence)
 - **Effort:** 1-2 days
 
+### TODO-107: Standardize JWT to RFC 7519 `sub` Claim Only — DONE
+- **Status:** Complete (2026-03-02)
+- **Summary:** Removed legacy `userId` field from JWT protocol. Rust `JwtClaims` now uses only standard `sub` claim (RFC 7519). All token generators (Rust auth, TS e2e helpers, TS server bootstrap, TS test files) updated to send only `sub`. No backward compatibility needed — no active clients.
+
+### TODO-108: Investigate and Fix Pre-Existing Rust Integration Test Failures — IN PROGRESS
+- **Priority:** P1 (blocks TODO-068 Integration Tests)
+- **Complexity:** Medium
+- **Summary:** 19 tests failing across 3 integration test suites against the Rust server. All failures are pre-existing and unrelated to SPEC-073e search tests (which all pass).
+- **Failures:**
+  1. `connection-auth.test.ts` — 1/6 fail: AUTH_FAIL + Close frame race (Bug 3)
+  2. `queries.test.ts` — 14/16 fail: 8 snapshot tests fail from ephemeral stores + partition mismatch (Bugs 1+2), 6 live update tests fail from missing QueryObserverFactory wiring (Bug 4)
+  3. `crdt-lww.test.ts` — 4/8 fail: ephemeral stores + partition mismatch (Bugs 1+2)
+- **Active spec:** SPEC-074 fixes Bugs 1, 2, 3 (13 tests). Bug 4 deferred to TODO-109.
+- **Depends on:** TODO-107 ✅ (JWT fix done)
+- **Effort:** 1-2 weeks
+
+### TODO-109: Wire QueryObserverFactory for Live Query Updates — NEW
+- **Priority:** P1 (required for full query test suite)
+- **Complexity:** Medium
+- **Summary:** `QueryMutationObserver` is defined in `query.rs` but only instantiated in `#[cfg(test)]` unit tests. The test server binary (`test_server.rs`) does not wire it as an observer factory. Without this, no `QUERY_UPDATE` messages (ENTER/UPDATE/LEAVE) are sent when data changes via CrdtService. 6 live query integration tests fail.
+- **Root cause:** `QueryMutationObserver::new()` requires `QueryRegistry` and `ConnectionRegistry` references to know which subscriptions to notify. The `ObserverFactory` trait (from SPEC-073e) creates observers per `(map_name, partition_id)` at store creation time. A `QueryObserverFactory` needs to be implemented that creates `QueryMutationObserver` instances wired to the shared `QueryRegistry`.
+- **Scope:**
+  1. Create `QueryObserverFactory` implementing `ObserverFactory` trait
+  2. Wire it in `test_server.rs` alongside `SearchObserverFactory`
+  3. Ensure `QueryMutationObserver` receives correct `QueryRegistry` + `ConnectionRegistry` refs
+  4. Verify all 6 live query tests pass: ENTER, UPDATE, LEAVE, UNSUB, multi-client, multi-query
+- **Affected tests:** `queries.test.ts` lines 516, 593, 685, 780, 879, 975
+- **Depends on:** TODO-108 / SPEC-074 (store caching must work first — observers persist with cached stores)
+- **Effort:** 3-5 days
+
 ---
 
 ## Milestone 2: Data Platform (v2.0)
@@ -959,6 +989,9 @@ All items below are completed and archived in `.specflow/archive/`:
 | TODO-096 | [PRODUCT_CAPABILITIES.md](../reference/PRODUCT_CAPABILITIES.md), [STRATEGIC_RECOMMENDATIONS.md](../reference/STRATEGIC_RECOMMENDATIONS.md) Section 4+5 |
 | TODO-097 | [STRATEGIC_RECOMMENDATIONS.md](../reference/STRATEGIC_RECOMMENDATIONS.md) Section 5 (Security Model) |
 | TODO-105 | [STRATEGIC_RECOMMENDATIONS.md](../reference/STRATEGIC_RECOMMENDATIONS.md) Section 12.4 (Sync Showcase spec), [SYNC_DEMO_RECOMMENDATIONS.md](../reference/SYNC_DEMO_RECOMMENDATIONS.md) (concept + review) |
+| TODO-107 | Discovered during SPEC-073e integration test debugging — JWT `serde(alias)` conflict |
+| TODO-108 | Discovered during SPEC-073e integration test execution — 19 pre-existing test failures (13 fixable by SPEC-074, 6 deferred to TODO-109) |
+| TODO-109 | Discovered during SPEC-074 audit v2 — QueryMutationObserver not wired in test_server.rs, 6 live query tests fail |
 
 ---
 
@@ -973,3 +1006,5 @@ All items below are completed and archived in `.specflow/archive/`:
 *Updated 2026-02-27: Marked TODO-088 as DONE (SPEC-065 completed, 419 server tests). 5 of 7 domain services complete. Created PRODUCT_CAPABILITIES.md — end-product capabilities document covering v1.0/v2.0/v3.0 feature sets, competitive comparison, positioning.*
 *Updated 2026-02-27: Added TODO-093 (Admin Dashboard) — phased across v1.0/v2.0/v3.0. v1.0: Rust admin API (utoipa OpenAPI), OpenAPI codegen, SWR migration. v2.0: ReactFlow+Dagre pipeline viz, DataFusion SQL playground, connector wizard. v3.0: multi-tenant admin, tiered storage monitor. Reference: Arroyo WebUI patterns. Updated execution order (waves 5f, 6e, 7d), dependency graph, timeline.*
 *Updated 2026-02-28: Strategic audit applied (STRATEGIC_RECOMMENDATIONS.md). Marked TODO-089 (SPEC-066), TODO-071 (SPEC-068), TODO-090 (SPEC-067) as DONE — ALL 7 domain services complete, `domain_stub!` removed, PostgreSQL done. Added 12 new TODOs from strategic audit: TODO-094 (Apache 2.0 LICENSE), TODO-095 (Enterprise dir v3.0), TODO-096 (Adoption Path + Security docs), TODO-097 (P0: HLC sanitization + Map ACL — blocks production), TODO-099 (Structured tracing + /metrics), TODO-101 (Client DevTools v2.0), TODO-102 (Rust CLI v2.0), TODO-103 (Remove legacy TS), TODO-104 (Fix demo apps), TODO-105 (Sync Showcase Demo), TODO-106 (Update docs for Rust). Merged TODO-098 into TODO-096, TODO-100 into TODO-093. Updated positioning to dual-level (vision + v1.0). Rewrote execution order: security (097) on critical path, then admin/docs/demo, then integration tests gate release. v1.0 effort unchanged (~6-8 weeks) but focus shifts from domain services (done) to security + polish.*
+*Updated 2026-03-02: Added TODO-107 (JWT Claims Dual-Field Deserialization — P1, protocol compat fix in auth.rs) and TODO-108 (Pre-existing integration test failures — P1, 20 tests in 3 suites). Both discovered during SPEC-073e integration test execution. Quick fix applied in test-client.ts for TODO-107; fundamental Rust-side fix still needed. TODO-108 blocks TODO-068 completion.*
+*Updated 2026-03-02: Added TODO-109 (Wire QueryObserverFactory — P1, 6 live query tests). Split from TODO-108 after SPEC-074 audit v2 discovered QueryMutationObserver only exists in #[cfg(test)] blocks, not wired in test_server.rs. SPEC-074 scoped to Bugs 1-3 (13 tests), TODO-109 handles Bug 4 (6 live update tests).*
