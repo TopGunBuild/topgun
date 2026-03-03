@@ -72,7 +72,7 @@ pub enum ExpiryReason {
 /// Orchestrates Layer 1 ([`StorageEngine`]) and Layer 3 ([`MapDataStore`]),
 /// adding metadata tracking, expiry, eviction, and mutation observation.
 ///
-/// Used as `Box<dyn RecordStore>`.
+/// Used as `Arc<dyn RecordStore>`.
 #[async_trait]
 pub trait RecordStore: Send + Sync {
     /// Name of the map this record store manages.
