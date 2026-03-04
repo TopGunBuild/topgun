@@ -340,18 +340,9 @@ Each Rust spec should reference up to THREE sources:
 - **Status:** Complete (SPEC-066 completed 2026-02-27)
 - **Summary:** Server-side counters, entry processing, journal subscriptions, resolver requests. Sixth domain service replacing stub.
 
-### TODO-068: Integration Test Suite
-- **Priority:** P0
-- **Complexity:** Large
-- **Summary:** Port critical test scenarios, use TS server as behavioral oracle
-- **Approach:**
-  - Run identical test scenarios against TS server and Rust server
-  - Compare behavior for: CRDT merge, sync protocol, cluster operations, query results
-  - Client-server tests: TS client connects to Rust server
-  - **Incremental:** Start after TODO-084 (Ping e2e), expand as each domain service lands
-- **Source:** `packages/server/src/__tests__/`, `tests/e2e/`
-- **Depends on:** TODO-084+ (incremental — each domain service adds testable surface)
-- **Effort:** 3-4 weeks (concurrent with domain service work)
+### TODO-068: Integration Test Suite — DONE
+- **Status:** Complete (2026-03-03, SPEC-073a-e + SPEC-074 + SPEC-075)
+- **Summary:** 50 TS→Rust integration tests across 6 suites (connection-auth, crdt-lww, crdt-ormap, pubsub, queries, search) — all passing. 502 Rust unit tests — all passing. Single-node behavioral equivalence proven.
 
 ---
 
@@ -422,6 +413,7 @@ Each Rust spec should reference up to THREE sources:
   - Multi-tab awareness: banner prompting to open another tab for live sync
   - Split-screen conflict demo: two "devices" editing same data while "offline", click "Reconnect" to see automatic LWW merge with visual highlight of which version won
   - Designed to be embeddable as iframe on docs homepage (replacing mock TacticalDemo)
+  - `?demo` URL param: shows performance badge (load time, read latency) for marketing videos/screenshots. Inspired by RociCorp/zbugs approach — see [ZERO_ANALYSIS.md](../reference/ZERO_ANALYSIS.md)
 - **Depends on:** Working Rust server (all domain services done) or can use TS server for initial version
 - **Effort:** 1 week
 
@@ -464,18 +456,9 @@ Each Rust spec should reference up to THREE sources:
 - **Depends on:** TODO-064 ✅ (Network — axum endpoints), TODO-090 (admin needs working storage for system maps)
 - **Effort:** v1.0: 1-2 weeks · v2.0: 2-3 weeks · v3.0: 1-2 weeks
 
-### TODO-068: Integration Test Suite
-- **Priority:** P0 (gates v1.0 release)
-- **Complexity:** Large
-- **Summary:** Port critical test scenarios, use TS server as behavioral oracle
-- **Approach:**
-  - Run identical test scenarios against TS server and Rust server
-  - Compare behavior for: CRDT merge, sync protocol, cluster operations, query results
-  - Client-server tests: TS client connects to Rust server
-  - **Incremental:** Start after TODO-084 (Ping e2e), expand as each domain service lands
-- **Source:** `packages/server/src/__tests__/`, `tests/e2e/`
-- **Depends on:** TODO-084+ (incremental — each domain service adds testable surface)
-- **Effort:** 3-4 weeks (concurrent with domain service work)
+### TODO-068: Integration Test Suite — DONE
+- **Status:** Complete (2026-03-03, SPEC-073a-e + SPEC-074 + SPEC-075)
+- **Summary:** 50 TS→Rust integration tests across 6 suites — all passing. 502 Rust unit tests — all passing. Single-node behavioral equivalence proven. TS e2e tests (tests/e2e/) removed — they tested TS server internals, replaced by integration-rust suite.
 
 ### TODO-106: Update Documentation Content for Rust Server — NEW
 - **Priority:** P2 (post-migration docs sync)
@@ -512,31 +495,13 @@ Each Rust spec should reference up to THREE sources:
 - **Status:** Complete (2026-03-02)
 - **Summary:** Removed legacy `userId` field from JWT protocol. Rust `JwtClaims` now uses only standard `sub` claim (RFC 7519). All token generators (Rust auth, TS e2e helpers, TS server bootstrap, TS test files) updated to send only `sub`. No backward compatibility needed — no active clients.
 
-### TODO-108: Investigate and Fix Pre-Existing Rust Integration Test Failures — IN PROGRESS
-- **Priority:** P1 (blocks TODO-068 Integration Tests)
-- **Complexity:** Medium
-- **Summary:** 19 tests failing across 3 integration test suites against the Rust server. All failures are pre-existing and unrelated to SPEC-073e search tests (which all pass).
-- **Failures:**
-  1. `connection-auth.test.ts` — 1/6 fail: AUTH_FAIL + Close frame race (Bug 3)
-  2. `queries.test.ts` — 14/16 fail: 8 snapshot tests fail from ephemeral stores + partition mismatch (Bugs 1+2), 6 live update tests fail from missing QueryObserverFactory wiring (Bug 4)
-  3. `crdt-lww.test.ts` — 4/8 fail: ephemeral stores + partition mismatch (Bugs 1+2)
-- **Active spec:** SPEC-074 fixes Bugs 1, 2, 3 (13 tests). Bug 4 deferred to TODO-109.
-- **Depends on:** TODO-107 ✅ (JWT fix done)
-- **Effort:** 1-2 weeks
+### TODO-108: Investigate and Fix Pre-Existing Rust Integration Test Failures — DONE
+- **Status:** Complete (2026-03-03, SPEC-074)
+- **Summary:** Fixed 3 bugs: ephemeral RecordStore (DashMap cache), partition mismatch (multi-partition scan), AUTH_FAIL race (Close frame removal). 13 tests fixed.
 
-### TODO-109: Wire QueryObserverFactory for Live Query Updates — NEW
-- **Priority:** P1 (required for full query test suite)
-- **Complexity:** Medium
-- **Summary:** `QueryMutationObserver` is defined in `query.rs` but only instantiated in `#[cfg(test)]` unit tests. The test server binary (`test_server.rs`) does not wire it as an observer factory. Without this, no `QUERY_UPDATE` messages (ENTER/UPDATE/LEAVE) are sent when data changes via CrdtService. 6 live query integration tests fail.
-- **Root cause:** `QueryMutationObserver::new()` requires `QueryRegistry` and `ConnectionRegistry` references to know which subscriptions to notify. The `ObserverFactory` trait (from SPEC-073e) creates observers per `(map_name, partition_id)` at store creation time. A `QueryObserverFactory` needs to be implemented that creates `QueryMutationObserver` instances wired to the shared `QueryRegistry`.
-- **Scope:**
-  1. Create `QueryObserverFactory` implementing `ObserverFactory` trait
-  2. Wire it in `test_server.rs` alongside `SearchObserverFactory`
-  3. Ensure `QueryMutationObserver` receives correct `QueryRegistry` + `ConnectionRegistry` refs
-  4. Verify all 6 live query tests pass: ENTER, UPDATE, LEAVE, UNSUB, multi-client, multi-query
-- **Affected tests:** `queries.test.ts` lines 516, 593, 685, 780, 879, 975
-- **Depends on:** TODO-108 / SPEC-074 (store caching must work first — observers persist with cached stores)
-- **Effort:** 3-5 days
+### TODO-109: Wire QueryObserverFactory for Live Query Updates — DONE
+- **Status:** Complete (2026-03-03, SPEC-075)
+- **Summary:** Created QueryObserverFactory in test_server.rs, wired alongside SearchObserverFactory. 6 live query tests fixed. All 50/50 integration tests now pass.
 
 ---
 
@@ -850,14 +815,15 @@ MILESTONE 1: Working IMDG (v1.0) — remaining work
   ~~TODO-104 ✅~~ (Fix demo apps) — DONE
   ~~TODO-097 ✅~~ (Security: HLC sanitize + Map ACL) — DONE
   ~~TODO-099 ✅~~ (Structured Tracing + /metrics) — DONE
+  ~~TODO-068 ✅~~ (Integration Tests — 50/50 pass) — DONE
+  ~~TODO-108 ✅~~ · ~~TODO-109 ✅~~ (test bug fixes) — DONE
        ↓
-  TODO-068 (Integration Tests) ← NEXT, GATES v1.0 RELEASE
-  TODO-093 v1.0 (Admin Dashboard — Rust API, OpenAPI, CRDT debug) ← parallel
+  TODO-093 v1.0 (Admin Dashboard — Rust API, OpenAPI, CRDT debug) ← NEXT
   TODO-096 (Adoption Path docs + Security docs) ← parallel
   TODO-105 (Sync Showcase Demo) ← parallel
        ↓
   TODO-106 (Update docs for Rust server) ← after API finalized
-  TODO-103 (Remove legacy TS server) ← after 068 proves equivalence
+  TODO-103 (Remove legacy TS server) ← TS e2e tests already removed
 
 ═══════════════════════════════════════════════════════════════
 MILESTONE 2: Data Platform (v2.0)
@@ -892,9 +858,9 @@ MILESTONE 3: Enterprise (v3.0+)
 
 | Milestone | Remaining Items | Effort | Status |
 |-----------|----------------|--------|--------|
-| **v1.0 Working IMDG** | 093 v1.0, 096, 105, 068, 106, 103 | ~4-5 weeks | **In progress** (services + security + tracing done, admin + docs + demo + tests remaining) |
-| — v1.0.0-rc.1 tag | After 068 first pass | — | Pre-release: npm + Rust binary |
-| — Merge to main | After 068 complete | — | Deprecate TS server |
+| **v1.0 Working IMDG** | 093 v1.0, 096, 105, 106, 103 | ~3-4 weeks | **In progress** (services + security + tracing + tests done; admin + docs + demo remaining) |
+| — v1.0.0-rc.1 tag | After 068 ✅ | — | Pre-release: npm + Rust binary |
+| — Merge to main | After 068 ✅ complete | — | Deprecate TS server |
 | — v1.0.0 stable | After merge + 106 + 103 | — | npm publish + GitHub Release |
 | **v2.0 Data Platform** | 069, 070, 091, 025, 092, 033, 036, 072, 048, 049, 076, 101, 102, 093 v2.0 | ~14-18 weeks | After v1.0 |
 | **v3.0 Enterprise** | 041, 043, 040, 039, 044, 095, 093 v3.0 | ~18-26 weeks | After v2.0 |
@@ -1008,3 +974,4 @@ All items below are completed and archived in `.specflow/archive/`:
 *Updated 2026-02-28: Strategic audit applied (STRATEGIC_RECOMMENDATIONS.md). Marked TODO-089 (SPEC-066), TODO-071 (SPEC-068), TODO-090 (SPEC-067) as DONE — ALL 7 domain services complete, `domain_stub!` removed, PostgreSQL done. Added 12 new TODOs from strategic audit: TODO-094 (Apache 2.0 LICENSE), TODO-095 (Enterprise dir v3.0), TODO-096 (Adoption Path + Security docs), TODO-097 (P0: HLC sanitization + Map ACL — blocks production), TODO-099 (Structured tracing + /metrics), TODO-101 (Client DevTools v2.0), TODO-102 (Rust CLI v2.0), TODO-103 (Remove legacy TS), TODO-104 (Fix demo apps), TODO-105 (Sync Showcase Demo), TODO-106 (Update docs for Rust). Merged TODO-098 into TODO-096, TODO-100 into TODO-093. Updated positioning to dual-level (vision + v1.0). Rewrote execution order: security (097) on critical path, then admin/docs/demo, then integration tests gate release. v1.0 effort unchanged (~6-8 weeks) but focus shifts from domain services (done) to security + polish.*
 *Updated 2026-03-02: Added TODO-107 (JWT Claims Dual-Field Deserialization — P1, protocol compat fix in auth.rs) and TODO-108 (Pre-existing integration test failures — P1, 20 tests in 3 suites). Both discovered during SPEC-073e integration test execution. Quick fix applied in test-client.ts for TODO-107; fundamental Rust-side fix still needed. TODO-108 blocks TODO-068 completion.*
 *Updated 2026-03-02: Added TODO-109 (Wire QueryObserverFactory — P1, 6 live query tests). Split from TODO-108 after SPEC-074 audit v2 discovered QueryMutationObserver only exists in #[cfg(test)] blocks, not wired in test_server.rs. SPEC-074 scoped to Bugs 1-3 (13 tests), TODO-109 handles Bug 4 (6 live update tests).*
+*Updated 2026-03-03: Marked TODO-068, TODO-108, TODO-109 as DONE. Integration tests: 50/50 pass (6 suites), Rust unit tests: 502 pass. Single-node behavioral equivalence proven. Removed obsolete TS e2e tests (tests/e2e/) — they depended on TS ServerCoordinator and are replaced by tests/integration-rust/. TODO-103 (TS server removal) updated accordingly.*
