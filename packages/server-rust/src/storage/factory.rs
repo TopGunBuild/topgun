@@ -135,6 +135,22 @@ impl RecordStoreFactory {
             .clone()
     }
 
+    /// Returns a sorted, deduplicated list of all map names in the store cache.
+    ///
+    /// Iterates the cache keys, extracts the map name (first element of each
+    /// `(String, u32)` tuple), deduplicates, and returns sorted.
+    #[must_use]
+    pub fn map_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .store_cache
+            .iter()
+            .map(|entry| entry.key().0.clone())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// Returns all cached stores for the given map name across all partitions.
     ///
     /// Iterates the store cache and collects entries where the map name matches.
