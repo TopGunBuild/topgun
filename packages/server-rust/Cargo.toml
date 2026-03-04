@@ -20,7 +20,7 @@ axum = { version = "0.8", features = ["ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "net"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors", "timeout", "request-id", "compression-gzip"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "timeout", "request-id", "compression-gzip", "fs"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 dashmap = "6"
 parking_lot = "0.12"
@@ -41,6 +41,10 @@ rand = "0.9"
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres"], optional = true }
 tantivy = "0.22"
 jsonwebtoken = "9"
+subtle = "2"
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-axum = "0.2"
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 [[bin]]
 name = "test-server"

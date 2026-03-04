@@ -33,9 +33,12 @@ pub enum AuthError {
 ///
 /// Uses the standard `sub` (subject) claim for user identification per RFC 7519.
 #[derive(Debug, Deserialize)]
-struct JwtClaims {
-    /// User identifier — standard JWT `sub` (subject) claim.
-    sub: Option<String>,
+pub struct JwtClaims {
+    /// User identifier -- standard JWT `sub` (subject) claim.
+    pub sub: Option<String>,
+    /// Roles assigned to this principal (e.g., `["admin"]`).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub roles: Option<Vec<String>>,
 }
 
 /// Handles the authentication handshake for WebSocket connections.
@@ -107,11 +110,12 @@ impl AuthHandler {
                     .sub
                     .unwrap_or_else(|| "anonymous".to_string());
 
-                debug!(user_id = %user_id, "JWT verified successfully");
+                let roles = token_data.claims.roles.unwrap_or_default();
+                debug!(user_id = %user_id, ?roles, "JWT verified successfully");
 
                 Ok(Principal {
                     id: user_id,
-                    roles: vec![],
+                    roles,
                 })
             }
             Err(e) => {

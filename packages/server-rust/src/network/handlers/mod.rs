@@ -4,6 +4,8 @@
 //! extractors) and re-exports all handler functions for convenient access
 //! when building the router.
 
+pub mod admin_auth;
+pub mod admin_types;
 pub mod auth;
 pub mod health;
 pub mod http_sync;
