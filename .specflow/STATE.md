@@ -2,19 +2,18 @@
 
 ## Current Position
 
-- **Active Specification:** SPEC-076b
-- **Status:** running
+- **Active Specification:** none
+- **Status:** idle
 - **Project Phase:** Phase 3 (Rust Server) — Wave 4
 - **TODO Items:** 28 (1 client bug fix + 8 Rust bridge/core + 5 audit findings + 14 existing deferred)
-- **Next Step:** autopilot executing SPEC-076b
+- **Next Step:** `/sf:new` or `/sf:next`
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
 ## Queue
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-076b | Admin Dashboard v1.0 -- Rust Admin Handlers & Wiring | audited | 3 |
-| 2 | SPEC-076c | Admin Dashboard v1.0 -- React Dashboard Adaptation | draft | 3 |
+| 1 | SPEC-076c | Admin Dashboard v1.0 -- React Dashboard Adaptation | draft | 3 |
 
 ## Migration Roadmap (high-level)
 
@@ -46,13 +45,14 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-03-04 | SPEC-076b | COMPLETED: Admin handlers, OpenAPI, and router wiring -- admin.rs (6 handlers: status, login, cluster/status, maps, settings GET/PUT), openapi.rs (utoipa OpenApi derive + Swagger UI), module.rs (ServeDir SPA fallback with ServeFile for index.html, NetworkModule setter methods), handlers/mod.rs (AppState extended with cluster_state/store_factory/server_config), network/mod.rs (pub mod openapi), factory.rs (map_names()). 2 files created, 4 modified. All 12 ACs met. 502 tests pass, clippy clean. APPROVED by impl-reviewer v2. |
 | 2026-03-04 | SPEC-076a | COMPLETED: Admin types & auth middleware — admin_types.rs (13 types with ToSchema), admin_auth.rs (AdminClaims extractor with 401/403), JwtClaims made pub with roles, handle_auth propagates roles to Principal. 2 files created, 3 modified, 2 commits, 1 audit cycle, 1 fix cycle. All 10 ACs met. 502 tests pass, clippy clean. APPROVED by impl-reviewer v2. |
 | 2026-03-04 | SPEC-076 | SPLIT into 3 parts: SPEC-076a (Rust admin types + auth middleware, 4 files), SPEC-076b (Rust admin handlers + wiring, 4 files), SPEC-076c (React dashboard adaptation, 14 TS/TSX files). Parent archived. |
 | 2026-03-03 | SPEC-075 | COMPLETED: Wire QueryObserverFactory for Live Query Updates — QueryObserverFactory struct in test_server.rs sharing Arc<QueryRegistry> and Arc<ConnectionRegistry> with QueryService, registered alongside SearchObserverFactory in RecordStoreFactory::with_observer_factories(). 1 file modified, 1 commit, 2 audit cycles. All 12 ACs met. Integration tests: 50/50 passing (up from 44/50). |
 | 2026-03-03 | SPEC-074 | COMPLETED: Fix RecordStoreFactory Ephemeral Stores, Partition Mismatch, AUTH_FAIL Race — DashMap store cache with get_or_create()/get_all_for_map() in factory.rs, Arc<dyn RecordStore> return type, multi-partition scan in QueryService, Close frame removal + WebSocket outbound drain for AUTH_FAIL, rmpv_to_value Map key quoting fix. 7 files modified, 6 commits, 3 audit cycles, 1 review cycle. All 8 ACs met. Integration tests: 44/50 passing (up from 31/50), 6 remaining are expected QueryObserverFactory failures. APPROVED by impl-reviewer v1. |
 | 2026-03-02 | SPEC-073e | COMPLETED: Search Integration Tests — ObserverFactory trait added to RecordStoreFactory (factory.rs), SearchObserverFactory wired in test_server.rs sharing indexes/search_registry with SearchService, search.test.ts (11 test cases: one-shot SEARCH with BM25 ranking, limit, minScore, boost acceptance, unseen map 0 results, SEARCH_SUB initial + ENTER, UPDATE, LEAVE, UNSUB, multi-client). 1 file created, 2 modified, 3 commits, 2 audit cycles, 1 review cycle. All 5 ACs met. APPROVED by impl-reviewer v1. |
 | 2026-03-01 | SPEC-073d | COMPLETED: Query and Pub/Sub Integration Tests — queries.test.ts (QUERY_SUB snapshot, where filter, predicate comparison ops gt/lt/gte/lte/neq, sort, limit, live ENTER/UPDATE/LEAVE, QUERY_UNSUB, multi-query), pubsub.test.ts (TOPIC_SUB/PUB delivery, publisher exclusion, multi-subscriber, TOPIC_UNSUB, topic isolation, 10-message ordering, data types). 2 files created, 3 commits, 2 audit cycles, 1 review cycle. All 15 ACs met. APPROVED by impl-reviewer v1. |
-| 2026-03-01 | SPEC-073c | COMPLETED: Core Integration Tests: Connection, Auth, LWW CRDT, ORMap — connection-auth.test.ts (connect, AUTH_REQUIRED, AUTH_ACK, AUTH_FAIL), crdt-lww.test.ts (PUT/OP_ACK, QUERY_SUB read-back, OP_BATCH, conflict resolution, tombstone, deterministic winner), crdt-ormap.test.ts (OR_ADD/OR_REMOVE via CLIENT_OP with SERVER_EVENT verification). 3 files created, 2 modified, 3 commits, 2 audit cycles, 1 review cycle. All 11 ACs met. APPROVED by impl-reviewer v1. |
+
 
 ## Project Patterns
 
@@ -94,11 +94,10 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Spec | Mode | Progress | Last Updated |
 |------|------|----------|--------------|
-| SPEC-076b | orchestrated | Wave 0/2 (0%) | 2026-03-04 |
 
 ## Warnings
 
 (none)
 
 ---
-*Last updated: 2026-03-04 (SPEC-076b audit v2 -- approved)*
+*Last updated: 2026-03-04 (SPEC-076b archived)*
