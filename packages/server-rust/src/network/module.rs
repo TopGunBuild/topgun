@@ -14,7 +14,7 @@ use arc_swap::ArcSwap;
 use axum::routing::{get, post};
 use axum::Router;
 use tokio::net::TcpListener;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 use tracing::{info, warn};
 use utoipa::OpenApi;
 
@@ -249,9 +249,10 @@ fn build_app(
     // Static SPA serving for admin dashboard
     let admin_spa_dir = std::env::var("TOPGUN_ADMIN_DIR")
         .unwrap_or_else(|_| "./admin-dashboard/dist".to_string());
+    let index_html = format!("{admin_spa_dir}/index.html");
     let serve_dir = ServeDir::new(&admin_spa_dir)
         .append_index_html_on_directories(true)
-        .fallback(ServeDir::new(&admin_spa_dir).append_index_html_on_directories(true));
+        .fallback(ServeFile::new(index_html));
 
     Router::new()
         // Existing routes
