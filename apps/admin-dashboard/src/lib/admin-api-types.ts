@@ -1,6 +1,6 @@
 /**
  * Hand-typed TypeScript interfaces matching Rust admin response structs.
- * These types mirror the Rust admin_types.rs definitions from SPEC-076a.
+ * These types mirror the Rust admin_types.rs definitions for the admin API.
  */
 
 export type ServerMode = 'normal' | 'bootstrap';
