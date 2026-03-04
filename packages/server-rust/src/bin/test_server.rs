@@ -127,7 +127,7 @@ impl ObserverFactory for SearchObserverFactory {
 /// Observer factory that creates a `QueryMutationObserver` for every map.
 ///
 /// Shares the same `QueryRegistry` and `ConnectionRegistry` with `QueryService`
-/// so that writes trigger live QUERY_UPDATE messages for active subscriptions.
+/// so that writes trigger live `QUERY_UPDATE` messages for active subscriptions.
 struct QueryObserverFactory {
     query_registry: Arc<QueryRegistry>,
     connection_registry: Arc<ConnectionRegistry>,

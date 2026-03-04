@@ -1,6 +1,6 @@
-//! Admin API request and response types for the TopGun admin dashboard.
+//! Admin API request and response types for the `TopGun` admin dashboard.
 //!
-//! All types derive `utoipa::ToSchema` for OpenAPI documentation and use
+//! All types derive [`ToSchema`] for `OpenAPI` documentation and use
 //! `#[serde(rename_all = "camelCase")]` for consistent JSON field naming.
 
 use serde::{Deserialize, Serialize};
@@ -95,7 +95,7 @@ pub struct SettingsResponse {
     pub max_value_bytes: u64,
 
     // Runtime (not from config structs)
-    /// Current RUST_LOG / tracing EnvFilter value.
+    /// Current `RUST_LOG` / tracing `EnvFilter` value.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub log_level: Option<String>,
 }
@@ -104,22 +104,31 @@ pub struct SettingsResponse {
 #[derive(Deserialize, ToSchema, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsUpdateRequest {
-    /// Update tracing EnvFilter at runtime.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    /// Update tracing `EnvFilter` at runtime.
+    #[serde(default)]
     pub log_level: Option<String>,
     /// Update GC interval (takes effect on next GC cycle).
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(default)]
     pub gc_interval_ms: Option<u64>,
-    /// Update max concurrent operations (takes effect immediately via ArcSwap).
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    /// Update max concurrent operations (takes effect immediately via `ArcSwap`).
+    #[serde(default)]
     pub max_concurrent_operations: Option<u32>,
 }
 
-#[derive(Deserialize, ToSchema, Clone, Debug)]
+#[derive(Deserialize, ToSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
+}
+
+impl std::fmt::Debug for LoginRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginRequest")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Serialize, ToSchema, Clone, Debug)]
