@@ -10,20 +10,30 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwap;
 use axum::routing::{get, post};
 use axum::Router;
 use tokio::net::TcpListener;
+use tower_http::services::ServeDir;
 use tracing::{info, warn};
+use utoipa::OpenApi;
 
 use super::config::NetworkConfig;
 use super::connection::{ConnectionRegistry, OutboundMessage};
+use super::handlers::admin::{
+    cluster_status, get_settings, list_maps, login, server_status, update_settings,
+};
 use super::handlers::{
     health_handler, http_sync_handler, liveness_handler, metrics_handler, readiness_handler,
     ws_upgrade_handler, AppState,
 };
 use super::middleware::build_http_layers;
+use super::openapi::AdminApiDoc;
 use super::shutdown::ShutdownController;
+use crate::cluster::state::ClusterState;
+use crate::service::config::ServerConfig;
 use crate::service::middleware::ObservabilityHandle;
+use crate::storage::factory::RecordStoreFactory;
 
 /// Manages the full HTTP/WebSocket server lifecycle.
 ///
@@ -40,6 +50,9 @@ pub struct NetworkModule {
     registry: Arc<ConnectionRegistry>,
     shutdown: Arc<ShutdownController>,
     observability: Option<Arc<ObservabilityHandle>>,
+    cluster_state: Option<Arc<ClusterState>>,
+    store_factory: Option<Arc<RecordStoreFactory>>,
+    server_config: Option<Arc<ArcSwap<ServerConfig>>>,
 }
 
 impl NetworkModule {
@@ -55,6 +68,9 @@ impl NetworkModule {
             registry: Arc::new(ConnectionRegistry::new()),
             shutdown: Arc::new(ShutdownController::new()),
             observability: None,
+            cluster_state: None,
+            store_factory: None,
+            server_config: None,
         }
     }
 
@@ -65,6 +81,21 @@ impl NetworkModule {
     /// returns an empty 200 response (graceful degradation).
     pub fn set_observability(&mut self, handle: Arc<ObservabilityHandle>) {
         self.observability = Some(handle);
+    }
+
+    /// Configures the cluster state for the admin cluster status endpoint.
+    pub fn set_cluster_state(&mut self, state: Arc<ClusterState>) {
+        self.cluster_state = Some(state);
+    }
+
+    /// Configures the record store factory for the admin maps endpoint.
+    pub fn set_store_factory(&mut self, factory: Arc<RecordStoreFactory>) {
+        self.store_factory = Some(factory);
+    }
+
+    /// Configures the hot-reloadable server config for admin settings endpoints.
+    pub fn set_server_config(&mut self, config: Arc<ArcSwap<ServerConfig>>) {
+        self.server_config = Some(config);
     }
 
     /// Returns a shared reference to the connection registry.
@@ -98,6 +129,9 @@ impl NetworkModule {
             Arc::clone(&self.registry),
             Arc::clone(&self.shutdown),
             self.observability.clone(),
+            self.cluster_state.clone(),
+            self.store_factory.clone(),
+            self.server_config.clone(),
         )
     }
 
@@ -154,7 +188,19 @@ impl NetworkModule {
         let tls = config.tls.take();
         let observability = self.observability.clone();
 
-        let router = build_app(config, Arc::clone(&registry), Arc::clone(&shutdown_ctrl), observability);
+        let cluster_state = self.cluster_state;
+        let store_factory = self.store_factory;
+        let server_config = self.server_config;
+
+        let router = build_app(
+            config,
+            Arc::clone(&registry),
+            Arc::clone(&shutdown_ctrl),
+            observability,
+            cluster_state,
+            store_factory,
+            server_config,
+        );
 
         // Transition to Ready so readiness probes pass.
         shutdown_ctrl.set_ready();
@@ -176,6 +222,9 @@ fn build_app(
     registry: Arc<ConnectionRegistry>,
     shutdown: Arc<ShutdownController>,
     observability: Option<Arc<ObservabilityHandle>>,
+    cluster_state: Option<Arc<ClusterState>>,
+    store_factory: Option<Arc<RecordStoreFactory>>,
+    server_config: Option<Arc<ArcSwap<ServerConfig>>>,
 ) -> Router {
     let layers = build_http_layers(&config);
 
@@ -188,15 +237,41 @@ fn build_app(
         operation_service: None,
         operation_pipeline: None,
         jwt_secret: None,
+        cluster_state,
+        store_factory,
+        server_config,
     };
 
+    // Swagger UI served at /api/docs
+    let swagger_ui = utoipa_swagger_ui::SwaggerUi::new("/api/docs")
+        .url("/api/openapi.json", AdminApiDoc::openapi());
+
+    // Static SPA serving for admin dashboard
+    let admin_spa_dir = std::env::var("TOPGUN_ADMIN_DIR")
+        .unwrap_or_else(|_| "./admin-dashboard/dist".to_string());
+    let serve_dir = ServeDir::new(&admin_spa_dir)
+        .append_index_html_on_directories(true)
+        .fallback(ServeDir::new(&admin_spa_dir).append_index_html_on_directories(true));
+
     Router::new()
+        // Existing routes
         .route("/health", get(health_handler))
         .route("/health/live", get(liveness_handler))
         .route("/health/ready", get(readiness_handler))
         .route("/ws", get(ws_upgrade_handler))
         .route("/sync", post(http_sync_handler))
         .route("/metrics", get(metrics_handler))
+        // Admin API -- public endpoints (no auth)
+        .route("/api/status", get(server_status))
+        .route("/api/auth/login", post(login))
+        // Admin API -- protected endpoints (require AdminClaims)
+        .route("/api/admin/cluster/status", get(cluster_status))
+        .route("/api/admin/maps", get(list_maps))
+        .route("/api/admin/settings", get(get_settings).put(update_settings))
+        // Swagger UI serves both the JSON spec at /api/openapi.json and the UI at /api/docs
+        .merge(swagger_ui)
+        // Static SPA for admin dashboard
+        .nest_service("/admin", serve_dir)
         .layer(layers)
         .with_state(state)
 }

@@ -4,6 +4,7 @@
 //! extractors) and re-exports all handler functions for convenient access
 //! when building the router.
 
+pub mod admin;
 pub mod admin_auth;
 pub mod admin_types;
 pub mod auth;
@@ -22,10 +23,15 @@ use std::time::Instant;
 
 use tokio::sync::Mutex;
 
+use arc_swap::ArcSwap;
+
 use super::{ConnectionRegistry, NetworkConfig, ShutdownController};
+use crate::cluster::state::ClusterState;
 use crate::service::classify::OperationService;
+use crate::service::config::ServerConfig;
 use crate::service::middleware::ObservabilityHandle;
 use crate::service::operation::OperationPipeline;
+use crate::storage::factory::RecordStoreFactory;
 
 /// Shared application state passed to all axum handlers via `State` extraction.
 ///
@@ -60,4 +66,18 @@ pub struct AppState {
     ///
     /// `None` when auth is not configured (existing network tests).
     pub jwt_secret: Option<String>,
+    /// Cluster state for admin cluster status endpoint.
+    ///
+    /// `None` in single-node mode or when cluster is not configured.
+    pub cluster_state: Option<Arc<ClusterState>>,
+    /// Record store factory for admin map enumeration.
+    ///
+    /// `None` in network-only tests that do not wire the storage layer.
+    pub store_factory: Option<Arc<RecordStoreFactory>>,
+    /// Hot-reloadable server configuration wrapped in `ArcSwap`.
+    ///
+    /// Introduced specifically for admin settings hot-reload. Existing services
+    /// continue using their own `Arc<ServerConfig>` references unchanged.
+    /// `None` when admin endpoints are not configured.
+    pub server_config: Option<Arc<ArcSwap<ServerConfig>>>,
 }

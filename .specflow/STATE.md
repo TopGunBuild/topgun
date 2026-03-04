@@ -2,18 +2,18 @@
 
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
+- **Active Specification:** SPEC-076b
+- **Status:** running
 - **Project Phase:** Phase 3 (Rust Server) — Wave 4
 - **TODO Items:** 28 (1 client bug fix + 8 Rust bridge/core + 5 audit findings + 14 existing deferred)
-- **Next Step:** `/sf:new` or `/sf:next`
+- **Next Step:** autopilot executing SPEC-076b
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
 ## Queue
 
 | Position | Spec | Title | Status | Phase |
 |----------|------|-------|--------|-------|
-| 1 | SPEC-076b | Admin Dashboard v1.0 -- Rust Admin Handlers & Wiring | draft | 3 |
+| 1 | SPEC-076b | Admin Dashboard v1.0 -- Rust Admin Handlers & Wiring | audited | 3 |
 | 2 | SPEC-076c | Admin Dashboard v1.0 -- React Dashboard Adaptation | draft | 3 |
 
 ## Migration Roadmap (high-level)
@@ -94,10 +94,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Spec | Mode | Progress | Last Updated |
 |------|------|----------|--------------|
+| SPEC-076b | orchestrated | Wave 0/2 (0%) | 2026-03-04 |
 
 ## Warnings
 
 (none)
 
 ---
-*Last updated: 2026-03-04 (SPEC-076a completed and archived)*
+*Last updated: 2026-03-04 (SPEC-076b audit v2 -- approved)*
