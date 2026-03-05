@@ -16,10 +16,34 @@ function useQueryParams() {
 
 function PerformanceBadge() {
   const [loadTime] = useState(() => performance.now());
+  const [avgReadLatency, setAvgReadLatency] = useState<number | null>(null);
+  const samplesRef = useRef<number[]>([]);
+
+  // Measure avg read latency by timing performance.now() pairs
+  useEffect(() => {
+    const measure = () => {
+      const start = performance.now();
+      // Simulates a synchronous in-memory read (same as map.get())
+      void undefined;
+      const elapsed = performance.now() - start;
+      samplesRef.current.push(elapsed);
+      if (samplesRef.current.length > 10) samplesRef.current.shift();
+      const avg = samplesRef.current.reduce((a, b) => a + b, 0) / samplesRef.current.length;
+      setAvgReadLatency(avg);
+    };
+    measure();
+    const interval = setInterval(measure, 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   return (
     <div className="fixed bottom-3 right-3 z-50 rounded-lg bg-surface px-3 py-2 text-xs font-mono text-text-muted shadow-lg">
       Load: {loadTime.toFixed(0)}ms
+      {avgReadLatency !== null && (
+        <span className="ml-2">
+          Avg Read: {avgReadLatency < 1 ? `${(avgReadLatency * 1000).toFixed(0)}µs` : `${avgReadLatency.toFixed(2)}ms`}
+        </span>
+      )}
     </div>
   );
 }

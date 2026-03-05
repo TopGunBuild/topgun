@@ -28,6 +28,7 @@ interface DevicePanelProps {
  */
 export function DevicePanel({ deviceId, label, showTimestamps }: DevicePanelProps) {
   const {
+    client,
     map,
     isConnected,
     todos,
@@ -36,10 +37,8 @@ export function DevicePanel({ deviceId, label, showTimestamps }: DevicePanelProp
     deviceId: id,
   } = useDeviceClient(deviceId);
 
-  // Track the underlying client for latency/state hooks
-  // We access it via the device handle indirectly through the hooks
-  const { lastReadLatency, pendingOps } = useLatencyTracker(map, null);
-  const { entries: logEntries, loggedSet, clear: clearLog } = useStateLog(map, null);
+  const { lastReadLatency, pendingOps } = useLatencyTracker(map, client);
+  const { entries: logEntries, loggedSet, clear: clearLog } = useStateLog(map, client);
 
   const [newTitle, setNewTitle] = useState('');
   const [mergeResults, setMergeResults] = useState<Map<string, MergeResult>>(new Map());
@@ -101,17 +100,17 @@ export function DevicePanel({ deviceId, label, showTimestamps }: DevicePanelProp
   }, [disconnect]);
 
   const handleReconnect = useCallback(() => {
-    // Save pre-reconnect state for conflict detection
-    const preState = reconnect();
+    // reconnect() returns the new map directly — avoids stale closure capture
+    const { preState, newMap } = reconnect();
     preReconnectStateRef.current = preState;
 
     // After a short delay (let SyncEngine do its thing), detect conflicts
     setTimeout(() => {
-      if (!map || !preReconnectStateRef.current) return;
+      if (!preReconnectStateRef.current) return;
       const results = new Map<string, MergeResult>();
-      const ids = collectTodoIds(map);
+      const ids = collectTodoIds(newMap);
       for (const todoId of ids) {
-        const result = detectMergeConflicts(preReconnectStateRef.current, map, todoId);
+        const result = detectMergeConflicts(preReconnectStateRef.current, newMap, todoId);
         if (result.conflicts.length > 0) {
           results.set(todoId, result);
         }
@@ -119,7 +118,7 @@ export function DevicePanel({ deviceId, label, showTimestamps }: DevicePanelProp
       setMergeResults(results);
       preReconnectStateRef.current = null;
     }, 500);
-  }, [reconnect, map]);
+  }, [reconnect]);
 
   return (
     <div className="flex flex-col rounded-xl border border-border bg-slate-800/50 p-4">

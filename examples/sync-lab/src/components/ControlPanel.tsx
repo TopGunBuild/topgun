@@ -1,3 +1,5 @@
+import { useState, useEffect, useRef } from 'react';
+
 interface ControlPanelProps {
   readLatency: number;
   pendingOps: number;
@@ -15,9 +17,24 @@ export function ControlPanel({
   isConnected,
   deviceLabel,
 }: ControlPanelProps) {
-  const syncStatus =
-    !isConnected
-      ? 'Offline'
+  const [syncing, setSyncing] = useState(false);
+  const prevPendingRef = useRef(pendingOps);
+
+  // Show "Syncing..." briefly when pending ops transitions from >0 to 0
+  useEffect(() => {
+    if (prevPendingRef.current > 0 && pendingOps === 0 && isConnected) {
+      setSyncing(true);
+      const timer = setTimeout(() => setSyncing(false), 1000);
+      prevPendingRef.current = pendingOps;
+      return () => clearTimeout(timer);
+    }
+    prevPendingRef.current = pendingOps;
+  }, [pendingOps, isConnected]);
+
+  const syncStatus = !isConnected
+    ? 'Offline'
+    : syncing
+      ? 'Syncing...'
       : pendingOps === 0
         ? 'Synced'
         : `${pendingOps} ops pending`;
@@ -57,7 +74,9 @@ export function ControlPanel({
               ? 'text-success'
               : syncStatus === 'Offline'
                 ? 'text-danger'
-                : 'text-warning'
+                : syncStatus === 'Syncing...'
+                  ? 'text-primary animate-pulse'
+                  : 'text-warning'
           }`}
         >
           {syncStatus}

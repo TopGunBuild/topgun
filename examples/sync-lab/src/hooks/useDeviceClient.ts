@@ -1,10 +1,10 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import type { LWWMap, LWWRecord } from '@topgunbuild/core';
+import type { TopGunClient } from '@topgunbuild/client';
 import {
   createDevice,
   disconnectDevice,
   reconnectDevice,
-  snapshotDevice,
   type DeviceHandle,
   type DeviceState,
 } from '@/lib/device-manager';
@@ -13,6 +13,8 @@ import { getAllTodos, type TodoItem } from '@/lib/conflict-detector';
 const MAP_NAME = 'sync-lab-todos';
 
 export interface UseDeviceClientReturn {
+  /** The current TopGunClient instance (changes on reconnect) */
+  client: TopGunClient | null;
   /** The current LWWMap instance (changes on reconnect) */
   map: LWWMap<string, any> | null;
   /** Whether this device is currently connected */
@@ -21,8 +23,8 @@ export interface UseDeviceClientReturn {
   todos: TodoItem[];
   /** Disconnect the device (snapshot + close) */
   disconnect: () => void;
-  /** Reconnect the device (create new client + replay snapshot) */
-  reconnect: () => Map<string, LWWRecord<any>>;
+  /** Reconnect the device (create new client + replay snapshot). Returns { preState, newMap } for conflict detection. */
+  reconnect: () => { preState: Map<string, LWWRecord<any>>; newMap: LWWMap<string, any> };
   /** Force re-read todos from the map */
   refreshTodos: () => void;
   /** The device ID */
@@ -39,29 +41,48 @@ export function useDeviceClient(deviceId: string): UseDeviceClientReturn {
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const savedStateRef = useRef<DeviceState | null>(null);
   const handleRef = useRef<DeviceHandle | null>(null);
+  const unsubscribeRef = useRef<(() => void) | null>(null);
+  const mountedRef = useRef(false);
 
   // Keep ref in sync for use in callbacks
   useEffect(() => {
     handleRef.current = handle;
   }, [handle]);
 
+  // Subscribe to a map's onChange and store the unsubscribe function
+  const subscribeToMap = useCallback((map: LWWMap<string, any>) => {
+    // Clean up previous subscription
+    if (unsubscribeRef.current) {
+      unsubscribeRef.current();
+    }
+    const unsub = map.onChange(() => {
+      setTodos(getAllTodos(map));
+    });
+    unsubscribeRef.current = unsub;
+  }, []);
+
   // Create the device on mount
   useEffect(() => {
+    // Guard against StrictMode double-mount creating two clients
+    if (mountedRef.current) return;
+    mountedRef.current = true;
+
     const h = createDevice(deviceId, MAP_NAME);
     setHandle(h);
     setIsConnected(true);
     handleRef.current = h;
 
-    // Subscribe to map changes so we re-render on any local/remote mutation
-    const unsubscribe = h.map.onChange(() => {
-      setTodos(getAllTodos(h.map));
-    });
+    subscribeToMap(h.map);
 
     // Initial read
     setTodos(getAllTodos(h.map));
 
     return () => {
-      unsubscribe();
+      mountedRef.current = false;
+      if (unsubscribeRef.current) {
+        unsubscribeRef.current();
+        unsubscribeRef.current = null;
+      }
       h.client.close();
     };
     // Only create once per deviceId
@@ -72,14 +93,20 @@ export function useDeviceClient(deviceId: string): UseDeviceClientReturn {
     const h = handleRef.current;
     if (!h || !h.isConnected) return;
 
+    // Clean up subscription before closing
+    if (unsubscribeRef.current) {
+      unsubscribeRef.current();
+      unsubscribeRef.current = null;
+    }
+
     savedStateRef.current = disconnectDevice(h);
     setIsConnected(false);
   }, []);
 
-  const reconnect = useCallback((): Map<string, LWWRecord<any>> => {
+  const reconnect = useCallback((): { preState: Map<string, LWWRecord<any>>; newMap: LWWMap<string, any> } => {
     const saved = savedStateRef.current;
     // Capture pre-reconnect state for conflict detection
-    const preReconnectEntries = saved?.entries ?? new Map<string, LWWRecord<any>>();
+    const preState = saved?.entries ?? new Map<string, LWWRecord<any>>();
 
     const newHandle = reconnectDevice(
       deviceId,
@@ -87,10 +114,8 @@ export function useDeviceClient(deviceId: string): UseDeviceClientReturn {
       saved ?? { entries: new Map() },
     );
 
-    // Subscribe to the new map for re-renders
-    newHandle.map.onChange(() => {
-      setTodos(getAllTodos(newHandle.map));
-    });
+    // Subscribe to the new map (cleans up any previous subscription)
+    subscribeToMap(newHandle.map);
 
     setHandle(newHandle);
     setIsConnected(true);
@@ -100,8 +125,8 @@ export function useDeviceClient(deviceId: string): UseDeviceClientReturn {
     // Read current state after replay
     setTodos(getAllTodos(newHandle.map));
 
-    return preReconnectEntries;
-  }, [deviceId]);
+    return { preState, newMap: newHandle.map };
+  }, [deviceId, subscribeToMap]);
 
   const refreshTodos = useCallback(() => {
     const h = handleRef.current;
@@ -111,6 +136,7 @@ export function useDeviceClient(deviceId: string): UseDeviceClientReturn {
   }, []);
 
   return {
+    client: handle?.client ?? null,
     map: handle?.map ?? null,
     isConnected,
     todos,

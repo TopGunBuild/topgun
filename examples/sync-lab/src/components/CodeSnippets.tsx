@@ -22,16 +22,16 @@ const title = todos.get('todo:1:title'); // 'Buy milk'`,
   },
   {
     title: 'React hooks (auto-sync, auto-render)',
-    code: `import { useMap } from '@topgunbuild/react';
+    code: `import { TopGunProvider, useMap } from '@topgunbuild/react';
 
 function TodoList() {
-  const todos = useMap('todos');
+  // Each field is its own key — gives per-field HLC timestamps
+  const map = useMap<string, any>('sync-lab-todos');
+  const title = map?.get('todo:1:title');
+  const done = map?.get('todo:1:done');
 
-  // Automatically re-renders when any entry changes
-  // (local writes OR remote merges)
-  const title = todos.get('todo:1:title');
-
-  return <div>{title}</div>;
+  // Auto-re-renders on local writes AND remote merges
+  return <div>{done ? '✓' : '○'} {title}</div>;
 }`,
   },
 ];

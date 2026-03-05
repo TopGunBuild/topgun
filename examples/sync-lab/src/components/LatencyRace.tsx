@@ -11,8 +11,8 @@ const BENCHMARK_COUNT = 100;
  * Runs a 100-write benchmark in each mode and displays side-by-side histograms.
  */
 export function LatencyRace() {
-  const { map, isConnected, disconnect, reconnect } = useDeviceClient('latency-racer');
-  const { lastReadLatency, pendingOps, runBenchmark } = useLatencyTracker(map, null);
+  const { client, map, isConnected, disconnect, reconnect } = useDeviceClient('latency-racer');
+  const { lastReadLatency, pendingOps, runBenchmark } = useLatencyTracker(map, client);
 
   const [onlineStats, setOnlineStats] = useState<LatencyStats | null>(null);
   const [offlineStats, setOfflineStats] = useState<LatencyStats | null>(null);
@@ -46,7 +46,9 @@ export function LatencyRace() {
     const offlineClient = new TopGunClient({
       nodeId: 'latency-offline',
       storage,
-      // No serverUrl — truly offline
+      // Dummy URL — client initializes but fails to connect silently,
+      // so writes still work locally (truly offline benchmark)
+      serverUrl: 'ws://localhost:0',
     });
     const offlineMap = offlineClient.getMap<string, any>('latency-bench');
 
