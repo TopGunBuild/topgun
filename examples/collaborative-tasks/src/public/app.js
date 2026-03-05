@@ -130,8 +130,8 @@ presenceMap.set(USER_ID, { taskId: null, since: Date.now() });
 // Render presence indicators
 function renderPresence() {
   const bar = document.getElementById('presence');
-  const entries = presenceMap.entries();
-  if (!entries || entries.length === 0) {
+  const entries = [...presenceMap.entries()];
+  if (entries.length === 0) {
     bar.textContent = `Online as ${USER_ID}`;
     return;
   }

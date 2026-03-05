@@ -18,7 +18,7 @@ class MemoryStorageAdapter implements IStorageAdapter {
   private store = new Map<string, any>();
   private meta = new Map<string, any>();
 
-  async initialize(): Promise<void> {}
+  async initialize(_dbName: string): Promise<void> {}
   async close(): Promise<void> {}
   async get<V>(key: string): Promise<LWWRecord<V> | undefined> {
     return this.store.get(key);
@@ -44,7 +44,7 @@ class MemoryStorageAdapter implements IStorageAdapter {
   async getPendingOps(): Promise<OpLogEntry[]> {
     return [];
   }
-  async markOpsSynced(): Promise<void> {}
+  async markOpsSynced(_lastId: number): Promise<void> {}
   async getAllKeys(): Promise<string[]> {
     return [...this.store.keys()];
   }

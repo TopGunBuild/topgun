@@ -33,10 +33,10 @@ This example demonstrates the **hybrid pattern**: REST handles CRUD, PostgreSQL 
  +---------|-------------+
             |
             v
- +---------------------+       +------------------+
- | TopGun Rust Server   | <---> | PostgreSQL       |
- | :8080 (WebSocket)    |       | (tasks table)    |
- +---------------------+       +------------------+
+ +---------------------+
+ | TopGun Rust Server   |
+ | :8080 (WebSocket)    |
+ +---------------------+
 ```
 
 **Data flow:**
