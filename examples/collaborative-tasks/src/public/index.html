@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Collaborative Tasks</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f5f5f5; color: #333; padding: 1rem; }
+    h1 { margin-bottom: 1rem; }
+    .board { display: flex; gap: 1rem; overflow-x: auto; }
+    .column { background: #e9ecef; border-radius: 8px; padding: 0.75rem; min-width: 250px; flex: 1; }
+    .column h2 { font-size: 0.9rem; text-transform: uppercase; color: #666; margin-bottom: 0.5rem; }
+    .card { background: #fff; border-radius: 6px; padding: 0.75rem; margin-bottom: 0.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    .card .assignee { font-size: 0.8rem; color: #888; margin-top: 0.25rem; }
+    .presence-bar { margin-bottom: 1rem; font-size: 0.85rem; color: #555; }
+    .presence-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+    .add-form { margin-bottom: 1rem; display: flex; gap: 0.5rem; }
+    .add-form input, .add-form button { padding: 0.5rem 0.75rem; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem; }
+    .add-form button { background: #4c6ef5; color: #fff; border: none; cursor: pointer; }
+    .status-btn { font-size: 0.75rem; margin-top: 0.25rem; padding: 2px 6px; cursor: pointer; border: 1px solid #ccc; border-radius: 3px; background: #f8f9fa; }
+  </style>
+</head>
+<body>
+  <h1>Collaborative Task Board</h1>
+  <div class="presence-bar" id="presence">Presence: connecting...</div>
+  <form class="add-form" id="add-form">
+    <input type="text" id="new-title" placeholder="New task title..." required />
+    <button type="submit">Add Task</button>
+  </form>
+  <div class="board" id="board">
+    <div class="column" id="col-todo"><h2>To Do</h2></div>
+    <div class="column" id="col-in-progress"><h2>In Progress</h2></div>
+    <div class="column" id="col-done"><h2>Done</h2></div>
+  </div>
+  <script src="app.bundle.js"></script>
+</body>
+</html>
