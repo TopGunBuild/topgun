@@ -6,7 +6,7 @@
 - **Status:** idle
 - **Project Phase:** Phase 3 (Rust Server) — Wave 4
 - **TODO Items:** 28 (1 client bug fix + 8 Rust bridge/core + 5 audit findings + 14 existing deferred)
-- **Next Step:** `/sf:new` or `/sf:next`
+- **Next Step:** /sf:new or /sf:next
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
 ## Queue
@@ -44,11 +44,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-03-05 | SPEC-077 | COMPLETED: Tier 1 Adoption Example App and Integration Guides -- collaborative-tasks example (Express+Postgres CRUD + TopGun real-time), postgres-integration.md, auth-integration.md. 12 files created, 5 commits, 2 review cycles. All 15 ACs met. APPROVED by impl-reviewer v2. |
 | 2026-03-04 | SPEC-076c | COMPLETED: React admin dashboard adaptation — admin-api-types.ts (13 hand-typed interfaces), swr-config.ts (SWR global config), CrdtDebug.tsx (placeholder UI). SWR replaces manual polling in ClusterTopology/Settings/useServerStatus. Settings restructured from 5-tab nested to 2-tab flat layout. Token key unified to topgun_admin_token. Setup Wizard hidden. 3 files created, 11 modified, 4 commits, 2 audit cycles, 1 review cycle. All 13 ACs met. APPROVED by impl-reviewer v1. |
 | 2026-03-04 | SPEC-076b | COMPLETED: Admin handlers, OpenAPI, and router wiring -- admin.rs (6 handlers: status, login, cluster/status, maps, settings GET/PUT), openapi.rs (utoipa OpenApi derive + Swagger UI), module.rs (ServeDir SPA fallback with ServeFile for index.html, NetworkModule setter methods), handlers/mod.rs (AppState extended with cluster_state/store_factory/server_config), network/mod.rs (pub mod openapi), factory.rs (map_names()). 2 files created, 4 modified. All 12 ACs met. 502 tests pass, clippy clean. APPROVED by impl-reviewer v2. |
 | 2026-03-04 | SPEC-076a | COMPLETED: Admin types & auth middleware — admin_types.rs (13 types with ToSchema), admin_auth.rs (AdminClaims extractor with 401/403), JwtClaims made pub with roles, handle_auth propagates roles to Principal. 2 files created, 3 modified, 2 commits, 1 audit cycle, 1 fix cycle. All 10 ACs met. 502 tests pass, clippy clean. APPROVED by impl-reviewer v2. |
 | 2026-03-04 | SPEC-076 | SPLIT into 3 parts: SPEC-076a (Rust admin types + auth middleware, 4 files), SPEC-076b (Rust admin handlers + wiring, 4 files), SPEC-076c (React dashboard adaptation, 14 TS/TSX files). Parent archived. |
-| 2026-03-03 | SPEC-075 | COMPLETED: Wire QueryObserverFactory for Live Query Updates — QueryObserverFactory struct in test_server.rs sharing Arc<QueryRegistry> and Arc<ConnectionRegistry> with QueryService, registered alongside SearchObserverFactory in RecordStoreFactory::with_observer_factories(). 1 file modified, 1 commit, 2 audit cycles. All 12 ACs met. Integration tests: 50/50 passing (up from 44/50). |
 
 
 ## Project Patterns
@@ -87,14 +87,9 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 - Rust integration test harness pattern: `spawnRustServer()` spawns test binary (RUST_SERVER_BINARY or cargo run), captures PORT= from stdout via readline, returns cleanup (process-group SIGTERM/SIGKILL); standalone `TestClient` in test-client.ts (no @topgunbuild/server dep) sends individual MsgPack frames (no BATCH)
 - Observer factory pattern: `ObserverFactory` trait enables per-map mutation observer creation at `RecordStore` creation time; `RecordStoreFactory.with_observer_factories()` builder wires factories; `get_or_create()` calls each factory on cache miss and merges returned observers into `CompositeMutationObserver`; `get_all_for_map()` returns all cached stores across partitions for cross-partition aggregation
 
-## Execution Status
-
-| Spec | Mode | Progress | Last Updated |
-|------|------|----------|--------------|
-
 ## Warnings
 
 (none)
 
 ---
-*Last updated: 2026-03-04 (SPEC-076c archived)*
+*Last updated: 2026-03-05 (SPEC-077 completed and archived)*

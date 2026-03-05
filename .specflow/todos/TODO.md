@@ -417,24 +417,19 @@ Each Rust spec should reference up to THREE sources:
 - **Depends on:** Working Rust server (all domain services done) or can use TS server for initial version
 - **Effort:** 1 week
 
-### TODO-093: Admin Dashboard
-- **Priority:** P1 (v1.0 deliverable — product differentiator vs Hazelcast Management Center)
+### TODO-093: Admin Dashboard — v1.0 DONE, v2.0/v3.0 deferred
+- **Priority:** P1 (v1.0 DONE; v2.0/v3.0 deferred to Milestones 2/3)
 - **Complexity:** Medium (foundation exists, needs Rust server adaptation)
+- **Status (v1.0):** Complete (SPEC-076a/b/c — 2026-03-04)
 - **Summary:** Adapt existing React admin dashboard (`apps/admin-dashboard/`) to work with Rust server. Phased: v1.0 foundation → v2.0 data platform features → v3.0 enterprise views.
 - **Existing state:** ~85% functional React 19 + Vite app with: cluster topology (SVG partition ring), data explorer (CRUD + Monaco JSON editor), query playground, settings management, JWT auth, command palette (Cmd+K), dark mode.
-- **Scope (v1.0 — Rust Server Adaptation):**
-  - Rust admin API: expose OpenAPI spec via `utoipa` crate on axum endpoints
-  - OpenAPI codegen: `openapi-typescript` generates type-safe API client (zero manual type sync)
-  - Admin API endpoints on Rust server:
-    - `GET /api/admin/cluster/status` — cluster topology, node health
-    - `GET /api/admin/maps` — list maps, entry counts, replication info
-    - `GET/PUT /api/admin/settings` — server configuration
-    - `POST /api/setup` — initial bootstrap wizard
-    - `POST /api/setup/test-connection` — database connection testing
-  - System maps: `$sys/stats`, `$sys/cluster`, `$sys/maps` — live data via TopGun client
-  - SWR migration: replace manual fetch+useState with SWR for live metrics (`refreshInterval: 1000ms`)
-  - Verify all existing pages work against Rust server
-  - **CRDT Debug tab** in Data Explorer: HLC state per map, merge history, Merkle tree summary, conflict inspector (absorbs TODO-100 scope)
+- **Scope (v1.0 — Rust Server Adaptation) — DONE:**
+  - ~~Rust admin API: expose OpenAPI spec via `utoipa` crate on axum endpoints~~ ✅ SPEC-076a/b
+  - ~~Admin API endpoints on Rust server (status, login, cluster/status, maps, settings GET/PUT)~~ ✅ SPEC-076b
+  - ~~SWR migration: replace manual fetch+useState with SWR for live metrics~~ ✅ SPEC-076c
+  - ~~CRDT Debug panel in Data Explorer (placeholder UI, system maps not populated)~~ ✅ SPEC-076c
+  - ~~Dashboard adaptation: token unification, Settings restructuring, Setup Wizard hidden~~ ✅ SPEC-076c
+  - **Deferred from v1.0:** OpenAPI codegen (hand-typed interfaces instead), system maps population ($sys/*), bootstrap/setup wizard
 - **Scope (v2.0 — Data Platform Features):**
   - **Pipeline visualization:** ReactFlow + Dagre for DAG stream processing graphs
   - **Live metric coloring:** node/partition coloring by backpressure/load thresholds (Arroyo pattern)
@@ -502,6 +497,20 @@ Each Rust spec should reference up to THREE sources:
 ### TODO-109: Wire QueryObserverFactory for Live Query Updates — DONE
 - **Status:** Complete (2026-03-03, SPEC-075)
 - **Summary:** Created QueryObserverFactory in test_server.rs, wired alongside SearchObserverFactory. 6 live query tests fixed. All 50/50 integration tests now pass.
+
+### TODO-027: Deterministic Simulation Testing (DST) — NEW
+- **Priority:** P2 (testing infrastructure — after v0.12.0)
+- **Complexity:** Medium
+- **Summary:** Deterministic simulation testing for distributed protocol correctness. Seeded RNG, virtual time, simulated network — reproduce any distributed bug by seed.
+- **Scope:**
+  - Integrate `madsim` crate — patches tokio for deterministic scheduling, virtual clock, simulated network
+  - Virtual network layer: inject partitions, latency, packet loss between cluster nodes
+  - Property-based invariant checking: CRDT convergence, Merkle sync correctness, cluster rebalancing
+  - Seed-based regression: failing seed → reproducible test case
+  - Scenarios: network partition during sync, node crash mid-replication, clock drift between nodes
+- **Ref:** RisingWave (`/Users/koristuvac/Projects/rust/risingwave`) — production use of madsim for streaming SQL, `ci-sim` build profile; [TURSO_INSIGHTS.md](../reference/TURSO_INSIGHTS.md) Section 2 (DST concept)
+- **Depends on:** v0.12.0 release (stable cluster protocol)
+- **Effort:** ~1 week (madsim integration, not from scratch)
 
 ---
 
@@ -574,7 +583,7 @@ Each Rust spec should reference up to THREE sources:
   - `Codec` trait: encode/decode between wire format and Arrow
   - Connector registry for dynamic discovery
   - Initial connectors: Kafka source/sink, S3 sink, PostgreSQL CDC source
-- **Ref:** Arroyo connector traits, ArkFlow Input/Output/Codec pattern
+- **Ref:** Arroyo connector traits, ArkFlow Input/Output/Codec pattern, RisingWave (`/Users/koristuvac/Projects/rust/risingwave/src/connector/`) — 25+ sources, 30+ sinks, pluggable codec layer (Avro/JSON/Protobuf)
 - **Depends on:** TODO-025 (DAG executor for pipeline integration)
 - **Effort:** 2 weeks
 
@@ -764,7 +773,7 @@ Items within the same wave can run in parallel. Each wave starts when its blocke
 | **5a** | ~~TODO-084~~ ✅ · ~~TODO-085~~ ✅ · ~~TODO-086~~ ✅ · ~~TODO-087~~ ✅ · ~~TODO-088~~ ✅ · ~~TODO-089~~ ✅ · ~~TODO-090~~ ✅ · ~~TODO-071~~ ✅ | — | ✅ All 7 services + PostgreSQL + Search done |
 | **5b** | ~~TODO-074~~ ✅ · ~~TODO-075~~ ✅ · ~~TODO-094~~ ✅ (LICENSE) · ~~TODO-104~~ ✅ (Fix demos/blog) | — | ✅ All done |
 | **5c** | ~~TODO-097~~ ✅ (Security: HLC sanitize + ACL) · ~~TODO-099~~ ✅ (Tracing + /metrics) | 085 | ✅ All done |
-| **5d** | TODO-068 (Integration Tests) · TODO-093 (Admin Dashboard v1.0) · TODO-096 (Adoption Path + Security docs) · TODO-105 (Sync Showcase Demo) | All services · 097 · 097 · — | Parallel — 068 unblocked, all services done |
+| **5d** | ~~TODO-068~~ ✅ (Integration Tests) · ~~TODO-093 v1.0~~ ✅ (Admin Dashboard) · TODO-096 (Adoption Path + Security docs) · TODO-105 (Sync Showcase Demo) | All services · 097 · 097 · — | 068 + 093 v1.0 done; 096 + 105 remaining |
 | — | **v0.12.0-rc.1** — npm pre-release + Rust server binary | 068 first pass | 🏷️ Tag + GitHub Release |
 | **5e** | TODO-106 (Update Docs) · TODO-103 (Remove Legacy TS) | 068 · 068 | Final cleanup |
 | — | **Merge `rust-migration` → `main`** · Deprecate TS server | 068 complete | 🔀 Merge |
@@ -789,7 +798,7 @@ Items within the same wave can run in parallel. Each wave starts when its blocke
 | **7c** | TODO-044 (Bi-Temporal) | 043 |
 | **7d** | TODO-095 (Enterprise dir structure) · TODO-093 v3.0 (Tenant admin, tiered storage monitor) | — · 041+040 |
 
-**Current position:** Wave 5d — Waves 5a-5c ALL DONE. Next: 068 (Integration Tests) + 093 (Admin Dashboard) + 096 (Docs) + 105 (Demo) — all four in parallel (no inter-dependencies). Critical path: 068 first pass → v0.12.0-rc.1 → 106 (Docs) + 103 (Legacy removal) → merge to main → v0.12.0.
+**Current position:** Wave 5d — 068 ✅ + 093 v1.0 ✅ DONE. Remaining: 096 (Adoption Path docs) + 105 (Sync Showcase Demo) — both in parallel. Critical path: 096 + 105 → v0.12.0-rc.1 → 106 (Update Docs) + 103 (Legacy removal) → merge to main → v0.12.0.
 
 ---
 
@@ -818,8 +827,8 @@ MILESTONE 1: Working IMDG (v1.0) — remaining work
   ~~TODO-068 ✅~~ (Integration Tests — 50/50 pass) — DONE
   ~~TODO-108 ✅~~ · ~~TODO-109 ✅~~ (test bug fixes) — DONE
        ↓
-  TODO-093 v1.0 (Admin Dashboard — Rust API, OpenAPI, CRDT debug) ← NEXT
-  TODO-096 (Adoption Path docs + Security docs) ← parallel
+  ~~TODO-093 v1.0~~ ✅ (Admin Dashboard — SPEC-076a/b/c) — DONE
+  TODO-096 (Adoption Path docs + Security docs) ← NEXT
   TODO-105 (Sync Showcase Demo) ← parallel
        ↓
   TODO-106 (Update docs for Rust server) ← after API finalized
@@ -858,8 +867,8 @@ MILESTONE 3: Enterprise (v3.0+)
 
 | Milestone | Remaining Items | Effort | Status |
 |-----------|----------------|--------|--------|
-| **v1.0 Working IMDG** | 093 v1.0, 096, 105, 106, 103 | ~3-4 weeks | **In progress** (services + security + tracing + tests done; admin + docs + demo remaining) |
-| — v1.0.0-rc.1 tag | After 068 ✅ | — | Pre-release: npm + Rust binary |
+| **v1.0 Working IMDG** | ~~093 v1.0~~ ✅, 096, 105, 106, 103 | ~2-3 weeks | **In progress** (services + security + tracing + tests + admin done; docs + demo remaining) |
+| — v1.0.0-rc.1 tag | After 096 + 105 | — | Pre-release: npm + Rust binary |
 | — Merge to main | After 068 ✅ complete | — | Deprecate TS server |
 | — v1.0.0 stable | After merge + 106 + 103 | — | npm publish + GitHub Release |
 | **v2.0 Data Platform** | 069, 070, 091, 025, 092, 033, 036, 072, 048, 049, 076, 101, 102, 093 v2.0 | ~14-18 weeks | After v1.0 |
@@ -950,7 +959,8 @@ All items below are completed and archived in `.specflow/archive/`:
 | TODO-083 | Output: `.specflow/reference/RUST_NETWORKING_PATTERNS.md` |
 | TODO-090 | TS ref: `packages/server/src/storage/PostgreSQLAdapter.ts` |
 | TODO-091 | Arroyo: `arroyo-planner/builder.rs`, `arroyo-datastream/logical.rs`; ArkFlow: `arkflow-plugin/src/processor/sql.rs` |
-| TODO-092 | Arroyo: `arroyo-connector/src/`; ArkFlow: `arkflow-core/src/input/`, `arkflow-core/src/codec/` |
+| TODO-027 | [TURSO_INSIGHTS.md](../reference/TURSO_INSIGHTS.md) Section 2 (DST concept), RisingWave: madsim integration (`/Users/koristuvac/Projects/rust/risingwave`, `ci-sim` profile) |
+| TODO-092 | Arroyo: `arroyo-connector/src/`; ArkFlow: `arkflow-core/src/input/`, `arkflow-core/src/codec/`; RisingWave: `/Users/koristuvac/Projects/rust/risingwave/src/connector/` (25+ sources, 30+ sinks, pluggable codecs) |
 | TODO-093 | Existing: `apps/admin-dashboard/`; Arroyo WebUI: `/Users/koristuvac/Projects/rust/arroyo/webui/` (OpenAPI codegen, ReactFlow+Dagre, SWR, live metric coloring) |
 | TODO-096 | [PRODUCT_CAPABILITIES.md](../reference/PRODUCT_CAPABILITIES.md), [STRATEGIC_RECOMMENDATIONS.md](../reference/STRATEGIC_RECOMMENDATIONS.md) Section 4+5 |
 | TODO-097 | [STRATEGIC_RECOMMENDATIONS.md](../reference/STRATEGIC_RECOMMENDATIONS.md) Section 5 (Security Model) |
