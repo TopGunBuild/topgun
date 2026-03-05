@@ -378,24 +378,9 @@ Each Rust spec should reference up to THREE sources:
 - **Status:** Complete (SPEC-072 completed 2026-03-01)
 - **Summary:** `tracing-subscriber` with `RUST_LOG` filtering, `metrics-exporter-prometheus` recorder, `/metrics` endpoint with Prometheus text format v0.0.4, operation counters/histograms/error counters, connection gauge, `info_span!` + `.instrument()` on all 7 domain services.
 
-### TODO-096: Adoption Path Documentation + Security Model — NEW
-- **Priority:** P1 (critical for first users and trust signal)
-- **Complexity:** Medium
-- **Summary:** PRODUCT_CAPABILITIES.md currently only describes the "replace everything" model (Tier 3). Add 3-tier adoption path + security model documentation. Includes Tier 1 example app.
-- **Scope:**
-  - **Adoption Path section** in PRODUCT_CAPABILITIES.md:
-    - Tier 1 (Real-Time Layer): Add collaborative features to existing app, keep existing DB
-    - Tier 2 (Cache + Sync): Accelerate reads with in-memory cache, add offline support
-    - Tier 3 (Full Platform): Greenfield, TopGun as primary data platform
-  - **Security Model section** in PRODUCT_CAPABILITIES.md:
-    - Trust boundary: clients are untrusted, server is authoritative
-    - HLC sanitization, map-level ACL, write validation pipeline
-    - Authentication flow (JWT, integration with existing auth)
-  - **Tier 1 example app:** existing Express+Postgres app + TopGun for one collaborative feature
-  - Document how to use PostgresDataStore with existing tables (no migration required)
-  - Add "Works alongside existing DB: Yes" to competitive comparison table
-- **Depends on:** TODO-097 (security must be implemented before documenting it)
-- **Effort:** 1 week
+### TODO-096: Adoption Path Documentation + Security Model → SPEC-077 — DONE
+- **Status:** Complete (SPEC-077 completed 2026-03-05)
+- **Summary:** PRODUCT_CAPABILITIES.md already had Adoption Path (3 tiers) and Security Model sections. SPEC-077 delivered the missing pieces: Tier 1 example app (`examples/collaborative-tasks/`), PostgresDataStore integration guide, JWT auth integration guide. Competitive comparison table already had "Works alongside existing DB: Yes".
 
 ### TODO-104: Fix Demo App + Blog Issues → SPEC-070 — DONE
 - **Status:** Complete (SPEC-070 completed 2026-02-28)
@@ -773,7 +758,7 @@ Items within the same wave can run in parallel. Each wave starts when its blocke
 | **5a** | ~~TODO-084~~ ✅ · ~~TODO-085~~ ✅ · ~~TODO-086~~ ✅ · ~~TODO-087~~ ✅ · ~~TODO-088~~ ✅ · ~~TODO-089~~ ✅ · ~~TODO-090~~ ✅ · ~~TODO-071~~ ✅ | — | ✅ All 7 services + PostgreSQL + Search done |
 | **5b** | ~~TODO-074~~ ✅ · ~~TODO-075~~ ✅ · ~~TODO-094~~ ✅ (LICENSE) · ~~TODO-104~~ ✅ (Fix demos/blog) | — | ✅ All done |
 | **5c** | ~~TODO-097~~ ✅ (Security: HLC sanitize + ACL) · ~~TODO-099~~ ✅ (Tracing + /metrics) | 085 | ✅ All done |
-| **5d** | ~~TODO-068~~ ✅ (Integration Tests) · ~~TODO-093 v1.0~~ ✅ (Admin Dashboard) · TODO-096 (Adoption Path + Security docs) · TODO-105 (Sync Showcase Demo) | All services · 097 · 097 · — | 068 + 093 v1.0 done; 096 + 105 remaining |
+| **5d** | ~~TODO-068~~ ✅ (Integration Tests) · ~~TODO-093 v1.0~~ ✅ (Admin Dashboard) · ~~TODO-096~~ ✅ (Adoption Path + Security docs → SPEC-077) · TODO-105 (Sync Showcase Demo) | All services · 097 · 097 · — | 068 + 093 v1.0 + 096 done; 105 remaining |
 | — | **v0.12.0-rc.1** — npm pre-release + Rust server binary | 068 first pass | 🏷️ Tag + GitHub Release |
 | **5e** | TODO-106 (Update Docs) · TODO-103 (Remove Legacy TS) | 068 · 068 | Final cleanup |
 | — | **Merge `rust-migration` → `main`** · Deprecate TS server | 068 complete | 🔀 Merge |
@@ -798,7 +783,7 @@ Items within the same wave can run in parallel. Each wave starts when its blocke
 | **7c** | TODO-044 (Bi-Temporal) | 043 |
 | **7d** | TODO-095 (Enterprise dir structure) · TODO-093 v3.0 (Tenant admin, tiered storage monitor) | — · 041+040 |
 
-**Current position:** Wave 5d — 068 ✅ + 093 v1.0 ✅ DONE. Remaining: 096 (Adoption Path docs) + 105 (Sync Showcase Demo) — both in parallel. Critical path: 096 + 105 → v0.12.0-rc.1 → 106 (Update Docs) + 103 (Legacy removal) → merge to main → v0.12.0.
+**Current position:** Wave 5d — 068 ✅ + 093 v1.0 ✅ + 096 ✅ DONE. Remaining: 105 (Sync Showcase Demo). Critical path: 105 → v0.12.0-rc.1 → 106 (Update Docs) + 103 (Legacy removal) → merge to main → v0.12.0.
 
 ---
 
@@ -828,8 +813,8 @@ MILESTONE 1: Working IMDG (v1.0) — remaining work
   ~~TODO-108 ✅~~ · ~~TODO-109 ✅~~ (test bug fixes) — DONE
        ↓
   ~~TODO-093 v1.0~~ ✅ (Admin Dashboard — SPEC-076a/b/c) — DONE
-  TODO-096 (Adoption Path docs + Security docs) ← NEXT
-  TODO-105 (Sync Showcase Demo) ← parallel
+  ~~TODO-096~~ ✅ (Adoption Path docs → SPEC-077) — DONE
+  TODO-105 (Sync Showcase Demo) ← NEXT
        ↓
   TODO-106 (Update docs for Rust server) ← after API finalized
   TODO-103 (Remove legacy TS server) ← TS e2e tests already removed
@@ -867,8 +852,8 @@ MILESTONE 3: Enterprise (v3.0+)
 
 | Milestone | Remaining Items | Effort | Status |
 |-----------|----------------|--------|--------|
-| **v1.0 Working IMDG** | ~~093 v1.0~~ ✅, 096, 105, 106, 103 | ~2-3 weeks | **In progress** (services + security + tracing + tests + admin done; docs + demo remaining) |
-| — v1.0.0-rc.1 tag | After 096 + 105 | — | Pre-release: npm + Rust binary |
+| **v1.0 Working IMDG** | ~~093 v1.0~~ ✅, ~~096~~ ✅, 105, 106, 103 | ~1-2 weeks | **In progress** (services + security + tracing + tests + admin + adoption docs done; demo remaining) |
+| — v1.0.0-rc.1 tag | After 105 | — | Pre-release: npm + Rust binary |
 | — Merge to main | After 068 ✅ complete | — | Deprecate TS server |
 | — v1.0.0 stable | After merge + 106 + 103 | — | npm publish + GitHub Release |
 | **v2.0 Data Platform** | 069, 070, 091, 025, 092, 033, 036, 072, 048, 049, 076, 101, 102, 093 v2.0 | ~14-18 weeks | After v1.0 |
@@ -911,6 +896,7 @@ MILESTONE 3: Enterprise (v3.0+)
 | TODO-104 → SPEC-070 | Fix demo apps: Vite aliases, hardcoded JWT, Russian strings, Mongo refs, serverless blog | 2026-02-28 |
 | TODO-097 → SPEC-071 | WriteValidator: auth check, map ACL, value size, HLC sanitization before CRDT merge | 2026-02-28 |
 | TODO-099 → SPEC-072 | Structured tracing: tracing-subscriber, metrics-exporter-prometheus, /metrics endpoint | 2026-03-01 |
+| TODO-096 → SPEC-077 | Adoption Path docs + Tier 1 example app (collaborative-tasks), PostgresDataStore guide, JWT auth guide | 2026-03-05 |
 
 ### Phase 2 Rust Items
 
