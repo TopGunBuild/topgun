@@ -44,11 +44,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
-| 2026-03-05 | SPEC-077 | COMPLETED: Tier 1 Adoption Example App and Integration Guides -- collaborative-tasks example (Express+Postgres CRUD + TopGun real-time), postgres-integration.md, auth-integration.md. 12 files created, 5 commits, 2 review cycles. All 15 ACs met. APPROVED by impl-reviewer v2. |
-| 2026-03-04 | SPEC-076c | COMPLETED: React admin dashboard adaptation — admin-api-types.ts (13 hand-typed interfaces), swr-config.ts (SWR global config), CrdtDebug.tsx (placeholder UI). SWR replaces manual polling in ClusterTopology/Settings/useServerStatus. Settings restructured from 5-tab nested to 2-tab flat layout. Token key unified to topgun_admin_token. Setup Wizard hidden. 3 files created, 11 modified, 4 commits, 2 audit cycles, 1 review cycle. All 13 ACs met. APPROVED by impl-reviewer v1. |
-| 2026-03-04 | SPEC-076b | COMPLETED: Admin handlers, OpenAPI, and router wiring -- admin.rs (6 handlers: status, login, cluster/status, maps, settings GET/PUT), openapi.rs (utoipa OpenApi derive + Swagger UI), module.rs (ServeDir SPA fallback with ServeFile for index.html, NetworkModule setter methods), handlers/mod.rs (AppState extended with cluster_state/store_factory/server_config), network/mod.rs (pub mod openapi), factory.rs (map_names()). 2 files created, 4 modified. All 12 ACs met. 502 tests pass, clippy clean. APPROVED by impl-reviewer v2. |
-| 2026-03-04 | SPEC-076a | COMPLETED: Admin types & auth middleware — admin_types.rs (13 types with ToSchema), admin_auth.rs (AdminClaims extractor with 401/403), JwtClaims made pub with roles, handle_auth propagates roles to Principal. 2 files created, 3 modified, 2 commits, 1 audit cycle, 1 fix cycle. All 10 ACs met. 502 tests pass, clippy clean. APPROVED by impl-reviewer v2. |
-| 2026-03-04 | SPEC-076 | SPLIT into 3 parts: SPEC-076a (Rust admin types + auth middleware, 4 files), SPEC-076b (Rust admin handlers + wiring, 4 files), SPEC-076c (React dashboard adaptation, 14 TS/TSX files). Parent archived. |
+| 2026-03-06 | SPEC-078 | COMPLETED: TopGun Sync Lab — 25 files, 4 commits, 2 review cycles. Interactive demo with Conflict Arena (per-field HLC merge visualization) and Latency Race (sub-ms benchmark histogram). All 17 ACs met. APPROVED by impl-reviewer v2. |
+| 2026-03-06 | SPEC-078 | REVIEW v2: APPROVED — all 8 v1 fixes verified in code, no new issues. All 17 ACs pass. |
+| 2026-03-06 | SPEC-078 | REVIEW v1: CHANGES_REQUESTED — 3 critical (offline benchmark crash, null client in hooks, stale map ref), 1 major (subscription leak), 3 minor. |
+| 2026-03-06 | SPEC-078 | EXECUTED: 25 files created, 4 commits, 3 waves. All 17 ACs addressed. Sequential fallback (subagent CLI unavailable). Ready for review. |
+| 2026-03-05 | SPEC-078 | AUDIT v2: NEEDS_DECOMPOSITION — 22 files, ~102% context, 6 task groups across 3 waves. All v1 critical issues resolved. No new critical issues. Spec quality is high — decomposition needed only due to size. |
 
 
 ## Project Patterns
@@ -92,4 +92,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-03-05 (SPEC-077 completed and archived)*
+*Last updated: 2026-03-06 (SPEC-078 COMPLETED — archived)*
