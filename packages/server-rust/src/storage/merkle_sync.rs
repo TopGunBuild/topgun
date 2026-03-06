@@ -11,6 +11,7 @@ use parking_lot::Mutex;
 use topgun_core::hash::fnv1a_hash;
 use topgun_core::merkle::{MerkleTree, ORMapMerkleTree};
 
+use super::factory::ObserverFactory;
 use super::mutation_observer::MutationObserver;
 use super::record::{Record, RecordValue};
 
@@ -135,6 +136,42 @@ impl MerkleSyncManager {
 impl Default for MerkleSyncManager {
     fn default() -> Self {
         Self::new(3)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MerkleObserverFactory
+// ---------------------------------------------------------------------------
+
+/// Factory that creates [`MerkleMutationObserver`] instances for every map.
+///
+/// Implements [`ObserverFactory`] so it can be wired into
+/// [`RecordStoreFactory::with_observer_factories()`](super::factory::RecordStoreFactory::with_observer_factories).
+/// Every map participates in Merkle sync, so `create_observer` always returns
+/// `Some(...)`.
+pub struct MerkleObserverFactory {
+    manager: Arc<MerkleSyncManager>,
+}
+
+impl MerkleObserverFactory {
+    /// Creates a new factory backed by the given [`MerkleSyncManager`].
+    #[must_use]
+    pub fn new(manager: Arc<MerkleSyncManager>) -> Self {
+        Self { manager }
+    }
+}
+
+impl ObserverFactory for MerkleObserverFactory {
+    fn create_observer(
+        &self,
+        map_name: &str,
+        partition_id: u32,
+    ) -> Option<Arc<dyn MutationObserver>> {
+        Some(Arc::new(MerkleMutationObserver::new(
+            Arc::clone(&self.manager),
+            map_name.to_string(),
+            partition_id,
+        )))
     }
 }
 
@@ -332,6 +369,22 @@ mod tests {
             #[allow(clippy::cast_possible_wrap)]
             metadata: RecordMetadata::new(millis as i64, 64),
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC5: MerkleObserverFactory creates observers for any map
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn merkle_observer_factory_returns_some_for_any_map() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        let factory = MerkleObserverFactory::new(Arc::clone(&manager));
+
+        let observer = factory.create_observer("test-map", 0);
+        assert!(observer.is_some(), "factory should return Some for any map");
+
+        let observer2 = factory.create_observer("another-map", 42);
+        assert!(observer2.is_some(), "factory should return Some for any partition");
     }
 
     // ---------------------------------------------------------------------------
