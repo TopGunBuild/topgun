@@ -1119,4 +1119,36 @@ describe('SyncEngine', () => {
       warnSpy.mockRestore();
     });
   });
+
+  describe('HLC timestamp guard', () => {
+    test('PONG message with raw numeric timestamp must not poison the HLC', async () => {
+      syncEngine = new SyncEngine(config);
+      syncEngine.setAuthToken('test-token');
+      await jest.runAllTimersAsync();
+
+      const ws = MockWebSocket.getLastInstance()!;
+
+      // Authenticate
+      ws.simulateMessage({ type: 'AUTH_ACK' });
+      await jest.runAllTimersAsync();
+
+      // Simulate PONG — has a flat numeric `timestamp` field, not an HLC Timestamp struct.
+      // Before the fix, this poisoned the HLC with NaN via Number(undefined).
+      ws.simulateMessage({ type: 'PONG', timestamp: 1709712000000, serverTime: 1709712000001 });
+      await jest.runAllTimersAsync();
+
+      // Record an operation — its timestamp comes from the HLC.
+      // If HLC were poisoned, millis would be NaN.
+      const timestamp = { millis: Date.now(), counter: 0, nodeId: 'test-node' };
+      const record = { value: 'hello', timestamp };
+      await syncEngine.recordOperation('test-map', 'PUT', 'key1', { record, timestamp });
+
+      // The OP_BATCH sent to the server should contain a valid timestamp
+      const opBatch = ws.sentMessages.find((m) => m.type === 'OP_BATCH');
+      expect(opBatch).toBeDefined();
+      const sentTimestamp = opBatch.payload.ops[0].timestamp;
+      expect(Number.isFinite(sentTimestamp.millis)).toBe(true);
+      expect(sentTimestamp.millis).toBeGreaterThan(0);
+    });
+  });
 });

@@ -666,10 +666,13 @@ export class SyncEngine {
     // Route to registered handler
     await this.messageRouter.route(message);
 
-    // Update HLC if message has timestamp
-    if (message.timestamp) {
-      this.hlc.update(message.timestamp);
-      this.lastSyncTimestamp = message.timestamp.millis;
+    // Update HLC if message has an HLC Timestamp struct (millis + counter + nodeId).
+    // Some messages (e.g. PONG) have a raw numeric `timestamp` field — passing that
+    // to HLC.update() would poison the clock with NaN via Number(undefined).
+    const ts = message.timestamp;
+    if (ts && typeof ts === 'object' && 'millis' in ts && 'counter' in ts && 'nodeId' in ts) {
+      this.hlc.update(ts);
+      this.lastSyncTimestamp = Number(ts.millis);
       await this.saveOpLog();
     }
   }

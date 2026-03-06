@@ -37,7 +37,9 @@ export class MerkleSyncHandler implements IMerkleSyncHandler {
    * Compares root hashes and requests buckets if mismatch detected.
    */
   public async handleSyncRespRoot(payload: { mapName: string; rootHash: number; timestamp?: any }): Promise<void> {
-    const { mapName, rootHash, timestamp } = payload;
+    const { mapName, timestamp } = payload;
+    // Coerce BigInt — Rust server sends u64 hashes which MsgPack decodes as BigInt
+    const rootHash = Number(payload.rootHash);
     const map = this.config.getMap(mapName);
     if (map instanceof LWWMap) {
       const localRootHash = map.getMerkleTree().getRootHash();

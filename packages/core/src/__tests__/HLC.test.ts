@@ -395,6 +395,83 @@ describe('HLC (Hybrid Logical Clock)', () => {
     });
   });
 
+  describe('Invalid Timestamp Guard', () => {
+    test('should ignore timestamp with NaN millis and not poison the clock', () => {
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation();
+      const fixedTime = 1000000;
+      jest.spyOn(Date, 'now').mockImplementation(() => fixedTime);
+
+      // Generate a valid timestamp first
+      const before = hlc.now();
+      expect(before.millis).toBe(fixedTime);
+
+      // Pass a timestamp with undefined millis (simulates PONG message's raw u64
+      // being treated as a Timestamp struct: Number(undefined) → NaN)
+      hlc.update({ millis: NaN, counter: 0, nodeId: 'bad' });
+
+      // Clock must NOT be poisoned — next timestamp should still be valid
+      const after = hlc.now();
+      expect(Number.isFinite(after.millis)).toBe(true);
+      expect(after.millis).toBe(fixedTime);
+      expect(HLC.compare(before, after)).toBeLessThan(0);
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ remoteMillis: NaN }),
+        'HLC.update() received invalid timestamp, ignoring'
+      );
+      warnSpy.mockRestore();
+    });
+
+    test('should ignore timestamp with NaN counter', () => {
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation();
+      const fixedTime = 1000000;
+      jest.spyOn(Date, 'now').mockImplementation(() => fixedTime);
+
+      hlc.now();
+      hlc.update({ millis: 1000000, counter: NaN, nodeId: 'bad' });
+
+      const after = hlc.now();
+      expect(Number.isFinite(after.millis)).toBe(true);
+      expect(Number.isFinite(after.counter)).toBe(true);
+
+      expect(warnSpy).toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    test('should ignore timestamp with Infinity millis', () => {
+      const warnSpy = jest.spyOn(logger, 'warn').mockImplementation();
+      const fixedTime = 1000000;
+      jest.spyOn(Date, 'now').mockImplementation(() => fixedTime);
+
+      hlc.now();
+      hlc.update({ millis: Infinity, counter: 0, nodeId: 'bad' });
+
+      const after = hlc.now();
+      expect(Number.isFinite(after.millis)).toBe(true);
+
+      expect(warnSpy).toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    test('should coerce BigInt millis and counter without error', () => {
+      const fixedTime = 1000000;
+      jest.spyOn(Date, 'now').mockImplementation(() => fixedTime);
+
+      // Simulate browser MsgPack BigInt decoding
+      const remote = {
+        millis: BigInt(1000050),
+        counter: BigInt(3),
+        nodeId: 'remote'
+      } as unknown as Timestamp;
+
+      hlc.update(remote);
+
+      const ts = hlc.now();
+      expect(ts.millis).toBe(1000050);
+      expect(ts.counter).toBeGreaterThan(3);
+    });
+  });
+
   describe('Strict Mode', () => {
     test('should throw error in strict mode when drift exceeds threshold', () => {
       const strictHlc = new HLC('strict-node', { strictMode: true, maxDriftMs: 5000 });
