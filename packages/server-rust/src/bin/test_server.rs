@@ -40,7 +40,7 @@ use topgun_server::service::OperationService;
 use topgun_server::storage::datastores::NullDataStore;
 use topgun_server::storage::factory::{ObserverFactory, RecordStoreFactory};
 use topgun_server::storage::impls::StorageConfig;
-use topgun_server::storage::merkle_sync::MerkleSyncManager;
+use topgun_server::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
 use topgun_server::storage::mutation_observer::MutationObserver;
 
 #[tokio::main]
@@ -68,18 +68,25 @@ async fn main() -> anyhow::Result<()> {
         operation_service: Some(classify_svc),
         operation_pipeline: Some(operation_pipeline),
         jwt_secret: Some("test-e2e-secret".to_string()),
+        cluster_state: None,
+        store_factory: None,
+        server_config: None,
     };
 
-    // Build the axum router with state
+    // Build the axum router with state.
+    // Serve WebSocket on both /ws (integration tests) and / (browser clients).
+    let ws_handler = get(topgun_server::network::handlers::ws_upgrade_handler);
     let app = axum::Router::new()
-        .route(
-            "/ws",
-            get(topgun_server::network::handlers::ws_upgrade_handler),
-        )
+        .route("/ws", ws_handler.clone())
+        .route("/", ws_handler)
         .with_state(state);
 
-    // Bind to port 0 (OS-assigned ephemeral port)
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    // Use PORT env var if set (for manual testing), otherwise OS-assigned
+    let bind_port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let listener = TcpListener::bind(format!("127.0.0.1:{bind_port}")).await?;
     let port = listener.local_addr()?.port();
 
     // Print port to stdout so the TS test harness can read it
@@ -206,15 +213,25 @@ fn build_services() -> (
             connection_registry: Arc::clone(&connection_registry),
         });
 
+    // MerkleSyncManager must be created before RecordStoreFactory so the
+    // MerkleObserverFactory can be included in with_observer_factories().
+    let merkle_manager = Arc::new(MerkleSyncManager::default());
+
+    let merkle_observer_factory: Arc<dyn ObserverFactory> =
+        Arc::new(MerkleObserverFactory::new(Arc::clone(&merkle_manager)));
+
     let record_store_factory = Arc::new(
         RecordStoreFactory::new(
             StorageConfig::default(),
             Arc::new(NullDataStore),
             Vec::new(),
         )
-        .with_observer_factories(vec![search_observer_factory, query_observer_factory]),
+        .with_observer_factories(vec![
+            search_observer_factory,
+            query_observer_factory,
+            merkle_observer_factory,
+        ]),
     );
-    let merkle_manager = Arc::new(MerkleSyncManager::default());
 
     let write_validator = {
         let wv_hlc = Arc::new(parking_lot::Mutex::new(HLC::new(
