@@ -386,6 +386,22 @@ Each Rust spec should reference up to THREE sources:
 - **Status:** Complete (SPEC-070 completed 2026-02-28)
 - **Summary:** Fixed Vite aliases, removed hardcoded JWT, translated Russian strings to English, removed incorrect Mongo reference, added RBAC GuideCard, deleted misleading serverless blog post. 1 file created, 5 modified, 1 deleted.
 
+### TODO-110: CrdtService Must Update Server Merkle Tree After Writes — NEW
+- **Priority:** P1 (blocks Merkle sync catch-up for new clients)
+- **Complexity:** Small
+- **Summary:** Rust CrdtService writes to RecordStore but never updates the server's Merkle tree. New clients connecting after data was written get `root_hash=0` from SYNC_RESP_ROOT, see "Map is in sync", and skip data catch-up entirely. Live sync via SERVER_EVENT works (already-connected clients get updates), but initial Merkle sync is broken.
+- **Root cause:** TS server calls `merkleTreeManager.updateRecord()` after each op (`operation-handler.ts:270`). Rust `CrdtService::apply_single_op()` calls `RecordStore.put()` but has no reference to `MerkleManager` — the Merkle tree stays empty.
+- **Scope:**
+  - Inject `Arc<MerkleManager>` into `CrdtService`
+  - After each successful `RecordStore.put()`, call `merkle_manager.with_lww_tree(map_name, partition_id, |tree| tree.update(key, record))` for LWW operations
+  - After each OR-Map operation, call corresponding `with_ormap_tree()` update
+  - For REMOVE operations, call `tree.remove(key)`
+  - Add integration test: write via Device A → new Device B connects → Merkle sync → Device B has the data
+- **TS Source:** `packages/server/src/coordinator/operation-handler.ts:270` (`merkleTreeManager.updateRecord()`)
+- **Rust Source:** `packages/server-rust/src/service/domain/crdt.rs` (`apply_single_op()`)
+- **Depends on:** TODO-085 ✅ (CrdtService), TODO-086 ✅ (SyncService/MerkleManager)
+- **Effort:** 1-2 days
+
 ### TODO-105: Sync Showcase Demo App — NEW
 - **Priority:** P1 (marketing — "Show, Don't Tell")
 - **Complexity:** Medium
@@ -814,7 +830,8 @@ MILESTONE 1: Working IMDG (v1.0) — remaining work
        ↓
   ~~TODO-093 v1.0~~ ✅ (Admin Dashboard — SPEC-076a/b/c) — DONE
   ~~TODO-096~~ ✅ (Adoption Path docs → SPEC-077) — DONE
-  TODO-105 (Sync Showcase Demo) ← NEXT
+  TODO-110 (CrdtService Merkle tree update) ← NEXT
+  TODO-105 (Sync Showcase Demo)
        ↓
   TODO-106 (Update docs for Rust server) ← after API finalized
   TODO-103 (Remove legacy TS server) ← TS e2e tests already removed
@@ -970,4 +987,5 @@ All items below are completed and archived in `.specflow/archive/`:
 *Updated 2026-02-28: Strategic audit applied (STRATEGIC_RECOMMENDATIONS.md). Marked TODO-089 (SPEC-066), TODO-071 (SPEC-068), TODO-090 (SPEC-067) as DONE — ALL 7 domain services complete, `domain_stub!` removed, PostgreSQL done. Added 12 new TODOs from strategic audit: TODO-094 (Apache 2.0 LICENSE), TODO-095 (Enterprise dir v3.0), TODO-096 (Adoption Path + Security docs), TODO-097 (P0: HLC sanitization + Map ACL — blocks production), TODO-099 (Structured tracing + /metrics), TODO-101 (Client DevTools v2.0), TODO-102 (Rust CLI v2.0), TODO-103 (Remove legacy TS), TODO-104 (Fix demo apps), TODO-105 (Sync Showcase Demo), TODO-106 (Update docs for Rust). Merged TODO-098 into TODO-096, TODO-100 into TODO-093. Updated positioning to dual-level (vision + v1.0). Rewrote execution order: security (097) on critical path, then admin/docs/demo, then integration tests gate release. v1.0 effort unchanged (~6-8 weeks) but focus shifts from domain services (done) to security + polish.*
 *Updated 2026-03-02: Added TODO-107 (JWT Claims Dual-Field Deserialization — P1, protocol compat fix in auth.rs) and TODO-108 (Pre-existing integration test failures — P1, 20 tests in 3 suites). Both discovered during SPEC-073e integration test execution. Quick fix applied in test-client.ts for TODO-107; fundamental Rust-side fix still needed. TODO-108 blocks TODO-068 completion.*
 *Updated 2026-03-02: Added TODO-109 (Wire QueryObserverFactory — P1, 6 live query tests). Split from TODO-108 after SPEC-074 audit v2 discovered QueryMutationObserver only exists in #[cfg(test)] blocks, not wired in test_server.rs. SPEC-074 scoped to Bugs 1-3 (13 tests), TODO-109 handles Bug 4 (6 live update tests).*
+*Updated 2026-03-06: Added TODO-110 (CrdtService Merkle tree update — P1). Rust CrdtService writes to RecordStore but never updates server Merkle tree, breaking initial sync catch-up for new clients. Discovered during sync-lab demo debugging (HLC NaN root cause fix revealed this secondary issue).*
 *Updated 2026-03-03: Marked TODO-068, TODO-108, TODO-109 as DONE. Integration tests: 50/50 pass (6 suites), Rust unit tests: 502 pass. Single-node behavioral equivalence proven. Removed obsolete TS e2e tests (tests/e2e/) — they depended on TS ServerCoordinator and are replaced by tests/integration-rust/. TODO-103 (TS server removal) updated accordingly.*

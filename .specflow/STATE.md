@@ -44,11 +44,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-03-06 | SPEC-079 | COMPLETED: Wire MerkleObserverFactory into RecordStoreFactory — 4 commits, 1 review cycle. Fixed broken Merkle sync for late-joining clients. All 7 ACs met, 499/499 Rust tests pass. |
+| 2026-03-06 | SPEC-079 | REVIEW v1: APPROVED — all 7 ACs met, 499/499 Rust tests pass, clippy clean, integration test passes. 1 minor issue (cosmetic). |
+| 2026-03-06 | SPEC-079 | AUDIT v2: APPROVED — all v1 critical issues resolved, spec is clear and implementable. ~18% context estimate. |
 | 2026-03-06 | SPEC-078 | COMPLETED: TopGun Sync Lab — 25 files, 4 commits, 2 review cycles. Interactive demo with Conflict Arena (per-field HLC merge visualization) and Latency Race (sub-ms benchmark histogram). All 17 ACs met. APPROVED by impl-reviewer v2. |
 | 2026-03-06 | SPEC-078 | REVIEW v2: APPROVED — all 8 v1 fixes verified in code, no new issues. All 17 ACs pass. |
-| 2026-03-06 | SPEC-078 | REVIEW v1: CHANGES_REQUESTED — 3 critical (offline benchmark crash, null client in hooks, stale map ref), 1 major (subscription leak), 3 minor. |
-| 2026-03-06 | SPEC-078 | EXECUTED: 25 files created, 4 commits, 3 waves. All 17 ACs addressed. Sequential fallback (subagent CLI unavailable). Ready for review. |
-| 2026-03-05 | SPEC-078 | AUDIT v2: NEEDS_DECOMPOSITION — 22 files, ~102% context, 6 task groups across 3 waves. All v1 critical issues resolved. No new critical issues. Spec quality is high — decomposition needed only due to size. |
 
 
 ## Project Patterns
@@ -92,4 +92,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-03-06 (SPEC-078 COMPLETED — archived)*
+*Last updated: 2026-03-06 (SPEC-079 completed and archived)*
