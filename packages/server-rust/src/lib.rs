@@ -48,9 +48,9 @@ mod integration_tests {
     use crate::service::security::{SecurityConfig, WriteValidator};
     use crate::service::{ClassifyError, OperationService};
     use crate::storage::datastores::NullDataStore;
-    use crate::storage::factory::RecordStoreFactory;
+    use crate::storage::factory::{ObserverFactory, RecordStoreFactory};
     use crate::storage::impls::StorageConfig;
-    use crate::storage::merkle_sync::MerkleSyncManager;
+    use crate::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
 
     fn make_write_validator(node_id: &str) -> Arc<WriteValidator> {
         let hlc = Arc::new(parking_lot::Mutex::new(HLC::new(
@@ -83,12 +83,21 @@ mod integration_tests {
         let cluster_state = Arc::new(cluster_state);
         let connection_registry = Arc::new(ConnectionRegistry::new());
 
-        let record_store_factory = Arc::new(RecordStoreFactory::new(
-            StorageConfig::default(),
-            Arc::new(NullDataStore),
-            Vec::new(),
-        ));
+        // MerkleSyncManager must be created before RecordStoreFactory so the
+        // MerkleObserverFactory can be included in with_observer_factories().
         let merkle_manager = Arc::new(MerkleSyncManager::default());
+
+        let merkle_observer_factory: Arc<dyn ObserverFactory> =
+            Arc::new(MerkleObserverFactory::new(Arc::clone(&merkle_manager)));
+
+        let record_store_factory = Arc::new(
+            RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::new(NullDataStore),
+                Vec::new(),
+            )
+            .with_observer_factories(vec![merkle_observer_factory]),
+        );
 
         let mut router = OperationRouter::new();
         router.register(
