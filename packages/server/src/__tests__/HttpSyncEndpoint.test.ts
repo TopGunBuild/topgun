@@ -13,7 +13,7 @@ describe('HttpSyncEndpoint', () => {
   let testMap: LWWMap<string, any>;
   let httpSyncHandler: HttpSyncHandler;
 
-  function makeAuthToken(payload: any = { userId: 'user-1', roles: ['USER'] }): string {
+  function makeAuthToken(payload: any = { sub: 'user-1', roles: ['USER'] }): string {
     return jwt.sign(payload, JWT_SECRET, { algorithm: 'HS256' });
   }
 

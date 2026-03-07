@@ -246,7 +246,7 @@ describe('BootstrapController Authentication', () => {
     it('should return 401 for expired token', async () => {
       // Create expired token
       const expiredToken = jwt.sign(
-        { userId: 'test', username: 'testadmin', roles: ['ADMIN'] },
+        { sub: 'test', username: 'testadmin', roles: ['ADMIN'] },
         JWT_SECRET,
         { expiresIn: '-1h' }
       );

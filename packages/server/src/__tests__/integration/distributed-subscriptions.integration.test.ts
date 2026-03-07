@@ -22,7 +22,7 @@ const JWT_SECRET = 'test-secret-for-e2e-tests';
 
 // Helper: Create a valid JWT token with ADMIN role for full access
 function createTestToken(userId = 'test-user', roles = ['ADMIN']): string {
-  return jwt.sign({ userId, roles }, JWT_SECRET, { expiresIn: '1h' });
+  return jwt.sign({ sub: userId, roles }, JWT_SECRET, { expiresIn: '1h' });
 }
 
 interface TestNode {

@@ -661,7 +661,6 @@ export class BootstrapController {
     return jwt.sign(
       {
         sub: payload.userId,
-        userId: payload.userId,
         username: payload.username,
         roles: [payload.role.toUpperCase()],
         iat: Math.floor(Date.now() / 1000),

@@ -33,7 +33,7 @@ export class AuthHandler implements IAuthHandler {
      *
      * Principal normalization:
      * - Adds default 'USER' role if roles missing
-     * - Maps 'sub' claim to 'userId' if userId missing
+     * - Maps standard 'sub' claim to 'userId'
      *
      * @param token The JWT token to verify
      * @returns The decoded and normalized principal
@@ -52,8 +52,8 @@ export class AuthHandler implements IAuthHandler {
             decoded.roles = ['USER'];
         }
 
-        // Normalize principal - map sub to userId if needed
-        if (!decoded.userId && decoded.sub) {
+        // Map standard JWT 'sub' claim to userId
+        if (decoded.sub) {
             decoded.userId = decoded.sub;
         }
 

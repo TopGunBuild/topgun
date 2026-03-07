@@ -96,7 +96,7 @@ describe('Metrics Integration', () => {
     await new Promise<void>(resolve => ws.on('open', () => resolve()));
     
     // 1. Authenticate
-    const token = jwt.sign({ userId: 'test-user', roles: ['USER'] }, JWT_SECRET);
+    const token = jwt.sign({ sub: 'test-user', roles: ['USER'] }, JWT_SECRET);
     ws.send(serialize({
         type: 'AUTH',
         token
