@@ -23,11 +23,10 @@ describe('Integration: Merkle Sync (Rust Server)', () => {
     test('Device B gets non-zero root_hash after Device A writes data', async () => {
       const [deviceA] = ctx.clients;
 
-      // Device A writes data to the "users" map.
-      // The key "u55" is chosen because it hashes to the same partition as
-      // "users" (partition 123 via FNV-1a % 271). SyncInit uses the map name
-      // as partition key, so the Merkle tree lookup must hit the same partition
-      // where the write landed.
+      // Device A writes data to the "users" map with an arbitrary key.
+      // Any key should work because the Merkle dual-write ensures partition 0
+      // (client-sync) always has the complete tree, and record lookups use
+      // per-key hash_to_partition to find the actual storage partition.
       const record = createLWWRecord({ name: 'Alice', age: 30 });
       deviceA.messages.length = 0;
 
@@ -37,7 +36,7 @@ describe('Integration: Merkle Sync (Rust Server)', () => {
           id: 'op-merkle-1',
           mapName: 'users',
           opType: 'PUT',
-          key: 'u55',
+          key: 'alice',
           record,
         },
       });
