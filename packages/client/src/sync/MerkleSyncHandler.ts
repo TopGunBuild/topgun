@@ -69,10 +69,12 @@ export class MerkleSyncHandler implements IMerkleSyncHandler {
     if (map instanceof LWWMap) {
       const tree = map.getMerkleTree();
       const localBuckets = tree.getBuckets(path);
+      let mismatchCount = 0;
 
       for (const [bucketKey, remoteHash] of Object.entries(buckets)) {
         const localHash = localBuckets[bucketKey] || 0;
         if (localHash !== remoteHash) {
+          mismatchCount++;
           const newPath = path + bucketKey;
           this.config.sendMessage({
             type: 'MERKLE_REQ_BUCKET',

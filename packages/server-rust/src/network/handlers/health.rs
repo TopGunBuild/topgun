@@ -71,6 +71,9 @@ mod tests {
             operation_service: None,
             operation_pipeline: None,
             jwt_secret: None,
+            cluster_state: None,
+            store_factory: None,
+            server_config: None,
         }
     }
 
