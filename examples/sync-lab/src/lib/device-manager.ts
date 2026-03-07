@@ -10,10 +10,17 @@ export interface DeviceHandle {
   client: TopGunClient;
   map: LWWMap<string, any>;
   isConnected: boolean;
+  /** Unsubscribe from server query subscription */
+  unsubscribeQuery: () => void;
 }
 
 const getServerUrl = (): string =>
   (import.meta as any).env?.VITE_SERVER_URL || 'ws://localhost:8080';
+
+// Pre-signed JWT for the demo test server (secret: "test-e2e-secret", expires 2036).
+const getDemoToken = (): string =>
+  (import.meta as any).env?.VITE_AUTH_TOKEN ||
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJkZW1vLXVzZXIiLCJyb2xlcyI6WyJVU0VSIl0sImlhdCI6MTc3MjgxNTUyNywiZXhwIjoyMDg4MzkxNTI3fQ.sxBWldBhyeq--0LNYaThMXa1q4bJjzAIvBiZn-aPWgY';
 
 /**
  * Create a fresh TopGunClient representing one "device" in the demo.
@@ -26,8 +33,14 @@ export function createDevice(deviceId: string, mapName: string): DeviceHandle {
     serverUrl: getServerUrl(),
     storage,
   });
+  client.setAuthToken(getDemoToken());
   const map = client.getMap<string, any>(mapName);
-  return { client, map, isConnected: true };
+
+  // Subscribe to server query so broadcast events reach this client
+  const queryHandle = client.query(mapName, {});
+  const unsubscribeQuery = queryHandle.subscribe(() => {});
+
+  return { client, map, isConnected: true, unsubscribeQuery };
 }
 
 /**
@@ -51,6 +64,7 @@ export function snapshotDevice(map: LWWMap<string, any>): DeviceState {
  */
 export function disconnectDevice(handle: DeviceHandle): DeviceState {
   const state = snapshotDevice(handle.map);
+  handle.unsubscribeQuery();
   handle.client.close();
   handle.isConnected = false;
   return state;

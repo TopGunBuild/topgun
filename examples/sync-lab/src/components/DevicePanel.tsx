@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import type { LWWMap, LWWRecord } from '@topgunbuild/core';
+import type { LWWRecord } from '@topgunbuild/core';
 import { useDeviceClient } from '@/hooks/useDeviceClient';
 import { useLatencyTracker } from '@/hooks/useLatencyTracker';
 import { useStateLog } from '@/hooks/useStateLog';
