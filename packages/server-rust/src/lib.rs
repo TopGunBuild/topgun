@@ -99,6 +99,8 @@ mod integration_tests {
             .with_observer_factories(vec![merkle_observer_factory]),
         );
 
+        let query_registry = Arc::new(QueryRegistry::new());
+
         let mut router = OperationRouter::new();
         router.register(
             service_names::CRDT,
@@ -106,6 +108,7 @@ mod integration_tests {
                 Arc::clone(&record_store_factory),
                 Arc::clone(&connection_registry),
                 make_write_validator(&config.node_id),
+                Arc::clone(&query_registry),
             )),
         );
         router.register(
@@ -116,7 +119,6 @@ mod integration_tests {
                 Arc::clone(&connection_registry),
             )),
         );
-        let query_registry = Arc::new(QueryRegistry::new());
         router.register(
             service_names::QUERY,
             Arc::new(QueryService::new(
@@ -335,18 +337,20 @@ mod integration_tests {
         let merkle_manager_for_sync = Arc::new(MerkleSyncManager::default());
         let connection_registry_for_sync = Arc::new(ConnectionRegistry::new());
 
+        let query_registry = Arc::new(QueryRegistry::new());
+
         let registry = ServiceRegistry::new();
         registry.register(CrdtService::new(
             Arc::clone(&record_store_factory),
             connection_registry_for_crdt,
             make_write_validator("registry-test-node"),
+            Arc::clone(&query_registry),
         ));
         registry.register(SyncService::new(
             merkle_manager_for_sync,
             Arc::clone(&record_store_factory),
             connection_registry_for_sync,
         ));
-        let query_registry = Arc::new(QueryRegistry::new());
         registry.register(QueryService::new(
             query_registry,
             Arc::clone(&record_store_factory),

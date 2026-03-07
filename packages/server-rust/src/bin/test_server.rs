@@ -251,6 +251,7 @@ fn build_services() -> (
             Arc::clone(&record_store_factory),
             Arc::clone(&connection_registry),
             write_validator,
+            Arc::clone(&query_registry),
         )),
     );
     router.register(
