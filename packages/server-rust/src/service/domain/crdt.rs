@@ -17,7 +17,7 @@ use topgun_core::messages::{
     OpBatchMessage, ServerEventPayload, ServerEventType,
 };
 use topgun_core::types::Value;
-use topgun_core::{LWWRecord, ORMapRecord, Timestamp};
+use topgun_core::{hash_to_partition, LWWRecord, ORMapRecord, Timestamp};
 
 use tracing::Instrument;
 
@@ -192,7 +192,6 @@ impl CrdtService {
             });
         }
 
-        let partition_id = ctx.partition_id.unwrap_or(0);
         let mut last_id = "unknown".to_string();
 
         // Validate all ops before applying any (atomic batch rejection).
@@ -204,8 +203,11 @@ impl CrdtService {
                 self.write_validator.validate_write(ctx, &metadata_snapshot, &op.map_name, value_size)?;
             }
             // All ops validated — apply them sequentially with sanitized timestamps.
+            // Each op gets its own partition based on its key (OpBatch ctx has
+            // partition_id=None because the batch contains keys for many partitions).
             for op in ops {
                 let sanitized_ts = self.write_validator.sanitize_hlc();
+                let partition_id = hash_to_partition(&op.key);
                 let event_payload = self.apply_single_op(op, partition_id, Some(&sanitized_ts)).await?;
                 self.broadcast_event(&event_payload, ctx.connection_id)?;
                 if let Some(id) = &op.id {
@@ -215,6 +217,7 @@ impl CrdtService {
         } else {
             // Internal/system call (no connection_id) — skip validation.
             for op in ops {
+                let partition_id = hash_to_partition(&op.key);
                 let event_payload = self.apply_single_op(op, partition_id, None).await?;
                 self.broadcast_event(&event_payload, ctx.connection_id)?;
                 if let Some(id) = &op.id {

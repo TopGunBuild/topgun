@@ -175,19 +175,27 @@ impl SyncService {
                 // (the client-sync partition). Look up each key from its
                 // actual storage partition.
                 let mut records = Vec::new();
-                for key in keys {
-                    let key_partition = hash_to_partition(&key);
+                for key in &keys {
+                    let key_partition = hash_to_partition(key);
                     let store = self.record_store_factory.get_or_create(&map_name, key_partition);
-                    if let Ok(Some(record)) = store.get(&key, false).await {
-                        if let RecordValue::Lww { value, timestamp } = record.value {
-                            records.push(SyncLeafRecord {
-                                key,
-                                record: LWWRecord {
-                                    value: Some(value_to_rmpv(&value)),
-                                    timestamp,
-                                    ttl_ms: None,
-                                },
-                            });
+                    match store.get(key, false).await {
+                        Ok(Some(record)) => {
+                            if let RecordValue::Lww { value, timestamp } = record.value {
+                                records.push(SyncLeafRecord {
+                                    key: key.clone(),
+                                    record: LWWRecord {
+                                        value: Some(value_to_rmpv(&value)),
+                                        timestamp,
+                                        ttl_ms: None,
+                                    },
+                                });
+                            }
+                        }
+                        Ok(None) => {
+                            tracing::warn!(key = %key, partition = key_partition, "Merkle leaf: record not found in store");
+                        }
+                        Err(e) => {
+                            tracing::error!(key = %key, partition = key_partition, error = %e, "Merkle leaf: store.get() error");
                         }
                     }
                 }
