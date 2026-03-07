@@ -1,9 +1,7 @@
 /**
  * Standalone test client for Rust server integration tests.
  *
- * This is a copy adapted from tests/e2e/helpers/index.ts with the following changes:
  * - No imports from @topgunbuild/server (avoids transitive TS server dependency)
- * - No MemoryStorageAdapter dependency
  * - No BATCH parsing for inbound messages (Rust server sends individual MsgPack frames)
  * - Sends individual MsgPack messages (not BATCH) to the Rust server
  * - Connects to ws://localhost:${port}/ws (Rust server mounts handler at /ws)
@@ -246,4 +244,96 @@ export function createORRecord<T>(value: T, nodeId = 'test-node'): any {
     },
     tag: `${nodeId}-${ts}-0`,
   };
+}
+
+/**
+ * Drives the full Merkle sync protocol for a given map:
+ *   SYNC_INIT -> SYNC_RESP_ROOT -> MERKLE_REQ_BUCKET (BFS) -> SYNC_RESP_BUCKETS | SYNC_RESP_LEAF
+ *
+ * Returns all records delivered via SYNC_RESP_LEAF messages.
+ */
+export async function completeMerkleSync(
+  client: TestClient,
+  mapName: string,
+  timeout = 15000
+): Promise<Map<string, { value: any; timestamp: any }>> {
+  const records = new Map<string, { value: any; timestamp: any }>();
+  const deadline = Date.now() + timeout;
+
+  // Track which messages we've already consumed so we don't double-process
+  let consumedIndex = client.messages.length;
+
+  // Step 1: Send SYNC_INIT (FLAT message — no payload wrapper)
+  client.send({ type: 'SYNC_INIT', mapName });
+
+  // Step 2: Wait for SYNC_RESP_ROOT
+  const rootResp = await client.waitForMessage('SYNC_RESP_ROOT', timeout);
+  if (rootResp.payload.rootHash === 0) {
+    return records;
+  }
+
+  // Step 3: BFS traversal of Merkle tree
+  // Queue of paths to request buckets for
+  const pendingPaths: string[] = [''];
+
+  while (pendingPaths.length > 0) {
+    if (Date.now() > deadline) {
+      throw new Error(`completeMerkleSync timeout after ${timeout}ms`);
+    }
+
+    const path = pendingPaths.shift()!;
+
+    // Send MERKLE_REQ_BUCKET (WRAPPED message — uses payload)
+    client.send({
+      type: 'MERKLE_REQ_BUCKET',
+      payload: { mapName, path },
+    });
+
+    // Poll messages[] for the response matching this path
+    // The server returns either SYNC_RESP_BUCKETS or SYNC_RESP_LEAF
+    let found = false;
+    while (!found) {
+      if (Date.now() > deadline) {
+        throw new Error(`completeMerkleSync timeout waiting for response to path "${path}"`);
+      }
+
+      // Scan new messages since last check
+      for (let i = consumedIndex; i < client.messages.length; i++) {
+        const msg = client.messages[i];
+
+        if (msg.type === 'SYNC_RESP_BUCKETS' && msg.payload?.path === path && msg.payload?.mapName === mapName) {
+          consumedIndex = i + 1;
+          // Internal node: queue non-zero child buckets for traversal
+          const buckets: Record<string, number> = msg.payload.buckets;
+          for (const [key, hash] of Object.entries(buckets)) {
+            if (hash !== 0) {
+              pendingPaths.push(path + key);
+            }
+          }
+          found = true;
+          break;
+        }
+
+        if (msg.type === 'SYNC_RESP_LEAF' && msg.payload?.path === path && msg.payload?.mapName === mapName) {
+          consumedIndex = i + 1;
+          // Leaf node: collect records
+          for (const entry of msg.payload.records) {
+            records.set(entry.key, {
+              value: entry.record.value,
+              timestamp: entry.record.timestamp,
+            });
+          }
+          found = true;
+          break;
+        }
+      }
+
+      if (!found) {
+        // Wait a bit before polling again
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }
+  }
+
+  return records;
 }

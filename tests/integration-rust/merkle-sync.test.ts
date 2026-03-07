@@ -3,23 +3,23 @@ import {
   createRustTestClient,
   createLWWRecord,
   waitForSync,
+  completeMerkleSync,
   RustTestContext,
   TestClient,
 } from './helpers';
 
 describe('Integration: Merkle Sync (Rust Server)', () => {
+  let ctx: RustTestContext;
+
+  beforeAll(async () => {
+    ctx = await createRustTestContext(1);
+  });
+
+  afterAll(async () => {
+    await ctx.cleanup();
+  });
+
   describe('Late-joiner receives non-zero root hash', () => {
-    let ctx: RustTestContext;
-
-    beforeAll(async () => {
-      // Spawn server with one client (Device A)
-      ctx = await createRustTestContext(1);
-    });
-
-    afterAll(async () => {
-      await ctx.cleanup();
-    });
-
     test('Device B gets non-zero root_hash after Device A writes data', async () => {
       const [deviceA] = ctx.clients;
 
@@ -70,6 +70,172 @@ describe('Integration: Merkle Sync (Rust Server)', () => {
         expect(syncResp.payload).toBeDefined();
         expect(syncResp.payload.mapName).toBe('users');
         expect(syncResp.payload.rootHash).not.toBe(0);
+      } finally {
+        deviceB.close();
+      }
+    });
+  });
+
+  describe('Full Merkle sync protocol', () => {
+    test('delivers single record to late-joiner', async () => {
+      const [deviceA] = ctx.clients;
+
+      const record = createLWWRecord({ name: 'Alice', age: 30 }, deviceA.nodeId);
+      deviceA.messages.length = 0;
+
+      deviceA.send({
+        type: 'CLIENT_OP',
+        payload: {
+          id: 'op-single-1',
+          mapName: 'sync-single',
+          opType: 'PUT',
+          key: 'user:alice',
+          record,
+        },
+      });
+
+      await deviceA.waitForMessage('OP_ACK');
+      await waitForSync(200);
+
+      const deviceB = await createRustTestClient(ctx.port, {
+        nodeId: 'device-b-single',
+        userId: 'user-b-single',
+        roles: ['ADMIN'],
+      });
+
+      try {
+        await deviceB.waitForMessage('AUTH_ACK', 10_000);
+        deviceB.messages.length = 0;
+
+        const records = await completeMerkleSync(deviceB, 'sync-single');
+
+        expect(records.size).toBe(1);
+        expect(records.has('user:alice')).toBe(true);
+        const entry = records.get('user:alice')!;
+        expect(entry.value).toEqual({ name: 'Alice', age: 30 });
+      } finally {
+        deviceB.close();
+      }
+    });
+
+    test('multi-key sync convergence (12 keys)', async () => {
+      const [deviceA] = ctx.clients;
+
+      const keys: { key: string; value: any }[] = [];
+      for (let i = 1; i <= 4; i++) {
+        const num = String(i).padStart(3, '0');
+        keys.push({ key: `todo:${num}:title`, value: `Task ${i}` });
+        keys.push({ key: `todo:${num}:done`, value: false });
+        keys.push({ key: `todo:${num}:priority`, value: i });
+      }
+
+      // Write each key and wait for ACK before proceeding
+      for (const { key, value } of keys) {
+        deviceA.messages.length = 0;
+        const record = createLWWRecord(value, deviceA.nodeId);
+        deviceA.send({
+          type: 'CLIENT_OP',
+          payload: {
+            id: `op-todo-${key}`,
+            mapName: 'todos',
+            opType: 'PUT',
+            key,
+            record,
+          },
+        });
+        await deviceA.waitForMessage('OP_ACK');
+      }
+
+      // Wait for Merkle tree to settle
+      await waitForSync(500);
+
+      const deviceB = await createRustTestClient(ctx.port, {
+        nodeId: 'device-b-multi',
+        userId: 'user-b-multi',
+        roles: ['ADMIN'],
+      });
+
+      try {
+        await deviceB.waitForMessage('AUTH_ACK', 10_000);
+        deviceB.messages.length = 0;
+
+        const records = await completeMerkleSync(deviceB, 'todos');
+
+        expect(records.size).toBe(12);
+        for (const { key, value } of keys) {
+          expect(records.has(key)).toBe(true);
+          expect(records.get(key)!.value).toEqual(value);
+        }
+      } finally {
+        deviceB.close();
+      }
+    });
+
+    test('empty map sync returns zero root hash and no records', async () => {
+      const deviceB = await createRustTestClient(ctx.port, {
+        nodeId: 'device-b-empty',
+        userId: 'user-b-empty',
+        roles: ['ADMIN'],
+      });
+
+      try {
+        await deviceB.waitForMessage('AUTH_ACK', 10_000);
+        deviceB.messages.length = 0;
+
+        const records = await completeMerkleSync(deviceB, 'empty-map');
+
+        expect(records.size).toBe(0);
+      } finally {
+        deviceB.close();
+      }
+    });
+
+    test('sync with diverse key patterns', async () => {
+      const [deviceA] = ctx.clients;
+
+      const diverseKeys = [
+        { key: 'a', value: 'short' },
+        { key: 'zzz', value: 'triple-z' },
+        { key: 'key-with-dashes', value: 'dashed' },
+        { key: 'nested:path:deep', value: 'nested' },
+        { key: '12345', value: 'numeric' },
+      ];
+
+      for (const { key, value } of diverseKeys) {
+        deviceA.messages.length = 0;
+        const record = createLWWRecord(value, deviceA.nodeId);
+        deviceA.send({
+          type: 'CLIENT_OP',
+          payload: {
+            id: `op-diverse-${key}`,
+            mapName: 'diverse',
+            opType: 'PUT',
+            key,
+            record,
+          },
+        });
+        await deviceA.waitForMessage('OP_ACK');
+      }
+
+      await waitForSync(200);
+
+      const deviceB = await createRustTestClient(ctx.port, {
+        nodeId: 'device-b-diverse',
+        userId: 'user-b-diverse',
+        roles: ['ADMIN'],
+      });
+
+      try {
+        await deviceB.waitForMessage('AUTH_ACK', 10_000);
+        deviceB.messages.length = 0;
+
+        const records = await completeMerkleSync(deviceB, 'diverse');
+
+        expect(records.size).toBe(5);
+        for (const { key, value } of diverseKeys) {
+          expect(records.has(key)).toBe(true);
+          expect(records.get(key)!.value).toEqual(value);
+        }
       } finally {
         deviceB.close();
       }

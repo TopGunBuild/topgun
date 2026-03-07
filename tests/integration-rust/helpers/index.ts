@@ -286,4 +286,5 @@ export {
   waitUntil,
   createLWWRecord,
   createORRecord,
+  completeMerkleSync,
 } from './test-client';

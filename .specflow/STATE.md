@@ -44,12 +44,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-03-07 | SPEC-081 | COMPLETED: Subscription-Aware CRDT Broadcast Filtering — 5 commits, 1 review cycle. broadcast_event() now queries QueryRegistry for subscriber IDs, sends via send_to_connections(), excludes writer, skips serialization when no subscribers. All 12 ACs met, 522/522 Rust tests pass, 51/51 integration tests pass. |
+| 2026-03-07 | SPEC-081 | REVIEW v1: APPROVED — all 12 ACs met, 522/522 Rust tests pass, 51/51 integration tests pass, clippy clean. No issues found. |
+| 2026-03-07 | SPEC-081 | AUDIT v1: APPROVED — 4 fixes applied (duplicate requirement removed, missing construction site added, context estimates corrected, G3 description updated). 1 optional recommendation (Vec allocation in get_subscribed_connection_ids). |
 | 2026-03-07 | SPEC-080 | COMPLETED: Fix Merkle Sync Partition Mismatch — 3 commits, 1 review cycle. Dual-write to partition 0 for client sync, per-key hash_to_partition for record lookup. All 9 ACs met, 509/509 Rust tests pass, 51/51 integration tests pass. |
 | 2026-03-07 | SPEC-080 | REVIEW v1: APPROVED — all 9 ACs met, 509/509 Rust tests pass, 51/51 integration tests pass, clippy clean. No issues found. |
-| 2026-03-07 | SPEC-080 | AUDIT v1: APPROVED — all 10 dimensions pass, 4 files within Language Profile limit, ~70% total context but all workers in PEAK/GOOD range with orchestrated execution. 1 minor recommendation (Goal Analysis text inconsistency). |
-| 2026-03-06 | SPEC-079 | COMPLETED: Wire MerkleObserverFactory into RecordStoreFactory — 4 commits, 1 review cycle. Fixed broken Merkle sync for late-joining clients. All 7 ACs met, 499/499 Rust tests pass. |
-| 2026-03-06 | SPEC-079 | REVIEW v1: APPROVED — all 7 ACs met, 499/499 Rust tests pass, clippy clean, integration test passes. 1 minor issue (cosmetic). |
-
 
 ## Project Patterns
 
@@ -86,10 +85,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 - WebSocket dispatch pattern: Two-phase auth (pre-split AUTH_REQUIRED on raw socket, post-split AUTH_ACK/FAIL via mpsc channel); inbound binary -> `rmp_serde::from_slice` -> auth gate -> `OperationService.classify()` -> `set_connection_id()` -> `OperationPipeline` (BoxService) dispatch; BATCH unpacking via 4-byte BE u32 length-prefixed inner messages; `OperationResponse` variant mapping (Message/Messages/Empty/Ack/NotImplemented); `Option<Arc<...>>` AppState fields with None defaults for backward-compatible test compilation
 - Rust integration test harness pattern: `spawnRustServer()` spawns test binary (RUST_SERVER_BINARY or cargo run), captures PORT= from stdout via readline, returns cleanup (process-group SIGTERM/SIGKILL); standalone `TestClient` in test-client.ts (no @topgunbuild/server dep) sends individual MsgPack frames (no BATCH)
 - Observer factory pattern: `ObserverFactory` trait enables per-map mutation observer creation at `RecordStore` creation time; `RecordStoreFactory.with_observer_factories()` builder wires factories; `get_or_create()` calls each factory on cache miss and merges returned observers into `CompositeMutationObserver`; `get_all_for_map()` returns all cached stores across partitions for cross-partition aggregation
+- Subscription-aware broadcast pattern: `CrdtService.broadcast_event()` queries `QueryRegistry.get_subscribed_connection_ids()` for targeted delivery via `ConnectionRegistry.send_to_connections()`, excluding the writing client and skipping serialization when no subscribers exist
 
 ## Warnings
 
-- **BROADCAST BUG (TODO-112):** CrdtService broadcasts ServerEvent to ALL clients, not just subscribers. TS server filters by `queryRegistry.getSubscribedClientIds(mapName)`. Causes unnecessary bandwidth usage.
+(none)
 
 ---
-*Last updated: 2026-03-07 (SPEC-080 completed — Merkle sync partition mismatch fixed)*
+*Last updated: 2026-03-07 (SPEC-081 completed — Subscription-Aware CRDT Broadcast Filtering)*
