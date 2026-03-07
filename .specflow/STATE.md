@@ -44,11 +44,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-03-07 | SPEC-082 | COMPLETED: Full Merkle Sync Protocol Integration Tests — 1 commit, 1 review cycle. completeMerkleSync() BFS protocol driver + 5 tests (single record, 12 composite keys, empty map, diverse keys). All 55/55 integration tests pass. |
+| 2026-03-07 | SPEC-082 | REVIEW v1: APPROVED — all 9 ACs met, 5/5 tests pass, 55/55 integration tests pass. completeMerkleSync() correctly implements BFS Merkle traversal with dual response type handling. No issues found. |
 | 2026-03-07 | SPEC-081 | COMPLETED: Subscription-Aware CRDT Broadcast Filtering — 5 commits, 1 review cycle. broadcast_event() now queries QueryRegistry for subscriber IDs, sends via send_to_connections(), excludes writer, skips serialization when no subscribers. All 12 ACs met, 522/522 Rust tests pass, 51/51 integration tests pass. |
 | 2026-03-07 | SPEC-081 | REVIEW v1: APPROVED — all 12 ACs met, 522/522 Rust tests pass, 51/51 integration tests pass, clippy clean. No issues found. |
-| 2026-03-07 | SPEC-081 | AUDIT v1: APPROVED — 4 fixes applied (duplicate requirement removed, missing construction site added, context estimates corrected, G3 description updated). 1 optional recommendation (Vec allocation in get_subscribed_connection_ids). |
 | 2026-03-07 | SPEC-080 | COMPLETED: Fix Merkle Sync Partition Mismatch — 3 commits, 1 review cycle. Dual-write to partition 0 for client sync, per-key hash_to_partition for record lookup. All 9 ACs met, 509/509 Rust tests pass, 51/51 integration tests pass. |
-| 2026-03-07 | SPEC-080 | REVIEW v1: APPROVED — all 9 ACs met, 509/509 Rust tests pass, 51/51 integration tests pass, clippy clean. No issues found. |
 
 ## Project Patterns
 
@@ -92,4 +92,4 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 (none)
 
 ---
-*Last updated: 2026-03-07 (SPEC-081 completed — Subscription-Aware CRDT Broadcast Filtering)*
+*Last updated: 2026-03-07 (SPEC-082 completed and archived)*
