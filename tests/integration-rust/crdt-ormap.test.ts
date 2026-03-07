@@ -8,6 +8,21 @@ import {
   TestClient,
 } from './helpers';
 
+/**
+ * Subscribes a client to a map via QUERY_SUB so it receives SERVER_EVENT
+ * broadcasts for writes to that map.
+ */
+function subscribeToMap(client: TestClient, mapName: string, queryId: string) {
+  client.send({
+    type: 'QUERY_SUB',
+    payload: {
+      queryId,
+      mapName,
+      query: {},
+    },
+  });
+}
+
 describe('Integration: ORMap CRDT (Rust Server)', () => {
   let cleanup: () => Promise<void>;
   let port: number;
@@ -42,6 +57,10 @@ describe('Integration: ORMap CRDT (Rust Server)', () => {
       });
       await observer.waitForMessage('AUTH_ACK');
 
+      // Subscribe observer to the map so it receives SERVER_EVENT broadcasts
+      subscribeToMap(observer, 'or-items', 'q-or-items-obs');
+      await waitForSync(100);
+
       // Clear observer messages before the operation
       observer.messages.length = 0;
 
@@ -60,7 +79,6 @@ describe('Integration: ORMap CRDT (Rust Server)', () => {
       });
 
       // Wait for the observer to receive a SERVER_EVENT confirming the OR_ADD
-      // The server broadcasts SERVER_EVENT with eventType to all connected clients
       await waitUntil(
         () =>
           observer.messages.some(
@@ -103,6 +121,10 @@ describe('Integration: ORMap CRDT (Rust Server)', () => {
         roles: ['ADMIN'],
       });
       await observer.waitForMessage('AUTH_ACK');
+
+      // Subscribe observer to the map so it receives SERVER_EVENT broadcasts
+      subscribeToMap(observer, 'removable', 'q-removable-obs');
+      await waitForSync(100);
 
       // First, add an item so we have something to remove
       const orRecord = createORRecord('To Remove', 'or-remover-1');
@@ -196,6 +218,11 @@ describe('Integration: ORMap CRDT (Rust Server)', () => {
         roles: ['ADMIN'],
       });
       await observer.waitForMessage('AUTH_ACK');
+
+      // Subscribe observer to the map so it receives SERVER_EVENT broadcasts
+      subscribeToMap(observer, 'multi-values', 'q-multi-values-obs');
+      await waitForSync(100);
+
       observer.messages.length = 0;
 
       // Client 1 adds value
@@ -267,6 +294,11 @@ describe('Integration: ORMap CRDT (Rust Server)', () => {
         roles: ['ADMIN'],
       });
       await client2.waitForMessage('AUTH_ACK');
+
+      // Both clients subscribe to the map so they receive each other's events
+      subscribeToMap(client1, 'shared-or', 'q-shared-or-c1');
+      subscribeToMap(client2, 'shared-or', 'q-shared-or-c2');
+      await waitForSync(100);
 
       // Client 1 adds an item
       const orRecord = createORRecord('Shared Item', 'tomb-or-1');
