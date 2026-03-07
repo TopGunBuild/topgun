@@ -271,6 +271,19 @@ impl ConnectionRegistry {
         }
     }
 
+    /// Sends a binary message to a specific set of connection IDs.
+    ///
+    /// Uses non-blocking `try_send` so a single slow connection cannot
+    /// block the caller. Missing connections and full channels are silently
+    /// skipped (same semantics as `broadcast`).
+    pub fn send_to_connections(&self, ids: &HashSet<ConnectionId>, msg_bytes: &[u8]) {
+        for id in ids {
+            if let Some(handle) = self.get(*id) {
+                let _ = handle.try_send(OutboundMessage::Binary(msg_bytes.to_vec()));
+            }
+        }
+    }
+
     /// Removes and returns all connections. Used during graceful shutdown.
     pub fn drain_all(&self) -> Vec<Arc<ConnectionHandle>> {
         let keys: Vec<ConnectionId> = self

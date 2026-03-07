@@ -5,6 +5,7 @@
 //! `QUERY_UPDATE` messages (ENTER/UPDATE/LEAVE) to subscribers via
 //! `QueryMutationObserver` when data changes.
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -116,6 +117,18 @@ impl QueryRegistry {
             Some(inner) => inner.iter().map(|entry| entry.value().clone()).collect(),
             None => Vec::new(),
         }
+    }
+
+    /// Returns the set of unique connection IDs with active subscriptions for `map_name`.
+    ///
+    /// Used by `CrdtService` to target broadcast events only to subscribers
+    /// instead of all connected clients.
+    #[must_use]
+    pub fn get_subscribed_connection_ids(&self, map_name: &str) -> HashSet<ConnectionId> {
+        self.get_subscriptions_for_map(map_name)
+            .into_iter()
+            .map(|sub| sub.connection_id)
+            .collect()
     }
 
     /// Total subscription count across all maps (for testing).
