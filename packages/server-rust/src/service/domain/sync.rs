@@ -21,7 +21,7 @@ use topgun_core::messages::{
     SyncRespLeafMessage, SyncRespLeafPayload, SyncRespRootMessage, SyncRespRootPayload,
 };
 use topgun_core::types::Value;
-use topgun_core::{LWWRecord, ORMapRecord};
+use topgun_core::{hash_to_partition, LWWRecord, ORMapRecord};
 
 // Helper enum for Merkle tree node classification (extracted to module level
 // to avoid "adding items after statements" clippy warning).
@@ -170,10 +170,14 @@ impl SyncService {
 
         match node_data {
             NodeData::Leaf(keys) => {
-                // Mutex released — now safe to do async RecordStore fetches.
-                let store = self.record_store_factory.get_or_create(&map_name, partition_id);
+                // Mutex released -- now safe to do async RecordStore fetches.
+                // Records live at hash_to_partition(key), not at partition 0
+                // (the client-sync partition). Look up each key from its
+                // actual storage partition.
                 let mut records = Vec::new();
                 for key in keys {
+                    let key_partition = hash_to_partition(&key);
+                    let store = self.record_store_factory.get_or_create(&map_name, key_partition);
                     if let Ok(Some(record)) = store.get(&key, false).await {
                         if let RecordValue::Lww { value, timestamp } = record.value {
                             records.push(SyncLeafRecord {
@@ -277,10 +281,12 @@ impl SyncService {
 
         match node_data {
             NodeData::Leaf(keys) => {
-                // Mutex released — now safe to do async RecordStore fetches.
-                let store = self.record_store_factory.get_or_create(&map_name, partition_id);
+                // Mutex released -- now safe to do async RecordStore fetches.
+                // Records live at hash_to_partition(key), not at partition 0.
                 let mut entries = Vec::new();
                 for key in keys {
+                    let key_partition = hash_to_partition(&key);
+                    let store = self.record_store_factory.get_or_create(&map_name, key_partition);
                     if let Ok(Some(record)) = store.get(&key, false).await {
                         match record.value {
                             RecordValue::OrMap { records } => {
@@ -344,17 +350,18 @@ impl SyncService {
     /// nested `.payload` field.
     async fn handle_ormap_diff_request(
         &self,
-        ctx: &crate::service::operation::OperationContext,
+        _ctx: &crate::service::operation::OperationContext,
         payload: messages::ORMapDiffRequest,
     ) -> Result<OperationResponse, OperationError> {
         let map_name = payload.payload.map_name;
         let keys = payload.payload.keys;
-        let partition_id = ctx.partition_id.unwrap_or(0);
 
-        let store = self.record_store_factory.get_or_create(&map_name, partition_id);
         let mut entries = Vec::new();
 
         for key in keys {
+            // Each key lives at its own partition based on hash_to_partition.
+            let key_partition = hash_to_partition(&key);
+            let store = self.record_store_factory.get_or_create(&map_name, key_partition);
             match store.get(&key, false).await {
                 Ok(Some(record)) => match record.value {
                     RecordValue::OrMap { records } => {
@@ -428,11 +435,11 @@ impl SyncService {
 
         let map_name = payload.payload.map_name;
         let entries = payload.payload.entries;
-        let partition_id = ctx.partition_id.unwrap_or(0);
-
-        let store = self.record_store_factory.get_or_create(&map_name, partition_id);
 
         for entry in &entries {
+            // Each entry's key determines its storage partition.
+            let key_partition = hash_to_partition(&entry.key);
+            let store = self.record_store_factory.get_or_create(&map_name, key_partition);
             // Convert wire-format ORMapRecords to storage OrMapEntries.
             let storage_records: Vec<crate::storage::record::OrMapEntry> = entry
                 .records
