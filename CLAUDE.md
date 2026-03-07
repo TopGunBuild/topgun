@@ -36,8 +36,8 @@ cd packages/server && pnpm test -- --testPathPattern="Cluster"
 pnpm test:coverage
 pnpm --filter @topgunbuild/core test:coverage
 
-# E2E tests
-pnpm test:e2e
+# Integration tests (TS client → Rust server)
+pnpm test:integration-rust
 
 # k6 load tests (requires k6 installed)
 pnpm test:k6:smoke

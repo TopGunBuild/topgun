@@ -114,10 +114,10 @@ Or for a specific package:
 pnpm --filter @topgunbuild/core test:coverage
 ```
 
-### E2E Tests
+### Integration Tests (TS client → Rust server)
 
 ```bash
-pnpm test:e2e
+pnpm test:integration-rust
 ```
 
 ### Load Tests

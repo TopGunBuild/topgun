@@ -481,4 +481,4 @@ export default function() {
 
 - [k6 Documentation](https://k6.io/docs/)
 - [k6 WebSocket API](https://k6.io/docs/javascript-api/k6-ws/)
-- TopGun E2E tests: `tests/e2e/json-fallback.test.ts`
+- TopGun integration tests: `tests/integration-rust/`
