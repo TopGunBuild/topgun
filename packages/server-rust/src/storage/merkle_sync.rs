@@ -224,7 +224,15 @@ impl MerkleMutationObserver {
         }
     }
 
+    /// Client-sync partition ID. All Merkle trees at partition 0 serve as
+    /// cross-partition aggregates for client-facing delta sync.
+    const CLIENT_SYNC_PARTITION: u32 = 0;
+
     /// Updates the appropriate Merkle tree based on the `RecordValue` variant.
+    ///
+    /// Dual-writes to both `self.partition_id` (the record's actual partition)
+    /// and partition 0 (the client-sync aggregate). When `self.partition_id`
+    /// is already 0, only one write occurs.
     fn update_tree(&self, key: &str, value: &RecordValue) {
         match value {
             RecordValue::Lww { timestamp, .. } => {
@@ -232,16 +240,28 @@ impl MerkleMutationObserver {
                     compute_lww_hash(key, timestamp.millis, timestamp.counter, &timestamp.node_id);
                 self.manager
                     .update_lww(&self.map_name, self.partition_id, key, hash);
+                if self.partition_id != Self::CLIENT_SYNC_PARTITION {
+                    self.manager
+                        .update_lww(&self.map_name, Self::CLIENT_SYNC_PARTITION, key, hash);
+                }
             }
             RecordValue::OrMap { records } => {
                 let hash = compute_ormap_hash(key, records);
                 self.manager
                     .update_ormap(&self.map_name, self.partition_id, key, hash);
+                if self.partition_id != Self::CLIENT_SYNC_PARTITION {
+                    self.manager
+                        .update_ormap(&self.map_name, Self::CLIENT_SYNC_PARTITION, key, hash);
+                }
             }
             RecordValue::OrTombstones { .. } => {
                 // Tombstones represent deletions — remove from OR-Map tree.
                 self.manager
                     .remove_ormap(&self.map_name, self.partition_id, key);
+                if self.partition_id != Self::CLIENT_SYNC_PARTITION {
+                    self.manager
+                        .remove_ormap(&self.map_name, Self::CLIENT_SYNC_PARTITION, key);
+                }
             }
         }
     }
@@ -283,6 +303,13 @@ impl MutationObserver for MerkleMutationObserver {
             .remove_lww(&self.map_name, self.partition_id, key);
         self.manager
             .remove_ormap(&self.map_name, self.partition_id, key);
+        // Dual-write: also remove from client-sync partition.
+        if self.partition_id != Self::CLIENT_SYNC_PARTITION {
+            self.manager
+                .remove_lww(&self.map_name, Self::CLIENT_SYNC_PARTITION, key);
+            self.manager
+                .remove_ormap(&self.map_name, Self::CLIENT_SYNC_PARTITION, key);
+        }
     }
 
     fn on_evict(&self, key: &str, _record: &Record, is_backup: bool) {
@@ -295,6 +322,13 @@ impl MutationObserver for MerkleMutationObserver {
             .remove_lww(&self.map_name, self.partition_id, key);
         self.manager
             .remove_ormap(&self.map_name, self.partition_id, key);
+        // Dual-write: also remove from client-sync partition.
+        if self.partition_id != Self::CLIENT_SYNC_PARTITION {
+            self.manager
+                .remove_lww(&self.map_name, Self::CLIENT_SYNC_PARTITION, key);
+            self.manager
+                .remove_ormap(&self.map_name, Self::CLIENT_SYNC_PARTITION, key);
+        }
     }
 
     fn on_load(&self, key: &str, record: &Record, is_backup: bool) {
@@ -580,6 +614,162 @@ mod tests {
 
         let hash = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
         assert_eq!(hash, 0, "on_reset should reset the partition");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Additional: clear_all
+    // ---------------------------------------------------------------------------
+
+    // ---------------------------------------------------------------------------
+    // Dual-write: partition N observers also update partition 0
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn dual_write_lww_put_updates_partition_0() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        // Observer for partition 42 (non-zero).
+        let observer = MerkleMutationObserver::new(
+            Arc::clone(&manager),
+            "users".to_string(),
+            42,
+        );
+
+        let record = make_lww_record("alice", 1_700_000_000_000, 0, "node-1");
+        observer.on_put("alice", &record, None, false);
+
+        // Partition 42 should have the record.
+        let hash_42 = manager.with_lww_tree("users", 42, |tree| tree.get_root_hash());
+        assert_ne!(hash_42, 0, "partition 42 should have non-zero hash");
+
+        // Partition 0 (client-sync) should also have the record.
+        let hash_0 = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+        assert_ne!(hash_0, 0, "partition 0 should have non-zero hash via dual-write");
+
+        // Both should have the same root hash (same single key, same value).
+        assert_eq!(hash_42, hash_0, "partition 42 and partition 0 should match");
+    }
+
+    #[test]
+    fn dual_write_ormap_put_updates_partition_0() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        let observer = MerkleMutationObserver::new(
+            Arc::clone(&manager),
+            "tags".to_string(),
+            42,
+        );
+
+        let record = make_ormap_record("tag-1", "1700000000000:0:node-1", 1_700_000_000_000);
+        observer.on_put("tag-1", &record, None, false);
+
+        let hash_42 = manager.with_ormap_tree("tags", 42, |tree| tree.get_root_hash());
+        assert_ne!(hash_42, 0, "partition 42 OR-Map should have non-zero hash");
+
+        let hash_0 = manager.with_ormap_tree("tags", 0, |tree| tree.get_root_hash());
+        assert_ne!(hash_0, 0, "partition 0 OR-Map should have non-zero hash via dual-write");
+    }
+
+    #[test]
+    fn dual_write_remove_clears_from_partition_0() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        let observer = MerkleMutationObserver::new(
+            Arc::clone(&manager),
+            "users".to_string(),
+            42,
+        );
+
+        let record = make_lww_record("alice", 1_700_000_000_000, 0, "node-1");
+        observer.on_put("alice", &record, None, false);
+
+        // Verify non-zero before remove.
+        let hash_0_before = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+        assert_ne!(hash_0_before, 0);
+
+        observer.on_remove("alice", &record, false);
+
+        // Both partitions should be empty.
+        let hash_42 = manager.with_lww_tree("users", 42, |tree| tree.get_root_hash());
+        let hash_0 = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+        assert_eq!(hash_42, 0, "partition 42 should be empty after remove");
+        assert_eq!(hash_0, 0, "partition 0 should be empty after dual-write remove");
+    }
+
+    #[test]
+    fn dual_write_evict_clears_from_partition_0() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        let observer = MerkleMutationObserver::new(
+            Arc::clone(&manager),
+            "users".to_string(),
+            42,
+        );
+
+        let record = make_lww_record("alice", 1_700_000_000_000, 0, "node-1");
+        observer.on_put("alice", &record, None, false);
+
+        observer.on_evict("alice", &record, false);
+
+        let hash_0 = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+        assert_eq!(hash_0, 0, "partition 0 should be empty after dual-write evict");
+    }
+
+    #[test]
+    fn on_clear_does_not_clear_partition_0_for_non_zero_partition() {
+        let manager = Arc::new(MerkleSyncManager::default());
+
+        // Observer at partition 42 writes a record (dual-writes to partition 0).
+        let observer_42 = MerkleMutationObserver::new(
+            Arc::clone(&manager),
+            "users".to_string(),
+            42,
+        );
+        let record = make_lww_record("alice", 1_700_000_000_000, 0, "node-1");
+        observer_42.on_put("alice", &record, None, false);
+
+        // Partition 0 should have data.
+        let hash_0_before = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+        assert_ne!(hash_0_before, 0);
+
+        // Clearing partition 42 should NOT clear partition 0.
+        observer_42.on_clear();
+
+        let hash_42 = manager.with_lww_tree("users", 42, |tree| tree.get_root_hash());
+        assert_eq!(hash_42, 0, "partition 42 should be cleared");
+
+        let hash_0_after = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+        assert_ne!(hash_0_after, 0, "partition 0 should NOT be cleared when a non-zero partition clears");
+    }
+
+    #[test]
+    fn partition_0_observer_does_not_double_write() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        // Observer at partition 0 should write only once, not twice.
+        let observer = MerkleMutationObserver::new(
+            Arc::clone(&manager),
+            "users".to_string(),
+            0,
+        );
+
+        let record = make_lww_record("alice", 1_700_000_000_000, 0, "node-1");
+        observer.on_put("alice", &record, None, false);
+
+        let hash_0 = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+        assert_ne!(hash_0, 0, "partition 0 should have the record");
+    }
+
+    #[test]
+    fn dual_write_replication_put_updates_partition_0() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        let observer = MerkleMutationObserver::new(
+            Arc::clone(&manager),
+            "users".to_string(),
+            42,
+        );
+
+        let record = make_lww_record("alice", 1_700_000_000_000, 0, "node-1");
+        // on_replication_put does NOT check is_backup (by design).
+        observer.on_replication_put("alice", &record, false);
+
+        let hash_0 = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
+        assert_ne!(hash_0, 0, "partition 0 should have data after replication put dual-write");
     }
 
     // ---------------------------------------------------------------------------

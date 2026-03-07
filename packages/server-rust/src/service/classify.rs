@@ -107,62 +107,60 @@ impl OperationService {
             // ----- Sync domain (service_name = "sync") -----
 
             Message::SyncInit(payload) => {
-                let partition_key = Some(payload.map_name.as_str());
+                // Sync messages use partition 0 (client-sync partition), not
+                // hash_to_partition(map_name). Setting partition_key to None
+                // causes SyncService to default to partition 0 via
+                // ctx.partition_id.unwrap_or(0).
                 let ctx = self.make_ctx(
                     service_names::SYNC,
                     client_id,
                     caller_origin,
-                    partition_key,
+                    None,
                 );
                 Ok(Operation::SyncInit { ctx, payload })
             }
             Message::MerkleReqBucket(payload) => {
-                let partition_key = Some(payload.payload.map_name.as_str());
                 let ctx = self.make_ctx(
                     service_names::SYNC,
                     client_id,
                     caller_origin,
-                    partition_key,
+                    None,
                 );
                 Ok(Operation::MerkleReqBucket { ctx, payload })
             }
             Message::ORMapSyncInit(payload) => {
-                let partition_key = Some(payload.map_name.as_str());
                 let ctx = self.make_ctx(
                     service_names::SYNC,
                     client_id,
                     caller_origin,
-                    partition_key,
+                    None,
                 );
                 Ok(Operation::ORMapSyncInit { ctx, payload })
             }
             Message::ORMapMerkleReqBucket(payload) => {
-                let partition_key = Some(payload.payload.map_name.as_str());
                 let ctx = self.make_ctx(
                     service_names::SYNC,
                     client_id,
                     caller_origin,
-                    partition_key,
+                    None,
                 );
                 Ok(Operation::ORMapMerkleReqBucket { ctx, payload })
             }
             Message::ORMapDiffRequest(payload) => {
-                let partition_key = Some(payload.payload.map_name.as_str());
                 let ctx = self.make_ctx(
                     service_names::SYNC,
                     client_id,
                     caller_origin,
-                    partition_key,
+                    None,
                 );
                 Ok(Operation::ORMapDiffRequest { ctx, payload })
             }
             Message::ORMapPushDiff(payload) => {
-                let partition_key = Some(payload.payload.map_name.as_str());
                 let ctx = self.make_ctx(
                     service_names::SYNC,
                     client_id,
                     caller_origin,
-                    partition_key,
+                    None,
                 );
                 Ok(Operation::ORMapPushDiff { ctx, payload })
             }
@@ -774,6 +772,60 @@ mod tests {
         let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
         assert_eq!(op.ctx().service_name, service_names::PERSISTENCE);
         assert!(op.ctx().partition_id.is_some());
+    }
+
+    #[test]
+    fn classify_sync_init_has_no_partition_id() {
+        let svc = make_service();
+        let msg = Message::SyncInit(topgun_core::messages::SyncInitMessage {
+            map_name: "users".to_string(),
+            last_sync_timestamp: None,
+        });
+        let op = svc
+            .classify(msg, Some("client-1".to_string()), CallerOrigin::Client)
+            .unwrap();
+        assert_eq!(op.ctx().service_name, service_names::SYNC);
+        assert!(
+            op.ctx().partition_id.is_none(),
+            "SyncInit should produce partition_id: None so SyncService defaults to partition 0"
+        );
+    }
+
+    #[test]
+    fn classify_merkle_req_bucket_has_no_partition_id() {
+        let svc = make_service();
+        let msg = Message::MerkleReqBucket(topgun_core::messages::MerkleReqBucketMessage {
+            payload: topgun_core::messages::MerkleReqBucketPayload {
+                map_name: "users".to_string(),
+                path: "0".to_string(),
+            },
+        });
+        let op = svc
+            .classify(msg, None, CallerOrigin::Client)
+            .unwrap();
+        assert!(
+            op.ctx().partition_id.is_none(),
+            "MerkleReqBucket should produce partition_id: None"
+        );
+    }
+
+    #[test]
+    fn classify_ormap_sync_init_has_no_partition_id() {
+        use std::collections::HashMap;
+        let svc = make_service();
+        let msg = Message::ORMapSyncInit(topgun_core::messages::ORMapSyncInit {
+            map_name: "tags".to_string(),
+            root_hash: 0,
+            bucket_hashes: HashMap::new(),
+            last_sync_timestamp: None,
+        });
+        let op = svc
+            .classify(msg, None, CallerOrigin::Client)
+            .unwrap();
+        assert!(
+            op.ctx().partition_id.is_none(),
+            "ORMapSyncInit should produce partition_id: None"
+        );
     }
 
     #[test]
