@@ -21,7 +21,8 @@ use topgun_core::{LWWRecord, ORMapRecord, Timestamp};
 
 use tracing::Instrument;
 
-use crate::network::connection::{ConnectionId, ConnectionKind, ConnectionMetadata, ConnectionRegistry};
+use crate::network::connection::{ConnectionId, ConnectionMetadata, ConnectionRegistry};
+use crate::service::domain::query::QueryRegistry;
 use crate::service::operation::{
     service_names, Operation, OperationContext, OperationError, OperationResponse,
 };
@@ -45,6 +46,7 @@ pub struct CrdtService {
     record_store_factory: Arc<RecordStoreFactory>,
     connection_registry: Arc<ConnectionRegistry>,
     write_validator: Arc<WriteValidator>,
+    query_registry: Arc<QueryRegistry>,
 }
 
 impl CrdtService {
@@ -54,11 +56,13 @@ impl CrdtService {
         record_store_factory: Arc<RecordStoreFactory>,
         connection_registry: Arc<ConnectionRegistry>,
         write_validator: Arc<WriteValidator>,
+        query_registry: Arc<QueryRegistry>,
     ) -> Self {
         Self {
             record_store_factory,
             connection_registry,
             write_validator,
+            query_registry,
         }
     }
 }
@@ -157,7 +161,7 @@ impl CrdtService {
 
         let event_payload = self.apply_single_op(op, partition_id, sanitized_ts.as_ref()).await?;
 
-        self.broadcast_event(&event_payload)?;
+        self.broadcast_event(&event_payload, ctx.connection_id)?;
 
         let last_id = op.id.clone().unwrap_or_else(|| "unknown".to_string());
         Ok(OperationResponse::Message(Box::new(Message::OpAck(
@@ -203,7 +207,7 @@ impl CrdtService {
             for op in ops {
                 let sanitized_ts = self.write_validator.sanitize_hlc();
                 let event_payload = self.apply_single_op(op, partition_id, Some(&sanitized_ts)).await?;
-                self.broadcast_event(&event_payload)?;
+                self.broadcast_event(&event_payload, ctx.connection_id)?;
                 if let Some(id) = &op.id {
                     last_id = id.clone();
                 }
@@ -212,7 +216,7 @@ impl CrdtService {
             // Internal/system call (no connection_id) — skip validation.
             for op in ops {
                 let event_payload = self.apply_single_op(op, partition_id, None).await?;
-                self.broadcast_event(&event_payload)?;
+                self.broadcast_event(&event_payload, ctx.connection_id)?;
                 if let Some(id) = &op.id {
                     last_id = id.clone();
                 }
@@ -382,15 +386,39 @@ impl CrdtService {
         }
     }
 
-    /// Serializes a `ServerEventPayload` as `MsgPack` and broadcasts to all client connections.
-    fn broadcast_event(&self, payload: &ServerEventPayload) -> Result<(), OperationError> {
+    /// Serializes a `ServerEventPayload` as `MsgPack` and sends only to connections
+    /// with active query subscriptions for the affected map.
+    ///
+    /// Skips serialization entirely when no subscribers exist, avoiding
+    /// unnecessary `rmp_serde::to_vec_named` calls.
+    fn broadcast_event(
+        &self,
+        payload: &ServerEventPayload,
+        exclude_connection_id: Option<ConnectionId>,
+    ) -> Result<(), OperationError> {
+        let mut ids = self
+            .query_registry
+            .get_subscribed_connection_ids(&payload.map_name);
+
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        // Exclude the writing client so it does not receive its own event back
+        if let Some(exclude_id) = exclude_connection_id {
+            ids.remove(&exclude_id);
+        }
+
+        if ids.is_empty() {
+            return Ok(());
+        }
+
         let msg = Message::ServerEvent {
             payload: payload.clone(),
         };
         let bytes = rmp_serde::to_vec_named(&msg)
             .map_err(|e| OperationError::Internal(anyhow::anyhow!("serialize error: {e}")))?;
-        self.connection_registry
-            .broadcast(&bytes, ConnectionKind::Client);
+        self.connection_registry.send_to_connections(&ids, &bytes);
         Ok(())
     }
 }
@@ -524,6 +552,7 @@ mod tests {
     use crate::storage::datastores::NullDataStore;
     use crate::storage::factory::RecordStoreFactory;
     use crate::storage::impls::StorageConfig;
+    use crate::service::domain::query::QueryRegistry;
 
     fn make_factory() -> Arc<RecordStoreFactory> {
         Arc::new(RecordStoreFactory::new(
@@ -541,7 +570,8 @@ mod tests {
     fn make_service() -> Arc<CrdtService> {
         let factory = make_factory();
         let registry = Arc::new(ConnectionRegistry::new());
-        Arc::new(CrdtService::new(factory, registry, make_validator()))
+        let query_registry = Arc::new(QueryRegistry::new());
+        Arc::new(CrdtService::new(factory, registry, make_validator(), query_registry))
     }
 
     fn make_timestamp() -> Timestamp {
@@ -562,7 +592,8 @@ mod tests {
     fn managed_service_name() {
         let factory = make_factory();
         let registry = Arc::new(ConnectionRegistry::new());
-        let svc = CrdtService::new(factory, registry, make_validator());
+        let query_registry = Arc::new(QueryRegistry::new());
+        let svc = CrdtService::new(factory, registry, make_validator(), query_registry);
         assert_eq!(svc.name(), "crdt");
     }
 
@@ -845,10 +876,12 @@ mod tests {
         let factory = make_factory();
         let registry = Arc::new(ConnectionRegistry::new());
         let validator = make_strict_validator();
+        let query_registry = Arc::new(QueryRegistry::new());
         let svc = Arc::new(CrdtService::new(
             factory,
             Arc::clone(&registry),
             validator,
+            query_registry,
         ));
         (svc, registry)
     }
@@ -980,10 +1013,12 @@ mod tests {
         let validator = Arc::new(WriteValidator::new(Arc::new(config), hlc));
         let factory = make_factory();
         let registry = Arc::new(ConnectionRegistry::new());
+        let query_registry = Arc::new(QueryRegistry::new());
         let svc = Arc::new(CrdtService::new(
             Arc::clone(&factory),
             Arc::clone(&registry),
             Arc::clone(&validator),
+            query_registry,
         ));
 
         let conn_config = crate::network::config::ConnectionConfig::default();
@@ -1063,7 +1098,8 @@ mod tests {
         let validator = Arc::new(WriteValidator::new(Arc::new(config), hlc));
         let factory = make_factory();
         let registry = Arc::new(ConnectionRegistry::new());
-        let svc = Arc::new(CrdtService::new(factory, Arc::clone(&registry), validator));
+        let query_registry = Arc::new(QueryRegistry::new());
+        let svc = Arc::new(CrdtService::new(factory, Arc::clone(&registry), validator, query_registry));
 
         let conn_config = crate::network::config::ConnectionConfig::default();
         let (handle, _rx) = registry.register(ConnectionKind::Client, &conn_config);
