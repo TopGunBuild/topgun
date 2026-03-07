@@ -4,8 +4,8 @@
 
 - **Active Specification:** none
 - **Status:** idle
-- **Project Phase:** Phase 3 (Rust Server) — Wave 4
-- **TODO Items:** 28 (1 client bug fix + 8 Rust bridge/core + 5 audit findings + 14 existing deferred)
+- **Project Phase:** Phase 3 (Rust Server) — Wave 5d.1 (sync bugfix)
+- **TODO Items:** 30 (2 sync bugfixes + 8 Rust bridge/core + 5 audit findings + 15 existing deferred)
 - **Next Step:** /sf:new or /sf:next
 - **Roadmap:** See [TODO.md](todos/TODO.md) for full phase-based roadmap
 
@@ -44,11 +44,11 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 | Date | Specification | Decision |
 |------|---------------|----------|
+| 2026-03-07 | SPEC-080 | COMPLETED: Fix Merkle Sync Partition Mismatch — 3 commits, 1 review cycle. Dual-write to partition 0 for client sync, per-key hash_to_partition for record lookup. All 9 ACs met, 509/509 Rust tests pass, 51/51 integration tests pass. |
+| 2026-03-07 | SPEC-080 | REVIEW v1: APPROVED — all 9 ACs met, 509/509 Rust tests pass, 51/51 integration tests pass, clippy clean. No issues found. |
+| 2026-03-07 | SPEC-080 | AUDIT v1: APPROVED — all 10 dimensions pass, 4 files within Language Profile limit, ~70% total context but all workers in PEAK/GOOD range with orchestrated execution. 1 minor recommendation (Goal Analysis text inconsistency). |
 | 2026-03-06 | SPEC-079 | COMPLETED: Wire MerkleObserverFactory into RecordStoreFactory — 4 commits, 1 review cycle. Fixed broken Merkle sync for late-joining clients. All 7 ACs met, 499/499 Rust tests pass. |
 | 2026-03-06 | SPEC-079 | REVIEW v1: APPROVED — all 7 ACs met, 499/499 Rust tests pass, clippy clean, integration test passes. 1 minor issue (cosmetic). |
-| 2026-03-06 | SPEC-079 | AUDIT v2: APPROVED — all v1 critical issues resolved, spec is clear and implementable. ~18% context estimate. |
-| 2026-03-06 | SPEC-078 | COMPLETED: TopGun Sync Lab — 25 files, 4 commits, 2 review cycles. Interactive demo with Conflict Arena (per-field HLC merge visualization) and Latency Race (sub-ms benchmark histogram). All 17 ACs met. APPROVED by impl-reviewer v2. |
-| 2026-03-06 | SPEC-078 | REVIEW v2: APPROVED — all 8 v1 fixes verified in code, no new issues. All 17 ACs pass. |
 
 
 ## Project Patterns
@@ -89,7 +89,7 @@ See [TODO.md](todos/TODO.md) for detailed task breakdown with dependencies.
 
 ## Warnings
 
-(none)
+- **BROADCAST BUG (TODO-112):** CrdtService broadcasts ServerEvent to ALL clients, not just subscribers. TS server filters by `queryRegistry.getSubscribedClientIds(mapName)`. Causes unnecessary bandwidth usage.
 
 ---
-*Last updated: 2026-03-06 (SPEC-079 completed and archived)*
+*Last updated: 2026-03-07 (SPEC-080 completed — Merkle sync partition mismatch fixed)*

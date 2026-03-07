@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-02-28
+**Last updated:** 2026-03-06
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture, not a TypeScript port
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 **v1.0 positioning:** "The reactive data grid that extends the cluster into the browser" ([PRODUCT_POSITIONING_RESEARCH.md](../reference/PRODUCT_POSITIONING_RESEARCH.md))
@@ -386,37 +386,13 @@ Each Rust spec should reference up to THREE sources:
 - **Status:** Complete (SPEC-070 completed 2026-02-28)
 - **Summary:** Fixed Vite aliases, removed hardcoded JWT, translated Russian strings to English, removed incorrect Mongo reference, added RBAC GuideCard, deleted misleading serverless blog post. 1 file created, 5 modified, 1 deleted.
 
-### TODO-110: CrdtService Must Update Server Merkle Tree After Writes — NEW
-- **Priority:** P1 (blocks Merkle sync catch-up for new clients)
-- **Complexity:** Small
-- **Summary:** Rust CrdtService writes to RecordStore but never updates the server's Merkle tree. New clients connecting after data was written get `root_hash=0` from SYNC_RESP_ROOT, see "Map is in sync", and skip data catch-up entirely. Live sync via SERVER_EVENT works (already-connected clients get updates), but initial Merkle sync is broken.
-- **Root cause:** TS server calls `merkleTreeManager.updateRecord()` after each op (`operation-handler.ts:270`). Rust `CrdtService::apply_single_op()` calls `RecordStore.put()` but has no reference to `MerkleManager` — the Merkle tree stays empty.
-- **Scope:**
-  - Inject `Arc<MerkleManager>` into `CrdtService`
-  - After each successful `RecordStore.put()`, call `merkle_manager.with_lww_tree(map_name, partition_id, |tree| tree.update(key, record))` for LWW operations
-  - After each OR-Map operation, call corresponding `with_ormap_tree()` update
-  - For REMOVE operations, call `tree.remove(key)`
-  - Add integration test: write via Device A → new Device B connects → Merkle sync → Device B has the data
-- **TS Source:** `packages/server/src/coordinator/operation-handler.ts:270` (`merkleTreeManager.updateRecord()`)
-- **Rust Source:** `packages/server-rust/src/service/domain/crdt.rs` (`apply_single_op()`)
-- **Depends on:** TODO-085 ✅ (CrdtService), TODO-086 ✅ (SyncService/MerkleManager)
-- **Effort:** 1-2 days
+### TODO-110: CrdtService Must Update Server Merkle Tree After Writes → SPEC-079 — DONE
+- **Status:** Complete (SPEC-079 completed 2026-03-06)
+- **Summary:** Wired `MerkleObserverFactory` into `RecordStoreFactory` so CRDT writes update the server Merkle tree. Late-joining clients now receive correct `root_hash` during sync handshake and pull missing data via Merkle delta sync.
 
-### TODO-105: Sync Showcase Demo App — NEW
-- **Priority:** P1 (marketing — "Show, Don't Tell")
-- **Complexity:** Medium
-- **Summary:** Neither existing demo shows TopGun's core differentiator (offline → reconnect → automatic conflict resolution). Create a "Collaborative Board" demo that makes the value proposition instantly visible.
-- **Scope:**
-  - New example: collaborative board (Kanban or shared list)
-  - **Zero external deps** — no Clerk, no R2, no push notifications. `pnpm install && pnpm dev` starts in 30 seconds
-  - Visual sync status indicator (online / offline / pending ops count)
-  - "Simulate Offline" button — disconnects WebSocket, shows pending queue
-  - Multi-tab awareness: banner prompting to open another tab for live sync
-  - Split-screen conflict demo: two "devices" editing same data while "offline", click "Reconnect" to see automatic LWW merge with visual highlight of which version won
-  - Designed to be embeddable as iframe on docs homepage (replacing mock TacticalDemo)
-  - `?demo` URL param: shows performance badge (load time, read latency) for marketing videos/screenshots. Inspired by RociCorp/zbugs approach — see [ZERO_ANALYSIS.md](../reference/ZERO_ANALYSIS.md)
-- **Depends on:** Working Rust server (all domain services done) or can use TS server for initial version
-- **Effort:** 1 week
+### TODO-105: Sync Showcase Demo App → SPEC-078 — DONE
+- **Status:** Complete (SPEC-078 completed 2026-03-05)
+- **Summary:** TopGun Sync Lab demo (`examples/sync-lab/`): split-screen dual-device simulation, real-time sync, conflict arena with LWW merge visualization, latency race histogram. Zero external deps.
 
 ### TODO-093: Admin Dashboard — v1.0 DONE, v2.0/v3.0 deferred
 - **Priority:** P1 (v1.0 DONE; v2.0/v3.0 deferred to Milestones 2/3)
@@ -455,6 +431,53 @@ Each Rust spec should reference up to THREE sources:
 ### TODO-068: Integration Test Suite — DONE
 - **Status:** Complete (2026-03-03, SPEC-073a-e + SPEC-074 + SPEC-075)
 - **Summary:** 50 TS→Rust integration tests across 6 suites — all passing. 502 Rust unit tests — all passing. Single-node behavioral equivalence proven. TS e2e tests (tests/e2e/) removed — they tested TS server internals, replaced by integration-rust suite.
+
+### TODO-111: Fix Merkle Sync Partition Mismatch (Late-Joiner Bug) — CONVERTED
+- **Status:** Converted to SPEC-080 (2026-03-07)
+
+### TODO-112: Subscription-Aware CRDT Broadcast — NEW
+- **Priority:** P1 (bandwidth waste + architectural deviation from TS server)
+- **Complexity:** Medium
+- **Summary:** `CrdtService.broadcast_event()` sends `ServerEvent` to ALL connected clients via `ConnectionRegistry.broadcast()`, ignoring subscriptions. The TS server sends events only to clients with active query subscriptions for the affected map, via `queryRegistry.getSubscribedClientIds(mapName)`.
+- **Current Behavior (Rust):** After every CRDT write, `CrdtService` serializes the `ServerEvent` and calls `connection_registry.broadcast(&bytes, ConnectionKind::Client)` which iterates ALL client connections (see `crdt.rs:385-395`, `connection.rs:260-272`). No filtering by map name, query subscription, or any other criteria.
+- **TS Server Reference:** `BroadcastHandler.broadcast()` in `packages/server/src/coordinator/broadcast-handler.ts`:
+  1. Calls `queryRegistry.getSubscribedClientIds(mapName)` to get subscriber set
+  2. Early exit if no subscribers (event dropped, metric `incEventsFilteredBySubscription` tracked)
+  3. Iterates only subscriber connections
+  4. Applies Field-Level Security (FLS) filtering per client role
+  5. Excludes the originating client (`excludeClientId`)
+  6. Uses `CoalescingWriter` for batched delivery
+- **Proposed Fix:** Wire `CrdtService` to the existing `QueryService`'s subscription registry for filtering. The `QueryService` already maintains `QueryRegistry` with per-map subscription tracking. CrdtService should:
+  1. Query the registry for subscribed connection IDs for the affected `mapName`
+  2. Send `ServerEvent` only to those connections (plus exclude the writer)
+  3. If no subscribers, skip serialization entirely
+- **Key Design Decision:** Should CrdtService depend directly on QueryRegistry, or should broadcast be extracted into a shared `BroadcastService` (matching the TS `BroadcastHandler` pattern)? The TS server uses a dedicated `BroadcastHandler` injected into `OperationHandler` — this separation is cleaner.
+- **Scope:**
+  - `packages/server-rust/src/service/domain/crdt.rs` — Replace `broadcast_event()` with subscription-aware version
+  - `packages/server-rust/src/network/connection.rs` — Add `send_to_connections(ids, bytes)` method on ConnectionRegistry (targeted send vs broadcast)
+  - `packages/server-rust/src/service/domain/query.rs` — Expose `get_subscribed_connection_ids(map_name)` from QueryRegistry (currently private)
+  - Optionally: create `packages/server-rust/src/service/domain/broadcast.rs` as shared broadcast helper
+- **Depends on:** None (can be done in parallel with TODO-111)
+- **Effort:** 1-2 days
+
+### TODO-113: Full Merkle Sync Protocol Integration Tests — NEW
+- **Priority:** P1 (critical path not covered by existing tests)
+- **Complexity:** Medium
+- **Summary:** The existing `merkle-sync.test.ts` only verifies that a late-joiner receives a non-zero root hash — it does NOT test the full sync protocol (bucket traversal → leaf records → client merge). The test also uses a carefully chosen key (`"u55"`) that happens to hash to the same partition as the map name, masking the partition mismatch bug (TODO-111).
+- **Current Coverage Gap:** No test verifies that a newly-connected client actually receives and can read previously-written records via the Merkle sync protocol. This is the core offline-first promise of TopGun.
+- **Proposed Tests:**
+  1. **Full sync protocol with arbitrary keys:** Device A writes N records with arbitrary keys (not partition-aligned). Device B connects, completes full Merkle sync (SYNC_INIT → SYNC_RESP_ROOT → MERKLE_REQ_BUCKET → SYNC_RESP_BUCKETS/SYNC_RESP_LEAF). Verify Device B receives all N records with correct values and timestamps.
+  2. **Multi-key sync convergence:** Device A writes 10+ keys to map "todos" (composite keys like `todo:abc:title`, `todo:abc:done`). Device B late-joins. Verify all keys arrive via Merkle sync.
+  3. **Empty map sync:** Device B sends SYNC_INIT for a map with no data. Verify root_hash = 0 and no bucket requests needed.
+  4. **Subscription-then-sync ordering:** Device B subscribes to a query, then receives Merkle sync data. Verify no duplicate records and correct final state.
+- **Test Infrastructure:**
+  - Extend `TestClient` in `tests/integration-rust/helpers/test-client.ts` to support full Merkle sync protocol (send MERKLE_REQ_BUCKET, parse SYNC_RESP_BUCKETS/SYNC_RESP_LEAF)
+  - Add helper: `completeMerkleSync(client, mapName)` that drives the full protocol and returns received records
+- **Scope:**
+  - `tests/integration-rust/merkle-sync.test.ts` — Expand from 1 test to 4-5 tests
+  - `tests/integration-rust/helpers/test-client.ts` — Add Merkle sync protocol helpers
+- **Depends on:** TODO-111 (partition fix — tests would fail without it)
+- **Effort:** 1 day
 
 ### TODO-106: Update Documentation Content for Rust Server — NEW
 - **Priority:** P2 (post-migration docs sync)
@@ -742,7 +765,7 @@ Each Rust spec should reference up to THREE sources:
 | **v0.12.0-rc.1** | After TODO-097 (Security) + TODO-099 (Tracing) + TODO-068 first pass | `@topgunbuild/core`, `@topgunbuild/client`, `@topgunbuild/react`, `@topgunbuild/adapters` | Client packages unchanged; Rust server binary separate |
 | **v0.12.0** | After TODO-068 complete + merge to `main` | All client packages | First release with Rust server |
 | **topgun-server** (cargo/binary) | Same as v0.12.0 | GitHub Release with prebuilt binaries (linux-x64, darwin-arm64, darwin-x64) | `cargo install topgun-server` or download from Releases |
-| **v0.13.0** | After TODO-093 (Admin Dashboard) + TODO-105 (Sync Showcase) | Client packages + Admin Dashboard | Polish release |
+| **v0.13.0** | After TODO-093 (Admin Dashboard) + ~~TODO-105~~ ✅ (Sync Showcase → SPEC-078) | Client packages + Admin Dashboard | Polish release |
 | **v0.14.0+** | Iterations based on first-user feedback | As needed | API stabilization |
 | **v1.0.0** | ≥1 production deployment + 3 months stable API | All packages | Commitment to backward compatibility |
 
@@ -774,8 +797,10 @@ Items within the same wave can run in parallel. Each wave starts when its blocke
 | **5a** | ~~TODO-084~~ ✅ · ~~TODO-085~~ ✅ · ~~TODO-086~~ ✅ · ~~TODO-087~~ ✅ · ~~TODO-088~~ ✅ · ~~TODO-089~~ ✅ · ~~TODO-090~~ ✅ · ~~TODO-071~~ ✅ | — | ✅ All 7 services + PostgreSQL + Search done |
 | **5b** | ~~TODO-074~~ ✅ · ~~TODO-075~~ ✅ · ~~TODO-094~~ ✅ (LICENSE) · ~~TODO-104~~ ✅ (Fix demos/blog) | — | ✅ All done |
 | **5c** | ~~TODO-097~~ ✅ (Security: HLC sanitize + ACL) · ~~TODO-099~~ ✅ (Tracing + /metrics) | 085 | ✅ All done |
-| **5d** | ~~TODO-068~~ ✅ (Integration Tests) · ~~TODO-093 v1.0~~ ✅ (Admin Dashboard) · ~~TODO-096~~ ✅ (Adoption Path + Security docs → SPEC-077) · TODO-105 (Sync Showcase Demo) | All services · 097 · 097 · — | 068 + 093 v1.0 + 096 done; 105 remaining |
-| — | **v0.12.0-rc.1** — npm pre-release + Rust server binary | 068 first pass | 🏷️ Tag + GitHub Release |
+| **5d** | ~~TODO-068~~ ✅ (Integration Tests) · ~~TODO-093 v1.0~~ ✅ (Admin Dashboard) · ~~TODO-096~~ ✅ (Adoption Path + Security docs → SPEC-077) · ~~TODO-105~~ ✅ (Sync Showcase Demo → SPEC-078) · ~~TODO-110~~ ✅ (CrdtService Merkle → SPEC-079) | All services · 097 · 097 · — · — | ✅ All done |
+| **5d.1** | TODO-111 (Fix Merkle Sync Partition Mismatch) · TODO-112 (Subscription-Aware CRDT Broadcast) | 110 · — | **Bugfix — blocks correct sync** |
+| **5d.2** | TODO-113 (Full Merkle Sync Integration Tests) | 111 | Test coverage for sync fix |
+| — | **v0.12.0-rc.1** — npm pre-release + Rust server binary | 111 + 113 | 🏷️ Tag + GitHub Release |
 | **5e** | TODO-106 (Update Docs) · TODO-103 (Remove Legacy TS) | 068 · 068 | Final cleanup |
 | — | **Merge `rust-migration` → `main`** · Deprecate TS server | 068 complete | 🔀 Merge |
 | — | **v0.12.0** — first Rust server release | merge + 106 + 103 | 🏷️ Tag + GitHub Release + npm publish |
@@ -799,7 +824,7 @@ Items within the same wave can run in parallel. Each wave starts when its blocke
 | **7c** | TODO-044 (Bi-Temporal) | 043 |
 | **7d** | TODO-095 (Enterprise dir structure) · TODO-093 v3.0 (Tenant admin, tiered storage monitor) | — · 041+040 |
 
-**Current position:** Wave 5d — 068 ✅ + 093 v1.0 ✅ + 096 ✅ DONE. Remaining: 105 (Sync Showcase Demo). Critical path: 105 → v0.12.0-rc.1 → 106 (Update Docs) + 103 (Legacy removal) → merge to main → v0.12.0.
+**Current position:** Wave 5d ✅ COMPLETE. Bugfix wave 5d.1 added: TODO-111 (Merkle sync partition mismatch — P0) and TODO-112 (subscription-aware broadcast — P1). Critical path: 111 → 113 (sync tests) → v0.12.0-rc.1 tag → 106 (Update Docs) + 103 (Remove Legacy TS) → merge to main → v0.12.0.
 
 ---
 
@@ -830,10 +855,15 @@ MILESTONE 1: Working IMDG (v1.0) — remaining work
        ↓
   ~~TODO-093 v1.0~~ ✅ (Admin Dashboard — SPEC-076a/b/c) — DONE
   ~~TODO-096~~ ✅ (Adoption Path docs → SPEC-077) — DONE
-  TODO-110 (CrdtService Merkle tree update) ← NEXT
-  TODO-105 (Sync Showcase Demo)
+  ~~TODO-110 ✅~~ (CrdtService Merkle tree update → SPEC-079) — DONE
+  ~~TODO-105 ✅~~ (Sync Showcase Demo → SPEC-078) — DONE
        ↓
-  TODO-106 (Update docs for Rust server) ← after API finalized
+  TODO-111 (Fix Merkle sync partition mismatch) ← NEXT (P0 — blocks correct sync)
+  TODO-112 (Subscription-aware CRDT broadcast) ← parallel with 111
+       ↓
+  TODO-113 (Full Merkle sync integration tests) ← depends on 111
+       ↓
+  TODO-106 (Update docs for Rust server)
   TODO-103 (Remove legacy TS server) ← TS e2e tests already removed
 
 ═══════════════════════════════════════════════════════════════
