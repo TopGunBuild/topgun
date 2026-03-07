@@ -546,13 +546,13 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::network::connection::ConnectionRegistry;
+    use crate::network::connection::{ConnectionKind, ConnectionRegistry};
+    use crate::service::domain::query::QueryRegistry;
     use crate::service::operation::{service_names, OperationContext, OperationResponse};
     use crate::service::security::{SecurityConfig, WriteValidator};
     use crate::storage::datastores::NullDataStore;
     use crate::storage::factory::RecordStoreFactory;
     use crate::storage::impls::StorageConfig;
-    use crate::service::domain::query::QueryRegistry;
 
     fn make_factory() -> Arc<RecordStoreFactory> {
         Arc::new(RecordStoreFactory::new(
@@ -1174,6 +1174,140 @@ mod tests {
         assert_eq!(
             rmpv_to_value(&v),
             Value::Array(vec![Value::Int(1), Value::Bool(true)])
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Subscription-aware broadcast tests (AC5, AC6, AC7)
+    // ---------------------------------------------------------------------------
+
+    use crate::service::domain::query::QuerySubscription;
+    use dashmap::DashSet;
+    use topgun_core::messages::base::Query;
+
+    /// Helper: build a CrdtService with shared registries for broadcast testing.
+    fn make_broadcast_test_setup() -> (
+        Arc<CrdtService>,
+        Arc<ConnectionRegistry>,
+        Arc<QueryRegistry>,
+    ) {
+        let factory = make_factory();
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let query_registry = Arc::new(QueryRegistry::new());
+        let svc = Arc::new(CrdtService::new(
+            factory,
+            Arc::clone(&conn_registry),
+            make_validator(),
+            Arc::clone(&query_registry),
+        ));
+        (svc, conn_registry, query_registry)
+    }
+
+    /// AC5+AC6: subscriber receives event, writer does not.
+    #[tokio::test]
+    async fn broadcast_sends_only_to_subscribers_and_excludes_writer() {
+        let (svc, conn_registry, query_registry) = make_broadcast_test_setup();
+        let config = crate::network::config::ConnectionConfig::default();
+
+        // Register two client connections
+        let (conn1_handle, mut conn1_rx) =
+            conn_registry.register(ConnectionKind::Client, &config);
+        let (conn2_handle, mut conn2_rx) =
+            conn_registry.register(ConnectionKind::Client, &config);
+
+        // Subscribe conn1 to "users" via QueryRegistry
+        query_registry.register(QuerySubscription {
+            query_id: "q-1".to_string(),
+            connection_id: conn1_handle.id,
+            map_name: "users".to_string(),
+            query: Query {
+                predicate: None,
+                r#where: None,
+                sort: None,
+                limit: None,
+                cursor: None,
+            },
+            previous_result_keys: DashSet::new(),
+        });
+
+        // conn2 writes to "users" — conn1 should receive, conn2 should NOT
+        let mut ctx = make_ctx();
+        ctx.connection_id = Some(conn2_handle.id);
+        let op = make_lww_put_op(ctx, "users");
+
+        let _resp = svc.oneshot(op).await.unwrap();
+
+        // conn1 subscribed to "users" => should receive the ServerEvent
+        let msg1 = conn1_rx.try_recv();
+        assert!(
+            msg1.is_ok(),
+            "subscriber conn1 should have received the event"
+        );
+
+        // conn2 is the writer => excluded from broadcast
+        let msg2 = conn2_rx.try_recv();
+        assert!(
+            msg2.is_err(),
+            "writer conn2 should NOT have received its own event"
+        );
+    }
+
+    /// AC7: zero subscribers => no serialization, no bytes sent.
+    #[tokio::test]
+    async fn broadcast_skips_serialization_when_no_subscribers() {
+        let (svc, conn_registry, _query_registry) = make_broadcast_test_setup();
+        let config = crate::network::config::ConnectionConfig::default();
+
+        // Register a connection but do NOT subscribe it to any map
+        let (_conn_handle, mut conn_rx) =
+            conn_registry.register(ConnectionKind::Client, &config);
+
+        // Write to "orders" with zero subscribers
+        let ctx = make_ctx();
+        let op = make_lww_put_op(ctx, "orders");
+        let _resp = svc.oneshot(op).await.unwrap();
+
+        // No connection should receive anything
+        let msg = conn_rx.try_recv();
+        assert!(
+            msg.is_err(),
+            "no bytes should be sent when zero subscribers exist"
+        );
+    }
+
+    /// AC5: non-subscriber for a different map does not receive events.
+    #[tokio::test]
+    async fn broadcast_does_not_leak_to_other_map_subscribers() {
+        let (svc, conn_registry, query_registry) = make_broadcast_test_setup();
+        let config = crate::network::config::ConnectionConfig::default();
+
+        let (conn1_handle, mut conn1_rx) =
+            conn_registry.register(ConnectionKind::Client, &config);
+
+        // Subscribe conn1 to "products" (NOT "users")
+        query_registry.register(QuerySubscription {
+            query_id: "q-products".to_string(),
+            connection_id: conn1_handle.id,
+            map_name: "products".to_string(),
+            query: Query {
+                predicate: None,
+                r#where: None,
+                sort: None,
+                limit: None,
+                cursor: None,
+            },
+            previous_result_keys: DashSet::new(),
+        });
+
+        // Write to "users" — conn1 is subscribed to "products", not "users"
+        let ctx = make_ctx();
+        let op = make_lww_put_op(ctx, "users");
+        let _resp = svc.oneshot(op).await.unwrap();
+
+        let msg = conn1_rx.try_recv();
+        assert!(
+            msg.is_err(),
+            "conn1 subscribed to 'products' should not receive 'users' event"
         );
     }
 }

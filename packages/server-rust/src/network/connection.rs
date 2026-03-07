@@ -566,4 +566,57 @@ mod tests {
         // 4th should fail
         assert!(!handle.try_send(OutboundMessage::Binary(vec![4])));
     }
+
+    // ---------------------------------------------------------------------------
+    // send_to_connections tests (AC3, AC4)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn send_to_connections_delivers_only_to_specified_ids() {
+        let config = small_channel_config();
+        let registry = ConnectionRegistry::new();
+
+        let (h1, mut rx1) = registry.register(ConnectionKind::Client, &config);
+        let (_h2, mut rx2) = registry.register(ConnectionKind::Client, &config);
+
+        let mut ids = HashSet::new();
+        ids.insert(h1.id);
+        // h2 is NOT in the target set
+
+        registry.send_to_connections(&ids, &[42]);
+
+        // h1 should have received the message
+        assert!(rx1.try_recv().is_ok(), "targeted connection should receive bytes");
+        // h2 should NOT have received anything
+        assert!(rx2.try_recv().is_err(), "non-targeted connection should not receive bytes");
+    }
+
+    #[test]
+    fn send_to_connections_skips_missing_ids() {
+        let registry = ConnectionRegistry::new();
+
+        let mut ids = HashSet::new();
+        ids.insert(ConnectionId(9999)); // does not exist
+
+        // Should not panic
+        registry.send_to_connections(&ids, &[1, 2, 3]);
+    }
+
+    #[test]
+    fn send_to_connections_skips_full_channels() {
+        let config = small_channel_config(); // capacity = 2
+        let registry = ConnectionRegistry::new();
+
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
+
+        // Fill the channel
+        assert!(handle.try_send(OutboundMessage::Binary(vec![1])));
+        assert!(handle.try_send(OutboundMessage::Binary(vec![2])));
+
+        let mut ids = HashSet::new();
+        ids.insert(handle.id);
+
+        // Should not block or panic when channel is full
+        registry.send_to_connections(&ids, &[3]);
+    }
 }

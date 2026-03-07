@@ -1219,4 +1219,93 @@ mod tests {
         assert!(matches!(result, OperationResponse::Empty));
         assert_eq!(registry.subscription_count(), 0);
     }
+
+    // ---- get_subscribed_connection_ids tests (AC1, AC2) ----
+
+    #[test]
+    fn get_subscribed_connection_ids_empty_when_no_subscriptions() {
+        let registry = QueryRegistry::new();
+        let ids = registry.get_subscribed_connection_ids("users");
+        assert!(ids.is_empty(), "expected empty set for unsubscribed map");
+    }
+
+    #[test]
+    fn get_subscribed_connection_ids_returns_subscribers() {
+        let registry = QueryRegistry::new();
+
+        let conn1 = ConnectionId(1);
+        let conn2 = ConnectionId(2);
+
+        registry.register(QuerySubscription {
+            query_id: "q-1".to_string(),
+            connection_id: conn1,
+            map_name: "users".to_string(),
+            query: Query {
+                predicate: None,
+                r#where: None,
+                sort: None,
+                limit: None,
+                cursor: None,
+            },
+            previous_result_keys: DashSet::new(),
+        });
+
+        registry.register(QuerySubscription {
+            query_id: "q-2".to_string(),
+            connection_id: conn2,
+            map_name: "users".to_string(),
+            query: Query {
+                predicate: None,
+                r#where: None,
+                sort: None,
+                limit: None,
+                cursor: None,
+            },
+            previous_result_keys: DashSet::new(),
+        });
+
+        let ids = registry.get_subscribed_connection_ids("users");
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&conn1));
+        assert!(ids.contains(&conn2));
+    }
+
+    #[test]
+    fn get_subscribed_connection_ids_deduplicates_same_connection() {
+        let registry = QueryRegistry::new();
+
+        let conn1 = ConnectionId(1);
+
+        // Same connection with two different queries on the same map
+        registry.register(QuerySubscription {
+            query_id: "q-1".to_string(),
+            connection_id: conn1,
+            map_name: "users".to_string(),
+            query: Query {
+                predicate: None,
+                r#where: None,
+                sort: None,
+                limit: None,
+                cursor: None,
+            },
+            previous_result_keys: DashSet::new(),
+        });
+        registry.register(QuerySubscription {
+            query_id: "q-2".to_string(),
+            connection_id: conn1,
+            map_name: "users".to_string(),
+            query: Query {
+                predicate: None,
+                r#where: None,
+                sort: None,
+                limit: None,
+                cursor: None,
+            },
+            previous_result_keys: DashSet::new(),
+        });
+
+        let ids = registry.get_subscribed_connection_ids("users");
+        assert_eq!(ids.len(), 1, "same connection should appear only once");
+        assert!(ids.contains(&conn1));
+    }
 }
