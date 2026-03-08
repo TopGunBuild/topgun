@@ -1,3 +1,5 @@
+import { Highlight, themes } from 'prism-react-renderer';
+
 const snippets = [
   {
     title: 'Create a client and map',
@@ -54,9 +56,22 @@ export function CodeSnippets() {
         {snippets.map(snippet => (
           <div key={snippet.title} className="rounded-lg bg-surface p-4">
             <h3 className="mb-3 text-sm font-semibold text-text">{snippet.title}</h3>
-            <pre className="overflow-x-auto rounded bg-slate-950 p-3 text-xs leading-relaxed">
-              <code className="text-text-muted">{snippet.code}</code>
-            </pre>
+            <Highlight theme={themes.nightOwl} code={snippet.code} language="tsx">
+              {({ style, tokens, getLineProps, getTokenProps }) => (
+                <pre
+                  className="overflow-x-auto rounded p-3 text-xs leading-relaxed"
+                  style={style}
+                >
+                  {tokens.map((line, i) => (
+                    <div key={i} {...getLineProps({ line })}>
+                      {line.map((token, key) => (
+                        <span key={key} {...getTokenProps({ token })} />
+                      ))}
+                    </div>
+                  ))}
+                </pre>
+              )}
+            </Highlight>
           </div>
         ))}
       </div>
