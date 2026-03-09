@@ -66,16 +66,28 @@ export const opBatchCode = `{
   }
 }`;
 
-export const batchCode = `{
-  "type": "BATCH",
-  "count": 3,
-  "data": <binary>
-}
-
-// The "data" field contains length-prefixed inner messages:
-// [4-byte BE u32 length][MsgPack message bytes]
-// [4-byte BE u32 length][MsgPack message bytes]
-// ...repeated "count" times`;
+export const batchCode = `// BATCH wire layout (binary MsgPack frame):
+//
+// ┌──────────────────────────────────────────────┐
+// │  MsgPack map: { "type": "BATCH", "count": N, │
+// │                  "data": <bin blob> }         │
+// └──────────────────────────────────────────────┘
+//
+// The "data" blob contains N length-prefixed inner messages:
+//
+// ┌────────────┬──────────────────────────────────┐
+// │ 4 bytes BE │ MsgPack message #1               │
+// │ u32 length │ (complete serialized Message)     │
+// ├────────────┼──────────────────────────────────┤
+// │ 4 bytes BE │ MsgPack message #2               │
+// │ u32 length │ (complete serialized Message)     │
+// ├────────────┼──────────────────────────────────┤
+// │    ...     │ ...repeated N times              │
+// └────────────┴──────────────────────────────────┘
+//
+// Example (hex) for a single 12-byte inner message:
+// 00 00 00 0C  <12 bytes of MsgPack>
+`;
 
 export const opAckCode = `{
   "type": "OP_ACK",

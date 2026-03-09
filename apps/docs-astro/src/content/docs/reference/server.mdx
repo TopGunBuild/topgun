@@ -17,13 +17,6 @@ PORT=8080 cargo run --bin test-server --release
 # With debug logging
 RUST_LOG=topgun_server=debug cargo run --bin test-server --release`;
 
-export const dockerRunCode = `docker run -d \\
-  -p 8080:8080 \\
-  -e PORT=8080 \\
-  -e RUST_LOG=topgun_server=info \\
-  -e TOPGUN_ADMIN_DIR=/app/admin-dashboard/dist \\
-  topgunbuild/topgun-server:latest`;
-
 export const embedServerCode = `use topgun_server::network::config::NetworkConfig;
 use topgun_server::network::module::NetworkModule;
 
@@ -154,34 +147,7 @@ The Rust server is configured via two primary mechanisms: **environment variable
 
 ### Environment Variables
 
-<div className="overflow-x-auto mb-6 not-prose">
-  <table className="w-full text-sm border-collapse">
-    <thead>
-      <tr className="border-b border-card-border">
-        <th className="text-left py-3 px-4 font-semibold text-foreground">Variable</th>
-        <th className="text-left py-3 px-4 font-semibold text-foreground">Description</th>
-        <th className="text-left py-3 px-4 font-semibold text-foreground">Default</th>
-      </tr>
-    </thead>
-    <tbody className="text-neutral-600 dark:text-neutral-300">
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-mono">PORT</td>
-        <td className="py-3 px-4">TCP port for the server to listen on. <code>0</code> means OS-assigned.</td>
-        <td className="py-3 px-4 font-mono">0</td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-mono">TOPGUN_ADMIN_DIR</td>
-        <td className="py-3 px-4">Path to the admin dashboard static files directory served at <code>/admin/*</code>.</td>
-        <td className="py-3 px-4 font-mono">./admin-dashboard/dist</td>
-      </tr>
-      <tr>
-        <td className="py-3 px-4 font-mono">RUST_LOG</td>
-        <td className="py-3 px-4">Tracing filter directive. Controls log verbosity (e.g., <code>topgun_server=debug</code>).</td>
-        <td className="py-3 px-4 font-mono">info</td>
-      </tr>
-    </tbody>
-  </table>
-</div>
+The server reads three environment variables at startup: `PORT`, `TOPGUN_ADMIN_DIR`, and `RUST_LOG`. See the <a href="/docs/reference/cli#environment-variables">CLI Reference</a> for the full table with descriptions and defaults.
 
 ### NetworkConfig (Programmatic)
 
@@ -395,9 +361,7 @@ The server exposes the following HTTP and WebSocket endpoints:
 
 ## Docker
 
-<div className="not-prose">
-  <CodeBlock title="terminal" language="bash" code={dockerRunCode} />
-</div>
+See the <a href="/docs/reference/cli#docker">CLI Reference</a> for Docker run examples with environment variable configuration.
 
 ## PostgreSQL Storage
 

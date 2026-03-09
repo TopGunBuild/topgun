@@ -67,14 +67,6 @@ let config = ServerConfig {
     ..ServerConfig::default()
 };`;
 
-<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
-  <span className="text-foreground font-medium">Docs</span>
-  <ChevronRight className="w-4 h-4" />
-  <span className="text-foreground font-medium">Reference</span>
-  <ChevronRight className="w-4 h-4" />
-  <span className="text-foreground font-medium">CLI</span>
-</div>
-
 # CLI Reference
 
 The TopGun Rust server currently provides a `test-server` binary for integration testing. The primary configuration surface is programmatic via Rust structs (`NetworkConfig` and `ServerConfig`) for embedding the server in applications.
