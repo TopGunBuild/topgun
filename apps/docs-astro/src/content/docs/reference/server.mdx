@@ -1,20 +1,54 @@
 ---
 title: Server API
-description: The Server API manages the TopGun backend including client connections, synchronization, clustering, and security.
+description: The Rust-based TopGun server — configuration, endpoints, storage, and deployment.
 order: 22
 ---
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
-import { ChevronRight, Server, Settings, Shield, Network, Lock, Gauge, Zap, Timer } from 'lucide-react';
+import { ChevronRight, Server, Settings, Shield, Network, Lock, Gauge, Database, Terminal } from 'lucide-react';
 import { ApiParam, ApiConstructor } from '../../../components/docs/ApiMethod';
 
-export const readyCode = `const server = ServerFactory.create(config);
-await server.ready();
-console.log(\`Server running on port \${server.port}\`);`;
+export const startServerCode = `# Run the test server (integration testing)
+cargo run --bin test-server --release
+
+# With a custom port
+PORT=8080 cargo run --bin test-server --release
+
+# With debug logging
+RUST_LOG=topgun_server=debug cargo run --bin test-server --release`;
+
+export const dockerRunCode = `docker run -d \\
+  -p 8080:8080 \\
+  -e PORT=8080 \\
+  -e RUST_LOG=topgun_server=info \\
+  -e TOPGUN_ADMIN_DIR=/app/admin-dashboard/dist \\
+  topgunbuild/topgun-server:latest`;
+
+export const embedServerCode = `use topgun_server::network::config::NetworkConfig;
+use topgun_server::network::module::NetworkModule;
+
+let config = NetworkConfig {
+    host: "0.0.0.0".to_string(),
+    port: 8080,
+    tls: None,
+    ..Default::default()
+};
+
+let mut module = NetworkModule::new(config);
+let port = module.start().await?;
+println!("Server listening on port {port}");
+module.serve(shutdown_signal()).await?;`;
+
+export const postgresCode = `use sqlx::PgPool;
+use topgun_server::storage::datastores::PostgresDataStore;
+
+let pool = PgPool::connect("postgres://user:pass@localhost/topgun").await?;
+let store = PostgresDataStore::new(pool, None)?; // table: "topgun_maps"
+store.initialize().await?; // CREATE TABLE IF NOT EXISTS`;
 
 export const httpSyncRequestExample = `// POST /sync
-// Content-Type: application/json
-// Authorization: Bearer <your-jwt-token>
+// Content-Type: application/x-msgpack
+// (shown as JSON for readability)
 
 {
   "clientId": "client-1",
@@ -50,7 +84,7 @@ export const httpSyncRequestExample = `// POST /sync
 }`;
 
 export const httpSyncResponseExample = `// 200 OK
-// Content-Type: application/json
+// Content-Type: application/msgpack
 
 {
   "serverHlc": {
@@ -102,304 +136,293 @@ export const httpSyncResponseExample = `// 200 OK
   <h1 className="text-4xl font-bold text-foreground">Server API</h1>
 </div>
 
-The `ServerFactory.create()` method creates a server instance that manages the TopGun backend. It handles client connections,
-synchronization logic, clustering, and security enforcement.
+The TopGun server is a Rust binary built on [axum](https://docs.rs/axum) and [tokio](https://tokio.rs). It manages client WebSocket connections, CRDT synchronization, Merkle tree delta sync, full-text search, clustering, and durable PostgreSQL storage.
+
+## Getting Started
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={startServerCode} />
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-4 mb-6 not-prose">
+  <span className="text-sm text-blue-700 dark:text-blue-400">The <code>test-server</code> binary is designed for integration testing. It uses in-memory storage (<code>NullDataStore</code>) and a hardcoded JWT secret. See the <a href="/docs/reference/cli">CLI Reference</a> for details on the test binary and future production builds.</span>
+</div>
 
 ## Configuration
 
-<div className="not-prose">
-  <ApiConstructor signature="interface ServerCoordinatorConfig">
-    <ApiParam
-      name="port"
-      type="number"
-      description="Port to listen on for WebSocket connections."
-    />
-    <ApiParam
-      name="storage?"
-      type="IServerStorage"
-      description="Backend storage adapter. Available adapters: PostgresAdapter (production), MemoryServerAdapter (testing). If omitted, runs in-memory."
-    />
-    <ApiParam
-      name="securityPolicies?"
-      type="PermissionPolicy[]"
-      description="List of RBAC policies. See RBAC Guide."
-    />
-    <ApiParam
-      name="clusterPort?"
-      type="number"
-      description="Port for inter-node communication."
-    />
-    <ApiParam
-      name="peers?"
-      type="string[]"
-      description="List of initial peer addresses for clustering (e.g., ['node2:8000'])."
-    />
-    <ApiParam
-      name="tls?"
-      type="TLSConfig"
-      description="TLS configuration for client-facing connections (HTTPS/WSS). See TLS Configuration below."
-    />
-    <ApiParam
-      name="clusterTls?"
-      type="ClusterTLSConfig"
-      description="TLS configuration for inter-node cluster communication. Supports mTLS."
-    />
-  </ApiConstructor>
+The Rust server is configured via two primary mechanisms: **environment variables** for runtime settings, and **Rust structs** for programmatic embedding.
+
+### Environment Variables
+
+<div className="overflow-x-auto mb-6 not-prose">
+  <table className="w-full text-sm border-collapse">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="text-left py-3 px-4 font-semibold text-foreground">Variable</th>
+        <th className="text-left py-3 px-4 font-semibold text-foreground">Description</th>
+        <th className="text-left py-3 px-4 font-semibold text-foreground">Default</th>
+      </tr>
+    </thead>
+    <tbody className="text-neutral-600 dark:text-neutral-300">
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-mono">PORT</td>
+        <td className="py-3 px-4">TCP port for the server to listen on. <code>0</code> means OS-assigned.</td>
+        <td className="py-3 px-4 font-mono">0</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-mono">TOPGUN_ADMIN_DIR</td>
+        <td className="py-3 px-4">Path to the admin dashboard static files directory served at <code>/admin/*</code>.</td>
+        <td className="py-3 px-4 font-mono">./admin-dashboard/dist</td>
+      </tr>
+      <tr>
+        <td className="py-3 px-4 font-mono">RUST_LOG</td>
+        <td className="py-3 px-4">Tracing filter directive. Controls log verbosity (e.g., <code>topgun_server=debug</code>).</td>
+        <td className="py-3 px-4 font-mono">info</td>
+      </tr>
+    </tbody>
+  </table>
 </div>
 
-## Connection Scaling Options
-
-<div className="flex items-center gap-2 mb-4 not-prose">
-  <Gauge className="w-6 h-6 text-blue-600" />
-  <span className="text-neutral-600 dark:text-neutral-300">Configure connection limits and WebSocket parameters for high-load scenarios.</span>
-</div>
-
-<div className="not-prose">
-  <ApiConstructor signature="Connection Scaling">
-    <ApiParam
-      name="wsBacklog?"
-      type="number"
-      description="TCP backlog for pending connections. Increase for high connection rates. Default: 511"
-    />
-    <ApiParam
-      name="wsCompression?"
-      type="boolean"
-      description="Enable WebSocket per-message compression. Disabled by default for CPU savings. Default: false"
-    />
-    <ApiParam
-      name="wsMaxPayload?"
-      type="number"
-      description="Maximum WebSocket payload size in bytes. Default: 67108864 (64MB)"
-    />
-    <ApiParam
-      name="maxConnections?"
-      type="number"
-      description="Maximum concurrent client connections. Default: 10000"
-    />
-    <ApiParam
-      name="serverTimeout?"
-      type="number"
-      description="Server timeout in milliseconds. Default: 120000 (2 minutes)"
-    />
-    <ApiParam
-      name="keepAliveTimeout?"
-      type="number"
-      description="Keep-alive timeout in milliseconds. Default: 5000"
-    />
-    <ApiParam
-      name="headersTimeout?"
-      type="number"
-      description="Headers timeout in milliseconds. Default: 60000"
-    />
-  </ApiConstructor>
-</div>
-
-## Event Queue Options
-
-<div className="flex items-center gap-2 mb-4 not-prose">
-  <Zap className="w-6 h-6 text-yellow-600" />
-  <span className="text-neutral-600 dark:text-neutral-300">Configure the bounded event queue for backpressure and memory protection.</span>
-</div>
-
-<div className="not-prose">
-  <ApiConstructor signature="Event Queue">
-    <ApiParam
-      name="eventQueueCapacity?"
-      type="number"
-      description="Maximum events in queue. Protects against OOM under load. Default: 10000"
-    />
-    <ApiParam
-      name="eventStripeCount?"
-      type="number"
-      description="Number of striped queues for parallel processing. Default: 4"
-    />
-  </ApiConstructor>
-</div>
-
-## Backpressure Options
-
-<div className="flex items-center gap-2 mb-4 not-prose">
-  <Timer className="w-6 h-6 text-orange-600" />
-  <span className="text-neutral-600 dark:text-neutral-300">Control backpressure behavior for async operation management.</span>
-</div>
-
-<div className="not-prose">
-  <ApiConstructor signature="Backpressure">
-    <ApiParam
-      name="backpressureEnabled?"
-      type="boolean"
-      description="Enable backpressure mechanism. Default: true"
-    />
-    <ApiParam
-      name="backpressureSyncFrequency?"
-      type="number"
-      description="Force synchronous processing every N operations. Lower values reduce latency spikes. Default: 100"
-    />
-    <ApiParam
-      name="backpressureMaxPending?"
-      type="number"
-      description="Maximum pending async operations before blocking. Default: 1000"
-    />
-    <ApiParam
-      name="backpressureBackoffMs?"
-      type="number"
-      description="Backoff timeout in milliseconds when at capacity. Default: 5000"
-    />
-  </ApiConstructor>
-</div>
-
-## Write Coalescing Options
-
-<div className="flex items-center gap-2 mb-4 not-prose">
-  <Zap className="w-6 h-6 text-purple-600" />
-  <span className="text-neutral-600 dark:text-neutral-300">Batch WebSocket writes to reduce syscalls and improve throughput.</span>
-</div>
-
-<div className="not-prose">
-  <ApiConstructor signature="Write Coalescing">
-    <ApiParam
-      name="writeCoalescingEnabled?"
-      type="boolean"
-      description="Enable write batching. Disable for lowest latency real-time apps. Default: true"
-    />
-    <ApiParam
-      name="writeCoalescingMaxBatch?"
-      type="number"
-      description="Maximum messages per batch before forcing flush. Default: 100"
-    />
-    <ApiParam
-      name="writeCoalescingMaxDelayMs?"
-      type="number"
-      description="Maximum delay in milliseconds before flushing. Lower values reduce latency. Default: 5"
-    />
-    <ApiParam
-      name="writeCoalescingMaxBytes?"
-      type="number"
-      description="Maximum batch size in bytes before flushing. Default: 65536 (64KB)"
-    />
-  </ApiConstructor>
-</div>
-
-## Rate Limiting Options
-
-<div className="flex items-center gap-2 mb-4 not-prose">
-  <Shield className="w-6 h-6 text-red-600" />
-  <span className="text-neutral-600 dark:text-neutral-300">Protect against connection floods and DDoS attacks.</span>
-</div>
-
-<div className="not-prose">
-  <ApiConstructor signature="Rate Limiting">
-    <ApiParam
-      name="rateLimitingEnabled?"
-      type="boolean"
-      description="Enable connection rate limiting. Default: true"
-    />
-    <ApiParam
-      name="maxConnectionsPerSecond?"
-      type="number"
-      description="Maximum new connections accepted per second. Default: 100"
-    />
-    <ApiParam
-      name="maxPendingConnections?"
-      type="number"
-      description="Maximum pending connection handshakes. Default: 1000"
-    />
-  </ApiConstructor>
-</div>
-
-## TLS Configuration
-
-<div className="flex items-center gap-2 mb-4 not-prose">
-  <Lock className="w-6 h-6 text-green-600" />
-  <span className="text-neutral-600 dark:text-neutral-300">Enable TLS/SSL encryption for secure client connections (WSS) and cluster communication.</span>
-</div>
-
-<div className="not-prose">
-  <ApiConstructor signature="interface TLSConfig">
-    <ApiParam
-      name="enabled"
-      type="boolean"
-      description="Enable TLS for client-facing server (HTTPS + WSS). Default: false"
-    />
-    <ApiParam
-      name="certPath"
-      type="string"
-      description="Path to the certificate file (PEM format). Supports chain certificates."
-    />
-    <ApiParam
-      name="keyPath"
-      type="string"
-      description="Path to the private key file (PEM format)."
-    />
-    <ApiParam
-      name="caCertPath?"
-      type="string"
-      description="Path to CA certificate for client certificate verification. Required for mTLS."
-    />
-    <ApiParam
-      name="minVersion?"
-      type="'TLSv1.2' | 'TLSv1.3'"
-      description="Minimum TLS version. Default: 'TLSv1.2'"
-    />
-    <ApiParam
-      name="ciphers?"
-      type="string"
-      description="List of allowed cipher suites. Uses Node.js defaults if not specified."
-    />
-    <ApiParam
-      name="passphrase?"
-      type="string"
-      description="Passphrase for encrypted private key."
-    />
-  </ApiConstructor>
-</div>
-
-<div className="not-prose mt-6">
-  <ApiConstructor signature="interface ClusterTLSConfig extends TLSConfig">
-    <ApiParam
-      name="requireClientCert?"
-      type="boolean"
-      description="Require client certificate for mTLS (mutual TLS). Default: false"
-    />
-    <ApiParam
-      name="rejectUnauthorized?"
-      type="boolean"
-      description="Verify peer certificates. Can be disabled for self-signed certs in development. Default: true"
-    />
-  </ApiConstructor>
-</div>
-
-<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-6 my-6 not-prose">
-  <h3 className="text-lg font-semibold text-yellow-800 dark:text-yellow-300 mb-2">Production Warning</h3>
-  <span className="text-yellow-700 dark:text-yellow-400">When running in production without TLS enabled, the server will log a warning. Always enable TLS in production environments to protect client data in transit.</span>
-</div>
-
-## Methods
-
-### ServerFactory.create(config)
+### NetworkConfig (Programmatic)
 
 <div className="flex items-center gap-2 mb-3 not-prose">
   <Settings className="w-5 h-5 text-neutral-500" />
-  <span className="text-neutral-600 dark:text-neutral-300">Creates a new server instance but does not start listening immediately.</span>
-</div>
-
-### ready()
-
-<div className="flex items-center gap-2 mb-3 not-prose">
-  <Network className="w-5 h-5 text-green-500" />
-  <span className="text-neutral-600 dark:text-neutral-300">Returns a Promise that resolves when the server is fully started and bound to the port.</span>
+  <span className="text-neutral-600 dark:text-neutral-300">Network-level configuration for embedding the server in a Rust application.</span>
 </div>
 
 <div className="not-prose">
-  <CodeBlock language="typescript" code={readyCode} />
+  <ApiConstructor signature="struct NetworkConfig">
+    <ApiParam
+      name="host"
+      type="String"
+      description="Bind address for the server. Default: &quot;0.0.0.0&quot;"
+    />
+    <ApiParam
+      name="port"
+      type="u16"
+      description="Port to listen on. 0 means OS-assigned. Default: 0"
+    />
+    <ApiParam
+      name="tls"
+      type="Option<TlsConfig>"
+      description="Optional TLS configuration with cert_path, key_path, and optional ca_cert_path. Default: None"
+    />
+    <ApiParam
+      name="connection"
+      type="ConnectionConfig"
+      description="Per-connection settings: outbound_channel_capacity (256), send_timeout (5s), idle_timeout (60s), ws_write_buffer_size (128KB), ws_max_write_buffer_size (512KB)."
+    />
+    <ApiParam
+      name="cors_origins"
+      type="Vec<String>"
+      description="Allowed CORS origins. Default: [&quot;*&quot;]"
+    />
+    <ApiParam
+      name="request_timeout"
+      type="Duration"
+      description="Maximum time to wait for a request to complete. Default: 30s"
+    />
+  </ApiConstructor>
 </div>
 
-### shutdown()
+### ServerConfig (Programmatic)
 
-<div className="flex items-center gap-2 mb-3 not-prose">
-  <Shield className="w-5 h-5 text-red-500" />
-  <span className="text-neutral-600 dark:text-neutral-300">Gracefully shuts down the server, closing all client connections, stopping the cluster, and closing storage.</span>
+<div className="not-prose">
+  <ApiConstructor signature="struct ServerConfig">
+    <ApiParam
+      name="node_id"
+      type="String"
+      description="Unique identifier for this server node."
+    />
+    <ApiParam
+      name="default_operation_timeout_ms"
+      type="u64"
+      description="Default timeout for operations in milliseconds. Default: 30000"
+    />
+    <ApiParam
+      name="max_concurrent_operations"
+      type="u32"
+      description="Maximum concurrent operations before load shedding. Default: 1000"
+    />
+    <ApiParam
+      name="gc_interval_ms"
+      type="u64"
+      description="Interval between garbage collection runs in milliseconds. Default: 60000"
+    />
+    <ApiParam
+      name="partition_count"
+      type="u32"
+      description="Number of partitions. Default: 271 (PARTITION_COUNT)"
+    />
+    <ApiParam
+      name="security"
+      type="SecurityConfig"
+      description="Security configuration for write validation. Default: SecurityConfig::default()"
+    />
+  </ApiConstructor>
 </div>
+
+### Embedding the Server
+
+<div className="not-prose">
+  <CodeBlock title="main.rs" language="rust" code={embedServerCode} />
+</div>
+
+## Endpoints
+
+The server exposes the following HTTP and WebSocket endpoints:
+
+### Health and Observability
+
+<div className="overflow-x-auto mb-6 not-prose">
+  <table className="w-full text-sm border-collapse">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="text-left py-3 px-4 font-semibold text-foreground">Endpoint</th>
+        <th className="text-left py-3 px-4 font-semibold text-foreground">Method</th>
+        <th className="text-left py-3 px-4 font-semibold text-foreground">Description</th>
+      </tr>
+    </thead>
+    <tbody className="text-neutral-600 dark:text-neutral-300">
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-mono">/health</td>
+        <td className="py-3 px-4">GET</td>
+        <td className="py-3 px-4">Detailed health JSON including server state, uptime, and connection count.</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-mono">/health/live</td>
+        <td className="py-3 px-4">GET</td>
+        <td className="py-3 px-4">Kubernetes liveness probe. Returns 200 if the process is alive.</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-mono">/health/ready</td>
+        <td className="py-3 px-4">GET</td>
+        <td className="py-3 px-4">Kubernetes readiness probe. Returns 200 when the server is accepting connections.</td>
+      </tr>
+      <tr>
+        <td className="py-3 px-4 font-mono">/metrics</td>
+        <td className="py-3 px-4">GET</td>
+        <td className="py-3 px-4">Prometheus metrics endpoint. Returns text/plain with counter, histogram, and gauge data.</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+### Client Communication
+
+<div className="overflow-x-auto mb-6 not-prose">
+  <table className="w-full text-sm border-collapse">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="text-left py-3 px-4 font-semibold text-foreground">Endpoint</th>
+        <th className="text-left py-3 px-4 font-semibold text-foreground">Method</th>
+        <th className="text-left py-3 px-4 font-semibold text-foreground">Description</th>
+      </tr>
+    </thead>
+    <tbody className="text-neutral-600 dark:text-neutral-300">
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-mono">/ws</td>
+        <td className="py-3 px-4">GET</td>
+        <td className="py-3 px-4">WebSocket upgrade. Primary real-time connection for CRDT sync, queries, and pub/sub. Sends AUTH_REQUIRED on connect.</td>
+      </tr>
+      <tr>
+        <td className="py-3 px-4 font-mono">/sync</td>
+        <td className="py-3 px-4">POST</td>
+        <td className="py-3 px-4">Stateless HTTP sync endpoint. Accepts MsgPack-encoded batched operations, returns deltas and query results.</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+### Admin API
+
+<div className="overflow-x-auto mb-6 not-prose">
+  <table className="w-full text-sm border-collapse">
+    <thead>
+      <tr className="border-b border-card-border">
+        <th className="text-left py-3 px-4 font-semibold text-foreground">Endpoint</th>
+        <th className="text-left py-3 px-4 font-semibold text-foreground">Method</th>
+        <th className="text-left py-3 px-4 font-semibold text-foreground">Auth</th>
+        <th className="text-left py-3 px-4 font-semibold text-foreground">Description</th>
+      </tr>
+    </thead>
+    <tbody className="text-neutral-600 dark:text-neutral-300">
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-mono">/api/status</td>
+        <td className="py-3 px-4">GET</td>
+        <td className="py-3 px-4">No</td>
+        <td className="py-3 px-4">Server status (version, uptime, node info).</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-mono">/api/auth/login</td>
+        <td className="py-3 px-4">POST</td>
+        <td className="py-3 px-4">No</td>
+        <td className="py-3 px-4">Admin login endpoint. Returns JWT for admin API access.</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-mono">/api/admin/cluster/status</td>
+        <td className="py-3 px-4">GET</td>
+        <td className="py-3 px-4">Admin JWT</td>
+        <td className="py-3 px-4">Cluster membership and partition status.</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-mono">/api/admin/maps</td>
+        <td className="py-3 px-4">GET</td>
+        <td className="py-3 px-4">Admin JWT</td>
+        <td className="py-3 px-4">List all maps with record counts and partition info.</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-mono">/api/admin/settings</td>
+        <td className="py-3 px-4">GET, PUT</td>
+        <td className="py-3 px-4">Admin JWT</td>
+        <td className="py-3 px-4">Read or update server configuration at runtime.</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-mono">/api/docs</td>
+        <td className="py-3 px-4">GET</td>
+        <td className="py-3 px-4">No</td>
+        <td className="py-3 px-4">Swagger UI for the admin API (OpenAPI spec at <code>/api/openapi.json</code>).</td>
+      </tr>
+      <tr>
+        <td className="py-3 px-4 font-mono">/admin/*</td>
+        <td className="py-3 px-4">GET</td>
+        <td className="py-3 px-4">No</td>
+        <td className="py-3 px-4">SPA admin dashboard. Serves static files from <code>TOPGUN_ADMIN_DIR</code>.</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+## Docker
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={dockerRunCode} />
+</div>
+
+## PostgreSQL Storage
+
+The `PostgresDataStore` provides durable write-through persistence via `sqlx::PgPool`. Every mutation is committed to PostgreSQL before the async method returns.
+
+<div className="not-prose">
+  <CodeBlock title="storage.rs" language="rust" code={postgresCode} />
+</div>
+
+<div className="not-prose">
+  <ApiConstructor signature="PostgresDataStore::new(pool, table_name)">
+    <ApiParam
+      name="pool"
+      type="PgPool"
+      description="A sqlx connection pool. Create with PgPool::connect(&quot;postgres://...&quot;)."
+    />
+    <ApiParam
+      name="table_name"
+      type="Option<String>"
+      description="Custom table name. Default: &quot;topgun_maps&quot;. Validated against ^[a-zA-Z_][a-zA-Z0-9_]*$."
+    />
+  </ApiConstructor>
+</div>
+
+Call `store.initialize().await?` after construction to run the schema migration (`CREATE TABLE IF NOT EXISTS`).
 
 ## POST /sync Endpoint
 
@@ -415,16 +438,12 @@ synchronization logic, clustering, and security enforcement.
       <code>POST /sync</code>
     </div>
     <div className="flex gap-2">
-      <span className="font-semibold text-foreground">Authentication:</span>
-      <code>Authorization: Bearer &lt;token&gt;</code> (required)
-    </div>
-    <div className="flex gap-2">
-      <span className="font-semibold text-foreground">Content Types:</span>
-      <span className="text-neutral-600 dark:text-neutral-300"><code>application/x-msgpack</code> (default), <code>application/json</code> (fallback)</span>
+      <span className="font-semibold text-foreground">Content Type:</span>
+      <code>application/x-msgpack</code> (binary MsgPack)
     </div>
     <div className="flex gap-2">
       <span className="font-semibold text-foreground">Response Format:</span>
-      <span className="text-neutral-600 dark:text-neutral-300">Matches request content type</span>
+      <code>application/msgpack</code>
     </div>
   </div>
 </div>
@@ -503,41 +522,6 @@ synchronization logic, clustering, and security enforcement.
   </ApiConstructor>
 </div>
 
-### HTTP Status Codes
-
-<div className="overflow-x-auto mb-6 not-prose">
-  <table className="w-full text-sm border-collapse">
-    <thead>
-      <tr className="border-b border-card-border">
-        <th className="text-left py-3 px-4 font-semibold text-foreground">Status</th>
-        <th className="text-left py-3 px-4 font-semibold text-foreground">Meaning</th>
-      </tr>
-    </thead>
-    <tbody className="text-neutral-600 dark:text-neutral-300">
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-mono">200</td>
-        <td className="py-3 px-4">Success. Response body contains <code>HttpSyncResponse</code>.</td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-mono">400</td>
-        <td className="py-3 px-4">Invalid request body. Zod schema validation failure.</td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-mono">401</td>
-        <td className="py-3 px-4">Missing or invalid <code>Authorization</code> header. JWT verification failed.</td>
-      </tr>
-      <tr className="border-b border-card-border">
-        <td className="py-3 px-4 font-mono">403</td>
-        <td className="py-3 px-4">Permission denied for specific operations. Individual errors appear in the response <code>errors</code> array.</td>
-      </tr>
-      <tr>
-        <td className="py-3 px-4 font-mono">500</td>
-        <td className="py-3 px-4">Internal server error.</td>
-      </tr>
-    </tbody>
-  </table>
-</div>
-
 ### Example Request
 
 <div className="not-prose mb-4">
@@ -545,7 +529,7 @@ synchronization logic, clustering, and security enforcement.
 </div>
 
 <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-4 mb-6 not-prose">
-  <span className="text-sm text-blue-700 dark:text-blue-400">The example above uses JSON for readability. In production, the default wire format is <code>application/x-msgpack</code> (msgpackr binary) for smaller payloads and faster serialization. Set <code>Content-Type: application/json</code> to use JSON instead.</span>
+  <span className="text-sm text-blue-700 dark:text-blue-400">The wire format is <code>application/x-msgpack</code> (binary). The examples above use JSON for readability.</span>
 </div>
 
 ### Example Response
@@ -553,6 +537,15 @@ synchronization logic, clustering, and security enforcement.
 <div className="not-prose">
   <CodeBlock language="json" code={httpSyncResponseExample} />
 </div>
+
+## Graceful Shutdown
+
+The server supports graceful shutdown via SIGTERM or SIGINT:
+
+1. Health state transitions to **Draining**
+2. All active WebSocket connections receive a Close frame
+3. In-flight requests are given up to 30 seconds to complete
+4. Health state transitions to **Stopped**
 
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
   <a href="/docs/reference/data-structures" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
