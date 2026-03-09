@@ -4,7 +4,6 @@ description: How TopGun compares to other solutions in the ecosystem.
 order: 2
 ---
 
-import { ComparisonRow } from '../../components/docs/ComparisonRow';
 import { ChevronRight } from 'lucide-react';
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
@@ -30,58 +29,74 @@ How TopGun compares to other solutions in the ecosystem.
         <th className="py-4 px-4 text-center text-neutral-500 font-medium">ElectricSQL</th>
         <th className="py-4 px-4 text-center text-neutral-500 font-medium">Firebase</th>
         <th className="py-4 px-4 text-center text-neutral-500 font-medium">RxDB</th>
+        <th className="py-4 px-4 text-center text-neutral-500 font-medium">Replicache/Zero</th>
+        <th className="py-4 px-4 text-center text-neutral-500 font-medium">Durable Objects</th>
       </tr>
     </thead>
     <tbody>
-      <ComparisonRow
-        feature="Primary Model"
-        tg="Local-First IMDG"
-        es="Postgres Sync"
-        fb="Cloud Doc DB"
-        rx="Local-First DB"
-      />
-      <ComparisonRow
-        feature="Offline Support"
-        tg={{ icon: 'check', text: 'First-Class' }}
-        es={{ icon: 'check', text: 'Good' }}
-        fb="Good"
-        rx={{ icon: 'check', text: 'Excellent' }}
-      />
-      <ComparisonRow
-        feature="Latency"
-        tg="~0ms (In-Memory)"
-        es="~5-10ms (SQLite)"
-        fb="Network Dependent"
-        rx="~5-10ms (IndexedDB)"
-      />
-      <ComparisonRow
-        feature="Backend Control"
-        tg="Self-Hosted Cluster"
-        es="Sync Service"
-        fb={{ icon: 'x', text: 'Proprietary', variant: 'error' }}
-        rx="CouchDB / Custom"
-      />
-      <ComparisonRow
-        feature="Consistency"
-        tg="HLC + CRDT"
-        es="Rich CRDTs"
-        fb="LWW (Server)"
-        rx="Revision Trees"
-      />
-      <ComparisonRow
-        feature="Distributed Locks"
-        tg={{ icon: 'check', text: 'Fencing Tokens' }}
-        es={{ icon: 'x', text: 'Not Supported', variant: 'error' }}
-        fb={{ icon: 'x', text: 'Not Supported', variant: 'error' }}
-        rx={{ icon: 'x', text: 'Not Supported', variant: 'error' }}
-      />
-      <ComparisonRow
-        feature="License"
-        tg="Open Source"
-        es="Open Source"
-        fb="Proprietary"
-        rx="Open Source"
-      />
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Primary Model</td>
+        <td className="py-3 px-4 text-center bg-blue-500/5 border-x border-blue-500/10">Local-First IMDG</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Postgres Sync</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Cloud Doc DB</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Local-First DB</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Client Auth Sync</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Edge Stateful</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Offline Support</td>
+        <td className="py-3 px-4 text-center bg-blue-500/5 border-x border-blue-500/10 text-green-600 dark:text-green-400">First-Class</td>
+        <td className="py-3 px-4 text-center text-green-600 dark:text-green-400">Good</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Good</td>
+        <td className="py-3 px-4 text-center text-green-600 dark:text-green-400">Excellent</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Good</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Limited</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Latency</td>
+        <td className="py-3 px-4 text-center bg-blue-500/5 border-x border-blue-500/10">~0ms (In-Memory)</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">~5-10ms (SQLite)</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Network Dependent</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">~5-10ms (IndexedDB)</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">~5-10ms</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Edge-fast</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Backend Control</td>
+        <td className="py-3 px-4 text-center bg-blue-500/5 border-x border-blue-500/10">Self-Hosted Cluster</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Sync Service</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Proprietary</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">CouchDB / Custom</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">SaaS</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Cloudflare Only</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Consistency</td>
+        <td className="py-3 px-4 text-center bg-blue-500/5 border-x border-blue-500/10">HLC + CRDT</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Rich CRDTs</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">LWW (Server)</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Revision Trees</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Server Authority</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Single-Object</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">Distributed Locks</td>
+        <td className="py-3 px-4 text-center bg-blue-500/5 border-x border-blue-500/10 text-green-600 dark:text-green-400">Fencing Tokens</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Not Supported</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Per-Object</td>
+      </tr>
+      <tr className="border-b border-card-border">
+        <td className="py-3 px-4 font-medium text-foreground">License</td>
+        <td className="py-3 px-4 text-center bg-blue-500/5 border-x border-blue-500/10">Open Source</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Open Source</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Proprietary</td>
+        <td className="py-3 px-4 text-center text-neutral-600 dark:text-neutral-400">Open Source</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Proprietary</td>
+        <td className="py-3 px-4 text-center text-red-600 dark:text-red-400">Proprietary</td>
+      </tr>
     </tbody>
   </table>
 </div>
@@ -105,6 +120,18 @@ How TopGun compares to other solutions in the ecosystem.
     <span className="mt-1 text-blue-600">vs RxDB:</span>
     <p>
       TopGun includes a powerful, sharded server cluster for handling massive datasets and complex server-side logic, rather than just replication.
+    </p>
+  </li>
+  <li className="flex gap-3">
+    <span className="mt-1 text-blue-600">vs Replicache/Zero:</span>
+    <p>
+      TopGun uses CRDTs for automatic conflict resolution without server round-trips. Replicache/Zero requires server-authoritative mutations (simpler security model but higher latency). TopGun is self-hosted and open source; Replicache/Zero is proprietary SaaS.
+    </p>
+  </li>
+  <li className="flex gap-3">
+    <span className="mt-1 text-blue-600">vs Durable Objects:</span>
+    <p>
+      TopGun runs on your own infrastructure with full control over data and deployment. Durable Objects are locked to the Cloudflare platform with per-object pricing. TopGun provides a complete data grid (clustering, partitioning, search), not just edge state.
     </p>
   </li>
 </ul>
