@@ -578,29 +578,22 @@ const unsubscribe = handle.subscribe((results) => {
 // Cleanup
 unsubscribe();`;
 
-export const serverSearchPermissionsCode = `// Server security configuration
-const server = ServerFactory.create({
-  port: 8080,
-  fullTextSearch: {
-    articles: { fields: ['title', 'body'] }
-  },
-  security: {
-    permissions: {
-      // Users need READ permission to search a map
-      articles: {
-        read: ['user', 'admin'],
-        write: ['admin']
-      }
-    }
-  }
-});
+export const serverSearchPermissionsCode = `# Search respects the RBAC security model.
+# Users need READ permission on a map to search it.
+#
+# Example RBAC policy structure:
+#   articles:
+#     read:  [user, admin]   # Can search and read
+#     write: [admin]         # Can add/update documents
+#
+# Start the server with JWT auth for role verification:
+PORT=8080 \\
+DATABASE_URL=postgres://user:pass@localhost/myapp \\
+JWT_SECRET=your-secret-key \\
+topgun-server
 
-// Client-side: search requires READ permission
-try {
-  const results = await client.search('articles', 'query');
-} catch (error) {
-  // Error: Permission denied for map: articles
-}`;
+# For the full RBAC and search configuration API,
+# see: /docs/reference/server and /docs/guides/rbac`;
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
   <span className="text-foreground font-medium">Docs</span>
@@ -839,7 +832,7 @@ Each result includes the document key, value, relevance score, and matched terms
 Server-side search respects the security model - users must have READ permission on a map to search it:
 
 <div className="not-prose">
-  <CodeBlock title="Permissions" language="typescript" code={serverSearchPermissionsCode} />
+  <CodeBlock title="Permissions" language="bash" code={serverSearchPermissionsCode} />
 </div>
 
 <div className="bg-green-50 dark:bg-green-900/20 border-l-4 border-green-500 p-4 my-6 not-prose">
