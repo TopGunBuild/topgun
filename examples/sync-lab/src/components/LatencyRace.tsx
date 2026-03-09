@@ -3,6 +3,7 @@ import { LatencyHistogram } from '@/components/LatencyHistogram';
 import { ControlPanel } from '@/components/ControlPanel';
 import { useDeviceClient } from '@/hooks/useDeviceClient';
 import { useLatencyTracker, type LatencyStats } from '@/hooks/useLatencyTracker';
+import { prefixMap } from '@/lib/session';
 
 const BENCHMARK_COUNT = 100;
 
@@ -50,7 +51,7 @@ export function LatencyRace() {
       // so writes still work locally (truly offline benchmark)
       serverUrl: 'ws://localhost:0',
     });
-    const offlineMap = offlineClient.getMap<string, any>('latency-bench');
+    const offlineMap = offlineClient.getMap<string, any>(prefixMap('latency-bench'));
 
     const offline = runBenchmark(offlineMap, BENCHMARK_COUNT);
     setOfflineStats(offline);

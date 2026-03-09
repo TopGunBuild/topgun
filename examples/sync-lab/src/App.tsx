@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { QRBanner } from '@/components/QRBanner';
 import { CodeSnippets } from '@/components/CodeSnippets';
 import { ConflictArena } from '@/components/ConflictArena';
 import { LatencyRace } from '@/components/LatencyRace';
+import { getShareUrl } from '@/lib/session';
 
 type Tab = 'conflict-arena' | 'latency-race';
 
@@ -52,6 +53,14 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('conflict-arena');
   const { embed, demo } = useQueryParams();
   const startTimeRef = useRef(performance.now());
+  const [copied, setCopied] = useState(false);
+
+  const handleShareSession = useCallback(async () => {
+    const url = getShareUrl();
+    await navigator.clipboard.writeText(url);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }, []);
 
   // Mark load complete for demo badge
   useEffect(() => {
@@ -68,13 +77,21 @@ export default function App() {
       {/* Header and QR banner hidden in embed mode */}
       {!embed && (
         <>
-          <header className="mb-6">
-            <h1 className="text-3xl font-bold text-text">
-              TopGun <span className="text-primary">Sync Lab</span>
-            </h1>
-            <p className="mt-1 text-text-muted">
-              Offline-first CRDT sync — see it happen live
-            </p>
+          <header className="mb-6 flex items-start justify-between">
+            <div>
+              <h1 className="text-3xl font-bold text-text">
+                TopGun <span className="text-primary">Sync Lab</span>
+              </h1>
+              <p className="mt-1 text-text-muted">
+                Offline-first CRDT sync — see it happen live
+              </p>
+            </div>
+            <button
+              onClick={handleShareSession}
+              className="rounded-lg border border-primary/30 bg-primary/10 px-3 py-1.5 text-sm font-medium text-primary hover:bg-primary/20 transition-colors"
+            >
+              {copied ? 'Copied!' : 'Share session'}
+            </button>
           </header>
           <div className="mb-6">
             <QRBanner />

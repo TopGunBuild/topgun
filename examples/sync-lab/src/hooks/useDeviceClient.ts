@@ -9,8 +9,9 @@ import {
   type DeviceState,
 } from '@/lib/device-manager';
 import { getAllTodos, type TodoItem } from '@/lib/conflict-detector';
+import { prefixMap } from '@/lib/session';
 
-const MAP_NAME = 'sync-lab-todos';
+const MAP_NAME = prefixMap('sync-lab-todos');
 
 export interface UseDeviceClientReturn {
   /** The current TopGunClient instance (changes on reconnect) */
