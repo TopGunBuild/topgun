@@ -1,0 +1,201 @@
+---
+title: Adoption Path
+description: Three tiers of adoption — from adding real-time features to an existing app, to using TopGun as your full data platform.
+order: 24
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Layers, Zap, Database, Server } from 'lucide-react';
+
+export const tier1ServerCode = `# Start the TopGun server
+PORT=8080 DATABASE_URL=postgres://user:pass@localhost/myapp topgun-server`;
+
+export const tier1ClientCode = `import React from 'react';
+import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+import { TopGunProvider, useQuery, useClient } from '@topgunbuild/react';
+
+// 1. Create client (your existing app stays unchanged)
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter()
+});
+client.start();
+
+// 2. Add a real-time collaborative component
+function KanbanBoard({ boardId }: { boardId: string }) {
+  const client = useClient();
+  const { data: cards } = useQuery('kanban-' + boardId);
+
+  const moveCard = (cardId: string, column: string) => {
+    client.getMap('kanban-' + boardId).set(cardId, {
+      column, movedAt: Date.now()
+    });
+  };
+
+  return (
+    <div>{cards.map(card => (
+      <div key={card.id}>{card.column}: {card.id}</div>
+    ))}</div>
+  );
+}`;
+
+export const tier2Code = `# Point TopGun at your existing PostgreSQL instance
+# TopGun creates its own tables (topgun_*) alongside yours
+DATABASE_URL=postgres://user:pass@localhost/myapp \\
+PORT=8080 \\
+topgun-server`;
+
+export const tier3Code = `# Full platform: TopGun handles everything
+# Storage, compute, sync, search, streaming
+DATABASE_URL=postgres://user:pass@localhost/topgun \\
+PORT=8080 \\
+TOPGUN_CLUSTER_SEEDS=node2:9000,node3:9000 \\
+topgun-server`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Adoption Path</span>
+</div>
+
+# Adoption Path
+
+<div className="flex items-center gap-3 mb-6 not-prose">
+  <Layers className="w-10 h-10 text-blue-600 dark:text-blue-400" />
+  <p className="text-lg text-neutral-600 dark:text-neutral-300">
+    TopGun doesn't require replacing your existing stack. Start small and grow.
+  </p>
+</div>
+
+Three tiers of adoption, from lightweight to full platform:
+
+<div className="overflow-x-auto not-prose my-8">
+
+| Tier | What you keep | What TopGun adds | Effort |
+|------|--------------|-----------------|--------|
+| **Tier 1: Real-Time Layer** | Existing DB, API, auth | Real-time sync + offline for specific features | Hours |
+| **Tier 2: Cache + Sync** | Existing DB (PostgreSQL) | In-memory cache, CRDT sync, live queries | Days |
+| **Tier 3: Full Platform** | Nothing | Everything: storage, compute, sync, search, streaming | Weeks |
+
+</div>
+
+## Tier 1: Real-Time Layer
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Zap className="w-6 h-6 text-yellow-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Add collaborative/real-time features to an existing application. Keep your current database and API.</span>
+</div>
+
+**Recommended starting point.** Your existing application stays unchanged. TopGun handles only the real-time collaborative features you choose to add.
+
+**Example:** A project management app keeps all data in Postgres via REST API. But the Kanban board state (card positions, assignments, comments) flows through TopGun for instant collaborative updates. User management, billing, and reports stay on the existing stack.
+
+### What you need
+
+1. A running TopGun server:
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={tier1ServerCode} />
+</div>
+
+2. Client-side integration in your React app:
+
+<div className="not-prose">
+  <CodeBlock title="src/KanbanBoard.tsx" language="tsx" code={tier1ClientCode} />
+</div>
+
+### When to use Tier 1
+
+- You have an existing app and want to add real-time features
+- You want instant collaborative editing without changing your backend
+- You need offline support for specific features
+- You want to evaluate TopGun without risk to existing infrastructure
+
+### What you gain
+
+- Zero-latency reads and writes for real-time features
+- Automatic CRDT conflict resolution (no custom merge code)
+- Offline support with automatic sync on reconnect
+- Works alongside your existing REST/GraphQL API
+
+## Tier 2: Cache + Sync
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Database className="w-6 h-6 text-green-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Use TopGun as an in-memory cache in front of your existing PostgreSQL database.</span>
+</div>
+
+TopGun sits in front of your existing PostgreSQL database as an in-memory data grid. Reads come from memory (0ms latency). Writes go through to PostgreSQL (write-through). TopGun adds CRDT sync, live queries, and offline support on top.
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={tier2Code} />
+</div>
+
+TopGun creates its own `topgun_*` tables alongside your existing data. See the [PostgreSQL guide](/docs/guides/postgresql) for details on how TopGun coexists with your schema.
+
+### When to use Tier 2
+
+- You want in-memory read performance for your existing data
+- You need live queries that push updates to clients automatically
+- You want to add CRDT sync and offline support across your entire app
+- Your app is read-heavy and would benefit from caching
+
+### What you gain
+
+- Everything from Tier 1, plus:
+- In-memory reads across all data (0ms latency)
+- Write-through to PostgreSQL for durability
+- Live queries across all TopGun data
+- No schema migration required
+
+## Tier 3: Full Platform
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Server className="w-6 h-6 text-purple-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Greenfield applications or full platform replacement.</span>
+</div>
+
+For new applications or full migrations, TopGun becomes your primary data store, compute layer, and sync engine. One deployment replaces the combination of a database, cache, sync engine, search engine, and stream processor.
+
+<div className="not-prose">
+  <CodeBlock title="terminal" language="bash" code={tier3Code} />
+</div>
+
+### When to use Tier 3
+
+- Building a new application from scratch
+- You want a single platform for storage, compute, sync, and search
+- You need distributed clustering with automatic partitioning
+- You want full-text search, stream processing, and pub/sub built in
+
+### What you gain
+
+- Everything from Tier 1 and 2, plus:
+- Multi-node clustering with automatic partitioning (271 partitions)
+- Full-text search (Tantivy-powered)
+- Server-side entry processors
+- Topic pub/sub with ordered delivery
+- PostgreSQL-backed durability
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 my-6 not-prose">
+  <h3 className="text-lg font-semibold text-blue-800 dark:text-blue-300 mb-2">Server API Reference</h3>
+  <span className="text-blue-700 dark:text-blue-400">For the full Rust server configuration including the embed API (<code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">NetworkConfig</code>, <code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">TlsConfig</code>), see the <a href="/docs/reference/server" className="underline">Server API reference</a>.</span>
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/security" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Security
+    </div>
+  </a>
+  <a href="/docs/guides/postgresql" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next Guide</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      PostgreSQL <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>
