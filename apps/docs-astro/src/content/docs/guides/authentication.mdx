@@ -136,33 +136,15 @@ export function SignUpForm() {
   );
 }`;
 
-export const serverConfigCode = `import { ServerFactory } from '@topgunbuild/server';
+export const serverConfigCode = `# Start the TopGun server with JWT authentication
+# The server verifies JWT tokens using the configured secret
+PORT=8090 \\
+DATABASE_URL=postgres://user:pass@localhost/myapp \\
+JWT_SECRET=your-secret-key \\
+topgun-server
 
-const server = ServerFactory.create({
-  port: 8090,
-  nodeId: 'node-1',
-
-  // JWT secret for token verification
-  // Use the same secret your auth provider uses to sign tokens
-  jwtSecret: process.env.JWT_SECRET || 'your-secret-key',
-
-  // Optional: RBAC security policies
-  securityPolicies: [
-    {
-      role: 'USER',
-      mapNamePattern: 'notes:{userId}/*',  // {userId} is replaced with the authenticated user's ID
-      actions: ['READ', 'PUT']
-    },
-    {
-      role: 'ADMIN',
-      mapNamePattern: '*',
-      actions: ['ALL']
-    }
-  ]
-});
-
-server.start();
-console.log('TopGun server running on port 8090');`;
+# For the full Rust server embed API (NetworkConfig, TlsConfig, RBAC),
+# see the Server API reference: /docs/reference/server`;
 
 export const jwtPayloadCode = `{
   "sub": "user_123",       // User ID (or use "userId")
@@ -384,7 +366,7 @@ Use the user ID from Clerk to scope data per user:
 The TopGun server validates JWT tokens using a shared secret. Configure the secret to match your auth provider.
 
 <div className="not-prose">
-  <CodeBlock title="server/index.ts" language="typescript" code={serverConfigCode} />
+  <CodeBlock title="terminal" language="bash" code={serverConfigCode} />
 </div>
 
 ### JWT Token Structure

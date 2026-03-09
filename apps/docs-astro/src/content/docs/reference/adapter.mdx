@@ -59,44 +59,29 @@ export const customAdapterCode = `class MyCustomAdapter implements IStorageAdapt
   // ... implement other methods
 }`;
 
-export const postgresBasicCode = `import { PostgresAdapter } from '@topgunbuild/server';
+export const postgresBasicCode = `# The Rust server handles PostgreSQL storage internally
+# Configure via the DATABASE_URL environment variable:
+DATABASE_URL=postgres://postgres:secret@localhost:5432/myapp \\
+PORT=8080 \\
+topgun-server
 
-const adapter = new PostgresAdapter({
-  host: 'localhost',
-  port: 5432,
-  database: 'myapp',
-  user: 'postgres',
-  password: 'secret'
-});
+# For the Rust PostgresDataStore API, see: /docs/reference/server`;
 
-await adapter.initialize();`;
+export const postgresCustomTableCode = `# The Rust server uses its own table format (topgun_maps, topgun_merkle)
+# Tables are auto-created on startup. Configure only the connection:
+DATABASE_URL=postgres://user:pass@localhost/myapp topgun-server
 
-export const postgresCustomTableCode = `import { PostgresAdapter } from '@topgunbuild/server';
-import { Pool } from 'pg';
+# For custom table configuration via the Rust embed API,
+# see: /docs/reference/server`;
 
-// Using custom table name
-const adapter = new PostgresAdapter(
-  { connectionString: process.env.DATABASE_URL },
-  { tableName: 'my_app_data' }
-);
+export const postgresServerCode = `# Start the server with PostgreSQL persistence
+DATABASE_URL=postgres://user:pass@localhost/myapp \\
+PORT=8765 \\
+topgun-server
 
-// Or with an existing Pool instance
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const adapter = new PostgresAdapter(pool, { tableName: 'my_app_data' });`;
-
-export const postgresServerCode = `import { ServerFactory } from '@topgunbuild/server';
-import { PostgresAdapter } from '@topgunbuild/server';
-
-const storage = new PostgresAdapter({
-  connectionString: process.env.DATABASE_URL
-});
-
-const server = ServerFactory.create({
-  port: 8765,
-  storage
-});
-
-await server.ready();`;
+# The Rust server automatically connects to PostgreSQL,
+# creates tables, and manages the storage lifecycle.
+# See: /docs/reference/server`;
 
 export const encryptedAdapterCode = `import { TopGunClient, EncryptedStorageAdapter, IDBAdapter } from '@topgunbuild/client';
 
@@ -242,7 +227,7 @@ To create a custom adapter, implement the interface above. Ensure that:
 ## PostgresAdapter
 
 <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-4 mb-4 not-prose">
-  <span className="text-blue-700 dark:text-blue-400"><strong>Note:</strong> PostgresAdapter is a <strong>server-side adapter</strong> from <code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">@topgunbuild/server</code>, not a client adapter. It's documented here for completeness.</span>
+  <span className="text-blue-700 dark:text-blue-400"><strong>Note:</strong> PostgreSQL storage is handled by the <strong>Rust server</strong> (<code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">PostgresDataStore</code>), not a client adapter. Configure via <code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">DATABASE_URL</code> environment variable. See the <a href="/docs/reference/server" className="underline">Server API reference</a> for details.</span>
 </div>
 
 <div className="flex items-center gap-2 mb-3 not-prose">
@@ -282,7 +267,7 @@ To create a custom adapter, implement the interface above. Ensure that:
 ### Basic Usage
 
 <div className="not-prose">
-  <CodeBlock title="PostgresAdapter Setup" language="typescript" code={postgresBasicCode} />
+  <CodeBlock title="PostgreSQL Setup" language="bash" code={postgresBasicCode} />
 </div>
 
 ### Custom Table Name
@@ -290,7 +275,7 @@ To create a custom adapter, implement the interface above. Ensure that:
 Use the `tableName` option when you need multiple TopGun instances sharing the same database, or to follow your organization's naming conventions.
 
 <div className="not-prose">
-  <CodeBlock title="Custom Table Name" language="typescript" code={postgresCustomTableCode} />
+  <CodeBlock title="Custom Table Configuration" language="bash" code={postgresCustomTableCode} />
 </div>
 
 ### With ServerCoordinator
@@ -301,7 +286,7 @@ Use the `tableName` option when you need multiple TopGun instances sharing the s
 </div>
 
 <div className="not-prose">
-  <CodeBlock title="Server with PostgreSQL" language="typescript" code={postgresServerCode} />
+  <CodeBlock title="Server with PostgreSQL" language="bash" code={postgresServerCode} />
 </div>
 
 ## EncryptedStorageAdapter

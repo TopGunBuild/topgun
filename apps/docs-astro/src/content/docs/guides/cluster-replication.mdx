@@ -7,64 +7,33 @@ order: 17
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Database, RefreshCw, Shield, Zap, Server, Copy } from 'lucide-react';
 
-export const clusterSetupCode = `import { ServerFactory } from '@topgunbuild/server';
+export const clusterSetupCode = `# Node 1 (seed node)
+PORT=8080 \\
+DATABASE_URL=postgres://user:pass@localhost/topgun \\
+TOPGUN_CLUSTER_PORT=9000 \\
+JWT_SECRET=your-secret-key \\
+topgun-server
 
-// Node 1 (seed node)
-const node1 = ServerFactory.create({
-  port: 8080,
-  nodeId: 'node-1',
-  host: 'localhost',
-  clusterPort: 9000,
-  peers: [],  // First node has no peers
-  jwtSecret: process.env.JWT_SECRET,
-  replicationEnabled: true,
-  defaultConsistency: 'EVENTUAL',
-});
+# Node 2 (joins via seed)
+PORT=8081 \\
+DATABASE_URL=postgres://user:pass@localhost/topgun \\
+TOPGUN_CLUSTER_PORT=9001 \\
+TOPGUN_CLUSTER_SEEDS=localhost:9000 \\
+JWT_SECRET=your-secret-key \\
+topgun-server
 
-await node1.ready();
+# For the full cluster configuration API, see: /docs/reference/server`;
 
-// Node 2 (joins via seed)
-const node2 = ServerFactory.create({
-  port: 8081,
-  nodeId: 'node-2',
-  host: 'localhost',
-  clusterPort: 9001,
-  peers: ['localhost:9000'],  // Connect to node-1
-  jwtSecret: process.env.JWT_SECRET,
-  replicationEnabled: true,
-  defaultConsistency: 'EVENTUAL',
-});
-
-await node2.ready();`;
-
-export const consistencyLevelsCode = `// EVENTUAL - Fire-and-forget replication (default)
-// Best for: High throughput, tolerance for brief inconsistency
-const eventualServer = ServerFactory.create({
-  defaultConsistency: 'EVENTUAL',
-  replicationConfig: {
-    batchIntervalMs: 50,   // Batch replication every 50ms
-    batchSize: 100,        // Max operations per batch
-    queueSizeLimit: 10000, // Max queued operations
-  },
-});
-
-// QUORUM - Wait for majority of replicas
-// Best for: Balance of consistency and availability
-const quorumServer = ServerFactory.create({
-  defaultConsistency: 'QUORUM',
-  replicationConfig: {
-    ackTimeoutMs: 5000,  // Wait up to 5s for acks
-  },
-});
-
-// STRONG - Wait for all replicas
-// Best for: Critical data requiring full consistency
-const strongServer = ServerFactory.create({
-  defaultConsistency: 'STRONG',
-  replicationConfig: {
-    ackTimeoutMs: 10000, // Longer timeout for all replicas
-  },
-});`;
+export const consistencyLevelsCode = `# Consistency levels are configured per-cluster
+# The Rust server uses CRDT-based eventual consistency by default
+# with automatic conflict resolution via Hybrid Logical Clocks.
+#
+# Consistency modes:
+#   EVENTUAL  - Fire-and-forget replication (default, highest throughput)
+#   QUORUM    - Wait for majority of replicas (balanced)
+#   STRONG    - Wait for all replicas (strongest guarantees)
+#
+# For detailed consistency configuration, see: /docs/reference/server`;
 
 export const partitioningCode = `// TopGun uses consistent hashing with 271 partitions
 // Each partition has an owner and backup nodes
@@ -246,7 +215,7 @@ This guide covers server-side replication configuration, consistency levels, and
 ## Cluster Setup
 
 <div className="not-prose">
-  <CodeBlock language="typescript" code={clusterSetupCode} />
+  <CodeBlock language="bash" code={clusterSetupCode} />
 </div>
 
 <div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
@@ -267,7 +236,7 @@ This guide covers server-side replication configuration, consistency levels, and
 TopGun supports three consistency levels for replication:
 
 <div className="not-prose">
-  <CodeBlock language="typescript" code={consistencyLevelsCode} />
+  <CodeBlock language="bash" code={consistencyLevelsCode} />
 </div>
 
 ### Comparison

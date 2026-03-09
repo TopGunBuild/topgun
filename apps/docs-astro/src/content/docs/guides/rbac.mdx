@@ -8,34 +8,21 @@ import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Shield, Lock, UserCheck, AlertTriangle } from 'lucide-react';
 import { FeatureCard } from '../../../components/docs/FeatureCard';
 
-export const configCode = `import { ServerFactory } from '@topgunbuild/server';
-import { PermissionPolicy } from '@topgunbuild/core';
+export const configCode = `# The Rust server configures RBAC via security policies
+# Policies define role-based permissions for map access patterns
+#
+# Example policy structure:
+#   ANON  -> public:*          -> READ only
+#   USER  -> users:{userId}:*  -> ALL (read, write, delete)
+#   ADMIN -> *                 -> ALL
+#
+# Start the server with JWT authentication for role verification:
+PORT=8765 \\
+DATABASE_URL=postgres://user:pass@localhost/myapp \\
+JWT_SECRET=your-secret-key \\
+topgun-server
 
-const policies: PermissionPolicy[] = [
-  // 1. Public Read-Only Access
-  {
-    role: 'ANON',
-    mapNamePattern: 'public:*',
-    actions: ['READ']
-  },
-  // 2. User Private Data (Dynamic Pattern)
-  {
-    role: 'USER',
-    mapNamePattern: 'users:{userId}:*', // {userId} is replaced at runtime
-    actions: ['ALL']
-  },
-  // 3. Admin Full Access
-  {
-    role: 'ADMIN',
-    mapNamePattern: '*',
-    actions: ['ALL']
-  }
-];
-
-const server = ServerFactory.create({
-  port: 8765,
-  securityPolicies: policies
-});`;
+# For the full RBAC configuration API, see: /docs/reference/server`;
 
 export const fieldLevelCode = `{
   role: 'USER',
@@ -92,7 +79,7 @@ You can define fine-grained access control rules for your data maps, controlling
 Policies are passed to `ServerFactory.create()`.
 
 <div className="not-prose">
-  <CodeBlock title="server.ts" language="typescript" code={configCode} />
+  <CodeBlock title="RBAC Configuration" language="bash" code={configCode} />
 </div>
 
 ## Field-Level Security

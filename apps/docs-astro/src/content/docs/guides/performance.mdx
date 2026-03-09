@@ -7,68 +7,43 @@ order: 17
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Zap, Gauge, Timer, Server, AlertTriangle, CheckCircle, Activity, Terminal } from 'lucide-react';
 
-export const highThroughputConfig = `import { ServerFactory } from '@topgunbuild/server';
+export const highThroughputConfig = `# High throughput configuration
+# The Rust server is optimized for high throughput out of the box
+# using tokio async runtime, zero-copy MsgPack, and Tower middleware
+PORT=8080 \\
+DATABASE_URL=postgres://user:pass@localhost/topgun \\
+topgun-server
 
-const server = ServerFactory.create({
-  port: 8080,
-  nodeId: 'prod-node-1',
+# The Rust server automatically handles:
+# - Async I/O via tokio (no event queue tuning needed)
+# - Efficient MsgPack serialization
+# - Connection pooling via sqlx
+# For advanced tuning, see: /docs/reference/server`;
 
-  // High throughput settings
-  eventQueueCapacity: 50000,        // Larger queue for bursts
-  eventStripeCount: 8,              // More parallel processing
-  backpressureSyncFrequency: 200,   // Less frequent sync
-  writeCoalescingMaxDelayMs: 10,    // Batch more writes
-  writeCoalescingMaxBatch: 200,     // Larger batches
+export const lowLatencyConfig = `# Low latency configuration
+# The Rust server delivers sub-millisecond in-memory operations
+# with immediate WebSocket push to subscribers
+PORT=8080 \\
+DATABASE_URL=postgres://user:pass@localhost/topgun \\
+topgun-server
 
-  // Connection scaling
-  maxConnections: 50000,
-  wsBacklog: 1024,
-  maxConnectionsPerSecond: 500,
-});`;
+# In-memory CRDT operations are synchronous (0ms)
+# WebSocket broadcast is immediate after CRDT merge
+# For latency tuning details, see: /docs/reference/server`;
 
-export const lowLatencyConfig = `import { ServerFactory } from '@topgunbuild/server';
+export const productionConfig = `# Balanced production configuration
+PORT=8080 \\
+DATABASE_URL=postgres://user:pass@localhost/topgun \\
+JWT_SECRET=your-production-secret \\
+RUST_LOG=topgun_server=info \\
+topgun-server
 
-const server = ServerFactory.create({
-  port: 8080,
-  nodeId: 'realtime-node-1',
-
-  // Low latency settings
-  writeCoalescingEnabled: false,    // Disable batching for instant delivery
-  // OR tune for minimal delay:
-  // writeCoalescingMaxDelayMs: 1,  // 1ms max delay
-  // writeCoalescingMaxBatch: 10,   // Small batches
-
-  backpressureSyncFrequency: 50,    // More frequent sync
-  eventStripeCount: 4,              // Balanced parallelism
-});`;
-
-export const productionConfig = `import { ServerFactory } from '@topgunbuild/server';
-
-const server = ServerFactory.create({
-  port: 8080,
-  nodeId: process.env.NODE_ID || 'prod-node-1',
-
-  // Balanced production settings
-  wsBacklog: 511,
-  maxConnections: 10000,
-  eventQueueCapacity: 50000,
-  eventStripeCount: 4,
-
-  // Backpressure tuning
-  backpressureEnabled: true,
-  backpressureSyncFrequency: 100,
-  backpressureMaxPending: 2000,
-
-  // Write coalescing (balanced)
-  writeCoalescingEnabled: true,
-  writeCoalescingMaxDelayMs: 5,
-  writeCoalescingMaxBatch: 100,
-
-  // Rate limiting for DDoS protection
-  rateLimitingEnabled: true,
-  maxConnectionsPerSecond: 200,
-  maxPendingConnections: 2000,
-});`;
+# The Rust server includes built-in production defaults:
+# - Tower LoadShed middleware for overload protection
+# - Request timeout enforcement
+# - Prometheus metrics at /metrics
+# - Structured logging via tracing
+# For full configuration, see: /docs/reference/server`;
 
 export const osLinuxTuning = `# Increase socket backlog
 sudo sysctl -w net.core.somaxconn=65535
@@ -205,7 +180,7 @@ TopGun includes several performance optimizations inspired by proven patterns fr
 Use these settings when your priority is maximizing events per second:
 
 <div className="not-prose">
-  <CodeBlock title="High Throughput Configuration" language="typescript" code={highThroughputConfig} />
+  <CodeBlock title="High Throughput Configuration" language="bash" code={highThroughputConfig} />
 </div>
 
 ### When to Adjust
@@ -227,7 +202,7 @@ Use these settings when your priority is maximizing events per second:
 Use these settings for gaming, live collaboration, or trading applications:
 
 <div className="not-prose">
-  <CodeBlock title="Low Latency Configuration" language="typescript" code={lowLatencyConfig} />
+  <CodeBlock title="Low Latency Configuration" language="bash" code={lowLatencyConfig} />
 </div>
 
 <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-6 my-6 not-prose">
@@ -255,7 +230,7 @@ Use these settings for gaming, live collaboration, or trading applications:
 </div>
 
 <div className="not-prose">
-  <CodeBlock title="Production Configuration" language="typescript" code={productionConfig} />
+  <CodeBlock title="Production Configuration" language="bash" code={productionConfig} />
 </div>
 
 ## Monitoring Performance
