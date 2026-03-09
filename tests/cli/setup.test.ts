@@ -11,7 +11,7 @@ describe('topgun setup', () => {
 
     // Create stub directories to skip pnpm install/build
     const nodeModulesPath = path.join(tempDir, 'node_modules');
-    const distPath = path.join(tempDir, 'packages/server/dist');
+    const distPath = path.join(tempDir, 'target/release/test-server');
     fs.mkdirSync(nodeModulesPath, { recursive: true });
     fs.mkdirSync(distPath, { recursive: true });
 
@@ -45,7 +45,7 @@ describe('topgun setup', () => {
 
     // Create stub directories to skip pnpm install/build
     const nodeModulesPath = path.join(tempDir, 'node_modules');
-    const distPath = path.join(tempDir, 'packages/server/dist');
+    const distPath = path.join(tempDir, 'target/release/test-server');
     fs.mkdirSync(nodeModulesPath, { recursive: true });
     fs.mkdirSync(distPath, { recursive: true });
 

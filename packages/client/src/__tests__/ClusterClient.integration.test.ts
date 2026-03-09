@@ -7,7 +7,7 @@
  * - Connection configuration
  *
  * Note: Full end-to-end connection tests require authentication setup
- * which is covered in packages/server/src/__tests__/ClusterE2E.test.ts.
+ * and are covered in the integration test suite (tests/integration-rust/).
  * These tests focus on client-side cluster functionality.
  */
 

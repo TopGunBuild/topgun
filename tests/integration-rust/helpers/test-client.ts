@@ -1,7 +1,7 @@
 /**
  * Standalone test client for Rust server integration tests.
  *
- * - No imports from @topgunbuild/server (avoids transitive TS server dependency)
+ * - No imports from the TS server package (avoids transitive dependency)
  * - No BATCH parsing for inbound messages (Rust server sends individual MsgPack frames)
  * - Sends individual MsgPack messages (not BATCH) to the Rust server
  * - Connects to ws://localhost:${port}/ws (Rust server mounts handler at /ws)
