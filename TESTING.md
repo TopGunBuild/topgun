@@ -1,156 +1,84 @@
-# Testing Guide and Recent Fixes
-
-## Summary of Recent Fixes
-
-### Issue: Test Environment Failures
-The system experienced test failures related to cluster coordination and live query updates across distributed nodes.
-
-### Root Causes and Solutions
-
-#### 1. **PartitionService Initialization Bug**
-- **Problem**: When a node had no connected peers, `getMembers()` returned an empty array, causing partition ownership to be undefined
-- **Solution**: Modified `PartitionService.rebalance()` to include the local node when no other members exist
-- **File**: `packages/server/src/cluster/PartitionService.ts`
-
-#### 2. **Cluster Event Broadcasting Issue**
-- **Problem**: Forwarded operations weren't broadcasting CLUSTER_EVENT messages to other nodes, preventing live query updates from propagating
-- **Solution**: Modified `processLocalOp()` to always broadcast events to all other nodes, ensuring clients with active subscriptions receive updates
-- **File**: `packages/server/src/ServerCoordinator.ts`
-
-#### 3. **Test Timing Issue**
-- **Problem**: Query subscriptions were not fully registered before write operations in tests
-- **Solution**: Added appropriate delays after subscription registration to ensure proper initialization
-- **File**: `packages/server/src/__tests__/Cluster.test.ts`
+# Testing Guide
 
 ## Running Tests
 
-### All Tests
+### All TS Package Tests
 From the project root:
 ```bash
-npm test
+pnpm test
 ```
 
-### Server Tests Only
-From the project root:
+This runs tests for: core, client, react, adapters, adapter-better-auth, mcp-server.
+
+### Rust Server Tests
 ```bash
-cd packages/server && npm test
+SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) cargo test --release -p topgun-server
 ```
 
-### Specific Test Files
+### Integration Tests (TS Client to Rust Server)
 ```bash
-# Run tests matching a specific pattern
-npm test -- --testNamePattern="Cluster"
-
-# Run tests in a specific file
-npm test -- --testPathPattern="SyncProtocol"
-
-# Run tests for live queries
-npm test -- --testPathPattern="LiveQuery"
+pnpm test:integration-rust
 ```
 
-### Run Distributed Query Test
-To verify distributed query functionality:
+### Specific TS Package Tests
 ```bash
-npx ts-node examples/distributed-query-test.ts
+pnpm --filter @topgunbuild/core test
+pnpm --filter @topgunbuild/client test
+pnpm --filter @topgunbuild/react test
+```
+
+### k6 Load Tests
+```bash
+pnpm test:k6:smoke
+pnpm test:k6:throughput
+pnpm test:k6:write
+pnpm test:k6:connections
 ```
 
 ### With Verbose Output
 ```bash
-npm test -- --verbose
+pnpm test -- --verbose
 ```
 
 ### Watch Mode
-To run tests in watch mode during development:
 ```bash
-npm test -- --watch
+pnpm test -- --watch
 ```
 
-## Current Test Status
-- ✅ **All 31 tests passing**
-- ✅ SyncProtocol tests: Working correctly
-- ✅ LiveQuery tests: Functioning properly
-- ✅ Cluster tests: Fixed and operational
-- ✅ QueryRegistry tests: All passing
-- ✅ Matcher tests: Working as expected
-
 ## Test Coverage
-The project includes the following test suites:
+```bash
+pnpm test:coverage
+pnpm --filter @topgunbuild/core test:coverage
+```
+
+## Test Suites
 
 ### Core Package (`packages/core`)
-- `LWWMap.test.ts` - Tests for Last-Write-Wins Map implementation
-- `MerkleTree.test.ts` - Tests for Merkle Tree synchronization
+- `LWWMap.test.ts` - Last-Write-Wins Map implementation
+- `MerkleTree.test.ts` - Merkle Tree synchronization
+- Message schema tests, HLC tests, serialization tests
 
-### Server Package (`packages/server`)
-- `Cluster.test.ts` - Cluster formation, replication, pub/sub, and partition service tests
-- `LiveQuery.test.ts` - Live query subscription and update tests
-- `SyncProtocol.test.ts` - Synchronization protocol tests
-- `QueryRegistry.test.ts` - Query registry management tests
-- `Matcher.test.ts` - Query matcher logic tests
+### Client Package (`packages/client`)
+- `ClusterClient.integration.test.ts` - Client-cluster interactions
+- SyncEngine tests, QueryHandle tests
 
-## Verified Functionality
-The system now correctly handles:
-- **Distributed Query Execution**: Scatter-gather queries across multiple nodes
-- **Live Updates**: Filter queries work correctly on spectator nodes
-- **Partition Rebalancing**: Proper redistribution when nodes join/leave the cluster
-- **Event Propagation**: Updates reach subscribed clients on any node in the cluster
-- **Idempotent Operations**: Duplicate batches are handled correctly
+### Server (Rust - `packages/server-rust`)
+- 509+ unit tests covering all domain services
+- CRDT, Sync, Query, Search, Messaging, Persistence, Coordination
+- Run via `cargo test`
 
-## Known Limitations
-- **Sort/Limit Queries**: Live updates for sort/limit queries on spectator nodes have limitations since spectator nodes don't store the full dataset
-- **Memory Optimization**: Spectator nodes don't store data they don't own to save memory
+### Integration Tests (`tests/integration-rust`)
+- 55 tests validating TS client against Rust server
+- Covers CRDT operations, sync protocol, queries, search, auth
 
 ## Troubleshooting
 
 ### "Cannot find module '@jest/test-sequencer'" Error
-
-This error indicates that Jest dependencies are not properly installed. To fix:
-
-1. **Clean install dependencies from project root:**
-   ```bash
-   npm ci
-   ```
-
-2. **If the problem persists, try a full reinstall:**
-   ```bash
-   rm -rf node_modules packages/*/node_modules
-   npm install
-   ```
-
-3. **Verify Jest is installed:**
-   ```bash
-   npm ls @jest/test-sequencer
-   ```
-   You should see `@jest/test-sequencer@29.7.0` in the output.
-
-### Configuration
-
-The project uses a workspace structure with Jest configured at both root and package levels:
-
-- Root `package.json` contains Jest dependencies
-- Each package has its own `jest.config.js` with specific settings
-- The server package uses `ts-jest` for TypeScript support
-
-### If Cluster Tests Timeout
-- Ensure no other processes are using ports 10001-10002, 11001-11002, 12000-13001
-- Check firewall settings allow local WebSocket connections
-- Increase timeout if needed: `npm test -- --testTimeout=10000`
-
-### Debug Output
-To see detailed test output:
-```bash
-npm test -- --verbose
-```
+1. Clean install: `pnpm install`
+2. Full reinstall: `rm -rf node_modules packages/*/node_modules && pnpm install`
 
 ## CI/CD Considerations
 
-When running tests in CI/CD pipelines:
-1. Ensure sufficient timeout for cluster formation (tests include delays for node synchronization)
-2. Run tests sequentially to avoid port conflicts: `npm test -- --runInBand`
-3. Consider increasing Jest timeout for slower environments: `npm test -- --testTimeout=10000`
-
-### Important Notes
-
-- Tests use specific ports (10000+ for servers, 11000+ for cluster nodes)
-- Make sure these ports are available before running tests
-- Tests include timeouts for cluster stabilization - don't interrupt them early
-- Console logs during tests are normal and indicate proper cluster communication
+1. Run TS tests sequentially to avoid port conflicts: `pnpm test -- --runInBand`
+2. Rust tests: `cargo test --release` (uses parallel test harness by default)
+3. Integration tests require the Rust server binary: `cargo build --release --bin test-server`
