@@ -50,77 +50,67 @@ export const partitioningCode = `// TopGun uses consistent hashing with 271 part
 
 // Total: Each piece of data exists on 2 nodes (owner + 1 backup)`;
 
-export const antiEntropyCode = `// Anti-entropy repair runs automatically
-const server = ServerFactory.create({
-  replicationEnabled: true,
-  // RepairScheduler configuration (defaults shown)
-  repairConfig: {
-    enabled: true,
-    scanIntervalMs: 300000,    // Full scan every 5 minutes
-    repairBatchSize: 1000,     // Keys per repair batch
-    maxConcurrentRepairs: 2,   // Parallel repair streams
-    throttleMs: 100,           // Delay between batches
-    prioritizeRecent: true,    // Repair recent data first
-  },
-});
+export const antiEntropyCode = `# Anti-entropy repair runs automatically when replication is enabled.
+# The server periodically compares Merkle tree roots between partition
+# owner and backup nodes, then syncs only the divergent keys.
+#
+# Repair process:
+#   1. MerkleTreeManager builds hash tree of partition data
+#   2. RepairScheduler compares Merkle roots with backup nodes
+#   3. Differences trigger targeted data sync
+#   4. Uses efficient bucket-level comparison before key-level
+#
+# Repair parameters (scan interval, batch size, concurrency)
+# are configured via the Rust server embed API.
+# For details, see: /docs/reference/server`;
 
-// Repair process:
-// 1. MerkleTreeManager builds hash tree of partition data
-// 2. RepairScheduler compares Merkle roots with backup nodes
-// 3. Differences trigger targeted data sync
-// 4. Uses efficient bucket-level comparison before key-level`;
+export const gossipProtocolCode = `# Cluster membership uses gossip protocol.
+# Nodes automatically discover each other — just provide one seed.
+#
+# Example: Node 2 joining via seed
+TOPGUN_CLUSTER_PORT=9000 \\
+TOPGUN_CLUSTER_SEEDS=node1:9000 \\
+topgun-server
 
-export const gossipProtocolCode = `// Cluster membership uses gossip protocol
-// Nodes automatically discover each other
+# When node2 joins:
+#   1. Connects to seed node (node1)
+#   2. Sends HELLO message with its info
+#   3. Receives MEMBER_LIST with all known members
+#   4. Connects to discovered members
+#   5. Broadcasts updated member list
+#
+# Result: All nodes learn about all others automatically`;
 
-const server = ServerFactory.create({
-  clusterPort: 9000,
-  peers: ['node1:9000'],  // Just one seed is enough
-});
+export const failoverCode = `# Automatic failover on node failure.
+# The FailureDetector uses the Phi Accrual algorithm.
+#
+# Default parameters:
+#   heartbeatInterval:     1000ms
+#   suspicionTimeout:      5000ms
+#   confirmationTimeout:  10000ms
+#   phiThreshold:          8
+#
+# Failover process:
+#   1. Heartbeats stop arriving from failed node
+#   2. Phi value exceeds threshold -> node marked SUSPECT
+#   3. After confirmationTimeout -> node marked FAILED
+#   4. PartitionService rebalances:
+#      - Backup nodes become new owners
+#      - Remaining nodes become new backups
+#   5. Clients receive updated partition map
+#
+# For failure detector tuning, see: /docs/reference/server`;
 
-// When node2 joins:
-// 1. Connects to seed node (node1)
-// 2. Sends HELLO message with its info
-// 3. Receives MEMBER_LIST with all known members
-// 4. Connects to discovered members
-// 5. Broadcasts updated member list
-
-// Result: All nodes learn about all others automatically`;
-
-export const failoverCode = `// Automatic failover on node failure
-// FailureDetector uses Phi Accrual algorithm
-
-const server = ServerFactory.create({
-  // FailureDetector config (defaults shown)
-  failureDetector: {
-    heartbeatIntervalMs: 1000,
-    suspicionTimeoutMs: 5000,
-    confirmationTimeoutMs: 10000,
-    phiThreshold: 8,
-  },
-});
-
-// Failover process:
-// 1. Heartbeats stop arriving from failed node
-// 2. Phi value exceeds threshold -> node marked SUSPECT
-// 3. After confirmationTimeout -> node marked FAILED
-// 4. PartitionService rebalances:
-//    - Backup nodes become new owners
-//    - Remaining nodes become new backups
-// 5. Clients receive updated partition map`;
-
-export const readReplicaCode = `// Read from replicas for lower latency
-const server = ServerFactory.create({
-  replicationEnabled: true,
-  // ReadReplicaHandler is automatically enabled
-});
-
-// Read routing options:
-// - Primary: Always read from partition owner
-// - Replica: Read from nearest replica (lower latency)
-// - Any: Read from any node that has the data
-
-// Clients can specify read preference per query`;
+export const readReplicaCode = `# Read from replicas for lower latency.
+# When replication is enabled, ReadReplicaHandler is active automatically.
+#
+# Read routing options:
+#   Primary: Always read from partition owner
+#   Replica: Read from nearest replica (lower latency)
+#   Any:     Read from any node that has the data
+#
+# Clients can specify read preference per query.
+# For configuration details, see: /docs/reference/server`;
 
 export const dockerComposeClusterCode = `version: '3.8'
 
@@ -228,7 +218,7 @@ This guide covers server-side replication configuration, consistency levels, and
 ### Gossip-Based Discovery
 
 <div className="not-prose">
-  <CodeBlock language="typescript" code={gossipProtocolCode} />
+  <CodeBlock language="bash" code={gossipProtocolCode} />
 </div>
 
 ## Consistency Levels
@@ -273,7 +263,7 @@ TopGun supports three consistency levels for replication:
 TopGun uses Merkle trees for efficient anti-entropy repair:
 
 <div className="not-prose">
-  <CodeBlock language="typescript" code={antiEntropyCode} />
+  <CodeBlock language="bash" code={antiEntropyCode} />
 </div>
 
 ### How It Works
@@ -320,7 +310,7 @@ TopGun uses Merkle trees for efficient anti-entropy repair:
 ## Failover Handling
 
 <div className="not-prose">
-  <CodeBlock language="typescript" code={failoverCode} />
+  <CodeBlock language="bash" code={failoverCode} />
 </div>
 
 ### Phi Accrual Failure Detector
@@ -334,7 +324,7 @@ TopGun uses the Phi Accrual failure detector algorithm, which:
 ## Read Replicas
 
 <div className="not-prose">
-  <CodeBlock language="typescript" code={readReplicaCode} />
+  <CodeBlock language="bash" code={readReplicaCode} />
 </div>
 
 ## Docker Compose Example
