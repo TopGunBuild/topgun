@@ -70,15 +70,8 @@ Local search is powerful, but sometimes you need centralized indexes. Multi-user
 TopGun v0.8.0 introduces **server-side FTS** with a feature we're particularly proud of: **live search subscriptions**.
 
 ```typescript
-// Server configuration
-const server = ServerFactory.create({
-  fullTextSearch: {
-    articles: {
-      fields: ['title', 'body'],
-      bm25: { k1: 1.2, b: 0.75 }
-    }
-  }
-});
+// Start the Rust server (FTS is enabled by default for all maps)
+// PORT=8080 DATABASE_URL=postgres://... topgun-server
 
 // Client subscribes to search results
 const handle = client.searchSubscribe('articles', 'machine learning');
