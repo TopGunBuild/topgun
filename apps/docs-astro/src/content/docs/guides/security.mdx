@@ -8,30 +8,19 @@ import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Shield, Lock, Key, Server, AlertTriangle, CheckCircle, Database, HardDrive } from 'lucide-react';
 import { ApiParam, ApiConstructor } from '../../../components/docs/ApiMethod';
 
-export const tlsConfigCode = `import { ServerFactory } from '@topgunbuild/server';
-
-const server = ServerFactory.create({
-  port: 443,
-  clusterPort: 9443,
-  nodeId: 'prod-node-1',
-
-  // Client-facing TLS (HTTPS + WSS)
-  tls: {
-    enabled: true,
-    certPath: '/etc/topgun/tls/server.crt',
-    keyPath: '/etc/topgun/tls/server.key',
-    minVersion: 'TLSv1.3'
-  },
-
-  // Cluster mTLS
-  clusterTls: {
-    enabled: true,
-    certPath: '/etc/topgun/tls/cluster.crt',
-    keyPath: '/etc/topgun/tls/cluster.key',
-    caCertPath: '/etc/topgun/tls/ca.crt',
-    requireClientCert: true
-  }
-});`;
+export const serverTlsCode = `# Start the TopGun server with TLS enabled
+PORT=443 \\
+DATABASE_URL=postgres://user:pass@localhost/topgun \\
+TOPGUN_TLS_ENABLED=true \\
+TOPGUN_TLS_CERT_PATH=/etc/topgun/tls/server.crt \\
+TOPGUN_TLS_KEY_PATH=/etc/topgun/tls/server.key \\
+TOPGUN_TLS_MIN_VERSION=TLSv1.3 \\
+TOPGUN_CLUSTER_TLS_ENABLED=true \\
+TOPGUN_CLUSTER_TLS_CERT_PATH=/etc/topgun/tls/cluster.crt \\
+TOPGUN_CLUSTER_TLS_KEY_PATH=/etc/topgun/tls/cluster.key \\
+TOPGUN_CLUSTER_TLS_CA_PATH=/etc/topgun/tls/ca.crt \\
+TOPGUN_CLUSTER_MTLS=true \\
+topgun-server`;
 
 export const clientWssCode = `import { TopGunClient } from '@topgunbuild/client';
 
@@ -258,11 +247,54 @@ openssl s_client -showcerts -connect topgun.example.com:443`;
 </div>
 
 This guide covers:
+- Security model and threat boundary
 - TLS/WSS configuration for client connections
 - mTLS (mutual TLS) for cluster communication
 - Environment variables reference
 - Certificate generation and management
 - Client-side encryption for data at rest
+
+## Security Model
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Shield className="w-6 h-6 text-green-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Understanding TopGun's trust boundaries and security pipeline.</span>
+</div>
+
+### Trust Boundary
+
+Clients are **untrusted**. The server is **authoritative**. While TopGun's "Client as Replica" architecture gives clients local CRDT replicas for zero-latency reads and writes, this does not mean clients have unrestricted access. The server enforces all security policies.
+
+### Security Pipeline
+
+Every write passes through the security pipeline before reaching CRDT merge:
+
+```
+Client write --> Auth check --> Map ACL check --> HLC sanitization --> CRDT merge --> Persist
+```
+
+<div className="overflow-x-auto not-prose">
+
+| Layer | What it does |
+|-------|-------------|
+| **JWT Authentication** | Clients must authenticate with a JWT containing a standard `sub` claim. No operations are permitted before authentication. |
+| **Map-level ACL** | Per-connection, per-map read/write permissions. Simple allow/deny rules control which maps a client can access. |
+| **HLC Sanitization** | The server replaces client-provided HLC timestamps with server-generated ones, preventing future-timestamp attacks that would "win" all LWW conflicts. |
+| **Value Size Limits** | The server enforces maximum value size per write to prevent abuse. |
+| **RBAC** | Role-based access control allows defining roles with specific permissions. Roles are assigned to connections and checked against map ACLs. |
+
+</div>
+
+### Transport Security
+
+- **TLS** encrypts all client-to-server traffic (HTTPS + WSS)
+- **mTLS** (mutual TLS) secures cluster-to-cluster communication, ensuring only authorized nodes can join
+- See sections below for configuration details
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 my-6 not-prose">
+  <h3 className="text-lg font-semibold text-blue-800 dark:text-blue-300 mb-2">Server API Reference</h3>
+  <span className="text-blue-700 dark:text-blue-400">For the full Rust server embed API including <code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">NetworkConfig</code> and <code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">TlsConfig</code>, see the <a href="/docs/reference/server" className="underline">Server API reference</a>.</span>
+</div>
 
 <div className="bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-800 rounded-xl p-6 my-6 not-prose">
   <div className="flex items-center gap-2 mb-2">
@@ -285,7 +317,7 @@ When TLS is enabled, TopGun automatically:
 - Logs a warning if TLS is disabled in production
 
 <div className="not-prose">
-  <CodeBlock title="Server Configuration" language="typescript" code={tlsConfigCode} />
+  <CodeBlock title="Server Configuration" language="bash" code={serverTlsCode} />
 </div>
 
 ### Client Connection
