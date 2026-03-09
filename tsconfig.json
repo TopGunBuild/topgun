@@ -21,9 +21,6 @@
       "@topgunbuild/client": [
         "packages/client/src"
       ],
-      "@topgunbuild/server": [
-        "packages/server/src"
-      ],
       "@topgunbuild/adapters": [
         "packages/adapters/src"
       ],

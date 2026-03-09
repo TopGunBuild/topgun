@@ -20,11 +20,9 @@ module.exports = {
   moduleNameMapper: {
     '^@topgunbuild/core$': '<rootDir>/packages/core/src/index.ts',
     '^@topgunbuild/client$': '<rootDir>/packages/client/src/index.ts',
-    '^@topgunbuild/server$': '<rootDir>/packages/server/src/index.ts'
   },
   projects: [
     '<rootDir>/packages/core',
-    '<rootDir>/packages/server',
     '<rootDir>/packages/client'
   ]
 };
