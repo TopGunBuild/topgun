@@ -4,12 +4,9 @@ const { execSync } = require('child_process');
 const TEST_SCOPES = {
   core: '@topgunbuild/core',
   client: '@topgunbuild/client',
-  server: '@topgunbuild/server',
   react: '@topgunbuild/react',
   adapters: '@topgunbuild/adapters',
-  native: '@topgunbuild/native',
   'adapter-better-auth': '@topgunbuild/adapter-better-auth',
-  e2e: 'e2e',
   'k6:smoke': 'k6:smoke',
   'k6:throughput': 'k6:throughput',
   'k6:write': 'k6:write',
