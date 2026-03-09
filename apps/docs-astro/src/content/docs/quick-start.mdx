@@ -5,7 +5,10 @@ order: 4
 ---
 
 import CodeBlock from '../../components/docs/CodeBlock.astro';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, Server } from 'lucide-react';
+
+export const serverStartCode = `# Start the TopGun server (Rust binary)
+PORT=8080 DATABASE_URL=postgres://user:pass@localhost/myapp topgun-server`;
 
 export const initCode = `import React from 'react';
 import ReactDOM from 'react-dom/client';
@@ -19,7 +22,7 @@ const adapter = new IDBAdapter();
 const client = new TopGunClient({
   // Use wss:// for production (TLS encrypted)
   // Use ws:// only for local development
-  serverUrl: 'ws://localhost:3000', // Optional sync server
+  serverUrl: 'ws://localhost:8080', // TopGun Rust server
   storage: adapter
 });
 
@@ -137,7 +140,25 @@ This guide will walk you through installation, initialization, and basic data op
   />
 </div>
 
-## 2. Initialization
+## 2. Start the Server
+
+<div className="not-prose">
+  <p className="text-neutral-600 dark:text-neutral-300 mb-4">
+    Start the TopGun server (a Rust binary) with a PostgreSQL connection for durability.
+  </p>
+  <CodeBlock
+    title="terminal"
+    language="bash"
+    code={serverStartCode}
+  />
+</div>
+
+<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 mb-6 not-prose">
+  <h3 className="text-lg font-semibold text-blue-800 dark:text-blue-300 mb-2 !mt-0">Server Configuration</h3>
+  <span className="text-blue-700 dark:text-blue-400">The TopGun server is configured via environment variables. For the full configuration reference including TLS, clustering, and the Rust embed API, see the <a href="/docs/reference/server" className="underline">Server API reference</a>. For a gradual adoption approach, see the <a href="/docs/guides/adoption-path" className="underline">Adoption Path guide</a>.</span>
+</div>
+
+## 3. Initialization
 
 <div className="not-prose">
   <p className="text-neutral-600 dark:text-neutral-300 mb-4">
@@ -151,7 +172,7 @@ This guide will walk you through installation, initialization, and basic data op
   />
 </div>
 
-## 3. Writing Data
+## 4. Writing Data
 
 <div className="not-prose">
   <p className="text-neutral-600 dark:text-neutral-300 mb-4">
@@ -164,7 +185,7 @@ This guide will walk you through installation, initialization, and basic data op
   />
 </div>
 
-## 4. Reading (Live Query)
+## 5. Reading (Live Query)
 
 <div className="not-prose">
   <p className="text-neutral-600 dark:text-neutral-300 mb-4">
