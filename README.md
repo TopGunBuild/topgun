@@ -100,7 +100,7 @@ Specifications in this repo:
 |---------|-------------|
 | `@topgunbuild/core` | CRDTs, Hybrid Logical Clock, Merkle trees, message schemas |
 | `@topgunbuild/client` | Browser/Node.js SDK with IndexedDB persistence |
-| `@topgunbuild/server` | WebSocket server, clustering, storage adapters |
+| `server-rust` | Rust WebSocket server (axum), clustering, PostgreSQL |
 | `@topgunbuild/react` | React hooks: `useQuery`, `useMap`, `useMutation`, `useTopic` |
 | `@topgunbuild/adapters` | Storage adapters: IndexedDB |
 | `@topgunbuild/adapter-better-auth` | Better Auth integration |

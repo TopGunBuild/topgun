@@ -31,7 +31,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # TopGun Server
+  # TopGun Rust Server
   server:
     build:
       context: .
@@ -43,7 +43,7 @@ services:
     ports:
       - "8080:8080"
     environment:
-      NODE_ENV: production
+      RUST_LOG: topgun_server=info
       DATABASE_URL: postgres://postgres:postgres_password@postgres:5432/topgun
     restart: unless-stopped
 
@@ -80,7 +80,7 @@ services:
       - "443:443"       # HTTPS/WSS
       - "9443:9443"     # Cluster TLS
     environment:
-      NODE_ENV: production
+      RUST_LOG: topgun_server=info
       TOPGUN_PORT: 443
       TOPGUN_CLUSTER_PORT: 9443
       DATABASE_URL: postgres://postgres:postgres_password@postgres:5432/topgun
@@ -285,11 +285,11 @@ Learn how to deploy the TopGun server to production using Docker, Docker Compose
 
 The Dockerfile handles:
 
-- Copying workspace package definitions
-- Installing dependencies via `pnpm install`
-- Building all packages (core, server)
-- Exposing port `8080`
-- Starting the server via `node packages/server/dist/start-server.js`
+- Multi-stage Rust build using `rust:1.85-bookworm`
+- Compiling the Rust server binary (`cargo build --release`)
+- Minimal `debian:bookworm-slim` runtime image
+- Exposing ports `8080` (client), `9080` (cluster), `9090` (metrics)
+- Running as non-root user with health check
 
 ## Docker Compose
 

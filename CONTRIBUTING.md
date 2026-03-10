@@ -50,10 +50,11 @@ This builds all packages in the monorepo in the correct order.
 
 ```
 topgun/
-├── packages/           # Core packages (npm publishable)
+├── packages/           # Core packages
 │   ├── core/          # @topgunbuild/core - CRDT, types, utilities
 │   ├── client/        # @topgunbuild/client - Browser/Node client
-│   ├── server/        # @topgunbuild/server - WebSocket server
+│   ├── server-rust/   # Rust WebSocket server (axum, tokio, sqlx)
+│   ├── core-rust/     # Rust CRDTs, HLC, MerkleTree
 │   ├── adapters/      # @topgunbuild/adapters - Storage adapters
 │   ├── react/         # @topgunbuild/react - React bindings
 │   └── adapter-better-auth/  # @topgunbuild/adapter-better-auth
@@ -68,8 +69,8 @@ topgun/
 │   └── ...
 │
 └── tests/             # Integration tests
-    ├── e2e/           # End-to-end tests
-    └── load/          # Load/performance tests
+    ├── integration-rust/  # TS client → Rust server tests
+    └── k6/            # Load/performance tests
 ```
 
 ### Package Dependencies
@@ -79,9 +80,11 @@ The packages have the following dependency hierarchy:
 ```
 @topgunbuild/core (no internal deps)
     ↓
-@topgunbuild/client, @topgunbuild/server (depend on core)
+@topgunbuild/client (depends on core)
     ↓
-@topgunbuild/adapters, @topgunbuild/react (depend on client/server)
+@topgunbuild/adapters, @topgunbuild/react (depend on client)
+
+Server (Rust): packages/server-rust depends on packages/core-rust
 ```
 
 ## Running Tests
@@ -99,7 +102,9 @@ Run tests for a specific package:
 ```bash
 pnpm --filter @topgunbuild/core test
 pnpm --filter @topgunbuild/client test
-pnpm --filter @topgunbuild/server test
+
+# Rust server tests
+SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) cargo test --release -p topgun-server
 ```
 
 ### Test Coverage
