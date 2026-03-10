@@ -34,7 +34,7 @@ services:
       - "${SERVER_PORT:-8080}:8080"
       - "${CLUSTER_PORT:-9080}:9080"
     environment:
-      NODE_ENV: production
+      RUST_LOG: topgun_server=info
       TOPGUN_PORT: 8080
       TOPGUN_CLUSTER_PORT: 9080
       DATABASE_URL: postgres://${DB_USER:-topgun}:${DB_PASSWORD:-topgun_dev}@postgres:5432/${DB_NAME:-topgun}
@@ -157,9 +157,7 @@ services:
       - topgun
 
   # ============================================================================
-  # PROFILE: auto-setup (Zero-Touch Automated Setup)
-  # Usage: docker compose --profile auto-setup up
-  # This profile demonstrates automatic server configuration via env vars
+  # PROFILE: auto-setup (Rust server with auto-setup profile)
   # ============================================================================
 
   server-auto:
@@ -170,29 +168,16 @@ services:
       - "${SERVER_PORT:-8080}:8080"
       - "${METRICS_PORT:-9090}:9090"
     environment:
-      NODE_ENV: production
-      # Zero-Touch Setup Configuration
-      TOPGUN_AUTO_SETUP: "true"
-      TOPGUN_STORAGE_TYPE: postgres
-      TOPGUN_DEPLOYMENT_MODE: standalone
+      RUST_LOG: topgun_server=info
       TOPGUN_PORT: 8080
       TOPGUN_METRICS_PORT: 9090
       DATABASE_URL: postgres://${DB_USER:-topgun}:${DB_PASSWORD:-topgun_dev}@postgres:5432/${DB_NAME:-topgun}
-      # Admin credentials from Docker secrets
-      TOPGUN_ADMIN_USER: admin
-      TOPGUN_ADMIN_PASSWORD_FILE: /run/secrets/admin_password
-      TOPGUN_ADMIN_EMAIL: admin@example.com
-      # Optional integrations
-      TOPGUN_MCP_ENABLED: "false"
-      TOPGUN_VECTOR_ENABLED: "false"
-    secrets:
-      - admin_password
     profiles: ["auto-setup"]
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/api/status"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -211,6 +196,7 @@ services:
       - "10001:8080"
       - "11001:9080"
     environment:
+      RUST_LOG: topgun_server=info
       NODE_ID: node-1
       TOPGUN_PORT: 8080
       TOPGUN_CLUSTER_PORT: 9080
@@ -231,6 +217,7 @@ services:
       - "10002:8080"
       - "11002:9080"
     environment:
+      RUST_LOG: topgun_server=info
       NODE_ID: node-2
       TOPGUN_PORT: 8080
       TOPGUN_CLUSTER_PORT: 9080
@@ -251,6 +238,7 @@ services:
       - "10003:8080"
       - "11003:9080"
     environment:
+      RUST_LOG: topgun_server=info
       NODE_ID: node-3
       TOPGUN_PORT: 8080
       TOPGUN_CLUSTER_PORT: 9080
@@ -267,10 +255,6 @@ volumes:
   postgres-data:
   prometheus-data:
   grafana-data:
-
-secrets:
-  admin_password:
-    file: ./secrets/admin_password.txt
 
 networks:
   topgun:

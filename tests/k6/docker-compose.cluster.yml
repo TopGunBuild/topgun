@@ -1,5 +1,4 @@
-# TopGun Cluster Load Testing Environment
-# Phase 4.5 Task 07 - K6 Cluster Tests
+# TopGun Cluster Load Testing Environment (Rust server)
 #
 # Usage:
 #   Start cluster:      docker-compose -f tests/k6/docker-compose.cluster.yml up -d
@@ -30,6 +29,7 @@ services:
       - TOPGUN_PORT=8080
       - TOPGUN_CLUSTER_PORT=9080
       - TOPGUN_PEERS=
+      - RUST_LOG=topgun_server=info
     networks:
       - topgun-cluster
     healthcheck:
@@ -55,6 +55,7 @@ services:
       - TOPGUN_PORT=8080
       - TOPGUN_CLUSTER_PORT=9080
       - TOPGUN_PEERS=node-1:9080
+      - RUST_LOG=topgun_server=info
     depends_on:
       node-1:
         condition: service_healthy
@@ -83,6 +84,7 @@ services:
       - TOPGUN_PORT=8080
       - TOPGUN_CLUSTER_PORT=9080
       - TOPGUN_PEERS=node-1:9080,node-2:9080
+      - RUST_LOG=topgun_server=info
     depends_on:
       node-1:
         condition: service_healthy
@@ -113,6 +115,7 @@ services:
       - TOPGUN_PORT=8080
       - TOPGUN_CLUSTER_PORT=9080
       - TOPGUN_PEERS=node-1:9080,node-2:9080,node-3:9080
+      - RUST_LOG=topgun_server=info
     profiles:
       - scale  # Only starts with --profile scale or explicit service name
     depends_on:
