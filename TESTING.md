@@ -59,8 +59,7 @@ pnpm --filter @topgunbuild/core test:coverage
 - Message schema tests, HLC tests, serialization tests
 
 ### Client Package (`packages/client`)
-- `ClusterClient.integration.test.ts` - Client-cluster interactions
-- SyncEngine tests, QueryHandle tests
+- SyncEngine tests, QueryHandle tests, TopGunClient tests
 
 ### Server (Rust - `packages/server-rust`)
 - 509+ unit tests covering all domain services
