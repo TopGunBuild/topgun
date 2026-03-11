@@ -14,8 +14,17 @@ export interface DeviceHandle {
   unsubscribeQuery: () => void;
 }
 
-const getServerUrl = (): string =>
-  (import.meta as any).env?.VITE_SERVER_URL || 'ws://localhost:8080';
+const getServerUrl = (): string => {
+  const envUrl = (import.meta as any).env?.VITE_SERVER_URL;
+  if (envUrl) return envUrl;
+  // In production (behind reverse proxy), derive WebSocket URL from page origin
+  if (typeof window !== 'undefined' && window.location.hostname !== 'localhost') {
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${proto}//${window.location.host}/ws`;
+  }
+  // Local development fallback
+  return 'ws://localhost:8080';
+};
 
 // Pre-signed JWT for the demo test server (secret: "test-e2e-secret", expires 2036).
 const getDemoToken = (): string =>

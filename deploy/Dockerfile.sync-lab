@@ -1,0 +1,92 @@
+# deploy/Dockerfile.sync-lab
+# Multi-stage build: Rust server + sync-lab frontend behind nginx
+#
+# Build:  docker build -f deploy/Dockerfile.sync-lab -t topgun-sync-lab .
+# Run:    docker run -p 80:80 topgun-sync-lab
+
+# ── Stage 1: Build Rust server ──────────────────────────────────────
+FROM rust:1.85-bookworm AS rust-builder
+
+WORKDIR /app
+
+COPY Cargo.toml Cargo.lock ./
+COPY packages/core-rust/ ./packages/core-rust/
+COPY packages/server-rust/ ./packages/server-rust/
+
+RUN cargo build --release --bin test-server
+
+# ── Stage 2: Build sync-lab frontend ────────────────────────────────
+FROM node:20-bookworm AS frontend-builder
+
+WORKDIR /app
+
+# Install pnpm
+RUN corepack enable && corepack prepare pnpm@10.13.1 --activate
+
+# Copy workspace config
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+
+# Copy package.json files for workspace resolution
+COPY packages/core/package.json ./packages/core/
+COPY packages/client/package.json ./packages/client/
+COPY packages/react/package.json ./packages/react/
+COPY packages/adapters/package.json ./packages/adapters/
+COPY packages/adapter-better-auth/package.json ./packages/adapter-better-auth/
+COPY packages/mcp-server/package.json ./packages/mcp-server/
+COPY examples/sync-lab/package.json ./examples/sync-lab/
+
+# Stub out workspace packages that aren't needed for sync-lab build
+RUN mkdir -p packages/server-rust packages/core-rust \
+    apps/docs-astro apps/admin-dashboard \
+    examples/notes-app examples/push-worker examples/storage-worker && \
+    echo '{"name":"@topgunbuild/server-rust","private":true}' > packages/server-rust/package.json && \
+    echo '{"name":"@topgunbuild/core-rust","private":true}' > packages/core-rust/package.json && \
+    echo '{"name":"docs-astro","private":true}' > apps/docs-astro/package.json && \
+    echo '{"name":"admin-dashboard","private":true}' > apps/admin-dashboard/package.json && \
+    echo '{"name":"notes-app","private":true}' > examples/notes-app/package.json && \
+    echo '{"name":"push-worker","private":true}' > examples/push-worker/package.json && \
+    echo '{"name":"storage-worker","private":true}' > examples/storage-worker/package.json
+
+# Install dependencies
+RUN pnpm install --frozen-lockfile
+
+# Copy source for TS packages (build order: core → client → react)
+COPY packages/core/ ./packages/core/
+RUN pnpm --filter @topgunbuild/core build
+
+COPY packages/client/ ./packages/client/
+RUN pnpm --filter @topgunbuild/client build
+
+COPY packages/react/ ./packages/react/
+RUN pnpm --filter @topgunbuild/react build
+
+# Build sync-lab
+COPY examples/sync-lab/ ./examples/sync-lab/
+RUN cd examples/sync-lab && pnpm build
+
+# ── Stage 3: Runtime (nginx + Rust binary) ──────────────────────────
+FROM debian:bookworm-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates libssl3 nginx && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy Rust binary
+COPY --from=rust-builder /app/target/release/test-server /usr/local/bin/topgun-server
+
+# Copy frontend build
+COPY --from=frontend-builder /app/examples/sync-lab/dist /usr/share/nginx/html
+
+# Nginx config (static files + WebSocket proxy to Rust server)
+COPY deploy/nginx-sync-lab.conf /etc/nginx/sites-available/default
+
+# Entrypoint script (starts Rust server + nginx)
+COPY deploy/entrypoint-sync-lab.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+EXPOSE 80
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -q --spider http://localhost/health || exit 1
+
+CMD ["/usr/local/bin/entrypoint.sh"]
