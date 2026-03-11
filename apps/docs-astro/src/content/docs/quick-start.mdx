@@ -7,8 +7,8 @@ order: 4
 import CodeBlock from '../../components/docs/CodeBlock.astro';
 import { ChevronRight, Server } from 'lucide-react';
 
-export const serverStartCode = `# Start the TopGun server (Rust binary)
-PORT=8080 DATABASE_URL=postgres://user:pass@localhost/myapp topgun-server`;
+export const serverStartCode = `# Start the TopGun test server (Rust binary, in-memory storage)
+PORT=8080 cargo run --bin test-server --release`;
 
 export const initCode = `import React from 'react';
 import ReactDOM from 'react-dom/client';

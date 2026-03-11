@@ -13,25 +13,23 @@ DATABASE_URL=postgres://user:pass@localhost/myapp \\
 PORT=8080 \\
 topgun-server`;
 
-export const tablesCode = `-- TopGun automatically creates these tables on startup
+export const tablesCode = `-- TopGun automatically creates this table on startup
 -- Your existing tables are NOT modified
 
 CREATE TABLE IF NOT EXISTS topgun_maps (
-  map_name   TEXT    NOT NULL,
-  key        TEXT    NOT NULL,
-  value      BYTEA   NOT NULL,  -- MsgPack-encoded CRDT data
-  hlc_millis BIGINT  NOT NULL,
-  hlc_counter INTEGER NOT NULL,
-  hlc_node   TEXT    NOT NULL,
-  PRIMARY KEY (map_name, key)
+  map_name        TEXT    NOT NULL,
+  key             TEXT    NOT NULL,
+  value           BYTEA   NOT NULL,  -- MsgPack-encoded CRDT data
+  expiration_time BIGINT  NOT NULL DEFAULT 0,
+  is_backup       BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at      BIGINT  NOT NULL,
+  updated_at      BIGINT  NOT NULL,
+  PRIMARY KEY (map_name, key, is_backup)
 );
 
-CREATE TABLE IF NOT EXISTS topgun_merkle (
-  map_name     TEXT   NOT NULL,
-  partition_id INTEGER NOT NULL,
-  tree_data    BYTEA  NOT NULL,
-  PRIMARY KEY (map_name, partition_id)
-);`;
+-- Index for efficient map-level queries
+CREATE INDEX IF NOT EXISTS idx_topgun_maps_map
+  ON topgun_maps (map_name);`;
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
   <span className="text-foreground font-medium">Docs</span>
@@ -86,7 +84,7 @@ TopGun stores data in its own `topgun_*` tables using MsgPack-encoded BYTEA colu
       <span className="font-semibold text-foreground">TopGun Tables</span>
     </div>
     <ul className="text-sm text-neutral-600 dark:text-neutral-300 space-y-1">
-      <li>topgun_maps, topgun_merkle</li>
+      <li>topgun_maps</li>
       <li>MsgPack BYTEA format</li>
       <li>Managed by TopGun server</li>
       <li>Auto-created on startup</li>

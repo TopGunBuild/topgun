@@ -316,8 +316,12 @@ When TLS is enabled, TopGun automatically:
 - Upgrades WebSocket connections to WSS
 - Logs a warning if TLS is disabled in production
 
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-4 mb-4 not-prose">
+  <span className="text-sm text-yellow-700 dark:text-yellow-400">The <code>topgun-server</code> production binary and TLS environment variables shown below are planned for a future release. Currently, use <code>cargo run --bin test-server</code> for testing, or embed the server programmatically with <code>TlsConfig</code>.</span>
+</div>
+
 <div className="not-prose">
-  <CodeBlock title="Server Configuration" language="bash" code={serverTlsCode} />
+  <CodeBlock title="Server Configuration (planned)" language="bash" code={serverTlsCode} />
 </div>
 
 ### Client Connection
@@ -409,6 +413,10 @@ With mTLS enabled:
 <div className="flex items-center gap-2 mb-4 not-prose">
   <Key className="w-6 h-6 text-orange-600" />
   <span className="text-neutral-600 dark:text-neutral-300">Configure TLS using environment variables for containerized deployments.</span>
+</div>
+
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-4 mb-6 not-prose">
+  <span className="text-sm text-yellow-700 dark:text-yellow-400">The environment variables below are planned for the future production binary. Currently, TLS is configured programmatically via the <code>TlsConfig</code> struct when embedding the server in a Rust application. See the <a href="/docs/reference/server" className="underline">Server API reference</a> for the programmatic API.</span>
 </div>
 
 <div className="overflow-x-auto not-prose">
