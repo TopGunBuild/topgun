@@ -11,7 +11,7 @@ export const configCode = `# Point TopGun at your existing PostgreSQL instance
 # TopGun creates its own tables alongside yours
 DATABASE_URL=postgres://user:pass@localhost/myapp \\
 PORT=8080 \\
-topgun-server`;
+cargo run --bin test-server --release`;
 
 export const tablesCode = `-- TopGun automatically creates this table on startup
 -- Your existing tables are NOT modified
@@ -139,7 +139,7 @@ For production deployments, you may want TopGun to use a **separate** PostgreSQL
 
 ```bash
 # Separate database for TopGun (recommended for high-traffic production)
-DATABASE_URL=postgres://user:pass@localhost/topgun_data topgun-server
+DATABASE_URL=postgres://user:pass@localhost/topgun_data cargo run --bin test-server --release
 ```
 
 Consider a separate database when:

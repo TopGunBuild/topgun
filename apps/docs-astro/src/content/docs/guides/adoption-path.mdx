@@ -8,7 +8,7 @@ import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Layers, Zap, Database, Server } from 'lucide-react';
 
 export const tier1ServerCode = `# Start the TopGun server
-PORT=8080 DATABASE_URL=postgres://user:pass@localhost/myapp topgun-server`;
+DATABASE_URL=postgres://user:pass@localhost/myapp PORT=8080 cargo run --bin test-server --release`;
 
 export const tier1ClientCode = `import React from 'react';
 import { TopGunClient } from '@topgunbuild/client';
@@ -44,14 +44,14 @@ export const tier2Code = `# Point TopGun at your existing PostgreSQL instance
 # TopGun creates its own tables (topgun_*) alongside yours
 DATABASE_URL=postgres://user:pass@localhost/myapp \\
 PORT=8080 \\
-topgun-server`;
+cargo run --bin test-server --release`;
 
 export const tier3Code = `# Full platform: TopGun handles everything
 # Storage, compute, sync, search, streaming
 DATABASE_URL=postgres://user:pass@localhost/topgun \\
 PORT=8080 \\
 TOPGUN_CLUSTER_SEEDS=node2:9000,node3:9000 \\
-topgun-server`;
+cargo run --bin test-server --release`;
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
   <span className="text-foreground font-medium">Docs</span>
