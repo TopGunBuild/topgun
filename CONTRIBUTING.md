@@ -65,7 +65,6 @@ topgun/
 │
 ├── examples/          # Example applications
 │   ├── notes-app/     # PWA notes app with offline sync
-│   ├── todo-app/      # Todo app example
 │   └── ...
 │
 └── tests/             # Integration tests
@@ -162,7 +161,7 @@ pnpm start:server
 Run an example app:
 
 ```bash
-cd examples/todo-app
+cd examples/notes-app
 pnpm install
 pnpm dev
 ```
