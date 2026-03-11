@@ -26,26 +26,24 @@ RUN corepack enable && corepack prepare pnpm@10.13.1 --activate
 # Copy workspace config
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 
-# Copy package.json files for workspace resolution
+# Copy all workspace package.json files so lockfile resolves correctly
 COPY packages/core/package.json ./packages/core/
 COPY packages/client/package.json ./packages/client/
 COPY packages/react/package.json ./packages/react/
 COPY packages/adapters/package.json ./packages/adapters/
 COPY packages/adapter-better-auth/package.json ./packages/adapter-better-auth/
 COPY packages/mcp-server/package.json ./packages/mcp-server/
+COPY apps/admin-dashboard/package.json ./apps/admin-dashboard/
+COPY apps/docs-astro/package.json ./apps/docs-astro/
 COPY examples/sync-lab/package.json ./examples/sync-lab/
+COPY examples/notes-app/package.json ./examples/notes-app/
+COPY examples/push-worker/package.json ./examples/push-worker/
+COPY examples/storage-worker/package.json ./examples/storage-worker/
 
-# Stub out workspace packages that aren't needed for sync-lab build
-RUN mkdir -p packages/server-rust packages/core-rust \
-    apps/docs-astro apps/admin-dashboard \
-    examples/notes-app examples/push-worker examples/storage-worker && \
+# Stub Rust-only packages (no package.json in repo)
+RUN mkdir -p packages/server-rust packages/core-rust && \
     echo '{"name":"@topgunbuild/server-rust","private":true}' > packages/server-rust/package.json && \
-    echo '{"name":"@topgunbuild/core-rust","private":true}' > packages/core-rust/package.json && \
-    echo '{"name":"docs-astro","private":true}' > apps/docs-astro/package.json && \
-    echo '{"name":"admin-dashboard","private":true}' > apps/admin-dashboard/package.json && \
-    echo '{"name":"notes-app","private":true}' > examples/notes-app/package.json && \
-    echo '{"name":"push-worker","private":true}' > examples/push-worker/package.json && \
-    echo '{"name":"storage-worker","private":true}' > examples/storage-worker/package.json
+    echo '{"name":"@topgunbuild/core-rust","private":true}' > packages/core-rust/package.json
 
 # Install dependencies
 RUN pnpm install --frozen-lockfile
