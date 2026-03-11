@@ -23,8 +23,8 @@ WORKDIR /app
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@10.13.1 --activate
 
-# Copy workspace config
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# Copy workspace config and root tsconfig (packages extend it)
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json ./
 
 # Copy all workspace package.json files so lockfile resolves correctly
 COPY packages/core/package.json ./packages/core/
