@@ -55,6 +55,9 @@ RUN pnpm --filter @topgunbuild/core build
 COPY packages/client/ ./packages/client/
 RUN pnpm --filter @topgunbuild/client build
 
+COPY packages/adapters/ ./packages/adapters/
+RUN pnpm --filter @topgunbuild/adapters build
+
 COPY packages/react/ ./packages/react/
 RUN pnpm --filter @topgunbuild/react build
 

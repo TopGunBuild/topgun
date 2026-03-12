@@ -1,6 +1,6 @@
 import { TopGunClient } from '@topgunbuild/client';
 import type { LWWMap, LWWRecord } from '@topgunbuild/core';
-import { MemoryStorageAdapter } from './memory-storage';
+import { IDBAdapter } from '@topgunbuild/adapters';
 
 export interface DeviceState {
   entries: Map<string, LWWRecord<any>>;
@@ -36,7 +36,7 @@ const getDemoToken = (): string =>
  * Each device has its own MemoryStorageAdapter so state is fully isolated.
  */
 export function createDevice(deviceId: string, mapName: string): DeviceHandle {
-  const storage = new MemoryStorageAdapter();
+  const storage = new IDBAdapter();
   const client = new TopGunClient({
     nodeId: deviceId,
     serverUrl: getServerUrl(),

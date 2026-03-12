@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@topgunbuild/adapters": "workspace:*",
     "@topgunbuild/client": "workspace:*",
     "@topgunbuild/core": "workspace:*",
     "@topgunbuild/react": "workspace:*",
