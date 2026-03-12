@@ -5,8 +5,8 @@ import {
   createDevice,
   disconnectDevice,
   reconnectDevice,
+  snapshotDevice,
   type DeviceHandle,
-  type DeviceState,
 } from '@/lib/device-manager';
 import { getAllTodos, type TodoItem } from '@/lib/conflict-detector';
 import { prefixMap } from '@/lib/session';
@@ -40,7 +40,6 @@ export function useDeviceClient(deviceId: string): UseDeviceClientReturn {
   const [handle, setHandle] = useState<DeviceHandle | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [todos, setTodos] = useState<TodoItem[]>([]);
-  const savedStateRef = useRef<DeviceState | null>(null);
   const handleRef = useRef<DeviceHandle | null>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const mountedRef = useRef(false);
@@ -94,25 +93,22 @@ export function useDeviceClient(deviceId: string): UseDeviceClientReturn {
     const h = handleRef.current;
     if (!h || !h.isConnected) return;
 
-    // Clean up subscription before closing
-    if (unsubscribeRef.current) {
-      unsubscribeRef.current();
-      unsubscribeRef.current = null;
-    }
-
-    savedStateRef.current = disconnectDevice(h);
+    // Keep onChange subscription alive — map stays writable offline and UI updates.
+    // Snapshot is deferred to reconnect() so offline writes are captured.
+    disconnectDevice(h);
     setIsConnected(false);
   }, []);
 
   const reconnect = useCallback((): { preState: Map<string, LWWRecord<any>>; newMap: LWWMap<string, any> } => {
-    const saved = savedStateRef.current;
-    // Capture pre-reconnect state for conflict detection
-    const preState = saved?.entries ?? new Map<string, LWWRecord<any>>();
+    const h = handleRef.current;
+    // Snapshot the live map now — captures both pre-disconnect state and offline writes
+    const currentState = h ? snapshotDevice(h.map) : { entries: new Map() };
+    const preState = currentState.entries;
 
     const newHandle = reconnectDevice(
       deviceId,
       MAP_NAME,
-      saved ?? { entries: new Map() },
+      currentState,
     );
 
     // Subscribe to the new map (cleans up any previous subscription)
@@ -121,7 +117,6 @@ export function useDeviceClient(deviceId: string): UseDeviceClientReturn {
     setHandle(newHandle);
     setIsConnected(true);
     handleRef.current = newHandle;
-    savedStateRef.current = null;
 
     // Read current state after replay
     setTodos(getAllTodos(newHandle.map));

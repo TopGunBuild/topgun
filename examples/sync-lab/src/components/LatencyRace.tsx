@@ -67,7 +67,7 @@ export function LatencyRace() {
   return (
     <div>
       <p className="mb-4 text-sm text-text-muted">
-        Compare write latency online vs offline. TopGun writes at the same speed
+        Compare write latency online vs offline. TopGun writes are sub-millisecond
         in both modes — because writes never wait for network.
       </p>
 
@@ -118,7 +118,7 @@ export function LatencyRace() {
             Offline avg: <span className="font-mono text-success">{offlineStats.avg.toFixed(3)}ms</span>
           </p>
           <p className="mt-2 text-sm text-text-muted">
-            TopGun writes at the same speed online or offline — because writes never wait for network.
+            Both sub-millisecond — TopGun writes never block on network.
           </p>
         </div>
       )}

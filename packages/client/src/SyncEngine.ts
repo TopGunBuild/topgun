@@ -757,18 +757,21 @@ export class SyncEngine {
       }
     }
 
-    // Backwards compatible: mark all ops up to lastId as synced
+    // Mark all ops up to lastId as synced (numeric comparison — IDs are stringified integers)
+    const lastIdNum = parseInt(lastId, 10);
     let maxSyncedId = -1;
     let ackedCount = 0;
     this.opLog.forEach(op => {
-      if (op.id && op.id <= lastId) {
-        if (!op.synced) {
-          ackedCount++;
-        }
-        op.synced = true;
-        const idNum = parseInt(op.id, 10);
-        if (!isNaN(idNum) && idNum > maxSyncedId) {
-          maxSyncedId = idNum;
+      if (op.id) {
+        const opIdNum = parseInt(op.id, 10);
+        if (!isNaN(opIdNum) && !isNaN(lastIdNum) && opIdNum <= lastIdNum) {
+          if (!op.synced) {
+            ackedCount++;
+          }
+          op.synced = true;
+          if (opIdNum > maxSyncedId) {
+            maxSyncedId = opIdNum;
+          }
         }
       }
     });

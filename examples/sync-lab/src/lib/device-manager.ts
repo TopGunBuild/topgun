@@ -68,15 +68,15 @@ export function snapshotDevice(map: LWWMap<string, any>): DeviceState {
 }
 
 /**
- * Disconnect a device by snapshotting its state and permanently closing
- * the client. TopGunClient has no pause/resume -- close() is final.
+ * Disconnect a device by closing the client's network connection.
+ * The LWWMap stays in memory and remains writable for offline edits.
+ * TopGunClient has no pause/resume -- close() is final.
+ * Snapshot is deferred to reconnect so offline writes are captured.
  */
-export function disconnectDevice(handle: DeviceHandle): DeviceState {
-  const state = snapshotDevice(handle.map);
+export function disconnectDevice(handle: DeviceHandle): void {
   handle.unsubscribeQuery();
   handle.client.close();
   handle.isConnected = false;
-  return state;
 }
 
 /**
