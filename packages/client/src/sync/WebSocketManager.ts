@@ -310,10 +310,9 @@ export class WebSocketManager implements IWebSocketManager {
 
       this.stopHeartbeat();
 
-      // Force close and reconnect via connection provider
-      this.connectionProvider.close().catch((err) => {
-        logger.error({ err }, 'Error closing ConnectionProvider on heartbeat timeout');
-      });
+      // Force reconnect — preserves the provider's reconnect behavior
+      // (unlike close() which permanently kills the connection)
+      this.connectionProvider.forceReconnect();
     }
   }
 

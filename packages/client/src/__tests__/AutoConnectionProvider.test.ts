@@ -7,6 +7,7 @@ jest.mock('../connection/SingleServerProvider', () => {
   return {
     SingleServerProvider: jest.fn().mockImplementation(() => ({
       connect: jest.fn().mockRejectedValue(new Error('WebSocket connection failed')),
+      forceReconnect: jest.fn(),
       close: jest.fn().mockResolvedValue(undefined),
       isConnected: jest.fn().mockReturnValue(false),
       getConnectedNodes: jest.fn().mockReturnValue([]),
@@ -52,6 +53,7 @@ describe('AutoConnectionProvider', () => {
     // Override mock so connect() succeeds for this test
     SingleServerProvider.mockImplementationOnce(() => ({
       connect: jest.fn().mockResolvedValue(undefined),
+      forceReconnect: jest.fn(),
       close: jest.fn().mockResolvedValue(undefined),
       isConnected: jest.fn().mockReturnValue(true),
       getConnectedNodes: jest.fn().mockReturnValue(['ws-node-1']),

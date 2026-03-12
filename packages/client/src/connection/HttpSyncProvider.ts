@@ -234,6 +234,18 @@ export class HttpSyncProvider implements IConnectionProvider {
   }
 
   /**
+   * Force reconnect by restarting the polling loop.
+   */
+  forceReconnect(): void {
+    this.stopPolling();
+    this.connected = false;
+    this.emit('disconnected', 'default');
+    this.connect().catch((err) => {
+      logger.error({ err }, 'HttpSyncProvider forceReconnect failed');
+    });
+  }
+
+  /**
    * Close the HTTP sync provider.
    * Stops the polling loop, clears queued operations, and sets disconnected state.
    */

@@ -180,6 +180,15 @@ export class AutoConnectionProvider implements IConnectionProvider {
   }
 
   /**
+   * Force reconnect by delegating to the active provider.
+   */
+  forceReconnect(): void {
+    if (this.activeProvider) {
+      this.activeProvider.forceReconnect();
+    }
+  }
+
+  /**
    * Close the active underlying provider.
    */
   async close(): Promise<void> {

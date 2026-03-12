@@ -1009,6 +1009,7 @@ describe('SyncEngine', () => {
           for (const op of ops) results.set(op.key, true);
           return results;
         }),
+        forceReconnect: jest.fn(),
         close: jest.fn().mockResolvedValue(undefined),
         _handlers: handlers,
       };

@@ -32,6 +32,7 @@ export class SingleServerProvider implements IConnectionProvider {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private isClosing: boolean = false;
   private listeners: Map<ConnectionProviderEvent, Set<ConnectionEventHandler>> = new Map();
+  private onlineHandler: (() => void) | null = null;
 
   constructor(config: SingleServerProviderConfig) {
     this.url = config.url;
@@ -41,7 +42,10 @@ export class SingleServerProvider implements IConnectionProvider {
       reconnectDelayMs: config.reconnectDelayMs ?? DEFAULT_CONFIG.reconnectDelayMs,
       backoffMultiplier: config.backoffMultiplier ?? DEFAULT_CONFIG.backoffMultiplier,
       maxReconnectDelayMs: config.maxReconnectDelayMs ?? DEFAULT_CONFIG.maxReconnectDelayMs,
+      listenNetworkEvents: config.listenNetworkEvents ?? true,
     };
+
+    this.setupNetworkListeners();
   }
 
   /**
@@ -174,6 +178,7 @@ export class SingleServerProvider implements IConnectionProvider {
    */
   async close(): Promise<void> {
     this.isClosing = true;
+    this.teardownNetworkListeners();
 
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -264,6 +269,34 @@ export class SingleServerProvider implements IConnectionProvider {
   }
 
   /**
+   * Force-close the current WebSocket so the onclose handler triggers reconnection.
+   * Unlike close(), this does NOT set isClosing and preserves reconnect behavior.
+   * Resets the reconnect counter so the full backoff budget is available.
+   */
+  forceReconnect(): void {
+    this.reconnectAttempts = 0;
+    this.isClosing = false;
+
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    if (this.ws) {
+      if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+        // onclose handler will call scheduleReconnect()
+        this.ws.close();
+      } else {
+        // WebSocket already closed — schedule reconnect directly
+        this.scheduleReconnect();
+      }
+    } else {
+      // No WebSocket at all — schedule reconnect directly
+      this.scheduleReconnect();
+    }
+  }
+
+  /**
    * Get the WebSocket URL this provider connects to.
    */
   getUrl(): string {
@@ -283,5 +316,34 @@ export class SingleServerProvider implements IConnectionProvider {
    */
   resetReconnectAttempts(): void {
     this.reconnectAttempts = 0;
+  }
+
+  /**
+   * Listen for browser 'online' event to trigger instant reconnect
+   * when network comes back. Only active in browser environments.
+   */
+  private setupNetworkListeners(): void {
+    if (!this.config.listenNetworkEvents) return;
+    if (typeof globalThis.addEventListener !== 'function') return;
+
+    this.onlineHandler = () => {
+      if (this.isClosing) return;
+      if (this.isConnected()) return;
+
+      logger.info({ url: this.url }, 'Network online detected — forcing reconnect');
+      this.forceReconnect();
+    };
+
+    globalThis.addEventListener('online', this.onlineHandler);
+  }
+
+  /**
+   * Remove browser network event listeners.
+   */
+  private teardownNetworkListeners(): void {
+    if (this.onlineHandler && typeof globalThis.removeEventListener === 'function') {
+      globalThis.removeEventListener('online', this.onlineHandler);
+      this.onlineHandler = null;
+    }
   }
 }
