@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import type { LWWMap, LWWRecord } from '@topgunbuild/core';
-import type { TopGunClient } from '@topgunbuild/client';
+import { type TopGunClient, SyncState } from '@topgunbuild/client';
 import {
   createDevice,
   disconnectDevice,
@@ -42,12 +42,28 @@ export function useDeviceClient(deviceId: string): UseDeviceClientReturn {
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const handleRef = useRef<DeviceHandle | null>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
+  const unsubscribeStateRef = useRef<(() => void) | null>(null);
+  /** True when explicitly disconnected via button (vs network loss) */
+  const manualDisconnectRef = useRef(false);
   const mountedRef = useRef(false);
 
   // Keep ref in sync for use in callbacks
   useEffect(() => {
     handleRef.current = handle;
   }, [handle]);
+
+  // Subscribe to real WebSocket connection state changes
+  const subscribeToConnectionState = useCallback((client: TopGunClient) => {
+    if (unsubscribeStateRef.current) {
+      unsubscribeStateRef.current();
+    }
+    unsubscribeStateRef.current = client.onConnectionStateChange((event) => {
+      // Don't override manual disconnect with connection state events
+      if (manualDisconnectRef.current) return;
+      const connected = event.to === SyncState.CONNECTED || event.to === SyncState.SYNCING;
+      setIsConnected(connected);
+    });
+  }, []);
 
   // Subscribe to a map's onChange and store the unsubscribe function
   const subscribeToMap = useCallback((map: LWWMap<string, any>) => {
@@ -73,6 +89,7 @@ export function useDeviceClient(deviceId: string): UseDeviceClientReturn {
     handleRef.current = h;
 
     subscribeToMap(h.map);
+    subscribeToConnectionState(h.client);
 
     // Initial read
     setTodos(getAllTodos(h.map));
@@ -82,6 +99,10 @@ export function useDeviceClient(deviceId: string): UseDeviceClientReturn {
       if (unsubscribeRef.current) {
         unsubscribeRef.current();
         unsubscribeRef.current = null;
+      }
+      if (unsubscribeStateRef.current) {
+        unsubscribeStateRef.current();
+        unsubscribeStateRef.current = null;
       }
       h.client.close();
     };
@@ -93,6 +114,7 @@ export function useDeviceClient(deviceId: string): UseDeviceClientReturn {
     const h = handleRef.current;
     if (!h || !h.isConnected) return;
 
+    manualDisconnectRef.current = true;
     // Keep onChange subscription alive — map stays writable offline and UI updates.
     // Snapshot is deferred to reconnect() so offline writes are captured.
     disconnectDevice(h);
@@ -111,8 +133,10 @@ export function useDeviceClient(deviceId: string): UseDeviceClientReturn {
       currentState,
     );
 
-    // Subscribe to the new map (cleans up any previous subscription)
+    manualDisconnectRef.current = false;
+    // Subscribe to the new map and connection state (cleans up previous subscriptions)
     subscribeToMap(newHandle.map);
+    subscribeToConnectionState(newHandle.client);
 
     setHandle(newHandle);
     setIsConnected(true);

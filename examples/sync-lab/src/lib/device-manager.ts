@@ -41,6 +41,7 @@ export function createDevice(deviceId: string, mapName: string): DeviceHandle {
     nodeId: deviceId,
     serverUrl: getServerUrl(),
     storage,
+    backoff: { maxRetries: Infinity },
   });
   client.setAuthToken(getDemoToken());
   const map = client.getMap<string, any>(mapName);
