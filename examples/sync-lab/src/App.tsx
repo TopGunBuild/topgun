@@ -12,6 +12,7 @@ function useQueryParams() {
   return {
     embed: params.has('embed'),
     demo: params.has('demo'),
+    theme: params.get('theme') as 'dark' | 'light' | null,
   };
 }
 
@@ -51,7 +52,7 @@ function PerformanceBadge() {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('conflict-arena');
-  const { embed, demo } = useQueryParams();
+  const { embed, demo, theme } = useQueryParams();
   const startTimeRef = useRef(performance.now());
   const [copied, setCopied] = useState(false);
 
@@ -60,6 +61,32 @@ export default function App() {
     await navigator.clipboard.writeText(url);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  }, []);
+
+  // Apply theme class to document root
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === 'light') {
+      root.classList.remove('dark');
+    } else {
+      root.classList.add('dark');
+    }
+  }, [theme]);
+
+  // Listen for theme changes from parent iframe host (postMessage)
+  useEffect(() => {
+    const handler = (event: MessageEvent) => {
+      if (event.data?.type === 'theme-change' && event.data.theme) {
+        const root = document.documentElement;
+        if (event.data.theme === 'light') {
+          root.classList.remove('dark');
+        } else {
+          root.classList.add('dark');
+        }
+      }
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
   }, []);
 
   // Mark load complete for demo badge
@@ -73,7 +100,7 @@ export default function App() {
   ];
 
   return (
-    <div className="mx-auto min-h-screen max-w-7xl px-4 py-6">
+    <div className={`mx-auto max-w-7xl px-4 py-6 ${embed ? '' : 'min-h-screen'}`}>
       {/* Header and QR banner hidden in embed mode */}
       {!embed && (
         <>

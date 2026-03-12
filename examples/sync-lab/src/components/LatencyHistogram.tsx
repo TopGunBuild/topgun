@@ -70,7 +70,7 @@ export function LatencyHistogram({ stats, label, color }: LatencyHistogramProps)
           y1={padding.top}
           x2={padding.left}
           y2={height - padding.bottom}
-          stroke="#475569"
+          className="stroke-border"
           strokeWidth={1}
         />
         {/* X axis */}
@@ -79,7 +79,7 @@ export function LatencyHistogram({ stats, label, color }: LatencyHistogramProps)
           y1={height - padding.bottom}
           x2={width - padding.right}
           y2={height - padding.bottom}
-          stroke="#475569"
+          className="stroke-border"
           strokeWidth={1}
         />
 
@@ -94,14 +94,14 @@ export function LatencyHistogram({ stats, label, color }: LatencyHistogramProps)
                 y1={y}
                 x2={padding.left}
                 y2={y}
-                stroke="#475569"
+                className="stroke-border"
               />
               <text
                 x={padding.left - 6}
                 y={y + 3}
                 textAnchor="end"
                 fontSize={8}
-                fill="#94a3b8"
+                className="fill-text-muted"
               >
                 {val}
               </text>
@@ -142,7 +142,7 @@ export function LatencyHistogram({ stats, label, color }: LatencyHistogramProps)
                 y={height - padding.bottom + 14}
                 textAnchor="middle"
                 fontSize={8}
-                fill="#94a3b8"
+                className="fill-text-muted"
               >
                 {lbl}ms
               </text>
@@ -155,7 +155,7 @@ export function LatencyHistogram({ stats, label, color }: LatencyHistogramProps)
           y={height / 2}
           textAnchor="middle"
           fontSize={8}
-          fill="#94a3b8"
+          className="fill-text-muted"
           transform={`rotate(-90 12 ${height / 2})`}
         >
           Count

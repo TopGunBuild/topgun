@@ -1,22 +1,45 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   --color-primary: #3b82f6;
   --color-primary-dark: #2563eb;
   --color-success: #22c55e;
   --color-warning: #eab308;
   --color-danger: #ef4444;
-  --color-surface: #1e293b;
-  --color-surface-light: #334155;
-  --color-surface-lighter: #475569;
-  --color-text: #f1f5f9;
-  --color-text-muted: #94a3b8;
-  --color-border: #475569;
+  --color-surface: var(--surface);
+  --color-surface-light: var(--surface-light);
+  --color-surface-lighter: var(--surface-lighter);
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-border: var(--border);
+  --color-bg: var(--bg);
+}
+
+:root {
+  --bg: #ffffff;
+  --surface: #f1f5f9;
+  --surface-light: #e2e8f0;
+  --surface-lighter: #cbd5e1;
+  --text: #0f172a;
+  --text-muted: #64748b;
+  --border: #cbd5e1;
+}
+
+.dark {
+  --bg: #111111;
+  --surface: #1e293b;
+  --surface-light: #334155;
+  --surface-lighter: #475569;
+  --text: #f1f5f9;
+  --text-muted: #94a3b8;
+  --border: #475569;
 }
 
 @layer base {
   body {
-    @apply bg-slate-900 text-text antialiased;
+    @apply bg-bg text-text antialiased;
     font-family: 'Inter', system-ui, -apple-system, sans-serif;
   }
 }

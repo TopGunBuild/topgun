@@ -121,7 +121,7 @@ export function DevicePanel({ deviceId, label, showTimestamps }: DevicePanelProp
   }, [reconnect]);
 
   return (
-    <div className="flex flex-col rounded-xl border border-border bg-slate-800/50 p-4">
+    <div className="flex flex-col rounded-xl border border-border bg-surface p-4">
       {/* Header with device label and controls */}
       <div className="mb-3 flex items-center justify-between">
         <h3 className="text-lg font-semibold text-text">{label}</h3>
