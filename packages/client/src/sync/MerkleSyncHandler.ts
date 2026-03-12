@@ -11,6 +11,8 @@ import { logger } from '../utils/logger';
 export class MerkleSyncHandler implements IMerkleSyncHandler {
   private readonly config: MerkleSyncHandlerConfig;
   private lastSyncTimestamp: number = 0;
+  /** Accumulated sync stats per map, flushed after a quiet period */
+  private syncStats = new Map<string, { count: number; timer: ReturnType<typeof setTimeout> }>();
 
   constructor(config: MerkleSyncHandlerConfig) {
     this.config = config;
@@ -104,7 +106,18 @@ export class MerkleSyncHandler implements IMerkleSyncHandler {
         }
       }
       if (updateCount > 0) {
-        logger.info({ mapName, count: updateCount }, 'Synced records from server');
+        // Aggregate sync stats and flush after a quiet period to avoid per-leaf log spam
+        const existing = this.syncStats.get(mapName);
+        if (existing) {
+          existing.count += updateCount;
+          clearTimeout(existing.timer);
+        }
+        const stats = existing ?? { count: updateCount, timer: undefined as any };
+        if (!existing) this.syncStats.set(mapName, stats);
+        stats.timer = setTimeout(() => {
+          logger.info({ mapName, count: stats.count }, 'Synced records from server');
+          this.syncStats.delete(mapName);
+        }, 100);
       }
     }
   }

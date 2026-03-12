@@ -538,8 +538,8 @@ export class SyncEngine {
     this.tokenProvider = null;
 
     const state = this.stateMachine.getState();
-    if (state === SyncState.AUTHENTICATING || state === SyncState.CONNECTING) {
-      // If we are already connected (e.g. waiting for token), send it now
+    if (state === SyncState.AUTHENTICATING) {
+      // Already connected and waiting for token — send it now
       this.sendAuth();
     } else if (state === SyncState.BACKOFF || state === SyncState.DISCONNECTED) {
       // Force immediate reconnect if we were waiting for retry timer
