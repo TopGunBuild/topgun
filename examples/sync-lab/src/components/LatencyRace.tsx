@@ -100,7 +100,7 @@ export function LatencyRace() {
         <LatencyHistogram
           stats={onlineStats}
           label="Online (connected to server)"
-          color="#3b82f6"
+          color="#2563eb"
         />
         <LatencyHistogram
           stats={offlineStats}

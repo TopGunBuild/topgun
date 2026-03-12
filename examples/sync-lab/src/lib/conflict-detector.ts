@@ -42,14 +42,10 @@ export interface MergeResult {
 const TODO_FIELDS = ['title', 'done', 'color', '_exists'] as const;
 
 const TODO_COLORS = [
-  '#3b82f6', // blue
+  '#2563eb', // blue
   '#ef4444', // red
   '#22c55e', // green
   '#eab308', // yellow
-  '#8b5cf6', // purple
-  '#ec4899', // pink
-  '#f97316', // orange
-  '#06b6d4', // cyan
 ];
 
 export function getRandomColor(): string {
