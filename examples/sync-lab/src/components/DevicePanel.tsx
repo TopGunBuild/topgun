@@ -129,14 +129,14 @@ export function DevicePanel({ deviceId, label, showTimestamps }: DevicePanelProp
           {isConnected ? (
             <button
               onClick={handleDisconnect}
-              className="rounded bg-danger/20 px-3 py-1 text-xs font-medium text-danger hover:bg-danger/30 transition-colors"
+              className="rounded-md bg-danger/20 px-3 py-1 text-xs font-medium text-danger hover:opacity-80 transition-opacity"
             >
               Disconnect
             </button>
           ) : (
             <button
               onClick={handleReconnect}
-              className="rounded bg-success/20 px-3 py-1 text-xs font-medium text-success hover:bg-success/30 transition-colors"
+              className="rounded-md bg-success/20 px-3 py-1 text-xs font-medium text-success hover:opacity-80 transition-opacity"
             >
               Reconnect
             </button>
@@ -161,12 +161,12 @@ export function DevicePanel({ deviceId, label, showTimestamps }: DevicePanelProp
           onKeyDown={e => e.key === 'Enter' && handleAdd()}
           placeholder="Add a to-do..."
           disabled={!map}
-          className="flex-1 rounded-md bg-surface px-3 py-2 text-sm text-text placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-primary"
+          className="flex-1 rounded-md border border-border bg-bg px-3 py-2 text-sm text-text placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-primary"
         />
         <button
           onClick={handleAdd}
           disabled={!map || !newTitle.trim()}
-          className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-white hover:bg-primary-dark disabled:opacity-50 transition-colors"
+          className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50 transition-opacity"
         >
           Add
         </button>
@@ -181,7 +181,7 @@ export function DevicePanel({ deviceId, label, showTimestamps }: DevicePanelProp
         ) : (
           todos.map(todo => (
             <div key={todo.id} className="group animate-fade-in">
-              <div className="flex items-center gap-2 rounded-lg bg-surface px-3 py-2">
+              <div className="flex items-center gap-2 rounded-lg border border-border bg-bg px-3 py-2">
                 {/* Color dot */}
                 <button
                   onClick={() => handleColorChange(todo)}
@@ -207,7 +207,7 @@ export function DevicePanel({ deviceId, label, showTimestamps }: DevicePanelProp
                     onKeyDown={e => e.key === 'Enter' && handleEditSave()}
                     onBlur={handleEditSave}
                     autoFocus
-                    className="flex-1 rounded bg-surface-light px-2 py-0.5 text-sm text-text focus:outline-none"
+                    className="flex-1 rounded border border-border bg-bg px-2 py-0.5 text-sm text-text focus:outline-none focus:ring-2 focus:ring-primary"
                   />
                 ) : (
                   <span

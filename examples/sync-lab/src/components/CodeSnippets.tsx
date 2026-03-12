@@ -54,7 +54,7 @@ export function CodeSnippets() {
 
       <div className="grid gap-6 md:grid-cols-3">
         {snippets.map(snippet => (
-          <div key={snippet.title} className="rounded-lg bg-surface p-4">
+          <div key={snippet.title} className="rounded-xl border border-border bg-surface p-4 shadow-sm dark:shadow-none">
             <h3 className="mb-3 text-sm font-semibold text-text">{snippet.title}</h3>
             <Highlight theme={themes.nightOwl} code={snippet.code} language="tsx">
               {({ style, tokens, getLineProps, getTokenProps }) => (

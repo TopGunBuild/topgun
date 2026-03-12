@@ -115,7 +115,7 @@ export default function App() {
             </div>
             <button
               onClick={handleShareSession}
-              className="rounded-lg border border-primary/30 bg-primary/10 px-3 py-1.5 text-sm font-medium text-primary hover:bg-primary/20 transition-colors"
+              className="rounded-lg border border-primary/30 bg-primary/10 px-3 py-1.5 text-sm font-medium text-primary hover:opacity-80 transition-opacity"
             >
               {copied ? 'Copied!' : 'Share session'}
             </button>
@@ -127,7 +127,7 @@ export default function App() {
       )}
 
       {/* Tab bar */}
-      <div className="mb-6 flex gap-1 rounded-lg bg-surface p-1">
+      <div className="mb-6 flex gap-1 rounded-lg border border-border bg-surface p-1">
         {tabs.map(tab => (
           <button
             key={tab.id}

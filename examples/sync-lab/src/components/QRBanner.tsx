@@ -114,7 +114,7 @@ export function QRBanner() {
   const url = typeof window !== 'undefined' ? window.location.href : '';
 
   return (
-    <div className="flex items-center justify-between rounded-lg bg-surface px-4 py-3">
+    <div className="flex items-center justify-between rounded-lg border border-border bg-surface px-4 py-3">
       <div>
         <p className="text-sm font-medium text-text">
           Open in another tab to see real-time sync

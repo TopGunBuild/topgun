@@ -40,7 +40,7 @@ export function ControlPanel({
         : `${pendingOps} ops pending`;
 
   return (
-    <div className="flex items-center gap-4 rounded-lg bg-surface px-4 py-2 text-sm">
+    <div className="flex items-center gap-4 rounded-lg border border-border bg-surface px-4 py-2 text-sm">
       <span className="font-medium text-text-muted">{deviceLabel}</span>
 
       {/* Connection status dot */}

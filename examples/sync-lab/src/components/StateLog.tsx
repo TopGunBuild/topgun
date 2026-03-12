@@ -44,7 +44,7 @@ export function StateLog({ entries, visible, onToggle, onClear }: StateLogProps)
       <div className="flex items-center gap-3">
         <button
           onClick={onToggle}
-          className="rounded bg-surface-light px-3 py-1.5 text-sm text-text-muted hover:text-text transition-colors"
+          className="rounded-md border border-border bg-bg px-3 py-1.5 text-sm text-text-muted hover:text-text transition-colors"
         >
           {visible ? 'Hide' : 'Show'} State / Network
         </button>
@@ -59,7 +59,7 @@ export function StateLog({ entries, visible, onToggle, onClear }: StateLogProps)
       </div>
 
       {visible && (
-        <div className="mt-2 max-h-64 overflow-y-auto rounded-lg bg-surface p-3 font-mono text-xs">
+        <div className="mt-2 max-h-64 overflow-y-auto rounded-lg border border-border bg-bg p-3 font-mono text-xs">
           {entries.length === 0 ? (
             <span className="text-text-muted">No events yet. Interact with the demo above.</span>
           ) : (

@@ -42,7 +42,7 @@ export function LatencyHistogram({ stats, label, color }: LatencyHistogramProps)
 
   if (!stats || stats.samples.length === 0) {
     return (
-      <div className="flex h-48 items-center justify-center rounded-lg bg-surface">
+      <div className="flex h-48 items-center justify-center rounded-xl border border-border bg-surface">
         <span className="text-sm text-text-muted">Run benchmark to see histogram</span>
       </div>
     );
@@ -56,7 +56,7 @@ export function LatencyHistogram({ stats, label, color }: LatencyHistogramProps)
   const barWidth = Math.max(2, chartWidth / buckets.length - 1);
 
   return (
-    <div className="rounded-lg bg-surface p-4">
+    <div className="rounded-xl border border-border bg-surface p-4">
       <h4 className="mb-2 text-sm font-semibold text-text">{label}</h4>
 
       <svg
