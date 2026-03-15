@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { CodeSnippets } from '@/components/CodeSnippets';
 import { ConflictArena } from '@/components/ConflictArena';
 import { LatencyRace } from '@/components/LatencyRace';
-import { getShareUrl } from '@/lib/session';
+import { getSessionId, getShareUrl } from '@/lib/session';
 
 type Tab = 'conflict-arena' | 'latency-race';
 
@@ -87,6 +87,16 @@ export default function App() {
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
   }, []);
+
+  // Send session ID to parent when embedded (for "open in new tab" link)
+  useEffect(() => {
+    if (embed && window.parent !== window) {
+      window.parent.postMessage(
+        { type: 'session-id', sessionId: getSessionId() },
+        '*',
+      );
+    }
+  }, [embed]);
 
   // Mark load complete for demo badge
   useEffect(() => {

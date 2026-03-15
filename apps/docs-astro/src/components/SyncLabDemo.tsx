@@ -5,6 +5,7 @@ const DEMO_URL = 'https://demo.topgun.build';
 export function SyncLabDemo() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [tabUrl, setTabUrl] = useState(DEMO_URL);
 
   // Sync theme from host page (initial read + watch for changes)
   useEffect(() => {
@@ -28,6 +29,17 @@ export function SyncLabDemo() {
     );
   }, [theme]);
 
+  // Listen for session ID from embedded sync-lab
+  useEffect(() => {
+    const handler = (event: MessageEvent) => {
+      if (event.data?.type === 'session-id' && event.data.sessionId) {
+        setTabUrl(`${DEMO_URL}?session=${event.data.sessionId}`);
+      }
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, []);
+
   // Initial src includes theme; subsequent changes use postMessage
   const src = `${DEMO_URL}?embed&theme=${theme}`;
   const srcRef = useRef(src);
@@ -47,7 +59,7 @@ export function SyncLabDemo() {
             Two devices, one session — watch CRDT conflict resolution happen in
             real time. Open in a{' '}
             <a
-              href={DEMO_URL}
+              href={tabUrl}
               target="_blank"
               rel="noreferrer"
               className="text-blue-600 dark:text-blue-400 underline underline-offset-2 hover:text-blue-800 dark:hover:text-blue-300"
