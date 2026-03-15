@@ -269,9 +269,14 @@ export class SingleServerProvider implements IConnectionProvider {
   }
 
   /**
-   * Force-close the current WebSocket so the onclose handler triggers reconnection.
+   * Force-close the current WebSocket and immediately schedule reconnection.
    * Unlike close(), this does NOT set isClosing and preserves reconnect behavior.
    * Resets the reconnect counter so the full backoff budget is available.
+   *
+   * Critically, this does NOT wait for the TCP close handshake (which can
+   * hang 20+ seconds on a dead network). Instead it strips all handlers from
+   * the old WebSocket, fires a best-effort close(), nulls the reference, and
+   * schedules reconnect right away.
    */
   forceReconnect(): void {
     this.reconnectAttempts = 0;
@@ -283,17 +288,26 @@ export class SingleServerProvider implements IConnectionProvider {
     }
 
     if (this.ws) {
-      if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
-        // onclose handler will call scheduleReconnect()
+      // Detach all handlers so the lingering socket cannot fire events
+      this.ws.onopen = null;
+      this.ws.onclose = null;
+      this.ws.onerror = null;
+      this.ws.onmessage = null;
+
+      // Best-effort close — don't await the TCP handshake
+      try {
         this.ws.close();
-      } else {
-        // WebSocket already closed — schedule reconnect directly
-        this.scheduleReconnect();
+      } catch {
+        // Ignore errors on already-dead sockets
       }
-    } else {
-      // No WebSocket at all — schedule reconnect directly
-      this.scheduleReconnect();
+      this.ws = null;
     }
+
+    // Emit disconnected so SyncEngine knows connection is down NOW
+    this.emit('disconnected', 'default');
+
+    // Schedule reconnect immediately (delay 0 → first attempt uses jittered base delay)
+    this.scheduleReconnect();
   }
 
   /**

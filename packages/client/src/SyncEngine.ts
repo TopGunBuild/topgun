@@ -761,20 +761,39 @@ export class SyncEngine {
     const lastIdNum = parseInt(lastId, 10);
     let maxSyncedId = -1;
     let ackedCount = 0;
-    this.opLog.forEach(op => {
-      if (op.id) {
-        const opIdNum = parseInt(op.id, 10);
-        if (!isNaN(opIdNum) && !isNaN(lastIdNum) && opIdNum <= lastIdNum) {
-          if (!op.synced) {
-            ackedCount++;
+
+    if (!isNaN(lastIdNum)) {
+      // Normal path: server returned a valid numeric lastId
+      this.opLog.forEach(op => {
+        if (op.id) {
+          const opIdNum = parseInt(op.id, 10);
+          if (!isNaN(opIdNum) && opIdNum <= lastIdNum) {
+            if (!op.synced) {
+              ackedCount++;
+            }
+            op.synced = true;
+            if (opIdNum > maxSyncedId) {
+              maxSyncedId = opIdNum;
+            }
           }
+        }
+      });
+    } else {
+      // Fallback: server returned non-numeric lastId (e.g. "unknown", "undefined").
+      // The server ACKed the batch, so mark ALL pending ops as synced.
+      logger.warn({ lastId }, 'OP_ACK has non-numeric lastId — marking all pending ops as synced');
+      this.opLog.forEach(op => {
+        if (!op.synced) {
+          ackedCount++;
           op.synced = true;
-          if (opIdNum > maxSyncedId) {
+          const opIdNum = parseInt(op.id, 10);
+          if (!isNaN(opIdNum) && opIdNum > maxSyncedId) {
             maxSyncedId = opIdNum;
           }
         }
-      }
-    });
+      });
+    }
+
     if (maxSyncedId !== -1) {
       this.storageAdapter.markOpsSynced(maxSyncedId).catch(err => logger.error({ err }, 'Failed to mark ops synced'));
     }
