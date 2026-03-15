@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { QRBanner } from '@/components/QRBanner';
 import { CodeSnippets } from '@/components/CodeSnippets';
 import { ConflictArena } from '@/components/ConflictArena';
 import { LatencyRace } from '@/components/LatencyRace';
@@ -120,9 +119,6 @@ export default function App() {
               {copied ? 'Copied!' : 'Share session'}
             </button>
           </header>
-          <div className="mb-6">
-            <QRBanner />
-          </div>
         </>
       )}
 
