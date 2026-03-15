@@ -33,9 +33,11 @@ export function SyncLabDemo() {
   // Listen for session ID from embedded sync-lab
   useEffect(() => {
     const handler = (event: MessageEvent) => {
+      console.log('[docs] postMessage received:', event.data?.type, event.data);
       if (event.data?.type === 'session-id' && event.data.sessionId) {
         setTabUrl(`${DEMO_URL}?session=${event.data.sessionId}`);
       } else if (event.data?.type === 'resize' && typeof event.data.height === 'number') {
+        console.log('[docs] setting iframe height to:', event.data.height);
         setIframeHeight(event.data.height);
       }
     };

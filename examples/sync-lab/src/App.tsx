@@ -53,6 +53,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('conflict-arena');
   const { embed, demo, theme } = useQueryParams();
   const startTimeRef = useRef(performance.now());
+  const rootRef = useRef<HTMLDivElement>(null);
   const [copied, setCopied] = useState(false);
 
   const handleShareSession = useCallback(async () => {
@@ -98,14 +99,21 @@ export default function App() {
     );
 
     const sendHeight = () => {
-      const height = document.documentElement.scrollHeight;
+      const el = rootRef.current;
+      if (!el) return;
+      const height = el.scrollHeight;
+      console.log('[sync-lab] sending resize postMessage, height:', height);
       window.parent.postMessage({ type: 'resize', height }, '*');
     };
 
-    sendHeight();
+    // Small delay to let content render before first measurement
+    const timer = setTimeout(sendHeight, 100);
     const observer = new ResizeObserver(sendHeight);
-    observer.observe(document.body);
-    return () => observer.disconnect();
+    if (rootRef.current) observer.observe(rootRef.current);
+    return () => {
+      clearTimeout(timer);
+      observer.disconnect();
+    };
   }, [embed]);
 
   // Mark load complete for demo badge
@@ -119,7 +127,7 @@ export default function App() {
   ];
 
   return (
-    <div className={`mx-auto max-w-7xl px-4 py-6 ${embed ? '' : 'min-h-screen'}`}>
+    <div ref={rootRef} className={`mx-auto max-w-7xl px-4 py-6 ${embed ? '' : 'min-h-screen'}`}>
       {/* Header and QR banner hidden in embed mode */}
       {!embed && (
         <>
