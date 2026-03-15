@@ -146,7 +146,9 @@ export function useDeviceClient(deviceId: string): UseDeviceClientReturn {
     subscribeToConnectionState(newHandle.client);
 
     setHandle(newHandle);
-    setIsConnected(true);
+    // Don't set isConnected manually — let the onConnectionStateChange listener
+    // reflect the real state. Setting it here causes a true→false→true flicker
+    // that breaks the ControlPanel's syncing timer.
     handleRef.current = newHandle;
 
     // Read current state after replay

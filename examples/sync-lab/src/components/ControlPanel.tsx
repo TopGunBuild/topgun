@@ -28,6 +28,8 @@ export function ControlPanel({
       prevPendingRef.current = pendingOps;
       return () => clearTimeout(timer);
     }
+    // Clear stale syncing state when conditions no longer match
+    setSyncing(false);
     prevPendingRef.current = pendingOps;
   }, [pendingOps, isConnected]);
 
