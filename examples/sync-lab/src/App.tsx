@@ -102,7 +102,6 @@ export default function App() {
       const el = rootRef.current;
       if (!el) return;
       const height = el.scrollHeight;
-      console.log('[sync-lab] sending resize postMessage, height:', height);
       window.parent.postMessage({ type: 'resize', height }, '*');
     };
 
