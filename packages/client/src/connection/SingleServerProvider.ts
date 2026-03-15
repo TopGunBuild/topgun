@@ -57,6 +57,12 @@ export class SingleServerProvider implements IConnectionProvider {
       return; // Already connected
     }
 
+    // Skip connection attempt when browser reports no network —
+    // the 'online' event listener will trigger forceReconnect() when network returns
+    if (typeof globalThis.navigator !== 'undefined' && globalThis.navigator.onLine === false) {
+      throw new Error('Browser is offline — skipping connection attempt');
+    }
+
     this.isClosing = false;
 
     return new Promise((resolve, reject) => {

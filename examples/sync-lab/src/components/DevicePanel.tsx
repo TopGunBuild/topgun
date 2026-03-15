@@ -99,9 +99,9 @@ export function DevicePanel({ deviceId, label, showTimestamps }: DevicePanelProp
     setMergeResults(new Map());
   }, [disconnect]);
 
-  const handleReconnect = useCallback(() => {
+  const handleReconnect = useCallback(async () => {
     // reconnect() returns the new map directly — avoids stale closure capture
-    const { preState, newMap } = reconnect();
+    const { preState, newMap } = await reconnect();
     preReconnectStateRef.current = preState;
 
     // After a short delay (let SyncEngine do its thing), detect conflicts

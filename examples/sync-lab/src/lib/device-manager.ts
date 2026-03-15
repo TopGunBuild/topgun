@@ -35,7 +35,7 @@ const getDemoToken = (): string =>
  * Create a fresh TopGunClient representing one "device" in the demo.
  * Each device has its own MemoryStorageAdapter so state is fully isolated.
  */
-export function createDevice(deviceId: string, mapName: string): DeviceHandle {
+export async function createDevice(deviceId: string, mapName: string): Promise<DeviceHandle> {
   const storage = new IDBAdapter();
   const client = new TopGunClient({
     nodeId: deviceId,
@@ -43,6 +43,7 @@ export function createDevice(deviceId: string, mapName: string): DeviceHandle {
     storage,
     backoff: { maxRetries: Infinity },
   });
+  await client.start();
   client.setAuthToken(getDemoToken());
   const map = client.getMap<string, any>(mapName);
 
@@ -85,12 +86,12 @@ export function disconnectDevice(handle: DeviceHandle): void {
  * saved snapshot via map.set() calls. The new SyncEngine will connect
  * to the server and trigger Merkle tree delta sync automatically.
  */
-export function reconnectDevice(
+export async function reconnectDevice(
   deviceId: string,
   mapName: string,
   savedState: DeviceState,
-): DeviceHandle {
-  const handle = createDevice(deviceId, mapName);
+): Promise<DeviceHandle> {
+  const handle = await createDevice(deviceId, mapName);
   // Replay saved state so the new client has the offline edits
   for (const [key, record] of savedState.entries) {
     if (record.value !== null) {

@@ -25,7 +25,7 @@ export interface UseDeviceClientReturn {
   /** Disconnect the device (snapshot + close) */
   disconnect: () => void;
   /** Reconnect the device (create new client + replay snapshot). Returns { preState, newMap } for conflict detection. */
-  reconnect: () => { preState: Map<string, LWWRecord<any>>; newMap: LWWMap<string, any> };
+  reconnect: () => Promise<{ preState: Map<string, LWWRecord<any>>; newMap: LWWMap<string, any> }>;
   /** Force re-read todos from the map */
   refreshTodos: () => void;
   /** The device ID */
@@ -83,18 +83,25 @@ export function useDeviceClient(deviceId: string): UseDeviceClientReturn {
     if (mountedRef.current) return;
     mountedRef.current = true;
 
-    const h = createDevice(deviceId, MAP_NAME);
-    setHandle(h);
-    setIsConnected(true);
-    handleRef.current = h;
+    let cleanedUp = false;
+    createDevice(deviceId, MAP_NAME).then((h) => {
+      if (cleanedUp) {
+        h.client.close();
+        return;
+      }
+      setHandle(h);
+      setIsConnected(true);
+      handleRef.current = h;
 
-    subscribeToMap(h.map);
-    subscribeToConnectionState(h.client);
+      subscribeToMap(h.map);
+      subscribeToConnectionState(h.client);
 
-    // Initial read
-    setTodos(getAllTodos(h.map));
+      // Initial read
+      setTodos(getAllTodos(h.map));
+    });
 
     return () => {
+      cleanedUp = true;
       mountedRef.current = false;
       if (unsubscribeRef.current) {
         unsubscribeRef.current();
@@ -104,7 +111,7 @@ export function useDeviceClient(deviceId: string): UseDeviceClientReturn {
         unsubscribeStateRef.current();
         unsubscribeStateRef.current = null;
       }
-      h.client.close();
+      handleRef.current?.client.close();
     };
     // Only create once per deviceId
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -121,13 +128,13 @@ export function useDeviceClient(deviceId: string): UseDeviceClientReturn {
     setIsConnected(false);
   }, []);
 
-  const reconnect = useCallback((): { preState: Map<string, LWWRecord<any>>; newMap: LWWMap<string, any> } => {
+  const reconnect = useCallback(async (): Promise<{ preState: Map<string, LWWRecord<any>>; newMap: LWWMap<string, any> }> => {
     const h = handleRef.current;
     // Snapshot the live map now — captures both pre-disconnect state and offline writes
     const currentState = h ? snapshotDevice(h.map) : { entries: new Map() };
     const preState = currentState.entries;
 
-    const newHandle = reconnectDevice(
+    const newHandle = await reconnectDevice(
       deviceId,
       MAP_NAME,
       currentState,

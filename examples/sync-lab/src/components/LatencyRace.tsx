@@ -27,7 +27,7 @@ export function LatencyRace() {
 
     // Phase 1: Online benchmark
     if (!isConnected) {
-      reconnectRef.current();
+      await reconnectRef.current();
     }
     // Small delay to let connection establish
     await new Promise(r => setTimeout(r, 300));
@@ -59,7 +59,7 @@ export function LatencyRace() {
     offlineClient.close();
 
     // Reconnect the main device
-    reconnectRef.current();
+    await reconnectRef.current();
 
     setRunning(false);
   }, [map, running, isConnected, disconnect, runBenchmark]);
