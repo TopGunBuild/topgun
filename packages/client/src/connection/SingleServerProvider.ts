@@ -232,6 +232,14 @@ export class SingleServerProvider implements IConnectionProvider {
       this.reconnectTimer = null;
     }
 
+    // When browser reports offline, don't schedule reconnects —
+    // the 'online' event listener will call forceReconnect() when network returns
+    if (typeof globalThis.navigator !== 'undefined' && globalThis.navigator.onLine === false
+        && this.config.listenNetworkEvents) {
+      logger.info({ url: this.url }, 'Browser offline — waiting for online event instead of polling');
+      return;
+    }
+
     if (this.reconnectAttempts >= this.config.maxReconnectAttempts) {
       logger.error(
         { attempts: this.reconnectAttempts, url: this.url },
