@@ -4,16 +4,15 @@ const DEMO_URL = 'https://demo.topgun.build';
 
 export function SyncLabDemo() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const [theme, setTheme] = useState<'dark' | 'light'>(() =>
-    document.documentElement.classList.contains('dark') ? 'dark' : 'light'
-  );
+  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
 
-  // Watch for dark class changes on the host page
+  // Sync theme from host page (initial read + watch for changes)
   useEffect(() => {
-    const observer = new MutationObserver(() => {
-      const isDark = document.documentElement.classList.contains('dark');
-      setTheme(isDark ? 'dark' : 'light');
-    });
+    const read = () =>
+      document.documentElement.classList.contains('dark') ? 'dark' : 'light';
+    setTheme(read());
+
+    const observer = new MutationObserver(() => setTheme(read()));
     observer.observe(document.documentElement, {
       attributes: true,
       attributeFilter: ['class'],
