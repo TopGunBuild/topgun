@@ -88,14 +88,24 @@ export default function App() {
     return () => window.removeEventListener('message', handler);
   }, []);
 
-  // Send session ID to parent when embedded (for "open in new tab" link)
+  // Send session ID and content height to parent when embedded
   useEffect(() => {
-    if (embed && window.parent !== window) {
-      window.parent.postMessage(
-        { type: 'session-id', sessionId: getSessionId() },
-        '*',
-      );
-    }
+    if (!embed || window.parent === window) return;
+
+    window.parent.postMessage(
+      { type: 'session-id', sessionId: getSessionId() },
+      '*',
+    );
+
+    const sendHeight = () => {
+      const height = document.documentElement.scrollHeight;
+      window.parent.postMessage({ type: 'resize', height }, '*');
+    };
+
+    sendHeight();
+    const observer = new ResizeObserver(sendHeight);
+    observer.observe(document.body);
+    return () => observer.disconnect();
   }, [embed]);
 
   // Mark load complete for demo badge

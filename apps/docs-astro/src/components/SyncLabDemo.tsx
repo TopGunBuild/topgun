@@ -6,6 +6,7 @@ export function SyncLabDemo() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [tabUrl, setTabUrl] = useState(DEMO_URL);
+  const [iframeHeight, setIframeHeight] = useState(680);
 
   // Sync theme from host page (initial read + watch for changes)
   useEffect(() => {
@@ -34,6 +35,8 @@ export function SyncLabDemo() {
     const handler = (event: MessageEvent) => {
       if (event.data?.type === 'session-id' && event.data.sessionId) {
         setTabUrl(`${DEMO_URL}?session=${event.data.sessionId}`);
+      } else if (event.data?.type === 'resize' && typeof event.data.height === 'number') {
+        setIframeHeight(event.data.height);
       }
     };
     window.addEventListener('message', handler);
@@ -77,7 +80,7 @@ export function SyncLabDemo() {
             src={srcRef.current}
             title="TopGun Sync Lab"
             className="w-full border-0"
-            style={{ height: '680px' }}
+            style={{ height: `${iframeHeight}px`, transition: 'height 0.2s ease' }}
             allow="clipboard-write"
             loading="lazy"
           />
