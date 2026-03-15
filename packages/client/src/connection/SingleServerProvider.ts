@@ -33,6 +33,7 @@ export class SingleServerProvider implements IConnectionProvider {
   private isClosing: boolean = false;
   private listeners: Map<ConnectionProviderEvent, Set<ConnectionEventHandler>> = new Map();
   private onlineHandler: (() => void) | null = null;
+  private offlineHandler: (() => void) | null = null;
 
   constructor(config: SingleServerProviderConfig) {
     this.url = config.url;
@@ -348,16 +349,31 @@ export class SingleServerProvider implements IConnectionProvider {
       this.forceReconnect();
     };
 
+    this.offlineHandler = () => {
+      if (this.isClosing) return;
+      if (!this.isConnected()) return;
+
+      logger.info({ url: this.url }, 'Network offline detected — disconnecting immediately');
+      this.forceReconnect();
+    };
+
     globalThis.addEventListener('online', this.onlineHandler);
+    globalThis.addEventListener('offline', this.offlineHandler);
   }
 
   /**
    * Remove browser network event listeners.
    */
   private teardownNetworkListeners(): void {
-    if (this.onlineHandler && typeof globalThis.removeEventListener === 'function') {
-      globalThis.removeEventListener('online', this.onlineHandler);
-      this.onlineHandler = null;
+    if (typeof globalThis.removeEventListener === 'function') {
+      if (this.onlineHandler) {
+        globalThis.removeEventListener('online', this.onlineHandler);
+        this.onlineHandler = null;
+      }
+      if (this.offlineHandler) {
+        globalThis.removeEventListener('offline', this.offlineHandler);
+        this.offlineHandler = null;
+      }
     }
   }
 }
