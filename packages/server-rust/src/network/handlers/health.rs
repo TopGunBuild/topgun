@@ -69,7 +69,7 @@ mod tests {
             start_time: Instant::now(),
             observability: None,
             operation_service: None,
-            operation_pipeline: None,
+            dispatcher: None,
             jwt_secret: None,
             cluster_state: None,
             store_factory: None,

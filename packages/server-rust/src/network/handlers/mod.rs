@@ -21,16 +21,14 @@ pub use websocket::ws_upgrade_handler;
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::Mutex;
-
 use arc_swap::ArcSwap;
 
 use super::{ConnectionRegistry, NetworkConfig, ShutdownController};
 use crate::cluster::state::ClusterState;
 use crate::service::classify::OperationService;
 use crate::service::config::ServerConfig;
+use crate::service::dispatch::PartitionDispatcher;
 use crate::service::middleware::ObservabilityHandle;
-use crate::service::operation::OperationPipeline;
 use crate::storage::factory::RecordStoreFactory;
 
 /// Shared application state passed to all axum handlers via `State` extraction.
@@ -57,11 +55,11 @@ pub struct AppState {
     ///
     /// `None` in network-only tests that do not wire the service layer.
     pub operation_service: Option<Arc<OperationService>>,
-    /// Full Tower middleware pipeline (`LoadShed` -> `Timeout` -> `Metrics` -> `Router`).
-    /// Wrapped in `Mutex` because `Service::call()` requires `&mut self`.
+    /// Partition-based operation dispatcher that routes operations to
+    /// per-worker pipelines via MPSC channels.
     ///
     /// `None` in network-only tests that do not wire the service layer.
-    pub operation_pipeline: Option<Arc<Mutex<OperationPipeline>>>,
+    pub dispatcher: Option<Arc<PartitionDispatcher>>,
     /// JWT secret for verifying authentication tokens.
     ///
     /// `None` when auth is not configured (existing network tests).

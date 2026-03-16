@@ -235,7 +235,7 @@ fn build_app(
         start_time: Instant::now(),
         observability,
         operation_service: None,
-        operation_pipeline: None,
+        dispatcher: None,
         jwt_secret: None,
         cluster_state,
         store_factory,
