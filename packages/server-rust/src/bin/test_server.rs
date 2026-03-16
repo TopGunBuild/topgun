@@ -32,8 +32,9 @@ use topgun_server::service::domain::search::{
     SearchMutationObserver, SearchRegistry, SearchService, TantivyMapIndex,
 };
 use topgun_server::service::domain::sync::SyncService;
+use topgun_server::service::dispatch::{DispatchConfig, PartitionDispatcher};
 use topgun_server::service::middleware::build_operation_pipeline;
-use topgun_server::service::operation::{service_names, OperationPipeline};
+use topgun_server::service::operation::service_names;
 use topgun_server::service::router::OperationRouter;
 use topgun_server::service::security::{SecurityConfig, WriteValidator};
 use topgun_server::service::OperationService;
@@ -53,9 +54,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let (classify_svc, pipeline, connection_registry) = build_services();
-
-    let operation_pipeline = Arc::new(tokio::sync::Mutex::new(pipeline));
+    let (classify_svc, dispatcher, connection_registry) = build_services();
 
     // Build the AppState with all services wired
     let shutdown = Arc::new(ShutdownController::new());
@@ -66,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
         start_time: Instant::now(),
         observability: None,
         operation_service: Some(classify_svc),
-        operation_pipeline: Some(operation_pipeline),
+        dispatcher: Some(Arc::new(dispatcher)),
         jwt_secret: Some("test-e2e-secret".to_string()),
         cluster_state: None,
         store_factory: None,
@@ -156,14 +155,16 @@ impl ObserverFactory for QueryObserverFactory {
     }
 }
 
-/// Wires all 7 domain services and builds the operation pipeline.
+/// Wires all 7 domain services and builds the partition dispatcher.
 ///
 /// Follows the `setup()` pattern from `packages/server-rust/src/lib.rs:63-148`.
-/// Returns the classifier, the boxed pipeline, and the connection registry.
+/// Domain services are `Arc`-wrapped and shared across all worker pipelines.
+/// Each worker gets its own `OperationRouter` + `OperationPipeline` via a
+/// factory closure passed to `PartitionDispatcher::new()`.
 #[allow(clippy::too_many_lines)]
 fn build_services() -> (
     Arc<OperationService>,
-    OperationPipeline,
+    PartitionDispatcher,
     Arc<ConnectionRegistry>,
 ) {
     let config = ServerConfig {
@@ -244,62 +245,57 @@ fn build_services() -> (
         ))
     };
 
-    let mut router = OperationRouter::new();
-    router.register(
-        service_names::CRDT,
-        Arc::new(CrdtService::new(
-            Arc::clone(&record_store_factory),
-            Arc::clone(&connection_registry),
-            write_validator,
-            Arc::clone(&query_registry),
-        )),
-    );
-    router.register(
-        service_names::SYNC,
-        Arc::new(SyncService::new(
-            merkle_manager,
-            Arc::clone(&record_store_factory),
-            Arc::clone(&connection_registry),
-        )),
-    );
-    router.register(
-        service_names::QUERY,
-        Arc::new(QueryService::new(
-            Arc::clone(&query_registry),
-            Arc::clone(&record_store_factory),
-            Arc::clone(&connection_registry),
-        )),
-    );
-    router.register(
-        service_names::MESSAGING,
-        Arc::new(MessagingService::new(Arc::clone(&connection_registry))),
-    );
-    router.register(
-        service_names::COORDINATION,
-        Arc::new(CoordinationService::new(
-            cluster_state,
-            Arc::clone(&connection_registry),
-        )),
-    );
-    router.register(
-        service_names::SEARCH,
-        Arc::new(SearchService::new(
-            search_registry,
-            search_indexes,
-            Arc::clone(&record_store_factory),
-            Arc::clone(&connection_registry),
-        )),
-    );
-    router.register(
-        service_names::PERSISTENCE,
-        Arc::new(PersistenceService::new(
-            Arc::clone(&connection_registry),
-            config.node_id.clone(),
-        )),
-    );
+    // Arc-wrap all domain services so they can be shared across N+1 worker pipelines.
+    let crdt_svc = Arc::new(CrdtService::new(
+        Arc::clone(&record_store_factory),
+        Arc::clone(&connection_registry),
+        write_validator,
+        Arc::clone(&query_registry),
+    ));
+    let sync_svc = Arc::new(SyncService::new(
+        merkle_manager,
+        Arc::clone(&record_store_factory),
+        Arc::clone(&connection_registry),
+    ));
+    let query_svc = Arc::new(QueryService::new(
+        Arc::clone(&query_registry),
+        Arc::clone(&record_store_factory),
+        Arc::clone(&connection_registry),
+    ));
+    let messaging_svc = Arc::new(MessagingService::new(Arc::clone(&connection_registry)));
+    let coordination_svc = Arc::new(CoordinationService::new(
+        cluster_state,
+        Arc::clone(&connection_registry),
+    ));
+    let search_svc = Arc::new(SearchService::new(
+        search_registry,
+        search_indexes,
+        Arc::clone(&record_store_factory),
+        Arc::clone(&connection_registry),
+    ));
+    let persistence_svc = Arc::new(PersistenceService::new(
+        Arc::clone(&connection_registry),
+        config.node_id.clone(),
+    ));
 
-    let pipeline = build_operation_pipeline(router, &config);
-    (classify_svc, pipeline, connection_registry)
+    // Factory closure: creates a fresh OperationRouter + pipeline per worker.
+    // Domain services are Arc-cloned (cheap reference count bump), while
+    // each worker gets its own Tower middleware stack.
+    let pipeline_factory = move || {
+        let mut router = OperationRouter::new();
+        router.register(service_names::CRDT, Arc::clone(&crdt_svc));
+        router.register(service_names::SYNC, Arc::clone(&sync_svc));
+        router.register(service_names::QUERY, Arc::clone(&query_svc));
+        router.register(service_names::MESSAGING, Arc::clone(&messaging_svc));
+        router.register(service_names::COORDINATION, Arc::clone(&coordination_svc));
+        router.register(service_names::SEARCH, Arc::clone(&search_svc));
+        router.register(service_names::PERSISTENCE, Arc::clone(&persistence_svc));
+        build_operation_pipeline(router, &config)
+    };
+
+    let dispatch_config = DispatchConfig::default();
+    let dispatcher = PartitionDispatcher::new(&dispatch_config, pipeline_factory);
+    (classify_svc, dispatcher, connection_registry)
 }
 
 /// Waits for SIGTERM or SIGINT (Ctrl+C) for graceful shutdown.
