@@ -45,7 +45,7 @@ impl Default for DispatchConfig {
     fn default() -> Self {
         Self {
             worker_count: std::thread::available_parallelism()
-                .map(|n| n.get())
+                .map(std::num::NonZeroUsize::get)
                 .unwrap_or(4),
             channel_buffer_size: 1024,
         }
@@ -66,7 +66,7 @@ impl Default for DispatchConfig {
 /// Dropping this struct drops all sender halves, causing worker tasks to drain
 /// and exit cleanly -- no explicit shutdown protocol is needed.
 pub struct PartitionDispatcher {
-    /// Per-worker MPSC senders, indexed by worker index (0..worker_count).
+    /// Per-worker MPSC senders, indexed by worker index (`0..worker_count`).
     workers: Vec<mpsc::Sender<DispatchRequest>>,
     /// Dedicated sender for operations with no partition affinity.
     global_worker: mpsc::Sender<DispatchRequest>,
@@ -80,7 +80,7 @@ impl PartitionDispatcher {
     /// `pipeline_factory` is called exactly `worker_count + 1` times: once per
     /// partition worker and once for the global worker. Each call must return a
     /// fresh, independent `OperationPipeline`.
-    pub fn new<F>(config: DispatchConfig, pipeline_factory: F) -> Self
+    pub fn new<F>(config: &DispatchConfig, pipeline_factory: F) -> Self
     where
         F: Fn() -> OperationPipeline,
     {
@@ -115,8 +115,11 @@ impl PartitionDispatcher {
     /// - `Some(id)`: routes to `workers[id % worker_count]`.
     /// - `None`: routes to the dedicated global worker.
     ///
+    /// # Errors
+    ///
     /// Returns `OperationError::Internal` if the target worker channel is closed
-    /// (worker task has dropped its receiver).
+    /// (worker task has dropped its receiver), or if the worker's response
+    /// channel is dropped before sending a result.
     pub async fn dispatch(
         &self,
         operation: Operation,
@@ -262,7 +265,7 @@ mod tests {
             worker_count: 4,
             channel_buffer_size: 64,
         };
-        PartitionDispatcher::new(config, make_pipeline)
+        PartitionDispatcher::new(&config, make_pipeline)
     }
 
     // -----------------------------------------------------------------------
