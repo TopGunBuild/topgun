@@ -20,7 +20,6 @@ use tokio::sync::mpsc;
 use topgun_core::messages::{
     AuthAckData, ErrorPayload, OpAckMessage, OpAckPayload, Message as TopGunMessage,
 };
-use tower::{Service, ServiceExt};
 use tracing::{debug, warn};
 
 use super::auth::AuthHandler;
@@ -28,9 +27,8 @@ use super::AppState;
 use crate::network::connection::ConnectionId;
 use crate::network::{ConnectionKind, OutboundMessage};
 use crate::service::classify::OperationService;
-use crate::service::operation::{
-    CallerOrigin, ClassifyError, OperationPipeline, OperationResponse,
-};
+use crate::service::dispatch::PartitionDispatcher;
+use crate::service::operation::{CallerOrigin, ClassifyError, OperationResponse};
 
 /// Upgrades an HTTP connection to a WebSocket connection.
 ///
@@ -111,7 +109,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         tg_msg,
                         conn_id,
                         state.operation_service.as_ref(),
-                        state.operation_pipeline.as_ref(),
+                        state.dispatcher.as_ref(),
                         &handle.tx,
                     )
                     .await;
@@ -213,17 +211,17 @@ async fn dispatch_message(
     tg_msg: TopGunMessage,
     conn_id: ConnectionId,
     operation_service: Option<&Arc<OperationService>>,
-    operation_pipeline: Option<&Arc<tokio::sync::Mutex<OperationPipeline>>>,
+    dispatcher: Option<&Arc<PartitionDispatcher>>,
     tx: &mpsc::Sender<OutboundMessage>,
 ) {
-    let (Some(classify_svc), Some(pipeline)) = (operation_service, operation_pipeline) else {
-        debug!("operation pipeline not configured, dropping message from {:?}", conn_id);
+    let (Some(classify_svc), Some(dispatcher)) = (operation_service, dispatcher) else {
+        debug!("dispatcher not configured, dropping message from {:?}", conn_id);
         return;
     };
 
     // Handle BATCH messages: unpack each inner message and route individually
     if let TopGunMessage::Batch(ref batch_msg) = tg_msg {
-        unpack_and_dispatch_batch(batch_msg, conn_id, classify_svc, pipeline, tx).await;
+        unpack_and_dispatch_batch(batch_msg, conn_id, classify_svc, dispatcher, tx).await;
         return;
     }
 
@@ -233,22 +231,13 @@ async fn dispatch_message(
             // Set connection_id so domain services can look up the connection
             op.set_connection_id(conn_id);
 
-            // Route through the full Tower middleware pipeline
-            let mut pipeline_guard = pipeline.lock().await;
-            match ServiceExt::ready(&mut *pipeline_guard).await {
-                Ok(ready_svc) => match ready_svc.call(op).await {
-                    Ok(resp) => {
-                        drop(pipeline_guard);
-                        send_operation_response(resp, tx).await;
-                    }
-                    Err(e) => {
-                        drop(pipeline_guard);
-                        debug!("pipeline error for {:?}: {}", conn_id, e);
-                    }
-                },
+            // Route through the partition dispatcher (MPSC channel per worker)
+            match dispatcher.dispatch(op).await {
+                Ok(resp) => {
+                    send_operation_response(resp, tx).await;
+                }
                 Err(e) => {
-                    drop(pipeline_guard);
-                    debug!("pipeline not ready for {:?}: {}", conn_id, e);
+                    debug!("dispatch error for {:?}: {}", conn_id, e);
                 }
             }
         }
@@ -284,7 +273,7 @@ async fn unpack_and_dispatch_batch(
     batch_msg: &topgun_core::messages::BatchMessage,
     conn_id: ConnectionId,
     classify_svc: &OperationService,
-    pipeline: &Arc<tokio::sync::Mutex<OperationPipeline>>,
+    dispatcher: &Arc<PartitionDispatcher>,
     tx: &mpsc::Sender<OutboundMessage>,
 ) {
     let data = &batch_msg.data;
@@ -329,26 +318,19 @@ async fn unpack_and_dispatch_batch(
             }
         };
 
-        // Classify and route each inner message
+        // Classify and route each inner message individually.
+        // Inner messages target different services and partitions, so each
+        // must be dispatched separately for correct partition routing.
         match classify_svc.classify(inner_msg, None, CallerOrigin::Client) {
             Ok(mut op) => {
                 op.set_connection_id(conn_id);
 
-                let mut pipeline_guard = pipeline.lock().await;
-                match ServiceExt::ready(&mut *pipeline_guard).await {
-                    Ok(ready_svc) => match ready_svc.call(op).await {
-                        Ok(resp) => {
-                            drop(pipeline_guard);
-                            send_operation_response(resp, tx).await;
-                        }
-                        Err(e) => {
-                            drop(pipeline_guard);
-                            debug!("pipeline error for batch item from {:?}: {}", conn_id, e);
-                        }
-                    },
+                match dispatcher.dispatch(op).await {
+                    Ok(resp) => {
+                        send_operation_response(resp, tx).await;
+                    }
                     Err(e) => {
-                        drop(pipeline_guard);
-                        debug!("pipeline not ready for batch item from {:?}: {}", conn_id, e);
+                        debug!("dispatch error for batch item from {:?}: {}", conn_id, e);
                     }
                 }
             }
