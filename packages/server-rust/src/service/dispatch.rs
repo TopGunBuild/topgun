@@ -206,7 +206,7 @@ mod tests {
     // Stub service
     // -----------------------------------------------------------------------
 
-    /// Records which partition_id was routed to it, returns Ack.
+    /// Records which `partition_id` was routed to it, returns Ack.
     struct EchoService;
 
     impl Service<Operation> for EchoService {
@@ -287,7 +287,7 @@ mod tests {
         // We verify this indirectly by checking that responses are returned for
         // several calls with known partition IDs.
         for partition_id in [0u32, 1, 2, 3, 7, 11, 100, 271] {
-            let op = make_op_with_partition(partition_id as u64, Some(partition_id));
+            let op = make_op_with_partition(u64::from(partition_id), Some(partition_id));
             let result = dispatcher.dispatch(op).await;
             assert!(result.is_ok(), "partition {partition_id} should succeed");
         }
@@ -332,8 +332,7 @@ mod tests {
         let result = dispatcher.dispatch(op).await;
         assert!(
             matches!(result, Err(OperationError::Internal(_))),
-            "closed channel should return OperationError::Internal, got: {:?}",
-            result
+            "closed channel should return OperationError::Internal, got: {result:?}",
         );
     }
 }
