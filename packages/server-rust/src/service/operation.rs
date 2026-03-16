@@ -13,11 +13,12 @@ use crate::network::connection::ConnectionId;
 // ---------------------------------------------------------------------------
 
 /// Concrete type for the composed Tower middleware pipeline that wraps
-/// `OperationRouter`. Uses `BoxService` to erase the unnameable future type
-/// produced by `build_operation_pipeline()`. Stored in `AppState` behind
-/// `Arc<tokio::sync::Mutex<OperationPipeline>>` because `Service::call()`
-/// requires `&mut self`.
-pub type OperationPipeline = tower::util::BoxService<Operation, OperationResponse, OperationError>;
+/// `OperationRouter`. Uses `BoxCloneService` so the pipeline can be cheaply
+/// cloned per-request, eliminating the need for a global `Mutex`. Each clone
+/// gets an independent copy of the service stack while sharing underlying
+/// `Arc`-wrapped domain services.
+pub type OperationPipeline =
+    tower::util::BoxCloneService<Operation, OperationResponse, OperationError>;
 
 // ---------------------------------------------------------------------------
 // Service name constants

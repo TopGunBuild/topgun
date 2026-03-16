@@ -5,19 +5,20 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use tower::util::BoxCloneService;
 use tower::Service;
 
 use super::operation::{Operation, OperationError, OperationResponse};
 
 // ---------------------------------------------------------------------------
-// DomainHandler trait alias
+// DomainHandler type alias
 // ---------------------------------------------------------------------------
 
-/// A boxed Tower service that handles operations for a single domain.
-type BoxedService =
-    Box<dyn Service<Operation, Response = OperationResponse, Error = OperationError, Future = BoxedFuture> + Send>;
-
-type BoxedFuture = Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
+/// A cloneable, boxed Tower service that handles operations for a single domain.
+///
+/// Uses `BoxCloneService` so the entire router (and thus the pipeline) can be
+/// cloned per-request, avoiding a global `Mutex` bottleneck.
+type BoxedService = BoxCloneService<Operation, OperationResponse, OperationError>;
 
 // ---------------------------------------------------------------------------
 // OperationRouter
@@ -28,6 +29,9 @@ type BoxedFuture = Pin<Box<dyn Future<Output = Result<OperationResponse, Operati
 /// Each registered domain service is a `tower::Service<Operation>` keyed by
 /// its service name (e.g., `"crdt"`, `"sync"`). Operations with an unregistered
 /// `service_name` return `OperationError::UnknownService`.
+///
+/// Implements `Clone` so the entire pipeline can be cloned per-request.
+#[derive(Clone)]
 pub struct OperationRouter {
     services: HashMap<&'static str, BoxedService>,
 }
@@ -42,12 +46,19 @@ impl OperationRouter {
     }
 
     /// Register a domain service for the given name.
+    ///
+    /// The service must be `Clone` so the router can be cloned per-request.
+    /// Domain services wrapped in `Arc` (e.g., `Arc<CrdtService>`) satisfy this.
     pub fn register<S>(&mut self, name: &'static str, service: S)
     where
-        S: Service<Operation, Response = OperationResponse, Error = OperationError> + Send + 'static,
+        S: Service<Operation, Response = OperationResponse, Error = OperationError>
+            + Clone
+            + Send
+            + 'static,
         S::Future: Send + 'static,
     {
-        self.services.insert(name, Box::new(ServiceWrapper(service)));
+        self.services
+            .insert(name, BoxCloneService::new(service));
     }
 }
 
@@ -84,31 +95,6 @@ impl Service<Operation> for OperationRouter {
                 })
             }),
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ServiceWrapper (type-erased adapter)
-// ---------------------------------------------------------------------------
-
-/// Wrapper to type-erase a concrete `Service<Operation>` into a `BoxedService`.
-struct ServiceWrapper<S>(S);
-
-impl<S> Service<Operation> for ServiceWrapper<S>
-where
-    S: Service<Operation, Response = OperationResponse, Error = OperationError> + Send,
-    S::Future: Send + 'static,
-{
-    type Response = OperationResponse;
-    type Error = OperationError;
-    type Future = BoxedFuture;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.0.poll_ready(cx)
-    }
-
-    fn call(&mut self, op: Operation) -> Self::Future {
-        Box::pin(self.0.call(op))
     }
 }
 

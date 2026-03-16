@@ -32,6 +32,20 @@ use crate::service::operation::{
     CallerOrigin, ClassifyError, OperationPipeline, OperationResponse,
 };
 
+/// Helper: clone the pipeline and dispatch a single operation through it.
+///
+/// The `parking_lot::Mutex` is held only for the brief `clone()` call
+/// (~nanoseconds, just Arc reference count increments). The cloned pipeline
+/// is then used exclusively by this request with no contention.
+async fn call_pipeline(
+    pipeline: &parking_lot::Mutex<OperationPipeline>,
+    op: crate::service::operation::Operation,
+) -> Result<OperationResponse, crate::service::operation::OperationError> {
+    let mut pipeline_clone = pipeline.lock().clone();
+    // Lock is dropped here — processing happens on an owned clone
+    ServiceExt::ready(&mut pipeline_clone).await?.call(op).await
+}
+
 /// Upgrades an HTTP connection to a WebSocket connection.
 ///
 /// Configures write buffer sizes from the connection config, then hands
@@ -213,7 +227,7 @@ async fn dispatch_message(
     tg_msg: TopGunMessage,
     conn_id: ConnectionId,
     operation_service: Option<&Arc<OperationService>>,
-    operation_pipeline: Option<&Arc<tokio::sync::Mutex<OperationPipeline>>>,
+    operation_pipeline: Option<&Arc<parking_lot::Mutex<OperationPipeline>>>,
     tx: &mpsc::Sender<OutboundMessage>,
 ) {
     let (Some(classify_svc), Some(pipeline)) = (operation_service, operation_pipeline) else {
@@ -233,23 +247,10 @@ async fn dispatch_message(
             // Set connection_id so domain services can look up the connection
             op.set_connection_id(conn_id);
 
-            // Route through the full Tower middleware pipeline
-            let mut pipeline_guard = pipeline.lock().await;
-            match ServiceExt::ready(&mut *pipeline_guard).await {
-                Ok(ready_svc) => match ready_svc.call(op).await {
-                    Ok(resp) => {
-                        drop(pipeline_guard);
-                        send_operation_response(resp, tx).await;
-                    }
-                    Err(e) => {
-                        drop(pipeline_guard);
-                        debug!("pipeline error for {:?}: {}", conn_id, e);
-                    }
-                },
-                Err(e) => {
-                    drop(pipeline_guard);
-                    debug!("pipeline not ready for {:?}: {}", conn_id, e);
-                }
+            // Route through the full Tower middleware pipeline (clone per-request, no lock)
+            match call_pipeline(pipeline, op).await {
+                Ok(resp) => send_operation_response(resp, tx).await,
+                Err(e) => debug!("pipeline error for {:?}: {}", conn_id, e),
             }
         }
         Err(ClassifyError::TransportEnvelope { variant }) => {
@@ -284,7 +285,7 @@ async fn unpack_and_dispatch_batch(
     batch_msg: &topgun_core::messages::BatchMessage,
     conn_id: ConnectionId,
     classify_svc: &OperationService,
-    pipeline: &Arc<tokio::sync::Mutex<OperationPipeline>>,
+    pipeline: &parking_lot::Mutex<OperationPipeline>,
     tx: &mpsc::Sender<OutboundMessage>,
 ) {
     let data = &batch_msg.data;
@@ -329,27 +330,14 @@ async fn unpack_and_dispatch_batch(
             }
         };
 
-        // Classify and route each inner message
+        // Classify and route each inner message (clone per-request, no lock)
         match classify_svc.classify(inner_msg, None, CallerOrigin::Client) {
             Ok(mut op) => {
                 op.set_connection_id(conn_id);
 
-                let mut pipeline_guard = pipeline.lock().await;
-                match ServiceExt::ready(&mut *pipeline_guard).await {
-                    Ok(ready_svc) => match ready_svc.call(op).await {
-                        Ok(resp) => {
-                            drop(pipeline_guard);
-                            send_operation_response(resp, tx).await;
-                        }
-                        Err(e) => {
-                            drop(pipeline_guard);
-                            debug!("pipeline error for batch item from {:?}: {}", conn_id, e);
-                        }
-                    },
-                    Err(e) => {
-                        drop(pipeline_guard);
-                        debug!("pipeline not ready for batch item from {:?}: {}", conn_id, e);
-                    }
+                match call_pipeline(pipeline, op).await {
+                    Ok(resp) => send_operation_response(resp, tx).await,
+                    Err(e) => debug!("pipeline error for batch item from {:?}: {}", conn_id, e),
                 }
             }
             Err(e) => {
