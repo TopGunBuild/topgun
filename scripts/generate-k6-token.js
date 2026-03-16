@@ -25,7 +25,7 @@ const args = process.argv.slice(2).reduce((acc, arg) => {
 }, {});
 
 // Configuration
-const secret = args.secret || process.env.JWT_SECRET || 'topgun-secret-dev';
+const secret = args.secret || process.env.JWT_SECRET || 'test-e2e-secret';
 const expiresIn = args.expires || '24h';
 const userId = args.userId || 'k6-load-test-user';
 const roles = (args.roles || 'ADMIN').split(',');
