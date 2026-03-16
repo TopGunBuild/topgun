@@ -456,15 +456,29 @@ fn send_to_connection(conn_reg: &ConnectionRegistry, conn_id: ConnectionId, msg:
 }
 
 // ---------------------------------------------------------------------------
-// Notification batching event
+// Batched mutation event
 // ---------------------------------------------------------------------------
+
+/// Describes the index operation to apply in the batch processor.
+#[derive(Debug)]
+enum IndexOp {
+    /// Index (insert or update) a document with the given key/value.
+    Index {
+        key: String,
+        value: rmpv::Value,
+        change_type: ChangeEventType,
+    },
+    /// Remove a document by key.
+    Remove { key: String },
+    /// Clear all documents for the map.
+    Clear,
+}
 
 /// A single batched mutation event sent to the background processor.
 #[derive(Debug)]
 struct MutationEvent {
     map_name: String,
-    key: String,
-    change_type: ChangeEventType,
+    op: IndexOp,
 }
 
 // ---------------------------------------------------------------------------
@@ -474,15 +488,12 @@ struct MutationEvent {
 /// Implements `MutationObserver` for the search domain.
 ///
 /// On data mutations:
-///   1. Updates the tantivy index for the affected map.
-///   2. Sends a batched event to the background processor.
-///   3. The background task re-scores changed keys against standing subscriptions
+///   1. Enqueues an `IndexOp` event to the background batch processor (non-blocking).
+///   2. The background task indexes documents in batch (WRITE lock + commit once per map).
+///   3. After commit, re-scores changed keys against standing subscriptions
 ///      and sends `SearchUpdate` messages (ENTER/UPDATE/LEAVE) via `ConnectionRegistry`.
 pub struct SearchMutationObserver {
     map_name: String,
-    registry: Arc<SearchRegistry>,
-    indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
-    connection_registry: Arc<ConnectionRegistry>,
     /// Sender for the background batch processor.
     /// `UnboundedSender::send()` is synchronous, safe to call from sync trait methods.
     event_tx: mpsc::UnboundedSender<MutationEvent>,
@@ -503,24 +514,19 @@ impl SearchMutationObserver {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let shutdown_tx = Arc::new(shutdown_tx);
 
-        // Spawn background batch processor.
-        let registry_clone = Arc::clone(&registry);
-        let indexes_clone = Arc::clone(&indexes);
-        let conn_reg_clone = Arc::clone(&connection_registry);
+        // Spawn background batch processor — move the Arc values directly since
+        // the observer no longer needs them (all indexing happens in the batch task).
         tokio::spawn(run_batch_processor(
             event_rx,
             shutdown_rx,
-            registry_clone,
-            indexes_clone,
-            conn_reg_clone,
+            registry,
+            indexes,
+            connection_registry,
             Duration::from_millis(batch_interval_ms),
         ));
 
         Self {
             map_name,
-            registry,
-            indexes,
-            connection_registry,
             event_tx,
             shutdown_tx,
         }
@@ -540,36 +546,25 @@ impl SearchMutationObserver {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    /// Indexes a record value and enqueues a mutation event.
-    fn index_and_notify(&self, key: &str, value: &rmpv::Value, change_type: ChangeEventType) {
-        {
-            let mut indexes = self.indexes.write();
-            let index = indexes
-                .entry(self.map_name.clone())
-                .or_default();
-            index.index_document(key, value);
-            index.commit();
-        }
+    /// Enqueues an index operation for the batch processor (no synchronous indexing).
+    fn enqueue_index(&self, key: &str, value: rmpv::Value, change_type: ChangeEventType) {
         let _ = self.event_tx.send(MutationEvent {
             map_name: self.map_name.clone(),
-            key: key.to_owned(),
-            change_type,
+            op: IndexOp::Index {
+                key: key.to_owned(),
+                value,
+                change_type,
+            },
         });
     }
 
-    /// Removes a document from the index and enqueues a LEAVE event.
-    fn remove_and_notify(&self, key: &str) {
-        {
-            let mut indexes = self.indexes.write();
-            if let Some(index) = indexes.get_mut(&self.map_name) {
-                index.remove_document(key);
-                index.commit();
-            }
-        }
+    /// Enqueues a remove operation for the batch processor (no synchronous indexing).
+    fn enqueue_remove(&self, key: &str) {
         let _ = self.event_tx.send(MutationEvent {
             map_name: self.map_name.clone(),
-            key: key.to_owned(),
-            change_type: ChangeEventType::LEAVE,
+            op: IndexOp::Remove {
+                key: key.to_owned(),
+            },
         });
     }
 }
@@ -586,7 +581,7 @@ impl MutationObserver for SearchMutationObserver {
             return;
         }
         let rmpv_val = record_to_rmpv(&record.value);
-        self.index_and_notify(key, &rmpv_val, ChangeEventType::ENTER);
+        self.enqueue_index(key, rmpv_val, ChangeEventType::ENTER);
     }
 
     fn on_update(
@@ -601,43 +596,21 @@ impl MutationObserver for SearchMutationObserver {
             return;
         }
         let rmpv_val = record_to_rmpv(&record.value);
-        self.index_and_notify(key, &rmpv_val, ChangeEventType::UPDATE);
+        self.enqueue_index(key, rmpv_val, ChangeEventType::UPDATE);
     }
 
     fn on_remove(&self, key: &str, _record: &Record, is_backup: bool) {
         if is_backup {
             return;
         }
-        self.remove_and_notify(key);
+        self.enqueue_remove(key);
     }
 
     fn on_clear(&self) {
-        {
-            let mut indexes = self.indexes.write();
-            if let Some(index) = indexes.get_mut(&self.map_name) {
-                index.clear();
-            }
-        }
-        // Notify all subscriptions for this map of LEAVE for their cached keys.
-        let subs = self.registry.get_subscriptions_for_map(&self.map_name);
-        for sub in &subs {
-            let keys: Vec<String> =
-                sub.current_results.iter().map(|e| e.key().clone()).collect();
-            for key in keys {
-                sub.current_results.remove(&key);
-                let msg = Message::SearchUpdate {
-                    payload: SearchUpdatePayload {
-                        subscription_id: sub.subscription_id.clone(),
-                        key: key.clone(),
-                        value: rmpv::Value::Nil,
-                        score: 0.0,
-                        matched_terms: Vec::new(),
-                        change_type: ChangeEventType::LEAVE,
-                    },
-                };
-                send_to_connection(&self.connection_registry, sub.connection_id, &msg);
-            }
-        }
+        let _ = self.event_tx.send(MutationEvent {
+            map_name: self.map_name.clone(),
+            op: IndexOp::Clear,
+        });
     }
 
     fn on_reset(&self) {
@@ -668,10 +641,14 @@ fn record_to_rmpv(record_value: &RecordValue) -> rmpv::Value {
 // Background batch processor
 // ---------------------------------------------------------------------------
 
+/// Maximum number of events to accumulate before flushing, regardless of timer.
+const BATCH_FLUSH_THRESHOLD: usize = 100;
+
 /// Runs as a tokio task, collecting mutation events and processing them in batches.
 ///
-/// Sleeps for `batch_interval` to accumulate events, then processes all pending
-/// events as a batch. On shutdown signal, drains remaining events before exiting.
+/// Flushes when either `batch_interval` elapses or `BATCH_FLUSH_THRESHOLD` events
+/// have been accumulated, whichever comes first. On shutdown signal, drains
+/// remaining events before exiting.
 async fn run_batch_processor(
     mut event_rx: mpsc::UnboundedReceiver<MutationEvent>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
@@ -680,149 +657,281 @@ async fn run_batch_processor(
     connection_registry: Arc<ConnectionRegistry>,
     batch_interval: Duration,
 ) {
+    let mut batch: Vec<MutationEvent> = Vec::new();
+
     loop {
-        // Wait for the batch interval or shutdown.
-        tokio::select! {
-            () = tokio::time::sleep(batch_interval) => {}
-            result = shutdown_rx.changed() => {
-                if result.is_ok() && *shutdown_rx.borrow() {
-                    // Drain remaining events before exiting.
-                    let mut pending = Vec::new();
-                    while let Ok(evt) = event_rx.try_recv() {
-                        pending.push(evt);
+        // Phase 1: Accumulate events (up to batch_interval or BATCH_FLUSH_THRESHOLD)
+        if batch.is_empty() {
+            // Nothing pending — wait for first event or shutdown.
+            tokio::select! {
+                Some(evt) = event_rx.recv() => {
+                    batch.push(evt);
+                }
+                result = shutdown_rx.changed() => {
+                    if result.is_ok() && *shutdown_rx.borrow() {
+                        while let Ok(evt) = event_rx.try_recv() {
+                            batch.push(evt);
+                        }
+                        if !batch.is_empty() {
+                            process_batch(batch, &registry, &indexes, &connection_registry);
+                        }
+                        return;
                     }
-                    process_batch(pending, &registry, &indexes, &connection_registry);
-                    return;
                 }
             }
         }
 
-        // Drain all events accumulated during this interval.
-        let mut batch = Vec::new();
+        // Accumulate more events until timer or threshold.
+        if !batch.is_empty() && batch.len() < BATCH_FLUSH_THRESHOLD {
+            let sleep = tokio::time::sleep(batch_interval);
+            tokio::pin!(sleep);
+
+            loop {
+                tokio::select! {
+                    biased;
+
+                    result = event_rx.recv() => {
+                        match result {
+                            Some(evt) => {
+                                batch.push(evt);
+                                if batch.len() >= BATCH_FLUSH_THRESHOLD {
+                                    break;
+                                }
+                            }
+                            None => break, // channel closed
+                        }
+                    }
+                    () = &mut sleep => {
+                        break;
+                    }
+                    result = shutdown_rx.changed() => {
+                        if result.is_ok() && *shutdown_rx.borrow() {
+                            while let Ok(evt) = event_rx.try_recv() {
+                                batch.push(evt);
+                            }
+                            if !batch.is_empty() {
+                                process_batch(batch, &registry, &indexes, &connection_registry);
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Drain any remaining buffered events without blocking.
         while let Ok(evt) = event_rx.try_recv() {
             batch.push(evt);
         }
+
         if !batch.is_empty() {
-            process_batch(batch, &registry, &indexes, &connection_registry);
+            let current_batch = std::mem::take(&mut batch);
+            process_batch(current_batch, &registry, &indexes, &connection_registry);
         }
     }
 }
 
-/// Processes a batch of mutation events, sending `SearchUpdate` messages to subscribers.
+/// Sends a LEAVE `SearchUpdate` for the given subscription and key.
+fn send_leave(
+    conn_reg: &ConnectionRegistry,
+    sub: &SearchSubscription,
+    key: &str,
+) {
+    let msg = Message::SearchUpdate {
+        payload: SearchUpdatePayload {
+            subscription_id: sub.subscription_id.clone(),
+            key: key.to_owned(),
+            value: rmpv::Value::Nil,
+            score: 0.0,
+            matched_terms: Vec::new(),
+            change_type: ChangeEventType::LEAVE,
+        },
+    };
+    send_to_connection(conn_reg, sub.connection_id, &msg);
+}
+
+/// Notifies subscriptions about a Clear: sends LEAVE for every cached key and
+/// clears `current_results`.
+fn notify_clear_subscriptions(
+    registry: &SearchRegistry,
+    connection_registry: &ConnectionRegistry,
+    map_name: &str,
+) {
+    let subs = registry.get_subscriptions_for_map(map_name);
+    for sub in &subs {
+        let keys: Vec<String> =
+            sub.current_results.iter().map(|e| e.key().clone()).collect();
+        for key in keys {
+            sub.current_results.remove(&key);
+            send_leave(connection_registry, sub, &key);
+        }
+    }
+}
+
+/// Re-scores a single key against all subscriptions for a map and sends
+/// ENTER/UPDATE/LEAVE deltas as appropriate.
+fn notify_key_subscriptions(
+    index: &TantivyMapIndex,
+    subs: &[Arc<SearchSubscription>],
+    connection_registry: &ConnectionRegistry,
+    key: &str,
+    change_type: &ChangeEventType,
+) {
+    if *change_type == ChangeEventType::LEAVE {
+        for sub in subs {
+            if sub.current_results.remove(key).is_some() {
+                send_leave(connection_registry, sub, key);
+            }
+        }
+        return;
+    }
+
+    for sub in subs {
+        let scored = index.score_single_document(key, &sub.query);
+        match scored {
+            Some(doc) => {
+                let score = doc.score;
+                let min_score = sub.options.min_score.unwrap_or(0.0);
+                if score < min_score {
+                    if sub.current_results.remove(key).is_some() {
+                        send_leave(connection_registry, sub, key);
+                    }
+                    continue;
+                }
+
+                let delta_type = if sub.current_results.contains_key(key) {
+                    ChangeEventType::UPDATE
+                } else {
+                    ChangeEventType::ENTER
+                };
+
+                sub.current_results.insert(
+                    key.to_owned(),
+                    CachedSearchResult {
+                        score,
+                        matched_terms: doc.matched_terms.clone(),
+                    },
+                );
+
+                let msg = Message::SearchUpdate {
+                    payload: SearchUpdatePayload {
+                        subscription_id: sub.subscription_id.clone(),
+                        key: key.to_owned(),
+                        value: rmpv::Value::Nil,
+                        score,
+                        matched_terms: doc.matched_terms,
+                        change_type: delta_type,
+                    },
+                };
+                send_to_connection(connection_registry, sub.connection_id, &msg);
+            }
+            None => {
+                if sub.current_results.remove(key).is_some() {
+                    send_leave(connection_registry, sub, key);
+                }
+            }
+        }
+    }
+}
+
+/// Processes a batch of mutation events: indexes documents, then notifies subscribers.
 ///
-/// Deduplicates events per (`map_name`, key), taking the last change type.
+/// Three phases:
+///   1. Deduplicate per `(map_name, key)` keeping the last `IndexOp`. A `Clear` op
+///      discards all prior per-key ops for that map.
+///   2. Acquire WRITE lock per map, apply index/remove/clear ops, commit once.
+///   3. Acquire READ lock, re-score subscriptions, send ENTER/UPDATE/LEAVE deltas.
+///      For `Clear` ops, send LEAVE for all cached keys and clear `current_results`.
 fn process_batch(
     batch: Vec<MutationEvent>,
     registry: &Arc<SearchRegistry>,
     indexes: &Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
     connection_registry: &Arc<ConnectionRegistry>,
 ) {
-    // Deduplicate: keep last event per (map_name, key).
-    let mut deduped: HashMap<(String, String), ChangeEventType> = HashMap::new();
+    // --- Phase 1: Deduplicate ---
+    let mut per_key_ops: HashMap<(String, String), IndexOp> = HashMap::new();
+    let mut cleared_maps: HashMap<String, bool> = HashMap::new();
+
     for evt in batch {
-        deduped.insert((evt.map_name, evt.key), evt.change_type);
+        match evt.op {
+            IndexOp::Clear => {
+                per_key_ops.retain(|(m, _), _| *m != evt.map_name);
+                cleared_maps.insert(evt.map_name, true);
+            }
+            IndexOp::Index { ref key, .. } | IndexOp::Remove { ref key, .. } => {
+                let map_key = (evt.map_name, key.clone());
+                per_key_ops.insert(map_key, evt.op);
+            }
+        }
     }
 
-    for ((map_name, key), change_type) in deduped {
-        let subs = registry.get_subscriptions_for_map(&map_name);
+    // Group per-key ops by map_name.
+    let mut ops_by_map: HashMap<String, Vec<IndexOp>> = HashMap::new();
+    for ((map_name, _), op) in per_key_ops {
+        ops_by_map.entry(map_name).or_default().push(op);
+    }
+    for map_name in cleared_maps.keys() {
+        ops_by_map.entry(map_name.clone()).or_default();
+    }
+
+    // --- Phase 2: Index documents (WRITE lock, one commit per map) ---
+    {
+        let mut indexes_w = indexes.write();
+        for (map_name, ops) in &ops_by_map {
+            let has_clear = cleared_maps.contains_key(map_name);
+            let index = indexes_w.entry(map_name.clone()).or_default();
+
+            if has_clear {
+                index.clear();
+            }
+
+            let mut did_mutate = has_clear;
+            for op in ops {
+                match op {
+                    IndexOp::Index { key, value, .. } => {
+                        index.index_document(key, value);
+                        did_mutate = true;
+                    }
+                    IndexOp::Remove { key } => {
+                        index.remove_document(key);
+                        did_mutate = true;
+                    }
+                    IndexOp::Clear => {}
+                }
+            }
+
+            // TantivyMapIndex::clear() commits internally, so only commit
+            // explicitly when there are per-key ops after a clear, or when
+            // there was no clear at all.
+            if did_mutate && (!has_clear || !ops.is_empty()) {
+                index.commit();
+            }
+        }
+    } // WRITE lock dropped
+
+    // --- Phase 3: Notify subscribers ---
+    for map_name in cleared_maps.keys() {
+        notify_clear_subscriptions(registry, connection_registry, map_name);
+    }
+
+    for (map_name, ops) in &ops_by_map {
+        let subs = registry.get_subscriptions_for_map(map_name);
         if subs.is_empty() {
             continue;
         }
 
-        // If the change is LEAVE, send LEAVE to all subscriptions that had this key cached.
-        if change_type == ChangeEventType::LEAVE {
-            for sub in &subs {
-                if sub.current_results.remove(&key).is_some() {
-                    let msg = Message::SearchUpdate {
-                        payload: SearchUpdatePayload {
-                            subscription_id: sub.subscription_id.clone(),
-                            key: key.clone(),
-                            value: rmpv::Value::Nil,
-                            score: 0.0,
-                            matched_terms: Vec::new(),
-                            change_type: ChangeEventType::LEAVE,
-                        },
-                    };
-                    send_to_connection(connection_registry, sub.connection_id, &msg);
-                }
-            }
-            continue;
-        }
-
-        // Re-score each subscription against the changed key.
         let indexes_read = indexes.read();
-        let Some(index) = indexes_read.get(&map_name) else {
+        let Some(index) = indexes_read.get(map_name) else {
             continue;
         };
 
-        for sub in &subs {
-            let scored = index.score_single_document(&key, &sub.query);
-
-            match scored {
-                Some(doc) => {
-                    let score = doc.score;
-                    let min_score = sub.options.min_score.unwrap_or(0.0);
-                    if score < min_score {
-                        // Below threshold — treat as LEAVE if was in results.
-                        if sub.current_results.remove(&key).is_some() {
-                            let msg = Message::SearchUpdate {
-                                payload: SearchUpdatePayload {
-                                    subscription_id: sub.subscription_id.clone(),
-                                    key: key.clone(),
-                                    value: rmpv::Value::Nil,
-                                    score: 0.0,
-                                    matched_terms: Vec::new(),
-                                    change_type: ChangeEventType::LEAVE,
-                                },
-                            };
-                            send_to_connection(connection_registry, sub.connection_id, &msg);
-                        }
-                        continue;
-                    }
-
-                    let delta_type = if sub.current_results.contains_key(&key) {
-                        ChangeEventType::UPDATE
-                    } else {
-                        ChangeEventType::ENTER
-                    };
-
-                    sub.current_results.insert(
-                        key.clone(),
-                        CachedSearchResult {
-                            score,
-                            matched_terms: doc.matched_terms.clone(),
-                        },
-                    );
-
-                    let msg = Message::SearchUpdate {
-                        payload: SearchUpdatePayload {
-                            subscription_id: sub.subscription_id.clone(),
-                            key: key.clone(),
-                            value: rmpv::Value::Nil,
-                            score,
-                            matched_terms: doc.matched_terms,
-                            change_type: delta_type,
-                        },
-                    };
-                    send_to_connection(connection_registry, sub.connection_id, &msg);
-                }
-                None => {
-                    // No match — send LEAVE if was in results.
-                    if sub.current_results.remove(&key).is_some() {
-                        let msg = Message::SearchUpdate {
-                            payload: SearchUpdatePayload {
-                                subscription_id: sub.subscription_id.clone(),
-                                key: key.clone(),
-                                value: rmpv::Value::Nil,
-                                score: 0.0,
-                                matched_terms: Vec::new(),
-                                change_type: ChangeEventType::LEAVE,
-                            },
-                        };
-                        send_to_connection(connection_registry, sub.connection_id, &msg);
-                    }
-                }
-            }
+        for op in ops {
+            let (key, change_type) = match op {
+                IndexOp::Index { key, change_type, .. } => (key.as_str(), change_type),
+                IndexOp::Remove { key } => (key.as_str(), &ChangeEventType::LEAVE),
+                IndexOp::Clear => continue,
+            };
+            notify_key_subscriptions(index, &subs, connection_registry, key, change_type);
         }
     }
 }
