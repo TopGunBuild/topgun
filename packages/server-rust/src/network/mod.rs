@@ -5,6 +5,7 @@ pub mod connection;
 pub mod handlers;
 pub mod middleware;
 pub mod module;
+pub mod openapi;
 pub mod shutdown;
 
 pub use config::*;

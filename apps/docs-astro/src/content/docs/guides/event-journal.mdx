@@ -7,31 +7,16 @@ order: 17
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, ScrollText, Database, Clock, Activity, Search } from 'lucide-react';
 
-export const serverConfigCode = `import { ServerFactory } from '@topgunbuild/server';
-import { Pool } from 'pg';
+export const serverConfigCode = `# Start the TopGun server with Event Journal enabled
+# The journal captures all map changes as an append-only log
+PORT=8080 \\
+DATABASE_URL=postgres://user:pass@localhost/myapp \\
+topgun-server
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-});
-
-const server = ServerFactory.create({
-  port: 8080,
-  storage: new PostgresAdapter({ pool }),
-
-  // Enable Event Journal
-  eventJournalEnabled: true,
-  eventJournalConfig: {
-    capacity: 10000,        // Max events in memory
-    ttlMs: 0,               // Time-to-live (0 = infinite)
-    persistent: true,       // Persist to PostgreSQL
-    persistBatchSize: 100,  // Batch size for DB writes
-    persistIntervalMs: 1000, // Flush interval
-    includeMaps: [],        // Filter: only these maps (empty = all)
-    excludeMaps: ['_internal'], // Filter: exclude these maps
-  },
-});
-
-await server.start();`;
+# The Rust server includes built-in event journal functionality
+# that persists change events to PostgreSQL for CDC, audit trails,
+# and event replay.
+# For configuration details, see: /docs/reference/server`;
 
 export const clientSubscribeCode = `import { TopGunClient } from '@topgunbuild/client';
 
@@ -312,7 +297,7 @@ The **Event Journal** captures all map changes as an append-only log, enabling C
 Enable the Event Journal on your server:
 
 <div className="not-prose">
-  <CodeBlock title="server.ts" language="typescript" code={serverConfigCode} />
+  <CodeBlock title="Server Setup" language="bash" code={serverConfigCode} />
 </div>
 
 ### Configuration Options

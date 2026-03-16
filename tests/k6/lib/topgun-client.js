@@ -11,7 +11,7 @@
  * Note: xk6-msgpack encodes all integers as int64, which msgpackr decodes as BigInt.
  * The server's TimestampSchema uses .transform(Number) to handle this automatically.
  *
- * @see tests/e2e/json-fallback.test.ts for protocol examples
+ * @see tests/integration-rust/ for protocol examples
  */
 
 import { check } from 'k6';

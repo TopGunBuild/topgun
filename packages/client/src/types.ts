@@ -116,6 +116,13 @@ export interface IConnectionProvider {
   sendBatch?(operations: Array<{ key: string; message: any }>): Map<string, boolean>;
 
   /**
+   * Force-close the current connection to trigger reconnection.
+   * Unlike close(), this preserves reconnect behavior so the provider
+   * will automatically attempt to re-establish the connection.
+   */
+  forceReconnect(): void;
+
+  /**
    * Close all connections gracefully.
    */
   close(): Promise<void>;
@@ -128,7 +135,7 @@ export interface SingleServerProviderConfig {
   /** WebSocket URL to connect to */
   url: string;
 
-  /** Maximum reconnection attempts (default: 10) */
+  /** Maximum reconnection attempts (default: 10). Use Infinity for unlimited. */
   maxReconnectAttempts?: number;
 
   /** Initial reconnect delay in ms (default: 1000) */
@@ -139,4 +146,7 @@ export interface SingleServerProviderConfig {
 
   /** Maximum reconnect delay in ms (default: 30000) */
   maxReconnectDelayMs?: number;
+
+  /** Listen for browser online/offline events to trigger instant reconnect (default: true) */
+  listenNetworkEvents?: boolean;
 }

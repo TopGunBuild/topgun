@@ -27,17 +27,12 @@ pnpm test
 # Run tests for a specific package
 pnpm --filter @topgunbuild/core test
 pnpm --filter @topgunbuild/client test
-pnpm --filter @topgunbuild/server test
-
-# Run a single test file (from package directory)
-cd packages/server && pnpm test -- --testPathPattern="Cluster"
-
 # Test coverage
 pnpm test:coverage
 pnpm --filter @topgunbuild/core test:coverage
 
-# E2E tests
-pnpm test:e2e
+# Integration tests (TS client → Rust server)
+pnpm test:integration-rust
 
 # k6 load tests (requires k6 installed)
 pnpm test:k6:smoke
@@ -48,7 +43,7 @@ pnpm test:k6:connections
 # CRDT micro-benchmarks
 pnpm --filter @topgunbuild/core bench
 
-# Start development server
+# Start Rust development server
 pnpm start:server
 
 # Start documentation site
@@ -62,10 +57,12 @@ pnpm start:docs
 ```
 @topgunbuild/core (no internal deps)
     ↓
-@topgunbuild/client, @topgunbuild/server (depend on core)
+@topgunbuild/client (depends on core)
     ↓
 @topgunbuild/adapters, @topgunbuild/react (depend on client)
 ```
+
+Note: The server is implemented in Rust (`packages/server-rust/`). See `packages/server-rust/` for the Rust server codebase.
 
 ### Packages
 
@@ -73,10 +70,9 @@ pnpm start:docs
 |---------|---------|
 | `core` | CRDTs (LWWMap, ORMap), Hybrid Logical Clock, MerkleTree, message schemas (Zod), serialization (msgpackr) |
 | `client` | Browser/Node SDK: TopGunClient, SyncEngine, QueryHandle, storage adapters interface |
-| `server` | WebSocket server: ServerCoordinator, clustering (ClusterManager, PartitionService), WorkerPool, PostgreSQL adapter |
+| `server-rust` | Rust server: axum WebSocket server, clustering, PostgreSQL adapter (tokio runtime) |
 | `react` | React bindings: TopGunProvider, useQuery, useMap, useORMap, useMutation, useTopic hooks |
 | `adapters` | Storage implementations: IDBAdapter (IndexedDB for browsers) |
-| `native` | Native xxHash64 hashing for Node.js performance (optional, JS fallback available) |
 | `adapter-better-auth` | BetterAuth integration |
 
 ### Key Abstractions
@@ -92,17 +88,11 @@ pnpm start:docs
 - `SyncEngine` - Orchestrates synchronization, handles WebSocket connection and state machine
 - `IStorageAdapter` - Interface for local persistence (IndexedDB, etc.)
 
-**Server:**
-- `ServerFactory` - Assembles server from domain modules via dependency injection
-- `modules/` - Domain-specific factories (see `packages/server/src/modules/`):
-  - `core-module` - HLC, nodeId, base configuration
-  - `workers-module` - WorkerPool for CPU-intensive ops
-  - `cluster-module` - ClusterManager, PartitionService (271 partitions)
-  - `storage-module` - PostgreSQL adapter initialization
-  - `network-module` - HTTP/WSS servers with deferred startup
-  - `handlers-module` - 26 message handlers grouped by domain (CRDT, Sync, Query, Messaging, Coordination, Search, Persistence, Client, Server)
-  - `lifecycle-module` - LifecycleManager with graceful shutdown hooks
-- `ServerCoordinator` - Main entry point, routes requests, manages connections
+**Server (Rust):**
+- `packages/server-rust/` - Rust server built with axum, tokio, sqlx
+- ServiceRegistry with Tower middleware pipeline for operation routing
+- Domain services: CRDT, Sync, Query, Search, Messaging, Persistence, Coordination
+- Cluster protocol with partition-based data distribution (271 partitions)
 
 ### Data Flow
 
@@ -143,6 +133,6 @@ Examples:
 
 ## Test Notes
 
-- Server tests use ports 10000+ for servers, 11000+ for cluster nodes
-- Run tests sequentially in CI to avoid port conflicts: `pnpm test -- --runInBand`
-- Cluster tests include timing delays for node synchronization - don't interrupt early
+- Rust server tests: `SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) cargo test --release -p topgun-server`
+- Integration tests (TS client to Rust server): `pnpm test:integration-rust`
+- Run TS tests sequentially in CI to avoid port conflicts: `pnpm test -- --runInBand`

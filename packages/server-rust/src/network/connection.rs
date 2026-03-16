@@ -4,7 +4,7 @@
 //! lock-free concurrent connection tracking via `DashMap`, and
 //! metadata storage for authentication and subscription state.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,6 +14,32 @@ use tokio::sync::{mpsc, RwLock};
 use topgun_core::{Principal, Timestamp};
 
 use super::config::ConnectionConfig;
+
+// ---------------------------------------------------------------------------
+// MapPermissions
+// ---------------------------------------------------------------------------
+
+/// Per-map read/write access permissions for a connection.
+///
+/// Defined here (not in `service/security.rs`) to avoid a circular module
+/// dependency: `service` imports from `network`, so placing `MapPermissions`
+/// in `service` would require `network` to import from `service`, creating a cycle.
+/// As a plain data struct with no service logic, it belongs here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapPermissions {
+    /// Whether this connection may read from the map.
+    pub read: bool,
+    /// Whether this connection may write to the map.
+    pub write: bool,
+}
+
+impl Default for MapPermissions {
+    fn default() -> Self {
+        Self { read: true, write: true }
+    }
+}
 
 /// Unique identifier for a connection, assigned by the registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -109,7 +135,10 @@ impl ConnectionHandle {
 ///
 /// Protected by an `RwLock` to allow concurrent reads (e.g., broadcast
 /// filtering) while serializing writes (e.g., authentication updates).
-#[derive(Debug)]
+///
+/// Derives `Clone` so the write validator can snapshot metadata once and
+/// release the read guard before any async storage calls.
+#[derive(Debug, Clone)]
 pub struct ConnectionMetadata {
     /// Whether this connection has completed authentication.
     pub authenticated: bool,
@@ -125,6 +154,9 @@ pub struct ConnectionMetadata {
     pub last_hlc: Option<Timestamp>,
     /// For cluster peer connections, the remote node's ID.
     pub peer_node_id: Option<String>,
+    /// Per-map access permissions for this connection.
+    /// Maps not present here fall back to `SecurityConfig.default_permissions`.
+    pub map_permissions: HashMap<String, MapPermissions>,
 }
 
 impl Default for ConnectionMetadata {
@@ -137,6 +169,7 @@ impl Default for ConnectionMetadata {
             last_heartbeat: Instant::now(),
             last_hlc: None,
             peer_node_id: None,
+            map_permissions: HashMap::new(),
         }
     }
 }
@@ -233,6 +266,19 @@ impl ConnectionRegistry {
             let handle = entry.value();
             if handle.kind == kind {
                 // Intentionally ignore the result: broadcast skips full channels
+                let _ = handle.try_send(OutboundMessage::Binary(msg_bytes.to_vec()));
+            }
+        }
+    }
+
+    /// Sends a binary message to a specific set of connection IDs.
+    ///
+    /// Uses non-blocking `try_send` so a single slow connection cannot
+    /// block the caller. Missing connections and full channels are silently
+    /// skipped (same semantics as `broadcast`).
+    pub fn send_to_connections(&self, ids: &HashSet<ConnectionId>, msg_bytes: &[u8]) {
+        for id in ids {
+            if let Some(handle) = self.get(*id) {
                 let _ = handle.try_send(OutboundMessage::Binary(msg_bytes.to_vec()));
             }
         }
@@ -519,5 +565,58 @@ mod tests {
 
         // 4th should fail
         assert!(!handle.try_send(OutboundMessage::Binary(vec![4])));
+    }
+
+    // ---------------------------------------------------------------------------
+    // send_to_connections tests (AC3, AC4)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn send_to_connections_delivers_only_to_specified_ids() {
+        let config = small_channel_config();
+        let registry = ConnectionRegistry::new();
+
+        let (h1, mut rx1) = registry.register(ConnectionKind::Client, &config);
+        let (_h2, mut rx2) = registry.register(ConnectionKind::Client, &config);
+
+        let mut ids = HashSet::new();
+        ids.insert(h1.id);
+        // h2 is NOT in the target set
+
+        registry.send_to_connections(&ids, &[42]);
+
+        // h1 should have received the message
+        assert!(rx1.try_recv().is_ok(), "targeted connection should receive bytes");
+        // h2 should NOT have received anything
+        assert!(rx2.try_recv().is_err(), "non-targeted connection should not receive bytes");
+    }
+
+    #[test]
+    fn send_to_connections_skips_missing_ids() {
+        let registry = ConnectionRegistry::new();
+
+        let mut ids = HashSet::new();
+        ids.insert(ConnectionId(9999)); // does not exist
+
+        // Should not panic
+        registry.send_to_connections(&ids, &[1, 2, 3]);
+    }
+
+    #[test]
+    fn send_to_connections_skips_full_channels() {
+        let config = small_channel_config(); // capacity = 2
+        let registry = ConnectionRegistry::new();
+
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
+
+        // Fill the channel
+        assert!(handle.try_send(OutboundMessage::Binary(vec![1])));
+        assert!(handle.try_send(OutboundMessage::Binary(vec![2])));
+
+        let mut ids = HashSet::new();
+        ids.insert(handle.id);
+
+        // Should not block or panic when channel is full
+        registry.send_to_connections(&ids, &[3]);
     }
 }

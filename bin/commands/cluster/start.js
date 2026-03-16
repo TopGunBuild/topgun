@@ -1,5 +1,5 @@
 const chalk = require('chalk');
-const { spawn, execSync } = require('child_process');
+const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
@@ -19,15 +19,24 @@ module.exports = async function clusterStart(options) {
     require('dotenv').config({ path: envPath });
   }
 
-  // Build seed list (all nodes except self)
-  const buildSeeds = (excludeNode) => {
-    const seeds = [];
+  // Check for Rust server binary
+  const rustBinaryPath = path.join(process.cwd(), 'target/release/test-server');
+  if (!fs.existsSync(rustBinaryPath)) {
+    console.error(chalk.red('  Error: Rust server binary not found.'));
+    console.log(chalk.yellow(`  Expected: ${rustBinaryPath}`));
+    console.log(chalk.yellow('  Run: cargo build --release --bin test-server'));
+    process.exit(1);
+  }
+
+  // Build peer list (all nodes except self)
+  const buildPeers = (excludeNode) => {
+    const peers = [];
     for (let i = 0; i < nodeCount; i++) {
       if (i !== excludeNode) {
-        seeds.push(`ws://localhost:${clusterPort + i}`);
+        peers.push(`ws://localhost:${clusterPort + i}`);
       }
     }
-    return seeds.join(',');
+    return peers.join(',');
   };
 
   // Start each node
@@ -35,23 +44,19 @@ module.exports = async function clusterStart(options) {
     const serverPort = basePort + i;
     const nodeClusterPort = clusterPort + i;
     const nodeId = `node-${i + 1}`;
-    const seeds = buildSeeds(i);
+    const peers = buildPeers(i);
 
     console.log(chalk.cyan(`  [${nodeId}] Starting on port ${serverPort} (cluster: ${nodeClusterPort})...`));
 
-    const serverPath = path.join(process.cwd(), 'examples/simple-server.ts');
-
     const env = {
       ...process.env,
-      SERVER_PORT: serverPort.toString(),
       PORT: serverPort.toString(),
       NODE_ID: nodeId,
-      CLUSTER_ENABLED: 'true',
-      CLUSTER_PORT: nodeClusterPort.toString(),
-      CLUSTER_SEEDS: seeds,
+      TOPGUN_CLUSTER_PORT: nodeClusterPort.toString(),
+      TOPGUN_PEERS: peers,
     };
 
-    const proc = spawn('npx', ['tsx', serverPath], {
+    const proc = spawn(rustBinaryPath, [], {
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: false,
@@ -90,7 +95,7 @@ module.exports = async function clusterStart(options) {
   const pids = processes.map((p) => p.proc.pid).join(',');
   fs.writeFileSync(pidsPath, pids);
 
-  console.log(chalk.green(`\n  ✓ Cluster started with ${nodeCount} nodes`));
+  console.log(chalk.green(`\n  Cluster started with ${nodeCount} nodes`));
   console.log(chalk.gray('  PIDs stored in .cluster-pids'));
   console.log(chalk.gray('  To stop: npx topgun cluster:stop\n'));
 

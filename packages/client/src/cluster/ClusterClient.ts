@@ -640,6 +640,16 @@ export class ClusterClient implements IConnectionProvider {
   }
 
   /**
+   * Force reconnect all connections in the pool.
+   */
+  public forceReconnect(): void {
+    this.connectionPool.close();
+    this.connect().catch((err) => {
+      logger.error({ err }, 'ClusterClient forceReconnect failed');
+    });
+  }
+
+  /**
    * Shutdown cluster client (IConnectionProvider interface).
    */
   public async close(): Promise<void> {

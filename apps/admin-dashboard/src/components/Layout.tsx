@@ -51,7 +51,7 @@ export function Layout() {
 
   const handleLogout = () => {
     if (window.confirm('Are you sure you want to logout?')) {
-      localStorage.removeItem('topgun_token');
+      localStorage.removeItem('topgun_admin_token');
       navigate('/login');
     }
   };

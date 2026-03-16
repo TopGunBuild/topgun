@@ -12,12 +12,11 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "test:cli": "jest --config tests/cli/jest.config.js",
-    "test:e2e": "jest --config tests/e2e/jest.config.js",
-    "test:e2e:coverage": "jest --config tests/e2e/jest.config.js --coverage",
+    "test:integration-rust": "jest --config tests/integration-rust/jest.config.js",
     "test:coverage": "pnpm -r test:coverage",
     "test:coverage:core": "pnpm --filter @topgunbuild/core test:coverage",
     "test:coverage:client": "pnpm --filter @topgunbuild/client test:coverage",
-    "test:coverage:server": "pnpm --filter @topgunbuild/server test:coverage",
+
     "test:coverage:react": "pnpm --filter @topgunbuild/react test:coverage",
     "test:coverage:adapters": "pnpm --filter @topgunbuild/adapters test:coverage",
     "test:coverage:adapter-better-auth": "pnpm --filter @topgunbuild/adapter-better-auth test:coverage",
@@ -40,15 +39,8 @@
     "cluster:down": "docker-compose -f tests/k6/docker-compose.cluster.yml down",
     "cluster:logs": "docker-compose -f tests/k6/docker-compose.cluster.yml logs -f",
     "cluster:scale": "docker-compose -f tests/k6/docker-compose.cluster.yml up -d node-4",
-    "test:k6:ab": "./scripts/perf-ab-test.sh",
-    "test:k6:ab:quick": "./scripts/perf-ab-test.sh --quick",
-    "start:perf-server": "pnpm exec ts-node -r tsconfig-paths/register --project ./examples/tsconfig.json ./scripts/perf-ab-server.ts",
-    "profile:flame": "./scripts/profile-server.sh flame",
-    "profile:cpu": "./scripts/profile-server.sh cpu",
-    "profile:doctor": "./scripts/profile-server.sh doctor",
-    "profile:inspect": "./scripts/profile-server.sh inspect",
     "clean": "rm -rf node_modules packages/*/node_modules examples/*/node_modules apps/*/node_modules packages/*/dist",
-    "start:server": "pnpm exec ts-node -r tsconfig-paths/register --project ./examples/tsconfig.json ./examples/simple-server.ts",
+    "start:server": "cargo run --bin test-server --release",
     "start:docs": "pnpm --filter apps-docs-astro dev",
     "lint": "eslint 'packages/*/src/**/*.{ts,tsx}' 'apps/*/src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}'",
     "lint:fix": "eslint 'packages/*/src/**/*.{ts,tsx}' 'apps/*/src/**/*.{ts,tsx}' 'tests/**/*.{ts,tsx}' --fix",
@@ -86,11 +78,8 @@
     "zod": "^4.1.13"
   },
   "author": "",
-  "license": "BSL-1.1",
+  "license": "Apache-2.0",
   "pnpm": {
-    "onlyBuiltDependencies": [
-      "isolated-vm",
-      "better-sqlite3"
-    ]
+    "onlyBuiltDependencies": []
   }
 }

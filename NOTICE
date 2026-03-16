@@ -1,72 +1,17 @@
 TopGun - Offline-First In-Memory Data Grid
 Copyright (c) 2024 TopGun Contributors
 
-This software is licensed under the Business Source License 1.1 (BSL 1.1).
-See the LICENSE file for the complete license text.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-================================================================================
-                            WHAT IS PERMITTED
-================================================================================
+    http://www.apache.org/licenses/LICENSE-2.0
 
-✅ ALLOWED USES:
-
-1. INTERNAL USE
-   Using TopGun within your organization for any internal purpose.
-
-2. APPLICATION BACKEND
-   Embedding TopGun as part of your application's data layer, where TopGun
-   is not directly exposed as a database service to your customers.
-
-3. DEVELOPMENT & TESTING
-   Using TopGun for development, testing, evaluation, and non-production
-   purposes without any restrictions.
-
-4. SELF-HOSTED DEPLOYMENT
-   Deploying TopGun on your own infrastructure for your own applications.
-
-5. CONSULTING & PROFESSIONAL SERVICES
-   Providing consulting, integration, and professional services around TopGun.
-
-6. EDUCATIONAL USE
-   Using TopGun for learning, teaching, research, and educational purposes.
-
-7. OPEN SOURCE PROJECTS
-   Using TopGun in open source projects (as long as those projects don't
-   offer TopGun as a managed database service).
-
-================================================================================
-                           WHAT IS NOT PERMITTED
-================================================================================
-
-❌ PROHIBITED WITHOUT A COMMERCIAL LICENSE:
-
-1. MANAGED DATABASE SERVICE
-   Offering TopGun to third parties as a commercial hosted database service,
-   database-as-a-service (DBaaS), or managed database offering.
-
-   Examples of prohibited use:
-   - "TopGun Cloud" - a hosted TopGun service
-   - Multi-tenant database platform built on TopGun
-   - Reselling TopGun hosting as a primary business
-
-================================================================================
-                             CHANGE LICENSE
-================================================================================
-
-Each version of TopGun will automatically convert to the Apache License 2.0
-four (4) years after its release date.
-
-This means:
-- Version released on January 1, 2025 → Apache 2.0 on January 1, 2029
-- You can use older versions under Apache 2.0 once they pass the Change Date
-
-================================================================================
-                          COMMERCIAL LICENSING
-================================================================================
-
-If your intended use falls outside the Additional Use Grant (e.g., you want
-to offer TopGun as a managed database service), please contact us for
-commercial licensing options.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 
 ================================================================================
                             THIRD-PARTY NOTICES
@@ -74,8 +19,3 @@ commercial licensing options.
 
 This product includes software developed by other open source projects.
 See the package dependencies for their respective licenses.
-
-================================================================================
-
-For questions about licensing, please open an issue on GitHub or contact
-the project maintainers.

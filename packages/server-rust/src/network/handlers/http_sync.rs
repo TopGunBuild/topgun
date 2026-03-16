@@ -49,6 +49,13 @@ mod tests {
             shutdown: Arc::new(ShutdownController::new()),
             config: Arc::new(NetworkConfig::default()),
             start_time: Instant::now(),
+            observability: None,
+            operation_service: None,
+            operation_pipeline: None,
+            jwt_secret: None,
+            cluster_state: None,
+            store_factory: None,
+            server_config: None,
         }
     }
 

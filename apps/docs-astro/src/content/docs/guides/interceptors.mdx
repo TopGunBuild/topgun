@@ -7,26 +7,20 @@ order: 19
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Plug, Shield, Zap, Brain, Filter, Bell } from 'lucide-react';
 
-export const basicInterceptorCode = `import { ServerFactory, IInterceptor, ServerOp, OpContext } from '@topgunbuild/server';
+export const basicInterceptorCode = `# The Rust server provides built-in interceptor functionality
+# via its Tower middleware pipeline. Configure via environment variables:
+PORT=8080 \\
+DATABASE_URL=postgres://user:pass@localhost/myapp \\
+topgun-server
 
-// Custom interceptor for logging all operations
-const loggingInterceptor: IInterceptor = {
-  name: 'logging',
-
-  async onBeforeOp(op: ServerOp, context: OpContext) {
-    console.log(\`[\${context.clientId}] \${op.opType} \${op.mapName}:\${op.key}\`);
-    return op; // Pass through unchanged
-  },
-
-  async onAfterOp(op: ServerOp, context: OpContext) {
-    console.log(\`[\${context.clientId}] Completed: \${op.mapName}:\${op.key}\`);
-  },
-};
-
-const server = ServerFactory.create({
-  port: 8080,
-  interceptors: [loggingInterceptor],
-});`;
+# The Rust server includes built-in middleware for:
+# - Rate limiting
+# - Load shedding
+# - Request timeouts
+# - Metrics collection
+#
+# For the full Rust server API and middleware configuration,
+# see the Server API reference: /docs/reference/server`;
 
 export const validationInterceptorCode = `// Validate and enrich data before it's stored
 const validationInterceptor: IInterceptor = {
@@ -200,31 +194,26 @@ const webhookInterceptor: IInterceptor = {
   },
 };`;
 
-export const rateLimitCode = `import { RateLimitInterceptor } from '@topgunbuild/server';
+export const rateLimitCode = `# The Rust server includes built-in rate limiting via Tower middleware
+# Rate limiting is enabled by default in production mode
+PORT=8080 \\
+DATABASE_URL=postgres://user:pass@localhost/myapp \\
+topgun-server
 
-// Built-in rate limiting interceptor
-const rateLimiter = new RateLimitInterceptor({
-  maxRequestsPerMinute: 100,
-  maxRequestsPerSecond: 10,
-});
+# Rate limiting is configured via the LoadShed and Timeout
+# middleware layers in the operation pipeline.
+# See the Server API reference for details: /docs/reference/server`;
 
-const server = ServerFactory.create({
-  port: 8080,
-  interceptors: [rateLimiter],
-});`;
-
-export const chainingCode = `// Interceptors execute in order - chain them for complex pipelines
-const server = ServerFactory.create({
-  port: 8080,
-  interceptors: [
-    rateLimiter,          // 1. Rate limiting first
-    authEnricher,         // 2. Add auth context
-    validationInterceptor, // 3. Validate data
-    moderationInterceptor, // 4. ML moderation
-    loggingInterceptor,   // 5. Log everything
-    webhookInterceptor,   // 6. Fire webhooks (onAfterOp)
-  ],
-});`;
+export const chainingCode = `# The Rust server uses a Tower middleware pipeline
+# Middleware layers are applied in order:
+#   1. LoadShed    - reject requests when overloaded
+#   2. Timeout     - enforce request deadlines
+#   3. Metrics     - collect prometheus metrics
+#   4. Router      - dispatch to domain services
+#
+# For custom server-side logic, use the Rust embed API
+# to build a custom Tower service pipeline.
+# See the Server API reference: /docs/reference/server`;
 
 export const interfaceCode = `interface IInterceptor {
   /** Name for logging and debugging */
@@ -303,7 +292,7 @@ interface OpContext {
 ## Basic Usage
 
 <div className="not-prose">
-  <CodeBlock title="server.ts" language="typescript" code={basicInterceptorCode} />
+  <CodeBlock title="terminal" language="bash" code={basicInterceptorCode} />
 </div>
 
 ---
@@ -359,7 +348,7 @@ Fire webhooks to external systems when data changes:
 TopGun includes ready-to-use interceptors:
 
 <div className="not-prose">
-  <CodeBlock title="Rate Limiting" language="typescript" code={rateLimitCode} />
+  <CodeBlock title="Rate Limiting" language="bash" code={rateLimitCode} />
 </div>
 
 | Interceptor | Purpose |
@@ -374,7 +363,7 @@ TopGun includes ready-to-use interceptors:
 Interceptors execute in order. Use this for building processing pipelines:
 
 <div className="not-prose">
-  <CodeBlock title="Interceptor Chain" language="typescript" code={chainingCode} />
+  <CodeBlock title="Middleware Pipeline" language="bash" code={chainingCode} />
 </div>
 
 ### Execution Order

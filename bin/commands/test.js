@@ -4,12 +4,9 @@ const { execSync } = require('child_process');
 const TEST_SCOPES = {
   core: '@topgunbuild/core',
   client: '@topgunbuild/client',
-  server: '@topgunbuild/server',
   react: '@topgunbuild/react',
   adapters: '@topgunbuild/adapters',
-  native: '@topgunbuild/native',
   'adapter-better-auth': '@topgunbuild/adapter-better-auth',
-  e2e: 'e2e',
   'k6:smoke': 'k6:smoke',
   'k6:throughput': 'k6:throughput',
   'k6:write': 'k6:write',
@@ -31,10 +28,10 @@ module.exports = async function test(scope, options) {
       console.log(chalk.cyan(`Running k6 ${testType} test...\n`));
       console.log(chalk.gray('  Note: k6 tests require the server to be running\n'));
       execSync(`pnpm test:k6:${testType}`, { stdio: 'inherit' });
-    } else if (scope === 'e2e') {
-      // E2E tests
-      console.log(chalk.cyan('Running E2E tests...\n'));
-      execSync('pnpm test:e2e', { stdio: 'inherit' });
+    } else if (scope === 'e2e' || scope === 'integration-rust') {
+      // Integration tests (TS client → Rust server)
+      console.log(chalk.cyan('Running integration tests (TS → Rust)...\n'));
+      execSync('pnpm test:integration-rust', { stdio: 'inherit' });
     } else if (TEST_SCOPES[scope]) {
       // Package-specific tests
       const packageName = TEST_SCOPES[scope];

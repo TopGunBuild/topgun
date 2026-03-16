@@ -65,8 +65,8 @@ module.exports = async function setup(options) {
 
   // Step 3: Build packages
   console.log(chalk.cyan('\n[3/4] Building packages...'));
-  const distPath = path.join(process.cwd(), 'packages/server/dist');
-  if (!fs.existsSync(distPath)) {
+  const rustBinaryPath = path.join(process.cwd(), 'target/release/test-server');
+  if (!fs.existsSync(rustBinaryPath)) {
     try {
       execSync('pnpm build', { stdio: 'inherit' });
       console.log(chalk.green('  ✓ Build complete'));

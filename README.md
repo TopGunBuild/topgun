@@ -6,6 +6,8 @@ Hybrid offline-first in-memory data grid. Zero-latency reads and writes via loca
 
 TopGun v2 is a complete rewrite. It's not a port — it's a new architecture designed for production workloads.
 
+**[Live Demo](https://demo.topgun.build/)** — try real-time CRDT sync in your browser
+
 ## Key features
 
 - **Local-first**: Data lives in memory. Reads and writes never wait for network.
@@ -14,7 +16,7 @@ TopGun v2 is a complete rewrite. It's not a port — it's a new architecture des
 - **Merkle tree sync**: Efficient delta synchronization — only changed data moves over the wire.
 - **Pluggable storage**: PostgreSQL for server, IndexedDB for client, or bring your own adapter.
 - **Cluster-ready**: Server-side partitioning, distributed locks, pub/sub.
-- **TypeScript-first**: Full type safety from client to server.
+- **Rust server, TypeScript client**: Type-safe SDK with a high-performance Rust backend.
 
 ## Quick start
 
@@ -90,6 +92,7 @@ function TodoList() {
 Full docs: [topgun.build/docs](https://topgun.build/docs)
 
 Specifications in this repo:
+- [Master Architecture](specifications/00_MASTER_ARCHITECTURE.md)
 - [System Architecture](specifications/01_SYSTEM_ARCHITECTURE.md)
 - [CRDT & Data Structures](specifications/02_DATA_STRUCTURES_CRDT.md)
 - [Synchronization Protocol](specifications/03_SYNCHRONIZATION_PROTOCOL.md)
@@ -100,7 +103,7 @@ Specifications in this repo:
 |---------|-------------|
 | `@topgunbuild/core` | CRDTs, Hybrid Logical Clock, Merkle trees, message schemas |
 | `@topgunbuild/client` | Browser/Node.js SDK with IndexedDB persistence |
-| `@topgunbuild/server` | WebSocket server, clustering, storage adapters |
+| `server-rust` | Rust WebSocket server (axum), clustering, PostgreSQL |
 | `@topgunbuild/react` | React hooks: `useQuery`, `useMap`, `useMutation`, `useTopic` |
 | `@topgunbuild/adapters` | Storage adapters: IndexedDB |
 | `@topgunbuild/adapter-better-auth` | Better Auth integration |
@@ -111,22 +114,25 @@ Specifications in this repo:
 # Start server with Postgres
 docker compose up --build
 
+# Or run the Rust server directly
+cargo run --bin test-server --release
+
 # Or run the example app
 cd examples/notes-app
 pnpm install
-pnpm dev
+pnpm start
 ```
 
 ## Performance Testing
 
 ### Quick Smoke Test
 ```bash
-pnpm benchmark:smoke
+pnpm test:k6:smoke
 ```
 
 ### Full Throughput Benchmark
 ```bash
-pnpm benchmark:throughput
+pnpm test:k6:throughput
 ```
 
 ### Micro-Benchmarks (CRDT operations)

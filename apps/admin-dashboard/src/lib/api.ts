@@ -2,8 +2,7 @@
  * Admin API client with authentication
  */
 
-// Admin API runs on metrics port (9091), not main WebSocket port (8080)
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:9091';
+export const API_BASE = import.meta.env.VITE_API_URL || '';
 const TOKEN_KEY = 'topgun_admin_token';
 
 /**
@@ -40,7 +39,7 @@ export function isAuthenticated(): boolean {
 export async function login(
   username: string,
   password: string
-): Promise<{ token: string; user: { id: string; username: string; role: string } }> {
+): Promise<{ token: string }> {
   const res = await fetch(`${API_BASE}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

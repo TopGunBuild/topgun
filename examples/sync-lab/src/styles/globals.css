@@ -1,0 +1,97 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-primary: var(--primary);
+  --color-primary-dark: var(--primary-dark);
+  --color-success: #22c55e;
+  --color-warning: #eab308;
+  --color-danger: #ef4444;
+  --color-surface: var(--surface);
+  --color-surface-light: var(--surface-light);
+  --color-surface-lighter: var(--surface-lighter);
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-border: var(--border);
+  --color-bg: var(--bg);
+}
+
+:root {
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-light: #f5f5f5;
+  --surface-lighter: #e5e5e5;
+  --text: #09090b;
+  --text-muted: #525252;
+  --border: #e4e4e7;
+  --primary: #2563eb;
+  --primary-dark: #1d4ed8;
+}
+
+.dark {
+  --bg: #111111;
+  --surface: #161616;
+  --surface-light: #262626;
+  --surface-lighter: #404040;
+  --text: #ffffff;
+  --text-muted: #737373;
+  --border: #262626;
+  --primary: #60a5fa;
+  --primary-dark: #3b82f6;
+}
+
+@layer base {
+  body {
+    @apply bg-bg text-text antialiased;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+}
+
+/* Conflict highlight animations */
+@keyframes highlight-green {
+  0% { background-color: rgba(34, 197, 94, 0.3); }
+  100% { background-color: transparent; }
+}
+
+@keyframes highlight-yellow {
+  0% { background-color: rgba(234, 179, 8, 0.3); }
+  100% { background-color: transparent; }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes slide-in {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@layer utilities {
+  .animate-highlight-green {
+    animation: highlight-green 3s ease-out forwards;
+  }
+
+  .animate-highlight-yellow {
+    animation: highlight-yellow 3s ease-out forwards;
+  }
+
+  .animate-fade-in {
+    animation: fade-in 0.3s ease-out;
+  }
+
+  .animate-pulse-dot {
+    animation: pulse-dot 2s ease-in-out infinite;
+  }
+
+  .animate-slide-in {
+    animation: slide-in 0.2s ease-out;
+  }
+}

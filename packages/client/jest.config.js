@@ -16,7 +16,7 @@ module.exports = {
   testTimeout: 30000,
   moduleNameMapper: {
     '^@topgunbuild/core$': '<rootDir>/../core/src/index.ts',
-    '^@topgunbuild/server$': '<rootDir>/../server/src/index.ts',
+
     '^@topgunbuild/client$': '<rootDir>/src/index.ts'
   },
   transform: {

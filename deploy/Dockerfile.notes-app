@@ -26,12 +26,10 @@ COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
 
 # Copy workspace package definitions
 COPY packages/core/package.json packages/core/package.json
-COPY packages/server/package.json packages/server/package.json
 COPY packages/client/package.json packages/client/package.json
 COPY packages/adapters/package.json packages/adapters/package.json
 COPY packages/react/package.json packages/react/package.json
 COPY packages/adapter-better-auth/package.json packages/adapter-better-auth/package.json
-COPY examples/todo-app/package.json examples/todo-app/package.json
 COPY examples/notes-app/package.json examples/notes-app/package.json
 
 # Install dependencies

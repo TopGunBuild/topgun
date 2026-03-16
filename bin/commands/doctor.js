@@ -98,16 +98,16 @@ const checks = [
     },
   },
   {
-    name: 'Build',
+    name: 'Rust Server Binary',
     check: () => {
-      const distPath = path.join(process.cwd(), 'packages/server/dist');
-      if (fs.existsSync(distPath)) {
+      const binaryPath = path.join(process.cwd(), 'target/release/test-server');
+      if (fs.existsSync(binaryPath)) {
         return { pass: true, message: 'Built' };
       }
       return {
         pass: false,
         message: 'Not built',
-        fix: 'pnpm build',
+        fix: 'cargo build --release --bin test-server',
       };
     },
   },

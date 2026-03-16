@@ -106,17 +106,28 @@ export class HLC {
    * Must be called whenever a message/event is received from another node.
    */
   public update(remote: Timestamp): void {
+    // Coerce BigInt to Number — MsgPack may decode Rust u64 as BigInt in browsers
+    const remoteMillis = Number(remote.millis);
+    const remoteCounter = Number(remote.counter);
+
+    // Guard against NaN — if millis/counter are undefined or invalid,
+    // Math.max() returns NaN which permanently poisons the clock.
+    if (!Number.isFinite(remoteMillis) || !Number.isFinite(remoteCounter)) {
+      logger.warn({ remoteMillis, remoteCounter, remote }, 'HLC.update() received invalid timestamp, ignoring');
+      return;
+    }
+
     const systemTime = this.clockSource.now();
 
     // Validate drift
-    const drift = remote.millis - systemTime;
+    const drift = remoteMillis - systemTime;
     if (drift > this.maxDriftMs) {
       if (this.strictMode) {
-        throw new Error(`Clock drift detected: Remote time ${remote.millis} is ${drift}ms ahead of local ${systemTime} (threshold: ${this.maxDriftMs}ms)`);
+        throw new Error(`Clock drift detected: Remote time ${remoteMillis} is ${drift}ms ahead of local ${systemTime} (threshold: ${this.maxDriftMs}ms)`);
       } else {
         logger.warn({
           drift,
-          remoteMillis: remote.millis,
+          remoteMillis,
           localMillis: systemTime,
           maxDriftMs: this.maxDriftMs
         }, 'Clock drift detected');
@@ -124,17 +135,17 @@ export class HLC {
       }
     }
 
-    const maxMillis = Math.max(this.lastMillis, systemTime, remote.millis);
+    const maxMillis = Math.max(this.lastMillis, systemTime, remoteMillis);
 
-    if (maxMillis === this.lastMillis && maxMillis === remote.millis) {
+    if (maxMillis === this.lastMillis && maxMillis === remoteMillis) {
       // Both clocks are on the same millisecond, take max counter
-      this.lastCounter = Math.max(this.lastCounter, remote.counter) + 1;
+      this.lastCounter = Math.max(this.lastCounter, remoteCounter) + 1;
     } else if (maxMillis === this.lastMillis) {
       // Local logical clock is ahead in millis (or same as remote but remote millis < local)
       this.lastCounter++;
-    } else if (maxMillis === remote.millis) {
+    } else if (maxMillis === remoteMillis) {
       // Remote clock is ahead, fast-forward local
-      this.lastCounter = remote.counter + 1;
+      this.lastCounter = remoteCounter + 1;
     } else {
       // System time is ahead of both
       this.lastCounter = 0;

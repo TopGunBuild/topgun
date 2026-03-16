@@ -13,7 +13,10 @@ import {
 } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
 import { adminFetch } from '@/lib/api';
-import { Search, Plus, Pencil, Trash2, RefreshCw, Database, Loader2 } from 'lucide-react';
+import { Search, Plus, Pencil, Trash2, RefreshCw, Database, Loader2, Bug } from 'lucide-react';
+import { CrdtDebug } from './CrdtDebug';
+
+type ExplorerView = 'data' | 'crdt-debug';
 
 interface MapInfo {
   name: string;
@@ -36,6 +39,7 @@ export function DataExplorer() {
   const [editingRecord, setEditingRecord] = useState<MapEntry | null>(null);
   const [isNewRecord, setIsNewRecord] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [activeView, setActiveView] = useState<ExplorerView>('data');
 
   // Fetch list of maps from API endpoint
   const fetchMaps = useCallback(async () => {
@@ -241,9 +245,39 @@ export function DataExplorer() {
         </div>
       </div>
 
-      {/* Main: Data table */}
+      {/* Main panel */}
       <div className="p-4 space-y-4 overflow-y-auto">
-        {selectedMap ? (
+        {/* View switcher */}
+        <div className="flex items-center gap-1 border rounded-lg p-1 w-fit">
+          <button
+            onClick={() => setActiveView('data')}
+            className={cn(
+              'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors',
+              activeView === 'data'
+                ? 'bg-primary text-primary-foreground'
+                : 'text-muted-foreground hover:bg-muted'
+            )}
+          >
+            <Database className="h-4 w-4" />
+            Data
+          </button>
+          <button
+            onClick={() => setActiveView('crdt-debug')}
+            className={cn(
+              'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors',
+              activeView === 'crdt-debug'
+                ? 'bg-primary text-primary-foreground'
+                : 'text-muted-foreground hover:bg-muted'
+            )}
+          >
+            <Bug className="h-4 w-4" />
+            CRDT Debug
+          </button>
+        </div>
+
+        {activeView === 'crdt-debug' ? (
+          <CrdtDebug />
+        ) : selectedMap ? (
           <>
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-semibold">{selectedMap}</h2>

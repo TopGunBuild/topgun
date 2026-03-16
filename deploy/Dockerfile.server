@@ -1,51 +1,31 @@
 # deploy/Dockerfile.server
-# Canonical production server image for TopGun
-FROM node:20-alpine AS builder
+# Canonical production server image for TopGun (Rust)
+FROM rust:1.88-bookworm AS builder
 
 WORKDIR /app
 
-# Install pnpm via corepack (official method)
-RUN corepack enable && corepack prepare pnpm@10.13.1 --activate
+# Copy Cargo workspace files
+COPY Cargo.toml Cargo.lock ./
+COPY packages/core-rust/ ./packages/core-rust/
+COPY packages/server-rust/ ./packages/server-rust/
 
-# Copy package files
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY packages/core/package.json ./packages/core/
-COPY packages/server/package.json ./packages/server/
+# Build the server binary in release mode
+RUN cargo build --release --bin test-server
 
-# Install dependencies
-RUN pnpm install --frozen-lockfile
+# Runtime image
+FROM debian:bookworm-slim
 
-# Copy source code
-COPY packages/core ./packages/core
-COPY packages/server ./packages/server
-COPY tsconfig.json ./
+# Install runtime dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates libssl3 wget && \
+    rm -rf /var/lib/apt/lists/*
 
-# Build packages (core first, then server with start-server.ts)
-RUN pnpm --filter @topgunbuild/core build && \
-    pnpm --filter @topgunbuild/server build
-
-# Production image
-FROM node:20-alpine
-
-WORKDIR /app
-
-# Install pnpm via corepack for production deps
-RUN corepack enable && corepack prepare pnpm@10.13.1 --activate
-
-# Copy built packages
-COPY --from=builder /app/packages/core/dist ./packages/core/dist
-COPY --from=builder /app/packages/core/package.json ./packages/core/
-COPY --from=builder /app/packages/server/dist ./packages/server/dist
-COPY --from=builder /app/packages/server/package.json ./packages/server/
-
-# Copy root package files
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-
-# Install production dependencies only
-RUN pnpm install --prod --frozen-lockfile
+# Copy the compiled binary, renaming for a cleaner container image
+COPY --from=builder /app/target/release/test-server /usr/local/bin/topgun-server
 
 # Run as non-root user for security
-USER node
+RUN useradd --create-home --shell /bin/bash topgun
+USER topgun
 
 # Health check on default port 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
@@ -54,5 +34,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
 # Expose ports (client WebSocket, cluster, metrics)
 EXPOSE 8080 9080 9090
 
-# Start server using the compiled entry point
-CMD ["node", "packages/server/dist/start-server.js"]
+CMD ["/usr/local/bin/topgun-server"]

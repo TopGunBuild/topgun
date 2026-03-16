@@ -1,13 +1,10 @@
-# Docker Compose for local 3-node TopGun cluster
-# Phase 4: Clustering Improvements
+# Docker Compose for local 3-node TopGun cluster (Rust server)
 #
 # Usage:
 #   docker-compose -f deploy/docker-compose.cluster.yml up --build
 #
 # This creates a 3-node cluster with:
 #   - Manual peer discovery
-#   - Gradual rebalancing enabled
-#   - Async replication pipeline
 #   - Prometheus metrics endpoints
 
 version: '3.8'
@@ -29,13 +26,8 @@ services:
       # Cluster discovery (manual mode)
       - TOPGUN_DISCOVERY=manual
       - TOPGUN_PEERS=topgun-node-2:9080,topgun-node-3:9080
-      # Phase 4: Clustering configuration
-      - TOPGUN_GRADUAL_REBALANCING=true
-      - TOPGUN_REPLICATION_ENABLED=true
-      - TOPGUN_MIGRATION_BATCH_SIZE=10
-      - TOPGUN_MIGRATION_PARALLEL_TRANSFERS=4
-      - TOPGUN_REPLICATION_CONSISTENCY=EVENTUAL
-      - TOPGUN_REPLICATION_QUEUE_SIZE=10000
+      # Logging
+      - RUST_LOG=topgun_server=info
     ports:
       - "8081:8080"   # Client WebSocket
       - "9081:9090"   # Metrics
@@ -63,12 +55,7 @@ services:
       - TOPGUN_METRICS_PORT=9090
       - TOPGUN_DISCOVERY=manual
       - TOPGUN_PEERS=topgun-node-1:9080,topgun-node-3:9080
-      - TOPGUN_GRADUAL_REBALANCING=true
-      - TOPGUN_REPLICATION_ENABLED=true
-      - TOPGUN_MIGRATION_BATCH_SIZE=10
-      - TOPGUN_MIGRATION_PARALLEL_TRANSFERS=4
-      - TOPGUN_REPLICATION_CONSISTENCY=EVENTUAL
-      - TOPGUN_REPLICATION_QUEUE_SIZE=10000
+      - RUST_LOG=topgun_server=info
     ports:
       - "8082:8080"
       - "9082:9090"
@@ -93,12 +80,7 @@ services:
       - TOPGUN_METRICS_PORT=9090
       - TOPGUN_DISCOVERY=manual
       - TOPGUN_PEERS=topgun-node-1:9080,topgun-node-2:9080
-      - TOPGUN_GRADUAL_REBALANCING=true
-      - TOPGUN_REPLICATION_ENABLED=true
-      - TOPGUN_MIGRATION_BATCH_SIZE=10
-      - TOPGUN_MIGRATION_PARALLEL_TRANSFERS=4
-      - TOPGUN_REPLICATION_CONSISTENCY=EVENTUAL
-      - TOPGUN_REPLICATION_QUEUE_SIZE=10000
+      - RUST_LOG=topgun_server=info
     ports:
       - "8083:8080"
       - "9083:9090"

@@ -32,6 +32,8 @@ export class SingleServerProvider implements IConnectionProvider {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private isClosing: boolean = false;
   private listeners: Map<ConnectionProviderEvent, Set<ConnectionEventHandler>> = new Map();
+  private onlineHandler: (() => void) | null = null;
+  private offlineHandler: (() => void) | null = null;
 
   constructor(config: SingleServerProviderConfig) {
     this.url = config.url;
@@ -41,7 +43,10 @@ export class SingleServerProvider implements IConnectionProvider {
       reconnectDelayMs: config.reconnectDelayMs ?? DEFAULT_CONFIG.reconnectDelayMs,
       backoffMultiplier: config.backoffMultiplier ?? DEFAULT_CONFIG.backoffMultiplier,
       maxReconnectDelayMs: config.maxReconnectDelayMs ?? DEFAULT_CONFIG.maxReconnectDelayMs,
+      listenNetworkEvents: config.listenNetworkEvents ?? true,
     };
+
+    this.setupNetworkListeners();
   }
 
   /**
@@ -50,6 +55,12 @@ export class SingleServerProvider implements IConnectionProvider {
   async connect(): Promise<void> {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       return; // Already connected
+    }
+
+    // Skip connection attempt when browser reports no network —
+    // the 'online' event listener will trigger forceReconnect() when network returns
+    if (typeof globalThis.navigator !== 'undefined' && globalThis.navigator.onLine === false) {
+      throw new Error('Browser is offline — skipping connection attempt');
     }
 
     this.isClosing = false;
@@ -174,6 +185,7 @@ export class SingleServerProvider implements IConnectionProvider {
    */
   async close(): Promise<void> {
     this.isClosing = true;
+    this.teardownNetworkListeners();
 
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -220,6 +232,14 @@ export class SingleServerProvider implements IConnectionProvider {
       this.reconnectTimer = null;
     }
 
+    // When browser reports offline, don't schedule reconnects —
+    // the 'online' event listener will call forceReconnect() when network returns
+    if (typeof globalThis.navigator !== 'undefined' && globalThis.navigator.onLine === false
+        && this.config.listenNetworkEvents) {
+      logger.info({ url: this.url }, 'Browser offline — waiting for online event instead of polling');
+      return;
+    }
+
     if (this.reconnectAttempts >= this.config.maxReconnectAttempts) {
       logger.error(
         { attempts: this.reconnectAttempts, url: this.url },
@@ -264,6 +284,48 @@ export class SingleServerProvider implements IConnectionProvider {
   }
 
   /**
+   * Force-close the current WebSocket and immediately schedule reconnection.
+   * Unlike close(), this does NOT set isClosing and preserves reconnect behavior.
+   * Resets the reconnect counter so the full backoff budget is available.
+   *
+   * Critically, this does NOT wait for the TCP close handshake (which can
+   * hang 20+ seconds on a dead network). Instead it strips all handlers from
+   * the old WebSocket, fires a best-effort close(), nulls the reference, and
+   * schedules reconnect right away.
+   */
+  forceReconnect(): void {
+    this.reconnectAttempts = 0;
+    this.isClosing = false;
+
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    if (this.ws) {
+      // Detach all handlers so the lingering socket cannot fire events
+      this.ws.onopen = null;
+      this.ws.onclose = null;
+      this.ws.onerror = null;
+      this.ws.onmessage = null;
+
+      // Best-effort close — don't await the TCP handshake
+      try {
+        this.ws.close();
+      } catch {
+        // Ignore errors on already-dead sockets
+      }
+      this.ws = null;
+    }
+
+    // Emit disconnected so SyncEngine knows connection is down NOW
+    this.emit('disconnected', 'default');
+
+    // Schedule reconnect immediately (delay 0 → first attempt uses jittered base delay)
+    this.scheduleReconnect();
+  }
+
+  /**
    * Get the WebSocket URL this provider connects to.
    */
   getUrl(): string {
@@ -283,5 +345,49 @@ export class SingleServerProvider implements IConnectionProvider {
    */
   resetReconnectAttempts(): void {
     this.reconnectAttempts = 0;
+  }
+
+  /**
+   * Listen for browser 'online' event to trigger instant reconnect
+   * when network comes back. Only active in browser environments.
+   */
+  private setupNetworkListeners(): void {
+    if (!this.config.listenNetworkEvents) return;
+    if (typeof globalThis.addEventListener !== 'function') return;
+
+    this.onlineHandler = () => {
+      if (this.isClosing) return;
+      if (this.isConnected()) return;
+
+      logger.info({ url: this.url }, 'Network online detected — forcing reconnect');
+      this.forceReconnect();
+    };
+
+    this.offlineHandler = () => {
+      if (this.isClosing) return;
+      if (!this.isConnected()) return;
+
+      logger.info({ url: this.url }, 'Network offline detected — disconnecting immediately');
+      this.forceReconnect();
+    };
+
+    globalThis.addEventListener('online', this.onlineHandler);
+    globalThis.addEventListener('offline', this.offlineHandler);
+  }
+
+  /**
+   * Remove browser network event listeners.
+   */
+  private teardownNetworkListeners(): void {
+    if (typeof globalThis.removeEventListener === 'function') {
+      if (this.onlineHandler) {
+        globalThis.removeEventListener('online', this.onlineHandler);
+        this.onlineHandler = null;
+      }
+      if (this.offlineHandler) {
+        globalThis.removeEventListener('offline', this.offlineHandler);
+        this.offlineHandler = null;
+      }
+    }
   }
 }

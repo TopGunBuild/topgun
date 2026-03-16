@@ -538,8 +538,8 @@ export class SyncEngine {
     this.tokenProvider = null;
 
     const state = this.stateMachine.getState();
-    if (state === SyncState.AUTHENTICATING || state === SyncState.CONNECTING) {
-      // If we are already connected (e.g. waiting for token), send it now
+    if (state === SyncState.AUTHENTICATING) {
+      // Already connected and waiting for token — send it now
       this.sendAuth();
     } else if (state === SyncState.BACKOFF || state === SyncState.DISCONNECTED) {
       // Force immediate reconnect if we were waiting for retry timer
@@ -666,10 +666,13 @@ export class SyncEngine {
     // Route to registered handler
     await this.messageRouter.route(message);
 
-    // Update HLC if message has timestamp
-    if (message.timestamp) {
-      this.hlc.update(message.timestamp);
-      this.lastSyncTimestamp = message.timestamp.millis;
+    // Update HLC if message has an HLC Timestamp struct (millis + counter + nodeId).
+    // Some messages (e.g. PONG) have a raw numeric `timestamp` field — passing that
+    // to HLC.update() would poison the clock with NaN via Number(undefined).
+    const ts = message.timestamp;
+    if (ts && typeof ts === 'object' && 'millis' in ts && 'counter' in ts && 'nodeId' in ts) {
+      this.hlc.update(ts);
+      this.lastSyncTimestamp = Number(ts.millis);
       await this.saveOpLog();
     }
   }
@@ -754,21 +757,43 @@ export class SyncEngine {
       }
     }
 
-    // Backwards compatible: mark all ops up to lastId as synced
+    // Mark all ops up to lastId as synced (numeric comparison — IDs are stringified integers)
+    const lastIdNum = parseInt(lastId, 10);
     let maxSyncedId = -1;
     let ackedCount = 0;
-    this.opLog.forEach(op => {
-      if (op.id && op.id <= lastId) {
+
+    if (!isNaN(lastIdNum)) {
+      // Normal path: server returned a valid numeric lastId
+      this.opLog.forEach(op => {
+        if (op.id) {
+          const opIdNum = parseInt(op.id, 10);
+          if (!isNaN(opIdNum) && opIdNum <= lastIdNum) {
+            if (!op.synced) {
+              ackedCount++;
+            }
+            op.synced = true;
+            if (opIdNum > maxSyncedId) {
+              maxSyncedId = opIdNum;
+            }
+          }
+        }
+      });
+    } else {
+      // Fallback: server returned non-numeric lastId (e.g. "unknown", "undefined").
+      // The server ACKed the batch, so mark ALL pending ops as synced.
+      logger.warn({ lastId }, 'OP_ACK has non-numeric lastId — marking all pending ops as synced');
+      this.opLog.forEach(op => {
         if (!op.synced) {
           ackedCount++;
+          op.synced = true;
+          const opIdNum = parseInt(op.id, 10);
+          if (!isNaN(opIdNum) && opIdNum > maxSyncedId) {
+            maxSyncedId = opIdNum;
+          }
         }
-        op.synced = true;
-        const idNum = parseInt(op.id, 10);
-        if (!isNaN(idNum) && idNum > maxSyncedId) {
-          maxSyncedId = idNum;
-        }
-      }
-    });
+      });
+    }
+
     if (maxSyncedId !== -1) {
       this.storageAdapter.markOpsSynced(maxSyncedId).catch(err => logger.error({ err }, 'Failed to mark ops synced'));
     }

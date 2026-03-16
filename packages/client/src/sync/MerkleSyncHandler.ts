@@ -11,6 +11,8 @@ import { logger } from '../utils/logger';
 export class MerkleSyncHandler implements IMerkleSyncHandler {
   private readonly config: MerkleSyncHandlerConfig;
   private lastSyncTimestamp: number = 0;
+  /** Accumulated sync stats per map, flushed after a quiet period */
+  private syncStats = new Map<string, { count: number; timer: ReturnType<typeof setTimeout> }>();
 
   constructor(config: MerkleSyncHandlerConfig) {
     this.config = config;
@@ -37,7 +39,9 @@ export class MerkleSyncHandler implements IMerkleSyncHandler {
    * Compares root hashes and requests buckets if mismatch detected.
    */
   public async handleSyncRespRoot(payload: { mapName: string; rootHash: number; timestamp?: any }): Promise<void> {
-    const { mapName, rootHash, timestamp } = payload;
+    const { mapName, timestamp } = payload;
+    // Coerce BigInt — Rust server sends u64 hashes which MsgPack decodes as BigInt
+    const rootHash = Number(payload.rootHash);
     const map = this.config.getMap(mapName);
     if (map instanceof LWWMap) {
       const localRootHash = map.getMerkleTree().getRootHash();
@@ -67,10 +71,12 @@ export class MerkleSyncHandler implements IMerkleSyncHandler {
     if (map instanceof LWWMap) {
       const tree = map.getMerkleTree();
       const localBuckets = tree.getBuckets(path);
+      let mismatchCount = 0;
 
       for (const [bucketKey, remoteHash] of Object.entries(buckets)) {
         const localHash = localBuckets[bucketKey] || 0;
         if (localHash !== remoteHash) {
+          mismatchCount++;
           const newPath = path + bucketKey;
           this.config.sendMessage({
             type: 'MERKLE_REQ_BUCKET',
@@ -100,7 +106,18 @@ export class MerkleSyncHandler implements IMerkleSyncHandler {
         }
       }
       if (updateCount > 0) {
-        logger.info({ mapName, count: updateCount }, 'Synced records from server');
+        // Aggregate sync stats and flush after a quiet period to avoid per-leaf log spam
+        const existing = this.syncStats.get(mapName);
+        if (existing) {
+          existing.count += updateCount;
+          clearTimeout(existing.timer);
+        }
+        const stats = existing ?? { count: updateCount, timer: undefined as any };
+        if (!existing) this.syncStats.set(mapName, stats);
+        stats.timer = setTimeout(() => {
+          logger.info({ mapName, count: stats.count }, 'Synced records from server');
+          this.syncStats.delete(mapName);
+        }, 100);
       }
     }
   }

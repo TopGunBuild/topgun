@@ -1,48 +1,12 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
+import useSWR from 'swr';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { adminFetch } from '@/lib/api';
+import type { ClusterStatusResponse, NodeInfo, PartitionInfo } from '@/lib/admin-api-types';
 import { Server, Activity, HardDrive, Users, RefreshCw, Loader2 } from 'lucide-react';
-
-const POLL_INTERVAL = 5000; // 5 seconds
-
-interface ClusterNode {
-  id: string;
-  address: string;
-  status: 'healthy' | 'suspect' | 'dead';
-  partitions: number[];
-  connections: number;
-  memory: { used: number; total: number };
-  uptime: number;
-}
-
-interface PartitionInfo {
-  id: number;
-  owner: string;
-  replicas: string[];
-}
-
-interface ClusterStatusResponse {
-  nodes: Array<{
-    nodeId: string;
-    address: string;
-    status: 'healthy' | 'suspect' | 'dead';
-    partitionCount: number;
-    connections: number;
-    memory: { used: number; total: number };
-    uptime: number;
-  }>;
-  partitions: Array<{
-    id: number;
-    owner: string;
-    replicas: string[];
-  }>;
-  totalPartitions: number;
-  isRebalancing: boolean;
-}
 
 function polarToCartesian(cx: number, cy: number, r: number, angle: number) {
   const rad = ((angle - 90) * Math.PI) / 180;
@@ -65,67 +29,29 @@ function formatUptime(seconds: number): string {
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
 }
 
 export function ClusterTopology() {
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
-  const [nodes, setNodes] = useState<ClusterNode[]>([]);
-  const [partitions, setPartitions] = useState<PartitionInfo[]>([]);
-  const [totalPartitions, setTotalPartitions] = useState(271);
-  const [isRebalancing, setIsRebalancing] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
-  const fetchClusterStatus = useCallback(async () => {
-    try {
-      const res = await adminFetch('/api/admin/cluster/status');
-      if (!res.ok) {
-        throw new Error('Failed to fetch cluster status');
-      }
-      const data: ClusterStatusResponse = await res.json();
+  const { data, error, isLoading, mutate } = useSWR<ClusterStatusResponse>(
+    '/api/admin/cluster/status',
+    { refreshInterval: 5000 }
+  );
 
-      // Transform API response to component state
-      const clusterNodes: ClusterNode[] = data.nodes.map((node) => ({
-        id: node.nodeId,
-        address: node.address,
-        status: node.status,
-        partitions: data.partitions
-          .filter((p) => p.owner === node.nodeId)
-          .map((p) => p.id),
-        connections: node.connections,
-        memory: node.memory,
-        uptime: node.uptime,
-      }));
-
-      setNodes(clusterNodes);
-      setPartitions(data.partitions);
-      setTotalPartitions(data.totalPartitions || 271);
-      setIsRebalancing(data.isRebalancing);
-      setError(null);
-    } catch (err) {
-      console.error('Failed to fetch cluster status:', err);
-      setError(err instanceof Error ? err.message : 'Unknown error');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  // Initial fetch and polling
-  useEffect(() => {
-    fetchClusterStatus();
-
-    const interval = setInterval(fetchClusterStatus, POLL_INTERVAL);
-    return () => clearInterval(interval);
-  }, [fetchClusterStatus]);
+  const nodes: NodeInfo[] = data?.nodes ?? [];
+  const partitions: PartitionInfo[] = data?.partitions ?? [];
+  const totalPartitions = data?.totalPartitions ?? 271;
+  const isRebalancing = data?.isRebalancing ?? false;
 
   const healthyNodes = nodes.filter((n) => n.status === 'healthy').length;
 
-  // Node colors for visualization
   const nodeColors = ['hsl(200, 70%, 50%)', 'hsl(150, 70%, 50%)', 'hsl(280, 70%, 50%)', 'hsl(30, 70%, 50%)'];
   const nodeColorClasses = ['bg-blue-500', 'bg-green-500', 'bg-purple-500', 'bg-orange-500'];
 
-  if (loading) {
+  if (isLoading) {
     return (
       <div className="flex items-center justify-center h-64">
         <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -138,7 +64,7 @@ export function ClusterTopology() {
       {/* Header with refresh */}
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Cluster Topology</h1>
-        <Button variant="outline" size="sm" onClick={fetchClusterStatus}>
+        <Button variant="outline" size="sm" onClick={() => mutate()}>
           <RefreshCw className="h-4 w-4 mr-2" />
           Refresh
         </Button>
@@ -146,7 +72,7 @@ export function ClusterTopology() {
 
       {error && (
         <div className="bg-destructive/10 text-destructive px-4 py-2 rounded-md">
-          {error}
+          {error instanceof Error ? error.message : 'Failed to fetch cluster status'}
         </div>
       )}
 
@@ -225,7 +151,7 @@ export function ClusterTopology() {
 
               {/* Partition segments */}
               {nodes.map((node, nodeIndex) => {
-                const nodePartitions = partitions.filter((p) => p.owner === node.id);
+                const nodePartitions = partitions.filter((p) => p.ownerNodeId === node.nodeId);
 
                 return nodePartitions.map((partition) => {
                   const startAngle = (partition.id / totalPartitions) * 360;
@@ -243,7 +169,7 @@ export function ClusterTopology() {
                       stroke={nodeColors[nodeIndex % nodeColors.length]}
                       strokeWidth="18"
                       className="cursor-pointer hover:opacity-80 transition-opacity"
-                      onClick={() => setSelectedNode(node.id)}
+                      onClick={() => setSelectedNode(node.nodeId)}
                     />
                   );
                 });
@@ -262,9 +188,9 @@ export function ClusterTopology() {
           {/* Legend */}
           <div className="flex justify-center gap-4 mt-4">
             {nodes.map((node, i) => (
-              <div key={node.id} className="flex items-center gap-2">
+              <div key={node.nodeId} className="flex items-center gap-2">
                 <div className={cn('w-3 h-3 rounded-full', nodeColorClasses[i % nodeColorClasses.length])} />
-                <span className="text-sm">{node.id}</span>
+                <span className="text-sm">{node.nodeId}</span>
               </div>
             ))}
           </div>
@@ -275,18 +201,18 @@ export function ClusterTopology() {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {nodes.map((node) => (
           <Card
-            key={node.id}
+            key={node.nodeId}
             className={cn(
               'cursor-pointer transition-all',
-              selectedNode === node.id && 'ring-2 ring-primary'
+              selectedNode === node.nodeId && 'ring-2 ring-primary'
             )}
-            onClick={() => setSelectedNode(node.id)}
+            onClick={() => setSelectedNode(node.nodeId)}
           >
             <CardHeader className="pb-2">
               <div className="flex items-center justify-between">
                 <CardTitle className="text-lg flex items-center gap-2">
                   <Server className="h-5 w-5" />
-                  {node.id}
+                  {node.nodeId}
                 </CardTitle>
                 <Badge
                   variant={
@@ -309,24 +235,14 @@ export function ClusterTopology() {
                     <HardDrive className="h-4 w-4" />
                     Partitions
                   </span>
-                  <span>{node.partitions.length}</span>
+                  <span>{node.partitionCount}</span>
                 </div>
-                <Progress value={(node.partitions.length / totalPartitions) * 100} />
+                <Progress value={(node.partitionCount / totalPartitions) * 100} />
               </div>
 
-              <div>
-                <div className="flex justify-between text-sm mb-1">
-                  <span>Memory</span>
-                  <span>
-                    {formatBytes(node.memory.used)} / {formatBytes(node.memory.total)}
-                  </span>
-                </div>
-                <Progress
-                  value={node.memory.total > 0 ? (node.memory.used / node.memory.total) * 100 : 0}
-                  className={cn(
-                    node.memory.total > 0 && node.memory.used / node.memory.total > 0.9 && 'bg-red-200'
-                  )}
-                />
+              <div className="flex justify-between text-sm">
+                <span>Memory</span>
+                <span>{formatBytes(node.memory)}</span>
               </div>
 
               <div className="flex justify-between text-sm">

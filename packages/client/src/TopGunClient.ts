@@ -153,7 +153,14 @@ export class TopGunClient {
       logger.info({ seeds: this.clusterConfig.seeds }, 'TopGunClient initialized in cluster mode');
     } else {
       // Single-server mode: create SingleServerProvider from serverUrl
-      const singleServerProvider = new SingleServerProvider({ url: config.serverUrl! });
+      // Map BackoffConfig to SingleServerProviderConfig for unified retry behavior
+      const singleServerProvider = new SingleServerProvider({
+        url: config.serverUrl!,
+        maxReconnectAttempts: config.backoff?.maxRetries,
+        reconnectDelayMs: config.backoff?.initialDelayMs,
+        backoffMultiplier: config.backoff?.multiplier,
+        maxReconnectDelayMs: config.backoff?.maxDelayMs,
+      });
 
       this.syncEngine = new SyncEngine({
         nodeId: this.nodeId,

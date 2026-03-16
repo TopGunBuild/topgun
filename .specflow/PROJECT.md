@@ -15,9 +15,9 @@ Local-first data access that never waits for network, with automatic conflict re
 | Layer | Technology |
 |-------|------------|
 | Language (client) | TypeScript |
-| Language (server) | TypeScript (migrating to Rust) |
+| Language (server) | Rust |
 | Runtime (client) | Browser / Node.js |
-| Runtime (server) | Node.js (migrating to tokio) |
+| Runtime (server) | tokio |
 | Package Manager | pnpm 10.13.1 (monorepo) |
 | Build Tool | tsup (TS), Cargo (Rust) |
 | Testing | Jest (TS), cargo test + proptest (Rust) |
@@ -32,24 +32,22 @@ Local-first data access that never waits for network, with automatic conflict re
 packages/
 ├── core/               # TS: CRDTs (LWWMap, ORMap), HLC, MerkleTree, schemas
 ├── client/             # TS: Browser/Node SDK: TopGunClient, SyncEngine
-├── server/             # TS: WebSocket server, clustering, PostgreSQL adapter
 ├── react/              # TS: React bindings: hooks (useQuery, useMap, etc.)
 ├── adapters/           # TS: Storage implementations (IndexedDB)
-├── native/             # N-API: Native xxHash64 for Node.js performance
 ├── mcp-server/         # TS: MCP server integration
 ├── adapter-better-auth/ # TS: BetterAuth integration
-├── core-rust/          # Rust (planned): CRDTs, HLC, MerkleTree
-└── server-rust/        # Rust (planned): Server rewrite (axum, tokio, sqlx)
+├── core-rust/          # Rust: CRDTs, HLC, MerkleTree
+└── server-rust/        # Rust: Server (axum, tokio, sqlx)
 tests/
-├── e2e/                # End-to-end tests
+├── integration-rust/   # Integration tests (TS client to Rust server)
 └── k6/                 # Load testing (k6)
 ```
 
 ## Rust Migration Status
 
-**Current phase:** Phase 0 (TypeScript Completion) — finishing client cluster routing (SPEC-048b, 048c)
+**Current phase:** Phase 3 (Rust Server) complete. All 7 domain services replaced, integration tests passing. Legacy TS server removed.
 
-**Strategy:** Complete TypeScript Wave 1 → Bridge (Cargo workspace + traits) → Rust server rewrite using TS as executable specification.
+**Strategy:** Rust-first design informed by Hazelcast. TS client remains, Rust server is production.
 
 **Key architectural decisions (2026-02-12):**
 - 6 upfront traits gate all Rust architecture (ServerStorage, MapProvider, QueryNotifier, Processor, RequestContext, SchemaProvider)

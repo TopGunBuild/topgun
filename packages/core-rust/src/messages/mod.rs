@@ -2336,6 +2336,7 @@ mod client_events_tests {
     fn auth_ack_data_roundtrip() {
         let data = AuthAckData {
             protocol_version: Some(1),
+            ..Default::default()
         };
         let bytes = rmp_serde::to_vec_named(&data).expect("serialize");
         let decoded: AuthAckData = rmp_serde::from_slice(&bytes).expect("deserialize");
@@ -2346,6 +2347,7 @@ mod client_events_tests {
     fn auth_ack_data_roundtrip_none() {
         let data = AuthAckData {
             protocol_version: None,
+            ..Default::default()
         };
         let bytes = rmp_serde::to_vec_named(&data).expect("serialize");
         let decoded: AuthAckData = rmp_serde::from_slice(&bytes).expect("deserialize");
@@ -2456,6 +2458,7 @@ mod client_events_tests {
         // Verify representative client event structs do NOT produce a "type" key
         let auth = AuthAckData {
             protocol_version: Some(1),
+            ..Default::default()
         };
         let bytes = rmp_serde::to_vec_named(&auth).expect("serialize");
         let raw: rmpv::Value =

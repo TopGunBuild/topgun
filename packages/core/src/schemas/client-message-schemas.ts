@@ -77,6 +77,7 @@ export type GcPruneMessage = z.infer<typeof GcPruneMessageSchema>;
 export const AuthAckMessageSchema = z.object({
   type: z.literal('AUTH_ACK'),
   protocolVersion: z.number().optional(),
+  userId: z.string().optional(),
 });
 export type AuthAckMessage = z.infer<typeof AuthAckMessageSchema>;
 
