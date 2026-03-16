@@ -10,6 +10,7 @@
 
 pub mod classify;
 pub mod config;
+pub mod dispatch;
 pub mod domain;
 pub mod middleware;
 pub mod operation;
@@ -21,6 +22,7 @@ pub mod worker;
 // Re-export key types for convenient access.
 pub use classify::OperationService;
 pub use config::ServerConfig;
+pub use dispatch::PartitionDispatcher;
 pub use operation::{
     service_names, CallerOrigin, ClassifyError, Operation, OperationContext, OperationError,
     OperationPipeline, OperationResponse,
