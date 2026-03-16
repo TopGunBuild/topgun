@@ -1,0 +1,114 @@
+---
+title: "TopGun v0.12 — Rust Server, Offline Persistence, Live Demo"
+excerpt: "We replaced the TypeScript server with Rust. Here's why, what changed, and how to try it right now."
+date: "Mar 16, 2026"
+readTime: "4 min read"
+author: "Ivan Kalashnik"
+role: "Creator"
+category: "Release"
+image: "/images/blog-rust-server.jpg"
+avatar: "/images/ivan-avatar.jpeg"
+---
+
+TopGun v0.12 ships a **complete Rust server** built on axum and tokio, replacing the previous TypeScript implementation. The TypeScript client SDK stays the same — your frontend code doesn't change.
+
+**[Try the live demo](https://demo.topgun.build/)** to see real-time CRDT sync between devices, or read on for the details.
+
+## Why Rust
+
+The TypeScript server worked, but we kept hitting the same walls:
+
+- **Single-threaded bottleneck.** Node.js event loop serializes CPU-bound work like CRDT merges and Merkle tree hashing. Under load, a single expensive merge blocks every connection.
+- **Memory unpredictability.** V8's garbage collector pauses are invisible until they're not. For a real-time data grid holding millions of entries in memory, GC spikes translated directly into sync latency spikes.
+- **No true parallelism.** Worker threads help, but they serialize on shared state. Rust gives us lock-free concurrent data structures (DashMap, ArcSwap) without the overhead of message passing between isolates.
+
+Rust solved all three. The new server handles CRDT merges, Merkle tree sync, and full-text search indexing concurrently across all CPU cores, with predictable memory usage and zero GC pauses.
+
+## What's in v0.12
+
+### Rust Server
+
+Seven domain services, each independently testable:
+
+| Service | Responsibility |
+|---------|---------------|
+| **CRDT** | LWW-Map and OR-Map merge, conflict resolution |
+| **Sync** | Merkle tree delta sync, operation batching |
+| **Query** | Live subscriptions, filtered result sets |
+| **Search** | Full-text search via tantivy |
+| **Messaging** | Pub/sub topics, ephemeral messages |
+| **Persistence** | PostgreSQL storage via sqlx |
+| **Coordination** | Distributed locks, cluster protocol |
+
+The cluster protocol distributes data across **271 partitions** with consistent hashing. Nodes join, leave, and rebalance without downtime.
+
+### Client Improvements
+
+The TypeScript client got several reliability fixes:
+
+- **Unified reconnection.** Previously, `SyncEngine` and `SingleServerProvider` had independent retry logic with different configs. Now there's one `BackoffConfig` that flows through the entire stack.
+- **Heartbeat fix.** A heartbeat timeout used to permanently kill the connection (calling `close()` instead of triggering reconnect). Fixed with a new `forceReconnect()` path.
+- **Network listener.** The client now listens for the browser's `online` event and reconnects immediately when WiFi returns — no waiting for the next backoff timer.
+- **IndexedDB persistence.** The demo (and any app using `IDBAdapter`) now survives page refreshes. Offline writes persist to IndexedDB and sync when the connection returns.
+
+### Live Demo
+
+The [Sync Lab demo](https://demo.topgun.build/) lets you:
+
+- **Latency Race** — compare online vs. offline write speed (both sub-millisecond)
+- **Conflict Arena** — disconnect a device, make conflicting edits, reconnect and watch CRDT resolution happen
+- **Share sessions** — open the same session on your phone to see cross-device sync
+
+The demo is also embedded on the [TopGun homepage](https://topgun.build/).
+
+## Test Coverage
+
+We don't ship without tests:
+
+- **953 Rust tests** — unit + integration across server and core crates
+- **2,052 TypeScript tests** — client SDK, CRDT core, React hooks, storage adapters
+- **55 integration tests** — TypeScript client talking to the Rust server over WebSocket
+
+## Get Started
+
+```bash
+npm install @topgunbuild/client@0.12.0 @topgunbuild/adapters@0.12.0
+```
+
+Start the server:
+
+```bash
+# Docker
+docker compose up --build
+
+# Or directly
+cargo run --bin test-server --release
+```
+
+Connect from your app:
+
+```typescript
+import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter(),
+});
+
+client.start();
+
+const todos = client.getMap('todos');
+todos.set('todo-1', { text: 'Ship it', done: true });
+```
+
+Full docs at [topgun.build/docs](https://topgun.build/docs).
+
+## What's Next
+
+- **Schema validation** — define and enforce record shapes
+- **SQL queries** — DataFusion-powered SQL over CRDT data
+- **WASM client** — same Rust CRDT engine running in the browser
+- **Multi-tenancy** — isolated namespaces on a shared cluster
+
+Follow the project on [GitHub](https://github.com/TopGunBuild/topgun).
