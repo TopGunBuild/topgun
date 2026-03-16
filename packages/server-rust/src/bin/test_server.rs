@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
 
     let (classify_svc, pipeline, connection_registry) = build_services();
 
-    let operation_pipeline = Arc::new(parking_lot::Mutex::new(pipeline));
+    let operation_pipeline = Arc::new(tokio::sync::Mutex::new(pipeline));
 
     // Build the AppState with all services wired
     let shutdown = Arc::new(ShutdownController::new());

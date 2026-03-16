@@ -19,8 +19,8 @@ use crate::service::router::OperationRouter;
 /// 2. `TimeoutLayer` -- enforce per-operation timeouts
 /// 3. `MetricsLayer` -- record timing and outcome (closest to the actual handler)
 ///
-/// Returns a `BoxCloneService` so the pipeline can be cheaply cloned per-request,
-/// eliminating the need for a global `Mutex`.
+/// Returns a `BoxService` to erase the unnameable composed type, making the
+/// pipeline storable in `AppState` via `Arc<Mutex<OperationPipeline>>`.
 #[must_use]
 pub fn build_operation_pipeline(
     router: OperationRouter,
@@ -51,7 +51,6 @@ mod tests {
     use crate::service::operation::{service_names, OperationContext};
 
     /// Stub service for pipeline testing.
-    #[derive(Clone)]
     struct StubService;
 
     impl Service<Operation> for StubService {

@@ -21,8 +21,9 @@ pub use websocket::ws_upgrade_handler;
 use std::sync::Arc;
 use std::time::Instant;
 
+use tokio::sync::Mutex;
+
 use arc_swap::ArcSwap;
-use parking_lot::Mutex;
 
 use super::{ConnectionRegistry, NetworkConfig, ShutdownController};
 use crate::cluster::state::ClusterState;
@@ -57,9 +58,7 @@ pub struct AppState {
     /// `None` in network-only tests that do not wire the service layer.
     pub operation_service: Option<Arc<OperationService>>,
     /// Full Tower middleware pipeline (`LoadShed` -> `Timeout` -> `Metrics` -> `Router`).
-    /// Uses `BoxCloneService` behind `parking_lot::Mutex` for `Sync` compliance.
-    /// The mutex is held only for the brief clone (~nanoseconds), not for the
-    /// entire operation processing — each request gets an independent clone.
+    /// Wrapped in `Mutex` because `Service::call()` requires `&mut self`.
     ///
     /// `None` in network-only tests that do not wire the service layer.
     pub operation_pipeline: Option<Arc<Mutex<OperationPipeline>>>,
