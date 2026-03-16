@@ -3,6 +3,7 @@ import '../styles/global.css';
 import { NavbarWrapper } from '../components/NavbarWrapper';
 import { Footer } from '../components/Footer';
 import SEO from '../components/SEO.astro';
+import PostHog from '../components/PostHog.astro';
 
 interface Props {
 	title?: string;
@@ -32,6 +33,7 @@ const {
 		<meta name="generator" content={Astro.generator} />
 		<SEO title={title} description={description} image={image} type={type} publishedTime={publishedTime} author={author} />
 		<title>{title}</title>
+		<PostHog />
         <script is:inline>
             // Theme toggle logic - default to dark if no preference saved
             const getThemePreference = () => {
