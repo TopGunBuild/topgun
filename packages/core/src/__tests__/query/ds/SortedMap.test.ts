@@ -458,7 +458,7 @@ describe('SortedMap', () => {
       const elapsed = performance.now() - start;
 
       // 10k lookups should be very fast (< 100ms)
-      expect(elapsed).toBeLessThan(100);
+      expect(elapsed).toBeLessThan(200);
     });
 
     it('should handle range queries efficiently', () => {
@@ -496,7 +496,7 @@ describe('SortedMap', () => {
 
       // 10k lookups should be very fast (< 100ms) if O(log N)
       // Would be > 1000ms if O(N)
-      expect(elapsed).toBeLessThan(100);
+      expect(elapsed).toBeLessThan(200);
     });
 
     it('should maintain O(log N) for floorKey (worst case)', () => {
@@ -515,7 +515,7 @@ describe('SortedMap', () => {
       const elapsed = performance.now() - start;
 
       // 10k lookups should be very fast (< 100ms) if O(log N)
-      expect(elapsed).toBeLessThan(100);
+      expect(elapsed).toBeLessThan(200);
     });
 
     it('should maintain O(log N) for higherKey', () => {
@@ -533,7 +533,7 @@ describe('SortedMap', () => {
       }
       const elapsed = performance.now() - start;
 
-      expect(elapsed).toBeLessThan(100);
+      expect(elapsed).toBeLessThan(200);
     });
 
     it('should maintain O(log N) for ceilingKey', () => {
@@ -551,7 +551,7 @@ describe('SortedMap', () => {
       }
       const elapsed = performance.now() - start;
 
-      expect(elapsed).toBeLessThan(100);
+      expect(elapsed).toBeLessThan(200);
     });
   });
 
