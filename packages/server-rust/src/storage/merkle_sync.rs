@@ -4,6 +4,7 @@
 //! a [`MutationObserver`] implementation ([`MerkleMutationObserver`]) that keeps
 //! trees in sync with `RecordStore` mutations automatically.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -131,6 +132,95 @@ impl MerkleSyncManager {
         self.lww_trees.clear();
         self.ormap_trees.clear();
     }
+
+    /// Aggregates LWW root hashes across all partitions for `map_name`.
+    ///
+    /// Returns the `wrapping_add` of all per-partition root hashes.
+    /// Returns 0 when no partitions exist for the given map.
+    /// `wrapping_add` is commutative and associative, so the result is
+    /// independent of DashMap's non-deterministic iteration order.
+    pub fn aggregate_lww_root_hash(&self, map_name: &str) -> u32 {
+        self.lww_trees
+            .iter()
+            .filter(|entry| entry.key().0 == map_name)
+            .fold(0u32, |acc, entry| {
+                let hash = entry.value().lock().get_root_hash();
+                acc.wrapping_add(hash)
+            })
+    }
+
+    /// Aggregates OR-Map root hashes across all partitions for `map_name`.
+    ///
+    /// Same aggregation strategy as `aggregate_lww_root_hash`.
+    pub fn aggregate_ormap_root_hash(&self, map_name: &str) -> u32 {
+        self.ormap_trees
+            .iter()
+            .filter(|entry| entry.key().0 == map_name)
+            .fold(0u32, |acc, entry| {
+                let hash = entry.value().lock().get_root_hash();
+                acc.wrapping_add(hash)
+            })
+    }
+
+    /// Aggregates LWW bucket hashes at `path` across all partitions for `map_name`.
+    ///
+    /// For each hex bucket character, combines partition values via `wrapping_add`.
+    /// Returns a `HashMap<char, u32>` with the combined hashes, suitable for
+    /// returning as a `SyncRespBuckets` response covering all partitions.
+    pub fn aggregate_lww_buckets(&self, map_name: &str, path: &str) -> HashMap<char, u32> {
+        let mut combined: HashMap<char, u32> = HashMap::new();
+        for entry in self.lww_trees.iter() {
+            if entry.key().0 != map_name {
+                continue;
+            }
+            let buckets = entry.value().lock().get_buckets(path);
+            for (c, h) in buckets {
+                combined
+                    .entry(c)
+                    .and_modify(|acc| *acc = acc.wrapping_add(h))
+                    .or_insert(h);
+            }
+        }
+        combined
+    }
+
+    /// Aggregates OR-Map bucket hashes at `path` across all partitions for `map_name`.
+    ///
+    /// Same aggregation strategy as `aggregate_lww_buckets`.
+    pub fn aggregate_ormap_buckets(&self, map_name: &str, path: &str) -> HashMap<char, u32> {
+        let mut combined: HashMap<char, u32> = HashMap::new();
+        for entry in self.ormap_trees.iter() {
+            if entry.key().0 != map_name {
+                continue;
+            }
+            let buckets = entry.value().lock().get_buckets(path);
+            for (c, h) in buckets {
+                combined
+                    .entry(c)
+                    .and_modify(|acc| *acc = acc.wrapping_add(h))
+                    .or_insert(h);
+            }
+        }
+        combined
+    }
+
+    /// Returns all partition IDs that have a LWW tree for `map_name`.
+    pub fn lww_partition_ids(&self, map_name: &str) -> Vec<u32> {
+        self.lww_trees
+            .iter()
+            .filter(|entry| entry.key().0 == map_name)
+            .map(|entry| entry.key().1)
+            .collect()
+    }
+
+    /// Returns all partition IDs that have an OR-Map tree for `map_name`.
+    pub fn ormap_partition_ids(&self, map_name: &str) -> Vec<u32> {
+        self.ormap_trees
+            .iter()
+            .filter(|entry| entry.key().0 == map_name)
+            .map(|entry| entry.key().1)
+            .collect()
+    }
 }
 
 impl Default for MerkleSyncManager {
@@ -224,15 +314,12 @@ impl MerkleMutationObserver {
         }
     }
 
-    /// Client-sync partition ID. All Merkle trees at partition 0 serve as
-    /// cross-partition aggregates for client-facing delta sync.
-    const CLIENT_SYNC_PARTITION: u32 = 0;
-
     /// Updates the appropriate Merkle tree based on the `RecordValue` variant.
     ///
-    /// Dual-writes to both `self.partition_id` (the record's actual partition)
-    /// and partition 0 (the client-sync aggregate). When `self.partition_id`
-    /// is already 0, only one write occurs.
+    /// Writes only to `self.partition_id`. The aggregate root hash for client sync
+    /// is computed on demand via `MerkleSyncManager::aggregate_lww_root_hash()` /
+    /// `aggregate_ormap_root_hash()`, eliminating the Mutex contention on a shared
+    /// partition 0 that previously bottlenecked concurrent writes.
     fn update_tree(&self, key: &str, value: &RecordValue) {
         match value {
             RecordValue::Lww { timestamp, .. } => {
@@ -240,28 +327,16 @@ impl MerkleMutationObserver {
                     compute_lww_hash(key, timestamp.millis, timestamp.counter, &timestamp.node_id);
                 self.manager
                     .update_lww(&self.map_name, self.partition_id, key, hash);
-                if self.partition_id != Self::CLIENT_SYNC_PARTITION {
-                    self.manager
-                        .update_lww(&self.map_name, Self::CLIENT_SYNC_PARTITION, key, hash);
-                }
             }
             RecordValue::OrMap { records } => {
                 let hash = compute_ormap_hash(key, records);
                 self.manager
                     .update_ormap(&self.map_name, self.partition_id, key, hash);
-                if self.partition_id != Self::CLIENT_SYNC_PARTITION {
-                    self.manager
-                        .update_ormap(&self.map_name, Self::CLIENT_SYNC_PARTITION, key, hash);
-                }
             }
             RecordValue::OrTombstones { .. } => {
                 // Tombstones represent deletions — remove from OR-Map tree.
                 self.manager
                     .remove_ormap(&self.map_name, self.partition_id, key);
-                if self.partition_id != Self::CLIENT_SYNC_PARTITION {
-                    self.manager
-                        .remove_ormap(&self.map_name, Self::CLIENT_SYNC_PARTITION, key);
-                }
             }
         }
     }
@@ -303,13 +378,6 @@ impl MutationObserver for MerkleMutationObserver {
             .remove_lww(&self.map_name, self.partition_id, key);
         self.manager
             .remove_ormap(&self.map_name, self.partition_id, key);
-        // Dual-write: also remove from client-sync partition.
-        if self.partition_id != Self::CLIENT_SYNC_PARTITION {
-            self.manager
-                .remove_lww(&self.map_name, Self::CLIENT_SYNC_PARTITION, key);
-            self.manager
-                .remove_ormap(&self.map_name, Self::CLIENT_SYNC_PARTITION, key);
-        }
     }
 
     fn on_evict(&self, key: &str, _record: &Record, is_backup: bool) {
@@ -322,13 +390,6 @@ impl MutationObserver for MerkleMutationObserver {
             .remove_lww(&self.map_name, self.partition_id, key);
         self.manager
             .remove_ormap(&self.map_name, self.partition_id, key);
-        // Dual-write: also remove from client-sync partition.
-        if self.partition_id != Self::CLIENT_SYNC_PARTITION {
-            self.manager
-                .remove_lww(&self.map_name, Self::CLIENT_SYNC_PARTITION, key);
-            self.manager
-                .remove_ormap(&self.map_name, Self::CLIENT_SYNC_PARTITION, key);
-        }
     }
 
     fn on_load(&self, key: &str, record: &Record, is_backup: bool) {
@@ -621,13 +682,129 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     // ---------------------------------------------------------------------------
-    // Dual-write: partition N observers also update partition 0
+    // Aggregate methods: scatter-gather root hash and buckets
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn dual_write_lww_put_updates_partition_0() {
+    fn aggregate_lww_root_hash_empty_returns_zero() {
         let manager = Arc::new(MerkleSyncManager::default());
-        // Observer for partition 42 (non-zero).
+        let result = manager.aggregate_lww_root_hash("users");
+        assert_eq!(result, 0, "no partitions should produce aggregate hash = 0");
+    }
+
+    #[test]
+    fn aggregate_lww_root_hash_combines_partitions() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        // Write to two different partitions.
+        manager.update_lww("users", 1, "alice", 111);
+        manager.update_lww("users", 2, "bob", 222);
+
+        let hash_1 = manager.with_lww_tree("users", 1, |tree| tree.get_root_hash());
+        let hash_2 = manager.with_lww_tree("users", 2, |tree| tree.get_root_hash());
+        let expected = hash_1.wrapping_add(hash_2);
+
+        let aggregate = manager.aggregate_lww_root_hash("users");
+        assert_eq!(aggregate, expected, "aggregate should equal wrapping_add of all partition hashes");
+        assert_ne!(aggregate, 0, "aggregate should be non-zero when partitions have data");
+    }
+
+    #[test]
+    fn aggregate_lww_root_hash_is_map_scoped() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        manager.update_lww("users", 1, "alice", 111);
+        manager.update_lww("orders", 2, "order-1", 999);
+
+        // Aggregate for "users" should not include "orders" data.
+        let users_hash = manager.aggregate_lww_root_hash("users");
+        let orders_hash = manager.aggregate_lww_root_hash("orders");
+        let users_p1 = manager.with_lww_tree("users", 1, |tree| tree.get_root_hash());
+        assert_eq!(users_hash, users_p1, "users aggregate should match only its own partition");
+        assert_ne!(users_hash, orders_hash, "different maps should have different aggregate hashes");
+    }
+
+    #[test]
+    fn aggregate_ormap_root_hash_empty_returns_zero() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        let result = manager.aggregate_ormap_root_hash("tags");
+        assert_eq!(result, 0, "no partitions should produce aggregate hash = 0");
+    }
+
+    #[test]
+    fn aggregate_ormap_root_hash_combines_partitions() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        manager.update_ormap("tags", 1, "tag-1", 111);
+        manager.update_ormap("tags", 2, "tag-2", 222);
+
+        let hash_1 = manager.with_ormap_tree("tags", 1, |tree| tree.get_root_hash());
+        let hash_2 = manager.with_ormap_tree("tags", 2, |tree| tree.get_root_hash());
+        let expected = hash_1.wrapping_add(hash_2);
+
+        let aggregate = manager.aggregate_ormap_root_hash("tags");
+        assert_eq!(aggregate, expected, "OR-Map aggregate should equal wrapping_add of partition hashes");
+    }
+
+    #[test]
+    fn aggregate_lww_buckets_empty_returns_empty_map() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        let buckets = manager.aggregate_lww_buckets("users", "");
+        assert!(buckets.is_empty(), "no partitions should produce empty bucket map");
+    }
+
+    #[test]
+    fn aggregate_lww_buckets_combines_from_all_partitions() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        // Write enough keys to ensure root has buckets.
+        for i in 0..8u32 {
+            manager.update_lww("users", i % 3 + 1, &format!("key-{i}"), i * 100 + 1);
+        }
+
+        let combined = manager.aggregate_lww_buckets("users", "");
+        // At depth=3 with multiple keys, root should have some buckets.
+        assert!(!combined.is_empty(), "aggregate buckets should be non-empty with data in partitions");
+        for c in combined.keys() {
+            assert!(c.is_ascii_hexdigit(), "bucket key should be a hex char, got: {c}");
+        }
+    }
+
+    #[test]
+    fn aggregate_ormap_buckets_empty_returns_empty_map() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        let buckets = manager.aggregate_ormap_buckets("tags", "");
+        assert!(buckets.is_empty(), "no partitions should produce empty bucket map");
+    }
+
+    #[test]
+    fn lww_partition_ids_returns_correct_partitions() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        manager.update_lww("users", 1, "alice", 111);
+        manager.update_lww("users", 42, "bob", 222);
+        manager.update_lww("orders", 5, "order-1", 333);
+
+        let mut ids = manager.lww_partition_ids("users");
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 42], "should return only partitions for 'users'");
+
+        let order_ids = manager.lww_partition_ids("orders");
+        assert_eq!(order_ids, vec![5], "should return only partitions for 'orders'");
+
+        let empty_ids = manager.lww_partition_ids("missing");
+        assert!(empty_ids.is_empty(), "non-existent map should return empty partition list");
+    }
+
+    #[test]
+    fn ormap_partition_ids_returns_correct_partitions() {
+        let manager = Arc::new(MerkleSyncManager::default());
+        manager.update_ormap("tags", 3, "t1", 100);
+        manager.update_ormap("tags", 7, "t2", 200);
+
+        let mut ids = manager.ormap_partition_ids("tags");
+        ids.sort_unstable();
+        assert_eq!(ids, vec![3, 7], "should return all partitions with OR-Map trees for 'tags'");
+    }
+
+    #[test]
+    fn single_partition_observer_writes_only_to_its_partition() {
+        let manager = Arc::new(MerkleSyncManager::default());
         let observer = MerkleMutationObserver::new(
             Arc::clone(&manager),
             "users".to_string(),
@@ -637,143 +814,15 @@ mod tests {
         let record = make_lww_record("alice", 1_700_000_000_000, 0, "node-1");
         observer.on_put("alice", &record, None, false);
 
-        // Partition 42 should have the record.
+        // Partition 42 should have data.
         let hash_42 = manager.with_lww_tree("users", 42, |tree| tree.get_root_hash());
-        assert_ne!(hash_42, 0, "partition 42 should have non-zero hash");
+        assert_ne!(hash_42, 0, "partition 42 should have non-zero hash after put");
 
-        // Partition 0 (client-sync) should also have the record.
-        let hash_0 = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
-        assert_ne!(hash_0, 0, "partition 0 should have non-zero hash via dual-write");
-
-        // Both should have the same root hash (same single key, same value).
-        assert_eq!(hash_42, hash_0, "partition 42 and partition 0 should match");
+        // No other partition tree should have been created.
+        let partition_ids = manager.lww_partition_ids("users");
+        assert_eq!(partition_ids, vec![42], "only partition 42 should exist, no dual-write");
     }
 
-    #[test]
-    fn dual_write_ormap_put_updates_partition_0() {
-        let manager = Arc::new(MerkleSyncManager::default());
-        let observer = MerkleMutationObserver::new(
-            Arc::clone(&manager),
-            "tags".to_string(),
-            42,
-        );
-
-        let record = make_ormap_record("tag-1", "1700000000000:0:node-1", 1_700_000_000_000);
-        observer.on_put("tag-1", &record, None, false);
-
-        let hash_42 = manager.with_ormap_tree("tags", 42, |tree| tree.get_root_hash());
-        assert_ne!(hash_42, 0, "partition 42 OR-Map should have non-zero hash");
-
-        let hash_0 = manager.with_ormap_tree("tags", 0, |tree| tree.get_root_hash());
-        assert_ne!(hash_0, 0, "partition 0 OR-Map should have non-zero hash via dual-write");
-    }
-
-    #[test]
-    fn dual_write_remove_clears_from_partition_0() {
-        let manager = Arc::new(MerkleSyncManager::default());
-        let observer = MerkleMutationObserver::new(
-            Arc::clone(&manager),
-            "users".to_string(),
-            42,
-        );
-
-        let record = make_lww_record("alice", 1_700_000_000_000, 0, "node-1");
-        observer.on_put("alice", &record, None, false);
-
-        // Verify non-zero before remove.
-        let hash_0_before = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
-        assert_ne!(hash_0_before, 0);
-
-        observer.on_remove("alice", &record, false);
-
-        // Both partitions should be empty.
-        let hash_42 = manager.with_lww_tree("users", 42, |tree| tree.get_root_hash());
-        let hash_0 = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
-        assert_eq!(hash_42, 0, "partition 42 should be empty after remove");
-        assert_eq!(hash_0, 0, "partition 0 should be empty after dual-write remove");
-    }
-
-    #[test]
-    fn dual_write_evict_clears_from_partition_0() {
-        let manager = Arc::new(MerkleSyncManager::default());
-        let observer = MerkleMutationObserver::new(
-            Arc::clone(&manager),
-            "users".to_string(),
-            42,
-        );
-
-        let record = make_lww_record("alice", 1_700_000_000_000, 0, "node-1");
-        observer.on_put("alice", &record, None, false);
-
-        observer.on_evict("alice", &record, false);
-
-        let hash_0 = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
-        assert_eq!(hash_0, 0, "partition 0 should be empty after dual-write evict");
-    }
-
-    #[test]
-    fn on_clear_does_not_clear_partition_0_for_non_zero_partition() {
-        let manager = Arc::new(MerkleSyncManager::default());
-
-        // Observer at partition 42 writes a record (dual-writes to partition 0).
-        let observer_42 = MerkleMutationObserver::new(
-            Arc::clone(&manager),
-            "users".to_string(),
-            42,
-        );
-        let record = make_lww_record("alice", 1_700_000_000_000, 0, "node-1");
-        observer_42.on_put("alice", &record, None, false);
-
-        // Partition 0 should have data.
-        let hash_0_before = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
-        assert_ne!(hash_0_before, 0);
-
-        // Clearing partition 42 should NOT clear partition 0.
-        observer_42.on_clear();
-
-        let hash_42 = manager.with_lww_tree("users", 42, |tree| tree.get_root_hash());
-        assert_eq!(hash_42, 0, "partition 42 should be cleared");
-
-        let hash_0_after = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
-        assert_ne!(hash_0_after, 0, "partition 0 should NOT be cleared when a non-zero partition clears");
-    }
-
-    #[test]
-    fn partition_0_observer_does_not_double_write() {
-        let manager = Arc::new(MerkleSyncManager::default());
-        // Observer at partition 0 should write only once, not twice.
-        let observer = MerkleMutationObserver::new(
-            Arc::clone(&manager),
-            "users".to_string(),
-            0,
-        );
-
-        let record = make_lww_record("alice", 1_700_000_000_000, 0, "node-1");
-        observer.on_put("alice", &record, None, false);
-
-        let hash_0 = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
-        assert_ne!(hash_0, 0, "partition 0 should have the record");
-    }
-
-    #[test]
-    fn dual_write_replication_put_updates_partition_0() {
-        let manager = Arc::new(MerkleSyncManager::default());
-        let observer = MerkleMutationObserver::new(
-            Arc::clone(&manager),
-            "users".to_string(),
-            42,
-        );
-
-        let record = make_lww_record("alice", 1_700_000_000_000, 0, "node-1");
-        // on_replication_put does NOT check is_backup (by design).
-        observer.on_replication_put("alice", &record, false);
-
-        let hash_0 = manager.with_lww_tree("users", 0, |tree| tree.get_root_hash());
-        assert_ne!(hash_0, 0, "partition 0 should have data after replication put dual-write");
-    }
-
-    // ---------------------------------------------------------------------------
-    // Additional: clear_all
     // ---------------------------------------------------------------------------
 
     #[test]
