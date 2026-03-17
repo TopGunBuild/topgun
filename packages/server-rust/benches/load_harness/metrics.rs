@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-
 use dashmap::DashMap;
 use hdrhistogram::Histogram;
 use parking_lot::Mutex;
@@ -17,7 +15,7 @@ pub struct HdrMetricsCollector {
     /// concurrent writers on different operations never block each other.
     histograms: DashMap<String, Mutex<Histogram<u64>>>,
     /// Simple counters that can be incremented without histogram overhead.
-    counters: DashMap<String, Arc<AtomicU64>>,
+    counters: DashMap<String, AtomicU64>,
 }
 
 impl HdrMetricsCollector {
@@ -68,7 +66,7 @@ impl HdrMetricsCollector {
                 .collect();
             counters.sort_by(|a, b| a.0.cmp(&b.0));
             for (name, value) in counters {
-                println!("  {}: {}", name, value);
+                println!("  {name}: {value}");
             }
         }
     }
@@ -98,7 +96,7 @@ impl MetricsCollector for HdrMetricsCollector {
         let entry = self
             .counters
             .entry(name.to_string())
-            .or_insert_with(|| Arc::new(AtomicU64::new(0)));
+            .or_insert_with(|| AtomicU64::new(0));
         entry.fetch_add(count, Ordering::Relaxed);
     }
 
