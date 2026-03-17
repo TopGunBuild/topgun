@@ -54,3 +54,9 @@ path = "src/bin/test_server.rs"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util", "time"] }
 reqwest = { version = "0.12", features = ["json"] }
 tokio-tungstenite = "0.26"
+hdrhistogram = "7"
+
+[[bench]]
+name = "load_harness"
+path = "benches/load_harness/main.rs"
+harness = false
