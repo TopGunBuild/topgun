@@ -47,7 +47,7 @@ impl Default for DispatchConfig {
             worker_count: std::thread::available_parallelism()
                 .map(std::num::NonZeroUsize::get)
                 .unwrap_or(4),
-            channel_buffer_size: 1024,
+            channel_buffer_size: 256,
         }
     }
 }
@@ -117,9 +117,10 @@ impl PartitionDispatcher {
     ///
     /// # Errors
     ///
-    /// Returns `OperationError::Internal` if the target worker channel is closed
-    /// (worker task has dropped its receiver), or if the worker's response
-    /// channel is dropped before sending a result.
+    /// Returns `OperationError::Overloaded` immediately if the target worker's
+    /// channel is full (non-blocking rejection). Returns
+    /// `OperationError::Internal` if the channel is closed (worker crashed) or
+    /// if the worker's response channel is dropped before sending a result.
     pub async fn dispatch(
         &self,
         operation: Operation,
@@ -137,8 +138,13 @@ impl PartitionDispatcher {
             response_tx,
         };
 
-        sender.send(request).await.map_err(|_| {
-            OperationError::Internal(anyhow::anyhow!("worker channel closed"))
+        // Non-blocking send: reject immediately when the worker inbox is full
+        // rather than holding the caller's task hostage until space is available.
+        sender.try_send(request).map_err(|e| match e {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => OperationError::Overloaded,
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                OperationError::Internal(anyhow::anyhow!("worker channel closed"))
+            }
         })?;
 
         response_rx.await.map_err(|_| {
@@ -276,7 +282,42 @@ mod tests {
     fn dispatch_config_default_has_sensible_values() {
         let config = DispatchConfig::default();
         assert!(config.worker_count > 0, "worker_count must be at least 1");
-        assert_eq!(config.channel_buffer_size, 1024);
+        assert_eq!(config.channel_buffer_size, 256);
+    }
+
+    /// Filling the channel to capacity must cause the next `dispatch()` call to
+    /// return `OperationError::Overloaded` without blocking.
+    ///
+    /// We bypass `dispatch()` for the slot-filling step so the test doesn't
+    /// need to await a response that will never arrive (no real worker attached).
+    #[tokio::test]
+    async fn full_channel_returns_overloaded_immediately() {
+        // channel_buffer_size: 1 means the channel holds exactly 1 item.
+        let (tx, _rx) = mpsc::channel::<DispatchRequest>(1);
+        let (global_tx, _global_rx) = mpsc::channel::<DispatchRequest>(1);
+
+        let dispatcher = PartitionDispatcher {
+            workers: vec![tx.clone()],
+            global_worker: global_tx,
+            worker_count: 1,
+        };
+
+        // Pre-fill the channel by sending directly via the raw sender so we
+        // don't block waiting for a response from a non-existent worker.
+        let (dummy_tx, _dummy_rx) = oneshot::channel();
+        let filler = DispatchRequest {
+            operation: make_op_with_partition(0, Some(0)),
+            response_tx: dummy_tx,
+        };
+        tx.try_send(filler).expect("channel should accept first item");
+
+        // Now the channel is full. dispatch() must return Overloaded at once.
+        let op = make_op_with_partition(2, Some(0));
+        let result = dispatcher.dispatch(op).await;
+        assert!(
+            matches!(result, Err(OperationError::Overloaded)),
+            "dispatch into full channel must return OperationError::Overloaded, got: {result:?}",
+        );
     }
 
     #[tokio::test]
