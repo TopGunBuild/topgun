@@ -9,6 +9,7 @@
 //! send AUTH messages; all other message types are silently dropped until
 //! the connection is authenticated.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
@@ -20,6 +21,7 @@ use tokio::sync::mpsc;
 use topgun_core::messages::{
     AuthAckData, ErrorPayload, OpAckMessage, OpAckPayload, Message as TopGunMessage,
 };
+use topgun_core::hash_to_partition;
 use tracing::{debug, warn};
 
 use super::auth::AuthHandler;
@@ -225,6 +227,14 @@ async fn dispatch_message(
         return;
     }
 
+    // Intercept OpBatch messages before generic classify/dispatch.
+    // Split by partition so each sub-batch runs on a dedicated partition worker
+    // rather than serializing all ops on the single global worker.
+    if let TopGunMessage::OpBatch(ref batch_msg) = tg_msg {
+        dispatch_op_batch(batch_msg, conn_id, classify_svc, dispatcher, tx).await;
+        return;
+    }
+
     // Classify the message into a typed Operation
     match classify_svc.classify(tg_msg, None, CallerOrigin::Client) {
         Ok(mut op) => {
@@ -262,6 +272,122 @@ async fn dispatch_message(
                 variant, conn_id
             );
         }
+    }
+}
+
+/// Splits an `OpBatch` by partition and dispatches all sub-batches concurrently.
+///
+/// Groups the batch's ops by `hash_to_partition(key)`, creates one
+/// `Operation::OpBatch` per partition group (each carrying `partition_id=Some(id)`
+/// so the dispatcher routes it to the correct partition worker instead of the
+/// single global worker), dispatches all groups concurrently, and sends a single
+/// `OP_ACK` with `lastId` from the last op in the original batch.
+///
+/// Per-sub-batch `OpAck` responses from `CrdtService::handle_op_batch()` are
+/// discarded; the aggregated ack is constructed from the original batch's
+/// last-op ID so the client always receives exactly one `OP_ACK`.
+async fn dispatch_op_batch(
+    batch_msg: &topgun_core::messages::OpBatchMessage,
+    conn_id: ConnectionId,
+    classify_svc: &OperationService,
+    dispatcher: &Arc<PartitionDispatcher>,
+    tx: &mpsc::Sender<OutboundMessage>,
+) {
+    let ops = &batch_msg.payload.ops;
+
+    if ops.is_empty() {
+        let ack = TopGunMessage::OpAck(OpAckMessage {
+            payload: OpAckPayload {
+                last_id: "unknown".to_string(),
+                ..Default::default()
+            },
+        });
+        if let Ok(bytes) = rmp_serde::to_vec_named(&ack) {
+            let _ = tx.send(OutboundMessage::Binary(bytes)).await;
+        }
+        return;
+    }
+
+    // Compute lastId from the last op in the original batch order.
+    let last_id = ops
+        .last()
+        .and_then(|op| op.id.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Group ops by their partition so each group targets one partition worker.
+    let mut partition_groups: HashMap<u32, Vec<topgun_core::messages::ClientOp>> = HashMap::new();
+    for op in ops {
+        let partition_id = hash_to_partition(&op.key);
+        partition_groups.entry(partition_id).or_default().push(op.clone());
+    }
+
+    let write_concern = batch_msg.payload.write_concern.clone();
+    let timeout = batch_msg.payload.timeout;
+
+    // Build all sub-batch operations up front, then dispatch concurrently.
+    let mut sub_ops: Vec<crate::service::operation::Operation> =
+        Vec::with_capacity(partition_groups.len());
+    for (partition_id, group_ops) in partition_groups {
+        let mut op = classify_svc.classify_op_batch_for_partition(
+            group_ops,
+            partition_id,
+            None,
+            CallerOrigin::Client,
+            write_concern.clone(),
+            timeout,
+        );
+        op.set_connection_id(conn_id);
+        sub_ops.push(op);
+    }
+
+    // Dispatch all sub-batches concurrently; collect results.
+    let mut join_set = tokio::task::JoinSet::new();
+    for sub_op in sub_ops {
+        let dispatcher = Arc::clone(dispatcher);
+        join_set.spawn(async move { dispatcher.dispatch(sub_op).await });
+    }
+
+    // Collect results and check for errors. Per-sub-batch OpAck responses are
+    // discarded; the aggregated OP_ACK is built from the original batch's lastId.
+    let mut dispatch_error: Option<String> = None;
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Ok(Ok(_resp)) => {
+                // Discard the per-sub-batch OpAck; we send one aggregated ack below.
+            }
+            Ok(Err(e)) => {
+                dispatch_error = Some(format!("{e}"));
+            }
+            Err(join_err) => {
+                dispatch_error = Some(format!("join error: {join_err}"));
+            }
+        }
+    }
+
+    if let Some(err_msg) = dispatch_error {
+        debug!("dispatch_op_batch error for {:?}: {}", conn_id, err_msg);
+        let err_response = TopGunMessage::Error {
+            payload: ErrorPayload {
+                code: 500,
+                message: err_msg,
+                details: None,
+            },
+        };
+        if let Ok(bytes) = rmp_serde::to_vec_named(&err_response) {
+            let _ = tx.send(OutboundMessage::Binary(bytes)).await;
+        }
+        return;
+    }
+
+    // All sub-batches succeeded — send one OP_ACK with the original batch's lastId.
+    let ack = TopGunMessage::OpAck(OpAckMessage {
+        payload: OpAckPayload {
+            last_id,
+            ..Default::default()
+        },
+    });
+    if let Ok(bytes) = rmp_serde::to_vec_named(&ack) {
+        let _ = tx.send(OutboundMessage::Binary(bytes)).await;
     }
 }
 
