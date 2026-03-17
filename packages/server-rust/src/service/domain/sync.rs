@@ -31,6 +31,29 @@ enum NodeData {
     Missing,
 }
 
+/// Parses a path with a 3-digit zero-padded partition prefix (e.g. `"042/abc"`).
+///
+/// Returns `Some((partition_id, sub_path))` when the path starts with exactly
+/// 3 ASCII digit characters followed by `/`. The sub_path is the remainder after
+/// the slash (may be empty for the partition root).
+///
+/// Returns `None` for aggregate-mode paths (`""`, `"a"`, `"ab"`, etc.) that have
+/// no partition prefix.
+fn parse_partition_prefix(path: &str) -> Option<(u32, String)> {
+    // Must have at least 4 bytes: 3 digits + '/'
+    if path.len() < 4 {
+        return None;
+    }
+    let bytes = path.as_bytes();
+    if bytes[0].is_ascii_digit() && bytes[1].is_ascii_digit() && bytes[2].is_ascii_digit() && bytes[3] == b'/' {
+        let partition_id: u32 = path[..3].parse().ok()?;
+        let sub_path = path[4..].to_string();
+        Some((partition_id, sub_path))
+    } else {
+        None
+    }
+}
+
 use tracing::Instrument;
 
 use crate::network::connection::{ConnectionKind, ConnectionRegistry};
@@ -111,6 +134,10 @@ impl SyncService {
     ///
     /// `SyncInitMessage` is a FLAT message: `map_name` is directly on the payload struct,
     /// not nested in a `.payload` sub-field (contrast with `MerkleReqBucketMessage`).
+    ///
+    /// Returns a scatter-gathered root hash: the `wrapping_add` of all per-partition
+    /// root hashes. This eliminates the Mutex bottleneck on a shared partition 0
+    /// that previously serialized all writes under concurrent load.
     #[allow(clippy::unused_async)] // declared async for uniformity with other handlers
     async fn handle_sync_init(
         &self,
@@ -118,11 +145,7 @@ impl SyncService {
         payload: messages::SyncInitMessage,
     ) -> Result<OperationResponse, OperationError> {
         let map_name = payload.map_name;
-        let partition_id = ctx.partition_id.unwrap_or(0);
-
-        let root_hash = self.merkle_manager.with_lww_tree(&map_name, partition_id, |tree| {
-            tree.get_root_hash()
-        });
+        let root_hash = self.merkle_manager.aggregate_lww_root_hash(&map_name);
 
         Ok(OperationResponse::Message(Box::new(Message::SyncRespRoot(
             SyncRespRootMessage {
@@ -140,91 +163,165 @@ impl SyncService {
     /// `MerkleReqBucketMessage` is a WRAPPED message: `map_name` and `path` live in a
     /// nested `.payload` field (i.e., `payload.payload.map_name`), unlike the flat
     /// `SyncInitMessage`.
+    ///
+    /// Path encoding operates in two modes:
+    /// - **Aggregate mode** (`""` or paths without a 3-digit partition prefix): the server
+    ///   combines results from all partition trees via `wrapping_add` for hashes.
+    /// - **Routed mode** (paths beginning with a 3-digit zero-padded partition prefix like
+    ///   `"042/abc"`): the server strips the prefix and routes to the specific partition tree.
     async fn handle_merkle_req_bucket(
         &self,
-        ctx: &crate::service::operation::OperationContext,
+        _ctx: &crate::service::operation::OperationContext,
         payload: messages::MerkleReqBucketMessage,
     ) -> Result<OperationResponse, OperationError> {
         let map_name = payload.payload.map_name;
         let path = payload.payload.path;
-        let partition_id = ctx.partition_id.unwrap_or(0);
 
-        // Extract all needed data within the closure so the Mutex is released
-        // before any async operations. parking_lot::MutexGuard is !Send and must
-        // not be held across .await points.
-        let node_data = self.merkle_manager.with_lww_tree(&map_name, partition_id, |tree| {
-            match tree.get_node(&path) {
-                Some(node) if !node.entries.is_empty() => {
-                    // Leaf node: extract keys as owned Vec<String>.
-                    let keys: Vec<String> = node.entries.keys().cloned().collect();
-                    NodeData::Leaf(keys)
-                }
-                Some(_) => {
-                    // Internal node: extract bucket hashes as owned HashMap.
-                    let buckets = tree.get_buckets(&path);
-                    NodeData::Internal(buckets)
-                }
-                None => NodeData::Missing,
-            }
-        });
+        // Parse path: routed mode uses a fixed 3-digit partition prefix (e.g. "042/abc").
+        if let Some((partition_id, sub_path)) = parse_partition_prefix(&path) {
+            // Routed mode: route directly to the specific partition tree.
+            let node_data =
+                self.merkle_manager
+                    .with_lww_tree(&map_name, partition_id, |tree| {
+                        match tree.get_node(&sub_path) {
+                            Some(node) if !node.entries.is_empty() => {
+                                let keys: Vec<String> =
+                                    node.entries.keys().cloned().collect();
+                                NodeData::Leaf(keys)
+                            }
+                            Some(_) => {
+                                let buckets = tree.get_buckets(&sub_path);
+                                NodeData::Internal(buckets)
+                            }
+                            None => NodeData::Missing,
+                        }
+                    });
 
-        match node_data {
-            NodeData::Leaf(keys) => {
-                // Mutex released -- now safe to do async RecordStore fetches.
-                // Records live at hash_to_partition(key), not at partition 0
-                // (the client-sync partition). Look up each key from its
-                // actual storage partition.
-                let mut records = Vec::new();
-                for key in &keys {
-                    let key_partition = hash_to_partition(key);
-                    let store = self.record_store_factory.get_or_create(&map_name, key_partition);
-                    match store.get(key, false).await {
-                        Ok(Some(record)) => {
-                            if let RecordValue::Lww { value, timestamp } = record.value {
-                                records.push(SyncLeafRecord {
-                                    key: key.clone(),
-                                    record: LWWRecord {
-                                        value: Some(value_to_rmpv(&value)),
-                                        timestamp,
-                                        ttl_ms: None,
-                                    },
-                                });
+            return match node_data {
+                NodeData::Leaf(keys) => {
+                    let mut records = Vec::new();
+                    for key in &keys {
+                        let key_partition = hash_to_partition(key);
+                        let store =
+                            self.record_store_factory.get_or_create(&map_name, key_partition);
+                        match store.get(key, false).await {
+                            Ok(Some(record)) => {
+                                if let RecordValue::Lww { value, timestamp } = record.value {
+                                    records.push(SyncLeafRecord {
+                                        key: key.clone(),
+                                        record: LWWRecord {
+                                            value: Some(value_to_rmpv(&value)),
+                                            timestamp,
+                                            ttl_ms: None,
+                                        },
+                                    });
+                                }
+                            }
+                            Ok(None) => {
+                                tracing::warn!(key = %key, partition = key_partition,
+                                    "Merkle leaf (routed): record not found in store");
+                            }
+                            Err(e) => {
+                                tracing::error!(key = %key, partition = key_partition, error = %e,
+                                    "Merkle leaf (routed): store.get() error");
                             }
                         }
-                        Ok(None) => {
-                            tracing::warn!(key = %key, partition = key_partition, "Merkle leaf: record not found in store");
-                        }
-                        Err(e) => {
-                            tracing::error!(key = %key, partition = key_partition, error = %e, "Merkle leaf: store.get() error");
+                    }
+                    Ok(OperationResponse::Message(Box::new(Message::SyncRespLeaf(
+                        SyncRespLeafMessage {
+                            payload: SyncRespLeafPayload { map_name, path, records },
+                        },
+                    ))))
+                }
+                NodeData::Internal(buckets) => {
+                    // Return sub-paths prefixed with the same partition ID so the
+                    // client can continue drilling down via routed mode.
+                    let prefix = format!("{partition_id:03}/");
+                    let buckets: HashMap<String, u32> = buckets
+                        .into_iter()
+                        .map(|(c, h)| (format!("{prefix}{sub_path}{c}"), h))
+                        .collect();
+                    Ok(OperationResponse::Message(Box::new(Message::SyncRespBuckets(
+                        SyncRespBucketsMessage {
+                            payload: SyncRespBucketsPayload { map_name, path, buckets },
+                        },
+                    ))))
+                }
+                NodeData::Missing => Ok(OperationResponse::Empty),
+            };
+        }
+
+        // Aggregate mode: combine bucket hashes from all partitions.
+        let combined_buckets = self.merkle_manager.aggregate_lww_buckets(&map_name, &path);
+
+        if combined_buckets.is_empty() {
+            // No data for this map at all — check if any partition has a leaf at this path.
+            let partition_ids = self.merkle_manager.lww_partition_ids(&map_name);
+            if partition_ids.is_empty() {
+                return Ok(OperationResponse::Empty);
+            }
+            // Some partitions exist but path is a leaf in all of them — collect keys.
+            let mut all_keys: Vec<String> = Vec::new();
+            for pid in &partition_ids {
+                self.merkle_manager.with_lww_tree(&map_name, *pid, |tree| {
+                    if let Some(node) = tree.get_node(&path) {
+                        if !node.entries.is_empty() {
+                            all_keys.extend(node.entries.keys().cloned());
                         }
                     }
+                });
+            }
+            if all_keys.is_empty() {
+                return Ok(OperationResponse::Empty);
+            }
+            // Return leaf records for all collected keys.
+            let mut records = Vec::new();
+            for key in &all_keys {
+                let key_partition = hash_to_partition(key);
+                let store = self.record_store_factory.get_or_create(&map_name, key_partition);
+                match store.get(key, false).await {
+                    Ok(Some(record)) => {
+                        if let RecordValue::Lww { value, timestamp } = record.value {
+                            records.push(SyncLeafRecord {
+                                key: key.clone(),
+                                record: LWWRecord {
+                                    value: Some(value_to_rmpv(&value)),
+                                    timestamp,
+                                    ttl_ms: None,
+                                },
+                            });
+                        }
+                    }
+                    Ok(None) => {
+                        tracing::warn!(key = %key, partition = key_partition,
+                            "Merkle leaf (aggregate): record not found in store");
+                    }
+                    Err(e) => {
+                        tracing::error!(key = %key, partition = key_partition, error = %e,
+                            "Merkle leaf (aggregate): store.get() error");
+                    }
                 }
-                Ok(OperationResponse::Message(Box::new(Message::SyncRespLeaf(
-                    SyncRespLeafMessage {
-                        payload: SyncRespLeafPayload {
-                            map_name,
-                            path,
-                            records,
-                        },
-                    },
-                ))))
             }
-            NodeData::Internal(buckets) => {
-                // Convert HashMap<char, u32> to HashMap<String, u32>.
-                let buckets: HashMap<String, u32> =
-                    buckets.into_iter().map(|(c, h)| (c.to_string(), h)).collect();
-                Ok(OperationResponse::Message(Box::new(
-                    Message::SyncRespBuckets(SyncRespBucketsMessage {
-                        payload: SyncRespBucketsPayload {
-                            map_name,
-                            path,
-                            buckets,
-                        },
-                    }),
-                )))
-            }
-            NodeData::Missing => Ok(OperationResponse::Empty),
+            return Ok(OperationResponse::Message(Box::new(Message::SyncRespLeaf(
+                SyncRespLeafMessage {
+                    payload: SyncRespLeafPayload { map_name, path, records },
+                },
+            ))));
         }
+
+        // Internal node in aggregate mode: return combined bucket hashes.
+        // Bucket keys remain single hex chars — the client will send subsequent
+        // requests with path extended by that character (still aggregate mode),
+        // or the server may return partition-prefixed paths for leaf drill-down.
+        let buckets: HashMap<String, u32> = combined_buckets
+            .into_iter()
+            .map(|(c, h)| (c.to_string(), h))
+            .collect();
+        Ok(OperationResponse::Message(Box::new(Message::SyncRespBuckets(
+            SyncRespBucketsMessage {
+                payload: SyncRespBucketsPayload { map_name, path, buckets },
+            },
+        ))))
     }
 
     // -----------------------------------------------------------------------
@@ -234,6 +331,9 @@ impl SyncService {
     /// Handles `ORMapSyncInit` — returns the server's OR-Map Merkle tree root hash.
     ///
     /// `ORMapSyncInit` is a FLAT message: `map_name` is directly on the struct.
+    ///
+    /// Returns a scatter-gathered root hash across all partitions, matching the
+    /// same approach as `handle_sync_init`.
     #[allow(clippy::unused_async)] // declared async for uniformity with other handlers
     async fn handle_ormap_sync_init(
         &self,
@@ -241,11 +341,7 @@ impl SyncService {
         payload: messages::ORMapSyncInit,
     ) -> Result<OperationResponse, OperationError> {
         let map_name = payload.map_name;
-        let partition_id = ctx.partition_id.unwrap_or(0);
-
-        let root_hash = self.merkle_manager.with_ormap_tree(&map_name, partition_id, |tree| {
-            tree.get_root_hash()
-        });
+        let root_hash = self.merkle_manager.aggregate_ormap_root_hash(&map_name);
 
         Ok(OperationResponse::Message(Box::new(Message::ORMapSyncRespRoot(
             ORMapSyncRespRoot {
@@ -262,94 +358,164 @@ impl SyncService {
     ///
     /// `ORMapMerkleReqBucket` is a WRAPPED message: `map_name` and `path` live in a
     /// nested `.payload` field.
+    ///
+    /// Follows the same scatter-gather and path prefix routing as `handle_merkle_req_bucket`.
     async fn handle_ormap_merkle_req_bucket(
         &self,
-        ctx: &crate::service::operation::OperationContext,
+        _ctx: &crate::service::operation::OperationContext,
         payload: messages::ORMapMerkleReqBucket,
     ) -> Result<OperationResponse, OperationError> {
         let map_name = payload.payload.map_name;
         let path = payload.payload.path;
-        let partition_id = ctx.partition_id.unwrap_or(0);
 
-        // Extract all needed data within the closure so the Mutex is released
-        // before any async operations.
-        let node_data = self.merkle_manager.with_ormap_tree(&map_name, partition_id, |tree| {
-            match tree.get_node(&path) {
-                Some(node) if !node.entries.is_empty() => {
-                    let keys: Vec<String> = node.entries.keys().cloned().collect();
-                    NodeData::Leaf(keys)
-                }
-                Some(_) => {
-                    let buckets = tree.get_buckets(&path);
-                    NodeData::Internal(buckets)
-                }
-                None => NodeData::Missing,
-            }
-        });
+        if let Some((partition_id, sub_path)) = parse_partition_prefix(&path) {
+            // Routed mode: route directly to the specific OR-Map partition tree.
+            let node_data =
+                self.merkle_manager
+                    .with_ormap_tree(&map_name, partition_id, |tree| {
+                        match tree.get_node(&sub_path) {
+                            Some(node) if !node.entries.is_empty() => {
+                                let keys: Vec<String> =
+                                    node.entries.keys().cloned().collect();
+                                NodeData::Leaf(keys)
+                            }
+                            Some(_) => {
+                                let buckets = tree.get_buckets(&sub_path);
+                                NodeData::Internal(buckets)
+                            }
+                            None => NodeData::Missing,
+                        }
+                    });
 
-        match node_data {
-            NodeData::Leaf(keys) => {
-                // Mutex released -- now safe to do async RecordStore fetches.
-                // Records live at hash_to_partition(key), not at partition 0.
-                let mut entries = Vec::new();
-                for key in keys {
-                    let key_partition = hash_to_partition(&key);
-                    let store = self.record_store_factory.get_or_create(&map_name, key_partition);
-                    if let Ok(Some(record)) = store.get(&key, false).await {
-                        match record.value {
-                            RecordValue::OrMap { records } => {
-                                let wire_records: Vec<ORMapRecord<rmpv::Value>> = records
-                                    .into_iter()
-                                    .map(|r| ORMapRecord {
-                                        value: value_to_rmpv(&r.value),
-                                        timestamp: r.timestamp,
-                                        tag: r.tag,
-                                        ttl_ms: None,
-                                    })
-                                    .collect();
-                                entries.push(ORMapEntry {
-                                    key,
-                                    records: wire_records,
-                                    tombstones: Vec::new(),
-                                });
+            return match node_data {
+                NodeData::Leaf(keys) => {
+                    let mut entries = Vec::new();
+                    for key in keys {
+                        let key_partition = hash_to_partition(&key);
+                        let store =
+                            self.record_store_factory.get_or_create(&map_name, key_partition);
+                        if let Ok(Some(record)) = store.get(&key, false).await {
+                            match record.value {
+                                RecordValue::OrMap { records } => {
+                                    let wire_records: Vec<ORMapRecord<rmpv::Value>> = records
+                                        .into_iter()
+                                        .map(|r| ORMapRecord {
+                                            value: value_to_rmpv(&r.value),
+                                            timestamp: r.timestamp,
+                                            tag: r.tag,
+                                            ttl_ms: None,
+                                        })
+                                        .collect();
+                                    entries.push(ORMapEntry {
+                                        key,
+                                        records: wire_records,
+                                        tombstones: Vec::new(),
+                                    });
+                                }
+                                RecordValue::OrTombstones { tags } => {
+                                    entries.push(ORMapEntry {
+                                        key,
+                                        records: Vec::new(),
+                                        tombstones: tags,
+                                    });
+                                }
+                                RecordValue::Lww { .. } => {}
                             }
-                            RecordValue::OrTombstones { tags } => {
-                                entries.push(ORMapEntry {
-                                    key,
-                                    records: Vec::new(),
-                                    tombstones: tags,
-                                });
-                            }
-                            // LWW records in an OR-Map leaf bucket are unexpected; skip silently.
-                            RecordValue::Lww { .. } => {}
                         }
                     }
+                    Ok(OperationResponse::Message(Box::new(Message::ORMapSyncRespLeaf(
+                        ORMapSyncRespLeaf {
+                            payload: ORMapSyncRespLeafPayload { map_name, path, entries },
+                        },
+                    ))))
                 }
-                Ok(OperationResponse::Message(Box::new(Message::ORMapSyncRespLeaf(
-                    ORMapSyncRespLeaf {
-                        payload: ORMapSyncRespLeafPayload {
-                            map_name,
-                            path,
-                            entries,
+                NodeData::Internal(buckets) => {
+                    let prefix = format!("{partition_id:03}/");
+                    let buckets: HashMap<String, u32> = buckets
+                        .into_iter()
+                        .map(|(c, h)| (format!("{prefix}{sub_path}{c}"), h))
+                        .collect();
+                    Ok(OperationResponse::Message(Box::new(Message::ORMapSyncRespBuckets(
+                        ORMapSyncRespBuckets {
+                            payload: ORMapSyncRespBucketsPayload { map_name, path, buckets },
                         },
-                    },
-                ))))
-            }
-            NodeData::Internal(buckets) => {
-                let buckets: HashMap<String, u32> =
-                    buckets.into_iter().map(|(c, h)| (c.to_string(), h)).collect();
-                Ok(OperationResponse::Message(Box::new(Message::ORMapSyncRespBuckets(
-                    ORMapSyncRespBuckets {
-                        payload: ORMapSyncRespBucketsPayload {
-                            map_name,
-                            path,
-                            buckets,
-                        },
-                    },
-                ))))
-            }
-            NodeData::Missing => Ok(OperationResponse::Empty),
+                    ))))
+                }
+                NodeData::Missing => Ok(OperationResponse::Empty),
+            };
         }
+
+        // Aggregate mode: combine bucket hashes from all OR-Map partitions.
+        let combined_buckets = self.merkle_manager.aggregate_ormap_buckets(&map_name, &path);
+
+        if combined_buckets.is_empty() {
+            let partition_ids = self.merkle_manager.ormap_partition_ids(&map_name);
+            if partition_ids.is_empty() {
+                return Ok(OperationResponse::Empty);
+            }
+            // Check if partitions have leaf entries at this path.
+            let mut all_keys: Vec<String> = Vec::new();
+            for pid in &partition_ids {
+                self.merkle_manager.with_ormap_tree(&map_name, *pid, |tree| {
+                    if let Some(node) = tree.get_node(&path) {
+                        if !node.entries.is_empty() {
+                            all_keys.extend(node.entries.keys().cloned());
+                        }
+                    }
+                });
+            }
+            if all_keys.is_empty() {
+                return Ok(OperationResponse::Empty);
+            }
+            let mut entries = Vec::new();
+            for key in all_keys {
+                let key_partition = hash_to_partition(&key);
+                let store = self.record_store_factory.get_or_create(&map_name, key_partition);
+                if let Ok(Some(record)) = store.get(&key, false).await {
+                    match record.value {
+                        RecordValue::OrMap { records } => {
+                            let wire_records: Vec<ORMapRecord<rmpv::Value>> = records
+                                .into_iter()
+                                .map(|r| ORMapRecord {
+                                    value: value_to_rmpv(&r.value),
+                                    timestamp: r.timestamp,
+                                    tag: r.tag,
+                                    ttl_ms: None,
+                                })
+                                .collect();
+                            entries.push(ORMapEntry {
+                                key,
+                                records: wire_records,
+                                tombstones: Vec::new(),
+                            });
+                        }
+                        RecordValue::OrTombstones { tags } => {
+                            entries.push(ORMapEntry {
+                                key,
+                                records: Vec::new(),
+                                tombstones: tags,
+                            });
+                        }
+                        RecordValue::Lww { .. } => {}
+                    }
+                }
+            }
+            return Ok(OperationResponse::Message(Box::new(Message::ORMapSyncRespLeaf(
+                ORMapSyncRespLeaf {
+                    payload: ORMapSyncRespLeafPayload { map_name, path, entries },
+                },
+            ))));
+        }
+
+        let buckets: HashMap<String, u32> = combined_buckets
+            .into_iter()
+            .map(|(c, h)| (c.to_string(), h))
+            .collect();
+        Ok(OperationResponse::Message(Box::new(Message::ORMapSyncRespBuckets(
+            ORMapSyncRespBuckets {
+                payload: ORMapSyncRespBucketsPayload { map_name, path, buckets },
+            },
+        ))))
     }
 
     /// Handles `ORMapDiffRequest` — returns OR-Map entries for the requested keys.
@@ -1279,5 +1445,189 @@ mod tests {
             matches!(result, Err(OperationError::WrongService)),
             "expected WrongService error, got {result:?}"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_partition_prefix helper unit tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn parse_partition_prefix_empty_path_returns_none() {
+        assert!(super::parse_partition_prefix("").is_none());
+    }
+
+    #[test]
+    fn parse_partition_prefix_short_hex_path_returns_none() {
+        assert!(super::parse_partition_prefix("a").is_none());
+        assert!(super::parse_partition_prefix("ab").is_none());
+        assert!(super::parse_partition_prefix("abc").is_none());
+    }
+
+    #[test]
+    fn parse_partition_prefix_routed_path_parses_correctly() {
+        let (pid, sub) = super::parse_partition_prefix("042/abc").unwrap();
+        assert_eq!(pid, 42);
+        assert_eq!(sub, "abc");
+    }
+
+    #[test]
+    fn parse_partition_prefix_routed_path_empty_sub_path() {
+        let (pid, sub) = super::parse_partition_prefix("000/").unwrap();
+        assert_eq!(pid, 0);
+        assert_eq!(sub, "");
+    }
+
+    #[test]
+    fn parse_partition_prefix_max_partition() {
+        let (pid, sub) = super::parse_partition_prefix("270/f3a").unwrap();
+        assert_eq!(pid, 270);
+        assert_eq!(sub, "f3a");
+    }
+
+    #[test]
+    fn parse_partition_prefix_hex_path_without_slash_returns_none() {
+        // "abc" has 3 chars but no slash at position 3.
+        assert!(super::parse_partition_prefix("abc").is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // AC4 (scatter-gather): SyncInit uses aggregate root hash
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn scatter_gather_sync_init_aggregates_across_partitions() {
+        let merkle_manager = Arc::new(MerkleSyncManager::default());
+        // Write to two different partitions.
+        merkle_manager.update_lww("users", 1, "alice", 111);
+        merkle_manager.update_lww("users", 2, "bob", 222);
+
+        let svc = Arc::new(SyncService::new(
+            Arc::clone(&merkle_manager),
+            make_factory(),
+            Arc::new(ConnectionRegistry::new()),
+        ));
+
+        let expected = merkle_manager.aggregate_lww_root_hash("users");
+        assert_ne!(expected, 0, "precondition: aggregate hash should be non-zero");
+
+        let op = Operation::SyncInit {
+            ctx: make_ctx(service_names::SYNC),
+            payload: messages::SyncInitMessage {
+                map_name: "users".to_string(),
+                last_sync_timestamp: None,
+            },
+        };
+
+        let resp = svc.oneshot(op).await.unwrap();
+        match resp {
+            OperationResponse::Message(msg) => {
+                if let Message::SyncRespRoot(m) = *msg {
+                    assert_eq!(m.payload.root_hash, expected,
+                        "SyncInit should return aggregate root hash from all partitions");
+                } else {
+                    panic!("expected SyncRespRoot");
+                }
+            }
+            other => panic!("expected Message response, got {other:?}"),
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // AC5: Path prefix routing — "042/abc" routes to partition 42, sub-path "abc"
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn path_prefix_routing_routes_to_correct_partition() {
+        let merkle_manager = Arc::new(MerkleSyncManager::default());
+        // Populate partition 42 only.
+        for i in 0..10u32 {
+            merkle_manager.update_lww("users", 42, &format!("key-{i}"), i * 100 + 1);
+        }
+
+        let svc = Arc::new(SyncService::new(
+            Arc::clone(&merkle_manager),
+            make_factory(),
+            Arc::new(ConnectionRegistry::new()),
+        ));
+
+        // Request partition 42's root bucket with empty sub-path "042/".
+        let op = Operation::MerkleReqBucket {
+            ctx: make_ctx(service_names::SYNC),
+            payload: messages::MerkleReqBucketMessage {
+                payload: messages::MerkleReqBucketPayload {
+                    map_name: "users".to_string(),
+                    path: "042/".to_string(),
+                },
+            },
+        };
+
+        let resp = svc.oneshot(op).await.unwrap();
+        match resp {
+            OperationResponse::Message(msg) => {
+                if let Message::SyncRespBuckets(m) = *msg {
+                    assert_eq!(m.payload.map_name, "users");
+                    assert_eq!(m.payload.path, "042/");
+                    assert!(!m.payload.buckets.is_empty(),
+                        "partition 42 with 10 keys should have non-empty buckets");
+                    // Bucket keys should be prefixed with "042/" to enable routed drill-down.
+                    for key in m.payload.buckets.keys() {
+                        assert!(key.starts_with("042/"),
+                            "bucket key should have partition prefix, got: {key}");
+                    }
+                } else {
+                    panic!("expected SyncRespBuckets, got different Message variant");
+                }
+            }
+            OperationResponse::Empty => {
+                panic!("expected SyncRespBuckets, got Empty (partition 42 should have data)");
+            }
+            other => panic!("expected Message response, got {other:?}"),
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // AC6: Root bucket aggregation — path "" returns buckets from all partitions
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn aggregate_bucket_request_combines_all_partitions() {
+        let merkle_manager = Arc::new(MerkleSyncManager::default());
+        // Write to two separate partitions.
+        merkle_manager.update_lww("users", 1, "alice", 111);
+        merkle_manager.update_lww("users", 2, "bob", 222);
+
+        let svc = Arc::new(SyncService::new(
+            Arc::clone(&merkle_manager),
+            make_factory(),
+            Arc::new(ConnectionRegistry::new()),
+        ));
+
+        let op = Operation::MerkleReqBucket {
+            ctx: make_ctx(service_names::SYNC),
+            payload: messages::MerkleReqBucketMessage {
+                payload: messages::MerkleReqBucketPayload {
+                    map_name: "users".to_string(),
+                    path: "".to_string(),
+                },
+            },
+        };
+
+        let resp = svc.oneshot(op).await.unwrap();
+        match resp {
+            OperationResponse::Message(msg) => {
+                if let Message::SyncRespBuckets(m) = *msg {
+                    assert_eq!(m.payload.path, "");
+                    assert!(!m.payload.buckets.is_empty(),
+                        "aggregate buckets should be non-empty with data across partitions");
+                    for key in m.payload.buckets.keys() {
+                        assert_eq!(key.len(), 1,
+                            "aggregate bucket keys should be single hex chars, got: {key}");
+                    }
+                } else {
+                    panic!("expected SyncRespBuckets, got different Message variant");
+                }
+            }
+            other => panic!("expected Message response, got {other:?}"),
+        }
     }
 }
