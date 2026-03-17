@@ -5,6 +5,8 @@
  * - Does NOT timeout pending ops (counts ALL acks that arrive)
  * - Tracks total acked ops regardless of latency
  * - Reports ops/sec at different VU levels
+ *
+ * Each VU writes for 15 seconds then closes. k6 manages VU lifecycle.
  */
 
 import ws from 'k6/ws';
@@ -22,7 +24,7 @@ import {
 const WS_URL = getWsUrl();
 const BATCH_SIZE = 10;
 const SEND_INTERVAL_MS = 50; // 20 batches/sec per VU
-const WRITE_DURATION_MS = 40000; // Send writes for 40s, then stop
+const SESSION_SECONDS = 15;  // Each VU writes for 15 seconds
 
 export const options = {
   scenarios: {
@@ -30,14 +32,14 @@ export const options = {
       executor: 'ramping-vus',
       startVUs: 10,
       stages: [
-        { duration: '10s', target: 50 },
-        { duration: '10s', target: 100 },
-        { duration: '10s', target: 200 },
-        { duration: '15s', target: 200 },  // sustain peak
+        { duration: '5s', target: 50 },
+        { duration: '5s', target: 100 },
+        { duration: '5s', target: 200 },
+        { duration: '10s', target: 200 },  // sustain peak
         { duration: '5s', target: 0 },
       ],
-      gracefulRampDown: '5s',
-      gracefulStop: '10s',
+      gracefulRampDown: '0s',
+      gracefulStop: '0s',
     },
   },
 };
@@ -54,12 +56,11 @@ export default function () {
   let authenticated = false;
   let client = null;
   let opCounter = 0;
-  let pendingOps = new Map(); // Never cleaned up by timeout — only by ACK
-  let sessionDone = false;
+  let pendingOps = new Map();
+  let writesRemaining = Math.floor(SESSION_SECONDS * 1000 / SEND_INTERVAL_MS);
 
   const res = ws.connect(WS_URL, {}, function (socket) {
     client = new TopGunClient(socket, nodeId);
-    const sessionStart = Date.now();
 
     const handleMessage = createMessageHandler(client, {
       onAuthRequired: () => {
@@ -87,11 +88,11 @@ export default function () {
     socket.on('binaryMessage', handleMessage);
 
     function doWrite() {
-      if (!authenticated || sessionDone) return;
+      if (!authenticated) return;
 
-      // Check if write duration exceeded — close socket directly
-      if (Date.now() - sessionStart > WRITE_DURATION_MS) {
-        sessionDone = true;
+      writesRemaining--;
+      if (writesRemaining <= 0) {
+        // Done writing — close immediately
         socket.close();
         return;
       }
@@ -111,17 +112,8 @@ export default function () {
       writeOpsTotal.add(BATCH_SIZE);
       sentBatches.add(1);
 
-      // Schedule next write
       socket.setTimeout(doWrite, SEND_INTERVAL_MS);
     }
-
-    // Safety net: force close if socket is still open after 50s
-    socket.setTimeout(() => {
-      if (!sessionDone) {
-        sessionDone = true;
-        socket.close();
-      }
-    }, 50000);
   });
 
   check(res, { 'WebSocket connected': (r) => r && r.status === 101 });
@@ -135,7 +127,7 @@ export function handleSummary(data) {
   const p50 = data.metrics.write_latency?.values?.med || 0;
   const p95 = data.metrics.write_latency?.values?.['p(95)'] || 0;
   const p99 = data.metrics.write_latency?.values?.['p(99)'] || 0;
-  const duration = data.state?.testRunDurationMs || 50000;
+  const duration = data.state?.testRunDurationMs || 30000;
 
   console.log('');
   console.log('═══════════════════════════════════════════════');
