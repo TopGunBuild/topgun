@@ -30,7 +30,7 @@ use crate::network::connection::ConnectionId;
 use crate::network::{ConnectionKind, OutboundMessage};
 use crate::service::classify::OperationService;
 use crate::service::dispatch::PartitionDispatcher;
-use crate::service::operation::{CallerOrigin, ClassifyError, OperationResponse};
+use crate::service::operation::{CallerOrigin, ClassifyError, OperationError, OperationResponse};
 
 /// Upgrades an HTTP connection to a WebSocket connection.
 ///
@@ -246,6 +246,19 @@ async fn dispatch_message(
                 Ok(resp) => {
                     send_operation_response(resp, tx).await;
                 }
+                Err(OperationError::Overloaded) => {
+                    // Worker inbox is full; tell the client to back off and retry.
+                    let err_msg = TopGunMessage::Error {
+                        payload: ErrorPayload {
+                            code: 429,
+                            message: "server overloaded, try again later".to_string(),
+                            details: None,
+                        },
+                    };
+                    if let Ok(bytes) = rmp_serde::to_vec_named(&err_msg) {
+                        let _ = tx.send(OutboundMessage::Binary(bytes)).await;
+                    }
+                }
                 Err(e) => {
                     debug!("dispatch error for {:?}: {}", conn_id, e);
                 }
@@ -349,27 +362,37 @@ async fn dispatch_op_batch(
 
     // Collect results and check for errors. Per-sub-batch OpAck responses are
     // discarded; the aggregated OP_ACK is built from the original batch's lastId.
-    let mut dispatch_error: Option<String> = None;
+    // Preserve the OperationError type so we can distinguish 429 from 500
+    // without inspecting string content.
+    let mut dispatch_error: Option<OperationError> = None;
     while let Some(result) = join_set.join_next().await {
         match result {
             Ok(Ok(_resp)) => {
                 // Discard the per-sub-batch OpAck; we send one aggregated ack below.
             }
             Ok(Err(e)) => {
-                dispatch_error = Some(format!("{e}"));
+                dispatch_error = Some(e);
             }
             Err(join_err) => {
-                dispatch_error = Some(format!("join error: {join_err}"));
+                dispatch_error = Some(OperationError::Internal(anyhow::anyhow!(
+                    "join error: {join_err}"
+                )));
             }
         }
     }
 
-    if let Some(err_msg) = dispatch_error {
-        debug!("dispatch_op_batch error for {:?}: {}", conn_id, err_msg);
+    if let Some(err) = dispatch_error {
+        debug!("dispatch_op_batch error for {:?}: {}", conn_id, err);
+        let (code, message) = match err {
+            OperationError::Overloaded => {
+                (429, "server overloaded, try again later".to_string())
+            }
+            ref e => (500, format!("{e}")),
+        };
         let err_response = TopGunMessage::Error {
             payload: ErrorPayload {
-                code: 500,
-                message: err_msg,
+                code,
+                message,
                 details: None,
             },
         };
