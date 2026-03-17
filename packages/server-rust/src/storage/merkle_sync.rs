@@ -138,7 +138,8 @@ impl MerkleSyncManager {
     /// Returns the `wrapping_add` of all per-partition root hashes.
     /// Returns 0 when no partitions exist for the given map.
     /// `wrapping_add` is commutative and associative, so the result is
-    /// independent of DashMap's non-deterministic iteration order.
+    /// independent of `DashMap`'s non-deterministic iteration order.
+    #[must_use]
     pub fn aggregate_lww_root_hash(&self, map_name: &str) -> u32 {
         self.lww_trees
             .iter()
@@ -152,6 +153,7 @@ impl MerkleSyncManager {
     /// Aggregates OR-Map root hashes across all partitions for `map_name`.
     ///
     /// Same aggregation strategy as `aggregate_lww_root_hash`.
+    #[must_use]
     pub fn aggregate_ormap_root_hash(&self, map_name: &str) -> u32 {
         self.ormap_trees
             .iter()
@@ -167,9 +169,10 @@ impl MerkleSyncManager {
     /// For each hex bucket character, combines partition values via `wrapping_add`.
     /// Returns a `HashMap<char, u32>` with the combined hashes, suitable for
     /// returning as a `SyncRespBuckets` response covering all partitions.
+    #[must_use]
     pub fn aggregate_lww_buckets(&self, map_name: &str, path: &str) -> HashMap<char, u32> {
         let mut combined: HashMap<char, u32> = HashMap::new();
-        for entry in self.lww_trees.iter() {
+        for entry in &self.lww_trees {
             if entry.key().0 != map_name {
                 continue;
             }
@@ -187,9 +190,10 @@ impl MerkleSyncManager {
     /// Aggregates OR-Map bucket hashes at `path` across all partitions for `map_name`.
     ///
     /// Same aggregation strategy as `aggregate_lww_buckets`.
+    #[must_use]
     pub fn aggregate_ormap_buckets(&self, map_name: &str, path: &str) -> HashMap<char, u32> {
         let mut combined: HashMap<char, u32> = HashMap::new();
-        for entry in self.ormap_trees.iter() {
+        for entry in &self.ormap_trees {
             if entry.key().0 != map_name {
                 continue;
             }
@@ -205,6 +209,7 @@ impl MerkleSyncManager {
     }
 
     /// Returns all partition IDs that have a LWW tree for `map_name`.
+    #[must_use]
     pub fn lww_partition_ids(&self, map_name: &str) -> Vec<u32> {
         self.lww_trees
             .iter()
@@ -214,6 +219,7 @@ impl MerkleSyncManager {
     }
 
     /// Returns all partition IDs that have an OR-Map tree for `map_name`.
+    #[must_use]
     pub fn ormap_partition_ids(&self, map_name: &str) -> Vec<u32> {
         self.ormap_trees
             .iter()

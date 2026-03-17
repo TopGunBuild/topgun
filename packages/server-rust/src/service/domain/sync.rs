@@ -34,7 +34,7 @@ enum NodeData {
 /// Parses a path with a 3-digit zero-padded partition prefix (e.g. `"042/abc"`).
 ///
 /// Returns `Some((partition_id, sub_path))` when the path starts with exactly
-/// 3 ASCII digit characters followed by `/`. The sub_path is the remainder after
+/// 3 ASCII digit characters followed by `/`. The `sub_path` is the remainder after
 /// the slash (may be empty for the partition root).
 ///
 /// Returns `None` for aggregate-mode paths (`""`, `"a"`, `"ab"`, etc.) that have
@@ -169,6 +169,7 @@ impl SyncService {
     ///   combines results from all partition trees via `wrapping_add` for hashes.
     /// - **Routed mode** (paths beginning with a 3-digit zero-padded partition prefix like
     ///   `"042/abc"`): the server strips the prefix and routes to the specific partition tree.
+    #[allow(clippy::too_many_lines)] // two-mode dispatch (routed vs aggregate) with leaf collection is inherently verbose
     async fn handle_merkle_req_bucket(
         &self,
         _ctx: &crate::service::operation::OperationContext,
@@ -360,6 +361,7 @@ impl SyncService {
     /// nested `.payload` field.
     ///
     /// Follows the same scatter-gather and path prefix routing as `handle_merkle_req_bucket`.
+    #[allow(clippy::too_many_lines)] // two-mode dispatch (routed vs aggregate) with entry collection is inherently verbose
     async fn handle_ormap_merkle_req_bucket(
         &self,
         _ctx: &crate::service::operation::OperationContext,
