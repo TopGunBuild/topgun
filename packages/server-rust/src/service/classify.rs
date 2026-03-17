@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use topgun_core::messages::Message;
+use topgun_core::messages::{ClientOp, Message, OpBatchMessage, OpBatchPayload, WriteConcern};
 use topgun_core::{hash_to_partition, HLC};
 
 use super::config::ServerConfig;
@@ -64,6 +64,50 @@ impl OperationService {
         ctx.client_id = client_id;
         ctx.partition_id = partition_key.map(hash_to_partition);
         ctx
+    }
+
+    /// Create an `OpBatch` operation for a specific partition.
+    ///
+    /// Unlike `classify()` which assigns `partition_id=None` for `OpBatch`
+    /// (because the batch may span multiple partitions), this method creates
+    /// an `OpBatch` routed to the specified partition worker. The caller is
+    /// responsible for grouping ops by `hash_to_partition(key)` before calling
+    /// this method.
+    ///
+    /// The `write_concern` and `timeout` from the original batch are passed
+    /// through unchanged to the sub-batch `OpBatchPayload`.
+    ///
+    /// `client_id` is `None` for WebSocket-originated batches because
+    /// `connection_id` is the primary per-connection identifier in that path.
+    /// The parameter is accepted for symmetry with `classify()`.
+    #[must_use]
+    pub fn classify_op_batch_for_partition(
+        &self,
+        ops: Vec<ClientOp>,
+        partition_id: u32,
+        client_id: Option<String>,
+        caller_origin: CallerOrigin,
+        write_concern: Option<WriteConcern>,
+        timeout: Option<u64>,
+    ) -> Operation {
+        let mut ctx = OperationContext::new(
+            self.next_call_id(),
+            service_names::CRDT,
+            self.now(),
+            self.config.default_operation_timeout_ms,
+        );
+        ctx.caller_origin = caller_origin;
+        ctx.client_id = client_id;
+        ctx.partition_id = Some(partition_id);
+
+        let payload = OpBatchMessage {
+            payload: OpBatchPayload {
+                ops,
+                write_concern,
+                timeout,
+            },
+        };
+        Operation::OpBatch { ctx, payload }
     }
 
     /// Classify a `Message` into an `Operation`.
@@ -826,6 +870,112 @@ mod tests {
             op.ctx().partition_id.is_none(),
             "ORMapSyncInit should produce partition_id: None"
         );
+    }
+
+    #[test]
+    fn classify_op_batch_for_partition_sets_explicit_partition_id() {
+        let svc = make_service();
+        let ops = vec![topgun_core::ClientOp {
+            id: Some("op-1".to_string()),
+            map_name: "users".to_string(),
+            key: "alice".to_string(),
+            op_type: None,
+            record: None,
+            or_record: None,
+            or_tag: None,
+            write_concern: None,
+            timeout: None,
+        }];
+        let op = svc.classify_op_batch_for_partition(
+            ops,
+            42,
+            None,
+            CallerOrigin::Client,
+            None,
+            None,
+        );
+        assert_eq!(op.ctx().service_name, service_names::CRDT);
+        assert_eq!(op.ctx().partition_id, Some(42));
+        assert!(op.ctx().client_id.is_none());
+    }
+
+    #[test]
+    fn classify_op_batch_for_partition_propagates_write_concern_and_timeout() {
+        use topgun_core::messages::WriteConcern;
+        let svc = make_service();
+        let ops = vec![];
+        let op = svc.classify_op_batch_for_partition(
+            ops,
+            7,
+            None,
+            CallerOrigin::Client,
+            Some(WriteConcern::APPLIED),
+            Some(5000),
+        );
+        match op {
+            Operation::OpBatch { payload, .. } => {
+                assert_eq!(payload.payload.write_concern, Some(WriteConcern::APPLIED));
+                assert_eq!(payload.payload.timeout, Some(5000));
+            }
+            _ => panic!("expected OpBatch variant"),
+        }
+    }
+
+    #[test]
+    fn classify_op_batch_for_partition_multi_partition_produces_distinct_ids() {
+        use topgun_core::hash_to_partition;
+        let svc = make_service();
+        // Build ops with keys that will hash to different partitions.
+        // We verify that calling classify_op_batch_for_partition with the
+        // partition IDs computed from hash_to_partition produces the correct
+        // routing contexts.
+        let key_a = "alpha";
+        let key_b = "zeta";
+        let part_a = hash_to_partition(key_a);
+        let part_b = hash_to_partition(key_b);
+
+        let op_a = svc.classify_op_batch_for_partition(
+            vec![topgun_core::ClientOp {
+                id: None,
+                map_name: "m".to_string(),
+                key: key_a.to_string(),
+                op_type: None,
+                record: None,
+                or_record: None,
+                or_tag: None,
+                write_concern: None,
+                timeout: None,
+            }],
+            part_a,
+            None,
+            CallerOrigin::Client,
+            None,
+            None,
+        );
+        let op_b = svc.classify_op_batch_for_partition(
+            vec![topgun_core::ClientOp {
+                id: None,
+                map_name: "m".to_string(),
+                key: key_b.to_string(),
+                op_type: None,
+                record: None,
+                or_record: None,
+                or_tag: None,
+                write_concern: None,
+                timeout: None,
+            }],
+            part_b,
+            None,
+            CallerOrigin::Client,
+            None,
+            None,
+        );
+
+        assert_eq!(op_a.ctx().partition_id, Some(part_a));
+        assert_eq!(op_b.ctx().partition_id, Some(part_b));
+        // If keys happen to collide to same partition the test still holds,
+        // but distinct call_ids are always produced.
+        assert_ne!(op_a.ctx().call_id, op_b.ctx().call_id);
     }
 
     #[test]
