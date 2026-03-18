@@ -1,0 +1,11 @@
+{
+  "fire_and_wait": {
+    "min_ops_per_sec": 1000,
+    "max_p50_us": 1000000
+  },
+  "fire_and_forget": {
+    "min_ops_per_sec": 50000,
+    "max_p50_us": 1000000
+  },
+  "regression_tolerance_pct": 20
+}
