@@ -101,7 +101,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     // contention in Phase 2 — set once in Phase 1, read once to decide
     // which phase to enter. handle.metadata is still written during Phase 1
     // so domain services can read the principal.
-    let authenticated = Arc::new(AtomicBool::new(false));
+    let authenticated = AtomicBool::new(false);
 
     // Semaphore limits in-flight dispatch tasks to MAX_IN_FLIGHT.
     // Closed on shutdown to unblock any pending acquire.
@@ -285,16 +285,14 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         }
     }
 
-    // Graceful shutdown: close the semaphore so any pending acquire returns
-    // Err, then drain all permits to wait for in-flight dispatch tasks to
-    // complete. Each task holds one permit and drops it when done.
-    semaphore.close();
+    // Graceful shutdown: acquire all permits to wait for in-flight dispatch
+    // tasks to complete. Each task holds one permit and drops it when done.
+    // Once all permits are re-acquired, close the semaphore so any racing
+    // acquire in the reader loop returns Err (defensive — loop has exited).
     for _ in 0..MAX_IN_FLIGHT {
-        // Each acquire succeeds once a running task releases its permit.
-        // After closing, already-held permits are still valid — we just
-        // wait for them all to be returned.
         let _ = semaphore.acquire().await;
     }
+    semaphore.close();
 
     // All in-flight tasks have completed; drop the handle to close handle.tx.
     // The outbound task will drain remaining buffered messages before exiting.
