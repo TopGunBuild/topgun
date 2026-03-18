@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -36,6 +37,32 @@ use crate::service::registry::{ManagedService, ServiceContext};
 use crate::storage::mutation_observer::MutationObserver;
 use crate::storage::record::{Record, RecordValue};
 use crate::storage::RecordStoreFactory;
+
+// ---------------------------------------------------------------------------
+// SearchConfig
+// ---------------------------------------------------------------------------
+
+/// Configuration for the search indexing batch processor.
+///
+/// Production defaults use a 100ms interval and 500-event threshold to reduce
+/// tantivy commit frequency from ~60/sec down to ~2-10/sec under sustained load.
+/// Test overrides keep 16ms/100 to preserve integration test responsiveness.
+#[derive(Debug, Clone)]
+pub struct SearchConfig {
+    /// Milliseconds between batch flushes (default: 100).
+    pub batch_interval_ms: u64,
+    /// Maximum events before forced flush (default: 500).
+    pub batch_flush_threshold: usize,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            batch_interval_ms: 100,
+            batch_flush_threshold: 500,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Internal scored-document result
@@ -165,13 +192,30 @@ impl SearchRegistry {
     }
 
     /// Returns all subscriptions targeting the given map.
-    #[must_use] 
+    #[must_use]
     pub fn get_subscriptions_for_map(&self, map_name: &str) -> Vec<Arc<SearchSubscription>> {
         self.subscriptions
             .iter()
             .filter(|entry| entry.value().map_name == map_name)
             .map(|entry| Arc::clone(entry.value()))
             .collect()
+    }
+
+    /// Returns true if any subscription targets the given map.
+    ///
+    /// O(n) scan of all subscriptions, returning early on first match.
+    /// Negligible cost compared to a tantivy commit (pointer scan vs disk I/O).
+    #[must_use]
+    pub fn has_subscriptions_for_map(&self, map_name: &str) -> bool {
+        self.subscriptions
+            .iter()
+            .any(|entry| entry.value().map_name == map_name)
+    }
+
+    /// Returns true if any subscriptions exist at all.
+    #[must_use]
+    pub fn has_any_subscriptions(&self) -> bool {
+        !self.subscriptions.is_empty()
     }
 }
 
