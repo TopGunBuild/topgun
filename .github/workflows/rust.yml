@@ -101,3 +101,100 @@ jobs:
 
       - name: Verify Rust decodes TS fixtures
         run: cargo test --test cross_lang_compat
+
+  perf-gate:
+    name: Performance Gate
+    needs: [check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Informational only — does not block merges while baseline stability is validated
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-perf-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-perf-
+            ${{ runner.os }}-cargo-
+
+      - name: Build load harness
+        # Explicit build step surfaces compilation failures before the longer scenario runs begin
+        run: cargo build --release --bench load_harness
+
+      - name: Run fire-and-wait scenario
+        run: |
+          cargo bench --bench load_harness -- \
+            --scenario throughput \
+            --connections 200 \
+            --duration 15 \
+            --interval 50 \
+            --json-output results-faw.json
+
+      - name: Run fire-and-forget scenario
+        run: |
+          cargo bench --bench load_harness -- \
+            --scenario throughput \
+            --connections 200 \
+            --duration 15 \
+            --interval 0 \
+            --fire-and-forget \
+            --json-output results-faf.json
+
+      - name: Validate results against baseline
+        run: |
+          BASELINE=packages/server-rust/benches/load_harness/baseline.json
+
+          FAW_OPS=$(jq '.ops_per_sec' results-faw.json)
+          FAW_P50=$(jq '.latency.p50_us' results-faw.json)
+          FAW_MIN_OPS=$(jq '.fire_and_wait.min_ops_per_sec' "$BASELINE")
+          FAW_MAX_P50=$(jq '.fire_and_wait.max_p50_us' "$BASELINE")
+
+          echo "fire-and-wait: ops/sec=$FAW_OPS (min=$FAW_MIN_OPS), p50=${FAW_P50}µs (max=${FAW_MAX_P50}µs)"
+
+          FAILED=0
+          if [ "$FAW_OPS" -lt "$FAW_MIN_OPS" ]; then
+            echo "FAIL: fire-and-wait ops/sec $FAW_OPS < baseline $FAW_MIN_OPS"
+            FAILED=1
+          fi
+          if [ "$FAW_P50" -gt "$FAW_MAX_P50" ]; then
+            echo "FAIL: fire-and-wait p50 ${FAW_P50}µs > baseline ${FAW_MAX_P50}µs"
+            FAILED=1
+          fi
+
+          FAF_OPS=$(jq '.ops_per_sec' results-faf.json)
+          FAF_P50=$(jq '.latency.p50_us' results-faf.json)
+          FAF_MIN_OPS=$(jq '.fire_and_forget.min_ops_per_sec' "$BASELINE")
+          FAF_MAX_P50=$(jq '.fire_and_forget.max_p50_us' "$BASELINE")
+
+          echo "fire-and-forget: ops/sec=$FAF_OPS (min=$FAF_MIN_OPS), p50=${FAF_P50}µs (max=${FAF_MAX_P50}µs)"
+
+          if [ "$FAF_OPS" -lt "$FAF_MIN_OPS" ]; then
+            echo "FAIL: fire-and-forget ops/sec $FAF_OPS < baseline $FAF_MIN_OPS"
+            FAILED=1
+          fi
+          if [ "$FAF_P50" -gt "$FAF_MAX_P50" ]; then
+            echo "FAIL: fire-and-forget p50 ${FAF_P50}µs > baseline ${FAF_MAX_P50}µs"
+            FAILED=1
+          fi
+
+          exit $FAILED
+
+      - name: Upload performance results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results-${{ github.run_id }}
+          path: |
+            results-faw.json
+            results-faf.json
+          retention-days: 90
