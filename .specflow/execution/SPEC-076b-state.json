@@ -1,0 +1,21 @@
+{
+  "spec_id": "SPEC-076b",
+  "mode": "orchestrated",
+  "started": "2026-03-04T12:00:00Z",
+  "waves": [
+    {
+      "id": 1,
+      "groups": ["G1", "G2", "G3"],
+      "status": "pending",
+      "results": {}
+    },
+    {
+      "id": 2,
+      "groups": ["G4"],
+      "status": "pending",
+      "results": {}
+    }
+  ],
+  "commits": [],
+  "last_checkpoint": "2026-03-04T12:00:00Z"
+}
