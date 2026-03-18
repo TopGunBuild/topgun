@@ -43,7 +43,7 @@ use topgun_server::storage::mutation_observer::MutationObserver;
 
 use metrics::HdrMetricsCollector;
 use scenarios::ThroughputScenario;
-use traits::{AssertionResult, HarnessContext, LoadScenario};
+use traits::{AssertionResult, HarnessContext, JsonAssertionResult, JsonLatency, JsonReport, LoadScenario, MetricsCollector};
 
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
@@ -62,6 +62,7 @@ async fn main() {
     let mut duration_secs: u64 = 30;
     let mut send_interval_ms: u64 = 50;
     let mut fire_and_forget = false;
+    let mut json_output: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -114,6 +115,15 @@ async fn main() {
             "--fire-and-forget" => {
                 fire_and_forget = true;
                 i += 1;
+            }
+            "--json-output" => {
+                if i + 1 < args.len() {
+                    json_output = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("--json-output requires a path");
+                    std::process::exit(1);
+                }
             }
             // Skip harness-injected flags (e.g. bench filter args)
             _ => {
@@ -228,15 +238,65 @@ async fn main() {
     // --- Run assertions ---
     let assertions = scenario.assertions();
     let mut any_failed = false;
+    let mut json_assertions: Vec<JsonAssertionResult> = Vec::new();
     for assertion in &assertions {
         let assertion_result = assertion.check(&ctx, &result).await;
         match &assertion_result {
             AssertionResult::Pass => {
                 println!("PASS [{}]", assertion.name());
+                json_assertions.push(JsonAssertionResult {
+                    name: assertion.name().to_string(),
+                    passed: true,
+                    message: None,
+                });
             }
             AssertionResult::Fail(msg) => {
                 println!("FAIL [{}]: {msg}", assertion.name());
                 any_failed = true;
+                json_assertions.push(JsonAssertionResult {
+                    name: assertion.name().to_string(),
+                    passed: false,
+                    message: Some(msg.clone()),
+                });
+            }
+        }
+    }
+
+    // --- Write JSON report if --json-output was provided ---
+    if let Some(path) = json_output {
+        let snapshot = metrics_collector.snapshot();
+        // Use write_latency key recorded by the throughput scenario, or zeros if absent.
+        let latency_stats = snapshot.latencies.get("write_latency");
+        let json_latency = JsonLatency {
+            p50_us:  latency_stats.map_or(0, |s| s.p50),
+            p95_us:  latency_stats.map_or(0, |s| s.p95),
+            p99_us:  latency_stats.map_or(0, |s| s.p99),
+            p999_us: latency_stats.map_or(0, |s| s.p999),
+        };
+        let mode = if fire_and_forget {
+            "fire-and-forget".to_string()
+        } else {
+            "fire-and-wait".to_string()
+        };
+        let report = JsonReport {
+            scenario: scenario_name,
+            mode,
+            connections: num_connections as u64,
+            duration_secs,
+            total_ops: result.total_ops,
+            ops_per_sec,
+            latency: json_latency,
+            assertions: json_assertions,
+            timestamp: utc_timestamp_now(),
+        };
+        match std::fs::File::create(&path) {
+            Ok(file) => {
+                if let Err(e) = serde_json::to_writer_pretty(file, &report) {
+                    eprintln!("Failed to write JSON report to {path}: {e}");
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to create JSON output file {path}: {e}");
             }
         }
     }
@@ -244,6 +304,56 @@ async fn main() {
     if any_failed {
         std::process::exit(1);
     }
+}
+
+/// Formats the current UTC time as `YYYY-MM-DDTHH:MM:SSZ` using only
+/// `std::time::SystemTime` and integer arithmetic on the Unix epoch value.
+///
+/// Avoids any external date/time crate dependency while producing a
+/// machine-readable ISO 8601 timestamp for CI consumers and dashboards.
+fn utc_timestamp_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let hh = (secs % 86400) / 3600;
+    let mm = (secs % 3600) / 60;
+    let ss = secs % 60;
+
+    // Days since 1970-01-01.
+    let mut days = secs / 86400;
+
+    // Determine year using a 400-year cycle (Gregorian calendar).
+    let mut year: u64 = 1970;
+    loop {
+        let days_in_year: u64 = if is_leap_year(year) { 366 } else { 365 };
+        if days < days_in_year {
+            break;
+        }
+        days -= days_in_year;
+        year += 1;
+    }
+
+    // Determine month and day within the year.
+    let leap = is_leap_year(year);
+    let month_days: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month: u64 = 1;
+    for &md in &month_days {
+        if days < md {
+            break;
+        }
+        days -= md;
+        month += 1;
+    }
+    let day = days + 1; // 1-indexed
+
+    format!("{year:04}-{month:02}-{day:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+/// Returns true for Gregorian leap years.
+fn is_leap_year(year: u64) -> bool {
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 // ---------------------------------------------------------------------------
