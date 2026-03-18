@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-18 — TODO-118 cleaned up (completed via SPEC-125)
+**Last updated:** 2026-03-18 — SPEC-126 completed (tantivy optimization)
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -193,7 +193,7 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 
 | Wave | Items | Blocked by | Rationale |
 |------|-------|------------|-----------|
-| **6a** | TODO-027 (DST) · TODO-118 (Flamegraph profiling) | — | Testing infra + perf baseline before complex features |
+| **6a** | SPEC-126 (Tantivy optimization) · TODO-027 (DST) | — | Tantivy eats 60-80% CPU; DST = test infra for complex features |
 | **6b** | TODO-069 (Schema) | — | Data model foundation: Arrow types, validation, field definitions |
 | **6c** | TODO-091 (DataFusion SQL) · TODO-070 (Shapes) · TODO-033 (Write-Behind) | 069 · 069 · — | SQL needs Schema for Arrow schemas; Shapes needs Schema for field projection; Write-Behind independent |
 | **6d** | TODO-025 (DAG Executor) · TODO-092 (Connectors) | 091 · — (traits) / 025 (DAG integration) | DAG needs SQL for pipeline definitions; Connector traits independent, DAG integration after |
@@ -215,8 +215,8 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 ```
 MILESTONE 2: Data Platform (v2.0)
 
+  SPEC-126 (Tantivy optimization) ← 60-80% CPU, highest impact
   TODO-027 (DST) ← foundational test infra
-  TODO-118 (Flamegraph) ← perf baseline
 
   TODO-069 (Schema)
        ├──→ TODO-091 (DataFusion SQL) ──→ TODO-025 (DAG Stream Processing)
@@ -269,7 +269,7 @@ MILESTONE 3: Enterprise (v3.0+)
 | TODO-092 | Arroyo: `arroyo-connector/src/`; ArkFlow: `arkflow-core/src/input/`, `arkflow-core/src/codec/`; RisingWave: `src/connector/` |
 | TODO-093 | Existing: `apps/admin-dashboard/`; Arroyo WebUI: `/Users/koristuvac/Projects/rust/arroyo/webui/` |
 | TODO-027 | [TURSO_INSIGHTS.md](../reference/TURSO_INSIGHTS.md) Section 2; RisingWave `ci-sim` profile |
-| TODO-118 | SPEC-116→122 (performance baseline), Rust load harness, `cargo-flamegraph` |
+| SPEC-126 | [FLAMEGRAPH_ANALYSIS.md](../../packages/server-rust/docs/profiling/FLAMEGRAPH_ANALYSIS.md); Quickwit `quickwit-indexing/src/actors/indexer.rs`; SurrealDB `core/src/kvs/index.rs`; Databend `inverted_index_writer.rs` |
 
 ## Reference Implementations
 
@@ -279,7 +279,7 @@ MILESTONE 3: Enterprise (v3.0+)
 | **Arroyo** (`/Users/koristuvac/Projects/rust/arroyo`) | DAG, DataFusion SQL, Admin UI patterns |
 | **ArkFlow** (`/Users/koristuvac/Projects/rust/arkflow`) | DataFusion + MsgPack→Arrow codec |
 | **TiKV** (`/Users/koristuvac/Projects/rust/tikv`) | Storage traits, per-partition FSM |
-| **Quickwit** (`/Users/koristuvac/Projects/rust/quickwit`) | Chitchat gossip, Tower layers |
+| **Quickwit** (`/Users/koristuvac/Projects/rust/quickwit`) | Chitchat gossip, Tower layers, **tantivy indexing pipeline** (actor-based, time+memory+doccount commit triggers) |
 | **Databend** (`/Users/koristuvac/Projects/rust/databend`) | OpenDAL, GlobalServices |
 | **RisingWave** (`/Users/koristuvac/Projects/rust/risingwave`) | DST (madsim), connectors |
-| **SurrealDB** | WS lifecycle, multi-tenancy |
+| **SurrealDB** (`/Users/koristuvac/Projects/rust/surrealdb`) | WS lifecycle, multi-tenancy, **batch indexing** (250-doc threshold, custom FT index) |
