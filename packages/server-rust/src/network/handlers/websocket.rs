@@ -5,11 +5,14 @@
 //! This avoids holding a single mutable reference across concurrent reads
 //! and writes.
 //!
-//! The authentication gate ensures unauthenticated connections can only
-//! send AUTH messages; all other message types are silently dropped until
-//! the connection is authenticated.
+//! Authentication is two-phase: Phase 1 reads messages sequentially until
+//! the connection is authenticated (or the connection closes). Phase 2
+//! spawns each dispatch task concurrently, bounded by a semaphore, so the
+//! reader can continue consuming frames while previous dispatches are
+//! still in flight. If no JWT secret is configured, Phase 1 is skipped.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
@@ -32,6 +35,14 @@ use crate::service::classify::OperationService;
 use crate::service::dispatch::PartitionDispatcher;
 use crate::service::operation::{CallerOrigin, ClassifyError, OperationError, OperationResponse};
 
+/// Maximum number of in-flight dispatch tasks per connection.
+///
+/// Each spawned task holds a semaphore permit until its dispatch completes.
+/// This bounds memory and task overhead: at 6-11µs per op, 32 slots is
+/// ~200µs of parallelism — enough to saturate the pipeline without
+/// accumulating an unbounded backlog.
+const MAX_IN_FLIGHT: usize = 32;
+
 /// Upgrades an HTTP connection to a WebSocket connection.
 ///
 /// Configures write buffer sizes from the connection config, then hands
@@ -48,12 +59,15 @@ pub async fn ws_upgrade_handler(
 /// Processes a connected WebSocket: registers it, runs message loops, and
 /// cleans up on disconnect.
 ///
-/// The function sends `AUTH_REQUIRED` before splitting, then splits the socket
-/// into sender/receiver halves, spawns an outbound task for writes, and
-/// runs the inbound loop in the current task. Unauthenticated connections
-/// can only send AUTH messages; all others are dropped. When the inbound
-/// loop exits (client disconnect or error), the connection is removed from
-/// the registry.
+/// Two-phase message processing:
+/// - Phase 1 (auth): reads messages sequentially until authenticated. If no
+///   JWT secret is configured the connection skips directly to Phase 2.
+/// - Phase 2 (pipeline): each binary frame spawns a concurrent dispatch task
+///   bounded by `MAX_IN_FLIGHT` semaphore permits.
+///
+/// On exit, the semaphore is closed and drained to ensure all in-flight
+/// tasks complete before the connection handle (and its outbound sender)
+/// is dropped, allowing the outbound task to flush cleanly.
 #[allow(clippy::too_many_lines)]
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
     let (handle, rx) = state
@@ -83,11 +97,144 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     // the mpsc channel, coalescing messages when multiple are ready.
     let outbound_handle = tokio::spawn(outbound_task(sender, rx));
 
-    // Inbound loop: read messages from the client until disconnect or error.
-    while let Some(result) = receiver.next().await {
-        match result {
-            Ok(Message::Binary(data)) => {
-                // Deserialize inbound MsgPack binary into a TopGun message
+    // Tracks auth state for phase switching. AtomicBool avoids RwLock
+    // contention in Phase 2 — set once in Phase 1, read once to decide
+    // which phase to enter. handle.metadata is still written during Phase 1
+    // so domain services can read the principal.
+    let authenticated = Arc::new(AtomicBool::new(false));
+
+    // Semaphore limits in-flight dispatch tasks to MAX_IN_FLIGHT.
+    // Closed on shutdown to unblock any pending acquire.
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT));
+
+    // Phase 1: sequential auth — only proceed when JWT secret is configured.
+    // If no secret is set, every connection is pre-authenticated.
+    if state.jwt_secret.is_some() {
+        'auth: loop {
+            match receiver.next().await {
+                Some(Ok(Message::Binary(data))) => {
+                    let tg_msg = match rmp_serde::from_slice::<TopGunMessage>(&data) {
+                        Ok(msg) => msg,
+                        Err(e) => {
+                            debug!(
+                                "failed to deserialize message from {:?}: {}",
+                                conn_id, e
+                            );
+                            continue;
+                        }
+                    };
+
+                    if let TopGunMessage::Auth(ref auth_msg) = tg_msg {
+                        if let Some(ref secret) = state.jwt_secret {
+                            let auth_handler = AuthHandler::new(secret.clone());
+                            match auth_handler.handle_auth(auth_msg, &handle.tx).await {
+                                Ok(principal) => {
+                                    // Store principal in metadata so domain services can read it.
+                                    // AtomicBool is set after metadata write so no reader sees
+                                    // authenticated=true without principal being set.
+                                    {
+                                        let mut meta = handle.metadata.write().await;
+                                        meta.authenticated = true;
+                                        meta.principal = Some(principal.clone());
+                                    }
+                                    authenticated.store(true, Ordering::Release);
+
+                                    // Send AUTH_ACK with userId via the outbound channel
+                                    let ack_msg = TopGunMessage::AuthAck(AuthAckData {
+                                        user_id: Some(principal.id.clone()),
+                                        ..Default::default()
+                                    });
+                                    if let Ok(bytes) = rmp_serde::to_vec_named(&ack_msg) {
+                                        let _ = handle.tx.send(OutboundMessage::Binary(bytes)).await;
+                                    }
+
+                                    debug!(
+                                        user_id = %principal.id,
+                                        "connection {:?} authenticated",
+                                        conn_id
+                                    );
+
+                                    break 'auth;
+                                }
+                                Err(e) => {
+                                    // AUTH_FAIL already sent by handle_auth; close connection
+                                    debug!(
+                                        "auth failed for {:?}: {}",
+                                        conn_id, e
+                                    );
+                                    // Drain semaphore and drop before returning
+                                    semaphore.close();
+                                    drop(handle);
+                                    tokio::time::timeout(
+                                        std::time::Duration::from_secs(2),
+                                        outbound_handle,
+                                    )
+                                    .await
+                                    .ok();
+                                    state.registry.remove(conn_id);
+                                    debug!("WebSocket disconnected: {:?}", conn_id);
+                                    return;
+                                }
+                            }
+                        }
+                    } else {
+                        // Drop non-AUTH messages from unauthenticated connections
+                        debug!(
+                            "dropping message from unauthenticated connection {:?}",
+                            conn_id
+                        );
+                    }
+                }
+                Some(Ok(Message::Close(_))) | None => {
+                    debug!("connection {:?} closed during auth phase", conn_id);
+                    semaphore.close();
+                    drop(handle);
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        outbound_handle,
+                    )
+                    .await
+                    .ok();
+                    state.registry.remove(conn_id);
+                    debug!("WebSocket disconnected: {:?}", conn_id);
+                    return;
+                }
+                Some(Ok(Message::Text(_))) => {
+                    warn!(
+                        "ignoring text message from connection {:?} -- binary only",
+                        conn_id
+                    );
+                }
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {
+                    // Handled automatically by axum/tungstenite.
+                }
+                Some(Err(e)) => {
+                    debug!(
+                        "WebSocket error on connection {:?} during auth: {}",
+                        conn_id, e
+                    );
+                    semaphore.close();
+                    drop(handle);
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        outbound_handle,
+                    )
+                    .await
+                    .ok();
+                    state.registry.remove(conn_id);
+                    debug!("WebSocket disconnected: {:?}", conn_id);
+                    return;
+                }
+            }
+        }
+    }
+
+    // Phase 2: pipeline mode — each binary frame is dispatched concurrently.
+    // The reader continues immediately after spawning, so multiple frames
+    // can be in-flight simultaneously up to MAX_IN_FLIGHT.
+    loop {
+        match receiver.next().await {
+            Some(Ok(Message::Binary(data))) => {
                 let tg_msg = match rmp_serde::from_slice::<TopGunMessage>(&data) {
                     Ok(msg) => msg,
                     Err(e) => {
@@ -99,83 +246,36 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     }
                 };
 
-                // Check authentication state
-                let is_authenticated = {
-                    let meta = handle.metadata.read().await;
-                    meta.authenticated
+                // Acquire a permit before spawning; if the semaphore is closed
+                // (shutdown signal), exit the reader loop.
+                let Ok(permit) = semaphore.clone().acquire_owned().await else {
+                    break; // Semaphore closed — exit reader loop
                 };
 
-                if is_authenticated {
-                    // Authenticated: dispatch through operation pipeline
-                    dispatch_message(
-                        tg_msg,
-                        conn_id,
-                        state.operation_service.as_ref(),
-                        state.dispatcher.as_ref(),
-                        &handle.tx,
-                    )
-                    .await;
-                } else if let TopGunMessage::Auth(ref auth_msg) = tg_msg {
-                    // Only AUTH messages are allowed before authentication
-                    if let Some(ref secret) = state.jwt_secret {
-                        let auth_handler = AuthHandler::new(secret.clone());
-                        match auth_handler.handle_auth(auth_msg, &handle.tx).await {
-                            Ok(principal) => {
-                                // Update connection metadata with auth state
-                                {
-                                    let mut meta = handle.metadata.write().await;
-                                    meta.authenticated = true;
-                                    meta.principal = Some(principal.clone());
-                                }
+                let tx = handle.tx.clone();
+                let op_service = state.operation_service.clone();
+                let dispatcher = state.dispatcher.clone();
 
-                                // Send AUTH_ACK with userId via the outbound channel
-                                let ack_msg = TopGunMessage::AuthAck(AuthAckData {
-                                    user_id: Some(principal.id.clone()),
-                                    ..Default::default()
-                                });
-                                if let Ok(bytes) = rmp_serde::to_vec_named(&ack_msg) {
-                                    let _ = handle.tx.send(OutboundMessage::Binary(bytes)).await;
-                                }
-
-                                debug!(
-                                    user_id = %principal.id,
-                                    "connection {:?} authenticated",
-                                    conn_id
-                                );
-                            }
-                            Err(e) => {
-                                // AUTH_FAIL already sent by handle_auth; close connection
-                                debug!(
-                                    "auth failed for {:?}: {}",
-                                    conn_id, e
-                                );
-                                break;
-                            }
-                        }
-                    }
-                } else {
-                    // Drop non-AUTH messages from unauthenticated connections
-                    debug!(
-                        "dropping message from unauthenticated connection {:?}",
-                        conn_id
-                    );
-                }
+                tokio::spawn(async move {
+                    dispatch_message(tg_msg, conn_id, op_service, dispatcher, tx).await;
+                    drop(permit); // Release after dispatch completes
+                });
             }
-            Ok(Message::Close(_)) => {
+            Some(Ok(Message::Close(_))) | None => {
                 debug!("close frame received from connection {:?}", conn_id);
                 break;
             }
-            Ok(Message::Text(_)) => {
+            Some(Ok(Message::Text(_))) => {
                 // TopGun uses binary MsgPack only; text messages are unexpected.
                 warn!(
                     "ignoring text message from connection {:?} -- binary only",
                     conn_id
                 );
             }
-            Ok(Message::Ping(_) | Message::Pong(_)) => {
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => {
                 // Ping/Pong are handled automatically by axum/tungstenite.
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 debug!(
                     "WebSocket error on connection {:?}: {}",
                     conn_id, e
@@ -185,25 +285,39 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         }
     }
 
-    // Clean up: drop the connection handle (which drops the mpsc sender),
-    // allowing the outbound task to drain any pending messages and exit
-    // gracefully. This ensures messages like AUTH_FAIL are flushed to the
-    // WebSocket before the connection is closed.
+    // Graceful shutdown: close the semaphore so any pending acquire returns
+    // Err, then drain all permits to wait for in-flight dispatch tasks to
+    // complete. Each task holds one permit and drops it when done.
+    semaphore.close();
+    for _ in 0..MAX_IN_FLIGHT {
+        // Each acquire succeeds once a running task releases its permit.
+        // After closing, already-held permits are still valid — we just
+        // wait for them all to be returned.
+        let _ = semaphore.acquire().await;
+    }
+
+    // All in-flight tasks have completed; drop the handle to close handle.tx.
+    // The outbound task will drain remaining buffered messages before exiting.
     drop(handle);
 
     // Wait for the outbound task to finish flushing, with a timeout to
     // prevent hanging if the writer is stuck.
-    let _ = tokio::time::timeout(
+    tokio::time::timeout(
         std::time::Duration::from_secs(2),
         outbound_handle,
     )
-    .await;
+    .await
+    .ok();
 
     state.registry.remove(conn_id);
     debug!("WebSocket disconnected: {:?}", conn_id);
 }
 
 /// Dispatches a single deserialized message through the operation pipeline.
+///
+/// Takes owned Arc and Sender so this function can be moved into a
+/// `tokio::spawn` closure (satisfying the `'static` bound). Helpers called
+/// from within this function borrow from its owned locals.
 ///
 /// Handles BATCH messages by unpacking and routing each inner message
 /// individually. Non-BATCH messages are classified, have `connection_id`
@@ -212,9 +326,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 async fn dispatch_message(
     tg_msg: TopGunMessage,
     conn_id: ConnectionId,
-    operation_service: Option<&Arc<OperationService>>,
-    dispatcher: Option<&Arc<PartitionDispatcher>>,
-    tx: &mpsc::Sender<OutboundMessage>,
+    operation_service: Option<Arc<OperationService>>,
+    dispatcher: Option<Arc<PartitionDispatcher>>,
+    tx: mpsc::Sender<OutboundMessage>,
 ) {
     let (Some(classify_svc), Some(dispatcher)) = (operation_service, dispatcher) else {
         debug!("dispatcher not configured, dropping message from {:?}", conn_id);
@@ -223,7 +337,7 @@ async fn dispatch_message(
 
     // Handle BATCH messages: unpack each inner message and route individually
     if let TopGunMessage::Batch(ref batch_msg) = tg_msg {
-        unpack_and_dispatch_batch(batch_msg, conn_id, classify_svc, dispatcher, tx).await;
+        unpack_and_dispatch_batch(batch_msg, conn_id, &classify_svc, &dispatcher, &tx).await;
         return;
     }
 
@@ -231,7 +345,7 @@ async fn dispatch_message(
     // Split by partition so each sub-batch runs on a dedicated partition worker
     // rather than serializing all ops on the single global worker.
     if let TopGunMessage::OpBatch(ref batch_msg) = tg_msg {
-        dispatch_op_batch(batch_msg, conn_id, classify_svc, dispatcher, tx).await;
+        dispatch_op_batch(batch_msg, conn_id, &classify_svc, &dispatcher, &tx).await;
         return;
     }
 
@@ -244,7 +358,7 @@ async fn dispatch_message(
             // Route through the partition dispatcher (MPSC channel per worker)
             match dispatcher.dispatch(op).await {
                 Ok(resp) => {
-                    send_operation_response(resp, tx).await;
+                    send_operation_response(resp, &tx).await;
                 }
                 Err(OperationError::Overloaded) => {
                     // Worker inbox is full; tell the client to back off and retry.
