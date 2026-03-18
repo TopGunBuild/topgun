@@ -5,8 +5,11 @@ mod traits;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
+
+use dashmap::DashMap;
 
 use axum::routing::get;
 use parking_lot::RwLock;
@@ -26,7 +29,7 @@ use topgun_server::service::domain::messaging::MessagingService;
 use topgun_server::service::domain::persistence::PersistenceService;
 use topgun_server::service::domain::query::{QueryMutationObserver, QueryRegistry, QueryService};
 use topgun_server::service::domain::search::{
-    SearchMutationObserver, SearchRegistry, SearchService, TantivyMapIndex,
+    SearchConfig, SearchMutationObserver, SearchRegistry, SearchService, TantivyMapIndex,
 };
 use topgun_server::service::domain::sync::SyncService;
 use topgun_server::service::dispatch::{DispatchConfig, PartitionDispatcher};
@@ -364,6 +367,7 @@ struct SearchObserverFactory {
     search_registry: Arc<SearchRegistry>,
     indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
     connection_registry: Arc<ConnectionRegistry>,
+    needs_population: Arc<DashMap<String, AtomicBool>>,
 }
 
 impl ObserverFactory for SearchObserverFactory {
@@ -372,12 +376,18 @@ impl ObserverFactory for SearchObserverFactory {
         map_name: &str,
         _partition_id: u32,
     ) -> Option<Arc<dyn MutationObserver>> {
+        // Use fast batch parameters for bench harness (keep in sync with test_server.rs).
+        let config = SearchConfig {
+            batch_interval_ms: 16,
+            batch_flush_threshold: 100,
+        };
         let observer = SearchMutationObserver::new(
             map_name.to_string(),
             Arc::clone(&self.search_registry),
             Arc::clone(&self.indexes),
             Arc::clone(&self.connection_registry),
-            16,
+            config,
+            Arc::clone(&self.needs_population),
         );
         Some(Arc::new(observer))
     }
@@ -440,12 +450,15 @@ fn build_services() -> (
     let search_registry = Arc::new(SearchRegistry::new());
     let search_indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>> =
         Arc::new(RwLock::new(HashMap::new()));
+    let search_needs_population: Arc<DashMap<String, AtomicBool>> =
+        Arc::new(DashMap::new());
 
     let search_observer_factory: Arc<dyn ObserverFactory> =
         Arc::new(SearchObserverFactory {
             search_registry: Arc::clone(&search_registry),
             indexes: Arc::clone(&search_indexes),
             connection_registry: Arc::clone(&connection_registry),
+            needs_population: Arc::clone(&search_needs_population),
         });
 
     let query_registry = Arc::new(QueryRegistry::new());
@@ -511,6 +524,7 @@ fn build_services() -> (
         search_indexes,
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
+        search_needs_population,
     ));
     let persistence_svc = Arc::new(PersistenceService::new(
         Arc::clone(&connection_registry),
