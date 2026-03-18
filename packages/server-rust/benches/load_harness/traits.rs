@@ -8,6 +8,7 @@ use anyhow::Result;
 
 /// All latency percentile statistics for a single operation type.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct LatencyStats {
     pub p50: u64,
     pub p95: u64,
@@ -23,12 +24,14 @@ pub struct LatencyStats {
 #[derive(Debug, Clone)]
 pub struct MetricsSnapshot {
     pub latencies: HashMap<String, LatencyStats>,
+    #[allow(dead_code)]
     pub counters: HashMap<String, u64>,
 }
 
 /// Thread-safe metrics recording interface.
 pub trait MetricsCollector: Send + Sync {
     fn record_latency(&self, operation: &str, duration_us: u64);
+    #[allow(dead_code)]
     fn increment_counter(&self, name: &str, count: u64);
     fn snapshot(&self) -> MetricsSnapshot;
 }
@@ -39,11 +42,13 @@ pub struct HarnessContext {
     pub jwt_secret: String,
     pub metrics: Arc<dyn MetricsCollector>,
     /// Placeholder for the connection pool added in SPEC-121b.
+    #[allow(dead_code)]
     pub pool: Option<()>,
 }
 
 /// Aggregated results produced by a single scenario run.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ScenarioResult {
     pub total_ops: u64,
     pub duration: Duration,

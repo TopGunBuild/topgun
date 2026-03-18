@@ -92,6 +92,7 @@ impl ConnectionPool {
     }
 
     /// Send a binary message to every connection in parallel.
+    #[allow(dead_code)]
     pub async fn broadcast(&self, msg: &[u8]) -> Result<()> {
         let sends: Vec<_> = self
             .connections
@@ -143,6 +144,7 @@ impl ConnectionPool {
     }
 
     /// Gracefully close all connections in the pool.
+    #[allow(dead_code)]
     pub async fn close_all(&self) {
         let closes: Vec<_> = self
             .connections
@@ -163,6 +165,7 @@ impl ConnectionPool {
     }
 
     /// Return the number of connections in the pool.
+    #[allow(dead_code)]
     pub fn size(&self) -> usize {
         self.connections.len()
     }

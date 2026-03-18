@@ -46,6 +46,7 @@ use scenarios::ThroughputScenario;
 use traits::{AssertionResult, HarnessContext, LoadScenario};
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -158,9 +159,11 @@ async fn main() {
 
     let scenario: Box<dyn LoadScenario> = match scenario_name.as_str() {
         "throughput" => {
-            let mut config = scenarios::throughput::ThroughputConfig::default();
-            config.num_connections = num_connections;
-            config.duration_secs = duration_secs;
+            let config = scenarios::throughput::ThroughputConfig {
+                num_connections,
+                duration_secs,
+                ..Default::default()
+            };
             Box::new(ThroughputScenario::new(config))
         }
         other => {
@@ -261,7 +264,7 @@ impl ObserverFactory for QueryObserverFactory {
 
 /// Wires all 7 domain services and builds the partition dispatcher.
 ///
-/// Duplicated from test_server.rs — keep in sync.
+/// Duplicated from `test_server.rs` — keep in sync.
 #[allow(clippy::too_many_lines)]
 fn build_services() -> (
     Arc<OperationService>,

@@ -38,7 +38,7 @@ impl Default for ThroughputConfig {
 ///
 /// Each connection independently loops for `duration_secs`, sending a batch of
 /// `batch_size` PUT operations every `send_interval_ms` milliseconds and waiting
-/// for an OP_ACK response.
+/// for an `OP_ACK` response.
 ///
 /// The pool is stored as `Arc<ConnectionPool>` inside a `OnceCell` so that
 /// `setup()` can initialize it via `&self` and `run()` can share it across
@@ -65,7 +65,9 @@ impl Default for ThroughputScenario {
 }
 
 #[async_trait]
+#[allow(clippy::too_many_lines)]
 impl LoadScenario for ThroughputScenario {
+    #[allow(clippy::unnecessary_literal_bound)]
     fn name(&self) -> &str {
         "throughput"
     }
@@ -84,6 +86,7 @@ impl LoadScenario for ThroughputScenario {
         Ok(())
     }
 
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss, clippy::cast_possible_wrap)]
     async fn run(&self, ctx: &HarnessContext) -> ScenarioResult {
         // Clone the Arc so tasks can hold a 'static reference to the pool.
         let pool = Arc::clone(
@@ -158,7 +161,6 @@ impl LoadScenario for ThroughputScenario {
                                 "conn-{conn_idx}: failed to serialize OpBatch: {e}"
                             );
                             seq += batch_size as u64;
-                            total_sent += batch_size as u64;
                             timeout_count += 1;
                             continue;
                         }
@@ -253,10 +255,12 @@ pub struct ThroughputAssertion;
 
 #[async_trait]
 impl Assertion for ThroughputAssertion {
+    #[allow(clippy::unnecessary_literal_bound)]
     fn name(&self) -> &str {
         "throughput_assertion"
     }
 
+    #[allow(clippy::cast_precision_loss)]
     async fn check(&self, ctx: &HarnessContext, result: &ScenarioResult) -> AssertionResult {
         let acked_ops = result.custom.get("acked_ops").copied().unwrap_or(0.0);
         let threshold_ops = 0.8 * result.total_ops as f64;
@@ -274,8 +278,7 @@ impl Assertion for ThroughputAssertion {
         let p99 = snapshot
             .latencies
             .get("write_latency")
-            .map(|s| s.p99)
-            .unwrap_or(0);
+            .map_or(0, |s| s.p99);
 
         if p99 >= 500_000 {
             return AssertionResult::Fail(format!("p99 {p99}µs >= 500000µs"));
