@@ -47,7 +47,7 @@ use crate::storage::RecordStoreFactory;
 /// Production defaults use a 100ms interval and 500-event threshold to reduce
 /// tantivy commit frequency from ~60/sec down to ~2-10/sec under sustained load.
 /// Test overrides keep 16ms/100 to preserve integration test responsiveness.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct SearchConfig {
     /// Milliseconds between batch flushes (default: 100).
     pub batch_interval_ms: u64,
@@ -543,6 +543,12 @@ pub struct SearchMutationObserver {
     event_tx: mpsc::UnboundedSender<MutationEvent>,
     /// Shutdown signal for the background task.
     shutdown_tx: Arc<tokio::sync::watch::Sender<bool>>,
+    /// Retained for per-enqueue subscription check — avoids indexing cost when
+    /// no search subscriptions are active for this map.
+    registry: Arc<SearchRegistry>,
+    /// Shared flag map: set to true when a write is skipped due to no active
+    /// subscriptions, so `SearchService` knows to populate the index on first query.
+    needs_population: Arc<DashMap<String, AtomicBool>>,
 }
 
 impl SearchMutationObserver {
@@ -552,27 +558,36 @@ impl SearchMutationObserver {
         registry: Arc<SearchRegistry>,
         indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
         connection_registry: Arc<ConnectionRegistry>,
-        batch_interval_ms: u64,
+        config: SearchConfig,
+        needs_population: Arc<DashMap<String, AtomicBool>>,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel::<MutationEvent>();
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let shutdown_tx = Arc::new(shutdown_tx);
 
-        // Spawn background batch processor — move the Arc values directly since
-        // the observer no longer needs them (all indexing happens in the batch task).
+        // Clone the registry Arc so the struct retains a reference for the
+        // subscription check in enqueue_index/enqueue_remove, while the batch
+        // processor task receives its own clone for subscription notification.
+        let registry_for_task = Arc::clone(&registry);
+
+        // Spawn background batch processor — registry_for_task is moved into
+        // the batch task; the struct holds the original registry for checks.
         tokio::spawn(run_batch_processor(
             event_rx,
             shutdown_rx,
-            registry,
+            registry_for_task,
             indexes,
             connection_registry,
-            Duration::from_millis(batch_interval_ms),
+            Duration::from_millis(config.batch_interval_ms),
+            config.batch_flush_threshold,
         ));
 
         Self {
             map_name,
             event_tx,
             shutdown_tx,
+            registry,
+            needs_population,
         }
     }
 
@@ -591,7 +606,22 @@ impl SearchMutationObserver {
     }
 
     /// Enqueues an index operation for the batch processor (no synchronous indexing).
+    ///
+    /// Skips enqueue when no search subscriptions are active for this map,
+    /// avoiding tantivy indexing cost for pure write workloads. Sets the
+    /// `needs_population` flag so the index is rebuilt lazily on first search query.
     fn enqueue_index(&self, key: &str, value: rmpv::Value, change_type: ChangeEventType) {
+        // Skip indexing when no search subscriptions exist for this map.
+        // Documents will be indexed on first search query via SearchService::ensure_index_populated
+        // which rebuilds from RecordStore when the flag is set.
+        if !self.registry.has_subscriptions_for_map(&self.map_name) {
+            // Mark this map as needing population when a search subscription arrives.
+            self.needs_population
+                .entry(self.map_name.clone())
+                .or_insert_with(|| AtomicBool::new(false))
+                .store(true, Ordering::Release);
+            return;
+        }
         let _ = self.event_tx.send(MutationEvent {
             map_name: self.map_name.clone(),
             op: IndexOp::Index {
@@ -603,7 +633,21 @@ impl SearchMutationObserver {
     }
 
     /// Enqueues a remove operation for the batch processor (no synchronous indexing).
+    ///
+    /// Skips enqueue when no search subscriptions are active for this map.
+    /// Sets the `needs_population` flag so the index is rebuilt lazily on first
+    /// search query (ensuring removals are reflected when indexing resumes).
     fn enqueue_remove(&self, key: &str) {
+        // Skip indexing when no search subscriptions exist for this map.
+        if !self.registry.has_subscriptions_for_map(&self.map_name) {
+            // Mark map as needing population so the first query triggers a full
+            // rebuild that correctly excludes the removed key.
+            self.needs_population
+                .entry(self.map_name.clone())
+                .or_insert_with(|| AtomicBool::new(false))
+                .store(true, Ordering::Release);
+            return;
+        }
         let _ = self.event_tx.send(MutationEvent {
             map_name: self.map_name.clone(),
             op: IndexOp::Remove {
@@ -685,12 +729,9 @@ fn record_to_rmpv(record_value: &RecordValue) -> rmpv::Value {
 // Background batch processor
 // ---------------------------------------------------------------------------
 
-/// Maximum number of events to accumulate before flushing, regardless of timer.
-const BATCH_FLUSH_THRESHOLD: usize = 100;
-
 /// Runs as a tokio task, collecting mutation events and processing them in batches.
 ///
-/// Flushes when either `batch_interval` elapses or `BATCH_FLUSH_THRESHOLD` events
+/// Flushes when either `batch_interval` elapses or `batch_flush_threshold` events
 /// have been accumulated, whichever comes first. On shutdown signal, drains
 /// remaining events before exiting.
 async fn run_batch_processor(
@@ -700,6 +741,7 @@ async fn run_batch_processor(
     indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
     connection_registry: Arc<ConnectionRegistry>,
     batch_interval: Duration,
+    batch_flush_threshold: usize,
 ) {
     let mut batch: Vec<MutationEvent> = Vec::new();
 
@@ -726,7 +768,7 @@ async fn run_batch_processor(
         }
 
         // Accumulate more events until timer or threshold.
-        if !batch.is_empty() && batch.len() < BATCH_FLUSH_THRESHOLD {
+        if !batch.is_empty() && batch.len() < batch_flush_threshold {
             let sleep = tokio::time::sleep(batch_interval);
             tokio::pin!(sleep);
 
@@ -738,7 +780,7 @@ async fn run_batch_processor(
                         match result {
                             Some(evt) => {
                                 batch.push(evt);
-                                if batch.len() >= BATCH_FLUSH_THRESHOLD {
+                                if batch.len() >= batch_flush_threshold {
                                     break;
                                 }
                             }
@@ -992,8 +1034,8 @@ fn process_batch(
 pub struct SearchService {
     registry: Arc<SearchRegistry>,
     indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
-    /// Retained for future full-record-value hydration in search results.
-    #[allow(dead_code)]
+    /// Used to populate the tantivy index lazily when the first search query
+    /// arrives for a map that had writes skipped due to no active subscriptions.
     record_store_factory: Arc<RecordStoreFactory>,
     /// Retained for future subscription-aware push (currently unused after
     /// switching to `OperationResponse::Message` for request-response ops).
@@ -1003,6 +1045,10 @@ pub struct SearchService {
     /// Sending `true` on each channel tells the background batch processor to
     /// drain pending events and exit.
     observer_shutdown_signals: RwLock<Vec<Arc<tokio::sync::watch::Sender<bool>>>>,
+    /// Shared with `SearchMutationObserver`: set to true when `enqueue_index`/
+    /// `enqueue_remove` skips a write due to no active subscriptions. Cleared
+    /// after `populate_index_from_store` completes.
+    needs_population: Arc<DashMap<String, AtomicBool>>,
 }
 
 impl SearchService {
@@ -1013,6 +1059,7 @@ impl SearchService {
         indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
         record_store_factory: Arc<RecordStoreFactory>,
         connection_registry: Arc<ConnectionRegistry>,
+        needs_population: Arc<DashMap<String, AtomicBool>>,
     ) -> Self {
         Self {
             registry,
@@ -1020,6 +1067,7 @@ impl SearchService {
             record_store_factory,
             connection_registry,
             observer_shutdown_signals: RwLock::new(Vec::new()),
+            needs_population,
         }
     }
 
@@ -1038,6 +1086,53 @@ impl SearchService {
         indexes.entry(map_name.to_owned()).or_default();
     }
 
+    /// Ensures the tantivy index for `map_name` is populated from `RecordStore`.
+    ///
+    /// Called before search queries. When conditional indexing skips writes
+    /// (no active subscriptions), the `needs_population` flag is set to true.
+    /// This method reads the flag and triggers a full index rebuild before
+    /// the search query executes, ensuring correct results.
+    fn ensure_index_populated(&self, map_name: &str) {
+        // Check explicit flag set when conditional indexing skipped writes for this map.
+        let needs_pop = self.needs_population
+            .get(map_name)
+            .is_some_and(|flag| flag.load(Ordering::Acquire));
+        if !needs_pop {
+            return; // index is up to date
+        }
+        // Populate from RecordStore (partition 0 is the client-facing aggregate),
+        // then clear the flag so subsequent queries skip this rebuild.
+        self.populate_index_from_store(map_name);
+        if let Some(flag) = self.needs_population.get(map_name) {
+            flag.store(false, Ordering::Release);
+        }
+    }
+
+    /// Populates the tantivy index for `map_name` by iterating all records from
+    /// `RecordStore` partition 0 (the client-facing aggregate for search queries).
+    ///
+    /// Indexes all records in a single batch and commits once, making this a
+    /// bounded one-time cost when the first search query arrives after writes
+    /// were skipped due to no active subscriptions.
+    fn populate_index_from_store(&self, map_name: &str) {
+        let store = self.record_store_factory.get_or_create(map_name, 0);
+        let mut indexes = self.indexes.write();
+        let index = indexes.entry(map_name.to_owned()).or_default();
+
+        // Clear the existing index before repopulating to remove stale state
+        // from records that may have been deleted while no subscription existed.
+        index.clear();
+
+        store.for_each_boxed(
+            &mut |key, record| {
+                let rmpv_val = record_to_rmpv(&record.value);
+                index.index_document(key, &rmpv_val);
+            },
+            false, // is_backup: false — primary partition
+        );
+        index.commit();
+    }
+
     /// Executes a search against the index for a map and builds `SearchResultEntry` list.
     fn execute_search(
         &self,
@@ -1046,6 +1141,9 @@ impl SearchService {
         options: &SearchOptions,
     ) -> Vec<SearchResultEntry> {
         self.ensure_index(map_name);
+        // Rebuild the index from RecordStore if conditional indexing skipped
+        // writes while no search subscriptions were active for this map.
+        self.ensure_index_populated(map_name);
         let indexes = self.indexes.read();
         let Some(index) = indexes.get(map_name) else {
             return Vec::new();
@@ -1147,13 +1245,14 @@ impl ManagedService for SearchService {
     }
 
     async fn reset(&self) -> anyhow::Result<()> {
-        // Clear all indexes and subscriptions.
+        // Clear all indexes, subscriptions, and population flags.
         let mut indexes = self.indexes.write();
         for index in indexes.values_mut() {
             index.clear();
         }
         indexes.clear();
         self.registry.subscriptions.clear();
+        self.needs_population.clear();
         Ok(())
     }
 
@@ -1264,7 +1363,8 @@ mod tests {
         let indexes = Arc::new(RwLock::new(HashMap::new()));
         let conn_reg = Arc::new(ConnectionRegistry::new());
         let store_factory = make_factory();
-        Arc::new(SearchService::new(reg, indexes, store_factory, conn_reg))
+        let needs_population = Arc::new(DashMap::new());
+        Arc::new(SearchService::new(reg, indexes, store_factory, conn_reg, needs_population))
     }
 
     fn make_search_op(map_name: &str, query: &str) -> Operation {
@@ -1556,11 +1656,13 @@ mod tests {
         let indexes = Arc::new(RwLock::new(HashMap::new()));
         let conn_reg = Arc::new(ConnectionRegistry::new());
         let store_factory = make_factory();
+        let needs_population = Arc::new(DashMap::new());
         let svc = Arc::new(SearchService::new(
             Arc::clone(&reg),
             indexes,
             store_factory,
             conn_reg,
+            needs_population,
         ));
 
         let op = make_subscribe_op("my-map", "hello");
@@ -1577,11 +1679,13 @@ mod tests {
         let indexes = Arc::new(RwLock::new(HashMap::new()));
         let conn_reg = Arc::new(ConnectionRegistry::new());
         let store_factory = make_factory();
+        let needs_population = Arc::new(DashMap::new());
         let svc = Arc::new(SearchService::new(
             Arc::clone(&reg),
             indexes,
             store_factory,
             conn_reg,
+            needs_population,
         ));
 
         svc.clone().oneshot(make_subscribe_op("my-map", "hello")).await.unwrap();
@@ -1610,11 +1714,13 @@ mod tests {
         let reg = Arc::new(SearchRegistry::new());
         let conn_reg = Arc::new(ConnectionRegistry::new());
         let store_factory = make_factory();
+        let needs_population = Arc::new(DashMap::new());
         let svc = Arc::new(SearchService::new(
             reg,
             Arc::clone(&indexes),
             store_factory,
             conn_reg,
+            needs_population,
         ));
 
         assert!(indexes.read().is_empty(), "no index before first search");

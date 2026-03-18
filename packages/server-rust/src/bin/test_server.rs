@@ -7,10 +7,12 @@
 //! to match the TS test helpers.
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
 use axum::routing::get;
+use dashmap::DashMap;
 use parking_lot::RwLock;
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -29,7 +31,7 @@ use topgun_server::service::domain::messaging::MessagingService;
 use topgun_server::service::domain::persistence::PersistenceService;
 use topgun_server::service::domain::query::{QueryMutationObserver, QueryRegistry, QueryService};
 use topgun_server::service::domain::search::{
-    SearchMutationObserver, SearchRegistry, SearchService, TantivyMapIndex,
+    SearchConfig, SearchMutationObserver, SearchRegistry, SearchService, TantivyMapIndex,
 };
 use topgun_server::service::domain::sync::SyncService;
 use topgun_server::service::dispatch::{DispatchConfig, PartitionDispatcher};
@@ -104,13 +106,16 @@ async fn main() -> anyhow::Result<()> {
 
 /// Observer factory that creates a `SearchMutationObserver` for every map.
 ///
-/// Shares the same `indexes` and `search_registry` with `SearchService` so that
-/// writes indexed by the observer are immediately visible to search queries and
-/// live subscriptions.
+/// Shares the same `indexes`, `search_registry`, and `needs_population` with
+/// `SearchService` so that writes indexed by the observer are immediately visible
+/// to search queries and live subscriptions.
 struct SearchObserverFactory {
     search_registry: Arc<SearchRegistry>,
     indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>>,
     connection_registry: Arc<ConnectionRegistry>,
+    /// Shared with `SearchService` so the observer can signal that an index needs
+    /// population when writes were skipped due to no active subscriptions.
+    needs_population: Arc<DashMap<String, AtomicBool>>,
 }
 
 impl ObserverFactory for SearchObserverFactory {
@@ -119,12 +124,19 @@ impl ObserverFactory for SearchObserverFactory {
         map_name: &str,
         _partition_id: u32,
     ) -> Option<Arc<dyn MutationObserver>> {
+        // Use fast batch parameters for integration tests to keep test latency low.
+        // Production uses SearchConfig::default() (100ms / 500 threshold).
+        let config = SearchConfig {
+            batch_interval_ms: 16,
+            batch_flush_threshold: 100,
+        };
         let observer = SearchMutationObserver::new(
             map_name.to_string(),
             Arc::clone(&self.search_registry),
             Arc::clone(&self.indexes),
             Arc::clone(&self.connection_registry),
-            16, // 16ms batch interval — fast enough for tests
+            config,
+            Arc::clone(&self.needs_population),
         );
         Some(Arc::new(observer))
     }
@@ -191,17 +203,22 @@ fn build_services() -> (
     let cluster_state = Arc::new(cluster_state);
     let connection_registry = Arc::new(ConnectionRegistry::new());
 
-    // Shared search state: indexes and registry are shared between the
-    // SearchObserverFactory (write path) and SearchService (query path).
+    // Shared search state: indexes, registry, and needs_population are shared
+    // between SearchObserverFactory (write path) and SearchService (query path).
+    // needs_population signals when writes were skipped due to no subscriptions,
+    // so SearchService can lazily repopulate the index on first search query.
     let search_registry = Arc::new(SearchRegistry::new());
     let search_indexes: Arc<RwLock<HashMap<String, TantivyMapIndex>>> =
         Arc::new(RwLock::new(HashMap::new()));
+    let search_needs_population: Arc<DashMap<String, AtomicBool>> =
+        Arc::new(DashMap::new());
 
     let search_observer_factory: Arc<dyn ObserverFactory> =
         Arc::new(SearchObserverFactory {
             search_registry: Arc::clone(&search_registry),
             indexes: Arc::clone(&search_indexes),
             connection_registry: Arc::clone(&connection_registry),
+            needs_population: Arc::clone(&search_needs_population),
         });
 
     // Create query_registry early so it can be shared with both
@@ -272,6 +289,7 @@ fn build_services() -> (
         search_indexes,
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
+        search_needs_population,
     ));
     let persistence_svc = Arc::new(PersistenceService::new(
         Arc::clone(&connection_registry),

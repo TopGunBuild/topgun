@@ -73,7 +73,8 @@ mod tests {
             Arc::new(NullDataStore),
             Vec::new(),
         ));
-        let svc = Arc::new(SearchService::new(reg, indexes, store_factory, conn_reg));
+        let needs_population = Arc::new(dashmap::DashMap::new());
+        let svc = Arc::new(SearchService::new(reg, indexes, store_factory, conn_reg, needs_population));
 
         let err = svc.oneshot(make_op(service_names::SEARCH)).await.unwrap_err();
         assert!(matches!(err, OperationError::WrongService));

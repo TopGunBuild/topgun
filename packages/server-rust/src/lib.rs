@@ -138,6 +138,7 @@ mod integration_tests {
                 Arc::clone(&connection_registry),
             )),
         );
+        let search_needs_population = Arc::new(dashmap::DashMap::new());
         router.register(
             service_names::SEARCH,
             Arc::new(SearchService::new(
@@ -145,6 +146,7 @@ mod integration_tests {
                 Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
                 Arc::clone(&record_store_factory),
                 Arc::clone(&connection_registry),
+                search_needs_population,
             )),
         );
         router.register(
@@ -366,6 +368,7 @@ mod integration_tests {
             Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())),
             Arc::clone(&record_store_factory),
             Arc::clone(&connection_registry),
+            Arc::new(dashmap::DashMap::new()),
         ));
         registry.register(PersistenceService::new(
             connection_registry,
