@@ -1,19 +1,16 @@
 ## Current Position
 
-- **Active Specification:** SPEC-121c
-- **Status:** review
-- **Next Step:** /sf:review
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | ID | Title | Status | Priority | Complexity |
 |----|-------|--------|----------|------------|
-| SPEC-121c | Throughput Scenario and Harness Main | audited | P2 | medium |
 
 ## Decisions
 
-- SPEC-116a established per-worker pipeline ownership via factory closure pattern and partition-based MPSC routing with dedicated global worker. Rationale: eliminates global mutex bottleneck measured at ~100 ops/sec under k6 load.
-- SPEC-116b wired PartitionDispatcher into AppState, websocket handlers, and test_server. Replaced global mutex dispatch with partition-based MPSC channels. 527 Rust tests + 55 integration tests passing.
 - SPEC-117 moved tantivy indexing from synchronous observer hot path into batch processor with 50ms/100-event flush, eliminating RwLock contention across partition workers. Rationale: second bottleneck fix after SPEC-116 dispatch, targeting ~100 ops/sec search indexing limit.
 - SPEC-118 splits OpBatch dispatch into per-partition sub-batches, eliminating global-worker serialization bottleneck. Each partition group dispatches to its dedicated worker concurrently via tokio::task::JoinSet. 526 Rust tests + 55 integration tests passing.
 - SPEC-119 replaced partition 0 dual-write with scatter-gather root hash aggregation. Established scatter-gather pattern (aggregate at query time via wrapping_add) and 3-digit zero-padded path prefix routing convention. 539 Rust tests + 55 integration tests passing.
