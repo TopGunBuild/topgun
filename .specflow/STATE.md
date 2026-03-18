@@ -1,13 +1,14 @@
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-125
+- **Status:** review
+- **Next Step:** /sf:review
 
 ## Queue
 
 | ID | Title | Status | Priority | Complexity |
 |----|-------|--------|----------|------------|
+| SPEC-125 | Flamegraph Profiling and Data-Driven Optimization Plan | review | P2 | medium |
 
 ## Decisions
 
