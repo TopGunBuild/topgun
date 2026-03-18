@@ -60,6 +60,8 @@ async fn main() {
     let mut scenario_name = "throughput".to_string();
     let mut num_connections: usize = 200;
     let mut duration_secs: u64 = 30;
+    let mut send_interval_ms: u64 = 50;
+    let mut fire_and_forget = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -97,6 +99,22 @@ async fn main() {
                     std::process::exit(1);
                 }
             }
+            "--interval" => {
+                if i + 1 < args.len() {
+                    send_interval_ms = args[i + 1].parse().unwrap_or_else(|_| {
+                        eprintln!("--interval requires a numeric value");
+                        std::process::exit(1);
+                    });
+                    i += 2;
+                } else {
+                    eprintln!("--interval requires a value");
+                    std::process::exit(1);
+                }
+            }
+            "--fire-and-forget" => {
+                fire_and_forget = true;
+                i += 1;
+            }
             // Skip harness-injected flags (e.g. bench filter args)
             _ => {
                 i += 1;
@@ -104,47 +122,59 @@ async fn main() {
         }
     }
 
-    // --- In-process server startup ---
-    // Duplicated from test_server.rs — keep in sync
-    let (classify_svc, dispatcher, connection_registry) = build_services();
+    // --- Server on dedicated tokio runtime (separate thread pool) ---
+    // This isolates server I/O from harness client tasks, preventing
+    // artificial scheduling contention that inflates latency measurements.
+    let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
 
-    let shutdown = Arc::new(ShutdownController::new());
-    let state = AppState {
-        registry: connection_registry,
-        shutdown: Arc::clone(&shutdown),
-        config: Arc::new(NetworkConfig::default()),
-        start_time: Instant::now(),
-        observability: None,
-        operation_service: Some(classify_svc),
-        dispatcher: Some(Arc::new(dispatcher)),
-        jwt_secret: Some("test-e2e-secret".to_string()),
-        cluster_state: None,
-        store_factory: None,
-        server_config: None,
-    };
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("server-rt")
+            .build()
+            .expect("failed to build server runtime");
 
-    let ws_handler = get(topgun_server::network::handlers::ws_upgrade_handler);
-    let app = axum::Router::new()
-        .route("/ws", ws_handler.clone())
-        .route("/", ws_handler)
-        .with_state(state);
+        rt.block_on(async {
+            let (classify_svc, dispatcher, connection_registry) = build_services();
 
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("failed to bind listener");
-    let port = listener
-        .local_addr()
-        .expect("failed to get local addr")
-        .port();
-    let server_addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+            let shutdown = Arc::new(ShutdownController::new());
+            let state = AppState {
+                registry: connection_registry,
+                shutdown: Arc::clone(&shutdown),
+                config: Arc::new(NetworkConfig::default()),
+                start_time: Instant::now(),
+                observability: None,
+                operation_service: Some(classify_svc),
+                dispatcher: Some(Arc::new(dispatcher)),
+                jwt_secret: Some("test-e2e-secret".to_string()),
+                cluster_state: None,
+                store_factory: None,
+                server_config: None,
+            };
 
-    shutdown.set_ready();
+            let ws_handler = get(topgun_server::network::handlers::ws_upgrade_handler);
+            let app = axum::Router::new()
+                .route("/ws", ws_handler.clone())
+                .route("/", ws_handler)
+                .with_state(state);
 
-    tokio::spawn(async move {
-        axum::serve(listener, app)
-            .await
-            .expect("server error");
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("failed to bind listener");
+            let addr = listener.local_addr().expect("failed to get local addr");
+
+            shutdown.set_ready();
+            addr_tx.send(addr).expect("failed to send server address");
+
+            axum::serve(listener, app)
+                .await
+                .expect("server error");
+        });
     });
+
+    let server_addr = addr_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("server did not start in time");
 
     // --- Scenario execution ---
     let jwt_secret = "test-e2e-secret".to_string();
@@ -162,6 +192,8 @@ async fn main() {
             let config = scenarios::throughput::ThroughputConfig {
                 num_connections,
                 duration_secs,
+                send_interval_ms,
+                fire_and_forget,
                 ..Default::default()
             };
             Box::new(ThroughputScenario::new(config))
