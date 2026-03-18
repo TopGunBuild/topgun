@@ -36,7 +36,6 @@ struct LoadTestClaims {
 /// handshake before being considered ready.
 pub struct ConnectionPool {
     connections: Vec<Connection>,
-    batch_size: usize,
 }
 
 impl ConnectionPool {
@@ -45,7 +44,8 @@ impl ConnectionPool {
     /// Connections are opened in batches of `batch_size` (default 500) with a
     /// 10ms delay between batches to prevent SYN flooding.
     pub async fn new(addr: SocketAddr, pool_size: usize, jwt_secret: &str) -> Result<Self> {
-        let batch_size = 500;
+        const BATCH_SIZE: usize = 500;
+        let batch_size = BATCH_SIZE;
         let mut connections: Vec<Connection> = Vec::with_capacity(pool_size);
 
         for batch_start in (0..pool_size).step_by(batch_size) {
@@ -53,7 +53,6 @@ impl ConnectionPool {
 
             let mut handles = Vec::with_capacity(batch_end - batch_start);
             for idx in batch_start..batch_end {
-                let addr = addr;
                 let secret = jwt_secret.to_string();
                 let handle =
                     tokio::spawn(async move { connect_and_auth(addr, idx, &secret).await });
@@ -77,10 +76,7 @@ impl ConnectionPool {
             }
         }
 
-        Ok(Self {
-            connections,
-            batch_size,
-        })
+        Ok(Self { connections })
     }
 
     /// Send a binary message to a specific connection by index.
@@ -132,11 +128,12 @@ impl ConnectionPool {
             match stream.next().await {
                 Some(Ok(WsMessage::Binary(data))) => return Ok(data.to_vec()),
                 Some(Ok(WsMessage::Text(text))) => return Ok(text.as_bytes().to_vec()),
-                Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => continue,
+                Some(Ok(
+                    WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Frame(_),
+                )) => {}
                 Some(Ok(WsMessage::Close(_))) => {
                     return Err(anyhow!("connection {conn_idx} closed by server"))
                 }
-                Some(Ok(WsMessage::Frame(_))) => continue,
                 Some(Err(e)) => {
                     return Err(anyhow!("recv_from({conn_idx}) error: {e}"))
                 }
@@ -278,12 +275,13 @@ async fn recv_binary_message(stream: &mut WsStream, idx: usize) -> Result<Vec<u8
     loop {
         match stream.next().await {
             Some(Ok(WsMessage::Binary(data))) => return Ok(data.to_vec()),
-            Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => continue,
+            Some(Ok(
+                WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Frame(_),
+            )) => {}
             Some(Ok(WsMessage::Text(text))) => return Ok(text.as_bytes().to_vec()),
             Some(Ok(WsMessage::Close(_))) => {
                 return Err(anyhow!("connection {idx}: server closed connection during auth"))
             }
-            Some(Ok(WsMessage::Frame(_))) => continue,
             Some(Err(e)) => {
                 return Err(anyhow!("connection {idx}: WebSocket error during auth: {e}"))
             }
