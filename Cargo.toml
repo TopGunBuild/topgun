@@ -17,3 +17,7 @@ pedantic = "warn"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+[profile.release-with-debug]
+inherits = "release"
+debug = true
