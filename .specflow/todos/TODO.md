@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-18 — TODO-115 cleaned up (completed via SPEC-123)
+**Last updated:** 2026-03-18 — TODO-116 converted to SPEC-124
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -133,20 +133,6 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Ref:** SPEC-116→122 performance series (100 → 200k ops/sec)
 - **Effort:** 1-2 weeks
 
-### TODO-116: Load Harness Documentation & Production Tuning Guide
-- **Priority:** P2 (developer onboarding + ops)
-- **Complexity:** Low
-- **Summary:** Two documents:
-  1. **`packages/server-rust/benches/load_harness/README.md`** — CLI flags (--connections, --duration, --interval, --fire-and-forget, --scenario), scenarios, how to interpret results, baseline numbers (200k ops/sec fire-and-forget, 2.8k fire-and-wait at 200 conn), how to add new scenarios.
-  2. **Production tuning section** (in server README or separate doc) — high-connection deployment guide:
-     - `ulimit -n 1048576` for 100k+ connections
-     - TCP buffer tuning: `SO_SNDBUF=8192, SO_RCVBUF=8192` to reduce per-conn memory from ~45KB to ~17KB
-     - Memory budget: ~45KB/conn default, ~250k conn per 16GB RAM
-     - Ephemeral port exhaustion at >28k conn per IP — use multiple IPs or SO_REUSEPORT
-     - tokio runtime tuning for >100k tasks
-     - Connection count monitoring via observability endpoint
-- **Effort:** 1-2 days
-
 ### TODO-027: Deterministic Simulation Testing (DST)
 - **Priority:** P2 (testing infrastructure)
 - **Complexity:** Medium
@@ -227,7 +213,7 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 | **6c** | TODO-092 (Connectors) · TODO-033 (Write-Behind) · TODO-036 (Extensions) | 025 · — · — |
 | **6d** | TODO-072 (WASM) · TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt) | 091 · — · — · — |
 | **6e** | TODO-093 v2.0 (Dashboard) · TODO-101 (DevTools) · TODO-102 (Rust CLI) | 025+091+092 · — · — |
-| **any** | TODO-027 (DST) · TODO-116 (Harness Docs) · TODO-117 (1M ops/sec) | — · — · — |
+| **any** | TODO-027 (DST) · TODO-117 (1M ops/sec) | — · — |
 
 ### Milestone 3 — v3.0+ (Enterprise)
 
@@ -254,7 +240,7 @@ MILESTONE 2: Data Platform (v2.0)
   TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt)
   TODO-101 (Client DevTools) · TODO-102 (Rust CLI)
   TODO-093 v2.0 (Dashboard) ← depends on 025+091+092
-  TODO-027 (DST) · TODO-116 (Harness Docs) · TODO-117 (1M ops/sec) ← independent
+  TODO-027 (DST) · TODO-117 (1M ops/sec) ← independent
 
 MILESTONE 3: Enterprise (v3.0+)
 
@@ -293,7 +279,6 @@ MILESTONE 3: Enterprise (v3.0+)
 | TODO-092 | Arroyo: `arroyo-connector/src/`; ArkFlow: `arkflow-core/src/input/`, `arkflow-core/src/codec/`; RisingWave: `src/connector/` |
 | TODO-093 | Existing: `apps/admin-dashboard/`; Arroyo WebUI: `/Users/koristuvac/Projects/rust/arroyo/webui/` |
 | TODO-027 | [TURSO_INSIGHTS.md](../reference/TURSO_INSIGHTS.md) Section 2; RisingWave `ci-sim` profile |
-| TODO-116 | packages/server-rust/benches/load_harness/ |
 | TODO-117 | SPEC-116→122, dispatch.rs, crdt.rs, default_record_store.rs, merkle_observer.rs |
 
 ## Reference Implementations
