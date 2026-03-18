@@ -1,14 +1,14 @@
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-121c
+- **Status:** review
+- **Next Step:** /sf:review
 
 ## Queue
 
 | ID | Title | Status | Priority | Complexity |
 |----|-------|--------|----------|------------|
-| SPEC-121c | Throughput Scenario and Harness Main | draft | P2 | medium |
+| SPEC-121c | Throughput Scenario and Harness Main | audited | P2 | medium |
 
 ## Decisions
 
@@ -21,3 +21,4 @@
 - Split SPEC-121 (Rust-Native Load Testing Harness) into 3 parts: SPEC-121a (traits + metrics), SPEC-121b (connection pool), SPEC-121c (throughput scenario + main).
 - SPEC-121a delivered load harness trait definitions (LoadScenario, Assertion, MetricsCollector) and HdrMetricsCollector with thread-safe HDR histogram storage. Foundation for SPEC-121b/121c. 544 tests passing.
 - SPEC-121b delivered ConnectionPool with batched WebSocket opening (500/batch, 10ms delay), JWT auth handshake, parallel broadcast via join_all, and HTTP 429 retry. tokio::sync::Mutex for async-safe sink/stream locks. 544 tests passing.
+- SPEC-121c delivered ThroughputScenario (LoadScenario impl), ThroughputAssertion (Assertion impl), and wired main.rs with CLI args, in-process server startup via duplicated build_services(), scenario execution, HDR histogram report, and exit code 0/1. 540 tests passing.
