@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use anyhow::Result;
+use serde::Serialize;
 
 /// All latency percentile statistics for a single operation type.
 #[derive(Debug, Clone)]
@@ -41,7 +42,7 @@ pub struct HarnessContext {
     pub server_addr: SocketAddr,
     pub jwt_secret: String,
     pub metrics: Arc<dyn MetricsCollector>,
-    /// Placeholder for the connection pool added in SPEC-121b.
+    /// Reserved for future connection pool integration.
     #[allow(dead_code)]
     pub pool: Option<()>,
 }
@@ -78,4 +79,49 @@ pub trait LoadScenario: Send + Sync {
 pub trait Assertion: Send + Sync {
     fn name(&self) -> &str;
     async fn check(&self, ctx: &HarnessContext, result: &ScenarioResult) -> AssertionResult;
+}
+
+/// Latency percentile statistics in the machine-readable JSON report.
+///
+/// All values are in microseconds (µs) to match the HDR histogram recording unit.
+/// The `_us` suffix on every field is intentional — it encodes the unit in the
+/// JSON key so consumers (jq, dashboards) do not need to guess the scale.
+#[allow(clippy::struct_field_names)]
+#[derive(Debug, Clone, Serialize)]
+pub struct JsonLatency {
+    pub p50_us: u64,
+    pub p95_us: u64,
+    pub p99_us: u64,
+    pub p999_us: u64,
+}
+
+/// Outcome of a single assertion in the machine-readable JSON report.
+///
+/// `message` is None when passed, and Some when failed — serde serializes
+/// as `null` for None so that jq can always access the field without
+/// a `has()` guard.
+#[derive(Debug, Clone, Serialize)]
+pub struct JsonAssertionResult {
+    pub name: String,
+    pub passed: bool,
+    pub message: Option<String>,
+}
+
+/// Full machine-readable JSON report produced after a scenario run.
+///
+/// Written to the path supplied via `--json-output` so that CI can
+/// parse results with jq and compare against baseline thresholds.
+#[derive(Debug, Clone, Serialize)]
+pub struct JsonReport {
+    pub scenario: String,
+    pub mode: String,
+    pub connections: u64,
+    pub duration_secs: u64,
+    pub total_ops: u64,
+    pub ops_per_sec: u64,
+    pub latency: JsonLatency,
+    pub assertions: Vec<JsonAssertionResult>,
+    /// UTC timestamp in `YYYY-MM-DDTHH:MM:SSZ` format, generated from
+    /// `std::time::SystemTime` without any external crate dependency.
+    pub timestamp: String,
 }
