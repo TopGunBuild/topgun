@@ -1,7 +1,7 @@
 ---
 id: SPEC-125
 type: feature
-status: running
+status: done
 priority: P2
 complexity: medium
 created: 2026-03-18
@@ -436,3 +436,58 @@ All assumptions low-to-medium impact with graceful fallbacks.
 ### Deviations
 
 None.
+
+---
+
+## Review History
+
+### Review v1 (2026-03-18)
+**Result:** APPROVED
+**Reviewer:** impl-reviewer (subagent)
+
+**Findings:**
+
+**Passed:**
+- [✓] AC1: `cargo build --profile release-with-debug -p topgun-server` compiles successfully — confirmed `Finished release-with-debug profile [optimized + debuginfo]`
+- [✓] AC2: `flamegraph-capture.sh` is executable (`-rwxr-xr-x`) and exits with error + installation instructions if `cargo flamegraph` is absent
+- [✓] AC3: Script uses `--bench load_harness` (not `--bin`) with `--profile release-with-debug` in both `cargo flamegraph` invocations
+- [✓] AC4: Script checks for `flamegraph.stacks` first, falls back to `*.stacks` glob, filters with `grep 'server-rt'`, pipes to `inferno-flamegraph`, and gracefully warns and skips if `inferno-flamegraph` is not installed
+- [✓] AC5: `FLAMEGRAPH_ANALYSIS.md` contains Environment, Baselines, two 5-row Hot Path Analysis tables with Category columns, two Observations sections, Optimization Plan table, and Proposed TODOs section — all as specified placeholders
+- [✓] AC6: `.gitattributes` contains exactly `packages/server-rust/docs/profiling/*.svg binary`
+- [✓] AC7: Commit diff shows only 4 files modified — `Cargo.toml`, `.gitattributes`, `flamegraph-capture.sh`, `FLAMEGRAPH_ANALYSIS.md` — no server source or load harness code touched
+- [✓] Cargo.toml profile matches spec exactly: `inherits = "release"`, `debug = true`
+- [✓] Script uses `set -euo pipefail` — robust error handling for a shell script
+- [✓] SDKROOT set via `xcrun --sdk macosx --show-sdk-path` — correct macOS linker compatibility fix
+- [✓] `sudo` requirement documented prominently in script header comment and in inline echo during capture
+- [✓] `filter_server_only` function uses `${primary_svg%.svg}-server-only.svg` naming — correct derivation from primary output path
+- [✓] Script prints completion paths for both primary and server-only SVGs
+- [✓] No spec/bug references in code comments — all comments are WHY-style (compliant with CLAUDE.md)
+- [✓] Language Profile compliance: 4 files total, under the 5-file limit; trait-first not applicable (tooling/docs)
+
+**Summary:** All 7 acceptance criteria pass. The implementation is a clean, minimal delivery of the profiling tooling. The shell script is robust (`set -euo pipefail`, graceful fallbacks for missing tools), the Cargo profile matches the spec exactly, the analysis template matches the specified structure, and the `.gitattributes` entry is correct. No issues found.
+
+---
+
+## Completion
+
+**Completed:** 2026-03-18
+**Total Commits:** 1
+**Review Cycles:** 1
+
+### Outcome
+
+Delivered flamegraph profiling tooling: a `release-with-debug` Cargo profile, a capture script for fire-and-forget and fire-and-wait workloads, and an analysis document template for recording hot path findings and optimization plans.
+
+### Key Files
+
+- `packages/server-rust/scripts/flamegraph-capture.sh` — captures flamegraphs with server-thread filtering
+- `packages/server-rust/docs/profiling/FLAMEGRAPH_ANALYSIS.md` — template for recording profiling results
+- `.gitattributes` — marks profiling SVGs as binary
+
+### Patterns Established
+
+None — followed existing patterns.
+
+### Deviations
+
+None — implemented as specified.

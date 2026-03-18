@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-18 — TODO-116 converted to SPEC-124
+**Last updated:** 2026-03-18 — TODO-118 cleaned up (completed via SPEC-125)
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -36,6 +36,7 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Complexity:** Large
 - **Summary:** Apache DataFusion as SQL query engine. `DataFusionBackend` implements `QueryBackend` trait (feature-gated). `TopGunTableProvider` wraps RecordStore. Arrow cache layer (lazy MsgPack → Arrow, invalidated on mutation). Distributed execution via partition owners + shuffle edges (Arroyo pattern). Partial→Final aggregation.
 - **Ref:** Arroyo (`arroyo-planner/builder.rs`), ArkFlow (SessionContext, MsgPack→Arrow codec)
+- **Depends on:** TODO-069 (Schema provides Arrow column types for TopGunTableProvider)
 - **Effort:** 2-3 weeks
 
 ### TODO-025: DAG Executor for Stream Processing
@@ -117,22 +118,6 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Depends on:** TODO-025, TODO-091, TODO-092
 - **Effort:** 2-3 weeks
 
-### TODO-117: Server Throughput Optimization — Path to 1M ops/sec
-- **Priority:** P2 (performance)
-- **Complexity:** Medium
-- **Summary:** Batch-oriented optimizations within current CRDT architecture to reach 500k-1M ops/sec from current 200k baseline.
-- **Current baseline:** 200k ops/sec (200 conn, fire-and-forget), 2.8k ops/sec (200 conn, fire-and-wait)
-- **Optimizations (ordered by expected impact):**
-  1. **Per-partition HLC** — Replace global `Mutex<HLC>` with per-worker HLC. Eliminates main lock contention across 10 workers. HLC monotonicity guaranteed per-partition; cross-partition ordering preserved by wall clock component.
-  2. **Worker-local batch drain** — `try_recv` drain: worker pulls all available ops from channel, processes as batch. Amortizes channel overhead, improves cache locality.
-  3. **Batch Merkle update** — Accumulate N ops → 1 bulk tree update instead of per-op tree traversal+hash.
-  4. **Batch broadcast** — `broadcast_event()` called once per batch with all ops, not per-op. Reduces channel sends and WS writes.
-  5. **Dynamic worker count** — `num_cpus::get()` instead of hardcoded 10. Linear scaling with CPU cores.
-- **Key files:** `dispatch.rs` (workers), `crdt.rs` (handle_op_batch), `default_record_store.rs` (put + observers), `merkle_observer.rs`, `websocket.rs` (broadcast)
-- **Validation:** Rust load harness `--connections 200 --interval 0 --fire-and-forget` must show >500k ops/sec
-- **Ref:** SPEC-116→122 performance series (100 → 200k ops/sec)
-- **Effort:** 1-2 weeks
-
 ### TODO-027: Deterministic Simulation Testing (DST)
 - **Priority:** P2 (testing infrastructure)
 - **Complexity:** Medium
@@ -206,14 +191,15 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 
 ### Milestone 2 — v2.0 (Data Platform)
 
-| Wave | Items | Blocked by |
-|------|-------|------------|
-| **6a** | TODO-069 (Schema) · TODO-091 (DataFusion SQL) | — |
-| **6b** | TODO-070 (Shapes) · TODO-025 (DAG Executor) | 069 · 091 |
-| **6c** | TODO-092 (Connectors) · TODO-033 (Write-Behind) · TODO-036 (Extensions) | 025 · — · — |
-| **6d** | TODO-072 (WASM) · TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt) | 091 · — · — · — |
-| **6e** | TODO-093 v2.0 (Dashboard) · TODO-101 (DevTools) · TODO-102 (Rust CLI) | 025+091+092 · — · — |
-| **any** | TODO-027 (DST) · TODO-117 (1M ops/sec) | — · — |
+| Wave | Items | Blocked by | Rationale |
+|------|-------|------------|-----------|
+| **6a** | TODO-027 (DST) · TODO-118 (Flamegraph profiling) | — | Testing infra + perf baseline before complex features |
+| **6b** | TODO-069 (Schema) | — | Data model foundation: Arrow types, validation, field definitions |
+| **6c** | TODO-091 (DataFusion SQL) · TODO-070 (Shapes) · TODO-033 (Write-Behind) | 069 · 069 · — | SQL needs Schema for Arrow schemas; Shapes needs Schema for field projection; Write-Behind independent |
+| **6d** | TODO-025 (DAG Executor) · TODO-092 (Connectors) | 091 · — (traits) / 025 (DAG integration) | DAG needs SQL for pipeline definitions; Connector traits independent, DAG integration after |
+| **6e** | TODO-072 (WASM) · TODO-036 (Extensions) | 091 · — | WASM compiles SQL to browser; Extensions knows all extension points |
+| **6f** | TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt) · TODO-102 (Rust CLI) | — | Independent network/tooling, no blockers |
+| **6g** | TODO-101 (DevTools) · TODO-093 v2.0 (Dashboard) | — · 025+091+092 | UI layer last: needs features to visualize |
 
 ### Milestone 3 — v3.0+ (Enterprise)
 
@@ -229,18 +215,21 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 ```
 MILESTONE 2: Data Platform (v2.0)
 
-  TODO-069 (Schema) ──→ TODO-070 (Shapes)
+  TODO-027 (DST) ← foundational test infra
+  TODO-118 (Flamegraph) ← perf baseline
 
-  TODO-091 (DataFusion SQL) ──→ TODO-025 (DAG Stream Processing)
-       │                              │
-       └──→ TODO-072 (WASM)          └──→ TODO-092 (Connectors)
+  TODO-069 (Schema)
+       ├──→ TODO-091 (DataFusion SQL) ──→ TODO-025 (DAG Stream Processing)
+       │         │                              │
+       │         └──→ TODO-072 (WASM)          └──→ TODO-092 (Connectors, DAG integration)
+       │
+       └──→ TODO-070 (Shapes)
 
-  TODO-033 (Write-Behind)
+  TODO-092 (Connector traits) ← independent of DAG
+  TODO-033 (Write-Behind) ← independent, unblocks v3.0 S3
   TODO-036 (Extensions)
-  TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt)
-  TODO-101 (Client DevTools) · TODO-102 (Rust CLI)
-  TODO-093 v2.0 (Dashboard) ← depends on 025+091+092
-  TODO-027 (DST) · TODO-117 (1M ops/sec) ← independent
+  TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt) · TODO-102 (Rust CLI)
+  TODO-101 (Client DevTools) · TODO-093 v2.0 (Dashboard) ← depends on 025+091+092
 
 MILESTONE 3: Enterprise (v3.0+)
 
@@ -262,6 +251,7 @@ MILESTONE 3: Enterprise (v3.0+)
 | TODO-042 (DBSP) | Not needed; StandingQueryRegistry + ReverseQueryIndex sufficient | 2026-02-10 |
 | TODO-034 (Rust/WASM hot paths) | Superseded by full Rust migration | 2026-02-10 |
 | TODO-045 (DST Documentation) | TS testing infrastructure documentation for deprecated system | 2026-02-18 |
+| TODO-117 (1M ops/sec) | 5 proposed optimizations invalid: per-partition HLC breaks LWW causality, batch drain breaks per-key ordering, batch Merkle/broadcast not bottlenecks (<1% CPU), dynamic workers already implemented. Replaced by TODO-118 (flamegraph profiling) | 2026-03-18 |
 
 ## Context Files
 
@@ -279,7 +269,7 @@ MILESTONE 3: Enterprise (v3.0+)
 | TODO-092 | Arroyo: `arroyo-connector/src/`; ArkFlow: `arkflow-core/src/input/`, `arkflow-core/src/codec/`; RisingWave: `src/connector/` |
 | TODO-093 | Existing: `apps/admin-dashboard/`; Arroyo WebUI: `/Users/koristuvac/Projects/rust/arroyo/webui/` |
 | TODO-027 | [TURSO_INSIGHTS.md](../reference/TURSO_INSIGHTS.md) Section 2; RisingWave `ci-sim` profile |
-| TODO-117 | SPEC-116→122, dispatch.rs, crdt.rs, default_record_store.rs, merkle_observer.rs |
+| TODO-118 | SPEC-116→122 (performance baseline), Rust load harness, `cargo-flamegraph` |
 
 ## Reference Implementations
 
