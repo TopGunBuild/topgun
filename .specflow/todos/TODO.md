@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-17 — TODO-114 converted to SPEC-121
+**Last updated:** 2026-03-18 — Added TODO-115 (perf regression), TODO-116 (harness docs), updated v1.0 with SPEC-121/122
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -8,7 +8,7 @@
 
 ## v1.0 — RELEASED
 
-v1.0 complete. 84 specs archived (SPEC-038–084, 114–120). 540+ Rust tests, 55 integration tests, clippy-clean. Legacy TS server removed. Post-release performance work: PartitionDispatcher, async tantivy indexing, scatter-gather Merkle, try_send backpressure (SPEC-114–120). Full v1.0 history in git: `git show b0ab167^:.specflow/todos/TODO.md`.
+v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 55 integration tests, clippy-clean. Legacy TS server removed. Post-release performance work: PartitionDispatcher (116), async tantivy (117), OP_BATCH splitting (118), scatter-gather Merkle (119), bounded channels (120), Rust load harness (121a-c), WebSocket pipelining (122). Result: 100 → 200,000 ops/sec (2000x). Full v1.0 history in git: `git show b0ab167^:.specflow/todos/TODO.md`.
 
 ---
 
@@ -117,6 +117,19 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–120). 540+ Rust tests, 5
 - **Depends on:** TODO-025, TODO-091, TODO-092
 - **Effort:** 2-3 weeks
 
+### TODO-115: Performance Regression Testing
+- **Priority:** P1 (prevents silent regressions)
+- **Complexity:** Low
+- **Summary:** Run Rust load harness as CI gate after each complex server change. Baseline assertions: >1000 ops/sec fire-and-wait (200 conn), >50k ops/sec fire-and-forget (200 conn), p50 <1s (200 conn). Store results in `logs/` for trend tracking. Fail CI if throughput drops >20% from baseline.
+- **Context:** SPEC-116→122 showed how a single architectural flaw can drop throughput 2000x. Regression testing ensures future changes don't reintroduce bottlenecks.
+- **Effort:** 2-3 days
+
+### TODO-116: Load Harness Documentation
+- **Priority:** P2 (developer onboarding)
+- **Complexity:** Low
+- **Summary:** Create `packages/server-rust/benches/load_harness/README.md` documenting: CLI flags (--connections, --duration, --interval, --fire-and-forget, --scenario), scenarios, how to interpret results, baseline numbers, how to add new scenarios.
+- **Effort:** 1 day
+
 ### TODO-027: Deterministic Simulation Testing (DST)
 - **Priority:** P2 (testing infrastructure)
 - **Complexity:** Medium
@@ -197,7 +210,7 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–120). 540+ Rust tests, 5
 | **6c** | TODO-092 (Connectors) · TODO-033 (Write-Behind) · TODO-036 (Extensions) | 025 · — · — |
 | **6d** | TODO-072 (WASM) · TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt) | 091 · — · — · — |
 | **6e** | TODO-093 v2.0 (Dashboard) · TODO-101 (DevTools) · TODO-102 (Rust CLI) | 025+091+092 · — · — |
-| **any** | TODO-027 (DST) · TODO-114 (Load Harness) | — · — |
+| **any** | TODO-027 (DST) · TODO-115 (Perf Regression) · TODO-116 (Harness Docs) | — · — · — |
 
 ### Milestone 3 — v3.0+ (Enterprise)
 
@@ -224,7 +237,7 @@ MILESTONE 2: Data Platform (v2.0)
   TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt)
   TODO-101 (Client DevTools) · TODO-102 (Rust CLI)
   TODO-093 v2.0 (Dashboard) ← depends on 025+091+092
-  TODO-027 (DST) · TODO-114 (Load Harness) ← independent
+  TODO-027 (DST) · TODO-116 (Harness Docs) ← independent
 
 MILESTONE 3: Enterprise (v3.0+)
 
@@ -263,7 +276,8 @@ MILESTONE 3: Enterprise (v3.0+)
 | TODO-092 | Arroyo: `arroyo-connector/src/`; ArkFlow: `arkflow-core/src/input/`, `arkflow-core/src/codec/`; RisingWave: `src/connector/` |
 | TODO-093 | Existing: `apps/admin-dashboard/`; Arroyo WebUI: `/Users/koristuvac/Projects/rust/arroyo/webui/` |
 | TODO-027 | [TURSO_INSIGHTS.md](../reference/TURSO_INSIGHTS.md) Section 2; RisingWave `ci-sim` profile |
-| TODO-114 | logs/test-report.md, OpenFang pattern, tests/k6/ |
+| TODO-115 | SPEC-116→122 performance series, logs/test-report.md |
+| TODO-116 | packages/server-rust/benches/load_harness/ |
 
 ## Reference Implementations
 

@@ -8,8 +8,8 @@ dist/
 .env.local
 .env.*.local
 
-# Claude Code local settings
-.claude/settings.local.json
+# Claude Code local settings and memory
+.claude/
 
 # TypeScript compiled files
 *.js
