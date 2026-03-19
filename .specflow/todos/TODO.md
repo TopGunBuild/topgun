@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-18 — SPEC-126 completed (tantivy optimization)
+**Last updated:** 2026-03-19 — SPEC-127 completed (schema types/validation/SchemaService); TODO-069 slice 1 done, 3 remaining
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -16,12 +16,40 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 
 *Goal: SQL queries, stream processing, schema validation, connectors — competitive with Hazelcast feature set.*
 
-### TODO-069: Schema System
+### TODO-069: Schema System *(split into 4 slices)*
 - **Priority:** P1 (product differentiator)
 - **Complexity:** Medium
 - **Summary:** TypeScript-first schema definition with server-side validation. Developer writes `topgun.schema.ts`, build step generates Rust validation code + TS client types. Phased rollout: optional → strict.
 - **Context:** [PRODUCT_POSITIONING_RESEARCH.md](../reference/PRODUCT_POSITIONING_RESEARCH.md) Section 7.4
 - **Effort:** 2-3 weeks
+- **Slice 1:** ~~SPEC-127 (Schema types, validation engine, SchemaService)~~ — **done**
+- **Slice 2:** TODO-128 (Write-path wiring)
+- **Slice 3:** TODO-129 (TS schema DSL & codegen)
+- **Slice 4:** TODO-130 (Schema → Arrow type derivation)
+
+### TODO-128: Schema Write-Path Wiring
+- **Priority:** P1 (required for schema enforcement)
+- **Complexity:** Small-Medium
+- **Summary:** Wire SchemaService into CrdtService write path. `CrdtService::handle_put` calls `SchemaProvider::validate()` before CRDT merge. Invalid data returns error to client (no merge, no broadcast). Optional mode: no schema registered = no validation (passthrough).
+- **Context:** SPEC-127 defines SchemaService + validate_value. CrdtService already has WriteValidator for permission/size checks — schema validation slots in alongside it.
+- **Depends on:** SPEC-127
+- **Effort:** 2-3 days
+
+### TODO-129: TS Schema DSL & Codegen Toolchain
+- **Priority:** P1 (developer-facing schema definition)
+- **Complexity:** Medium
+- **Summary:** Developer defines schemas in `topgun.schema.ts` using a TypeScript DSL (builder or decorator pattern). Build step (`topgun codegen`) generates: (1) Rust `MapSchema` registration code (serialized schemas), (2) TypeScript client types with full autocompletion. DSL must express all FieldType variants and FieldConstraint options from SPEC-127.
+- **Context:** SPEC-127 defines FieldType/FieldConstraint/MapSchema types. Codegen outputs must match these Rust types exactly. Consider: ts-morph, JSON intermediate format, or direct serde serialization.
+- **Depends on:** SPEC-127
+- **Effort:** 1-2 weeks
+
+### TODO-130: Schema → Arrow Type Derivation
+- **Priority:** P1 (bridge to DataFusion SQL)
+- **Complexity:** Small
+- **Summary:** Derive Apache Arrow `Schema` from `MapSchema`. Maps `FieldType` → Arrow `DataType` (String→Utf8, Int→Int64, Float→Float64, Bool→Boolean, Binary→Binary, Timestamp→TimestampMillisecond, Array→List, Map→Struct). Used by `TopGunTableProvider` in TODO-091 to register tables with DataFusion. Implement as `impl MapSchema { pub fn to_arrow_schema(&self) -> arrow::datatypes::Schema }`.
+- **Context:** SPEC-127 defines FieldType enum. TODO-091 (DataFusion SQL) needs Arrow schemas from TopGunTableProvider. This is the bridge.
+- **Depends on:** SPEC-127
+- **Effort:** 1-2 days
 
 ### TODO-070: Partial Replication / Shapes
 - **Priority:** P1 (table stakes for competitive parity)
@@ -194,8 +222,9 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 | Wave | Items | Blocked by | Rationale |
 |------|-------|------------|-----------|
 | **6a** | SPEC-126 (Tantivy optimization) · TODO-027 (DST) | — | Tantivy eats 60-80% CPU; DST = test infra for complex features |
-| **6b** | TODO-069 (Schema) | — | Data model foundation: Arrow types, validation, field definitions |
-| **6c** | TODO-091 (DataFusion SQL) · TODO-070 (Shapes) · TODO-033 (Write-Behind) | 069 · 069 · — | SQL needs Schema for Arrow schemas; Shapes needs Schema for field projection; Write-Behind independent |
+| **6b** | SPEC-127 (Schema types + validation + SchemaService) | — | Data model foundation: FieldType, FieldConstraint, validate_value, SchemaService |
+| **6b²** | TODO-128 (Write-path wiring) · TODO-129 (TS codegen) · TODO-130 (Arrow derivation) | SPEC-127 | All three parallel after types exist: enforcement, DX toolchain, DataFusion bridge |
+| **6c** | TODO-091 (DataFusion SQL) · TODO-070 (Shapes) · TODO-033 (Write-Behind) | 130 · 128 · — | SQL needs Arrow schemas (130); Shapes needs validation in write path (128); Write-Behind independent |
 | **6d** | TODO-025 (DAG Executor) · TODO-092 (Connectors) | 091 · — (traits) / 025 (DAG integration) | DAG needs SQL for pipeline definitions; Connector traits independent, DAG integration after |
 | **6e** | TODO-072 (WASM) · TODO-036 (Extensions) | 091 · — | WASM compiles SQL to browser; Extensions knows all extension points |
 | **6f** | TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt) · TODO-102 (Rust CLI) | — | Independent network/tooling, no blockers |
@@ -218,12 +247,12 @@ MILESTONE 2: Data Platform (v2.0)
   SPEC-126 (Tantivy optimization) ← 60-80% CPU, highest impact
   TODO-027 (DST) ← foundational test infra
 
-  TODO-069 (Schema)
-       ├──→ TODO-091 (DataFusion SQL) ──→ TODO-025 (DAG Stream Processing)
-       │         │                              │
-       │         └──→ TODO-072 (WASM)          └──→ TODO-092 (Connectors, DAG integration)
-       │
-       └──→ TODO-070 (Shapes)
+  SPEC-127 (Schema types + validation + SchemaService)
+       ├──→ TODO-128 (Write-path wiring) ──→ TODO-070 (Shapes)
+       ├──→ TODO-129 (TS codegen)
+       └──→ TODO-130 (Arrow derivation) ──→ TODO-091 (DataFusion SQL) ──→ TODO-025 (DAG Stream Processing)
+                                                    │                              │
+                                                    └──→ TODO-072 (WASM)          └──→ TODO-092 (Connectors, DAG integration)
 
   TODO-092 (Connector traits) ← independent of DAG
   TODO-033 (Write-Behind) ← independent, unblocks v3.0 S3
