@@ -1100,7 +1100,7 @@ impl SearchService {
         if !needs_pop {
             return; // index is up to date
         }
-        // Populate from RecordStore (partition 0 is the client-facing aggregate),
+        // Populate from RecordStore (iterates all partitions that hold data),
         // then clear the flag so subsequent queries skip this rebuild.
         self.populate_index_from_store(map_name);
         if let Some(flag) = self.needs_population.get(map_name) {
