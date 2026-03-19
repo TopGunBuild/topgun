@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-19 — SPEC-129 completed; TODO-069 slices 1-3 done, 1 remaining
+**Last updated:** 2026-03-19 — SPEC-130 completed (TODO-069 all 4 slices done)
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -25,15 +25,7 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Slice 1:** ~~SPEC-127 (Schema types, validation engine, SchemaService)~~ — **done**
 - **Slice 2:** ~~SPEC-128 (Write-path wiring)~~ — **done**
 - **Slice 3:** ~~SPEC-129 (TS schema DSL & codegen)~~ — **done**
-- **Slice 4:** TODO-130 (Schema → Arrow type derivation)
-
-### TODO-130: Schema → Arrow Type Derivation
-- **Priority:** P1 (bridge to DataFusion SQL)
-- **Complexity:** Small
-- **Summary:** Derive Apache Arrow `Schema` from `MapSchema`. Maps `FieldType` → Arrow `DataType` (String→Utf8, Int→Int64, Float→Float64, Bool→Boolean, Binary→Binary, Timestamp→TimestampMillisecond, Array→List, Map→Struct). Used by `TopGunTableProvider` in TODO-091 to register tables with DataFusion. Implement as `impl MapSchema { pub fn to_arrow_schema(&self) -> arrow::datatypes::Schema }`.
-- **Context:** SPEC-127 defines FieldType enum. TODO-091 (DataFusion SQL) needs Arrow schemas from TopGunTableProvider. This is the bridge.
-- **Depends on:** SPEC-127
-- **Effort:** 1-2 days
+- **Slice 4:** ~~SPEC-130 (Schema → Arrow type derivation)~~ — **done**
 
 ### TODO-070: Partial Replication / Shapes
 - **Priority:** P1 (table stakes for competitive parity)
