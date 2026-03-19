@@ -1108,14 +1108,14 @@ impl SearchService {
         }
     }
 
-    /// Populates the tantivy index for `map_name` by iterating all records from
-    /// `RecordStore` partition 0 (the client-facing aggregate for search queries).
+    /// Populates the tantivy index for `map_name` by iterating all records
+    /// across every partition that holds data for this map.
     ///
     /// Indexes all records in a single batch and commits once, making this a
     /// bounded one-time cost when the first search query arrives after writes
     /// were skipped due to no active subscriptions.
     fn populate_index_from_store(&self, map_name: &str) {
-        let store = self.record_store_factory.get_or_create(map_name, 0);
+        let stores = self.record_store_factory.get_all_for_map(map_name);
         let mut indexes = self.indexes.write();
         let index = indexes.entry(map_name.to_owned()).or_default();
 
@@ -1123,13 +1123,15 @@ impl SearchService {
         // from records that may have been deleted while no subscription existed.
         index.clear();
 
-        store.for_each_boxed(
-            &mut |key, record| {
-                let rmpv_val = record_to_rmpv(&record.value);
-                index.index_document(key, &rmpv_val);
-            },
-            false, // is_backup: false — primary partition
-        );
+        for store in &stores {
+            store.for_each_boxed(
+                &mut |key, record| {
+                    let rmpv_val = record_to_rmpv(&record.value);
+                    index.index_document(key, &rmpv_val);
+                },
+                false,
+            );
+        }
         index.commit();
     }
 
