@@ -18,6 +18,17 @@ pedantic = "warn"
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
+[workspace.dependencies]
+madsim = "0.2.34"
+
 [profile.release-with-debug]
 inherits = "release"
 debug = true
+
+# Faster builds for simulation runs: opt-level=1 reduces compile time vs release
+# while still being fast enough for large test suites. debug-assertions=true
+# catches invariant violations that release mode would silently skip.
+[profile.ci-sim]
+inherits = "dev"
+opt-level = 1
+debug-assertions = true
