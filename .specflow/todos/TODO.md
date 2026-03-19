@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-19 — SPEC-127 completed (schema types/validation/SchemaService); TODO-069 slice 1 done, 3 remaining
+**Last updated:** 2026-03-19 — TODO-128 cleaned up (completed via SPEC-128); TODO-069 slices 1-2 done, 2 remaining
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -23,17 +23,9 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Context:** [PRODUCT_POSITIONING_RESEARCH.md](../reference/PRODUCT_POSITIONING_RESEARCH.md) Section 7.4
 - **Effort:** 2-3 weeks
 - **Slice 1:** ~~SPEC-127 (Schema types, validation engine, SchemaService)~~ — **done**
-- **Slice 2:** TODO-128 (Write-path wiring)
+- **Slice 2:** ~~SPEC-128 (Write-path wiring)~~ — **done**
 - **Slice 3:** TODO-129 (TS schema DSL & codegen)
 - **Slice 4:** TODO-130 (Schema → Arrow type derivation)
-
-### TODO-128: Schema Write-Path Wiring
-- **Priority:** P1 (required for schema enforcement)
-- **Complexity:** Small-Medium
-- **Summary:** Wire SchemaService into CrdtService write path. `CrdtService::handle_put` calls `SchemaProvider::validate()` before CRDT merge. Invalid data returns error to client (no merge, no broadcast). Optional mode: no schema registered = no validation (passthrough).
-- **Context:** SPEC-127 defines SchemaService + validate_value. CrdtService already has WriteValidator for permission/size checks — schema validation slots in alongside it.
-- **Depends on:** SPEC-127
-- **Effort:** 2-3 days
 
 ### TODO-129: TS Schema DSL & Codegen Toolchain
 - **Priority:** P1 (developer-facing schema definition)
