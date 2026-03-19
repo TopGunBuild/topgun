@@ -28,7 +28,10 @@ pub mod types;
 pub use context::RequestContext;
 
 // Schema
-pub use schema::{FieldDef, MapSchema, Predicate, SyncShape, ValidationResult};
+pub use schema::{
+    FieldConstraint, FieldDef, FieldType, MapSchema, Predicate, SyncShape, ValidationResult,
+    validate_schema, validate_value,
+};
 
 // Traits
 pub use traits::{Inbox, Processor, ProcessorContext, QueryNotifier};
