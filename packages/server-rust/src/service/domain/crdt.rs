@@ -30,6 +30,7 @@ use crate::service::registry::{ManagedService, ServiceContext};
 use crate::service::security::WriteValidator;
 use crate::storage::record::{OrMapEntry, RecordValue};
 use crate::storage::{CallerProvenance, ExpiryPolicy, RecordStoreFactory};
+use crate::traits::SchemaProvider;
 
 // ---------------------------------------------------------------------------
 // CrdtService
@@ -41,12 +42,13 @@ use crate::storage::{CallerProvenance, ExpiryPolicy, RecordStoreFactory};
 /// Merges LWW and OR-Map data into the `RecordStore` and broadcasts
 /// `ServerEvent` messages to connected clients.
 ///
-/// Security validation runs BEFORE any CRDT merge: unauthorized writes never reach storage.
+/// Validation order: auth/ACL/size (`WriteValidator`) → schema (`SchemaProvider`) → CRDT merge.
 pub struct CrdtService {
     record_store_factory: Arc<RecordStoreFactory>,
     connection_registry: Arc<ConnectionRegistry>,
     write_validator: Arc<WriteValidator>,
     query_registry: Arc<QueryRegistry>,
+    schema_provider: Arc<dyn SchemaProvider>,
 }
 
 impl CrdtService {
@@ -57,12 +59,14 @@ impl CrdtService {
         connection_registry: Arc<ConnectionRegistry>,
         write_validator: Arc<WriteValidator>,
         query_registry: Arc<QueryRegistry>,
+        schema_provider: Arc<dyn SchemaProvider>,
     ) -> Self {
         Self {
             record_store_factory,
             connection_registry,
             write_validator,
             query_registry,
+            schema_provider,
         }
     }
 }
@@ -149,11 +153,13 @@ impl CrdtService {
         let partition_id = ctx.partition_id.unwrap_or(0);
 
         // Acquire metadata snapshot if a connection_id is present.
-        // None means internal/system call -- skip validation to maintain test compatibility.
+        // None means internal/system call — skip validation.
         let sanitized_ts = if let Some(conn_id) = ctx.connection_id {
             let metadata_snapshot = self.snapshot_metadata(conn_id).await?;
             let value_size = estimate_value_size(op);
             self.write_validator.validate_write(ctx, &metadata_snapshot, &op.map_name, value_size)?;
+            // Schema validation runs after auth/ACL/size checks.
+            self.validate_schema_for_op(op)?;
             Some(self.write_validator.sanitize_hlc())
         } else {
             None
@@ -201,6 +207,8 @@ impl CrdtService {
             for op in ops {
                 let value_size = estimate_value_size(op);
                 self.write_validator.validate_write(ctx, &metadata_snapshot, &op.map_name, value_size)?;
+                // Schema validation runs after auth/ACL/size checks, before any apply.
+                self.validate_schema_for_op(op)?;
             }
             // All ops validated — apply them sequentially with sanitized timestamps.
             // Each op gets its own partition based on its key (OpBatch ctx has
@@ -424,6 +432,55 @@ impl CrdtService {
         self.connection_registry.send_to_connections(&ids, &bytes);
         Ok(())
     }
+
+    /// Validates a single `ClientOp` against the registered schema for its map.
+    ///
+    /// Returns `Ok(())` immediately for:
+    /// - REMOVE operations (no value to validate): detected via `op_type == "REMOVE"` or
+    ///   `record == Some(None)` (tombstone pattern), mirroring `apply_single_op`.
+    /// - `OR_REMOVE` operations (tag-based, no value).
+    /// - LWW records where the inner value is `None` (partial tombstone).
+    /// - Maps with no registered schema (optional mode: passthrough).
+    ///
+    /// Returns `Err(OperationError::SchemaInvalid)` when the value fails validation.
+    fn validate_schema_for_op(&self, op: &ClientOp) -> Result<(), OperationError> {
+        // Mirror the same REMOVE detection as apply_single_op.
+        let is_remove = op.op_type.as_deref() == Some("REMOVE")
+            || matches!(&op.record, Some(None));
+        let is_or_remove = matches!(&op.or_tag, Some(Some(_))) && op.or_record.is_none();
+
+        if is_remove || is_or_remove {
+            return Ok(());
+        }
+
+        // Extract the rmpv::Value to validate.
+        let rmpv_val: Option<rmpv::Value> = if let Some(Some(or_rec)) = &op.or_record {
+            // OR_ADD: validate the value field of the ORMapRecord.
+            Some(or_rec.value.clone())
+        } else if let Some(Some(lww_rec)) = &op.record {
+            // LWW PUT: LWWRecord.value is Option<rmpv::Value>.
+            // None inner value means no data to validate — skip.
+            lww_rec.value.clone()
+        } else {
+            // No record payload — nothing to validate.
+            None
+        };
+
+        let Some(rmpv_val) = rmpv_val else {
+            return Ok(());
+        };
+
+        let value = topgun_core::types::Value::from(rmpv_val);
+        match self.schema_provider.validate(&op.map_name, &value) {
+            topgun_core::ValidationResult::Valid => Ok(()),
+            topgun_core::ValidationResult::Invalid { errors } => {
+                Err(OperationError::SchemaInvalid {
+                    map_name: op.map_name.clone(),
+                    errors,
+                })
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -551,6 +608,7 @@ mod tests {
     use super::*;
     use crate::network::connection::{ConnectionKind, ConnectionRegistry};
     use crate::service::domain::query::QueryRegistry;
+    use crate::service::domain::schema::SchemaService;
     use crate::service::operation::{service_names, OperationContext, OperationResponse};
     use crate::service::security::{SecurityConfig, WriteValidator};
     use crate::storage::datastores::NullDataStore;
@@ -574,7 +632,7 @@ mod tests {
         let factory = make_factory();
         let registry = Arc::new(ConnectionRegistry::new());
         let query_registry = Arc::new(QueryRegistry::new());
-        Arc::new(CrdtService::new(factory, registry, make_validator(), query_registry))
+        Arc::new(CrdtService::new(factory, registry, make_validator(), query_registry, Arc::new(SchemaService::new())))
     }
 
     fn make_timestamp() -> Timestamp {
@@ -596,7 +654,7 @@ mod tests {
         let factory = make_factory();
         let registry = Arc::new(ConnectionRegistry::new());
         let query_registry = Arc::new(QueryRegistry::new());
-        let svc = CrdtService::new(factory, registry, make_validator(), query_registry);
+        let svc = CrdtService::new(factory, registry, make_validator(), query_registry, Arc::new(SchemaService::new()));
         assert_eq!(svc.name(), "crdt");
     }
 
@@ -885,6 +943,7 @@ mod tests {
             Arc::clone(&registry),
             validator,
             query_registry,
+            Arc::new(SchemaService::new()),
         ));
         (svc, registry)
     }
@@ -1022,6 +1081,7 @@ mod tests {
             Arc::clone(&registry),
             Arc::clone(&validator),
             query_registry,
+            Arc::new(SchemaService::new()),
         ));
 
         let conn_config = crate::network::config::ConnectionConfig::default();
@@ -1102,7 +1162,7 @@ mod tests {
         let factory = make_factory();
         let registry = Arc::new(ConnectionRegistry::new());
         let query_registry = Arc::new(QueryRegistry::new());
-        let svc = Arc::new(CrdtService::new(factory, Arc::clone(&registry), validator, query_registry));
+        let svc = Arc::new(CrdtService::new(factory, Arc::clone(&registry), validator, query_registry, Arc::new(SchemaService::new())));
 
         let conn_config = crate::network::config::ConnectionConfig::default();
         let (handle, _rx) = registry.register(ConnectionKind::Client, &conn_config);
@@ -1202,6 +1262,7 @@ mod tests {
             Arc::clone(&conn_registry),
             make_validator(),
             Arc::clone(&query_registry),
+            Arc::new(SchemaService::new()),
         ));
         (svc, conn_registry, query_registry)
     }
@@ -1312,5 +1373,299 @@ mod tests {
             msg.is_err(),
             "conn1 subscribed to 'products' should not receive 'users' event"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Schema validation tests (AC3, AC4, AC5, AC6, AC7, AC8)
+    // ---------------------------------------------------------------------------
+
+    use topgun_core::{FieldDef, FieldType, MapSchema};
+
+    fn make_required_string_schema() -> MapSchema {
+        MapSchema {
+            version: 1,
+            fields: vec![FieldDef {
+                name: "name".to_string(),
+                required: true,
+                field_type: FieldType::String,
+                constraints: None,
+            }],
+            strict: false,
+        }
+    }
+
+    /// Builds a CrdtService with a SchemaService that has a schema registered for "typed-map".
+    /// Also registers a client connection and returns its ID so tests can set connection_id
+    /// to trigger schema validation (internal calls with no connection_id bypass it).
+    async fn make_schema_service() -> (Arc<CrdtService>, Arc<ConnectionRegistry>, ConnectionId) {
+        let factory = make_factory();
+        let registry = Arc::new(ConnectionRegistry::new());
+        let query_registry = Arc::new(QueryRegistry::new());
+        let schema_svc = Arc::new(SchemaService::new());
+        schema_svc
+            .register_schema("typed-map", make_required_string_schema())
+            .await
+            .unwrap();
+        let svc = Arc::new(CrdtService::new(
+            factory,
+            Arc::clone(&registry),
+            make_validator(),
+            query_registry,
+            schema_svc,
+        ));
+        // Register a client connection so tests can use its ID as connection_id.
+        let config = crate::network::config::ConnectionConfig::default();
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
+        let conn_id = handle.id;
+        (svc, registry, conn_id)
+    }
+
+    fn make_ctx_with_connection(conn_id: ConnectionId) -> OperationContext {
+        let mut ctx = make_ctx();
+        ctx.connection_id = Some(conn_id);
+        ctx
+    }
+
+    fn make_lww_put_with_value(ctx: OperationContext, map_name: &str, value: rmpv::Value) -> Operation {
+        let record = topgun_core::LWWRecord {
+            value: Some(value),
+            timestamp: make_timestamp(),
+            ttl_ms: None,
+        };
+        Operation::ClientOp {
+            ctx,
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("schema-op".to_string()),
+                    map_name: map_name.to_string(),
+                    key: "key-1".to_string(),
+                    op_type: None,
+                    record: Some(Some(record)),
+                    or_record: None,
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        }
+    }
+
+    /// AC3: PUT with valid data to schema-registered map succeeds.
+    #[tokio::test]
+    async fn schema_valid_put_succeeds() {
+        let (svc, _registry, conn_id) = make_schema_service().await;
+        // Map with required "name" field — provide it as a Map value.
+        let value = rmpv::Value::Map(vec![(
+            rmpv::Value::String("name".into()),
+            rmpv::Value::String("Alice".into()),
+        )]);
+        let op = make_lww_put_with_value(make_ctx_with_connection(conn_id), "typed-map", value);
+        let result = svc.oneshot(op).await;
+        assert!(
+            matches!(result, Ok(OperationResponse::Message(_))),
+            "expected OpAck for valid data, got {result:?}"
+        );
+    }
+
+    /// AC3: PUT with invalid data (missing required field) returns SchemaInvalid.
+    #[tokio::test]
+    async fn schema_invalid_put_rejected() {
+        let (svc, _registry, conn_id) = make_schema_service().await;
+        // Send an empty map — missing required "name" field.
+        let value = rmpv::Value::Map(vec![]);
+        let op = make_lww_put_with_value(make_ctx_with_connection(conn_id), "typed-map", value);
+        let result = svc.oneshot(op).await;
+        assert!(
+            matches!(result, Err(OperationError::SchemaInvalid { .. })),
+            "expected SchemaInvalid for missing required field, got {result:?}"
+        );
+    }
+
+    /// AC5: PUT to map with no registered schema passes through (optional mode).
+    #[tokio::test]
+    async fn schema_no_schema_registered_passes_through() {
+        let (svc, _registry, conn_id) = make_schema_service().await;
+        // "untyped-map" has no registered schema — any value is valid.
+        let value = rmpv::Value::String("anything".into());
+        let op = make_lww_put_with_value(make_ctx_with_connection(conn_id), "untyped-map", value);
+        let result = svc.oneshot(op).await;
+        assert!(
+            matches!(result, Ok(OperationResponse::Message(_))),
+            "expected OpAck for unschema'd map, got {result:?}"
+        );
+    }
+
+    /// AC7: REMOVE (tombstone) bypasses schema validation.
+    #[tokio::test]
+    async fn schema_remove_tombstone_bypasses_validation() {
+        let (svc, _registry, conn_id) = make_schema_service().await;
+        let op = Operation::ClientOp {
+            ctx: make_ctx_with_connection(conn_id),
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("remove-op".to_string()),
+                    map_name: "typed-map".to_string(),
+                    key: "key-1".to_string(),
+                    op_type: None,
+                    record: Some(None), // tombstone REMOVE
+                    or_record: None,
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+        let result = svc.oneshot(op).await;
+        assert!(
+            matches!(result, Ok(_)),
+            "expected Ok for REMOVE op bypassing schema, got {result:?}"
+        );
+    }
+
+    /// AC7: REMOVE via op_type bypasses schema validation.
+    #[tokio::test]
+    async fn schema_remove_via_op_type_bypasses_validation() {
+        let (svc, _registry, conn_id) = make_schema_service().await;
+        let op = Operation::ClientOp {
+            ctx: make_ctx_with_connection(conn_id),
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("remove-op-2".to_string()),
+                    map_name: "typed-map".to_string(),
+                    key: "key-1".to_string(),
+                    op_type: Some("REMOVE".to_string()),
+                    record: None,
+                    or_record: None,
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+        let result = svc.oneshot(op).await;
+        assert!(
+            matches!(result, Ok(_)),
+            "expected Ok for op_type=REMOVE bypassing schema, got {result:?}"
+        );
+    }
+
+    /// AC8: internal call (no connection_id) bypasses schema validation.
+    #[tokio::test]
+    async fn schema_internal_call_bypasses_validation() {
+        let (svc, _registry, _conn_id) = make_schema_service().await;
+        // No connection_id = internal/system call — validation is skipped.
+        let ctx = make_ctx(); // connection_id is None
+        let value = rmpv::Value::Map(vec![]); // would fail schema (missing "name")
+        let op = make_lww_put_with_value(ctx, "typed-map", value);
+        let result = svc.oneshot(op).await;
+        assert!(
+            matches!(result, Ok(_)),
+            "expected Ok for internal call bypassing schema, got {result:?}"
+        );
+    }
+
+    /// AC6: OpBatch with one invalid op rejects the entire batch atomically.
+    #[tokio::test]
+    async fn schema_op_batch_atomic_rejection_on_schema_failure() {
+        let factory = make_factory();
+        let registry = Arc::new(ConnectionRegistry::new());
+        let query_registry = Arc::new(QueryRegistry::new());
+        let schema_svc = Arc::new(SchemaService::new());
+        schema_svc
+            .register_schema("typed-map", make_required_string_schema())
+            .await
+            .unwrap();
+        let hlc = Arc::new(Mutex::new(HLC::new("server-node".to_string(), Box::new(SystemClock))));
+        let config = SecurityConfig {
+            require_auth: false,
+            ..SecurityConfig::default()
+        };
+        let validator = Arc::new(WriteValidator::new(Arc::new(config), hlc));
+        let svc = Arc::new(CrdtService::new(
+            Arc::clone(&factory),
+            Arc::clone(&registry),
+            validator,
+            query_registry,
+            Arc::clone(&schema_svc) as Arc<dyn crate::traits::SchemaProvider>,
+        ));
+
+        let conn_config = crate::network::config::ConnectionConfig::default();
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &conn_config);
+        let mut ctx = make_ctx();
+        ctx.connection_id = Some(handle.id);
+
+        // valid map with schema-conforming data.
+        let valid_value = rmpv::Value::Map(vec![(
+            rmpv::Value::String("name".into()),
+            rmpv::Value::String("Alice".into()),
+        )]);
+        // invalid: missing required "name" field.
+        let invalid_value = rmpv::Value::Map(vec![]);
+
+        let ops = vec![
+            topgun_core::messages::base::ClientOp {
+                id: Some("op-1".to_string()),
+                map_name: "typed-map".to_string(),
+                key: "key-1".to_string(),
+                op_type: None,
+                record: Some(Some(topgun_core::LWWRecord {
+                    value: Some(valid_value),
+                    timestamp: make_timestamp(),
+                    ttl_ms: None,
+                })),
+                or_record: None,
+                or_tag: None,
+                write_concern: None,
+                timeout: None,
+            },
+            topgun_core::messages::base::ClientOp {
+                id: Some("op-2".to_string()),
+                map_name: "typed-map".to_string(),
+                key: "key-2".to_string(),
+                op_type: None,
+                record: Some(Some(topgun_core::LWWRecord {
+                    value: Some(invalid_value),
+                    timestamp: make_timestamp(),
+                    ttl_ms: None,
+                })),
+                or_record: None,
+                or_tag: None,
+                write_concern: None,
+                timeout: None,
+            },
+        ];
+
+        let op = Operation::OpBatch {
+            ctx,
+            payload: topgun_core::messages::sync::OpBatchMessage {
+                payload: topgun_core::messages::sync::OpBatchPayload {
+                    ops,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        };
+
+        let result = svc.oneshot(op).await;
+        assert!(
+            matches!(result, Err(OperationError::SchemaInvalid { .. })),
+            "expected SchemaInvalid for batch with one invalid op, got {result:?}"
+        );
+    }
+
+    /// AC3: SchemaInvalid error has correct map_name and non-empty errors.
+    #[tokio::test]
+    async fn schema_invalid_error_contains_field_details() {
+        let (svc, _registry, conn_id) = make_schema_service().await;
+        let value = rmpv::Value::Map(vec![]);
+        let op = make_lww_put_with_value(make_ctx_with_connection(conn_id), "typed-map", value);
+        let result = svc.oneshot(op).await;
+        match result {
+            Err(OperationError::SchemaInvalid { map_name, errors }) => {
+                assert_eq!(map_name, "typed-map");
+                assert!(!errors.is_empty(), "expected at least one error message");
+            }
+            other => panic!("expected SchemaInvalid, got {other:?}"),
+        }
     }
 }
