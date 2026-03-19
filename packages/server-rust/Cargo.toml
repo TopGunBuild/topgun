@@ -13,7 +13,7 @@ default = []
 postgres = ["dep:sqlx"]
 
 [dependencies]
-topgun-core = { path = "../core-rust" }
+topgun-core = { path = "../core-rust", features = ["arrow"] }
 async-trait = "0.1"
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
