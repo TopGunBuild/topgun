@@ -91,6 +91,7 @@ function generateTypescript(schemas: Record<string, JsonMapSchema>): string {
 /**
  * Load a schema file and return the global SchemaRegistry schemas.
  * The schema file must call schema.register(...) using SchemaRegistry.global.
+ * ts-node must be registered by the caller before invoking this for .ts files.
  */
 function loadSchemaFile(schemaPath: string): Record<string, JsonMapSchema> {
   const absolutePath = path.resolve(schemaPath);
@@ -99,13 +100,6 @@ function loadSchemaFile(schemaPath: string): Record<string, JsonMapSchema> {
     throw new Error(`Schema file not found: ${absolutePath}`);
   }
 
-  // Reset the global registry before loading so successive runs are clean
-  const registry = SchemaRegistry.global as unknown as { _schemas: Record<string, JsonMapSchema> };
-  for (const key of Object.keys(registry._schemas)) {
-    delete registry._schemas[key];
-  }
-
-  // Load the schema file (ts-node/tsx must be registered by the caller for .ts files)
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   require(absolutePath);
 
