@@ -60,10 +60,10 @@ pub struct FieldConstraint {
     /// For String: regex pattern string. Compiled on each `validate_value` call
     /// and at registration time via `validate_schema`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub pattern: Option<std::string::String>,
+    pub pattern: Option<String>,
     /// For String: allowed values whitelist.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub enum_values: Option<Vec<std::string::String>>,
+    pub enum_values: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -77,7 +77,7 @@ pub struct FieldConstraint {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FieldDef {
     /// Name of the field.
-    pub name: std::string::String,
+    pub name: String,
     /// Whether the field must be present in every record.
     pub required: bool,
     /// Expected type for this field. Defaults to `FieldType::Any` for backward
@@ -121,7 +121,7 @@ pub enum ValidationResult {
     /// The value violates one or more schema constraints.
     Invalid {
         /// Human-readable descriptions of each validation failure.
-        errors: Vec<std::string::String>,
+        errors: Vec<String>,
     },
 }
 
@@ -134,7 +134,7 @@ pub enum ValidationResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Predicate {
     /// String representation of the filter expression.
-    pub expression: std::string::String,
+    pub expression: String,
 }
 
 /// Defines what subset of a map's data a client receives.
@@ -142,11 +142,11 @@ pub struct Predicate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncShape {
     /// Name of the map this shape applies to.
-    pub map_name: std::string::String,
+    pub map_name: String,
     /// Optional row-level filter to restrict which records are synced.
     pub filter: Option<Predicate>,
     /// Optional column projection to restrict which fields are synced.
-    pub fields: Option<Vec<std::string::String>>,
+    pub fields: Option<Vec<String>>,
     /// Optional maximum number of records to sync.
     pub limit: Option<usize>,
 }
@@ -161,16 +161,20 @@ pub struct SyncShape {
 /// regex. Returns `Err(errors)` listing each field whose pattern fails to
 /// compile. Called by `SchemaService::register_schema` to catch invalid
 /// patterns before they reach the hot validation path.
-pub fn validate_schema(schema: &MapSchema) -> Result<(), Vec<std::string::String>> {
-    let mut errors: Vec<std::string::String> = Vec::new();
+///
+/// # Errors
+///
+/// Returns `Err(errors)` where `errors` lists each invalid pattern by field name.
+pub fn validate_schema(schema: &MapSchema) -> Result<(), Vec<String>> {
+    let mut errors: Vec<String> = Vec::new();
 
     for field in &schema.fields {
         if let Some(constraints) = &field.constraints {
             if let Some(pattern) = &constraints.pattern {
                 if regex::Regex::new(pattern).is_err() {
                     errors.push(format!(
-                        "field '{}': invalid pattern '{}'",
-                        field.name, pattern
+                        "field '{}': invalid pattern '{pattern}'",
+                        field.name
                     ));
                 }
             }
@@ -193,21 +197,15 @@ pub fn validate_schema(schema: &MapSchema) -> Result<(), Vec<std::string::String
 ///
 /// Regex patterns in constraints are compiled on each call. Use
 /// `validate_schema` at registration time to ensure patterns are valid.
+#[must_use]
 pub fn validate_value(schema: &MapSchema, value: &Value) -> ValidationResult {
-    let map = match value {
-        Value::Map(m) => m,
-        _ => {
-            return ValidationResult::Invalid {
-                errors: vec!["expected a Map value".to_string()],
-            }
-        }
+    let Value::Map(map) = value else {
+        return ValidationResult::Invalid {
+            errors: vec!["expected a Map value".to_string()],
+        };
     };
 
-    let mut errors: Vec<std::string::String> = Vec::new();
-
-    // Build a lookup from field name -> FieldDef for O(n) check below.
-    let field_defs: std::collections::HashMap<&str, &FieldDef> =
-        schema.fields.iter().map(|f| (f.name.as_str(), f)).collect();
+    let mut errors: Vec<String> = Vec::new();
 
     // Check required fields and validate known fields.
     for field_def in &schema.fields {
@@ -234,9 +232,11 @@ pub fn validate_value(schema: &MapSchema, value: &Value) -> ValidationResult {
 
     // Strict mode: reject fields not defined in the schema.
     if schema.strict {
+        let field_defs: std::collections::HashSet<&str> =
+            schema.fields.iter().map(|f| f.name.as_str()).collect();
         for key in map.keys() {
-            if !field_defs.contains_key(key.as_str()) {
-                errors.push(format!("unknown field '{}'", key));
+            if !field_defs.contains(key.as_str()) {
+                errors.push(format!("unknown field '{key}'"));
             }
         }
     }
@@ -253,7 +253,7 @@ pub fn validate_value(schema: &MapSchema, value: &Value) -> ValidationResult {
 fn check_type_and_constraints(
     value: &Value,
     field_def: &FieldDef,
-    errors: &mut Vec<std::string::String>,
+    errors: &mut Vec<String>,
 ) {
     let name = &field_def.name;
     let type_ok = check_type(value, &field_def.field_type, name, errors);
@@ -271,23 +271,23 @@ fn check_type(
     value: &Value,
     field_type: &FieldType,
     name: &str,
-    errors: &mut Vec<std::string::String>,
+    errors: &mut Vec<String>,
 ) -> bool {
     let ok = match field_type {
         FieldType::String => matches!(value, Value::String(_)),
-        FieldType::Int => matches!(value, Value::Int(_)),
+        // Int and Timestamp both accept Value::Int.
+        FieldType::Int | FieldType::Timestamp => matches!(value, Value::Int(_)),
         // Int-to-float widening coercion: JS clients often send integers where floats are expected.
         FieldType::Float => matches!(value, Value::Float(_) | Value::Int(_)),
         FieldType::Bool => matches!(value, Value::Bool(_)),
         FieldType::Binary => matches!(value, Value::Bytes(_)),
-        FieldType::Timestamp => matches!(value, Value::Int(_)),
         FieldType::Map => matches!(value, Value::Map(_)),
         FieldType::Any => !matches!(value, Value::Null),
         FieldType::Array(inner) => {
             if let Value::Array(elements) = value {
                 let mut array_ok = true;
                 for (i, elem) in elements.iter().enumerate() {
-                    let elem_name = format!("{}[{}]", name, i);
+                    let elem_name = format!("{name}[{i}]");
                     if !check_type(elem, inner, &elem_name, errors) {
                         array_ok = false;
                     }
@@ -299,20 +299,19 @@ fn check_type(
         }
     };
 
-    if !ok && !matches!(field_type, FieldType::Array(_)) {
-        errors.push(format!(
-            "field '{}': expected {:?}, got {:?}",
-            name,
-            field_type,
-            value_type_name(value)
-        ));
-    } else if !ok {
-        // Array type mismatch (not an array at all).
-        errors.push(format!(
-            "field '{}': expected Array, got {:?}",
-            name,
-            value_type_name(value)
-        ));
+    if !ok {
+        if matches!(field_type, FieldType::Array(_)) {
+            // Array type mismatch (not an array at all).
+            errors.push(format!(
+                "field '{name}': expected Array, got {:?}",
+                value_type_name(value)
+            ));
+        } else {
+            errors.push(format!(
+                "field '{name}': expected {field_type:?}, got {:?}",
+                value_type_name(value)
+            ));
+        }
     }
 
     ok
@@ -325,24 +324,24 @@ fn check_constraints(
     field_type: &FieldType,
     constraints: &FieldConstraint,
     name: &str,
-    errors: &mut Vec<std::string::String>,
+    errors: &mut Vec<String>,
 ) {
     match (value, field_type) {
         (Value::String(s), _) => {
+            // Use saturating cast: strings >4 GB are rejected by max_length constraint anyway.
+            #[allow(clippy::cast_possible_truncation)]
             let len = s.chars().count() as u32;
             if let Some(min) = constraints.min_length {
                 if len < min {
                     errors.push(format!(
-                        "field '{}': length {} is less than minimum {}",
-                        name, len, min
+                        "field '{name}': length {len} is less than minimum {min}"
                     ));
                 }
             }
             if let Some(max) = constraints.max_length {
                 if len > max {
                     errors.push(format!(
-                        "field '{}': length {} exceeds maximum {}",
-                        name, len, max
+                        "field '{name}': length {len} exceeds maximum {max}"
                     ));
                 }
             }
@@ -351,43 +350,38 @@ fn check_constraints(
                     Ok(re) => {
                         if !re.is_match(s) {
                             errors.push(format!(
-                                "field '{}': value does not match pattern '{}'",
-                                name, pattern
+                                "field '{name}': value does not match pattern '{pattern}'"
                             ));
                         }
                     }
                     Err(_) => {
-                        errors.push(format!(
-                            "field '{}': invalid pattern '{}'",
-                            name, pattern
-                        ));
+                        errors.push(format!("field '{name}': invalid pattern '{pattern}'"));
                     }
                 }
             }
             if let Some(enum_values) = &constraints.enum_values {
                 if !enum_values.iter().any(|v| v == s) {
                     errors.push(format!(
-                        "field '{}': value '{}' is not in the allowed list",
-                        name, s
+                        "field '{name}': value '{s}' is not in the allowed list"
                     ));
                 }
             }
         }
         (Value::Array(arr), _) => {
+            // Use saturating cast: arrays >4 GB are rejected by max_length constraint anyway.
+            #[allow(clippy::cast_possible_truncation)]
             let len = arr.len() as u32;
             if let Some(min) = constraints.min_length {
                 if len < min {
                     errors.push(format!(
-                        "field '{}': array length {} is less than minimum {}",
-                        name, len, min
+                        "field '{name}': array length {len} is less than minimum {min}"
                     ));
                 }
             }
             if let Some(max) = constraints.max_length {
                 if len > max {
                     errors.push(format!(
-                        "field '{}': array length {} exceeds maximum {}",
-                        name, len, max
+                        "field '{name}': array length {len} exceeds maximum {max}"
                     ));
                 }
             }
@@ -396,16 +390,14 @@ fn check_constraints(
             if let Some(min) = constraints.min_value {
                 if *i < min {
                     errors.push(format!(
-                        "field '{}': value {} is less than minimum {}",
-                        name, i, min
+                        "field '{name}': value {i} is less than minimum {min}"
                     ));
                 }
             }
             if let Some(max) = constraints.max_value {
                 if *i > max {
                     errors.push(format!(
-                        "field '{}': value {} exceeds maximum {}",
-                        name, i, max
+                        "field '{name}': value {i} exceeds maximum {max}"
                     ));
                 }
             }
