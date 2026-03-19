@@ -458,6 +458,8 @@ pub enum OperationError {
     Forbidden { map_name: String },
     #[error("value size {size} bytes exceeds maximum {max} bytes")]
     ValueTooLarge { size: u64, max: u64 },
+    #[error("schema validation failed for map '{map_name}': {}", errors.join("; "))]
+    SchemaInvalid { map_name: String, errors: Vec<String> },
 }
 
 // ---------------------------------------------------------------------------

@@ -106,6 +106,7 @@ where
                         OperationError::Unauthorized => "unauthorized",
                         OperationError::Forbidden { .. } => "forbidden",
                         OperationError::ValueTooLarge { .. } => "value_too_large",
+                        OperationError::SchemaInvalid { .. } => "schema_invalid",
                     };
                     metrics::counter!("topgun_operation_errors_total", "service" => service_name, "error" => error_kind).increment(1);
                 }
