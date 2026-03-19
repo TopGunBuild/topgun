@@ -37,7 +37,7 @@ mod integration_tests {
     use crate::service::config::ServerConfig;
     use crate::service::domain::{
         CoordinationService, CrdtService, MessagingService, PersistenceService, QueryService,
-        SearchService, SyncService,
+        SchemaService, SearchService, SyncService,
     };
     use crate::service::domain::search::SearchRegistry;
     use crate::service::domain::query::QueryRegistry;
@@ -109,6 +109,7 @@ mod integration_tests {
                 Arc::clone(&connection_registry),
                 make_write_validator(&config.node_id),
                 Arc::clone(&query_registry),
+                Arc::new(SchemaService::new()),
             )),
         );
         router.register(
@@ -347,6 +348,7 @@ mod integration_tests {
             connection_registry_for_crdt,
             make_write_validator("registry-test-node"),
             Arc::clone(&query_registry),
+            Arc::new(SchemaService::new()),
         ));
         registry.register(SyncService::new(
             merkle_manager_for_sync,
