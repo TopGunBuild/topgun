@@ -422,6 +422,65 @@ fn value_type_name(value: &Value) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Arrow schema conversion (enabled by the `arrow` feature flag)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "arrow")]
+impl MapSchema {
+    /// Derive an Apache Arrow `Schema` from this map schema.
+    ///
+    /// Each `FieldDef` becomes an Arrow `Field` with the corresponding
+    /// `DataType`. The `required` flag maps to Arrow nullability (required
+    /// fields are non-nullable).
+    #[must_use]
+    pub fn to_arrow_schema(&self) -> arrow_schema::Schema {
+        use arrow_schema::{Field, Schema};
+        let fields: Vec<Field> = self
+            .fields
+            .iter()
+            .map(|fd| {
+                let data_type = field_type_to_arrow(&fd.field_type);
+                // Arrow nullable = true means the field may be null.
+                // TopGun required = true means the field must not be null,
+                // so we invert: required fields are non-nullable in Arrow.
+                let nullable = !fd.required;
+                Field::new(&fd.name, data_type, nullable)
+            })
+            .collect();
+        Schema::new(fields)
+    }
+}
+
+/// Convert a `FieldType` to the corresponding Arrow `DataType`.
+///
+/// Handles the recursive `Array` case by building a `List` type with a
+/// nullable `item` field for each element.
+#[cfg(feature = "arrow")]
+fn field_type_to_arrow(ft: &FieldType) -> arrow_schema::DataType {
+    use std::sync::Arc;
+
+    use arrow_schema::{DataType, Field, TimeUnit};
+
+    match ft {
+        // String, nested maps, and untyped fields all surface as UTF-8 text
+        // in Arrow. Nested maps are opaque in v1 (no recursive schema) and
+        // are serialized as JSON strings for SQL queryability.
+        FieldType::String | FieldType::Map | FieldType::Any => DataType::Utf8,
+        FieldType::Int => DataType::Int64,
+        FieldType::Float => DataType::Float64,
+        FieldType::Bool => DataType::Boolean,
+        FieldType::Binary => DataType::Binary,
+        FieldType::Timestamp => DataType::Timestamp(TimeUnit::Millisecond, None),
+        FieldType::Array(inner) => {
+            let inner_type = field_type_to_arrow(inner);
+            // Array elements are always nullable to allow optional entries.
+            let item_field = Arc::new(Field::new("item", inner_type, true));
+            DataType::List(item_field)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -897,5 +956,168 @@ mod tests {
         // 11-char string — fails max_length.
         let value = make_map(vec![("title", Value::String("hello world".to_string()))]);
         assert!(matches!(validate_value(&schema, &value), ValidationResult::Invalid { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // to_arrow_schema: one test per FieldType variant + nullability + array + round-trip
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "arrow")]
+    mod arrow_tests {
+        use arrow_schema::{DataType, TimeUnit};
+
+        use super::*;
+
+        fn make_field(name: &str, ft: FieldType, required: bool) -> FieldDef {
+            FieldDef { name: name.to_string(), required, field_type: ft, constraints: None }
+        }
+
+        #[test]
+        fn string_maps_to_utf8() {
+            let schema =
+                MapSchema { version: 1, strict: false, fields: vec![make_field("s", FieldType::String, false)] };
+            let arrow = schema.to_arrow_schema();
+            assert_eq!(arrow.field(0).data_type(), &DataType::Utf8);
+        }
+
+        #[test]
+        fn int_maps_to_int64() {
+            let schema =
+                MapSchema { version: 1, strict: false, fields: vec![make_field("i", FieldType::Int, false)] };
+            let arrow = schema.to_arrow_schema();
+            assert_eq!(arrow.field(0).data_type(), &DataType::Int64);
+        }
+
+        #[test]
+        fn float_maps_to_float64() {
+            let schema =
+                MapSchema { version: 1, strict: false, fields: vec![make_field("f", FieldType::Float, false)] };
+            let arrow = schema.to_arrow_schema();
+            assert_eq!(arrow.field(0).data_type(), &DataType::Float64);
+        }
+
+        #[test]
+        fn bool_maps_to_boolean() {
+            let schema =
+                MapSchema { version: 1, strict: false, fields: vec![make_field("b", FieldType::Bool, false)] };
+            let arrow = schema.to_arrow_schema();
+            assert_eq!(arrow.field(0).data_type(), &DataType::Boolean);
+        }
+
+        #[test]
+        fn binary_maps_to_binary() {
+            let schema =
+                MapSchema { version: 1, strict: false, fields: vec![make_field("bin", FieldType::Binary, false)] };
+            let arrow = schema.to_arrow_schema();
+            assert_eq!(arrow.field(0).data_type(), &DataType::Binary);
+        }
+
+        #[test]
+        fn timestamp_maps_to_timestamp_millisecond_no_tz() {
+            let schema =
+                MapSchema { version: 1, strict: false, fields: vec![make_field("ts", FieldType::Timestamp, false)] };
+            let arrow = schema.to_arrow_schema();
+            assert_eq!(
+                arrow.field(0).data_type(),
+                &DataType::Timestamp(TimeUnit::Millisecond, None)
+            );
+        }
+
+        #[test]
+        fn map_variant_maps_to_utf8() {
+            let schema =
+                MapSchema { version: 1, strict: false, fields: vec![make_field("m", FieldType::Map, false)] };
+            let arrow = schema.to_arrow_schema();
+            assert_eq!(arrow.field(0).data_type(), &DataType::Utf8);
+        }
+
+        #[test]
+        fn any_variant_maps_to_utf8() {
+            let schema =
+                MapSchema { version: 1, strict: false, fields: vec![make_field("a", FieldType::Any, false)] };
+            let arrow = schema.to_arrow_schema();
+            assert_eq!(arrow.field(0).data_type(), &DataType::Utf8);
+        }
+
+        #[test]
+        fn array_of_int_maps_to_list_int64() {
+            let schema = MapSchema {
+                version: 1,
+                strict: false,
+                fields: vec![make_field("ids", FieldType::Array(Box::new(FieldType::Int)), false)],
+            };
+            let arrow = schema.to_arrow_schema();
+            let dt = arrow.field(0).data_type();
+            if let DataType::List(item_field) = dt {
+                assert_eq!(item_field.data_type(), &DataType::Int64);
+                assert!(item_field.is_nullable(), "array item field should be nullable");
+            } else {
+                panic!("expected DataType::List, got {dt:?}");
+            }
+        }
+
+        #[test]
+        fn required_true_produces_non_nullable_field() {
+            let schema =
+                MapSchema { version: 1, strict: false, fields: vec![make_field("name", FieldType::String, true)] };
+            let arrow = schema.to_arrow_schema();
+            assert!(!arrow.field(0).is_nullable(), "required field must be non-nullable in Arrow");
+        }
+
+        #[test]
+        fn required_false_produces_nullable_field() {
+            let schema =
+                MapSchema { version: 1, strict: false, fields: vec![make_field("name", FieldType::String, false)] };
+            let arrow = schema.to_arrow_schema();
+            assert!(arrow.field(0).is_nullable(), "optional field must be nullable in Arrow");
+        }
+
+        #[test]
+        fn nested_array_of_string_produces_list_utf8() {
+            let schema = MapSchema {
+                version: 1,
+                strict: false,
+                fields: vec![make_field("tags", FieldType::Array(Box::new(FieldType::String)), false)],
+            };
+            let arrow = schema.to_arrow_schema();
+            if let DataType::List(item_field) = arrow.field(0).data_type() {
+                assert_eq!(item_field.data_type(), &DataType::Utf8);
+            } else {
+                panic!("expected DataType::List");
+            }
+        }
+
+        #[test]
+        fn multi_field_schema_round_trip() {
+            let schema = MapSchema {
+                version: 1,
+                strict: false,
+                fields: vec![
+                    make_field("id", FieldType::String, true),
+                    make_field("age", FieldType::Int, false),
+                    make_field("score", FieldType::Float, false),
+                    make_field("active", FieldType::Bool, true),
+                    make_field("data", FieldType::Binary, false),
+                    make_field("created_at", FieldType::Timestamp, false),
+                    make_field("tags", FieldType::Array(Box::new(FieldType::String)), false),
+                    make_field("meta", FieldType::Map, false),
+                    make_field("anything", FieldType::Any, false),
+                ],
+            };
+            let arrow = schema.to_arrow_schema();
+            assert_eq!(arrow.fields().len(), 9);
+
+            // Spot-check a few fields.
+            assert_eq!(arrow.field(0).name(), "id");
+            assert!(!arrow.field(0).is_nullable());
+            assert_eq!(arrow.field(0).data_type(), &DataType::Utf8);
+
+            assert_eq!(arrow.field(1).name(), "age");
+            assert!(arrow.field(1).is_nullable());
+            assert_eq!(arrow.field(1).data_type(), &DataType::Int64);
+
+            assert_eq!(arrow.field(6).name(), "tags");
+            assert!(matches!(arrow.field(6).data_type(), DataType::List(_)));
+        }
     }
 }
