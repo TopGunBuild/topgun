@@ -25,6 +25,9 @@ pub mod journal;
 pub mod persistence;
 pub use persistence::PersistenceService;
 
+pub mod schema;
+pub use schema::SchemaService;
+
 pub mod search;
 pub use search::SearchService;
 
