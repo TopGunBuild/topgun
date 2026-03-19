@@ -6,6 +6,9 @@ pub mod service;
 pub mod storage;
 pub mod traits;
 
+#[cfg(feature = "simulation")]
+pub mod sim;
+
 pub use service::{
     CallerOrigin, ManagedService, Operation, OperationContext, OperationError, OperationResponse,
     OperationService, OperationRouter, ServerConfig, ServiceContext, ServiceRegistry,
