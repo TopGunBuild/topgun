@@ -62,6 +62,15 @@ program
   .description('Show cluster status')
   .action(require('./commands/cluster/status'));
 
+program
+  .command('codegen')
+  .description('Generate types and schema files from topgun.schema.ts')
+  .option('--schema <path>', 'Path to schema file', './topgun.schema.ts')
+  .option('--out-dir <dir>', 'Output directory', './generated')
+  .option('--no-typescript', 'Skip TypeScript type generation')
+  .option('--no-json', 'Skip JSON schema generation')
+  .action(require('./commands/codegen'));
+
 // Debug commands (Phase 14C)
 program
   .command('debug:crdt <action>')
