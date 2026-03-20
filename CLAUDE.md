@@ -46,6 +46,12 @@ pnpm test:k6:connections
 # CRDT micro-benchmarks
 pnpm --filter @topgunbuild/core bench
 
+# Rust load harness (in-process perf test)
+cargo bench --bench load_harness
+
+# Load harness: fire-and-forget mode
+cargo bench --bench load_harness -- --fire-and-forget --interval 0
+
 # Start Rust development server
 pnpm start:server
 
@@ -164,3 +170,61 @@ Changes to domain services under `packages/server-rust/src/service/domain/` shou
 ### Proptest Async Bridge
 
 Proptest closures are synchronous, but the simulation harness is async. The bridge pattern uses `block_in_place` + `Handle::block_on` inside `#[tokio::test(flavor = "multi_thread")]` to run async sim code from within sync proptest strategies. The `multi_thread` flavor is required because `block_in_place` panics on a single-threaded runtime.
+
+## Performance Testing
+
+The load harness (`packages/server-rust/benches/load_harness/`) boots a full server instance (all 7 domain services, partition dispatcher, WebSocket handler) in-process, opens N WebSocket connections, and runs configurable scenarios while recording latency with HDR histograms. Results are printed as ASCII tables and optionally written as JSON for CI.
+
+### Modes
+
+- **Fire-and-wait** (default): sends an OpBatch, waits for OP_ACK, and records round-trip latency. Use this to measure end-to-end request latency.
+- **Fire-and-forget** (`--fire-and-forget`): sends batches without waiting for acknowledgement. Use this to measure raw push throughput.
+
+### CLI Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--connections` | 200 | Number of concurrent WebSocket connections |
+| `--duration` | 30s | Total test duration |
+| `--interval` | 50ms | Delay between sends per connection |
+| `--fire-and-forget` | off | Enable fire-and-forget mode |
+| `--json-output` | off | Write results as JSON (for CI consumption) |
+
+### Running Locally
+
+```bash
+# Quick smoke test
+cargo bench --bench load_harness -- --connections 50 --duration 10
+
+# Full run (default: 200 connections, 30s)
+cargo bench --bench load_harness
+
+# Fire-and-forget throughput test
+cargo bench --bench load_harness -- --fire-and-forget --interval 0
+```
+
+### Baseline Assertions
+
+The harness enforces two pass/fail checks:
+- **Acked ratio** >= 80%
+- **p99 latency** < 500ms
+
+Both must pass for exit code 0. Baseline thresholds for CI are defined in `packages/server-rust/benches/load_harness/baseline.json`.
+
+### CI Perf-Gate
+
+The `perf-gate` job in `.github/workflows/rust.yml` runs both fire-and-wait and fire-and-forget scenarios (200 connections, 15s each), compares results against baseline.json thresholds using `jq`, and is currently informational (`continue-on-error: true`).
+
+### Flamegraph Profiling
+
+See `packages/server-rust/docs/profiling/FLAMEGRAPH_ANALYSIS.md` for flamegraph methodology, baseline numbers, and hot-path analysis. Flamegraphs use the `release-with-debug` Cargo profile and can be generated with `cargo flamegraph` or macOS Instruments.
+
+### When to Run the Load Harness
+
+Changes to hot-path code should be verified with the load harness before merge:
+- Service routing: `service/dispatch/`, `service/middleware/`
+- CRDT merge: `service/domain/crdt/`
+- WebSocket handling: `network/handlers/`
+- Serialization
+
+Run at minimum a fire-and-wait scenario and compare ops/sec against the baseline. Regressions over 20% require investigation or justification in the PR.
