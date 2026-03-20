@@ -513,6 +513,7 @@ impl SimCluster {
     ///
     /// Returns an error if either node index is out of range, if either node is
     /// dead, or if reading from any store fails.
+    #[allow(clippy::too_many_lines)]
     pub async fn merkle_sync_pair(
         &self,
         src_idx: usize,
@@ -533,6 +534,11 @@ impl SimCluster {
 
         let src_node_id = src.node_id.clone();
         let dst_node_id = dst.node_id.clone();
+
+        // R5 item 1: check that the pair is not partitioned.
+        if self.network.is_partitioned(&src_node_id, &dst_node_id) {
+            return Ok(());
+        }
 
         // Partition 0 is the client-sync aggregate (dual-write pattern).
         let src_store = src.record_store_factory.get_or_create(map, 0);
@@ -628,17 +634,22 @@ impl SimCluster {
             },
         };
 
-        // deliver() will drop the batch silently if src–dst is partitioned.
-        // We target only dst by unregistering others temporarily is not feasible;
-        // instead, use a single-target delivery path by calling the dst service directly
-        // if partitioned, otherwise via transport (which may multicast). Since transport
-        // delivers to all peers except sender and respects partitions, and the batch
-        // already contains only delta records, we just call deliver() which will
-        // propagate to dst (and any other non-partitioned alive peer -- acceptable
-        // for Merkle delta sync semantics, which is idempotent).
-        self.transport.deliver(&src_node_id, batch).await?;
+        // Deliver directly to the destination node's CrdtService (targeted delivery).
+        let dst_node = &self.nodes[dst_idx];
+        let ts = Timestamp {
+            millis: 0,
+            counter: 0,
+            node_id: src_node_id,
+        };
+        let ctx = OperationContext::new(0, service_names::CRDT, ts, 5000);
+        let op = Operation::OpBatch {
+            ctx,
+            payload: batch,
+        };
+        let mut svc = Arc::clone(&dst_node.crdt_service);
+        let _ = Service::call(&mut svc, op).await;
 
-        let _ = dst_node_id; // acknowledged -- delivery targets all peers via transport
+        let _ = dst_node_id;
         Ok(())
     }
 
