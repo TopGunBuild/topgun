@@ -198,3 +198,30 @@ jobs:
             results-faw.json
             results-faf.json
           retention-days: 90
+
+  simulation:
+    name: Simulation Tests
+    needs: [check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-sim-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-sim-
+            ${{ runner.os }}-cargo-
+
+      - name: Run simulation tests
+        run: cargo test --profile ci-sim --features simulation -p topgun-server -- sim

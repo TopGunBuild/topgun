@@ -34,6 +34,9 @@ pnpm --filter @topgunbuild/core test:coverage
 # Integration tests (TS client → Rust server)
 pnpm test:integration-rust
 
+# Simulation tests (deterministic, with fault injection)
+pnpm test:sim
+
 # k6 load tests (requires k6 installed)
 pnpm test:k6:smoke
 pnpm test:k6:throughput
@@ -136,3 +139,28 @@ Examples:
 - Rust server tests: `SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path) cargo test --release -p topgun-server`
 - Integration tests (TS client to Rust server): `pnpm test:integration-rust`
 - Run TS tests sequentially in CI to avoid port conflicts: `pnpm test -- --runInBand`
+
+## Simulation Testing
+
+The simulation testing framework provides deterministic testing of distributed behavior under network faults and node failures, without real networking or timers.
+
+### Architecture
+
+- **SimCluster** (`packages/server-rust/src/sim/cluster.rs`) — orchestrates N in-memory nodes with `write`/`read`/`advance_time` convenience methods
+- **SimNetwork** (`packages/server-rust/src/sim/network.rs`) — structural fault injection: `partition`, `heal`, `delay`, `reorder` between node pairs
+- **SimNode** — single node built via `SimNode::build()`, wiring all 7 domain services with NullDataStore + HashMapStorage
+
+### Running Simulation Tests
+
+```bash
+pnpm test:sim
+# Equivalent to: cargo test --profile ci-sim --features simulation -p topgun-server -- sim
+```
+
+### When to Write Simulation Tests
+
+Changes to domain services under `packages/server-rust/src/service/domain/` should be accompanied by simulation tests that exercise the changed behavior under at least one fault scenario (network partition or node failure). This ensures distributed correctness is validated before merge.
+
+### Proptest Async Bridge
+
+Proptest closures are synchronous, but the simulation harness is async. The bridge pattern uses `block_in_place` + `Handle::block_on` inside `#[tokio::test(flavor = "multi_thread")]` to run async sim code from within sync proptest strategies. The `multi_thread` flavor is required because `block_in_place` panics on a single-threaded runtime.
