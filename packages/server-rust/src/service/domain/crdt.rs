@@ -17,7 +17,9 @@ use topgun_core::messages::{
     OpBatchMessage, ServerEventPayload, ServerEventType,
 };
 use topgun_core::types::Value;
-use topgun_core::{hash_to_partition, LWWRecord, ORMapRecord, Timestamp};
+use topgun_core::{hash_to_partition, LWWRecord, Timestamp};
+#[cfg(test)]
+use topgun_core::ORMapRecord;
 
 use tracing::Instrument;
 
@@ -267,6 +269,7 @@ impl CrdtService {
     ///
     /// `sanitized_ts` — when `Some`, replaces client-provided timestamps in stored records.
     /// When `None` (internal/test calls with no `connection_id`), the client timestamp is used as-is.
+    #[allow(clippy::too_many_lines)]
     async fn apply_single_op(
         &self,
         op: &ClientOp,
@@ -313,15 +316,38 @@ impl CrdtService {
                 .expect("or_record is Some(Some(_))");
 
             // Replace client timestamp with sanitized server timestamp if provided.
-            let (record_value, stored_or_rec) = if let Some(ts) = sanitized_ts {
+            let (new_entry, stored_or_rec) = if let Some(ts) = sanitized_ts {
                 let mut sanitized_rec = or_rec.clone();
                 sanitized_rec.timestamp = ts.clone();
                 // Regenerate tag from sanitized timestamp: "{millis}:{counter}:{node_id}"
                 sanitized_rec.tag = format!("{}:{}:{}", ts.millis, ts.counter, ts.node_id);
-                let rv = or_record_to_record_value(&sanitized_rec);
-                (rv, sanitized_rec)
+                let entry = OrMapEntry {
+                    value: rmpv_to_value(&sanitized_rec.value),
+                    tag: sanitized_rec.tag.clone(),
+                    timestamp: sanitized_rec.timestamp.clone(),
+                };
+                (entry, sanitized_rec)
             } else {
-                (or_record_to_record_value(or_rec), or_rec.clone())
+                let entry = OrMapEntry {
+                    value: rmpv_to_value(&or_rec.value),
+                    tag: or_rec.tag.clone(),
+                    timestamp: or_rec.timestamp.clone(),
+                };
+                (entry, or_rec.clone())
+            };
+
+            // Read existing OR-Map entries so the new entry is merged in rather than replacing.
+            // OR-Map add-wins semantics require all concurrent additions to be preserved.
+            let record_value = {
+                let existing = store.get(&op.key, false).await.map_err(OperationError::Internal)?;
+                let mut records: Vec<OrMapEntry> = match existing.map(|r| r.value) {
+                    Some(RecordValue::OrMap { records }) => records,
+                    _ => Vec::new(),
+                };
+                // Remove any existing entry with the same tag (idempotent re-add).
+                records.retain(|e| e.tag != new_entry.tag);
+                records.push(new_entry);
+                RecordValue::OrMap { records }
             };
 
             store
@@ -577,18 +603,6 @@ fn lww_record_to_record_value(record: &LWWRecord<rmpv::Value>) -> RecordValue {
     RecordValue::Lww {
         value,
         timestamp: record.timestamp.clone(),
-    }
-}
-
-/// Converts a wire-format `ORMapRecord<rmpv::Value>` into a storage `RecordValue::OrMap`
-/// containing a single entry.
-fn or_record_to_record_value(record: &ORMapRecord<rmpv::Value>) -> RecordValue {
-    RecordValue::OrMap {
-        records: vec![OrMapEntry {
-            value: rmpv_to_value(&record.value),
-            tag: record.tag.clone(),
-            timestamp: record.timestamp.clone(),
-        }],
     }
 }
 
