@@ -34,7 +34,7 @@ pub use cluster::{
 
 pub use query::{
     CursorStatus, QueryRespMessage, QueryRespPayload, QueryResultEntry, QuerySubMessage,
-    QuerySubPayload, QueryUnsubMessage, QueryUnsubPayload,
+    QuerySubPayload, QueryUnsubMessage, QueryUnsubPayload, SqlQueryPayload, SqlQueryRespPayload,
 };
 
 pub use search::{
@@ -195,6 +195,14 @@ pub enum Message {
     /// Server responds with query results.
     #[serde(rename = "QUERY_RESP")]
     QueryResp(QueryRespMessage),
+
+    /// SQL query request from client.
+    #[serde(rename = "SQL_QUERY")]
+    SqlQuery { payload: SqlQueryPayload },
+
+    /// SQL query response from server.
+    #[serde(rename = "SQL_QUERY_RESP")]
+    SqlQueryResp { payload: SqlQueryRespPayload },
 
     // --- client_events domain (query update) ---
 

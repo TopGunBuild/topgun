@@ -436,6 +436,12 @@ impl OperationService {
                 Ok(Operation::JournalRead { ctx, payload })
             }
 
+            // ----- SQL query (wired in SPEC-135c, currently unroutable) -----
+
+            Message::SqlQuery { .. } => {
+                Err(ClassifyError::ServerToClient { variant: "SqlQuery" })
+            }
+
             // ----- Server-to-client responses -> ClassifyError::ServerToClient -----
 
             Message::OpAck(_) => Err(ClassifyError::ServerToClient { variant: "OpAck" }),
@@ -465,6 +471,9 @@ impl OperationService {
             }
             Message::QueryResp(_) => {
                 Err(ClassifyError::ServerToClient { variant: "QueryResp" })
+            }
+            Message::SqlQueryResp { .. } => {
+                Err(ClassifyError::ServerToClient { variant: "SqlQueryResp" })
             }
             Message::QueryUpdate { .. } => {
                 Err(ClassifyError::ServerToClient { variant: "QueryUpdate" })

@@ -129,6 +129,39 @@ pub struct QueryRespMessage {
 }
 
 // ---------------------------------------------------------------------------
+// SQL query messages
+// ---------------------------------------------------------------------------
+
+/// Payload for a SQL query request from client to server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlQueryPayload {
+    /// SQL query string to execute.
+    pub sql: String,
+    /// Unique identifier for correlating request/response.
+    pub query_id: String,
+}
+
+/// Payload for a SQL query response from server to client.
+///
+/// Results are serialized as rows of `rmpv::Value` (not Arrow IPC)
+/// for cross-language client compatibility.
+/// On error, `rows` and `columns` are empty and `error` contains a description.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlQueryRespPayload {
+    /// Identifier correlating to the request.
+    pub query_id: String,
+    /// Column names in result order.
+    pub columns: Vec<String>,
+    /// Row data: each inner Vec corresponds to one row, values ordered by `columns`.
+    pub rows: Vec<Vec<rmpv::Value>>,
+    /// Error message if the query failed; `None` on success.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -355,5 +388,93 @@ mod tests {
         assert_eq!(p.next_cursor, None);
         assert_eq!(p.has_more, None);
         assert_eq!(p.cursor_status, None);
+    }
+
+    // ---- SQL query message tests ----
+
+    #[test]
+    fn sql_query_payload_roundtrip() {
+        let payload = SqlQueryPayload {
+            sql: "SELECT * FROM users WHERE age > 18".to_string(),
+            query_id: "sq-1".to_string(),
+        };
+        assert_eq!(roundtrip_named(&payload), payload);
+    }
+
+    #[test]
+    fn sql_query_payload_camel_case() {
+        let payload = SqlQueryPayload {
+            sql: "SELECT 1".to_string(),
+            query_id: "sq-2".to_string(),
+        };
+        let bytes = rmp_serde::to_vec_named(&payload).expect("serialize");
+        let val: rmpv::Value = rmp_serde::from_slice(&bytes).expect("deserialize");
+        let map = val.as_map().expect("should be a map");
+        let keys: Vec<&str> = map.iter().filter_map(|(k, _)| k.as_str()).collect();
+        assert!(keys.contains(&"sql"), "expected 'sql' key");
+        assert!(keys.contains(&"queryId"), "expected camelCase 'queryId'");
+    }
+
+    #[test]
+    fn sql_query_resp_payload_success_roundtrip() {
+        let payload = SqlQueryRespPayload {
+            query_id: "sq-1".to_string(),
+            columns: vec!["name".to_string(), "age".to_string()],
+            rows: vec![
+                vec![
+                    rmpv::Value::String("Alice".into()),
+                    rmpv::Value::Integer(30.into()),
+                ],
+                vec![
+                    rmpv::Value::String("Bob".into()),
+                    rmpv::Value::Integer(25.into()),
+                ],
+            ],
+            error: None,
+        };
+        assert_eq!(roundtrip_named(&payload), payload);
+    }
+
+    #[test]
+    fn sql_query_resp_payload_error_roundtrip() {
+        let payload = SqlQueryRespPayload {
+            query_id: "sq-err".to_string(),
+            columns: vec![],
+            rows: vec![],
+            error: Some("syntax error near 'SELCT'".to_string()),
+        };
+        assert_eq!(roundtrip_named(&payload), payload);
+    }
+
+    #[test]
+    fn sql_query_resp_error_field_omitted_when_none() {
+        let payload = SqlQueryRespPayload {
+            query_id: "sq-ok".to_string(),
+            columns: vec!["id".to_string()],
+            rows: vec![vec![rmpv::Value::Integer(1.into())]],
+            error: None,
+        };
+        let bytes = rmp_serde::to_vec_named(&payload).expect("serialize");
+        let val: rmpv::Value = rmp_serde::from_slice(&bytes).expect("deserialize");
+        let map = val.as_map().expect("should be a map");
+        let has_error = map.iter().any(|(k, _)| k.as_str() == Some("error"));
+        assert!(!has_error, "error field should be omitted when None");
+    }
+
+    #[test]
+    fn sql_query_resp_payload_camel_case() {
+        let payload = SqlQueryRespPayload {
+            query_id: "sq-cc".to_string(),
+            columns: vec![],
+            rows: vec![],
+            error: None,
+        };
+        let bytes = rmp_serde::to_vec_named(&payload).expect("serialize");
+        let val: rmpv::Value = rmp_serde::from_slice(&bytes).expect("deserialize");
+        let map = val.as_map().expect("should be a map");
+        let keys: Vec<&str> = map.iter().filter_map(|(k, _)| k.as_str()).collect();
+        assert!(keys.contains(&"queryId"), "expected camelCase 'queryId'");
+        assert!(keys.contains(&"columns"), "expected 'columns' key");
+        assert!(keys.contains(&"rows"), "expected 'rows' key");
     }
 }
