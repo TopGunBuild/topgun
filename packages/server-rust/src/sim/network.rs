@@ -115,9 +115,8 @@ impl SimTransport {
 /// Network fault injection layer for simulation tests.
 ///
 /// Tracks partitions, delays, and reordering state between nodes.
-/// These methods are structural only -- they update internal state but
-/// do not yet affect actual message delivery. A future spec will wire
-/// `SimTransport::deliver()` to consult this state.
+/// `SimTransport::deliver()` consults this state to skip delivery
+/// to partitioned peers.
 pub struct SimNetwork {
     /// Set of partitioned node pairs (bidirectional).
     partitions: RwLock<HashSet<(String, String)>>,

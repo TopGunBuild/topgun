@@ -535,7 +535,7 @@ impl SimCluster {
         let src_node_id = src.node_id.clone();
         let dst_node_id = dst.node_id.clone();
 
-        // R5 item 1: check that the pair is not partitioned.
+        // Skip delivery early if the link is currently partitioned.
         if self.network.is_partitioned(&src_node_id, &dst_node_id) {
             return Ok(());
         }
@@ -649,7 +649,6 @@ impl SimCluster {
         let mut svc = Arc::clone(&dst_node.crdt_service);
         let _ = Service::call(&mut svc, op).await;
 
-        let _ = dst_node_id;
         Ok(())
     }
 
