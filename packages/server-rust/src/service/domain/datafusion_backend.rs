@@ -1,9 +1,9 @@
-//! DataFusion-backed query engine implementation.
+//! `DataFusion`-backed query engine implementation.
 //!
 //! `DataFusionBackend` implements both `QueryBackend` (predicate queries) and
 //! `SqlQueryBackend` (SQL queries). Predicate queries delegate to the existing
 //! predicate engine for backward compatibility. SQL queries are executed via
-//! DataFusion's `SessionContext`.
+//! `DataFusion`'s `SessionContext`.
 //!
 //! All types in this module are feature-gated behind `#[cfg(feature = "datafusion")]`.
 
@@ -25,12 +25,12 @@ use crate::traits::SchemaProvider;
 // DataFusionBackend
 // ---------------------------------------------------------------------------
 
-/// Query backend powered by Apache DataFusion.
+/// Query backend powered by Apache `DataFusion`.
 ///
 /// Supports both predicate-based queries (delegated to the existing predicate
-/// engine) and SQL queries executed via DataFusion's `SessionContext`.
+/// engine) and SQL queries executed via `DataFusion`'s `SessionContext`.
 ///
-/// Maps are registered as DataFusion tables via `register_map()`, which
+/// Maps are registered as `DataFusion` tables via `register_map()`, which
 /// creates a `TopGunTableProvider` backed by the `RecordStoreFactory` and
 /// `ArrowCacheManager`.
 pub struct DataFusionBackend {
@@ -41,10 +41,10 @@ pub struct DataFusionBackend {
 }
 
 impl DataFusionBackend {
-    /// Creates a new DataFusion backend.
+    /// Creates a new `DataFusion` backend.
     ///
     /// The `schema_provider` is used to look up `MapSchema` for maps when
-    /// registering them as DataFusion tables. The `cache_manager` is shared
+    /// registering them as `DataFusion` tables. The `cache_manager` is shared
     /// with `ArrowCacheObserver` instances for cache invalidation.
     #[must_use]
     pub fn new(
@@ -65,7 +65,7 @@ impl DataFusionBackend {
 impl QueryBackend for DataFusionBackend {
     /// Delegates to the existing predicate engine for backward compatibility.
     ///
-    /// DataFusion is not used for predicate-based queries. This ensures that
+    /// `DataFusion` is not used for predicate-based queries. This ensures that
     /// standing query subscriptions continue to work without schema registration.
     async fn execute_query(
         &self,
@@ -76,11 +76,11 @@ impl QueryBackend for DataFusionBackend {
         Ok(super::predicate::execute_query(entries, query))
     }
 
-    /// Registers a map as a DataFusion table.
+    /// Registers a map as a `DataFusion` table.
     ///
     /// Looks up the `MapSchema` from the `SchemaProvider`, builds an Arrow
     /// schema with prepended `_key` column, creates a `TopGunTableProvider`,
-    /// and registers it with the DataFusion `SessionContext`.
+    /// and registers it with the `DataFusion` `SessionContext`.
     async fn register_map(&self, map_name: &str) -> Result<(), QueryBackendError> {
         let map_schema = self
             .schema_provider
@@ -103,7 +103,7 @@ impl QueryBackend for DataFusionBackend {
         Ok(())
     }
 
-    /// Deregisters a map from the DataFusion `SessionContext`.
+    /// Deregisters a map from the `DataFusion` `SessionContext`.
     async fn deregister_map(&self, map_name: &str) -> Result<(), QueryBackendError> {
         self.ctx
             .deregister_table(map_name)
@@ -114,7 +114,7 @@ impl QueryBackend for DataFusionBackend {
 
 #[async_trait]
 impl SqlQueryBackend for DataFusionBackend {
-    /// Executes a SQL query string via DataFusion, returning Arrow RecordBatches.
+    /// Executes a SQL query string via `DataFusion`, returning Arrow `RecordBatches`.
     async fn execute_sql(
         &self,
         sql: &str,

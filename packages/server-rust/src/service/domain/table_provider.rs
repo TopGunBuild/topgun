@@ -1,6 +1,6 @@
-//! DataFusion `TableProvider` implementation for TopGun maps.
+//! `DataFusion` `TableProvider` implementation for `TopGun` maps.
 //!
-//! `TopGunTableProvider` exposes a TopGun map as a DataFusion table,
+//! `TopGunTableProvider` exposes a `TopGun` map as a `DataFusion` table,
 //! scanning all partitions and converting records to Arrow via the
 //! `ArrowCacheManager`. `TopGunExec` implements `ExecutionPlan` as a
 //! leaf scan node.
@@ -36,11 +36,11 @@ use crate::storage::RecordStoreFactory;
 // TopGunTableProvider
 // ---------------------------------------------------------------------------
 
-/// DataFusion `TableProvider` backed by a TopGun map's `RecordStore`.
+/// `DataFusion` `TableProvider` backed by a `TopGun` map's `RecordStore`.
 ///
 /// On scan, iterates all partitions for the map, builds Arrow batches via
 /// `ArrowCacheManager` (lazy caching per partition), concatenates them, and
-/// returns a single DataFusion partition.
+/// returns a single `DataFusion` partition.
 #[derive(Debug)]
 pub struct TopGunTableProvider {
     map_name: String,
@@ -102,9 +102,9 @@ impl TableProvider for TopGunTableProvider {
 // TopGunExec
 // ---------------------------------------------------------------------------
 
-/// Leaf `ExecutionPlan` that scans a TopGun map's partitions.
+/// Leaf `ExecutionPlan` that scans a `TopGun` map's partitions.
 ///
-/// Aggregates all TopGun partitions into a single DataFusion partition.
+/// Aggregates all `TopGun` partitions into a single `DataFusion` partition.
 /// Uses `ArrowCacheManager` for per-partition caching of Arrow batches.
 #[derive(Debug, Clone)]
 pub struct TopGunExec {
@@ -119,6 +119,11 @@ pub struct TopGunExec {
 
 impl TopGunExec {
     /// Creates a new execution plan for the given map.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `projection` contains column indices that are out of bounds
+    /// for the given `full_schema`.
     #[must_use]
     pub fn new(
         map_name: String,
@@ -167,7 +172,7 @@ impl DisplayAs for TopGunExec {
 }
 
 impl ExecutionPlan for TopGunExec {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "TopGunExec"
     }
 

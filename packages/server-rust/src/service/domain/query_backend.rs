@@ -79,13 +79,13 @@ pub trait QueryBackend: Send + Sync {
 // SqlQueryBackend trait (feature-gated)
 // ---------------------------------------------------------------------------
 
-/// Extended query backend with SQL support via DataFusion.
+/// Extended query backend with SQL support via `DataFusion`.
 ///
 /// Only available when the `datafusion` feature is enabled.
 #[cfg(feature = "datafusion")]
 #[async_trait]
 pub trait SqlQueryBackend: QueryBackend {
-    /// Execute a SQL query string, returning Arrow RecordBatches.
+    /// Execute a SQL query string, returning Arrow `RecordBatches`.
     async fn execute_sql(
         &self,
         sql: &str,

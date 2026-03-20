@@ -53,7 +53,7 @@ impl std::fmt::Debug for RecordStoreFactory {
             .field("cached_stores", &self.store_cache.len())
             .field("observer_count", &self.observers.len())
             .field("factory_count", &self.observer_factories.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

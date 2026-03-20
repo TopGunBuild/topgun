@@ -1,7 +1,7 @@
 //! MsgPack-to-Arrow conversion utilities.
 //!
 //! Converts `rmpv::Value` entries from `RecordStore` iteration into Arrow
-//! `RecordBatch` instances for DataFusion query execution.
+//! `RecordBatch` instances for `DataFusion` query execution.
 //!
 //! All types in this module are feature-gated behind `#[cfg(feature = "datafusion")]`.
 
@@ -43,12 +43,16 @@ pub fn make_arrow_schema(map_schema: &MapSchema) -> Schema {
 ///
 /// Per-column builders are created based on the Arrow schema field types,
 /// and values are extracted from the `rmpv::Value::Map` by field name.
+///
+/// # Errors
+///
+/// Returns an error if Arrow fails to construct the `RecordBatch` from the
+/// built columns (e.g., mismatched column lengths).
 pub fn build_record_batch(
     entries: &[(String, rmpv::Value)],
     schema: &Schema,
 ) -> Result<RecordBatch, anyhow::Error> {
     let fields = schema.fields();
-    let num_fields = fields.len();
 
     // Create per-column builders.
     let mut builders: Vec<ColumnBuilder> = fields
@@ -57,15 +61,12 @@ pub fn build_record_batch(
         .collect();
 
     for (key, value) in entries {
-        let map_entries = match value {
-            rmpv::Value::Map(entries) => entries,
-            _ => {
-                tracing::warn!(
-                    key = key.as_str(),
-                    "skipping entry: LWW value is not a Map, cannot extract fields"
-                );
-                continue;
-            }
+        let rmpv::Value::Map(map_entries) = value else {
+            tracing::warn!(
+                key = key.as_str(),
+                "skipping entry: LWW value is not a Map, cannot extract fields"
+            );
+            continue;
         };
 
         // First column is always _key.
@@ -79,12 +80,7 @@ pub fn build_record_batch(
     }
 
     // Finalize builders into arrays.
-    let columns: Vec<ArrayRef> = builders.into_iter().map(|b| b.finish()).collect();
-
-    if columns.is_empty() || (num_fields > 0 && columns[0].len() == 0 && entries.is_empty()) {
-        // Empty batch with correct schema.
-        return Ok(RecordBatch::new_empty(Arc::new(schema.clone())));
-    }
+    let columns: Vec<ArrayRef> = builders.into_iter().map(ColumnBuilder::finish).collect();
 
     Ok(RecordBatch::try_new(Arc::new(schema.clone()), columns)?)
 }
@@ -139,7 +135,7 @@ impl ColumnBuilder {
                 DataType::Int64 => Self::ListInt64(ListBuilder::new(Int64Builder::new())),
                 DataType::Float64 => Self::ListFloat64(ListBuilder::new(Float64Builder::new())),
                 DataType::Boolean => Self::ListBool(ListBuilder::new(BooleanBuilder::new())),
-                DataType::Utf8 | _ => Self::ListUtf8(ListBuilder::new(StringBuilder::new())),
+                _ => Self::ListUtf8(ListBuilder::new(StringBuilder::new())),
             },
             _ => Self::JsonFallback(StringBuilder::new()),
         }
@@ -168,7 +164,6 @@ impl ColumnBuilder {
 
     fn append_null(&mut self) {
         match self {
-            Self::Utf8(b) => b.append_null(),
             Self::Int64(b) => b.append_null(),
             Self::Float64(b) => b.append_null(),
             Self::Boolean(b) => b.append_null(),
@@ -178,7 +173,7 @@ impl ColumnBuilder {
             Self::ListFloat64(b) => b.append_null(),
             Self::ListUtf8(b) => b.append_null(),
             Self::ListBool(b) => b.append_null(),
-            Self::JsonFallback(b) => b.append_null(),
+            Self::Utf8(b) | Self::JsonFallback(b) => b.append_null(),
         }
     }
 
@@ -221,67 +216,10 @@ impl ColumnBuilder {
                 }
                 _ => b.append_null(),
             },
-            Self::ListInt64(b) => {
-                if let rmpv::Value::Array(arr) = value {
-                    b.values().append_slice(
-                        &arr.iter()
-                            .map(|v| match v {
-                                rmpv::Value::Integer(i) => i.as_i64().unwrap_or(0),
-                                _ => 0,
-                            })
-                            .collect::<Vec<_>>(),
-                    );
-                    b.append(true);
-                } else {
-                    b.append_null();
-                }
-            }
-            Self::ListFloat64(b) => {
-                if let rmpv::Value::Array(arr) = value {
-                    b.values().append_slice(
-                        &arr.iter()
-                            .map(|v| match v {
-                                rmpv::Value::F64(f) => *f,
-                                rmpv::Value::Integer(i) => i.as_f64().unwrap_or(0.0),
-                                _ => 0.0,
-                            })
-                            .collect::<Vec<_>>(),
-                    );
-                    b.append(true);
-                } else {
-                    b.append_null();
-                }
-            }
-            Self::ListUtf8(b) => {
-                if let rmpv::Value::Array(arr) = value {
-                    for item in arr {
-                        match item {
-                            rmpv::Value::String(s) => {
-                                b.values().append_value(s.as_str().unwrap_or(""));
-                            }
-                            _ => {
-                                b.values().append_value(rmpv_to_json_string(item));
-                            }
-                        }
-                    }
-                    b.append(true);
-                } else {
-                    b.append_null();
-                }
-            }
-            Self::ListBool(b) => {
-                if let rmpv::Value::Array(arr) = value {
-                    for item in arr {
-                        match item {
-                            rmpv::Value::Boolean(v) => b.values().append_value(*v),
-                            _ => b.values().append_null(),
-                        }
-                    }
-                    b.append(true);
-                } else {
-                    b.append_null();
-                }
-            }
+            Self::ListInt64(b) => append_list_int64(b, value),
+            Self::ListFloat64(b) => append_list_float64(b, value),
+            Self::ListUtf8(b) => append_list_utf8(b, value),
+            Self::ListBool(b) => append_list_bool(b, value),
             Self::JsonFallback(b) => {
                 b.append_value(rmpv_to_json_string(value));
             }
@@ -290,7 +228,6 @@ impl ColumnBuilder {
 
     fn finish(self) -> ArrayRef {
         match self {
-            Self::Utf8(mut b) => Arc::new(b.finish()),
             Self::Int64(mut b) => Arc::new(b.finish()),
             Self::Float64(mut b) => Arc::new(b.finish()),
             Self::Boolean(mut b) => Arc::new(b.finish()),
@@ -300,15 +237,83 @@ impl ColumnBuilder {
             Self::ListFloat64(mut b) => Arc::new(b.finish()),
             Self::ListUtf8(mut b) => Arc::new(b.finish()),
             Self::ListBool(mut b) => Arc::new(b.finish()),
-            Self::JsonFallback(mut b) => Arc::new(b.finish()),
+            Self::Utf8(mut b) | Self::JsonFallback(mut b) => Arc::new(b.finish()),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// List append helpers (extracted to keep `append_value` under the line limit)
+// ---------------------------------------------------------------------------
+
+fn append_list_int64(b: &mut ListBuilder<Int64Builder>, value: &rmpv::Value) {
+    if let rmpv::Value::Array(arr) = value {
+        b.values().append_slice(
+            &arr.iter()
+                .map(|v| match v {
+                    rmpv::Value::Integer(i) => i.as_i64().unwrap_or(0),
+                    _ => 0,
+                })
+                .collect::<Vec<_>>(),
+        );
+        b.append(true);
+    } else {
+        b.append_null();
+    }
+}
+
+fn append_list_float64(b: &mut ListBuilder<Float64Builder>, value: &rmpv::Value) {
+    if let rmpv::Value::Array(arr) = value {
+        b.values().append_slice(
+            &arr.iter()
+                .map(|v| match v {
+                    rmpv::Value::F64(f) => *f,
+                    rmpv::Value::Integer(i) => i.as_f64().unwrap_or(0.0),
+                    _ => 0.0,
+                })
+                .collect::<Vec<_>>(),
+        );
+        b.append(true);
+    } else {
+        b.append_null();
+    }
+}
+
+fn append_list_utf8(b: &mut ListBuilder<StringBuilder>, value: &rmpv::Value) {
+    if let rmpv::Value::Array(arr) = value {
+        for item in arr {
+            match item {
+                rmpv::Value::String(s) => {
+                    b.values().append_value(s.as_str().unwrap_or(""));
+                }
+                _ => {
+                    b.values().append_value(rmpv_to_json_string(item));
+                }
+            }
+        }
+        b.append(true);
+    } else {
+        b.append_null();
+    }
+}
+
+fn append_list_bool(b: &mut ListBuilder<BooleanBuilder>, value: &rmpv::Value) {
+    if let rmpv::Value::Array(arr) = value {
+        for item in arr {
+            match item {
+                rmpv::Value::Boolean(v) => b.values().append_value(*v),
+                _ => b.values().append_null(),
+            }
+        }
+        b.append(true);
+    } else {
+        b.append_null();
     }
 }
 
 /// Converts an `rmpv::Value` to a JSON string for fallback serialization.
 fn rmpv_to_json_string(value: &rmpv::Value) -> String {
     match value {
-        rmpv::Value::Nil => "null".to_string(),
         rmpv::Value::Boolean(b) => b.to_string(),
         rmpv::Value::Integer(i) => {
             if let Some(v) = i.as_i64() {
@@ -322,7 +327,8 @@ fn rmpv_to_json_string(value: &rmpv::Value) -> String {
         rmpv::Value::F32(f) => f.to_string(),
         rmpv::Value::F64(f) => f.to_string(),
         rmpv::Value::String(s) => {
-            format!("\"{}\"", s.as_str().unwrap_or(""))
+            // Use serde_json to ensure proper escaping of special characters.
+            serde_json::to_string(s.as_str().unwrap_or("")).unwrap_or_default()
         }
         rmpv::Value::Binary(b) => {
             format!("{b:?}")
@@ -344,7 +350,7 @@ fn rmpv_to_json_string(value: &rmpv::Value) -> String {
                 .collect();
             format!("{{{}}}", items.join(","))
         }
-        rmpv::Value::Ext(_, _) => "null".to_string(),
+        rmpv::Value::Nil | rmpv::Value::Ext(_, _) => "null".to_string(),
     }
 }
 

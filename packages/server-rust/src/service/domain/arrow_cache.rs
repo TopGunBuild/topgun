@@ -42,7 +42,7 @@ pub struct CachedBatch {
 /// `RecordStore` and stores it with the new version.
 pub struct ArrowCacheManager {
     cache: DashMap<(String, u32), CachedBatch>,
-    /// Version counters per (map_name, partition_id). Incremented on invalidation.
+    /// Version counters per (`map_name`, `partition_id`). Incremented on invalidation.
     versions: DashMap<(String, u32), Arc<AtomicU64>>,
 }
 
@@ -70,6 +70,10 @@ impl ArrowCacheManager {
     /// Compares the cached entry's version against the current version counter.
     /// If they match, returns the cached batch. Otherwise, calls `build_fn()`
     /// to produce a fresh `RecordBatch`, stores it, and returns it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `build_fn` fails to build the `RecordBatch`.
     pub fn get_or_build<F>(
         &self,
         map_name: &str,
@@ -89,15 +93,23 @@ impl ArrowCacheManager {
             }
         }
 
-        // Slow path: build a new batch and cache it.
+        // Slow path: build a new batch.
         let batch = build_fn()?;
-        self.cache.insert(
-            key,
-            CachedBatch {
-                batch: batch.clone(),
-                version: current_ver,
-            },
-        );
+
+        // CAS: only cache the batch if the version has not changed since we
+        // read it above. A concurrent mutation may have incremented the version
+        // while build_fn was running; in that case, skip caching so the stale
+        // batch is not stored and the next caller will rebuild with fresh data.
+        let version_after_build = self.current_version(map_name, partition_id);
+        if version_after_build == current_ver {
+            self.cache.insert(
+                key,
+                CachedBatch {
+                    batch: batch.clone(),
+                    version: current_ver,
+                },
+            );
+        }
         Ok(batch)
     }
 
@@ -123,8 +135,7 @@ impl ArrowCacheManager {
         let key = (map_name.to_string(), partition_id);
         self.versions
             .get(&key)
-            .map(|v| v.load(Ordering::Acquire))
-            .unwrap_or(0)
+            .map_or(0, |v| v.load(Ordering::Acquire))
     }
 }
 
