@@ -61,7 +61,7 @@ fn arb_map() -> impl Strategy<Value = String> {
 
 /// Strategy for generating a short key name from a fixed alphabet.
 fn arb_key() -> impl Strategy<Value = String> {
-    "[a-z]{1,4}".prop_map(|s| s)
+    "[a-z]{1,4}"
 }
 
 /// Strategy for generating a single `Op`.
