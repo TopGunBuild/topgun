@@ -202,12 +202,27 @@ impl SimNode {
 
 /// Converts a `topgun_core::Value` into an `rmpv::Value` for wire-format ops.
 ///
-/// Uses `MsgPack` round-trip serialization because there is no direct
-/// `From<topgun_core::Value>` impl for `rmpv::Value`. This is acceptable for
-/// simulation code where throughput is not a concern.
+/// Direct structural conversion to avoid the round-trip through `rmp_serde`
+/// which would serialize the enum as a tagged map `{"String": "..."}` rather
+/// than a plain `rmpv::Value::String`. The symmetry with `rmpv_to_value` in
+/// `crdt.rs` ensures values survive a store → wire → store round-trip unchanged.
 fn value_to_rmpv(v: &topgun_core::Value) -> rmpv::Value {
-    let bytes = rmp_serde::to_vec(v).unwrap_or_default();
-    rmp_serde::from_slice::<rmpv::Value>(&bytes).unwrap_or(rmpv::Value::Nil)
+    match v {
+        topgun_core::Value::Null => rmpv::Value::Nil,
+        topgun_core::Value::Bool(b) => rmpv::Value::Boolean(*b),
+        topgun_core::Value::Int(n) => rmpv::Value::Integer((*n).into()),
+        topgun_core::Value::Float(f) => rmpv::Value::F64(*f),
+        topgun_core::Value::String(s) => rmpv::Value::String(s.as_str().into()),
+        topgun_core::Value::Bytes(b) => rmpv::Value::Binary(b.clone()),
+        topgun_core::Value::Array(arr) => rmpv::Value::Array(arr.iter().map(value_to_rmpv).collect()),
+        topgun_core::Value::Map(map) => {
+            let entries: Vec<(rmpv::Value, rmpv::Value)> = map
+                .iter()
+                .map(|(k, val)| (rmpv::Value::String(k.as_str().into()), value_to_rmpv(val)))
+                .collect();
+            rmpv::Value::Map(entries)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -540,30 +555,36 @@ impl SimCluster {
             return Ok(());
         }
 
-        // Partition 0 is the client-sync aggregate (dual-write pattern).
-        let src_store = src.record_store_factory.get_or_create(map, 0);
-        let dst_store = dst.record_store_factory.get_or_create(map, 0);
+        // Read all records across all partitions for this map on both src and dst.
+        // Data is distributed across partitions by key hash, so we must scan every
+        // partition rather than a single aggregate partition.
+        let src_stores = src.record_store_factory.get_all_for_map(map);
+        let dst_stores = dst.record_store_factory.get_all_for_map(map);
 
-        // Collect all records from source.
+        // Collect all records from source across all partitions.
         let mut src_records: Vec<(String, RecordValue)> = Vec::new();
-        src_store.for_each_boxed(
-            &mut |key, record| {
-                src_records.push((key.to_string(), record.value.clone()));
-            },
-            false,
-        );
+        for src_store in &src_stores {
+            src_store.for_each_boxed(
+                &mut |key, record| {
+                    src_records.push((key.to_string(), record.value.clone()));
+                },
+                false,
+            );
+        }
 
         // Collect destination timestamps for LWW records to detect stale entries.
         let mut dst_timestamps: std::collections::HashMap<String, Timestamp> =
             std::collections::HashMap::new();
-        dst_store.for_each_boxed(
-            &mut |key, record| {
-                if let RecordValue::Lww { timestamp, .. } = &record.value {
-                    dst_timestamps.insert(key.to_string(), timestamp.clone());
-                }
-            },
-            false,
-        );
+        for dst_store in &dst_stores {
+            dst_store.for_each_boxed(
+                &mut |key, record| {
+                    if let RecordValue::Lww { timestamp, .. } = &record.value {
+                        dst_timestamps.insert(key.to_string(), timestamp.clone());
+                    }
+                },
+                false,
+            );
+        }
 
         // Build ops for records missing or older on destination.
         let mut ops: Vec<ClientOp> = Vec::new();
@@ -572,9 +593,10 @@ impl SimCluster {
             let client_op = match &value {
                 RecordValue::Lww { value: v, timestamp } => {
                     // Skip if destination already has an equal or newer timestamp.
+                    // Full Timestamp ordering includes node_id as tiebreaker (millis → counter → node_id),
+                    // matching the LWW semantics used by LWWMap::merge().
                     if let Some(dst_ts) = dst_timestamps.get(&key) {
-                        if (dst_ts.millis, dst_ts.counter) >= (timestamp.millis, timestamp.counter)
-                        {
+                        if dst_ts >= timestamp {
                             continue;
                         }
                     }
