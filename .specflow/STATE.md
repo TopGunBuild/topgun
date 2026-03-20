@@ -1,14 +1,14 @@
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-132c2
+- **Status:** review
+- **Next Step:** /sf:review
 
 ## Queue
 
 | ID | Title | Status | Priority | Complexity |
 |----|-------|--------|----------|------------|
-| SPEC-132c2 | Simulation Test Scenarios: CRDT, Merkle, and Cluster Membership | draft | P2 | medium |
+| SPEC-132c2 | Simulation Test Scenarios: CRDT, Merkle, and Cluster Membership | review | P2 | medium |
 | SPEC-132d | Property-Based Simulation Testing with proptest | draft | P2 | small |
 
 ## Decisions
