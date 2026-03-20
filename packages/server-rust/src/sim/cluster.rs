@@ -11,7 +11,7 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use tower::Service;
 
-use topgun_core::messages::sync::ClientOpMessage;
+use topgun_core::messages::sync::{ClientOpMessage, OpBatchMessage, OpBatchPayload};
 use topgun_core::{ClientOp, HLC, LWWRecord, ORMapRecord, SystemClock, Timestamp};
 
 use crate::cluster::state::ClusterState;
@@ -194,6 +194,20 @@ impl SimNode {
     pub fn kill(&mut self) {
         self.alive = false;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Converts a `topgun_core::Value` into an `rmpv::Value` for wire-format ops.
+///
+/// Uses `MsgPack` round-trip serialization because there is no direct
+/// `From<topgun_core::Value>` impl for `rmpv::Value`. This is acceptable for
+/// simulation code where throughput is not a concern.
+fn value_to_rmpv(v: &topgun_core::Value) -> rmpv::Value {
+    let bytes = rmp_serde::to_vec(v).unwrap_or_default();
+    rmp_serde::from_slice::<rmpv::Value>(&bytes).unwrap_or(rmpv::Value::Nil)
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +406,242 @@ impl SimCluster {
         self.network.heal_partition();
     }
 
+    /// Propagates the current value of `(map, key)` from every alive node to
+    /// every other alive node via `SimTransport::deliver()`.
+    ///
+    /// For each alive node that has a value for the key, an `OpBatchMessage`
+    /// is constructed and delivered to all other alive nodes. Delivery respects
+    /// partition state — partitioned links are silently dropped by `SimTransport`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading from any alive node's store fails, or if
+    /// `deliver()` returns an error.
+    pub async fn sync_all(&self, map: &str, key: &str) -> anyhow::Result<()> {
+        let partition_id = topgun_core::hash_to_partition(key);
+
+        // Collect (node_id, ClientOp) for every alive node that has the key.
+        let mut entries: Vec<(String, ClientOp)> = Vec::new();
+
+        for node in &self.nodes {
+            if !node.is_alive() {
+                continue;
+            }
+
+            let store = node.record_store_factory.get_or_create(map, partition_id);
+            let record = store.get(key, false).await?;
+
+            if let Some(rec) = record {
+                let client_op = match rec.value {
+                    RecordValue::Lww { value, timestamp } => {
+                        let lww = LWWRecord {
+                            value: Some(value_to_rmpv(&value)),
+                            timestamp,
+                            ttl_ms: None,
+                        };
+                        ClientOp {
+                            id: Some(format!("{map}/{key}")),
+                            map_name: map.to_string(),
+                            key: key.to_string(),
+                            op_type: None,
+                            record: Some(Some(lww)),
+                            or_record: None,
+                            or_tag: None,
+                            write_concern: None,
+                            timeout: None,
+                        }
+                    }
+                    RecordValue::OrMap { records } => {
+                        // Deliver each OR-Map entry as a separate op.
+                        // Use the first entry's tag as representative for simplicity;
+                        // full OR-Map convergence goes through or_write/merkle_sync_pair.
+                        if records.is_empty() {
+                            continue;
+                        }
+                        let entry = &records[0];
+                        let or_rec = ORMapRecord {
+                            value: value_to_rmpv(&entry.value),
+                            timestamp: entry.timestamp.clone(),
+                            tag: entry.tag.clone(),
+                            ttl_ms: None,
+                        };
+                        ClientOp {
+                            id: Some(format!("{map}/{key}/{}", entry.tag)),
+                            map_name: map.to_string(),
+                            key: key.to_string(),
+                            op_type: None,
+                            record: None,
+                            or_record: Some(Some(or_rec)),
+                            or_tag: Some(Some(entry.tag.clone())),
+                            write_concern: None,
+                            timeout: None,
+                        }
+                    }
+                    RecordValue::OrTombstones { .. } => continue,
+                };
+                entries.push((node.node_id.clone(), client_op));
+            }
+        }
+
+        // For each source node that has data, deliver to every other alive node.
+        for (from_node_id, client_op) in entries {
+            let batch = OpBatchMessage {
+                payload: OpBatchPayload {
+                    ops: vec![client_op],
+                    write_concern: None,
+                    timeout: None,
+                },
+            };
+            self.transport.deliver(&from_node_id, batch).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Performs a record-level Merkle delta sync from node `src_idx` to node `dst_idx`
+    /// for the given map.
+    ///
+    /// Uses partition 0 as the aggregate (per the dual-write pattern established by
+    /// the Merkle partition-mismatch fix): reads all keys from the source node's
+    /// partition-0 store and sends any that are absent or have an older timestamp on
+    /// the destination as an `OpBatchMessage`.
+    ///
+    /// Partition state is respected: if the src–dst link is partitioned the batch
+    /// is silently dropped by `SimTransport::deliver()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either node index is out of range, if either node is
+    /// dead, or if reading from any store fails.
+    pub async fn merkle_sync_pair(
+        &self,
+        src_idx: usize,
+        dst_idx: usize,
+        map: &str,
+    ) -> anyhow::Result<()> {
+        let src = self.nodes.get(src_idx)
+            .ok_or_else(|| anyhow::anyhow!("src node index {src_idx} out of range"))?;
+        let dst = self.nodes.get(dst_idx)
+            .ok_or_else(|| anyhow::anyhow!("dst node index {dst_idx} out of range"))?;
+
+        if !src.is_alive() {
+            return Err(anyhow::anyhow!("src node {src_idx} is dead"));
+        }
+        if !dst.is_alive() {
+            return Err(anyhow::anyhow!("dst node {dst_idx} is dead"));
+        }
+
+        let src_node_id = src.node_id.clone();
+        let dst_node_id = dst.node_id.clone();
+
+        // Partition 0 is the client-sync aggregate (dual-write pattern).
+        let src_store = src.record_store_factory.get_or_create(map, 0);
+        let dst_store = dst.record_store_factory.get_or_create(map, 0);
+
+        // Collect all records from source.
+        let mut src_records: Vec<(String, RecordValue)> = Vec::new();
+        src_store.for_each_boxed(
+            &mut |key, record| {
+                src_records.push((key.to_string(), record.value.clone()));
+            },
+            false,
+        );
+
+        // Collect destination timestamps for LWW records to detect stale entries.
+        let mut dst_timestamps: std::collections::HashMap<String, Timestamp> =
+            std::collections::HashMap::new();
+        dst_store.for_each_boxed(
+            &mut |key, record| {
+                if let RecordValue::Lww { timestamp, .. } = &record.value {
+                    dst_timestamps.insert(key.to_string(), timestamp.clone());
+                }
+            },
+            false,
+        );
+
+        // Build ops for records missing or older on destination.
+        let mut ops: Vec<ClientOp> = Vec::new();
+
+        for (key, value) in src_records {
+            let client_op = match &value {
+                RecordValue::Lww { value: v, timestamp } => {
+                    // Skip if destination already has an equal or newer timestamp.
+                    if let Some(dst_ts) = dst_timestamps.get(&key) {
+                        if (dst_ts.millis, dst_ts.counter) >= (timestamp.millis, timestamp.counter)
+                        {
+                            continue;
+                        }
+                    }
+                    ClientOp {
+                        id: Some(format!("{map}/{key}")),
+                        map_name: map.to_string(),
+                        key: key.clone(),
+                        op_type: None,
+                        record: Some(Some(LWWRecord {
+                            value: Some(value_to_rmpv(v)),
+                            timestamp: timestamp.clone(),
+                            ttl_ms: None,
+                        })),
+                        or_record: None,
+                        or_tag: None,
+                        write_concern: None,
+                        timeout: None,
+                    }
+                }
+                RecordValue::OrMap { records } => {
+                    // Transfer all OR-Map entries; destination merges via CRDT semantics.
+                    for entry in records {
+                        let op = ClientOp {
+                            id: Some(format!("{map}/{key}/{}", entry.tag)),
+                            map_name: map.to_string(),
+                            key: key.clone(),
+                            op_type: None,
+                            record: None,
+                            or_record: Some(Some(ORMapRecord {
+                                value: value_to_rmpv(&entry.value),
+                                timestamp: entry.timestamp.clone(),
+                                tag: entry.tag.clone(),
+                                ttl_ms: None,
+                            })),
+                            or_tag: Some(Some(entry.tag.clone())),
+                            write_concern: None,
+                            timeout: None,
+                        };
+                        ops.push(op);
+                    }
+                    continue;
+                }
+                RecordValue::OrTombstones { .. } => continue,
+            };
+            ops.push(client_op);
+        }
+
+        if ops.is_empty() {
+            return Ok(());
+        }
+
+        let batch = OpBatchMessage {
+            payload: OpBatchPayload {
+                ops,
+                write_concern: None,
+                timeout: None,
+            },
+        };
+
+        // deliver() will drop the batch silently if src–dst is partitioned.
+        // We target only dst by unregistering others temporarily is not feasible;
+        // instead, use a single-target delivery path by calling the dst service directly
+        // if partitioned, otherwise via transport (which may multicast). Since transport
+        // delivers to all peers except sender and respects partitions, and the batch
+        // already contains only delta records, we just call deliver() which will
+        // propagate to dst (and any other non-partitioned alive peer -- acceptable
+        // for Merkle delta sync semantics, which is idempotent).
+        self.transport.deliver(&src_node_id, batch).await?;
+
+        let _ = dst_node_id; // acknowledged -- delivery targets all peers via transport
+        Ok(())
+    }
+
     /// Adds a new node to a running cluster and registers it with the transport.
     ///
     /// The new node gets a `node_id` of `"sim-node-N"` where `N` is the current
@@ -522,6 +772,6 @@ impl SimCluster {
             }
         }
 
-        Ok(first.map(|(_, v)| v).unwrap_or(None))
+        Ok(first.and_then(|(_, v)| v))
     }
 }
