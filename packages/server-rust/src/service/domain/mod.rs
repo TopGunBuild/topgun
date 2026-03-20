@@ -34,6 +34,10 @@ pub use schema::SchemaService;
 pub mod arrow_cache;
 #[cfg(feature = "datafusion")]
 pub mod arrow_convert;
+#[cfg(feature = "datafusion")]
+pub mod table_provider;
+#[cfg(feature = "datafusion")]
+pub mod datafusion_backend;
 
 pub mod search;
 pub use search::SearchService;

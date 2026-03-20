@@ -47,6 +47,16 @@ pub struct RecordStoreFactory {
     store_cache: DashMap<(String, u32), Arc<dyn RecordStore>>,
 }
 
+impl std::fmt::Debug for RecordStoreFactory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecordStoreFactory")
+            .field("cached_stores", &self.store_cache.len())
+            .field("observer_count", &self.observers.len())
+            .field("factory_count", &self.observer_factories.len())
+            .finish()
+    }
+}
+
 impl RecordStoreFactory {
     /// Creates a new factory with the given configuration.
     ///

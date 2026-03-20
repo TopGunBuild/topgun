@@ -6,6 +6,7 @@
 //!
 //! All types in this module are feature-gated behind `#[cfg(feature = "datafusion")]`.
 
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -43,6 +44,15 @@ pub struct ArrowCacheManager {
     cache: DashMap<(String, u32), CachedBatch>,
     /// Version counters per (map_name, partition_id). Incremented on invalidation.
     versions: DashMap<(String, u32), Arc<AtomicU64>>,
+}
+
+impl fmt::Debug for ArrowCacheManager {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ArrowCacheManager")
+            .field("cache_entries", &self.cache.len())
+            .field("version_entries", &self.versions.len())
+            .finish()
+    }
 }
 
 impl ArrowCacheManager {
