@@ -27,18 +27,24 @@ use crate::service::operation::{service_names, Operation, OperationContext};
 /// an op-batch, it calls [`SimTransport::deliver()`], which forwards the
 /// batch to all other registered nodes via the Tower `Service<Operation>`
 /// interface on `Arc<CrdtService>`.
+///
+/// Delivery is filtered by the shared `SimNetwork` partition state: if the
+/// source–target pair is partitioned, the message is silently dropped.
 #[derive(Clone)]
 pub struct SimTransport {
     /// Shared registry of all nodes' `CrdtService` handles in this cluster.
     peers: Arc<RwLock<HashMap<String, Arc<CrdtService>>>>,
+    /// Shared network fault-injection layer consulted before each delivery.
+    network: Arc<SimNetwork>,
 }
 
 impl SimTransport {
-    /// Creates an empty transport with no registered peers.
+    /// Creates an empty transport backed by the given network fault layer.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(network: Arc<SimNetwork>) -> Self {
         Self {
             peers: Arc::new(RwLock::new(HashMap::new())),
+            network,
         }
     }
 
@@ -58,8 +64,8 @@ impl SimTransport {
     /// `handle_op_batch` skips client auth/validation (same pattern used
     /// for internal/system calls).
     ///
-    /// Note: This method does NOT consult `SimNetwork` fault injection state.
-    /// A future spec will wire fault injection into delivery.
+    /// Peers that are partitioned from `from_node` (per `SimNetwork`) are
+    /// silently skipped — the message is dropped for that link only.
     ///
     /// # Errors
     ///
@@ -76,7 +82,12 @@ impl SimTransport {
                 .collect()
         };
 
-        for (_target_id, svc) in targets {
+        for (target_id, svc) in targets {
+            // Respect partition state: drop message silently for partitioned links.
+            if self.network.is_partitioned(from_node, &target_id) {
+                continue;
+            }
+
             let ts = Timestamp {
                 millis: 0,
                 counter: 0,
@@ -89,17 +100,11 @@ impl SimTransport {
                 payload: batch.clone(),
             };
             let mut svc_clone = svc;
-            // Ignore errors from individual peers (they may be partitioned/down).
+            // Ignore errors from individual peers (they may be down).
             let _ = Service::call(&mut svc_clone, op).await;
         }
 
         Ok(())
-    }
-}
-
-impl Default for SimTransport {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

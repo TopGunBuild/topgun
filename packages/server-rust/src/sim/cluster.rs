@@ -208,8 +208,8 @@ impl SimNode {
 pub struct SimCluster {
     /// All nodes in the cluster (some may be dead).
     pub nodes: Vec<SimNode>,
-    /// Network fault injection layer.
-    pub network: SimNetwork,
+    /// Network fault injection layer (shared with transport for partition checks).
+    pub network: Arc<SimNetwork>,
     /// Shared transport for inter-node message delivery.
     transport: SimTransport,
     /// Number of nodes to create.
@@ -224,10 +224,11 @@ impl SimCluster {
     /// Creates a new `SimCluster` configuration. Call `start()` to build nodes.
     #[must_use]
     pub fn new(node_count: usize, seed: u64) -> Self {
+        let network = Arc::new(SimNetwork::new());
         Self {
             nodes: Vec::with_capacity(node_count),
-            network: SimNetwork::new(),
-            transport: SimTransport::new(),
+            transport: SimTransport::new(Arc::clone(&network)),
+            network,
             node_count,
             seed,
             started: false,
