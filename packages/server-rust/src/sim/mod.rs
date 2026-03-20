@@ -43,3 +43,6 @@ pub use madsim::time;
 /// this RNG from the test's seed value, so every test run with the same seed
 /// produces the same sequence of random numbers.
 pub use madsim::rand;
+
+pub mod cluster;
+pub mod network;
