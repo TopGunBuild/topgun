@@ -30,6 +30,9 @@ pub use persistence::PersistenceService;
 pub mod schema;
 pub use schema::SchemaService;
 
+#[cfg(feature = "datafusion")]
+pub mod arrow_cache;
+
 pub mod search;
 pub use search::SearchService;
 
