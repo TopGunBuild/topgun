@@ -18,6 +18,8 @@ pub use messaging::MessagingService;
 pub mod predicate;
 
 pub mod query;
+
+pub mod query_backend;
 pub use query::QueryService;
 
 pub mod counter;

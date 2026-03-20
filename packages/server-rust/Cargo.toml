@@ -12,6 +12,7 @@ workspace = true
 default = []
 postgres = ["dep:sqlx"]
 simulation = ["dep:madsim"]
+datafusion = ["dep:datafusion", "dep:arrow"]
 
 [dependencies]
 topgun-core = { path = "../core-rust", features = ["arrow"] }
@@ -41,6 +42,8 @@ http = "1"
 rand = "0.9"
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres"], optional = true }
 madsim = { workspace = true, optional = true }
+datafusion = { version = "45", optional = true }
+arrow = { version = "55", optional = true }
 tantivy = "0.22"
 jsonwebtoken = "9"
 subtle = "2"
