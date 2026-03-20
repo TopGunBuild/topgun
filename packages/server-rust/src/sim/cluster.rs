@@ -12,7 +12,7 @@ use parking_lot::Mutex;
 use tower::Service;
 
 use topgun_core::messages::sync::ClientOpMessage;
-use topgun_core::{ClientOp, HLC, LWWRecord, SystemClock, Timestamp};
+use topgun_core::{ClientOp, HLC, LWWRecord, ORMapRecord, SystemClock, Timestamp};
 
 use crate::cluster::state::ClusterState;
 use crate::cluster::types::ClusterConfig;
@@ -390,5 +390,138 @@ impl SimCluster {
     /// Heals all network partitions.
     pub fn heal_partition(&self) {
         self.network.heal_partition();
+    }
+
+    /// Adds a new node to a running cluster and registers it with the transport.
+    ///
+    /// The new node gets a `node_id` of `"sim-node-N"` where `N` is the current
+    /// length of `self.nodes`. This is the correct ID format for late-joiner tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `SimNode::build()` fails.
+    pub fn add_node(&mut self) -> anyhow::Result<usize> {
+        let node_id = format!("sim-node-{}", self.nodes.len());
+        let node = SimNode::build(&node_id, self.seed, self.transport.clone())?;
+        self.transport.register(&node_id, Arc::clone(&node.crdt_service));
+        self.nodes.push(node);
+        Ok(self.nodes.len() - 1)
+    }
+
+    /// Writes an OR-Map entry to a specific node.
+    ///
+    /// Uses the same path as `write()` but constructs a `ClientOp` with
+    /// `or_record: Some(Some(...))` and `or_tag: Some(Some(tag))`, enabling
+    /// OR-Map concurrent-add semantics (each entry is uniquely tagged).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the node index is out of range, the node is dead,
+    /// or the CRDT service rejects the operation.
+    pub async fn or_write(
+        &self,
+        node_idx: usize,
+        map: &str,
+        key: &str,
+        tag: impl Into<String>,
+        value: rmpv::Value,
+    ) -> anyhow::Result<()> {
+        let tag = tag.into();
+        let node = self.nodes.get(node_idx)
+            .ok_or_else(|| anyhow::anyhow!("node index {node_idx} out of range"))?;
+
+        if !node.is_alive() {
+            return Err(anyhow::anyhow!("node {node_idx} is dead"));
+        }
+
+        let partition_id = topgun_core::hash_to_partition(key);
+        let ts = Timestamp {
+            millis: 0,
+            counter: 0,
+            node_id: node.node_id.clone(),
+        };
+        let mut ctx = OperationContext::new(0, service_names::CRDT, ts.clone(), 5000);
+        ctx.partition_id = Some(partition_id);
+        ctx.caller_origin = CallerOrigin::System;
+
+        let or_record = ORMapRecord {
+            value,
+            timestamp: ts,
+            tag: tag.clone(),
+            ttl_ms: None,
+        };
+
+        let client_op = ClientOp {
+            id: Some(format!("{map}/{key}/{tag}")),
+            map_name: map.to_string(),
+            key: key.to_string(),
+            op_type: None,
+            record: None,
+            or_record: Some(Some(or_record)),
+            or_tag: Some(Some(tag)),
+            write_concern: None,
+            timeout: None,
+        };
+
+        let op = Operation::ClientOp {
+            ctx,
+            payload: ClientOpMessage { payload: client_op },
+        };
+
+        let mut svc = Arc::clone(&node.crdt_service);
+        Service::call(&mut svc, op).await?;
+
+        Ok(())
+    }
+
+    /// Asserts that all alive nodes hold the same value for `(map, key)`.
+    ///
+    /// Collects the stored `RecordValue` from every alive node and panics with
+    /// a descriptive message if any two nodes disagree. Returns the agreed-upon
+    /// value, or `None` if all alive nodes agree the key is absent.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any two alive nodes hold different values for the same key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading from any alive node's store fails.
+    pub async fn assert_converged(
+        &self,
+        map: &str,
+        key: &str,
+    ) -> anyhow::Result<Option<RecordValue>> {
+        let mut first: Option<(usize, Option<RecordValue>)> = None;
+
+        for (idx, node) in self.nodes.iter().enumerate() {
+            if !node.is_alive() {
+                continue;
+            }
+
+            let partition_id = topgun_core::hash_to_partition(key);
+            let store = node.record_store_factory.get_or_create(map, partition_id);
+            let record = store.get(key, false).await?;
+            let value = record.map(|r| r.value);
+
+            match &first {
+                None => {
+                    first = Some((idx, value));
+                }
+                Some((first_idx, first_value)) => {
+                    // Compare serialized forms because RecordValue does not implement PartialEq.
+                    let lhs = rmp_serde::to_vec_named(first_value).unwrap_or_default();
+                    let rhs = rmp_serde::to_vec_named(&value).unwrap_or_default();
+                    assert_eq!(
+                        lhs,
+                        rhs,
+                        "convergence failure for map={map:?} key={key:?}: \
+                         node {first_idx} and node {idx} hold different values",
+                    );
+                }
+            }
+        }
+
+        Ok(first.map(|(_, v)| v).unwrap_or(None))
     }
 }
