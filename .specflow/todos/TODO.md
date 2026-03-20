@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-19 — SPEC-130 completed (TODO-069 all 4 slices done)
+**Last updated:** 2026-03-19 — cleaned up completed waves, fixed dependency inconsistencies, moved TODO-027 to wave 6c
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -58,7 +58,7 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Complexity:** Medium
 - **Summary:** Trait-based connector system: `ConnectorSource`, `ConnectorSink`, `Codec` traits. Connector registry. Initial connectors: Kafka source/sink, S3 sink, PostgreSQL CDC source.
 - **Ref:** Arroyo connector traits, ArkFlow Input/Output/Codec, RisingWave (`/Users/koristuvac/Projects/rust/risingwave/src/connector/`)
-- **Depends on:** TODO-025
+- **Depends on:** TODO-025 (DAG integration only; connector traits are independent)
 - **Effort:** 2 weeks
 
 ### TODO-033: AsyncStorageWrapper (Write-Behind)
@@ -195,15 +195,14 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 
 ### Milestone 2 — v2.0 (Data Platform)
 
+**Completed waves:** 6a (SPEC-126 Tantivy), 6a¹ (SPEC-131 search fix), 6b (SPEC-127 schema types), 6b² (SPEC-128 write-path, SPEC-129 TS codegen, SPEC-130 Arrow derivation).
+
 | Wave | Items | Blocked by | Rationale |
 |------|-------|------------|-----------|
-| **6a** | SPEC-126 (Tantivy optimization) · TODO-027 (DST) | — | Tantivy eats 60-80% CPU; DST = test infra for complex features |
-| **6b** | SPEC-127 (Schema types + validation + SchemaService) | — | Data model foundation: FieldType, FieldConstraint, validate_value, SchemaService |
-| **6b²** | TODO-128 (Write-path wiring) · SPEC-129 (TS codegen) · TODO-130 (Arrow derivation) | SPEC-127 | All three parallel after types exist: enforcement, DX toolchain, DataFusion bridge |
-| **6c** | TODO-091 (DataFusion SQL) · TODO-070 (Shapes) · TODO-033 (Write-Behind) | 130 · 128 · — | SQL needs Arrow schemas (130); Shapes needs validation in write path (128); Write-Behind independent |
-| **6d** | TODO-025 (DAG Executor) · TODO-092 (Connectors) | 091 · — (traits) / 025 (DAG integration) | DAG needs SQL for pipeline definitions; Connector traits independent, DAG integration after |
-| **6e** | TODO-072 (WASM) · TODO-036 (Extensions) | 091 · — | WASM compiles SQL to browser; Extensions knows all extension points |
-| **6f** | TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt) · TODO-102 (Rust CLI) | — | Independent network/tooling, no blockers |
+| **6c** | TODO-091 (DataFusion SQL) · TODO-070 (Shapes) · TODO-033 (Write-Behind) · TODO-027 (DST) | 130 ✓ · 128 ✓ · — · — | SQL needs Arrow schemas (done); Shapes needs write-path wiring (done); Write-Behind and DST are independent |
+| **6d** | TODO-025 (DAG Executor) · TODO-092 (Connector traits) | 091 · — | DAG needs SQL for pipeline definitions; Connector traits independent, DAG integration after |
+| **6e** | TODO-072 (WASM) · TODO-036 (Extensions) | 091 · soft: 025+091+092 | WASM compiles SQL to browser; Extensions benefits from knowing all extension points first |
+| **6f** | TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt) · TODO-102 (Rust CLI) | — | Independent network/tooling, low priority (P3), no blockers |
 | **6g** | TODO-101 (DevTools) · TODO-093 v2.0 (Dashboard) | — · 025+091+092 | UI layer last: needs features to visualize |
 
 ### Milestone 3 — v3.0+ (Enterprise)
@@ -220,20 +219,19 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 ```
 MILESTONE 2: Data Platform (v2.0)
 
-  SPEC-126 (Tantivy optimization) ← 60-80% CPU, highest impact
-  TODO-027 (DST) ← foundational test infra
+  ✓ SPEC-126 (Tantivy optimization)
+  ✓ SPEC-131 (Search partition fix)
+  ✓ SPEC-127 → SPEC-128 (Write-path) → TODO-070 (Shapes)
+  ✓ SPEC-127 → SPEC-129 (TS codegen)
+  ✓ SPEC-127 → SPEC-130 (Arrow)     → TODO-091 (DataFusion SQL) → TODO-025 (DAG Stream Processing)
+                                              │                            │
+                                              └→ TODO-072 (WASM)          └→ TODO-092 (DAG integration)
 
-  SPEC-127 (Schema types + validation + SchemaService)
-       ├──→ TODO-128 (Write-path wiring) ──→ TODO-070 (Shapes)
-       ├──→ SPEC-129 (TS codegen)
-       └──→ TODO-130 (Arrow derivation) ──→ TODO-091 (DataFusion SQL) ──→ TODO-025 (DAG Stream Processing)
-                                                    │                              │
-                                                    └──→ TODO-072 (WASM)          └──→ TODO-092 (Connectors, DAG integration)
-
-  TODO-092 (Connector traits) ← independent of DAG
+  TODO-092 (Connector traits) ← independent of DAG, can start in 6d
   TODO-033 (Write-Behind) ← independent, unblocks v3.0 S3
-  TODO-036 (Extensions)
-  TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt) · TODO-102 (Rust CLI)
+  TODO-027 (DST) ← independent test infra, can start anytime
+  TODO-036 (Extensions) ← soft dep on 025+091+092 (needs extension points)
+  TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt) · TODO-102 (Rust CLI) ← P3, no blockers
   TODO-101 (Client DevTools) · TODO-093 v2.0 (Dashboard) ← depends on 025+091+092
 
 MILESTONE 3: Enterprise (v3.0+)

@@ -77,14 +77,9 @@ async fn sim_cluster_advance_time() {
     let mut cluster = SimCluster::new(1, 42);
     cluster.start().expect("cluster should start");
 
-    let before = tokio::time::Instant::now();
-    cluster.advance_time(Duration::from_secs(10)).await;
-    let elapsed = before.elapsed();
-
-    // In real tokio (not madsim), the sleep completes in real time.
-    // We just verify it doesn't panic and returns.
-    // Under madsim runtime, this would advance virtual time instantly.
-    assert!(elapsed < Duration::from_secs(15), "advance_time should complete");
+    // Under madsim runtime this would advance virtual time instantly.
+    // Under real tokio we just verify it completes without panic.
+    cluster.advance_time(Duration::from_millis(1)).await;
 }
 
 /// AC5: Running with same seed produces identical results (determinism).

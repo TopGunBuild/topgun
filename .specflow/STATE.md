@@ -8,7 +8,6 @@
 
 | ID | Title | Status | Priority | Complexity |
 |----|-------|--------|----------|------------|
-| SPEC-132b | SimCluster Harness with Fault Injection | draft | P2 | medium |
 | SPEC-132c | Simulation Test Scenarios: CRDT, Merkle, and Cluster Rebalancing | draft | P2 | medium |
 | SPEC-132d | Property-Based Simulation Testing with proptest | draft | P2 | small |
 
@@ -22,3 +21,4 @@
 - SPEC-131 fixed search lazy population to read all partitions by replacing get_or_create(map_name, 0) with get_all_for_map(map_name) in populate_index_from_store(). All 10 search integration tests pass (4 previously failing now fixed). 559 server tests passing, clippy-clean.
 - Split SPEC-132 (Deterministic Simulation Testing via madsim) into 4 parts: SPEC-132a (Cargo config/IO seams), SPEC-132b (SimCluster harness), SPEC-132c (test scenarios), SPEC-132d (proptest integration).
 - SPEC-132a added madsim 0.2.34 workspace dep, ci-sim profile (opt-level=1, debug-assertions=true), simulation feature flag on topgun-server with optional madsim dep, sim.rs I/O seam module (madsim::time + madsim::rand re-exports), and pnpm test:sim script. Option A chosen for tokio shim (conditional import alias, no global patch). 559 server tests passing, clippy-clean.
+- SPEC-132b converted sim.rs to sim/ directory module with cluster.rs and network.rs sub-modules. SimNode::build() wires all 7 domain services with NullDataStore+HashMapStorage. SimTransport routes ops between nodes via Tower Service<Operation> (connection_id: None). SimNetwork provides structural fault injection (partition/heal/delay/reorder). SimCluster orchestrates N nodes with write/read/advance_time convenience methods. 7 simulation smoke tests passing, 559 regular server tests unaffected, clippy-clean.
