@@ -39,6 +39,9 @@ pub mod table_provider;
 #[cfg(feature = "datafusion")]
 pub mod datafusion_backend;
 
+pub mod shape;
+pub mod shape_evaluator;
+
 pub mod search;
 pub use search::SearchService;
 
