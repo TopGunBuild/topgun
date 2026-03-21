@@ -100,7 +100,7 @@ mod integration_tests {
         // When datafusion is enabled, register ArrowCacheObserverFactory so that
         // record mutations invalidate the Arrow cache for SQL query freshness.
         #[cfg(feature = "datafusion")]
-        let arrow_cache_manager = {
+        let _arrow_cache_manager = {
             let mgr = Arc::new(
                 crate::service::domain::arrow_cache::ArrowCacheManager::new(),
             );
