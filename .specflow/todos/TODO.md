@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-20 — Added TODO-136–142 (v2.0 gaps), Milestone 4 GTM, language-adapted strategy
+**Last updated:** 2026-03-21 — Added TODO-160 (README rewrite), TODO-161 (social strategy); prev: TODO-159, audit 153/154/155, TODO-136–142, Milestone 4 GTM
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -42,7 +42,7 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Ref:** Arroyo (`arroyo-planner/builder.rs`), ArkFlow (SessionContext, MsgPack→Arrow codec)
 - **Depends on:** TODO-069 (Schema provides Arrow column types for TopGunTableProvider)
 - **Effort:** 2-3 weeks
-- **Status:** ~~SPEC-135~~ — needs `/sf:split` (large, 7 groups across 5 waves)
+- **Status:** ~~SPEC-135a~~ ✓ · ~~SPEC-135b~~ ✓ · ~~SPEC-135c~~ ✓ — **done** (DistributedPlanner deferred)
 
 ### TODO-025: DAG Executor for Stream Processing
 - **Priority:** P1 (Hazelcast Jet equivalent)
@@ -258,21 +258,137 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 ### TODO-153: Landing Page & Waitlist
 - **Priority:** P2 (pre-launch)
 - **Complexity:** Low
-- **Summary:** topgun.build landing page with clear value prop, feature comparison, pricing preview, email waitlist. Static site (Astro/Next) on Vercel.
+- **Summary:** topgun.build landing page with clear value prop, feature comparison, pricing preview, email waitlist.
 - **Effort:** 2-3 days
+- **Audit (2026-03-21):** Landing page already exists in `apps/docs-astro` (Astro 5 + React 19 + Tailwind 4). Hero section with interactive SyncLab demo, feature comparison matrix, architecture visualization — all production-ready. Remaining work:
+  - [ ] Add email waitlist form (currently no signup capture)
+  - [ ] Add pricing preview section (tiers from BUSINESS_STRATEGY.md)
+  - [ ] Add community links (Discord, Telegram, GitHub Discussions)
+  - [ ] Add "Customers/Use Cases" placeholder section
+  - [ ] Consider static fallback if demo.topgun.build is unavailable
 
 ### TODO-154: Documentation Site
 - **Priority:** P1 (adoption prerequisite)
 - **Complexity:** Medium
-- **Summary:** Comprehensive docs on topgun.build: getting started, API reference, guides (offline-first, real-time sync, SQL queries), deployment. Content written RU → LLM → EN.
+- **Summary:** Comprehensive docs on topgun.build. Content written RU → LLM → EN.
 - **Effort:** 2 weeks (ongoing)
+- **Audit (2026-03-21):** Site already exists (`apps/docs-astro`), score **8.5/10**. 48+ pages, 9 blog articles, full API reference, 24 guides, Quick Start — all accurate for v1.0/Rust server. Missing sections for launch:
+  - [ ] Troubleshooting Guide — common errors: CRDT merge edge cases, WebSocket issues, IDB persistence, server startup (P1, 1 day)
+  - [ ] 2-3 tutorial projects with full source: todo app, chat app, collaborative editor (P1, 3-5 days)
+  - [ ] FAQ page — "How does TopGun compare to X?", "Can I use with GraphQL?", "How much data?", "Free tier?" (P1, 0.5 day)
+  - [ ] Schema System guide — v2.0 feature already implemented, not documented (P1, 1 day)
+  - [ ] Changelog page linking to GitHub releases (P2, 2 hours)
+  - [ ] Community & Support page — Discord, Telegram, GitHub links (P2, 1 hour)
+  - [ ] Performance Benchmarks page — publish load harness results: 200K ops/sec, p99 latency (P2, 1 day)
+  - [ ] Video walkthrough or animated GIF tour of demo (P3)
 
 ### TODO-155: Show HN Launch
 - **Priority:** P1 (primary launch event)
 - **Complexity:** Low
 - **Summary:** "Show HN: TopGun — Open-source real-time data platform with offline-first CRDTs (Rust)". Prerequisites: working demo, clean README, quick start, Discord, docs, 1-2 blog posts. Prepare FAQ answers via LLM in advance.
-- **Depends on:** TODO-153, TODO-154, TODO-156
+- **Depends on:** TODO-153, TODO-154, TODO-156, TODO-159
 - **Effort:** 1 day (prep: 1 week)
+- **Launch checklist:**
+  - [ ] Demo at demo.topgun.build is stable and monitored
+  - [ ] README has clear value prop + quick start + badges
+  - [ ] At least 2 blog posts published (technical depth)
+  - [ ] Discord server with welcome message + FAQ channel
+  - [ ] Pre-written answers to expected HN questions (via LLM)
+  - [ ] Uptime monitoring on demo.topgun.build (avoid launch-day downtime)
+
+### TODO-159: Sync Lab Demo Improvements
+- **Priority:** P2 (Show HN differentiator)
+- **Complexity:** Medium
+- **Summary:** Enhance the interactive demo (`examples/sync-lab`) embedded on topgun.build landing page. Current state: Conflict Arena + Latency Race, score B+ for Show HN. Improvements to maximize impact.
+- **Depends on:** — (independent, can start anytime)
+- **Effort:** 3-5 days total
+- **Source:** `examples/sync-lab/`, embedded via `apps/docs-astro/src/components/SyncLabDemo.tsx`
+- **Quick wins (high impact, low effort):**
+  - [ ] Persistence demo — "Reload Page" button, show data survives browser reload (2-3 hours)
+  - [ ] Scale badge — "Add 1000 items" button, show sub-ms latency holds at scale (0.5 day)
+  - [ ] Error boundary — wrap ConflictArena/LatencyRace in React error boundary for graceful crashes (1 hour)
+  - [ ] Empty state onboarding — replace "No to-dos yet" with guided hint (1 hour)
+- **Medium effort (high impact):**
+  - [ ] Concurrent edits — 3+ virtual devices editing same field simultaneously, HLC resolves (1-2 days)
+  - [ ] Network latency slider — artificial 50ms/200ms/1000ms delay, show app stays responsive (0.5 day)
+  - [ ] ORMap tab — demonstrate concurrent adds without deletion races (collaborative tags) (1 day)
+- **Stretch (nice to have):**
+  - [ ] Merkle delta sync visualization — animated tree showing which keys synced (2-3 days)
+  - [ ] Partition awareness — show "271 partitions" stat, color-code which partition each item belongs to (1 day)
+  - [ ] Auto-show State/Network log on first visit with guiding tooltip (2 hours)
+
+### TODO-160: README Rewrite
+- **Priority:** P1 (first thing visitors see on GitHub)
+- **Complexity:** Low
+- **Summary:** Rewrite `README.md` based on best practices research (Hazelcast, SurrealDB, Quickwit, Arroyo, TiKV, RisingWave, Databend). Current README has broken links, "Alpha" label (v1.0 shipped), no badges, no numbers.
+- **Depends on:** TODO-156 (community channels must exist before linking them)
+- **Effort:** 0.5-1 day
+- **Timing:** Pre-launch, after community channels are live
+- **Research (2026-03-21):** Analyzed 7 popular OSS READMEs. Common pattern: Logo → Badges → Nav → Tagline → "What is X?" → Features → Quick Start → Architecture → Community → License.
+- **Structure:**
+  - [ ] Badges: CI status, License (Apache 2.0), npm version. Add Discord/Twitter only when channels are active
+  - [ ] Nav links: `Docs | Getting Started | Live Demo | Discord` (horizontal, linked)
+  - [ ] Tagline: one-liner value prop, NOT architecture jargon (e.g., "Zero-latency reads and writes, offline-first, real-time sync — browser to cluster")
+  - [ ] "What is TopGun?" — 3-5 sentences, problem-first (not implementation-first)
+  - [ ] "When to use TopGun" — explicit use-case bullets instead of naming competitors
+  - [ ] Key Features — grouped, with numbers where available (200K ops/sec, 540+ tests, sub-ms writes)
+  - [ ] Quick Start — keep current code examples (they're good), add `docker compose up` path
+  - [ ] Architecture diagram — ASCII or linked image: Client (CRDT+IDB) → WebSocket → Rust Server → PostgreSQL
+  - [ ] Packages table — keep as-is
+  - [ ] Community — Discord, GitHub Discussions, Telegram (RU). Add Twitter/X only when active
+  - [ ] License — Apache 2.0 one-liner
+- **Fix broken links:**
+  - [ ] Remove `tests/benchmark/README.md` link (file doesn't exist)
+  - [ ] Remove or move `specifications/` links to docs site (internal docs, not marketing)
+  - [ ] Remove "Alpha — API may change" (v1.0 released)
+- **What NOT to do:**
+  - Don't name competitors directly — state advantages only (user preference)
+  - Don't link empty social accounts (Twitter is clean, Discord not created yet)
+  - Don't add info that isn't verified — only factual, proven claims
+  - Don't over-detail Performance Testing section — move to CONTRIBUTING.md
+
+### TODO-161: Multi-Platform Marketing Strategy
+- **Priority:** P2 (pre-launch, but after community setup)
+- **Complexity:** Medium (ongoing)
+- **Summary:** Multi-platform presence strategy. All social accounts are clean (no posts). Plan: what to post, where, when, who to follow, how to build audience as non-native EN speaker. One blog post → cross-post to 3-5 platforms. Text-first approach minimizes language barrier.
+- **Depends on:** TODO-156 (community channels), TODO-160 (README ready for traffic)
+- **Effort:** 2 days strategy + 30-45 min/day ongoing
+- **Принцип:** Один контент → максимальное покрытие. Блог-пост → Twitter thread + Reddit post + Dev.to + Хабр + LinkedIn.
+- **Платформы по приоритету:**
+  - **P1 — Core (обязательно к launch):**
+    - [ ] **Twitter/X** — build-in-public, short posts + screenshots/GIFs/benchmarks. Follow 50-100: Rust leaders, local-first advocates, CRDT researchers, dev tools founders. Cadence: 3-5 posts/week
+    - [ ] **Reddit** — r/rust, r/programming, r/selfhosted, r/webdev. Share blog posts, answer questions. Не спамить — 1-2 поста/месяц + активные комментарии в чужих тредах
+    - [ ] **Hacker News** — Show HN (TODO-155) + comment on relevant threads about CRDTs, local-first, real-time sync. Organic presence before launch
+  - **P2 — Amplification (первые 2 месяца после launch):**
+    - [ ] **Dev.to / Hashnode** — кросс-постинг блога с topgun.build. Бесплатный reach, SEO backlinks. Zero extra effort
+    - [ ] **LinkedIn** — professional posts for B2B visibility. Repost blog articles with 2-3 sentence summary. Enterprise segment найдёт здесь
+    - [ ] **Хабр** — технические статьи на русском (родной язык, нулевой барьер). RU-аудитория для валидации и первых пользователей
+    - [ ] **Telegram** — канал на русском (в TODO-156). Кросс-пост из Хабра + progress updates
+  - **P3 — Growth (после $1K MRR):**
+    - [ ] **YouTube** — записанные видео-туториалы и deep-dives. Можно перезаписывать. 1-2 видео/месяц
+    - [ ] **Lobste.rs** — invite-only HN-альтернатива, Rust-дружелюбная. Попросить invite у Rust community
+    - [ ] **Rust-specific:** This Week in Rust (newsletter submissions), Rust subreddit, Rust Discord #showcase
+- **Контент-микс (Twitter/X):**
+  - 40% build-in-public progress (screenshots, metrics, "today I shipped X")
+  - 30% technical insights (CRDT tricks, Rust patterns, benchmark results)
+  - 20% community engagement (reply, retweet, quote-tweet relevant content)
+  - 10% product announcements (releases, blog posts, demo updates)
+- **Формат для non-native speaker:**
+  - Twitter: 1-2 предложения + визуал (screenshot, GIF, benchmark chart). LLM-редактура
+  - Reddit: longer text через LLM, substantive technical content
+  - Dev.to/Хабр: полные блог-посты (RU → LLM → EN для Dev.to, оригинал RU для Хабра)
+  - LinkedIn: 2-3 sentences + link. Professional tone через LLM
+  - YouTube: подготовленный скрипт, можно перезаписать до идеала
+- **Последовательность запуска:**
+  - [ ] Week 1: Twitter (follow, first 5 posts) + Reddit (lurk, comment)
+  - [ ] Week 2-3: First blog post → cross-post Dev.to + Хабр + Twitter thread + LinkedIn
+  - [ ] Week 4: Show HN (TODO-155) → все каналы одновременно amplify
+  - [ ] Month 2+: YouTube first video, Lobste.rs invite, consistent cadence
+- **What NOT to do:**
+  - Don't post until README and docs are launch-ready (visitors will click through)
+  - Don't create accounts you can't maintain (better 3 active than 7 dead)
+  - Don't self-promote on Reddit without contributing value first (comment history matters)
+  - Don't buy followers or engagement — dev community detects this instantly
 
 ### TODO-156: Community Setup
 - **Priority:** P2 (retention)
@@ -326,11 +442,12 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 
 | Wave | Items | Blocked by | Timing |
 |------|-------|------------|--------|
-| **8a** (pre-launch) | TODO-156 (Community) · TODO-153 (Landing page) · TODO-157 (Content) | — | Start during wave 6d-6e |
+| **8a** (pre-launch) | TODO-156 (Community) · TODO-153 (Landing page) · TODO-157 (Content) · TODO-159 (Demo improvements) | — | Start during wave 6d-6e |
+| **8a²** (pre-launch) | TODO-160 (README rewrite) · TODO-161 (Social strategy) | 156 | After community channels live |
 | **8b** (pre-launch) | TODO-150 (Company reg) · TODO-154 (Docs) | — | Start 4-6 weeks before cloud launch |
 | **8c** (launch) | TODO-151 (Paddle) · TODO-152 (Cloud) | 150 · 136+141 | After v2.0 feature-complete |
-| **8d** (launch) | TODO-155 (Show HN) | 153+154+156 | 1-2 weeks after cloud beta |
-| **8e** (post-launch) | TODO-158 (Premium license) | Revenue validation | After first paying customers |
+| **8d** (launch) | TODO-155 (Show HN) | 153+154+156+159+160 | 1-2 weeks after cloud beta |
+| **8e** (post-launch) | TODO-158 (Premium license) · TODO-161 execution | Revenue validation | After first paying customers |
 
 ## Dependency Graph
 
@@ -371,10 +488,12 @@ MILESTONE 3: Enterprise (v3.0+)
 
 MILESTONE 4: GTM (parallel with late v2.0)
 
-  TODO-156 (Community) ──┐
-  TODO-153 (Landing)  ───┤
-  TODO-157 (Content)  ───┼→ TODO-155 (Show HN)
-  TODO-154 (Docs)     ───┘
+  TODO-156 (Community) ──→ TODO-160 (README) ──┐
+  TODO-153 (Landing)  ────────────────────────┤
+  TODO-157 (Content)  ────────────────────────┼→ TODO-155 (Show HN)
+  TODO-154 (Docs)     ────────────────────────┤
+  TODO-159 (Demo)     ────────────────────────┘
+  TODO-156 (Community) ──→ TODO-161 (Social strategy) ← execution after Show HN
   TODO-150 (Company) → TODO-151 (Paddle) → TODO-152 (Cloud) ← also needs 136+141
   TODO-158 (Premium license) ← after revenue validation
 ```
