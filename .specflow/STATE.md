@@ -8,7 +8,6 @@
 
 | ID | Title | Status | Priority | Complexity |
 |----|-------|--------|----------|------------|
-| SPEC-135b | DataFusion SQL: Engine Implementation | draft | P1 | medium |
 | SPEC-135c | DataFusion SQL: QueryService Integration | draft | P1 | small |
 
 ## Decisions
@@ -24,3 +23,4 @@
 - SPEC-134 added load harness commands to Common Commands and Performance Testing section to CLAUDE.md, covering architecture, modes, CLI flags, baseline assertions, CI perf-gate, flamegraph reference, and When to Run the Load Harness guideline.
 - Split SPEC-135 (DataFusion SQL Query Engine) into 3 parts: SPEC-135a (traits, types, wire messages, Cargo feature flag), SPEC-135b (DataFusion engine: ArrowCache, Arrow conversion, TableProvider, DataFusionBackend), SPEC-135c (QueryService integration, SQL_QUERY operation, observer factory wiring). DistributedPlanner (R7) deferred entirely per audit recommendation. QueryBackend split into base trait (always available) and SqlQueryBackend (feature-gated) per audit issue 4.
 - SPEC-135a established QueryBackend/SqlQueryBackend trait boundary, PredicateBackend default impl, SqlQuery/SqlQueryResp wire messages, and `datafusion` Cargo feature flag. Patterns: feature-gated trait extension (base trait always available + extended trait behind cfg), inline error via `error: Option<String>` on response payloads.
+- SPEC-135b implemented DataFusion engine: ArrowCacheManager (lazy per-partition cache with version-based invalidation), ArrowCacheObserver/Factory (MutationObserver for cache invalidation), build_record_batch (MsgPack-to-Arrow conversion for all value types), TopGunTableProvider/TopGunExec (DataFusion TableProvider with projection pushdown), DataFusionBackend (implements QueryBackend + SqlQueryBackend). Arrow/arrow-schema aligned to v54 for DataFusion 45 compatibility. 602 tests pass (32 new), clippy-clean.
