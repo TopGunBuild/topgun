@@ -239,17 +239,35 @@ fn build_services() -> (
     let merkle_observer_factory: Arc<dyn ObserverFactory> =
         Arc::new(MerkleObserverFactory::new(Arc::clone(&merkle_manager)));
 
+    #[allow(unused_mut)]
+    let mut observer_factories: Vec<Arc<dyn ObserverFactory>> = vec![
+        search_observer_factory,
+        query_observer_factory,
+        merkle_observer_factory,
+    ];
+
+    // When datafusion is enabled, register ArrowCacheObserverFactory so that
+    // record mutations invalidate the Arrow cache for SQL query freshness.
+    #[cfg(feature = "datafusion")]
+    let _arrow_cache_manager = {
+        let mgr = Arc::new(
+            topgun_server::service::domain::arrow_cache::ArrowCacheManager::new(),
+        );
+        observer_factories.push(Arc::new(
+            topgun_server::service::domain::arrow_cache::ArrowCacheObserverFactory::new(
+                Arc::clone(&mgr),
+            ),
+        ));
+        mgr
+    };
+
     let record_store_factory = Arc::new(
         RecordStoreFactory::new(
             StorageConfig::default(),
             Arc::new(NullDataStore),
             Vec::new(),
         )
-        .with_observer_factories(vec![
-            search_observer_factory,
-            query_observer_factory,
-            merkle_observer_factory,
-        ]),
+        .with_observer_factories(observer_factories),
     );
 
     let write_validator = {

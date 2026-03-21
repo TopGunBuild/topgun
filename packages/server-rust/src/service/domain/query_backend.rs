@@ -5,6 +5,8 @@
 //! `DataFusion`. The default `PredicateBackend` delegates to the existing
 //! predicate engine.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use topgun_core::messages::{Query, QueryResultEntry};
 
@@ -121,6 +123,36 @@ impl QueryBackend for PredicateBackend {
     async fn deregister_map(&self, _map_name: &str) -> Result<(), QueryBackendError> {
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Convenience factory functions
+// ---------------------------------------------------------------------------
+
+/// Creates a default `PredicateBackend` wrapped in `Arc`.
+///
+/// Convenience for server assembly call sites that need to pass a
+/// `QueryBackend` without SQL support.
+#[must_use]
+pub fn create_default_backend() -> Arc<PredicateBackend> {
+    Arc::new(PredicateBackend)
+}
+
+/// Creates a `DataFusionBackend` with the given dependencies.
+///
+/// Convenience for server assembly when the `datafusion` feature is enabled.
+#[cfg(feature = "datafusion")]
+#[must_use]
+pub fn create_datafusion_backend(
+    record_store_factory: Arc<crate::storage::RecordStoreFactory>,
+    schema_provider: Arc<dyn crate::traits::SchemaProvider>,
+    cache_manager: Arc<crate::service::domain::arrow_cache::ArrowCacheManager>,
+) -> Arc<crate::service::domain::datafusion_backend::DataFusionBackend> {
+    Arc::new(crate::service::domain::datafusion_backend::DataFusionBackend::new(
+        record_store_factory,
+        schema_provider,
+        cache_manager,
+    ))
 }
 
 // ---------------------------------------------------------------------------

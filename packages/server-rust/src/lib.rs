@@ -93,13 +93,32 @@ mod integration_tests {
         let merkle_observer_factory: Arc<dyn ObserverFactory> =
             Arc::new(MerkleObserverFactory::new(Arc::clone(&merkle_manager)));
 
+        #[allow(unused_mut)]
+        let mut observer_factories: Vec<Arc<dyn ObserverFactory>> =
+            vec![merkle_observer_factory];
+
+        // When datafusion is enabled, register ArrowCacheObserverFactory so that
+        // record mutations invalidate the Arrow cache for SQL query freshness.
+        #[cfg(feature = "datafusion")]
+        let arrow_cache_manager = {
+            let mgr = Arc::new(
+                crate::service::domain::arrow_cache::ArrowCacheManager::new(),
+            );
+            observer_factories.push(Arc::new(
+                crate::service::domain::arrow_cache::ArrowCacheObserverFactory::new(
+                    Arc::clone(&mgr),
+                ),
+            ));
+            mgr
+        };
+
         let record_store_factory = Arc::new(
             RecordStoreFactory::new(
                 StorageConfig::default(),
                 Arc::new(NullDataStore),
                 Vec::new(),
             )
-            .with_observer_factories(vec![merkle_observer_factory]),
+            .with_observer_factories(observer_factories),
         );
 
         let query_registry = Arc::new(QueryRegistry::new());

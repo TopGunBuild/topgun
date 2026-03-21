@@ -551,8 +551,8 @@ impl QueryService {
     /// Handles a `SqlQuery` operation.
     ///
     /// When the `datafusion` feature is enabled and a `SqlQueryBackend` is
-    /// configured, executes the SQL string and converts Arrow RecordBatches
-    /// to MsgPack rows for wire transport. Without the feature or backend,
+    /// configured, executes the SQL string and converts Arrow `RecordBatch`es
+    /// to `rmpv::Value` rows for wire transport. Without the feature or backend,
     /// returns an error indicating SQL is not available.
     #[cfg(feature = "datafusion")]
     async fn handle_sql_query(
@@ -593,6 +593,7 @@ impl QueryService {
 
     /// Handles a `SqlQuery` operation when the `datafusion` feature is disabled.
     #[cfg(not(feature = "datafusion"))]
+    #[allow(clippy::unused_async)]
     async fn handle_sql_query(
         &self,
         _ctx: &crate::service::operation::OperationContext,
@@ -610,8 +611,8 @@ impl QueryService {
 
 /// Converts Arrow `RecordBatch`es to column names and rows of `rmpv::Value`.
 ///
-/// Used to serialize SQL query results for wire transport via MsgPack instead
-/// of Arrow IPC, ensuring cross-language client compatibility.
+/// Used to serialize SQL query results for wire transport via `rmpv::Value`
+/// rows instead of Arrow IPC, ensuring cross-language client compatibility.
 #[cfg(feature = "datafusion")]
 fn record_batches_to_rows(
     batches: &[arrow::array::RecordBatch],
@@ -643,7 +644,11 @@ fn record_batches_to_rows(
 /// Converts a single Arrow array value at `row_idx` to `rmpv::Value`.
 #[cfg(feature = "datafusion")]
 fn arrow_value_to_rmpv(array: &dyn arrow::array::Array, row_idx: usize) -> rmpv::Value {
-    use arrow::array::*;
+    use arrow::array::{
+        BinaryArray, BooleanArray, Float32Array, Float64Array, Int32Array,
+        Int64Array, LargeStringArray, StringArray, TimestampMicrosecondArray, UInt32Array,
+        UInt64Array,
+    };
     use arrow::datatypes::DataType;
 
     if array.is_null(row_idx) {
