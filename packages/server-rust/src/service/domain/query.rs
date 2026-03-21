@@ -24,9 +24,9 @@ use tracing::Instrument;
 
 use crate::network::connection::{ConnectionId, ConnectionRegistry, OutboundMessage};
 use crate::service::domain::predicate::{
-    evaluate_predicate, evaluate_where, execute_query, value_to_rmpv,
+    evaluate_predicate, evaluate_where, value_to_rmpv,
 };
-use crate::service::domain::query_backend::{PredicateBackend, QueryBackend};
+use crate::service::domain::query_backend::QueryBackend;
 use crate::service::operation::{
     service_names, Operation, OperationError, OperationResponse,
 };
@@ -437,10 +437,13 @@ impl Service<Operation> for Arc<QueryService> {
             async move {
                 match op {
                     Operation::QuerySubscribe { ctx, payload } => {
-                        svc.handle_query_subscribe(&ctx, &payload)
+                        svc.handle_query_subscribe(&ctx, &payload).await
                     }
                     Operation::QueryUnsubscribe { ctx, payload } => {
                         svc.handle_query_unsubscribe(&ctx, &payload)
+                    }
+                    Operation::SqlQuery { ctx, payload } => {
+                        svc.handle_sql_query(&ctx, &payload).await
                     }
                     _ => Err(OperationError::WrongService),
                 }
@@ -460,10 +463,10 @@ impl QueryService {
     /// 1. Extracts `connection_id` from context (error if missing).
     /// 2. Gets or creates `RecordStore` for the target map and partition.
     /// 3. Iterates all records, converting each `RecordValue` to `rmpv::Value`.
-    /// 4. Passes through `execute_query` for filtering, sorting, and limiting.
+    /// 4. Delegates to `query_backend.execute_query()` for filtering, sorting, and limiting.
     /// 5. Registers a standing `QuerySubscription` in the registry.
     /// 6. Returns `QueryResp` with initial results.
-    fn handle_query_subscribe(
+    async fn handle_query_subscribe(
         &self,
         ctx: &crate::service::operation::OperationContext,
         payload: &topgun_core::messages::query::QuerySubMessage,
@@ -496,8 +499,12 @@ impl QueryService {
             );
         }
 
-        // Execute query (filter, sort, limit)
-        let results = execute_query(entries, &query);
+        // Delegate to query backend for filtering, sorting, and limiting
+        let results = self
+            .query_backend
+            .execute_query(&map_name, entries, &query)
+            .await
+            .map_err(|e| OperationError::Internal(anyhow::anyhow!("{e}")))?;
 
         // Build previous_result_keys from results
         let previous_keys = DashSet::new();
@@ -540,6 +547,169 @@ impl QueryService {
             .unregister(&payload.payload.query_id);
         Ok(OperationResponse::Empty)
     }
+
+    /// Handles a `SqlQuery` operation.
+    ///
+    /// When the `datafusion` feature is enabled and a `SqlQueryBackend` is
+    /// configured, executes the SQL string and converts Arrow RecordBatches
+    /// to MsgPack rows for wire transport. Without the feature or backend,
+    /// returns an error indicating SQL is not available.
+    #[cfg(feature = "datafusion")]
+    async fn handle_sql_query(
+        &self,
+        _ctx: &crate::service::operation::OperationContext,
+        payload: &topgun_core::messages::query::SqlQueryPayload,
+    ) -> Result<OperationResponse, OperationError> {
+        let sql_backend = self.sql_query_backend.as_ref().ok_or_else(|| {
+            OperationError::Internal(anyhow::anyhow!("SQL requires datafusion feature"))
+        })?;
+
+        match sql_backend.execute_sql(&payload.sql).await {
+            Ok(batches) => {
+                let (columns, rows) = record_batches_to_rows(&batches);
+                let resp_payload = topgun_core::messages::query::SqlQueryRespPayload {
+                    query_id: payload.query_id.clone(),
+                    columns,
+                    rows,
+                    error: None,
+                };
+                Ok(OperationResponse::Message(Box::new(
+                    Message::SqlQueryResp { payload: resp_payload },
+                )))
+            }
+            Err(e) => {
+                let resp_payload = topgun_core::messages::query::SqlQueryRespPayload {
+                    query_id: payload.query_id.clone(),
+                    columns: vec![],
+                    rows: vec![],
+                    error: Some(e.to_string()),
+                };
+                Ok(OperationResponse::Message(Box::new(
+                    Message::SqlQueryResp { payload: resp_payload },
+                )))
+            }
+        }
+    }
+
+    /// Handles a `SqlQuery` operation when the `datafusion` feature is disabled.
+    #[cfg(not(feature = "datafusion"))]
+    async fn handle_sql_query(
+        &self,
+        _ctx: &crate::service::operation::OperationContext,
+        _payload: &topgun_core::messages::query::SqlQueryPayload,
+    ) -> Result<OperationResponse, OperationError> {
+        Err(OperationError::Internal(anyhow::anyhow!(
+            "SQL requires datafusion feature"
+        )))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RecordBatch to MsgPack row conversion
+// ---------------------------------------------------------------------------
+
+/// Converts Arrow `RecordBatch`es to column names and rows of `rmpv::Value`.
+///
+/// Used to serialize SQL query results for wire transport via MsgPack instead
+/// of Arrow IPC, ensuring cross-language client compatibility.
+#[cfg(feature = "datafusion")]
+fn record_batches_to_rows(
+    batches: &[arrow::array::RecordBatch],
+) -> (Vec<String>, Vec<Vec<rmpv::Value>>) {
+    if batches.is_empty() {
+        return (vec![], vec![]);
+    }
+
+    let schema = batches[0].schema();
+    let columns: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
+    let mut rows: Vec<Vec<rmpv::Value>> = Vec::new();
+
+    for batch in batches {
+        let num_rows = batch.num_rows();
+        for row_idx in 0..num_rows {
+            let mut row = Vec::with_capacity(batch.num_columns());
+            for col_idx in 0..batch.num_columns() {
+                let col = batch.column(col_idx);
+                let value = arrow_value_to_rmpv(col.as_ref(), row_idx);
+                row.push(value);
+            }
+            rows.push(row);
+        }
+    }
+
+    (columns, rows)
+}
+
+/// Converts a single Arrow array value at `row_idx` to `rmpv::Value`.
+#[cfg(feature = "datafusion")]
+fn arrow_value_to_rmpv(array: &dyn arrow::array::Array, row_idx: usize) -> rmpv::Value {
+    use arrow::array::*;
+    use arrow::datatypes::DataType;
+
+    if array.is_null(row_idx) {
+        return rmpv::Value::Nil;
+    }
+
+    match array.data_type() {
+        DataType::Int32 => {
+            let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
+            rmpv::Value::Integer(i64::from(arr.value(row_idx)).into())
+        }
+        DataType::Int64 => {
+            let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
+            rmpv::Value::Integer(arr.value(row_idx).into())
+        }
+        DataType::UInt32 => {
+            let arr = array.as_any().downcast_ref::<UInt32Array>().unwrap();
+            rmpv::Value::Integer(u64::from(arr.value(row_idx)).into())
+        }
+        DataType::UInt64 => {
+            let arr = array.as_any().downcast_ref::<UInt64Array>().unwrap();
+            rmpv::Value::Integer(arr.value(row_idx).into())
+        }
+        DataType::Float32 => {
+            let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
+            rmpv::Value::F64(f64::from(arr.value(row_idx)))
+        }
+        DataType::Float64 => {
+            let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
+            rmpv::Value::F64(arr.value(row_idx))
+        }
+        DataType::Boolean => {
+            let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
+            rmpv::Value::Boolean(arr.value(row_idx))
+        }
+        DataType::Utf8 => {
+            let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
+            rmpv::Value::String(arr.value(row_idx).into())
+        }
+        DataType::LargeUtf8 => {
+            let arr = array.as_any().downcast_ref::<LargeStringArray>().unwrap();
+            rmpv::Value::String(arr.value(row_idx).into())
+        }
+        DataType::Binary => {
+            let arr = array.as_any().downcast_ref::<BinaryArray>().unwrap();
+            rmpv::Value::Binary(arr.value(row_idx).to_vec())
+        }
+        DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, _) => {
+            let arr = array
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            rmpv::Value::Integer(arr.value(row_idx).into())
+        }
+        // Fallback: use debug representation for unsupported types
+        _ => {
+            let fmt_opts = arrow::util::display::FormatOptions::default();
+            match arrow::util::display::ArrayFormatter::try_new(array, &fmt_opts) {
+                Ok(fmt) => {
+                    let display = fmt.value(row_idx);
+                    rmpv::Value::String(display.to_string().into())
+                }
+                Err(_) => rmpv::Value::String(format!("<unsupported: {:?}>", array.data_type()).into()),
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -575,6 +745,7 @@ mod tests {
     use super::*;
     use crate::network::config::ConnectionConfig;
     use crate::network::connection::{ConnectionId, ConnectionKind, ConnectionRegistry};
+    use crate::service::domain::query_backend::PredicateBackend;
     use crate::service::operation::{service_names, OperationContext};
     use crate::storage::datastores::NullDataStore;
     use crate::storage::impls::StorageConfig;
