@@ -132,14 +132,14 @@ pub enum ValidationResult {
 
 /// Defines what subset of a map's data a client receives.
 /// Used for partial replication (shapes).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncShape {
     /// Client-assigned shape identifier (UUID v4).
     pub shape_id: String,
     /// Name of the map this shape applies to.
     pub map_name: String,
-    /// Optional row-level filter using the PredicateNode expression tree.
+    /// Optional row-level filter using the `PredicateNode` expression tree.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub filter: Option<PredicateNode>,
     /// Optional column projection to restrict which fields are synced.

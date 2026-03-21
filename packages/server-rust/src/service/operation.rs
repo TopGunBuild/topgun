@@ -33,6 +33,7 @@ pub mod service_names {
     pub const COORDINATION: &str = "coordination";
     pub const SEARCH: &str = "search";
     pub const PERSISTENCE: &str = "persistence";
+    pub const SHAPE: &str = "shape";
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +311,24 @@ pub enum Operation {
         payload: messages::JournalReadData,
     },
 
+    // --- Shape domain (service_name = "shape") ---
+
+    /// Client subscribes to a shape (partial replication filter).
+    ShapeSubscribe {
+        ctx: OperationContext,
+        payload: messages::ShapeSubscribeMessage,
+    },
+    /// Client unsubscribes from a shape.
+    ShapeUnsubscribe {
+        ctx: OperationContext,
+        payload: messages::ShapeUnsubscribeMessage,
+    },
+    /// Client initiates shape-specific Merkle delta sync.
+    ShapeSyncInit {
+        ctx: OperationContext,
+        payload: messages::ShapeSyncInitMessage,
+    },
+
     // --- System domain (internal, not from classify) ---
 
     /// System-internal garbage collection operation.
@@ -360,6 +379,10 @@ impl Operation {
             | Self::JournalSubscribe { ctx, .. }
             | Self::JournalUnsubscribe { ctx, .. }
             | Self::JournalRead { ctx, .. }
+            // Shape
+            | Self::ShapeSubscribe { ctx, .. }
+            | Self::ShapeUnsubscribe { ctx, .. }
+            | Self::ShapeSyncInit { ctx, .. }
             // System
             | Self::GarbageCollect { ctx } => ctx,
         }
@@ -412,6 +435,10 @@ impl Operation {
             | Self::JournalSubscribe { ctx, .. }
             | Self::JournalUnsubscribe { ctx, .. }
             | Self::JournalRead { ctx, .. }
+            // Shape
+            | Self::ShapeSubscribe { ctx, .. }
+            | Self::ShapeUnsubscribe { ctx, .. }
+            | Self::ShapeSyncInit { ctx, .. }
             // System
             | Self::GarbageCollect { ctx } => {
                 ctx.connection_id = Some(id);
@@ -574,6 +601,7 @@ mod tests {
         assert_eq!(service_names::COORDINATION, "coordination");
         assert_eq!(service_names::SEARCH, "search");
         assert_eq!(service_names::PERSISTENCE, "persistence");
+        assert_eq!(service_names::SHAPE, "shape");
     }
 
     /// Verify that the Operation enum has all 32 variants by constructing each one.
@@ -619,6 +647,9 @@ mod tests {
             | Operation::JournalSubscribe { .. }
             | Operation::JournalUnsubscribe { .. }
             | Operation::JournalRead { .. }
+            | Operation::ShapeSubscribe { .. }
+            | Operation::ShapeUnsubscribe { .. }
+            | Operation::ShapeSyncInit { .. }
             | Operation::GarbageCollect { .. } => {}
         }
     }
