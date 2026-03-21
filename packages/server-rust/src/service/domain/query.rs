@@ -26,6 +26,7 @@ use crate::network::connection::{ConnectionId, ConnectionRegistry, OutboundMessa
 use crate::service::domain::predicate::{
     evaluate_predicate, evaluate_where, execute_query, value_to_rmpv,
 };
+use crate::service::domain::query_backend::{PredicateBackend, QueryBackend};
 use crate::service::operation::{
     service_names, Operation, OperationError, OperationResponse,
 };
@@ -349,6 +350,9 @@ pub struct QueryService {
     /// Retained for `unregister_by_connection` on client disconnect (module wiring deferred).
     #[allow(dead_code)]
     connection_registry: Arc<ConnectionRegistry>,
+    query_backend: Arc<dyn QueryBackend>,
+    #[cfg(feature = "datafusion")]
+    sql_query_backend: Option<Arc<dyn crate::service::domain::query_backend::SqlQueryBackend>>,
 }
 
 impl QueryService {
@@ -358,11 +362,17 @@ impl QueryService {
         query_registry: Arc<QueryRegistry>,
         record_store_factory: Arc<RecordStoreFactory>,
         connection_registry: Arc<ConnectionRegistry>,
+        query_backend: Arc<dyn QueryBackend>,
+        #[cfg(feature = "datafusion")]
+        sql_query_backend: Option<Arc<dyn crate::service::domain::query_backend::SqlQueryBackend>>,
     ) -> Self {
         Self {
             query_registry,
             record_store_factory,
             connection_registry,
+            query_backend,
+            #[cfg(feature = "datafusion")]
+            sql_query_backend,
         }
     }
 
@@ -1058,7 +1068,14 @@ mod tests {
         let registry = Arc::new(QueryRegistry::new());
         let factory = make_factory();
         let conn_registry = Arc::new(ConnectionRegistry::new());
-        let svc = QueryService::new(registry, factory, conn_registry);
+        let svc = QueryService::new(
+            registry,
+            factory,
+            conn_registry,
+            Arc::new(PredicateBackend),
+            #[cfg(feature = "datafusion")]
+            None,
+        );
         assert_eq!(svc.name(), "query");
     }
 
@@ -1067,7 +1084,14 @@ mod tests {
         let registry = Arc::new(QueryRegistry::new());
         let factory = make_factory();
         let conn_registry = Arc::new(ConnectionRegistry::new());
-        let svc = Arc::new(QueryService::new(registry, factory, conn_registry));
+        let svc = Arc::new(QueryService::new(
+            registry,
+            factory,
+            conn_registry,
+            Arc::new(PredicateBackend),
+            #[cfg(feature = "datafusion")]
+            None,
+        ));
 
         let ctx = OperationContext::new(1, service_names::QUERY, make_timestamp(), 5000);
         let op = Operation::GarbageCollect { ctx };
@@ -1080,7 +1104,14 @@ mod tests {
         let registry = Arc::new(QueryRegistry::new());
         let factory = make_factory();
         let conn_registry = Arc::new(ConnectionRegistry::new());
-        let svc = Arc::new(QueryService::new(registry, factory, conn_registry));
+        let svc = Arc::new(QueryService::new(
+            registry,
+            factory,
+            conn_registry,
+            Arc::new(PredicateBackend),
+            #[cfg(feature = "datafusion")]
+            None,
+        ));
 
         let ctx = make_ctx(None); // no connection_id
         let payload = QuerySubMessage {
@@ -1104,7 +1135,14 @@ mod tests {
         let (handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
         let conn_id = handle.id;
 
-        let svc = Arc::new(QueryService::new(registry.clone(), factory, conn_registry));
+        let svc = Arc::new(QueryService::new(
+            registry.clone(),
+            factory,
+            conn_registry,
+            Arc::new(PredicateBackend),
+            #[cfg(feature = "datafusion")]
+            None,
+        ));
 
         let ctx = make_ctx(Some(conn_id));
         let payload = QuerySubMessage {
@@ -1188,7 +1226,14 @@ mod tests {
         let conn_id = handle.id;
 
         // First subscribe
-        let svc = Arc::new(QueryService::new(registry.clone(), factory, conn_registry));
+        let svc = Arc::new(QueryService::new(
+            registry.clone(),
+            factory,
+            conn_registry,
+            Arc::new(PredicateBackend),
+            #[cfg(feature = "datafusion")]
+            None,
+        ));
 
         let ctx = make_ctx(Some(conn_id));
         let sub_payload = QuerySubMessage {

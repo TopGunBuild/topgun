@@ -436,10 +436,16 @@ impl OperationService {
                 Ok(Operation::JournalRead { ctx, payload })
             }
 
-            // ----- SQL query (wired in SPEC-135c, currently unroutable) -----
+            // ----- SQL query -----
 
-            Message::SqlQuery { .. } => {
-                Err(ClassifyError::ServerToClient { variant: "SqlQuery" })
+            Message::SqlQuery { payload } => {
+                let ctx = self.make_ctx(
+                    service_names::QUERY,
+                    client_id,
+                    caller_origin,
+                    None,
+                );
+                Ok(Operation::SqlQuery { ctx, payload })
             }
 
             // ----- Server-to-client responses -> ClassifyError::ServerToClient -----

@@ -129,6 +129,9 @@ mod integration_tests {
                 Arc::clone(&query_registry),
                 Arc::clone(&record_store_factory),
                 Arc::clone(&connection_registry),
+                Arc::new(crate::service::domain::query_backend::PredicateBackend),
+                #[cfg(feature = "datafusion")]
+                None,
             )),
         );
         router.register(
@@ -362,6 +365,9 @@ mod integration_tests {
             query_registry,
             Arc::clone(&record_store_factory),
             Arc::new(ConnectionRegistry::new()),
+            Arc::new(crate::service::domain::query_backend::PredicateBackend),
+            #[cfg(feature = "datafusion")]
+            None,
         ));
         registry.register(MessagingService::new(Arc::clone(&connection_registry)));
         registry.register(CoordinationService::new(

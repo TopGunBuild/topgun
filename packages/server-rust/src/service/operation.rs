@@ -125,7 +125,7 @@ impl OperationContext {
 /// Grouped by domain:
 /// - **CRDT** (2): `ClientOp`, `OpBatch`
 /// - **Sync** (6): `SyncInit`, `MerkleReqBucket`, `ORMapSyncInit`, `ORMapMerkleReqBucket`, `ORMapDiffRequest`, `ORMapPushDiff`
-/// - **Query** (2): `QuerySubscribe`, `QueryUnsubscribe`
+/// - **Query** (3): `QuerySubscribe`, `QueryUnsubscribe`, `SqlQuery`
 /// - **Messaging** (3): `TopicSubscribe`, `TopicUnsubscribe`, `TopicPublish`
 /// - **Coordination** (4): `LockRequest`, `LockRelease`, `PartitionMapRequest`, `Ping`
 /// - **Search** (3): `Search`, `SearchSubscribe`, `SearchUnsubscribe`
@@ -191,6 +191,11 @@ pub enum Operation {
     QueryUnsubscribe {
         ctx: OperationContext,
         payload: messages::QueryUnsubMessage,
+    },
+    /// Client executes a SQL query.
+    SqlQuery {
+        ctx: OperationContext,
+        payload: messages::query::SqlQueryPayload,
     },
 
     // --- Messaging domain (service_name = "messaging") ---
@@ -330,6 +335,7 @@ impl Operation {
             // Query
             | Self::QuerySubscribe { ctx, .. }
             | Self::QueryUnsubscribe { ctx, .. }
+            | Self::SqlQuery { ctx, .. }
             // Messaging
             | Self::TopicSubscribe { ctx, .. }
             | Self::TopicUnsubscribe { ctx, .. }
@@ -381,6 +387,7 @@ impl Operation {
             // Query
             | Self::QuerySubscribe { ctx, .. }
             | Self::QueryUnsubscribe { ctx, .. }
+            | Self::SqlQuery { ctx, .. }
             // Messaging
             | Self::TopicSubscribe { ctx, .. }
             | Self::TopicUnsubscribe { ctx, .. }
@@ -569,10 +576,10 @@ mod tests {
         assert_eq!(service_names::PERSISTENCE, "persistence");
     }
 
-    /// Verify that the Operation enum has all 31 variants by constructing each one.
+    /// Verify that the Operation enum has all 32 variants by constructing each one.
     /// This ensures the enum definition is exhaustive and compiles correctly.
     #[test]
-    fn operation_variant_count_covers_all_30_client_plus_1_system() {
+    fn operation_variant_count_covers_all_31_client_plus_1_system() {
         // We simply verify all variant paths exist by naming them.
         // The actual construction requires real payload types, so we just check
         // that the match arms compile with all expected variants.
@@ -591,6 +598,7 @@ mod tests {
             | Operation::ORMapPushDiff { .. }
             | Operation::QuerySubscribe { .. }
             | Operation::QueryUnsubscribe { .. }
+            | Operation::SqlQuery { .. }
             | Operation::TopicSubscribe { .. }
             | Operation::TopicUnsubscribe { .. }
             | Operation::TopicPublish { .. }

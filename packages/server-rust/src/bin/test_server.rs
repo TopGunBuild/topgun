@@ -280,6 +280,9 @@ fn build_services() -> (
         Arc::clone(&query_registry),
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
+        Arc::new(topgun_server::service::domain::query_backend::PredicateBackend),
+        #[cfg(feature = "datafusion")]
+        None,
     ));
     let messaging_svc = Arc::new(MessagingService::new(Arc::clone(&connection_registry)));
     let coordination_svc = Arc::new(CoordinationService::new(
