@@ -14,7 +14,7 @@ use topgun_core::schema::SyncShape;
 /// An active shape subscription associated with a connection.
 #[derive(Debug, Clone)]
 pub struct ActiveShape {
-    /// The shape definition (includes map_name, filter, fields, limit).
+    /// The shape definition (includes `map_name`, `filter`, `fields`, `limit`).
     pub shape: SyncShape,
     /// The connection that registered this shape.
     pub connection_id: u64,
@@ -23,7 +23,7 @@ pub struct ActiveShape {
 /// Errors that can occur when interacting with the shape registry.
 #[derive(Debug, thiserror::Error)]
 pub enum ShapeRegistryError {
-    /// The shape_id is already registered.
+    /// The `shape_id` is already registered.
     #[error("Shape ID already registered: {0}")]
     DuplicateShapeId(String),
 }
@@ -32,10 +32,10 @@ pub enum ShapeRegistryError {
 // ShapeRegistry
 // ---------------------------------------------------------------------------
 
-/// Concurrent registry tracking active shapes keyed by shape_id.
+/// Concurrent registry tracking active shapes keyed by `shape_id`.
 ///
 /// Uses `DashMap` for lock-free concurrent access. Shapes are registered
-/// per-connection and can be queried by shape_id, map_name, or connection_id.
+/// per-connection and can be queried by `shape_id`, `map_name`, or `connection_id`.
 pub struct ShapeRegistry {
     shapes: DashMap<String, ActiveShape>,
 }
@@ -55,7 +55,7 @@ impl ShapeRegistry {
     ///
     /// # Errors
     ///
-    /// Returns `ShapeRegistryError::DuplicateShapeId` if the shape_id already exists.
+    /// Returns `ShapeRegistryError::DuplicateShapeId` if the `shape_id` already exists.
     pub fn register(
         &self,
         shape_id: String,
@@ -76,12 +76,14 @@ impl ShapeRegistry {
         }
     }
 
-    /// Removes and returns a shape by its shape_id.
+    /// Removes and returns a shape by its `shape_id`.
+    #[must_use]
     pub fn unregister(&self, shape_id: &str) -> Option<ActiveShape> {
         self.shapes.remove(shape_id).map(|(_, v)| v)
     }
 
-    /// Removes all shapes for a given connection, returning the removed shape_ids.
+    /// Removes all shapes for a given connection, returning the removed `shape_id`s.
+    #[must_use]
     pub fn unregister_all_for_connection(&self, connection_id: u64) -> Vec<String> {
         let shape_ids: Vec<String> = self
             .shapes
@@ -120,7 +122,7 @@ impl ShapeRegistry {
             .collect()
     }
 
-    /// Looks up a shape by its shape_id.
+    /// Looks up a shape by its `shape_id`.
     #[must_use]
     pub fn get(&self, shape_id: &str) -> Option<ActiveShape> {
         self.shapes.get(shape_id).map(|entry| entry.value().clone())

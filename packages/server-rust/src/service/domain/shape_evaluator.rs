@@ -38,7 +38,7 @@ pub fn project(fields: &[String], record: &rmpv::Value) -> rmpv::Value {
         .iter()
         .filter(|(k, _)| {
             k.as_str()
-                .map_or(false, |key_str| fields.iter().any(|f| f == key_str))
+                .is_some_and(|key_str| fields.iter().any(|f| f == key_str))
         })
         .cloned()
         .collect();
