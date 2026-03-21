@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::messages::base::PredicateNode;
 use crate::types::Value;
 
 // ---------------------------------------------------------------------------
@@ -126,29 +127,27 @@ pub enum ValidationResult {
 }
 
 // ---------------------------------------------------------------------------
-// Predicate / SyncShape
+// SyncShape
 // ---------------------------------------------------------------------------
-
-/// Row-level filter predicate for sync shapes.
-/// Placeholder: will become an expression tree when query filtering is built.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Predicate {
-    /// String representation of the filter expression.
-    pub expression: String,
-}
 
 /// Defines what subset of a map's data a client receives.
 /// Used for partial replication (shapes).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncShape {
+    /// Client-assigned shape identifier (UUID v4).
+    pub shape_id: String,
     /// Name of the map this shape applies to.
     pub map_name: String,
-    /// Optional row-level filter to restrict which records are synced.
-    pub filter: Option<Predicate>,
+    /// Optional row-level filter using the PredicateNode expression tree.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub filter: Option<PredicateNode>,
     /// Optional column projection to restrict which fields are synced.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub fields: Option<Vec<String>>,
     /// Optional maximum number of records to sync.
-    pub limit: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub limit: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------

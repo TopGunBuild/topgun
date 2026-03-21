@@ -9,7 +9,7 @@
 //! - **`ORMap`** ([`or_map`]): Observed-Remove Map CRDT with add-wins semantics
 //! - **Types** ([`types`]): `Value` enum, `StorageValue`, `MapType`, `CrdtMap`, `Principal`
 //! - **Traits** ([`traits`]): `Processor`, `QueryNotifier` for DAG execution and live queries
-//! - **Schema** ([`schema`]): `MapSchema`, `SyncShape`, `Predicate` for validation and shapes
+//! - **Schema** ([`schema`]): `MapSchema`, `SyncShape` for validation and shapes
 //! - **Context** ([`context`]): `RequestContext` for per-request identity and tracing
 
 pub mod context;
@@ -29,7 +29,7 @@ pub use context::RequestContext;
 
 // Schema
 pub use schema::{
-    FieldConstraint, FieldDef, FieldType, MapSchema, Predicate, SyncShape, ValidationResult,
+    FieldConstraint, FieldDef, FieldType, MapSchema, SyncShape, ValidationResult,
     validate_schema, validate_value,
 };
 
