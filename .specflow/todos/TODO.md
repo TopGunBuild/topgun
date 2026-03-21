@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-21 — Added TODO-160 (README rewrite), TODO-161 (social strategy); prev: TODO-159, audit 153/154/155, TODO-136–142, Milestone 4 GTM
+**Last updated:** 2026-03-21 — TODO-070 converted to SPEC-136; prev: TODO-162, TODO-160, TODO-161, audit 153/154/155, TODO-136–142
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -27,13 +27,14 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Slice 3:** ~~SPEC-129 (TS schema DSL & codegen)~~ — **done**
 - **Slice 4:** ~~SPEC-130 (Schema → Arrow type derivation)~~ — **done**
 
-### TODO-070: Partial Replication / Shapes
+### TODO-070: Partial Replication / Shapes *(converted to SPEC-136)*
 - **Priority:** P1 (table stakes for competitive parity)
 - **Complexity:** Medium-Large
 - **Summary:** Client subscribes to data subsets; server syncs only matching entries. SyncShape struct with filter + field projection + limit. MerkleTree per shape for efficient delta sync.
 - **Context:** [PRODUCT_POSITIONING_RESEARCH.md](../reference/PRODUCT_POSITIONING_RESEARCH.md) Section 7.5
 - **Depends on:** TODO-069
 - **Effort:** 2-3 weeks
+- **Status:** → SPEC-136 (large, recommended split into 136a–136e)
 
 ### TODO-091: DataFusion SQL Integration *(converted to SPEC-135)*
 - **Priority:** P1 (distributed SQL — Hazelcast-level queries)
@@ -43,6 +44,13 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Depends on:** TODO-069 (Schema provides Arrow column types for TopGunTableProvider)
 - **Effort:** 2-3 weeks
 - **Status:** ~~SPEC-135a~~ ✓ · ~~SPEC-135b~~ ✓ · ~~SPEC-135c~~ ✓ — **done** (DistributedPlanner deferred)
+
+### TODO-162: SQL API Documentation for docs-astro
+- **Priority:** P2
+- **Complexity:** Small
+- **Summary:** Add documentation page for the DataFusion SQL query feature to `apps/docs-astro`. Cover: enabling the `datafusion` Cargo feature, SQL query API (SqlQuery/SqlQueryResp wire messages), supported SQL syntax (SELECT, WHERE, GROUP BY, ORDER BY), supported data types and Arrow conversion, example queries, limitations (single-node only, no JOINs across maps yet).
+- **Ref:** SPEC-135a/b/c for technical details
+- **Depends on:** TODO-091
 
 ### TODO-025: DAG Executor for Stream Processing
 - **Priority:** P1 (Hazelcast Jet equivalent)

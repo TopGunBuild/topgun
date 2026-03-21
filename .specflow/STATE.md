@@ -8,6 +8,10 @@
 
 | ID | Title | Status | Priority | Complexity |
 |----|-------|--------|----------|------------|
+| SPEC-136b | Shapes: ShapeEvaluator Module and ShapeRegistry | draft | P1 | small |
+| SPEC-136c | Shapes: ShapeService and CRDT Broadcast Filtering | draft | P1 | medium |
+| SPEC-136d | Shapes: Per-Shape Merkle Trees and Shape-Aware Sync | draft | P1 | small |
+| SPEC-136e | Shapes: TS Client Shape API and Integration Tests | draft | P1 | small |
 
 ## Decisions
 
@@ -24,3 +28,5 @@
 - SPEC-135a established QueryBackend/SqlQueryBackend trait boundary, PredicateBackend default impl, SqlQuery/SqlQueryResp wire messages, and `datafusion` Cargo feature flag. Patterns: feature-gated trait extension (base trait always available + extended trait behind cfg), inline error via `error: Option<String>` on response payloads.
 - SPEC-135b implemented DataFusion engine: ArrowCacheManager (lazy per-partition cache with version-based invalidation), ArrowCacheObserver/Factory (MutationObserver for cache invalidation), build_record_batch (MsgPack-to-Arrow conversion for all value types), TopGunTableProvider/TopGunExec (DataFusion TableProvider with projection pushdown), DataFusionBackend (implements QueryBackend + SqlQueryBackend). Arrow/arrow-schema aligned to v54 for DataFusion 45 compatibility. 602 tests pass (32 new), clippy-clean.
 - SPEC-135c wired QueryBackend into QueryService, routed SQL_QUERY operation, added handle_sql_query with record_batches_to_rows conversion, registered ArrowCacheObserverFactory conditionally. 569 tests (no datafusion) + 601 tests (with datafusion) pass, clippy-clean.
+- Split SPEC-136 (Partial Replication / Shapes) into 5 parts: SPEC-136a (types, wire messages, Operation variants), SPEC-136b (ShapeEvaluator module, ShapeRegistry), SPEC-136c (ShapeService, CRDT broadcast filtering), SPEC-136d (per-shape Merkle trees, shape-aware sync), SPEC-136e (TS client shape API, integration tests).
+- SPEC-136a added shape wire messages (5 payload structs, 5 Message variants), upgraded SyncShape (shape_id, map_name, filter, fields, limit), removed Predicate placeholder, added Operation::ShapeSubscribe/Unsubscribe/SyncInit + service_names::SHAPE routing. Shape Merkle sync reuses existing protocol with shape_id prefix. 494 core + 565 server tests pass, clippy-clean.
