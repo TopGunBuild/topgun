@@ -342,10 +342,14 @@ fn rmpv_to_json_string(value: &rmpv::Value) -> String {
                 .iter()
                 .map(|(k, v)| {
                     let key_str = match k {
-                        rmpv::Value::String(s) => s.as_str().unwrap_or("").to_string(),
+                        rmpv::Value::String(s) => {
+                            // Use serde_json for proper escaping of special characters in keys.
+                            serde_json::to_string(s.as_str().unwrap_or(""))
+                                .unwrap_or_default()
+                        }
                         _ => rmpv_to_json_string(k),
                     };
-                    format!("\"{}\":{}", key_str, rmpv_to_json_string(v))
+                    format!("{}:{}", key_str, rmpv_to_json_string(v))
                 })
                 .collect();
             format!("{{{}}}", items.join(","))
