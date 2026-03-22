@@ -291,7 +291,7 @@ fn build_services() -> (
         Arc::new(SchemaService::new()),
         None,
     ));
-    let sync_svc = Arc::new(SyncService::new(
+    let sync_svc = Arc::new(SyncService::new_basic(
         merkle_manager,
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),

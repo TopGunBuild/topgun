@@ -55,6 +55,7 @@ mod integration_tests {
     use crate::storage::factory::{ObserverFactory, RecordStoreFactory};
     use crate::storage::impls::StorageConfig;
     use crate::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
+    use crate::storage::shape_merkle::ShapeMerkleSyncManager;
 
     fn make_write_validator(node_id: &str) -> Arc<WriteValidator> {
         let hlc = Arc::new(parking_lot::Mutex::new(HLC::new(
@@ -124,6 +125,7 @@ mod integration_tests {
 
         let query_registry = Arc::new(QueryRegistry::new());
         let shape_registry = Arc::new(ShapeRegistry::new());
+        let shape_merkle_manager = Arc::new(ShapeMerkleSyncManager::new());
 
         let mut router = OperationRouter::new();
         router.register(
@@ -143,6 +145,8 @@ mod integration_tests {
                 merkle_manager,
                 Arc::clone(&record_store_factory),
                 Arc::clone(&connection_registry),
+                Some(Arc::clone(&shape_merkle_manager)),
+                Some(Arc::clone(&shape_registry)),
             )),
         );
         router.register(
@@ -184,6 +188,7 @@ mod integration_tests {
                 Arc::clone(&shape_registry),
                 Arc::clone(&record_store_factory),
                 Arc::clone(&connection_registry),
+                Some(Arc::clone(&shape_merkle_manager)),
             )),
         );
         router.register(
@@ -387,7 +392,7 @@ mod integration_tests {
             Arc::new(SchemaService::new()),
             None,
         ));
-        registry.register(SyncService::new(
+        registry.register(SyncService::new_basic(
             merkle_manager_for_sync,
             Arc::clone(&record_store_factory),
             connection_registry_for_sync,
