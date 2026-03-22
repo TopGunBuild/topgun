@@ -240,6 +240,7 @@ fn build_app(
         cluster_state,
         store_factory,
         server_config,
+        shape_registry: None,
     };
 
     // Swagger UI served at /api/docs

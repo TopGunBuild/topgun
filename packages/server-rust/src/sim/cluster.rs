@@ -116,6 +116,7 @@ impl SimNode {
             write_validator,
             Arc::clone(&query_registry),
             Arc::new(SchemaService::new()),
+            None,
         ));
 
         let mut router = OperationRouter::new();

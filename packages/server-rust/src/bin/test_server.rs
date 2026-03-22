@@ -73,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
         cluster_state: None,
         store_factory: None,
         server_config: None,
+        shape_registry: None,
     };
 
     // Build the axum router with state.
@@ -288,6 +289,7 @@ fn build_services() -> (
         write_validator,
         Arc::clone(&query_registry),
         Arc::new(SchemaService::new()),
+        None,
     ));
     let sync_svc = Arc::new(SyncService::new(
         merkle_manager,

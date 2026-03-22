@@ -40,10 +40,11 @@ mod integration_tests {
     use crate::service::config::ServerConfig;
     use crate::service::domain::{
         CoordinationService, CrdtService, MessagingService, PersistenceService, QueryService,
-        SchemaService, SearchService, SyncService,
+        SchemaService, SearchService, ShapeService, SyncService,
     };
     use crate::service::domain::search::SearchRegistry;
     use crate::service::domain::query::QueryRegistry;
+    use crate::service::domain::shape::ShapeRegistry;
     use crate::service::middleware::build_operation_pipeline;
     use crate::service::operation::{service_names, CallerOrigin, OperationResponse};
     use crate::service::registry::{ServiceContext, ServiceRegistry};
@@ -122,6 +123,7 @@ mod integration_tests {
         );
 
         let query_registry = Arc::new(QueryRegistry::new());
+        let shape_registry = Arc::new(ShapeRegistry::new());
 
         let mut router = OperationRouter::new();
         router.register(
@@ -132,6 +134,7 @@ mod integration_tests {
                 make_write_validator(&config.node_id),
                 Arc::clone(&query_registry),
                 Arc::new(SchemaService::new()),
+                Some(Arc::clone(&shape_registry)),
             )),
         );
         router.register(
@@ -173,6 +176,14 @@ mod integration_tests {
                 Arc::clone(&record_store_factory),
                 Arc::clone(&connection_registry),
                 search_needs_population,
+            )),
+        );
+        router.register(
+            service_names::SHAPE,
+            Arc::new(ShapeService::new(
+                Arc::clone(&shape_registry),
+                Arc::clone(&record_store_factory),
+                Arc::clone(&connection_registry),
             )),
         );
         router.register(
@@ -374,6 +385,7 @@ mod integration_tests {
             make_write_validator("registry-test-node"),
             Arc::clone(&query_registry),
             Arc::new(SchemaService::new()),
+            None,
         ));
         registry.register(SyncService::new(
             merkle_manager_for_sync,

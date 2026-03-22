@@ -308,6 +308,10 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     .ok();
 
     state.registry.remove(conn_id);
+    // Clean up all active shape subscriptions for the disconnected client.
+    if let Some(ref sr) = state.shape_registry {
+        let _ = sr.unregister_all_for_connection(conn_id.0);
+    }
     debug!("WebSocket disconnected: {:?}", conn_id);
 }
 

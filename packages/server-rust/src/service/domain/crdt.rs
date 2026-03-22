@@ -25,6 +25,8 @@ use tracing::Instrument;
 
 use crate::network::connection::{ConnectionId, ConnectionMetadata, ConnectionRegistry};
 use crate::service::domain::query::QueryRegistry;
+use crate::service::domain::shape::ShapeRegistry;
+use crate::service::domain::shape_evaluator;
 use crate::service::operation::{
     service_names, Operation, OperationContext, OperationError, OperationResponse,
 };
@@ -51,10 +53,18 @@ pub struct CrdtService {
     write_validator: Arc<WriteValidator>,
     query_registry: Arc<QueryRegistry>,
     schema_provider: Arc<dyn SchemaProvider>,
+    /// Shape registry for filtering CRDT broadcast mutations through active shapes.
+    ///
+    /// `None` in test environments that do not wire shapes, allowing existing
+    /// construction sites to append `, None` without further changes.
+    shape_registry: Option<Arc<ShapeRegistry>>,
 }
 
 impl CrdtService {
     /// Creates a new `CrdtService` with its required dependencies.
+    ///
+    /// Pass `Some(Arc::clone(&shape_registry))` in production wiring to enable
+    /// shape-filtered broadcast. Pass `None` in test environments.
     #[must_use]
     pub fn new(
         record_store_factory: Arc<RecordStoreFactory>,
@@ -62,6 +72,7 @@ impl CrdtService {
         write_validator: Arc<WriteValidator>,
         query_registry: Arc<QueryRegistry>,
         schema_provider: Arc<dyn SchemaProvider>,
+        shape_registry: Option<Arc<ShapeRegistry>>,
     ) -> Self {
         Self {
             record_store_factory,
@@ -69,6 +80,7 @@ impl CrdtService {
             write_validator,
             query_registry,
             schema_provider,
+            shape_registry,
         }
     }
 }
@@ -167,9 +179,14 @@ impl CrdtService {
             None
         };
 
+        // Read old value before mutation for shape broadcast filtering.
+        // Uses ctx.partition_id (existing pattern for handle_client_op).
+        let old_rmpv_value = self.read_old_value_for_shapes(&op.map_name, &op.key, partition_id).await;
+
         let event_payload = self.apply_single_op(op, partition_id, sanitized_ts.as_ref()).await?;
 
         self.broadcast_event(&event_payload, ctx.connection_id)?;
+        self.broadcast_shape_updates(&event_payload, old_rmpv_value.as_ref(), ctx.connection_id);
 
         let last_id = op.id.clone().unwrap_or_else(|| "unknown".to_string());
         Ok(OperationResponse::Message(Box::new(Message::OpAck(
@@ -218,8 +235,11 @@ impl CrdtService {
             for op in ops {
                 let sanitized_ts = self.write_validator.sanitize_hlc();
                 let partition_id = hash_to_partition(&op.key);
+                // Read old value before mutation for shape broadcast filtering.
+                let old_rmpv_value = self.read_old_value_for_shapes(&op.map_name, &op.key, partition_id).await;
                 let event_payload = self.apply_single_op(op, partition_id, Some(&sanitized_ts)).await?;
                 self.broadcast_event(&event_payload, ctx.connection_id)?;
+                self.broadcast_shape_updates(&event_payload, old_rmpv_value.as_ref(), ctx.connection_id);
                 if let Some(id) = &op.id {
                     last_id = id.clone();
                 }
@@ -228,8 +248,11 @@ impl CrdtService {
             // Internal/system call (no connection_id) — skip validation.
             for op in ops {
                 let partition_id = hash_to_partition(&op.key);
+                // Read old value before mutation for shape broadcast filtering.
+                let old_rmpv_value = self.read_old_value_for_shapes(&op.map_name, &op.key, partition_id).await;
                 let event_payload = self.apply_single_op(op, partition_id, None).await?;
                 self.broadcast_event(&event_payload, ctx.connection_id)?;
+                self.broadcast_shape_updates(&event_payload, old_rmpv_value.as_ref(), ctx.connection_id);
                 if let Some(id) = &op.id {
                     last_id = id.clone();
                 }
@@ -459,6 +482,107 @@ impl CrdtService {
         Ok(())
     }
 
+    /// Reads the old record value for a key before mutation, for shape broadcast filtering.
+    ///
+    /// Returns `None` if no shape registry is configured, if no record exists,
+    /// or if the record is not an LWW record (OR-Map records are skipped per Assumption 1).
+    async fn read_old_value_for_shapes(
+        &self,
+        map_name: &str,
+        key: &str,
+        partition_id: u32,
+    ) -> Option<rmpv::Value> {
+        // Skip if no shape registry is wired (test environments).
+        self.shape_registry.as_ref()?;
+
+        let store = self.record_store_factory.get_or_create(map_name, partition_id);
+        let old_record = store.get(key, false).await.ok().flatten()?;
+        if let RecordValue::Lww { ref value, .. } = old_record.value {
+            Some(value_to_rmpv(value))
+        } else {
+            None
+        }
+    }
+
+    /// Broadcasts shape update messages to all connections with active shapes on the affected map.
+    ///
+    /// For each active shape targeting `event_payload.map_name`, evaluates the old and new
+    /// values against the shape filter and sends `ShapeUpdateMessage` with the appropriate
+    /// `ChangeEventType` (ENTER/UPDATE/LEAVE). Skips the writing connection.
+    fn broadcast_shape_updates(
+        &self,
+        event_payload: &ServerEventPayload,
+        old_rmpv_value: Option<&rmpv::Value>,
+        exclude_connection_id: Option<ConnectionId>,
+    ) {
+        let Some(ref registry) = self.shape_registry else {
+            return;
+        };
+
+        let active_shapes = registry.shapes_for_map(&event_payload.map_name);
+        if active_shapes.is_empty() {
+            return;
+        }
+
+        // Extract the new value from the event payload (already rmpv::Value, no conversion needed).
+        // For REMOVE events, record is None so new_rmpv_value is None.
+        let new_rmpv_value: Option<rmpv::Value> = event_payload
+            .record
+            .as_ref()
+            .and_then(|r| r.value.clone());
+
+        for (shape_id, active_shape) in &active_shapes {
+            // Skip the writing connection so it does not receive its own updates.
+            if let Some(exclude_id) = exclude_connection_id {
+                if active_shape.connection_id == exclude_id.0 {
+                    continue;
+                }
+            }
+
+            let old_matches = old_rmpv_value
+                .is_some_and(|v| shape_evaluator::matches(&active_shape.shape, v));
+
+            let new_matches = new_rmpv_value
+                .as_ref()
+                .is_some_and(|v| shape_evaluator::matches(&active_shape.shape, v));
+
+            let change_type = match (old_matches, new_matches) {
+                (false, true) => topgun_core::messages::base::ChangeEventType::ENTER,
+                (true, true) => topgun_core::messages::base::ChangeEventType::UPDATE,
+                (true, false) => topgun_core::messages::base::ChangeEventType::LEAVE,
+                (false, false) => continue, // no change relevant to this shape
+            };
+
+            // Project the new value for ENTER/UPDATE; LEAVE sends no value.
+            let projected_value = if new_matches {
+                new_rmpv_value.as_ref().and_then(|v| {
+                    shape_evaluator::apply_shape(&active_shape.shape, v)
+                })
+            } else {
+                None
+            };
+
+            let update = topgun_core::messages::Message::ShapeUpdate(
+                topgun_core::messages::shape::ShapeUpdateMessage {
+                    payload: topgun_core::messages::shape::ShapeUpdatePayload {
+                        shape_id: shape_id.clone(),
+                        key: event_payload.key.clone(),
+                        value: projected_value,
+                        change_type,
+                    },
+                },
+            );
+
+            if let Ok(bytes) = rmp_serde::to_vec_named(&update) {
+                use crate::network::connection::ConnectionId as CId;
+                use crate::network::connection::OutboundMessage;
+                if let Some(handle) = self.connection_registry.get(CId(active_shape.connection_id)) {
+                    let _ = handle.try_send(OutboundMessage::Binary(bytes));
+                }
+            }
+        }
+    }
+
     /// Validates a single `ClientOp` against the registered schema for its map.
     ///
     /// Returns `Ok(())` immediately for:
@@ -598,7 +722,6 @@ pub(crate) fn rmpv_to_value(v: &rmpv::Value) -> Value {
 ///
 /// Used by shape evaluation when comparing stored records against shape filters.
 /// The inverse of `rmpv_to_value`.
-#[allow(dead_code)] // Used by shape.rs (G2) and will be active once wired
 pub(crate) fn value_to_rmpv(v: &Value) -> rmpv::Value {
     match v {
         Value::Null => rmpv::Value::Nil,
@@ -668,7 +791,7 @@ mod tests {
         let factory = make_factory();
         let registry = Arc::new(ConnectionRegistry::new());
         let query_registry = Arc::new(QueryRegistry::new());
-        Arc::new(CrdtService::new(factory, registry, make_validator(), query_registry, Arc::new(SchemaService::new())))
+        Arc::new(CrdtService::new(factory, registry, make_validator(), query_registry, Arc::new(SchemaService::new()), None))
     }
 
     fn make_timestamp() -> Timestamp {
@@ -690,7 +813,7 @@ mod tests {
         let factory = make_factory();
         let registry = Arc::new(ConnectionRegistry::new());
         let query_registry = Arc::new(QueryRegistry::new());
-        let svc = CrdtService::new(factory, registry, make_validator(), query_registry, Arc::new(SchemaService::new()));
+        let svc = CrdtService::new(factory, registry, make_validator(), query_registry, Arc::new(SchemaService::new()), None);
         assert_eq!(svc.name(), "crdt");
     }
 
@@ -980,6 +1103,7 @@ mod tests {
             validator,
             query_registry,
             Arc::new(SchemaService::new()),
+            None,
         ));
         (svc, registry)
     }
@@ -1118,6 +1242,7 @@ mod tests {
             Arc::clone(&validator),
             query_registry,
             Arc::new(SchemaService::new()),
+            None,
         ));
 
         let conn_config = crate::network::config::ConnectionConfig::default();
@@ -1198,7 +1323,7 @@ mod tests {
         let factory = make_factory();
         let registry = Arc::new(ConnectionRegistry::new());
         let query_registry = Arc::new(QueryRegistry::new());
-        let svc = Arc::new(CrdtService::new(factory, Arc::clone(&registry), validator, query_registry, Arc::new(SchemaService::new())));
+        let svc = Arc::new(CrdtService::new(factory, Arc::clone(&registry), validator, query_registry, Arc::new(SchemaService::new()), None));
 
         let conn_config = crate::network::config::ConnectionConfig::default();
         let (handle, _rx) = registry.register(ConnectionKind::Client, &conn_config);
@@ -1299,6 +1424,7 @@ mod tests {
             make_validator(),
             Arc::clone(&query_registry),
             Arc::new(SchemaService::new()),
+            None,
         ));
         (svc, conn_registry, query_registry)
     }
@@ -1448,6 +1574,7 @@ mod tests {
             make_validator(),
             query_registry,
             schema_svc,
+            None,
         ));
         // Register a client connection so tests can use its ID as connection_id.
         let config = crate::network::config::ConnectionConfig::default();
@@ -1623,6 +1750,7 @@ mod tests {
             validator,
             query_registry,
             Arc::clone(&schema_svc) as Arc<dyn crate::traits::SchemaProvider>,
+            None,
         ));
 
         let conn_config = crate::network::config::ConnectionConfig::default();
