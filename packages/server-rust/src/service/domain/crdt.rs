@@ -24,6 +24,7 @@ use topgun_core::ORMapRecord;
 use tracing::Instrument;
 
 use crate::network::connection::{ConnectionId, ConnectionMetadata, ConnectionRegistry};
+use crate::service::domain::predicate::value_to_rmpv;
 use crate::service::domain::query::QueryRegistry;
 use crate::service::domain::shape::ShapeRegistry;
 use crate::service::domain::shape_evaluator;
@@ -715,27 +716,6 @@ pub(crate) fn rmpv_to_value(v: &rmpv::Value) -> Value {
         // Nil and Extension types are not represented in topgun_core::types::Value;
         // fall back to Null rather than panicking.
         rmpv::Value::Nil | rmpv::Value::Ext(_, _) => Value::Null,
-    }
-}
-
-/// Converts a `topgun_core::types::Value` (storage format) to `rmpv::Value` (wire format).
-///
-/// Used by shape evaluation when comparing stored records against shape filters.
-/// The inverse of `rmpv_to_value`.
-pub(crate) fn value_to_rmpv(v: &Value) -> rmpv::Value {
-    match v {
-        Value::Null => rmpv::Value::Nil,
-        Value::Bool(b) => rmpv::Value::Boolean(*b),
-        Value::Int(i) => rmpv::Value::Integer((*i).into()),
-        Value::Float(f) => rmpv::Value::F64(*f),
-        Value::String(s) => rmpv::Value::String(s.clone().into()),
-        Value::Bytes(b) => rmpv::Value::Binary(b.clone()),
-        Value::Array(a) => rmpv::Value::Array(a.iter().map(value_to_rmpv).collect()),
-        Value::Map(m) => rmpv::Value::Map(
-            m.iter()
-                .map(|(k, v)| (rmpv::Value::String(k.clone().into()), value_to_rmpv(v)))
-                .collect(),
-        ),
     }
 }
 
@@ -1831,5 +1811,298 @@ mod tests {
             }
             other => panic!("expected SchemaInvalid, got {other:?}"),
         }
+    }
+
+    // -- Shape broadcast ENTER/UPDATE/LEAVE tests --
+
+    fn make_shape_service() -> (Arc<CrdtService>, Arc<ConnectionRegistry>, Arc<ShapeRegistry>) {
+        let factory = make_factory();
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let query_registry = Arc::new(QueryRegistry::new());
+        let shape_registry = Arc::new(ShapeRegistry::new());
+        let svc = Arc::new(CrdtService::new(
+            factory,
+            Arc::clone(&conn_registry),
+            make_validator(),
+            query_registry,
+            Arc::new(SchemaService::new()),
+            Some(Arc::clone(&shape_registry)),
+        ));
+        (svc, conn_registry, shape_registry)
+    }
+
+    fn make_lww_put_with_map_value(
+        ctx: OperationContext,
+        map_name: &str,
+        key: &str,
+        value: rmpv::Value,
+    ) -> Operation {
+        let record = topgun_core::LWWRecord {
+            value: Some(value),
+            timestamp: make_timestamp(),
+            ttl_ms: None,
+        };
+        Operation::ClientOp {
+            ctx,
+            payload: topgun_core::messages::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    id: Some("op-1".to_string()),
+                    map_name: map_name.to_string(),
+                    key: key.to_string(),
+                    op_type: None,
+                    record: Some(Some(record)),
+                    or_record: None,
+                    or_tag: None,
+                    write_concern: None,
+                    timeout: None,
+                },
+            },
+        }
+    }
+
+    fn make_rmpv_map(pairs: Vec<(&str, rmpv::Value)>) -> rmpv::Value {
+        rmpv::Value::Map(
+            pairs
+                .into_iter()
+                .map(|(k, v)| (rmpv::Value::String(k.into()), v))
+                .collect(),
+        )
+    }
+
+    /// Drains all ShapeUpdate messages from a receiver, returning (change_type, key, value).
+    fn drain_shape_updates(
+        rx: &mut tokio::sync::mpsc::Receiver<crate::network::connection::OutboundMessage>,
+    ) -> Vec<(topgun_core::messages::base::ChangeEventType, String, Option<rmpv::Value>)> {
+        let mut results = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let crate::network::connection::OutboundMessage::Binary(bytes) = msg {
+                if let Ok(decoded) = rmp_serde::from_slice::<Message>(&bytes) {
+                    if let Message::ShapeUpdate(update) = decoded {
+                        results.push((
+                            update.payload.change_type,
+                            update.payload.key,
+                            update.payload.value,
+                        ));
+                    }
+                }
+            }
+        }
+        results
+    }
+
+    #[tokio::test]
+    async fn shape_broadcast_enter_on_newly_matching_write() {
+        use topgun_core::messages::base::{ChangeEventType, PredicateNode, PredicateOp};
+
+        let (svc, conn_registry, shape_registry) = make_shape_service();
+
+        // Register writer connection.
+        let config = crate::network::config::ConnectionConfig::default();
+        let (writer_handle, _writer_rx) =
+            conn_registry.register(ConnectionKind::Client, &config);
+        let writer_id = writer_handle.id;
+
+        // Register subscriber connection.
+        let (_sub_handle, mut sub_rx) =
+            conn_registry.register(ConnectionKind::Client, &config);
+        let sub_conn_id = _sub_handle.id;
+
+        // Register a shape: status == "active" on map "users".
+        let shape = topgun_core::SyncShape {
+            shape_id: "shape-1".to_string(),
+            map_name: "users".to_string(),
+            filter: Some(PredicateNode {
+                op: PredicateOp::Eq,
+                attribute: Some("status".to_string()),
+                value: Some(rmpv::Value::String("active".into())),
+                children: None,
+            }),
+            fields: None,
+            limit: None,
+        };
+        shape_registry
+            .register("shape-1".to_string(), sub_conn_id.0, shape)
+            .unwrap();
+
+        // Write a matching record (status: "active") — should trigger ENTER.
+        let value = make_rmpv_map(vec![
+            ("name", rmpv::Value::String("Alice".into())),
+            ("status", rmpv::Value::String("active".into())),
+        ]);
+        let mut ctx = make_ctx();
+        ctx.connection_id = Some(writer_id);
+        ctx.partition_id = Some(0);
+        let op = make_lww_put_with_map_value(ctx, "users", "user-1", value);
+        let _ = svc.clone().oneshot(op).await;
+
+        let updates = drain_shape_updates(&mut sub_rx);
+        assert_eq!(updates.len(), 1, "expected 1 shape update, got {}", updates.len());
+        assert_eq!(updates[0].0, ChangeEventType::ENTER);
+        assert_eq!(updates[0].1, "user-1");
+        assert!(updates[0].2.is_some(), "ENTER should include the value");
+    }
+
+    #[tokio::test]
+    async fn shape_broadcast_update_on_matching_to_matching_write() {
+        use topgun_core::messages::base::{ChangeEventType, PredicateNode, PredicateOp};
+
+        let (svc, conn_registry, shape_registry) = make_shape_service();
+        let config = crate::network::config::ConnectionConfig::default();
+        let (writer_handle, _writer_rx) =
+            conn_registry.register(ConnectionKind::Client, &config);
+        let writer_id = writer_handle.id;
+        let (_sub_handle, mut sub_rx) =
+            conn_registry.register(ConnectionKind::Client, &config);
+        let sub_conn_id = _sub_handle.id;
+
+        let shape = topgun_core::SyncShape {
+            shape_id: "shape-1".to_string(),
+            map_name: "users".to_string(),
+            filter: Some(PredicateNode {
+                op: PredicateOp::Eq,
+                attribute: Some("status".to_string()),
+                value: Some(rmpv::Value::String("active".into())),
+                children: None,
+            }),
+            fields: None,
+            limit: None,
+        };
+        shape_registry
+            .register("shape-1".to_string(), sub_conn_id.0, shape)
+            .unwrap();
+
+        // First write: matching record → ENTER.
+        let value1 = make_rmpv_map(vec![
+            ("name", rmpv::Value::String("Alice".into())),
+            ("status", rmpv::Value::String("active".into())),
+        ]);
+        let mut ctx = make_ctx();
+        ctx.connection_id = Some(writer_id);
+        ctx.partition_id = Some(0);
+        let op = make_lww_put_with_map_value(ctx, "users", "user-1", value1);
+        let _ = svc.clone().oneshot(op).await;
+        // Drain the ENTER.
+        let _ = drain_shape_updates(&mut sub_rx);
+
+        // Second write: still matching → UPDATE.
+        let value2 = make_rmpv_map(vec![
+            ("name", rmpv::Value::String("Alice Updated".into())),
+            ("status", rmpv::Value::String("active".into())),
+        ]);
+        let mut ctx2 = make_ctx();
+        ctx2.connection_id = Some(writer_id);
+        ctx2.partition_id = Some(0);
+        let op2 = make_lww_put_with_map_value(ctx2, "users", "user-1", value2);
+        let _ = svc.clone().oneshot(op2).await;
+
+        let updates = drain_shape_updates(&mut sub_rx);
+        assert_eq!(updates.len(), 1, "expected 1 shape update, got {}", updates.len());
+        assert_eq!(updates[0].0, ChangeEventType::UPDATE);
+        assert_eq!(updates[0].1, "user-1");
+        assert!(updates[0].2.is_some(), "UPDATE should include the new value");
+    }
+
+    #[tokio::test]
+    async fn shape_broadcast_leave_on_matching_to_non_matching_write() {
+        use topgun_core::messages::base::{ChangeEventType, PredicateNode, PredicateOp};
+
+        let (svc, conn_registry, shape_registry) = make_shape_service();
+        let config = crate::network::config::ConnectionConfig::default();
+        let (writer_handle, _writer_rx) =
+            conn_registry.register(ConnectionKind::Client, &config);
+        let writer_id = writer_handle.id;
+        let (_sub_handle, mut sub_rx) =
+            conn_registry.register(ConnectionKind::Client, &config);
+        let sub_conn_id = _sub_handle.id;
+
+        let shape = topgun_core::SyncShape {
+            shape_id: "shape-1".to_string(),
+            map_name: "users".to_string(),
+            filter: Some(PredicateNode {
+                op: PredicateOp::Eq,
+                attribute: Some("status".to_string()),
+                value: Some(rmpv::Value::String("active".into())),
+                children: None,
+            }),
+            fields: None,
+            limit: None,
+        };
+        shape_registry
+            .register("shape-1".to_string(), sub_conn_id.0, shape)
+            .unwrap();
+
+        // First write: matching record → ENTER.
+        let value1 = make_rmpv_map(vec![
+            ("name", rmpv::Value::String("Alice".into())),
+            ("status", rmpv::Value::String("active".into())),
+        ]);
+        let mut ctx = make_ctx();
+        ctx.connection_id = Some(writer_id);
+        ctx.partition_id = Some(0);
+        let op = make_lww_put_with_map_value(ctx, "users", "user-1", value1);
+        let _ = svc.clone().oneshot(op).await;
+        let _ = drain_shape_updates(&mut sub_rx);
+
+        // Second write: non-matching → LEAVE.
+        let value2 = make_rmpv_map(vec![
+            ("name", rmpv::Value::String("Alice".into())),
+            ("status", rmpv::Value::String("inactive".into())),
+        ]);
+        let mut ctx2 = make_ctx();
+        ctx2.connection_id = Some(writer_id);
+        ctx2.partition_id = Some(0);
+        let op2 = make_lww_put_with_map_value(ctx2, "users", "user-1", value2);
+        let _ = svc.clone().oneshot(op2).await;
+
+        let updates = drain_shape_updates(&mut sub_rx);
+        assert_eq!(updates.len(), 1, "expected 1 shape update, got {}", updates.len());
+        assert_eq!(updates[0].0, ChangeEventType::LEAVE);
+        assert_eq!(updates[0].1, "user-1");
+        assert!(updates[0].2.is_none(), "LEAVE should not include a value");
+    }
+
+    #[tokio::test]
+    async fn shape_broadcast_skips_non_matching_to_non_matching() {
+        use topgun_core::messages::base::{PredicateNode, PredicateOp};
+
+        let (svc, conn_registry, shape_registry) = make_shape_service();
+        let config = crate::network::config::ConnectionConfig::default();
+        let (writer_handle, _writer_rx) =
+            conn_registry.register(ConnectionKind::Client, &config);
+        let writer_id = writer_handle.id;
+        let (_sub_handle, mut sub_rx) =
+            conn_registry.register(ConnectionKind::Client, &config);
+        let sub_conn_id = _sub_handle.id;
+
+        let shape = topgun_core::SyncShape {
+            shape_id: "shape-1".to_string(),
+            map_name: "users".to_string(),
+            filter: Some(PredicateNode {
+                op: PredicateOp::Eq,
+                attribute: Some("status".to_string()),
+                value: Some(rmpv::Value::String("active".into())),
+                children: None,
+            }),
+            fields: None,
+            limit: None,
+        };
+        shape_registry
+            .register("shape-1".to_string(), sub_conn_id.0, shape)
+            .unwrap();
+
+        // Write a non-matching record (status: "inactive").
+        let value = make_rmpv_map(vec![
+            ("name", rmpv::Value::String("Bob".into())),
+            ("status", rmpv::Value::String("inactive".into())),
+        ]);
+        let mut ctx = make_ctx();
+        ctx.connection_id = Some(writer_id);
+        ctx.partition_id = Some(0);
+        let op = make_lww_put_with_map_value(ctx, "users", "user-2", value);
+        let _ = svc.clone().oneshot(op).await;
+
+        // Drain: should find zero shape updates (there will be ServerEvent broadcasts though).
+        let updates = drain_shape_updates(&mut sub_rx);
+        assert!(updates.is_empty(), "expected no shape updates for non-matching write, got {}", updates.len());
     }
 }
