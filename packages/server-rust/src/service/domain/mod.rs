@@ -40,6 +40,7 @@ pub mod table_provider;
 pub mod datafusion_backend;
 
 pub mod shape;
+pub use shape::ShapeService;
 pub mod shape_evaluator;
 
 pub mod search;

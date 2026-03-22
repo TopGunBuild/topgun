@@ -1,11 +1,254 @@
-//! Shape registry for tracking active shapes per connection.
+//! Shape registry and service for partial replication subscriptions.
 //!
 //! `ShapeRegistry` is a `DashMap`-based concurrent data structure that tracks
 //! which shapes are active on which connections, following the same pattern
 //! as the existing `QueryRegistry`.
+//!
+//! `ShapeService` is a Tower `Service<Operation>` that handles shape
+//! subscribe/unsubscribe lifecycle: scanning the map, evaluating records,
+//! and sending the initial `ShapeResp` snapshot.
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+
+use async_trait::async_trait;
 use dashmap::DashMap;
+use tower::Service;
+
+use topgun_core::messages::shape::{ShapeRecord, ShapeRespMessage, ShapeRespPayload};
+use topgun_core::messages::Message;
 use topgun_core::schema::SyncShape;
+
+use tracing::Instrument;
+
+use crate::network::connection::{ConnectionRegistry, OutboundMessage};
+use crate::service::domain::predicate::value_to_rmpv;
+use crate::service::domain::shape_evaluator;
+use crate::service::operation::{
+    service_names, Operation, OperationError, OperationResponse,
+};
+use crate::service::registry::{ManagedService, ServiceContext};
+use crate::storage::record::RecordValue;
+use crate::storage::RecordStoreFactory;
+
+// ---------------------------------------------------------------------------
+// ShapeService
+// ---------------------------------------------------------------------------
+
+/// Tower `Service<Operation>` that handles shape subscribe/unsubscribe lifecycle.
+///
+/// On `ShapeSubscribe`: reads all records for the target map, evaluates them
+/// against the shape filter, registers the shape, and sends the initial snapshot.
+/// On `ShapeUnsubscribe`: removes the shape from the registry.
+pub struct ShapeService {
+    shape_registry: Arc<ShapeRegistry>,
+    record_store_factory: Arc<RecordStoreFactory>,
+    connection_registry: Arc<ConnectionRegistry>,
+}
+
+impl ShapeService {
+    /// Creates a new `ShapeService` with its required dependencies.
+    #[must_use]
+    pub fn new(
+        shape_registry: Arc<ShapeRegistry>,
+        record_store_factory: Arc<RecordStoreFactory>,
+        connection_registry: Arc<ConnectionRegistry>,
+    ) -> Self {
+        Self {
+            shape_registry,
+            record_store_factory,
+            connection_registry,
+        }
+    }
+
+    /// Returns a reference to the underlying `ShapeRegistry`.
+    #[must_use]
+    pub fn registry(&self) -> &Arc<ShapeRegistry> {
+        &self.shape_registry
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ManagedService implementation
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl ManagedService for ShapeService {
+    fn name(&self) -> &'static str {
+        service_names::SHAPE
+    }
+
+    async fn init(&self, _ctx: &ServiceContext) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn reset(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn shutdown(&self, _terminate: bool) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tower::Service<Operation> implementation
+// ---------------------------------------------------------------------------
+
+impl Service<Operation> for Arc<ShapeService> {
+    type Response = OperationResponse;
+    type Error = OperationError;
+    type Future =
+        Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, op: Operation) -> Self::Future {
+        let svc = Arc::clone(self);
+        let service_name = op.ctx().service_name;
+        let call_id = op.ctx().call_id;
+        let caller_origin = format!("{:?}", op.ctx().caller_origin);
+
+        let span = tracing::info_span!(
+            "domain_op",
+            service = service_name,
+            call_id = call_id,
+            caller_origin = %caller_origin,
+        );
+
+        Box::pin(
+            async move {
+                match op {
+                    Operation::ShapeSubscribe { ctx, payload } => {
+                        svc.handle_shape_subscribe(&ctx, &payload)
+                    }
+                    Operation::ShapeUnsubscribe { ctx, payload } => {
+                        svc.handle_shape_unsubscribe(&ctx, &payload)
+                    }
+                    _ => Err(OperationError::WrongService),
+                }
+            }
+            .instrument(span),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handler implementations
+// ---------------------------------------------------------------------------
+
+impl ShapeService {
+    /// Handles a `ShapeSubscribe` operation.
+    ///
+    /// Steps (ordered to avoid the race window where updates arrive before snapshot):
+    /// 1. Extract `connection_id` from context.
+    /// 2. Access the `SyncShape` from the payload.
+    /// 3. Read + evaluate all records for the target map.
+    /// 4. Apply limit if set.
+    /// 5. Register the shape in `ShapeRegistry`.
+    /// 6. Send `ShapeRespMessage` with matching records.
+    fn handle_shape_subscribe(
+        &self,
+        ctx: &crate::service::operation::OperationContext,
+        payload: &topgun_core::messages::shape::ShapeSubscribeMessage,
+    ) -> Result<OperationResponse, OperationError> {
+        let connection_id = ctx.connection_id.ok_or_else(|| {
+            OperationError::Internal(anyhow::anyhow!(
+                "ShapeSubscribe requires connection_id in OperationContext"
+            ))
+        })?;
+
+        let shape = payload.payload.shape.clone();
+        let shape_id = shape.shape_id.clone();
+        let map_name = shape.map_name.clone();
+
+        // Step 3: Read all records for the target map across all partitions.
+        // Scan ALL partitions to aggregate the full key space.
+        let stores = self.record_store_factory.get_all_for_map(&map_name);
+
+        let mut matching_records: Vec<ShapeRecord> = Vec::new();
+        let mut total_matches: usize = 0;
+
+        for store in &stores {
+            store.for_each_boxed(
+                &mut |key, record| {
+                    if let RecordValue::Lww { ref value, .. } = record.value {
+                        // Convert storage Value to rmpv::Value for shape evaluation.
+                        let rmpv_value = value_to_rmpv(value);
+                        // Step 4: Evaluate against the shape (filter + project).
+                        if let Some(projected) = shape_evaluator::apply_shape(&shape, &rmpv_value) {
+                            total_matches += 1;
+                            // Step 5 (part 1): only collect up to limit.
+                            let limit = shape.limit.map(|l| l as usize);
+                            if limit.is_none_or(|l| matching_records.len() < l) {
+                                matching_records.push(ShapeRecord {
+                                    key: key.to_string(),
+                                    value: projected,
+                                });
+                            }
+                        }
+                    }
+                    // OR-Map records are skipped per Assumption 1 (shapes are LWW-only).
+                },
+                false, // not backup
+            );
+        }
+
+        // Step 5 (part 2): determine has_more.
+        let limit = shape.limit.map(|l| l as usize);
+        let has_more = limit.and_then(|l| {
+            if total_matches > l {
+                Some(true)
+            } else {
+                None
+            }
+        });
+
+        // Step 6: Register shape in registry.
+        // Registration before send is the lesser evil: sending before registration
+        // risks the client missing updates entirely. Clients must buffer shape
+        // updates until the initial response arrives.
+        self.shape_registry
+            .register(shape_id.clone(), connection_id.0, shape)
+            .map_err(|e| {
+                OperationError::Internal(anyhow::anyhow!("Shape registration failed: {e}"))
+            })?;
+
+        // Step 7: Send ShapeRespMessage with matching records.
+        // merkle_root_hash is 0 until SPEC-136d implements per-shape Merkle trees.
+        let resp = Message::ShapeResp(ShapeRespMessage {
+            payload: ShapeRespPayload {
+                shape_id,
+                records: matching_records,
+                merkle_root_hash: 0,
+                has_more,
+            },
+        });
+
+        if let Ok(bytes) = rmp_serde::to_vec_named(&resp) {
+            if let Some(handle) = self.connection_registry.get(connection_id) {
+                let _ = handle.try_send(OutboundMessage::Binary(bytes));
+            }
+        }
+
+        Ok(OperationResponse::Empty)
+    }
+
+    /// Handles a `ShapeUnsubscribe` operation.
+    #[allow(clippy::unnecessary_wraps)]
+    fn handle_shape_unsubscribe(
+        &self,
+        _ctx: &crate::service::operation::OperationContext,
+        payload: &topgun_core::messages::shape::ShapeUnsubscribeMessage,
+    ) -> Result<OperationResponse, OperationError> {
+        let _ = self.shape_registry.unregister(&payload.payload.shape_id);
+        Ok(OperationResponse::Empty)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Data structures

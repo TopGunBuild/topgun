@@ -594,6 +594,28 @@ pub(crate) fn rmpv_to_value(v: &rmpv::Value) -> Value {
     }
 }
 
+/// Converts a `topgun_core::types::Value` (storage format) to `rmpv::Value` (wire format).
+///
+/// Used by shape evaluation when comparing stored records against shape filters.
+/// The inverse of `rmpv_to_value`.
+#[allow(dead_code)] // Used by shape.rs (G2) and will be active once wired
+pub(crate) fn value_to_rmpv(v: &Value) -> rmpv::Value {
+    match v {
+        Value::Null => rmpv::Value::Nil,
+        Value::Bool(b) => rmpv::Value::Boolean(*b),
+        Value::Int(i) => rmpv::Value::Integer((*i).into()),
+        Value::Float(f) => rmpv::Value::F64(*f),
+        Value::String(s) => rmpv::Value::String(s.clone().into()),
+        Value::Bytes(b) => rmpv::Value::Binary(b.clone()),
+        Value::Array(a) => rmpv::Value::Array(a.iter().map(value_to_rmpv).collect()),
+        Value::Map(m) => rmpv::Value::Map(
+            m.iter()
+                .map(|(k, v)| (rmpv::Value::String(k.clone().into()), value_to_rmpv(v)))
+                .collect(),
+        ),
+    }
+}
+
 /// Converts a wire-format `LWWRecord<rmpv::Value>` into a storage `RecordValue::Lww`.
 fn lww_record_to_record_value(record: &LWWRecord<rmpv::Value>) -> RecordValue {
     let value = record
