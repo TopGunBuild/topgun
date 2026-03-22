@@ -29,6 +29,7 @@ use topgun_server::service::domain::messaging::MessagingService;
 use topgun_server::service::domain::schema::SchemaService;
 use topgun_server::service::domain::persistence::PersistenceService;
 use topgun_server::service::domain::query::{QueryMutationObserver, QueryRegistry, QueryService};
+use topgun_server::service::domain::query_backend::PredicateBackend;
 use topgun_server::service::domain::search::{
     SearchConfig, SearchMutationObserver, SearchRegistry, SearchService, TantivyMapIndex,
 };
@@ -164,6 +165,7 @@ async fn main() {
                 cluster_state: None,
                 store_factory: None,
                 server_config: None,
+                shape_registry: None,
             };
 
             let ws_handler = get(topgun_server::network::handlers::ws_upgrade_handler);
@@ -507,7 +509,7 @@ fn build_services() -> (
         Arc::new(SchemaService::new()),
         None,
     ));
-    let sync_svc = Arc::new(SyncService::new(
+    let sync_svc = Arc::new(SyncService::new_basic(
         merkle_manager,
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
@@ -516,6 +518,7 @@ fn build_services() -> (
         Arc::clone(&query_registry),
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
+        Arc::new(PredicateBackend),
     ));
     let messaging_svc = Arc::new(MessagingService::new(Arc::clone(&connection_registry)));
     let coordination_svc = Arc::new(CoordinationService::new(

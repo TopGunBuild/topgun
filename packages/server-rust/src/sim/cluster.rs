@@ -125,7 +125,7 @@ impl SimNode {
 
         router.register(
             service_names::SYNC,
-            Arc::new(SyncService::new(
+            Arc::new(SyncService::new_basic(
                 merkle_manager,
                 Arc::clone(&record_store_factory),
                 Arc::clone(&connection_registry),
