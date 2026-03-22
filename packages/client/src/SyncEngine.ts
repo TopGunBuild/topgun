@@ -30,8 +30,9 @@ import type {
 import { DEFAULT_BACKPRESSURE_CONFIG } from './BackpressureConfig';
 import type { IConnectionProvider } from './types';
 import { ConflictResolverClient } from './ConflictResolverClient';
-import { WebSocketManager, BackpressureController, QueryManager, TopicManager, LockManager, WriteConcernManager, CounterManager, EntryProcessorClient, SearchClient, MerkleSyncHandler, ORMapSyncHandler, MessageRouter, registerClientMessageHandlers } from './sync';
-import type { SearchResult, IMessageRouter } from './sync';
+import { WebSocketManager, BackpressureController, QueryManager, TopicManager, LockManager, WriteConcernManager, CounterManager, EntryProcessorClient, SearchClient, MerkleSyncHandler, ORMapSyncHandler, MessageRouter, registerClientMessageHandlers, ShapeManager } from './sync';
+import type { SearchResult, IMessageRouter, ShapeSubscribeOptions } from './sync';
+import type { ShapeHandle } from './ShapeHandle';
 
 // Re-export SearchResult from sync module for backwards compatibility
 export type { SearchResult } from './sync';
@@ -131,6 +132,9 @@ export class SyncEngine {
 
   // SearchClient handles full-text search operations
   private readonly searchClient: SearchClient;
+
+  // ShapeManager handles shape (partial replication) subscriptions
+  private readonly shapeManager: ShapeManager;
 
   // MerkleSyncHandler handles LWWMap sync protocol messages
   private readonly merkleSyncHandler: MerkleSyncHandler;
@@ -254,6 +258,11 @@ export class SyncEngine {
       isAuthenticated: () => this.isAuthenticated(),
     });
 
+    // Initialize ShapeManager for shape (partial replication) subscriptions
+    this.shapeManager = new ShapeManager({
+      sendMessage: (msg) => this.sendMessage(msg),
+    });
+
     // Initialize MerkleSyncHandler for LWWMap sync protocol
     this.merkleSyncHandler = new MerkleSyncHandler({
       getMap: (name) => this.maps.get(name),
@@ -309,6 +318,7 @@ export class SyncEngine {
         entryProcessorClient: this.entryProcessorClient,
         conflictResolverClient: this.conflictResolverClient,
         searchClient: this.searchClient,
+        shapeManager: this.shapeManager,
         merkleSyncHandler: this.merkleSyncHandler,
         orMapSyncHandler: this.orMapSyncHandler,
       }
@@ -635,6 +645,14 @@ export class SyncEngine {
    */
   public unsubscribeFromQuery(queryId: string): void {
     this.queryManager.unsubscribeFromQuery(queryId);
+  }
+
+  /**
+   * Subscribe to a shape (partial replication).
+   * Delegates to ShapeManager.
+   */
+  public subscribeShape(mapName: string, options?: ShapeSubscribeOptions): ShapeHandle {
+    return this.shapeManager.subscribeShape(mapName, options);
   }
 
   /**
