@@ -161,24 +161,6 @@ impl ShapeMerkleSyncManager {
         })
     }
 
-    /// Returns the partition IDs for which a shape tree exists.
-    ///
-    /// Used by `SyncService` during shape-prefixed bucket traversal to iterate
-    /// over known partitions for a `(shape_id, map_name)` pair.
-    #[must_use]
-    pub fn partition_ids(&self, shape_id: &str, map_name: &str) -> Vec<u32> {
-        self.trees
-            .iter()
-            .filter_map(|entry| {
-                let (sid, mn, pid) = entry.key();
-                if sid == shape_id && mn == map_name {
-                    Some(*pid)
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
 }
 
 impl Default for ShapeMerkleSyncManager {

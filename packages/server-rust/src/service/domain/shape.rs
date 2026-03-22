@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use tower::Service;
 
+use topgun_core::hash::fnv1a_hash;
 use topgun_core::messages::shape::{ShapeRecord, ShapeRespMessage, ShapeRespPayload};
 use topgun_core::messages::{Message, SyncRespRootMessage, SyncRespRootPayload};
 use topgun_core::schema::SyncShape;
@@ -186,14 +187,30 @@ impl ShapeService {
         let mut total_matches: usize = 0;
 
         for store in &stores {
+            let partition_id = store.partition_id();
+            // Collect (key, hash) pairs for Merkle tree init.
+            let mut key_hash_pairs: Vec<(String, u32)> = Vec::new();
+
             store.for_each_boxed(
                 &mut |key, record| {
-                    if let RecordValue::Lww { ref value, .. } = record.value {
+                    if let RecordValue::Lww {
+                        ref value,
+                        ref timestamp,
+                    } = record.value
+                    {
                         // Convert storage Value to rmpv::Value for shape evaluation.
                         let rmpv_value = value_to_rmpv(value);
                         // Step 4: Evaluate against the shape (filter + project).
                         if let Some(projected) = shape_evaluator::apply_shape(&shape, &rmpv_value) {
                             total_matches += 1;
+
+                            // Compute hash matching MerkleSyncManager's compute_lww_hash pattern.
+                            let item_hash = fnv1a_hash(&format!(
+                                "{}:{}:{}:{}",
+                                key, timestamp.millis, timestamp.counter, timestamp.node_id
+                            ));
+                            key_hash_pairs.push((key.to_string(), item_hash));
+
                             // Step 5 (part 1): only collect up to limit.
                             let limit = shape.limit.map(|l| l as usize);
                             if limit.is_none_or(|l| matching_records.len() < l) {
@@ -208,6 +225,13 @@ impl ShapeService {
                 },
                 false, // not backup
             );
+
+            // Populate per-shape Merkle tree for this partition.
+            if let Some(ref merkle) = self.shape_merkle_manager {
+                if !key_hash_pairs.is_empty() {
+                    merkle.init_tree(&shape_id, &map_name, partition_id, &key_hash_pairs);
+                }
+            }
         }
 
         // Step 5 (part 2): determine has_more.
@@ -230,13 +254,17 @@ impl ShapeService {
                 OperationError::Internal(anyhow::anyhow!("Shape registration failed: {e}"))
             })?;
 
-        // Step 7: Send ShapeRespMessage with matching records.
-        // merkle_root_hash is 0 until SPEC-136d implements per-shape Merkle trees.
+        // Step 7: Send ShapeRespMessage with matching records and aggregate Merkle hash.
+        let merkle_root_hash = self
+            .shape_merkle_manager
+            .as_ref()
+            .map_or(0, |m| m.aggregate_shape_root_hash(&shape_id, &map_name));
+
         let resp = Message::ShapeResp(ShapeRespMessage {
             payload: ShapeRespPayload {
                 shape_id,
                 records: matching_records,
-                merkle_root_hash: 0,
+                merkle_root_hash,
                 has_more,
             },
         });
@@ -350,6 +378,14 @@ impl ShapeRegistry {
     /// Registers a shape for a connection.
     ///
     /// Returns an error if a shape with the same `shape_id` is already registered.
+    ///
+    /// # Note
+    ///
+    /// `shape_id` must not be a 3-digit numeric string (e.g. `"042"`). Such IDs
+    /// collide with partition path prefixes in Merkle sync bucket traversal, causing
+    /// `parse_partition_prefix` to misidentify shape-prefixed paths as regular
+    /// partition paths. In practice, `shape_id` values are client-generated UUIDs or
+    /// prefixed strings (e.g. `"s-1"`), which are not affected.
     ///
     /// # Errors
     ///

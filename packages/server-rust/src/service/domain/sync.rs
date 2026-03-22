@@ -280,15 +280,12 @@ impl SyncService {
         // Shape-prefixed mode: path starts with a shape_id (not a 3-digit partition prefix).
         // Path format: "<shape_id>/<partition_id>/<sub_path>".
         // Detection: parse_partition_prefix returned None above AND path contains '/'.
-        if path.contains('/') {
-            // Clone the segments we need — `path` is moved into the response later.
-            if let Some(slash_pos) = path.find('/') {
-                let shape_id = path[..slash_pos].to_string();
-                let after_shape = path[slash_pos + 1..].to_string();
-                return self
-                    .handle_shape_prefixed_bucket(&shape_id, &after_shape, map_name, path)
-                    .await;
-            }
+        if let Some(slash_pos) = path.find('/') {
+            let shape_id = path[..slash_pos].to_string();
+            let after_shape = path[slash_pos + 1..].to_string();
+            return self
+                .handle_shape_prefixed_bucket(&shape_id, &after_shape, map_name, path)
+                .await;
         }
 
         // Aggregate mode: combine bucket hashes from all partitions.
