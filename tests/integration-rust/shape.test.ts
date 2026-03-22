@@ -521,8 +521,9 @@ describe('Integration: Shapes (Rust Server)', () => {
 
       conn2.close();
 
-      // Connection 3: Simulate reconnect by sending SHAPE_SYNC_INIT with stored rootHash
-      // The server should respond with only the delta (the new record added after conn1 disconnected)
+      // Connection 3: Simulate reconnect — first re-subscribe (as a real client would on reconnect
+      // to re-register the shape on the server), then send SHAPE_SYNC_INIT with the stored
+      // rootHash to request only the delta since we last synced.
       const conn3 = await createRustTestClient(port, {
         nodeId: 'shape-sync-conn3',
         userId: 'shape-sync-user-3',
@@ -530,6 +531,28 @@ describe('Integration: Shapes (Rust Server)', () => {
       });
       await conn3.waitForMessage('AUTH_ACK');
 
+      // Re-subscribe first so the server re-registers the shape and rebuilds Merkle trees.
+      // This mirrors how ShapeManager.resubscribeAll() works on reconnect — the shape
+      // definition is held locally on the client and re-sent on every reconnect.
+      conn3.send({
+        type: 'SHAPE_SUBSCRIBE',
+        payload: {
+          shape: {
+            shapeId,
+            mapName,
+            filter: {
+              op: 'eq',
+              attribute: 'category',
+              value: 'widget',
+            },
+          },
+        },
+      });
+      await conn3.waitForMessage('SHAPE_RESP');
+
+      // Now send SHAPE_SYNC_INIT with the stored rootHash from conn1's original snapshot.
+      // Since new data was added while conn1 was disconnected, the hashes will differ
+      // and the server should respond with SYNC_RESP_ROOT to initiate delta sync.
       conn3.messages.length = 0;
       conn3.send({
         type: 'SHAPE_SYNC_INIT',
