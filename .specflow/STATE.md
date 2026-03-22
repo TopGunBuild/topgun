@@ -1,14 +1,13 @@
 ## Current Position
 
-- **Active Specification:** SPEC-136d
-- **Status:** review
-- **Next Step:** /sf:review
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | ID | Title | Status | Priority | Complexity |
 |----|-------|--------|----------|------------|
-| SPEC-136d | Shapes: Per-Shape Merkle Trees and Shape-Aware Sync | running | P1 | small |
 | SPEC-136e | Shapes: TS Client Shape API and Integration Tests | draft | P1 | small |
 
 ## Decisions
