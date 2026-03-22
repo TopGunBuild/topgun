@@ -28,6 +28,10 @@ export type ShapeUpdateCallback = (update: ShapeUpdate) => void;
  */
 export interface ShapeHandleOptions {
   shapeId: string;
+  mapName: string;
+  filter?: any;
+  fields?: string[];
+  limit?: number;
   sendMessage: (message: any) => boolean;
 }
 
@@ -43,6 +47,18 @@ export interface ShapeHandleOptions {
 export class ShapeHandle {
   /** Unique identifier for this shape subscription. */
   readonly shapeId: string;
+
+  /** Original map name used to create this subscription (needed for reconnect). */
+  readonly mapName: string;
+
+  /** Original filter used to create this subscription (needed for reconnect). */
+  readonly filter: any | undefined;
+
+  /** Original field projection used to create this subscription (needed for reconnect). */
+  readonly fields: string[] | undefined;
+
+  /** Original limit used to create this subscription (needed for reconnect). */
+  readonly limit: number | undefined;
 
   /**
    * Current matching records.
@@ -63,6 +79,10 @@ export class ShapeHandle {
 
   constructor(options: ShapeHandleOptions) {
     this.shapeId = options.shapeId;
+    this.mapName = options.mapName;
+    this.filter = options.filter;
+    this.fields = options.fields;
+    this.limit = options.limit;
     this.sendMessage = options.sendMessage;
   }
 

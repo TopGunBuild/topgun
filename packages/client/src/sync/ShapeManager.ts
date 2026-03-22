@@ -60,6 +60,10 @@ export class ShapeManager {
 
     const handle = new ShapeHandle({
       shapeId,
+      mapName,
+      filter: options?.filter,
+      fields: options?.fields,
+      limit: options?.limit,
       sendMessage: this.config.sendMessage,
     });
 
@@ -146,17 +150,33 @@ export class ShapeManager {
    * can send only the delta since the last snapshot.
    */
   public resubscribeAll(): void {
+    // Collect stale handles first to avoid mutating the Map during iteration
+    const staleIds: string[] = [];
     for (const [shapeId, handle] of this.shapes) {
       if (handle.isUnsubscribed()) {
-        // Remove stale unsubscribed handles
-        this.shapes.delete(shapeId);
-        continue;
+        staleIds.push(shapeId);
       }
+    }
+    for (const id of staleIds) {
+      this.shapes.delete(id);
+    }
 
-      // Re-send the subscribe — server will respond with a fresh SHAPE_RESP
-      // We don't store the original mapName/options on the handle, so
-      // we cannot resend the full SHAPE_SUBSCRIBE automatically.
-      // Instead, send SHAPE_SYNC_INIT which is the efficient reconnect path.
+    // Re-subscribe active shapes: SHAPE_SUBSCRIBE first (server cleans up
+    // registrations on disconnect), then SHAPE_SYNC_INIT for delta sync
+    for (const [shapeId, handle] of this.shapes) {
+      this.config.sendMessage({
+        type: 'SHAPE_SUBSCRIBE',
+        payload: {
+          shape: {
+            shapeId,
+            mapName: handle.mapName,
+            filter: handle.filter,
+            fields: handle.fields,
+            limit: handle.limit,
+          },
+        },
+      });
+
       this.config.sendMessage({
         type: 'SHAPE_SYNC_INIT',
         payload: {
@@ -167,7 +187,7 @@ export class ShapeManager {
 
       logger.debug(
         { shapeId, rootHash: handle.merkleRootHash },
-        'Shape resubscribed with SHAPE_SYNC_INIT'
+        'Shape resubscribed with SHAPE_SUBSCRIBE + SHAPE_SYNC_INIT'
       );
     }
   }

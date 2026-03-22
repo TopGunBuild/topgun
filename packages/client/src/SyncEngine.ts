@@ -744,6 +744,8 @@ export class SyncEngine {
       this.queryManager.resubscribeAll();
       // Re-subscribe topics via TopicManager
       this.topicManager.resubscribeAll();
+      // Re-subscribe shapes via ShapeManager
+      this.shapeManager.resubscribeAll();
     }
 
     // After initial sync setup, transition to CONNECTED
