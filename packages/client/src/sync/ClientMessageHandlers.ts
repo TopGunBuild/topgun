@@ -29,6 +29,8 @@ import type {
   UnregisterResolverResponse,
   ListResolversResponse,
   MergeRejectedMessage,
+  ShapeRespPayload,
+  ShapeUpdatePayload,
 } from '@topgunbuild/core';
 
 /**
@@ -76,6 +78,10 @@ export interface ManagerDelegates {
   searchClient: {
     handleSearchResponse(payload: SearchRespPayload): void;
   };
+  shapeManager: {
+    handleShapeResp(payload: ShapeRespPayload): void;
+    handleShapeUpdate(payload: ShapeUpdatePayload): void;
+  };
   merkleSyncHandler: {
     handleSyncRespRoot(payload: SyncRespRootPayload): void;
     handleSyncRespBuckets(payload: SyncRespBucketsPayload): void;
@@ -109,6 +115,7 @@ export const CLIENT_MESSAGE_TYPES = [
   'ENTRY_PROCESS_RESPONSE', 'ENTRY_PROCESS_BATCH_RESPONSE',
   'REGISTER_RESOLVER_RESPONSE', 'UNREGISTER_RESOLVER_RESPONSE', 'LIST_RESOLVERS_RESPONSE', 'MERGE_REJECTED',
   'SEARCH_RESP', 'SEARCH_UPDATE',
+  'SHAPE_RESP', 'SHAPE_UPDATE',
 ] as const;
 
 /**
@@ -213,5 +220,9 @@ export function registerClientMessageHandlers(
     'SEARCH_UPDATE': () => {
       // SEARCH_UPDATE is handled by SearchHandle via emitMessage, no-op here
     },
+
+    // SHAPE handlers
+    'SHAPE_RESP': (msg) => managers.shapeManager.handleShapeResp(msg.payload),
+    'SHAPE_UPDATE': (msg) => managers.shapeManager.handleShapeUpdate(msg.payload),
   });
 }
