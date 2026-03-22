@@ -18,7 +18,7 @@ use dashmap::DashMap;
 use tower::Service;
 
 use topgun_core::messages::shape::{ShapeRecord, ShapeRespMessage, ShapeRespPayload};
-use topgun_core::messages::Message;
+use topgun_core::messages::{Message, SyncRespRootMessage, SyncRespRootPayload};
 use topgun_core::schema::SyncShape;
 
 use tracing::Instrument;
@@ -31,6 +31,7 @@ use crate::service::operation::{
 };
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::storage::record::RecordValue;
+use crate::storage::shape_merkle::ShapeMerkleSyncManager;
 use crate::storage::RecordStoreFactory;
 
 // ---------------------------------------------------------------------------
@@ -46,20 +47,28 @@ pub struct ShapeService {
     shape_registry: Arc<ShapeRegistry>,
     record_store_factory: Arc<RecordStoreFactory>,
     connection_registry: Arc<ConnectionRegistry>,
+    /// Per-shape Merkle manager used by `handle_shape_sync_init`.
+    /// `None` when shape Merkle sync is not wired (passes `None` at unchanged call sites).
+    shape_merkle_manager: Option<Arc<ShapeMerkleSyncManager>>,
 }
 
 impl ShapeService {
     /// Creates a new `ShapeService` with its required dependencies.
+    ///
+    /// Pass `Some(shape_merkle_manager)` to enable shape-aware Merkle sync init.
+    /// Pass `None` to keep all existing call sites working unchanged.
     #[must_use]
     pub fn new(
         shape_registry: Arc<ShapeRegistry>,
         record_store_factory: Arc<RecordStoreFactory>,
         connection_registry: Arc<ConnectionRegistry>,
+        shape_merkle_manager: Option<Arc<ShapeMerkleSyncManager>>,
     ) -> Self {
         Self {
             shape_registry,
             record_store_factory,
             connection_registry,
+            shape_merkle_manager,
         }
     }
 
@@ -128,6 +137,9 @@ impl Service<Operation> for Arc<ShapeService> {
                     }
                     Operation::ShapeUnsubscribe { ctx, payload } => {
                         svc.handle_shape_unsubscribe(&ctx, &payload)
+                    }
+                    Operation::ShapeSyncInit { ctx, payload } => {
+                        svc.handle_shape_sync_init(&ctx, payload).await
                     }
                     _ => Err(OperationError::WrongService),
                 }
@@ -247,6 +259,49 @@ impl ShapeService {
     ) -> Result<OperationResponse, OperationError> {
         let _ = self.shape_registry.unregister(&payload.payload.shape_id);
         Ok(OperationResponse::Empty)
+    }
+
+    /// Handles a `ShapeSyncInit` operation.
+    ///
+    /// Client sends its stored shape Merkle root hash. The server computes the aggregate
+    /// shape root hash across all partitions and responds with `SyncRespRootMessage`.
+    ///
+    /// If the hashes differ, the client drives traversal via `MerkleReqBucket` messages
+    /// with shape-prefixed paths (e.g. `"<shape_id>/<partition_id>/<sub_path>"`), which
+    /// are handled by `SyncService::handle_merkle_req_bucket`.
+    ///
+    /// Returns `OperationResponse::Empty` (no error) when shape Merkle sync is not wired
+    /// (i.e. `shape_merkle_manager` is `None`) so unchanged call sites continue working.
+    #[allow(clippy::unused_async)]
+    async fn handle_shape_sync_init(
+        &self,
+        ctx: &crate::service::operation::OperationContext,
+        payload: topgun_core::messages::shape::ShapeSyncInitMessage,
+    ) -> Result<OperationResponse, OperationError> {
+        let Some(shape_merkle) = self.shape_merkle_manager.as_ref() else {
+            return Ok(OperationResponse::Empty);
+        };
+
+        let shape_id = payload.payload.shape_id;
+
+        // Resolve map_name for the shape from the registry.
+        let Some(active_shape) = self.shape_registry.get(&shape_id) else {
+            return Ok(OperationResponse::Empty);
+        };
+        let map_name = active_shape.shape.map_name.clone();
+
+        // Compute the server's aggregate shape root hash across all partitions.
+        let root_hash = shape_merkle.aggregate_shape_root_hash(&shape_id, &map_name);
+
+        Ok(OperationResponse::Message(Box::new(Message::SyncRespRoot(
+            SyncRespRootMessage {
+                payload: SyncRespRootPayload {
+                    map_name,
+                    root_hash,
+                    timestamp: ctx.timestamp.clone(),
+                },
+            },
+        ))))
     }
 }
 
