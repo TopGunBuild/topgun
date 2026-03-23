@@ -35,6 +35,7 @@ pub enum AuthError {
 #[derive(Debug, Deserialize)]
 pub struct JwtClaims {
     /// User identifier -- standard JWT `sub` (subject) claim.
+    #[serde(default)]
     pub sub: Option<String>,
     /// Roles assigned to this principal (e.g., `["admin"]`).
     #[serde(skip_serializing_if = "Option::is_none", default)]
