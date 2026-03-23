@@ -136,22 +136,32 @@ export function SignUpForm() {
   );
 }`;
 
-export const serverConfigCode = `# Start the TopGun server with JWT authentication
-# The server verifies JWT tokens using the configured secret
+export const serverConfigCode = `# Development: use the test-server binary (included in repo)
+# cargo run --bin test-server --release
 PORT=8090 \\
 DATABASE_URL=postgres://user:pass@localhost/myapp \\
 JWT_SECRET=your-secret-key \\
-topgun-server
+cargo run --bin test-server
 
+# Production: embed the server programmatically in your Rust application
+# use topgun_server::{ServerBuilder, NetworkConfig};
+#
+# let server = ServerBuilder::new()
+#     .network(NetworkConfig { port: 8090, ..Default::default() })
+#     .build()
+#     .await?;
+#
+# Note: a standalone topgun-server production binary with env-var configuration
+# is planned but does not yet exist. Use programmatic embedding for production.
+#
 # For the full Rust server embed API (NetworkConfig, TlsConfig, RBAC),
 # see the Server API reference: /docs/reference/server`;
 
 export const jwtPayloadCode = `{
-  "sub": "user_123",       // User ID (or use "userId")
-  "userId": "user_123",    // Alternative to "sub"
-  "roles": ["USER"],       // Array of roles for RBAC
-  "iat": 1699000000,       // Issued at
-  "exp": 1699086400        // Expiration
+  "sub": "user_123",    // User ID — required, per RFC 7519
+  "roles": ["USER"],    // Array of roles for RBAC (optional)
+  "iat": 1699000000,    // Issued at
+  "exp": 1699086400     // Expiration
 }`;
 
 export const customJwtCode = `import jwt from 'jsonwebtoken';
@@ -161,8 +171,7 @@ const JWT_SECRET = process.env.JWT_SECRET!;
 export function generateToken(user: { id: string; roles: string[] }) {
   return jwt.sign(
     {
-      sub: user.id,
-      userId: user.id,
+      sub: user.id,    // RFC 7519 standard claim — the only user identifier TopGun reads
       roles: user.roles
     },
     JWT_SECRET,
@@ -187,6 +196,35 @@ app.post('/api/login', async (req, res) => {
 
 export const clientAuthCode = `import { tgClient } from './topgun';
 
+// In-memory cache — not persisted to storage.
+// The token is re-acquired from the server on page reload via the provider below.
+let cachedToken: string | null = null;
+
+// Register a token provider with TopGun.
+// The provider is called on every AUTH_REQUIRED message from the server,
+// which happens on initial connection and after any reconnect.
+tgClient.setAuthTokenProvider(async () => {
+  if (cachedToken) {
+    return cachedToken;
+  }
+
+  try {
+    const res = await fetch('/api/token', {
+      method: 'POST',
+      credentials: 'include'   // send session cookie to your auth endpoint
+    });
+
+    if (!res.ok) return null;
+
+    const { token } = await res.json();
+    cachedToken = token;
+    return token;
+  } catch {
+    return null;
+  }
+});
+
+// Call this after a user explicitly logs in so the cache is primed immediately
 export async function login(email: string, password: string) {
   const res = await fetch('/api/login', {
     method: 'POST',
@@ -195,18 +233,12 @@ export async function login(email: string, password: string) {
   });
 
   const { token } = await res.json();
-
-  // Set the token in TopGun client
-  tgClient.setAuthToken(token);
-
-  // Store for persistence across page reloads
-  localStorage.setItem('topgun_token', token);
+  cachedToken = token;    // prime the in-memory cache; provider will return this on next AUTH_REQUIRED
 }
 
-// On app init, restore token
-const savedToken = localStorage.getItem('topgun_token');
-if (savedToken) {
-  tgClient.setAuthToken(savedToken);
+// Call this on logout to clear the cache
+export function logout() {
+  cachedToken = null;
 }`;
 
 export const clerkProductionCode = `# 1. Get your Clerk Public Key from the JWKS endpoint
@@ -221,6 +253,58 @@ JWT_SECRET="-----BEGIN PUBLIC KEY-----\\nMIIBIjAN...your-key...AQAB\\n-----END P
 export JWT_SECRET="-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...
 -----END PUBLIC KEY-----"`;
+
+export const betterAuthBridgeServerCode = `import { auth } from '../lib/auth';
+import jwt from 'jsonwebtoken';
+
+const JWT_SECRET = process.env.JWT_SECRET!;
+
+// Custom endpoint: verifies the BetterAuth session cookie and mints a TopGun JWT.
+// BetterAuth uses opaque session tokens by default — not JWTs.
+// This endpoint bridges BetterAuth sessions into a JWT that TopGun can verify.
+export async function GET(request: Request) {
+  // Verify the BetterAuth session from the request (cookie-based)
+  const session = await auth.api.getSession({ headers: request.headers });
+
+  if (!session?.user) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+
+  const token = jwt.sign(
+    {
+      sub: session.user.id,       // RFC 7519 standard claim
+      roles: session.user.roles ?? ['USER']
+    },
+    JWT_SECRET,
+    { expiresIn: '1h' }
+  );
+
+  return Response.json({ token });
+}`;
+
+export const betterAuthBridgeClientCode = `import { tgClient } from './topgun';
+
+// In-memory cache — not persisted to storage
+let cachedToken: string | null = null;
+
+// Register the token provider. It is called on every AUTH_REQUIRED message,
+// which happens on initial connect and on every reconnect after a network drop.
+tgClient.setAuthTokenProvider(async () => {
+  if (cachedToken) return cachedToken;
+
+  // Exchange the BetterAuth session cookie for a TopGun JWT
+  const res = await fetch('/api/topgun-token', { credentials: 'include' });
+  if (!res.ok) return null;
+
+  const { token } = await res.json();
+  cachedToken = token;
+  return token;
+});
+
+// Clear the cache on logout so the next reconnect forces a fresh exchange
+export function clearTopGunToken() {
+  cachedToken = null;
+}`;
 
 export const clerkJwksCode = `// Fetch JWKS from Clerk
 const response = await fetch('https://YOUR_CLERK_DOMAIN.clerk.accounts.dev/.well-known/jwks.json');
@@ -361,6 +445,24 @@ Use the user ID from Clerk to scope data per user:
   <CodeBlock title="src/components/AuthForm.tsx" language="tsx" code={signUpFormCode} />
 </div>
 
+### 4. Connect BetterAuth Session to TopGun
+
+<div className="p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg mb-6 not-prose">
+  <p className="text-blue-800 dark:text-blue-200 text-sm">
+    <strong>Important:</strong> BetterAuth manages sessions using cookies or opaque session tokens by default — it does not issue JWTs. TopGun requires a JWT for sync authentication. To connect BetterAuth sessions to TopGun, you must create a custom server endpoint that verifies the BetterAuth session and mints a signed JWT for TopGun consumption.
+  </p>
+</div>
+
+**Two-step bridge pattern: BetterAuth session → custom endpoint → JWT → TopGun**
+
+<div className="not-prose">
+  <CodeBlock title="server/api/topgun-token.ts" language="typescript" code={betterAuthBridgeServerCode} />
+</div>
+
+<div className="not-prose">
+  <CodeBlock title="src/lib/topgun-auth.ts" language="typescript" code={betterAuthBridgeClientCode} />
+</div>
+
 ## Server Configuration
 
 The TopGun server validates JWT tokens using a shared secret. Configure the secret to match your auth provider.
@@ -390,6 +492,16 @@ If you're using a custom authentication system, you can generate JWT tokens manu
 <div className="not-prose">
   <CodeBlock title="src/lib/auth.ts" language="typescript" code={clientAuthCode} />
 </div>
+
+## Token Lifecycle
+
+Understanding how token expiry interacts with active connections helps you build robust auth flows.
+
+- **Active connections are not terminated when a token expires.** Once a WebSocket connection is established and authenticated, token expiry does not disconnect the client. The existing session continues until the connection is dropped.
+- **Token expiry only matters on reconnect.** If the network drops, the page is reloaded, or the WebSocket is otherwise closed, the client must re-authenticate. At that point, the server sends an `AUTH_REQUIRED` message.
+- **`setAuthTokenProvider()` is called on every `AUTH_REQUIRED` message.** This happens on initial connection and on every reconnect. The provider must return a valid, non-expired token for the connection to be established.
+- **Returning `null` from the provider leaves the connection unauthenticated.** The client will be connected but no data operations will be permitted.
+- **Recommendation:** your token provider should call your app's token or session refresh endpoint rather than relying on a cached token that may be stale after a long offline period.
 
 ## Production Deployment with Clerk
 
