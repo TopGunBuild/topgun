@@ -1,7 +1,7 @@
 ---
 id: SPEC-139
 type: bugfix
-status: approved
+status: done
 priority: P2
 complexity: medium
 created: 2026-03-23
@@ -259,3 +259,66 @@ None. All requirements implemented as specified.
 ### Notes
 - The `betterAuthBridgeServerCode` and `betterAuthBridgeClientCode` exports were added to authentication.mdx alongside the bridge section — no new MDX components were introduced, consistent with spec constraints.
 - The `envVarsTable` export in security.mdx was not used inline in the page body (it was an export but the page rendered the table directly). The replacement maintains the same pattern.
+
+---
+
+## Review History
+
+### Review v1 (2026-03-23)
+**Result:** APPROVED
+**Reviewer:** impl-reviewer (subagent)
+
+**Findings:**
+
+**Passed:**
+- [✓] AC1: No `userId` as a JWT claim anywhere in `authentication.mdx` — zero grep matches confirmed
+- [✓] AC2: All token examples use `setAuthTokenProvider()` — no bare `setAuthToken()` calls present
+- [✓] AC3: "Token Lifecycle" section added at line 496 covering all 5 required points (no disconnect on expiry, expiry on reconnect, provider called on AUTH_REQUIRED, null = unauthenticated, refresh recommendation)
+- [✓] AC4: Better Auth bridge section added with prominent callout, two-step pattern prose, `betterAuthBridgeServerCode` + `betterAuthBridgeClientCode` exports, and explicit note about opaque session tokens requiring a custom JWT-minting endpoint
+- [✓] AC5: Every `TOPGUN_TLS_*` and `TOPGUN_CLUSTER_*` entry in the env vars table carries a "**Planned**" marker; code block `serverTlsCode` has a prominent planned callout; yellow callout box before the table is clear and prominent
+- [✓] AC6: mTLS section has a yellow callout banner "Planned for v3.0" with explanation that cluster traffic is currently plaintext TCP and `ClusterConfig` has no TLS fields
+- [✓] AC7: Working env vars table present at security.mdx line 463 — all seven required variables (`PORT`, `DATABASE_URL`, `JWT_SECRET`, `TOPGUN_ADMIN_PASSWORD`, `TOPGUN_ADMIN_USERNAME`, `TOPGUN_ADMIN_DIR`, `TOPGUN_LOG_FORMAT`) documented with correct defaults
+- [✓] AC8: Trusted-Origin Bypass subsection added under Security Pipeline; table covers all four origins (`Forwarded`, `Backup`, `Wan`, `System`) with bypass explanation; contrast with `Client` origin clearly stated
+- [✓] AC9: `rbac.mdx` has a prominent amber callout banner at top with "Current Implementation Status"; "What Works Today" section added; Configuration and Field-Level Security sections both have yellow "Planned — TODO-171" callout boxes
+- [✓] AC10: All `topgun-server` references in all three files are qualified — `authentication.mdx` serverConfigCode uses `test-server` for dev and marks production binary as planned; `security.mdx` "Server Deployment Model" section explains library crate model; `rbac.mdx` configCode comment marks production binary as planned
+- [✓] AC11: Both `clientAuthCode` (line 199) and `betterAuthBridgeClientCode` (line 287) use `let cachedToken: string | null = null` with explicit "In-memory cache — not persisted to storage" comment; no `localStorage` in either export
+- [✓] No new MDX components introduced — constraint honored
+- [✓] No Rust server code changed — documentation-only constraint honored
+- [✓] Existing page structure and navigation links intact
+- [✓] `sub` claim correctly used (not `userId`) in rbac.mdx Principal card
+- [✓] RS256 auto-detection callout in authentication.mdx matches SPEC-138 implementation (accurate, no change needed per R5)
+
+**Summary:** All 11 acceptance criteria pass. The implementation is thorough, accurate, and well-executed. Every requirement from R1 through R14 is satisfied. The documentation now correctly reflects the actual server state — no phantom TLS env vars, no incorrect JWT claims, and clear implemented-vs-planned distinction across all three guides.
+
+---
+
+## Completion
+
+**Completed:** 2026-03-23
+**Total Commits:** 3
+**Review Cycles:** 1
+
+### Outcome
+
+Fixed all auth and security documentation errors introduced during the Rust migration — removed phantom JWT claims, replaced insecure token patterns, marked unimplemented TLS/mTLS/RBAC features as planned, and documented working environment variables and security pipeline behavior.
+
+### Key Files
+
+- `apps/docs-astro/src/content/docs/guides/authentication.mdx` — JWT claims, token provider pattern, token lifecycle, Better Auth bridge
+- `apps/docs-astro/src/content/docs/guides/security.mdx` — Working env vars, TLS planned markers, trusted-origin bypass, deployment model
+- `apps/docs-astro/src/content/docs/guides/rbac.mdx` — Implementation status banner, what works vs planned distinction
+
+### Changes Applied
+
+**Modified:**
+- `apps/docs-astro/src/content/docs/guides/authentication.mdx` — Removed userId from JWT examples, replaced setAuthToken/localStorage with setAuthTokenProvider + in-memory cache, added Token Lifecycle section, added Better Auth JWT-minting bridge, updated serverConfigCode to use test-server
+- `apps/docs-astro/src/content/docs/guides/security.mdx` — Added Server Deployment Model section, mTLS v3.0 planned banner, split env vars into working/planned tables, added Trusted-Origin Bypass subsection
+- `apps/docs-astro/src/content/docs/guides/rbac.mdx` — Added Current Implementation Status banner, What Works Today section, Planned banners on Configuration and Field-Level Security sections, replaced userId with sub in Principal card
+
+### Patterns Established
+
+None — followed existing MDX component patterns (callout boxes, CodeBlock exports, FeatureCard).
+
+### Spec Deviations
+
+None — implemented as specified.

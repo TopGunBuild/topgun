@@ -1,14 +1,13 @@
 ## Current Position
 
-- **Active Specification:** SPEC-139
-- **Status:** review
-- **Next Step:** /sf:review
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | ID | Title | Status | Priority | Complexity |
 |----|-------|--------|----------|------------|
-| SPEC-139 | Fix Auth & Security Documentation (Outdated Claims, Missing Guidance) | review | P2 | medium |
 
 ## Decisions
 
