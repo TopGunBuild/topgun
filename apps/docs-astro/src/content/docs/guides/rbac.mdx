@@ -8,21 +8,25 @@ import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Shield, Lock, UserCheck, AlertTriangle } from 'lucide-react';
 import { FeatureCard } from '../../../components/docs/FeatureCard';
 
-export const configCode = `# The Rust server configures RBAC via security policies
-# Policies define role-based permissions for map access patterns
+export const configCode = `# PLANNED — map pattern matching (users:*, public:*, etc.) is not yet implemented.
+# Role-based policy evaluation against map name patterns is planned (TODO-171).
 #
-# Example policy structure:
+# Planned policy structure (future):
 #   ANON  -> public:*          -> READ only
 #   USER  -> users:{userId}:*  -> ALL (read, write, delete)
 #   ADMIN -> *                 -> ALL
 #
-# Start the server with JWT authentication for role verification:
+# What works today: basic per-connection read/write booleans applied by WriteValidator.
+# Roles are extracted from the JWT "roles" claim and stored on the connection principal.
+#
+# Start the server (development):
 PORT=8765 \\
 DATABASE_URL=postgres://user:pass@localhost/myapp \\
 JWT_SECRET=your-secret-key \\
-topgun-server
-
-# For the full RBAC configuration API, see: /docs/reference/server`;
+cargo run --bin test-server
+#
+# Note: a standalone topgun-server production binary is planned but does not yet exist.
+# For the full RBAC configuration API (when implemented), see: /docs/reference/server`;
 
 export const fieldLevelCode = `{
   role: 'USER',
@@ -41,6 +45,19 @@ export const fieldLevelCode = `{
 </div>
 
 # Role-Based Access Control (RBAC)
+
+<div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-xl p-5 mb-8 not-prose">
+  <div className="flex items-center gap-2 mb-2">
+    <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0" />
+    <span className="font-semibold text-amber-800 dark:text-amber-200">Current Implementation Status</span>
+  </div>
+  <ul className="text-sm text-amber-800 dark:text-amber-200 space-y-1 list-disc list-inside">
+    <li><strong>Works today:</strong> JWT <code>roles</code> claim is extracted and stored on the connection principal.</li>
+    <li><strong>Works today:</strong> Basic per-connection, per-map <code>read</code>/<code>write</code> booleans are enforced by <code>WriteValidator</code>.</li>
+    <li><strong>Works today:</strong> Default-deny — connections without explicit permissions cannot access maps.</li>
+    <li><strong>Planned (TODO-171):</strong> Role-based policy evaluation, map pattern matching (<code>users:*</code>), and field-level security (<code>allowedFields</code>) are not yet implemented.</li>
+  </ul>
+</div>
 
 TopGun provides a flexible security model based on **Permission Policies**.
 You can define fine-grained access control rules for your data maps, controlling who can read (READ), write (PUT), or delete (REMOVE) data based on user roles.
@@ -62,7 +79,7 @@ You can define fine-grained access control rules for your data maps, controlling
     <UserCheck className="w-8 h-8 text-neutral-500 mb-3" />
     <h3 className="text-lg font-medium mb-2">Principal</h3>
     <p className="text-neutral-600 dark:text-neutral-300 text-sm">
-      Represents the authenticated user. Contains a <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded">userId</code> and a list of <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded">roles</code> (e.g., 'USER', 'ADMIN').
+      Represents the authenticated user. Contains the <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded">sub</code> claim from the JWT (RFC 7519 user identifier) and a list of <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded">roles</code> (e.g., 'USER', 'ADMIN').
     </p>
   </div>
   <div className="p-6 bg-card border border-card-border rounded-xl">
@@ -74,29 +91,46 @@ You can define fine-grained access control rules for your data maps, controlling
   </div>
 </div>
 
-## Configuration
+## What Works Today
 
-RBAC policies are configured on the Rust server via security settings and environment variables.
+The following RBAC capabilities are implemented and enforced in the current server:
 
-<div className="not-prose">
-  <CodeBlock title="RBAC Configuration" language="bash" code={configCode} />
+- **JWT role extraction:** The server reads the `roles` array from the JWT payload and stores it on the connection's principal object. Roles are available for use in permission checks.
+- **Per-connection map permissions:** Each connection can be granted `read: true` or `write: true` (or both) on specific maps. These booleans are the primary access control mechanism today.
+- **Default-deny:** Connections without explicit map-level permissions cannot read or write any map. Permission must be explicitly granted.
+- **`WriteValidator` enforcement:** All write operations pass through `WriteValidator`, which checks map-level permissions before allowing the CRDT merge.
+
+## Configuration (Planned — TODO-171)
+
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-xl p-4 mb-4 not-prose">
+  <div className="flex items-center gap-2 mb-1">
+    <AlertTriangle className="w-5 h-5 text-yellow-600 dark:text-yellow-400" />
+    <span className="font-semibold text-yellow-800 dark:text-yellow-200">Planned — TODO-171</span>
+  </div>
+  <p className="text-sm text-yellow-700 dark:text-yellow-300">Map name pattern matching (e.g., <code>users:*</code>) and role-based policy evaluation are not yet implemented. The configuration example below shows the planned design.</p>
 </div>
 
-## Field-Level Security
+RBAC policies will be configured on the Rust server via security settings and environment variables.
 
-You can restrict which fields are returned to the client using `allowedFields`.
+<div className="not-prose">
+  <CodeBlock title="RBAC Configuration (planned)" language="bash" code={configCode} />
+</div>
+
+## Field-Level Security (Planned — TODO-171)
+
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-xl p-4 mb-4 not-prose">
+  <div className="flex items-center gap-2 mb-1">
+    <AlertTriangle className="w-5 h-5 text-yellow-600 dark:text-yellow-400" />
+    <span className="font-semibold text-yellow-800 dark:text-yellow-200">Planned — TODO-171</span>
+  </div>
+  <p className="text-sm text-yellow-700 dark:text-yellow-300"><code>allowedFields</code> field-level security is not yet implemented. The example below shows the planned API.</p>
+</div>
+
+You will be able to restrict which fields are returned to the client using `allowedFields`.
 This is useful for hiding sensitive data like password hashes or internal metadata.
 
 <div className="not-prose">
-  <CodeBlock title="Example: User Profile" language="typescript" code={fieldLevelCode} />
-</div>
-
-<div className="mt-6 flex items-start gap-3 p-4 bg-amber-50 dark:bg-amber-900/20 text-amber-800 dark:text-amber-200 rounded-lg text-sm not-prose">
-  <AlertTriangle className="w-5 h-5 shrink-0" />
-  <p>
-    Field-level security currently applies only to <strong>READ</strong> operations.
-    Write operations (PUT) validate permission to the map but do not yet validate the schema of the payload.
-  </p>
+  <CodeBlock title="Example: User Profile (planned)" language="typescript" code={fieldLevelCode} />
 </div>
 
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
