@@ -9,7 +9,7 @@ use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use jsonwebtoken::Validation;
 
 use super::admin_types::ErrorResponse;
 use super::auth::JwtClaims;
@@ -89,11 +89,11 @@ impl FromRequestParts<AppState> for AdminClaims {
 
         // Validate JWT — do NOT clear required_spec_claims so that `exp` is
         // enforced. Use the configured clock skew tolerance for leeway.
-        let mut validation = Validation::new(Algorithm::HS256);
+        let (algorithm, key) = super::auth::decode_jwt_key(jwt_secret)
+            .map_err(AdminAuthError::InvalidToken)?;
+        let mut validation = Validation::new(algorithm);
         validation.validate_aud = false;
         validation.leeway = state.config.jwt_clock_skew_secs;
-
-        let key = DecodingKey::from_secret(jwt_secret.as_bytes());
 
         let token_data = jsonwebtoken::decode::<JwtClaims>(token, &key, &validation)
             .map_err(|e| AdminAuthError::InvalidToken(e.to_string()))?;
@@ -261,6 +261,104 @@ mod tests {
         assert!(result.is_ok(), "valid admin token should be accepted, got {result:?}");
         let claims = result.unwrap();
         assert_eq!(claims.user_id, "admin-user");
+        assert!(claims.roles.contains(&"admin".to_string()));
+    }
+
+    const TEST_RSA_PRIVATE_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCsOcDOoBAsEl9w
+osjKuwm0TVX9wF0kWhOwSeHmGPn01o5ngBHfWeJ7a8CXE7U5rPsvIxIvjQvLiKsg
+jyattjkaHsIGn+X1/vqsv7ETIKTSN4VBiPiVLmtl08vFGy2mp9FTNlbnkSh8JcK9
+u2VqqOpKgZ2gt4MvZaLYnlD93POA3K0Aho4WtzQvg+hIseK2VKXlXVrUhhoac6yC
+vsi/QjKjA+VUpu/IEZxXxDXpkqflX1uYzm1EFSPBlS+sDjprnOwc2ZUy1Dqd6q2y
+zoIqgYh9uoRIbsEsLnBP1wr8Q5Zb/k0nKk8JfdO7jLndNY+NQmt8j8N89Z46/3eY
+0q4RpskJAgMBAAECggEAEioFK8W17vABIOAKTVdsrpd5eknPiQX3DaC9Modv1WLL
+oh7fw663NE0pAsYRVwPnehE42csGc3D2m3h9m9ScMSUNUaWLm2ZJCe8tvdazi3hP
+lZncnd9HdHXiB+fV6L3KVfxlLgchPfa9k0UwbQ9jpngFJ+4y58zQYAhSgnPLOsve
+40r6JFEkpGmU/zjcmztAL08DqVNoG/Ayyf1fGHTsTZ41h/bjHpGqR/umUDKD3mUu
+nHKnH7KSdZGhd664gkxU15djQ3fvo8MKfycjHJJIB08loRjssF1cM2YucgUUBKGb
+20pZNhI08/u+P1qY/RA2mgMXufuOQl3fR6v7sj4AAQKBgQDqfhNJ3aprU5aZt8Cj
+TD64rrlJwaGd+KH3So8R7RqHaLDZ0tnuTo1Qd5Ug/Nj3+/YoV3SsBXHTz2vEySqE
+6TtZC3BIX8fgOBS/NKkEutLxIWJA2Rvb9Z7TuvoqNrRz4C//Ov+da8ejAm145BEt
+nICmJZAgTBWAIg2NIylJqgRF6QKBgQC8BaP0P747BhEbRvKWX7h3fTBmsNpbkFOI
+Zc9grdukBclyY7YTpJlNS9DsMIvoLKGbfb+MarkoiIdhD1OzsZv6CKl9m4W4L896
+Q2tVAKrdhicxDjEzF1+9JV3+sLAYpHyCL34VJ/SYykgPYISqi6zk9gwEfANeLKTR
+XYpz4MHWIQKBgQCetrLLfjNI7YyzgoHqhUK2sdxLpbmEOLM3s8lecsNP/3YkGOjU
+uWpAmo/fggRA5NNZvsgDXrQKjwv8Z8RVrZ8zx+A5vEqG4q54NGZqAyGff98G0Wxf
+1sGnwZhtVhWRkJ4r/Hziyf6XwJ7kAkn2O0WAL1B768NptKLDcpcRevflcQKBgAwA
+8C6vwx1RjdYH+YTQJ565R1XHBKnD1RFoLo0ljFg0Zl//LaijYYYlyPjLQKNZ9hdP
+N+NnDNshnEL+D4HxXNvhobB7NVZE9yH/G+MZX880uVvQZCO24k3ZDN8tuJBaL/i/
+v3TqUBtRDrismMuqjycu7iV7JVvlzb/wEN7FApsBAoGANHsJS78Hxl1yY7ABixpu
+nRD/SytM0demZdDwwB4SEeBpWQxhrYDVkikJa0ZOLmmOpuZwk9Tfc8z7Kd6qSJX2
+CHBa2gUH4KdtTxyw4E0nlwt4EO50DLl7fFYm9h5V/tZnO5IlSzZ3mMj0DlFuw9bG
+Wto2YWk79zlL0d+wF6HV47I=
+-----END PRIVATE KEY-----";
+
+    const TEST_RSA_PUBLIC_PEM: &str = "-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArDnAzqAQLBJfcKLIyrsJ
+tE1V/cBdJFoTsEnh5hj59NaOZ4AR31nie2vAlxO1Oaz7LyMSL40Ly4irII8mrbY5
+Gh7CBp/l9f76rL+xEyCk0jeFQYj4lS5rZdPLxRstpqfRUzZW55EofCXCvbtlaqjq
+SoGdoLeDL2Wi2J5Q/dzzgNytAIaOFrc0L4PoSLHitlSl5V1a1IYaGnOsgr7Iv0Iy
+owPlVKbvyBGcV8Q16ZKn5V9bmM5tRBUjwZUvrA46a5zsHNmVMtQ6neqtss6CKoGI
+fbqESG7BLC5wT9cK/EOWW/5NJypPCX3Tu4y53TWPjUJrfI/DfPWeOv93mNKuEabJ
+CQIDAQAB
+-----END PUBLIC KEY-----";
+
+    /// Encode an RS256 admin token with the given sub and roles.
+    fn make_rs256_admin_token(sub: &str) -> String {
+        use jsonwebtoken::Algorithm;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_secs();
+        let exp = now + 3600;
+        let claims = TestAdminClaims {
+            sub: Some(sub.to_owned()),
+            roles: vec!["admin".to_string()],
+            exp,
+        };
+        let encoding_key = EncodingKey::from_rsa_pem(TEST_RSA_PRIVATE_PEM.as_bytes())
+            .expect("test RSA private key should be valid PEM");
+        jsonwebtoken::encode(
+            &Header::new(Algorithm::RS256),
+            &claims,
+            &encoding_key,
+        )
+        .expect("RS256 admin token encoding should not fail")
+    }
+
+    /// Build an AppState with the RSA public key as jwt_secret.
+    fn test_state_rsa(leeway: u64) -> AppState {
+        let mut config = NetworkConfig::default();
+        config.jwt_clock_skew_secs = leeway;
+        AppState {
+            registry: Arc::new(ConnectionRegistry::new()),
+            shutdown: Arc::new(ShutdownController::new()),
+            config: Arc::new(config),
+            start_time: Instant::now(),
+            observability: None,
+            operation_service: None,
+            dispatcher: None,
+            jwt_secret: Some(TEST_RSA_PUBLIC_PEM.to_owned()),
+            cluster_state: None,
+            store_factory: None,
+            server_config: None,
+            shape_registry: None,
+        }
+    }
+
+    // RS256 admin token accepted when jwt_secret is the RSA public key PEM.
+    #[tokio::test]
+    async fn rs256_admin_token_accepted() {
+        let state = test_state_rsa(60);
+        let token = make_rs256_admin_token("admin-rsa-user");
+        let mut parts = parts_with_bearer(&token);
+        let result = AdminClaims::from_request_parts(&mut parts, &state).await;
+        assert!(
+            result.is_ok(),
+            "RS256 admin token with matching RSA public key should be accepted, got {result:?}"
+        );
+        let claims = result.unwrap();
+        assert_eq!(claims.user_id, "admin-rsa-user");
         assert!(claims.roles.contains(&"admin".to_string()));
     }
 }
