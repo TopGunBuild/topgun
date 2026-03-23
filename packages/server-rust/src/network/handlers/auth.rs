@@ -92,6 +92,10 @@ impl AuthHandler {
     /// On failure, sends `AUTH_FAIL` via the outbound channel and returns
     /// `Err(AuthError)`. The caller should close the connection.
     ///
+    /// The `leeway` parameter specifies the clock skew tolerance in seconds.
+    /// Tokens expired within this window are still accepted to handle clock
+    /// drift between clients and the server.
+    ///
     /// # Errors
     ///
     /// Returns `AuthError::InvalidToken` if the JWT is invalid or expired.
@@ -101,20 +105,33 @@ impl AuthHandler {
         &self,
         auth_msg: &AuthMessage,
         tx: &mpsc::Sender<OutboundMessage>,
+        leeway: u64,
     ) -> Result<Principal, AuthError> {
         let mut validation = Validation::new(Algorithm::HS256);
-        // Disable audience/issuer checks since TopGun tokens do not use them
+        // Disable audience/issuer checks since TopGun tokens do not use them.
+        // Do NOT clear required_spec_claims: the jsonwebtoken crate defaults to
+        // requiring `exp`, which enforces token expiry validation.
         validation.validate_aud = false;
-        validation.required_spec_claims.clear();
+        validation.leeway = leeway;
 
         let key = DecodingKey::from_secret(self.jwt_secret.as_bytes());
 
         match jsonwebtoken::decode::<JwtClaims>(&auth_msg.token, &key, &validation) {
             Ok(token_data) => {
-                let user_id = token_data
-                    .claims
-                    .sub
-                    .unwrap_or_else(|| "anonymous".to_string());
+                // Reject tokens without a subject claim — anonymous identity is
+                // not permitted; callers must always provide a `sub` field.
+                let Some(user_id) = token_data.claims.sub else {
+                    warn!("JWT accepted by signature but missing required `sub` claim");
+                    let fail_msg = Message::AuthFail(AuthFailData {
+                        error: Some("missing sub claim in JWT".to_string()),
+                        ..Default::default()
+                    });
+                    let bytes = rmp_serde::to_vec_named(&fail_msg)?;
+                    tx.send(OutboundMessage::Binary(bytes)).await?;
+                    return Err(AuthError::InvalidToken {
+                        reason: "missing sub claim in JWT".to_string(),
+                    });
+                };
 
                 let roles = token_data.claims.roles.unwrap_or_default();
                 debug!(user_id = %user_id, ?roles, "JWT verified successfully");

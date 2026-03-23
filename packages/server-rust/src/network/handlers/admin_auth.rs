@@ -87,20 +87,23 @@ impl FromRequestParts<AppState> for AdminClaims {
             return Err(AdminAuthError::MissingToken);
         }
 
-        // Validate JWT
+        // Validate JWT — do NOT clear required_spec_claims so that `exp` is
+        // enforced. Use the configured clock skew tolerance for leeway.
         let mut validation = Validation::new(Algorithm::HS256);
         validation.validate_aud = false;
-        validation.required_spec_claims.clear();
+        validation.leeway = state.config.jwt_clock_skew_secs;
 
         let key = DecodingKey::from_secret(jwt_secret.as_bytes());
 
         let token_data = jsonwebtoken::decode::<JwtClaims>(token, &key, &validation)
             .map_err(|e| AdminAuthError::InvalidToken(e.to_string()))?;
 
+        // Reject tokens without a subject claim — anonymous identity is not
+        // permitted for admin endpoints.
         let user_id = token_data
             .claims
             .sub
-            .unwrap_or_else(|| "anonymous".to_string());
+            .ok_or_else(|| AdminAuthError::InvalidToken("missing sub claim in JWT".to_string()))?;
 
         let roles = token_data.claims.roles.unwrap_or_default();
 

@@ -228,6 +228,34 @@ fn build_app(
 ) -> Router {
     let layers = build_http_layers(&config);
 
+    // Load JWT secret from environment so the server can authenticate tokens
+    // without requiring secret injection through application code paths.
+    let jwt_secret = std::env::var("JWT_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty());
+
+    // Refuse to start when auth is required but no secret is configured.
+    // Only enforced when server_config is Some (production paths). Unit tests
+    // and the load harness construct AppState directly with server_config: None
+    // and bypass this check intentionally.
+    if let Some(ref sc) = server_config {
+        let cfg = sc.load();
+        assert!(
+            !(cfg.security.require_auth && jwt_secret.is_none()),
+            "JWT_SECRET environment variable is required when require_auth is true"
+        );
+    }
+
+    // Warn operators who have JWT auth enabled but no TLS configured: tokens
+    // will be transmitted in plaintext over ws://.
+    if jwt_secret.is_some() && config.tls.is_none() {
+        warn!(
+            "JWT authentication is enabled but TLS is not configured. \
+             Credentials will be sent in plaintext over ws://. \
+             Configure TLS for production deployments."
+        );
+    }
+
     let state = AppState {
         registry,
         shutdown,
@@ -236,7 +264,7 @@ fn build_app(
         observability,
         operation_service: None,
         dispatcher: None,
-        jwt_secret: None,
+        jwt_secret,
         cluster_state,
         store_factory,
         server_config,

@@ -127,7 +127,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     if let TopGunMessage::Auth(ref auth_msg) = tg_msg {
                         if let Some(ref secret) = state.jwt_secret {
                             let auth_handler = AuthHandler::new(secret.clone());
-                            match auth_handler.handle_auth(auth_msg, &handle.tx).await {
+                            match auth_handler.handle_auth(auth_msg, &handle.tx, state.config.jwt_clock_skew_secs).await {
                                 Ok(principal) => {
                                     // Store principal in metadata so domain services can read it.
                                     // AtomicBool is set after metadata write so no reader sees
