@@ -1,13 +1,14 @@
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-138
+- **Status:** review
+- **Next Step:** /sf:review
 
 ## Queue
 
 | ID | Title | Status | Priority | Complexity |
 |----|-------|--------|----------|------------|
+| SPEC-138 | Add RSA JWT Algorithm Auto-Detection (RS256/RS384/RS512) | audited | P1 | small |
 
 ## Decisions
 
@@ -17,3 +18,4 @@
 - SPEC-136d added ShapeMerkleSyncManager (per-shape Merkle trees), handle_shape_sync_init in ShapeService, shape-prefixed bucket traversal in SyncService::handle_merkle_req_bucket, new_basic convenience constructor. 593 tests pass, clippy-clean.
 - SPEC-136e added TS client shape API: shape Zod schemas in @topgunbuild/core, ShapeHandle + ShapeManager in @topgunbuild/client, SHAPE_RESP/SHAPE_UPDATE handlers in ClientMessageHandlers, subscribeShape() on SyncEngine, re-exports from index.ts. 6 integration tests. Fixed test_server.rs to share shape_registry between CrdtService and ShapeService. 61 integration tests pass, 461 client tests pass, clippy-clean.
 - SPEC-137 fixed 5 auth vulnerabilities: re-enabled JWT exp validation with configurable leeway, JWT_SECRET read from env, cors_origins default changed to empty vec, missing sub claim rejected with AUTH_FAIL, TLS warning when jwt+no-TLS. 603 server tests pass, clippy-clean.
+- SPEC-138 added RSA JWT auto-detection: normalize_pem() + decode_jwt_key() in auth.rs, updated handle_auth() and AdminClaims::from_request_parts() to use auto-detection. 6 new tests (5 in auth.rs, 1 in admin_auth.rs). 609 server tests pass, clippy-clean.
