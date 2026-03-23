@@ -1,14 +1,13 @@
 ## Current Position
 
-- **Active Specification:** SPEC-138
-- **Status:** review
-- **Next Step:** /sf:review
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | ID | Title | Status | Priority | Complexity |
 |----|-------|--------|----------|------------|
-| SPEC-138 | Add RSA JWT Algorithm Auto-Detection (RS256/RS384/RS512) | audited | P1 | small |
 
 ## Decisions
 
