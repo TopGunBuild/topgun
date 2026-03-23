@@ -115,3 +115,152 @@ impl FromRequestParts<AppState> for AdminClaims {
         Ok(AdminClaims { user_id, roles })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::FromRequestParts;
+    use axum::http::{header, Request};
+    use jsonwebtoken::{EncodingKey, Header};
+    use serde::Serialize;
+    use std::sync::Arc;
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+    use crate::network::connection::ConnectionRegistry;
+    use crate::network::config::NetworkConfig;
+    use crate::network::shutdown::ShutdownController;
+    use crate::network::handlers::AppState;
+
+    const TEST_SECRET: &str = "test-admin-secret";
+
+    /// Minimal claims struct for building test admin tokens.
+    #[derive(Serialize)]
+    struct TestAdminClaims {
+        sub: Option<String>,
+        roles: Vec<String>,
+        exp: u64,
+    }
+
+    /// Encode a token with given claims, using exp_offset_secs relative to now.
+    fn make_token(sub: Option<&str>, exp_offset_secs: i64) -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_secs();
+        let exp = if exp_offset_secs >= 0 {
+            now + exp_offset_secs as u64
+        } else {
+            now.saturating_sub((-exp_offset_secs) as u64)
+        };
+        let claims = TestAdminClaims {
+            sub: sub.map(str::to_owned),
+            roles: vec!["admin".to_string()],
+            exp,
+        };
+        jsonwebtoken::encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(TEST_SECRET.as_bytes()),
+        )
+        .expect("test token encoding should not fail")
+    }
+
+    /// Construct a minimal AppState for testing.
+    fn test_state(leeway: u64) -> AppState {
+        let mut config = NetworkConfig::default();
+        config.jwt_clock_skew_secs = leeway;
+        AppState {
+            registry: Arc::new(ConnectionRegistry::new()),
+            shutdown: Arc::new(ShutdownController::new()),
+            config: Arc::new(config),
+            start_time: Instant::now(),
+            observability: None,
+            operation_service: None,
+            dispatcher: None,
+            jwt_secret: Some(TEST_SECRET.to_owned()),
+            cluster_state: None,
+            store_factory: None,
+            server_config: None,
+            shape_registry: None,
+        }
+    }
+
+    /// Build request parts with a Bearer token in the Authorization header.
+    fn parts_with_bearer(token: &str) -> Parts {
+        let req = Request::builder()
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(())
+            .expect("request construction should not fail");
+        let (parts, _) = req.into_parts();
+        parts
+    }
+
+    // AC8 + AC9: valid signature but no sub claim is rejected with HTTP 401
+    #[tokio::test]
+    async fn missing_sub_rejected() {
+        let state = test_state(60);
+        let token = make_token(None, 3600);
+        let mut parts = parts_with_bearer(&token);
+        let result = AdminClaims::from_request_parts(&mut parts, &state).await;
+        assert!(result.is_err(), "expected Err when sub is missing");
+        match result.unwrap_err() {
+            AdminAuthError::InvalidToken(msg) => {
+                assert!(
+                    msg.contains("sub"),
+                    "error should mention 'sub', got: {msg}"
+                );
+            }
+            e => panic!("expected InvalidToken, got {e:?}"),
+        }
+    }
+
+    // AC1 equivalent: expired token (1 hour ago) is rejected
+    #[tokio::test]
+    async fn expired_token_rejected() {
+        let state = test_state(60);
+        let token = make_token(Some("admin-user"), -3600);
+        let mut parts = parts_with_bearer(&token);
+        let result = AdminClaims::from_request_parts(&mut parts, &state).await;
+        assert!(result.is_err(), "expected Err for expired token");
+        assert!(
+            matches!(result.unwrap_err(), AdminAuthError::InvalidToken(_)),
+            "should be InvalidToken"
+        );
+    }
+
+    // AC3 equivalent: token expired 30s ago is accepted when leeway is 60s
+    #[tokio::test]
+    async fn token_within_leeway_accepted() {
+        let state = test_state(60);
+        let token = make_token(Some("admin-user"), -30);
+        let mut parts = parts_with_bearer(&token);
+        let result = AdminClaims::from_request_parts(&mut parts, &state).await;
+        assert!(
+            result.is_ok(),
+            "token 30s expired should be accepted within 60s leeway, got {result:?}"
+        );
+    }
+
+    // AC4 equivalent: token expired 90s ago is rejected when leeway is 60s
+    #[tokio::test]
+    async fn token_beyond_leeway_rejected() {
+        let state = test_state(60);
+        let token = make_token(Some("admin-user"), -90);
+        let mut parts = parts_with_bearer(&token);
+        let result = AdminClaims::from_request_parts(&mut parts, &state).await;
+        assert!(result.is_err(), "token 90s expired should be rejected with 60s leeway");
+    }
+
+    // Valid admin token is accepted
+    #[tokio::test]
+    async fn valid_admin_token_accepted() {
+        let state = test_state(60);
+        let token = make_token(Some("admin-user"), 3600);
+        let mut parts = parts_with_bearer(&token);
+        let result = AdminClaims::from_request_parts(&mut parts, &state).await;
+        assert!(result.is_ok(), "valid admin token should be accepted, got {result:?}");
+        let claims = result.unwrap();
+        assert_eq!(claims.user_id, "admin-user");
+        assert!(claims.roles.contains(&"admin".to_string()));
+    }
+}

@@ -162,3 +162,134 @@ impl AuthHandler {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jsonwebtoken::{EncodingKey, Header};
+    use serde::Serialize;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::sync::mpsc;
+    use topgun_core::messages::AuthMessage;
+
+    const TEST_SECRET: &str = "test-unit-secret";
+
+    /// Minimal claims struct for building test tokens.
+    #[derive(Serialize)]
+    struct TestClaims {
+        sub: Option<String>,
+        exp: u64,
+    }
+
+    /// Encode a token with the given claims using HS256 and the test secret.
+    fn make_token(sub: Option<&str>, exp_offset_secs: i64) -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_secs();
+        // Cast carefully: if offset is negative the result saturates to 0
+        let exp = if exp_offset_secs >= 0 {
+            now + exp_offset_secs as u64
+        } else {
+            now.saturating_sub((-exp_offset_secs) as u64)
+        };
+        let claims = TestClaims {
+            sub: sub.map(str::to_owned),
+            exp,
+        };
+        jsonwebtoken::encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(TEST_SECRET.as_bytes()),
+        )
+        .expect("test token encoding should not fail")
+    }
+
+    /// Create an `AuthHandler` and a channel pair for testing.
+    fn setup() -> (AuthHandler, mpsc::Sender<OutboundMessage>, mpsc::Receiver<OutboundMessage>) {
+        let handler = AuthHandler::new(TEST_SECRET.to_owned());
+        let (tx, rx) = mpsc::channel(8);
+        (handler, tx, rx)
+    }
+
+    // AC2: valid token (exp 1 hour from now) is accepted
+    #[tokio::test]
+    async fn valid_token_accepted() {
+        let (handler, tx, _rx) = setup();
+        let token = make_token(Some("user-1"), 3600);
+        let auth_msg = AuthMessage { token, protocol_version: None };
+        let result = handler.handle_auth(&auth_msg, &tx, 60).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let principal = result.unwrap();
+        assert_eq!(principal.id, "user-1");
+    }
+
+    // AC1: token expired 1 hour ago is rejected
+    #[tokio::test]
+    async fn expired_token_rejected() {
+        let (handler, tx, mut rx) = setup();
+        let token = make_token(Some("user-1"), -3600);
+        let auth_msg = AuthMessage { token, protocol_version: None };
+        let result = handler.handle_auth(&auth_msg, &tx, 60).await;
+        assert!(result.is_err(), "expected Err for expired token");
+        // AUTH_FAIL must have been sent on the channel (AC12 for expired path)
+        assert!(
+            rx.try_recv().is_ok(),
+            "AUTH_FAIL should be sent when token is rejected"
+        );
+    }
+
+    // AC3: token expired 30 seconds ago is accepted when leeway is 60s
+    #[tokio::test]
+    async fn token_within_leeway_accepted() {
+        let (handler, tx, _rx) = setup();
+        let token = make_token(Some("user-1"), -30);
+        let auth_msg = AuthMessage { token, protocol_version: None };
+        let result = handler.handle_auth(&auth_msg, &tx, 60).await;
+        assert!(
+            result.is_ok(),
+            "token 30s expired should be accepted within 60s leeway, got {result:?}"
+        );
+    }
+
+    // AC4: token expired 90 seconds ago is rejected when leeway is 60s
+    #[tokio::test]
+    async fn token_beyond_leeway_rejected() {
+        let (handler, tx, mut rx) = setup();
+        let token = make_token(Some("user-1"), -90);
+        let auth_msg = AuthMessage { token, protocol_version: None };
+        let result = handler.handle_auth(&auth_msg, &tx, 60).await;
+        assert!(
+            result.is_err(),
+            "token 90s expired should be rejected with 60s leeway"
+        );
+        assert!(
+            rx.try_recv().is_ok(),
+            "AUTH_FAIL should be sent when token is beyond leeway"
+        );
+    }
+
+    // AC8 + AC12: token with valid signature but no sub is rejected and AUTH_FAIL is sent
+    #[tokio::test]
+    async fn missing_sub_rejected_with_auth_fail() {
+        let (handler, tx, mut rx) = setup();
+        let token = make_token(None, 3600);
+        let auth_msg = AuthMessage { token, protocol_version: None };
+        let result = handler.handle_auth(&auth_msg, &tx, 60).await;
+        assert!(result.is_err(), "expected Err when sub is missing");
+        match result.unwrap_err() {
+            AuthError::InvalidToken { reason } => {
+                assert!(
+                    reason.contains("sub"),
+                    "error reason should mention 'sub', got: {reason}"
+                );
+            }
+            e => panic!("expected InvalidToken, got {e:?}"),
+        }
+        // AC12: AUTH_FAIL must be sent before returning the error
+        assert!(
+            rx.try_recv().is_ok(),
+            "AUTH_FAIL should be sent when sub claim is missing"
+        );
+    }
+}
