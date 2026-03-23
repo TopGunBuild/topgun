@@ -14,10 +14,15 @@ pub struct NetworkConfig {
     pub tls: Option<TlsConfig>,
     /// Per-connection settings.
     pub connection: ConnectionConfig,
-    /// Allowed CORS origins.
+    /// Allowed CORS origins. An empty list rejects all cross-origin requests.
     pub cors_origins: Vec<String>,
     /// Maximum time to wait for a request to complete.
     pub request_timeout: Duration,
+    /// Clock skew tolerance in seconds for JWT `exp` validation.
+    ///
+    /// Tokens expired within this window are still accepted to handle clock
+    /// drift between clients and the server. Defaults to 60 seconds.
+    pub jwt_clock_skew_secs: u64,
 }
 
 impl Default for NetworkConfig {
@@ -27,8 +32,9 @@ impl Default for NetworkConfig {
             port: 0,
             tls: None,
             connection: ConnectionConfig::default(),
-            cors_origins: vec!["*".to_string()],
+            cors_origins: vec![],
             request_timeout: Duration::from_secs(30),
+            jwt_clock_skew_secs: 60,
         }
     }
 }
@@ -83,8 +89,11 @@ mod tests {
         assert_eq!(config.host, "0.0.0.0");
         assert_eq!(config.port, 0);
         assert!(config.tls.is_none());
-        assert_eq!(config.cors_origins, vec!["*"]);
+        // Default CORS allowlist is empty to reject all cross-origin requests
+        // by default; operators must explicitly configure allowed origins.
+        assert!(config.cors_origins.is_empty());
         assert_eq!(config.request_timeout, Duration::from_secs(30));
+        assert_eq!(config.jwt_clock_skew_secs, 60);
     }
 
     #[test]

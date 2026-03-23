@@ -39,6 +39,12 @@ pub struct JwtClaims {
     /// Roles assigned to this principal (e.g., `["admin"]`).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub roles: Option<Vec<String>>,
+    /// Token expiry timestamp (seconds since Unix epoch). The `jsonwebtoken`
+    /// crate validates `exp` from raw JSON even without a struct field, but
+    /// making it explicit enables future use and ensures consistent serde
+    /// behavior across all `Option<T>` fields.
+    #[serde(default)]
+    pub exp: Option<u64>,
 }
 
 /// Handles the authentication handshake for WebSocket connections.
