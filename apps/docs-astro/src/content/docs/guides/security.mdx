@@ -8,19 +8,22 @@ import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Shield, Lock, Key, Server, AlertTriangle, CheckCircle, Database, HardDrive } from 'lucide-react';
 import { ApiParam, ApiConstructor } from '../../../components/docs/ApiMethod';
 
-export const serverTlsCode = `# Start the TopGun server with TLS enabled
-PORT=443 \\
-DATABASE_URL=postgres://user:pass@localhost/topgun \\
-TOPGUN_TLS_ENABLED=true \\
-TOPGUN_TLS_CERT_PATH=/etc/topgun/tls/server.crt \\
-TOPGUN_TLS_KEY_PATH=/etc/topgun/tls/server.key \\
-TOPGUN_TLS_MIN_VERSION=TLSv1.3 \\
-TOPGUN_CLUSTER_TLS_ENABLED=true \\
-TOPGUN_CLUSTER_TLS_CERT_PATH=/etc/topgun/tls/cluster.crt \\
-TOPGUN_CLUSTER_TLS_KEY_PATH=/etc/topgun/tls/cluster.key \\
-TOPGUN_CLUSTER_TLS_CA_PATH=/etc/topgun/tls/ca.crt \\
-TOPGUN_CLUSTER_MTLS=true \\
-topgun-server`;
+export const serverTlsCode = `# PLANNED — these TLS environment variables do not exist yet.
+# A standalone topgun-server production binary with env-var TLS config is planned.
+# For TLS today, configure it programmatically via TlsConfig when embedding the server.
+#
+# PORT=443 \\
+# DATABASE_URL=postgres://user:pass@localhost/topgun \\
+# TOPGUN_TLS_ENABLED=true \\
+# TOPGUN_TLS_CERT_PATH=/etc/topgun/tls/server.crt \\
+# TOPGUN_TLS_KEY_PATH=/etc/topgun/tls/server.key \\
+# TOPGUN_TLS_MIN_VERSION=TLSv1.3 \\
+# TOPGUN_CLUSTER_TLS_ENABLED=true \\       # Planned — v3.0
+# TOPGUN_CLUSTER_TLS_CERT_PATH=/etc/topgun/tls/cluster.crt \\
+# TOPGUN_CLUSTER_TLS_KEY_PATH=/etc/topgun/tls/cluster.key \\
+# TOPGUN_CLUSTER_TLS_CA_PATH=/etc/topgun/tls/ca.crt \\
+# TOPGUN_CLUSTER_MTLS=true \\
+# topgun-server    # <-- planned binary, not yet available`;
 
 export const clientWssCode = `import { TopGunClient } from '@topgunbuild/client';
 
@@ -254,6 +257,24 @@ This guide covers:
 - Certificate generation and management
 - Client-side encryption for data at rest
 
+## Server Deployment Model
+
+`topgun-server` is a **library crate**. There is no standalone production binary today. The only binary included in the repository is `test-server` — intended for development and integration testing only.
+
+For production, embed the server programmatically in your Rust application:
+
+```rust
+use topgun_server::{ServerBuilder, NetworkConfig};
+
+let server = ServerBuilder::new()
+    .network(NetworkConfig { port: 8090, ..Default::default() })
+    .build()
+    .await?;
+server.start().await?;
+```
+
+A standalone `topgun-server` production binary with full env-var configuration (including TLS) is **planned** but does not yet exist.
+
 ## Security Model
 
 <div className="flex items-center gap-2 mb-4 not-prose">
@@ -285,10 +306,24 @@ Client write --> Auth check --> Map ACL check --> HLC sanitization --> CRDT merg
 
 </div>
 
+### Trusted-Origin Bypass
+
+Operations arriving from trusted internal origins skip the `WriteValidator` security checks entirely. This is by design for internal server-to-server operations (replication, backup restore, cluster forwarding) that must be applied without re-validation.
+
+| Caller Origin | Passes Through Security Pipeline? |
+|--------------|-----------------------------------|
+| `Client` | Yes — all checks apply |
+| `Forwarded` | No — cluster-forwarded writes, bypass `WriteValidator` |
+| `Backup` | No — backup restore operations, bypass `WriteValidator` |
+| `Wan` | No — WAN replication, bypass `WriteValidator` |
+| `System` | No — internal system operations, bypass `WriteValidator` |
+
+External client connections always carry `CallerOrigin::Client` and pass through all security checks. Trusted origins are only set by the server itself for internal operations.
+
 ### Transport Security
 
 - **TLS** encrypts all client-to-server traffic (HTTPS + WSS)
-- **mTLS** (mutual TLS) secures cluster-to-cluster communication, ensuring only authorized nodes can join
+- **mTLS** (mutual TLS) for cluster communication is planned for v3.0; cluster traffic is currently plaintext TCP
 - See sections below for configuration details
 
 <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 my-6 not-prose">
@@ -371,6 +406,14 @@ Client (wss://) → Reverse Proxy (TLS termination) → TopGun Server (ws://)
 
 ## mTLS for Cluster Communication
 
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-xl p-4 mb-6 not-prose">
+  <div className="flex items-center gap-2 mb-1">
+    <AlertTriangle className="w-5 h-5 text-yellow-600 dark:text-yellow-400" />
+    <span className="font-semibold text-yellow-800 dark:text-yellow-200">Planned for v3.0</span>
+  </div>
+  <p className="text-sm text-yellow-700 dark:text-yellow-300">Cluster communication currently uses plaintext TCP. <code>ClusterConfig</code> has no TLS fields. mTLS for cluster nodes is on the roadmap for v3.0. See TODO-164 for progress.</p>
+</div>
+
 <div className="flex items-center gap-2 mb-4 not-prose">
   <Server className="w-6 h-6 text-purple-600" />
   <span className="text-neutral-600 dark:text-neutral-300">Mutual TLS (mTLS) ensures that only authorized nodes can join the cluster.</span>
@@ -408,53 +451,84 @@ With mTLS enabled:
   </div>
 </div>
 
-## Environment Variables Reference
+## Server Environment Variables
 
 <div className="flex items-center gap-2 mb-4 not-prose">
   <Key className="w-6 h-6 text-orange-600" />
-  <span className="text-neutral-600 dark:text-neutral-300">Configure TLS using environment variables for containerized deployments.</span>
+  <span className="text-neutral-600 dark:text-neutral-300">Environment variables that are implemented and work today in the <code>test-server</code> binary and programmatic embedding.</span>
 </div>
 
-<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-4 mb-6 not-prose">
-  <span className="text-sm text-yellow-700 dark:text-yellow-400">The environment variables below are planned for the future production binary. Currently, TLS is configured programmatically via the <code>TlsConfig</code> struct when embedding the server in a Rust application. See the <a href="/docs/reference/server" className="underline">Server API reference</a> for the programmatic API.</span>
+<div className="overflow-x-auto not-prose">
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `PORT` | No | `8090` | HTTP/WebSocket listen port |
+| `DATABASE_URL` | Yes | — | PostgreSQL connection string |
+| `JWT_SECRET` | Yes | — | HMAC secret or RSA public key (PEM) for JWT verification |
+| `TOPGUN_ADMIN_PASSWORD` | Yes (for admin) | — | Password for admin API login |
+| `TOPGUN_ADMIN_USERNAME` | No | `admin` | Username for admin API login |
+| `TOPGUN_ADMIN_DIR` | No | — | Path to admin SPA static files |
+| `TOPGUN_LOG_FORMAT` | No | human-readable | Set to `json` for structured JSON logging |
+
+</div>
+
+## TLS Environment Variables (Planned)
+
+<div className="flex items-center gap-2 mb-4 not-prose">
+  <Key className="w-6 h-6 text-orange-600" />
+  <span className="text-neutral-600 dark:text-neutral-300">Planned TLS configuration via environment variables for a future production binary.</span>
+</div>
+
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-xl p-4 mb-6 not-prose">
+  <div className="flex items-center gap-2 mb-1">
+    <AlertTriangle className="w-5 h-5 text-yellow-600 dark:text-yellow-400" />
+    <span className="font-semibold text-yellow-800 dark:text-yellow-200">Planned — not yet implemented</span>
+  </div>
+  <p className="text-sm text-yellow-700 dark:text-yellow-300">The TLS environment variables below are planned for a future production binary. They do not exist in the current server. Currently, TLS is configured programmatically via the <code>TlsConfig</code> struct when embedding the server in a Rust application. See the <a href="/docs/reference/server" className="underline">Server API reference</a> for the programmatic API.</p>
 </div>
 
 <div className="overflow-x-auto not-prose">
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `TOPGUN_TLS_ENABLED` | boolean | `false` | Enable TLS for client connections |
-| `TOPGUN_TLS_CERT_PATH` | string | - | Path to certificate (PEM) |
-| `TOPGUN_TLS_KEY_PATH` | string | - | Path to private key (PEM) |
-| `TOPGUN_TLS_CA_PATH` | string | - | Path to CA certificate |
-| `TOPGUN_TLS_MIN_VERSION` | enum | `TLSv1.2` | Minimum TLS version (`TLSv1.2` or `TLSv1.3`) |
-| `TOPGUN_TLS_PASSPHRASE` | string | - | Key passphrase (if encrypted) |
-| `TOPGUN_CLUSTER_TLS_ENABLED` | boolean | `false` | Enable TLS for cluster |
-| `TOPGUN_CLUSTER_TLS_CERT_PATH` | string | - | Cluster certificate path |
-| `TOPGUN_CLUSTER_TLS_KEY_PATH` | string | - | Cluster key path |
-| `TOPGUN_CLUSTER_TLS_CA_PATH` | string | - | CA for peer verification |
-| `TOPGUN_CLUSTER_MTLS` | boolean | `false` | Require client certificate (mTLS) |
-| `TOPGUN_CLUSTER_TLS_REJECT_UNAUTHORIZED` | boolean | `true` | Verify peer certificates |
+| `TOPGUN_TLS_ENABLED` | boolean | `false` | **Planned** — Enable TLS for client connections |
+| `TOPGUN_TLS_CERT_PATH` | string | — | **Planned** — Path to certificate (PEM) |
+| `TOPGUN_TLS_KEY_PATH` | string | — | **Planned** — Path to private key (PEM) |
+| `TOPGUN_TLS_CA_PATH` | string | — | **Planned** — Path to CA certificate |
+| `TOPGUN_TLS_MIN_VERSION` | enum | `TLSv1.2` | **Planned** — Minimum TLS version |
+| `TOPGUN_TLS_PASSPHRASE` | string | — | **Planned** — Key passphrase (if encrypted) |
+| `TOPGUN_CLUSTER_TLS_ENABLED` | boolean | `false` | **Planned** — Enable TLS for cluster |
+| `TOPGUN_CLUSTER_TLS_CERT_PATH` | string | — | **Planned** — Cluster certificate path |
+| `TOPGUN_CLUSTER_TLS_KEY_PATH` | string | — | **Planned** — Cluster key path |
+| `TOPGUN_CLUSTER_TLS_CA_PATH` | string | — | **Planned** — CA for peer verification |
+| `TOPGUN_CLUSTER_MTLS` | boolean | `false` | **Planned** — Require client certificate (mTLS) |
+| `TOPGUN_CLUSTER_TLS_REJECT_UNAUTHORIZED` | boolean | `true` | **Planned** — Verify peer certificates |
 
 </div>
 
-### Example: Production Environment
+### Example: Planned Production Environment (TLS vars not yet implemented)
 
 <div className="not-prose">
-  <CodeBlock title=".env.production" language="bash" code={`# Client TLS
-TOPGUN_PORT=443
-TOPGUN_TLS_ENABLED=true
-TOPGUN_TLS_CERT_PATH=/etc/topgun/tls/server.crt
-TOPGUN_TLS_KEY_PATH=/etc/topgun/tls/server.key
-TOPGUN_TLS_MIN_VERSION=TLSv1.3
+  <CodeBlock title=".env.production (planned — TLS vars not yet implemented)" language="bash" code={`# Working today:
+PORT=8090
+DATABASE_URL=postgres://user:pass@localhost/topgun
+JWT_SECRET=your-secret-key
+TOPGUN_ADMIN_PASSWORD=your-admin-password
 
-# Cluster mTLS
-TOPGUN_CLUSTER_PORT=9443
-TOPGUN_CLUSTER_TLS_ENABLED=true
-TOPGUN_CLUSTER_TLS_CERT_PATH=/etc/topgun/tls/cluster.crt
-TOPGUN_CLUSTER_TLS_KEY_PATH=/etc/topgun/tls/cluster.key
-TOPGUN_CLUSTER_TLS_CA_PATH=/etc/topgun/tls/ca.crt
-TOPGUN_CLUSTER_MTLS=true`} />
+# Planned (not yet implemented — use TlsConfig struct for programmatic TLS):
+# TOPGUN_PORT=443
+# TOPGUN_TLS_ENABLED=true
+# TOPGUN_TLS_CERT_PATH=/etc/topgun/tls/server.crt
+# TOPGUN_TLS_KEY_PATH=/etc/topgun/tls/server.key
+# TOPGUN_TLS_MIN_VERSION=TLSv1.3
+
+# Planned — cluster mTLS (v3.0):
+# TOPGUN_CLUSTER_PORT=9443
+# TOPGUN_CLUSTER_TLS_ENABLED=true
+# TOPGUN_CLUSTER_TLS_CERT_PATH=/etc/topgun/tls/cluster.crt
+# TOPGUN_CLUSTER_TLS_KEY_PATH=/etc/topgun/tls/cluster.key
+# TOPGUN_CLUSTER_TLS_CA_PATH=/etc/topgun/tls/ca.crt
+# TOPGUN_CLUSTER_MTLS=true`} />
 </div>
 
 ## Certificate Generation
