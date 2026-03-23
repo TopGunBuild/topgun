@@ -1,13 +1,14 @@
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-139
+- **Status:** review
+- **Next Step:** /sf:review
 
 ## Queue
 
 | ID | Title | Status | Priority | Complexity |
 |----|-------|--------|----------|------------|
+| SPEC-139 | Fix Auth & Security Documentation (Outdated Claims, Missing Guidance) | review | P2 | medium |
 
 ## Decisions
 
@@ -18,3 +19,4 @@
 - SPEC-136e added TS client shape API: shape Zod schemas in @topgunbuild/core, ShapeHandle + ShapeManager in @topgunbuild/client, SHAPE_RESP/SHAPE_UPDATE handlers in ClientMessageHandlers, subscribeShape() on SyncEngine, re-exports from index.ts. 6 integration tests. Fixed test_server.rs to share shape_registry between CrdtService and ShapeService. 61 integration tests pass, 461 client tests pass, clippy-clean.
 - SPEC-137 fixed 5 auth vulnerabilities: re-enabled JWT exp validation with configurable leeway, JWT_SECRET read from env, cors_origins default changed to empty vec, missing sub claim rejected with AUTH_FAIL, TLS warning when jwt+no-TLS. 603 server tests pass, clippy-clean.
 - SPEC-138 added RSA JWT auto-detection: normalize_pem() + decode_jwt_key() in auth.rs, updated handle_auth() and AdminClaims::from_request_parts() to use auto-detection. 6 new tests (5 in auth.rs, 1 in admin_auth.rs). 609 server tests pass, clippy-clean.
+- SPEC-139 fixed auth/security docs: removed userId JWT claim, replaced setAuthToken/localStorage with setAuthTokenProvider + in-memory cache, added Token Lifecycle section, added Better Auth JWT-minting bridge, marked TLS env vars and mTLS as planned, documented working env vars, documented trusted-origin bypass, rewrote RBAC to show current status vs planned, replaced all unqualified topgun-server binary references with planned qualifiers.
