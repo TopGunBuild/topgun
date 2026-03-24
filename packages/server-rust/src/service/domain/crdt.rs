@@ -1564,7 +1564,6 @@ mod tests {
             make_validator(),
             query_registry,
             schema_svc,
-            None,
         ));
         // Register a client connection so tests can use its ID as connection_id.
         let config = crate::network::config::ConnectionConfig::default();
@@ -1740,7 +1739,6 @@ mod tests {
             validator,
             query_registry,
             Arc::clone(&schema_svc) as Arc<dyn crate::traits::SchemaProvider>,
-            None,
         ));
 
         let conn_config = crate::network::config::ConnectionConfig::default();
