@@ -1,7 +1,7 @@
 ---
 id: SPEC-140
 type: docs
-status: running
+status: done
 priority: P2
 complexity: medium
 created: 2026-03-24
@@ -456,3 +456,58 @@ None — spec executed as designed with two-pass strategy.
 **Fixes:**
 1. [✓] Summary totals mismatch — corrected Totals line in DOCS_AUDIT_REPORT.md from "9/5/3" to "11/6/5", updated Execution Summary key findings in SPEC-140, updated STATE.md decision line
    - Commit: ba08771
+
+---
+
+### Review v2 (2026-03-24)
+**Result:** APPROVED
+**Reviewer:** impl-reviewer (subagent)
+
+**Findings:**
+
+**Passed:**
+- [✓] Fix from Review v1 correctly applied — DOCS_AUDIT_REPORT.md line 38 now reads "11 major-rewrite, 6 minor-issues, 5 accurate", matching the 22-row summary table exactly (11 + 6 + 5 = 22)
+- [✓] SPEC-140 Execution Summary Key Findings updated to match: "11 pages need major-rewrite", "6 pages have minor issues", "5 pages are accurate" — all consistent
+- [✓] STATE.md decision line updated to reflect correct counts
+- [✓] Fix commit ba08771 touched exactly the right 3 files: DOCS_AUDIT_REPORT.md, SPEC-140.md, STATE.md — no over-reach
+- [✓] Both output files exist: `.specflow/reference/DOCS_AUDIT_TRIAGE.md` and `.specflow/reference/DOCS_AUDIT_REPORT.md`
+- [✓] TODO-174 through TODO-180 all present in TODO.md (7 entries, confirmed by grep)
+- [✓] No guide pages modified — constraint honored (zero changes to `apps/docs-astro/src/content/docs/guides/` in any commit)
+- [✓] All acceptance criteria verified as passing (AC1-AC6 from Execution Summary all marked [x])
+- [✓] Summary table totals now match individual page section counts — Validation Checklist item satisfied
+
+**Summary:** The sole major issue from Review v1 (summary totals mismatch 9/5/3 vs actual 11/6/5) has been correctly fixed. All three locations (report footer, Execution Summary, STATE.md decision line) are now consistent. No new issues found. Implementation is complete and accurate.
+
+---
+
+## Completion
+
+**Completed:** 2026-03-24
+**Total Commits:** 2 (1fc5260, abcc706) + 1 fix (ba08771)
+**Review Cycles:** 2
+
+### Outcome
+
+Systematically audited all 22 remaining guide pages against actual Rust server and TS client code. Produced a structured audit report with verdicts, issue lists, and fix priorities. Created 7 new TODO entries (TODO-174 through TODO-180) for documented but untracked features.
+
+### Key Files
+
+- `.specflow/reference/DOCS_AUDIT_REPORT.md` — Final audit report with per-page verdicts, issues, and fix priorities
+- `.specflow/reference/DOCS_AUDIT_TRIAGE.md` — Pass 1 triage table classifying all 22 pages by feature existence
+
+### Changes Applied
+
+**Added:**
+- `.specflow/reference/DOCS_AUDIT_TRIAGE.md` — Pass 1 quick sweep triage table
+- `.specflow/reference/DOCS_AUDIT_REPORT.md` — Final audit report with all 22 page verdicts
+
+**Modified:**
+- `.specflow/todos/TODO.md` — Added TODO-174 through TODO-180 for unimplemented features (adaptive indexing, distributed locks, entry processor, indexing, interceptors, conflict resolvers, event journal)
+
+### Patterns Established
+
+None — followed existing patterns.
+
+### Spec Deviations
+
+None — implemented as specified with two-pass strategy.

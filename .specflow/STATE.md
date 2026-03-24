@@ -1,14 +1,13 @@
 ## Current Position
 
-- **Active Specification:** SPEC-140
-- **Status:** review
-- **Next Step:** /sf:fix
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | ID | Title | Status | Priority | Complexity |
 |----|-------|--------|----------|------------|
-| SPEC-140 | Docs Audit: Verify All Remaining Guides Against Rust Implementation | review | P2 | medium |
 
 ## Decisions
 
