@@ -1106,4 +1106,174 @@ describe('Integration: Queries (Rust Server)', () => {
       writer.close();
     });
   });
+
+  // ========================================
+  // Field Projection (SPEC-144)
+  // ========================================
+  describe('QUERY_SUB with field projection', () => {
+    test('fields projection returns only specified fields in results', async () => {
+      const mapName = `fields-proj-${Date.now()}`;
+
+      const client = await createRustTestClient(port, {
+        nodeId: 'fields-proj-client-1',
+        userId: 'fields-proj-user-1',
+        roles: ['ADMIN'],
+      });
+      await client.waitForMessage('AUTH_ACK');
+
+      // Write records with multiple fields
+      const records = [
+        { key: 'fp-1', value: { name: 'Alice', email: 'alice@example.com', age: 30, role: 'admin' } },
+        { key: 'fp-2', value: { name: 'Bob', email: 'bob@example.com', age: 25, role: 'user' } },
+      ];
+
+      for (const rec of records) {
+        client.messages.length = 0;
+        client.send({
+          type: 'CLIENT_OP',
+          payload: {
+            id: `fp-put-${rec.key}`,
+            mapName,
+            opType: 'PUT',
+            key: rec.key,
+            record: createLWWRecord(rec.value),
+          },
+        });
+        await client.waitForMessage('OP_ACK');
+      }
+
+      await waitForSync(200);
+
+      // Subscribe with field projection: only 'name' and 'email'
+      client.messages.length = 0;
+      client.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'fp-q-1',
+          mapName,
+          query: {},
+          fields: ['name', 'email'],
+        },
+      });
+
+      const response = await client.waitForMessage('QUERY_RESP');
+      expect(response).toBeDefined();
+      expect(response.payload.queryId).toBe('fp-q-1');
+      expect(response.payload.results).toBeDefined();
+      expect(response.payload.results.length).toBe(2);
+
+      // Each result should only contain projected fields (name and email)
+      for (const result of response.payload.results) {
+        const keys = Object.keys(result.value);
+        expect(keys).toContain('name');
+        expect(keys).toContain('email');
+        // Non-projected fields should not be present
+        expect(keys).not.toContain('age');
+        expect(keys).not.toContain('role');
+      }
+
+      // Verify a merkleRootHash is returned (server builds Merkle tree for projected queries)
+      expect(response.payload.merkleRootHash).toBeDefined();
+      expect(typeof response.payload.merkleRootHash).toBe('number');
+
+      client.close();
+    });
+  });
+
+  // ========================================
+  // Merkle Delta Reconnect (SPEC-144)
+  // ========================================
+  describe('QUERY_SYNC_INIT Merkle delta reconnect', () => {
+    test('reconnect with stored Merkle hash sends QUERY_SYNC_INIT', async () => {
+      const mapName = `merkle-reconnect-${Date.now()}`;
+
+      // First connection: establish query with fields, receive QUERY_RESP with merkleRootHash
+      const client1 = await createRustTestClient(port, {
+        nodeId: 'merkle-rc-client-1',
+        userId: 'merkle-rc-user-1',
+        roles: ['ADMIN'],
+      });
+      await client1.waitForMessage('AUTH_ACK');
+
+      // Write initial data
+      client1.messages.length = 0;
+      client1.send({
+        type: 'CLIENT_OP',
+        payload: {
+          id: 'mrc-put-1',
+          mapName,
+          opType: 'PUT',
+          key: 'mrc-item-1',
+          record: createLWWRecord({ name: 'Initial', status: 'active' }),
+        },
+      });
+      await client1.waitForMessage('OP_ACK');
+      await waitForSync(200);
+
+      // Subscribe with field projection
+      const queryId = 'mrc-q-1';
+      client1.messages.length = 0;
+      client1.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId,
+          mapName,
+          query: {},
+          fields: ['name', 'status'],
+        },
+      });
+
+      const initialResp = await client1.waitForMessage('QUERY_RESP');
+      expect(initialResp.payload.queryId).toBe(queryId);
+      expect(initialResp.payload.results.length).toBe(1);
+
+      // Server should return a merkleRootHash for field-projected queries
+      const storedHash = initialResp.payload.merkleRootHash;
+      expect(storedHash).toBeDefined();
+      expect(typeof storedHash).toBe('number');
+      expect(storedHash).not.toBe(0);
+
+      client1.close();
+      await waitForSync(200);
+
+      // Second connection: simulate reconnect by opening a new client
+      // and sending QUERY_SYNC_INIT with the stored hash
+      const client2 = await createRustTestClient(port, {
+        nodeId: 'merkle-rc-client-2',
+        userId: 'merkle-rc-user-2',
+        roles: ['ADMIN'],
+      });
+      await client2.waitForMessage('AUTH_ACK');
+
+      // Send QUERY_SUB first (as QueryManager.resubscribeAll does)
+      client2.messages.length = 0;
+      client2.send({
+        type: 'QUERY_SUB',
+        payload: {
+          queryId: 'mrc-q-reconnect',
+          mapName,
+          query: {},
+          fields: ['name', 'status'],
+        },
+      });
+
+      // Then send QUERY_SYNC_INIT with the stored Merkle hash
+      client2.send({
+        type: 'QUERY_SYNC_INIT',
+        payload: {
+          queryId: 'mrc-q-reconnect',
+          rootHash: storedHash,
+        },
+      });
+
+      // Server should respond — either QUERY_RESP (full snapshot if hash mismatch)
+      // or no response if state is identical. In test, we expect at least QUERY_RESP
+      // from the initial QUERY_SUB to confirm the server accepted both messages.
+      const reconnectResp = await client2.waitForMessage('QUERY_RESP');
+      expect(reconnectResp).toBeDefined();
+      expect(reconnectResp.payload.queryId).toBe('mrc-q-reconnect');
+
+      client2.close();
+    });
+  });
 });
