@@ -6,6 +6,9 @@ order: 17
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Zap, Gauge, Timer, Server, AlertTriangle, CheckCircle, Activity, Terminal } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
+
+<AlertBox variant="warning" title="Partially Implemented" text="Some tuning knobs and config options on this page do not exist in the current Rust server. Benchmark numbers may not reflect actual performance." />
 
 export const highThroughputConfig = `# High throughput configuration
 # The Rust server is optimized for high throughput out of the box

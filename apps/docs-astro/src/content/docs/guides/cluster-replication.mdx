@@ -6,6 +6,9 @@ order: 17
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Database, RefreshCw, Shield, Zap, Server, Copy } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
+
+<AlertBox variant="warning" title="Partially Implemented" text="Some features on this page (consistency modes, configurable replication factor) are not yet available. The cluster uses eventual consistency with a fixed replication factor." />
 
 export const clusterSetupCode = `# Node 1 (seed node)
 PORT=8080 \\

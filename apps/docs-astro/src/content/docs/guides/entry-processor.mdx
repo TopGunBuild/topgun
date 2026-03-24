@@ -6,6 +6,9 @@ order: 16
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Cpu, Shield, Zap, Server } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
+
+<AlertBox variant="warning" title="Planned Feature" text="Entry processors are on the roadmap but not yet implemented in the current Rust server. The persistence service exists as a stub." />
 
 export const basicUsageCode = `import { TopGunClient } from '@topgunbuild/client';
 import { BuiltInProcessors } from '@topgunbuild/core';

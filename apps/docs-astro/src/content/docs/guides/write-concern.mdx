@@ -6,6 +6,9 @@ order: 16
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Shield, Zap, Database, Server, HardDrive } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
+
+<AlertBox variant="warning" title="Partially Implemented" text="Write concern levels beyond the default are not yet configurable. The server currently acknowledges writes at the local level only." />
 
 export const basicUsageCode = `import { TopGunClient, WriteConcern } from '@topgunbuild/client';
 

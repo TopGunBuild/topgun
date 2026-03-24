@@ -7,6 +7,9 @@ order: 15
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Lightbulb, Zap, Shield, Settings } from 'lucide-react';
 import { FeatureCard } from '../../../components/docs/FeatureCard';
+import { AlertBox } from '../../../components/docs/AlertBox';
+
+<AlertBox variant="warning" title="Planned Feature" text="This feature is on the roadmap but not yet implemented in the current Rust server. The API shown below represents the planned design." />
 
 export const advisorCode = `import { IndexedLWWMap, simpleAttribute, HLC } from '@topgunbuild/core';
 

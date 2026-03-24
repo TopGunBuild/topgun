@@ -6,6 +6,9 @@ order: 15
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Server, Container, Layers, Lock, Shield, Zap, Cloud, Network } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
+
+<AlertBox variant="warning" title="Partially Implemented" text="Some env vars and config options shown on this page (TOPGUN_PORT, TOPGUN_TLS_*, TOPGUN_CLUSTER_*) are not yet read by the Rust server. See the audit report for details." />
 
 export const dockerBuildCode = `# From the root of the repository
 docker build -t topgun-server -f deploy/Dockerfile.server .`;

@@ -6,6 +6,9 @@ order: 17
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Shield, AlertTriangle, Lock, Users } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
+
+<AlertBox variant="warning" title="Planned Feature" text="Custom conflict resolvers are on the roadmap but not yet implemented in the current Rust server. The server currently uses LWW (Last-Write-Wins) resolution only." />
 
 export const problemCode = `// The LWW Problem: Two users book the same seat concurrently
 

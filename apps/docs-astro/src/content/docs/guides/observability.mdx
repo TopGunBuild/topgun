@@ -6,6 +6,9 @@ order: 16
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Gauge, FileText } from 'lucide-react';
+import { AlertBox } from '../../../components/docs/AlertBox';
+
+<AlertBox variant="warning" title="Partially Implemented" text="Some metric names and config options on this page reference the old Node.js server. The Rust server uses different metric names and tracing configuration." />
 
 export const logExample = `{
   "level": 30,

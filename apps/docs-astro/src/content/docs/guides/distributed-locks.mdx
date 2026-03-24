@@ -8,6 +8,8 @@ import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Lock, ShieldCheck } from 'lucide-react';
 import { AlertBox } from '../../../components/docs/AlertBox';
 
+<AlertBox variant="warning" title="Planned Feature" text="Distributed locks are on the roadmap but not yet implemented in the current Rust server. The coordination service exists as a stub." />
+
 export const lockCode = `import { TopGunClient } from '@topgunbuild/client';
 
 // ... initialize client ...
