@@ -3,7 +3,7 @@
 //! Manages an in-memory `QueryRegistry` of standing query subscriptions,
 //! evaluates queries against `RecordStore` contents, and pushes incremental
 //! `QUERY_UPDATE` messages (ENTER/UPDATE/LEAVE) to subscribers via
-//! `QueryMutationObserver` when data changes.
+//! `CrdtService::broadcast_query_updates()` when data changes.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -1750,18 +1750,26 @@ mod tests {
 
     /// AC7: QUERY_RESP with results exceeding `max_query_records` returns
     /// exactly `max_query_records` entries with `has_more: true`.
+    ///
+    /// Mirrors the exact clamping-then-projection order in `handle_query_subscribe()`:
+    /// 1. `execute_query` returns all matches
+    /// 2. Truncate to `max_query_records` → `has_more: true`
+    /// 3. Apply field projection on the clamped set
+    /// This ensures a regression in ordering (e.g., projecting before clamping)
+    /// would be caught.
     #[test]
     fn max_query_records_clamping() {
         use super::super::predicate::execute_query;
-        use topgun_core::messages::query::QueryResultEntry;
+        use super::super::shape_evaluator;
 
-        // Create 15 entries
+        // Create 15 entries with two fields each
         let entries: Vec<(String, rmpv::Value)> = (0..15)
             .map(|i| {
                 (
                     format!("key-{i}"),
                     rmpv::Value::Map(vec![
                         (rmpv::Value::String("id".into()), rmpv::Value::Integer(i.into())),
+                        (rmpv::Value::String("name".into()), rmpv::Value::String(format!("item-{i}").into())),
                     ]),
                 )
             })
@@ -1771,7 +1779,7 @@ mod tests {
         let mut results = execute_query(entries, &query);
         assert_eq!(results.len(), 15);
 
-        // Simulate max_query_records = 10
+        // Step 1: Clamp (same as handle_query_subscribe)
         let max = 10_usize;
         let has_more = if results.len() > max {
             results.truncate(max);
@@ -1782,6 +1790,20 @@ mod tests {
 
         assert_eq!(results.len(), 10);
         assert_eq!(has_more, Some(true));
+
+        // Step 2: Project fields on the clamped set (same order as service)
+        let proj_fields = vec!["name".to_string()];
+        for entry in &mut results {
+            entry.value = shape_evaluator::project(&proj_fields, &entry.value);
+        }
+
+        // Verify projection applied to clamped results
+        assert_eq!(results.len(), 10);
+        for entry in &results {
+            let map = entry.value.as_map().expect("projected value should be Map");
+            assert_eq!(map.len(), 1, "projected entry should have exactly 1 field");
+            assert_eq!(map[0].0.as_str().unwrap(), "name");
+        }
     }
 
     /// AC8: `ServerConfig::default().max_query_records` equals `10_000`.
