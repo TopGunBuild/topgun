@@ -54,6 +54,7 @@ import {
   QuerySubMessageSchema,
   QueryUnsubMessageSchema,
   QueryRespMessageSchema,
+  QuerySyncInitMessageSchema,
 } from './query-schemas';
 import {
   SearchMessageSchema,
@@ -153,6 +154,7 @@ export const MessageSchema = z.discriminatedUnion('type', [
   QuerySubMessageSchema,
   QueryUnsubMessageSchema,
   QueryRespMessageSchema,
+  QuerySyncInitMessageSchema,
   QueryUpdateMessageSchema,
   // --- Search ---
   SearchMessageSchema,

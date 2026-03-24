@@ -9,6 +9,7 @@ export const QuerySubMessageSchema = z.object({
     queryId: z.string(),
     mapName: z.string(),
     query: QuerySchema,
+    fields: z.array(z.string()).optional(),
   }),
 });
 export type QuerySubMessage = z.infer<typeof QuerySubMessageSchema>;
@@ -34,6 +35,7 @@ export const QueryRespPayloadSchema = z.object({
   nextCursor: z.string().optional(),
   hasMore: z.boolean().optional(),
   cursorStatus: CursorStatusSchema.optional(),
+  merkleRootHash: z.number().int().optional(),
 });
 export type QueryRespPayload = z.infer<typeof QueryRespPayloadSchema>;
 
@@ -42,3 +44,16 @@ export const QueryRespMessageSchema = z.object({
   payload: QueryRespPayloadSchema,
 });
 export type QueryRespMessage = z.infer<typeof QueryRespMessageSchema>;
+
+// --- Query Sync Init (Merkle delta reconnect) ---
+export const QuerySyncInitPayloadSchema = z.object({
+  queryId: z.string(),
+  rootHash: z.number().int(),
+});
+export type QuerySyncInitPayload = z.infer<typeof QuerySyncInitPayloadSchema>;
+
+export const QuerySyncInitMessageSchema = z.object({
+  type: z.literal('QUERY_SYNC_INIT'),
+  payload: QuerySyncInitPayloadSchema,
+});
+export type QuerySyncInitMessage = z.infer<typeof QuerySyncInitMessageSchema>;
