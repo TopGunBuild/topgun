@@ -1,0 +1,51 @@
+---
+title: Changelog
+description: Release history and version notes
+order: 90
+---
+
+# Changelog
+
+TopGun follows [Semantic Versioning](https://semver.org/) (semver):
+
+- **Major** versions (X.0.0) introduce breaking changes to the public API or wire protocol
+- **Minor** versions (0.X.0) add new features in a backward-compatible manner
+- **Patch** versions (0.0.X) contain backward-compatible bug fixes
+
+---
+
+## Releases
+
+For the complete list of releases with detailed notes, visit the [GitHub Releases page](https://github.com/topgunbuild/topgun/releases).
+
+### v1.0.0 -- Launch Release
+
+The first stable release of TopGun, featuring:
+
+- **Rust server** with all 7 domain services (CRDT, Sync, Query, Search, Messaging, Persistence, Coordination)
+- **TypeScript client SDK** (`@topgunbuild/client`) with offline-first LWWMap and ORMap CRDTs
+- **React hooks** (`@topgunbuild/react`) including `useMap`, `useQuery`, `useMutation`, `useTopic`
+- **IndexedDB adapter** (`@topgunbuild/adapters`) for browser-side persistence
+- **PostgreSQL storage** for server-side durability
+- **Cluster protocol** with 271-partition data distribution
+- **Full-text search** powered by Tantivy
+- **MerkleTree delta sync** for efficient reconnection
+- **JWT authentication** and role-based access control
+- **Apache 2.0 license**
+
+### Pre-release History
+
+Development milestones leading to v1.0:
+
+- **Phase 3:** Rust server with all domain services, integration tests (TS client to Rust server)
+- **Phase 2.5:** Research sprint -- storage architecture, cluster architecture, service patterns
+- **Phase 2:** Core Rust library -- CRDTs, HLC, MerkleTree, message schema
+- **Phase 1:** TypeScript implementation -- client SDK, React hooks, sync engine
+
+---
+
+## Tracking Changes
+
+- **GitHub Releases:** [github.com/topgunbuild/topgun/releases](https://github.com/topgunbuild/topgun/releases) -- detailed notes for every release
+- **Commit log:** Each commit follows the `type(scope): description` convention for easy scanning
+- **Migration guides:** Breaking changes in major versions include migration instructions in the release notes
