@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-24 — TODO-182 converted to SPEC-143; prev: TODO-181 converted to SPEC-142, TODO-181–184 (Query+Shape unification), TODO-167/168 superseded
+**Last updated:** 2026-03-24 — TODO-183 converted to SPEC-144; prev: TODO-182 converted to SPEC-143, TODO-181 converted to SPEC-142, TODO-181–184 (Query+Shape unification), TODO-167/168 superseded
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -51,36 +51,8 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 ### TODO-168: ~~ShapeHandle Generic Typing~~ → Absorbed into TODO-183
 - **Status:** Superseded — QueryHandle\<T\> generic typing will be part of unified client API (TODO-183)
 
-### TODO-183: Unified Query Client — Client-Side Merge *(Query+Shape merge, step 3/4)*
-- **Priority:** P1
-- **Complexity:** Medium
-- **Summary:** Merge ShapeHandle/ShapeManager capabilities into QueryHandle/QueryManager on the TS client. `client.query()` becomes the single API for all filtered subscriptions — with optional `fields`, `limit`, and Merkle delta reconnect. `subscribeShape()` is deprecated. `useQuery` React hook gains `fields` parameter for free.
-- **Depends on:** TODO-182
-- **Effort:** 1-2 weeks
-- **Context:** Currently two parallel client-side systems:
-  - **QueryHandle** (`QueryHandle.ts`, 353 lines): `subscribe(cb)` returns full results array. `onChanges()` for deltas. Built-in `ChangeTracker`. Cursor pagination. Sort support. No field projection, no Merkle sync.
-  - **ShapeHandle** (`ShapeHandle.ts`, 139 lines): `onUpdate(cb)` returns individual deltas. Public `records` Map. `merkleRootHash` for reconnect. Field projection via `fields`. No sort, no pagination, no ChangeTracker.
-  - **QueryManager** (`QueryManager.ts`, 328 lines): `resubscribeAll()` re-sends all QUERY_SUB. Local query execution via storage adapter.
-  - **ShapeManager** (`ShapeManager.ts`, 212 lines): `resubscribeAll()` re-sends SHAPE_SUBSCRIBE + SHAPE_SYNC_INIT with stored merkleRootHash.
-  - Both use `PredicateNode` from `@topgunbuild/core` — filter syntax is already identical.
-- **Scope:**
-  - **QueryHandle gains**: `fields` readonly property, `merkleRootHash` for delta reconnect, `onUpdate(cb)` method for individual deltas (like ShapeHandle). Generic typing: `QueryHandle<T>` with `results: Map<string, T>` (absorbs TODO-168).
-  - **QueryManager gains**: Merkle reconnect logic from ShapeManager — on reconnect, send QUERY_SYNC_INIT with stored merkleRootHash for queries that have field projection. `resubscribeAll()` merges both patterns.
-  - **`client.query()` extended**: Accept `fields?: string[]` in QueryFilter. When `fields` present, server uses Shape-path (Merkle sync, projection). Transparent to user.
-  - **`syncEngine.subscribeShape()` deprecated**: Mark as deprecated, internally delegates to QueryManager. Keep for one version cycle, remove in TODO-184.
-  - **`useQuery` hook**: Gets `fields` parameter automatically since it wraps `client.query()`. No hook changes needed.
-  - **Filter syntax unified**: `client.query('users', { predicate: Predicates.equal('status', 'active'), fields: ['name'] })` — one syntax, one handle, one API.
-  - **Tests**: Update client unit tests. Update integration tests to use `client.query()` with fields/limit instead of `subscribeShape()`.
-- **Key files:**
-  - `packages/client/src/QueryHandle.ts` (extend)
-  - `packages/client/src/sync/QueryManager.ts` (merge ShapeManager logic)
-  - `packages/client/src/ShapeHandle.ts` (deprecate)
-  - `packages/client/src/sync/ShapeManager.ts` (deprecate)
-  - `packages/client/src/SyncEngine.ts` (deprecate subscribeShape, update message routing)
-  - `packages/client/src/TopGunClient.ts` (extend query() options)
-  - `packages/react/src/hooks/useQuery.ts` (add fields to options type)
-  - `tests/integration-rust/queries.test.ts` (extend)
-  - `tests/integration-rust/shape.test.ts` (migrate to query API)
+### TODO-183: ~~Unified Query Client — Client-Side Merge~~ → Converted to SPEC-144
+- **Status:** Converted to SPEC-144
 
 ### TODO-184: Shape Cleanup — Remove Deprecated Code *(Query+Shape merge, step 4/4)*
 - **Priority:** P1

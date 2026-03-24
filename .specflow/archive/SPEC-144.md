@@ -1,7 +1,7 @@
 ---
 id: SPEC-144
 type: refactor
-status: running
+status: done
 priority: P1
 complexity: medium
 created: 2026-03-24
@@ -369,3 +369,66 @@ All assumptions verified against source code. Impact is low even if wrong.
 ### Deviations
 
 None. All requirements implemented as specified.
+
+---
+
+## Review History
+
+### Review v1 (2026-03-24)
+**Result:** APPROVED
+**Reviewer:** impl-reviewer (subagent)
+
+**Findings:**
+
+**Passed:**
+- [✓] AC1: `QueryFilter` interface includes `fields?: string[]` at line 14 of QueryHandle.ts
+- [✓] AC2: `QueryHandle` exposes `readonly fields: string[] | undefined` (line 54) and `merkleRootHash: number = 0` (line 57)
+- [✓] AC3: `sendQuerySubscription()` in QueryManager.ts includes `fields: filter.fields` in QUERY_SUB payload (line 99)
+- [✓] AC4: `resubscribeAll()` sends QUERY_SYNC_INIT for queries with `fields` and non-zero `merkleRootHash` (lines 326-334 of QueryManager.ts)
+- [✓] AC5: `subscribeShape()` carries `@deprecated` JSDoc at SyncEngine.ts line 651 and continues delegating to `this.shapeManager.subscribeShape()`
+- [✓] AC6: `QueryFilter.fields` is exported from client package index and flows to `useQuery` automatically — no hook changes needed
+- [✓] AC7: 461 client tests and 182 react tests pass unchanged; build clean
+- [✓] AC8: Two integration test cases added to queries.test.ts (lines 1113-1278) — field projection test and Merkle delta reconnect test
+- [✓] R6 wiring: `handleQueryResp` in SyncEngine.ts destructures `merkleRootHash` from payload and passes it as third argument to `query.onResult()` (lines 828, 831)
+- [✓] `onResult()` updated signature accepts optional third `merkleRootHash?: number` and stores it (lines 120, 146-148)
+- [✓] SyncEngine.test.ts updated to expect `undefined` as third argument when no `merkleRootHash` in payload (line 403)
+- [✓] ShapeHandle, ShapeManager, and Shape wire types untouched — constraint respected
+- [✓] No Rust server changes — constraint respected
+- [✓] Build completes cleanly (CJS + ESM + DTS)
+
+**Summary:** All 8 acceptance criteria met. Implementation follows specification exactly with no deviations. All tests pass, build is clean, and the constraint boundaries (no Shape removal, no Rust changes, no useQuery changes) are honored throughout.
+
+---
+
+## Completion
+
+**Completed:** 2026-03-24
+**Total Commits:** 2
+**Review Cycles:** 1
+
+### Outcome
+
+Unified the client-side filtered subscription API by merging ShapeHandle/ShapeManager capabilities (field projection, Merkle delta reconnect) into QueryHandle/QueryManager. `client.query()` is now the single API for all filtered subscriptions.
+
+### Key Files
+
+- `packages/client/src/QueryHandle.ts` — Extended QueryFilter and QueryHandle with fields/merkleRootHash
+- `packages/client/src/sync/QueryManager.ts` — QUERY_SUB includes fields, resubscribeAll sends QUERY_SYNC_INIT for delta reconnect
+- `packages/client/src/SyncEngine.ts` — subscribeShape() deprecated, QUERY_RESP passes merkleRootHash through
+
+### Changes Applied
+
+**Modified:**
+- `packages/client/src/QueryHandle.ts` — Added `fields?: string[]` to QueryFilter, `readonly fields` and `merkleRootHash` properties to QueryHandle, updated `onResult()` signature
+- `packages/client/src/sync/QueryManager.ts` — `sendQuerySubscription()` includes fields in QUERY_SUB, `resubscribeAll()` sends QUERY_SYNC_INIT for field-projected queries
+- `packages/client/src/SyncEngine.ts` — `@deprecated` on subscribeShape(), handleQueryResp passes merkleRootHash to onResult()
+- `packages/client/src/__tests__/SyncEngine.test.ts` — Updated assertion for onResult third argument
+- `tests/integration-rust/queries.test.ts` — Added field projection and Merkle delta reconnect test cases
+
+### Patterns Established
+
+None — followed existing patterns.
+
+### Spec Deviations
+
+None — implemented as specified.
