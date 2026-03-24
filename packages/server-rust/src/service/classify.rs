@@ -229,6 +229,15 @@ impl OperationService {
                 );
                 Ok(Operation::QueryUnsubscribe { ctx, payload })
             }
+            Message::QuerySyncInit(payload) => {
+                let ctx = self.make_ctx(
+                    service_names::QUERY,
+                    client_id,
+                    caller_origin,
+                    None,
+                );
+                Ok(Operation::QuerySyncInit { ctx, payload })
+            }
 
             // ----- Messaging domain (service_name = "messaging") -----
 
@@ -1037,9 +1046,24 @@ mod tests {
                 query_id: "sub-1".to_string(),
                 map_name: "users".to_string(),
                 query: topgun_core::messages::base::Query::default(),
+                fields: None,
             },
         });
         let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
         assert_eq!(op.ctx().service_name, service_names::QUERY);
+    }
+
+    #[test]
+    fn classify_query_sync_init_routes_to_query() {
+        let svc = make_service();
+        let msg = Message::QuerySyncInit(topgun_core::messages::QuerySyncInitMessage {
+            payload: topgun_core::messages::QuerySyncInitPayload {
+                query_id: "q-sync-1".to_string(),
+                root_hash: 999,
+            },
+        });
+        let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
+        assert_eq!(op.ctx().service_name, service_names::QUERY);
+        assert!(matches!(op, Operation::QuerySyncInit { .. }));
     }
 }

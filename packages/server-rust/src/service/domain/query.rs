@@ -530,6 +530,7 @@ impl QueryService {
                 next_cursor: None,
                 has_more: None,
                 cursor_status: None,
+                merkle_root_hash: None,
             },
         });
 
@@ -1295,6 +1296,7 @@ mod tests {
                 query_id: "q-1".to_string(),
                 map_name: "users".to_string(),
                 query: Query::default(),
+                fields: None,
             },
         };
         let op = Operation::QuerySubscribe { ctx, payload };
@@ -1326,6 +1328,7 @@ mod tests {
                 query_id: "q-1".to_string(),
                 map_name: "users".to_string(),
                 query: Query::default(),
+                fields: None,
             },
         };
         let op = Operation::QuerySubscribe { ctx, payload };
@@ -1417,6 +1420,7 @@ mod tests {
                 query_id: "q-1".to_string(),
                 map_name: "users".to_string(),
                 query: Query::default(),
+                fields: None,
             },
         };
         let op = Operation::QuerySubscribe {
