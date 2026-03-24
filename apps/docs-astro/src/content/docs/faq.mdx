@@ -1,0 +1,112 @@
+---
+title: FAQ
+description: Frequently asked questions about TopGun
+order: 5
+---
+
+# Frequently Asked Questions
+
+---
+
+## How does TopGun compare to Firebase/Supabase?
+
+TopGun takes a fundamentally different approach:
+
+- **Self-hosted and open source** (Apache 2.0). You own your data and infrastructure. No vendor lock-in
+- **True offline-first with CRDTs.** Firebase and Supabase offer client-side caching, but TopGun uses conflict-free replicated data types (CRDTs) with Hybrid Logical Clocks for automatic conflict resolution. Writes never wait for the network
+- **Rust server performance.** The TopGun server is built in Rust with tokio, delivering 200K+ ops/sec on a single node. Firebase and Supabase rely on managed cloud infrastructure
+- **Built-in clustering.** TopGun supports multi-node clusters with 271-partition data distribution, similar to enterprise data grids like Hazelcast
+
+Firebase and Supabase are better choices if you want a fully managed backend with minimal ops. TopGun is better if you need true offline capability, CRDT conflict resolution, or self-hosted infrastructure.
+
+---
+
+## How does TopGun compare to PowerSync/ElectricSQL?
+
+PowerSync and ElectricSQL are sync layers that sit between your existing database and clients. TopGun is an integrated data platform:
+
+- **Integrated server.** TopGun includes its own Rust server with storage, clustering, search, and pub/sub -- not just a sync proxy
+- **CRDT conflict resolution.** PowerSync and ElectricSQL use SQL-based conflict resolution (last-write-wins at the row level, or custom SQL rules). TopGun uses purpose-built CRDTs (LWWMap, ORMap) with field-level conflict resolution via Hybrid Logical Clocks
+- **Pub/Sub and search built-in.** TopGun includes real-time topics and full-text search (via Tantivy) as core features, not add-ons
+- **No existing database required.** TopGun can run with in-memory storage for development or PostgreSQL for production. You do not need an existing Postgres database to start
+
+PowerSync and ElectricSQL are better if you already have a PostgreSQL database and want to add sync. TopGun is better for greenfield projects that want an integrated offline-first data platform.
+
+---
+
+## Can I use TopGun with GraphQL?
+
+TopGun has its own query protocol optimized for real-time subscriptions and CRDT sync. However, you can layer GraphQL on top:
+
+```typescript
+// Example: GraphQL resolver reading from TopGun
+const resolvers = {
+  Query: {
+    todos: async () => {
+      const map = client.getMap('todos');
+      return map.getAll();
+    },
+    todo: async (_, { id }) => {
+      const map = client.getMap('todos');
+      return map.get(id);
+    }
+  }
+};
+```
+
+The TopGun client SDK provides the data layer, and your GraphQL resolvers read from it. Mutations go through TopGun's write path to get CRDT conflict resolution. Real-time updates can be bridged to GraphQL subscriptions.
+
+Note that this adds a layer of indirection. For most use cases, TopGun's native React hooks (`useMap`, `useQuery`, `useMutation`) provide a simpler integration path than GraphQL.
+
+---
+
+## How much data can TopGun handle?
+
+It depends on the layer:
+
+- **Client (browser):** Limited by browser memory and IndexedDB storage quota. Comfortable range is 50-100MB. Browsers may evict IndexedDB data under storage pressure unless persistent storage is requested. Use selective sync and query pagination to keep the client dataset manageable
+- **Client (Node.js):** Limited by available RAM. Node.js has no IndexedDB quota restrictions, so the practical limit is your server's memory
+- **Server (single node):** Limited by RAM for in-memory data and PostgreSQL for durable storage. The Rust server is designed for high throughput (200K+ ops/sec) with low memory overhead
+- **Server (cluster):** Data is partitioned across nodes using 271 partitions. Adding nodes increases both storage capacity and throughput. Each node handles a subset of partitions
+
+For most applications (task managers, collaboration tools, dashboards), a single server node with PostgreSQL is sufficient.
+
+---
+
+## Is there a free tier?
+
+TopGun is **open source under the Apache 2.0 license**. You can self-host it for free with no restrictions on usage, number of connections, or data volume.
+
+A managed cloud service is planned but pricing is not yet finalized. Self-hosting will always remain free and fully featured.
+
+---
+
+## Does TopGun support React Native?
+
+Yes. The `@topgunbuild/client` SDK works in React Native environments. The React hooks from `@topgunbuild/react` (`useMap`, `useQuery`, `useMutation`, etc.) work in React Native just as they do in the browser.
+
+The main difference is storage: in the browser, TopGun uses `IDBAdapter` (IndexedDB) for local persistence. In React Native, you would use an AsyncStorage-based adapter instead. The `IStorageAdapter` interface makes it straightforward to implement a React Native storage backend.
+
+```typescript
+import { TopGunClient } from '@topgunbuild/client';
+import { AsyncStorageAdapter } from './my-async-storage-adapter';
+
+const client = new TopGunClient({
+  serverUrl: 'wss://your-server.com',
+  storage: new AsyncStorageAdapter()
+});
+```
+
+---
+
+## What happens if the server goes down?
+
+Clients continue operating normally:
+
+1. **All reads are local.** Data is already in memory via CRDTs, so reads never fail
+2. **All writes are local.** New writes go to the local LWWMap and are persisted to IndexedDB (or your storage adapter). The user experiences zero latency
+3. **Writes are queued for sync.** The SyncEngine detects the disconnection and queues outgoing operations
+4. **Automatic reconnection.** When the server comes back online, the client automatically reconnects
+5. **Efficient delta sync.** On reconnection, MerkleTree comparison determines exactly which records changed on each side, avoiding a full data transfer. Only the delta is synced
+
+This means your application works identically whether the server is up or down. The only difference is that other clients will not see the changes until sync resumes.
