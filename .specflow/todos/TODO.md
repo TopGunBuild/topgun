@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-24 — TODO-173 converted to SPEC-141; prev: SPEC-140 docs audit created TODO-174–179, TODO-172→SPEC-140, TODO-171 (RBAC)
+**Last updated:** 2026-03-24 — TODO-181 converted to SPEC-142; prev: TODO-181–184 (Query+Shape unification), TODO-167/168 superseded
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -45,26 +45,81 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Effort:** 2-3 weeks
 - **Status:** ~~SPEC-135a~~ ✓ · ~~SPEC-135b~~ ✓ · ~~SPEC-135c~~ ✓ — **done** (DistributedPlanner deferred)
 
-### TODO-167: Server-Side Shape Max Limit
-- **Priority:** P2 (production safety — prevents accidental full-table sync to browser)
-- **Complexity:** Small
-- **Summary:** Add `max_shape_records: u32` server config (default 10,000, inspired by Hazelcast Near Cache default). ShapeService clamps `SHAPE_RESP` records to this limit and sets `has_more: true` when clamped. Log warning on clamp. No wire protocol changes needed — `has_more` field already exists in `ShapeRespPayload`.
-- **Context:** [SHAPE_LIMITS_AND_TYPING_RESEARCH.md](../reference/SHAPE_LIMITS_AND_TYPING_RESEARCH.md) — no major competitor (ElectricSQL, PowerSync, Replicache, Firebase) enforces default limits, but TopGun serves untrusted browser clients.
-- **Depends on:** TODO-070 ✓
-- **Effort:** 1-2 days
-- **Scope:**
-  - Add `max_shape_records` to server `Config` struct (default 10,000)
-  - Clamp in `ShapeService::handle_shape_subscribe()` after evaluator produces records
-  - Client-side: surface `hasMore` on `ShapeHandle` so apps can show "showing X of Y" or paginate
-  - Sim test: verify clamp behavior under load
+### TODO-167: ~~Server-Side Shape Max Limit~~ → Absorbed into TODO-182
+- **Status:** Superseded — max_query_records will be implemented as part of the unified QueryService (TODO-182)
 
-### TODO-168: ShapeHandle Generic Typing (`ShapeHandle<T>`)
-- **Priority:** P3 (DX improvement, zero runtime cost)
+### TODO-168: ~~ShapeHandle Generic Typing~~ → Absorbed into TODO-183
+- **Status:** Superseded — QueryHandle\<T\> generic typing will be part of unified client API (TODO-183)
+
+### TODO-182: Unified Query Service — Server-Side Merge *(Query+Shape merge, step 2/4)*
+- **Priority:** P1
+- **Complexity:** Medium
+- **Summary:** Merge ShapeService capabilities into QueryService on the Rust server. QueryService gains: field projection, per-query Merkle trees for delta reconnect, writer exclusion on broadcasts, and configurable max_query_records limit. ShapeService is NOT deleted yet — both coexist temporarily until client migration (TODO-183).
+- **Depends on:** TODO-181
+- **Effort:** 1-2 weeks
+- **Context:** Currently two parallel server-side systems:
+  - **QueryService** (`query.rs`): `QueryRegistry` + `QueryMutationObserver` pattern. Re-evaluates predicates on every RecordStore mutation. Tracks `previous_result_keys` for ENTER/UPDATE/LEAVE. No field projection, no Merkle sync, no writer exclusion. Reconnect = full QUERY_RESP resend.
+  - **ShapeService** (`shape.rs`): `ShapeRegistry` + `ShapeEvaluator`. Scans all partitions on subscribe, builds per-shape Merkle trees via `ShapeMerkleSyncManager`. Field projection via `shape_evaluator::apply_shape()`. Writer exclusion via `exclude_connection_id`. Delta reconnect via `SHAPE_SYNC_INIT` + Merkle tree comparison.
+  - Both use identical `evaluate_predicate()` for filtering.
+- **Scope:**
+  - **QueryService gains field projection**: When `fields` is present in QUERY_SUB, apply field projection (port `shape_evaluator::apply_shape()` logic) to QUERY_RESP results and QUERY_UPDATE values.
+  - **QueryService gains Merkle delta sync**: When query has field projection or limit, create per-query Merkle tree (port `ShapeMerkleSyncManager` pattern). Handle `QUERY_SYNC_INIT` message — compare client rootHash, send delta via existing Merkle sync protocol.
+  - **QueryService gains writer exclusion**: On QUERY_UPDATE broadcast, skip the connection that originated the write (already done in ShapeService `broadcast_shape_updates()`).
+  - **QueryService gains max_query_records**: Add `max_query_records: u32` to server Config (default 10,000). Clamp initial QUERY_RESP. Set `has_more: true` when clamped. Log warning.
+  - **ShapeService stays alive** — old SHAPE_* messages still work. This allows incremental client migration.
+  - **Tests**: Extend existing query integration tests to cover `fields`, Merkle reconnect, writer exclusion. Port relevant shape tests to use QUERY_* messages.
+- **Key files:**
+  - `packages/server-rust/src/service/domain/query.rs` (major changes)
+  - `packages/server-rust/src/service/domain/shape_evaluator.rs` (reuse, may move to shared module)
+  - `packages/server-rust/src/service/domain/sync.rs` (handle QUERY_SYNC_INIT routing)
+  - `packages/server-rust/src/config.rs` (add max_query_records)
+
+### TODO-183: Unified Query Client — Client-Side Merge *(Query+Shape merge, step 3/4)*
+- **Priority:** P1
+- **Complexity:** Medium
+- **Summary:** Merge ShapeHandle/ShapeManager capabilities into QueryHandle/QueryManager on the TS client. `client.query()` becomes the single API for all filtered subscriptions — with optional `fields`, `limit`, and Merkle delta reconnect. `subscribeShape()` is deprecated. `useQuery` React hook gains `fields` parameter for free.
+- **Depends on:** TODO-182
+- **Effort:** 1-2 weeks
+- **Context:** Currently two parallel client-side systems:
+  - **QueryHandle** (`QueryHandle.ts`, 353 lines): `subscribe(cb)` returns full results array. `onChanges()` for deltas. Built-in `ChangeTracker`. Cursor pagination. Sort support. No field projection, no Merkle sync.
+  - **ShapeHandle** (`ShapeHandle.ts`, 139 lines): `onUpdate(cb)` returns individual deltas. Public `records` Map. `merkleRootHash` for reconnect. Field projection via `fields`. No sort, no pagination, no ChangeTracker.
+  - **QueryManager** (`QueryManager.ts`, 328 lines): `resubscribeAll()` re-sends all QUERY_SUB. Local query execution via storage adapter.
+  - **ShapeManager** (`ShapeManager.ts`, 212 lines): `resubscribeAll()` re-sends SHAPE_SUBSCRIBE + SHAPE_SYNC_INIT with stored merkleRootHash.
+  - Both use `PredicateNode` from `@topgunbuild/core` — filter syntax is already identical.
+- **Scope:**
+  - **QueryHandle gains**: `fields` readonly property, `merkleRootHash` for delta reconnect, `onUpdate(cb)` method for individual deltas (like ShapeHandle). Generic typing: `QueryHandle<T>` with `results: Map<string, T>` (absorbs TODO-168).
+  - **QueryManager gains**: Merkle reconnect logic from ShapeManager — on reconnect, send QUERY_SYNC_INIT with stored merkleRootHash for queries that have field projection. `resubscribeAll()` merges both patterns.
+  - **`client.query()` extended**: Accept `fields?: string[]` in QueryFilter. When `fields` present, server uses Shape-path (Merkle sync, projection). Transparent to user.
+  - **`syncEngine.subscribeShape()` deprecated**: Mark as deprecated, internally delegates to QueryManager. Keep for one version cycle, remove in TODO-184.
+  - **`useQuery` hook**: Gets `fields` parameter automatically since it wraps `client.query()`. No hook changes needed.
+  - **Filter syntax unified**: `client.query('users', { predicate: Predicates.equal('status', 'active'), fields: ['name'] })` — one syntax, one handle, one API.
+  - **Tests**: Update client unit tests. Update integration tests to use `client.query()` with fields/limit instead of `subscribeShape()`.
+- **Key files:**
+  - `packages/client/src/QueryHandle.ts` (extend)
+  - `packages/client/src/sync/QueryManager.ts` (merge ShapeManager logic)
+  - `packages/client/src/ShapeHandle.ts` (deprecate)
+  - `packages/client/src/sync/ShapeManager.ts` (deprecate)
+  - `packages/client/src/SyncEngine.ts` (deprecate subscribeShape, update message routing)
+  - `packages/client/src/TopGunClient.ts` (extend query() options)
+  - `packages/react/src/hooks/useQuery.ts` (add fields to options type)
+  - `tests/integration-rust/queries.test.ts` (extend)
+  - `tests/integration-rust/shape.test.ts` (migrate to query API)
+
+### TODO-184: Shape Cleanup — Remove Deprecated Code *(Query+Shape merge, step 4/4)*
+- **Priority:** P1
 - **Complexity:** Small
-- **Summary:** Make `ShapeHandle` generic: `ShapeHandle<T>` with `records: Map<string, T>` instead of `Map<string, any>`. `ShapeUpdate<T>` gets typed `value: T | undefined`. Pattern: ElectricSQL's `ShapeStream<T>`. Purely TypeScript-level, no wire changes. Phase B (typed filters from Zod schemas, like Prisma's `where` clause) deferred to post-TODO-069 as a separate TODO.
-- **Context:** [SHAPE_LIMITS_AND_TYPING_RESEARCH.md](../reference/SHAPE_LIMITS_AND_TYPING_RESEARCH.md) — ElectricSQL uses `ShapeStream<T>` for output typing; Prisma/Drizzle derive filter types from schema (Phase B).
-- **Depends on:** TODO-070 ✓
-- **Effort:** 0.5-1 day
+- **Summary:** Delete all Shape-specific code, wire messages, and documentation now that everything is unified under `client.query()`. Clean break — no backwards compatibility needed (no active users).
+- **Depends on:** TODO-183
+- **Effort:** 2-3 days
+- **Scope:**
+  - **Wire protocol**: Remove SHAPE_SUBSCRIBE, SHAPE_UNSUBSCRIBE, SHAPE_RESP, SHAPE_UPDATE, SHAPE_SYNC_INIT from TS schemas and Rust message enum. Remove Operation::ShapeSubscribe/Unsubscribe/SyncInit routing.
+  - **Server**: Delete `ShapeService`, `ShapeRegistry`, `ShapeMerkleSyncManager`. Delete or merge `shape_evaluator.rs` into query module. Remove `shape_registry` from `AppState`. Remove ShapeService from ServiceRegistry.
+  - **Client**: Delete `ShapeHandle.ts`, `ShapeManager.ts`. Remove `subscribeShape()` from SyncEngine. Remove shape message handlers from `ClientMessageHandlers`. Clean up re-exports from `index.ts`.
+  - **Core schemas**: Delete `packages/core/src/schemas/shape-schemas.ts`. Remove shape Zod schemas from barrel exports.
+  - **Core Rust**: Delete shape-related structs from `types.rs`/`message.rs`.
+  - **Tests**: Delete `tests/integration-rust/shape.test.ts` (functionality moved to queries.test.ts in TODO-183). Delete shape-specific server unit tests (replaced by extended query tests in TODO-182).
+  - **Docs**: Delete `apps/docs-astro/src/content/docs/guides/shapes.mdx`. Update `live-queries.mdx` to document `fields`, `limit`, Merkle reconnect (the features that were Shape-only). Update pagination nav links.
+  - **TODO cleanup**: Archive TODO-070 as superseded (Shapes concept merged into Queries).
 
 
 ### TODO-171: RBAC — Role-Based Access Control Implementation
@@ -612,13 +667,13 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 | Wave | Items | Blocked by | Rationale |
 |------|-------|------------|-----------|
 | **6c** | TODO-091 (DataFusion SQL) · TODO-070 (Shapes) · TODO-033 (Write-Behind) | 130 ✓ · 128 ✓ · — | SQL needs Arrow schemas (done); Shapes needs write-path wiring (done); Write-Behind independent |
-| **6c²** | TODO-167 (Shape max limit) · TODO-168 (ShapeHandle generic) | 070 ✓ | Shape polish: server-side safety + TS DX. Both small, no blockers |
+| **6c²** | TODO-181 (Wire schema unification) · TODO-182 (Server merge) · TODO-183 (Client merge) · TODO-184 (Shape cleanup) | 070 ✓ | Query+Shape API unification — eliminates dual subscription model. TODO-167/168 absorbed into 182/183 |
 | **6d** | TODO-025 (DAG Executor) · TODO-092 (Connector traits) | 091 · — | DAG needs SQL for pipeline definitions; Connector traits independent, DAG integration after |
 | **6e** | TODO-072 (WASM) · TODO-036 (Extensions) | 091 · soft: 025+091+092 | WASM compiles SQL to browser; Extensions benefits from knowing all extension points first |
 | **6f** | TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt) · TODO-102 (Rust CLI) | — | Independent network/tooling, low priority (P3), no blockers |
 | **6f²** | ~~TODO-163 (P0 Security fixes)~~ ✓ · ~~TODO-169 (RS256 regression)~~ ✓ | — · 163 ✓ | JWT exp/CORS/sub done. RS256 done (SPEC-138): Clerk/Auth0/Firebase unblocked |
 | **6f²¹** | TODO-170 (Auth/Security/RBAC docs fixes) · TODO-172 (Docs audit) | 169 ✓ | Fix misleading docs, audit remaining pages |
-| **6f²²** | TODO-173 (Shapes docs) · TODO-162 (SQL docs) · TODO-154↑schema guide | — | v2.0 feature docs — Shapes, SQL, Schema have no pages yet |
+| **6f²²** | ~~TODO-173 (Shapes docs)~~ ✓ · TODO-162 (SQL docs) · TODO-154↑schema guide | — | v2.0 feature docs — Shapes guide done (SPEC-141, will be merged into live-queries by TODO-184), SQL+Schema pages pending |
 | **6f³** | TODO-136 (Rate Limits) · TODO-137 (Metrics) · TODO-138 (Schema Migrations) | 069 ✓ | Cloud prerequisites; Rate limits needed for free tier |
 | **6f⁴** | TODO-164 (P2 Security) · TODO-139 (Backup/Restore) · TODO-141 (Docker) | 163 ✓ | Cloud-readiness; auth rate limit, HSTS, cluster TLS (RS256 moved to 169) |
 | **6g** | TODO-101 (DevTools) · TODO-093 v2.0 (Dashboard) | — · 025+091+092 | UI layer last: needs features to visualize |
