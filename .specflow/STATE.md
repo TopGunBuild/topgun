@@ -1,20 +1,14 @@
 ## Current Position
 
 - **Active Specification:** SPEC-140
-- **Status:** running
-- **Next Step:** (in progress)
-
-## Execution Status
-
-| Spec | Mode | Progress | Last Updated |
-|------|------|----------|-------------|
-| SPEC-140 | orchestrated | Wave 1/3 (33%) | 2026-03-24T09:58:00Z |
+- **Status:** review
+- **Next Step:** /sf:review
 
 ## Queue
 
 | ID | Title | Status | Priority | Complexity |
 |----|-------|--------|----------|------------|
-| SPEC-140 | Docs Audit: Verify All Remaining Guides Against Rust Implementation | running | P2 | medium |
+| SPEC-140 | Docs Audit: Verify All Remaining Guides Against Rust Implementation | review | P2 | medium |
 
 ## Decisions
 
@@ -26,3 +20,4 @@
 - SPEC-137 fixed 5 auth vulnerabilities: re-enabled JWT exp validation with configurable leeway, JWT_SECRET read from env, cors_origins default changed to empty vec, missing sub claim rejected with AUTH_FAIL, TLS warning when jwt+no-TLS. 603 server tests pass, clippy-clean.
 - SPEC-138 added RSA JWT auto-detection: normalize_pem() + decode_jwt_key() in auth.rs, updated handle_auth() and AdminClaims::from_request_parts() to use auto-detection. 6 new tests (5 in auth.rs, 1 in admin_auth.rs). 609 server tests pass, clippy-clean.
 - SPEC-139 fixed auth/security docs: removed userId JWT claim, replaced setAuthToken/localStorage with setAuthTokenProvider + in-memory cache, added Token Lifecycle section, added Better Auth JWT-minting bridge, marked TLS env vars and mTLS as planned, documented working env vars, documented trusted-origin bypass, rewrote RBAC to show current status vs planned, replaced all unqualified topgun-server binary references with planned qualifiers.
+- SPEC-140 audited all 22 remaining guide pages. Found 9 major-rewrite (7 unimplemented + deployment/observability/performance with critical TS-server artifact mismatches), 5 minor-issues, 3 accurate. Created TODO-174 through TODO-180 for untracked missing features. Key finding: observability.mdx and performance.mdx use metric names and config knobs from the removed TS server.
