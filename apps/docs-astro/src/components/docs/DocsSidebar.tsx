@@ -6,6 +6,8 @@ import {
     Zap,
     FileText,
     Database,
+    BookOpen,
+    LifeBuoy,
 } from 'lucide-react';
 
 const SidebarItem = ({
@@ -53,23 +55,31 @@ const SubItem = ({ to, children, currentPath }: { to: string; children: React.Re
     );
 };
 
-type SectionKey = 'started' | 'concepts' | 'guides' | 'reference';
+type SectionKey = 'started' | 'tutorials' | 'concepts' | 'guides' | 'reference' | 'resources';
 
 // Helper to determine initial expanded section from path
 const getInitialExpandedSection = (pathname: string): Record<SectionKey, boolean> => {
     const sections: Record<SectionKey, boolean> = {
         started: false,
+        tutorials: false,
         concepts: false,
         guides: false,
-        reference: false
+        reference: false,
+        resources: false,
     };
 
-    if (pathname.includes('/docs/concepts')) {
+    if (pathname.startsWith('/docs/tutorials/') || pathname === '/docs/tutorials') {
+        sections.tutorials = true;
+    } else if (pathname.startsWith('/docs/concepts/') || pathname === '/docs/concepts') {
         sections.concepts = true;
-    } else if (pathname.includes('/docs/guides')) {
+    } else if (pathname.startsWith('/docs/guides/') || pathname === '/docs/guides') {
         sections.guides = true;
-    } else if (pathname.includes('/docs/reference')) {
+    } else if (pathname.startsWith('/docs/reference/') || pathname === '/docs/reference') {
         sections.reference = true;
+    } else if (pathname === '/docs/faq') {
+        sections.started = true;
+    } else if (pathname === '/docs/community' || pathname === '/docs/changelog' || pathname === '/docs/benchmarks') {
+        sections.resources = true;
     } else {
         sections.started = true;
     }
@@ -106,6 +116,24 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                         <SubItem to="/docs/comparison" currentPath={currentPath}>Comparison</SubItem>
                         <SubItem to="/docs/installation" currentPath={currentPath}>Installation</SubItem>
                         <SubItem to="/docs/quick-start" currentPath={currentPath}>Quick Start</SubItem>
+                        <SubItem to="/docs/faq" currentPath={currentPath}>FAQ</SubItem>
+                    </div>
+                )}
+            </div>
+
+            <div className="mb-4">
+                <SidebarItem
+                    icon={BookOpen}
+                    hasSub
+                    expanded={expandedSections.tutorials}
+                    onClick={() => toggleSection('tutorials')}
+                >
+                    Tutorials
+                </SidebarItem>
+                {expandedSections.tutorials && (
+                    <div className="mt-1 space-y-1">
+                        <SubItem to="/docs/tutorials" currentPath={currentPath}>All Tutorials</SubItem>
+                        <SubItem to="/docs/tutorials/todo-app" currentPath={currentPath}>Todo App</SubItem>
                     </div>
                 )}
             </div>
@@ -146,6 +174,7 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                         <SubItem to="/docs/guides/security" currentPath={currentPath}>Security (TLS)</SubItem>
                         <SubItem to="/docs/guides/rbac" currentPath={currentPath}>RBAC</SubItem>
                         <SubItem to="/docs/guides/live-queries" currentPath={currentPath}>Live Queries</SubItem>
+                        <SubItem to="/docs/guides/schema" currentPath={currentPath}>Schema & Type Safety</SubItem>
                         <SubItem to="/docs/guides/indexing" currentPath={currentPath}>Indexing</SubItem>
                         <SubItem to="/docs/guides/full-text-search" currentPath={currentPath}>Full-Text Search</SubItem>
                         <SubItem to="/docs/guides/adaptive-indexing" currentPath={currentPath}>Adaptive Indexing</SubItem>
@@ -158,12 +187,14 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                         <SubItem to="/docs/guides/conflict-resolvers" currentPath={currentPath}>Conflict Resolvers</SubItem>
                         <SubItem to="/docs/guides/interceptors" currentPath={currentPath}>Interceptors</SubItem>
                         <SubItem to="/docs/guides/distributed-locks" currentPath={currentPath}>Distributed Locks</SubItem>
+                        <SubItem to="/docs/guides/adoption-path" currentPath={currentPath}>Adoption Path</SubItem>
                         <SubItem to="/docs/guides/deployment" currentPath={currentPath}>Deployment</SubItem>
                         <SubItem to="/docs/guides/cluster-client" currentPath={currentPath}>Cluster Client</SubItem>
                         <SubItem to="/docs/guides/cluster-replication" currentPath={currentPath}>Cluster Replication</SubItem>
                         <SubItem to="/docs/guides/observability" currentPath={currentPath}>Observability</SubItem>
                         <SubItem to="/docs/guides/performance" currentPath={currentPath}>Performance</SubItem>
                         <SubItem to="/docs/guides/mcp-server" currentPath={currentPath}>MCP Server</SubItem>
+                        <SubItem to="/docs/guides/troubleshooting" currentPath={currentPath}>Troubleshooting</SubItem>
                     </div>
                 )}
             </div>
@@ -187,6 +218,24 @@ export const DocsSidebar = ({ currentPath }: { currentPath: string }) => {
                         <SubItem to="/docs/reference/adapter" currentPath={currentPath}>Adapter API</SubItem>
                         <SubItem to="/docs/reference/react-hooks" currentPath={currentPath}>React Hooks</SubItem>
                         <SubItem to="/docs/reference/protocol" currentPath={currentPath}>Protocol</SubItem>
+                    </div>
+                )}
+            </div>
+
+            <div className="mb-4">
+                <SidebarItem
+                    icon={LifeBuoy}
+                    hasSub
+                    expanded={expandedSections.resources}
+                    onClick={() => toggleSection('resources')}
+                >
+                    Resources
+                </SidebarItem>
+                {expandedSections.resources && (
+                    <div className="mt-1 space-y-1">
+                        <SubItem to="/docs/community" currentPath={currentPath}>Community & Support</SubItem>
+                        <SubItem to="/docs/changelog" currentPath={currentPath}>Changelog</SubItem>
+                        <SubItem to="/docs/benchmarks" currentPath={currentPath}>Benchmarks</SubItem>
                     </div>
                 )}
             </div>
