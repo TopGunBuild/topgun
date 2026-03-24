@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-23 — TODO-173 (Shapes docs), TODO-171 (RBAC), TODO-172 (docs audit), TODO-170 expanded; prev: TODO-169→SPEC-138, TODO-163→SPEC-137
+**Last updated:** 2026-03-24 — SPEC-140 docs audit created TODO-174 (adaptive-indexing), TODO-175 (distributed locks), TODO-176 (entry processor), TODO-177 (indexing), TODO-178 (interceptors), TODO-179 (conflict resolvers); prev: TODO-172 converted to SPEC-140, TODO-173 (Shapes docs), TODO-171 (RBAC)
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -66,26 +66,6 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Depends on:** TODO-070 ✓
 - **Effort:** 0.5-1 day
 
-### TODO-170: Fix Auth & Security Documentation (Outdated Claims, Missing Guidance)
-- **Priority:** P2 (misleading docs cause integration failures and false security expectations)
-- **Complexity:** Small-Medium
-- **Summary:** Auth and security documentation have errors and undocumented gaps introduced during Rust migration. Two pages affected: `guides/authentication.mdx` and `guides/security.mdx`.
-- **Depends on:** TODO-169 (RS256 must work before documenting it)
-- **Effort:** 1 day
-- **Authentication page (`guides/authentication.mdx`):**
-  - [ ] **`userId` claim is wrong (lines 150-155, 163-166).** JWT payload example shows `"userId": "user_123"` as "Alternative to sub". Rust server `JwtClaims` has NO `userId` field — only `sub`. A developer sending JWT with only `userId` (no `sub`) gets `AUTH_FAIL` with no explanation. Remove `userId` from example, document that only standard `sub` claim is accepted (per RFC 7519, resolved in TODO-107).
-  - [ ] **Custom JWT example uses static token (lines 188-210).** Shows `setAuthToken()` + `localStorage`. Token expires after 24h, reconnect fails silently. Must show `setAuthTokenProvider()` pattern instead, with a token refresh callback that calls the custom `/api/login` endpoint.
-  - [ ] **No token expiry behavior explained.** Developers don't know: (a) active connections are NOT terminated on token expiry, (b) problem occurs on reconnect, (c) `tokenProvider` is called on every `AUTH_REQUIRED`. Add "Token Lifecycle" section explaining this.
-  - [ ] **RS256 auto-detection claim (lines 424-425).** Currently says "automatically detects RSA public keys". After TODO-169 this will be true. Verify the documentation matches the implementation.
-  - [ ] **Better Auth section incomplete.** Shows database adapter setup but not how to get JWT from BetterAuth and pass to TopGun client via `setAuthTokenProvider()`. Missing the bridge between "BetterAuth manages sessions" and "TopGun client needs a JWT".
-- **Security page (`guides/security.mdx`):**
-  - [ ] **TLS env vars don't exist (High).** Documents `TOPGUN_TLS_ENABLED`, `TOPGUN_TLS_CERT_PATH`, `TOPGUN_TLS_KEY_PATH`, `TOPGUN_TLS_MIN_VERSION` as working configuration. These env vars are NOT read anywhere in the Rust server. TLS is only configurable programmatically via `TlsConfig` struct. Must clearly mark as "planned for future production binary" or remove until implemented.
-  - [ ] **Cluster mTLS not implemented (Critical).** Entire section on `TOPGUN_CLUSTER_TLS_ENABLED`, `TOPGUN_CLUSTER_MTLS`, etc. `ClusterConfig` has no TLS fields — cluster traffic is plaintext TCP. Must remove or clearly mark as "planned for v3.0" (aligns with TODO-164 cluster TLS subtask).
-  - [ ] **Production binary doesn't exist.** Docs imply a `topgun-server` binary that reads env vars. Only `test-server` exists with hardcoded `tls: None`. Clarify that server is a library crate requiring programmatic embedding, or that `test-server` is for development only.
-  - [ ] **Undocumented working env vars.** `TOPGUN_ADMIN_PASSWORD` (required for admin login), `TOPGUN_ADMIN_USERNAME` (default "admin"), `TOPGUN_ADMIN_DIR` (admin SPA path), `TOPGUN_LOG_FORMAT` ("json" for structured logging) — all work but are not documented in the security page.
-  - [ ] **Security pipeline missing origin bypass.** `WriteValidator` has a trusted-origin bypass (Forwarded, Backup, Wan, System sources skip all checks). This is important for understanding the security model but not documented.
-- **RBAC page (`guides/rbac.mdx`):**
-  - [ ] **Almost entirely describes unimplemented features.** Role-based policies, map pattern matching (`users:*`), field-level security (`allowedFields`) — none exist in Rust server. Roles are extracted from JWT but never evaluated for data access. Only basic map-level `read`/`write` booleans per connection work. Must either rewrite to document only what exists (basic map permissions), or clearly mark RBAC sections as "planned — see TODO-171".
 
 ### TODO-171: RBAC — Role-Based Access Control Implementation
 - **Priority:** P2 (documented but not implemented — expectation gap for adopters)
@@ -108,17 +88,6 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
   - `server-rust/src/network/connection.rs` — `MapPermissions { read, write }` (extend with policy evaluation)
   - `server-rust/src/network/handlers/auth.rs` — role extraction (exists, works)
 
-### TODO-172: Docs Audit — Verify All Guides Against Rust Implementation
-- **Priority:** P2 (systematic — prevents more "docs promise, code doesn't deliver" surprises)
-- **Complexity:** Small
-- **Summary:** Systematic audit of all `apps/docs-astro/src/content/docs/guides/` pages against actual Rust server and TS client code. Already found critical mismatches in 3 of ~24 pages (authentication, security, rbac). Remaining pages need the same treatment before public launch. Output: list of issues per page, fed into TODO-170 or new TODOs as needed.
-- **Effort:** 0.5-1 day (research task)
-- **Pages already audited:**
-  - [x] `guides/authentication.mdx` — `userId` claim wrong, custom JWT example broken, RS256 claim premature (TODO-170)
-  - [x] `guides/security.mdx` — TLS env vars don't exist, cluster mTLS not implemented, undocumented env vars (TODO-170)
-  - [x] `guides/rbac.mdx` — almost entirely unimplemented features (TODO-170, TODO-171)
-- **Pages to audit:** All remaining guides (~21 pages). Priority targets: `deployment.mdx`, `cli.mdx`, `clustering.mdx`, `persistence.mdx` — most likely to have TS→Rust migration gaps.
-
 ### TODO-173: Shapes / Partial Replication Documentation
 - **Priority:** P1 (key v2.0 feature, no docs = invisible to users)
 - **Complexity:** Small
@@ -139,6 +108,83 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
   - [ ] Limits and pagination (server-side `limit`, `has_more`)
   - [ ] Offline behavior (shapes survive reconnection, auto-resubscribe)
   - [ ] Performance considerations (one Merkle tree per shape)
+
+### TODO-174: Adaptive Indexing — Rust Port
+- **Priority:** P3
+- **Complexity:** Medium
+- **Summary:** Feature described in `adaptive-indexing.mdx` — automatic index suggestions and creation based on query patterns. Implemented in old TS server but not ported to Rust. Currently presented as available in docs but does not exist in `packages/server-rust/src/`. No grep evidence of HashIndex, NavigableIndex, AdaptiveIndex, or IndexRegistry in server-rust.
+- **Documented in:** `guides/adaptive-indexing.mdx` — presented as available but not yet ported to Rust
+- **TS Reference:** Old TS server had working implementation — recover via git:
+  - `git show 926e856^:packages/server/src/` — search for adaptive-index, index-registry, query-pattern files
+  - Search: `git show 926e856^:packages/server/src/` for `AdaptiveIndex`, `IndexSuggestion`, `QueryPattern`
+- **HC Reference:** `hazelcast/query/` — Hazelcast query indexing patterns
+- **Effort:** 2-3 weeks
+
+### TODO-175: Distributed Locks — Rust Port
+- **Priority:** P2 (documented as available, commonly needed for coordination)
+- **Complexity:** Medium
+- **Summary:** Feature described in `distributed-locks.mdx` — distributed locking with fencing tokens. Wire messages (`LockRequest`, `LockRelease`) exist in core-rust and are routed to `CoordinationService`, but `coordination.rs` returns `NotImplemented` for both (confirmed by AC6 test). Feature is a stub.
+- **Documented in:** `guides/distributed-locks.mdx` — presented as available but currently returns NotImplemented at runtime
+- **TS Reference:** Old TS server had working distributed locks — recover via git:
+  - `git show 926e856^:packages/server/src/coordinator/` — look for lock-handler, distributed-lock files
+  - Search: `git show 926e856^:packages/server/src/` for `LockRequest`, `fencing_token`, `acquireLock`
+- **HC Reference:** `hazelcast/cp/` — CP subsystem, FencedLock, ILock patterns
+- **Effort:** 1-2 weeks
+
+### TODO-176: Entry Processor — Rust Port (WASM Sandbox)
+- **Priority:** P2 (documented as available, important for atomic read-modify-write)
+- **Complexity:** Large
+- **Summary:** Feature described in `entry-processor.mdx` — atomic read-modify-write operations executed server-side. Wire messages (`EntryProcess`, `EntryProcessBatch`) exist in core-rust and are routed to `PersistenceService`, but `persistence.rs` comment says "stub — WASM sandbox required" and returns `NotImplemented` for all calls.
+- **Documented in:** `guides/entry-processor.mdx` — presented as available but currently returns NotImplemented at runtime
+- **TS Reference:** Old TS server had working entry processor with sandbox execution — recover via git:
+  - `git show 926e856^:packages/server/src/` — search for entry-processor, sandbox, execute files
+  - Search: `git show 926e856^:packages/server/src/` for `EntryProcessor`, `sandbox`, `vm.runInContext`
+- **HC Reference:** `hazelcast/map/impl/operation/` — EntryProcessor execution patterns
+- **Effort:** 3-4 weeks (requires WASM sandbox or Deno-based execution environment)
+
+### TODO-177: Indexing (Hash/Navigable/Inverted) — Rust Port
+- **Priority:** P2 (documented as available, required for O(1) queries on large maps)
+- **Complexity:** Large
+- **Summary:** Feature described in `indexing.mdx` — HashIndex (equality), NavigableIndex (range queries), InvertedIndex (tokenized text search). None of these index types exist in `packages/server-rust/src/` (confirmed by grep). This is separate from tantivy full-text search (SearchService) which is already implemented.
+- **Documented in:** `guides/indexing.mdx` — presented as available but no index types exist in server-rust
+- **TS Reference:** Old TS server had working index types — recover via git:
+  - `git show 926e856^:packages/server/src/` — search for hash-index, navigable-index, inverted-index files
+  - Search: `git show 926e856^:packages/server/src/` for `HashIndex`, `NavigableIndex`, `IndexRegistry`
+- **HC Reference:** `hazelcast/query/impl/` — CompositeIndex, QueryContext, IndexRegistry
+- **Effort:** 3-4 weeks
+
+### TODO-178: Interceptors / User-Extensible Middleware — Rust Port
+- **Priority:** P3
+- **Complexity:** Medium
+- **Summary:** Feature described in `interceptors.mdx` — user-facing middleware/interceptor API for validation, enrichment, ML inference, and external service integration. No `Interceptor` or user-extensible API exists in `packages/server-rust/src/` (confirmed by grep). The Tower middleware pipeline is internal only.
+- **Documented in:** `guides/interceptors.mdx` — presented as available but no user-facing interceptor API exists
+- **TS Reference:** Old TS server had working interceptors — recover via git:
+  - `git show 926e856^:packages/server/src/` — search for interceptor files
+  - Search: `git show 926e856^:packages/server/src/` for `Interceptor`, `middleware`, `before_write`
+- **HC Reference:** `hazelcast/map/impl/MapInterceptor`, `hazelcast/map/interceptor/` — interceptor patterns
+- **Effort:** 1-2 weeks
+
+### TODO-179: Conflict Resolvers — Rust Port (WASM Sandbox)
+- **Priority:** P2 (documented as available, needed for business-rule conflict resolution)
+- **Complexity:** Large
+- **Summary:** Feature described in `conflict-resolvers.mdx` — custom server-side JavaScript conflict resolution functions. `ConflictResolver` struct and `RegisterResolver`/`UnregisterResolver`/`ListResolvers` messages exist in core-rust. `PersistenceService` routes these ops, but `handle_register_resolver()` returns `NotImplemented`. Comment: "stub — WASM sandbox required". Feature is functionally unavailable at runtime.
+- **Documented in:** `guides/conflict-resolvers.mdx` — presented as available but returns NotImplemented. Code examples will compile but fail at runtime.
+- **TS Reference:** Old TS server had working conflict resolvers — recover via git:
+  - `git show 926e856^:packages/server/src/` — search for conflict-resolver, resolver-registry, sandbox files
+  - Search: `git show 926e856^:packages/server/src/` for `ConflictResolver`, `registerResolver`, `sandbox`
+- **Effort:** 3-4 weeks (requires WASM sandbox, same infrastructure as TODO-176)
+- **Note:** TODO-176 (Entry Processor) and TODO-179 (Conflict Resolvers) both require WASM sandbox — implement together as a shared infrastructure project
+
+### TODO-180: Write Concern — Server Achievement Reporting
+- **Priority:** P2 (documented as reporting achieved_level, but server always returns None)
+- **Complexity:** Small-Medium
+- **Summary:** `write-concern.mdx` documents that `OpAck` responses include `achieved_level` (the durability level actually achieved). In practice, `crdt.rs` lines 197 and 267 always set `achieved_level: None`. The `WriteConcern` wire protocol exists (FIRE_AND_FORGET, MEMORY, APPLIED, REPLICATED, PERSISTED) but the server never reports back what was achieved. Also: `setWithAck()` and `batchSet()` methods shown in docs do not exist in TS client.
+- **Documented in:** `guides/write-concern.mdx` — `achieved_level` claim is false, `setWithAck()` does not exist
+- **Scope:**
+  - Server: populate `achieved_level` in `OpAckPayload` based on what was actually done (APPLIED after CRDT merge, PERSISTED after PostgreSQL write)
+  - TS client: add `setWithAck(key, value, options)` method that returns `WriteResult` with `achievedLevel` and `latencyMs`
+  - TS client: add `batchSet(ops, options)` convenience method
+- **Effort:** 1-2 weeks
 
 ### TODO-162: SQL API Documentation for docs-astro
 - **Priority:** P2
