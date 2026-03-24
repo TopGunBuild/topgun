@@ -648,6 +648,7 @@ export class SyncEngine {
   }
 
   /**
+   * @deprecated Use client.query() with { fields } instead. Will be removed in a future version.
    * Subscribe to a shape (partial replication).
    * Delegates to ShapeManager.
    */
@@ -824,10 +825,10 @@ export class SyncEngine {
   }
 
   private handleQueryResp(message: QueryRespMessage): void {
-    const { queryId, results, nextCursor, hasMore, cursorStatus } = message.payload;
+    const { queryId, results, nextCursor, hasMore, cursorStatus, merkleRootHash } = message.payload;
     const query = this.queryManager.getQueries().get(queryId);
     if (query) {
-      query.onResult(results, 'server');
+      query.onResult(results, 'server', merkleRootHash);
       query.updatePaginationInfo({ nextCursor, hasMore, cursorStatus });
     }
   }

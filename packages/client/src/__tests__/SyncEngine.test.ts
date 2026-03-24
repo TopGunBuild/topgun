@@ -396,10 +396,11 @@ describe('SyncEngine', () => {
       });
       await jest.runAllTimersAsync();
 
-      // Verify onResult is called with 'server' source parameter
+      // Verify onResult is called with 'server' source parameter and optional merkleRootHash
       expect(mockQuery.onResult).toHaveBeenCalledWith(
         [{ key: 'user1', value: { name: 'Alice' } }],
-        'server'
+        'server',
+        undefined
       );
 
       // Verify pagination info is updated

@@ -10,6 +10,8 @@ export interface QueryFilter {
   limit?: number;
   /** Cursor for pagination */
   cursor?: string;
+  /** Optional field projection — only these fields will be returned by the server */
+  fields?: string[];
 }
 
 /** Cursor status for debugging */
@@ -48,11 +50,18 @@ export class QueryHandle<T> {
   private _paginationInfo: PaginationInfo = { hasMore: false, cursorStatus: 'none' };
   private paginationListeners: Set<(info: PaginationInfo) => void> = new Set();
 
+  /** Field projection list — only these fields are returned by the server when set */
+  public readonly fields: string[] | undefined;
+
+  /** Merkle root hash from last server QUERY_RESP — used for delta reconnect */
+  public merkleRootHash: number = 0;
+
   constructor(syncEngine: SyncEngine, mapName: string, filter: QueryFilter = {}) {
     this.id = crypto.randomUUID();
     this.syncEngine = syncEngine;
     this.mapName = mapName;
     this.filter = filter;
+    this.fields = filter.fields;
   }
 
   public subscribe(callback: (results: QueryResultItem<T>[]) => void): () => void {
@@ -108,7 +117,7 @@ export class QueryHandle<T> {
    * - This prevents clearing local data when server hasn't loaded from storage yet
    * - Works with any async storage adapter (PostgreSQL, SQLite, Redis, etc.)
    */
-  public onResult(items: { key: string, value: T }[], source: QueryResultSource = 'server') {
+  public onResult(items: { key: string, value: T }[], source: QueryResultSource = 'server', merkleRootHash?: number) {
     logger.debug({
       mapName: this.mapName,
       itemCount: items.length,
@@ -131,6 +140,11 @@ export class QueryHandle<T> {
     // Mark that we've received authoritative server data (non-empty from server)
     if (source === 'server' && items.length > 0) {
       this.hasReceivedServerData = true;
+    }
+
+    // Store Merkle root hash for delta reconnect on next connection
+    if (merkleRootHash !== undefined) {
+      this.merkleRootHash = merkleRootHash;
     }
 
     const newKeys = new Set(items.map(i => i.key));

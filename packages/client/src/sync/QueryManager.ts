@@ -86,14 +86,17 @@ export class QueryManager implements IQueryManager {
 
   /**
    * Send query subscription message to server.
+   * Includes field projection when specified in the query filter.
    */
   private sendQuerySubscription(query: QueryHandle<any>): void {
+    const filter = query.getFilter();
     this.config.sendMessage({
       type: 'QUERY_SUB',
       payload: {
         queryId: query.id,
         mapName: query.getMapName(),
-        query: query.getFilter()
+        query: filter,
+        fields: filter.fields,
       }
     });
   }
@@ -316,6 +319,19 @@ export class QueryManager implements IQueryManager {
     // Re-subscribe standard queries
     for (const query of this.queries.values()) {
       this.sendQuerySubscription(query);
+
+      // Delta reconnect for field-projected queries: send QUERY_SYNC_INIT when we have
+      // a stored Merkle root hash so the server can diff and send only changed records
+      const filter = query.getFilter();
+      if (filter.fields && filter.fields.length > 0 && query.merkleRootHash !== 0) {
+        this.config.sendMessage({
+          type: 'QUERY_SYNC_INIT',
+          payload: {
+            queryId: query.id,
+            rootHash: query.merkleRootHash,
+          }
+        });
+      }
     }
 
     // Re-subscribe hybrid queries with FTS predicates
