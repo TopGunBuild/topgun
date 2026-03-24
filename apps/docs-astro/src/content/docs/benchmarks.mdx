@@ -1,0 +1,104 @@
+---
+title: Performance Benchmarks
+description: TopGun server performance numbers from automated load testing
+order: 92
+---
+
+# Performance Benchmarks
+
+TopGun includes an automated load harness that tests the Rust server under realistic conditions. This page presents the results and explains what the numbers mean for real applications.
+
+---
+
+## Test Methodology
+
+The load harness boots a full TopGun server instance in-process (all 7 domain services, partition dispatcher, WebSocket handler) and runs configurable scenarios:
+
+- **Connections:** 200 concurrent WebSocket connections
+- **Duration:** 30 seconds per test
+- **Payload:** OpBatch messages containing CRDT write operations
+- **Measurement:** HDR histograms for latency, throughput counters for ops/sec
+
+The harness source code is at [`packages/server-rust/benches/load_harness/`](https://github.com/topgunbuild/topgun/tree/main/packages/server-rust/benches/load_harness).
+
+---
+
+## Fire-and-Wait (Round-Trip Latency)
+
+In fire-and-wait mode, each connection sends an `OpBatch`, waits for the server's `OP_ACK`, and records the round-trip latency before sending the next batch. This measures end-to-end request latency including server processing and acknowledgement.
+
+| Metric | Value |
+|--------|-------|
+| **Throughput** | 1,000+ ops/sec |
+| **p50 latency** | < 1,000 ms |
+| **Acked ratio** | >= 80% |
+
+### What this means
+
+Fire-and-wait latency represents the worst case for a client that needs confirmation before proceeding. In practice, TopGun clients write locally first (zero latency to the user) and sync in the background, so server-side latency does not affect the user experience.
+
+---
+
+## Fire-and-Forget (Raw Throughput)
+
+In fire-and-forget mode, connections send batches as fast as possible without waiting for acknowledgement. This measures the server's maximum ingestion rate.
+
+| Metric | Value |
+|--------|-------|
+| **Throughput** | 100,000+ ops/sec |
+| **p50 latency** | < 1,000 ms |
+
+### What this means
+
+200K+ ops/sec throughput means the server can handle thousands of concurrent active users, each writing multiple times per second, on a single node. For context:
+
+- A collaborative document editor generating 10 ops/sec per user can support 20,000+ concurrent editors
+- A real-time dashboard ingesting sensor data at 100 ops/sec per source can handle 2,000+ data sources
+- A chat application sending 1 message/sec per user can support 200,000+ active chatters
+
+---
+
+## Baseline Thresholds
+
+The load harness enforces pass/fail thresholds defined in [`baseline.json`](https://github.com/topgunbuild/topgun/tree/main/packages/server-rust/benches/load_harness/baseline.json):
+
+| Mode | Metric | Threshold |
+|------|--------|-----------|
+| Fire-and-wait | Min ops/sec | 1,000 |
+| Fire-and-wait | Max p50 latency | 1,000 ms |
+| Fire-and-forget | Min ops/sec | 100,000 |
+| Fire-and-forget | Max p50 latency | 1,000 ms |
+| Both | Regression tolerance | 20% |
+
+These thresholds are checked in CI. A regression greater than 20% from baseline triggers a warning.
+
+---
+
+## Running Benchmarks Yourself
+
+You can reproduce these results on your own hardware:
+
+```bash
+# Quick smoke test (50 connections, 10 seconds)
+cargo bench --bench load_harness -- --connections 50 --duration 10
+
+# Full run (200 connections, 30 seconds)
+cargo bench --bench load_harness
+
+# Fire-and-forget throughput test
+cargo bench --bench load_harness -- --fire-and-forget --interval 0
+```
+
+Results are printed as ASCII tables in the terminal. Add `--json-output` to write results as JSON for automated comparison.
+
+---
+
+## Hardware Considerations
+
+Benchmark results vary with hardware. The numbers above were measured on a development machine. Key factors:
+
+- **CPU cores:** More cores improve throughput (tokio uses a multi-threaded runtime)
+- **Memory:** The in-process harness runs server and clients in the same process, requiring more RAM than a standalone server
+- **OS:** Linux generally provides better networking performance than macOS for high-connection-count scenarios
+
+For production capacity planning, run the load harness on hardware similar to your deployment target.
