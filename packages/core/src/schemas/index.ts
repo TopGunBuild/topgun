@@ -24,9 +24,6 @@ export * from './client-message-schemas';
 // HTTP sync schemas (stateless request/response for serverless environments)
 export * from './http-sync-schemas';
 
-// Shape schemas (partial replication / live shape subscriptions)
-export * from './shape-schemas';
-
 // Union MessageSchema (combines all message types)
 import { z } from 'zod';
 import { AuthMessageSchema, AuthRequiredMessageSchema } from './base-schemas';
@@ -118,14 +115,6 @@ import {
   LockReleasedMessageSchema,
   SyncResetRequiredMessageSchema,
 } from './client-message-schemas';
-import {
-  ShapeSubscribeMessageSchema,
-  ShapeUnsubscribeMessageSchema,
-  ShapeRespMessageSchema,
-  ShapeUpdateMessageSchema,
-  ShapeSyncInitMessageSchema,
-} from './shape-schemas';
-
 export const MessageSchema = z.discriminatedUnion('type', [
   // --- Base ---
   AuthMessageSchema,
@@ -216,12 +205,6 @@ export const MessageSchema = z.discriminatedUnion('type', [
   LockGrantedMessageSchema,
   LockReleasedMessageSchema,
   SyncResetRequiredMessageSchema,
-  // --- Shape (partial replication) ---
-  ShapeSubscribeMessageSchema,
-  ShapeUnsubscribeMessageSchema,
-  ShapeRespMessageSchema,
-  ShapeUpdateMessageSchema,
-  ShapeSyncInitMessageSchema,
 ]);
 
 export type Message = z.infer<typeof MessageSchema>;
