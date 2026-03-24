@@ -30,7 +30,7 @@ use topgun_server::service::domain::crdt::CrdtService;
 use topgun_server::service::domain::messaging::MessagingService;
 use topgun_server::service::domain::schema::SchemaService;
 use topgun_server::service::domain::persistence::PersistenceService;
-use topgun_server::service::domain::query::{QueryMutationObserver, QueryRegistry, QueryService};
+use topgun_server::service::domain::query::{QueryRegistry, QueryService};
 use topgun_server::service::domain::search::{
     SearchConfig, SearchMutationObserver, SearchRegistry, SearchService, TantivyMapIndex,
 };
@@ -147,30 +147,6 @@ impl ObserverFactory for SearchObserverFactory {
     }
 }
 
-/// Observer factory that creates a `QueryMutationObserver` for every map.
-///
-/// Shares the same `QueryRegistry` and `ConnectionRegistry` with `QueryService`
-/// so that writes trigger live `QUERY_UPDATE` messages for active subscriptions.
-struct QueryObserverFactory {
-    query_registry: Arc<QueryRegistry>,
-    connection_registry: Arc<ConnectionRegistry>,
-}
-
-impl ObserverFactory for QueryObserverFactory {
-    fn create_observer(
-        &self,
-        map_name: &str,
-        partition_id: u32,
-    ) -> Option<Arc<dyn MutationObserver>> {
-        let observer = QueryMutationObserver::new(
-            Arc::clone(&self.query_registry),
-            Arc::clone(&self.connection_registry),
-            map_name.to_string(),
-            partition_id,
-        );
-        Some(Arc::new(observer))
-    }
-}
 
 /// Wires all 7 domain services and builds the partition dispatcher.
 ///
@@ -227,15 +203,10 @@ fn build_services() -> (
             needs_population: Arc::clone(&search_needs_population),
         });
 
-    // Create query_registry early so it can be shared with both
-    // QueryObserverFactory (write path) and QueryService (query path).
+    // QueryRegistry shared between CrdtService (broadcast_query_updates) and QueryService.
+    // QueryMutationObserver is no longer in the observer chain -- CrdtService handles
+    // QUERY_UPDATE broadcast directly with writer exclusion and field projection.
     let query_registry = Arc::new(QueryRegistry::new());
-
-    let query_observer_factory: Arc<dyn ObserverFactory> =
-        Arc::new(QueryObserverFactory {
-            query_registry: Arc::clone(&query_registry),
-            connection_registry: Arc::clone(&connection_registry),
-        });
 
     // MerkleSyncManager must be created before RecordStoreFactory so the
     // MerkleObserverFactory can be included in with_observer_factories().
@@ -247,7 +218,6 @@ fn build_services() -> (
     #[allow(unused_mut)]
     let mut observer_factories: Vec<Arc<dyn ObserverFactory>> = vec![
         search_observer_factory,
-        query_observer_factory,
         merkle_observer_factory,
     ];
 

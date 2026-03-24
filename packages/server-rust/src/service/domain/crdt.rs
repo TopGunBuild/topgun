@@ -24,7 +24,7 @@ use topgun_core::ORMapRecord;
 use tracing::Instrument;
 
 use crate::network::connection::{ConnectionId, ConnectionMetadata, ConnectionRegistry};
-use crate::service::domain::predicate::value_to_rmpv;
+use crate::service::domain::predicate::{evaluate_predicate, evaluate_where, value_to_rmpv};
 use crate::service::domain::query::QueryRegistry;
 use crate::service::domain::shape::ShapeRegistry;
 use crate::service::domain::shape_evaluator;
@@ -36,6 +36,25 @@ use crate::service::security::WriteValidator;
 use crate::storage::record::{OrMapEntry, RecordValue};
 use crate::storage::{CallerProvenance, ExpiryPolicy, RecordStoreFactory};
 use crate::traits::SchemaProvider;
+
+// ---------------------------------------------------------------------------
+// Query predicate matching
+// ---------------------------------------------------------------------------
+
+/// Evaluates whether an `rmpv::Value` matches a query's predicate or where clause.
+///
+/// Used by `broadcast_query_updates` to determine ENTER/UPDATE/LEAVE events
+/// without depending on `QueryMutationObserver`.
+fn matches_query_predicate(query: &topgun_core::messages::base::Query, data: &rmpv::Value) -> bool {
+    if let Some(pred) = &query.predicate {
+        evaluate_predicate(pred, data)
+    } else if let Some(wh) = &query.r#where {
+        evaluate_where(wh, data)
+    } else {
+        // No filter: match all
+        true
+    }
+}
 
 // ---------------------------------------------------------------------------
 // CrdtService
@@ -188,6 +207,7 @@ impl CrdtService {
 
         self.broadcast_event(&event_payload, ctx.connection_id)?;
         self.broadcast_shape_updates(&event_payload, old_rmpv_value.as_ref(), ctx.connection_id);
+        self.broadcast_query_updates(&event_payload, old_rmpv_value.as_ref(), ctx.connection_id);
 
         let last_id = op.id.clone().unwrap_or_else(|| "unknown".to_string());
         Ok(OperationResponse::Message(Box::new(Message::OpAck(
@@ -241,6 +261,7 @@ impl CrdtService {
                 let event_payload = self.apply_single_op(op, partition_id, Some(&sanitized_ts)).await?;
                 self.broadcast_event(&event_payload, ctx.connection_id)?;
                 self.broadcast_shape_updates(&event_payload, old_rmpv_value.as_ref(), ctx.connection_id);
+        self.broadcast_query_updates(&event_payload, old_rmpv_value.as_ref(), ctx.connection_id);
                 if let Some(id) = &op.id {
                     last_id = id.clone();
                 }
@@ -254,6 +275,7 @@ impl CrdtService {
                 let event_payload = self.apply_single_op(op, partition_id, None).await?;
                 self.broadcast_event(&event_payload, ctx.connection_id)?;
                 self.broadcast_shape_updates(&event_payload, old_rmpv_value.as_ref(), ctx.connection_id);
+        self.broadcast_query_updates(&event_payload, old_rmpv_value.as_ref(), ctx.connection_id);
                 if let Some(id) = &op.id {
                     last_id = id.clone();
                 }
@@ -493,8 +515,12 @@ impl CrdtService {
         key: &str,
         partition_id: u32,
     ) -> Option<rmpv::Value> {
-        // Skip if no shape registry is wired (test environments).
-        self.shape_registry.as_ref()?;
+        // Skip if neither shapes nor queries are active for this map.
+        let has_shapes = self.shape_registry.is_some();
+        let has_queries = !self.query_registry.get_subscriptions_for_map(map_name).is_empty();
+        if !has_shapes && !has_queries {
+            return None;
+        }
 
         let store = self.record_store_factory.get_or_create(map_name, partition_id);
         let old_record = store.get(key, false).await.ok().flatten()?;
@@ -578,6 +604,88 @@ impl CrdtService {
                 use crate::network::connection::ConnectionId as CId;
                 use crate::network::connection::OutboundMessage;
                 if let Some(handle) = self.connection_registry.get(CId(active_shape.connection_id)) {
+                    let _ = handle.try_send(OutboundMessage::Binary(bytes));
+                }
+            }
+        }
+    }
+
+    /// Broadcasts QUERY_UPDATE messages to subscribers of queries targeting the mutated map.
+    ///
+    /// Parallel to `broadcast_shape_updates`, this method:
+    /// - Evaluates each standing query subscription against the old and new values
+    /// - Determines ENTER/UPDATE/LEAVE change type
+    /// - Applies field projection if the subscription has `fields`
+    /// - Skips the writing connection (writer exclusion)
+    /// - Updates `previous_result_keys` for accurate future change detection
+    fn broadcast_query_updates(
+        &self,
+        event_payload: &ServerEventPayload,
+        old_rmpv_value: Option<&rmpv::Value>,
+        exclude_connection_id: Option<ConnectionId>,
+    ) {
+        let subs = self.query_registry.get_subscriptions_for_map(&event_payload.map_name);
+        if subs.is_empty() {
+            return;
+        }
+
+        // Extract the new value from the event payload.
+        let new_rmpv_value: Option<rmpv::Value> = event_payload
+            .record
+            .as_ref()
+            .and_then(|r| r.value.clone());
+
+        for sub in &subs {
+            // Skip the writing connection so it does not receive its own updates.
+            if let Some(exclude_id) = exclude_connection_id {
+                if sub.connection_id == exclude_id {
+                    continue;
+                }
+            }
+
+            // Evaluate old/new against the query predicate.
+            let old_matches = old_rmpv_value.is_some_and(|v| {
+                matches_query_predicate(&sub.query, v)
+            });
+            let new_matches = new_rmpv_value.as_ref().is_some_and(|v| {
+                matches_query_predicate(&sub.query, v)
+            });
+
+            let change_type = match (old_matches, new_matches) {
+                (false, true) => {
+                    sub.previous_result_keys.insert(event_payload.key.clone());
+                    topgun_core::messages::base::ChangeEventType::ENTER
+                }
+                (true, true) => topgun_core::messages::base::ChangeEventType::UPDATE,
+                (true, false) => {
+                    sub.previous_result_keys.remove(&event_payload.key);
+                    topgun_core::messages::base::ChangeEventType::LEAVE
+                }
+                (false, false) => continue,
+            };
+
+            // Apply field projection if the subscription has fields.
+            let value = if new_matches {
+                let raw = new_rmpv_value.clone().unwrap_or(rmpv::Value::Nil);
+                if let Some(ref fields) = sub.fields {
+                    super::shape_evaluator::project(fields, &raw)
+                } else {
+                    raw
+                }
+            } else {
+                rmpv::Value::Nil
+            };
+
+            let payload = topgun_core::messages::client_events::QueryUpdatePayload {
+                query_id: sub.query_id.clone(),
+                key: event_payload.key.clone(),
+                value,
+                change_type,
+            };
+            let msg = topgun_core::messages::Message::QueryUpdate { payload };
+            if let Ok(bytes) = rmp_serde::to_vec_named(&msg) {
+                use crate::network::connection::OutboundMessage;
+                if let Some(handle) = self.connection_registry.get(sub.connection_id) {
                     let _ = handle.try_send(OutboundMessage::Binary(bytes));
                 }
             }

@@ -28,7 +28,7 @@ use topgun_server::service::domain::crdt::CrdtService;
 use topgun_server::service::domain::messaging::MessagingService;
 use topgun_server::service::domain::schema::SchemaService;
 use topgun_server::service::domain::persistence::PersistenceService;
-use topgun_server::service::domain::query::{QueryMutationObserver, QueryRegistry, QueryService};
+use topgun_server::service::domain::query::{QueryRegistry, QueryService};
 use topgun_server::service::domain::query_backend::PredicateBackend;
 use topgun_server::service::domain::search::{
     SearchConfig, SearchMutationObserver, SearchRegistry, SearchService, TantivyMapIndex,
@@ -396,26 +396,6 @@ impl ObserverFactory for SearchObserverFactory {
     }
 }
 
-struct QueryObserverFactory {
-    query_registry: Arc<QueryRegistry>,
-    connection_registry: Arc<ConnectionRegistry>,
-}
-
-impl ObserverFactory for QueryObserverFactory {
-    fn create_observer(
-        &self,
-        map_name: &str,
-        partition_id: u32,
-    ) -> Option<Arc<dyn MutationObserver>> {
-        let observer = QueryMutationObserver::new(
-            Arc::clone(&self.query_registry),
-            Arc::clone(&self.connection_registry),
-            map_name.to_string(),
-            partition_id,
-        );
-        Some(Arc::new(observer))
-    }
-}
 
 /// Wires all 7 domain services and builds the partition dispatcher.
 ///
@@ -466,12 +446,6 @@ fn build_services() -> (
 
     let query_registry = Arc::new(QueryRegistry::new());
 
-    let query_observer_factory: Arc<dyn ObserverFactory> =
-        Arc::new(QueryObserverFactory {
-            query_registry: Arc::clone(&query_registry),
-            connection_registry: Arc::clone(&connection_registry),
-        });
-
     let merkle_manager = Arc::new(MerkleSyncManager::default());
 
     let merkle_observer_factory: Arc<dyn ObserverFactory> =
@@ -485,7 +459,6 @@ fn build_services() -> (
         )
         .with_observer_factories(vec![
             search_observer_factory,
-            query_observer_factory,
             merkle_observer_factory,
         ]),
     );
