@@ -1,0 +1,409 @@
+---
+title: "Tutorial: Todo App"
+description: Build a React todo app with offline-first data and real-time sync using TopGun
+order: 10
+---
+
+# Build a Todo App with TopGun
+
+In this tutorial, you will build a React todo application that works offline and syncs in real time across browser tabs. You will learn how to use TopGun's core APIs: `TopGunClient`, `useMap`, `useMutation`, and the `IDBAdapter` for persistence.
+
+**Time:** ~15 minutes | **Difficulty:** Beginner
+
+**What you will build:**
+- A todo list with add, toggle, and delete functionality
+- Offline-first data that persists across page refreshes
+- Real-time sync between multiple browser tabs
+
+---
+
+## Prerequisites
+
+Before starting, make sure you have:
+
+1. **Node.js 18+** and **pnpm** (or npm/yarn) installed
+2. **The TopGun Rust server** running locally:
+   ```bash
+   PORT=8080 cargo run --bin test-server --release
+   ```
+   See [Quick Start](/docs/quick-start) if you have not set up the server yet.
+
+---
+
+## Step 1: Create the Project
+
+Scaffold a new Vite + React + TypeScript project:
+
+```bash
+pnpm create vite todo-app --template react-ts
+cd todo-app
+```
+
+Install TopGun packages:
+
+```bash
+pnpm add @topgunbuild/client @topgunbuild/adapters @topgunbuild/react
+```
+
+---
+
+## Step 2: Define the Todo Type
+
+Create a file for your data types. This interface describes the shape of a todo item stored in a TopGun `LWWMap`.
+
+Create `src/types.ts`:
+
+```typescript
+export interface Todo {
+  id: string;
+  text: string;
+  completed: boolean;
+  createdAt: number;
+}
+```
+
+Each todo has a unique `id` (used as the map key), display `text`, a `completed` boolean, and a `createdAt` timestamp for ordering.
+
+---
+
+## Step 3: Initialize the TopGun Client
+
+Replace the contents of `src/main.tsx` with:
+
+```tsx
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+import { TopGunProvider } from '@topgunbuild/react';
+import App from './App';
+import './index.css';
+
+// Create the storage adapter for IndexedDB persistence
+const adapter = new IDBAdapter();
+
+// Create the TopGun client
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+  storage: adapter,
+});
+
+// Start the client (non-blocking)
+client.start();
+
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <TopGunProvider client={client}>
+      <App />
+    </TopGunProvider>
+  </React.StrictMode>,
+);
+```
+
+Key points:
+- `IDBAdapter` persists data to IndexedDB so todos survive page refreshes
+- `TopGunProvider` makes the client available to all React hooks
+- `client.start()` is non-blocking -- the UI renders immediately
+
+---
+
+## Step 4: Build the AddTodo Component
+
+Create `src/AddTodo.tsx`:
+
+```tsx
+import { useState } from 'react';
+import { useClient } from '@topgunbuild/react';
+import type { Todo } from './types';
+
+export function AddTodo() {
+  const client = useClient();
+  const [text, setText] = useState('');
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    const id = crypto.randomUUID();
+    const todos = client.getMap('todos');
+
+    // Write the todo locally -- this is instant, no network wait
+    todos.set(id, {
+      id,
+      text: trimmed,
+      completed: false,
+      createdAt: Date.now(),
+    } satisfies Todo);
+
+    setText('');
+  };
+
+  return (
+    <form onSubmit={handleSubmit} style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
+      <input
+        type="text"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder="What needs to be done?"
+        style={{
+          flex: 1,
+          padding: '8px 12px',
+          border: '1px solid #ddd',
+          borderRadius: '4px',
+          fontSize: '16px',
+        }}
+      />
+      <button
+        type="submit"
+        style={{
+          padding: '8px 16px',
+          backgroundColor: '#3b82f6',
+          color: 'white',
+          border: 'none',
+          borderRadius: '4px',
+          cursor: 'pointer',
+          fontSize: '16px',
+        }}
+      >
+        Add
+      </button>
+    </form>
+  );
+}
+```
+
+The `useClient()` hook accesses the `TopGunClient` from the provider. Writing to the map via `todos.set()` is synchronous and local-first -- the todo appears in the UI instantly. TopGun syncs it to the server in the background.
+
+---
+
+## Step 5: Build the TodoItem Component
+
+Create `src/TodoItem.tsx`:
+
+```tsx
+import { useClient } from '@topgunbuild/react';
+import type { Todo } from './types';
+
+interface TodoItemProps {
+  todo: Todo;
+}
+
+export function TodoItem({ todo }: TodoItemProps) {
+  const client = useClient();
+  const todos = client.getMap('todos');
+
+  const toggleCompleted = () => {
+    // Overwrite the todo with the toggled completed state
+    todos.set(todo.id, {
+      ...todo,
+      completed: !todo.completed,
+    });
+  };
+
+  const deleteTodo = () => {
+    // Remove the todo from the map
+    todos.delete(todo.id);
+  };
+
+  return (
+    <li
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '8px',
+        padding: '8px 0',
+        borderBottom: '1px solid #eee',
+      }}
+    >
+      <input
+        type="checkbox"
+        checked={todo.completed}
+        onChange={toggleCompleted}
+        style={{ width: '18px', height: '18px' }}
+      />
+      <span
+        style={{
+          flex: 1,
+          textDecoration: todo.completed ? 'line-through' : 'none',
+          color: todo.completed ? '#999' : '#333',
+          fontSize: '16px',
+        }}
+      >
+        {todo.text}
+      </span>
+      <button
+        onClick={deleteTodo}
+        style={{
+          padding: '4px 8px',
+          backgroundColor: '#ef4444',
+          color: 'white',
+          border: 'none',
+          borderRadius: '4px',
+          cursor: 'pointer',
+          fontSize: '12px',
+        }}
+      >
+        Delete
+      </button>
+    </li>
+  );
+}
+```
+
+Both `toggleCompleted` and `deleteTodo` operate on the local CRDT map. Changes propagate to other tabs and the server automatically.
+
+---
+
+## Step 6: Build the TodoList Component
+
+Create `src/TodoList.tsx`:
+
+```tsx
+import { useQuery } from '@topgunbuild/react';
+import { TodoItem } from './TodoItem';
+import type { Todo } from './types';
+
+export function TodoList() {
+  // Subscribe to all entries in the 'todos' map
+  // The component re-renders automatically when data changes
+  const { data: todos } = useQuery<Todo>('todos');
+
+  // Sort by creation time, newest first
+  const sorted = [...todos].sort((a, b) => b.createdAt - a.createdAt);
+
+  if (sorted.length === 0) {
+    return (
+      <p style={{ color: '#999', textAlign: 'center', padding: '24px 0' }}>
+        No todos yet. Add one above!
+      </p>
+    );
+  }
+
+  return (
+    <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+      {sorted.map((todo) => (
+        <TodoItem key={todo.id} todo={todo} />
+      ))}
+    </ul>
+  );
+}
+```
+
+The `useQuery<Todo>('todos')` hook subscribes to the `todos` map. It returns a reactive `data` array that updates whenever:
+- You add, edit, or delete a todo locally
+- Another browser tab modifies a todo
+- The server sends updates from other clients
+
+---
+
+## Step 7: Wire Up the App Component
+
+Replace the contents of `src/App.tsx` with:
+
+```tsx
+import { AddTodo } from './AddTodo';
+import { TodoList } from './TodoList';
+
+function App() {
+  return (
+    <div
+      style={{
+        maxWidth: '500px',
+        margin: '40px auto',
+        padding: '0 16px',
+        fontFamily: 'system-ui, -apple-system, sans-serif',
+      }}
+    >
+      <h1 style={{ fontSize: '24px', marginBottom: '24px' }}>
+        TopGun Todo App
+      </h1>
+      <AddTodo />
+      <TodoList />
+      <footer
+        style={{
+          marginTop: '32px',
+          paddingTop: '16px',
+          borderTop: '1px solid #eee',
+          color: '#999',
+          fontSize: '13px',
+        }}
+      >
+        Data persists in IndexedDB and syncs via WebSocket.
+        Try opening this page in two browser tabs!
+      </footer>
+    </div>
+  );
+}
+
+export default App;
+```
+
+---
+
+## Step 8: Run the App
+
+Start the development server:
+
+```bash
+pnpm dev
+```
+
+Open `http://localhost:5173` in your browser. You should see the todo app. Try adding a few todos, toggling them complete, and deleting them.
+
+---
+
+## Step 9: Test Offline Capability
+
+TopGun is offline-first, so the app works without a network connection:
+
+1. **Open the app** in your browser
+2. **Open DevTools** (F12) and go to the Network tab
+3. **Set "Throttling" to Offline** (or stop the TopGun server with Ctrl+C)
+4. **Add some todos** -- they appear instantly and persist in IndexedDB
+5. **Refresh the page** -- your todos are still there (loaded from IndexedDB)
+6. **Re-enable the network** (or restart the server)
+7. **Watch the sync** -- your offline todos are automatically sent to the server
+
+All writes during the offline period are queued locally and synced when connectivity is restored. The user experience is identical whether online or offline.
+
+---
+
+## Step 10: Test Real-Time Sync
+
+To see real-time sync in action:
+
+1. **Open the app in two browser tabs** (same URL)
+2. **Add a todo in Tab 1** -- it appears in Tab 2 within milliseconds
+3. **Toggle a todo in Tab 2** -- the checkbox updates in Tab 1
+4. **Delete a todo in either tab** -- it disappears from both
+
+This works because both tabs share the same TopGun client connection (via IndexedDB) and receive real-time updates through the WebSocket connection to the server.
+
+---
+
+## How It Works
+
+Here is what happens under the hood when you add a todo:
+
+1. `todos.set(id, todo)` writes to the local `LWWMap` CRDT in memory
+2. The write is stamped with a Hybrid Logical Clock (HLC) timestamp for causal ordering
+3. The `IDBAdapter` persists the write to IndexedDB (async, non-blocking)
+4. The `SyncEngine` batches the write and sends it to the server via WebSocket
+5. The server merges the write using HLC timestamps and broadcasts to other subscribers
+6. Other clients receive the update and merge it into their local state
+7. React components subscribed via `useQuery` re-render with the new data
+
+If the network is unavailable at step 4, the write is queued. When connectivity is restored, `MerkleTree` delta sync efficiently determines what needs to be sent without retransmitting everything.
+
+---
+
+## Next Steps
+
+Now that you have a working todo app, explore more TopGun features:
+
+- **[Live Queries](/docs/guides/live-queries)** -- Subscribe to filtered subsets of data with field projection
+- **[Pub/Sub Topics](/docs/guides/pub-sub)** -- Broadcast ephemeral messages (typing indicators, presence)
+- **[Authentication](/docs/guides/authentication)** -- Add JWT-based authentication to your app
+- **[Schema & Type Safety](/docs/guides/schema)** -- Add compile-time type checking with `TopGun<T>`
+- **[Concepts: CRDTs & Time](/docs/concepts/crdt-hlc)** -- Understand how conflict resolution works
