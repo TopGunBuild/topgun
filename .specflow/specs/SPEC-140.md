@@ -449,3 +449,10 @@ None — spec executed as designed with two-pass strategy.
 - [✓] Two-pass strategy executed correctly — Pass 1 triage eliminated non-existent features cheaply, Pass 2 concentrated on implemented features
 
 **Summary:** The audit is substantive and thorough — all source code claims were verified against actual implementation. One major issue: the report's own summary totals footer (line 38) says "9 major-rewrite, 5 minor-issues, 3 accurate" while the table shows 11/6/5. This factual error propagates to the Execution Summary. Fix is a one-line correction in the report and two lines in the spec.
+
+### Fix Response v1 (2026-03-24)
+**Applied:** Issue #1 only
+
+**Fixes:**
+1. [✓] Summary totals mismatch — corrected Totals line in DOCS_AUDIT_REPORT.md from "9/5/3" to "11/6/5", updated Execution Summary key findings in SPEC-140, updated STATE.md decision line
+   - Commit: ba08771
