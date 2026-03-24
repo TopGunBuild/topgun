@@ -408,12 +408,44 @@ All assumptions are reasonable and low-risk.
 
 ### Key Findings
 
-- **9 pages need major-rewrite** (7 with unimplemented/stub features + deployment + observability + performance with critical metric/config mismatches)
-- **5 pages have minor issues**
-- **3 pages are accurate** (live-queries, pub-sub, postgresql, pn-counter, mcp-server)
+- **11 pages need major-rewrite** (7 with unimplemented/stub features + deployment, observability, performance, write-concern with critical mismatches)
+- **6 pages have minor issues**
+- **5 pages are accurate** (live-queries, pub-sub, postgresql, pn-counter, mcp-server)
 - **Critical priority:** observability.mdx metric names are from the old TS server (Pino/Node.js), not the Rust server. performance.mdx config knobs don't exist in Rust. deployment.mdx shows planned TOPGUN_TLS_* env vars as current. cluster-replication.mdx shows non-existent consistency modes (QUORUM/STRONG).
 - **7 new TODOs created** for features documented but not yet tracked in TODO.md
 
 ### Deviations
 
 None — spec executed as designed with two-pass strategy.
+
+---
+
+## Review History
+
+### Review v1 (2026-03-24)
+**Result:** CHANGES_REQUESTED
+**Reviewer:** impl-reviewer (subagent)
+
+**Findings:**
+
+**Major:**
+1. **Summary totals mismatch — report footer contradicts its own table**
+   - File: `.specflow/reference/DOCS_AUDIT_REPORT.md:38`
+   - Issue: The "Totals" footer line reads "9 major-rewrite, 5 minor-issues, 3 accurate" but the summary table immediately above it contains 11 major-rewrite, 6 minor-issues, and 5 accurate pages (22 pages total). This violates Validation Checklist item "Summary table totals match individual page sections" and AC4 ("report includes a summary table"). The incorrect totals also propagate into the Execution Summary in SPEC-140 ("9 pages need major-rewrite", "5 pages have minor issues", "3 pages are accurate (live-queries, pub-sub, postgresql, pn-counter, mcp-server)" — listing 5 pages while calling it 3).
+   - Fix: Correct the Totals footer line to "11 major-rewrite, 6 minor-issues, 5 accurate". Update the Execution Summary Key Findings in SPEC-140 to match.
+
+**Passed:**
+- [✓] Both output files exist: `.specflow/reference/DOCS_AUDIT_TRIAGE.md` and `.specflow/reference/DOCS_AUDIT_REPORT.md`
+- [✓] TODO.md modified with 7 new entries (TODO-174 through TODO-180) — all present and properly structured
+- [✓] No guide pages modified — constraint honored (verified via git diff, zero changes to `apps/docs-astro/src/content/docs/guides/`)
+- [✓] All 22 remaining pages covered (25 total minus 3 from SPEC-139 = 22, confirmed by directory count)
+- [✓] All 6 priority targets (deployment, cluster-replication, cluster-client, postgresql, performance, observability) thoroughly audited with line-by-line verification
+- [✓] Each issue references a specific source file with line numbers — verified against actual source code
+- [✓] Critical claims confirmed against real code: metric names (`topgun_active_connections`, `topgun_operations_total`) verified in `metrics_endpoint.rs`/`metrics.rs`; absent doc metrics confirmed absent; `achieved_level: None` confirmed at `crdt.rs:197,267`; `setWithAck`/`batchSet` confirmed absent from TS client; stub status of LockRequest/LockRelease confirmed in `coordination.rs`; WASM sandbox stubs confirmed in `persistence.rs`
+- [✓] Env var claims verified: only `PORT`, `JWT_SECRET`, `DATABASE_URL`, `RUST_LOG`, `TOPGUN_LOG_FORMAT`, `TOPGUN_ADMIN_*` are actually read; `TOPGUN_PORT`, `TOPGUN_TLS_*`, `TOPGUN_CLUSTER_*` confirmed absent
+- [✓] Pages with unimplemented features correctly flagged as major-rewrite with "add planned banner" recommendation (not "delete page")
+- [✓] Every unimplemented feature cross-references an existing TODO or a newly created one (R5/R6 compliance)
+- [✓] New TODOs include TS server file references via `git show 926e856^:` format (R6 compliance)
+- [✓] Two-pass strategy executed correctly — Pass 1 triage eliminated non-existent features cheaply, Pass 2 concentrated on implemented features
+
+**Summary:** The audit is substantive and thorough — all source code claims were verified against actual implementation. One major issue: the report's own summary totals footer (line 38) says "9 major-rewrite, 5 minor-issues, 3 accurate" while the table shows 11/6/5. This factual error propagates to the Execution Summary. Fix is a one-line correction in the report and two lines in the spec.

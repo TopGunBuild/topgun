@@ -35,7 +35,7 @@
 | ttl.mdx | minor-issues | 1 minor | P2 | PARTIAL |
 | write-concern.mdx | major-rewrite | 2 critical | P1 | PARTIAL |
 
-**Totals:** 9 major-rewrite, 5 minor-issues, 3 accurate, 5 critical blocking count pages
+**Totals:** 11 major-rewrite, 6 minor-issues, 5 accurate
 
 ---
 
