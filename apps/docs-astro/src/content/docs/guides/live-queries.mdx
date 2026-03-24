@@ -233,6 +233,57 @@ Instead of resending full result sets, nodes send targeted delta updates:
 
 This approach minimizes network traffic and enables efficient UI updates.
 
+## Field Projection
+
+Use the `fields` option to receive only the fields you need. This reduces network traffic when records contain many fields but your UI only displays a subset.
+
+```js
+const query = client.query('users', {
+  where: { status: 'active' },
+  fields: ['name', 'avatar'],
+});
+
+query.subscribe((results) => {
+  // Each result contains only { name, avatar } — other fields are omitted
+  results.forEach(r => console.log(r.value));
+});
+```
+
+Field projection is applied server-side, so only the selected fields traverse the network. The key is always included regardless of the `fields` list.
+
+## Result Limit
+
+Use the `limit` option to cap the number of results returned in the initial response. This is useful for pagination or when you only need a top-N view.
+
+```js
+const query = client.query('orders', {
+  where: { status: 'pending' },
+  sort: { createdAt: 'desc' },
+  limit: 20,
+});
+
+query.subscribe((results) => {
+  // results contains at most 20 entries
+  // Live updates (ENTER/UPDATE/LEAVE) still arrive for subsequent mutations
+  console.log('Top orders:', results.length);
+});
+```
+
+When the total matching records exceed the limit, the response includes `hasMore: true` so your application can implement load-more or cursor-based pagination.
+
+## Merkle Delta Reconnect
+
+When a client reconnects after going offline, TopGun uses Merkle trees to efficiently synchronize only the changes that occurred while the client was disconnected, instead of retransmitting the full result set.
+
+**How it works:**
+
+1. The server maintains a per-query Merkle tree of record hashes
+2. On initial `QUERY_RESP`, the server includes a `merkleRootHash`
+3. When the client reconnects, it sends a `QUERY_SYNC_INIT` message with its last known `merkleRootHash`
+4. The server compares trees and sends only the changed records
+
+This is fully automatic -- no application code is needed. The client stores the Merkle root hash and sends it on reconnect. If the hashes match, no data is retransmitted.
+
 <div className="bg-green-50 dark:bg-green-900/20 border-l-4 border-green-500 p-4 my-6 not-prose">
   <p className="text-sm text-green-800 dark:text-green-200">
     <strong>Automatic failover:</strong> If a cluster node disconnects, the coordinator automatically removes its results from the subscription state. When the node rejoins, its data becomes visible again through normal query updates.

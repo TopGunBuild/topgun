@@ -540,7 +540,7 @@ impl QueryService {
                         let rmpv_value = value_to_rmpv(value);
                         entries.push((key.to_string(), rmpv_value));
 
-                        // Compute hash for Merkle tree (same pattern as ShapeService).
+                        // Compute hash for Merkle tree.
                         let item_hash = topgun_core::hash::fnv1a_hash(&format!(
                             "{}:{}:{}:{}",
                             key, timestamp.millis, timestamp.counter, timestamp.node_id
@@ -888,7 +888,7 @@ fn extract_rmpv_value(record_value: &RecordValue) -> rmpv::Value {
 }
 
 // ---------------------------------------------------------------------------
-// Field projection helper (inlined from shape_evaluator)
+// Field projection helper
 // ---------------------------------------------------------------------------
 
 /// Projects a record to include only the specified fields.

@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-24 — TODO-183 converted to SPEC-144; prev: TODO-182 converted to SPEC-143, TODO-181 converted to SPEC-142, TODO-181–184 (Query+Shape unification), TODO-167/168 superseded
+**Last updated:** 2026-03-24 — TODO-184 converted to SPEC-145; prev: TODO-183 converted to SPEC-144, TODO-182 converted to SPEC-143, TODO-181 converted to SPEC-142
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -27,14 +27,14 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Slice 3:** ~~SPEC-129 (TS schema DSL & codegen)~~ — **done**
 - **Slice 4:** ~~SPEC-130 (Schema → Arrow type derivation)~~ — **done**
 
-### TODO-070: Partial Replication / Shapes *(converted to SPEC-136)*
+### TODO-070: Partial Replication / Shapes *(superseded)*
 - **Priority:** P1 (table stakes for competitive parity)
 - **Complexity:** Medium-Large
 - **Summary:** Client subscribes to data subsets; server syncs only matching entries. SyncShape struct with filter + field projection + limit. MerkleTree per shape for efficient delta sync.
 - **Context:** [PRODUCT_POSITIONING_RESEARCH.md](../reference/PRODUCT_POSITIONING_RESEARCH.md) Section 7.5
 - **Depends on:** TODO-069
 - **Effort:** 2-3 weeks
-- **Status:** ~~SPEC-136a~~ ✓ · ~~SPEC-136b~~ ✓ · ~~SPEC-136c~~ ✓ · ~~SPEC-136d~~ ✓ · ~~SPEC-136e~~ ✓ — **done**
+- **Status:** **Superseded** — Shapes merged into Queries via TODO-181/182/183/184 (SPEC-142/143/144/145). All Shape functionality (field projection, limit, Merkle delta sync) now lives under the Query path. Shape-specific code deleted in SPEC-145.
 
 ### TODO-091: DataFusion SQL Integration *(converted to SPEC-135)*
 - **Priority:** P1 (distributed SQL — Hazelcast-level queries)
@@ -54,22 +54,8 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 ### TODO-183: ~~Unified Query Client — Client-Side Merge~~ → Converted to SPEC-144
 - **Status:** Converted to SPEC-144
 
-### TODO-184: Shape Cleanup — Remove Deprecated Code *(Query+Shape merge, step 4/4)*
-- **Priority:** P1
-- **Complexity:** Small
-- **Summary:** Delete all Shape-specific code, wire messages, and documentation now that everything is unified under `client.query()`. Clean break — no backwards compatibility needed (no active users).
-- **Depends on:** TODO-183
-- **Effort:** 2-3 days
-- **Scope:**
-  - **Wire protocol**: Remove SHAPE_SUBSCRIBE, SHAPE_UNSUBSCRIBE, SHAPE_RESP, SHAPE_UPDATE, SHAPE_SYNC_INIT from TS schemas and Rust message enum. Remove Operation::ShapeSubscribe/Unsubscribe/SyncInit routing.
-  - **Server**: Delete `ShapeService`, `ShapeRegistry`, `ShapeMerkleSyncManager`. Delete or merge `shape_evaluator.rs` into query module. Remove `shape_registry` from `AppState`. Remove ShapeService from ServiceRegistry.
-  - **Client**: Delete `ShapeHandle.ts`, `ShapeManager.ts`. Remove `subscribeShape()` from SyncEngine. Remove shape message handlers from `ClientMessageHandlers`. Clean up re-exports from `index.ts`.
-  - **Core schemas**: Delete `packages/core/src/schemas/shape-schemas.ts`. Remove shape Zod schemas from barrel exports.
-  - **Core Rust**: Delete shape-related structs from `types.rs`/`message.rs`.
-  - **Tests**: Delete `tests/integration-rust/shape.test.ts` (functionality moved to queries.test.ts in TODO-183). Delete shape-specific server unit tests (replaced by extended query tests in TODO-182).
-  - **Docs**: Delete `apps/docs-astro/src/content/docs/guides/shapes.mdx`. Update `live-queries.mdx` to document `fields`, `limit`, Merkle reconnect (the features that were Shape-only). Update pagination nav links.
-  - **TODO cleanup**: Archive TODO-070 as superseded (Shapes concept merged into Queries).
-
+### TODO-184: ~~Shape Cleanup — Remove Deprecated Code~~ → Converted to SPEC-145
+- **Status:** Converted to SPEC-145
 
 ### TODO-171: RBAC — Role-Based Access Control Implementation
 - **Priority:** P2 (documented but not implemented — expectation gap for adopters)

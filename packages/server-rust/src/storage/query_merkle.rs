@@ -1,13 +1,13 @@
 //! Per-query Merkle tree manager for query-aware delta sync.
 //!
 //! `QueryMerkleSyncManager` manages per-`(query_id, map_name, partition_id)` Merkle
-//! trees, following the same patterns as `ShapeMerkleSyncManager` for shape sync.
+//! trees for query-aware delta sync.
 //!
 //! Trees are populated at subscribe time via `init_tree` and cleaned up on
 //! unsubscribe/disconnect via `cleanup_query`. The traversal protocol reuses
 //! the existing `SyncRespRoot`/`SyncRespBuckets`/`SyncRespLeaf` wire messages,
 //! with query-prefixed paths (e.g. `"query:<query_id>/<partition_id>/<depth>/<bucket>"`)
-//! to distinguish them from regular partition paths and shape-prefixed paths.
+//! to distinguish them from regular partition paths.
 
 use dashmap::DashMap;
 use parking_lot::Mutex;
@@ -21,7 +21,7 @@ use topgun_core::merkle::MerkleTree;
 ///
 /// Maintains a separate `MerkleTree` per `(query_id, map_name, partition_id)` triple.
 /// Trees are wrapped in `Mutex` to avoid holding the `DashMap` shard lock during
-/// tree operations -- the same pattern as `ShapeMerkleSyncManager`.
+/// tree operations.
 ///
 /// Trees are populated at subscribe time via `init_tree` and removed on
 /// unsubscribe or disconnect via `cleanup_query`. Mutation updates keep trees
@@ -29,7 +29,7 @@ use topgun_core::merkle::MerkleTree;
 pub struct QueryMerkleSyncManager {
     /// Key: (`query_id`, `map_name`, `partition_id`) -> `MerkleTree`
     trees: DashMap<(String, String, u32), Mutex<MerkleTree>>,
-    /// Tree depth -- matches the depth used by `ShapeMerkleSyncManager`.
+    /// Tree depth for Merkle trees.
     depth: usize,
 }
 
