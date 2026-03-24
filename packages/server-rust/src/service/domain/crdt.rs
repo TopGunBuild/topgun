@@ -1434,6 +1434,7 @@ mod tests {
                 cursor: None,
             },
             previous_result_keys: DashSet::new(),
+            fields: None,
         });
 
         // conn2 writes to "users" — conn1 should receive, conn2 should NOT
@@ -1503,6 +1504,7 @@ mod tests {
                 cursor: None,
             },
             previous_result_keys: DashSet::new(),
+            fields: None,
         });
 
         // Write to "users" — conn1 is subscribed to "products", not "users"

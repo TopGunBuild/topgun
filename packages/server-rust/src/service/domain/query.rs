@@ -51,6 +51,9 @@ pub struct QuerySubscription {
     pub query: Query,
     /// Keys that matched on the last evaluation (for ENTER/UPDATE/LEAVE detection).
     pub previous_result_keys: DashSet<String>,
+    /// Optional field projection list. When `Some`, only these fields are
+    /// included in QUERY_RESP and QUERY_UPDATE payloads sent to this subscriber.
+    pub fields: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -519,6 +522,7 @@ impl QueryService {
             map_name,
             query,
             previous_result_keys: previous_keys,
+            fields: None,
         };
         self.query_registry.register(subscription);
 
@@ -820,6 +824,7 @@ mod tests {
             map_name: "users".to_string(),
             query: Query::default(),
             previous_result_keys: DashSet::new(),
+            fields: None,
         };
         registry.register(sub);
         assert_eq!(registry.subscription_count(), 1);
@@ -834,6 +839,7 @@ mod tests {
             map_name: "users".to_string(),
             query: Query::default(),
             previous_result_keys: DashSet::new(),
+            fields: None,
         });
 
         assert!(registry.unregister("q-1"));
@@ -855,6 +861,7 @@ mod tests {
             map_name: "users".to_string(),
             query: Query::default(),
             previous_result_keys: DashSet::new(),
+            fields: None,
         });
         registry.register(QuerySubscription {
             query_id: "q-2".to_string(),
@@ -862,6 +869,7 @@ mod tests {
             map_name: "users".to_string(),
             query: Query::default(),
             previous_result_keys: DashSet::new(),
+            fields: None,
         });
         registry.register(QuerySubscription {
             query_id: "q-3".to_string(),
@@ -869,6 +877,7 @@ mod tests {
             map_name: "orders".to_string(),
             query: Query::default(),
             previous_result_keys: DashSet::new(),
+            fields: None,
         });
 
         registry.unregister_by_connection(ConnectionId(1));
@@ -888,6 +897,7 @@ mod tests {
             map_name: "users".to_string(),
             query: Query::default(),
             previous_result_keys: DashSet::new(),
+            fields: None,
         });
         registry.register(QuerySubscription {
             query_id: "q-2".to_string(),
@@ -895,6 +905,7 @@ mod tests {
             map_name: "orders".to_string(),
             query: Query::default(),
             previous_result_keys: DashSet::new(),
+            fields: None,
         });
 
         let subs = registry.get_subscriptions_for_map("users");
@@ -926,6 +937,7 @@ mod tests {
             map_name: "users".to_string(),
             query: Query::default(),
             previous_result_keys: prev_keys,
+            fields: None,
         });
 
         let record = make_record(make_value_map(vec![("name", Value::String("Alice".to_string()))]));
@@ -960,6 +972,7 @@ mod tests {
             map_name: "users".to_string(),
             query: Query::default(),
             previous_result_keys: DashSet::new(),
+            fields: None,
         });
 
         let record = make_record(make_value_map(vec![("name", Value::String("Alice".to_string()))]));
@@ -1011,6 +1024,7 @@ mod tests {
             map_name: "users".to_string(),
             query: Query::default(), // match all
             previous_result_keys: prev_keys,
+            fields: None,
         });
 
         let old_value = RecordValue::Lww {
@@ -1076,6 +1090,7 @@ mod tests {
                 ..Query::default()
             },
             previous_result_keys: prev_keys,
+            fields: None,
         });
 
         // Update to age=10 (no longer matches)
@@ -1125,6 +1140,7 @@ mod tests {
             map_name: "users".to_string(),
             query: Query::default(),
             previous_result_keys: prev_keys,
+            fields: None,
         });
 
         let record = make_record(make_value_map(vec![("name", Value::String("Alice".to_string()))]));
@@ -1169,6 +1185,7 @@ mod tests {
             map_name: "users".to_string(),
             query: Query::default(),
             previous_result_keys: prev_keys,
+            fields: None,
         });
 
         observer.on_clear();
@@ -1228,6 +1245,7 @@ mod tests {
                 ..Query::default()
             },
             previous_result_keys: DashSet::new(),
+            fields: None,
         });
 
         // Put a record that does NOT match (age=10)
@@ -1473,6 +1491,7 @@ mod tests {
                 cursor: None,
             },
             previous_result_keys: DashSet::new(),
+            fields: None,
         });
 
         registry.register(QuerySubscription {
@@ -1487,6 +1506,7 @@ mod tests {
                 cursor: None,
             },
             previous_result_keys: DashSet::new(),
+            fields: None,
         });
 
         let ids = registry.get_subscribed_connection_ids("users");
@@ -1514,6 +1534,7 @@ mod tests {
                 cursor: None,
             },
             previous_result_keys: DashSet::new(),
+            fields: None,
         });
         registry.register(QuerySubscription {
             query_id: "q-2".to_string(),
@@ -1527,6 +1548,7 @@ mod tests {
                 cursor: None,
             },
             previous_result_keys: DashSet::new(),
+            fields: None,
         });
 
         let ids = registry.get_subscribed_connection_ids("users");
