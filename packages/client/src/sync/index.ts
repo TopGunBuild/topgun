@@ -56,8 +56,6 @@ export { SearchClient } from './SearchClient';
 export { MerkleSyncHandler } from './MerkleSyncHandler';
 export { ORMapSyncHandler } from './ORMapSyncHandler';
 export { MessageRouter } from './MessageRouter';
-export { ShapeManager } from './ShapeManager';
-export type { ShapeManagerConfig, ShapeSubscribeOptions } from './ShapeManager';
 export {
   registerClientMessageHandlers,
   CLIENT_MESSAGE_TYPES,

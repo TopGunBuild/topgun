@@ -61,10 +61,6 @@ export type { SearchResult } from './SyncEngine';
 export { SearchHandle } from './SearchHandle';
 export type { SearchResultsCallback } from './SearchHandle';
 
-// Shape (partial replication) exports
-export { ShapeHandle } from './ShapeHandle';
-export type { ShapeUpdate } from './ShapeHandle';
-
 // Hybrid Query exports
 export { HybridQueryHandle } from './HybridQueryHandle';
 export type { HybridQueryFilter, HybridResultItem, HybridResultSource } from './HybridQueryHandle';
