@@ -113,11 +113,11 @@ Create `src/AddTodo.tsx`:
 
 ```tsx
 import { useState } from 'react';
-import { useClient } from '@topgunbuild/react';
+import { useMutation } from '@topgunbuild/react';
 import type { Todo } from './types';
 
 export function AddTodo() {
-  const client = useClient();
+  const { create } = useMutation<Todo>('todos');
   const [text, setText] = useState('');
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -126,15 +126,14 @@ export function AddTodo() {
     if (!trimmed) return;
 
     const id = crypto.randomUUID();
-    const todos = client.getMap('todos');
 
     // Write the todo locally -- this is instant, no network wait
-    todos.set(id, {
+    create(id, {
       id,
       text: trimmed,
       completed: false,
       createdAt: Date.now(),
-    } satisfies Todo);
+    });
 
     setText('');
   };
@@ -173,7 +172,7 @@ export function AddTodo() {
 }
 ```
 
-The `useClient()` hook accesses the `TopGunClient` from the provider. Writing to the map via `todos.set()` is synchronous and local-first -- the todo appears in the UI instantly. TopGun syncs it to the server in the background.
+The `useMutation<Todo>('todos')` hook provides `create`, `update`, and `remove` functions for the `todos` map. Writing via `create()` is synchronous and local-first -- the todo appears in the UI instantly. TopGun syncs it to the server in the background.
 
 ---
 
@@ -182,7 +181,7 @@ The `useClient()` hook accesses the `TopGunClient` from the provider. Writing to
 Create `src/TodoItem.tsx`:
 
 ```tsx
-import { useClient } from '@topgunbuild/react';
+import { useMutation } from '@topgunbuild/react';
 import type { Todo } from './types';
 
 interface TodoItemProps {
@@ -190,12 +189,11 @@ interface TodoItemProps {
 }
 
 export function TodoItem({ todo }: TodoItemProps) {
-  const client = useClient();
-  const todos = client.getMap('todos');
+  const { update, remove } = useMutation<Todo>('todos');
 
   const toggleCompleted = () => {
     // Overwrite the todo with the toggled completed state
-    todos.set(todo.id, {
+    update(todo.id, {
       ...todo,
       completed: !todo.completed,
     });
@@ -203,7 +201,7 @@ export function TodoItem({ todo }: TodoItemProps) {
 
   const deleteTodo = () => {
     // Remove the todo from the map
-    todos.delete(todo.id);
+    remove(todo.id);
   };
 
   return (
@@ -251,7 +249,7 @@ export function TodoItem({ todo }: TodoItemProps) {
 }
 ```
 
-Both `toggleCompleted` and `deleteTodo` operate on the local CRDT map. Changes propagate to other tabs and the server automatically.
+Both `toggleCompleted` and `deleteTodo` use `useMutation` to operate on the local CRDT map. Changes propagate to other tabs and the server automatically.
 
 ---
 
@@ -260,17 +258,18 @@ Both `toggleCompleted` and `deleteTodo` operate on the local CRDT map. Changes p
 Create `src/TodoList.tsx`:
 
 ```tsx
-import { useQuery } from '@topgunbuild/react';
+import { useMap } from '@topgunbuild/react';
 import { TodoItem } from './TodoItem';
 import type { Todo } from './types';
 
 export function TodoList() {
-  // Subscribe to all entries in the 'todos' map
-  // The component re-renders automatically when data changes
-  const { data: todos } = useQuery<Todo>('todos');
+  // Subscribe to the 'todos' map -- re-renders automatically on changes
+  const todos = useMap<string, Todo>('todos');
 
-  // Sort by creation time, newest first
-  const sorted = [...todos].sort((a, b) => b.createdAt - a.createdAt);
+  // Get all entries and sort by creation time, newest first
+  const sorted = [...todos.entries()]
+    .map(([, value]) => value)
+    .sort((a, b) => b.createdAt - a.createdAt);
 
   if (sorted.length === 0) {
     return (
@@ -290,7 +289,7 @@ export function TodoList() {
 }
 ```
 
-The `useQuery<Todo>('todos')` hook subscribes to the `todos` map. It returns a reactive `data` array that updates whenever:
+The `useMap<string, Todo>('todos')` hook returns a reactive `LWWMap` that re-renders the component whenever:
 - You add, edit, or delete a todo locally
 - Another browser tab modifies a todo
 - The server sends updates from other clients
@@ -392,7 +391,7 @@ Here is what happens under the hood when you add a todo:
 4. The `SyncEngine` batches the write and sends it to the server via WebSocket
 5. The server merges the write using HLC timestamps and broadcasts to other subscribers
 6. Other clients receive the update and merge it into their local state
-7. React components subscribed via `useQuery` re-render with the new data
+7. React components subscribed via `useMap` re-render with the new data
 
 If the network is unavailable at step 4, the write is queued. When connectivity is restored, `MerkleTree` delta sync efficiently determines what needs to be sent without retransmitting everything.
 
