@@ -20,7 +20,7 @@ pub struct ServerConfig {
     pub partition_count: u32,
     /// Security configuration for write validation.
     pub security: SecurityConfig,
-    /// Maximum number of records returned in a single QUERY_RESP.
+    /// Maximum number of records returned in a single `QUERY_RESP`.
     /// Queries matching more records are clamped to this limit with `has_more: true`.
     pub max_query_records: u32,
 }

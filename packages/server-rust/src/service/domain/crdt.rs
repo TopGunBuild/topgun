@@ -610,7 +610,7 @@ impl CrdtService {
         }
     }
 
-    /// Broadcasts QUERY_UPDATE messages to subscribers of queries targeting the mutated map.
+    /// Broadcasts `QUERY_UPDATE` messages to subscribers of queries targeting the mutated map.
     ///
     /// Parallel to `broadcast_shape_updates`, this method:
     /// - Evaluates each standing query subscription against the old and new values
@@ -2214,5 +2214,94 @@ mod tests {
         // Drain: should find zero shape updates (there will be ServerEvent broadcasts though).
         let updates = drain_shape_updates(&mut sub_rx);
         assert!(updates.is_empty(), "expected no shape updates for non-matching write, got {}", updates.len());
+    }
+
+    // ---------------------------------------------------------------------------
+    // broadcast_query_updates writer exclusion test
+    // ---------------------------------------------------------------------------
+
+    /// Helper: drain all QUERY_UPDATE messages from a connection receiver.
+    /// Returns (change_type, key, value) triples.
+    fn drain_query_updates(rx: &mut tokio::sync::mpsc::Receiver<crate::network::connection::OutboundMessage>) -> Vec<(topgun_core::messages::base::ChangeEventType, String, rmpv::Value)> {
+        let mut updates = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let crate::network::connection::OutboundMessage::Binary(bytes) = msg {
+                if let Ok(decoded) = rmp_serde::from_slice::<topgun_core::messages::Message>(&bytes) {
+                    if let topgun_core::messages::Message::QueryUpdate { payload } = decoded {
+                        updates.push((payload.change_type, payload.key, payload.value));
+                    }
+                }
+            }
+        }
+        updates
+    }
+
+    /// AC3 (SPEC-143): QUERY_UPDATE is NOT sent to the connection that originated the write.
+    /// This tests broadcast_query_updates() writer exclusion + field projection.
+    #[tokio::test]
+    async fn broadcast_query_updates_writer_exclusion_and_projection() {
+        let (svc, conn_registry, query_registry) = make_broadcast_test_setup();
+        let config = crate::network::config::ConnectionConfig::default();
+
+        // Register two client connections
+        let (writer_handle, mut writer_rx) =
+            conn_registry.register(ConnectionKind::Client, &config);
+        let (sub_handle, mut sub_rx) =
+            conn_registry.register(ConnectionKind::Client, &config);
+
+        // Subscribe sub_handle to "users" with field projection ["name"]
+        query_registry.register(QuerySubscription {
+            query_id: "q-proj".to_string(),
+            connection_id: sub_handle.id,
+            map_name: "users".to_string(),
+            query: Query {
+                predicate: None,
+                r#where: None,
+                sort: None,
+                limit: None,
+                cursor: None,
+            },
+            previous_result_keys: DashSet::new(),
+            fields: Some(vec!["name".to_string()]),
+        });
+
+        // Writer writes to "users"
+        let value = make_rmpv_map(vec![
+            ("name", rmpv::Value::String("Alice".into())),
+            ("age", rmpv::Value::Integer(30.into())),
+        ]);
+        let mut ctx = make_ctx();
+        ctx.connection_id = Some(writer_handle.id);
+        ctx.partition_id = Some(0);
+        let op = make_lww_put_with_map_value(ctx, "users", "user-1", value);
+        let _ = svc.oneshot(op).await.unwrap();
+
+        // Drain ServerEvent messages first (both connections may get them)
+        // Then look specifically for QUERY_UPDATE messages
+
+        // Writer should NOT have received any QueryUpdate
+        let writer_updates = drain_query_updates(&mut writer_rx);
+        assert!(
+            writer_updates.is_empty(),
+            "writer should not receive QUERY_UPDATE, got {} updates",
+            writer_updates.len()
+        );
+
+        // Subscriber should have received a QueryUpdate with projected fields
+        let sub_updates = drain_query_updates(&mut sub_rx);
+        assert_eq!(
+            sub_updates.len(),
+            1,
+            "subscriber should receive exactly 1 QUERY_UPDATE"
+        );
+        let (change_type, key, value) = &sub_updates[0];
+        assert_eq!(*change_type, topgun_core::messages::base::ChangeEventType::ENTER);
+        assert_eq!(key, "user-1");
+
+        // The value should be projected to only include "name"
+        let map = value.as_map().expect("projected value should be a map");
+        assert_eq!(map.len(), 1, "projected value should have only 1 field");
+        assert_eq!(map[0].0.as_str().unwrap(), "name");
+        assert_eq!(map[0].1.as_str().unwrap(), "Alice");
     }
 }

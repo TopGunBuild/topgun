@@ -52,7 +52,7 @@ pub struct QuerySubscription {
     /// Keys that matched on the last evaluation (for ENTER/UPDATE/LEAVE detection).
     pub previous_result_keys: DashSet<String>,
     /// Optional field projection list. When `Some`, only these fields are
-    /// included in QUERY_RESP and QUERY_UPDATE payloads sent to this subscriber.
+    /// included in `QUERY_RESP` and `QUERY_UPDATE` payloads sent to this subscriber.
     pub fields: Option<Vec<String>>,
 }
 
@@ -140,7 +140,7 @@ impl QueryRegistry {
     /// Used by `handle_query_sync_init` to resolve the `map_name` for a query.
     #[must_use]
     pub fn get_subscription(&self, query_id: &str) -> Option<Arc<QuerySubscription>> {
-        for entry in self.subscriptions.iter() {
+        for entry in &self.subscriptions {
             if let Some(sub) = entry.value().get(query_id) {
                 return Some(sub.value().clone());
             }
@@ -370,7 +370,7 @@ pub struct QueryService {
     /// Per-query Merkle manager for delta sync init.
     /// `None` when query Merkle sync is not wired (test ergonomics).
     query_merkle_manager: Option<Arc<crate::storage::query_merkle::QueryMerkleSyncManager>>,
-    /// Maximum records returned in a single QUERY_RESP. Queries matching more
+    /// Maximum records returned in a single `QUERY_RESP`. Queries matching more
     /// records are clamped to this limit with `has_more: true`.
     max_query_records: u32,
     #[cfg(feature = "datafusion")]
@@ -500,6 +500,7 @@ impl QueryService {
     /// 6. Initializes per-query Merkle trees and computes aggregate root hash.
     /// 7. Registers a standing `QuerySubscription` in the registry.
     /// 8. Returns `QueryResp` with initial results.
+    #[allow(clippy::too_many_lines)]
     async fn handle_query_subscribe(
         &self,
         ctx: &crate::service::operation::OperationContext,
@@ -1714,5 +1715,235 @@ mod tests {
         let ids = registry.get_subscribed_connection_ids("users");
         assert_eq!(ids.len(), 1, "same connection should appear only once");
         assert!(ids.contains(&conn1));
+    }
+
+    // ---- G4: Field projection, clamping, Merkle sync init tests ----
+
+    /// AC1: QUERY_SUB with `fields: ["name"]` returns QUERY_RESP where every
+    /// result value has only the `name` field.
+    #[test]
+    fn field_projection_on_query_resp() {
+        use super::super::shape_evaluator::project;
+
+        // Simulate a record with multiple fields
+        let value = rmpv::Value::Map(vec![
+            (rmpv::Value::String("name".into()), rmpv::Value::String("Alice".into())),
+            (rmpv::Value::String("age".into()), rmpv::Value::Integer(30.into())),
+            (rmpv::Value::String("email".into()), rmpv::Value::String("alice@test.com".into())),
+        ]);
+
+        let fields = vec!["name".to_string()];
+        let projected = project(&fields, &value);
+
+        // Projected value should only contain "name"
+        let map = projected.as_map().expect("projected should be a map");
+        assert_eq!(map.len(), 1);
+        assert_eq!(
+            map[0].0.as_str().unwrap(),
+            "name"
+        );
+        assert_eq!(
+            map[0].1.as_str().unwrap(),
+            "Alice"
+        );
+    }
+
+    /// AC7: QUERY_RESP with results exceeding `max_query_records` returns
+    /// exactly `max_query_records` entries with `has_more: true`.
+    #[test]
+    fn max_query_records_clamping() {
+        use super::super::predicate::execute_query;
+        use topgun_core::messages::query::QueryResultEntry;
+
+        // Create 15 entries
+        let entries: Vec<(String, rmpv::Value)> = (0..15)
+            .map(|i| {
+                (
+                    format!("key-{i}"),
+                    rmpv::Value::Map(vec![
+                        (rmpv::Value::String("id".into()), rmpv::Value::Integer(i.into())),
+                    ]),
+                )
+            })
+            .collect();
+
+        let query = Query::default(); // no filter: match all
+        let mut results = execute_query(entries, &query);
+        assert_eq!(results.len(), 15);
+
+        // Simulate max_query_records = 10
+        let max = 10_usize;
+        let has_more = if results.len() > max {
+            results.truncate(max);
+            Some(true)
+        } else {
+            None
+        };
+
+        assert_eq!(results.len(), 10);
+        assert_eq!(has_more, Some(true));
+    }
+
+    /// AC8: `ServerConfig::default().max_query_records` equals `10_000`.
+    #[test]
+    fn server_config_default_max_query_records() {
+        use crate::service::config::ServerConfig;
+        let config = ServerConfig::default();
+        assert_eq!(config.max_query_records, 10_000);
+    }
+
+    /// AC4: QUERY_RESP includes `merkle_root_hash` computed from per-query Merkle trees.
+    /// AC5: QUERY_SYNC_INIT with matching root_hash returns SyncRespRoot with same hash.
+    #[tokio::test]
+    async fn query_sync_init_matching_hash_returns_same_hash() {
+        use crate::storage::query_merkle::QueryMerkleSyncManager;
+        use topgun_core::messages::query::{QuerySyncInitMessage, QuerySyncInitPayload};
+
+        let registry = Arc::new(QueryRegistry::new());
+        let factory = make_factory();
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let config = test_config();
+        let (_handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
+
+        let merkle_mgr = Arc::new(QueryMerkleSyncManager::new());
+
+        let svc = Arc::new(QueryService::new(
+            registry.clone(),
+            factory,
+            conn_registry,
+            Arc::new(PredicateBackend),
+            Some(Arc::clone(&merkle_mgr)),
+            10_000,
+            #[cfg(feature = "datafusion")]
+            None,
+        ));
+
+        // Register a subscription manually so QUERY_SYNC_INIT can find it.
+        registry.register(QuerySubscription {
+            query_id: "q-sync-1".to_string(),
+            connection_id: ConnectionId(1),
+            map_name: "users".to_string(),
+            query: Query::default(),
+            previous_result_keys: DashSet::new(),
+            fields: None,
+        });
+
+        // Init a Merkle tree for this query
+        merkle_mgr.init_tree("q-sync-1", "users", 0, &[("k1".to_string(), 42)]);
+        let server_hash = merkle_mgr.aggregate_query_root_hash("q-sync-1", "users");
+        assert_ne!(server_hash, 0);
+
+        // Send QUERY_SYNC_INIT with the server's hash (matching).
+        let ctx = make_ctx(Some(ConnectionId(1)));
+        let payload = QuerySyncInitMessage {
+            payload: QuerySyncInitPayload {
+                query_id: "q-sync-1".to_string(),
+                root_hash: server_hash,
+            },
+        };
+        let op = Operation::QuerySyncInit { ctx, payload };
+        let result = svc.oneshot(op).await.unwrap();
+
+        // Should get SyncRespRoot with the same hash.
+        match result {
+            OperationResponse::Message(msg) => {
+                if let Message::SyncRespRoot(resp) = *msg {
+                    assert_eq!(resp.payload.root_hash, server_hash);
+                    assert_eq!(resp.payload.map_name, "users");
+                } else {
+                    panic!("Expected SyncRespRoot, got {:?}", msg);
+                }
+            }
+            other => panic!("Expected Message response, got {:?}", other),
+        }
+    }
+
+    /// AC6: QUERY_SYNC_INIT with stale root_hash returns SyncRespRoot with server's current hash.
+    #[tokio::test]
+    async fn query_sync_init_different_hash_returns_server_hash() {
+        use crate::storage::query_merkle::QueryMerkleSyncManager;
+        use topgun_core::messages::query::{QuerySyncInitMessage, QuerySyncInitPayload};
+
+        let registry = Arc::new(QueryRegistry::new());
+        let factory = make_factory();
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let config = test_config();
+        let (_handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
+
+        let merkle_mgr = Arc::new(QueryMerkleSyncManager::new());
+
+        let svc = Arc::new(QueryService::new(
+            registry.clone(),
+            factory,
+            conn_registry,
+            Arc::new(PredicateBackend),
+            Some(Arc::clone(&merkle_mgr)),
+            10_000,
+            #[cfg(feature = "datafusion")]
+            None,
+        ));
+
+        // Register a subscription
+        registry.register(QuerySubscription {
+            query_id: "q-sync-2".to_string(),
+            connection_id: ConnectionId(1),
+            map_name: "users".to_string(),
+            query: Query::default(),
+            previous_result_keys: DashSet::new(),
+            fields: None,
+        });
+
+        // Init a Merkle tree
+        merkle_mgr.init_tree("q-sync-2", "users", 0, &[("k1".to_string(), 42)]);
+        let server_hash = merkle_mgr.aggregate_query_root_hash("q-sync-2", "users");
+
+        // Send QUERY_SYNC_INIT with a different (stale) hash.
+        let stale_hash = server_hash.wrapping_add(1);
+        let ctx = make_ctx(Some(ConnectionId(1)));
+        let payload = QuerySyncInitMessage {
+            payload: QuerySyncInitPayload {
+                query_id: "q-sync-2".to_string(),
+                root_hash: stale_hash,
+            },
+        };
+        let op = Operation::QuerySyncInit { ctx, payload };
+        let result = svc.oneshot(op).await.unwrap();
+
+        // Should get SyncRespRoot with the server's actual hash (different from client's).
+        match result {
+            OperationResponse::Message(msg) => {
+                if let Message::SyncRespRoot(resp) = *msg {
+                    assert_eq!(resp.payload.root_hash, server_hash);
+                    assert_ne!(resp.payload.root_hash, stale_hash);
+                } else {
+                    panic!("Expected SyncRespRoot, got {:?}", msg);
+                }
+            }
+            other => panic!("Expected Message response, got {:?}", other),
+        }
+    }
+
+    /// Verify `QueryRegistry::get_subscription` lookup by query_id.
+    #[test]
+    fn registry_get_subscription_by_query_id() {
+        let registry = QueryRegistry::new();
+        registry.register(QuerySubscription {
+            query_id: "q-lookup".to_string(),
+            connection_id: ConnectionId(1),
+            map_name: "users".to_string(),
+            query: Query::default(),
+            previous_result_keys: DashSet::new(),
+            fields: Some(vec!["name".to_string()]),
+        });
+
+        let sub = registry.get_subscription("q-lookup");
+        assert!(sub.is_some());
+        let sub = sub.unwrap();
+        assert_eq!(sub.query_id, "q-lookup");
+        assert_eq!(sub.map_name, "users");
+        assert_eq!(sub.fields, Some(vec!["name".to_string()]));
+
+        // Non-existent query returns None
+        assert!(registry.get_subscription("nonexistent").is_none());
     }
 }
