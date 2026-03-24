@@ -35,9 +35,6 @@ use topgun_server::service::domain::search::{
     SearchConfig, SearchMutationObserver, SearchRegistry, SearchService, TantivyMapIndex,
 };
 use topgun_server::service::domain::sync::SyncService;
-use topgun_server::service::domain::shape::ShapeService;
-use topgun_server::service::domain::shape::ShapeRegistry;
-use topgun_server::storage::shape_merkle::ShapeMerkleSyncManager;
 use topgun_server::service::dispatch::{DispatchConfig, PartitionDispatcher};
 use topgun_server::service::middleware::build_operation_pipeline;
 use topgun_server::service::operation::service_names;
@@ -60,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let (classify_svc, dispatcher, connection_registry, shape_registry) = build_services();
+    let (classify_svc, dispatcher, connection_registry) = build_services();
 
     // Build the AppState with all services wired
     let shutdown = Arc::new(ShutdownController::new());
@@ -76,7 +73,6 @@ async fn main() -> anyhow::Result<()> {
         cluster_state: None,
         store_factory: None,
         server_config: None,
-        shape_registry: Some(shape_registry),
     };
 
     // Build the axum router with state.
@@ -159,7 +155,6 @@ fn build_services() -> (
     Arc<OperationService>,
     PartitionDispatcher,
     Arc<ConnectionRegistry>,
-    Arc<ShapeRegistry>,
 ) {
     let config = ServerConfig {
         node_id: "test-server-node".to_string(),
@@ -256,10 +251,6 @@ fn build_services() -> (
         ))
     };
 
-    // Shape registry must be created before CrdtService so mutations can trigger
-    // SHAPE_UPDATE broadcasts via the shared registry reference.
-    let shape_registry = Arc::new(ShapeRegistry::new());
-
     // Arc-wrap all domain services so they can be shared across N+1 worker pipelines.
     let crdt_svc = Arc::new(CrdtService::new(
         Arc::clone(&record_store_factory),
@@ -267,9 +258,8 @@ fn build_services() -> (
         write_validator,
         Arc::clone(&query_registry),
         Arc::new(SchemaService::new()),
-        Some(Arc::clone(&shape_registry)),
     ));
-    let sync_svc = Arc::new(SyncService::new_basic(
+    let sync_svc = Arc::new(SyncService::new(
         merkle_manager,
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
@@ -304,16 +294,6 @@ fn build_services() -> (
         config.node_id.clone(),
     ));
 
-    // Shape service: partial replication via filtered subscriptions.
-    // shape_registry was created earlier and shared with CrdtService.
-    let shape_merkle_manager = Arc::new(ShapeMerkleSyncManager::new());
-    let shape_svc = Arc::new(ShapeService::new(
-        Arc::clone(&shape_registry),
-        Arc::clone(&record_store_factory),
-        Arc::clone(&connection_registry),
-        Some(Arc::clone(&shape_merkle_manager)),
-    ));
-
     // Factory closure: creates a fresh OperationRouter + pipeline per worker.
     // Domain services are Arc-cloned (cheap reference count bump), while
     // each worker gets its own Tower middleware stack.
@@ -326,13 +306,12 @@ fn build_services() -> (
         router.register(service_names::COORDINATION, Arc::clone(&coordination_svc));
         router.register(service_names::SEARCH, Arc::clone(&search_svc));
         router.register(service_names::PERSISTENCE, Arc::clone(&persistence_svc));
-        router.register(service_names::SHAPE, Arc::clone(&shape_svc));
         build_operation_pipeline(router, &config)
     };
 
     let dispatch_config = DispatchConfig::default();
     let dispatcher = PartitionDispatcher::new(&dispatch_config, pipeline_factory);
-    (classify_svc, dispatcher, connection_registry, shape_registry)
+    (classify_svc, dispatcher, connection_registry)
 }
 
 /// Waits for SIGTERM or SIGINT (Ctrl+C) for graceful shutdown.

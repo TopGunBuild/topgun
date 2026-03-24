@@ -20,7 +20,6 @@ pub mod map_data_store;
 pub mod merkle_sync;
 pub mod mutation_observer;
 pub mod query_merkle;
-pub mod shape_merkle;
 pub mod record;
 pub mod record_store;
 

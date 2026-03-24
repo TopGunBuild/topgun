@@ -116,7 +116,6 @@ impl SimNode {
             write_validator,
             Arc::clone(&query_registry),
             Arc::new(SchemaService::new()),
-            None,
         ));
 
         let mut router = OperationRouter::new();
@@ -125,7 +124,7 @@ impl SimNode {
 
         router.register(
             service_names::SYNC,
-            Arc::new(SyncService::new_basic(
+            Arc::new(SyncService::new(
                 merkle_manager,
                 Arc::clone(&record_store_factory),
                 Arc::clone(&connection_registry),

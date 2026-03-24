@@ -85,7 +85,6 @@ mod tests {
             cluster_state: None,
             store_factory: None,
             server_config: None,
-            shape_registry: None,
         }
     }
 

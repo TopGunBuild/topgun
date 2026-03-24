@@ -57,14 +57,12 @@ fn parse_partition_prefix(path: &str) -> Option<(u32, String)> {
 use tracing::Instrument;
 
 use crate::network::connection::{ConnectionKind, ConnectionRegistry};
-use crate::service::domain::shape::ShapeRegistry;
 use crate::service::operation::{
     service_names, Operation, OperationError, OperationResponse,
 };
 use crate::service::registry::{ManagedService, ServiceContext};
 use crate::storage::merkle_sync::MerkleSyncManager;
 use crate::storage::record::RecordValue;
-use crate::storage::shape_merkle::ShapeMerkleSyncManager;
 use crate::storage::{CallerProvenance, ExpiryPolicy, RecordStoreFactory};
 
 // ---------------------------------------------------------------------------
@@ -111,44 +109,21 @@ pub struct SyncService {
     merkle_manager: Arc<MerkleSyncManager>,
     record_store_factory: Arc<RecordStoreFactory>,
     connection_registry: Arc<ConnectionRegistry>,
-    /// Per-shape Merkle manager for shape-prefixed bucket traversal.
-    /// `None` when shape sync is not wired (e.g. test server, sim harness).
-    shape_merkle_manager: Option<Arc<ShapeMerkleSyncManager>>,
-    /// Shape registry for resolving `map_name` from `shape_id` during traversal.
-    /// `None` when shape sync is not wired.
-    shape_registry: Option<Arc<ShapeRegistry>>,
 }
 
 impl SyncService {
-    /// Creates a new `SyncService` with full shape sync support.
+    /// Creates a new `SyncService`.
     #[must_use]
     pub fn new(
         merkle_manager: Arc<MerkleSyncManager>,
         record_store_factory: Arc<RecordStoreFactory>,
         connection_registry: Arc<ConnectionRegistry>,
-        shape_merkle_manager: Option<Arc<ShapeMerkleSyncManager>>,
-        shape_registry: Option<Arc<ShapeRegistry>>,
     ) -> Self {
         Self {
             merkle_manager,
             record_store_factory,
             connection_registry,
-            shape_merkle_manager,
-            shape_registry,
         }
-    }
-
-    /// Convenience constructor for callers that do not need shape sync.
-    ///
-    /// Equivalent to `new(..., None, None)`. Used by the test server, simulation
-    /// harness, and load harness — all of which do not wire shape Merkle trees.
-    #[must_use]
-    pub fn new_basic(
-        merkle_manager: Arc<MerkleSyncManager>,
-        record_store_factory: Arc<RecordStoreFactory>,
-        connection_registry: Arc<ConnectionRegistry>,
-    ) -> Self {
-        Self::new(merkle_manager, record_store_factory, connection_registry, None, None)
     }
 
     // -----------------------------------------------------------------------
@@ -277,17 +252,6 @@ impl SyncService {
             };
         }
 
-        // Shape-prefixed mode: path starts with a shape_id (not a 3-digit partition prefix).
-        // Path format: "<shape_id>/<partition_id>/<sub_path>".
-        // Detection: parse_partition_prefix returned None above AND path contains '/'.
-        if let Some(slash_pos) = path.find('/') {
-            let shape_id = path[..slash_pos].to_string();
-            let after_shape = path[slash_pos + 1..].to_string();
-            return self
-                .handle_shape_prefixed_bucket(&shape_id, &after_shape, map_name, path)
-                .await;
-        }
-
         // Aggregate mode: combine bucket hashes from all partitions.
         let combined_buckets = self.merkle_manager.aggregate_lww_buckets(&map_name, &path);
 
@@ -361,133 +325,6 @@ impl SyncService {
         ))))
     }
 
-    // -----------------------------------------------------------------------
-    // Shape-prefixed bucket handler (shape-aware Merkle traversal)
-    // -----------------------------------------------------------------------
-
-    /// Handles a `MerkleReqBucket` for a shape-prefixed path.
-    ///
-    /// Path format after the `shape_id` prefix is `"<partition_id>/<sub_path>"` (where
-    /// `sub_path` may be empty for the partition root). Delegates to
-    /// `ShapeMerkleSyncManager::with_tree` for tree access.
-    ///
-    /// Returns empty when shape sync dependencies are not wired.
-    async fn handle_shape_prefixed_bucket(
-        &self,
-        shape_id: &str,
-        after_shape: &str,
-        map_name: String,
-        full_path: String,
-    ) -> Result<OperationResponse, OperationError> {
-        let (Some(shape_merkle), Some(shape_reg)) =
-            (self.shape_merkle_manager.as_ref(), self.shape_registry.as_ref())
-        else {
-            return Ok(OperationResponse::Empty);
-        };
-
-        // Resolve map_name for this shape from the registry (used for record lookup).
-        let Some(active_shape) = shape_reg.get(shape_id) else {
-            return Ok(OperationResponse::Empty);
-        };
-        let shape_map_name = active_shape.shape.map_name.clone();
-
-        // Parse the partition_id from the leading segment of `after_shape`.
-        // After the shape_id prefix, the path is "<partition_id>" or "<partition_id>/<sub_path>".
-        let (partition_id, sub_path) = if let Some((pid_str, rest)) = after_shape.split_once('/') {
-            let pid: u32 = match pid_str.parse() {
-                Ok(p) => p,
-                Err(_) => return Ok(OperationResponse::Empty),
-            };
-            (pid, rest.to_string())
-        } else {
-            // Only partition_id, no sub_path yet — root of this partition's tree.
-            let pid: u32 = match after_shape.parse() {
-                Ok(p) => p,
-                Err(_) => return Ok(OperationResponse::Empty),
-            };
-            (pid, String::new())
-        };
-
-        // Access the shape's Merkle tree for this partition.
-        let node_data = shape_merkle.with_tree(shape_id, &shape_map_name, partition_id, |tree| {
-            match tree.get_node(&sub_path) {
-                Some(node) if !node.entries.is_empty() => {
-                    let keys: Vec<String> = node.entries.keys().cloned().collect();
-                    NodeData::Leaf(keys)
-                }
-                Some(_) => {
-                    let buckets = tree.get_buckets(&sub_path);
-                    NodeData::Internal(buckets)
-                }
-                None => NodeData::Missing,
-            }
-        });
-
-        let Some(node_data) = node_data else {
-            return Ok(OperationResponse::Empty);
-        };
-
-        match node_data {
-            NodeData::Leaf(keys) => {
-                let mut records = Vec::new();
-                for key in &keys {
-                    let key_partition = topgun_core::hash_to_partition(key);
-                    let store = self
-                        .record_store_factory
-                        .get_or_create(&shape_map_name, key_partition);
-                    match store.get(key, false).await {
-                        Ok(Some(record)) => {
-                            if let RecordValue::Lww { value, timestamp } = record.value {
-                                // Apply field projection so only shape-selected fields are sent.
-                                let rmpv_val = value_to_rmpv(&value);
-                                let projected = crate::service::domain::shape_evaluator::apply_shape(
-                                    &active_shape.shape,
-                                    &rmpv_val,
-                                )
-                                .unwrap_or(rmpv_val);
-                                records.push(SyncLeafRecord {
-                                    key: key.clone(),
-                                    record: topgun_core::LWWRecord {
-                                        value: Some(projected),
-                                        timestamp,
-                                        ttl_ms: None,
-                                    },
-                                });
-                            }
-                        }
-                        Ok(None) => {
-                            tracing::warn!(key = %key, partition = key_partition,
-                                "Shape Merkle leaf: record not found in store");
-                        }
-                        Err(e) => {
-                            tracing::error!(key = %key, partition = key_partition, error = %e,
-                                "Shape Merkle leaf: store.get() error");
-                        }
-                    }
-                }
-                Ok(OperationResponse::Message(Box::new(Message::SyncRespLeaf(
-                    SyncRespLeafMessage {
-                        payload: SyncRespLeafPayload { map_name, path: full_path, records },
-                    },
-                ))))
-            }
-            NodeData::Internal(buckets) => {
-                // Preserve the shape_id prefix and partition_id in bucket paths so the
-                // client continues using shape-prefixed paths on subsequent requests.
-                let shape_prefix = format!("{shape_id}/{partition_id}/");
-                let buckets: HashMap<String, u32> = buckets
-                    .into_iter()
-                    .map(|(c, h)| (format!("{shape_prefix}{sub_path}{c}"), h))
-                    .collect();
-                Ok(OperationResponse::Message(Box::new(Message::SyncRespBuckets(
-                    SyncRespBucketsMessage {
-                        payload: SyncRespBucketsPayload { map_name, path: full_path, buckets },
-                    },
-                ))))
-            }
-            NodeData::Missing => Ok(OperationResponse::Empty),
-        }
-    }
 
     // -----------------------------------------------------------------------
     // OR-Map handlers
@@ -944,7 +781,7 @@ mod tests {
         let merkle_manager = Arc::new(MerkleSyncManager::default());
         let record_store_factory = make_factory();
         let connection_registry = Arc::new(ConnectionRegistry::new());
-        Arc::new(SyncService::new_basic(
+        Arc::new(SyncService::new(
             merkle_manager,
             record_store_factory,
             connection_registry,
@@ -962,7 +799,7 @@ mod tests {
         merkle_manager.update_lww("users", 0, "user-1", 12345);
 
         let connection_registry = Arc::new(ConnectionRegistry::new());
-        let svc = Arc::new(SyncService::new_basic(
+        let svc = Arc::new(SyncService::new(
             Arc::clone(&merkle_manager),
             make_factory(),
             connection_registry,
@@ -1032,7 +869,7 @@ mod tests {
             merkle_manager.update_lww("users", 0, &key, i * 100 + 1);
         }
 
-        let svc = Arc::new(SyncService::new_basic(
+        let svc = Arc::new(SyncService::new(
             Arc::clone(&merkle_manager),
             make_factory(),
             Arc::new(ConnectionRegistry::new()),
@@ -1099,7 +936,7 @@ mod tests {
             format!("{level2_path}{third_char}")
         });
 
-        let svc = Arc::new(SyncService::new_basic(
+        let svc = Arc::new(SyncService::new(
             Arc::clone(&merkle_manager),
             make_factory(),
             Arc::new(ConnectionRegistry::new()),
@@ -1257,7 +1094,7 @@ mod tests {
         // Pre-populate the OR-Map tree so root hash is non-zero.
         merkle_manager.update_ormap("tags", 0, "tag-1", 99999);
 
-        let svc = Arc::new(SyncService::new_basic(
+        let svc = Arc::new(SyncService::new(
             Arc::clone(&merkle_manager),
             make_factory(),
             Arc::new(ConnectionRegistry::new()),
@@ -1332,7 +1169,7 @@ mod tests {
             merkle_manager.update_ormap("tags", 0, &key, i * 100 + 1);
         }
 
-        let svc = Arc::new(SyncService::new_basic(
+        let svc = Arc::new(SyncService::new(
             Arc::clone(&merkle_manager),
             make_factory(),
             Arc::new(ConnectionRegistry::new()),
@@ -1392,7 +1229,7 @@ mod tests {
             format!("{level2_path}{third_char}")
         });
 
-        let svc = Arc::new(SyncService::new_basic(
+        let svc = Arc::new(SyncService::new(
             Arc::clone(&merkle_manager),
             make_factory(),
             Arc::new(ConnectionRegistry::new()),
@@ -1525,7 +1362,7 @@ mod tests {
             vec![observer as Arc<dyn crate::storage::mutation_observer::MutationObserver>],
         ));
         let connection_registry = Arc::new(ConnectionRegistry::new());
-        let svc = Arc::new(SyncService::new_basic(
+        let svc = Arc::new(SyncService::new(
             Arc::clone(&merkle_manager),
             factory,
             connection_registry,
@@ -1667,7 +1504,7 @@ mod tests {
         merkle_manager.update_lww("users", 1, "alice", 111);
         merkle_manager.update_lww("users", 2, "bob", 222);
 
-        let svc = Arc::new(SyncService::new_basic(
+        let svc = Arc::new(SyncService::new(
             Arc::clone(&merkle_manager),
             make_factory(),
             Arc::new(ConnectionRegistry::new()),
@@ -1710,7 +1547,7 @@ mod tests {
             merkle_manager.update_lww("users", 42, &format!("key-{i}"), i * 100 + 1);
         }
 
-        let svc = Arc::new(SyncService::new_basic(
+        let svc = Arc::new(SyncService::new(
             Arc::clone(&merkle_manager),
             make_factory(),
             Arc::new(ConnectionRegistry::new()),
@@ -1762,7 +1599,7 @@ mod tests {
         merkle_manager.update_lww("users", 1, "alice", 111);
         merkle_manager.update_lww("users", 2, "bob", 222);
 
-        let svc = Arc::new(SyncService::new_basic(
+        let svc = Arc::new(SyncService::new(
             Arc::clone(&merkle_manager),
             make_factory(),
             Arc::new(ConnectionRegistry::new()),

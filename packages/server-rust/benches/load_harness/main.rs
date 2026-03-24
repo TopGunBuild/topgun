@@ -165,7 +165,6 @@ async fn main() {
                 cluster_state: None,
                 store_factory: None,
                 server_config: None,
-                shape_registry: None,
             };
 
             let ws_handler = get(topgun_server::network::handlers::ws_upgrade_handler);
@@ -480,9 +479,8 @@ fn build_services() -> (
         write_validator,
         Arc::clone(&query_registry),
         Arc::new(SchemaService::new()),
-        None,
     ));
-    let sync_svc = Arc::new(SyncService::new_basic(
+    let sync_svc = Arc::new(SyncService::new(
         merkle_manager,
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),

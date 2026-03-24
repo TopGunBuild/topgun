@@ -457,36 +457,6 @@ impl OperationService {
                 Ok(Operation::SqlQuery { ctx, payload })
             }
 
-            // ----- Shape domain (service_name = "shape") -----
-
-            Message::ShapeSubscribe(payload) => {
-                let ctx = self.make_ctx(
-                    service_names::SHAPE,
-                    client_id,
-                    caller_origin,
-                    None,
-                );
-                Ok(Operation::ShapeSubscribe { ctx, payload })
-            }
-            Message::ShapeUnsubscribe(payload) => {
-                let ctx = self.make_ctx(
-                    service_names::SHAPE,
-                    client_id,
-                    caller_origin,
-                    None,
-                );
-                Ok(Operation::ShapeUnsubscribe { ctx, payload })
-            }
-            Message::ShapeSyncInit(payload) => {
-                let ctx = self.make_ctx(
-                    service_names::SHAPE,
-                    client_id,
-                    caller_origin,
-                    None,
-                );
-                Ok(Operation::ShapeSyncInit { ctx, payload })
-            }
-
             // ----- Server-to-client responses -> ClassifyError::ServerToClient -----
 
             Message::OpAck(_) => Err(ClassifyError::ServerToClient { variant: "OpAck" }),
@@ -522,12 +492,6 @@ impl OperationService {
             }
             Message::QueryUpdate { .. } => {
                 Err(ClassifyError::ServerToClient { variant: "QueryUpdate" })
-            }
-            Message::ShapeResp(_) => {
-                Err(ClassifyError::ServerToClient { variant: "ShapeResp" })
-            }
-            Message::ShapeUpdate(_) => {
-                Err(ClassifyError::ServerToClient { variant: "ShapeUpdate" })
             }
             Message::SearchResp { .. } => {
                 Err(ClassifyError::ServerToClient { variant: "SearchResp" })

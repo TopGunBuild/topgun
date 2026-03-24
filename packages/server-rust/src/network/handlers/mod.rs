@@ -29,7 +29,6 @@ use crate::service::classify::OperationService;
 use crate::service::config::ServerConfig;
 use crate::service::dispatch::PartitionDispatcher;
 use crate::service::middleware::ObservabilityHandle;
-use crate::service::domain::shape::ShapeRegistry;
 use crate::storage::factory::RecordStoreFactory;
 
 /// Shared application state passed to all axum handlers via `State` extraction.
@@ -73,11 +72,6 @@ pub struct AppState {
     ///
     /// `None` in network-only tests that do not wire the storage layer.
     pub store_factory: Option<Arc<RecordStoreFactory>>,
-    /// Shape registry for tracking active shape subscriptions per connection.
-    ///
-    /// `None` in tests that do not wire the shape layer. Set to `Some` in
-    /// production to clean up shape subscriptions on WebSocket disconnect.
-    pub shape_registry: Option<Arc<ShapeRegistry>>,
     /// Hot-reloadable server configuration wrapped in `ArcSwap`.
     ///
     /// Introduced specifically for admin settings hot-reload. Existing services

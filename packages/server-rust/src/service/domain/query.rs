@@ -583,8 +583,7 @@ impl QueryService {
         // Apply field projection if specified
         if let Some(ref proj_fields) = fields {
             for entry in &mut results {
-                entry.value =
-                    super::shape_evaluator::project(proj_fields, &entry.value);
+                entry.value = project_fields(proj_fields, &entry.value);
             }
         }
 
@@ -886,6 +885,32 @@ fn extract_rmpv_value(record_value: &RecordValue) -> rmpv::Value {
         RecordValue::Lww { ref value, .. } => value_to_rmpv(value),
         RecordValue::OrMap { .. } | RecordValue::OrTombstones { .. } => rmpv::Value::Nil,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Field projection helper (inlined from shape_evaluator)
+// ---------------------------------------------------------------------------
+
+/// Projects a record to include only the specified fields.
+///
+/// Strips non-projected fields from a Map value, returning the projected subset.
+/// If the record is not a Map, returns it unchanged (cloned).
+#[must_use]
+pub(crate) fn project_fields(fields: &[String], record: &rmpv::Value) -> rmpv::Value {
+    let Some(map) = record.as_map() else {
+        return record.clone();
+    };
+
+    let projected: Vec<(rmpv::Value, rmpv::Value)> = map
+        .iter()
+        .filter(|(k, _)| {
+            k.as_str()
+                .is_some_and(|key_str| fields.iter().any(|f| f == key_str))
+        })
+        .cloned()
+        .collect();
+
+    rmpv::Value::Map(projected)
 }
 
 // ---------------------------------------------------------------------------
@@ -1723,8 +1748,6 @@ mod tests {
     /// result value has only the `name` field.
     #[test]
     fn field_projection_on_query_resp() {
-        use super::super::shape_evaluator::project;
-
         // Simulate a record with multiple fields
         let value = rmpv::Value::Map(vec![
             (rmpv::Value::String("name".into()), rmpv::Value::String("Alice".into())),
@@ -1733,7 +1756,7 @@ mod tests {
         ]);
 
         let fields = vec!["name".to_string()];
-        let projected = project(&fields, &value);
+        let projected = project_fields(&fields, &value);
 
         // Projected value should only contain "name"
         let map = projected.as_map().expect("projected should be a map");
@@ -1760,8 +1783,6 @@ mod tests {
     #[test]
     fn max_query_records_clamping() {
         use super::super::predicate::execute_query;
-        use super::super::shape_evaluator;
-
         // Create 15 entries with two fields each
         let entries: Vec<(String, rmpv::Value)> = (0..15)
             .map(|i| {
@@ -1794,7 +1815,7 @@ mod tests {
         // Step 2: Project fields on the clamped set (same order as service)
         let proj_fields = vec!["name".to_string()];
         for entry in &mut results {
-            entry.value = shape_evaluator::project(&proj_fields, &entry.value);
+            entry.value = project_fields(&proj_fields, &entry.value);
         }
 
         // Verify projection applied to clamped results
