@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-24 — SPEC-140 docs audit created TODO-174 (adaptive-indexing), TODO-175 (distributed locks), TODO-176 (entry processor), TODO-177 (indexing), TODO-178 (interceptors), TODO-179 (conflict resolvers); prev: TODO-172 converted to SPEC-140, TODO-173 (Shapes docs), TODO-171 (RBAC)
+**Last updated:** 2026-03-24 — TODO-173 converted to SPEC-141; prev: SPEC-140 docs audit created TODO-174–179, TODO-172→SPEC-140, TODO-171 (RBAC)
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -87,27 +87,6 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
   - `server-rust/src/service/security.rs` — `WriteValidator`, `SecurityConfig` (extend)
   - `server-rust/src/network/connection.rs` — `MapPermissions { read, write }` (extend with policy evaluation)
   - `server-rust/src/network/handlers/auth.rs` — role extraction (exists, works)
-
-### TODO-173: Shapes / Partial Replication Documentation
-- **Priority:** P1 (key v2.0 feature, no docs = invisible to users)
-- **Complexity:** Small
-- **Summary:** Add `guides/shapes.mdx` documentation page for Shapes (partial replication). Cover: concept (subscribe to data subsets), `subscribeShape()` API, `ShapeHandle` lifecycle (records, updates, unsubscribe), filter syntax, field projection, limit, server-side evaluation, Merkle sync per shape, reconnect resubscription. Include React hook examples if `useShape` exists, otherwise show `SyncEngine.subscribeShape()` pattern.
-- **Depends on:** TODO-070 ✓ (Shapes implemented)
-- **Effort:** 0.5-1 day
-- **Source code for examples:**
-  - TS client: `packages/client/src/SyncEngine.ts` (`subscribeShape()`), `packages/client/src/shapes/ShapeManager.ts`, `packages/client/src/shapes/ShapeHandle.ts`
-  - Core schemas: `packages/core/src/schemas/shape.ts` (Zod schemas for SyncShape, ShapeUpdate, ShapeResp)
-  - Integration tests: `tests/integration-rust/shapes.test.ts` — working examples of subscribe/update/unsubscribe
-  - Server: `packages/server-rust/src/service/domain/shape/` — ShapeService, ShapeEvaluator, ShapeRegistry
-- **Sections:**
-  - [ ] What are Shapes (concept: partial replication, subscribe to subsets)
-  - [ ] Basic usage: `subscribeShape({ mapName, filter, fields, limit })`
-  - [ ] ShapeHandle API: `records`, `on('update')`, `unsubscribe()`
-  - [ ] Filter syntax (predicate expressions)
-  - [ ] Field projection (select specific fields)
-  - [ ] Limits and pagination (server-side `limit`, `has_more`)
-  - [ ] Offline behavior (shapes survive reconnection, auto-resubscribe)
-  - [ ] Performance considerations (one Merkle tree per shape)
 
 ### TODO-174: Adaptive Indexing — Rust Port
 - **Priority:** P3
