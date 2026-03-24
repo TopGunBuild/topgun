@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-24 — TODO-184 converted to SPEC-145; prev: TODO-183 converted to SPEC-144, TODO-182 converted to SPEC-143, TODO-181 converted to SPEC-142
+**Last updated:** 2026-03-24 — TODO-184 cleaned up (completed via SPEC-145); prev: TODO-184 converted to SPEC-145
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -53,9 +53,6 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 
 ### TODO-183: ~~Unified Query Client — Client-Side Merge~~ → Converted to SPEC-144
 - **Status:** Converted to SPEC-144
-
-### TODO-184: ~~Shape Cleanup — Remove Deprecated Code~~ → Converted to SPEC-145
-- **Status:** Converted to SPEC-145
 
 ### TODO-171: RBAC — Role-Based Access Control Implementation
 - **Priority:** P2 (documented but not implemented — expectation gap for adopters)
