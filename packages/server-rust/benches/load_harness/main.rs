@@ -514,11 +514,16 @@ fn build_services() -> (
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
     ));
+    let query_merkle_manager = Arc::new(
+        topgun_server::storage::query_merkle::QueryMerkleSyncManager::new(),
+    );
     let query_svc = Arc::new(QueryService::new(
         Arc::clone(&query_registry),
         Arc::clone(&record_store_factory),
         Arc::clone(&connection_registry),
         Arc::new(PredicateBackend),
+        Some(Arc::clone(&query_merkle_manager)),
+        config.max_query_records,
     ));
     let messaging_svc = Arc::new(MessagingService::new(Arc::clone(&connection_registry)));
     let coordination_svc = Arc::new(CoordinationService::new(

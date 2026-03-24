@@ -58,7 +58,12 @@ impl QueryMerkleSyncManager {
         partition_id: u32,
         matching_keys: &[(String, u32)],
     ) {
-        todo!()
+        let key = (query_id.to_string(), map_name.to_string(), partition_id);
+        let mut tree = MerkleTree::new(self.depth);
+        for (k, h) in matching_keys {
+            tree.update(k, *h);
+        }
+        self.trees.insert(key, Mutex::new(tree));
     }
 
     /// Updates a single entry in the query's Merkle tree.
@@ -73,7 +78,10 @@ impl QueryMerkleSyncManager {
         key: &str,
         hash: u32,
     ) {
-        todo!()
+        let k = (query_id.to_string(), map_name.to_string(), partition_id);
+        if let Some(entry) = self.trees.get(&k) {
+            entry.lock().update(key, hash);
+        }
     }
 
     /// Removes an entry from the query's Merkle tree.
@@ -87,7 +95,10 @@ impl QueryMerkleSyncManager {
         partition_id: u32,
         key: &str,
     ) {
-        todo!()
+        let k = (query_id.to_string(), map_name.to_string(), partition_id);
+        if let Some(entry) = self.trees.get(&k) {
+            entry.lock().remove(key);
+        }
     }
 
     /// Returns the root hash for `(query_id, map_name, partition_id)`.
@@ -95,7 +106,10 @@ impl QueryMerkleSyncManager {
     /// Returns `0` if no tree exists for the given triple.
     #[must_use]
     pub fn get_root_hash(&self, query_id: &str, map_name: &str, partition_id: u32) -> u32 {
-        todo!()
+        let k = (query_id.to_string(), map_name.to_string(), partition_id);
+        self.trees
+            .get(&k)
+            .map_or(0, |entry| entry.lock().get_root_hash())
     }
 
     /// Computes the aggregate root hash across all partitions for `(query_id, map_name)`.
@@ -105,7 +119,16 @@ impl QueryMerkleSyncManager {
     /// non-deterministic iteration order. Returns `0` if no partitions exist.
     #[must_use]
     pub fn aggregate_query_root_hash(&self, query_id: &str, map_name: &str) -> u32 {
-        todo!()
+        self.trees
+            .iter()
+            .filter(|entry| {
+                let (qid, mn, _) = entry.key();
+                qid == query_id && mn == map_name
+            })
+            .fold(0u32, |acc, entry| {
+                let hash = entry.value().lock().get_root_hash();
+                acc.wrapping_add(hash)
+            })
     }
 
     /// Removes all Merkle trees for a given `query_id`.
@@ -114,7 +137,7 @@ impl QueryMerkleSyncManager {
     /// the shard lock internally -- safe for removing during iteration, without
     /// the deadlock risk of external iteration-while-removing.
     pub fn cleanup_query(&self, query_id: &str) {
-        todo!()
+        self.trees.retain(|(qid, _, _), _| qid != query_id);
     }
 
     /// Provides closure-based mutable access to the tree for `(query_id, map_name, partition_id)`.
@@ -131,7 +154,11 @@ impl QueryMerkleSyncManager {
         partition_id: u32,
         f: impl FnOnce(&mut MerkleTree) -> R,
     ) -> Option<R> {
-        todo!()
+        let k = (query_id.to_string(), map_name.to_string(), partition_id);
+        self.trees.get(&k).map(|entry| {
+            let mut guard = entry.lock();
+            f(&mut guard)
+        })
     }
 }
 

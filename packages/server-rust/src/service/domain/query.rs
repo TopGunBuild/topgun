@@ -18,7 +18,7 @@ use tower::Service;
 use topgun_core::messages::base::{ChangeEventType, Query};
 use topgun_core::messages::client_events::QueryUpdatePayload;
 use topgun_core::messages::query::{QueryRespMessage, QueryRespPayload};
-use topgun_core::messages::Message;
+use topgun_core::messages::{Message, SyncRespRootMessage, SyncRespRootPayload};
 
 use tracing::Instrument;
 
@@ -133,6 +133,19 @@ impl QueryRegistry {
             .into_iter()
             .map(|sub| sub.connection_id)
             .collect()
+    }
+
+    /// Looks up a subscription by `query_id` across all maps.
+    ///
+    /// Used by `handle_query_sync_init` to resolve the `map_name` for a query.
+    #[must_use]
+    pub fn get_subscription(&self, query_id: &str) -> Option<Arc<QuerySubscription>> {
+        for entry in self.subscriptions.iter() {
+            if let Some(sub) = entry.value().get(query_id) {
+                return Some(sub.value().clone());
+            }
+        }
+        None
     }
 
     /// Total subscription count across all maps (for testing).
@@ -354,18 +367,29 @@ pub struct QueryService {
     #[allow(dead_code)]
     connection_registry: Arc<ConnectionRegistry>,
     query_backend: Arc<dyn QueryBackend>,
+    /// Per-query Merkle manager for delta sync init.
+    /// `None` when query Merkle sync is not wired (test ergonomics).
+    query_merkle_manager: Option<Arc<crate::storage::query_merkle::QueryMerkleSyncManager>>,
+    /// Maximum records returned in a single QUERY_RESP. Queries matching more
+    /// records are clamped to this limit with `has_more: true`.
+    max_query_records: u32,
     #[cfg(feature = "datafusion")]
     sql_query_backend: Option<Arc<dyn crate::service::domain::query_backend::SqlQueryBackend>>,
 }
 
 impl QueryService {
     /// Creates a new `QueryService` with its required dependencies.
+    ///
+    /// Pass `Some(query_merkle_manager)` to enable per-query Merkle sync init.
+    /// Pass `None` to keep existing call sites working unchanged.
     #[must_use]
     pub fn new(
         query_registry: Arc<QueryRegistry>,
         record_store_factory: Arc<RecordStoreFactory>,
         connection_registry: Arc<ConnectionRegistry>,
         query_backend: Arc<dyn QueryBackend>,
+        query_merkle_manager: Option<Arc<crate::storage::query_merkle::QueryMerkleSyncManager>>,
+        max_query_records: u32,
         #[cfg(feature = "datafusion")]
         sql_query_backend: Option<Arc<dyn crate::service::domain::query_backend::SqlQueryBackend>>,
     ) -> Self {
@@ -374,6 +398,8 @@ impl QueryService {
             record_store_factory,
             connection_registry,
             query_backend,
+            query_merkle_manager,
+            max_query_records,
             #[cfg(feature = "datafusion")]
             sql_query_backend,
         }
@@ -445,6 +471,9 @@ impl Service<Operation> for Arc<QueryService> {
                     Operation::QueryUnsubscribe { ctx, payload } => {
                         svc.handle_query_unsubscribe(&ctx, &payload)
                     }
+                    Operation::QuerySyncInit { ctx, payload } => {
+                        svc.handle_query_sync_init(&ctx, payload).await
+                    }
                     Operation::SqlQuery { ctx, payload } => {
                         svc.handle_sql_query(&ctx, &payload).await
                     }
@@ -464,11 +493,13 @@ impl QueryService {
     /// Handles a `QuerySubscribe` operation.
     ///
     /// 1. Extracts `connection_id` from context (error if missing).
-    /// 2. Gets or creates `RecordStore` for the target map and partition.
-    /// 3. Iterates all records, converting each `RecordValue` to `rmpv::Value`.
-    /// 4. Delegates to `query_backend.execute_query()` for filtering, sorting, and limiting.
-    /// 5. Registers a standing `QuerySubscription` in the registry.
-    /// 6. Returns `QueryResp` with initial results.
+    /// 2. Scans all partitions, collecting entries and Merkle key-hash pairs.
+    /// 3. Delegates to `query_backend.execute_query()` for filtering, sorting, and limiting.
+    /// 4. Applies `max_query_records` clamping with `has_more` flag.
+    /// 5. Applies field projection if `fields` is specified.
+    /// 6. Initializes per-query Merkle trees and computes aggregate root hash.
+    /// 7. Registers a standing `QuerySubscription` in the registry.
+    /// 8. Returns `QueryResp` with initial results.
     async fn handle_query_subscribe(
         &self,
         ctx: &crate::service::operation::OperationContext,
@@ -483,6 +514,7 @@ impl QueryService {
         let query_id = payload.payload.query_id.clone();
         let map_name = payload.payload.map_name.clone();
         let query = payload.payload.query.clone();
+        let fields = payload.payload.fields.clone();
 
         // Scan ALL partitions for this map to aggregate entries across the full key space.
         // Keys are deterministically mapped to partitions via hash_to_partition,
@@ -490,39 +522,110 @@ impl QueryService {
         let stores = self.record_store_factory.get_all_for_map(&map_name);
 
         let mut entries: Vec<(String, rmpv::Value)> = Vec::new();
+        // Collect (partition_id, key, hash) for Merkle tree initialization.
+        let mut key_hash_pairs_by_partition: Vec<(u32, Vec<(String, u32)>)> = Vec::new();
+
         for store in &stores {
+            let partition_id = store.partition_id();
+            let mut partition_hashes: Vec<(String, u32)> = Vec::new();
+
             store.for_each_boxed(
                 &mut |key, record| {
-                    if let RecordValue::Lww { ref value, .. } = record.value {
-                        entries.push((key.to_string(), value_to_rmpv(value)));
+                    if let RecordValue::Lww {
+                        ref value,
+                        ref timestamp,
+                    } = record.value
+                    {
+                        let rmpv_value = value_to_rmpv(value);
+                        entries.push((key.to_string(), rmpv_value));
+
+                        // Compute hash for Merkle tree (same pattern as ShapeService).
+                        let item_hash = topgun_core::hash::fnv1a_hash(&format!(
+                            "{}:{}:{}:{}",
+                            key, timestamp.millis, timestamp.counter, timestamp.node_id
+                        ));
+                        partition_hashes.push((key.to_string(), item_hash));
                     }
                     // Skip OrMap/OrTombstones records for query evaluation
                 },
                 false, // not backup
             );
+
+            if !partition_hashes.is_empty() {
+                key_hash_pairs_by_partition.push((partition_id, partition_hashes));
+            }
         }
 
         // Delegate to query backend for filtering, sorting, and limiting
-        let results = self
+        let mut results = self
             .query_backend
             .execute_query(&map_name, entries, &query)
             .await
             .map_err(|e| OperationError::Internal(anyhow::anyhow!("{e}")))?;
 
-        // Build previous_result_keys from results
+        // Apply max_query_records clamping
+        let total_count = results.len();
+        let max = self.max_query_records as usize;
+        let has_more = if total_count > max {
+            tracing::info!(
+                query_id = %query_id,
+                total_count = total_count,
+                max_query_records = max,
+                "Clamping query results to max_query_records limit"
+            );
+            results.truncate(max);
+            Some(true)
+        } else {
+            None
+        };
+
+        // Apply field projection if specified
+        if let Some(ref proj_fields) = fields {
+            for entry in &mut results {
+                entry.value =
+                    super::shape_evaluator::project(proj_fields, &entry.value);
+            }
+        }
+
+        // Build previous_result_keys from results (after clamping, before Merkle)
         let previous_keys = DashSet::new();
         for entry in &results {
             previous_keys.insert(entry.key.clone());
         }
 
-        // Register standing subscription
+        // Initialize per-query Merkle trees for matching records
+        if let Some(ref merkle) = self.query_merkle_manager {
+            // Only insert keys that are in the result set into Merkle trees.
+            // Build a set of result keys for fast lookup.
+            let result_key_set: HashSet<&str> =
+                results.iter().map(|e| e.key.as_str()).collect();
+
+            for (partition_id, partition_hashes) in &key_hash_pairs_by_partition {
+                let matching: Vec<(String, u32)> = partition_hashes
+                    .iter()
+                    .filter(|(k, _)| result_key_set.contains(k.as_str()))
+                    .cloned()
+                    .collect();
+                if !matching.is_empty() {
+                    merkle.init_tree(&query_id, &map_name, *partition_id, &matching);
+                }
+            }
+        }
+
+        // Compute aggregate Merkle root hash across all partitions
+        let merkle_root_hash = self
+            .query_merkle_manager
+            .as_ref()
+            .map(|m| m.aggregate_query_root_hash(&query_id, &map_name));
+
+        // Register standing subscription (with fields for future QUERY_UPDATE projection)
         let subscription = QuerySubscription {
             query_id: query_id.clone(),
             connection_id,
             map_name,
             query,
             previous_result_keys: previous_keys,
-            fields: None,
+            fields,
         };
         self.query_registry.register(subscription);
 
@@ -532,9 +635,9 @@ impl QueryService {
                 query_id,
                 results,
                 next_cursor: None,
-                has_more: None,
+                has_more,
                 cursor_status: None,
-                merkle_root_hash: None,
+                merkle_root_hash,
             },
         });
 
@@ -548,9 +651,56 @@ impl QueryService {
         _ctx: &crate::service::operation::OperationContext,
         payload: &topgun_core::messages::query::QueryUnsubMessage,
     ) -> Result<OperationResponse, OperationError> {
+        // Clean up Merkle trees for this query
+        if let Some(ref merkle) = self.query_merkle_manager {
+            merkle.cleanup_query(&payload.payload.query_id);
+        }
         let _ = self.query_registry
             .unregister(&payload.payload.query_id);
         Ok(OperationResponse::Empty)
+    }
+
+    /// Handles a `QuerySyncInit` operation.
+    ///
+    /// Client sends its stored query Merkle root hash. The server computes the aggregate
+    /// query root hash across all partitions and responds with `SyncRespRootMessage`.
+    ///
+    /// If the hashes differ, the client drives traversal via `MerkleReqBucket` messages
+    /// with query-prefixed paths (e.g. `"query:<query_id>/<partition_id>/<sub_path>"`).
+    /// Parsing of query-prefixed bucket paths in `SyncService` is deferred to a follow-up spec.
+    ///
+    /// Returns `OperationResponse::Empty` when query Merkle sync is not wired
+    /// (i.e. `query_merkle_manager` is `None`).
+    #[allow(clippy::unused_async)]
+    async fn handle_query_sync_init(
+        &self,
+        ctx: &crate::service::operation::OperationContext,
+        payload: topgun_core::messages::query::QuerySyncInitMessage,
+    ) -> Result<OperationResponse, OperationError> {
+        let Some(query_merkle) = self.query_merkle_manager.as_ref() else {
+            return Ok(OperationResponse::Empty);
+        };
+
+        let query_id = payload.payload.query_id;
+
+        // Look up map_name for this query from the registry.
+        let Some(sub) = self.query_registry.get_subscription(&query_id) else {
+            return Ok(OperationResponse::Empty);
+        };
+        let map_name = sub.map_name.clone();
+
+        // Compute the server's aggregate query root hash across all partitions.
+        let root_hash = query_merkle.aggregate_query_root_hash(&query_id, &map_name);
+
+        Ok(OperationResponse::Message(Box::new(Message::SyncRespRoot(
+            SyncRespRootMessage {
+                payload: SyncRespRootPayload {
+                    map_name,
+                    root_hash,
+                    timestamp: ctx.timestamp.clone(),
+                },
+            },
+        ))))
     }
 
     /// Handles a `SqlQuery` operation.
@@ -1268,6 +1418,8 @@ mod tests {
             factory,
             conn_registry,
             Arc::new(PredicateBackend),
+            None,
+            10_000,
             #[cfg(feature = "datafusion")]
             None,
         );
@@ -1284,6 +1436,8 @@ mod tests {
             factory,
             conn_registry,
             Arc::new(PredicateBackend),
+            None,
+            10_000,
             #[cfg(feature = "datafusion")]
             None,
         ));
@@ -1304,6 +1458,8 @@ mod tests {
             factory,
             conn_registry,
             Arc::new(PredicateBackend),
+            None,
+            10_000,
             #[cfg(feature = "datafusion")]
             None,
         ));
@@ -1336,6 +1492,8 @@ mod tests {
             factory,
             conn_registry,
             Arc::new(PredicateBackend),
+            None,
+            10_000,
             #[cfg(feature = "datafusion")]
             None,
         ));
@@ -1428,6 +1586,8 @@ mod tests {
             factory,
             conn_registry,
             Arc::new(PredicateBackend),
+            None,
+            10_000,
             #[cfg(feature = "datafusion")]
             None,
         ));

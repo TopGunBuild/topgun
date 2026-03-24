@@ -139,6 +139,8 @@ impl SimNode {
                 Arc::clone(&record_store_factory),
                 Arc::clone(&connection_registry),
                 Arc::new(crate::service::domain::query_backend::PredicateBackend),
+                None,
+                10_000,
                 #[cfg(feature = "datafusion")]
                 None,
             )),
