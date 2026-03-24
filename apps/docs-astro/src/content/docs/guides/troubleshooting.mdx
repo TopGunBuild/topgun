@@ -1,0 +1,168 @@
+---
+title: Troubleshooting
+description: Solutions for common TopGun issues
+order: 25
+---
+
+# Troubleshooting
+
+This guide covers common issues you may encounter when using TopGun, organized by category.
+
+---
+
+## CRDT Merge Edge Cases
+
+### Data reverted after reconnect
+
+**Symptom:** After going offline and reconnecting, some of your local changes appear to revert to an older state.
+
+**Cause:** TopGun uses Hybrid Logical Clocks (HLC) to order writes. Each write carries a timestamp of `{millis, counter, nodeId}`. When two clients write to the same field, the write with the higher HLC timestamp wins (Last-Write-Wins semantics). If your local clock is behind the server or another client, your writes may have lower timestamps.
+
+**Solutions:**
+- Ensure system clocks are reasonably synchronized (NTP). TopGun tolerates moderate clock skew, but large drift (minutes+) can cause unexpected ordering
+- Check that `nodeId` is unique per client instance -- duplicate node IDs cause HLC collisions
+- Remember that LWW is per-field, not per-record. Only the conflicting fields revert; other fields retain their values
+
+### Concurrent edits lost
+
+**Symptom:** Two users edit different items in a collection simultaneously, but one user's additions disappear after sync.
+
+**Cause:** If you are using `LWWMap` for a collection where items are added and removed concurrently, LWW semantics may cause one write to overwrite another when they modify the same key.
+
+**Solutions:**
+- Use `ORMap` (Observed-Remove Map) for collections where concurrent additions and removals are expected. ORMap uses unique tags to track each add operation, allowing concurrent adds to coexist
+- Reserve `LWWMap` for single-document fields where last-write-wins is the desired behavior
+- See the [Data Structures guide](/docs/concepts/data-structures) for details on when to use each CRDT type
+
+### Stale data after merge
+
+**Symptom:** After a sync cycle completes, some records still show old values even though newer writes exist on the server.
+
+**Cause:** MerkleTree-based delta sync compares hash digests to determine which records need syncing. If the sync was interrupted or only partially completed, some records may not have been transferred yet.
+
+**Solutions:**
+- Wait for the sync cycle to fully complete. Check the `SyncEngine` connection state -- it should transition to `connected` and then `synced`
+- For large datasets, sync happens in batches. Initial sync after a long offline period may take several seconds
+- If the issue persists, the client's local MerkleTree may be corrupted. Clearing IndexedDB storage and re-syncing will rebuild it from the server
+
+---
+
+## WebSocket Connection Issues
+
+### Connection drops repeatedly
+
+**Symptom:** The client connects briefly then disconnects in a loop, or never establishes a stable connection.
+
+**Solutions:**
+- Verify the server address format: use `ws://` for local development and `wss://` for production (TLS)
+- Check that the server is actually running and listening on the expected port
+- If behind a reverse proxy (nginx, Cloudflare), ensure WebSocket upgrade headers are forwarded. Common nginx configuration:
+  ```
+  proxy_http_version 1.1;
+  proxy_set_header Upgrade $http_upgrade;
+  proxy_set_header Connection "upgrade";
+  ```
+- Increase proxy timeout settings. Many proxies close idle WebSocket connections after 60 seconds. TopGun sends heartbeats, but aggressive proxy timeouts can still cause drops
+
+### Sync not working behind corporate proxy
+
+**Symptom:** The application works on home WiFi but fails to sync in a corporate environment.
+
+**Cause:** Many corporate proxies block WebSocket upgrade requests (`HTTP 101 Switching Protocols`) or filter non-HTTP traffic.
+
+**Solutions:**
+- Use `wss://` (WebSocket over TLS) which is harder for proxies to inspect and block
+- If the proxy terminates TLS, you may need to configure the proxy to allow WebSocket upgrades
+- Check with your network administrator whether WebSocket traffic is explicitly blocked
+- TopGun clients automatically queue writes when offline and sync when connectivity is restored, so the application remains usable even if sync is intermittently blocked
+
+### Authentication failed
+
+**Symptom:** Connection is rejected with an authentication error, or the server returns a 401/403 status.
+
+**Cause:** TopGun uses JWT tokens for authentication. The token must contain a `sub` (subject) claim per RFC 7519.
+
+**Solutions:**
+- Verify your JWT token has not expired. Check the `exp` claim
+- Ensure the token contains a `sub` claim with the user ID. TopGun uses only the standard `sub` claim -- there is no custom `userId` field
+- Verify the token is signed with the same secret or key pair configured on the server
+- Check that the token is passed correctly in the connection configuration:
+  ```typescript
+  const client = new TopGunClient({
+    serverUrl: 'wss://your-server.com',
+    auth: { token: 'your-jwt-token' }
+  });
+  ```
+
+---
+
+## IndexedDB Persistence
+
+### Data gone after browser update
+
+**Symptom:** After a browser update or clearing browser data, locally stored records are gone.
+
+**Cause:** IndexedDB storage can be evicted by the browser under storage pressure, especially if the site is not installed as a PWA or if the user has not interacted with it recently.
+
+**Solutions:**
+- Request persistent storage to reduce eviction risk:
+  ```typescript
+  if (navigator.storage && navigator.storage.persist) {
+    const granted = await navigator.storage.persist();
+    console.log('Persistent storage granted:', granted);
+  }
+  ```
+- Inform users that critical data is synced to the server. Local storage is a cache for offline access, not the sole source of truth
+- Consider using a Service Worker to register the app as a PWA, which gives it higher storage priority
+
+### Slow startup with large dataset
+
+**Symptom:** The application takes several seconds to become interactive when there is a lot of data in IndexedDB.
+
+**Cause:** On startup, the `IDBAdapter` loads stored records into memory to hydrate the local CRDT state.
+
+**Solutions:**
+- Use selective sync to limit which data is loaded at startup. Only subscribe to the maps and queries your initial view needs
+- Paginate large collections using query limits rather than loading everything at once
+- Consider using `fields` projection in queries to load only the fields you need for list views, then fetch full records on demand
+
+---
+
+## Server Startup
+
+### Port already in use
+
+**Symptom:** The server fails to start with "Address already in use" error.
+
+**Solutions:**
+- Check if another TopGun instance or other service is using the port:
+  ```bash
+  lsof -i :8080
+  ```
+- Kill the existing process or choose a different port:
+  ```bash
+  PORT=8081 cargo run --bin test-server --release
+  ```
+- If running in development, ensure previous server processes are terminated before restarting
+
+### PostgreSQL connection failed
+
+**Symptom:** The server starts but fails to connect to PostgreSQL, logging connection errors.
+
+**Solutions:**
+- Verify the connection string format: `postgresql://user:password@host:port/database`
+- Check that PostgreSQL is running and accepting connections on the configured host and port
+- If using SSL, ensure the `sslmode` parameter matches your PostgreSQL configuration (e.g., `sslmode=require` or `sslmode=prefer`)
+- Verify the database exists and the user has appropriate permissions
+- Check PostgreSQL's `pg_hba.conf` for client authentication rules
+
+### Cluster nodes not discovering each other
+
+**Symptom:** Multiple server nodes are running but not forming a cluster. Each node operates independently.
+
+**Solutions:**
+- Verify that all nodes are configured with the same cluster name/identifier
+- Ensure the cluster port (separate from the client-facing WebSocket port) is accessible between nodes. Check firewall rules
+- Verify that nodes can resolve each other's hostnames or IP addresses
+- Check that the seed node addresses are correctly configured in each node's cluster configuration
+- Review server logs with `RUST_LOG=topgun_server=debug` to see cluster protocol messages and identify where discovery fails
