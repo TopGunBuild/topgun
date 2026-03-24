@@ -1,0 +1,169 @@
+---
+title: Schema & Type Safety
+description: Add TypeScript type safety to TopGun maps using the TopGun<T> generic class
+order: 13
+---
+
+# Schema & Type Safety
+
+TopGun provides compile-time type safety for your data through the `TopGun<T extends TopGunSchema>` generic class. This guide shows you how to define typed schemas and get full TypeScript autocomplete and error checking for your map operations.
+
+> **Important:** Type enforcement is compile-time only. There is no runtime validation or server-side schema enforcement in the current version. The types help catch mistakes during development but do not prevent invalid data from being written at runtime.
+
+---
+
+## What `TopGun<T>` Provides
+
+The `TopGun<T>` generic class gives you:
+
+- **Compile-time type checking** for map field names and value types
+- **Typed collection access** via `client.collection(name)` that returns a `CollectionWrapper<ItemType>` with correctly typed `get()` and `set()` methods
+- **Autocomplete** in your editor for field names and collection names
+
+The `TopGunSchema` type is defined as `Record<string, any>`. Your schema interface must satisfy this constraint.
+
+---
+
+## Defining Your Schema
+
+Create a TypeScript interface that describes your data collections:
+
+```typescript
+// Define the shape of each collection's items
+interface Todo {
+  id: string;
+  text: string;
+  completed: boolean;
+  createdAt: number;
+}
+
+interface UserProfile {
+  id: string;
+  name: string;
+  email: string;
+  avatar?: string;
+}
+
+// Define your schema mapping collection names to item types
+interface MyAppSchema extends Record<string, any> {
+  todos: Todo;
+  profiles: UserProfile;
+}
+```
+
+The schema interface maps collection names (as keys) to the item types stored in each collection.
+
+---
+
+## Typed Entry Point: `TopGun<T>`
+
+Instantiate the typed entry point by passing your schema type parameter:
+
+```typescript
+import { TopGun } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
+
+// Create a typed TopGun instance
+const client = new TopGun<MyAppSchema>({
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter()
+});
+
+client.start();
+```
+
+Now you can access collections with full type safety:
+
+```typescript
+// collection() returns CollectionWrapper<Todo>
+const todos = client.collection('todos');
+
+// get() returns Todo | undefined -- correctly typed
+const todo = todos.get('todo-1');
+if (todo) {
+  console.log(todo.text);       // OK: 'text' exists on Todo
+  console.log(todo.completed);  // OK: 'completed' exists on Todo
+  // console.log(todo.foo);     // ERROR: Property 'foo' does not exist on type 'Todo'
+}
+
+// set() accepts Todo -- correctly typed
+await todos.set({
+  id: 'todo-2',
+  text: 'Learn TopGun',
+  completed: false,
+  createdAt: Date.now()
+});
+
+// collection() returns CollectionWrapper<UserProfile>
+const profiles = client.collection('profiles');
+const profile = profiles.get('user-1');
+if (profile) {
+  console.log(profile.name);    // OK: 'name' exists on UserProfile
+}
+```
+
+TypeScript will flag errors at compile time if you:
+- Access a collection name that is not in your schema
+- Pass the wrong type to `set()`
+- Access a field that does not exist on the item type
+
+---
+
+## How Type Narrowing Works
+
+The typed narrowing works through the `TopGun<T>.collection(name)` path:
+
+1. `TopGun<T>` captures your schema type `T` (e.g., `MyAppSchema`)
+2. When you call `client.collection('todos')`, TypeScript looks up `T['todos']` to get the item type (`Todo`)
+3. The returned `CollectionWrapper<Todo>` has methods typed to `Todo`:
+   - `get(key: string): Todo | undefined`
+   - `set(value: Todo): Promise<Todo>`
+
+This narrowing is **only available via `TopGun<T>.collection(name)`**. It is not available through the direct `TopGunClient.getMap<K, V>(name)` path (see below).
+
+---
+
+## Typed vs. Untyped Access
+
+TopGun offers two ways to access data. Here is how they compare:
+
+### Typed: `TopGun<T>.collection(name)`
+
+```typescript
+const client = new TopGun<MyAppSchema>({
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter()
+});
+
+// Type is derived from the schema -- no manual type parameters needed
+const todos = client.collection('todos');
+const todo = todos.get('todo-1'); // Type: Todo | undefined
+```
+
+### Untyped: `TopGunClient.getMap<K, V>(name)`
+
+```typescript
+import { TopGunClient } from '@topgunbuild/client';
+
+const client = new TopGunClient({
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter()
+});
+
+// You must provide K and V type parameters manually
+const todosMap = client.getMap<string, Todo>('todos');
+
+// getMap returns LWWMap<string, Todo> -- lower-level CRDT access
+// No schema-level validation of the collection name
+```
+
+The `getMap<K, V>(name)` path accepts explicit `K` (key) and `V` (value) type parameters but does not derive them from a schema type. You are responsible for ensuring the type parameters match the actual data. The `TopGun<T>` path is recommended for application code because it centralizes your type definitions in one schema interface.
+
+---
+
+## Limitations
+
+- **Compile-time only.** Types are erased at runtime. If external code or another client writes data that does not match your interface, TypeScript will not catch it. Consider adding runtime checks for untrusted data
+- **No server-side enforcement.** The server does not validate data against your TypeScript schema. Any valid CRDT operation is accepted regardless of the value shape
+- **Schema evolution.** If you add or rename fields in your interface, existing data in storage will not be migrated. Use optional fields (`field?: type`) for new fields to handle records written before the schema change
+- **No cross-language schemas.** The TypeScript schema is only available in TypeScript. If you have non-TypeScript clients, they must independently maintain compatible type definitions
