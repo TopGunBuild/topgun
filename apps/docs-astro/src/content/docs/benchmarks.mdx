@@ -37,6 +37,8 @@ In fire-and-wait mode, each connection sends an `OpBatch`, waits for the server'
 
 Fire-and-wait latency represents the worst case for a client that needs confirmation before proceeding. In practice, TopGun clients write locally first (zero latency to the user) and sync in the background, so server-side latency does not affect the user experience.
 
+> **Note:** The CI baseline tracks p50 latency for regression detection. Running `cargo bench --bench load_harness` locally prints the full HDR histogram including p95 and p99 percentiles in the terminal output.
+
 ---
 
 ## Fire-and-Forget (Raw Throughput)
@@ -50,11 +52,11 @@ In fire-and-forget mode, connections send batches as fast as possible without wa
 
 ### What this means
 
-200K+ ops/sec throughput means the server can handle thousands of concurrent active users, each writing multiple times per second, on a single node. For context:
+100,000+ ops/sec throughput means the server can handle thousands of concurrent active users, each writing multiple times per second, on a single node. For context:
 
-- A collaborative document editor generating 10 ops/sec per user can support 20,000+ concurrent editors
-- A real-time dashboard ingesting sensor data at 100 ops/sec per source can handle 2,000+ data sources
-- A chat application sending 1 message/sec per user can support 200,000+ active chatters
+- A collaborative document editor generating 10 ops/sec per user can support 10,000+ concurrent editors
+- A real-time dashboard ingesting sensor data at 100 ops/sec per source can handle 1,000+ data sources
+- A chat application sending 1 message/sec per user can support 100,000+ active chatters
 
 ---
 
