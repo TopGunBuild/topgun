@@ -11,12 +11,12 @@ use crate::or_map::ORMap;
 // rmpv::Value -> Value conversion
 // ---------------------------------------------------------------------------
 
-/// Converts a wire-format `rmpv::Value` (MsgPack dynamic value) into a
+/// Converts a wire-format `rmpv::Value` (`MsgPack` dynamic value) into a
 /// `Value` for schema validation.
 ///
 /// All 10 `rmpv::Value` variants are handled. Non-string map keys are
-/// converted via `Display` to match existing MsgPack handling patterns.
-/// MsgPack extension types are mapped to `Value::Bytes`; the type tag is
+/// converted via `Display` to match existing `MsgPack` handling patterns.
+/// `MsgPack` extension types are mapped to `Value::Bytes`; the type tag is
 /// discarded because `Value` has no extension variant.
 /// Integer values exceeding `i64::MAX` are cast via `as i64` (wrapping),
 /// which is acceptable because schema integer constraints operate on
@@ -39,7 +39,7 @@ impl From<rmpv::Value> for Value {
             }
             rmpv::Value::F32(f) => Value::Float(f64::from(f)),
             rmpv::Value::F64(f) => Value::Float(f),
-            rmpv::Value::String(s) => Value::String(s.into_str().unwrap_or_default().to_owned()),
+            rmpv::Value::String(s) => Value::String(s.into_str().unwrap_or_default().clone()),
             rmpv::Value::Binary(b) => Value::Bytes(b),
             rmpv::Value::Array(a) => Value::Array(a.into_iter().map(Value::from).collect()),
             rmpv::Value::Map(m) => {
@@ -49,7 +49,7 @@ impl From<rmpv::Value> for Value {
                         // Extract the raw string from rmpv::Value::String to avoid
                         // the Display impl which wraps strings in double quotes.
                         let key = match k {
-                            rmpv::Value::String(s) => s.into_str().unwrap_or_default().to_owned(),
+                            rmpv::Value::String(s) => s.into_str().unwrap_or_default().clone(),
                             other => format!("{other}"),
                         };
                         (key, Value::from(v))
