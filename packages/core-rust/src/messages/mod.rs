@@ -35,7 +35,8 @@ pub use cluster::{
 
 pub use query::{
     CursorStatus, QueryRespMessage, QueryRespPayload, QueryResultEntry, QuerySubMessage,
-    QuerySubPayload, QueryUnsubMessage, QueryUnsubPayload, SqlQueryPayload, SqlQueryRespPayload,
+    QuerySubPayload, QuerySyncInitMessage, QuerySyncInitPayload, QueryUnsubMessage,
+    QueryUnsubPayload, SqlQueryPayload, SqlQueryRespPayload,
 };
 
 pub use search::{
@@ -202,6 +203,10 @@ pub enum Message {
     /// Server responds with query results.
     #[serde(rename = "QUERY_RESP")]
     QueryResp(QueryRespMessage),
+
+    /// Client initiates query Merkle delta sync reconnect.
+    #[serde(rename = "QUERY_SYNC_INIT")]
+    QuerySyncInit(QuerySyncInitMessage),
 
     /// SQL query request from client.
     #[serde(rename = "SQL_QUERY")]

@@ -46,6 +46,9 @@ pub struct QuerySubPayload {
     pub map_name: String,
     /// The query parameters (filter, sort, pagination).
     pub query: Query,
+    /// Optional list of field names to include in each result (projection).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fields: Option<Vec<String>>,
 }
 
 /// Query subscription request message.
@@ -115,6 +118,9 @@ pub struct QueryRespPayload {
     /// Optional status of the cursor.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cursor_status: Option<CursorStatus>,
+    /// Optional Merkle root hash for delta sync reconnect.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub merkle_root_hash: Option<u32>,
 }
 
 /// Query response message containing matching records.
@@ -126,6 +132,34 @@ pub struct QueryRespPayload {
 pub struct QueryRespMessage {
     /// The query response payload.
     pub payload: QueryRespPayload,
+}
+
+// ---------------------------------------------------------------------------
+// Query sync init messages (Merkle delta reconnect)
+// ---------------------------------------------------------------------------
+
+/// Payload for a query Merkle delta sync reconnect request.
+///
+/// Maps to `QuerySyncInitPayloadSchema` in `query-schemas.ts`.
+/// Sent by the client when reconnecting to resume from a known Merkle root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuerySyncInitPayload {
+    /// The query subscription identifier to resume.
+    pub query_id: String,
+    /// The client's current Merkle root hash.
+    pub root_hash: u32,
+}
+
+/// Query Merkle delta sync init message.
+///
+/// Maps to `QuerySyncInitMessageSchema` in `query-schemas.ts`.
+/// Uses payload wrapper pattern.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuerySyncInitMessage {
+    /// The sync init payload.
+    pub payload: QuerySyncInitPayload,
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +268,7 @@ mod tests {
                     limit: Some(100),
                     cursor: None,
                 },
+                fields: None,
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
@@ -277,6 +312,7 @@ mod tests {
                 next_cursor: Some("cursor-abc".to_string()),
                 has_more: Some(true),
                 cursor_status: Some(CursorStatus::Valid),
+                merkle_root_hash: None,
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
@@ -291,6 +327,7 @@ mod tests {
                 next_cursor: None,
                 has_more: None,
                 cursor_status: None,
+                merkle_root_hash: None,
             },
         };
         assert_eq!(roundtrip_named(&msg), msg);
@@ -307,6 +344,7 @@ mod tests {
                 next_cursor: None,
                 has_more: None,
                 cursor_status: None,
+                merkle_root_hash: None,
             },
         };
         let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
@@ -357,6 +395,7 @@ mod tests {
                     limit: None,
                     cursor: None,
                 },
+                fields: None,
             },
         };
         let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
@@ -388,6 +427,137 @@ mod tests {
         assert_eq!(p.next_cursor, None);
         assert_eq!(p.has_more, None);
         assert_eq!(p.cursor_status, None);
+        assert_eq!(p.merkle_root_hash, None);
+    }
+
+    // ---- QuerySubPayload fields extension tests ----
+
+    #[test]
+    fn query_sub_with_fields_roundtrip() {
+        let msg = QuerySubMessage {
+            payload: QuerySubPayload {
+                query_id: "q-fields".to_string(),
+                map_name: "users".to_string(),
+                query: Query {
+                    r#where: None,
+                    predicate: None,
+                    sort: None,
+                    limit: None,
+                    cursor: None,
+                },
+                fields: Some(vec!["name".to_string(), "email".to_string()]),
+            },
+        };
+        assert_eq!(roundtrip_named(&msg), msg);
+    }
+
+    #[test]
+    fn query_sub_fields_omitted_when_none() {
+        let msg = QuerySubMessage {
+            payload: QuerySubPayload {
+                query_id: "q-no-fields".to_string(),
+                map_name: "users".to_string(),
+                query: Query {
+                    r#where: None,
+                    predicate: None,
+                    sort: None,
+                    limit: None,
+                    cursor: None,
+                },
+                fields: None,
+            },
+        };
+        let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
+        let val: rmpv::Value = rmp_serde::from_slice(&bytes).expect("deserialize");
+        let map = val.as_map().expect("should be a map");
+        let payload = map
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("payload"))
+            .map(|(_, v)| v)
+            .expect("should have payload");
+        let payload_map = payload.as_map().expect("payload should be a map");
+        let has_fields = payload_map
+            .iter()
+            .any(|(k, _)| k.as_str() == Some("fields"));
+        assert!(!has_fields, "fields should be omitted when None");
+    }
+
+    #[test]
+    fn query_resp_with_merkle_root_hash_roundtrip() {
+        let msg = QueryRespMessage {
+            payload: QueryRespPayload {
+                query_id: "q-merkle".to_string(),
+                results: vec![],
+                next_cursor: None,
+                has_more: None,
+                cursor_status: None,
+                merkle_root_hash: Some(12345),
+            },
+        };
+        assert_eq!(roundtrip_named(&msg), msg);
+    }
+
+    #[test]
+    fn query_resp_merkle_root_hash_omitted_when_none() {
+        let msg = QueryRespMessage {
+            payload: QueryRespPayload {
+                query_id: "q-no-merkle".to_string(),
+                results: vec![],
+                next_cursor: None,
+                has_more: None,
+                cursor_status: None,
+                merkle_root_hash: None,
+            },
+        };
+        let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
+        let val: rmpv::Value = rmp_serde::from_slice(&bytes).expect("deserialize");
+        let map = val.as_map().expect("should be a map");
+        let payload = map
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("payload"))
+            .map(|(_, v)| v)
+            .expect("should have payload");
+        let payload_map = payload.as_map().expect("payload should be a map");
+        let has_merkle = payload_map
+            .iter()
+            .any(|(k, _)| k.as_str() == Some("merkleRootHash"));
+        assert!(!has_merkle, "merkleRootHash should be omitted when None");
+    }
+
+    #[test]
+    fn query_sync_init_roundtrip() {
+        let msg = QuerySyncInitMessage {
+            payload: QuerySyncInitPayload {
+                query_id: "q-sync".to_string(),
+                root_hash: 98765,
+            },
+        };
+        assert_eq!(roundtrip_named(&msg), msg);
+    }
+
+    #[test]
+    fn query_sync_init_camel_case() {
+        let msg = QuerySyncInitMessage {
+            payload: QuerySyncInitPayload {
+                query_id: "q-cc".to_string(),
+                root_hash: 42,
+            },
+        };
+        let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
+        let val: rmpv::Value = rmp_serde::from_slice(&bytes).expect("deserialize");
+        let map = val.as_map().expect("should be a map");
+        let payload = map
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("payload"))
+            .map(|(_, v)| v)
+            .expect("should have payload");
+        let payload_map = payload.as_map().expect("payload should be a map");
+        let keys: Vec<&str> = payload_map
+            .iter()
+            .filter_map(|(k, _)| k.as_str())
+            .collect();
+        assert!(keys.contains(&"queryId"), "expected camelCase 'queryId'");
+        assert!(keys.contains(&"rootHash"), "expected camelCase 'rootHash'");
     }
 
     // ---- SQL query message tests ----
