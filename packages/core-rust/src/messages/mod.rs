@@ -17,7 +17,6 @@ pub mod sync;
 pub mod client_events;
 pub mod http_sync;
 pub mod messaging;
-pub mod shape;
 
 pub use base::{
     AuthMessage, AuthRequiredMessage, ChangeEventType, ClientOp, PredicateNode, PredicateOp,
@@ -76,12 +75,6 @@ pub use http_sync::{
     DeltaRecord, DeltaRecordEventType, HttpQueryRequest, HttpQueryResult, HttpSearchRequest,
     HttpSearchResult, HttpSyncAck, HttpSyncError, HttpSyncRequest, HttpSyncResponse, MapDelta,
     SyncMapEntry,
-};
-
-pub use shape::{
-    ShapeRecord, ShapeRespMessage, ShapeRespPayload, ShapeSubscribeMessage, ShapeSubscribePayload,
-    ShapeSyncInitMessage, ShapeSyncInitPayload, ShapeUnsubscribeMessage, ShapeUnsubscribePayload,
-    ShapeUpdateMessage, ShapeUpdatePayload,
 };
 
 // ---------------------------------------------------------------------------
@@ -469,27 +462,6 @@ pub enum Message {
         payload: SyncResetRequiredPayload,
     },
 
-    // --- shape domain (5 variants) ---
-
-    /// Client subscribes to a shape (partial replication filter).
-    #[serde(rename = "SHAPE_SUBSCRIBE")]
-    ShapeSubscribe(ShapeSubscribeMessage),
-
-    /// Client unsubscribes from a shape.
-    #[serde(rename = "SHAPE_UNSUBSCRIBE")]
-    ShapeUnsubscribe(ShapeUnsubscribeMessage),
-
-    /// Server responds with shape initial data.
-    #[serde(rename = "SHAPE_RESP")]
-    ShapeResp(ShapeRespMessage),
-
-    /// Server pushes a shape record update to client.
-    #[serde(rename = "SHAPE_UPDATE")]
-    ShapeUpdate(ShapeUpdateMessage),
-
-    /// Client initiates shape-specific Merkle delta sync.
-    #[serde(rename = "SHAPE_SYNC_INIT")]
-    ShapeSyncInit(ShapeSyncInitMessage),
 }
 
 #[cfg(test)]
