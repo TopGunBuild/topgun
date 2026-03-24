@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-24 — TODO-181 converted to SPEC-142; prev: TODO-181–184 (Query+Shape unification), TODO-167/168 superseded
+**Last updated:** 2026-03-24 — TODO-182 converted to SPEC-143; prev: TODO-181 converted to SPEC-142, TODO-181–184 (Query+Shape unification), TODO-167/168 superseded
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -50,29 +50,6 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 
 ### TODO-168: ~~ShapeHandle Generic Typing~~ → Absorbed into TODO-183
 - **Status:** Superseded — QueryHandle\<T\> generic typing will be part of unified client API (TODO-183)
-
-### TODO-182: Unified Query Service — Server-Side Merge *(Query+Shape merge, step 2/4)*
-- **Priority:** P1
-- **Complexity:** Medium
-- **Summary:** Merge ShapeService capabilities into QueryService on the Rust server. QueryService gains: field projection, per-query Merkle trees for delta reconnect, writer exclusion on broadcasts, and configurable max_query_records limit. ShapeService is NOT deleted yet — both coexist temporarily until client migration (TODO-183).
-- **Depends on:** TODO-181
-- **Effort:** 1-2 weeks
-- **Context:** Currently two parallel server-side systems:
-  - **QueryService** (`query.rs`): `QueryRegistry` + `QueryMutationObserver` pattern. Re-evaluates predicates on every RecordStore mutation. Tracks `previous_result_keys` for ENTER/UPDATE/LEAVE. No field projection, no Merkle sync, no writer exclusion. Reconnect = full QUERY_RESP resend.
-  - **ShapeService** (`shape.rs`): `ShapeRegistry` + `ShapeEvaluator`. Scans all partitions on subscribe, builds per-shape Merkle trees via `ShapeMerkleSyncManager`. Field projection via `shape_evaluator::apply_shape()`. Writer exclusion via `exclude_connection_id`. Delta reconnect via `SHAPE_SYNC_INIT` + Merkle tree comparison.
-  - Both use identical `evaluate_predicate()` for filtering.
-- **Scope:**
-  - **QueryService gains field projection**: When `fields` is present in QUERY_SUB, apply field projection (port `shape_evaluator::apply_shape()` logic) to QUERY_RESP results and QUERY_UPDATE values.
-  - **QueryService gains Merkle delta sync**: When query has field projection or limit, create per-query Merkle tree (port `ShapeMerkleSyncManager` pattern). Handle `QUERY_SYNC_INIT` message — compare client rootHash, send delta via existing Merkle sync protocol.
-  - **QueryService gains writer exclusion**: On QUERY_UPDATE broadcast, skip the connection that originated the write (already done in ShapeService `broadcast_shape_updates()`).
-  - **QueryService gains max_query_records**: Add `max_query_records: u32` to server Config (default 10,000). Clamp initial QUERY_RESP. Set `has_more: true` when clamped. Log warning.
-  - **ShapeService stays alive** — old SHAPE_* messages still work. This allows incremental client migration.
-  - **Tests**: Extend existing query integration tests to cover `fields`, Merkle reconnect, writer exclusion. Port relevant shape tests to use QUERY_* messages.
-- **Key files:**
-  - `packages/server-rust/src/service/domain/query.rs` (major changes)
-  - `packages/server-rust/src/service/domain/shape_evaluator.rs` (reuse, may move to shared module)
-  - `packages/server-rust/src/service/domain/sync.rs` (handle QUERY_SYNC_INIT routing)
-  - `packages/server-rust/src/config.rs` (add max_query_records)
 
 ### TODO-183: Unified Query Client — Client-Side Merge *(Query+Shape merge, step 3/4)*
 - **Priority:** P1
