@@ -1,13 +1,20 @@
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-140
+- **Status:** running
+- **Next Step:** (in progress)
+
+## Execution Status
+
+| Spec | Mode | Progress | Last Updated |
+|------|------|----------|-------------|
+| SPEC-140 | orchestrated | Wave 1/3 (33%) | 2026-03-24T09:58:00Z |
 
 ## Queue
 
 | ID | Title | Status | Priority | Complexity |
 |----|-------|--------|----------|------------|
+| SPEC-140 | Docs Audit: Verify All Remaining Guides Against Rust Implementation | running | P2 | medium |
 
 ## Decisions
 

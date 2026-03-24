@@ -1,0 +1,104 @@
+{
+  "spec_id": "SPEC-140",
+  "mode": "orchestrated",
+  "started": "2026-03-24T09:48:07Z",
+  "waves": [
+    {
+      "id": 1,
+      "groups": ["G0"],
+      "status": "complete",
+      "results": {
+        "G0": {
+          "status": "complete",
+          "commits": ["1fc5260"],
+          "files_created": [".specflow/reference/DOCS_AUDIT_TRIAGE.md"],
+          "files_modified": [".specflow/todos/TODO.md"],
+          "criteria_met": [
+            "Triage table covers all 22 pages",
+            "Pass 2 assignments identified for G1/G2/G3",
+            "New TODOs created (TODO-174 through TODO-180) for untracked missing features"
+          ],
+          "deviations": [],
+          "error": null
+        }
+      }
+    },
+    {
+      "id": 2,
+      "groups": ["G1", "G2", "G3"],
+      "status": "complete",
+      "results": {
+        "G1": {
+          "status": "complete",
+          "commits": [],
+          "files_created": [],
+          "files_modified": [],
+          "criteria_met": [
+            "deployment.mdx: critical env var mismatches documented",
+            "postgresql.mdx: accurate, no issues",
+            "performance.mdx: TS server config knobs documented as critical issues",
+            "observability.mdx: metric name mismatches documented"
+          ],
+          "deviations": ["G1 research merged into single DOCS_AUDIT_REPORT.md commit by G4"],
+          "error": null
+        },
+        "G2": {
+          "status": "complete",
+          "commits": [],
+          "files_created": [],
+          "files_modified": [],
+          "criteria_met": [
+            "cluster-replication.mdx: critical env var and consistency mode issues documented",
+            "cluster-client.mdx: minor circuitBreaker config key issue documented",
+            "live-queries.mdx: accurate, no issues",
+            "pub-sub.mdx: accurate, no issues"
+          ],
+          "deviations": ["G2 research merged into single DOCS_AUDIT_REPORT.md commit by G4"],
+          "error": null
+        },
+        "G3": {
+          "status": "complete",
+          "commits": [],
+          "files_created": [],
+          "files_modified": [],
+          "criteria_met": [
+            "full-text-search.mdx: local vs server search confusion documented",
+            "conflict-resolvers.mdx: stub behavior documented as critical",
+            "adoption-path.mdx: accurate, minor issues",
+            "mcp-server.mdx: accurate, no issues",
+            "pn-counter.mdx: accurate, no issues",
+            "ttl.mdx: minor enforcement chain uncertainty documented",
+            "write-concern.mdx: critical issues (achieved_level=None, missing client methods)",
+            "event-journal.mdx: minor issues documented",
+            "index.mdx: minor description accuracy issues"
+          ],
+          "deviations": ["G3 research merged into single DOCS_AUDIT_REPORT.md commit by G4"],
+          "error": null
+        }
+      }
+    },
+    {
+      "id": 3,
+      "groups": ["G4"],
+      "status": "complete",
+      "results": {
+        "G4": {
+          "status": "complete",
+          "commits": ["abcc706"],
+          "files_created": [".specflow/reference/DOCS_AUDIT_REPORT.md"],
+          "files_modified": [],
+          "criteria_met": [
+            "Final report with summary table covering all 22 pages",
+            "Recommended fix order by priority",
+            "Missing functionality registry with TODO cross-references",
+            "All acceptance criteria verified"
+          ],
+          "deviations": [],
+          "error": null
+        }
+      }
+    }
+  ],
+  "commits": ["1fc5260", "abcc706"],
+  "last_checkpoint": "2026-03-24T10:15:00Z"
+}
