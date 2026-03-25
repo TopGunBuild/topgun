@@ -4,6 +4,9 @@ Older decisions rotated from STATE.md.
 
 ---
 
+- SPEC-140 audited all 22 remaining guide pages. Found 11 major-rewrite (7 unimplemented/stub + deployment/observability/performance/write-concern with critical mismatches), 6 minor-issues, 5 accurate. Created TODO-174 through TODO-180 for untracked missing features. Key finding: observability.mdx and performance.mdx use metric names and config knobs from the removed TS server.
+- SPEC-141 created Shapes (Partial Replication) guide page at apps/docs-astro/src/content/docs/guides/shapes.mdx. All 9 sections present. Code examples use actual SyncEngine + subscribeShape() API. order: 12.5 (no collision).
+- SPEC-142 extended QUERY_SUB/QUERY_RESP with Shape capabilities: optional fields projection on QuerySubPayload, optional merkle_root_hash on QueryRespPayload, new QUERY_SYNC_INIT message + Operation::QuerySyncInit variant routed to query service. 483 core + 610 server tests pass, TS build clean.
 - SPEC-136a added shape wire messages (5 payload structs, 5 Message variants), upgraded SyncShape (shape_id, map_name, filter, fields, limit), removed Predicate placeholder, added Operation::ShapeSubscribe/Unsubscribe/SyncInit + service_names::SHAPE routing. Shape Merkle sync reuses existing protocol with shape_id prefix. 494 core + 565 server tests pass, clippy-clean.
 - SPEC-136b added ShapeEvaluator module (matches/project/apply_shape free functions) and ShapeRegistry (DashMap-based concurrent registry with ActiveShape, ShapeRegistryError). 18 new unit tests, 582 total server tests pass, clippy-clean.
 - SPEC-136c added ShapeService Tower service (subscribe/unsubscribe handlers), value_to_rmpv consolidated in predicate.rs, CRDT broadcast filtering (ENTER/UPDATE/LEAVE), AppState shape_registry field, websocket disconnect cleanup. Option<Arc<ShapeRegistry>> pattern for optional service dependencies. 586 tests pass, clippy-clean.
