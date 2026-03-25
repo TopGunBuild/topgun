@@ -65,7 +65,7 @@ export function SyncLabDemo() {
               href={tabUrl}
               target="_blank"
               rel="noreferrer"
-              className="text-blue-600 dark:text-blue-400 underline underline-offset-2 hover:text-blue-800 dark:hover:text-blue-300"
+              className="text-brand underline underline-offset-2 hover:text-brand-hover"
             >
               new tab
             </a>{' '}

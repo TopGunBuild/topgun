@@ -32,7 +32,7 @@ export const HeroCodeSnippet = () => {
   };
 
   return (
-    <div className="w-full max-w-lg mx-auto lg:mx-0 rounded-xl overflow-hidden border border-white/10 bg-[#0d0d0d] shadow-2xl shadow-blue-900/10">
+    <div className="w-full max-w-lg mx-auto lg:mx-0 rounded-xl overflow-hidden border border-white/10 bg-[#0d0d0d] shadow-2xl shadow-brand/10">
       <div className="flex items-center justify-between px-4 py-3 bg-white/5 border-b border-white/5">
         <div className="flex space-x-2">
           <div className="w-3 h-3 rounded-full bg-red-500/20 border border-red-500/50"></div>

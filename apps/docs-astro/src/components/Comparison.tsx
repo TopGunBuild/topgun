@@ -4,8 +4,8 @@ import { Check, X, Minus } from 'lucide-react';
 const ComparisonRow = ({ feature, tg, es, fb, rx }: { feature: string, tg: any, es: any, fb: any, rx: any }) => (
   <tr className="border-b border-card-border hover:bg-black/5 dark:hover:bg-white/[0.02] transition-colors">
     <td className="py-4 px-4 text-sm font-medium text-neutral-700 dark:text-neutral-300">{feature}</td>
-    <td className="py-4 px-4 text-center bg-blue-500/5 border-x border-blue-500/10">
-      <div className="flex justify-center text-blue-600 dark:text-blue-400 font-semibold text-sm">{tg}</div>
+    <td className="py-4 px-4 text-center bg-brand-subtle/5 border-x border-brand-subtle/10">
+      <div className="flex justify-center text-brand font-semibold text-sm">{tg}</div>
     </td>
     <td className="py-4 px-4 text-center text-neutral-600 dark:text-neutral-300 text-sm">{es}</td>
     <td className="py-4 px-4 text-center text-neutral-600 dark:text-neutral-300 text-sm">{fb}</td>
@@ -28,7 +28,7 @@ export const Comparison = () => {
           <thead>
             <tr className="border-b border-card-border">
               <th className="py-4 px-4 text-sm font-mono text-neutral-500 uppercase tracking-wider">Feature</th>
-              <th className="py-4 px-4 text-center bg-blue-500/5 border-t border-x border-blue-500/10 rounded-t-lg">
+              <th className="py-4 px-4 text-center bg-brand-subtle/5 border-t border-x border-brand-subtle/10 rounded-t-lg">
                 <span className="text-foreground font-bold text-lg">TopGun</span>
               </th>
               <th className="py-4 px-4 text-center text-neutral-500 font-medium">ElectricSQL</th>

@@ -32,7 +32,7 @@ const CodeSnippet = () => {
   };
 
   return (
-    <div className="w-full max-w-lg mx-auto lg:mx-0 rounded-xl overflow-hidden border border-white/10 bg-[#0d0d0d] shadow-2xl shadow-blue-900/10">
+    <div className="w-full max-w-lg mx-auto lg:mx-0 rounded-xl overflow-hidden border border-white/10 bg-[#0d0d0d] shadow-2xl shadow-brand/10">
       <div className="flex items-center justify-between px-4 py-3 bg-white/5 border-b border-white/5">
         <div className="flex space-x-2">
           <div className="w-3 h-3 rounded-full bg-red-500/20 border border-red-500/50"></div>
@@ -68,14 +68,14 @@ export const Hero = () => {
        <div className="flex flex-col lg:flex-row items-center gap-16">
          {/* Text Content */}
          <div className="flex-1 text-center lg:text-left">
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-600 dark:text-blue-400 text-sm font-medium mb-8">
-              <span className="flex h-2 w-2 rounded-full bg-blue-600 dark:bg-blue-400 animate-pulse"></span>
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-brand-subtle/10 border border-brand-subtle/20 text-brand text-sm font-medium mb-8">
+              <span className="flex h-2 w-2 rounded-full bg-brand animate-pulse"></span>
               The Hybrid Offline-First In-Memory Data Grid
             </div>
             
             <h1 className="text-5xl sm:text-6xl lg:text-7xl font-bold tracking-tight text-foreground mb-6">
               Invert Your <br/>
-              <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-600 via-purple-600 to-black dark:from-blue-400 dark:via-purple-400 dark:to-white animate-pulse-slow">Data Architecture.</span>
+              <span className="text-transparent bg-clip-text bg-gradient-to-r from-brand via-purple-600 to-black dark:via-purple-400 dark:to-white animate-pulse-slow">Data Architecture.</span>
             </h1>
             
             <p className="text-lg text-neutral-600 dark:text-neutral-300 mb-8 max-w-2xl mx-auto lg:mx-0 leading-relaxed">
@@ -111,7 +111,7 @@ export const Hero = () => {
          <div className="flex-1 w-full max-w-[600px] lg:max-w-none perspective-1000">
             <div className="relative transform lg:rotate-y-[-5deg] lg:rotate-x-[5deg] transition-transform duration-500 hover:rotate-0">
                {/* Decorative Glow */}
-               <div className="absolute -inset-1 bg-gradient-to-r from-blue-600 to-purple-600 rounded-xl blur opacity-20"></div>
+               <div className="absolute -inset-1 bg-gradient-to-r from-brand to-purple-600 rounded-xl blur opacity-20"></div>
                <CodeSnippet />
                
             </div>

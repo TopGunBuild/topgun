@@ -70,13 +70,13 @@ export const Navbar = ({
                             <button onClick={() => handleLinkClick('#comparison')} className="text-sm font-medium text-neutral-600 dark:text-neutral-300 hover:text-black dark:hover:text-white transition-colors cursor-pointer">Comparison</button>
                             <button
                                 onClick={() => handleNavigate('/docs/intro')}
-                                className={`text-sm font-medium transition-colors cursor-pointer ${isDocs ? 'text-blue-600 dark:text-blue-400' : 'text-neutral-600 dark:text-neutral-300 hover:text-black dark:hover:text-white'}`}
+                                className={`text-sm font-medium transition-colors cursor-pointer ${isDocs ? 'text-brand' : 'text-neutral-600 dark:text-neutral-300 hover:text-black dark:hover:text-white'}`}
                             >
                                 Docs
                             </button>
                             <button
                                 onClick={() => handleNavigate('/blog')}
-                                className={`text-sm font-medium transition-colors cursor-pointer ${isBlog ? 'text-blue-600 dark:text-blue-400' : 'text-neutral-600 dark:text-neutral-300 hover:text-black dark:hover:text-white'}`}
+                                className={`text-sm font-medium transition-colors cursor-pointer ${isBlog ? 'text-brand' : 'text-neutral-600 dark:text-neutral-300 hover:text-black dark:hover:text-white'}`}
                             >
                                 Blog
                             </button>

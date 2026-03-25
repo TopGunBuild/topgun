@@ -3,11 +3,11 @@ import { WifiOff, Zap, RefreshCw, Database, Lock, Globe, Shield } from 'lucide-r
 
 const FeatureCard = ({ icon: Icon, title, description, colSpan = 1 }: { icon: any, title: string, description: string, colSpan?: number }) => (
   <div className={`group relative overflow-hidden rounded-xl border border-card-border bg-card p-8 hover:border-neutral-300 dark:hover:border-white/20 transition-colors shadow-sm dark:shadow-none ${colSpan === 2 ? 'md:col-span-2' : ''}`}>
-    <div className="absolute top-0 right-0 -mt-4 -mr-4 w-24 h-24 bg-gradient-to-br from-blue-500/10 to-transparent rounded-full blur-2xl group-hover:from-blue-500/20 transition-all duration-500"></div>
+    <div className="absolute top-0 right-0 -mt-4 -mr-4 w-24 h-24 bg-gradient-to-br from-brand-subtle/10 to-transparent rounded-full blur-2xl group-hover:from-brand-subtle/20 transition-all duration-500"></div>
 
     <div className="relative z-10">
       <div className="w-12 h-12 rounded-lg bg-black/5 dark:bg-black/50 border border-black/10 dark:border-white/10 flex items-center justify-center mb-6 text-foreground group-hover:scale-110 transition-transform duration-300">
-        <Icon className="w-6 h-6 text-blue-600 dark:text-white" />
+        <Icon className="w-6 h-6 text-brand dark:text-white" />
       </div>
       <h3 className="text-xl font-bold text-foreground mb-3">{title}</h3>
       <p className="text-neutral-600 dark:text-neutral-300 leading-relaxed">
@@ -22,7 +22,7 @@ export const Features = () => {
     <section id="features" className="py-24 px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto relative">
       <div className="mb-16">
         <h2 className="text-3xl md:text-5xl font-bold text-foreground mb-6">
-          The <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-purple-600 dark:from-blue-400 dark:to-purple-400">Local-First</span> Standard.
+          The <span className="text-transparent bg-clip-text bg-gradient-to-r from-brand to-purple-600 dark:to-purple-400">Local-First</span> Standard.
         </h2>
         <p className="text-xl text-neutral-600 dark:text-neutral-300 max-w-3xl">
           TopGun bridges the gap between scalable In-Memory Data Grids and Offline-First Client Databases.
