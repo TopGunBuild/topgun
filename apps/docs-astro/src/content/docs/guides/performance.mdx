@@ -5,48 +5,17 @@ order: 17
 ---
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
-import { ChevronRight, Zap, Gauge, Timer, Server, AlertTriangle, CheckCircle, Activity, Terminal } from 'lucide-react';
+import { ChevronRight, Zap, Gauge, Timer, Server, CheckCircle, Activity, Terminal } from 'lucide-react';
 import { AlertBox } from '../../../components/docs/AlertBox';
 
-<AlertBox variant="warning" title="Partially Implemented" text="Some tuning knobs and config options on this page do not exist in the current Rust server. Benchmark numbers may not reflect actual performance." />
-
-export const highThroughputConfig = `# High throughput configuration
-# The Rust server is optimized for high throughput out of the box
-# using tokio async runtime, zero-copy MsgPack, and Tower middleware
-PORT=8080 \\
-DATABASE_URL=postgres://user:pass@localhost/topgun \\
-topgun-server
-
-# The Rust server automatically handles:
-# - Async I/O via tokio (no event queue tuning needed)
-# - Efficient MsgPack serialization
-# - Connection pooling via sqlx
-# For advanced tuning, see: /docs/reference/server`;
-
-export const lowLatencyConfig = `# Low latency configuration
-# The Rust server delivers sub-millisecond in-memory operations
-# with immediate WebSocket push to subscribers
-PORT=8080 \\
-DATABASE_URL=postgres://user:pass@localhost/topgun \\
-topgun-server
-
-# In-memory CRDT operations are synchronous (0ms)
-# WebSocket broadcast is immediate after CRDT merge
-# For latency tuning details, see: /docs/reference/server`;
-
-export const productionConfig = `# Balanced production configuration
+export const serverStartup = `# Server startup
+# Server-level tuning (concurrency, timeouts, buffer sizes) is controlled
+# via Rust ServerConfig/ConnectionConfig structs at compile time, not env vars.
 PORT=8080 \\
 DATABASE_URL=postgres://user:pass@localhost/topgun \\
 JWT_SECRET=your-production-secret \\
 RUST_LOG=topgun_server=info \\
-topgun-server
-
-# The Rust server includes built-in production defaults:
-# - Tower LoadShed middleware for overload protection
-# - Request timeout enforcement
-# - Prometheus metrics at /metrics
-# - Structured logging via tracing
-# For full configuration, see: /docs/reference/server`;
+test-server`;
 
 export const osLinuxTuning = `# Increase socket backlog
 sudo sysctl -w net.core.somaxconn=65535
@@ -75,20 +44,17 @@ topgun hard nofile 65535
 topgun soft nproc 65535
 topgun hard nproc 65535`;
 
-export const grafanaQueries = `# Queue utilization (should stay below 80%)
-topgun_event_queue_size / topgun_event_queue_capacity * 100
+export const grafanaQueries = `# Operation throughput
+rate(topgun_operations_total[5m])
 
-# Connection rejection rate (should be near 0)
-rate(topgun_connections_rejected_total[5m])
+# p99 latency
+histogram_quantile(0.99, rate(topgun_operation_duration_seconds_bucket[5m]))
 
-# Backpressure timeout rate (alert if > 0)
-rate(topgun_backpressure_timeouts_total[5m])
+# Error rate
+rate(topgun_operation_errors_total[5m])
 
-# Event throughput
-rate(topgun_events_routed_total[5m])
-
-# Average subscribers per event
-topgun_subscribers_per_event{quantile="0.5"}`;
+# Active connections
+topgun_active_connections`;
 
 <div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
   <span className="text-foreground font-medium">Docs</span>
@@ -147,94 +113,59 @@ TopGun includes several performance optimizations inspired by proven patterns fr
   <div className="p-4 border border-card-border rounded-lg">
     <div className="flex items-center gap-2 mb-2">
       <Gauge className="w-5 h-5 text-green-600" />
-      <span className="font-semibold text-foreground">Bounded Event Queue</span>
+      <span className="font-semibold text-foreground">Tower LoadShed Middleware</span>
     </div>
     <p className="text-sm text-neutral-600 dark:text-neutral-300">
-      A capacity-limited queue protects against OOM under load spikes. Events are rejected rather than accumulating unbounded.
+      Rejects requests when <code>max_concurrent_operations</code> is exceeded, protecting the server from overload rather than queuing unbounded work.
     </p>
   </div>
   <div className="p-4 border border-card-border rounded-lg">
     <div className="flex items-center gap-2 mb-2">
       <Timer className="w-5 h-5 text-orange-600" />
-      <span className="font-semibold text-foreground">Backpressure Regulation</span>
+      <span className="font-semibold text-foreground">Bounded Outbound Channels</span>
     </div>
     <p className="text-sm text-neutral-600 dark:text-neutral-300">
-      Periodic synchronous processing prevents async operation buildup and ensures consistent latency under load.
+      Per-connection <code>outbound_channel_capacity</code> limits prevent slow clients from causing out-of-memory conditions on the server.
     </p>
   </div>
   <div className="p-4 border border-card-border rounded-lg">
     <div className="flex items-center gap-2 mb-2">
       <Zap className="w-5 h-5 text-purple-600" />
-      <span className="font-semibold text-foreground">Write Coalescing</span>
+      <span className="font-semibold text-foreground">Async I/O via tokio</span>
     </div>
     <p className="text-sm text-neutral-600 dark:text-neutral-300">
-      Multiple small messages are batched into single syscalls, dramatically reducing kernel overhead at high throughput.
+      Non-blocking async runtime eliminates thread-per-connection overhead, enabling thousands of concurrent connections on modest hardware.
     </p>
   </div>
 </div>
 
-## Tuning for High Throughput
+## Server Configuration
 
 <div className="flex items-center gap-2 mb-4 not-prose">
   <Server className="w-6 h-6 text-brand" />
-  <span className="text-neutral-600 dark:text-neutral-300">For 100+ concurrent clients with heavy write loads.</span>
-</div>
-
-Use these settings when your priority is maximizing events per second:
-
-<div className="not-prose">
-  <CodeBlock title="High Throughput Configuration" language="bash" code={highThroughputConfig} />
-</div>
-
-### When to Adjust
-
-| Setting | Increase When | Decrease When |
-|---------|---------------|---------------|
-| `eventQueueCapacity` | Seeing `queue_rejected` metrics | Memory constrained |
-| `eventStripeCount` | CPU has many cores, queue contention | Few cores, diminishing returns |
-| `backpressureSyncFrequency` | Throughput is priority over latency | Latency spikes are unacceptable |
-| `writeCoalescingMaxDelayMs` | Network is bottleneck | Real-time delivery needed |
-
-## Tuning for Low Latency
-
-<div className="flex items-center gap-2 mb-4 not-prose">
-  <Timer className="w-6 h-6 text-orange-600" />
-  <span className="text-neutral-600 dark:text-neutral-300">For real-time applications where every millisecond matters.</span>
-</div>
-
-Use these settings for gaming, live collaboration, or trading applications:
-
-<div className="not-prose">
-  <CodeBlock title="Low Latency Configuration" language="bash" code={lowLatencyConfig} />
-</div>
-
-<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-6 my-6 not-prose">
-  <div className="flex items-center gap-2 mb-2">
-    <AlertTriangle className="w-5 h-5 text-yellow-600 dark:text-yellow-400" />
-    <h3 className="text-lg font-semibold text-yellow-800 dark:text-yellow-300">Trade-off Warning</h3>
-  </div>
-  <span className="text-yellow-700 dark:text-yellow-400">Disabling write coalescing increases syscall overhead significantly. Only disable when sub-millisecond latency is critical and you have sufficient CPU headroom.</span>
-</div>
-
-### Latency vs Throughput Trade-offs
-
-| `writeCoalescingMaxDelayMs` | Latency | Throughput | Use Case |
-|-----------------------------|---------|------------|----------|
-| Disabled (`false`) | ~0ms added | Lower | Live gaming, trading |
-| 1ms | ~1ms added | Medium | Live collaboration |
-| 5ms (default) | ~5ms added | High | General purpose |
-| 10-20ms | ~10-20ms added | Maximum | Batch processing |
-
-## Balanced Production Settings
-
-<div className="flex items-center gap-2 mb-4 not-prose">
-  <CheckCircle className="w-6 h-6 text-green-600" />
-  <span className="text-neutral-600 dark:text-neutral-300">Recommended starting point for most production deployments.</span>
+  <span className="text-neutral-600 dark:text-neutral-300">Starting the server with real env vars.</span>
 </div>
 
 <div className="not-prose">
-  <CodeBlock title="Production Configuration" language="bash" code={productionConfig} />
+  <CodeBlock title="Server Startup" language="bash" code={serverStartup} />
 </div>
+
+### Configuration Fields
+
+| Field | Default | Increase When | Decrease When |
+|-------|---------|---------------|---------------|
+| `max_concurrent_operations` | 1000 | High `topgun_operation_errors_total` with load-shed errors | Memory constrained |
+| `default_operation_timeout_ms` | 30000 | Complex queries timing out before completion | Want faster failure for hung operations |
+| `max_query_records` | 10000 | Large dataset queries returning truncated results | Memory constrained or query abuse concerns |
+| `outbound_channel_capacity` | 256 | Slow consumers causing send timeouts | Memory per connection too high |
+| `send_timeout` | 5s | Clients on high-latency networks | Want to drop slow clients faster |
+| `idle_timeout` | 60s | Clients reconnect frequently | Want to reclaim idle connections sooner |
+| `ws_write_buffer_size` | 128KB | Large messages being fragmented | Memory constrained |
+| `ws_max_write_buffer_size` | 512KB | Very large payloads needed | Memory per connection too high |
+| `request_timeout` | 30s | Complex queries timing out | Want faster failure for hung requests |
+| `gc_interval_ms` | 60000 | GC overhead too frequent | Stale data accumulating |
+
+<AlertBox variant="info" title="Compile-Time Configuration" text="These fields are Rust struct defaults, not env-var configurable. To change them, modify the config structs in packages/server-rust/src/service/config.rs and packages/server-rust/src/network/config.rs and rebuild. Future releases may expose env-var overrides." />
 
 ## Monitoring Performance
 
@@ -245,13 +176,12 @@ Use these settings for gaming, live collaboration, or trading applications:
 
 ### Critical Metrics
 
-| Metric | Healthy Range | Action if Exceeded |
-|--------|---------------|-------------------|
-| `topgun_event_queue_size` | &lt;80% of capacity | Increase `eventQueueCapacity` or add nodes |
-| `topgun_event_queue_rejected_total` | 0 | Urgent: queue is full, events being dropped |
-| `topgun_backpressure_timeouts_total` | 0 | Increase `backpressureBackoffMs` or reduce load |
-| `topgun_backpressure_pending_ops` | &lt;80% of `maxPending` | Increase `backpressureMaxPending` |
-| `topgun_connections_rejected_total` | Near 0 | Increase rate limits or investigate DDoS |
+| Metric | Type | Labels | Healthy Range | Action if Exceeded |
+|--------|------|--------|---------------|-------------------|
+| `topgun_active_connections` | Gauge | — | Depends on capacity | Add nodes or increase file descriptors |
+| `topgun_operations_total` | Counter | service, outcome | Steady rate | Investigate spikes by service label |
+| `topgun_operation_duration_seconds` | Histogram | service | p99 &lt; 500ms | Profile slow service, check DB |
+| `topgun_operation_errors_total` | Counter | service, error | Near 0 | Investigate by error label |
 
 ### Grafana Dashboard Queries
 
@@ -272,23 +202,18 @@ Use these settings for gaming, live collaboration, or trading applications:
     </thead>
     <tbody className="divide-y divide-card-border">
       <tr>
-        <td className="p-3 font-medium">EventQueueFull</td>
-        <td className="p-3 font-mono text-xs">rate(topgun_event_queue_rejected_total[5m]) &gt; 0</td>
+        <td className="p-3 font-medium">HighErrorRate</td>
+        <td className="p-3 font-mono text-xs">rate(topgun_operation_errors_total[5m]) &gt; 10</td>
         <td className="p-3"><span className="px-2 py-1 bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200 rounded text-xs">Critical</span></td>
       </tr>
       <tr>
-        <td className="p-3 font-medium">BackpressureTimeout</td>
-        <td className="p-3 font-mono text-xs">rate(topgun_backpressure_timeouts_total[5m]) &gt; 0</td>
-        <td className="p-3"><span className="px-2 py-1 bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200 rounded text-xs">Critical</span></td>
-      </tr>
-      <tr>
-        <td className="p-3 font-medium">HighQueueUtilization</td>
-        <td className="p-3 font-mono text-xs">topgun_event_queue_size / capacity &gt; 0.8</td>
+        <td className="p-3 font-medium">HighLatency</td>
+        <td className="p-3 font-mono text-xs">histogram_quantile(0.99, rate(topgun_operation_duration_seconds_bucket[5m])) &gt; 0.5</td>
         <td className="p-3"><span className="px-2 py-1 bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-200 rounded text-xs">Warning</span></td>
       </tr>
       <tr>
-        <td className="p-3 font-medium">ConnectionRateLimitHit</td>
-        <td className="p-3 font-mono text-xs">rate(topgun_connections_rejected_total[5m]) &gt; 10</td>
+        <td className="p-3 font-medium">ConnectionSpike</td>
+        <td className="p-3 font-mono text-xs">topgun_active_connections &gt; 1000</td>
         <td className="p-3"><span className="px-2 py-1 bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-200 rounded text-xs">Warning</span></td>
       </tr>
     </tbody>
@@ -323,32 +248,20 @@ For production servers handling thousands of connections, tune the operating sys
 
 ## Quick Reference
 
-<div className="grid md:grid-cols-3 gap-4 my-6 not-prose">
-  <div className="p-4 border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-900/20 rounded-lg">
-    <h4 className="font-semibold text-green-800 dark:text-green-300 mb-2">High Throughput</h4>
-    <ul className="text-sm text-green-700 dark:text-green-400 space-y-1">
-      <li>eventQueueCapacity: 50000+</li>
-      <li>eventStripeCount: 8</li>
-      <li>writeCoalescingMaxDelayMs: 10-20</li>
-      <li>backpressureSyncFrequency: 200</li>
-    </ul>
-  </div>
-  <div className="p-4 border border-orange-200 dark:border-orange-800 bg-orange-50 dark:bg-orange-900/20 rounded-lg">
-    <h4 className="font-semibold text-orange-800 dark:text-orange-300 mb-2">Low Latency</h4>
-    <ul className="text-sm text-orange-700 dark:text-orange-400 space-y-1">
-      <li>writeCoalescingEnabled: false</li>
-      <li>OR writeCoalescingMaxDelayMs: 1</li>
-      <li>backpressureSyncFrequency: 50</li>
-      <li>eventStripeCount: 4</li>
-    </ul>
-  </div>
+<div className="grid md:grid-cols-1 gap-4 my-6 not-prose">
   <div className="p-4 border border-brand-subtle/20 bg-brand-subtle/10 rounded-lg">
-    <h4 className="font-semibold text-brand mb-2">Balanced</h4>
+    <h4 className="font-semibold text-brand mb-2">Server Defaults</h4>
     <ul className="text-sm text-brand space-y-1">
-      <li>Use defaults</li>
-      <li>eventQueueCapacity: 10000-50000</li>
-      <li>writeCoalescingMaxDelayMs: 5</li>
-      <li>backpressureSyncFrequency: 100</li>
+      <li>max_concurrent_operations: 1000</li>
+      <li>default_operation_timeout_ms: 30000</li>
+      <li>max_query_records: 10000</li>
+      <li>gc_interval_ms: 60000</li>
+      <li>outbound_channel_capacity: 256</li>
+      <li>send_timeout: 5s</li>
+      <li>idle_timeout: 60s</li>
+      <li>ws_write_buffer_size: 128KB</li>
+      <li>ws_max_write_buffer_size: 512KB</li>
+      <li>request_timeout: 30s</li>
     </ul>
   </div>
 </div>
