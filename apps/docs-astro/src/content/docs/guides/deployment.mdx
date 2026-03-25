@@ -6,9 +6,6 @@ order: 15
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Server, Container, Layers, Lock, Shield, Zap, Cloud, Network } from 'lucide-react';
-import { AlertBox } from '../../../components/docs/AlertBox';
-
-<AlertBox variant="warning" title="Partially Implemented" text="Some env vars and config options shown on this page (TOPGUN_PORT, TOPGUN_TLS_*, TOPGUN_CLUSTER_*) are not yet read by the Rust server. See the audit report for details." />
 
 export const dockerBuildCode = `# From the root of the repository
 docker build -t topgun-server -f deploy/Dockerfile.server .`;
@@ -84,7 +81,7 @@ services:
       - "9443:9443"     # Cluster TLS
     environment:
       RUST_LOG: topgun_server=info
-      TOPGUN_PORT: 443
+      PORT: 443
       TOPGUN_CLUSTER_PORT: 9443
       DATABASE_URL: postgres://postgres:postgres_password@postgres:5432/topgun
       # TLS Configuration
@@ -164,7 +161,7 @@ spec:
         - containerPort: 9443
           name: cluster
         env:
-        - name: TOPGUN_PORT
+        - name: PORT
           value: "443"
         - name: TOPGUN_CLUSTER_PORT
           value: "9443"
@@ -416,14 +413,22 @@ docker-compose -f docker-compose.tls.yml up -d`} />
   <span className="text-neutral-600 dark:text-neutral-300">Store TLS certificates securely using Kubernetes Secrets.</span>
 </div>
 
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-4 mb-4 not-prose">
+  <span className="text-sm text-yellow-700 dark:text-yellow-400">The Kubernetes TLS configuration shown below is planned for the future production binary. The env vars (<code>{'TOPGUN_TLS_*'}</code>, <code>{'TOPGUN_CLUSTER_*'}</code>) are not yet parsed by the server. For current TLS setup, configure <code>TlsConfig</code> programmatically when embedding the server. See the <a href="/docs/reference/server" className="underline">Server API</a> for the current programmatic approach.</span>
+</div>
+
 <div className="not-prose">
-  <CodeBlock title="k8s/tls-secret.yaml" language="yaml" code={k8sSecretCode} />
+  <CodeBlock title="k8s/tls-secret.yaml (planned)" language="yaml" code={k8sSecretCode} />
 </div>
 
 ### Kubernetes Deployment with TLS
 
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-4 mb-4 not-prose">
+  <span className="text-sm text-yellow-700 dark:text-yellow-400">The Kubernetes TLS configuration shown below is planned for the future production binary. The env vars (<code>{'TOPGUN_TLS_*'}</code>, <code>{'TOPGUN_CLUSTER_*'}</code>) are not yet parsed by the server. For current TLS setup, configure <code>TlsConfig</code> programmatically when embedding the server. See the <a href="/docs/reference/server" className="underline">Server API</a> for the current programmatic approach.</span>
+</div>
+
 <div className="not-prose">
-  <CodeBlock title="k8s/deployment.yaml" language="yaml" code={k8sDeploymentTlsCode} />
+  <CodeBlock title="k8s/deployment.yaml (planned)" language="yaml" code={k8sDeploymentTlsCode} />
 </div>
 
 <div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-6 mb-6 not-prose">
