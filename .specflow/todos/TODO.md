@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-25 — TODO-188 converted to SPEC-153
+**Last updated:** 2026-03-25 — TODO-189 converted to SPEC-154
 **Strategy:** Feature-complete open-source core first, then cloud. All differentiators built before launch.
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -186,14 +186,6 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 
 
 
-### TODO-189: Fix cluster-replication.mdx — Remove False Env Vars & Consistency Modes
-- **Priority:** P1 (cluster setup instructions don't work)
-- **Complexity:** Small
-- **Summary:** `cluster-replication.mdx` shows `TOPGUN_CLUSTER_PORT`, `TOPGUN_CLUSTER_SEEDS`, `TOPGUN_NODE_ID`, `TOPGUN_CONSISTENCY` env vars — none parsed. Documents QUORUM/STRONG consistency modes — only eventual consistency exists. Docker Compose cluster example will not configure nodes. Replication metrics are aspirational.
-- **What IS accurate:** 271 partitions, `backup_count`, Phi Accrual failure detection (`phi_threshold: 8.0`), gossip discovery (HELLO/MEMBER_LIST), partition rebalancing on failure.
-- **Fix:** Add banners noting env var cluster config is planned. Mark QUORUM/STRONG as planned. Keep architecture overview sections (gossip, partitions, failure detection) — they describe real behavior. Remove non-existent replication metrics.
-- **Ref:** DOCS_AUDIT_REPORT.md — cluster-replication.mdx section
-- **Effort:** 0.5 day
 
 ### TODO-036: Pluggable Extension System
 - **Priority:** P2

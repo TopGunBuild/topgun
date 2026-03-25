@@ -1,14 +1,13 @@
 ## Current Position
 
-- **Active Specification:** SPEC-154
-- **Status:** review
-- **Next Step:** /sf:review
+- **Active Specification:** none
+- **Status:** idle
+- **Next Step:** /sf:new or /sf:next
 
 ## Queue
 
 | ID | Title | Status | Priority | Complexity |
 |----|-------|--------|----------|------------|
-| SPEC-154 | Fix cluster-replication.mdx — Remove False Env Vars, Consistency Modes, and Metrics | review | P1 | small |
 
 ## Decisions
 
@@ -20,4 +19,4 @@
 - SPEC-151 removed non-functional env vars (`TOPGUN_PORT`) from deployment.mdx, replaced with `PORT`, added yellow "planned" banners above all TLS/cluster config sections. 1 commit, 1 review cycle.
 - SPEC-152 rewrote observability.mdx: replaced ~30 fake Node.js metrics with 4 actual Rust server Prometheus metrics, removed 4 obsolete TS sections, added Metric Labels subsection, replaced Pino with tracing-subscriber docs, added Planned Metrics info box. 1 commit, 1 review cycle.
 - SPEC-153 rewrote performance.mdx: replaced fake TS config knobs with actual Rust ServerConfig/ConnectionConfig/NetworkConfig defaults, replaced 5 fake Prometheus metrics with 4 real ones, fixed binary name to test-server, removed Trade-off Warning box, consolidated 3 config code blocks into 1. 2 commits, 2 review cycles, all fixes applied.
-- SPEC-154 fixed cluster-replication.mdx: added yellow planned banners above all unimplemented env var sections, fixed gossip message names (JoinRequest/JoinResponse), marked QUORUM/STRONG as planned, removed non-existent metrics and health checks, fixed anti-entropy component names, updated AlertBox, Best Practices, and Data Flow. 2 commits.
+- SPEC-154 fixed cluster-replication.mdx: added yellow planned banners above all unimplemented env var sections, fixed gossip message names (JoinRequest/JoinResponse), marked QUORUM/STRONG as planned, removed non-existent metrics and health checks, fixed anti-entropy component names, updated AlertBox, Best Practices, and Data Flow. 3 commits, 2 review cycles.
