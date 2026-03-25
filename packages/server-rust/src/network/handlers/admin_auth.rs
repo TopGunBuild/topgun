@@ -263,6 +263,7 @@ mod tests {
         assert!(claims.roles.contains(&"admin".to_string()));
     }
 
+    // NOT a real key — RSA 2048-bit test pair generated for unit tests only
     const TEST_RSA_PRIVATE_PEM: &str = "-----BEGIN PRIVATE KEY-----
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCsOcDOoBAsEl9w
 osjKuwm0TVX9wF0kWhOwSeHmGPn01o5ngBHfWeJ7a8CXE7U5rPsvIxIvjQvLiKsg
