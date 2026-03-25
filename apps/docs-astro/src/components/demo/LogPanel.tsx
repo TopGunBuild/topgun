@@ -36,7 +36,7 @@ export const LogPanel: React.FC<LogPanelProps> = ({ logs }) => {
           <div key={log.id} className="flex gap-1.5 text-[11px] leading-tight">
             <span className="text-slate-500 shrink-0">[{log.timestamp}]</span>
             <span className={`font-bold shrink-0 w-20 ${
-              log.source === 'CLIENT_A' ? 'text-blue-400' :
+              log.source === 'CLIENT_A' ? 'text-brand-muted' :
               log.source === 'SERVER' ? 'text-purple-400' : 'text-green-400'
             }`}>
               {log.source}

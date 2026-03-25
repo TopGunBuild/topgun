@@ -21,9 +21,9 @@ export async function generateOgImage(options: OgImageOptions): Promise<Buffer> 
 
   // Color schemes based on type
   const colors = {
-    default: { gradient: 'from-blue-600 to-purple-600', accent: '#3b82f6' },
+    default: { gradient: 'from-brand to-purple-600', accent: '#3b82f6' },
     blog: { gradient: 'from-purple-600 to-pink-600', accent: '#9333ea' },
-    docs: { gradient: 'from-emerald-600 to-blue-600', accent: '#10b981' },
+    docs: { gradient: 'from-emerald-600 to-brand', accent: '#10b981' },
   };
 
   const color = colors[type];

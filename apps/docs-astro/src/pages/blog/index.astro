@@ -32,7 +32,7 @@ posts.sort((a, b) => new Date(b.data.date).getTime() - new Date(a.data.date).get
           )}
           <div class="flex-1 p-6 flex flex-col">
             <div class="flex items-center justify-between mb-4">
-              <span class="text-xs font-medium text-blue-600 dark:text-blue-400">
+              <span class="text-xs font-medium text-brand">
                 {post.data.category}
               </span>
               <span class="text-xs text-neutral-500">
@@ -40,7 +40,7 @@ posts.sort((a, b) => new Date(b.data.date).getTime() - new Date(a.data.date).get
               </span>
             </div>
 
-            <h3 class="text-xl font-bold text-foreground mb-3 group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors">
+            <h3 class="text-xl font-bold text-foreground mb-3 group-hover:text-brand transition-colors">
               {post.data.title}
             </h3>
 

@@ -102,9 +102,9 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
       {/* Dragging Target Line */}
       {draggingId && dragPosition && (
         <>
-          <div className="absolute top-0 bottom-0 border-l border-dashed border-blue-500/30 pointer-events-none z-0" style={{ left: `${dragPosition.x}%` }}></div>
-          <div className="absolute left-0 right-0 border-t border-dashed border-blue-500/30 pointer-events-none z-0" style={{ top: `${dragPosition.y}%` }}></div>
-          <div className="absolute font-mono text-xs text-blue-400 bg-slate-900/80 px-1.5 py-0.5 rounded -translate-y-6 pointer-events-none z-30" style={{ left: `${dragPosition.x}%`, top: `${dragPosition.y}%` }}>
+          <div className="absolute top-0 bottom-0 border-l border-dashed border-brand-subtle/30 pointer-events-none z-0" style={{ left: `${dragPosition.x}%` }}></div>
+          <div className="absolute left-0 right-0 border-t border-dashed border-brand-subtle/30 pointer-events-none z-0" style={{ top: `${dragPosition.y}%` }}></div>
+          <div className="absolute font-mono text-xs text-brand-muted bg-slate-900/80 px-1.5 py-0.5 rounded -translate-y-6 pointer-events-none z-30" style={{ left: `${dragPosition.x}%`, top: `${dragPosition.y}%` }}>
             XY: {dragPosition.x.toFixed(0)}, {dragPosition.y.toFixed(0)}
           </div>
         </>
@@ -125,23 +125,23 @@ export const TacticalMap: React.FC<TacticalMapProps> = ({
           >
             {/* Pulse Effect */}
             <div className={`absolute inset-0 rounded-full animate-ping opacity-75 pointer-events-none ${
-              drone.status === DroneStatus.COMBAT ? 'bg-red-500' : 'bg-blue-500'
+              drone.status === DroneStatus.COMBAT ? 'bg-red-500' : 'bg-brand-subtle'
             }`}></div>
 
             {/* Drone Icon with hover area */}
             <div className="relative group">
               <div className={`relative flex items-center justify-center w-6 h-6 rounded-full border-2 bg-slate-900 transition-colors ${
                  isSelected || isDragging ? 'border-white scale-125 z-20 shadow-[0_0_15px_rgba(255,255,255,0.5)]' :
-                 drone.status === DroneStatus.COMBAT ? 'border-red-500' : 'border-blue-500'
+                 drone.status === DroneStatus.COMBAT ? 'border-red-500' : 'border-brand-subtle'
               }`}>
-                <div className={`w-2 h-2 rounded-full ${drone.status === DroneStatus.COMBAT ? 'bg-red-500' : 'bg-blue-500'}`}></div>
+                <div className={`w-2 h-2 rounded-full ${drone.status === DroneStatus.COMBAT ? 'bg-red-500' : 'bg-brand-subtle'}`}></div>
               </div>
 
               {/* Label - always visible when selected/dragging, hover otherwise */}
               <div className={`absolute top-7 left-1/2 -translate-x-1/2 whitespace-nowrap z-30 pointer-events-none transition-opacity duration-150 ${
                 isDragging || isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
               }`}>
-                 <div className="bg-slate-900/95 text-[10px] text-blue-400 px-2 py-1 border border-blue-900 rounded shadow-lg font-mono">
+                 <div className="bg-slate-900/95 text-[10px] text-brand-muted px-2 py-1 border border-brand-muted rounded shadow-lg font-mono">
                     {drone.id} | {drone.status}
                  </div>
               </div>

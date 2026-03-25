@@ -33,7 +33,7 @@ export const INITIAL_DRONES: Drone[] = [
 
 export const STATUS_COLORS = {
   [DroneStatus.IDLE]: 'text-slate-400 border-slate-400 bg-slate-400/10',
-  [DroneStatus.PATROL]: 'text-blue-400 border-blue-400 bg-blue-400/10',
+  [DroneStatus.PATROL]: 'text-brand-muted border-brand-muted bg-brand-muted/10',
   [DroneStatus.COMBAT]: 'text-red-500 border-red-500 bg-red-500/10',
   [DroneStatus.RTB]: 'text-yellow-400 border-yellow-400 bg-yellow-400/10',
 };

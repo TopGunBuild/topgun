@@ -41,7 +41,7 @@ const currentPath = Astro.url.pathname;
             document.documentElement.classList[isDark ? 'add' : 'remove']('dark');
         </script>
 	</head>
-	<body class="min-h-screen bg-background text-foreground overflow-x-hidden selection:bg-blue-500/30">
+	<body class="min-h-screen bg-background text-foreground overflow-x-hidden selection:bg-brand-subtle/30">
         <div class="fixed inset-0 z-0 pointer-events-none">
           <div class="absolute inset-0 bg-grid opacity-[0.15]"></div>
           <div class="absolute inset-0 bg-gradient-to-t from-background via-transparent to-transparent"></div>
@@ -54,7 +54,7 @@ const currentPath = Astro.url.pathname;
                 <!-- Mobile Menu Toggle -->
                 <button
                     id="mobile-menu-toggle"
-                    class="fixed bottom-6 right-6 z-50 p-4 bg-blue-600 text-white rounded-full shadow-lg lg:hidden hover:bg-blue-700 transition-colors"
+                    class="fixed bottom-6 right-6 z-50 p-4 bg-brand text-white rounded-full shadow-lg lg:hidden hover:bg-brand-hover transition-colors"
                     aria-label="Toggle Documentation Menu"
                 >
                     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-6 h-6 menu-icon"><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="18" y2="18"/></svg>

@@ -207,10 +207,10 @@ export const TacticalDemo: React.FC = () => {
           {/* Top Bar */}
           <header className="h-12 border-b border-slate-800 bg-slate-900/50 backdrop-blur flex items-center justify-between px-4">
             <div className="flex items-center gap-2">
-              <div className="bg-blue-600 p-1 rounded">
+              <div className="bg-brand p-1 rounded">
                 <Database className="w-3 h-3 text-white" />
               </div>
-              <span className="text-sm font-bold tracking-wider text-white font-mono">TOPGUN<span className="text-blue-400">v2</span></span>
+              <span className="text-sm font-bold tracking-wider text-white font-mono">TOPGUN<span className="text-brand-muted">v2</span></span>
             </div>
 
             <div className="flex items-center gap-4">
@@ -258,7 +258,7 @@ export const TacticalDemo: React.FC = () => {
                 <div className={`absolute top-0 left-0 w-1 h-full ${network === NetworkState.ONLINE ? 'bg-green-500' : 'bg-red-500'} transition-colors duration-500`}></div>
                 <div className="flex justify-between items-start mb-3">
                   <h3 className="text-xs font-bold text-slate-100 uppercase tracking-widest flex items-center gap-2">
-                    <Shield className="w-3 h-3 text-blue-500" />
+                    <Shield className="w-3 h-3 text-brand-subtle" />
                     Local Client A
                   </h3>
                 </div>
@@ -277,12 +277,12 @@ export const TacticalDemo: React.FC = () => {
                 <div className="mt-3 p-3 bg-slate-800/50 rounded-lg border border-slate-700/50">
                   <div className="flex justify-between items-center mb-2">
                     <span className="text-xs text-slate-400 font-mono">SELECTED</span>
-                    <span className="text-xs text-blue-400 font-bold font-mono">{selectedDrone?.name || 'NONE'}</span>
+                    <span className="text-xs text-brand-muted font-bold font-mono">{selectedDrone?.name || 'NONE'}</span>
                   </div>
 
                   {selectedDrone && (
                     <div className="grid grid-cols-2 gap-1.5">
-                      <button onClick={() => updateDrone('status', DroneStatus.PATROL)} className={`p-2 text-xs font-bold rounded border transition-colors ${selectedDrone.status === DroneStatus.PATROL ? 'bg-blue-500/20 border-blue-500 text-blue-400' : 'bg-slate-800 border-slate-600 hover:border-slate-500 text-slate-400'}`}>PATROL</button>
+                      <button onClick={() => updateDrone('status', DroneStatus.PATROL)} className={`p-2 text-xs font-bold rounded border transition-colors ${selectedDrone.status === DroneStatus.PATROL ? 'bg-brand-subtle/20 border-brand-subtle text-brand-muted' : 'bg-slate-800 border-slate-600 hover:border-slate-500 text-slate-400'}`}>PATROL</button>
                       <button onClick={() => updateDrone('status', DroneStatus.COMBAT)} className={`p-2 text-xs font-bold rounded border transition-colors ${selectedDrone.status === DroneStatus.COMBAT ? 'bg-red-500/20 border-red-500 text-red-400' : 'bg-slate-800 border-slate-600 hover:border-slate-500 text-slate-400'}`}>COMBAT</button>
                       <button onClick={() => updateDrone('status', DroneStatus.RTB)} className={`p-2 text-xs font-bold rounded border transition-colors ${selectedDrone.status === DroneStatus.RTB ? 'bg-yellow-500/20 border-yellow-500 text-yellow-400' : 'bg-slate-800 border-slate-600 hover:border-slate-500 text-slate-400'}`}>RTB</button>
                       <button onClick={() => updateDrone('status', DroneStatus.IDLE)} className={`p-2 text-xs font-bold rounded border transition-colors ${selectedDrone.status === DroneStatus.IDLE ? 'bg-slate-500/20 border-slate-500 text-slate-300' : 'bg-slate-800 border-slate-600 hover:border-slate-500 text-slate-400'}`}>IDLE</button>
@@ -355,7 +355,7 @@ export const TacticalDemo: React.FC = () => {
                           <td className="p-1.5">
                             <span className={`px-1 py-0.5 rounded border text-[10px] ${
                               d.status === DroneStatus.COMBAT ? 'border-red-500/30 text-red-400 bg-red-500/10' :
-                              d.status === DroneStatus.PATROL ? 'border-blue-500/30 text-blue-400 bg-blue-500/10' :
+                              d.status === DroneStatus.PATROL ? 'border-brand-subtle/30 text-brand-muted bg-brand-subtle/10' :
                               d.status === DroneStatus.RTB ? 'border-yellow-500/30 text-yellow-400 bg-yellow-500/10' :
                               'border-slate-500/30 text-slate-400'
                             }`}>

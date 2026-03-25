@@ -29,7 +29,7 @@ import { ArrowLeft } from 'lucide-react';
     <article class="prose prose-neutral dark:prose-invert max-w-none prose-headings:font-bold prose-h2:text-2xl prose-h2:mt-12 prose-h2:mb-6 prose-p:text-lg prose-p:leading-relaxed prose-p:text-neutral-600 dark:prose-p:text-neutral-300">
 
       <h2 class="flex items-center gap-3">
-        <span class="text-blue-600 dark:text-blue-400">1.</span> Executive Summary
+        <span class="text-brand">1.</span> Executive Summary
       </h2>
       <p>
         <strong>TopGun</strong> is a next-generation data platform designed for the modern "Local-First" web.
@@ -50,7 +50,7 @@ import { ArrowLeft } from 'lucide-react';
       </ul>
 
       <h2 class="flex items-center gap-3">
-        <span class="text-blue-600 dark:text-blue-400">2.</span> Key Concepts
+        <span class="text-brand">2.</span> Key Concepts
       </h2>
 
       <h3>2.1. Local-First Architecture</h3>
@@ -80,7 +80,7 @@ import { ArrowLeft } from 'lucide-react';
       </p>
 
       <h2 class="flex items-center gap-3">
-        <span class="text-blue-600 dark:text-blue-400">3.</span> Architecture
+        <span class="text-brand">3.</span> Architecture
       </h2>
       <p>
         TopGun consists of a <strong>Client SDK</strong> (running in browser/mobile) and a <strong>Server Cluster</strong> (running in cloud/on-prem).
@@ -116,7 +116,7 @@ import { ArrowLeft } from 'lucide-react';
       </ol>
 
       <h2 class="flex items-center gap-3">
-        <span class="text-blue-600 dark:text-blue-400">4.</span> Data Consistency
+        <span class="text-brand">4.</span> Data Consistency
       </h2>
       <p>
         TopGun guarantees <strong>Eventual Consistency</strong> using robust distributed systems primitives.
@@ -136,7 +136,7 @@ import { ArrowLeft } from 'lucide-react';
       </p>
 
       <h2 class="flex items-center gap-3">
-        <span class="text-blue-600 dark:text-blue-400">5.</span> Comparison
+        <span class="text-brand">5.</span> Comparison
       </h2>
 
       <div class="overflow-x-auto my-8">
@@ -144,7 +144,7 @@ import { ArrowLeft } from 'lucide-react';
           <thead>
             <tr class="border-b border-card-border">
               <th class="py-2 px-2 font-mono text-neutral-500 uppercase tracking-wider">Feature</th>
-              <th class="py-2 px-2 bg-blue-500/5 border-t border-x border-blue-500/10 text-foreground font-bold">TopGun</th>
+              <th class="py-2 px-2 bg-brand-subtle/5 border-t border-x border-brand-subtle/10 text-foreground font-bold">TopGun</th>
               <th class="py-2 px-2 text-neutral-500 font-medium">ElectricSQL</th>
               <th class="py-2 px-2 text-neutral-500 font-medium">Firebase</th>
               <th class="py-2 px-2 text-neutral-500 font-medium">RxDB</th>
@@ -153,49 +153,49 @@ import { ArrowLeft } from 'lucide-react';
           <tbody>
             <tr class="border-b border-card-border">
               <td class="py-2 px-2 font-medium">Primary Model</td>
-              <td class="py-2 px-2 bg-blue-500/5 border-x border-blue-500/10 text-blue-600 dark:text-blue-400">Local-First IMDG</td>
+              <td class="py-2 px-2 bg-brand-subtle/5 border-x border-brand-subtle/10 text-brand">Local-First IMDG</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Postgres Sync</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Cloud Doc DB</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Local-First DB</td>
             </tr>
             <tr class="border-b border-card-border">
               <td class="py-2 px-2 font-medium">Offline Support</td>
-              <td class="py-2 px-2 bg-blue-500/5 border-x border-blue-500/10 text-blue-600 dark:text-blue-400">First-Class</td>
+              <td class="py-2 px-2 bg-brand-subtle/5 border-x border-brand-subtle/10 text-brand">First-Class</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Good</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Good</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Excellent</td>
             </tr>
             <tr class="border-b border-card-border">
               <td class="py-2 px-2 font-medium">Latency</td>
-              <td class="py-2 px-2 bg-blue-500/5 border-x border-blue-500/10 text-blue-600 dark:text-blue-400">~0ms (In-Memory)</td>
+              <td class="py-2 px-2 bg-brand-subtle/5 border-x border-brand-subtle/10 text-brand">~0ms (In-Memory)</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">~5-10ms (SQLite)</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Network Dependent</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">~5-10ms (IndexedDB)</td>
             </tr>
             <tr class="border-b border-card-border">
               <td class="py-2 px-2 font-medium">Backend Control</td>
-              <td class="py-2 px-2 bg-blue-500/5 border-x border-blue-500/10 text-blue-600 dark:text-blue-400">Self-Hosted Cluster</td>
+              <td class="py-2 px-2 bg-brand-subtle/5 border-x border-brand-subtle/10 text-brand">Self-Hosted Cluster</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Sync Service</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Proprietary</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">CouchDB / Custom</td>
             </tr>
             <tr class="border-b border-card-border">
               <td class="py-2 px-2 font-medium">Consistency</td>
-              <td class="py-2 px-2 bg-blue-500/5 border-x border-blue-500/10 text-blue-600 dark:text-blue-400">HLC + CRDT</td>
+              <td class="py-2 px-2 bg-brand-subtle/5 border-x border-brand-subtle/10 text-brand">HLC + CRDT</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Rich CRDTs</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">LWW (Server)</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Revision Trees</td>
             </tr>
             <tr class="border-b border-card-border">
               <td class="py-2 px-2 font-medium">Distributed Locks</td>
-              <td class="py-2 px-2 bg-blue-500/5 border-x border-blue-500/10 text-blue-600 dark:text-blue-400">Fencing Tokens</td>
+              <td class="py-2 px-2 bg-brand-subtle/5 border-x border-brand-subtle/10 text-brand">Fencing Tokens</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Not Supported</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Not Supported</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Not Supported</td>
             </tr>
             <tr class="border-b border-card-border">
               <td class="py-2 px-2 font-medium">License</td>
-              <td class="py-2 px-2 bg-blue-500/5 border-x border-blue-500/10 text-blue-600 dark:text-blue-400">Open Source</td>
+              <td class="py-2 px-2 bg-brand-subtle/5 border-x border-brand-subtle/10 text-brand">Open Source</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Open Source</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Proprietary</td>
               <td class="py-2 px-2 text-neutral-600 dark:text-neutral-300">Open Source</td>
@@ -219,10 +219,10 @@ import { ArrowLeft } from 'lucide-react';
 
     </article>
 
-    <div class="mt-20 p-8 rounded-2xl bg-gradient-to-br from-blue-600/10 to-purple-600/10 border border-blue-500/20 text-center">
+    <div class="mt-20 p-8 rounded-2xl bg-gradient-to-br from-brand/10 to-purple-600/10 border border-brand-subtle/20 text-center">
       <h3 class="text-xl font-bold text-foreground mb-2">Ready to invert your architecture?</h3>
       <p class="text-neutral-600 dark:text-neutral-300 mb-6">Get started with the open source edition today.</p>
-      <a href="/docs/installation" class="inline-block px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg transition-colors">
+      <a href="/docs/installation" class="inline-block px-6 py-3 bg-brand hover:bg-brand-hover text-white font-semibold rounded-lg transition-colors">
         npm install @topgunbuild/client
       </a>
     </div>
