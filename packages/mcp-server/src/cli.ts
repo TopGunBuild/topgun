@@ -19,10 +19,14 @@
  *   --version             Show version
  */
 
+import { createRequire } from 'node:module';
 import { TopGunMCPServer } from './TopGunMCPServer';
 import { HTTPTransport } from './transport/http';
 import type { MCPServerConfig } from './types';
 import { createLogger } from './logger';
+
+const require = createRequire(import.meta.url);
+const { version: VERSION } = require('../package.json') as { version: string };
 
 interface CLIOptions {
   url: string;
@@ -36,8 +40,6 @@ interface CLIOptions {
   help: boolean;
   version: boolean;
 }
-
-const VERSION = '0.8.1';
 
 function parseArgs(args: string[]): CLIOptions {
   const options: CLIOptions = {
