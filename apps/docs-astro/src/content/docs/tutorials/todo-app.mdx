@@ -385,7 +385,7 @@ This works because both tabs share the same TopGun client connection (via Indexe
 
 Here is what happens under the hood when you add a todo:
 
-1. `todos.set(id, todo)` writes to the local `LWWMap` CRDT in memory
+1. `useMutation.create(todo)` writes to the local `LWWMap` CRDT in memory via the mutation hook
 2. The write is stamped with a Hybrid Logical Clock (HLC) timestamp for causal ordering
 3. The `IDBAdapter` persists the write to IndexedDB (async, non-blocking)
 4. The `SyncEngine` batches the write and sends it to the server via WebSocket
