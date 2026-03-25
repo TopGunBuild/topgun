@@ -12,10 +12,10 @@ interface ConceptCardProps {
 
 const colorClasses = {
     blue: {
-        iconBg: 'bg-blue-100 dark:bg-blue-900/30',
-        iconText: 'text-blue-600 dark:text-blue-400',
-        hoverText: 'group-hover:text-blue-600 dark:group-hover:text-blue-400',
-        linkText: 'text-blue-600 dark:text-blue-400',
+        iconBg: 'bg-brand-subtle/10',
+        iconText: 'text-brand',
+        hoverText: 'group-hover:text-brand',
+        linkText: 'text-brand',
     },
     purple: {
         iconBg: 'bg-purple-100 dark:bg-purple-900/30',

@@ -41,20 +41,20 @@ export const GuideCard: React.FC<GuideCardProps> = ({
     return (
         <a
             href={href}
-            className="group block p-6 border border-card-border rounded-xl bg-card hover:border-blue-500/50 transition-all"
+            className="group block p-6 border border-card-border rounded-xl bg-card hover:border-brand-subtle/50 transition-all"
         >
             <div className="flex items-start gap-4">
-                <div className="p-3 rounded-lg bg-neutral-100 dark:bg-neutral-800 text-blue-600 dark:text-blue-400 group-hover:text-blue-500 transition-colors">
+                <div className="p-3 rounded-lg bg-neutral-100 dark:bg-neutral-800 text-brand group-hover:text-brand-subtle transition-colors">
                     <Icon className="w-6 h-6" />
                 </div>
                 <div className="flex-1">
                     <div className="flex items-center gap-2 mb-2">
-                        <h3 className="text-xl font-semibold text-foreground group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors">
+                        <h3 className="text-xl font-semibold text-foreground group-hover:text-brand transition-colors">
                             {title}
                         </h3>
                     </div>
                     <p className="text-neutral-600 dark:text-neutral-300 mb-4">{description}</p>
-                    <span className="text-sm font-medium text-blue-600 dark:text-blue-400 flex items-center gap-1">
+                    <span className="text-sm font-medium text-brand flex items-center gap-1">
                         <span>Read Guide</span>
                         <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
                     </span>

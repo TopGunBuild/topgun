@@ -66,7 +66,7 @@ export const TableOfContents = () => {
             <div className="space-y-1 text-sm border-l border-card-border">
                 <a
                     href="#top"
-                    className={`block pl-4 py-1 border-l -ml-px transition-colors ${activeId === '' ? 'text-blue-600 border-blue-500 font-medium' : 'text-neutral-400 hover:text-foreground border-transparent'}`}
+                    className={`block pl-4 py-1 border-l -ml-px transition-colors ${activeId === '' ? 'text-brand border-brand-subtle font-medium' : 'text-neutral-400 hover:text-foreground border-transparent'}`}
                 >
                     Top
                 </a>
@@ -76,7 +76,7 @@ export const TableOfContents = () => {
                         href={`#${item.id}`}
                         className={`block py-1 border-l -ml-px transition-colors ${item.level === 3 ? 'pl-8' : 'pl-4'
                             } ${activeId === item.id
-                                ? 'text-blue-600 border-blue-500 font-medium'
+                                ? 'text-brand border-brand-subtle font-medium'
                                 : 'text-neutral-400 hover:text-foreground border-transparent'
                             }`}
                     >

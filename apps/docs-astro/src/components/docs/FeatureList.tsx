@@ -8,7 +8,7 @@ interface FeatureItemProps {
 }
 
 const colorClasses = {
-    blue: 'bg-blue-100 dark:bg-blue-900/30',
+    blue: 'bg-brand-subtle/10',
     purple: 'bg-purple-100 dark:bg-purple-900/30',
     orange: 'bg-orange-100 dark:bg-orange-900/30',
 };

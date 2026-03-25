@@ -15,9 +15,9 @@ const variantStyles: Record<AlertVariant, { container: string; title: string; te
         text: 'text-amber-700 dark:text-amber-400',
     },
     info: {
-        container: 'bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800',
-        title: 'text-blue-800 dark:text-blue-300',
-        text: 'text-blue-700 dark:text-blue-400',
+        container: 'bg-brand-subtle/10 border border-brand-subtle/20',
+        title: 'text-brand',
+        text: 'text-brand',
     },
     success: {
         container: 'bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800',

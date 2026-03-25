@@ -23,7 +23,7 @@ export const ReferenceCard: React.FC<ReferenceCardProps> = ({
             <p className="text-sm text-neutral-600 dark:text-neutral-300 mb-4">{description}</p>
             <a
                 href={href}
-                className="text-sm font-medium text-blue-600 dark:text-blue-400 hover:underline"
+                className="text-sm font-medium text-brand hover:underline"
             >
                 {linkText} →
             </a>

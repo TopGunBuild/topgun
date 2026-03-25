@@ -5,7 +5,7 @@ export const AuthProtocol: React.FC = () => {
         <div className="bg-neutral-50 dark:bg-neutral-800/50 rounded-xl p-6 font-mono text-sm">
             <div className="space-y-3">
                 <div className="flex items-start gap-4">
-                    <span className="text-blue-500 font-semibold w-16">Client</span>
+                    <span className="text-brand-subtle font-semibold w-16">Client</span>
                     <span className="text-neutral-400">→</span>
                     <span>Connect to WebSocket</span>
                 </div>
@@ -17,7 +17,7 @@ export const AuthProtocol: React.FC = () => {
                     </span>
                 </div>
                 <div className="flex items-start gap-4">
-                    <span className="text-blue-500 font-semibold w-16">Client</span>
+                    <span className="text-brand-subtle font-semibold w-16">Client</span>
                     <span className="text-neutral-400">→</span>
                     <span>
                         <code className="bg-neutral-200 dark:bg-neutral-700 px-1 rounded">AUTH</code> + JWT token

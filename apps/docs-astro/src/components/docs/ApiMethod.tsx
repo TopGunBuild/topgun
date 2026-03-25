@@ -59,7 +59,7 @@ export const ApiConstructor: React.FC<ApiConstructorProps> = ({ signature, child
     return (
         <div className="bg-card border border-card-border rounded-xl overflow-hidden">
             <div className="p-4 border-b border-card-border bg-neutral-50 dark:bg-neutral-900/50">
-                <code className="text-sm font-mono text-blue-600 dark:text-blue-400">{signature}</code>
+                <code className="text-sm font-mono text-brand">{signature}</code>
             </div>
             <div className="p-6">
                 <h4 className="text-sm font-semibold text-neutral-500 uppercase tracking-wider mb-4">

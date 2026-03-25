@@ -46,7 +46,7 @@ const SubItem = ({ to, children, currentPath }: { to: string; children: React.Re
         <a
             href={to}
             className={`block pl-9 py-1.5 text-sm border-l border-neutral-200 dark:border-neutral-800 ml-3 cursor-pointer transition-colors ${isActive
-                ? 'text-blue-600 dark:text-blue-400 font-medium border-blue-500'
+                ? 'text-brand font-medium border-brand-subtle'
                 : 'text-neutral-400 hover:text-black dark:hover:text-white hover:border-neutral-400'
                 }`}
         >
