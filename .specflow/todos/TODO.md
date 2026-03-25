@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-25 — TODO-170 converted to SPEC-149
+**Last updated:** 2026-03-25 — Added TODO-186–189 (docs fixes for deployment, observability, performance, cluster-replication)
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -183,6 +183,40 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
   - Existing building blocks already in codebase: `max_entry_count`, `estimated_cost()`, `random_samples()`, `RecordMetadata` (last_access_time, hits), `ExpiryPolicy` (TTL, max-idle), `MutationObserver::on_evict()`
   - **Recommended split:** extract LRU evictor as a minimal slice (TODO-033a, 3-5 days) for cloud launch, defer full Write-Behind (staging area, coalescing, batch flush) to v3.0
   - LRU evictor converts TopGun from "data must fit in RAM" to "hot data in RAM, cold data in PostgreSQL" — sufficient for v2.0 cloud
+
+
+### TODO-186: Fix deployment.mdx — Remove Non-Functional Env Vars & Config
+- **Priority:** P1 (Docker/K8s configs silently fail)
+- **Complexity:** Small
+- **Summary:** `deployment.mdx` shows `TOPGUN_PORT`, `TOPGUN_TLS_*`, `TOPGUN_CLUSTER_PORT`, `TOPGUN_CLUSTER_TLS_*` env vars in Docker Compose and Kubernetes configs — none are parsed by the Rust server. Users copying these configs get no TLS, wrong ports, no cluster. Only actual env vars: `PORT`, `JWT_SECRET`, `DATABASE_URL`, `RUST_LOG`, `TOPGUN_LOG_FORMAT`, `TOPGUN_ADMIN_*`.
+- **Fix:** Add "planned" banners to TLS/cluster Docker Compose and K8s sections. Keep basic Docker section (accurate). Replace `TOPGUN_PORT` with `PORT` where applicable. Note that production CLI binary with env var config is planned.
+- **Ref:** DOCS_AUDIT_REPORT.md — deployment.mdx section
+- **Effort:** 0.5 day
+
+### TODO-187: Fix observability.mdx — Replace TS Server Metrics with Rust Actuals
+- **Priority:** P1 (all metric names wrong, monitoring dashboards will fail)
+- **Complexity:** Small
+- **Summary:** `observability.mdx` lists ~30 metric names from old TS server (Node.js event queue architecture). None exist in Rust server. Claims Pino JSON logging — actual is Rust tracing. Actual Rust metrics: `topgun_active_connections` (gauge), `topgun_operations_total` (counter, labels: service/outcome), `topgun_operation_duration_seconds` (histogram), `topgun_operation_errors_total` (counter).
+- **Fix:** Rewrite all metric tables with actual Rust metrics from `metrics_endpoint.rs` and `metrics.rs`. Replace Pino with Rust tracing (`TOPGUN_LOG_FORMAT=json`). Remove Event Queue/Backpressure/Connection Rate Limiting metric tables (TS server artifacts). Add note that extended metrics (map size, cluster members) are planned (TODO-137).
+- **Ref:** DOCS_AUDIT_REPORT.md — observability.mdx section
+- **Effort:** 0.5 day
+
+### TODO-188: Fix performance.mdx — Replace TS Server Config Knobs
+- **Priority:** P1 (tuning instructions reference non-existent config)
+- **Complexity:** Small
+- **Summary:** `performance.mdx` documents `eventQueueCapacity`, `eventStripeCount`, `backpressureSyncFrequency`, `writeCoalescingMaxDelayMs` etc. — all TS server config. None exist in Rust. Binary name `topgun-server` incorrect (actual: `test-server` from source). Monitoring metrics section has same TS metric names issue.
+- **Fix:** Replace with actual Rust config: `ServerConfig` fields (`max_concurrent_operations`, `gc_interval_ms`), `ConnectionConfig` fields (`outbound_channel_capacity`, `send_timeout`, `idle_timeout`). Fix binary name. Replace metric names with actuals.
+- **Ref:** DOCS_AUDIT_REPORT.md — performance.mdx section
+- **Effort:** 0.5 day
+
+### TODO-189: Fix cluster-replication.mdx — Remove False Env Vars & Consistency Modes
+- **Priority:** P1 (cluster setup instructions don't work)
+- **Complexity:** Small
+- **Summary:** `cluster-replication.mdx` shows `TOPGUN_CLUSTER_PORT`, `TOPGUN_CLUSTER_SEEDS`, `TOPGUN_NODE_ID`, `TOPGUN_CONSISTENCY` env vars — none parsed. Documents QUORUM/STRONG consistency modes — only eventual consistency exists. Docker Compose cluster example will not configure nodes. Replication metrics are aspirational.
+- **What IS accurate:** 271 partitions, `backup_count`, Phi Accrual failure detection (`phi_threshold: 8.0`), gossip discovery (HELLO/MEMBER_LIST), partition rebalancing on failure.
+- **Fix:** Add banners noting env var cluster config is planned. Mark QUORUM/STRONG as planned. Keep architecture overview sections (gossip, partitions, failure detection) — they describe real behavior. Remove non-existent replication metrics.
+- **Ref:** DOCS_AUDIT_REPORT.md — cluster-replication.mdx section
+- **Effort:** 0.5 day
 
 ### TODO-036: Pluggable Extension System
 - **Priority:** P2
