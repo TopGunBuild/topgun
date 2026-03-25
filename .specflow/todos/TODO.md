@@ -1,7 +1,7 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-25 — Added TODO-186–189 (docs fixes for deployment, observability, performance, cluster-replication)
-**Strategy:** Rust-first IMDG design informed by Hazelcast architecture
+**Last updated:** 2026-03-25 — TODO-187 converted to SPEC-152
+**Strategy:** Feature-complete open-source core first, then cloud. All differentiators built before launch.
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
 ---
@@ -184,22 +184,6 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
   - **Recommended split:** extract LRU evictor as a minimal slice (TODO-033a, 3-5 days) for cloud launch, defer full Write-Behind (staging area, coalescing, batch flush) to v3.0
   - LRU evictor converts TopGun from "data must fit in RAM" to "hot data in RAM, cold data in PostgreSQL" — sufficient for v2.0 cloud
 
-
-### TODO-186: Fix deployment.mdx — Remove Non-Functional Env Vars & Config
-- **Priority:** P1 (Docker/K8s configs silently fail)
-- **Complexity:** Small
-- **Summary:** `deployment.mdx` shows `TOPGUN_PORT`, `TOPGUN_TLS_*`, `TOPGUN_CLUSTER_PORT`, `TOPGUN_CLUSTER_TLS_*` env vars in Docker Compose and Kubernetes configs — none are parsed by the Rust server. Users copying these configs get no TLS, wrong ports, no cluster. Only actual env vars: `PORT`, `JWT_SECRET`, `DATABASE_URL`, `RUST_LOG`, `TOPGUN_LOG_FORMAT`, `TOPGUN_ADMIN_*`.
-- **Fix:** Add "planned" banners to TLS/cluster Docker Compose and K8s sections. Keep basic Docker section (accurate). Replace `TOPGUN_PORT` with `PORT` where applicable. Note that production CLI binary with env var config is planned.
-- **Ref:** DOCS_AUDIT_REPORT.md — deployment.mdx section
-- **Effort:** 0.5 day
-
-### TODO-187: Fix observability.mdx — Replace TS Server Metrics with Rust Actuals
-- **Priority:** P1 (all metric names wrong, monitoring dashboards will fail)
-- **Complexity:** Small
-- **Summary:** `observability.mdx` lists ~30 metric names from old TS server (Node.js event queue architecture). None exist in Rust server. Claims Pino JSON logging — actual is Rust tracing. Actual Rust metrics: `topgun_active_connections` (gauge), `topgun_operations_total` (counter, labels: service/outcome), `topgun_operation_duration_seconds` (histogram), `topgun_operation_errors_total` (counter).
-- **Fix:** Rewrite all metric tables with actual Rust metrics from `metrics_endpoint.rs` and `metrics.rs`. Replace Pino with Rust tracing (`TOPGUN_LOG_FORMAT=json`). Remove Event Queue/Backpressure/Connection Rate Limiting metric tables (TS server artifacts). Add note that extended metrics (map size, cluster members) are planned (TODO-137).
-- **Ref:** DOCS_AUDIT_REPORT.md — observability.mdx section
-- **Effort:** 0.5 day
 
 ### TODO-188: Fix performance.mdx — Replace TS Server Config Knobs
 - **Priority:** P1 (tuning instructions reference non-existent config)
@@ -604,24 +588,63 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 
 ## Execution Order
 
+**Strategy:** Feature-complete open-source core first, then cloud. Cloud launch only after all key differentiators are built and there is a compelling story for marketing and Show HN. No shortcuts to revenue — quality and feature depth come first.
+
 ### Milestone 2 — v2.0 (Data Platform)
 
-**Completed waves:** 6a (SPEC-126 Tantivy), 6a¹ (SPEC-131 search fix), 6b (SPEC-127 schema types), 6b² (SPEC-128 write-path, SPEC-129 TS codegen, SPEC-130 Arrow derivation).
+**Completed waves:** 6a (SPEC-126 Tantivy), 6a¹ (SPEC-131 search fix), 6b (SPEC-127 schema types), 6b² (SPEC-128 write-path, SPEC-129 TS codegen, SPEC-130 Arrow derivation), 6c (SPEC-135a-c DataFusion SQL), 6c² (SPEC-142–145 Query unification), 6f² (SPEC-137 P0 Security, SPEC-138 RS256), 6f²¹ (SPEC-149 auth/security docs), 6f²² (SPEC-141 Shapes docs, SPEC-148 SQL docs).
 
-| Wave | Items | Blocked by | Rationale |
-|------|-------|------------|-----------|
-| **6c** | TODO-091 (DataFusion SQL) · TODO-070 (Shapes) · TODO-033 (Write-Behind) | 130 ✓ · 128 ✓ · — | SQL needs Arrow schemas (done); Shapes needs write-path wiring (done); Write-Behind independent |
-| **6c²** | ~~TODO-181~~ ✓ · ~~TODO-182~~ ✓ · ~~TODO-183~~ ✓ · ~~TODO-184~~ ✓ | 070 ✓ | Query+Shape API unification — **done** (SPEC-142–145). Dual subscription model eliminated. TODO-167/168 absorbed |
-| **6d** | TODO-025 (DAG Executor) · TODO-092 (Connector traits) | 091 · — | DAG needs SQL for pipeline definitions; Connector traits independent, DAG integration after |
-| **6e** | TODO-072 (WASM) · TODO-036 (Extensions) | 091 · soft: 025+091+092 | WASM compiles SQL to browser; Extensions benefits from knowing all extension points first |
-| **6f** | TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt) · TODO-102 (Rust CLI) | — | Independent network/tooling, low priority (P3), no blockers |
-| **6f²** | ~~TODO-163 (P0 Security fixes)~~ ✓ · ~~TODO-169 (RS256 regression)~~ ✓ | — · 163 ✓ | JWT exp/CORS/sub done. RS256 done (SPEC-138): Clerk/Auth0/Firebase unblocked |
-| **6f²¹** | ~~TODO-170 (Auth/Security/RBAC docs fixes)~~ ✓ · TODO-172 (Docs audit) | 169 ✓ | Auth/Security/RBAC docs done (SPEC-149), audit remaining pages |
-| **6f²²** | ~~TODO-173 (Shapes docs)~~ ✓ · ~~TODO-162 (SQL docs)~~ ✓ · TODO-154↑schema guide | — | v2.0 feature docs — Shapes guide done (SPEC-141, will be merged into live-queries by TODO-184), SQL done (SPEC-148), Schema page pending |
-| **6f³** | TODO-136 (Rate Limits) · TODO-137 (Metrics) · TODO-138 (Schema Migrations) | 069 ✓ | Cloud prerequisites; Rate limits needed for free tier |
-| **6f⁴** | TODO-164 (P2 Security) · TODO-139 (Backup/Restore) · TODO-141 (Docker) | 163 ✓ | Cloud-readiness; auth rate limit, HSTS, cluster TLS (RS256 moved to 169) |
-| **6g** | TODO-101 (DevTools) · TODO-093 v2.0 (Dashboard) | — · 025+091+092 | UI layer last: needs features to visualize |
-| **6h** | TODO-142 (Python SDK) | — | Market expansion; after core stabilizes |
+#### Phase: v2.0-beta — Solid Foundation
+
+*Goal: Make what exists work correctly. Production-ready IMDG with SQL, indexing, RBAC, locks, durability guarantees.*
+*Marketing point: "Production-ready IMDG with offline-first CRDTs, SQL queries, indexes, RBAC, distributed locks, and write concern guarantees." — first technical blog posts possible here.*
+
+| # | TODO | Feature | Effort | Blocked by |
+|---|------|---------|--------|------------|
+| 1 | 186, 187, 188, 189 | Docs fixes (deployment, observability, performance, cluster) | 2 days | — |
+| 2 | 177 | Indexing: Hash / Navigable / Inverted | 3-4 weeks | — |
+| 3 | 175 | Distributed Locks | 1-2 weeks | — |
+| 4 | 171 | RBAC (role-based access control) | 1-2 weeks | SPEC-137 ✓ |
+| 5 | 180 | Write Concern (server achievement reporting) | 1-2 weeks | — |
+| 6 | 138 | Schema Migrations | 2 weeks | TODO-069 ✓ |
+
+#### Phase: v2.0-rc — Headline Differentiators
+
+*Goal: Build the features that make TopGun unique. Stream processing, connectors, WASM user-defined functions, data > RAM.*
+*Marketing point: "Stream processing like Hazelcast Jet, connectors to Kafka/S3/PostgreSQL CDC, user-defined WASM functions — and it all works offline-first. No competitor covers both quadrants." — this is the moment to start content marketing.*
+
+| # | TODO | Feature | Effort | Blocked by |
+|---|------|---------|--------|------------|
+| 7 | 025 | DAG Executor (stream processing) | 3-4 weeks | TODO-091 ✓ |
+| 8 | 092 | Connector Framework (Kafka, S3, PG CDC) | 2 weeks | 025 (DAG integration) |
+| 9 | 176 + 179 | WASM Sandbox: Entry Processor + Conflict Resolvers | 4-5 weeks | — (shared infra) |
+| 10 | 033 | Write-Behind / LRU (data > RAM) | 2-3 weeks | — |
+
+#### Phase: v2.0-release — DX Polish
+
+*Goal: Best developer experience in the category. Same SQL offline and online, browser DevTools, visual pipeline dashboard.*
+
+| # | TODO | Feature | Effort | Blocked by |
+|---|------|---------|--------|------------|
+| 11 | 072 | WASM client modules (SQL + search in browser) | 2-3 weeks | TODO-091 ✓ |
+| 12 | 101 | Client DevTools | 4-6 weeks | — |
+| 13 | 093 v2.0 | Admin Dashboard (pipelines, SQL playground) | 2-3 weeks | 025 + 091 + 092 |
+| 14 | 048 | SSE Push (serverless environments) | 2-3 days | — |
+
+#### Phase: v2.0-cloud — Cloud Preparation
+
+*Goal: All infrastructure needed for cloud launch in one sprint. After this block — deploy, Show HN, start accepting payments.*
+
+| # | TODO | Feature | Effort | Blocked by |
+|---|------|---------|--------|------------|
+| 15 | 136 | Rate Limiting & Quotas | 1-2 weeks | — |
+| 16 | 033a | LRU Evictor slice (if not covered by 033) | 3-5 days | — |
+| 17 | 137 | Prometheus / OpenTelemetry Metrics | 1 week | — |
+| 18 | 164 | Security Hardening (auth rate limit, HSTS, token revocation) | 1-2 weeks | TODO-163 ✓ |
+| 19 | 139 | Backup / Restore API | 1-2 weeks | — |
+| 20 | 141 | Docker deployment configs | 3-5 days | — |
+| 21 | 140 | Webhooks (Zapier/n8n/Make integration) | 1 week | — |
+| — | — | Namespace isolation (tenant prefix, per-tenant config, PG tenant_id) | 3-5 days | 136 |
 
 ### Milestone 3 — v3.0+ (Enterprise)
 
@@ -631,17 +654,19 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 | **7b** | TODO-040 (Tiered Storage) · TODO-039 (Vector Search) | 043 · — |
 | **7c** | TODO-044 (Bi-Temporal) | 043 |
 | **7d** | TODO-095 (Enterprise dir) · TODO-093 v3.0 (Dashboard) | — · 041+040 |
+| **7e** | TODO-036 (Extensions) · TODO-102 (Rust CLI) · TODO-142 (Multi-language SDKs) | — |
+| **7f** | TODO-174 (Adaptive Indexing) · TODO-178 (Interceptors) · TODO-049 (Cluster HTTP) · TODO-076 (Merkle hash opt) | — |
 
 ### Milestone 4 — GTM (Go-to-Market)
 
-*Runs in parallel with late v2.0 waves (6f²+). Business tasks don't block technical work.*
+*Starts after v2.0-release is complete. Pre-launch marketing (community, landing page, content) can begin during v2.0-rc phase. Cloud launch and Show HN only after v2.0-cloud is done.*
 
 | Wave | Items | Blocked by | Timing |
 |------|-------|------------|--------|
-| **8a** (pre-launch) | TODO-156 (Community) · TODO-153 (Landing page) · TODO-157 (Content) · TODO-159 (Demo improvements) | — | Start during wave 6d-6e |
+| **8a** (pre-launch) | TODO-156 (Community) · TODO-153 (Landing page) · TODO-157 (Content) · TODO-159 (Demo improvements) | — | Start during v2.0-rc |
 | **8a²** (pre-launch) | TODO-160 (README rewrite) · TODO-161 (Social strategy) | 156 | After community channels live |
 | **8b** (pre-launch) | TODO-150 (Company reg) · TODO-154 (Docs) · TODO-166 (ToS/PP) | — | Start 4-6 weeks before cloud launch |
-| **8c** (launch) | TODO-151 (Paddle) · TODO-152 (Cloud: shared instance + Clerk portal) | 150+166 · 136+141+163+164 | After v2.0 feature-complete + security hardened |
+| **8c** (launch) | TODO-151 (Paddle) · TODO-152 (Cloud: shared instance + Clerk portal) | 150+166 · v2.0-cloud done | After v2.0-cloud phase complete |
 | **8d** (launch) | TODO-155 (Show HN) | 153+154+156+159+160 | 1-2 weeks after cloud beta |
 | **8e** (post-launch) | TODO-158 (Premium license) · TODO-161 execution | Revenue validation | After first paying customers |
 
@@ -650,51 +675,57 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 ```
 MILESTONE 2: Data Platform (v2.0)
 
-  ✓ SPEC-126 (Tantivy optimization)
-  ✓ SPEC-131 (Search partition fix)
-  ✓ SPEC-127 → SPEC-128 (Write-path) → TODO-070 (Shapes) ✓ → TODO-167 (Shape max limit) · TODO-168 (ShapeHandle<T>)
-  ✓ SPEC-127 → SPEC-129 (TS codegen)
-  ✓ SPEC-127 → SPEC-130 (Arrow)     → TODO-091 (DataFusion SQL) → TODO-025 (DAG Stream Processing)
-                                              │                            │
-                                              └→ TODO-072 (WASM)          └→ TODO-092 (DAG integration)
+  v2.0-beta (Solid Foundation):
+  ┌─ TODO-186-189 (Docs fixes) ← no deps, hygiene first
+  ├─ TODO-177 (Indexing) ← no deps, O(1) queries
+  ├─ TODO-175 (Distributed Locks) ← no deps, coordination
+  ├─ TODO-171 (RBAC) ← depends on SPEC-137 ✓
+  ├─ TODO-180 (Write Concern) ← no deps
+  └─ TODO-138 (Schema Migrations) ← depends on TODO-069 ✓
 
-  TODO-092 (Connector traits) ← independent of DAG, can start in 6d
-  TODO-033 (Write-Behind) ← independent, unblocks v3.0 S3
-  ✓ TODO-027 (DST) ← completed via SPEC-132a-d (madsim, SimCluster, fault injection, proptest)
-  TODO-036 (Extensions) ← soft dep on 025+091+092 (needs extension points)
-  TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt) · TODO-102 (Rust CLI) ← P3, no blockers
-  TODO-101 (Client DevTools) · TODO-093 v2.0 (Dashboard) ← depends on 025+091+092
+  v2.0-rc (Headline Differentiators):
+  ┌─ TODO-025 (DAG Executor) ← depends on TODO-091 ✓
+  ├─ TODO-092 (Connectors) ← depends on TODO-025 (DAG integration)
+  ├─ TODO-176 + 179 (WASM Sandbox: Entry Processor + Conflict Resolvers) ← shared infra
+  └─ TODO-033 (Write-Behind / LRU) ← no deps, unblocks v3.0 S3
 
-  Security & Cloud prerequisites (wave 6f²-6f⁴):
-  ✓ TODO-163 (P0 Security) ← DONE (SPEC-137): JWT exp, NetworkModule auth, CORS
-  ✓ TODO-169 (RS256 regression) ← DONE (SPEC-138): auto-detection in auth.rs + admin_auth.rs
-  ✓ TODO-170 (auth/security/rbac docs) ← DONE (SPEC-149): security.mdx + rbac.mdx fixes
-  TODO-163 → TODO-171 (RBAC implementation, P2) ← role-based policies, pattern matching, field-level security
-  TODO-163 → TODO-164 (P2 Security) ← auth rate limit, HSTS, cluster TLS (RS256 extracted to 169)
-  TODO-172 (Docs audit, P2) ← systematic verification of all guides pages
-  TODO-136 (Rate Limits) ← Tower middleware, independent
-  TODO-137 (Metrics) ← complements TODO-099 (tracing)
-  TODO-138 (Schema Migrations) ← depends on TODO-069 ✓
-  TODO-139 (Backup/Restore) · TODO-141 (Docker) ← independent
-  TODO-142 (Python SDK) ← after core API stabilizes
+  v2.0-release (DX Polish):
+  ┌─ TODO-072 (WASM client: SQL+search in browser) ← depends on TODO-091 ✓
+  ├─ TODO-101 (Client DevTools) ← no deps
+  ├─ TODO-093 v2.0 (Admin Dashboard) ← depends on 025+091+092
+  └─ TODO-048 (SSE Push) ← no deps, 2-3 days
 
-  Storage strategy:
-  TODO-033 (Write-Behind) ← split: 033a (LRU evictor, 3-5d) for cloud, full 033 for v3.0
-  TODO-033 unblocks: TODO-043 (S3) → TODO-040 (Tiered) → TODO-044 (Time-Travel)
+  v2.0-cloud (Cloud Preparation):
+  ┌─ TODO-136 (Rate Limits) ← no deps
+  ├─ TODO-033a (LRU Evictor slice) ← if not covered by TODO-033
+  ├─ TODO-137 (Prometheus/OTel) ← no deps
+  ├─ TODO-164 (P2 Security) ← depends on TODO-163 ✓
+  ├─ TODO-139 (Backup/Restore) ← no deps
+  ├─ TODO-141 (Docker configs) ← no deps
+  ├─ TODO-140 (Webhooks) ← no deps
+  └─ Namespace isolation ← depends on TODO-136
+
+  Completed:
+  ✓ SPEC-126 (Tantivy) · ✓ SPEC-131 (Search fix)
+  ✓ SPEC-127-130 (Schema system) · ✓ SPEC-135a-c (DataFusion SQL)
+  ✓ SPEC-142-145 (Query unification, Shapes absorbed)
+  ✓ SPEC-137 (P0 Security) · ✓ SPEC-138 (RS256) · ✓ SPEC-149 (Auth docs)
+  ✓ TODO-027 (DST via SPEC-132a-d)
 
 MILESTONE 3: Enterprise (v3.0+)
 
-  TODO-041 (Multi-Tenancy) ← triggers Cloud Phase B (shared infra, ~20+ customers)
+  TODO-041 (Multi-Tenancy) ← triggers Cloud Phase B (~100+ customers)
   TODO-043 (S3 Bottomless) ──→ TODO-040 (Tiered) ──→ TODO-044 (Time-Travel)
        ↑
-  TODO-033 (Write-Behind full, from v2.0)
+  TODO-033 (Write-Behind, from v2.0)
   TODO-039 (Vector Search)
   TODO-095 (Enterprise dir)
-  TODO-165 (Enterprise Security) ← KMS encryption, JWKS, audit logging
+  TODO-165 (Enterprise Security) ← KMS, JWKS, audit logging
   TODO-093 v3.0 (Dashboard) ← depends on 041+040
-  TODO-152 Phase B (Multi-tenant Cloud) ← depends on 041
+  TODO-036 (Extensions) · TODO-102 (Rust CLI) · TODO-142 (SDKs)
+  TODO-174 (Adaptive Indexing) · TODO-178 (Interceptors) · TODO-049 (HTTP) · TODO-076 (Hash opt)
 
-MILESTONE 4: GTM (parallel with late v2.0)
+MILESTONE 4: GTM (pre-launch starts during v2.0-rc)
 
   TODO-156 (Community) ──→ TODO-160 (README) ──┐
   TODO-153 (Landing)  ────────────────────────┤
@@ -702,7 +733,7 @@ MILESTONE 4: GTM (parallel with late v2.0)
   TODO-154 (Docs)     ────────────────────────┤
   TODO-159 (Demo)     ────────────────────────┘
   TODO-156 (Community) ──→ TODO-161 (Social strategy) ← execution after Show HN
-  TODO-150 (Company) → TODO-151 (Paddle) → TODO-152 (Cloud) ← also needs 136+141
+  TODO-150 (Company) → TODO-151 (Paddle) → TODO-152 (Cloud) ← needs v2.0-cloud done
   TODO-158 (Premium license) ← after revenue validation
 ```
 

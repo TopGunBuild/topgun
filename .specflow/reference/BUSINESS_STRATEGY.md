@@ -1,9 +1,10 @@
 # TopGun — Бизнес-стратегия и дорожная карта монетизации
 
-> **Дата:** 2026-03-20
-> **Контекст:** Соло-основатель, v1.0 выпущен, v2.0 в разработке (wave 6c)
+> **Дата:** 2026-03-25 (обновлено)
+> **Контекст:** Соло-основатель, v1.0 выпущен, v2.0 в разработке (v2.0-beta phase)
 > **Ограничение:** Non-native English speaker (письменный через LLM = нативный; разговорный — в развитии)
 > **Цель:** Дорожная карта от open-source проекта до прибыльного бизнеса с потенциалом exit
+> **Ключевое решение (2026-03-25):** Feature-first стратегия — полное open-source ядро до cloud launch. Cloud только после реализации всех дифференциаторов.
 
 ---
 
@@ -12,7 +13,7 @@
 ### Что уже есть
 - v1.0 выпущен: 540+ Rust-тестов, 55 интеграционных, clippy-clean
 - Производительность: 200,000 ops/sec (рост с 100 в 2000 раз)
-- v2.0 в активной разработке: Schema System готов, DataFusion SQL следующий
+- v2.0 в активной разработке (v2.0-beta phase): Schema System ✓, DataFusion SQL ✓, Query unification ✓, P0 Security ✓, RS256 auth ✓
 - Apache 2.0 лицензия (уже сменена с BSL)
 - Admin Dashboard, React SDK, TypeScript client
 
@@ -89,27 +90,43 @@ Break-even: **4 Pro клиента.** Первые 3 месяца убыточн
 
 ## 3. Когда начать зарабатывать: фазовый план
 
-### Фаза 0: Сейчас → v2.0 готов (текущая позиция)
+### Стратегическое решение: Feature-First (2026-03-25)
+
+**Быстрый запуск cloud НЕ является приоритетом.** Главный фокус — на постепенном развитии продукта: переход к cloud-версии состоится только тогда, когда будут реализованы все ключевые функции, выделяющие TopGun среди конкурентов и дающие пользователям веские причины выбрать именно его.
+
+**Почему:**
+- TopGun должен обладать качественными отличиями для публикаций и маркетинговых материалов
+- Show HN с неполным продуктом — одноразовый шанс, потраченный зря
+- Open-source adoption создаёт воронку для будущих cloud customers
+- Конкуренты (ElectricSQL, PowerSync) запустились рано с минимальным feature set — не привело к быстрому росту
+
+### Фаза 0: v2.0-beta + v2.0-rc — Feature-Complete Core (текущая позиция)
 
 **Действия:**
-- Завершить v2.0 (DataFusion SQL, DAG, Connectors)
-- Параллельно: landing page с waitlist для TopGun Cloud
-- Параллельно: 2 блог-поста/месяц (технические)
+- Завершить v2.0-beta: Indexing, Distributed Locks, RBAC, Write Concern, Schema Migrations
+- Завершить v2.0-rc: DAG Executor, Connectors, WASM Sandbox, Write-Behind
+- Завершить v2.0-release: WASM client, DevTools, Admin Dashboard, SSE
+- Параллельно (с v2.0-rc): landing page с waitlist, community setup, первые блог-посты
+- Параллельно: 2 блог-поста/месяц (технические, начиная с v2.0-rc когда есть о чём писать)
 - **Доход: $0**
 
-### Фаза 1: Бета-запуск Cloud (v2.0 + 1-2 месяца)
+**Маркетинговые точки (контент можно публиковать):**
+- После v2.0-beta: "Production-ready IMDG с offline-first CRDTs, SQL, индексами, RBAC, distributed locks"
+- После v2.0-rc: "Stream processing + connectors + WASM user-defined functions — и всё offline-first" ← **главная история**
+- После v2.0-release: "Один SQL-диалект offline и online, browser DevTools, visual pipeline dashboard"
 
-**Триггер:** v2.0 feature-complete (SQL + Shapes как минимум) + TODO-163 (P0 security) исправлен
+### Фаза 1: Cloud Launch (после v2.0-cloud phase)
+
+**Триггер:** v2.0 feature-complete (все 4 фазы: beta, rc, release, cloud) — все дифференциаторы реализованы
 
 **Действия:**
-1. Исправить P0 security (TODO-163) — **blocker**
-2. Реализовать namespace isolation + rate limits (TODO-136)
-3. Зарегистрировать компанию (см. раздел 5)
-4. Настроить Paddle для приёма платежей
-5. Развернуть TopGun Cloud на Hetzner CCX33 (shared instance, €55/мес)
-6. **Show HN: "TopGun — Local-first real-time data platform in Rust"**
-7. Открыть бету: Free tier для всех, Pro за $25 для ранних adopters
-8. Discord-сервер для сообщества
+1. Завершить v2.0-cloud: Rate Limits, Metrics, Security Hardening, Backup/Restore, Docker, Webhooks, Namespace Isolation
+2. Зарегистрировать компанию (см. раздел 5)
+3. Настроить Paddle для приёма платежей
+4. Развернуть TopGun Cloud на Hetzner CCX33 (shared instance, €55/мес)
+5. **Show HN: "TopGun — Local-first real-time data platform with stream processing in Rust"**
+6. Открыть бету: Free tier для всех, Pro за $25 для ранних adopters
+7. Discord-сервер для сообщества
 
 **Цель:** 50+ бесплатных пользователей, 3-5 платящих
 **Доход: $75-125/мес (pre-profit, break-even при 4 Pro)**
@@ -389,31 +406,35 @@ Base cost: $85/мес (Hetzner CCX33 $60 + managed PostgreSQL $25). Paddle: 5%.
 
 ---
 
-## 11. Конкретный план действий (следующие 30 дней)
+## 11. Конкретный план действий
 
-### Параллельно с разработкой v2.0:
-
-| # | Действие | Усилия | Важность |
-|---|----------|--------|----------|
-| 1 | Открыть Discord-сервер (text-only, без voice каналов) | 1 час | Высокая |
-| 2 | Написать первый блог-пост: "Why I'm building a real-time data platform in Rust" (черновик RU → LLM → EN) | 4-8 часов | Высокая |
-| 3 | Настроить waitlist на topgun.build (email-сбор) | 2-4 часа | Средняя |
-| 4 | Начать Twitter/X build-in-public (короткие посты + скриншоты/гифки, минимум текста) | 30 мин/день | Средняя |
-| 5 | Открыть Telegram-канал на русском для RU-сообщества | 30 мин | Средняя |
-| 6 | Подготовить Stripe Atlas заявку (не отправлять до готовности cloud) | 1 час | Низкая |
-| 7 | Начать Paddle регистрацию (занимает 1-2 недели) | 1 час | Низкая |
-| 8 | Записаться на Italki/Preply (разговорный EN, 2-3 раза/неделю) | 1 час/setup | Средняя |
-
-### После v2.0 feature-complete:
+### Сейчас: фокус на v2.0-beta (feature development)
 
 | # | Действие | Усилия | Важность |
 |---|----------|--------|----------|
-| 9 | **Исправить P0 security (TODO-163)** | 2-3 дня | **BLOCKER** |
-| 10 | Реализовать namespace isolation + rate limits | 1-2 нед | Критическая |
-| 11 | Зарегистрировать компанию (Stripe Atlas) | $500 + 1 час | Критическая |
-| 12 | Развернуть TopGun Cloud на Hetzner CCX33 | 1-2 дня | Критическая |
-| 13 | Show HN launch | 1 день | Критическая |
-| 14 | Написать 2-3 comparison поста (SEO) | 1 неделя | Высокая |
+| 1 | Завершить v2.0-beta: Indexing, Locks, RBAC, Write Concern, Migrations | ~10-12 нед | **Критическая** |
+| 2 | Записаться на Italki/Preply (разговорный EN, 2-3 раза/неделю) | 1 час/setup | Средняя |
+
+### Во время v2.0-rc: начать маркетинговую подготовку параллельно
+
+| # | Действие | Усилия | Важность |
+|---|----------|--------|----------|
+| 3 | Открыть Discord-сервер (text-only, без voice каналов) | 1 час | Высокая |
+| 4 | Написать первый блог-пост: "Why I'm building a real-time data platform in Rust" | 4-8 часов | Высокая |
+| 5 | Настроить waitlist на topgun.build (email-сбор) | 2-4 часа | Средняя |
+| 6 | Начать Twitter/X build-in-public | 30 мин/день | Средняя |
+| 7 | Открыть Telegram-канал на русском для RU-сообщества | 30 мин | Средняя |
+
+### После v2.0-release: подготовка к cloud launch
+
+| # | Действие | Усилия | Важность |
+|---|----------|--------|----------|
+| 8 | Завершить v2.0-cloud phase (Rate Limits, Metrics, Security, Docker, Webhooks) | ~6-8 нед | Критическая |
+| 9 | Подготовить Stripe Atlas заявку + зарегистрировать компанию | $500 + 1 час | Критическая |
+| 10 | Настроить Paddle (занимает 1-2 недели) | 1 час | Критическая |
+| 11 | Развернуть TopGun Cloud на Hetzner CCX33 | 1-2 дня | Критическая |
+| 12 | Show HN launch | 1 день | Критическая |
+| 13 | Написать 2-3 comparison поста (SEO) | 1 неделя | Высокая |
 
 ---
 
@@ -450,16 +471,22 @@ Base cost: $85/мес (Hetzner CCX33 $60 + managed PostgreSQL $25). Paddle: 5%.
 ## Итого: Timeline to Exit
 
 ```
-2026 Q2-Q3: Завершить v2.0, исправить P0 security, подготовить Cloud
-2026 Q3-Q4: Бета-запуск, Show HN → 50+ free, 3-5 paid → $75-125 MRR
-2027 Q1-Q2: Self-serve рост → 20-30 paid → $800-1,500 MRR
-2027 Q3-Q4: v3.0 начало, Team/Enterprise → $3-5K MRR
-2028:       Развилка — lifestyle ($5-15K/мес) или seed round ($1-3M)
+2026 Q2-Q3: v2.0-beta (Indexing, Locks, RBAC, Write Concern, Migrations)
+2026 Q3-Q4: v2.0-rc (DAG Executor, Connectors, WASM Sandbox, Write-Behind)
+            Параллельно: community setup, первые блог-посты, waitlist
+2026 Q4-2027 Q1: v2.0-release (WASM client, DevTools, Dashboard, SSE)
+                  + v2.0-cloud (Rate Limits, Security, Docker, Webhooks)
+2027 Q1-Q2: Cloud launch, Show HN → 50+ free, 3-5 paid → $75-125 MRR
+2027 Q2-Q3: Self-serve рост → 20-30 paid → $800-1,500 MRR
+2027 Q4-2028: v3.0 начало, Team/Enterprise → $3-5K MRR
+2028-2029:  Развилка — lifestyle ($5-15K/мес) или seed round ($1-3M)
 2029-2030:  При seed: $500K-1M ARR → acquisition target ($5-15M+)
 ```
 
-**Самый короткий путь к exit:** 3-4 года при агрессивном росте.
-**Самый вероятный путь:** Прибыльный lifestyle business через 18-24 месяцев.
+**Самый короткий путь к exit:** 3.5-4.5 года при агрессивном росте.
+**Самый вероятный путь:** Прибыльный lifestyle business через 24-30 месяцев.
 **Оба варианта хорошие** — решение принимать при достижении $5K MRR.
 
-**Честная оценка зрелости плана: 6/10** (подробности в [CLOUD_ARCHITECTURE.md](CLOUD_ARCHITECTURE.md) раздел 7). Каждая итерация вопросов выявляет пробелы — это нормальный процесс stress-testing стратегии. Основные риски: сырая security (P0 найдены), непроверенный pricing (нужен feedback от beta users), отсутствие legal framework (ToS, Privacy Policy).
+**Преимущество feature-first подхода:** Show HN с полным набором дифференциаторов (stream processing, WASM, connectors, offline-first SQL) — это гораздо более мощный launch, чем ранний запуск с минимальным feature set. Один шанс на first impression.
+
+**Честная оценка зрелости плана: 6/10** (подробности в [CLOUD_ARCHITECTURE.md](CLOUD_ARCHITECTURE.md) раздел 7). Каждая итерация вопросов выявляет пробелы — это нормальный процесс stress-testing стратегии. Основные риски: ~~сырая security (P0 найдены)~~ P0 security исправлен (SPEC-137), непроверенный pricing (нужен feedback от beta users), отсутствие legal framework (ToS, Privacy Policy).

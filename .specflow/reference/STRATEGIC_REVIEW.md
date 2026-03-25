@@ -20,6 +20,7 @@
 | 2026-03-22 | Cloud portal auth: Clerk (не BetterAuth) | $0 для 50K MAU, pre-built UI, zero maintenance. Уже работает в `examples/notes-app` — проверенная интеграция. Clerk = только portal login, не data plane. TopGun data connections используют собственные HS256 JWT | BetterAuth self-hosted (больше контроля, но 1-2 нед UI + hosting + maintenance) | Если Clerk меняет pricing >$50/мес или sunset — миграция на BetterAuth |
 | 2026-03-22 | TODO-163 (P0 security) — сразу после SPEC-136 | demo.topgun.build уже публичен с уязвимостями. 2-3 дня. Смежный код с SPEC-136 | Отложить до wave 6f² (позже, но рискованнее) | — |
 | 2026-03-20 | Apache 2.0 core + BSL enterprise | Open-core стандарт для dev tools. Apache для adoption, BSL для enterprise revenue | Full Apache (нет enterprise moat), proprietary (нет adoption) | Если конкурент fork'ает и обгоняет — рассмотреть SSPL или Elastic License |
+| 2026-03-25 | Feature-first: полное open-source ядро до cloud launch | Show HN с полным набором дифференциаторов (DAG, WASM, Connectors, Indexing, Locks, RBAC) — мощнее, чем ранний запуск с минимальным feature set. Один шанс на first impression | Ранний cloud launch после SQL+Shapes (быстрее к revenue, но слабый launch) | Если разработка затягивается >12 мес до launch — пересмотреть scope |
 
 ---
 
@@ -29,7 +30,7 @@
 
 | ID | Риск | Вероятность | Импакт | Статус | Митигация | Триггер для эскалации |
 |----|------|------------|--------|--------|-----------|----------------------|
-| R-001 | P0 security bugs (JWT, auth) позволят атаку на production | Высокая | Критический | **OPEN** | TODO-163 (2-3 дня) | Любой публичный деплой до фикса |
+| R-001 | P0 security bugs (JWT, auth) позволят атаку на production | Высокая | Критический | **FIXED** (SPEC-137, SPEC-138) | TODO-163 ✓, TODO-169 ✓. Remaining P2 hardening in TODO-164 | — |
 | R-002 | Pricing слишком низкий — не хватает на жизнь | Средняя | Высокий | Мониторинг | Пересмотр при $2K MRR. Добавить Team ($79) и Enterprise ($299) | Если после 6 мес <$500 MRR |
 | R-003 | Pricing слишком высокий — нет adoption | Средняя | Высокий | Снижен | Снизили с $99 до $25. Мониторить conversion | Если conversion free→pro <1% через 3 мес |
 | R-004 | Burnout (соло-основатель, dev + biz + support) | Высокая | Критический | **OPEN** | Реалистичные сроки. Первый найм при $3K MRR (part-time support) | Если работа >60ч/нед >2 мес подряд |
