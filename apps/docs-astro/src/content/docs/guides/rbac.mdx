@@ -54,7 +54,8 @@ export const fieldLevelCode = `{
   <ul className="text-sm text-amber-800 dark:text-amber-200 space-y-1 list-disc list-inside">
     <li><strong>Works today:</strong> JWT <code>roles</code> claim is extracted and stored on the connection principal.</li>
     <li><strong>Works today:</strong> Basic per-connection, per-map <code>read</code>/<code>write</code> booleans are enforced by <code>WriteValidator</code>.</li>
-    <li><strong>Works today:</strong> Default-deny — connections without explicit permissions cannot access maps.</li>
+    <li><strong>Works today:</strong> Default-allow — <code>MapPermissions::default()</code> is <code>&#123; read: true, write: true &#125;</code> and <code>require_auth</code> defaults to <code>false</code>. All maps are accessible without authentication by default.</li>
+    <li><strong>To enable deny-by-default:</strong> Configure <code>SecurityConfig</code> with <code>require_auth: true</code> and <code>default_permissions: MapPermissions &#123; read: false, write: false &#125;</code>.</li>
     <li><strong>Planned (TODO-171):</strong> Role-based policy evaluation, map pattern matching (<code>users:*</code>), and field-level security (<code>allowedFields</code>) are not yet implemented.</li>
   </ul>
 </div>
@@ -65,9 +66,9 @@ You can define fine-grained access control rules for your data maps, controlling
 <div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-lg p-4 mb-12 flex items-start gap-3 not-prose">
   <Shield className="w-6 h-6 text-brand mt-1 shrink-0" />
   <div>
-    <h3 className="font-semibold text-brand mb-1">Security by Default</h3>
+    <h3 className="font-semibold text-brand mb-1">Development-Friendly Defaults</h3>
     <p className="text-sm text-brand">
-      TopGun Server denies all access by default. You must explicitly define policies to allow access to your maps.
+      TopGun Server allows all access by default (<code>read: true, write: true</code>, <code>require_auth: false</code>). To enable deny-by-default, configure <code>SecurityConfig</code> with <code>require_auth: true</code> and <code>default_permissions: &#123; read: false, write: false &#125;</code>.
     </p>
   </div>
 </div>
@@ -97,7 +98,7 @@ The following RBAC capabilities are implemented and enforced in the current serv
 
 - **JWT role extraction:** The server reads the `roles` array from the JWT payload and stores it on the connection's principal object. Roles are available for use in permission checks.
 - **Per-connection map permissions:** Each connection can be granted `read: true` or `write: true` (or both) on specific maps. These booleans are the primary access control mechanism today.
-- **Default-deny:** Connections without explicit map-level permissions cannot read or write any map. Permission must be explicitly granted.
+- **Default-allow:** `MapPermissions::default()` is `{ read: true, write: true }` and `require_auth` defaults to `false`. All maps are accessible without authentication unless you explicitly configure otherwise. To enable deny-by-default, set `require_auth: true` and `default_permissions: MapPermissions { read: false, write: false }` in `SecurityConfig`. Per-connection `map_permissions` can then grant access to specific maps.
 - **`WriteValidator` enforcement:** All write operations pass through `WriteValidator`, which checks map-level permissions before allowing the CRDT merge.
 
 ## Configuration (Planned — TODO-171)
