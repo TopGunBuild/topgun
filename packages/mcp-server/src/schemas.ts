@@ -26,6 +26,10 @@ export const QueryArgsSchema = z.object({
     .describe('Sort configuration'),
   limit: z.number().optional().default(10).describe('Maximum number of results to return'),
   cursor: z.string().optional().describe('Opaque cursor for pagination (from previous response nextCursor)'),
+  fields: z
+    .array(z.string())
+    .optional()
+    .describe('Field names to return (projection). If omitted, all fields are returned.'),
 });
 
 export type QueryArgs = z.infer<typeof QueryArgsSchema>;
@@ -53,11 +57,6 @@ export type MutateArgs = z.infer<typeof MutateArgsSchema>;
 export const SearchArgsSchema = z.object({
   map: z.string().describe("Name of the map to search (e.g., 'articles', 'documents', 'tasks')"),
   query: z.string().describe('Search query (keywords or phrases to find)'),
-  methods: z
-    .array(z.enum(['exact', 'fulltext', 'range']))
-    .optional()
-    .default(['exact', 'fulltext'])
-    .describe('Search methods to use. Default: ["exact", "fulltext"]'),
   limit: z.number().optional().default(10).describe('Maximum number of results to return'),
   minScore: z.number().optional().default(0).describe('Minimum relevance score (0-1) for results'),
 });
@@ -158,6 +157,11 @@ export const toolSchemas = {
       },
       limit: { type: 'number', description: 'Maximum number of results to return', default: 10 },
       cursor: { type: 'string', description: 'Opaque cursor for pagination (from previous response nextCursor)' },
+      fields: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Field names to return (projection). If omitted, all fields are returned.',
+      },
     },
     required: ['map'],
   },
@@ -184,12 +188,6 @@ export const toolSchemas = {
     properties: {
       map: { type: 'string', description: "Name of the map to search (e.g., 'articles', 'documents', 'tasks')" },
       query: { type: 'string', description: 'Search query (keywords or phrases to find)' },
-      methods: {
-        type: 'array',
-        items: { type: 'string', enum: ['exact', 'fulltext', 'range'] },
-        description: 'Search methods to use. Default: ["exact", "fulltext"]',
-        default: ['exact', 'fulltext'],
-      },
       limit: { type: 'number', description: 'Maximum number of results to return', default: 10 },
       minScore: { type: 'number', description: 'Minimum relevance score (0-1) for results', default: 0 },
     },
