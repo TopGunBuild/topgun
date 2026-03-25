@@ -14,7 +14,7 @@ TopGun takes a fundamentally different approach:
 
 - **Self-hosted and open source** (Apache 2.0). You own your data and infrastructure. No vendor lock-in
 - **True offline-first with CRDTs.** Firebase and Supabase offer client-side caching, but TopGun uses conflict-free replicated data types (CRDTs) with Hybrid Logical Clocks for automatic conflict resolution. Writes never wait for the network
-- **Rust server performance.** The TopGun server is built in Rust with tokio, delivering 200K+ ops/sec on a single node. Firebase and Supabase rely on managed cloud infrastructure
+- **Rust server performance.** The TopGun server is built in Rust with tokio, delivering 100,000+ ops/sec on a single node. Firebase and Supabase rely on managed cloud infrastructure
 - **Built-in clustering.** TopGun supports multi-node clusters with 271-partition data distribution, similar to enterprise data grids like Hazelcast
 
 Firebase and Supabase are better choices if you want a fully managed backend with minimal ops. TopGun is better if you need true offline capability, CRDT conflict resolution, or self-hosted infrastructure.
@@ -66,7 +66,7 @@ It depends on the layer:
 
 - **Client (browser):** Limited by browser memory and IndexedDB storage quota. Comfortable range is 50-100MB. Browsers may evict IndexedDB data under storage pressure unless persistent storage is requested. Use selective sync and query pagination to keep the client dataset manageable
 - **Client (Node.js):** Limited by available RAM. Node.js has no IndexedDB quota restrictions, so the practical limit is your server's memory
-- **Server (single node):** Limited by RAM for in-memory data and PostgreSQL for durable storage. The Rust server is designed for high throughput (200K+ ops/sec) with low memory overhead
+- **Server (single node):** Limited by RAM for in-memory data and PostgreSQL for durable storage. The Rust server is designed for high throughput (100,000+ ops/sec) with low memory overhead
 - **Server (cluster):** Data is partitioned across nodes using 271 partitions. Adding nodes increases both storage capacity and throughput. Each node handles a subset of partitions
 
 For most applications (task managers, collaboration tools, dashboards), a single server node with PostgreSQL is sufficient.
