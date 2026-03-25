@@ -8,7 +8,7 @@ import CodeBlock from '../../../components/docs/CodeBlock.astro';
 import { ChevronRight, Database, RefreshCw, Shield, Zap, Server, Copy } from 'lucide-react';
 import { AlertBox } from '../../../components/docs/AlertBox';
 
-<AlertBox variant="warning" title="Partially Implemented" text="Some features on this page (consistency modes, configurable replication factor) are not yet available. The cluster uses eventual consistency with a fixed replication factor." />
+<AlertBox variant="warning" title="Partially Implemented" text="Several features on this page are marked as planned, including: environment variable cluster configuration, QUORUM/STRONG consistency modes, read replica routing, and replication metrics. Sections describing real behavior (partitioning, gossip discovery, failure detection, anti-entropy design) are accurate." />
 
 export const clusterSetupCode = `# These env vars are planned — the server does not currently parse them.
 #
@@ -197,6 +197,10 @@ This guide covers server-side replication configuration, consistency levels, and
 
 ## Cluster Setup
 
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-4 mb-4 not-prose">
+  <span className="text-sm text-yellow-700 dark:text-yellow-400">Environment variable-based cluster configuration (<code>TOPGUN_CLUSTER_PORT</code>, <code>TOPGUN_CLUSTER_SEEDS</code>) is planned for the production CLI binary. The cluster is currently configured programmatically via the <code>ClusterConfig</code> struct when embedding the server. See the <a href="/docs/reference/server" className="underline">Server API</a> for the current approach.</span>
+</div>
+
 <div className="not-prose">
   <CodeBlock language="bash" code={clusterSetupCode} />
 </div>
@@ -210,6 +214,10 @@ This guide covers server-side replication configuration, consistency levels, and
 
 ### Gossip-Based Discovery
 
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-4 mb-4 not-prose">
+  <span className="text-sm text-yellow-700 dark:text-yellow-400">The <code>TOPGUN_CLUSTER_PORT</code> and <code>TOPGUN_CLUSTER_SEEDS</code> env vars shown below are planned. The gossip discovery mechanism (JoinRequest/JoinResponse) is real — only the env var configuration is aspirational.</span>
+</div>
+
 <div className="not-prose">
   <CodeBlock language="bash" code={gossipProtocolCode} />
 </div>
@@ -217,6 +225,10 @@ This guide covers server-side replication configuration, consistency levels, and
 ## Consistency Levels
 
 TopGun supports three consistency levels for replication:
+
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-4 mb-4 not-prose">
+  <span className="text-sm text-yellow-700 dark:text-yellow-400">Only EVENTUAL consistency is currently implemented. QUORUM and STRONG modes are planned for a future release.</span>
+</div>
 
 <div className="not-prose">
   <CodeBlock language="bash" code={consistencyLevelsCode} />
@@ -227,8 +239,8 @@ TopGun supports three consistency levels for replication:
 | Level | Latency | Consistency | Availability | Use Case |
 |-------|---------|-------------|--------------|----------|
 | **EVENTUAL** | Lowest | Eventually consistent | Highest | Real-time updates, gaming, social feeds |
-| **QUORUM** | Medium | Majority agree | High | Most applications, shopping carts |
-| **STRONG** | Highest | All replicas agree | Lower | Financial data, inventory counts |
+| **QUORUM** (planned) | Medium | Majority agree | High | Most applications, shopping carts |
+| **STRONG** (planned) | Highest | All replicas agree | Lower | Financial data, inventory counts |
 
 ## Partitioning
 
@@ -242,7 +254,7 @@ TopGun supports three consistency levels for replication:
 2. **Routing**: If not owner, forward to partition owner
 3. **Owner stores** data locally using CRDT merge
 4. **Replication**: Owner sends to backup nodes
-5. **Acknowledgment**: Based on consistency level
+5. **Acknowledgment**: Eventual — the CRDT merge completes locally and the operation is acknowledged; no quorum coordination occurs.
 
 <div className="bg-yellow-50 dark:bg-yellow-900/20 border-l-4 border-yellow-500 p-4 my-6 not-prose">
   <p className="text-sm text-yellow-800 dark:text-yellow-200">
@@ -276,7 +288,7 @@ TopGun uses Merkle trees for efficient anti-entropy repair:
     <div>
       <h4 className="font-semibold text-foreground">Compare Roots</h4>
       <p className="text-sm text-neutral-600 dark:text-neutral-400">
-        RepairScheduler periodically compares Merkle roots between owner and backup.
+        The system periodically compares Merkle roots between owner and backup nodes to detect divergence.
       </p>
     </div>
   </div>
@@ -316,11 +328,19 @@ TopGun uses the Phi Accrual failure detector algorithm, which:
 
 ## Read Replicas
 
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-4 mb-4 not-prose">
+  <span className="text-sm text-yellow-700 dark:text-yellow-400">Read replica routing is planned. The server does not currently implement ReadReplicaHandler or configurable read preferences.</span>
+</div>
+
 <div className="not-prose">
   <CodeBlock language="bash" code={readReplicaCode} />
 </div>
 
 ## Docker Compose Example
+
+<div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-4 mb-4 not-prose">
+  <span className="text-sm text-yellow-700 dark:text-yellow-400">The Docker Compose cluster example below uses environment variables (<code>TOPGUN_NODE_ID</code>, <code>TOPGUN_CONSISTENCY</code>, <code>TOPGUN_REPLICATION</code>, <code>TOPGUN_PEERS</code>) that are not yet parsed by the server. This example shows the planned configuration approach. Multi-node cluster setup currently requires programmatic configuration.</span>
+</div>
 
 Deploy a 3-node cluster with Docker Compose:
 
@@ -338,22 +358,7 @@ Run with:
 
 ### Prometheus Metrics
 
-<div className="not-prose">
-  <CodeBlock language="text" code={metricsCode} />
-</div>
-
-### Health Checks
-
-The `ReplicationPipeline.getHealth()` method returns:
-
-```typescript
-interface ReplicationHealth {
-  healthy: boolean;          // Overall health status
-  unhealthyNodes: string[];  // Nodes with issues
-  laggyNodes: string[];      // Nodes with high lag
-  avgLagMs: number;          // Average replication lag
-}
-```
+Replication-specific Prometheus metrics are planned. The server does not currently expose replication metrics.
 
 ## Distributed Subscriptions
 
@@ -427,24 +432,7 @@ When a cluster node disconnects:
 
 ### Metrics
 
-Distributed subscription metrics are available via Prometheus:
-
-```text
-# Active subscriptions by type (SEARCH/QUERY)
-topgun_distributed_sub_active{type="SEARCH"} 15
-topgun_distributed_sub_active{type="QUERY"} 8
-
-# Subscription registrations
-topgun_distributed_sub_total{type="SEARCH",status="success"} 100
-topgun_distributed_sub_total{type="QUERY",status="timeout"} 2
-
-# Update delivery
-topgun_distributed_sub_updates{direction="sent",change_type="ENTER"} 5000
-topgun_distributed_sub_updates{direction="received",change_type="UPDATE"} 4800
-
-# Latency histogram
-topgun_distributed_sub_update_latency_ms{type="SEARCH",quantile="0.99"} 12
-```
+Distributed subscription metrics are planned for a future release.
 
 <div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-6 not-prose">
   <p className="text-sm text-brand">
@@ -458,37 +446,27 @@ topgun_distributed_sub_update_latency_ms{type="SEARCH",quantile="0.99"} 12
   <div className="flex gap-3 p-4 rounded-lg border border-card-border">
     <div className="text-2xl">1</div>
     <div>
-      <h4 className="font-semibold text-foreground">Use Odd Node Counts</h4>
+      <h4 className="font-semibold text-foreground">Use Multiple Nodes for Redundancy</h4>
       <p className="text-sm text-neutral-600 dark:text-neutral-400">
-        For QUORUM consistency, use 3, 5, or 7 nodes. This ensures clear majority without split-brain.
+        The <code className="bg-neutral-100 dark:bg-neutral-800 px-1 rounded">backup_count</code> setting (default: 1) controls how many backup copies exist per partition. Increase this for higher fault tolerance.
       </p>
     </div>
   </div>
   <div className="flex gap-3 p-4 rounded-lg border border-card-border">
     <div className="text-2xl">2</div>
     <div>
-      <h4 className="font-semibold text-foreground">Match Consistency to Use Case</h4>
+      <h4 className="font-semibold text-foreground">Monitor Cluster Health</h4>
       <p className="text-sm text-neutral-600 dark:text-neutral-400">
-        Use EVENTUAL for real-time features, QUORUM for most data, STRONG only for critical operations.
+        Track node membership and partition rebalancing events in server logs. Frequent rebalancing may indicate unstable nodes or network issues.
       </p>
     </div>
   </div>
   <div className="flex gap-3 p-4 rounded-lg border border-card-border">
     <div className="text-2xl">3</div>
     <div>
-      <h4 className="font-semibold text-foreground">Monitor Replication Lag</h4>
+      <h4 className="font-semibold text-foreground">Enable Cluster TLS (planned)</h4>
       <p className="text-sm text-neutral-600 dark:text-neutral-400">
-        Set up alerts on <code className="bg-neutral-100 dark:bg-neutral-800 px-1 rounded">topgun_replication_lag_ms</code>.
-        High lag may indicate network issues or overloaded nodes.
-      </p>
-    </div>
-  </div>
-  <div className="flex gap-3 p-4 rounded-lg border border-card-border">
-    <div className="text-2xl">4</div>
-    <div>
-      <h4 className="font-semibold text-foreground">Enable Cluster TLS</h4>
-      <p className="text-sm text-neutral-600 dark:text-neutral-400">
-        In production, always use TLS for inter-node communication with <code className="bg-neutral-100 dark:bg-neutral-800 px-1 rounded">clusterTls</code> config.
+        In production, TLS for inter-node communication is planned. When available, always enable it to encrypt cluster traffic.
       </p>
     </div>
   </div>
