@@ -4,6 +4,8 @@ description: Add TypeScript type safety to TopGun maps using the TopGun<T> gener
 order: 13
 ---
 
+import { ChevronRight } from 'lucide-react';
+
 # Schema & Type Safety
 
 TopGun provides compile-time type safety for your data through the `TopGun<T extends TopGunSchema>` generic class. This guide shows you how to define typed schemas and get full TypeScript autocomplete and error checking for your map operations.
@@ -167,3 +169,18 @@ The `getMap<K, V>(name)` path accepts explicit `K` (key) and `V` (value) type pa
 - **No server-side enforcement.** The server does not validate data against your TypeScript schema. Any valid CRDT operation is accepted regardless of the value shape
 - **Schema evolution.** If you add or rename fields in your interface, existing data in storage will not be migrated. Use optional fields (`field?: type`) for new fields to handle records written before the schema change
 - **No cross-language schemas.** The TypeScript schema is only available in TypeScript. If you have non-TypeScript clients, they must independently maintain compatible type definitions
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/sql-queries" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> SQL Queries
+    </div>
+  </a>
+  <a href="/docs/guides/indexing" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      Indexing <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>
