@@ -18,6 +18,34 @@ TopGun follows [Semantic Versioning](https://semver.org/) (semver):
 
 For the complete list of releases with detailed notes, visit the [GitHub Releases page](https://github.com/topgunbuild/topgun/releases).
 
+### v0.13.0 -- Data Platform (Intermediate)
+
+New features and documentation for the v2.0 Data Platform milestone:
+
+**Unified Query API (breaking change):**
+- `client.query()` now supports **field projection** (`fields: string[]`) and **result limits** (`limit: number`)
+- Efficient **Merkle delta reconnect** — on reconnect, only changed records are re-sent instead of the full result set
+- **Writer exclusion** — query subscribers no longer receive echo of their own writes
+- The separate Shapes API (`subscribeShape()`) has been removed; all partial replication features are now part of `client.query()`
+
+**New v2.0 features (server):**
+- **Schema system** — TypeScript-first schema definition with server-side validation (`@topgunbuild/core`)
+- **DataFusion SQL queries** — `SELECT`, `WHERE`, `GROUP BY`, `ORDER BY` via Apache DataFusion (feature-gated: `--features datafusion`)
+- **RSA JWT auto-detection** — server automatically detects HMAC vs RSA/EC key format
+
+**Security fixes:**
+- Re-enabled JWT expiration validation with configurable leeway
+- CORS origins default changed from wildcard to empty (deny-all)
+- Missing `sub` claim in JWT now rejected
+
+**Documentation:**
+- New guide pages: Schema & Type Safety, SQL Queries, Troubleshooting, FAQ, Benchmarks, Tutorials (Todo App)
+- Updated Live Queries guide with field projection, limits, and Merkle reconnect
+- Fixed misleading auth/security/RBAC documentation
+- Brand color token system replacing hardcoded Tailwind classes
+
+**Updated packages:** `@topgunbuild/core`, `@topgunbuild/client`, `@topgunbuild/react`
+
 ### v1.0.0 -- Launch Release
 
 The first stable release of TopGun, featuring:
