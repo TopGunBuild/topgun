@@ -65,7 +65,7 @@ Unlike traditional databases where you have to poll for updates, TopGun pushes u
 <div className="grid md:grid-cols-3 gap-6 mb-16 not-prose">
   <FeatureCard
     icon={Activity}
-    iconColor="text-blue-500"
+    iconColor="text-brand-subtle"
     title="Real-time Updates"
     description="Changes are pushed to subscribers immediately as they happen, no polling required."
   />
@@ -158,9 +158,9 @@ const consumed = query.consumeChanges();
 
 If you are using React, we recommend using the `useQuery` hook which handles subscription management automatically.
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-4 not-prose">
-  <p className="text-sm text-blue-800 dark:text-blue-200">
-    See the <a href="/docs/reference/react-hooks" className="underline hover:no-underline">React Hooks</a> reference for detailed documentation on <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">useQuery</code> (including change tracking), <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">useMutation</code>, and other hooks.
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-4 not-prose">
+  <p className="text-sm text-brand">
+    See the <a href="/docs/reference/react-hooks" className="underline hover:no-underline">React Hooks</a> reference for detailed documentation on <code className="bg-brand-subtle/10 px-1 rounded">useQuery</code> (including change tracking), <code className="bg-brand-subtle/10 px-1 rounded">useMutation</code>, and other hooks.
   </p>
 </div>
 
@@ -177,7 +177,7 @@ In clustered environments, live queries automatically work across all nodes. Whe
   />
   <FeatureCard
     icon={Activity}
-    iconColor="text-blue-500"
+    iconColor="text-brand-subtle"
     title="Transparent Coordination"
     description="The node you connect to becomes the coordinator, aggregating updates from all nodes."
   />

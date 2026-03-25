@@ -330,7 +330,7 @@ Secure your local-first application by integrating authentication providers and 
 <div className="grid md:grid-cols-3 gap-6 mb-16 not-prose">
   <FeatureCard
     icon={Shield}
-    iconColor="text-blue-500"
+    iconColor="text-brand-subtle"
     title="Token-Based"
     description="Standard JWT authentication integrated directly into the sync protocol."
   />
@@ -447,8 +447,8 @@ Use the user ID from Clerk to scope data per user:
 
 ### 4. Connect BetterAuth Session to TopGun
 
-<div className="p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg mb-6 not-prose">
-  <p className="text-blue-800 dark:text-blue-200 text-sm">
+<div className="p-4 bg-brand-subtle/10 border border-brand-subtle/20 rounded-lg mb-6 not-prose">
+  <p className="text-brand text-sm">
     <strong>Important:</strong> BetterAuth manages sessions using cookies or opaque session tokens by default — it does not issue JWTs. TopGun requires a JWT for sync authentication. To connect BetterAuth sessions to TopGun, you must create a custom server endpoint that verifies the BetterAuth session and mints a signed JWT for TopGun consumption.
   </p>
 </div>
@@ -505,8 +505,8 @@ Understanding how token expiry interacts with active connections helps you build
 
 ## Production Deployment with Clerk
 
-<div className="p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg mb-6 not-prose">
-  <p className="text-blue-800 dark:text-blue-200 text-sm">
+<div className="p-4 bg-brand-subtle/10 border border-brand-subtle/20 rounded-lg mb-6 not-prose">
+  <p className="text-brand text-sm">
     <strong>Important:</strong> Clerk uses RS256 (asymmetric RSA) algorithm for JWT signing, not HS256. This means you need to use Clerk's <strong>public key</strong> for token verification on the server.
   </p>
 </div>

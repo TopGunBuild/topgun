@@ -64,8 +64,8 @@ The **LWW-Map** is the default map structure in TopGun. As the name suggests, it
 
 The **OR-Map** is designed for Sets and Collections. It allows you to add multiple items to a key without them overwriting each other, even if they have the same value (depending on implementation) or if they are added concurrently. In TopGun, the OR-Map is implemented as a map where values are "observed" and can be removed without race conditions affecting re-additions.
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
-  <p className="text-sm text-blue-800 dark:text-blue-200">
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-6 not-prose">
+  <p className="text-sm text-brand">
     <strong>Best for:</strong> Collections, Lists, Sets, and scenarios where multiple users might add/remove items concurrently (e.g., Todo Lists, Chat Messages in a channel, Tags).
   </p>
 </div>

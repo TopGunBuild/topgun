@@ -278,10 +278,10 @@ interface OpContext {
     <h3 className="font-semibold text-purple-900 dark:text-purple-100">ML Integration</h3>
     <p className="text-sm text-purple-700 dark:text-purple-300">Call external ML APIs for moderation, fraud detection, recommendations</p>
   </div>
-  <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
-    <Filter className="w-6 h-6 text-blue-500 mb-2" />
-    <h3 className="font-semibold text-blue-900 dark:text-blue-100">Validation & Enrichment</h3>
-    <p className="text-sm text-blue-700 dark:text-blue-300">Validate data, add server timestamps, enrich with external data</p>
+  <div className="p-4 bg-brand-subtle/10 rounded-lg border border-brand-subtle/20">
+    <Filter className="w-6 h-6 text-brand-subtle mb-2" />
+    <h3 className="font-semibold text-brand">Validation & Enrichment</h3>
+    <p className="text-sm text-brand">Validate data, add server timestamps, enrich with external data</p>
   </div>
   <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800">
     <Bell className="w-6 h-6 text-green-500 mb-2" />
@@ -328,9 +328,9 @@ Real-time fraud scoring for financial transactions:
   <CodeBlock title="Fraud Detection" language="typescript" code={fraudDetectionCode} />
 </div>
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
-  <p className="text-sm text-blue-800 dark:text-blue-200">
-    <strong>Performance Tip:</strong> For high-throughput scenarios, consider caching ML responses, using connection pooling for external APIs, or offloading non-critical enrichment to <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">onAfterOp</code> to avoid blocking writes.
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-6 not-prose">
+  <p className="text-sm text-brand">
+    <strong>Performance Tip:</strong> For high-throughput scenarios, consider caching ML responses, using connection pooling for external APIs, or offloading non-critical enrichment to <code className="bg-brand-subtle/10 px-1 rounded">onAfterOp</code> to avoid blocking writes.
   </p>
 </div>
 

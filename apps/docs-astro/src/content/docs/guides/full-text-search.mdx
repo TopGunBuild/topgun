@@ -610,7 +610,7 @@ TopGun's **InvertedIndex** provides fast full-text search with O(K) performance,
 <div className="grid md:grid-cols-3 gap-6 mb-16 not-prose">
   <FeatureCard
     icon={Search}
-    iconColor="text-blue-500"
+    iconColor="text-brand-subtle"
     title="Token-Based Search"
     description="Inverted index maps tokens to documents for instant lookups."
   />
@@ -680,8 +680,8 @@ Create custom pipelines for specialized use cases:
   <CodeBlock title="N-Gram Pipeline for Substring Matching" language="typescript" code={customPipelineCode} />
 </div>
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
-  <p className="text-sm text-blue-800 dark:text-blue-200">
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-6 not-prose">
+  <p className="text-sm text-brand">
     <strong>N-gram tip:</strong> N-grams enable substring matching but increase memory usage significantly.
     Use only when needed (e.g., autocomplete, partial name matching).
   </p>
@@ -718,7 +718,7 @@ For search-engine-style relevance ranking, TopGun provides **BM25 full-text sear
   />
   <FeatureCard
     icon={Search}
-    iconColor="text-blue-500"
+    iconColor="text-brand-subtle"
     title="Porter Stemming"
     description="Words are stemmed (running→run) for better matching with 174 English stopwords."
   />
@@ -953,8 +953,8 @@ For search-as-you-type interfaces, use the `debounceMs` option to avoid excessiv
 | `boost` | `Record<string, number>` | Field boost weights |
 | `debounceMs` | `number` | Debounce delay for query changes |
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
-  <p className="text-sm text-blue-800 dark:text-blue-200">
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-6 not-prose">
+  <p className="text-sm text-brand">
     <strong>See Also:</strong> The <a href="/docs/reference/react-hooks" className="underline">React Hooks Reference</a> for all available hooks.
   </p>
 </div>

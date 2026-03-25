@@ -228,10 +228,10 @@ if (result.result?.conflict) {
     <h3 className="font-semibold text-purple-900 dark:text-purple-100">Atomic Operations</h3>
     <p className="text-sm text-purple-700 dark:text-purple-300">Read-modify-write in a single atomic operation on the server</p>
   </div>
-  <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
-    <Server className="w-6 h-6 text-blue-500 mb-2" />
-    <h3 className="font-semibold text-blue-900 dark:text-blue-100">Server-Side Execution</h3>
-    <p className="text-sm text-blue-700 dark:text-blue-300">Logic runs in secure sandbox on the server</p>
+  <div className="p-4 bg-brand-subtle/10 rounded-lg border border-brand-subtle/20">
+    <Server className="w-6 h-6 text-brand-subtle mb-2" />
+    <h3 className="font-semibold text-brand">Server-Side Execution</h3>
+    <p className="text-sm text-brand">Logic runs in secure sandbox on the server</p>
   </div>
   <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800">
     <Zap className="w-6 h-6 text-green-500 mb-2" />
@@ -420,10 +420,10 @@ await client.executeOnKey('leaderboard', 'player-123', {
 
 ## Security
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
-  <p className="text-sm text-blue-800 dark:text-blue-200">
-    <strong>Sandboxed Execution:</strong> Processor code runs in an isolated sandbox using <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">isolated-vm</code>.
-    It has no access to Node.js APIs, filesystem, network, or globals. Only <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">value</code>, <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">key</code>, and <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">args</code> are available.
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-6 not-prose">
+  <p className="text-sm text-brand">
+    <strong>Sandboxed Execution:</strong> Processor code runs in an isolated sandbox using <code className="bg-brand-subtle/10 px-1 rounded">isolated-vm</code>.
+    It has no access to Node.js APIs, filesystem, network, or globals. Only <code className="bg-brand-subtle/10 px-1 rounded">value</code>, <code className="bg-brand-subtle/10 px-1 rounded">key</code>, and <code className="bg-brand-subtle/10 px-1 rounded">args</code> are available.
   </p>
 </div>
 

@@ -277,7 +277,7 @@ Learn how to deploy the TopGun server to production using Docker, Docker Compose
 ## Docker
 
 <div className="flex items-center gap-2 mb-4 not-prose">
-  <Container className="w-6 h-6 text-blue-600" />
+  <Container className="w-6 h-6 text-brand" />
   <span className="text-neutral-600 dark:text-neutral-300">TopGun provides a standardized Dockerfile for building the server. It uses a multi-stage build process to ensure a small image size.</span>
 </div>
 
@@ -363,9 +363,9 @@ Deploying with Helm allows easy scaling of the server replicas. TopGun nodes aut
 | `outbound_channel_capacity` | 256 | Per-connection backpressure buffer |
 | `request_timeout` | 30s | Maximum time for an HTTP request |
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 my-6 not-prose">
-  <h3 className="text-lg font-semibold text-blue-800 dark:text-blue-300 mb-2">Performance Tuning Guide</h3>
-  <span className="text-blue-700 dark:text-blue-400">For detailed tuning guidance including high-throughput and low-latency configurations, see the <a href="/docs/guides/performance" className="underline">Performance Tuning Guide</a>.</span>
+<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-6 my-6 not-prose">
+  <h3 className="text-lg font-semibold text-brand mb-2">Performance Tuning Guide</h3>
+  <span className="text-brand">For detailed tuning guidance including high-throughput and low-latency configurations, see the <a href="/docs/guides/performance" className="underline">Performance Tuning Guide</a>.</span>
 </div>
 
 ## TLS Configuration
@@ -426,9 +426,9 @@ docker-compose -f docker-compose.tls.yml up -d`} />
   <CodeBlock title="k8s/deployment.yaml" language="yaml" code={k8sDeploymentTlsCode} />
 </div>
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 mb-6 not-prose">
-  <h3 className="text-lg font-semibold text-blue-800 dark:text-blue-300 mb-2">cert-manager Integration</h3>
-  <span className="text-blue-700 dark:text-blue-400">For automatic certificate management, consider using <a href="https://cert-manager.io/" className="underline">cert-manager</a> with Let's Encrypt or your internal CA. See the <a href="/docs/guides/security" className="underline">Security Guide</a> for detailed setup instructions.</span>
+<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-6 mb-6 not-prose">
+  <h3 className="text-lg font-semibold text-brand mb-2">cert-manager Integration</h3>
+  <span className="text-brand">For automatic certificate management, consider using <a href="https://cert-manager.io/" className="underline">cert-manager</a> with Let's Encrypt or your internal CA. See the <a href="/docs/guides/security" className="underline">Security Guide</a> for detailed setup instructions.</span>
 </div>
 
 ## Serverless Deployment
@@ -481,14 +481,14 @@ For environments where you are unsure if WebSocket is available, `AutoConnection
   <CodeBlock language="typescript" code={serverlessClientAutoCode} />
 </div>
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 mb-6 not-prose">
+<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-6 mb-6 not-prose">
   <div className="flex items-center gap-2 mb-2">
-    <Network className="w-5 h-5 text-blue-600 dark:text-blue-400" />
-    <h4 className="font-semibold text-blue-800 dark:text-blue-300">Provider Configuration Reference</h4>
+    <Network className="w-5 h-5 text-brand" />
+    <h4 className="font-semibold text-brand">Provider Configuration Reference</h4>
   </div>
-  <span className="text-blue-700 dark:text-blue-400">
-    For the full list of configuration options for <code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">HttpSyncProvider</code> and
-    <code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">AutoConnectionProvider</code>,
+  <span className="text-brand">
+    For the full list of configuration options for <code className="px-1.5 py-0.5 rounded bg-brand-subtle/10 text-sm">HttpSyncProvider</code> and
+    <code className="px-1.5 py-0.5 rounded bg-brand-subtle/10 text-sm">AutoConnectionProvider</code>,
     see the <a href="/docs/reference/client" className="underline">Client API reference</a>.
   </span>
 </div>

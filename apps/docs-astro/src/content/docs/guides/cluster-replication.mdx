@@ -189,7 +189,7 @@ This guide covers server-side replication configuration, consistency levels, and
 
 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 my-6 not-prose">
   <div className="p-4 rounded-lg border border-card-border bg-card">
-    <Database className="w-6 h-6 text-blue-500 mb-2" />
+    <Database className="w-6 h-6 text-brand-subtle mb-2" />
     <h4 className="font-semibold text-foreground mb-1">Partitioned Data</h4>
     <p className="text-sm text-neutral-600 dark:text-neutral-400">271 partitions with consistent hashing</p>
   </div>
@@ -211,8 +211,8 @@ This guide covers server-side replication configuration, consistency levels, and
   <CodeBlock language="bash" code={clusterSetupCode} />
 </div>
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
-  <p className="text-sm text-blue-800 dark:text-blue-200">
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-6 not-prose">
+  <p className="text-sm text-brand">
     <strong>Gossip Protocol:</strong> You only need to provide one seed node. Nodes automatically discover
     each other via gossip protocol - when node2 connects to node1, it learns about all other members.
   </p>
@@ -456,8 +456,8 @@ topgun_distributed_sub_updates{direction="received",change_type="UPDATE"} 4800
 topgun_distributed_sub_update_latency_ms{type="SEARCH",quantile="0.99"} 12
 ```
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
-  <p className="text-sm text-blue-800 dark:text-blue-200">
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-6 not-prose">
+  <p className="text-sm text-brand">
     <strong>See Also:</strong> <a href="/docs/guides/live-queries" className="underline">Live Queries</a> and <a href="/docs/guides/full-text-search" className="underline">Full-Text Search</a> guides for client-side usage of distributed subscriptions.
   </p>
 </div>

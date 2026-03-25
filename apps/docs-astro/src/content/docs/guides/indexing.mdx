@@ -157,7 +157,7 @@ TopGun's Query Engine provides **CQEngine-inspired indexing** that accelerates q
   />
   <FeatureCard
     icon={TrendingUp}
-    iconColor="text-blue-500"
+    iconColor="text-brand-subtle"
     title="O(log N) Ranges"
     description="NavigableIndex enables efficient range queries with skip-list based indexing."
   />
@@ -242,12 +242,12 @@ Monitor index usage and performance:
 
 ## Best Practices
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-6 not-prose">
   <div className="flex items-center gap-2 mb-2">
-    <Lightbulb className="w-5 h-5 text-blue-500" />
-    <strong className="text-blue-800 dark:text-blue-200">When to Add Indexes</strong>
+    <Lightbulb className="w-5 h-5 text-brand-subtle" />
+    <strong className="text-brand">When to Add Indexes</strong>
   </div>
-  <ul className="text-sm text-blue-800 dark:text-blue-200 space-y-1">
+  <ul className="text-sm text-brand space-y-1">
     <li>• Add indexes on attributes you query frequently</li>
     <li>• Use HashIndex for equality checks (status, type, userId)</li>
     <li>• Use NavigableIndex for sortable/range fields (price, date, score)</li>

@@ -127,7 +127,7 @@ export function Providers({ children }) {
 }`;
 
 <div className="flex items-center gap-3 mb-6 not-prose">
-  <Network className="w-10 h-10 text-blue-600 dark:text-blue-400" />
+  <Network className="w-10 h-10 text-brand" />
   <h1 className="text-4xl font-bold text-foreground">Client Cluster Mode</h1>
 </div>
 
@@ -236,7 +236,7 @@ The partition map is also updated immediately when:
 ## Failover Handling
 
 <div className="flex items-center gap-2 mb-3 not-prose">
-  <RefreshCw className="w-5 h-5 text-blue-500" />
+  <RefreshCw className="w-5 h-5 text-brand-subtle" />
   <span className="text-neutral-600 dark:text-neutral-300">The client uses a circuit breaker pattern to handle node failures gracefully.</span>
 </div>
 
@@ -260,9 +260,9 @@ The partition map is also updated immediately when:
   <CodeBlock language="typescript" code={failoverCode} />
 </div>
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 my-6 not-prose">
-  <h4 className="font-semibold text-blue-800 dark:text-blue-300 mb-2">Offline Support</h4>
-  <span className="text-blue-700 dark:text-blue-400">
+<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-6 my-6 not-prose">
+  <h4 className="font-semibold text-brand mb-2">Offline Support</h4>
+  <span className="text-brand">
     If all nodes become unavailable, operations are queued locally in IndexedDB.
     When connectivity is restored, the client automatically syncs pending operations.
     This provides true offline-first capability even in cluster mode.

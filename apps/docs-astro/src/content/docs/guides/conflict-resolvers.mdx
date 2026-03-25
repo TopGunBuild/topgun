@@ -341,11 +341,11 @@ Resolvers also receive deletions (when `remoteValue` is `null`), allowing you to
 
 <CodeBlock code={deletionProtectionCode} lang="typescript" title="Delete Protection" />
 
-<div className="not-prose mb-8 rounded-lg border border-blue-500/20 bg-blue-500/10 p-4">
+<div className="not-prose mb-8 rounded-lg border border-brand-subtle/20 bg-brand-subtle/10 p-4">
   <div className="flex items-start gap-3">
-    <Shield className="h-5 w-5 text-blue-500 mt-0.5" />
+    <Shield className="h-5 w-5 text-brand-subtle mt-0.5" />
     <div>
-      <p className="font-medium text-blue-500">Deletion Handling</p>
+      <p className="font-medium text-brand-subtle">Deletion Handling</p>
       <p className="text-sm text-slate-300 mt-1">
         Deletions are passed through resolvers with <code>remoteValue: null</code>.
         This allows IMMUTABLE, OWNER_ONLY, and custom resolvers to protect entries from unauthorized deletion.

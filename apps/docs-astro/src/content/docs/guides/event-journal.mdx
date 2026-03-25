@@ -268,10 +268,10 @@ The **Event Journal** captures all map changes as an append-only log, enabling C
     <h3 className="font-semibold text-indigo-900 dark:text-indigo-100">Durable Storage</h3>
     <p className="text-sm text-indigo-700 dark:text-indigo-300">Events persisted to PostgreSQL with configurable retention</p>
   </div>
-  <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
-    <Activity className="w-6 h-6 text-blue-500 mb-2" />
-    <h3 className="font-semibold text-blue-900 dark:text-blue-100">Real-time Streaming</h3>
-    <p className="text-sm text-blue-700 dark:text-blue-300">Subscribe to live changes via WebSocket</p>
+  <div className="p-4 bg-brand-subtle/10 rounded-lg border border-brand-subtle/20">
+    <Activity className="w-6 h-6 text-brand-subtle mb-2" />
+    <h3 className="font-semibold text-brand">Real-time Streaming</h3>
+    <p className="text-sm text-brand">Subscribe to live changes via WebSocket</p>
   </div>
   <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800">
     <Clock className="w-6 h-6 text-green-500 mb-2" />
@@ -410,9 +410,9 @@ Stream events to ML services for async processing (sentiment analysis, content m
   <CodeBlock title="ML Pipeline Consumer" language="typescript" code={mlPipelineCode} />
 </div>
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
-  <p className="text-sm text-blue-800 dark:text-blue-200">
-    <strong>Real-time vs Async:</strong> For synchronous ML processing (blocking writes until ML completes), use <a href="/docs/guides/interceptors" className="text-blue-700 dark:text-blue-300 underline hover:no-underline">Interceptors</a> instead. Event Journal is better for async pipelines where you don't need to block the write operation.
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-6 not-prose">
+  <p className="text-sm text-brand">
+    <strong>Real-time vs Async:</strong> For synchronous ML processing (blocking writes until ML completes), use <a href="/docs/guides/interceptors" className="text-brand underline hover:no-underline">Interceptors</a> instead. Event Journal is better for async pipelines where you don't need to block the write operation.
   </p>
 </div>
 
@@ -467,9 +467,9 @@ CREATE INDEX idx_journal_created_at ON event_journal(created_at);
 CREATE INDEX idx_journal_node_id ON event_journal(node_id);
 ```
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
-  <p className="text-sm text-blue-800 dark:text-blue-200">
-    <strong>Performance Tip:</strong> For high-volume deployments, consider time-based partitioning of the <code className="bg-blue-100 dark:bg-blue-800 px-1 rounded">event_journal</code> table and schedule regular cleanup using <code className="bg-blue-100 dark:bg-blue-800 px-1 rounded">cleanupOldEvents()</code>.
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-6 not-prose">
+  <p className="text-sm text-brand">
+    <strong>Performance Tip:</strong> For high-volume deployments, consider time-based partitioning of the <code className="bg-brand-subtle/10 dark:bg-brand-muted px-1 rounded">event_journal</code> table and schedule regular cleanup using <code className="bg-brand-subtle/10 dark:bg-brand-muted px-1 rounded">cleanupOldEvents()</code>.
   </p>
 </div>
 
