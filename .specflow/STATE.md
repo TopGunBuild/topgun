@@ -1,13 +1,20 @@
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-147
+- **Status:** running
+- **Next Step:** (in progress)
+
+## Execution Status
+
+| Spec | Mode | Progress | Last Updated |
+|------|------|----------|--------------|
+| SPEC-147 | orchestrated | Wave 2/3 (67%) | 2026-03-25 |
 
 ## Queue
 
 | ID | Title | Status | Priority | Complexity |
 |----|-------|--------|----------|------------|
+| SPEC-147 | Replace Hardcoded Blue Classes with Brand Color Token System | running | P3 | medium |
 
 ## Decisions
 

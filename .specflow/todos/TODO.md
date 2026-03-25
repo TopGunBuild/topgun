@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-24 — TODO-184 cleaned up (completed via SPEC-145); prev: TODO-184 converted to SPEC-145
+**Last updated:** 2026-03-25 — TODO-185 converted to SPEC-147
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -45,11 +45,11 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Effort:** 2-3 weeks
 - **Status:** ~~SPEC-135a~~ ✓ · ~~SPEC-135b~~ ✓ · ~~SPEC-135c~~ ✓ — **done** (DistributedPlanner deferred)
 
-### TODO-167: ~~Server-Side Shape Max Limit~~ → Absorbed into TODO-182
-- **Status:** Superseded — max_query_records will be implemented as part of the unified QueryService (TODO-182)
+### TODO-167: ~~Server-Side Shape Max Limit~~ → Absorbed into TODO-182 ✓
+- **Status:** Done — max_query_records implemented in unified QueryService (SPEC-143)
 
-### TODO-168: ~~ShapeHandle Generic Typing~~ → Absorbed into TODO-183
-- **Status:** Superseded — QueryHandle\<T\> generic typing will be part of unified client API (TODO-183)
+### TODO-168: ~~ShapeHandle Generic Typing~~ → Absorbed into TODO-183 ✓
+- **Status:** Done — unified QueryHandle with fields/merkleRootHash (SPEC-144)
 
 ### TODO-183: ~~Unified Query Client — Client-Side Merge~~ → Converted to SPEC-144
 - **Status:** Converted to SPEC-144
@@ -433,21 +433,6 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
   - [ ] Add "Customers/Use Cases" placeholder section
   - [ ] Consider static fallback if demo.topgun.build is unavailable
 
-### TODO-154: Documentation Site
-- **Priority:** P1 (adoption prerequisite)
-- **Complexity:** Medium
-- **Summary:** Comprehensive docs on topgun.build. Content written RU → LLM → EN.
-- **Effort:** 2 weeks (ongoing)
-- **Audit (2026-03-21):** Site already exists (`apps/docs-astro`), score **8.5/10**. 48+ pages, 9 blog articles, full API reference, 24 guides, Quick Start — all accurate for v1.0/Rust server. Missing sections for launch:
-  - [ ] Troubleshooting Guide — common errors: CRDT merge edge cases, WebSocket issues, IDB persistence, server startup (P1, 1 day)
-  - [ ] 2-3 tutorial projects with full source: todo app, chat app, collaborative editor (P1, 3-5 days)
-  - [ ] FAQ page — "How does TopGun compare to X?", "Can I use with GraphQL?", "How much data?", "Free tier?" (P1, 0.5 day)
-  - [ ] Schema System guide — v2.0 feature already implemented, not documented (P1, 1 day)
-  - [ ] Changelog page linking to GitHub releases (P2, 2 hours)
-  - [ ] Community & Support page — Discord, Telegram, GitHub links (P2, 1 hour)
-  - [ ] Performance Benchmarks page — publish load harness results: 200K ops/sec, p99 latency (P2, 1 day)
-  - [ ] Video walkthrough or animated GIF tour of demo (P3)
-
 ### TODO-155: Show HN Launch
 - **Priority:** P1 (primary launch event)
 - **Complexity:** Low
@@ -599,7 +584,7 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 | Wave | Items | Blocked by | Rationale |
 |------|-------|------------|-----------|
 | **6c** | TODO-091 (DataFusion SQL) · TODO-070 (Shapes) · TODO-033 (Write-Behind) | 130 ✓ · 128 ✓ · — | SQL needs Arrow schemas (done); Shapes needs write-path wiring (done); Write-Behind independent |
-| **6c²** | TODO-181 (Wire schema unification) · TODO-182 (Server merge) · TODO-183 (Client merge) · TODO-184 (Shape cleanup) | 070 ✓ | Query+Shape API unification — eliminates dual subscription model. TODO-167/168 absorbed into 182/183 |
+| **6c²** | ~~TODO-181~~ ✓ · ~~TODO-182~~ ✓ · ~~TODO-183~~ ✓ · ~~TODO-184~~ ✓ | 070 ✓ | Query+Shape API unification — **done** (SPEC-142–145). Dual subscription model eliminated. TODO-167/168 absorbed |
 | **6d** | TODO-025 (DAG Executor) · TODO-092 (Connector traits) | 091 · — | DAG needs SQL for pipeline definitions; Connector traits independent, DAG integration after |
 | **6e** | TODO-072 (WASM) · TODO-036 (Extensions) | 091 · soft: 025+091+092 | WASM compiles SQL to browser; Extensions benefits from knowing all extension points first |
 | **6f** | TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt) · TODO-102 (Rust CLI) | — | Independent network/tooling, low priority (P3), no blockers |
