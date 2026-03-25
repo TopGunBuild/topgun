@@ -109,15 +109,15 @@ export const failoverCode = `# Automatic failover on node failure.
 #
 # For failure detector tuning, see: /docs/reference/server`;
 
-export const readReplicaCode = `# Read from replicas for lower latency.
-# When replication is enabled, ReadReplicaHandler is active automatically.
+export const readReplicaCode = `# Read from replicas for lower latency (planned).
+# Read replica routing is not yet implemented.
 #
-# Read routing options:
+# Planned read routing options:
 #   Primary: Always read from partition owner
 #   Replica: Read from nearest replica (lower latency)
 #   Any:     Read from any node that has the data
 #
-# Clients can specify read preference per query.
+# Clients will be able to specify read preference per query.
 # For configuration details, see: /docs/reference/server`;
 
 export const dockerComposeClusterCode = `version: '3.8'
