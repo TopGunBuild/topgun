@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-25 — TODO-185 converted to SPEC-147
+**Last updated:** 2026-03-25 — TODO-162 converted to SPEC-148
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -151,13 +151,6 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
   - TS client: add `setWithAck(key, value, options)` method that returns `WriteResult` with `achievedLevel` and `latencyMs`
   - TS client: add `batchSet(ops, options)` convenience method
 - **Effort:** 1-2 weeks
-
-### TODO-162: SQL API Documentation for docs-astro
-- **Priority:** P2
-- **Complexity:** Small
-- **Summary:** Add documentation page for the DataFusion SQL query feature to `apps/docs-astro`. Cover: enabling the `datafusion` Cargo feature, SQL query API (SqlQuery/SqlQueryResp wire messages), supported SQL syntax (SELECT, WHERE, GROUP BY, ORDER BY), supported data types and Arrow conversion, example queries, limitations (single-node only, no JOINs across maps yet).
-- **Ref:** SPEC-135a/b/c for technical details
-- **Depends on:** TODO-091
 
 ### TODO-025: DAG Executor for Stream Processing
 - **Priority:** P1 (Hazelcast Jet equivalent)
@@ -590,7 +583,7 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 | **6f** | TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt) · TODO-102 (Rust CLI) | — | Independent network/tooling, low priority (P3), no blockers |
 | **6f²** | ~~TODO-163 (P0 Security fixes)~~ ✓ · ~~TODO-169 (RS256 regression)~~ ✓ | — · 163 ✓ | JWT exp/CORS/sub done. RS256 done (SPEC-138): Clerk/Auth0/Firebase unblocked |
 | **6f²¹** | TODO-170 (Auth/Security/RBAC docs fixes) · TODO-172 (Docs audit) | 169 ✓ | Fix misleading docs, audit remaining pages |
-| **6f²²** | ~~TODO-173 (Shapes docs)~~ ✓ · TODO-162 (SQL docs) · TODO-154↑schema guide | — | v2.0 feature docs — Shapes guide done (SPEC-141, will be merged into live-queries by TODO-184), SQL+Schema pages pending |
+| **6f²²** | ~~TODO-173 (Shapes docs)~~ ✓ · ~~TODO-162 (SQL docs)~~ ✓ · TODO-154↑schema guide | — | v2.0 feature docs — Shapes guide done (SPEC-141, will be merged into live-queries by TODO-184), SQL done (SPEC-148), Schema page pending |
 | **6f³** | TODO-136 (Rate Limits) · TODO-137 (Metrics) · TODO-138 (Schema Migrations) | 069 ✓ | Cloud prerequisites; Rate limits needed for free tier |
 | **6f⁴** | TODO-164 (P2 Security) · TODO-139 (Backup/Restore) · TODO-141 (Docker) | 163 ✓ | Cloud-readiness; auth rate limit, HSTS, cluster TLS (RS256 moved to 169) |
 | **6g** | TODO-101 (DevTools) · TODO-093 v2.0 (Dashboard) | — · 025+091+092 | UI layer last: needs features to visualize |
