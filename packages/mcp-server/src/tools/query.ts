@@ -82,21 +82,24 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
     // so we race against a timeout to avoid hanging if no metadata arrives.
     // Note: onPaginationChange fires immediately with the current value (cursorStatus 'none'
     // means not yet received), so we only resolve once the server has responded.
+    let unsubPagination: (() => void) | undefined;
     const paginationInfo = await Promise.race([
       new Promise<ReturnType<typeof handle.getPaginationInfo>>((resolve) => {
         // unsubPagination may not be assigned yet when the callback fires synchronously,
         // so we defer the unsubscribe call to the next tick.
-        let unsubPagination: (() => void) | undefined;
         unsubPagination = handle.onPaginationChange((info) => {
           if (info.cursorStatus !== 'none' || info.hasMore) {
-            // Use setTimeout to ensure unsubPagination is always defined before calling it
             Promise.resolve().then(() => unsubPagination?.());
             resolve(info);
           }
         });
       }),
       new Promise<ReturnType<typeof handle.getPaginationInfo>>((resolve) =>
-        setTimeout(() => resolve(handle.getPaginationInfo()), 500)
+        setTimeout(() => {
+          // Clean up pagination listener when timeout wins the race
+          unsubPagination?.();
+          resolve(handle.getPaginationInfo());
+        }, 500)
       ),
     ]);
 

@@ -153,7 +153,6 @@ export interface MutateToolArgs {
 export interface SearchToolArgs {
   map: string;
   query: string;
-  methods?: Array<'exact' | 'fulltext' | 'range'>;
   limit?: number;
   minScore?: number;
 }
