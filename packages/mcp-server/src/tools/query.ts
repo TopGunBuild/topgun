@@ -4,6 +4,7 @@
  * Uses cursor-based pagination via QueryHandle.
  */
 
+import type { QueryFilter } from '@topgunbuild/client';
 import type { MCPTool, MCPToolResult, ToolContext } from '../types';
 import { QueryArgsSchema, toolSchemas } from '../schemas';
 
@@ -27,7 +28,7 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
     };
   }
 
-  const { map, filter, sort, limit, cursor } = parseResult.data;
+  const { map, filter, sort, limit, cursor, fields } = parseResult.data;
 
   // Validate map access
   if (ctx.config.allowedMaps && !ctx.config.allowedMaps.includes(map)) {
@@ -47,7 +48,7 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
 
   try {
     // Build query filter for QueryHandle
-    const queryFilter: Record<string, unknown> = {
+    const queryFilter: QueryFilter = {
       where: filter,
       limit: effectiveLimit,
     };
@@ -61,19 +62,40 @@ export async function handleQuery(rawArgs: unknown, ctx: ToolContext): Promise<M
       queryFilter.cursor = cursor;
     }
 
+    if (fields && fields.length > 0) {
+      queryFilter.fields = fields;
+    }
+
     // Use QueryHandle for proper server-side query execution
     const handle = ctx.client.query<Record<string, unknown>>(map, queryFilter);
 
-    // Get results via one-shot subscription
+    // Get results via one-shot subscription, then wait for pagination metadata
+    let unsubscribe: (() => void) | undefined;
     const results = await new Promise<Array<Record<string, unknown> & { _key: string }>>((resolve) => {
-      const unsubscribe = handle.subscribe((data) => {
-        unsubscribe();
+      unsubscribe = handle.subscribe((data) => {
         resolve(data);
       });
     });
 
-    // Get pagination info
-    const paginationInfo = handle.getPaginationInfo();
+    // Await pagination metadata from the server with a 500ms timeout.
+    // The server sends pagination info asynchronously after the initial results,
+    // so we race against a timeout to avoid hanging if no metadata arrives.
+    const paginationInfo = await Promise.race([
+      new Promise<ReturnType<typeof handle.getPaginationInfo>>((resolve) => {
+        const unsubPagination = handle.onPaginationChange((info) => {
+          if (info.cursorStatus !== 'none' || info.hasMore) {
+            unsubPagination();
+            resolve(info);
+          }
+        });
+      }),
+      new Promise<ReturnType<typeof handle.getPaginationInfo>>((resolve) =>
+        setTimeout(() => resolve(handle.getPaginationInfo()), 500)
+      ),
+    ]);
+
+    // Clean up the subscribe handle to prevent memory leaks
+    unsubscribe?.();
 
     // Format results
     if (results.length === 0) {
