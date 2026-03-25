@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-25 — TODO-162 converted to SPEC-148
+**Last updated:** 2026-03-25 — TODO-170 converted to SPEC-149
 **Strategy:** Rust-first IMDG design informed by Hazelcast architecture
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -582,7 +582,7 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 | **6e** | TODO-072 (WASM) · TODO-036 (Extensions) | 091 · soft: 025+091+092 | WASM compiles SQL to browser; Extensions benefits from knowing all extension points first |
 | **6f** | TODO-048 (SSE) · TODO-049 (Cluster HTTP) · TODO-076 (Hash opt) · TODO-102 (Rust CLI) | — | Independent network/tooling, low priority (P3), no blockers |
 | **6f²** | ~~TODO-163 (P0 Security fixes)~~ ✓ · ~~TODO-169 (RS256 regression)~~ ✓ | — · 163 ✓ | JWT exp/CORS/sub done. RS256 done (SPEC-138): Clerk/Auth0/Firebase unblocked |
-| **6f²¹** | TODO-170 (Auth/Security/RBAC docs fixes) · TODO-172 (Docs audit) | 169 ✓ | Fix misleading docs, audit remaining pages |
+| **6f²¹** | ~~TODO-170 (Auth/Security/RBAC docs fixes)~~ ✓ · TODO-172 (Docs audit) | 169 ✓ | Auth/Security/RBAC docs done (SPEC-149), audit remaining pages |
 | **6f²²** | ~~TODO-173 (Shapes docs)~~ ✓ · ~~TODO-162 (SQL docs)~~ ✓ · TODO-154↑schema guide | — | v2.0 feature docs — Shapes guide done (SPEC-141, will be merged into live-queries by TODO-184), SQL done (SPEC-148), Schema page pending |
 | **6f³** | TODO-136 (Rate Limits) · TODO-137 (Metrics) · TODO-138 (Schema Migrations) | 069 ✓ | Cloud prerequisites; Rate limits needed for free tier |
 | **6f⁴** | TODO-164 (P2 Security) · TODO-139 (Backup/Restore) · TODO-141 (Docker) | 163 ✓ | Cloud-readiness; auth rate limit, HSTS, cluster TLS (RS256 moved to 169) |
@@ -634,7 +634,7 @@ MILESTONE 2: Data Platform (v2.0)
   Security & Cloud prerequisites (wave 6f²-6f⁴):
   ✓ TODO-163 (P0 Security) ← DONE (SPEC-137): JWT exp, NetworkModule auth, CORS
   ✓ TODO-169 (RS256 regression) ← DONE (SPEC-138): auto-detection in auth.rs + admin_auth.rs
-  TODO-169 ✓ → TODO-170 (auth/security/rbac docs, P2)
+  ✓ TODO-170 (auth/security/rbac docs) ← DONE (SPEC-149): security.mdx + rbac.mdx fixes
   TODO-163 → TODO-171 (RBAC implementation, P2) ← role-based policies, pattern matching, field-level security
   TODO-163 → TODO-164 (P2 Security) ← auth rate limit, HSTS, cluster TLS (RS256 extracted to 169)
   TODO-172 (Docs audit, P2) ← systematic verification of all guides pages
