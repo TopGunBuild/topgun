@@ -240,7 +240,7 @@ export const topicMessageCode = `{
 }`;
 
 <div className="flex items-center gap-3 mb-6 not-prose">
-  <Globe className="w-10 h-10 text-blue-600 dark:text-blue-400" />
+  <Globe className="w-10 h-10 text-brand" />
   <h1 className="text-4xl font-bold text-foreground">Protocol Specification</h1>
 </div>
 
@@ -287,29 +287,29 @@ The `BATCH` message type carries multiple inner messages in a single binary fram
   <CodeBlock title="BATCH" language="json" code={batchCode} />
 </div>
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-4 mb-6 not-prose">
-  <span className="text-sm text-blue-700 dark:text-blue-400">Each inner message within <code>data</code> is a complete MsgPack-serialized <code>Message</code>. The 4-byte length prefix allows the receiver to split the binary blob without parsing each message's MsgPack structure.</span>
+<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-4 mb-6 not-prose">
+  <span className="text-sm text-brand">Each inner message within <code>data</code> is a complete MsgPack-serialized <code>Message</code>. The 4-byte length prefix allows the receiver to split the binary blob without parsing each message's MsgPack structure.</span>
 </div>
 
 ## Connection Lifecycle
 
 <div className="relative border-l-2 border-neutral-200 dark:border-neutral-800 ml-4 space-y-8 py-2 not-prose">
   <div className="pl-8 relative">
-    <div className="absolute -left-[9px] top-1 w-4 h-4 rounded-full bg-blue-500 ring-4 ring-background" />
+    <div className="absolute -left-[9px] top-1 w-4 h-4 rounded-full bg-brand-subtle ring-4 ring-background" />
     <h3 className="font-semibold text-foreground mb-1">1. WebSocket Connect</h3>
     <p className="text-sm text-neutral-600 dark:text-neutral-300">
       Client opens a WebSocket connection to <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">/ws</code>. Server immediately sends <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">AUTH_REQUIRED</code> as a binary MsgPack frame.
     </p>
   </div>
   <div className="pl-8 relative">
-    <div className="absolute -left-[9px] top-1 w-4 h-4 rounded-full bg-blue-500 ring-4 ring-background" />
+    <div className="absolute -left-[9px] top-1 w-4 h-4 rounded-full bg-brand-subtle ring-4 ring-background" />
     <h3 className="font-semibold text-foreground mb-1">2. Authentication</h3>
     <p className="text-sm text-neutral-600 dark:text-neutral-300">
       Client sends <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">AUTH</code> with a JWT token. Server verifies the token and responds with <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">AUTH_ACK</code> (success) or <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">AUTH_FAIL</code> (failure). Unauthenticated messages are rejected until AUTH_ACK.
     </p>
   </div>
   <div className="pl-8 relative">
-    <div className="absolute -left-[9px] top-1 w-4 h-4 rounded-full bg-blue-500 ring-4 ring-background" />
+    <div className="absolute -left-[9px] top-1 w-4 h-4 rounded-full bg-brand-subtle ring-4 ring-background" />
     <h3 className="font-semibold text-foreground mb-1">3. Synchronization</h3>
     <p className="text-sm text-neutral-600 dark:text-neutral-300">
       Client sends <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">SYNC_INIT</code> with the last sync timestamp. Server responds with <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">SYNC_RESP_ROOT</code>. If roots differ, the client walks the Merkle tree via <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">MERKLE_REQ_BUCKET</code> / <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">SYNC_RESP_BUCKETS</code> / <code className="bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 rounded text-xs">SYNC_RESP_LEAF</code>.
@@ -341,7 +341,7 @@ The `BATCH` message type carries multiple inner messages in a single binary fram
   </div>
   <div className="grid md:grid-cols-2 gap-4">
     <div className="bg-card border border-card-border rounded-lg p-4">
-      <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">AUTH</h4>
+      <h4 className="font-mono text-sm text-brand mb-2">AUTH</h4>
       <pre className="text-xs text-neutral-300 overflow-x-auto">{authCode}</pre>
     </div>
     <div className="bg-card border border-card-border rounded-lg p-4">
@@ -364,12 +364,12 @@ The `BATCH` message type carries multiple inner messages in a single binary fram
 
 <div className="space-y-4 not-prose">
   <div className="bg-card border border-card-border rounded-lg p-4">
-    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">CLIENT_OP</h4>
+    <h4 className="font-mono text-sm text-brand mb-2">CLIENT_OP</h4>
     <p className="text-xs text-neutral-300 mb-2">Single client operation wrapped in a <code>payload</code> object. Maps to Rust <code>ClientOpMessage &#123; payload: ClientOp &#125;</code>.</p>
     <pre className="text-xs text-neutral-300 overflow-x-auto">{clientOpCode}</pre>
   </div>
   <div className="bg-card border border-card-border rounded-lg p-4">
-    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">OP_BATCH</h4>
+    <h4 className="font-mono text-sm text-brand mb-2">OP_BATCH</h4>
     <p className="text-xs text-neutral-300 mb-2">Batch of client operations. Maps to Rust <code>OpBatchMessage &#123; payload: OpBatchPayload &#125;</code>.</p>
     <pre className="text-xs text-neutral-300 overflow-x-auto">{opBatchCode}</pre>
   </div>
@@ -422,7 +422,7 @@ Operations can specify a `writeConcern` to control acknowledgment:
   </table>
 </div>
 
-See the <a href="/docs/guides/write-concern" className="text-blue-600 dark:text-blue-400 hover:underline">Write Concern Guide</a> for detailed usage.
+See the <a href="/docs/guides/write-concern" className="text-brand hover:underline">Write Concern Guide</a> for detailed usage.
 
 ### Query Subscriptions
 
@@ -433,11 +433,11 @@ See the <a href="/docs/guides/write-concern" className="text-blue-600 dark:text-
 
 <div className="grid md:grid-cols-2 gap-4 not-prose">
   <div className="bg-card border border-card-border rounded-lg p-4">
-    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">QUERY_SUB</h4>
+    <h4 className="font-mono text-sm text-brand mb-2">QUERY_SUB</h4>
     <pre className="text-xs text-neutral-300 overflow-x-auto">{querySubCode}</pre>
   </div>
   <div className="bg-card border border-card-border rounded-lg p-4">
-    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">QUERY_UNSUB</h4>
+    <h4 className="font-mono text-sm text-brand mb-2">QUERY_UNSUB</h4>
     <pre className="text-xs text-neutral-300 overflow-x-auto">{queryUnsubCode}</pre>
   </div>
 </div>
@@ -445,13 +445,13 @@ See the <a href="/docs/guides/write-concern" className="text-blue-600 dark:text-
 ### Synchronization (Merkle)
 
 <div className="flex items-center gap-2 mb-4 not-prose">
-  <RefreshCw className="w-5 h-5 text-blue-500" />
+  <RefreshCw className="w-5 h-5 text-brand-subtle" />
   <span className="text-neutral-600 dark:text-neutral-300">TopGun uses a prefix-trie Merkle Tree. The client walks the tree to find differing buckets, then fetches leaf records for those buckets.</span>
 </div>
 
 <div className="space-y-4 not-prose">
   <div className="bg-card border border-card-border rounded-lg p-4">
-    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">SYNC_INIT</h4>
+    <h4 className="font-mono text-sm text-brand mb-2">SYNC_INIT</h4>
     <p className="text-xs text-neutral-300 mb-2">Client initiates sync. Flat message (no payload wrapper). Maps to Rust <code>SyncInitMessage</code>.</p>
     <pre className="text-xs text-neutral-300 overflow-x-auto">{syncInitCode}</pre>
   </div>
@@ -461,7 +461,7 @@ See the <a href="/docs/guides/write-concern" className="text-blue-600 dark:text-
     <pre className="text-xs text-neutral-300 overflow-x-auto">{syncRespRootCode}</pre>
   </div>
   <div className="bg-card border border-card-border rounded-lg p-4">
-    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">MERKLE_REQ_BUCKET</h4>
+    <h4 className="font-mono text-sm text-brand mb-2">MERKLE_REQ_BUCKET</h4>
     <p className="text-xs text-neutral-300 mb-2">Client requests bucket hashes if root differs.</p>
     <pre className="text-xs text-neutral-300 overflow-x-auto">{merkleReqBucketCode}</pre>
   </div>
@@ -486,7 +486,7 @@ See the <a href="/docs/guides/write-concern" className="text-blue-600 dark:text-
 
 <div className="grid md:grid-cols-2 gap-4 mb-4 not-prose">
   <div className="bg-card border border-card-border rounded-lg p-4">
-    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">LOCK_REQUEST</h4>
+    <h4 className="font-mono text-sm text-brand mb-2">LOCK_REQUEST</h4>
     <pre className="text-xs text-neutral-300 overflow-x-auto">{lockRequestCode}</pre>
   </div>
   <div className="bg-card border border-card-border rounded-lg p-4">
@@ -497,7 +497,7 @@ See the <a href="/docs/guides/write-concern" className="text-blue-600 dark:text-
 
 <div className="not-prose">
   <div className="bg-card border border-card-border rounded-lg p-4">
-    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">LOCK_RELEASE</h4>
+    <h4 className="font-mono text-sm text-brand mb-2">LOCK_RELEASE</h4>
     <pre className="text-xs text-neutral-300 overflow-x-auto">{lockReleaseCode}</pre>
   </div>
 </div>
@@ -511,18 +511,18 @@ See the <a href="/docs/guides/write-concern" className="text-blue-600 dark:text-
 
 <div className="grid md:grid-cols-2 gap-4 mb-4 not-prose">
   <div className="bg-card border border-card-border rounded-lg p-4">
-    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">TOPIC_SUB</h4>
+    <h4 className="font-mono text-sm text-brand mb-2">TOPIC_SUB</h4>
     <pre className="text-xs text-neutral-300 overflow-x-auto">{topicSubCode}</pre>
   </div>
   <div className="bg-card border border-card-border rounded-lg p-4">
-    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">TOPIC_UNSUB</h4>
+    <h4 className="font-mono text-sm text-brand mb-2">TOPIC_UNSUB</h4>
     <pre className="text-xs text-neutral-300 overflow-x-auto">{topicUnsubCode}</pre>
   </div>
 </div>
 
 <div className="grid md:grid-cols-2 gap-4 not-prose">
   <div className="bg-card border border-card-border rounded-lg p-4">
-    <h4 className="font-mono text-sm text-blue-600 dark:text-blue-400 mb-2">TOPIC_PUB</h4>
+    <h4 className="font-mono text-sm text-brand mb-2">TOPIC_PUB</h4>
     <pre className="text-xs text-neutral-300 overflow-x-auto">{topicPubCode}</pre>
   </div>
   <div className="bg-card border border-card-border rounded-lg p-4">

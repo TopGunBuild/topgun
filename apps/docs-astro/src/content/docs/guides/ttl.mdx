@@ -35,7 +35,7 @@ TopGun supports automatic data expiration via **TTL (Time-To-Live)**. This is us
 <div className="grid md:grid-cols-3 gap-6 mb-16 not-prose">
   <FeatureCard
     icon={Timer}
-    iconColor="text-blue-500"
+    iconColor="text-brand-subtle"
     title="Auto-Expiration"
     description="Set expiration time in milliseconds, and data will be automatically cleaned up."
   />
@@ -75,8 +75,8 @@ Similarly, pass `ttlMs` as the third argument to `.add()`.
 
 ## Garbage Collection
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-4 not-prose">
-  <p className="text-sm text-blue-800 dark:text-blue-200">
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-4 not-prose">
+  <p className="text-sm text-brand">
     <strong>Note:</strong> Expiration is handled by the server's background garbage collector. Clients may locally check TTL when reading, but the authoritative removal happens via the sync protocol when the server prunes the data.
   </p>
 </div>

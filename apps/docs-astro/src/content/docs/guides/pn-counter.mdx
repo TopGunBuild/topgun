@@ -121,10 +121,10 @@ console.log('Total stock:', stock.get()); // 97`;
 The **PN-Counter** (Positive-Negative Counter) is a CRDT that supports both increment and decrement operations. Unlike a simple counter, it works correctly in distributed systems where multiple clients may update the counter concurrently, even while offline.
 
 <div className="grid md:grid-cols-3 gap-4 my-6 not-prose">
-  <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
-    <Cloud className="w-6 h-6 text-blue-500 mb-2" />
-    <h3 className="font-semibold text-blue-900 dark:text-blue-100">Real-time Sync</h3>
-    <p className="text-sm text-blue-700 dark:text-blue-300">Changes sync automatically between all connected clients</p>
+  <div className="p-4 bg-brand-subtle/10 rounded-lg border border-brand-subtle/20">
+    <Cloud className="w-6 h-6 text-brand-subtle mb-2" />
+    <h3 className="font-semibold text-brand">Real-time Sync</h3>
+    <p className="text-sm text-brand">Changes sync automatically between all connected clients</p>
   </div>
   <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-800">
     <HardDrive className="w-6 h-6 text-green-500 mb-2" />
@@ -186,8 +186,8 @@ PN-Counter operations work offline. Changes are persisted to local storage (Inde
   <CodeBlock title="Offline Operations" language="typescript" code={offlineCode} />
 </div>
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
-  <p className="text-sm text-blue-800 dark:text-blue-200">
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-6 not-prose">
+  <p className="text-sm text-brand">
     <strong>Persistence:</strong> Counter state is automatically saved to IndexedDB using the storage adapter.
     When the app restarts, the counter restores its previous value before syncing with the server.
   </p>

@@ -414,7 +414,7 @@ function FacetedSearch() {
 </div>
 
 <div className="flex items-center gap-3 mb-6 not-prose">
-  <Zap className="w-10 h-10 text-blue-600 dark:text-blue-400" />
+  <Zap className="w-10 h-10 text-brand" />
   <h1 className="text-4xl font-bold text-foreground">React Hooks</h1>
 </div>
 
@@ -557,8 +557,8 @@ function LikeButton({ postId }) {
 | `decrement` | `() => void` | Decrement by 1 |
 | `add` | `(delta: number) => void` | Add arbitrary amount (positive or negative) |
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
-  <p className="text-sm text-blue-800 dark:text-blue-200">
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-6 not-prose">
+  <p className="text-sm text-brand">
     <strong>Offline Support:</strong> Counter operations work offline and are persisted to IndexedDB.
     Changes sync automatically when the connection is restored.
     See the <a href="/docs/guides/pn-counter" className="underline">PN-Counter Guide</a> for more details.
@@ -607,8 +607,8 @@ function LikeButton({ postId }) {
 | `error` | `Error \| null` | Last error encountered |
 | `reset` | `() => void` | Clear lastResult and error |
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
-  <p className="text-sm text-blue-800 dark:text-blue-200">
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-6 not-prose">
+  <p className="text-sm text-brand">
     <strong>Atomic Operations:</strong> Entry processors run on the server, solving race conditions in read-modify-write scenarios.
     See the <a href="/docs/guides/entry-processor" className="underline">Entry Processor Guide</a> for more details.
   </p>
@@ -675,9 +675,9 @@ interface JournalEvent {
   <CodeBlock title="components/AuditLog.tsx" language="typescript" code={useEventJournalHistoryCode} />
 </div>
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
-  <p className="text-sm text-blue-800 dark:text-blue-200">
-    <strong>Server-side Feature:</strong> The Event Journal must be enabled on the server with <code className="bg-blue-100 dark:bg-blue-800 px-1 rounded">eventJournalEnabled: true</code>.
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-6 not-prose">
+  <p className="text-sm text-brand">
+    <strong>Server-side Feature:</strong> The Event Journal must be enabled on the server with <code className="bg-brand-subtle/10 px-1 rounded">eventJournalEnabled: true</code>.
     Events are persisted to PostgreSQL for durability. See the <a href="/docs/guides/event-journal" className="underline">Event Journal Guide</a> for server configuration.
   </p>
 </div>
@@ -685,7 +685,7 @@ interface JournalEvent {
 ## useSearch
 
 <div className="flex items-center gap-2 mb-4 not-prose">
-  <Search className="w-6 h-6 text-blue-500" />
+  <Search className="w-6 h-6 text-brand-subtle" />
   <span className="text-neutral-600 dark:text-neutral-300">Subscribe to live full-text search results with BM25 relevance ranking. Results update automatically when matching documents change.</span>
 </div>
 
@@ -729,9 +729,9 @@ For search-as-you-type interfaces, use `debounceMs` to avoid excessive server re
   <CodeBlock title="components/ProductSearch.tsx" language="typescript" code={useSearchDebounceCode} />
 </div>
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
-  <p className="text-sm text-blue-800 dark:text-blue-200">
-    <strong>Server-side Feature:</strong> Full-text search must be enabled on the server for the target map with <code className="bg-blue-100 dark:bg-blue-800 px-1 rounded">fullTextSearch</code> configuration.
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-6 not-prose">
+  <p className="text-sm text-brand">
+    <strong>Server-side Feature:</strong> Full-text search must be enabled on the server for the target map with <code className="bg-brand-subtle/10 px-1 rounded">fullTextSearch</code> configuration.
     See the <a href="/docs/guides/full-text-search" className="underline">Full-Text Search Guide</a> for server setup.
   </p>
 </div>
@@ -953,8 +953,8 @@ interface MergeRejection {
 }
 ```
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
-  <p className="text-sm text-blue-800 dark:text-blue-200">
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-6 not-prose">
+  <p className="text-sm text-brand">
     <strong>See Also:</strong> The <a href="/docs/guides/conflict-resolvers" className="underline">Conflict Resolvers Guide</a> for detailed examples and use cases.
   </p>
 </div>

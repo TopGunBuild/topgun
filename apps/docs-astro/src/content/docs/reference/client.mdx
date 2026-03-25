@@ -188,7 +188,7 @@ client.onConnectionChange((state) => {
 await users.set('key', { data: 'value' });`;
 
 <div className="flex items-center gap-3 mb-6 not-prose">
-  <Code2 className="w-10 h-10 text-blue-600 dark:text-blue-400" />
+  <Code2 className="w-10 h-10 text-brand" />
   <h1 className="text-4xl font-bold text-foreground">Client API</h1>
 </div>
 
@@ -238,13 +238,13 @@ For production deployments with multiple nodes, use the `cluster` configuration:
   <CodeBlock language="typescript" code={clusterModeCode} />
 </div>
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 my-6 not-prose">
+<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-6 my-6 not-prose">
   <div className="flex items-center gap-2 mb-2">
-    <Network className="w-5 h-5 text-blue-600 dark:text-blue-400" />
-    <h4 className="font-semibold text-blue-800 dark:text-blue-300">Smart Routing</h4>
+    <Network className="w-5 h-5 text-brand" />
+    <h4 className="font-semibold text-brand">Smart Routing</h4>
   </div>
-  <span className="text-blue-700 dark:text-blue-400">
-    When <code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">smartRouting</code> is enabled,
+  <span className="text-brand">
+    When <code className="px-1.5 py-0.5 rounded bg-brand-subtle/10 text-sm">smartRouting</code> is enabled,
     the client automatically routes operations to the correct partition owner node. This reduces network hops and improves latency.
     The client maintains a partition map and updates it automatically when the cluster topology changes.
   </span>
@@ -402,15 +402,15 @@ For serverless environments where WebSocket connections are unavailable, use `Ht
   </ApiConstructor>
 </div>
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 my-6 not-prose">
+<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-6 my-6 not-prose">
   <div className="flex items-center gap-2 mb-2">
-    <Network className="w-5 h-5 text-blue-600 dark:text-blue-400" />
-    <h4 className="font-semibold text-blue-800 dark:text-blue-300">HTTP Mode Limitations</h4>
+    <Network className="w-5 h-5 text-brand" />
+    <h4 className="font-semibold text-brand">HTTP Mode Limitations</h4>
   </div>
-  <span className="text-blue-700 dark:text-blue-400">
+  <span className="text-brand">
     HTTP sync mode supports batch operations and one-shot queries only. It does not support live query subscriptions,
     Merkle tree synchronization, or real-time topic messages. For real-time features, use WebSocket mode or
-    <code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">AutoConnectionProvider</code>
+    <code className="px-1.5 py-0.5 rounded bg-brand-subtle/10 text-sm">AutoConnectionProvider</code>
     which will use WebSocket when available.
   </span>
 </div>
@@ -535,12 +535,12 @@ for (const [key, result] of results) {
 }`} />
 </div>
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 my-6 not-prose">
+<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-6 my-6 not-prose">
   <div className="flex items-center gap-2 mb-2">
-    <Zap className="w-5 h-5 text-blue-600 dark:text-blue-400" />
-    <h4 className="font-semibold text-blue-800 dark:text-blue-300">Entry Processor</h4>
+    <Zap className="w-5 h-5 text-brand" />
+    <h4 className="font-semibold text-brand">Entry Processor</h4>
   </div>
-  <span className="text-blue-700 dark:text-blue-400">
+  <span className="text-brand">
     Entry processors execute user-defined logic atomically on the server. This solves race conditions where multiple clients
     might read, modify, and write the same data concurrently. See the <a href="/docs/guides/entry-processor" className="underline">Entry Processor Guide</a> for detailed usage.
   </span>

@@ -154,9 +154,9 @@ Want to see it running first? Try the [live demo](https://demo.topgun.build/).
   />
 </div>
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 mb-6 not-prose">
-  <h3 className="text-lg font-semibold text-blue-800 dark:text-blue-300 mb-2 !mt-0">Server Configuration</h3>
-  <span className="text-blue-700 dark:text-blue-400">The TopGun server is configured via environment variables. For the full configuration reference including TLS, clustering, and the Rust embed API, see the <a href="/docs/reference/server" className="underline">Server API reference</a>. For a gradual adoption approach, see the <a href="/docs/guides/adoption-path" className="underline">Adoption Path guide</a>.</span>
+<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-6 mb-6 not-prose">
+  <h3 className="text-lg font-semibold text-brand mb-2 !mt-0">Server Configuration</h3>
+  <span className="text-brand">The TopGun server is configured via environment variables. For the full configuration reference including TLS, clustering, and the Rust embed API, see the <a href="/docs/reference/server" className="underline">Server API reference</a>. For a gradual adoption approach, see the <a href="/docs/guides/adoption-path" className="underline">Adoption Path guide</a>.</span>
 </div>
 
 ## 3. Initialization
@@ -204,9 +204,9 @@ Want to see it running first? Try the [live demo](https://demo.topgun.build/).
   <span className="text-green-700 dark:text-green-400">IndexedDB can take 50-500ms to initialize. TopGun queues write operations in memory and persists them once ready—your UI renders instantly with zero blocking time. If using the simplified <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">TopGun</code> API, use <code className="px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-800/50 text-sm">await db.waitForReady()</code> only if you need guaranteed persistence before proceeding.</span>
 </div>
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 mb-6 not-prose">
-  <h3 className="text-lg font-semibold text-blue-800 dark:text-blue-300 mb-2 !mt-0">Persistence</h3>
-  <span className="text-blue-700 dark:text-blue-400">By using <code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">IDBAdapter</code>, your data is automatically saved to IndexedDB. Even if the user refreshes the page or closes the browser, the state is preserved locally.</span>
+<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-6 mb-6 not-prose">
+  <h3 className="text-lg font-semibold text-brand mb-2 !mt-0">Persistence</h3>
+  <span className="text-brand">By using <code className="px-1.5 py-0.5 rounded bg-brand-subtle/10 text-sm">IDBAdapter</code>, your data is automatically saved to IndexedDB. Even if the user refreshes the page or closes the browser, the state is preserved locally.</span>
 </div>
 
 <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-100 dark:border-yellow-800 rounded-xl p-6 mb-6 not-prose">

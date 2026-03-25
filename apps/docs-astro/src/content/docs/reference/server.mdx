@@ -125,7 +125,7 @@ export const httpSyncResponseExample = `// 200 OK
 }`;
 
 <div className="flex items-center gap-3 mb-6 not-prose">
-  <Server className="w-10 h-10 text-blue-600 dark:text-blue-400" />
+  <Server className="w-10 h-10 text-brand" />
   <h1 className="text-4xl font-bold text-foreground">Server API</h1>
 </div>
 
@@ -137,8 +137,8 @@ The TopGun server is a Rust binary built on [axum](https://docs.rs/axum) and [to
   <CodeBlock title="terminal" language="bash" code={startServerCode} />
 </div>
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-4 mb-6 not-prose">
-  <span className="text-sm text-blue-700 dark:text-blue-400">The <code>test-server</code> binary is designed for integration testing. It uses in-memory storage (<code>NullDataStore</code>) and a hardcoded JWT secret. See the <a href="/docs/reference/cli">CLI Reference</a> for details on the test binary and future production builds.</span>
+<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-4 mb-6 not-prose">
+  <span className="text-sm text-brand">The <code>test-server</code> binary is designed for integration testing. It uses in-memory storage (<code>NullDataStore</code>) and a hardcoded JWT secret. See the <a href="/docs/reference/cli">CLI Reference</a> for details on the test binary and future production builds.</span>
 </div>
 
 ## Configuration
@@ -391,7 +391,7 @@ Call `store.initialize().await?` after construction to run the schema migration 
 ## POST /sync Endpoint
 
 <div className="flex items-center gap-2 mb-4 not-prose">
-  <Network className="w-6 h-6 text-blue-600" />
+  <Network className="w-6 h-6 text-brand" />
   <span className="text-neutral-600 dark:text-neutral-300">Stateless HTTP sync endpoint for serverless environments. Accepts batched operations, returns deltas and query results in a single request-response cycle.</span>
 </div>
 
@@ -492,8 +492,8 @@ Call `store.initialize().await?` after construction to run the schema migration 
   <CodeBlock language="json" code={httpSyncRequestExample} />
 </div>
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-4 mb-6 not-prose">
-  <span className="text-sm text-blue-700 dark:text-blue-400">The wire format is <code>application/x-msgpack</code> (binary). The examples above use JSON for readability.</span>
+<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-4 mb-6 not-prose">
+  <span className="text-sm text-brand">The wire format is <code>application/x-msgpack</code> (binary). The examples above use JSON for readability.</span>
 </div>
 
 ### Example Response

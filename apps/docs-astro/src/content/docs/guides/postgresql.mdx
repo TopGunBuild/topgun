@@ -42,7 +42,7 @@ CREATE INDEX IF NOT EXISTS idx_topgun_maps_map
 # TopGun + Your PostgreSQL
 
 <div className="flex items-center gap-3 mb-6 not-prose">
-  <Database className="w-10 h-10 text-blue-600 dark:text-blue-400" />
+  <Database className="w-10 h-10 text-brand" />
   <p className="text-lg text-neutral-600 dark:text-neutral-300">
     TopGun uses PostgreSQL as a durability backend with its own storage format. It lives alongside your existing database, not on top of it.
   </p>
@@ -68,7 +68,7 @@ TopGun stores data in its own `topgun_*` tables using MsgPack-encoded BYTEA colu
 <div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
   <div className="p-4 border border-card-border rounded-lg">
     <div className="flex items-center gap-2 mb-2">
-      <HardDrive className="w-5 h-5 text-blue-600" />
+      <HardDrive className="w-5 h-5 text-brand" />
       <span className="font-semibold text-foreground">Your Tables</span>
     </div>
     <ul className="text-sm text-neutral-600 dark:text-neutral-300 space-y-1">
@@ -147,9 +147,9 @@ Consider a separate database when:
 - You want independent backup/restore for TopGun data
 - Your existing database is already under heavy load
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 my-6 not-prose">
-  <h3 className="text-lg font-semibold text-blue-800 dark:text-blue-300 mb-2">Server API Reference</h3>
-  <span className="text-blue-700 dark:text-blue-400">For the full Rust server configuration including the <code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">PostgresDataStore</code> API, see the <a href="/docs/reference/server" className="underline">Server API reference</a>.</span>
+<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-6 my-6 not-prose">
+  <h3 className="text-lg font-semibold text-brand mb-2">Server API Reference</h3>
+  <span className="text-brand">For the full Rust server configuration including the <code className="px-1.5 py-0.5 rounded bg-brand-subtle/10 text-sm">PostgresDataStore</code> API, see the <a href="/docs/reference/server" className="underline">Server API reference</a>.</span>
 </div>
 
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">

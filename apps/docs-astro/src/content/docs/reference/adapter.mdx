@@ -171,7 +171,7 @@ if (storedKey) {
 }`;
 
 <div className="flex items-center gap-3 mb-6 not-prose">
-  <BookOpen className="w-10 h-10 text-blue-600 dark:text-blue-400" />
+  <BookOpen className="w-10 h-10 text-brand" />
   <h1 className="text-4xl font-bold text-foreground">Adapter API</h1>
 </div>
 
@@ -226,12 +226,12 @@ To create a custom adapter, implement the interface above. Ensure that:
 
 ## PostgresAdapter
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-4 mb-4 not-prose">
-  <span className="text-blue-700 dark:text-blue-400"><strong>Note:</strong> PostgreSQL storage is handled by the <strong>Rust server</strong> (<code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">PostgresDataStore</code>), not a client adapter. Configure via <code className="px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-800/50 text-sm">DATABASE_URL</code> environment variable. See the <a href="/docs/reference/server" className="underline">Server API reference</a> for details.</span>
+<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-4 mb-4 not-prose">
+  <span className="text-brand"><strong>Note:</strong> PostgreSQL storage is handled by the <strong>Rust server</strong> (<code className="px-1.5 py-0.5 rounded bg-brand-subtle/10 text-sm">PostgresDataStore</code>), not a client adapter. Configure via <code className="px-1.5 py-0.5 rounded bg-brand-subtle/10 text-sm">DATABASE_URL</code> environment variable. See the <a href="/docs/reference/server" className="underline">Server API reference</a> for details.</span>
 </div>
 
 <div className="flex items-center gap-2 mb-3 not-prose">
-  <Database className="w-5 h-5 text-blue-500" />
+  <Database className="w-5 h-5 text-brand-subtle" />
   <span className="text-neutral-600 dark:text-neutral-300">Production-ready adapter for PostgreSQL databases. Recommended for server-side deployments.</span>
 </div>
 
@@ -371,9 +371,9 @@ Best for protecting data from disk dumps without requiring user password:
   <span className="text-red-700 dark:text-red-400">If the encryption key is lost, <strong>all encrypted data becomes irrecoverable</strong>. Consider implementing key backup strategies for password-derived keys, or accept data loss on device change for device-bound keys.</span>
 </div>
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 mb-6 not-prose">
-  <h3 className="text-lg font-semibold text-blue-800 dark:text-blue-300 mb-2">Learn More</h3>
-  <span className="text-blue-700 dark:text-blue-400">For detailed security considerations and best practices, see the <a href="/docs/guides/security#client-side-encryption" className="underline">Client-Side Encryption section</a> in the Security Guide.</span>
+<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-6 mb-6 not-prose">
+  <h3 className="text-lg font-semibold text-brand mb-2">Learn More</h3>
+  <span className="text-brand">For detailed security considerations and best practices, see the <a href="/docs/guides/security#client-side-encryption" className="underline">Client-Side Encryption section</a> in the Security Guide.</span>
 </div>
 
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">

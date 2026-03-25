@@ -113,7 +113,7 @@ topgun_subscribers_per_event{quantile="0.5"}`;
   <h3 className="text-lg font-semibold text-foreground mb-4">Measured Performance (single node)</h3>
   <div className="grid md:grid-cols-3 gap-6">
     <div>
-      <div className="text-3xl font-bold text-blue-600 dark:text-blue-400">33,000+</div>
+      <div className="text-3xl font-bold text-brand">33,000+</div>
       <div className="text-sm text-neutral-600 dark:text-neutral-400">ops/sec sustained throughput</div>
     </div>
     <div>
@@ -137,7 +137,7 @@ TopGun includes several performance optimizations inspired by proven patterns fr
 <div className="grid md:grid-cols-2 gap-4 my-6 not-prose">
   <div className="p-4 border border-card-border rounded-lg">
     <div className="flex items-center gap-2 mb-2">
-      <Activity className="w-5 h-5 text-blue-600" />
+      <Activity className="w-5 h-5 text-brand" />
       <span className="font-semibold text-foreground">Subscription-Based Routing</span>
     </div>
     <p className="text-sm text-neutral-600 dark:text-neutral-300">
@@ -176,7 +176,7 @@ TopGun includes several performance optimizations inspired by proven patterns fr
 ## Tuning for High Throughput
 
 <div className="flex items-center gap-2 mb-4 not-prose">
-  <Server className="w-6 h-6 text-blue-600" />
+  <Server className="w-6 h-6 text-brand" />
   <span className="text-neutral-600 dark:text-neutral-300">For 100+ concurrent clients with heavy write loads.</span>
 </div>
 
@@ -239,7 +239,7 @@ Use these settings for gaming, live collaboration, or trading applications:
 ## Monitoring Performance
 
 <div className="flex items-center gap-2 mb-4 not-prose">
-  <Activity className="w-6 h-6 text-blue-600" />
+  <Activity className="w-6 h-6 text-brand" />
   <span className="text-neutral-600 dark:text-neutral-300">Key metrics to monitor for performance tuning.</span>
 </div>
 
@@ -316,9 +316,9 @@ For production servers handling thousands of connections, tune the operating sys
   <CodeBlock title="/etc/security/limits.conf" language="text" code={osLimitConf} />
 </div>
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-xl p-6 my-6 not-prose">
-  <h3 className="text-lg font-semibold text-blue-800 dark:text-blue-300 mb-2">Docker/Kubernetes Note</h3>
-  <span className="text-blue-700 dark:text-blue-400">When running in containers, ensure the host has these settings applied. You may also need to set <code className="bg-blue-100 dark:bg-blue-800 px-1.5 py-0.5 rounded">ulimits</code> in your Docker Compose or Kubernetes pod spec.</span>
+<div className="bg-brand-subtle/10 border border-brand-subtle/20 rounded-xl p-6 my-6 not-prose">
+  <h3 className="text-lg font-semibold text-brand mb-2">Docker/Kubernetes Note</h3>
+  <span className="text-brand">When running in containers, ensure the host has these settings applied. You may also need to set <code className="bg-brand-subtle/10 px-1.5 py-0.5 rounded">ulimits</code> in your Docker Compose or Kubernetes pod spec.</span>
 </div>
 
 ## Quick Reference
@@ -342,9 +342,9 @@ For production servers handling thousands of connections, tune the operating sys
       <li>eventStripeCount: 4</li>
     </ul>
   </div>
-  <div className="p-4 border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
-    <h4 className="font-semibold text-blue-800 dark:text-blue-300 mb-2">Balanced</h4>
-    <ul className="text-sm text-blue-700 dark:text-blue-400 space-y-1">
+  <div className="p-4 border border-brand-subtle/20 bg-brand-subtle/10 rounded-lg">
+    <h4 className="font-semibold text-brand mb-2">Balanced</h4>
+    <ul className="text-sm text-brand space-y-1">
       <li>Use defaults</li>
       <li>eventQueueCapacity: 10000-50000</li>
       <li>writeCoalescingMaxDelayMs: 5</li>

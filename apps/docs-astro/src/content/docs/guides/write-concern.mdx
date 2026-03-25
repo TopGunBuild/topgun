@@ -112,12 +112,12 @@ Configure acknowledgment levels for write operations to balance performance vs d
 Write Concern allows you to specify how much confirmation you need before a write operation is considered successful. This is similar to MongoDB's `writeConcern` or Kafka's `acks` parameter.
 
 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6 not-prose">
-  <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-100 dark:border-blue-800">
+  <div className="p-4 bg-brand-subtle/10 rounded-lg border border-brand-subtle/20">
     <div className="flex items-center gap-2 mb-2">
-      <Zap className="w-5 h-5 text-blue-500" />
-      <h3 className="font-semibold text-blue-900 dark:text-blue-300">Low Latency</h3>
+      <Zap className="w-5 h-5 text-brand-subtle" />
+      <h3 className="font-semibold text-brand">Low Latency</h3>
     </div>
-    <p className="text-sm text-blue-800 dark:text-blue-400">
+    <p className="text-sm text-brand">
       Use FIRE_AND_FORGET or MEMORY for real-time features where speed matters more than guaranteed persistence.
     </p>
   </div>
@@ -148,11 +148,11 @@ TopGun provides five Write Concern levels, ordered from lowest to highest durabi
     </p>
   </div>
 
-  <div className="p-4 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-900/10">
+  <div className="p-4 rounded-lg border border-brand-subtle/20 bg-brand-subtle/10">
     <div className="flex items-center gap-3 mb-2">
-      <Database className="w-5 h-5 text-blue-500" />
+      <Database className="w-5 h-5 text-brand-subtle" />
       <h4 className="font-bold text-foreground">MEMORY</h4>
-      <span className="text-xs px-2 py-0.5 bg-blue-100 dark:bg-blue-800 rounded text-blue-800 dark:text-blue-200">Default</span>
+      <span className="text-xs px-2 py-0.5 bg-brand-subtle/10 rounded text-brand">Default</span>
       <span className="text-xs px-2 py-0.5 bg-neutral-100 dark:bg-neutral-800 rounded">Latency: ~1-5ms</span>
     </div>
     <p className="text-sm text-neutral-600 dark:text-neutral-300">
@@ -250,10 +250,10 @@ Write Concern can be applied to batch operations:
     </p>
   </div>
 
-  <div className="p-4 rounded-lg bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800">
-    <h4 className="font-semibold text-blue-800 dark:text-blue-300 mb-2">Handle Partial Success</h4>
-    <p className="text-sm text-blue-700 dark:text-blue-400">
-      Even if a write doesn't reach the requested level before timeout, it may have been partially processed. Check <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">achievedLevel</code> to understand the actual state.
+  <div className="p-4 rounded-lg bg-brand-subtle/10 border border-brand-subtle/20">
+    <h4 className="font-semibold text-brand mb-2">Handle Partial Success</h4>
+    <p className="text-sm text-brand">
+      Even if a write doesn't reach the requested level before timeout, it may have been partially processed. Check <code className="bg-brand-subtle/10 px-1 rounded">achievedLevel</code> to understand the actual state.
     </p>
   </div>
 </div>

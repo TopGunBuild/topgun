@@ -212,10 +212,10 @@ const query = client.query<Product>('products', {
 TopGun provides two CRDT-based data structures for storing and syncing data.
 This page documents all available methods for performing CRUD operations.
 
-<div className="bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 p-4 my-6 not-prose">
-  <p className="text-sm text-blue-800 dark:text-blue-200">
-    <strong>Which one to use?</strong> Use <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">LWWMap</code> for key-value data where each key has one value (profiles, settings).
-    Use <code className="bg-blue-100 dark:bg-blue-800/50 px-1 rounded">ORMap</code> for collections where a key can have multiple values (todo lists, tags, comments).
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-6 not-prose">
+  <p className="text-sm text-brand">
+    <strong>Which one to use?</strong> Use <code className="bg-brand-subtle/10 px-1 rounded">LWWMap</code> for key-value data where each key has one value (profiles, settings).
+    Use <code className="bg-brand-subtle/10 px-1 rounded">ORMap</code> for collections where a key can have multiple values (todo lists, tags, comments).
     See <a href="/docs/concepts/data-structures" className="underline">Concepts: Data Structures</a> for detailed comparison.
   </p>
 </div>
@@ -240,7 +240,7 @@ Access it via `client.getMap<K, V>(name)`.
 ### Reading Data
 
 <div className="flex items-center gap-2 mb-3 not-prose">
-  <Eye className="w-5 h-5 text-blue-500" />
+  <Eye className="w-5 h-5 text-brand-subtle" />
   <span className="text-neutral-600 dark:text-neutral-300">Retrieve values by key or iterate over entries.</span>
 </div>
 
@@ -427,7 +427,7 @@ Access it via `client.getORMap<K, V>(name)`.
 ### Reading Data
 
 <div className="flex items-center gap-2 mb-3 not-prose">
-  <Eye className="w-5 h-5 text-blue-500" />
+  <Eye className="w-5 h-5 text-brand-subtle" />
   <span className="text-neutral-600 dark:text-neutral-300">Retrieve all values for a key.</span>
 </div>
 
