@@ -26,16 +26,20 @@ export const serverTlsCode = `# PLANNED — these TLS environment variables do n
 # topgun-server    # <-- planned binary, not yet available`;
 
 export const clientWssCode = `import { TopGunClient } from '@topgunbuild/client';
+import { IDBAdapter } from '@topgunbuild/adapters';
 
 // Production: Use wss:// (WebSocket Secure)
 const client = new TopGunClient({
   serverUrl: 'wss://topgun.example.com',
-  token: 'your-jwt-token'
+  storage: new IDBAdapter()
 });
+// Set the JWT after construction — the constructor has no token field
+client.setAuthToken('your-jwt-token');
 
 // Development only: ws:// (unencrypted)
 const devClient = new TopGunClient({
-  serverUrl: 'ws://localhost:8080'
+  serverUrl: 'ws://localhost:8080',
+  storage: new IDBAdapter()
 });`;
 
 export const generateCertsCode = `#!/bin/bash
