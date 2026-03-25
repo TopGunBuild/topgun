@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-25 — TODO-187 converted to SPEC-152
+**Last updated:** 2026-03-25 — TODO-188 converted to SPEC-153
 **Strategy:** Feature-complete open-source core first, then cloud. All differentiators built before launch.
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -185,13 +185,6 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
   - LRU evictor converts TopGun from "data must fit in RAM" to "hot data in RAM, cold data in PostgreSQL" — sufficient for v2.0 cloud
 
 
-### TODO-188: Fix performance.mdx — Replace TS Server Config Knobs
-- **Priority:** P1 (tuning instructions reference non-existent config)
-- **Complexity:** Small
-- **Summary:** `performance.mdx` documents `eventQueueCapacity`, `eventStripeCount`, `backpressureSyncFrequency`, `writeCoalescingMaxDelayMs` etc. — all TS server config. None exist in Rust. Binary name `topgun-server` incorrect (actual: `test-server` from source). Monitoring metrics section has same TS metric names issue.
-- **Fix:** Replace with actual Rust config: `ServerConfig` fields (`max_concurrent_operations`, `gc_interval_ms`), `ConnectionConfig` fields (`outbound_channel_capacity`, `send_timeout`, `idle_timeout`). Fix binary name. Replace metric names with actuals.
-- **Ref:** DOCS_AUDIT_REPORT.md — performance.mdx section
-- **Effort:** 0.5 day
 
 ### TODO-189: Fix cluster-replication.mdx — Remove False Env Vars & Consistency Modes
 - **Priority:** P1 (cluster setup instructions don't work)
