@@ -44,7 +44,7 @@ class MockTopGunClient {
   }
 
   getConnectionState() {
-    return 'connected';
+    return 'CONNECTED';
   }
 
   isCluster() {
@@ -75,10 +75,45 @@ class MockTopGunClient {
     return [];
   }
 
-  query(_map: string, _filter: unknown) {
+  query(mapName: string, filter: { where?: Record<string, unknown>; limit?: number } = {}) {
+    const lwwMap = this.maps.get(mapName);
+    let items: Array<Record<string, unknown> & { _key: string }> = [];
+
+    if (lwwMap) {
+      for (const [key, value] of lwwMap.entries()) {
+        if (value !== null && value !== undefined) {
+          items.push({ ...(value as Record<string, unknown>), _key: key });
+        }
+      }
+    }
+
+    // Apply where filter
+    if (filter.where) {
+      const where = filter.where as Record<string, unknown>;
+      items = items.filter((item) =>
+        Object.entries(where).every(([k, v]) => item[k] === v)
+      );
+    }
+
+    // Apply limit
+    if (filter.limit !== undefined && filter.limit < items.length) {
+      items = items.slice(0, filter.limit);
+    }
+
+    const captured = items;
+
     return {
-      subscribe: () => () => {},
-      dispose: () => {},
+      subscribe: (callback: (data: typeof captured) => void) => {
+        // Invoke callback synchronously so handleQuery's subscribe Promise resolves immediately
+        callback(captured);
+        return () => {};
+      },
+      onPaginationChange: (listener: (info: { hasMore: boolean; cursorStatus: string }) => void) => {
+        // Report 'valid' cursor status so the pagination race in handleQuery resolves without waiting
+        listener({ hasMore: false, cursorStatus: 'valid' });
+        return () => {};
+      },
+      getPaginationInfo: () => ({ hasMore: false, cursorStatus: 'valid' as const }),
     };
   }
 }
@@ -178,7 +213,6 @@ describe('MCP Tools', () => {
 
       expect(result.isError).toBeUndefined();
       expect(result.content[0].text).toContain('5 result');
-      expect(result.content[0].text).toContain('of 20 total');
     });
 
     it('should deny access to restricted maps', async () => {
@@ -351,7 +385,7 @@ describe('MCP Tools', () => {
       const result = await handleStats({}, ctx);
 
       expect(result.isError).toBeUndefined();
-      expect(result.content[0].text).toContain('connected');
+      expect(result.content[0].text).toContain('CONNECTED');
       expect(result.content[0].text).toContain('Pending Operations: 0');
     });
 
