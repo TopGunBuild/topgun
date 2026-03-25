@@ -10,7 +10,9 @@ import { AlertBox } from '../../../components/docs/AlertBox';
 
 <AlertBox variant="warning" title="Partially Implemented" text="Some features on this page (consistency modes, configurable replication factor) are not yet available. The cluster uses eventual consistency with a fixed replication factor." />
 
-export const clusterSetupCode = `# Node 1 (seed node)
+export const clusterSetupCode = `# These env vars are planned — the server does not currently parse them.
+#
+# Node 1 (seed node)
 PORT=8080 \\
 DATABASE_URL=postgres://user:pass@localhost/topgun \\
 TOPGUN_CLUSTER_PORT=9000 \\
@@ -27,14 +29,15 @@ topgun-server
 
 # For the full cluster configuration API, see: /docs/reference/server`;
 
-export const consistencyLevelsCode = `# Consistency levels are configured per-cluster
-# The Rust server uses CRDT-based eventual consistency by default
-# with automatic conflict resolution via Hybrid Logical Clocks.
+export const consistencyLevelsCode = `# Currently only EVENTUAL is implemented. QUORUM and STRONG are planned.
 #
 # Consistency modes:
-#   EVENTUAL  - Fire-and-forget replication (default, highest throughput)
-#   QUORUM    - Wait for majority of replicas (balanced)
-#   STRONG    - Wait for all replicas (strongest guarantees)
+#   EVENTUAL  - Fire-and-forget replication (default, highest throughput) [implemented]
+#   QUORUM    - Wait for majority of replicas (balanced)                  [planned]
+#   STRONG    - Wait for all replicas (strongest guarantees)              [planned]
+#
+# The Rust server uses CRDT-based eventual consistency by default
+# with automatic conflict resolution via Hybrid Logical Clocks.
 #
 # For detailed consistency configuration, see: /docs/reference/server`;
 
@@ -57,11 +60,11 @@ export const antiEntropyCode = `# Anti-entropy repair runs automatically when re
 # The server periodically compares Merkle tree roots between partition
 # owner and backup nodes, then syncs only the divergent keys.
 #
-# Repair process:
-#   1. MerkleTreeManager builds hash tree of partition data
-#   2. RepairScheduler compares Merkle roots with backup nodes
-#   3. Differences trigger targeted data sync
-#   4. Uses efficient bucket-level comparison before key-level
+# Repair process (architectural design):
+#   1. Partition owner builds a Merkle hash tree of its local data
+#   2. The system periodically compares Merkle roots between owner and backup nodes
+#   3. Differences trigger targeted data sync — only divergent keys are transferred
+#   4. Uses efficient bucket-level comparison before key-level sync
 #
 # Repair parameters (scan interval, batch size, concurrency)
 # are configured via the Rust server embed API.
@@ -70,6 +73,8 @@ export const antiEntropyCode = `# Anti-entropy repair runs automatically when re
 export const gossipProtocolCode = `# Cluster membership uses gossip protocol.
 # Nodes automatically discover each other — just provide one seed.
 #
+# Note: TOPGUN_CLUSTER_PORT and TOPGUN_CLUSTER_SEEDS are planned env vars.
+#
 # Example: Node 2 joining via seed
 TOPGUN_CLUSTER_PORT=9000 \\
 TOPGUN_CLUSTER_SEEDS=node1:9000 \\
@@ -77,8 +82,8 @@ topgun-server
 
 # When node2 joins:
 #   1. Connects to seed node (node1)
-#   2. Sends HELLO message with its info
-#   3. Receives MEMBER_LIST with all known members
+#   2. Sends JoinRequest with its node info
+#   3. Receives JoinResponse with cluster membership
 #   4. Connects to discovered members
 #   5. Broadcasts updated member list
 #
@@ -161,21 +166,6 @@ services:
     depends_on:
       - node1`;
 
-export const metricsCode = `// Replication metrics available via Prometheus
-// GET /metrics on metricsPort
-
-# Replication queue size per node
-topgun_replication_queue_size{node="node-2"} 15
-
-# Pending synchronous acknowledgments
-topgun_replication_pending_acks 3
-
-# Replication lag in milliseconds
-topgun_replication_lag_ms{node="node-2"} 42
-
-# Health status
-topgun_replication_healthy 1
-topgun_replication_unhealthy_nodes 0`;
 
 <div className="flex items-center gap-3 mb-6 not-prose">
   <Copy className="w-10 h-10 text-purple-600 dark:text-purple-400" />
