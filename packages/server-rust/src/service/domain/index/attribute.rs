@@ -1,6 +1,6 @@
 //! Attribute extraction from `rmpv::Value` records.
 //!
-//! Records in TopGun are stored as `rmpv::Value::Map`. `AttributeExtractor`
+//! Records in `TopGun` are stored as `rmpv::Value::Map`. `AttributeExtractor`
 //! pulls a named field out of those maps, supporting dot-notation for nested
 //! traversal. Each index implementation calls `extract` before indexing.
 
@@ -28,7 +28,7 @@ impl AttributeExtractor {
     /// `extract` do not allocate for path splitting.
     pub fn new(attribute_name: impl Into<String>) -> Self {
         let name = attribute_name.into();
-        let segments = name.split('.').map(|s| s.to_owned()).collect();
+        let segments = name.split('.').map(String::from).collect();
         AttributeExtractor {
             attribute_name: name,
             segments,
@@ -36,6 +36,7 @@ impl AttributeExtractor {
     }
 
     /// Returns the attribute name this extractor was created for.
+    #[must_use]
     pub fn attribute_name(&self) -> &str {
         &self.attribute_name
     }
@@ -45,6 +46,7 @@ impl AttributeExtractor {
     /// `record` is expected to be an `rmpv::Value::Map`. Non-map records
     /// return `Nil` immediately. Uses owned traversal to avoid lifetime
     /// complications when descending nested maps.
+    #[must_use]
     pub fn extract(&self, record: &rmpv::Value) -> rmpv::Value {
         let mut current: rmpv::Value = record.clone();
         for segment in &self.segments {

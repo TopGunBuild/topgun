@@ -1,4 +1,4 @@
-//! Navigable (range-capable) secondary index backed by a sorted BTreeMap.
+//! Navigable (range-capable) secondary index backed by a sorted `BTreeMap`.
 //!
 //! Provides O(log N) range queries and O(log N) equality lookups. All
 //! concurrent access is mediated by a `parking_lot::RwLock`.
@@ -21,6 +21,7 @@ pub struct NavigableIndex {
 }
 
 impl NavigableIndex {
+    #[must_use]
     pub fn new(attribute_name: String) -> Self {
         NavigableIndex {
             extractor: AttributeExtractor::new(attribute_name.clone()),
@@ -43,7 +44,7 @@ impl NavigableIndex {
     fn index_single(&self, key: &str, val: &rmpv::Value) {
         let cv = ComparableValue::from_value(val);
         let mut guard = self.map.write();
-        guard.entry(cv).or_insert_with(HashSet::new).insert(key.to_owned());
+        guard.entry(cv).or_default().insert(key.to_owned());
     }
 
     fn deindex_value(&self, key: &str, attr_val: &rmpv::Value) {
@@ -63,7 +64,7 @@ impl NavigableIndex {
         if let Some(set) = guard.get_mut(&cv) {
             set.remove(key);
         }
-        if guard.get(&cv).map(|s| s.is_empty()).unwrap_or(false) {
+        if guard.get(&cv).is_some_and(HashSet::is_empty) {
             guard.remove(&cv);
         }
     }
@@ -145,7 +146,7 @@ impl Index for NavigableIndex {
             .collect()
     }
 
-    /// NavigableIndex does not support token search; returns an empty set.
+    /// `NavigableIndex` does not support token search; returns an empty set.
     fn lookup_contains(&self, _token: &str) -> HashSet<String> {
         HashSet::new()
     }

@@ -2,7 +2,7 @@
 //!
 //! Maps tokens → record keys. Tokens are produced by a default tokenizer
 //! that lowercases the string and splits on whitespace and punctuation.
-//! This is a lightweight complement to the tantivy SearchService; it is NOT
+//! This is a lightweight complement to the tantivy `SearchService`; it is NOT
 //! a replacement.
 
 use std::collections::HashSet;
@@ -24,6 +24,7 @@ pub struct InvertedIndex {
 }
 
 impl InvertedIndex {
+    #[must_use]
     pub fn new(attribute_name: String) -> Self {
         InvertedIndex {
             extractor: AttributeExtractor::new(attribute_name.clone()),
@@ -36,6 +37,7 @@ impl InvertedIndex {
     /// given tokens (intersection).
     ///
     /// This is an inherent method, not part of the `Index` trait.
+    #[must_use]
     pub fn lookup_contains_all(&self, tokens: &[&str]) -> HashSet<String> {
         if tokens.is_empty() {
             return HashSet::new();
@@ -46,7 +48,7 @@ impl InvertedIndex {
             let keys: HashSet<String> = self
                 .map
                 .get(&norm)
-                .map(|s| s.iter().map(|k| k.clone()).collect())
+                .map(|s| s.iter().map(|k| String::clone(&k)).collect())
                 .unwrap_or_default();
             result = Some(match result {
                 None => keys,
@@ -60,6 +62,7 @@ impl InvertedIndex {
     /// given tokens (union).
     ///
     /// This is an inherent method, not part of the `Index` trait.
+    #[must_use]
     pub fn lookup_contains_any(&self, tokens: &[&str]) -> HashSet<String> {
         let mut result = HashSet::new();
         for token in tokens {
@@ -79,7 +82,7 @@ impl InvertedIndex {
         text.to_lowercase()
             .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
             .filter(|t| !t.is_empty())
-            .map(|t| t.to_owned())
+            .map(str::to_owned)
             .collect()
     }
 
@@ -100,7 +103,7 @@ impl InvertedIndex {
             for token in Self::tokenize(text) {
                 self.map
                     .entry(token)
-                    .or_insert_with(DashSet::new)
+                    .or_default()
                     .insert(key.to_owned());
             }
         }
@@ -164,17 +167,17 @@ impl Index for InvertedIndex {
         let norm = token.to_lowercase();
         self.map
             .get(&norm)
-            .map(|set| set.iter().map(|k| k.clone()).collect())
+            .map(|set| set.iter().map(|k| String::clone(&k)).collect())
             .unwrap_or_default()
     }
 
-    /// InvertedIndex does not support equality lookups on raw values; returns
+    /// `InvertedIndex` does not support equality lookups on raw values; returns
     /// an empty set. Use `lookup_contains` instead.
     fn lookup_eq(&self, _value: &rmpv::Value) -> HashSet<String> {
         HashSet::new()
     }
 
-    /// InvertedIndex does not support range queries; returns an empty set.
+    /// `InvertedIndex` does not support range queries; returns an empty set.
     fn lookup_range(
         &self,
         _lower: Option<&rmpv::Value>,

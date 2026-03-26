@@ -24,6 +24,7 @@ pub struct HashIndex {
 }
 
 impl HashIndex {
+    #[must_use]
     pub fn new(attribute_name: String) -> Self {
         HashIndex {
             extractor: AttributeExtractor::new(attribute_name.clone()),
@@ -50,7 +51,7 @@ impl HashIndex {
         let iv = IndexableValue::from_value(val);
         self.map
             .entry(iv)
-            .or_insert_with(DashSet::new)
+            .or_default()
             .insert(key.to_owned());
     }
 
@@ -111,11 +112,11 @@ impl Index for HashIndex {
         let iv = IndexableValue::from_value(value);
         self.map
             .get(&iv)
-            .map(|set| set.iter().map(|s| s.clone()).collect())
+            .map(|set| set.iter().map(|s| String::clone(&s)).collect())
             .unwrap_or_default()
     }
 
-    /// HashIndex does not support range queries; returns an empty set.
+    /// `HashIndex` does not support range queries; returns an empty set.
     fn lookup_range(
         &self,
         _lower: Option<&rmpv::Value>,
@@ -126,7 +127,7 @@ impl Index for HashIndex {
         HashSet::new()
     }
 
-    /// HashIndex does not support token search; returns an empty set.
+    /// `HashIndex` does not support token search; returns an empty set.
     fn lookup_contains(&self, _token: &str) -> HashSet<String> {
         HashSet::new()
     }
