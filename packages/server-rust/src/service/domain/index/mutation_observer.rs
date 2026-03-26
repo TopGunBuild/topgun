@@ -387,6 +387,49 @@ mod tests {
     }
 
     #[test]
+    fn on_update_reindexes_changed_value() {
+        let registry = Arc::new(IndexRegistry::new());
+        registry.add_hash_index("name");
+        let observer = IndexMutationObserver::new(Arc::clone(&registry));
+
+        let old_record = make_lww_record(vec![
+            ("name", rmpv::Value::String("alice".into())),
+        ]);
+        observer.on_put("k1", &old_record, None, false);
+
+        let new_record = make_lww_record(vec![
+            ("name", rmpv::Value::String("bob".into())),
+        ]);
+        observer.on_update("k1", &new_record, &old_record.value, &new_record.value, false);
+
+        let idx = registry.get_index("name").unwrap();
+        let old_result = idx.lookup_eq(&rmpv::Value::String("alice".into()));
+        assert!(!old_result.contains("k1"), "old value should be removed from index");
+        let new_result = idx.lookup_eq(&rmpv::Value::String("bob".into()));
+        assert!(new_result.contains("k1"), "new value should be in index");
+    }
+
+    #[test]
+    fn on_reset_empties_all_indexes() {
+        let registry = Arc::new(IndexRegistry::new());
+        registry.add_hash_index("name");
+        let observer = IndexMutationObserver::new(Arc::clone(&registry));
+
+        let record = make_lww_record(vec![
+            ("name", rmpv::Value::String("alice".into())),
+        ]);
+        observer.on_put("k1", &record, None, false);
+        assert_eq!(registry.get_index("name").unwrap().entry_count(), 1);
+
+        observer.on_reset();
+        assert_eq!(
+            registry.get_index("name").unwrap().entry_count(),
+            0,
+            "on_reset should empty all indexes"
+        );
+    }
+
+    #[test]
     fn on_clear_empties_all_indexes() {
         let registry = Arc::new(IndexRegistry::new());
         registry.add_hash_index("name");
