@@ -8,9 +8,13 @@
 
 | ID | Title | Status | Priority | Complexity |
 |----|-------|--------|----------|------------|
+| SPEC-155b | Index Registry and Mutation Observer | draft | P2 | small |
+| SPEC-155c | Index Query Optimizer and Service Wiring | draft | P2 | small |
 
 ## Decisions
 
+- SPEC-155a implemented foundational indexing layer: Index trait, IndexableValue/ComparableValue wrappers, AttributeExtractor, HashIndex (DashMap), NavigableIndex (RwLock<BTreeMap>), InvertedIndex (DashMap). 5 files, 26 tests, 3 commits, 3 review cycles.
+- Split SPEC-155 (Implement Indexing Subsystem) into 3 parts: SPEC-155a (core types + 3 index implementations), SPEC-155b (registry + mutation observer), SPEC-155c (query optimizer + wiring). Boundaries follow the 5-file Rust language profile limit and natural layer separation (data structures -> management -> integration).
 - SPEC-146 added 8 missing documentation pages for launch readiness: troubleshooting, tutorials (index + todo app), FAQ, schema guide, changelog, community, benchmarks. Updated DocsSidebar.tsx with Tutorials and Resources sections. 8 commits, 2 review cycles, all fixes applied.
 - SPEC-147 replaced ~195 hardcoded blue Tailwind classes with brand CSS token system. Added --brand/--brand-hover/--brand-subtle/--brand-muted to global.css :root/.dark/@theme. Zero blue- class residue across all TSX/Astro/MDX files. og-image.ts and SVG chart hex values retained as documented exceptions (satori/recharts cannot use CSS custom properties).
 - SPEC-148 added DataFusion SQL query documentation page (sql-queries.mdx) with all 7 required sections, and added SQL Queries SubItem to DocsSidebar.tsx between Live Queries and Schema & Type Safety. 2 commits, all 9 acceptance criteria met.

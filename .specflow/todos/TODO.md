@@ -1,6 +1,6 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-25 — TODO-189 converted to SPEC-154
+**Last updated:** 2026-03-26 — TODO-187 added (SetupWizard audit & backend)
 **Strategy:** Feature-complete open-source core first, then cloud. All differentiators built before launch.
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
@@ -108,16 +108,6 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **HC Reference:** `hazelcast/map/impl/operation/` — EntryProcessor execution patterns
 - **Effort:** 3-4 weeks (requires WASM sandbox or Deno-based execution environment)
 
-### TODO-177: Indexing (Hash/Navigable/Inverted) — Rust Port
-- **Priority:** P2 (documented as available, required for O(1) queries on large maps)
-- **Complexity:** Large
-- **Summary:** Feature described in `indexing.mdx` — HashIndex (equality), NavigableIndex (range queries), InvertedIndex (tokenized text search). None of these index types exist in `packages/server-rust/src/` (confirmed by grep). This is separate from tantivy full-text search (SearchService) which is already implemented.
-- **Documented in:** `guides/indexing.mdx` — presented as available but no index types exist in server-rust
-- **TS Reference:** Old TS server had working index types — recover via git:
-  - `git show 926e856^:packages/server/src/` — search for hash-index, navigable-index, inverted-index files
-  - Search: `git show 926e856^:packages/server/src/` for `HashIndex`, `NavigableIndex`, `IndexRegistry`
-- **HC Reference:** `hazelcast/query/impl/` — CompositeIndex, QueryContext, IndexRegistry
-- **Effort:** 3-4 weeks
 
 ### TODO-178: Interceptors / User-Extensible Middleware — Rust Port
 - **Priority:** P3
@@ -239,6 +229,14 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Ref:** Arroyo WebUI (`/Users/koristuvac/Projects/rust/arroyo/webui/`)
 - **Depends on:** TODO-025, TODO-091, TODO-092
 - **Effort:** 2-3 weeks
+
+### TODO-187: SetupWizard — Audit & Backend Implementation
+- **Priority:** P2 (DX, first-run experience)
+- **Complexity:** Medium
+- **Summary:** Audit the full SetupWizard implementation and implement missing backend. Three parts: (1) **Audit existing frontend** — review `apps/admin-dashboard/src/features/setup/SetupWizard.tsx` for correctness, security (credential handling, CSRF), UX completeness, and alignment with current server capabilities. (2) **Implement Rust backend** — add `POST /api/setup` (apply config, create admin user, restart) and `POST /api/setup/test-connection` (validate DB connectivity) endpoints in `packages/server-rust/src/network/handlers/`. Add bootstrap mode to `GET /api/status` (`configured: false` when unconfigured, currently hardcoded `true`). (3) **Audit CLI setup** — review `bin/commands/setup.js` and `.env.auto-setup.example` for consistency with UI wizard and server config model. Ensure zero-touch (`TOPGUN_AUTO_SETUP=true`) and interactive paths both work end-to-end.
+- **Files:** `SetupWizard.tsx`, `admin.rs`, `bin/commands/setup.js`, `.env.auto-setup.example`, `tests/cli/setup.test.ts`
+- **Depends on:** TODO-093 v2.0 (Admin Dashboard)
+- **Effort:** 1-2 weeks
 
 ### TODO-136: Rate Limiting & Quotas
 - **Priority:** P1 (required for cloud free tier)
