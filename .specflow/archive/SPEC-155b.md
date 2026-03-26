@@ -1,7 +1,7 @@
 ---
 id: SPEC-155b
 type: feature
-status: running
+status: done
 priority: P2
 complexity: small
 created: 2026-03-25
@@ -210,3 +210,104 @@ Language profile: Compliant with Rust profile (3 files, within 5-file limit)
 - Each index implementation holds its own `AttributeExtractor`; the observer passes the full rmpv record value to `index.insert/update/remove` and each index extracts its own attribute
 - `IndexObserverFactory::register_map` is idempotent via DashMap `entry().or_insert_with()`; repeated calls return the same `Arc<IndexRegistry>`
 - 651 total tests pass, no regressions
+
+---
+
+## Review History
+
+### Review v1 (2026-03-26 14:00)
+**Result:** APPROVED
+**Reviewer:** impl-reviewer (subagent)
+
+**Findings:**
+
+**Passed:**
+- [✓] AC1: `on_put` test confirms all indexes are updated when a record is inserted
+- [✓] AC2: `insert_remove_100_records_no_leaks` test verifies zero stale index entries after removing 100 records; `on_remove` and `on_evict` both delegate to `index.remove`
+- [✓] AC3: `stats_accuracy` and `stats_entry_count_updates_after_insert` tests confirm correct attribute, index_type, and entry_count reporting
+- [✓] AC4: `on_clear_empties_all_indexes` test confirms `entry_count()` returns 0 and lookups return empty sets after clear
+- [✓] All 9 MutationObserver trait methods implemented and match trait signatures exactly
+- [✓] `get_best_index` op-to-type mapping complete: Eq/Neq -> Hash, Gt/Gte/Lt/Lte -> Navigable, Like -> Inverted, Regex -> None, And/Or/Not -> None
+- [✓] Type-mismatch guard present: returns `None` when registered index type does not match required type for the operation
+- [✓] OrMap and OrTombstones records correctly skipped via `extract_rmpv` returning `None`
+- [✓] `on_replication_put` no-ops when `populate_index` is false, indexes when true
+- [✓] `IndexObserverFactory::register_map` is idempotent (pointer equality test confirms same Arc returned on repeated calls)
+- [✓] `create_observer` returns `None` for unregistered maps
+- [✓] `entry_count: u64` — no f64 for integer-semantic fields (constraint met)
+- [✓] `IndexType` enum with `#[derive(Debug, Clone, PartialEq, Eq)]` — enums over strings for known value sets
+- [✓] 3 files touched — within 5-file Rust language profile limit
+- [✓] Build check: `cargo check` passes (0 errors)
+- [✓] Lint check: `cargo clippy -- -D warnings` passes (0 warnings)
+- [✓] Test check: 651 tests pass, 0 failures, 0 regressions
+- [✓] No unnecessary `.clone()` calls beyond required Arc clones
+- [✓] No `.unwrap()` or `.expect()` in production code paths
+- [✓] No `unsafe` blocks
+- [✓] No spec/bug/phase references in code comments — WHY-comments used throughout
+- [✓] `Default` implemented via `fn default() -> Self { Self::new() }` on both `IndexRegistry` and `IndexObserverFactory`
+
+**Minor:**
+1. `on_update` has no dedicated test in `mutation_observer.rs`. Every other MutationObserver method has a direct test, but `on_update` (which calls `index.update` with old and new values) is untested. The code path is a trivial delegation, but a test would complete the coverage set.
+2. `on_reset` also has no dedicated test; its implementation is identical to `on_clear`, so the behavioral coverage is present but the method is not exercised directly.
+3. `on_put` receives `old_value: Option<&RecordValue>` but ignores it. When a key is re-put with a new value, the old value bucket is not cleaned up — correctness relies on `HashIndex`/`NavigableIndex`/`InvertedIndex` insert implementations handling the "key already present" case by removing from the old bucket first. This is SPEC-155a's responsibility, but future maintainers should be aware of this contract.
+
+**Summary:** The implementation fully meets all acceptance criteria and requirements from the specification. All 9 MutationObserver methods are correctly implemented, the op-to-index-type mapping in `get_best_index` is complete and matches the spec, and all constraint checks pass. Build, lint, and test checks are all green with no regressions. Minor gaps in `on_update` and `on_reset` test coverage are the only items worth addressing.
+
+### Fix Response v1 (2026-03-26)
+**Applied:** All minor issues
+
+**Fixes:**
+1. [✓] Added `on_update_reindexes_changed_value` test — verifies old value removed from index and new value inserted after `on_update`
+   - Commit: 474dd80
+2. [✓] Added `on_reset_empties_all_indexes` test — verifies `on_reset` clears all index entries
+   - Commit: 474dd80
+
+**Skipped:**
+3. [✗] `on_put` ignoring `old_value` — not a code fix; behavior is correct per spec (index `insert` handles key-already-present). Noted as implicit contract in review.
+
+### Review v2 (2026-03-26 15:00)
+**Result:** APPROVED
+**Reviewer:** impl-reviewer (subagent)
+
+**Findings:**
+
+**Fix Verification:**
+- [✓] Minor issue 1 fixed: `on_update_reindexes_changed_value` test added at line 390 of `mutation_observer.rs` — verifies old value ("alice") is removed from the hash index and new value ("bob") is inserted after `on_update`
+- [✓] Minor issue 2 fixed: `on_reset_empties_all_indexes` test added at line 413 of `mutation_observer.rs` — inserts a record, calls `on_reset`, asserts `entry_count()` drops to 0
+- [✓] Minor issue 3 skipped as documented — no action required, behavior is correct per spec
+
+**Passed:**
+- [✓] Both new tests pass: `on_update_reindexes_changed_value` and `on_reset_empties_all_indexes` verified by direct test run
+- [✓] 69 index tests pass, 0 failures (up from 67 in v1 — 2 new tests added)
+- [✓] Full suite: 653 tests pass (649 unit + 4 integration), 0 failures, 0 regressions
+- [✓] Build check: `cargo check` passes (0 errors)
+- [✓] Lint check: `cargo clippy -- -D warnings` passes (0 warnings)
+- [✓] All AC1-AC4 remain fully met — no production code was changed, only tests added
+- [✓] All v1 passing items remain valid
+
+**Summary:** Both minor issues from Review v1 are correctly fixed. The two new tests directly exercise `on_update` and `on_reset`, completing coverage for all 9 MutationObserver methods. Build, lint, and all 653 tests are green. No further issues found.
+
+---
+
+## Completion
+
+**Completed:** 2026-03-26
+**Total Commits:** 4
+**Review Cycles:** 2
+
+### Outcome
+
+Implemented IndexRegistry (per-map index management with DashMap) and IndexMutationObserver (wires index updates into the existing MutationObserver pipeline), with IndexObserverFactory for composable observer creation. 69 index tests, 653 total tests pass.
+
+### Key Files
+
+- `packages/server-rust/src/service/domain/index/registry.rs` — IndexRegistry with add/get/stats/get_best_index (op-to-type mapping)
+- `packages/server-rust/src/service/domain/index/mutation_observer.rs` — IndexMutationObserver (all 9 MutationObserver methods) + IndexObserverFactory
+
+### Patterns Established
+
+None — followed existing MutationObserver/ObserverFactory pattern from MerkleMutationObserver.
+
+### Deviations
+
+1. `Value::Map` uses `BTreeMap` not `HashMap` — fixed test helper accordingly
+2. Clippy `match-same-arms`: merged compound/Regex `None` branches into single arm
