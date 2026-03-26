@@ -1,14 +1,14 @@
 ## Current Position
 
-- **Active Specification:** none
-- **Status:** idle
-- **Next Step:** /sf:new or /sf:next
+- **Active Specification:** SPEC-155b
+- **Status:** review
+- **Next Step:** /sf:review
 
 ## Queue
 
 | ID | Title | Status | Priority | Complexity |
 |----|-------|--------|----------|------------|
-| SPEC-155b | Index Registry and Mutation Observer | draft | P2 | small |
+| SPEC-155b | Index Registry and Mutation Observer | running | P2 | small |
 | SPEC-155c | Index Query Optimizer and Service Wiring | draft | P2 | small |
 
 ## Decisions
