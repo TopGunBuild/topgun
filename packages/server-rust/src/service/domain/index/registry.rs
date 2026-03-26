@@ -95,8 +95,9 @@ impl IndexRegistry {
     #[must_use]
     pub fn get_best_index(&self, predicate: &PredicateNode) -> Option<Arc<dyn Index>> {
         let required_type = match predicate.op {
-            PredicateOp::And | PredicateOp::Or | PredicateOp::Not => return None,
-            PredicateOp::Regex => return None,
+            PredicateOp::And | PredicateOp::Or | PredicateOp::Not | PredicateOp::Regex => {
+                return None;
+            }
             PredicateOp::Eq | PredicateOp::Neq => IndexType::Hash,
             PredicateOp::Gt | PredicateOp::Gte | PredicateOp::Lt | PredicateOp::Lte => {
                 IndexType::Navigable

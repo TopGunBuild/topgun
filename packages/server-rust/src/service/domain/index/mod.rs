@@ -8,6 +8,7 @@
 pub mod attribute;
 pub mod hash_index;
 pub mod inverted_index;
+pub mod mutation_observer;
 pub mod navigable_index;
 pub mod registry;
 
@@ -15,6 +16,7 @@ pub use attribute::AttributeExtractor;
 pub use hash_index::HashIndex;
 pub use inverted_index::InvertedIndex;
 pub use navigable_index::NavigableIndex;
+pub use mutation_observer::{IndexMutationObserver, IndexObserverFactory};
 pub use registry::{IndexRegistry, IndexStats};
 
 use std::collections::HashSet;
