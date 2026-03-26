@@ -174,6 +174,18 @@ impl IndexObserverFactory {
             .or_insert_with(|| Arc::new(IndexRegistry::new()))
             .clone()
     }
+
+    /// Returns the [`IndexRegistry`] for `map_name`, or `None` if the map has not
+    /// been registered.
+    ///
+    /// Unlike `register_map`, this method does not create a registry when one is
+    /// absent — it is a pure read-only lookup suitable for query-time index selection.
+    #[must_use]
+    pub fn get_registry(&self, map_name: &str) -> Option<Arc<IndexRegistry>> {
+        self.registries
+            .get(map_name)
+            .map(|r| Arc::clone(r.value()))
+    }
 }
 
 impl Default for IndexObserverFactory {
