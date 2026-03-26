@@ -280,9 +280,8 @@ mod tests {
         let all_keys = vec!["k1".to_string(), "k2".to_string(), "k3".to_string()];
         let records = |key: &str| -> Option<rmpv::Value> {
             match key {
-                "k1" => Some(make_record("status", rmpv::Value::String("active".into()))),
+                "k1" | "k3" => Some(make_record("status", rmpv::Value::String("active".into()))),
                 "k2" => Some(make_record("status", rmpv::Value::String("inactive".into()))),
-                "k3" => Some(make_record("status", rmpv::Value::String("active".into()))),
                 _ => None,
             }
         };

@@ -391,6 +391,7 @@ impl QueryService {
     /// Pass `Some(index_observer_factory)` to enable index-accelerated predicate
     /// evaluation. Pass `None` to fall back to full-scan (sim/test call sites).
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         query_registry: Arc<QueryRegistry>,
         record_store_factory: Arc<RecordStoreFactory>,
