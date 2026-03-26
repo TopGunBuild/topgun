@@ -287,11 +287,12 @@ mod tests {
     fn eq_with_hash_index_returns_only_matching_keys() {
         let registry = make_registry_with_hash("status");
 
-        // Pre-populate the index with 3 records.
+        // Index::insert expects the full record map so AttributeExtractor can
+        // pull the "status" attribute from it.
         let idx = registry.get_index("status").unwrap();
-        idx.insert("k1", &rmpv::Value::String("active".into()));
-        idx.insert("k2", &rmpv::Value::String("inactive".into()));
-        idx.insert("k3", &rmpv::Value::String("active".into()));
+        idx.insert("k1", &make_record("status", rmpv::Value::String("active".into())));
+        idx.insert("k2", &make_record("status", rmpv::Value::String("inactive".into())));
+        idx.insert("k3", &make_record("status", rmpv::Value::String("active".into())));
 
         let all_keys = vec!["k1".to_string(), "k2".to_string(), "k3".to_string()];
         let records = |key: &str| -> Option<rmpv::Value> {
@@ -318,9 +319,9 @@ mod tests {
     fn gte_with_navigable_index_uses_range_scan() {
         let registry = make_registry_with_navigable("age");
         let idx = registry.get_index("age").unwrap();
-        idx.insert("k1", &rmpv::Value::Integer(10.into()));
-        idx.insert("k2", &rmpv::Value::Integer(20.into()));
-        idx.insert("k3", &rmpv::Value::Integer(30.into()));
+        idx.insert("k1", &make_record("age", rmpv::Value::Integer(10.into())));
+        idx.insert("k2", &make_record("age", rmpv::Value::Integer(20.into())));
+        idx.insert("k3", &make_record("age", rmpv::Value::Integer(30.into())));
 
         let all_keys = vec!["k1".to_string(), "k2".to_string(), "k3".to_string()];
         let records = |key: &str| -> Option<rmpv::Value> {
@@ -346,10 +347,10 @@ mod tests {
     fn like_with_inverted_index_uses_lookup_contains() {
         let registry = make_registry_with_inverted("bio");
         let idx = registry.get_index("bio").unwrap();
-        // InvertedIndex tokenises on whitespace, so index whole words.
-        idx.insert("k1", &rmpv::Value::String("rust developer".into()));
-        idx.insert("k2", &rmpv::Value::String("javascript developer".into()));
-        idx.insert("k3", &rmpv::Value::String("rust engineer".into()));
+        // InvertedIndex tokenises on whitespace; pass full record maps.
+        idx.insert("k1", &make_record("bio", rmpv::Value::String("rust developer".into())));
+        idx.insert("k2", &make_record("bio", rmpv::Value::String("javascript developer".into())));
+        idx.insert("k3", &make_record("bio", rmpv::Value::String("rust engineer".into())));
 
         let all_keys = vec!["k1".to_string(), "k2".to_string(), "k3".to_string()];
         let records = |key: &str| -> Option<rmpv::Value> {
@@ -361,17 +362,15 @@ mod tests {
             }
         };
 
-        // evaluate_predicate returns false for Like, so we expect 0 results here
-        // because the full-predicate verification step uses evaluate_predicate.
-        // This test validates that the index candidate lookup works correctly
-        // (the results are filtered only by evaluate_predicate which returns false
-        // for Like since L3 is deferred in the predicate engine).
+        // evaluate_predicate returns false for Like (L3 deferred), so the final
+        // verification pass will filter out all candidates regardless of index hits.
+        // The test asserts that the index narrows candidates correctly (not all 3
+        // keys are returned, since Like falls back to full scan which would include
+        // all 3 — but then evaluate_predicate rejects all since Like returns false).
         let pred = leaf(PredicateOp::Like, "bio", rmpv::Value::String("rust".into()));
         let result = index_aware_evaluate(&registry, &pred, &all_keys, records);
-        // Since evaluate_predicate returns false for Like, results are empty.
-        // The index correctly narrows to rust-containing keys, but final
-        // verification is blocked by the deferred Like implementation.
-        assert!(result.is_empty() || result.len() <= 2, "should not return all 3 keys");
+        // evaluate_predicate returns false for Like, so all candidates are rejected.
+        assert!(result.is_empty(), "Like returns false in evaluate_predicate, so no matches");
     }
 
     // ---- Fallback to full scan when no index exists ----------------------
@@ -404,11 +403,6 @@ mod tests {
     fn and_with_indexed_child_narrows_candidates() {
         let registry = make_registry_with_hash("role");
         let idx = registry.get_index("role").unwrap();
-        idx.insert("k1", &rmpv::Value::String("admin".into()));
-        idx.insert("k2", &rmpv::Value::String("user".into()));
-        idx.insert("k3", &rmpv::Value::String("admin".into()));
-
-        let all_keys = vec!["k1".to_string(), "k2".to_string(), "k3".to_string()];
 
         // Records with two fields: role and active.
         let make_full_record = |role: &str, active: bool| -> rmpv::Value {
@@ -417,6 +411,13 @@ mod tests {
                 (rmpv::Value::String("active".into()), rmpv::Value::Boolean(active)),
             ])
         };
+
+        // Insert full record maps so AttributeExtractor can find the "role" field.
+        idx.insert("k1", &make_full_record("admin", true));
+        idx.insert("k2", &make_full_record("user", true));
+        idx.insert("k3", &make_full_record("admin", false));
+
+        let all_keys = vec!["k1".to_string(), "k2".to_string(), "k3".to_string()];
 
         let records = |key: &str| -> Option<rmpv::Value> {
             match key {
@@ -450,9 +451,9 @@ mod tests {
     fn or_with_all_indexed_children_unions_candidates() {
         let registry = make_registry_with_hash("status");
         let idx = registry.get_index("status").unwrap();
-        idx.insert("k1", &rmpv::Value::String("active".into()));
-        idx.insert("k2", &rmpv::Value::String("pending".into()));
-        idx.insert("k3", &rmpv::Value::String("inactive".into()));
+        idx.insert("k1", &make_record("status", rmpv::Value::String("active".into())));
+        idx.insert("k2", &make_record("status", rmpv::Value::String("pending".into())));
+        idx.insert("k3", &make_record("status", rmpv::Value::String("inactive".into())));
 
         let all_keys = vec!["k1".to_string(), "k2".to_string(), "k3".to_string()];
         let records = |key: &str| -> Option<rmpv::Value> {

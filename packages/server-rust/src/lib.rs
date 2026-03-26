@@ -111,6 +111,13 @@ mod integration_tests {
             mgr
         };
 
+        // Register IndexObserverFactory so that maps with secondary indexes
+        // keep their indexes in sync with record mutations.
+        let index_observer_factory = Arc::new(
+            crate::service::domain::index::IndexObserverFactory::new(),
+        );
+        observer_factories.push(Arc::clone(&index_observer_factory) as Arc<dyn ObserverFactory>);
+
         let record_store_factory = Arc::new(
             RecordStoreFactory::new(
                 StorageConfig::default(),
@@ -153,6 +160,7 @@ mod integration_tests {
                 Arc::new(crate::service::domain::query_backend::PredicateBackend),
                 Some(query_merkle_manager),
                 config.max_query_records,
+                Some(Arc::clone(&index_observer_factory)),
                 #[cfg(feature = "datafusion")]
                 None,
             )),
@@ -391,6 +399,7 @@ mod integration_tests {
             Arc::new(crate::service::domain::query_backend::PredicateBackend),
             None,
             10_000,
+            None,
             #[cfg(feature = "datafusion")]
             None,
         ));
