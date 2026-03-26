@@ -251,7 +251,7 @@ mod tests {
             let idx_clone = Arc::clone(&idx);
             handles.push(thread::spawn(move || {
                 for j in 0..100 {
-                    let key = format!("k{}-{}", i, j);
+                    let key = format!("k{i}-{j}");
                     let cat = if j % 2 == 0 { "electronics" } else { "books" };
                     idx_clone.insert(&key, &record(cat));
                     let _ = idx_clone.lookup_eq(&rmpv::Value::String(
