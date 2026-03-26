@@ -495,6 +495,9 @@ fn build_services() -> (
         Arc::new(PredicateBackend),
         Some(Arc::clone(&query_merkle_manager)),
         config.max_query_records,
+        None,
+        #[cfg(feature = "datafusion")]
+        None,
     ));
     let messaging_svc = Arc::new(MessagingService::new(Arc::clone(&connection_registry)));
     let coordination_svc = Arc::new(CoordinationService::new(
