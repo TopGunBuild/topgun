@@ -140,6 +140,7 @@ impl SimNode {
                 Arc::new(crate::service::domain::query_backend::PredicateBackend),
                 None,
                 10_000,
+                None,
                 #[cfg(feature = "datafusion")]
                 None,
             )),

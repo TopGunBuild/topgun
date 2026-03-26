@@ -274,6 +274,7 @@ fn build_services() -> (
         Arc::new(topgun_server::service::domain::query_backend::PredicateBackend),
         Some(Arc::clone(&query_merkle_manager)),
         config.max_query_records,
+        None,
         #[cfg(feature = "datafusion")]
         None,
     ));

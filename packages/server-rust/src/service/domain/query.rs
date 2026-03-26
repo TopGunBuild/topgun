@@ -23,6 +23,8 @@ use topgun_core::messages::{Message, SyncRespRootMessage, SyncRespRootPayload};
 use tracing::Instrument;
 
 use crate::network::connection::{ConnectionId, ConnectionRegistry, OutboundMessage};
+use crate::service::domain::index::query_optimizer::index_aware_evaluate;
+use crate::service::domain::index::IndexObserverFactory;
 use crate::service::domain::predicate::{
     evaluate_predicate, evaluate_where, value_to_rmpv,
 };
@@ -373,6 +375,9 @@ pub struct QueryService {
     /// Maximum records returned in a single `QUERY_RESP`. Queries matching more
     /// records are clamped to this limit with `has_more: true`.
     max_query_records: u32,
+    /// Index observer factory for index-accelerated predicate evaluation.
+    /// `None` when index wiring is not enabled (sim/test call sites).
+    index_observer_factory: Option<Arc<IndexObserverFactory>>,
     #[cfg(feature = "datafusion")]
     sql_query_backend: Option<Arc<dyn crate::service::domain::query_backend::SqlQueryBackend>>,
 }
@@ -382,6 +387,9 @@ impl QueryService {
     ///
     /// Pass `Some(query_merkle_manager)` to enable per-query Merkle sync init.
     /// Pass `None` to keep existing call sites working unchanged.
+    ///
+    /// Pass `Some(index_observer_factory)` to enable index-accelerated predicate
+    /// evaluation. Pass `None` to fall back to full-scan (sim/test call sites).
     #[must_use]
     pub fn new(
         query_registry: Arc<QueryRegistry>,
@@ -390,6 +398,7 @@ impl QueryService {
         query_backend: Arc<dyn QueryBackend>,
         query_merkle_manager: Option<Arc<crate::storage::query_merkle::QueryMerkleSyncManager>>,
         max_query_records: u32,
+        index_observer_factory: Option<Arc<IndexObserverFactory>>,
         #[cfg(feature = "datafusion")]
         sql_query_backend: Option<Arc<dyn crate::service::domain::query_backend::SqlQueryBackend>>,
     ) -> Self {
@@ -400,6 +409,7 @@ impl QueryService {
             query_backend,
             query_merkle_manager,
             max_query_records,
+            index_observer_factory,
             #[cfg(feature = "datafusion")]
             sql_query_backend,
         }
@@ -556,6 +566,41 @@ impl QueryService {
                 key_hash_pairs_by_partition.push((partition_id, partition_hashes));
             }
         }
+
+        // Narrow candidate entries using index-accelerated evaluation when an
+        // IndexObserverFactory is wired and the query has a predicate. This
+        // reduces the entries passed to execute_query without altering the
+        // query semantics — the predicate is re-evaluated inside the backend
+        // and inside index_aware_evaluate itself, so no correctness risk.
+        let entries = if let (Some(factory), Some(predicate)) =
+            (self.index_observer_factory.as_ref(), query.predicate.as_ref())
+        {
+            if let Some(registry) = factory.get_registry(&map_name) {
+                // Build a lookup map so the optimizer can fetch record values by key.
+                let entry_map: std::collections::HashMap<&str, &rmpv::Value> =
+                    entries.iter().map(|(k, v)| (k.as_str(), v)).collect();
+                let all_keys: Vec<String> =
+                    entries.iter().map(|(k, _)| k.clone()).collect();
+
+                let matching_keys = index_aware_evaluate(
+                    &registry,
+                    predicate,
+                    &all_keys,
+                    |key| entry_map.get(key).map(|v| (*v).clone()),
+                );
+
+                let matching_set: HashSet<&str> =
+                    matching_keys.iter().map(|k| k.as_str()).collect();
+                entries
+                    .into_iter()
+                    .filter(|(k, _)| matching_set.contains(k.as_str()))
+                    .collect()
+            } else {
+                entries
+            }
+        } else {
+            entries
+        };
 
         // Delegate to query backend for filtering, sorting, and limiting
         let mut results = self
@@ -1446,6 +1491,7 @@ mod tests {
             Arc::new(PredicateBackend),
             None,
             10_000,
+            None,
             #[cfg(feature = "datafusion")]
             None,
         );
@@ -1464,6 +1510,7 @@ mod tests {
             Arc::new(PredicateBackend),
             None,
             10_000,
+            None,
             #[cfg(feature = "datafusion")]
             None,
         ));
@@ -1486,6 +1533,7 @@ mod tests {
             Arc::new(PredicateBackend),
             None,
             10_000,
+            None,
             #[cfg(feature = "datafusion")]
             None,
         ));
@@ -1520,6 +1568,7 @@ mod tests {
             Arc::new(PredicateBackend),
             None,
             10_000,
+            None,
             #[cfg(feature = "datafusion")]
             None,
         ));
@@ -1614,6 +1663,7 @@ mod tests {
             Arc::new(PredicateBackend),
             None,
             10_000,
+            None,
             #[cfg(feature = "datafusion")]
             None,
         ));
@@ -1857,6 +1907,7 @@ mod tests {
             Arc::new(PredicateBackend),
             Some(Arc::clone(&merkle_mgr)),
             10_000,
+            None,
             #[cfg(feature = "datafusion")]
             None,
         ));
@@ -1922,6 +1973,7 @@ mod tests {
             Arc::new(PredicateBackend),
             Some(Arc::clone(&merkle_mgr)),
             10_000,
+            None,
             #[cfg(feature = "datafusion")]
             None,
         ));
