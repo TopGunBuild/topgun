@@ -82,9 +82,6 @@ fn collect_candidates(
             full_scan_keys(all_keys)
         }
 
-        // ---- Neq: inverting a hash lookup is not cheaper than full scan ------
-        PredicateOp::Neq => full_scan_keys(all_keys),
-
         // ---- Range operators: use NavigableIndex ----------------------------
         PredicateOp::Gt => {
             if let Some(index) = registry.get_best_index(predicate) {
@@ -131,88 +128,74 @@ fn collect_candidates(
             full_scan_keys(all_keys)
         }
 
-        // ---- Regex: no index type covers regex evaluation -------------------
-        PredicateOp::Regex => full_scan_keys(all_keys),
+        // ---- Neq/Regex/Not: no index acceleration possible ------------------
+        PredicateOp::Neq | PredicateOp::Regex | PredicateOp::Not => full_scan_keys(all_keys),
 
         // ---- And: intersect indexed children; full-scan the rest ------------
-        //
-        // Strategy: use indexes for children that have covering indexes,
-        // accumulate the intersection, then fall back to full scan for any
-        // children without indexes. The intersection shrinks the candidate set
-        // before verification.
-        PredicateOp::And => {
-            let children = predicate.children.as_deref().unwrap_or(&[]);
-            if children.is_empty() {
-                return full_scan_keys(all_keys);
-            }
+        PredicateOp::And => candidates_for_and(registry, predicate, all_keys),
 
-            // Separate indexed from non-indexed children.
-            let mut indexed_sets: Vec<HashSet<String>> = Vec::new();
-            let mut has_unindexed = false;
-
-            for child in children {
-                let child_candidates = collect_candidates(registry, child, all_keys);
-                // A child has index coverage if its candidate set is smaller
-                // than full scan (i.e. the registry returned a narrower result).
-                let is_full_scan = child_candidates.len() == all_keys.len()
-                    || is_leaf_without_index(registry, child);
-                if is_full_scan {
-                    has_unindexed = true;
-                } else {
-                    indexed_sets.push(child_candidates);
-                }
-            }
-
-            if indexed_sets.is_empty() {
-                // No index coverage at all — full scan.
-                return full_scan_keys(all_keys);
-            }
-
-            // Start with the smallest indexed set and intersect the rest.
-            let result = indexed_sets
-                .into_iter()
-                .reduce(|acc, set| acc.intersection(&set).cloned().collect())
-                .unwrap_or_default();
-
-            // If there are unindexed children, the intersection is still an
-            // over-approximation that will be filtered by evaluate_predicate.
-            // For And, any key that passes indexed children may still fail
-            // unindexed ones — but evaluate_predicate handles that correctly.
-            let _ = has_unindexed; // covered by final evaluate_predicate pass
-
-            result
-        }
-
-        // ---- Or: union results from indexed children; full-scan if any
-        // child lacks an index (otherwise the union would be incomplete).
-        PredicateOp::Or => {
-            let children = predicate.children.as_deref().unwrap_or(&[]);
-            if children.is_empty() {
-                return HashSet::new();
-            }
-
-            let mut union: HashSet<String> = HashSet::new();
-            let mut needs_full_scan = false;
-
-            for child in children {
-                if is_leaf_without_index(registry, child) {
-                    needs_full_scan = true;
-                    break;
-                }
-                let child_candidates = collect_candidates(registry, child, all_keys);
-                union.extend(child_candidates);
-            }
-
-            if needs_full_scan {
-                full_scan_keys(all_keys)
-            } else {
-                union
-            }
-        }
-
-        // ---- Not: negate result of child evaluation, no index acceleration --
-        PredicateOp::Not => full_scan_keys(all_keys),
+        // ---- Or: union indexed children; full-scan if any child unindexed ---
+        PredicateOp::Or => candidates_for_or(registry, predicate, all_keys),
     }
+}
+
+/// And combinator: intersect candidates from indexed children, full-scan the rest.
+fn candidates_for_and(
+    registry: &IndexRegistry,
+    predicate: &PredicateNode,
+    all_keys: &[String],
+) -> HashSet<String> {
+    let children = predicate.children.as_deref().unwrap_or(&[]);
+    if children.is_empty() {
+        return full_scan_keys(all_keys);
+    }
+
+    let mut indexed_sets: Vec<HashSet<String>> = Vec::new();
+
+    for child in children {
+        let child_candidates = collect_candidates(registry, child, all_keys);
+        let is_full_scan =
+            child_candidates.len() == all_keys.len() || is_leaf_without_index(registry, child);
+        if !is_full_scan {
+            indexed_sets.push(child_candidates);
+        }
+    }
+
+    if indexed_sets.is_empty() {
+        return full_scan_keys(all_keys);
+    }
+
+    // Start with the smallest indexed set and intersect the rest.
+    // Unindexed children are handled by the final evaluate_predicate pass.
+    indexed_sets
+        .into_iter()
+        .reduce(|acc, set| acc.intersection(&set).cloned().collect())
+        .unwrap_or_default()
+}
+
+/// Or combinator: union candidates from indexed children; full-scan if any child
+/// lacks an index (otherwise the union would be incomplete).
+fn candidates_for_or(
+    registry: &IndexRegistry,
+    predicate: &PredicateNode,
+    all_keys: &[String],
+) -> HashSet<String> {
+    let children = predicate.children.as_deref().unwrap_or(&[]);
+    if children.is_empty() {
+        return HashSet::new();
+    }
+
+    let mut union: HashSet<String> = HashSet::new();
+
+    for child in children {
+        if is_leaf_without_index(registry, child) {
+            return full_scan_keys(all_keys);
+        }
+        let child_candidates = collect_candidates(registry, child, all_keys);
+        union.extend(child_candidates);
+    }
+
+    union
 }
 
 /// Returns all keys as a `HashSet` (full-scan fallback).

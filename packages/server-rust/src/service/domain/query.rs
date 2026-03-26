@@ -590,7 +590,7 @@ impl QueryService {
                 );
 
                 let matching_set: HashSet<&str> =
-                    matching_keys.iter().map(|k| k.as_str()).collect();
+                    matching_keys.iter().map(String::as_str).collect();
                 entries
                     .into_iter()
                     .filter(|(k, _)| matching_set.contains(k.as_str()))
