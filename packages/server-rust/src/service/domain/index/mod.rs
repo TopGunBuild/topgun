@@ -18,6 +18,7 @@ pub use navigable_index::NavigableIndex;
 use std::collections::HashSet;
 
 /// Discriminant for the three index strategies.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexType {
     Hash,
     Navigable,
