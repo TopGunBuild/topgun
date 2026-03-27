@@ -60,9 +60,9 @@ async function start(options) {
       }
       if (profile === 'cluster') {
         console.log(chalk.white('\n  Cluster:'));
-        console.log(chalk.cyan('    - Node 1: http://localhost:8080'));
-        console.log(chalk.cyan('    - Node 2: http://localhost:8081'));
-        console.log(chalk.cyan('    - Node 3: http://localhost:8082'));
+        console.log(chalk.cyan('    - Node 1: http://localhost:10001'));
+        console.log(chalk.cyan('    - Node 2: http://localhost:10002'));
+        console.log(chalk.cyan('    - Node 3: http://localhost:10003'));
       }
     }
 

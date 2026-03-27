@@ -11,9 +11,9 @@ module.exports = async function clusterStart() {
 
     console.log(chalk.green('\n  Cluster started (3 nodes)\n'));
     console.log(chalk.white('  Nodes (mapped via Docker):'));
-    console.log(chalk.cyan('    - node-1: http://localhost:8080'));
-    console.log(chalk.cyan('    - node-2: http://localhost:8081'));
-    console.log(chalk.cyan('    - node-3: http://localhost:8082'));
+    console.log(chalk.cyan('    - node-1: http://localhost:10001'));
+    console.log(chalk.cyan('    - node-2: http://localhost:10002'));
+    console.log(chalk.cyan('    - node-3: http://localhost:10003'));
     console.log('');
     console.log(chalk.gray('  To stop: npx topgun cluster:stop'));
     console.log(chalk.gray('  To view status: npx topgun cluster:status\n'));
