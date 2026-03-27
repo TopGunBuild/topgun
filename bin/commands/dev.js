@@ -1,5 +1,5 @@
 const chalk = require('chalk');
-const { spawn, execSync } = require('child_process');
+const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
@@ -12,10 +12,13 @@ if (fs.existsSync(envPath)) {
 module.exports = async function dev(options) {
   console.log(chalk.bold('\n TopGun Development Server\n'));
 
-  const serverPort = options.port || process.env.SERVER_PORT || '8080';
+  const serverPort = options.port || process.env.PORT || '8080';
 
   // Display configuration
   console.log(chalk.gray(`  Port: ${serverPort}`));
+  if (options.debug) {
+    console.log(chalk.gray('  Debug: enabled (RUST_LOG=debug, TOPGUN_LOG_FORMAT=json)'));
+  }
   console.log('');
 
   // Determine Rust server binary path
@@ -24,7 +27,7 @@ module.exports = async function dev(options) {
   if (!fs.existsSync(rustBinaryPath)) {
     console.error(chalk.red('  Error: Rust server binary not found.'));
     console.log(chalk.yellow(`  Expected: ${rustBinaryPath}`));
-    console.log(chalk.yellow('  Run: cargo build --release --bin test-server'));
+    console.log(chalk.yellow('  Run: cargo build --release -p topgun-server --bin test-server'));
     process.exit(1);
   }
 
@@ -33,9 +36,16 @@ module.exports = async function dev(options) {
 
   const env = {
     ...process.env,
-    SERVER_PORT: serverPort,
     PORT: serverPort,
   };
+
+  // Remove SERVER_PORT — the Rust server only reads PORT
+  delete env.SERVER_PORT;
+
+  if (options.debug) {
+    env.RUST_LOG = 'debug';
+    env.TOPGUN_LOG_FORMAT = 'json';
+  }
 
   const server = spawn(rustBinaryPath, [], {
     stdio: 'inherit',

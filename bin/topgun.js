@@ -21,7 +21,6 @@ program
   .command('setup')
   .description('Interactive project setup')
   .option('-y, --yes', 'Skip prompts, use defaults')
-  .option('--storage <type>', 'Storage backend: sqlite, postgres, memory', 'sqlite')
   .action(require('./commands/setup'));
 
 program
@@ -29,6 +28,7 @@ program
   .description('Start development server')
   .option('--no-db', 'Skip database startup')
   .option('-p, --port <port>', 'Server port', '8080')
+  .option('--debug', 'Enable debug logging (RUST_LOG=debug, TOPGUN_LOG_FORMAT=json)')
   .action(require('./commands/dev'));
 
 program
@@ -40,16 +40,14 @@ program
 program
   .command('config')
   .description('Manage configuration')
-  .option('--transport <type>', 'Set transport: ws, http')
-  .option('--storage <type>', 'Set storage: sqlite, postgres, memory')
+  .option('--storage <type>', 'Set storage: postgres, memory')
   .option('--show', 'Show current configuration')
   .action(require('./commands/config'));
 
 // Cluster commands
 program
   .command('cluster:start')
-  .description('Start local cluster')
-  .option('-n, --nodes <count>', 'Number of nodes', '3')
+  .description('Start local cluster via Docker Compose')
   .action(require('./commands/cluster/start'));
 
 program
@@ -71,7 +69,7 @@ program
   .option('--no-json', 'Skip JSON schema generation')
   .action(require('./commands/codegen'));
 
-// Debug commands (Phase 14C)
+// Debug commands
 program
   .command('debug:crdt <action>')
   .description('CRDT debugging tools (export, stats, conflicts, timeline, replay, tail)')
@@ -98,7 +96,7 @@ const docker = require('./commands/docker');
 program
   .command('docker:start')
   .description('Start Docker services')
-  .option('--with <profiles>', 'Profiles to start (admin,monitoring,dbtools,k6,cluster,all)')
+  .option('--with <profiles>', 'Profiles to start (admin,monitoring,dbtools,k6,cluster,auto-setup,all)')
   .action(docker.start);
 
 program
