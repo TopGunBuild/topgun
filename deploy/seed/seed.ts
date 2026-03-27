@@ -172,12 +172,9 @@ type Op = {
 };
 
 async function seedMap(ws: WebSocket, mapName: string, ops: Op[]): Promise<void> {
-  const batchId = `seed-${mapName}-${Date.now()}`;
-
   send(ws, {
     type: 'OP_BATCH',
     payload: {
-      batchId,
       ops,
     },
   });
