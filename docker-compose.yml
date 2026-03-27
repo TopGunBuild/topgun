@@ -62,9 +62,30 @@ services:
     environment:
       VITE_TOPGUN_SERVER_URL: ws://localhost:8080
       VITE_TOPGUN_METRICS_URL: http://localhost:9091
-    profiles: ["admin", "all"]
+    profiles: ["admin", "all", "getting-started"]
     depends_on:
       - server
+    networks:
+      - topgun
+
+  # ============================================================================
+  # PROFILE: getting-started (one-command onboarding demo)
+  # ============================================================================
+
+  seed:
+    build:
+      context: ./deploy/seed
+      dockerfile: Dockerfile.seed
+    environment:
+      TOPGUN_HOST: server
+      TOPGUN_PORT: "8080"
+    # JWT_SECRET is intentionally omitted — the default server config uses
+    # require_auth: false, so the seed script skips authentication.
+    profiles: ["getting-started"]
+    restart: "no"
+    depends_on:
+      server:
+        condition: service_healthy
     networks:
       - topgun
 
