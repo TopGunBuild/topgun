@@ -38,7 +38,7 @@ class MemoryAdapter implements IStorageAdapter {
     return id;
   }
   async getPendingOps(): Promise<OpLogEntry[]> { return this.opLog.filter(e => e.synced === 0); }
-  async markOpsSynced(lastId: number): Promise<void> { this.opLog.forEach(e => { if ((e as any).id <= lastId) e.synced = 1; }); }
+  async markOpsSynced(lastId: number): Promise<void> { this.opLog.forEach(e => { if (e.id <= lastId) e.synced = 1; }); }
   async getAllKeys(): Promise<string[]> { return Array.from(this.data.keys()); }
 }
 
