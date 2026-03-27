@@ -167,8 +167,8 @@ The server CPU is now spent on its actual work (CRDT merge, storage, sync) rathe
 
 | Priority | Target | Current % | Approach | Expected Impact |
 |----------|--------|-----------|----------|-----------------|
-| Low | `SearchRegistry::has_subscriptions_for_map` | 20% | Replace DashMap scan with `HashSet<MapName>` tracking maps with active subs | -15% CPU, ~400k+ ops/sec |
+| Low | `SearchRegistry::has_subscriptions_for_map` | 20% | Replace DashMap scan with `HashSet<MapName>` tracking maps with active subs | -15% CPU, potential further throughput gains |
 | Low | `MerkleSyncManager::update_lww` | 8% | Already optimized (scatter-gather, SPEC-119) | Marginal |
 | Low | `rmp_serde::decode` | 4% | Zero-copy deserialization or pre-parsed cache | Marginal |
 
-**Conclusion:** At 348k ops/sec fire-and-wait with sub-10ms p99, the server is performant enough for v2.0 feature work. Further optimization should be driven by production workload profiling, not synthetic benchmarks.
+**Conclusion:** At 348k ops/sec fire-and-wait with sub-10ms p99 (profiling overhead; clean benchmark 2026-03-27 shows 37K fire-and-wait, 560K+ fire-and-forget), the server is performant enough for v2.0 feature work. Further optimization should be driven by production workload profiling, not synthetic benchmarks.

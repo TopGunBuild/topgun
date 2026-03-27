@@ -20,7 +20,8 @@
 | 2026-03-22 | Cloud portal auth: Clerk (не BetterAuth) | $0 для 50K MAU, pre-built UI, zero maintenance. Уже работает в `examples/notes-app` — проверенная интеграция. Clerk = только portal login, не data plane. TopGun data connections используют собственные HS256 JWT | BetterAuth self-hosted (больше контроля, но 1-2 нед UI + hosting + maintenance) | Если Clerk меняет pricing >$50/мес или sunset — миграция на BetterAuth |
 | 2026-03-22 | TODO-163 (P0 security) — сразу после SPEC-136 | demo.topgun.build уже публичен с уязвимостями. 2-3 дня. Смежный код с SPEC-136 | Отложить до wave 6f² (позже, но рискованнее) | — |
 | 2026-03-20 | Apache 2.0 core + BSL enterprise | Open-core стандарт для dev tools. Apache для adoption, BSL для enterprise revenue | Full Apache (нет enterprise moat), proprietary (нет adoption) | Если конкурент fork'ает и обгоняет — рассмотреть SSPL или Elastic License |
-| 2026-03-25 | Feature-first: полное open-source ядро до cloud launch | Show HN с полным набором дифференциаторов (DAG, WASM, Connectors, Indexing, Locks, RBAC) — мощнее, чем ранний запуск с минимальным feature set. Один шанс на first impression | Ранний cloud launch после SQL+Shapes (быстрее к revenue, но слабый launch) | Если разработка затягивается >12 мес до launch — пересмотреть scope |
+| 2026-03-25 | ~~Feature-first: полное open-source ядро до cloud launch~~ **SUPERSEDED 2026-03-26** | Show HN с полным набором дифференциаторов (DAG, WASM, Connectors, Indexing, Locks, RBAC) — мощнее, чем ранний запуск с минимальным feature set. Один шанс на first impression | Ранний cloud launch после SQL+Shapes (быстрее к revenue, но слабый launch) | — (заменено решением от 2026-03-26) |
+| 2026-03-26 | **Firebase Killer — Compressed:** UX-first, отложить enterprise-фичи | 5+ VC-конкурентов выпускают обновления ежемесячно. 9+ мес без обратной связи от пользователей — неприемлемый риск. SQL + search + offline + scale уже работают. Разрыв — в UX и онбординге, а не в фичах. /office-hours + /plan-ceo-review (SELECTIVE EXPANSION). Phase 0: Getting Started guide (валидация). Упрощённый RBAC. Индексы через Admin API. Позиционирование: "Firestore alternative". | Feature-first (9+ мес, слишком долго), Speed Run (2-3 нед, слишком мало фич), Full v2.0 design doc (5-7 мес, Distributed Locks + Schema Migrations не нужны первым пользователям) | Если первые 50 пользователей запросят enterprise-фичи (DAG, WASM, Connectors) — пересмотреть. Если Show HN провалится — Direct outreach к GUN.js/Firebase community |
 
 ---
 
@@ -134,6 +135,17 @@
 - **Зрелость плана:** оценена в 6/10. Каждый вопрос вскрывает пробелы — это нормально
 - **Storage strategy:** TODO-033 split на 033a (LRU evictor) для cloud + full 033 для v3.0
 - **Multi-tenancy vs cloud:** Namespace isolation (3-5 дней) вместо full TODO-041 (4-6 недель)
+
+### 2026-03-27: Product Concept Audit + CEO Review v2
+- **Product concept finalized** (TopGun-Product-Concept-Final.md) — positioning: "Firestore alternative with offline-first CRDTs"
+- **CEO review v2:** 4 concept overreach gaps found and fixed (SQL from SDK, row-level RBAC, S3 tiering, zero infrastructure claim)
+- **New section added to concept:** "Что TopGun НЕ заменяет" (auth, hosting, functions, analytics, push notifications)
+- **TODO-201 created:** Client SDK `sql()` method — thin wrapper over WS → QueryService → DataFusion. Phase 1, 2-3 days.
+- **BUSINESS_STRATEGY.md synced** with Firebase Killer pivot (was stale — still said "Feature-first")
+- **Competitive table updated** in BUSINESS_STRATEGY.md — added Instant, Triplit, Convex, SQL/FTS column
+- **Benchmark verified (earlier today):** 560K fire-and-forget, 37K fire-and-wait, sub-2ms p50 median latency (M1 Max, 200 connections)
+- **TODO.md alignment:** 90% aligned with product concept. No structural changes needed.
+- **Plan maturity raised:** 6/10 → 7/10 (CEO + eng review + concept + benchmarks all done)
 
 ### 2026-03-22 (continued): Strategic Advisor System + Decisions
 - Создана система стратегического контроля: STRATEGIC_REVIEW.md + memory-записи + протокол

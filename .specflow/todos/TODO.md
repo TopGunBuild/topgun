@@ -1,7 +1,8 @@
 # TopGun Roadmap
 
-**Last updated:** 2026-03-26 — TODO-187 added (SetupWizard audit & backend)
-**Strategy:** Feature-complete open-source core first, then cloud. All differentiators built before launch.
+**Last updated:** 2026-03-27 — CEO review v2: TODO-201 (Client SDK `sql()` method) added to Phase 1 to support product concept "SQL из SDK" claim. Prior: Product concept audit: TODO-200 (CLI Audit & Fix) added to Phase 0; TODO-194 updated for 3 onboarding paths; TODO-191 marked verified (560K/37K); TODO-151 pricing corrected ($25/$79/$299); TODO-187/199 dependencies updated for CLI.
+**Strategy:** ~~Feature-complete open-source core first~~ → **Firebase Killer (compressed):** UX-first, Phase 0 validation, simplified RBAC, enterprise features deferred. See CEO plan: `~/.gstack/projects/TopGunBuild-topgun/ceo-plans/2026-03-26-firebase-killer-compressed.md`
+**Eng review:** `~/.claude/plans/sequential-frolicking-wave.md` — 14 decisions, all resolved. See review for phase structure.
 **Product vision:** "The unified real-time data platform — from browser to cluster to cloud storage"
 
 ---
@@ -12,11 +13,13 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 
 ---
 
-## Milestone 2: Data Platform (v2.0)
+## Milestone 2: Data Platform (v2.0) — Firebase Killer
 
-*Goal: SQL queries, stream processing, schema validation, connectors — competitive with Hazelcast feature set.*
+*Goal: ~~SQL queries, stream processing, schema validation, connectors — competitive with Hazelcast feature set.~~ → **Firebase Killer:** UX-first, production-ready core, admin panel, Docker one-click, template apps, Show HN. Enterprise features deferred until user demand.*
 
-### TODO-069: Schema System *(split into 4 slices)*
+*Execution order: Phase 0 (validation) → Phase 1 (production core) → **SOFT LAUNCH** → Phase 2 (UX) → Phase 3 (cloud) → Phase 4 (Show HN). See Execution Order section below.*
+
+### TODO-069: Schema System *(split into 4 slices)* — ✅ DONE
 - **Priority:** P1 (product differentiator)
 - **Complexity:** Medium
 - **Summary:** TypeScript-first schema definition with server-side validation. Developer writes `topgun.schema.ts`, build step generates Rust validation code + TS client types. Phased rollout: optional → strict.
@@ -36,7 +39,7 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Effort:** 2-3 weeks
 - **Status:** **Superseded** — Shapes merged into Queries via TODO-181/182/183/184 (SPEC-142/143/144/145). All Shape functionality (field projection, limit, Merkle delta sync) now lives under the Query path. Shape-specific code deleted in SPEC-145.
 
-### TODO-091: DataFusion SQL Integration *(converted to SPEC-135)*
+### TODO-091: DataFusion SQL Integration *(converted to SPEC-135)* — ✅ DONE
 - **Priority:** P1 (distributed SQL — Hazelcast-level queries)
 - **Complexity:** Large
 - **Summary:** Apache DataFusion as SQL query engine. `DataFusionBackend` implements `QueryBackend` trait (feature-gated). `TopGunTableProvider` wraps RecordStore. Arrow cache layer (lazy MsgPack → Arrow, invalidated on mutation). Distributed execution via partition owners + shuffle edges (Arroyo pattern). Partial→Final aggregation.
@@ -55,20 +58,21 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Status:** Converted to SPEC-144
 
 ### TODO-171: RBAC — Role-Based Access Control Implementation
-- **Priority:** P2 (documented but not implemented — expectation gap for adopters)
+- **Priority:** P2 → **P1** (documented but not implemented — expectation gap for adopters)
 - **Complexity:** Medium
 - **Summary:** Docs describe a full RBAC system (role-based policies, map pattern matching, field-level security) that was implemented in the old TS server but not ported to Rust. Current Rust server has only basic map-level `read`/`write` booleans with exact-match lookup. Roles are extracted from JWT into `Principal.roles` but never evaluated for data access permissions.
 - **Depends on:** SPEC-137 ✓ (auth hardening)
-- **Effort:** 1-2 weeks
+- **Effort:** Phase A: 3-5 days. Phase A-ext: 1 week.
 - **TS Reference:** Old TS server had working RBAC — check git history (commit `926e856` removed TS server). Key files to recover via `git show`:
   - `packages/server/src/coordinator/auth-handler.ts` — role extraction + permission assignment
   - `packages/server/src/coordinator/` — permission evaluation logic
   - Search for `PermissionPolicy`, `mapNamePattern`, `allowedFields` in old TS code
 - **HC Reference:** `hazelcast/security/` — enterprise security model, permission policies
-- **Scope:**
-  - **Phase A (core RBAC):** Role-to-policy mapping, wildcard/glob pattern matching on map names (`users:*`, `public:*`), policy evaluation in `WriteValidator`. Store policies in `SecurityConfig`, evaluate `Principal.roles` against policies during `validate_write()` and add `validate_read()`.
-  - **Phase B (field-level):** `allowedFields` per policy, field filtering on read responses. More invasive — touches CRDT response serialization.
-  - **Phase C (dynamic):** Admin API for policy CRUD, hot-reload without restart.
+- **Scope (eng review 2026-03-27 — split into phases):**
+  - **Phase A (minimal RBAC — v2.0 Phase 1):** Role→map permission matrix (boolean read/write per role per map). Policies stored in `topgun-rbac.json` file, loaded at startup. Exact map name matching only. Default-allow when no policies configured. Precomputed into per-connection `MapPermissions` cache on auth (O(1) lookup on write path). **PREREQUISITE:** Write regression tests for existing `WriteValidator` behavior before modifying.
+  - **Phase A-ext (extended RBAC — v2.0 Phase 3):** Admin API hot-reload via `PUT /api/admin/rbac/policies`. Wildcard `"*"` map matching. Precomputed cache invalidation on reload (broadcast to all connections). TODO-190 simulation test (hot-reload under write load).
+  - **Phase B (field-level):** `allowedFields` per policy, field filtering on read responses. More invasive — touches CRDT response serialization. Deferred until users ask.
+  - **Phase C (dynamic):** Full policy CRUD via admin API, UI in admin dashboard. Deferred until users ask.
 - **Current code touchpoints:**
   - `core-rust/src/types.rs` — `Principal { id, roles }` (exists, roles unused)
   - `server-rust/src/service/security.rs` — `WriteValidator`, `SecurityConfig` (extend)
@@ -86,8 +90,39 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **HC Reference:** `hazelcast/query/` — Hazelcast query indexing patterns
 - **Effort:** 2-3 weeks
 
+### TODO-188: Index Management via Admin API *(revised by eng review 2026-03-27)*
+- **Priority:** P1 (bridges server indexing to user-controllable API)
+- **Complexity:** Medium
+- **Summary:** Admin API endpoints for index create/drop/list. Admin panel UI for index management. `remove_index()` on Rust `IndexRegistry`. Async backfill with progress reporting for existing records. **No client wire protocol changes** — indexes managed via admin panel, not client SDK. (Revised from original wire protocol scope per CEO review outside voice.)
+- **Depends on:** SPEC-155 ✓ (server indexing), TODO-177 ✓ (indexing core)
+- **Blocks:** Removing "Planned Feature" banner from `indexing.mdx` docs
+- **Files (estimated):** `server-rust/src/network/handlers/admin.rs` (add index endpoints), `server-rust/src/service/domain/index/registry.rs` (add `remove_index()`), `apps/admin-dashboard/src/features/indexes/` (new UI page)
+- **Phase:** v2.0 Phase 1 (Production Core)
+- **Effort:** 1-1.5 weeks
+- **Eng review details (2026-03-27):**
+  - REST endpoints: `POST /api/admin/indexes` (create), `DELETE /api/admin/indexes/:attr` (remove), `GET /api/admin/indexes` (list + stats), `GET /api/admin/indexes/:id/status` (backfill progress)
+  - Backfill: async background task via `store.snapshot_iter()`. Returns 202 Accepted with status `"building"`. Admin panel polls for progress.
+  - `remove_index()`: add to `IndexRegistry` (currently only `add_*_index` exists). DashMap removal.
+  - Admin panel: index CRUD page with create form (attribute, type), status indicators, remove button
+
+### TODO-189: Webhook DNS Rebinding Protection
+- **Priority:** P2 (security hardening)
+- **Complexity:** Small
+- **Summary:** Add DNS resolution check before webhook HTTP dispatch — resolve the target URL's DNS, verify the resolved IP is not in the private range blocklist, then connect. Prevents DNS rebinding attacks where a domain initially resolves to a public IP (passing the blocklist) but later resolves to an internal IP during the actual HTTP request. Phase 1 ships URL blocklist (blocks private IPs directly); this TODO adds the DNS-level bypass prevention.
+- **Depends on:** TODO-140 (Webhooks), TODO-164 (Security Hardening)
+- **Effort:** 2-3 hours
+- **Phase:** v2.0 Phase 3 (Cloud Readiness) — post-webhook security hardening
+
+### TODO-190: RBAC Policy Hot-Reload Chaos Test
+- **Priority:** P2 (test hardening)
+- **Complexity:** Small
+- **Summary:** Simulation test that hot-reloads RBAC policies during high write load and verifies no writes slip through during the transition from old policies to new ones. Uses existing SimCluster framework. Validates that policy update is atomic — no window where writes are evaluated against partially-updated policy set.
+- **Depends on:** TODO-171 Phase A-ext (RBAC hot-reload)
+- **Effort:** 3 hours
+- **Phase:** v2.0 Phase 3 (bundled with RBAC extended — hot-reload + wildcard)
+
 ### TODO-175: Distributed Locks — Rust Port
-- **Priority:** P2 (documented as available, commonly needed for coordination)
+- **Priority:** ~~P2~~ → **P3 DEFERRED** (documented as available — deferred per Firebase Killer pivot)
 - **Complexity:** Medium
 - **Summary:** Feature described in `distributed-locks.mdx` — distributed locking with fencing tokens. Wire messages (`LockRequest`, `LockRelease`) exist in core-rust and are routed to `CoordinationService`, but `coordination.rs` returns `NotImplemented` for both (confirmed by AC6 test). Feature is a stub.
 - **Documented in:** `guides/distributed-locks.mdx` — presented as available but currently returns NotImplemented at runtime
@@ -98,7 +133,7 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Effort:** 1-2 weeks
 
 ### TODO-176: Entry Processor — Rust Port (WASM Sandbox)
-- **Priority:** P2 (documented as available, important for atomic read-modify-write)
+- **Priority:** ~~P2~~ → **P3 DEFERRED** (documented as available — deferred per Firebase Killer pivot)
 - **Complexity:** Large
 - **Summary:** Feature described in `entry-processor.mdx` — atomic read-modify-write operations executed server-side. Wire messages (`EntryProcess`, `EntryProcessBatch`) exist in core-rust and are routed to `PersistenceService`, but `persistence.rs` comment says "stub — WASM sandbox required" and returns `NotImplemented` for all calls.
 - **Documented in:** `guides/entry-processor.mdx` — presented as available but currently returns NotImplemented at runtime
@@ -121,7 +156,7 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Effort:** 1-2 weeks
 
 ### TODO-179: Conflict Resolvers — Rust Port (WASM Sandbox)
-- **Priority:** P2 (documented as available, needed for business-rule conflict resolution)
+- **Priority:** ~~P2~~ → **P3 DEFERRED** (documented as available — deferred per Firebase Killer pivot)
 - **Complexity:** Large
 - **Summary:** Feature described in `conflict-resolvers.mdx` — custom server-side JavaScript conflict resolution functions. `ConflictResolver` struct and `RegisterResolver`/`UnregisterResolver`/`ListResolvers` messages exist in core-rust. `PersistenceService` routes these ops, but `handle_register_resolver()` returns `NotImplemented`. Comment: "stub — WASM sandbox required". Feature is functionally unavailable at runtime.
 - **Documented in:** `guides/conflict-resolvers.mdx` — presented as available but returns NotImplemented. Code examples will compile but fail at runtime.
@@ -132,28 +167,31 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Note:** TODO-176 (Entry Processor) and TODO-179 (Conflict Resolvers) both require WASM sandbox — implement together as a shared infrastructure project
 
 ### TODO-180: Write Concern — Server Achievement Reporting
-- **Priority:** P2 (documented as reporting achieved_level, but server always returns None)
+- **Priority:** P2 → **P1** (documented as reporting achieved_level, but server always returns None)
 - **Complexity:** Small-Medium
 - **Summary:** `write-concern.mdx` documents that `OpAck` responses include `achieved_level` (the durability level actually achieved). In practice, `crdt.rs` lines 197 and 267 always set `achieved_level: None`. The `WriteConcern` wire protocol exists (FIRE_AND_FORGET, MEMORY, APPLIED, REPLICATED, PERSISTED) but the server never reports back what was achieved. Also: `setWithAck()` and `batchSet()` methods shown in docs do not exist in TS client.
 - **Documented in:** `guides/write-concern.mdx` — `achieved_level` claim is false, `setWithAck()` does not exist
-- **Scope:**
-  - Server: populate `achieved_level` in `OpAckPayload` based on what was actually done (APPLIED after CRDT merge, PERSISTED after PostgreSQL write)
-  - TS client: add `setWithAck(key, value, options)` method that returns `WriteResult` with `achievedLevel` and `latencyMs`
-  - TS client: add `batchSet(ops, options)` convenience method
-- **Effort:** 1-2 weeks
+- **Phase:** v2.0 Phase 1 (APPLIED only). PERSISTED level ships in Phase 3 alongside LRU Evictor (TODO-033a).
+- **Scope (eng review 2026-03-27 — server + client in Phase 1):**
+  - Server: populate `achieved_level: Some("APPLIED".into())` in `OpAckPayload` after CRDT merge succeeds. Levels: FIRE_AND_FORGET, MEMORY, APPLIED (Phase 1), REPLICATED, PERSISTED (Phase 3 via TODO-033a flush path).
+  - TS client: add `setWithAck(key, value, options?)` method returning `{ achievedLevel: string, latencyMs: number }`
+  - TS client: add `batchSet(ops, options?)` method returning `{ results: [...], achievedLevel }`
+  - Without client methods, the feature is invisible to users — both must ship together.
+- **Effort:** 3-5 days (server: 1 day, client: 2-3 days, tests: 1 day)
 
 ### TODO-025: DAG Executor for Stream Processing
-- **Priority:** P1 (Hazelcast Jet equivalent)
+- **Priority:** ~~P1~~ → **P3 DEFERRED** (Hazelcast Jet equivalent — deferred per Firebase Killer pivot 2026-03-26)
 - **Complexity:** Large
 - **Summary:** Distributed stream processing DAG. SQL-defined pipelines compiled to operator graphs with windowed aggregation, stateful processing, and checkpointing. petgraph DiGraph, operator chaining, barrier-based checkpointing, shuffle edges.
-- **Context:** [HAZELCAST_DAG_EXECUTOR_SPEC.md](../reference/HAZELCAST_DAG_EXECUTOR_SPEC.md)
-- **HC Reference:** `hazelcast/jet/core/`, `jet/impl/execution/`
-- **Rust Reference:** Arroyo (petgraph DAG, barrier checkpoints, shuffle edges)
+- **Context:** [HAZELCAST_DAG_EXECUTOR_SPEC.md](../reference/HAZELCAST_DAG_EXECUTOR_SPEC.md) (restored from git `b0ab167^`)
+- **HC Reference:** `hazelcast/jet/core/`, `jet/impl/execution/` — Jet DAG model, cooperative multithreading, snapshot barriers
+- **Rust Reference:** Arroyo `crates/arroyo-planner/` — DataFusion LogicalPlan → streaming operators (ArroyoRewriter, PlanToGraphVisitor). Key: DataFusion as parser/optimizer only, physical execution replaced with streaming operators (UpdatingAggregateOperator, WindowAggregate, WatermarkNode). This is the pattern for making SQL live in TopGun.
+- **Relevance to Live SQL:** TODO-025 is the prerequisite for live SQL with aggregations/JOINs/GROUP BY. Simple SELECT...WHERE can be made live earlier via SQL→predicate bridge (see TODO-025 notes). Full incremental view maintenance requires this DAG.
 - **Depends on:** TODO-091
 - **Effort:** 3-4 weeks
 
 ### TODO-092: Connector Framework
-- **Priority:** P2 (extensible data ingestion/egress)
+- **Priority:** ~~P2~~ → **P3 DEFERRED** (extensible data ingestion/egress — deferred per Firebase Killer pivot)
 - **Complexity:** Medium
 - **Summary:** Trait-based connector system: `ConnectorSource`, `ConnectorSink`, `Codec` traits. Connector registry. Initial connectors: Kafka source/sink, S3 sink, PostgreSQL CDC source.
 - **Ref:** Arroyo connector traits, ArkFlow Input/Output/Codec, RisingWave (`/Users/koristuvac/Projects/rust/risingwave/src/connector/`)
@@ -161,7 +199,7 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Effort:** 2 weeks
 
 ### TODO-033: AsyncStorageWrapper (Write-Behind)
-- **Priority:** P2 → **P1 for Cloud** (foundation for memory management)
+- **Priority:** ~~P1 for Cloud~~ → **P2** (foundation for memory management — Phase 3)
 - **Complexity:** Medium
 - **Summary:** Hazelcast-style Write-Behind: staging area, write coalescing, batch flush, retry queue.
 - **Context:** [topgun-rocksdb.md](../reference/topgun-rocksdb.md)
@@ -173,19 +211,21 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
   - Existing building blocks already in codebase: `max_entry_count`, `estimated_cost()`, `random_samples()`, `RecordMetadata` (last_access_time, hits), `ExpiryPolicy` (TTL, max-idle), `MutationObserver::on_evict()`
   - **Recommended split:** extract LRU evictor as a minimal slice (TODO-033a, 3-5 days) for cloud launch, defer full Write-Behind (staging area, coalescing, batch flush) to v3.0
   - LRU evictor converts TopGun from "data must fit in RAM" to "hot data in RAM, cold data in PostgreSQL" — sufficient for v2.0 cloud
+  - **Phase 3 sequencing (eng review 2026-03-26):** LRU evictor's flush-to-PostgreSQL path IS the Write Concern PERSISTED acknowledgment path. Implement PERSISTED level as part of evictor work, not as a separate item — avoids building the async persistence pipeline twice. Phase 1 delivers APPLIED-only; Phase 3 delivers PERSISTED via evictor flush.
+  - **Evictor implementation spec (eng review 2026-03-27):** Dedicated tokio task, configurable interval (default 10s). Reservoir sampling: `random_samples(100)` via lock-free DashMap shard iteration. Sort samples by `last_access_time`, evict coldest 25%. Each eviction calls `flush_key()` to PostgreSQL before removal. Write Concern PERSISTED acknowledged after flush completes. Failure handling: if PG is down during `flush_key()`, skip eviction for that record (do not evict without persistence — data loss risk).
 
 
 
 
 ### TODO-036: Pluggable Extension System
-- **Priority:** P2
+- **Priority:** ~~P2~~ → **P3 DEFERRED** (deferred per Firebase Killer pivot)
 - **Complexity:** Medium
 - **Summary:** Modular extension system for community contributions (crypto, compression, audit, geo).
 - **Context:** [TURSO_INSIGHTS.md](../reference/TURSO_INSIGHTS.md) Section 5
 - **Effort:** 2-3 weeks
 
 ### TODO-072: Selective WASM Modules for Client
-- **Priority:** P2
+- **Priority:** ~~P2~~ → **P3 DEFERRED** (deferred per Firebase Killer pivot)
 - **Complexity:** Medium
 - **Summary:** Compile DataFusion SQL + tantivy search to WASM for browser. Same SQL dialect offline and online. NOT for basic CRDT ops (sync JS is faster due to WASM boundary cost).
 - **Context:** [PRODUCT_POSITIONING_RESEARCH.md](../reference/PRODUCT_POSITIONING_RESEARCH.md) Section 7.6
@@ -211,7 +251,7 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Effort:** 1 day (evaluation) + 2-3 days (implementation)
 
 ### TODO-101: Client DevTools
-- **Priority:** P2 (DX differentiator)
+- **Priority:** ~~P2~~ → **P3 DEFERRED** (DX differentiator — deferred per Firebase Killer pivot)
 - **Complexity:** Medium-Large
 - **Summary:** Browser DevTools panel or in-app debug overlay: local replica state, pending sync queue, HLC timeline, connection status, CRDT merge history.
 - **Effort:** 4-6 weeks
@@ -223,7 +263,7 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Effort:** 1-2 weeks
 
 ### TODO-093 v2.0: Admin Dashboard — Data Platform Features
-- **Priority:** P2
+- **Priority:** ~~P2~~ → **P3 DEFERRED** (deferred per Firebase Killer pivot — depends on DAG/Connectors)
 - **Complexity:** Medium
 - **Summary:** Pipeline visualization (ReactFlow + Dagre), live metric coloring by backpressure, DataFusion SQL playground, connector wizard, schema browser.
 - **Ref:** Arroyo WebUI (`/Users/koristuvac/Projects/rust/arroyo/webui/`)
@@ -231,15 +271,16 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Effort:** 2-3 weeks
 
 ### TODO-187: SetupWizard — Audit & Backend Implementation
-- **Priority:** P2 (DX, first-run experience)
+- **Priority:** P2 → **P1** (DX, first-run experience — de-risks Phase 2)
 - **Complexity:** Medium
 - **Summary:** Audit the full SetupWizard implementation and implement missing backend. Three parts: (1) **Audit existing frontend** — review `apps/admin-dashboard/src/features/setup/SetupWizard.tsx` for correctness, security (credential handling, CSRF), UX completeness, and alignment with current server capabilities. (2) **Implement Rust backend** — add `POST /api/setup` (apply config, create admin user, restart) and `POST /api/setup/test-connection` (validate DB connectivity) endpoints in `packages/server-rust/src/network/handlers/`. Add bootstrap mode to `GET /api/status` (`configured: false` when unconfigured, currently hardcoded `true`). (3) **Audit CLI setup** — review `bin/commands/setup.js` and `.env.auto-setup.example` for consistency with UI wizard and server config model. Ensure zero-touch (`TOPGUN_AUTO_SETUP=true`) and interactive paths both work end-to-end.
 - **Files:** `SetupWizard.tsx`, `admin.rs`, `bin/commands/setup.js`, `.env.auto-setup.example`, `tests/cli/setup.test.ts`
-- **Depends on:** TODO-093 v2.0 (Admin Dashboard)
-- **Effort:** 1-2 weeks
+- **Depends on:** — (no blockers; admin API already exists)
+- **Phase:** v2.0 Phase 1 (late) — de-risks Phase 2 by removing the Phase 2 blocker. Eng review 2026-03-27.
+- **Effort:** 3-5 days
 
 ### TODO-136: Rate Limiting & Quotas
-- **Priority:** P1 (required for cloud free tier)
+- **Priority:** ~~P1~~ → **P2** (required for cloud free tier — Phase 3)
 - **Complexity:** Medium
 - **Summary:** Per-connection and per-tenant rate limiting via Tower middleware. Configurable limits: ops/sec, concurrent connections, storage bytes. Needed to prevent abuse on free tier and enforce pricing tiers.
 - **Crates:** governor (token-bucket), tower::limit
@@ -253,7 +294,7 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Effort:** 1 week
 
 ### TODO-138: Schema Migrations
-- **Priority:** P2 (production readiness)
+- **Priority:** ~~P2~~ → **P3 DEFERRED** (production readiness — deferred per Firebase Killer pivot)
 - **Complexity:** Medium
 - **Summary:** Versioned schema evolution: add/remove fields, change types with coercion rules. Migration defined in `topgun.schema.ts`, applied via CLI or API. Backward-compatible reads during migration window.
 - **Depends on:** TODO-069
@@ -262,21 +303,27 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 ### TODO-139: Backup/Restore API
 - **Priority:** P2 (cloud self-serve)
 - **Complexity:** Medium
-- **Summary:** `POST /admin/backup` triggers consistent snapshot (pause writes, snapshot RecordStore + OpLog + MerkleTree, resume). `POST /admin/restore` from snapshot. JSON + MsgPack format. Needed for cloud self-serve and enterprise compliance.
+- **Summary:** `POST /admin/backup` triggers consistent snapshot (pause writes, snapshot RecordStore + OpLog + MerkleTree, resume). `POST /admin/restore` from snapshot (atomic: restore to temp state, verify, then swap). Pre-flight disk space check. Exclude security config/secrets from snapshots. JSON + MsgPack format. Needed for cloud self-serve and enterprise compliance.
+- **Phase:** v2.0 Phase 3 (Cloud Readiness)
 - **Effort:** 1-2 weeks
 
 ### TODO-140: Webhooks
-- **Priority:** P3 (integration)
-- **Complexity:** Low-Medium
-- **Summary:** User-configurable HTTP callbacks on data events (insert, update, delete per map). Webhook registry, retry with exponential backoff, delivery log. Enables Zapier/n8n/Make integration.
-- **Effort:** 1 week
+- **Priority:** P3 → **P2** (integration — accepted in CEO review cherry-pick)
+- **Complexity:** Medium
+- **Summary:** User-configurable HTTP callbacks on data events (insert, update, delete per map). WebhookService domain service with event registry per map, HTTP POST dispatch via reqwest, retry (3x exponential backoff), delivery log, SSRF protection (block private IPs + cloud metadata endpoints), dedicated connection pool with circuit breaker. Admin API for webhook CRUD. Enables Zapier/n8n/Make integration.
+- **Phase:** v2.0 Phase 3 (Cloud Readiness) — moved from Phase 2 per eng review 2026-03-27. Not needed for onboarding; aligns with security hardening.
+- **Effort:** 1-2 weeks
+- **Eng review details (2026-03-27):**
+  - Bounded delivery queue: `tokio::sync::mpsc` bounded channel (10K capacity). If full, drop oldest undelivered. Log dropped count via metrics counter.
+  - SSRF protection: resolve target URL DNS, verify resolved IP is not in private range blocklist. See also TODO-189 (DNS rebinding).
+  - Circuit breaker: per-webhook-URL. Open after 5 consecutive failures. Half-open after 60s. Close after 1 success.
 
 
 ### TODO-164: Security Hardening — Production Readiness
 - **Priority:** P2 (required for cloud launch)
 - **Complexity:** Medium
 - **Summary:** Second-tier security improvements identified in audit. Required before TopGun Cloud launch but not blocking self-hosted or demo deployments.
-- **Depends on:** TODO-163
+- **Depends on:** SPEC-137 ✓ (auth hardening — was TODO-163)
 - **Effort:** 1-2 weeks
 - **Tasks:**
   - [x] RS256/ES256 algorithm support — extracted to **TODO-169** (P1, regression)
@@ -291,7 +338,7 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Priority:** P3 (v3.0 enterprise)
 - **Complexity:** Large
 - **Summary:** Enterprise-grade security features. Gated behind enterprise license (BSL 1.1).
-- **Depends on:** TODO-041 (multi-tenancy), TODO-164
+- **Depends on:** TODO-041 (multi-tenancy), TODO-164 (production security hardening)
 - **Effort:** 4-6 weeks
 - **Tasks:**
   - [ ] Application-level encryption at rest in PostgreSQL (column encryption with KMS integration)
@@ -301,10 +348,10 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
   - [ ] Non-exportable CryptoKey storage for client device keys
   - [ ] SOC 2 compliance checklist and documentation
 
-### TODO-141: Cloud Deployment Configs
+### TODO-141: Cloud Deployment Configs (Production)
 - **Priority:** P2 (GTM prerequisite)
 - **Complexity:** Low
-- **Summary:** Production-ready Docker Compose (single-node), Docker Compose (3-node cluster), Dockerfile (multi-stage, minimal image). Hetzner Cloud deployment guide. Health check endpoints.
+- **Summary:** **Production-only** Docker configs — distinct from Phase 2 dev setup. Multi-stage minimal Dockerfile, production Docker Compose (single-node), Docker Compose (3-node cluster), Hetzner Cloud deployment guide, health check endpoints. Phase 2 delivers the *development* docker-compose with demo data and admin profile; this TODO delivers *production hardening*.
 - **Effort:** 3-5 days
 
 ### TODO-142: Multi-Language SDKs (Python, Go)
@@ -312,6 +359,124 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Complexity:** Large
 - **Summary:** Python and Go client SDKs. MsgPack wire protocol makes this feasible (language-agnostic). Start with Python (larger market). Core: connect, authenticate, CRUD, subscribe, offline queue.
 - **Effort:** 3-4 weeks per SDK
+
+### TODO-194: Phase 0 — Getting Started Validation
+- **Priority:** P1 (validates entire plan)
+- **Complexity:** Small-Medium
+- **Summary:** Write "Getting Started in 60 seconds" tutorial, follow it yourself, fix every blocker. Validate **all three onboarding paths:**
+  1. **Docker path:** `docker compose up` → working server + admin panel + demo data in <2 min
+  2. **CLI path:** `topgun doctor && topgun setup && topgun dev` → server running in <2 min (depends on TODO-200)
+  3. **SDK path:** `npm install @topgunbuild/client` + 10 lines of code → data syncing with running server
+  Create headless client seed script for demo data (valid HLC + Merkle state, <500 records, <5s seed time, runs as init container in docker-compose).
+- **Depends on:** TODO-200 (CLI must work before CLI path can be validated)
+- **Phase:** v2.0 Phase 0 (Validation) — first thing to execute
+- **Effort:** 2-3 weeks
+- **Origin:** CEO plan Phase 0, eng review 2026-03-27, updated 2026-03-27 (three onboarding paths per product concept audit)
+
+### TODO-195: SQL Tab in Admin QueryPlayground
+- **Priority:** P1 (key demo feature)
+- **Complexity:** Small
+- **Summary:** Add SQL query tab to existing QueryPlayground (Monaco editor). Queries execute via admin-authenticated WebSocket connection through existing QueryService → DataFusion backend. Technical path: Admin Panel → WS connect (admin JWT) → QueryService → DataFusionBackend → results. Needs: query timeout (30s), result limit (10K rows), cancel button. Decoupled from SetupWizard — can ship independently.
+- **Depends on:** SPEC-135 ✓ (DataFusion), existing QueryService + admin WS connection
+- **Phase:** v2.0 Phase 1 (Production Core)
+- **Effort:** 2-3 days
+- **Origin:** eng review 2026-03-27 (decoupled from SetupWizard, moved to Phase 1)
+
+### TODO-196: "Planned Feature" Cleanup
+- **Priority:** P2 (trust-building)
+- **Complexity:** Small
+- **Summary:** Replace docs pages for Distributed Locks, Entry Processor, Conflict Resolvers, Interceptors with honest "Coming Soon" pages + GitHub tracking issues. Audit client SDK surface for methods that call NotImplemented endpoints — either remove or add clear deprecation warnings. 77 wire protocol message types exist, many are stubs — identify which are real vs stub.
+- **Phase:** v2.0 Phase 2 (User Experience)
+- **Effort:** 1-2 days
+- **Origin:** CEO plan Phase 1 → moved to Phase 2 by eng review 2026-03-27
+
+### TODO-197: Template Apps (todo, chat, e-commerce)
+- **Priority:** P2 (onboarding)
+- **Complexity:** Medium
+- **Summary:** 3 template apps: (1) Collaborative todo — offline sync + conflict resolution. (2) Real-time chat — multi-user messaging. (3) E-commerce catalog — product search + filtering via predicate queries. All use React + TopGun client SDK. Zero external dependencies — only TopGun server from docker-compose. Shared `packages/template-base` with TopGunProvider setup, auth helpers, docker-compose fragment, shared CSS. Runnable via `docker compose up`.
+- **Depends on:** TODO-194 (Docker compose ready)
+- **Phase:** v2.0 Phase 2 (User Experience)
+- **Effort:** 2-3 weeks
+- **Origin:** CEO plan Phase 2, eng review 2026-03-27 (shared base for DRY, zero ext deps)
+
+### TODO-198: "Migrating from Firebase" Guide
+- **Priority:** P2 (content marketing)
+- **Complexity:** Small
+- **Summary:** Map Firebase concepts → TopGun equivalents: collections→maps, onSnapshot→subscribe, security rules→RBAC, Firestore queries→predicate queries. Note what TopGun does NOT replace (auth, hosting, Cloud Functions). Content marketing piece for Show HN.
+- **Depends on:** TODO-171 (RBAC)
+- **Phase:** v2.0 Phase 2 (User Experience) — moved from Phase 4 per eng review 2026-03-27
+- **Effort:** 2-3 days
+- **Origin:** CEO plan cherry-pick #3
+
+### TODO-199: Docs Audit & Accuracy Pass
+- **Priority:** P1 (trust — soft launch sends people to docs)
+- **Complexity:** Small-Medium
+- **Summary:** Audit all 51 pages in `apps/docs-astro/` against current Rust server codebase. For each page, verify that API descriptions, code examples, and behavioral claims match reality. Fix or flag every discrepancy. **Two categories:**
+  - **NotImplemented features** (entry-processor, conflict-resolvers, interceptors, distributed-locks, adaptive-indexing) — handled by TODO-196 (Coming Soon pages). This audit verifies those 5 pages are covered AND checks that no other pages reference NotImplemented APIs as available.
+  - **Implemented features with stale docs** — RBAC (docs may describe glob patterns / field-level access that don't exist yet), Write Concern (`setWithAck()` described but not in client SDK until TODO-180), Observability (references TODO-137 metrics that don't exist yet), Indexing (must reflect SPEC-155 reality), community.mdx (Discord/Telegram links point to `#`). Reference pages (client.mdx, server.mdx, cli.mdx) may describe APIs that changed during Rust migration.
+- **Depends on:** TODO-171 Phase A, TODO-180, TODO-188 (audit must run after Phase 1 features land — they change what's "true")
+- **Phase:** v2.0 Phase 1 (late, before soft launch)
+- **Effort:** 2-3 days
+- **Note:** All NotImplemented features (entry processors, conflict resolvers, interceptors, distributed locks, adaptive indexing) were previously implemented in the old TypeScript server, removed at commit `926e856`. The TS implementations are recoverable via `git show 926e856^:packages/server/src/` and serve as reference for future Rust ports. This context is already captured in individual TODO entries (171, 174, 175, 176, 178, 179) but is noted here as the single source of truth for the docs audit scope.
+
+### TODO-200: CLI Audit & Fix — Verify All Commands Against Rust Server
+- **Priority:** P1 (onboarding — second entry path alongside Docker)
+- **Complexity:** Small-Medium
+- **Summary:** The existing CLI (`bin/topgun.js`, Commander.js) has 15 commands built for the old TypeScript server. Many likely broken or misaligned with the current Rust server. Audit and fix every command end-to-end:
+  - **Must work:** `topgun doctor` (verify prerequisites), `topgun setup` (interactive setup → .env → dependencies), `topgun dev` (start Rust server — verify binary name `target/release/test-server` is correct), `topgun config --show` (display current config)
+  - **Must work:** `topgun docker:start/stop/status/logs` (Docker Compose profiles: admin, monitoring, dbtools, k6, cluster)
+  - **Must work:** `topgun codegen` (schema → types generation via `@topgunbuild/schema`)
+  - **Verify:** `topgun cluster:start/stop/status` (multi-node Rust server spawn with correct env vars)
+  - **Verify:** `topgun debug:crdt` and `topgun search:explain` (require `TOPGUN_DEBUG=true` and metrics port 9091 endpoints — do these Rust endpoints exist?)
+  - **Verify:** `topgun test` (all 12 scopes — correct commands?)
+  - **Sync with TODO-187:** If SetupWizard backend changes the config flow (`POST /api/setup`), CLI `setup.js` must be consistent. Ensure both zero-touch (`.env.auto-setup.example`) and interactive paths work.
+  - **Docs:** Verify `cli.mdx` docs page describes commands that actually work (part of TODO-199 audit scope but blocked by this fix).
+- **Files:** `bin/topgun.js`, `bin/commands/*.js`, `bin/commands/cluster/`, `bin/commands/debug/`, `.env.example`
+- **Depends on:** — (no blockers; audit against current Rust server codebase)
+- **Phase:** v2.0 Phase 0 (Validation) — prerequisite for TODO-194 CLI path validation
+- **Effort:** 2-3 days
+- **Origin:** Product concept audit 2026-03-27 — CLI is the developer's daily interface but was completely absent from roadmap
+
+### TODO-201: Client SDK SQL Method (`client.sql()`)
+- **Priority:** P1 (product concept differentiator — "SQL из SDK")
+- **Complexity:** Small
+- **Summary:** Add `client.sql(query, params?)` method to the TypeScript client SDK. Sends SQL string over existing WebSocket connection to QueryService → DataFusion backend → returns results. This is a thin wrapper over the same server path that TODO-195 (SQL tab in admin panel) uses. NOT client-side SQL execution — queries are executed on the server. Enables the product concept claim "SQL-запросы из SDK."
+- **API:**
+  ```typescript
+  const results = await client.sql("SELECT * FROM products WHERE price > ?", [10]);
+  // Returns: { columns: string[], rows: any[][], rowCount: number }
+  ```
+- **Depends on:** SPEC-135 ✓ (DataFusion SQL on server)
+- **Phase:** v2.0 Phase 1 (Production Core) — ships alongside TODO-195 (SQL tab)
+- **Effort:** 2-3 days
+- **Origin:** CEO review 2026-03-27 — product concept claims "SQL из SDK" but no SDK method exists
+
+### TODO-191: ~~Verify 200K ops/sec Benchmark Claim~~ → Document Verified Benchmark Numbers
+- **Priority:** P2 (positioning integrity)
+- **Complexity:** Small
+- **Summary:** ~~Re-run the load harness under fire-and-wait conditions.~~ **Benchmark verified (2026-03-27):** fire-and-wait: ~37K confirmed writes/sec (sub-2ms median latency); fire-and-forget: ~560K ops/sec (OS-bottlenecked — macOS socket buffers, server ceiling higher). 200 WebSocket connections, in-process benchmark, Apple M1 Max. Remaining work: document these numbers in README benchmarks section as part of TODO-160 (README Rewrite). Use marketing-safe formulation: "500K+ ops/sec throughput, sub-2ms median write latency."
+- **Depends on:** —
+- **Phase:** Absorbed into TODO-160 (README Rewrite, Phase 4)
+- **Effort:** 30 min (write benchmark section for README)
+- **Origin:** eng review outside voice (2026-03-27), updated 2026-03-27 after benchmark run
+
+### TODO-192: Docker Image CI/CD — GitHub Actions + GHCR
+- **Priority:** P2 (distribution)
+- **Complexity:** Small
+- **Summary:** GitHub Actions workflow for automated Docker image build and push to GitHub Container Registry (GHCR) on git tag. The `deploy/Dockerfile.server` exists but no CI/CD publishes it. Enables `docker pull ghcr.io/topgunbuild/server:latest` convenience for users and is a prerequisite for cloud launch. Also build and push admin dashboard image.
+- **Depends on:** TODO-141 (Docker production configs)
+- **Phase:** v2.0 Phase 3 (Cloud Readiness)
+- **Effort:** 3-5 hours
+- **Origin:** eng review distribution check (2026-03-27)
+
+### TODO-193: Phase 1 Lightweight Metrics Counters
+- **Priority:** P1 (observability)
+- **Complexity:** Small
+- **Summary:** Add basic atomic counters to the Rust server: ops/sec, active connections, RBAC denials, write concern acks. Expose via existing `GET /api/status` endpoint (extend `ServerStatusResponse`). This is NOT full Prometheus (TODO-137) — just enough to debug Phase 1 features without flying blind. Uses `std::sync::atomic::AtomicU64` counters, no external crates.
+- **Depends on:** —
+- **Phase:** v2.0 Phase 1 (Production Core)
+- **Effort:** 2-3 hours
+- **Origin:** eng review performance section + outside voice (2026-03-27)
 
 ---
 
@@ -389,7 +554,7 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 ### TODO-151: Payment Integration (Paddle)
 - **Priority:** P1 (blocker for revenue)
 - **Complexity:** Low-Medium
-- **Summary:** Integrate Paddle as Merchant of Record. Handles VAT/sales tax globally. Subscription tiers: Free / Starter ($99) / Pro ($299) / Enterprise ($999). Paddle approval takes 1-2 weeks — start early.
+- **Summary:** Integrate Paddle as Merchant of Record. Handles VAT/sales tax globally. Subscription tiers: Free ($0) / Pro ($25/мес) / Team ($79/мес) / Enterprise ($299+/мес). ~~Old pricing: $99/$299/$999 — superseded by Decision Log 2026-03-22 in STRATEGIC_REVIEW.md.~~ Paddle approval takes 1-2 weeks — start early.
 - **Depends on:** TODO-150
 - **Effort:** 3-5 days
 
@@ -431,7 +596,8 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 - **Priority:** P1 (primary launch event)
 - **Complexity:** Low
 - **Summary:** "Show HN: TopGun — Open-source real-time data platform with offline-first CRDTs (Rust)". Prerequisites: working demo, clean README, quick start, Discord, docs, 1-2 blog posts. Prepare FAQ answers via LLM in advance.
-- **Depends on:** TODO-153, TODO-154, TODO-156, TODO-159
+- **Positioning (eng review 2026-03-26):** Use **"Firestore alternative"** not "Firebase Killer" in Show HN title and README. Firebase includes Auth, Hosting, Cloud Functions — claiming to "kill" it sets expectations TopGun can't meet. "Firestore alternative with offline-first, SQL, and search" is honest and compelling. Avoids HN comments like "this doesn't replace Firebase."
+- **Depends on:** TODO-153, TODO-156, TODO-159, TODO-160
 - **Effort:** 1 day (prep: 1 week)
 - **Launch checklist:**
   - [ ] Demo at demo.topgun.build is stable and monitored
@@ -571,65 +737,110 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 
 ## Execution Order
 
-**Strategy:** Feature-complete open-source core first, then cloud. Cloud launch only after all key differentiators are built and there is a compelling story for marketing and Show HN. No shortcuts to revenue — quality and feature depth come first.
+**Strategy:** ~~Feature-complete open-source core first~~ → **Firebase Killer (compressed).** UX-first, soft launch after Phase 1, Show HN after Phase 4. Enterprise features deferred until user demand. See eng review: `~/.claude/plans/sequential-frolicking-wave.md`
 
-### Milestone 2 — v2.0 (Data Platform)
+### Milestone 2 — v2.0 (Firebase Killer)
 
-**Completed waves:** 6a (SPEC-126 Tantivy), 6a¹ (SPEC-131 search fix), 6b (SPEC-127 schema types), 6b² (SPEC-128 write-path, SPEC-129 TS codegen, SPEC-130 Arrow derivation), 6c (SPEC-135a-c DataFusion SQL), 6c² (SPEC-142–145 Query unification), 6f² (SPEC-137 P0 Security, SPEC-138 RS256), 6f²¹ (SPEC-149 auth/security docs), 6f²² (SPEC-141 Shapes docs, SPEC-148 SQL docs).
+**Completed:** SPEC-126 (Tantivy), SPEC-127–130 (Schema), SPEC-131 (Search fix), SPEC-135a-c (DataFusion SQL), SPEC-142–145 (Query unification), SPEC-137 (P0 Security), SPEC-138 (RS256), SPEC-149 (Auth docs), SPEC-150–155 (Docs fixes + Indexing). TODO-069 ✓, TODO-091 ✓, TODO-177 ✓.
 
-#### Phase: v2.0-beta — Solid Foundation
+#### Phase 0: Validation (3-4 weeks)
 
-*Goal: Make what exists work correctly. Production-ready IMDG with SQL, indexing, RBAC, locks, durability guarantees.*
-*Marketing point: "Production-ready IMDG with offline-first CRDTs, SQL queries, indexes, RBAC, distributed locks, and write concern guarantees." — first technical blog posts possible here.*
-
-| # | TODO | Feature | Effort | Blocked by |
-|---|------|---------|--------|------------|
-| 1 | 186, 187, 188, 189 | Docs fixes (deployment, observability, performance, cluster) | 2 days | — |
-| 2 | 177 | Indexing: Hash / Navigable / Inverted | 3-4 weeks | — |
-| 3 | 175 | Distributed Locks | 1-2 weeks | — |
-| 4 | 171 | RBAC (role-based access control) | 1-2 weeks | SPEC-137 ✓ |
-| 5 | 180 | Write Concern (server achievement reporting) | 1-2 weeks | — |
-| 6 | 138 | Schema Migrations | 2 weeks | TODO-069 ✓ |
-
-#### Phase: v2.0-rc — Headline Differentiators
-
-*Goal: Build the features that make TopGun unique. Stream processing, connectors, WASM user-defined functions, data > RAM.*
-*Marketing point: "Stream processing like Hazelcast Jet, connectors to Kafka/S3/PostgreSQL CDC, user-defined WASM functions — and it all works offline-first. No competitor covers both quadrants." — this is the moment to start content marketing.*
+*Goal: Validate the plan. Fix CLI, write Getting Started guide, follow it via all three paths (Docker, CLI, SDK), fix every blocker it reveals.*
 
 | # | TODO | Feature | Effort | Blocked by |
 |---|------|---------|--------|------------|
-| 7 | 025 | DAG Executor (stream processing) | 3-4 weeks | TODO-091 ✓ |
-| 8 | 092 | Connector Framework (Kafka, S3, PG CDC) | 2 weeks | 025 (DAG integration) |
-| 9 | 176 + 179 | WASM Sandbox: Entry Processor + Conflict Resolvers | 4-5 weeks | — (shared infra) |
-| 10 | 033 | Write-Behind / LRU (data > RAM) | 2-3 weeks | — |
+| 1 | 200 | CLI Audit & Fix (verify all 15 commands against Rust server) | 2-3 days | — |
+| 2 | 194 | Getting Started guide + Docker demo data + compose polish + validate 3 onboarding paths | 2-3 weeks | 200 |
 
-#### Phase: v2.0-release — DX Polish
+#### Phase 1: Production Core (7-9 weeks)
 
-*Goal: Best developer experience in the category. Same SQL offline and online, browser DevTools, visual pipeline dashboard.*
+*Goal: Make TopGun credible for real apps. RBAC, write acknowledgments, index management, SQL queries, first-run wizard.*
 
 | # | TODO | Feature | Effort | Blocked by |
 |---|------|---------|--------|------------|
-| 11 | 072 | WASM client modules (SQL + search in browser) | 2-3 weeks | TODO-091 ✓ |
-| 12 | 101 | Client DevTools | 4-6 weeks | — |
-| 13 | 093 v2.0 | Admin Dashboard (pipelines, SQL playground) | 2-3 weeks | 025 + 091 + 092 |
-| 14 | 048 | SSE Push (serverless environments) | 2-3 days | — |
+| 3 | 193 | Lightweight metrics counters (ops/sec, connections, RBAC denials) | 2-3 hours | — |
+| 4 | 171 Phase A | Simplified RBAC (role→map boolean, JSON file, startup load) | 3-5 days | SPEC-137 ✓ |
+| 5 | 180 | Write Concern APPLIED (server + client setWithAck/batchSet) | 3-5 days | — |
+| 6 | 188 | Index Admin API (REST CRUD, async backfill, remove_index) | 1-1.5 weeks | SPEC-155 ✓ |
+| 7 | 195 | SQL tab in Admin QueryPlayground (Monaco → WS → DataFusion) | 2-3 days | SPEC-135 ✓ |
+| 8 | 201 | Client SDK `sql()` method (WS → QueryService → DataFusion) | 2-3 days | SPEC-135 ✓ |
+| 9 | 187 | SetupWizard backend (POST /api/setup, test-connection) + sync with CLI setup.js | 3-5 days | 200 |
+| 10 | 199 | Docs audit & accuracy pass (51 pages + cli.mdx vs current codebase) | 2-3 days | 171+180+188+200 |
 
-#### Phase: v2.0-cloud — Cloud Preparation
+#### ── SOFT LAUNCH ── (r/rust, r/selfhosted, GUN.js Discord)
 
-*Goal: All infrastructure needed for cloud launch in one sprint. After this block — deploy, Show HN, start accepting payments.*
+*Note: TODO-191 (benchmark verification) completed 2026-03-27. Numbers documented: 500K+ ops/sec throughput, sub-2ms median write latency. Remaining: write benchmark section for README (part of TODO-160, Phase 4).*
+
+#### Phase 2: User Experience (6-8 weeks)
+
+*Goal: Make TopGun accessible to non-technical users. Templates, docs cleanup, migration guide.*
 
 | # | TODO | Feature | Effort | Blocked by |
 |---|------|---------|--------|------------|
-| 15 | 136 | Rate Limiting & Quotas | 1-2 weeks | — |
-| 16 | 033a | LRU Evictor slice (if not covered by 033) | 3-5 days | — |
-| 17 | 137 | Prometheus / OpenTelemetry Metrics | 1 week | — |
-| 18 | 164 | Security Hardening (auth rate limit, HSTS, token revocation) | 1-2 weeks | TODO-163 ✓ |
-| 19 | 139 | Backup / Restore API | 1-2 weeks | — |
-| 20 | 141 | Docker deployment configs | 3-5 days | — |
-| 21 | 140 | Webhooks (Zapier/n8n/Make integration) | 1 week | — |
-| — | — | Namespace isolation (tenant prefix, per-tenant config, PG tenant_id) | 3-5 days | 136 |
+| 11 | 196 | "Planned Feature" cleanup (Coming Soon pages, SDK audit) | 1-2 days | — |
+| 12 | 197 | Template apps: todo + chat + e-commerce (shared base, zero ext deps) | 2-3 weeks | 194 |
+| 13 | 198 | "Migrating from Firebase" guide | 2-3 days | 171 |
+| — | — | Admin Dashboard polish (based on soft launch feedback, component tests for key interactions) | 1-2 weeks | Phase 1 |
+| — | — | Getting Started guide finalization — all 3 paths (based on soft launch feedback) | 2-3 days | 194+200 |
+
+#### Phase 3: Cloud Readiness (4-5 weeks)
+
+*Goal: Production infrastructure. Rate limits, persistence, security, observability, webhooks.*
+
+| # | TODO | Feature | Effort | Blocked by |
+|---|------|---------|--------|------------|
+| 14 | 136 | Rate Limiting & Quotas (governor + Tower) | 1-2 weeks | — |
+| 15 | 033a | LRU Evictor (reservoir sampling, flush to PG, PERSISTED) | 3-5 days | — |
+| 16 | 171 Phase A-ext | RBAC extended (hot-reload, wildcard, precomputed cache invalidation) | 1 week | 171 Phase A |
+| 17 | 190 | RBAC hot-reload simulation test | 3 hours | 171 Phase A-ext |
+| 18 | 137 | Prometheus / OpenTelemetry Metrics | 1 week | — |
+| 19 | 164 | Security Hardening (auth rate limit, HSTS, token revocation) | 1-2 weeks | SPEC-137 ✓ |
+| 20 | 141 | Docker production configs | 3-5 days | — |
+| 21 | 139 | Backup / Restore API | 1-2 weeks | — |
+| 22 | 140 | Webhooks (bounded queue 10K, SSRF, circuit breaker) | 1-2 weeks | — |
+| 23 | 189 | Webhook DNS Rebinding Protection | 2-3 hours | 140+164 |
+| 24 | 192 | Docker Image CI/CD (GitHub Actions + GHCR) | 3-5 hours | 141 |
+| — | — | Namespace isolation (tenant prefix, per-tenant config) | 3-5 days | 136 |
+
+#### Phase 4: Show HN Launch (2-3 weeks)
+
+*Goal: Maximum launch impact. README, community, landing page, demo polish.*
+
+| # | TODO | Feature | Effort | Blocked by |
+|---|------|---------|--------|------------|
+| 25 | 156 | Community setup (Discord, Telegram) | 2-3 hours | — |
+| 26 | 160 | README rewrite ("Firestore alternative" positioning) | 0.5-1 day | 156 |
+| 27 | 153 | Landing page polish (waitlist, pricing preview) | 2-3 days | — |
+| 28 | 159 | Sync Lab demo improvements (quick wins only) | 3-5 days | — |
+| 29 | 155 | Show HN | 1 day | 153+156+159+160 |
+
+#### DEFERRED (build when users ask)
+
+*Enterprise features deferred per Firebase Killer pivot 2026-03-26. Trigger for re-evaluation: first 50 users request the feature, or single-server ceiling hit.*
+
+| TODO | Feature | When to Build |
+|------|---------|---------------|
+| 025 | DAG Executor | When user hits single-server ceiling |
+| 092 | Connector Framework | After DAG, when users request connectors |
+| 176+179 | WASM Sandbox (Entry Processor + Conflict Resolvers) | When users need custom server-side logic |
+| 072 | WASM Client Modules | When offline SQL/search demand validated |
+| 101 | Client DevTools (full version) | After adoption reveals debugging pain |
+| 048 | SSE Push | When serverless deployment requested |
+| 175 | Distributed Locks | When multi-user coordination demand appears |
+| 138 | Schema Migrations | When production users need schema evolution |
+| 174 | Adaptive Indexing | When query pattern optimization needed |
+| 178 | Interceptors / Middleware | When users need custom server-side hooks |
+| 093 v2.0 | Admin Dashboard — Data Platform Features | After DAG+Connectors built |
+| 036 | Pluggable Extension System | Post-adoption |
+| 049 | Cluster-Aware HTTP Routing | → Milestone 3 (depends on cluster maturity) |
+| 076 | MsgPack-Based Merkle Hashing | → Milestone 3 (deferred optimization) |
+| 102 | Rust CLI (clap) | → Milestone 3 (post-adoption tooling) |
+| 142 | Multi-Language SDKs (Python, Go) | → Milestone 3 (market expansion) |
+| 165 | Security Hardening — Enterprise | → Milestone 3 (enterprise, BSL 1.1) |
 
 ### Milestone 3 — v3.0+ (Enterprise)
+
+*Triggers: first 50 users request feature, or single-server ceiling hit, or $5K MRR.*
 
 | Wave | Items | Blocked by |
 |------|-------|------------|
@@ -642,65 +853,82 @@ v1.0 complete. 84 specs archived (SPEC-038–084, 114–122). 540+ Rust tests, 5
 
 ### Milestone 4 — GTM (Go-to-Market)
 
-*Starts after v2.0-release is complete. Pre-launch marketing (community, landing page, content) can begin during v2.0-rc phase. Cloud launch and Show HN only after v2.0-cloud is done.*
+*Cloud launch after Phase 3 complete. Show HN is Phase 4. GTM business tasks (company reg, payments) start 4-6 weeks before cloud launch.*
 
 | Wave | Items | Blocked by | Timing |
 |------|-------|------------|--------|
-| **8a** (pre-launch) | TODO-156 (Community) · TODO-153 (Landing page) · TODO-157 (Content) · TODO-159 (Demo improvements) | — | Start during v2.0-rc |
-| **8a²** (pre-launch) | TODO-160 (README rewrite) · TODO-161 (Social strategy) | 156 | After community channels live |
-| **8b** (pre-launch) | TODO-150 (Company reg) · TODO-154 (Docs) · TODO-166 (ToS/PP) | — | Start 4-6 weeks before cloud launch |
-| **8c** (launch) | TODO-151 (Paddle) · TODO-152 (Cloud: shared instance + Clerk portal) | 150+166 · v2.0-cloud done | After v2.0-cloud phase complete |
-| **8d** (launch) | TODO-155 (Show HN) | 153+154+156+159+160 | 1-2 weeks after cloud beta |
-| **8e** (post-launch) | TODO-158 (Premium license) · TODO-161 execution | Revenue validation | After first paying customers |
+| **8a** (pre-launch) | TODO-150 (Company reg) · TODO-166 (ToS/PP) | — | Start during Phase 3 |
+| **8b** (launch) | TODO-151 (Paddle) · TODO-152 (Cloud: shared instance + Clerk) | 150+166 · Phase 3 done | After Phase 3 |
+| **8c** (post-launch) | TODO-161 (Social strategy execution) · TODO-157 (Content pipeline) · TODO-158 (Premium license) | Revenue validation | After Show HN |
 
 ## Dependency Graph
 
 ```
-MILESTONE 2: Data Platform (v2.0)
+MILESTONE 2: Firebase Killer (v2.0)
 
-  v2.0-beta (Solid Foundation):
-  ┌─ TODO-186-189 (Docs fixes) ← no deps, hygiene first
-  ├─ TODO-177 (Indexing) ← no deps, O(1) queries
-  ├─ TODO-175 (Distributed Locks) ← no deps, coordination
-  ├─ TODO-171 (RBAC) ← depends on SPEC-137 ✓
-  ├─ TODO-180 (Write Concern) ← no deps
-  └─ TODO-138 (Schema Migrations) ← depends on TODO-069 ✓
+  Phase 0 (Validation):
+  ┌─ TODO-200 (CLI Audit & Fix — verify 15 commands against Rust server)
+  └─ TODO-194 (Getting Started + Docker demo + compose polish + 3 onboarding paths) ← TODO-200
 
-  v2.0-rc (Headline Differentiators):
-  ┌─ TODO-025 (DAG Executor) ← depends on TODO-091 ✓
-  ├─ TODO-092 (Connectors) ← depends on TODO-025 (DAG integration)
-  ├─ TODO-176 + 179 (WASM Sandbox: Entry Processor + Conflict Resolvers) ← shared infra
-  └─ TODO-033 (Write-Behind / LRU) ← no deps, unblocks v3.0 S3
+  Phase 1 (Production Core):
+  ┌─ TODO-193 (Lightweight metrics) ← no deps, 2-3 hours
+  ├─ TODO-171 Phase A (Minimal RBAC) ← SPEC-137 ✓
+  ├─ TODO-180 (Write Concern APPLIED + client SDK) ← no deps
+  ├─ TODO-188 (Index Admin API) ← SPEC-155 ✓
+  ├─ TODO-195 (SQL tab in QueryPlayground) ← SPEC-135 ✓
+  ├─ TODO-201 (Client SDK sql() method) ← SPEC-135 ✓
+  ├─ TODO-187 (SetupWizard backend + sync CLI setup.js) ← TODO-200
+  └─ TODO-199 (Docs audit & accuracy pass + cli.mdx) ← TODO-171+180+188+200
 
-  v2.0-release (DX Polish):
-  ┌─ TODO-072 (WASM client: SQL+search in browser) ← depends on TODO-091 ✓
-  ├─ TODO-101 (Client DevTools) ← no deps
-  ├─ TODO-093 v2.0 (Admin Dashboard) ← depends on 025+091+092
-  └─ TODO-048 (SSE Push) ← no deps, 2-3 days
+  ── SOFT LAUNCH → r/rust, r/selfhosted, GUN.js Discord ──
+  └─ TODO-191 (Verify 200K ops/sec benchmark)
 
-  v2.0-cloud (Cloud Preparation):
-  ┌─ TODO-136 (Rate Limits) ← no deps
-  ├─ TODO-033a (LRU Evictor slice) ← if not covered by TODO-033
+  Phase 2 (User Experience):
+  ┌─ TODO-196 (Planned Feature cleanup) ← no deps
+  ├─ TODO-197 (Template apps: todo, chat, e-commerce) ← TODO-194
+  ├─ TODO-198 (Firebase migration guide) ← TODO-171
+  └─ Admin Dashboard polish (+ component tests for key interactions) ← soft launch feedback
+
+  Phase 3 (Cloud Readiness):
+  ┌─ TODO-136 (Rate Limiting) ← no deps
+  ├─ TODO-033a (LRU Evictor + PERSISTED) ← no deps
+  ├─ TODO-171 Phase A-ext (RBAC hot-reload + wildcard) ← TODO-171 Phase A
+  │  └─ TODO-190 (RBAC sim test) ← TODO-171 Phase A-ext
   ├─ TODO-137 (Prometheus/OTel) ← no deps
-  ├─ TODO-164 (P2 Security) ← depends on TODO-163 ✓
+  ├─ TODO-164 (Security Hardening) ← SPEC-137 ✓
+  ├─ TODO-141 (Docker prod configs) ← no deps
+  │  └─ TODO-192 (Docker CI/CD) ← TODO-141
   ├─ TODO-139 (Backup/Restore) ← no deps
-  ├─ TODO-141 (Docker configs) ← no deps
   ├─ TODO-140 (Webhooks) ← no deps
-  └─ Namespace isolation ← depends on TODO-136
+  │  └─ TODO-189 (DNS rebinding) ← TODO-140 + TODO-164
+  └─ Namespace isolation ← TODO-136
+
+  Phase 4 (Show HN Launch):
+  ┌─ TODO-156 (Community) ──→ TODO-160 (README) ──┐
+  ├─ TODO-153 (Landing page)  ─────────────────────┼→ TODO-155 (Show HN)
+  └─ TODO-159 (Demo improvements) ─────────────────┘
 
   Completed:
-  ✓ SPEC-126 (Tantivy) · ✓ SPEC-131 (Search fix)
-  ✓ SPEC-127-130 (Schema system) · ✓ SPEC-135a-c (DataFusion SQL)
-  ✓ SPEC-142-145 (Query unification, Shapes absorbed)
-  ✓ SPEC-137 (P0 Security) · ✓ SPEC-138 (RS256) · ✓ SPEC-149 (Auth docs)
+  ✓ TODO-069 (Schema) · ✓ TODO-091 (DataFusion SQL) · ✓ TODO-177 (Indexing)
+  ✓ SPEC-126 (Tantivy) · ✓ SPEC-131 (Search fix) · ✓ SPEC-127-130 (Schema)
+  ✓ SPEC-135a-c (DataFusion) · ✓ SPEC-142-145 (Query unification)
+  ✓ SPEC-137 (P0 Security) · ✓ SPEC-138 (RS256) · ✓ SPEC-149-155 (Docs+Indexing)
   ✓ TODO-027 (DST via SPEC-132a-d)
+
+  Deferred (build when users ask → Milestone 3):
+  TODO-025 (DAG) · TODO-092 (Connectors) · TODO-176+179 (WASM Sandbox)
+  TODO-072 (WASM Client) · TODO-101 (DevTools) · TODO-048 (SSE Push)
+  TODO-175 (Dist. Locks) · TODO-138 (Schema Migrations)
+  TODO-174 (Adaptive Index) · TODO-178 (Interceptors) · TODO-093 v2.0 (Dashboard++)
+  TODO-036 (Extensions) · TODO-049 (Cluster HTTP) · TODO-076 (Merkle hash opt)
+  TODO-102 (Rust CLI) · TODO-142 (Multi-lang SDKs) · TODO-165 (Enterprise Security)
 
 MILESTONE 3: Enterprise (v3.0+)
 
   TODO-041 (Multi-Tenancy) ← triggers Cloud Phase B (~100+ customers)
   TODO-043 (S3 Bottomless) ──→ TODO-040 (Tiered) ──→ TODO-044 (Time-Travel)
        ↑
-  TODO-033 (Write-Behind, from v2.0)
+  TODO-033 (Full Write-Behind, deferred from v2.0)
   TODO-039 (Vector Search)
   TODO-095 (Enterprise dir)
   TODO-165 (Enterprise Security) ← KMS, JWKS, audit logging
@@ -708,16 +936,11 @@ MILESTONE 3: Enterprise (v3.0+)
   TODO-036 (Extensions) · TODO-102 (Rust CLI) · TODO-142 (SDKs)
   TODO-174 (Adaptive Indexing) · TODO-178 (Interceptors) · TODO-049 (HTTP) · TODO-076 (Hash opt)
 
-MILESTONE 4: GTM (pre-launch starts during v2.0-rc)
+MILESTONE 4: GTM
 
-  TODO-156 (Community) ──→ TODO-160 (README) ──┐
-  TODO-153 (Landing)  ────────────────────────┤
-  TODO-157 (Content)  ────────────────────────┼→ TODO-155 (Show HN)
-  TODO-154 (Docs)     ────────────────────────┤
-  TODO-159 (Demo)     ────────────────────────┘
-  TODO-156 (Community) ──→ TODO-161 (Social strategy) ← execution after Show HN
-  TODO-150 (Company) → TODO-151 (Paddle) → TODO-152 (Cloud) ← needs v2.0-cloud done
-  TODO-158 (Premium license) ← after revenue validation
+  TODO-150 (Company) → TODO-151 (Paddle) → TODO-152 (Cloud) ← needs Phase 3 done
+  TODO-166 (ToS/PP) ← blocker for payments
+  TODO-161 (Social) · TODO-157 (Content) · TODO-158 (Premium) ← post Show HN
 ```
 
 ---

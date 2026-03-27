@@ -56,14 +56,14 @@ FAIL [throughput_assertion]: acked ratio 0.72 < 0.80
 
 ## Baseline Numbers
 
-Observed performance on reference hardware (in-process, no network hop):
+Observed performance on reference hardware (Apple M1 Max, in-process, no network hop):
 
-| Mode | Connections | Approximate ops/sec |
-|------|-------------|---------------------|
-| Fire-and-forget | 200 | ~200k |
-| Fire-and-wait | 200 | ~2.8k |
+| Mode | Connections | Approximate ops/sec | Median latency |
+|------|-------------|---------------------|----------------|
+| Fire-and-forget | 200 | ~560k | N/A (no ACK) |
+| Fire-and-wait | 200 | ~37k | ~1.5ms |
 
-These numbers are from in-process testing where client and server share the same machine. Production deployments with a real network hop will see different results.
+These numbers are from in-process testing where client and server share the same machine (2026-03-27 benchmark). Fire-and-forget throughput is OS-limited (macOS socket buffers); actual server capacity is higher. Production deployments with a real network hop will see different results.
 
 ## CI Integration
 
@@ -101,11 +101,11 @@ Located at `packages/server-rust/benches/load_harness/baseline.json`, it defines
 ```json
 {
   "fire_and_wait": {
-    "min_ops_per_sec": 1000,
-    "max_p50_us": 1000000
+    "min_ops_per_sec": 30000,
+    "max_p50_us": 5000
   },
   "fire_and_forget": {
-    "min_ops_per_sec": 50000,
+    "min_ops_per_sec": 400000,
     "max_p50_us": 1000000
   },
   "regression_tolerance_pct": 20
