@@ -77,10 +77,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Build the axum router with state.
     // Serve WebSocket on both /ws (integration tests) and / (browser clients).
+    // Include /health so Docker Compose healthchecks and inter-container probes succeed.
     let ws_handler = get(topgun_server::network::handlers::ws_upgrade_handler);
+    let health_handler = get(topgun_server::network::handlers::health_handler);
     let app = axum::Router::new()
         .route("/ws", ws_handler.clone())
         .route("/", ws_handler)
+        .route("/health", health_handler)
         .with_state(state);
 
     // Use PORT env var if set (for manual testing), otherwise OS-assigned
@@ -88,7 +91,12 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    let listener = TcpListener::bind(format!("127.0.0.1:{bind_port}")).await?;
+    // Bind to all interfaces so inter-container traffic (Docker networking) reaches
+    // the server. TOPGUN_BIND_ADDR overrides the default for environments that
+    // require loopback-only binding.
+    let bind_addr = std::env::var("TOPGUN_BIND_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0".to_string());
+    let listener = TcpListener::bind(format!("{bind_addr}:{bind_port}")).await?;
     let port = listener.local_addr()?.port();
 
     // Print port to stdout so the TS test harness can read it
