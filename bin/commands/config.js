@@ -19,9 +19,7 @@ module.exports = async function config(options) {
 
     console.log(chalk.cyan('  Storage'));
     console.log(`    Mode: ${config.STORAGE_MODE || 'not set'}`);
-    if (config.STORAGE_MODE === 'sqlite') {
-      console.log(`    Path: ${config.DB_PATH || './topgun.db'}`);
-    } else if (config.STORAGE_MODE === 'postgres') {
+    if (config.STORAGE_MODE === 'postgres') {
       console.log(`    Host: ${config.DB_HOST || 'localhost'}`);
       console.log(`    Port: ${config.DB_PORT || '5432'}`);
       console.log(`    Database: ${config.DB_NAME || 'topgun'}`);
@@ -29,13 +27,18 @@ module.exports = async function config(options) {
 
     console.log('');
     console.log(chalk.cyan('  Server'));
-    console.log(`    Port: ${config.SERVER_PORT || '8080'}`);
+    console.log(`    Port: ${config.PORT || '8080'}`);
     console.log(`    Metrics Port: ${config.METRICS_PORT || '9091'}`);
 
     console.log('');
-    console.log(chalk.cyan('  Debug'));
-    console.log(`    Debug Mode: ${config.TOPGUN_DEBUG || 'false'}`);
+    console.log(chalk.cyan('  Logging'));
+    console.log(`    Log Format: ${config.TOPGUN_LOG_FORMAT || 'human-readable'}`);
     console.log(`    Log Level: ${config.LOG_LEVEL || 'info'}`);
+
+    console.log('');
+    console.log(chalk.cyan('  Admin'));
+    console.log(`    Username: ${config.TOPGUN_ADMIN_USERNAME || 'not set'}`);
+    console.log(`    Password: ${config.TOPGUN_ADMIN_PASSWORD ? '********' : 'not set'}`);
 
     console.log('');
     return;
@@ -52,7 +55,7 @@ module.exports = async function config(options) {
   let envContent = fs.readFileSync(envPath, 'utf8');
 
   if (options.storage) {
-    const validStorages = ['sqlite', 'postgres', 'memory'];
+    const validStorages = ['postgres', 'memory'];
     if (!validStorages.includes(options.storage)) {
       console.error(chalk.red(`Invalid storage type: ${options.storage}`));
       console.log(chalk.gray(`Valid options: ${validStorages.join(', ')}`));
@@ -60,26 +63,7 @@ module.exports = async function config(options) {
     }
 
     envContent = updateEnvValue(envContent, 'STORAGE_MODE', options.storage);
-
-    // Update storage-specific settings
-    if (options.storage === 'sqlite') {
-      envContent = updateEnvValue(envContent, 'DB_PATH', './topgun.db');
-    }
-
     console.log(chalk.green(`  ✓ Storage mode set to: ${options.storage}`));
-    updated = true;
-  }
-
-  if (options.transport) {
-    const validTransports = ['ws', 'http'];
-    if (!validTransports.includes(options.transport)) {
-      console.error(chalk.red(`Invalid transport type: ${options.transport}`));
-      console.log(chalk.gray(`Valid options: ${validTransports.join(', ')}`));
-      process.exit(1);
-    }
-
-    envContent = updateEnvValue(envContent, 'TRANSPORT_MODE', options.transport);
-    console.log(chalk.green(`  ✓ Transport mode set to: ${options.transport}`));
     updated = true;
   }
 
@@ -90,9 +74,8 @@ module.exports = async function config(options) {
     console.log(chalk.bold('\n TopGun Config\n'));
     console.log(chalk.gray('  Usage:'));
     console.log(chalk.gray('    topgun config --show              Show current configuration'));
-    console.log(chalk.gray('    topgun config --storage sqlite    Set storage to SQLite'));
     console.log(chalk.gray('    topgun config --storage postgres  Set storage to PostgreSQL'));
-    console.log(chalk.gray('    topgun config --transport ws      Set transport to WebSocket'));
+    console.log(chalk.gray('    topgun config --storage memory    Set storage to in-memory'));
     console.log('');
   }
 };

@@ -3,6 +3,12 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
+// Load .env so PORT can be read
+const envPath = path.join(process.cwd(), '.env');
+if (fs.existsSync(envPath)) {
+  require('dotenv').config({ path: envPath });
+}
+
 const checks = [
   {
     name: 'Node.js',
@@ -40,6 +46,24 @@ const checks = [
     },
   },
   {
+    name: 'Rust toolchain (cargo)',
+    check: () => {
+      try {
+        const version = execSync('cargo --version', { encoding: 'utf8' }).trim();
+        return {
+          pass: true,
+          message: `${version} (OK)`,
+        };
+      } catch {
+        return {
+          pass: false,
+          message: 'Not installed — required to build the server',
+          fix: 'Install Rust from https://rustup.rs',
+        };
+      }
+    },
+  },
+  {
     name: 'Docker',
     check: () => {
       try {
@@ -53,27 +77,27 @@ const checks = [
       } catch {
         return {
           pass: true,
-          message: 'Not installed (optional for SQLite mode)',
+          message: 'Not installed (optional — required for PostgreSQL and cluster)',
           optional: true,
         };
       }
     },
   },
   {
-    name: 'Port 8080',
+    name: `Port ${process.env.PORT || '8080'}`,
     check: () => {
+      const port = process.env.PORT || '8080';
       try {
         // Cross-platform port check
         if (process.platform === 'win32') {
-          execSync('netstat -ano | findstr :8080', { encoding: 'utf8' });
+          execSync(`netstat -ano | findstr :${port}`, { encoding: 'utf8' });
         } else {
-          // Use lsof on macOS/Linux; netstat as fallback for minimal Linux systems
-          execSync('lsof -i :8080 2>/dev/null || netstat -tln 2>/dev/null | grep :8080', { encoding: 'utf8' });
+          execSync(`lsof -i :${port} 2>/dev/null || netstat -tln 2>/dev/null | grep :${port}`, { encoding: 'utf8' });
         }
         return {
           pass: false,
           message: 'In use',
-          fix: 'Stop the process using port 8080 or use --port flag',
+          fix: `Stop the process using port ${port} or set PORT= in .env`,
         };
       } catch {
         return {
@@ -107,14 +131,13 @@ const checks = [
       return {
         pass: false,
         message: 'Not built',
-        fix: 'cargo build --release --bin test-server',
+        fix: 'cargo build --release -p topgun-server --bin test-server',
       };
     },
   },
   {
     name: '.env file',
     check: () => {
-      const envPath = path.join(process.cwd(), '.env');
       if (fs.existsSync(envPath)) {
         return { pass: true, message: 'Present' };
       }
