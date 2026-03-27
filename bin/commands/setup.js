@@ -2,13 +2,13 @@ const inquirer = require('inquirer');
 const chalk = require('chalk');
 const fs = require('fs');
 const path = require('path');
-const { execSync, spawn } = require('child_process');
+const { execSync } = require('child_process');
 
 module.exports = async function setup(options) {
   console.log(chalk.bold('\n TopGun Setup Wizard\n'));
 
   let config = {
-    storage: options.storage || 'sqlite',
+    storage: 'postgres',
     installK6: false,
     devContainer: false,
   };
@@ -21,11 +21,10 @@ module.exports = async function setup(options) {
         name: 'storage',
         message: 'Storage backend:',
         choices: [
-          { name: 'SQLite (no Docker needed, dev only)', value: 'sqlite' },
           { name: 'PostgreSQL (recommended for production)', value: 'postgres' },
-          { name: 'Memory (testing only)', value: 'memory' },
+          { name: 'Memory (testing only, data lost on restart)', value: 'memory' },
         ],
-        default: 'sqlite',
+        default: 'postgres',
       },
       {
         type: 'confirm',
@@ -63,19 +62,20 @@ module.exports = async function setup(options) {
     console.log(chalk.green('  ✓ Dependencies already installed'));
   }
 
-  // Step 3: Build packages
-  console.log(chalk.cyan('\n[3/4] Building packages...'));
+  // Step 3: Build server binary if missing
+  console.log(chalk.cyan('\n[3/4] Building server binary...'));
   const rustBinaryPath = path.join(process.cwd(), 'target/release/test-server');
   if (!fs.existsSync(rustBinaryPath)) {
     try {
-      execSync('pnpm build', { stdio: 'inherit' });
-      console.log(chalk.green('  ✓ Build complete'));
+      execSync('cargo build --release -p topgun-server --bin test-server', { stdio: 'inherit' });
+      console.log(chalk.green('  ✓ Server binary built'));
     } catch (error) {
-      console.error(chalk.red('  ✗ Build failed'));
+      console.error(chalk.red('  ✗ Failed to build server binary'));
+      console.log(chalk.yellow('  Hint: Make sure Rust toolchain is installed (https://rustup.rs)'));
       process.exit(1);
     }
   } else {
-    console.log(chalk.green('  ✓ Already built'));
+    console.log(chalk.green('  ✓ Server binary already built'));
   }
 
   // Step 4: Start PostgreSQL (if selected)
@@ -95,8 +95,8 @@ module.exports = async function setup(options) {
       process.exit(1);
     }
   } else {
-    console.log(chalk.cyan('\n[4/4] Skipping database (SQLite mode)'));
-    console.log(chalk.green('  ✓ SQLite will be used'));
+    console.log(chalk.cyan('\n[4/4] Skipping database (memory mode)'));
+    console.log(chalk.green('  ✓ Memory storage will be used'));
   }
 
   // Done!
@@ -115,9 +115,7 @@ function generateEnvFile(config) {
     `STORAGE_MODE=${config.storage}`,
   ];
 
-  if (config.storage === 'sqlite') {
-    lines.push('DB_PATH=./topgun.db');
-  } else if (config.storage === 'postgres') {
+  if (config.storage === 'postgres') {
     lines.push('DB_HOST=localhost');
     lines.push('DB_PORT=5432');
     lines.push('DB_USER=topgun');
@@ -128,12 +126,17 @@ function generateEnvFile(config) {
 
   lines.push('');
   lines.push('# Server');
-  lines.push('SERVER_PORT=8080');
+  lines.push('PORT=8080');
   lines.push('METRICS_PORT=9091');
   lines.push('');
-  lines.push('# Debug (enable for development)');
-  lines.push('# TOPGUN_DEBUG=true  # Enables all debug features (CRDT, Search, endpoints)');
+  lines.push('# Logging (optional)');
+  lines.push('# TOPGUN_LOG_FORMAT=json  # json or omit for human-readable');
   lines.push('# LOG_LEVEL=debug');
+  lines.push('');
+  lines.push('# Admin (optional)');
+  lines.push('# TOPGUN_ADMIN_USERNAME=admin');
+  lines.push('# TOPGUN_ADMIN_PASSWORD=changeme');
+  lines.push('# TOPGUN_ADMIN_DIR=./admin/dist');
 
   return lines.join('\n') + '\n';
 }
