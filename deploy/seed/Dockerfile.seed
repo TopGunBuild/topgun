@@ -1,0 +1,20 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Copy package files first for layer caching
+COPY package.json tsconfig.json ./
+
+# Install all dependencies (including devDependencies needed for tsc)
+RUN npm install
+
+# Copy source
+COPY seed.ts ./
+
+# Compile TypeScript to JavaScript
+RUN npx tsc
+
+# Remove devDependencies after build to reduce image size
+RUN npm prune --omit=dev
+
+ENTRYPOINT ["node", "dist/seed.js"]

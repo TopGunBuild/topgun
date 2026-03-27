@@ -1,0 +1,19 @@
+{
+  "name": "@topgunbuild/seed",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Headless seed script to populate TopGun server with demo data",
+  "scripts": {
+    "build": "tsc",
+    "seed": "node dist/seed.js"
+  },
+  "dependencies": {
+    "msgpackr": "^1.11.8",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.4.0"
+  }
+}
