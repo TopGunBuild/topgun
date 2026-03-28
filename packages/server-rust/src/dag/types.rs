@@ -346,6 +346,24 @@ impl Dag {
         &self.edges
     }
 
+    /// Return all edges whose source vertex name matches `name`.
+    #[must_use]
+    pub fn edges_for_source(&self, name: &str) -> Vec<&Edge> {
+        self.edges_by_source
+            .get(name)
+            .map(|idxs| idxs.iter().map(|&i| &self.edges[i]).collect())
+            .unwrap_or_default()
+    }
+
+    /// Return all edges whose destination vertex name matches `name`.
+    #[must_use]
+    pub fn edges_for_dest(&self, name: &str) -> Vec<&Edge> {
+        self.edges_by_dest
+            .get(name)
+            .map(|idxs| idxs.iter().map(|&i| &self.edges[i]).collect())
+            .unwrap_or_default()
+    }
+
     /// Reconstruct a runtime `Dag` from a serializable `DagPlanDescriptor`.
     ///
     /// The `supplier_factory` callback is responsible for mapping each
