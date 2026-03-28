@@ -98,7 +98,7 @@ fn get_field<'a>(item: &'a rmpv::Value, field: &str) -> Option<&'a rmpv::Value> 
 fn rmpv_to_f64(v: &rmpv::Value) -> Option<f64> {
     match v {
         rmpv::Value::Integer(i) => Some(i.as_f64().unwrap_or(0.0)),
-        rmpv::Value::F32(f) => Some(*f as f64),
+        rmpv::Value::F32(f) => Some(f64::from(*f)),
         rmpv::Value::F64(f) => Some(*f),
         _ => None,
     }
@@ -111,7 +111,7 @@ fn rmpv_to_key_part(v: &rmpv::Value) -> String {
         rmpv::Value::Boolean(b) => b.to_string(),
         rmpv::Value::F64(f) => format!("{f}"),
         rmpv::Value::F32(f) => format!("{f}"),
-        rmpv::Value::Nil => "".to_string(),
+        rmpv::Value::Nil => String::new(),
         _ => format!("{v:?}"),
     }
 }
@@ -136,8 +136,8 @@ fn group_key_string(item: &rmpv::Value, group_by: &[String]) -> String {
 ///
 /// `RecordStore::for_each_boxed` yields `RecordValue` items containing
 /// `topgun_core::types::Value`. The bridge to `rmpv::Value` is done via
-/// `rmp_serde::to_value(&record)` (serialize through MsgPack) because adding
-/// a reverse `From` impl in core-rust would require modifying a file outside
+/// `rmp_serde::to_value(&record)` (serialize through `MsgPack`) because adding
+/// a reverse `From` impl in `core-rust` would require modifying a file outside
 /// this spec's scope.
 pub struct ScanProcessor {
     map_name: String,
@@ -165,7 +165,7 @@ impl ScanProcessor {
 
 impl Processor for ScanProcessor {
     fn init(&mut self, context: &ProcessorContext) -> Result<()> {
-        self.partition_ids = context.partition_ids.clone();
+        self.partition_ids.clone_from(&context.partition_ids);
         // Pre-load all records from all assigned partitions into the buffer.
         for &pid in &self.partition_ids {
             let store = self.factory.get_or_create(&self.map_name, pid);
@@ -173,13 +173,10 @@ impl Processor for ScanProcessor {
                 &mut |_key, record| {
                     // Bridge topgun_core::types::Value -> rmpv::Value via MsgPack round-trip.
                     if let RecordValue::Lww { value, .. } = &record.value {
-                        match rmp_serde::to_vec_named(value) {
-                            Ok(bytes) => {
-                                if let Ok(rmpv_val) = rmp_serde::from_slice::<rmpv::Value>(&bytes) {
-                                    self.buffer.push(rmpv_val);
-                                }
+                        if let Ok(bytes) = rmp_serde::to_vec_named(value) {
+                            if let Ok(rmpv_val) = rmp_serde::from_slice::<rmpv::Value>(&bytes) {
+                                self.buffer.push(rmpv_val);
                             }
-                            Err(_) => {} // skip unserializable records
                         }
                     }
                 },
@@ -276,14 +273,14 @@ impl Processor for FilterProcessor {
         inbox: &mut dyn Inbox,
         outbox: &mut dyn Outbox,
     ) -> Result<bool> {
-        let mut count = 0;
-        let predicate = &self.predicate;
-        inbox.drain(&mut |item| {
-            if count < BATCH_SIZE && evaluate_predicate(predicate, &item) {
+        // Poll items one at a time up to BATCH_SIZE to avoid consuming items
+        // beyond the batch limit (drain() would remove ALL items permanently).
+        for _ in 0..BATCH_SIZE {
+            let Some(item) = inbox.poll() else { break };
+            if evaluate_predicate(&self.predicate, &item) {
                 outbox.offer(0, item);
             }
-            count += 1;
-        });
+        }
         Ok(false) // filter never completes on its own; executor marks done when upstream completes
     }
 
@@ -325,7 +322,7 @@ impl ProcessorSupplier for FilterProcessorSupplier {
 
 /// Drains inbox items and emits only the specified fields from each `rmpv::Value` Map.
 ///
-/// Used only in SQL-derived DAGs (DataFusion SQL path). The base `Query` struct
+/// Used only in SQL-derived DAGs (`DataFusion` SQL path). The base `Query` struct
 /// has no projection field, so this processor is not used in predicate-only paths.
 pub struct ProjectProcessor {
     fields: Vec<String>,
@@ -417,7 +414,7 @@ impl ProcessorSupplier for ProjectProcessorSupplier {
 /// - `__sum`: f64 sum
 /// - `__min`: min value (or Nil)
 /// - `__max`: max value (or Nil)
-/// - one field per group_by column with its sampled value
+/// - one field per `group_by` column with its sampled value
 pub struct AggregateProcessor {
     group_by: Vec<String>,
     agg_field: String,
@@ -699,6 +696,7 @@ pub struct CollectorProcessor {
 }
 
 impl CollectorProcessor {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             results: Vec::new(),

@@ -133,20 +133,17 @@ impl Outbox for VecDequeOutbox {
     }
 
     fn offer_to_all(&mut self, item: rmpv::Value) -> bool {
-        // Check capacity first — do not partially enqueue.
-        for bucket in &self.buckets {
-            if bucket.len() >= self.capacity {
-                return false;
-            }
+        if self.buckets.iter().any(|b| b.len() >= self.capacity) {
+            return false;
         }
         // Clone to all except the last bucket; move into the last.
         let last = self.buckets.len().saturating_sub(1);
         for (i, bucket) in self.buckets.iter_mut().enumerate() {
             if i == last {
-                bucket.push_back(item.clone());
-            } else {
-                bucket.push_back(item.clone());
+                bucket.push_back(item);
+                return true;
             }
+            bucket.push_back(item.clone());
         }
         true
     }
@@ -157,7 +154,7 @@ impl Outbox for VecDequeOutbox {
     }
 
     fn bucket_count(&self) -> u32 {
-        self.buckets.len() as u32
+        u32::try_from(self.buckets.len()).unwrap_or(u32::MAX)
     }
 }
 
@@ -189,7 +186,7 @@ struct VertexState {
     outbox: VecDequeOutbox,
     /// Whether this vertex has been fully completed.
     completed: bool,
-    /// Whether this processor is a sink (CollectorProcessor).
+    /// Whether this processor is a sink (`CollectorProcessor`).
     is_sink: bool,
 }
 
@@ -250,13 +247,13 @@ impl DagExecutor {
             // Create processor via supplier (local_parallelism=1 per vertex in v1).
             let mut processors = vertex.processor_supplier.get(1);
             let mut processor = processors.pop().ok_or_else(|| {
-                anyhow!("supplier for vertex '{}' returned no processors", name)
+                anyhow!("supplier for vertex '{name}' returned no processors")
             })?;
 
             // Build ProcessorContext.
             let ctx = ProcessorContext {
                 node_id: self.context.node_id.clone(),
-                global_processor_index: topo_index as u32,
+                global_processor_index: u32::try_from(topo_index).unwrap_or(u32::MAX),
                 local_processor_index: 0,
                 total_parallelism: 1,
                 vertex_name: name.clone(),
@@ -305,270 +302,213 @@ impl DagExecutor {
 
         tokio::time::timeout(timeout, self.execute_inner())
             .await
-            .map_err(|_| anyhow!("DAG execution timed out after {}ms", timeout_ms))?
+            .map_err(|_| anyhow!("DAG execution timed out after {timeout_ms}ms"))?
     }
 
     async fn execute_inner(mut self) -> Result<Vec<rmpv::Value>> {
         let (topo_order, mut states) = self.init()?;
-
-        // Track which vertices have signalled done from process().
-        let mut process_done: HashMap<String, bool> = topo_order
-            .iter()
-            .map(|n| (n.clone(), false))
-            .collect();
+        let mut process_done: HashMap<String, bool> =
+            topo_order.iter().map(|n| (n.clone(), false)).collect();
 
         loop {
             let mut any_progress = false;
             let mut all_complete = true;
 
             for name in &topo_order {
-                let state = states.get_mut(name).unwrap();
-
-                if state.completed {
+                if states.get(name).is_none_or(|s| s.completed) {
                     continue;
                 }
-
                 all_complete = false;
 
-                // Check whether all upstream vertices are complete.
                 let in_edges = self.dag.edges_for_dest(name);
-                let upstream_all_complete = in_edges.iter().all(|e| {
-                    states
-                        .get(&e.source_name)
-                        .map(|s| s.completed)
-                        .unwrap_or(true)
-                });
+                let upstream_all_complete = in_edges
+                    .iter()
+                    .all(|e| states.get(&e.source_name).is_none_or(|s| s.completed));
 
-                let state = states.get_mut(name).unwrap();
-
-                // Determine if we should call complete() or process():
-                //
-                // Call complete() when:
-                //   - upstream is all complete, AND
-                //   - inbox is empty (no more input to process), AND
-                //   - either the source's process() returned true (process_done) or this is
-                //     not a source (has in_edges — upstream completion is sufficient)
-                //
-                // Call process() when:
-                //   - inbox has items, OR
-                //   - this is a source (no in_edges) and process() hasn't returned true yet
-
-                let is_source = in_edges.is_empty();
-                let src_done = *process_done.get(name).unwrap_or(&false);
-                let inbox_empty = state.inbox.is_empty();
-
-                // Ready to complete: upstream done, inbox empty, and (non-source OR source exhausted).
-                let ready_to_complete =
-                    upstream_all_complete && inbox_empty && (!is_source || src_done);
-
-                if ready_to_complete {
-                    if let Some(mut proc) = state.processor.take() {
-                        let done = if proc.is_cooperative() {
-                            proc.complete(&mut state.outbox)?
-                        } else {
-                            // Non-cooperative: run complete() in blocking task.
-                            let mut p = proc;
-                            let mut outbox = std::mem::replace(
-                                &mut state.outbox,
-                                VecDequeOutbox::new(1, DEFAULT_QUEUE_CAPACITY),
-                            );
-                            let result = tokio::task::spawn_blocking(move || {
-                                p.complete(&mut outbox).map(|done| (done, outbox, p))
-                            })
-                            .await??;
-                            state.outbox = result.1;
-                            proc = result.2;
-                            result.0
-                        };
-
-                        if done {
-                            state.completed = true;
-                            state.processor = Some(proc);
-                            any_progress = true;
-                        } else {
-                            state.processor = Some(proc);
-                        }
-                    } else {
-                        state.completed = true;
-                        any_progress = true;
-                    }
-                } else if !inbox_empty || (is_source && !src_done) {
-                    // Process items: inbox has data or this is an unexhausted source.
-                    if let Some(mut proc) = state.processor.take() {
-                        let done = if proc.is_cooperative() {
-                            proc.process(0, &mut state.inbox, &mut state.outbox)?
-                        } else {
-                            // Non-cooperative: run process() in blocking task.
-                            let mut p = proc;
-                            let mut inbox = std::mem::replace(
-                                &mut state.inbox,
-                                VecDequeInbox::new(DEFAULT_QUEUE_CAPACITY),
-                            );
-                            let mut outbox = std::mem::replace(
-                                &mut state.outbox,
-                                VecDequeOutbox::new(1, DEFAULT_QUEUE_CAPACITY),
-                            );
-                            let result = tokio::task::spawn_blocking(move || {
-                                p.process(0, &mut inbox, &mut outbox)
-                                    .map(|done| (done, inbox, outbox, p))
-                            })
-                            .await??;
-                            state.inbox = result.1;
-                            state.outbox = result.2;
-                            proc = result.3;
-                            result.0
-                        };
-
-                        if done {
-                            *process_done.get_mut(name).unwrap() = true;
-                        }
-                        state.processor = Some(proc);
-                        any_progress = true;
-                    }
+                let progress = step_vertex(
+                    name,
+                    &in_edges,
+                    upstream_all_complete,
+                    &mut states,
+                    &mut process_done,
+                )
+                .await?;
+                if progress {
+                    any_progress = true;
                 }
 
-                // Route outbox items to downstream inboxes.
-                // Two-phase to avoid simultaneous mutable borrows:
-                // Phase 1: drain source outbox buckets into a local buffer.
-                // Phase 2: push items into destination inboxes.
-                let out_edges = self.dag.edges_for_source(name);
-                if !out_edges.is_empty() {
-                    // Build routing plan (owned data, no borrow of states).
-                    let routing_plan: Vec<(String, RoutingPolicy, u32)> = out_edges
-                        .iter()
-                        .map(|e| (e.dest_name.clone(), e.routing_policy.clone(), e.source_ordinal))
-                        .collect();
-
-                    // Phase 1: drain items from source outbox into a local buffer.
-                    let mut routed: Vec<(String, RoutingPolicy, Vec<rmpv::Value>)> = Vec::new();
-                    {
-                        let state = states.get_mut(name).unwrap();
-                        for (dest_name, routing, source_ordinal) in &routing_plan {
-                            let items: Vec<rmpv::Value> =
-                                state.outbox.drain_bucket(*source_ordinal).collect();
-                            if !items.is_empty() {
-                                routed.push((dest_name.clone(), routing.clone(), items));
-                            }
-                        }
-                    } // source borrow ends here
-
-                    // Phase 2: push items into destination inboxes.
-                    for (dest_name, routing, items) in routed {
-                        let dest_count = routing_plan
-                            .iter()
-                            .filter(|(d, _, _)| *d == dest_name)
-                            .count();
-                        if let Some(dest_state) = states.get_mut(&dest_name) {
-                            route_items(items, &routing, dest_count, &mut dest_state.inbox);
-                        }
-                    }
-                }
+                route_vertex_outbox(name, &self.dag, &mut states);
             }
 
             if all_complete {
                 break;
             }
-
             if !any_progress {
-                // No progress made — all inboxes empty and no completion possible.
-                // This can happen if all upstream sources are done and remaining
-                // processors are waiting for complete() to be called.
-                // Run one more pass to flush complete() calls.
                 let remaining = topo_order
                     .iter()
-                    .filter(|n| !states.get(*n).map(|s| s.completed).unwrap_or(true))
+                    .filter(|n| !states.get(*n).is_none_or(|s| s.completed))
                     .count();
                 if remaining == 0 {
                     break;
                 }
             }
 
-            // Yield unconditionally on each outer loop iteration to give the
-            // tokio runtime a chance to fire the timeout future and to prevent
-            // starving other tasks during long-running pipelines.
+            // Yield to let tokio fire the timeout future.
             tokio::task::yield_now().await;
         }
 
-        // Collect results from the sink vertex (last vertex in topological order).
-        let sink_name = topo_order
-            .iter()
-            .rev()
-            .find(|n| states.get(*n).map(|s| s.is_sink).unwrap_or(false))
-            .cloned()
-            .ok_or_else(|| anyhow!("no sink vertex found in DAG"))?;
-
-        let sink_state = states
-            .get_mut(&sink_name)
-            .ok_or_else(|| anyhow!("sink vertex '{}' not found in states", sink_name))?;
-
-        // Extract results from the sink's processor (CollectorProcessor) or inbox.
-        let results = if let Some(_proc) = sink_state.processor.as_mut() {
-            // Try to downcast to CollectorProcessor — if not possible, drain inbox.
-            // Since we can't downcast dyn Processor, collect from inbox directly.
-            let mut collected = Vec::new();
-            sink_state.inbox.drain(&mut |item| collected.push(item));
-            collected
-        } else {
-            Vec::new()
-        };
-
-        // Also check if processor stored results internally (CollectorProcessor pattern).
-        // Since we can't downcast, processors that store results must emit them to outbox
-        // during complete(). The executor collects from the sink's inbox.
-        // (ScanProcessor -> FilterProcessor -> CollectorProcessor: collector drains inbox
-        //  into self.results in process(); we collected from inbox above which is empty
-        //  after process(). Need to get them from the processor itself.)
-        //
-        // Resolution: CollectorProcessor emits nothing to outbox — it stores internally.
-        // We need a different approach for the sink: collect from the processor directly
-        // if it's a CollectorProcessor. Since we can't downcast, we make CollectorProcessor
-        // emit its results to outbox in complete(), then drain the outbox here.
-        //
-        // Actually: CollectorProcessor.process() accumulates in self.results.
-        // CollectorProcessor.complete() returns Ok(true) without emitting to outbox.
-        // The results are only accessible via take_results().
-        //
-        // This means the executor needs to call complete() and then access the processor.
-        // Let's drain from the sink processor's stored results via a trait method.
-        //
-        // Best fix: make CollectorProcessor emit to outbox in complete(), then drain here.
-        // But that requires changing processors.rs. Instead, we'll use the "drain inbox"
-        // approach since by the time complete() is called, all items ARE in the inbox.
-        // The CollectorProcessor.process() drains inbox into self.results.
-        // So the results ARE in the processor, not in the inbox.
-        //
-        // We need a way to extract results. Options:
-        // 1. Add `take_results() -> Vec<rmpv::Value>` to the `Processor` trait (breaking)
-        // 2. Make CollectorProcessor emit to outbox in complete()
-        // 3. Keep results in the sink inbox (don't run CollectorProcessor.process())
-        //
-        // Simplest: option 2 — modify CollectorProcessor.complete() to emit to outbox.
-        // But we already committed processors.rs. We'll do a post-commit fix.
-        //
-        // For now: collect items that the collector accumulated. Since we can't downcast,
-        // we need a workaround. The cleanest solution without modifying the trait is to
-        // change CollectorProcessor.complete() to emit its accumulated results to outbox,
-        // and then drain the sink's outbox bucket 0 here.
-        // This is done in the fix below.
-
-        // After the loop, the sink's outbox bucket 0 has results emitted by complete().
-        let sink_state = states
-            .get_mut(&sink_name)
-            .ok_or_else(|| anyhow!("sink state missing after collection"))?;
-
-        let mut final_results: Vec<rmpv::Value> =
-            sink_state.outbox.drain_bucket(0).collect();
-
-        // Merge with any items from inbox drain above (for non-collector sinks).
-        final_results.extend(results);
-
-        Ok(final_results)
+        collect_sink_results(&topo_order, &mut states)
     }
 }
 
 // ---------------------------------------------------------------------------
 // Routing logic
 // ---------------------------------------------------------------------------
+
+/// Advance a single vertex: either call `complete()` or `process()`.
+/// Returns `true` if progress was made.
+async fn step_vertex(
+    name: &str,
+    in_edges: &[&crate::dag::types::Edge],
+    upstream_all_complete: bool,
+    states: &mut HashMap<String, VertexState>,
+    process_done: &mut HashMap<String, bool>,
+) -> Result<bool> {
+    let state = states.get_mut(name).unwrap();
+    let is_source = in_edges.is_empty();
+    let src_done = *process_done.get(name).unwrap_or(&false);
+    let inbox_empty = state.inbox.is_empty();
+
+    // Ready to complete: upstream done, inbox empty, and (non-source OR source exhausted).
+    let ready_to_complete = upstream_all_complete && inbox_empty && (!is_source || src_done);
+
+    if ready_to_complete {
+        if let Some(mut proc) = state.processor.take() {
+            let done = if proc.is_cooperative() {
+                proc.complete(&mut state.outbox)?
+            } else {
+                let mut p = proc;
+                let mut outbox = std::mem::replace(
+                    &mut state.outbox,
+                    VecDequeOutbox::new(1, DEFAULT_QUEUE_CAPACITY),
+                );
+                let result = tokio::task::spawn_blocking(move || {
+                    p.complete(&mut outbox).map(|done| (done, outbox, p))
+                })
+                .await??;
+                state.outbox = result.1;
+                proc = result.2;
+                result.0
+            };
+            if done {
+                state.completed = true;
+            }
+            state.processor = Some(proc);
+            return Ok(done);
+        }
+        state.completed = true;
+        return Ok(true);
+    }
+
+    if !inbox_empty || (is_source && !src_done) {
+        if let Some(mut proc) = state.processor.take() {
+            let done = if proc.is_cooperative() {
+                proc.process(0, &mut state.inbox, &mut state.outbox)?
+            } else {
+                let mut p = proc;
+                let mut inbox = std::mem::replace(
+                    &mut state.inbox,
+                    VecDequeInbox::new(DEFAULT_QUEUE_CAPACITY),
+                );
+                let mut outbox = std::mem::replace(
+                    &mut state.outbox,
+                    VecDequeOutbox::new(1, DEFAULT_QUEUE_CAPACITY),
+                );
+                let result = tokio::task::spawn_blocking(move || {
+                    p.process(0, &mut inbox, &mut outbox)
+                        .map(|done| (done, inbox, outbox, p))
+                })
+                .await??;
+                state.inbox = result.1;
+                state.outbox = result.2;
+                proc = result.3;
+                result.0
+            };
+            if done {
+                *process_done.get_mut(name).unwrap() = true;
+            }
+            state.processor = Some(proc);
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+/// Collect results from the sink vertex after pipeline completion.
+fn collect_sink_results(
+    topo_order: &[String],
+    states: &mut HashMap<String, VertexState>,
+) -> Result<Vec<rmpv::Value>> {
+    let sink_name = topo_order
+        .iter()
+        .rev()
+        .find(|n| states.get(*n).is_some_and(|s| s.is_sink))
+        .cloned()
+        .ok_or_else(|| anyhow!("no sink vertex found in DAG"))?;
+
+    let sink_state = states
+        .get_mut(&sink_name)
+        .ok_or_else(|| anyhow!("sink vertex '{sink_name}' not found in states"))?;
+
+    // CollectorProcessor emits to outbox bucket 0 in complete().
+    let mut results: Vec<rmpv::Value> = sink_state.outbox.drain_bucket(0).collect();
+    sink_state.inbox.drain(&mut |item| results.push(item));
+    Ok(results)
+}
+
+/// Drain a vertex's outbox and push items into downstream inboxes.
+///
+/// Two-phase approach avoids simultaneous mutable borrows of `states`:
+/// Phase 1: drain source outbox buckets into a local buffer.
+/// Phase 2: push items into destination inboxes.
+fn route_vertex_outbox(
+    name: &str,
+    dag: &Dag,
+    states: &mut HashMap<String, VertexState>,
+) {
+    let out_edges = dag.edges_for_source(name);
+    if out_edges.is_empty() {
+        return;
+    }
+
+    let routing_plan: Vec<(String, RoutingPolicy, u32)> = out_edges
+        .iter()
+        .map(|e| (e.dest_name.clone(), e.routing_policy.clone(), e.source_ordinal))
+        .collect();
+
+    // Phase 1: drain items from source outbox.
+    let mut routed: Vec<(String, RoutingPolicy, Vec<rmpv::Value>)> = Vec::new();
+    if let Some(state) = states.get_mut(name) {
+        for (dest_name, routing, source_ordinal) in &routing_plan {
+            let items: Vec<rmpv::Value> = state.outbox.drain_bucket(*source_ordinal).collect();
+            if !items.is_empty() {
+                routed.push((dest_name.clone(), routing.clone(), items));
+            }
+        }
+    }
+
+    // Phase 2: push items into destination inboxes.
+    for (dest_name, routing, items) in routed {
+        let dest_count = routing_plan
+            .iter()
+            .filter(|(d, _, _)| *d == dest_name)
+            .count();
+        if let Some(dest_state) = states.get_mut(&dest_name) {
+            route_items(items, &routing, dest_count, &mut dest_state.inbox);
+        }
+    }
+}
 
 /// Route `items` to `dest_inbox` based on the given `RoutingPolicy`.
 ///
