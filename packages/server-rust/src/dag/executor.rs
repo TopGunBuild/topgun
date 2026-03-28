@@ -1079,4 +1079,115 @@ mod tests {
         // With a single collector, broadcast = push-all.
         assert_eq!(results.len(), 2);
     }
+
+    /// AC #3: Backpressure — VecDequeOutbox.offer returns false when bucket is at capacity.
+    ///
+    /// This tests the backpressure mechanism directly at the buffer level. When a downstream
+    /// inbox is full, the upstream outbox bucket fills up and `offer` returns `false`,
+    /// signalling the upstream processor to pause.
+    #[test]
+    fn backpressure_outbox_full_offer_returns_false() {
+        let capacity = 4;
+        let mut outbox = VecDequeOutbox::new(1, capacity);
+
+        // Fill to capacity.
+        for i in 0..capacity {
+            let accepted = outbox.offer(0, rmpv::Value::Integer((i as i64).into()));
+            assert!(accepted, "offer {i} should be accepted while under capacity");
+        }
+
+        // Next offer should be rejected (backpressure).
+        let rejected = outbox.offer(0, rmpv::Value::Integer(99.into()));
+        assert!(!rejected, "offer past capacity should return false (backpressure)");
+
+        // After draining, capacity is restored.
+        let _drained: Vec<_> = outbox.drain_bucket(0).collect();
+        let accepted_after_drain = outbox.offer(0, rmpv::Value::Integer(100.into()));
+        assert!(accepted_after_drain, "offer should succeed after drain");
+    }
+
+    /// AC #2: GROUP BY aggregation pipeline (source -> aggregate -> collector).
+    ///
+    /// 10 items across 2 categories (5 each). GROUP BY category COUNT(*) returns 2 rows.
+    #[tokio::test]
+    async fn executor_aggregate_pipeline_group_by() {
+        use crate::dag::processors::{AggregateProcessorSupplier, CollectorProcessorSupplier};
+
+        let factory = make_test_factory();
+
+        // 10 items: 5 in category "A", 5 in category "B".
+        let mut items = Vec::new();
+        for i in 0..5i64 {
+            items.push(make_rmpv_map(&[
+                ("category", rmpv::Value::String("A".into())),
+                ("value", rmpv::Value::Integer(i.into())),
+            ]));
+        }
+        for i in 0..5i64 {
+            items.push(make_rmpv_map(&[
+                ("category", rmpv::Value::String("B".into())),
+                ("value", rmpv::Value::Integer(i.into())),
+            ]));
+        }
+
+        let mut dag = Dag::new();
+        dag.new_vertex(Vertex {
+            name: "source".to_string(),
+            local_parallelism: 1,
+            processor_supplier: Box::new(StaticSourceSupplier { items }),
+            preferred_partitions: None,
+        });
+        dag.new_vertex(Vertex {
+            name: "aggregate".to_string(),
+            local_parallelism: 1,
+            processor_supplier: Box::new(AggregateProcessorSupplier {
+                group_by: vec!["category".to_string()],
+                agg_field: "".to_string(), // COUNT(*)
+            }),
+            preferred_partitions: None,
+        });
+        dag.new_vertex(Vertex {
+            name: "collector".to_string(),
+            local_parallelism: 1,
+            processor_supplier: Box::new(CollectorProcessorSupplier),
+            preferred_partitions: None,
+        });
+        dag.edge(make_edge("source", "aggregate"));
+        dag.edge(make_edge("aggregate", "collector"));
+
+        let ctx = make_test_context(factory);
+        let executor = DagExecutor::new(dag, ctx, 5000);
+        let results = executor.execute().await.expect("aggregate pipeline should succeed");
+
+        assert_eq!(results.len(), 2, "GROUP BY category should produce 2 rows");
+
+        // Both groups should have count=5.
+        let total_count: u64 = results
+            .iter()
+            .map(|item| {
+                if let rmpv::Value::Map(pairs) = item {
+                    pairs.iter().find(|(k, _)| k == &rmpv::Value::String("__count".into()))
+                        .and_then(|(_, v)| if let rmpv::Value::Integer(n) = v { n.as_u64() } else { None })
+                        .unwrap_or(0)
+                } else {
+                    0
+                }
+            })
+            .sum();
+        assert_eq!(total_count, 10, "total count across groups should be 10");
+    }
+
+    /// AC #5: Partitioned routing hashes items deterministically.
+    ///
+    /// Tests that compute_partition_hash produces a stable hash for a given field value.
+    #[test]
+    fn partitioned_routing_hash_is_deterministic() {
+        let item = make_rmpv_map(&[("userId", rmpv::Value::String("alice".into()))]);
+
+        let hash1 = compute_partition_hash(&item, "userId");
+        let hash2 = compute_partition_hash(&item, "userId");
+
+        assert_eq!(hash1, hash2, "same item should produce same hash");
+        assert_ne!(hash1, 0, "hash should not be zero for non-empty key");
+    }
 }
