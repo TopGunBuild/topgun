@@ -4,9 +4,10 @@ Get from zero to real-time data syncing in under 2 minutes.
 
 ## Prerequisites
 
-- **Docker Desktop** 4.x or later ([download](https://www.docker.com/products/docker-desktop/))
-- **Node.js** 18 or later ([download](https://nodejs.org/)) — required for the SDK path
-- **pnpm** (optional) — only needed if you are working inside the TopGun monorepo
+- **Docker Desktop** 4.x or later ([download](https://www.docker.com/products/docker-desktop/)) — required for Docker path
+- **Node.js** 18 or later ([download](https://nodejs.org/)) — required for SDK and CLI paths
+- **Rust toolchain** ([rustup.rs](https://rustup.rs)) — required for CLI path only
+- **pnpm** — required for CLI path, optional otherwise
 
 ---
 
@@ -167,9 +168,67 @@ Subscription update: { key: 'quickstart-task-1', record: { value: { title: 'My f
 
 ---
 
-## CLI Path — Coming Soon
+## CLI Path (3 minutes)
 
-A one-command CLI experience is planned but depends on upcoming tooling (TODO-200). Check back soon.
+For contributors who have cloned the repo and want to run a local development server without Docker.
+
+**Prerequisites:** Node.js 18+, pnpm, Rust toolchain ([rustup.rs](https://rustup.rs))
+
+### 1. Run the setup wizard
+
+```bash
+npx topgun setup
+```
+
+The wizard will:
+- Create a `.env` file with sensible defaults
+- Install pnpm dependencies
+- Build the Rust server binary (`target/release/test-server`)
+- Optionally start PostgreSQL via Docker (or choose memory-only mode)
+
+> **Tip:** Pass `--yes` to skip interactive prompts and use defaults (PostgreSQL storage).
+
+### 2. Start the development server
+
+```bash
+npx topgun dev
+```
+
+Expected output:
+
+```
+ TopGun Development Server
+
+  Port: 8080
+
+[server] Starting Rust server...
+```
+
+The server is now running at `http://localhost:8080`. Verify with:
+
+```bash
+curl http://localhost:8080/health
+```
+
+### 3. Check your environment
+
+If something doesn't work, run the doctor command to diagnose:
+
+```bash
+npx topgun doctor
+```
+
+It checks for Node.js, pnpm, Rust toolchain, Docker, and the compiled server binary.
+
+### 4. Run tests
+
+```bash
+npx topgun test           # all TS tests
+npx topgun test sim       # simulation tests
+npx topgun test server    # Rust server tests
+```
+
+> **Next:** Once your server is running, try the [SDK Path](#sdk-path-5-minutes) above to write your first record.
 
 ---
 
