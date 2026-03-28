@@ -53,7 +53,7 @@ pub struct VertexDescriptor {
     pub processor_type: ProcessorType,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub preferred_partitions: Option<Vec<u32>>,
-    /// Processor-specific configuration (map_name, predicate bytes, field list, etc.).
+    /// Processor-specific configuration (`map_name`, predicate bytes, field list, etc.).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub config: Option<rmpv::Value>,
 }
@@ -103,7 +103,7 @@ impl Default for QueryConfig {
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionPlan {
     pub plan: DagPlanDescriptor,
-    /// node_id -> partition_ids assigned to that node for this execution.
+    /// `node_id` -> `partition_ids` assigned to that node for this execution.
     pub partition_assignment: HashMap<String, Vec<u32>>,
     pub version: u64,
     pub config: QueryConfig,
@@ -119,12 +119,13 @@ pub struct ExecutionPlan {
 /// Processors may store a copy from `init()` for later use.
 #[derive(Debug, Clone)]
 pub struct ProcessorContext {
+    /// Unique identifier of the cluster node running this processor.
     pub node_id: String,
     pub global_processor_index: u32,
     pub local_processor_index: u32,
     pub total_parallelism: u32,
     pub vertex_name: String,
-    /// Local partitions assigned to this processor instance.
+    /// Local `partition_ids` assigned to this processor instance.
     pub partition_ids: Vec<u32>,
 }
 
@@ -133,9 +134,15 @@ pub struct ProcessorContext {
 /// behind exclusive access and never shares them across threads.
 pub trait Processor: Send {
     /// Initialize with context. Called once before processing begins.
+    ///
+    /// # Errors
+    /// Returns an error if the processor cannot initialize (e.g., invalid config).
     fn init(&mut self, context: &ProcessorContext) -> Result<()>;
 
     /// Process items from inbox at the given ordinal. Returns `true` when done.
+    ///
+    /// # Errors
+    /// Returns an error if processing fails (e.g., malformed input data).
     fn process(
         &mut self,
         ordinal: u32,
@@ -144,6 +151,9 @@ pub trait Processor: Send {
     ) -> Result<bool>;
 
     /// Called when all upstream inputs are complete. Returns `true` when done emitting.
+    ///
+    /// # Errors
+    /// Returns an error if final emission fails.
     fn complete(&mut self, outbox: &mut dyn Outbox) -> Result<bool>;
 
     /// Whether this processor can share a tokio task with others (non-blocking).
@@ -221,6 +231,7 @@ pub struct Dag {
 
 impl Dag {
     /// Create an empty DAG.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             vertices: HashMap::new(),
@@ -252,9 +263,9 @@ impl Dag {
 
     /// Validate the DAG and return vertices in topological order (Kahn's algorithm).
     ///
-    /// Returns an error if:
-    /// - Any edge references a vertex name not present in the vertex set.
-    /// - A cycle is detected.
+    /// # Errors
+    /// Returns an error if any edge references a vertex name not present in the
+    /// vertex set, or if a cycle is detected.
     pub fn validate(&self) -> Result<Vec<&Vertex>> {
         // Step 1: Edge validity — all referenced vertex names must exist.
         for edge in &self.edges {
@@ -293,7 +304,10 @@ impl Dag {
         let mut sorted: Vec<&Vertex> = Vec::with_capacity(self.vertices.len());
 
         while let Some(name) = queue.pop_front() {
-            let vertex = self.vertices.get(name).expect("vertex must exist");
+            let vertex = self
+                .vertices
+                .get(name)
+                .ok_or_else(|| anyhow::anyhow!("vertex '{name}' must exist in vertex set"))?;
             sorted.push(vertex);
 
             // Decrement in-degree for all neighbors.
@@ -321,11 +335,13 @@ impl Dag {
     }
 
     /// Return a reference to all vertices keyed by name.
+    #[must_use]
     pub fn get_vertices(&self) -> &HashMap<String, Vertex> {
         &self.vertices
     }
 
     /// Return all edges.
+    #[must_use]
     pub fn get_edges(&self) -> &[Edge] {
         &self.edges
     }
@@ -333,8 +349,11 @@ impl Dag {
     /// Reconstruct a runtime `Dag` from a serializable `DagPlanDescriptor`.
     ///
     /// The `supplier_factory` callback is responsible for mapping each
-    /// `VertexDescriptor` to a concrete `ProcessorSupplier`. SPEC-158b provides
-    /// the real factory; tests may supply a stub closure.
+    /// `VertexDescriptor` to a concrete `ProcessorSupplier`. Tests may supply a
+    /// stub closure; the real factory is provided by the executor module.
+    ///
+    /// # Errors
+    /// Returns an error if the `supplier_factory` fails for any vertex descriptor.
     pub fn from_descriptor(
         desc: &DagPlanDescriptor,
         supplier_factory: &dyn Fn(&VertexDescriptor) -> Result<Box<dyn ProcessorSupplier>>,
