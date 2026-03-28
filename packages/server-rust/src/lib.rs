@@ -1,6 +1,7 @@
 //! `TopGun` Server — `WebSocket` server with clustering, partitioning, and `PostgreSQL` storage.
 
 pub mod cluster;
+pub mod dag;
 pub mod network;
 pub mod service;
 pub mod storage;
