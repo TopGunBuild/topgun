@@ -734,7 +734,12 @@ impl Processor for CollectorProcessor {
         Ok(false)
     }
 
-    fn complete(&mut self, _outbox: &mut dyn Outbox) -> Result<bool> {
+    fn complete(&mut self, outbox: &mut dyn Outbox) -> Result<bool> {
+        // Emit all accumulated results to outbox bucket 0 so the executor can
+        // collect them via VecDequeOutbox::drain_bucket(0) after pipeline completion.
+        for item in self.results.drain(..) {
+            outbox.offer(0, item);
+        }
         Ok(true)
     }
 
@@ -965,9 +970,10 @@ mod tests {
 
         let mut outbox = VecDequeOutbox::new(1, 8);
         proc.process(0, &mut inbox, &mut outbox).unwrap();
+        // complete() emits accumulated results to outbox bucket 0.
         proc.complete(&mut outbox).unwrap();
 
-        let results = proc.take_results();
+        let results: Vec<_> = outbox.drain_bucket(0).collect();
         assert_eq!(results.len(), 5);
         for (i, item) in results.iter().enumerate() {
             assert_eq!(*item, rmpv::Value::Integer((i as i64).into()));
