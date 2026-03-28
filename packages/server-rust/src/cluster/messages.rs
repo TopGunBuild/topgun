@@ -46,7 +46,7 @@ pub struct DeltaOp {
 ///
 /// Internally tagged on `"type"` with `SCREAMING_SNAKE_CASE` variant names.
 /// Covers membership (4), heartbeat (3), partition (2), migration (5),
-/// split-brain (3), and forwarding (1).
+/// split-brain (3), forwarding (1), and DAG execution (3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ClusterMessage {
@@ -79,6 +79,14 @@ pub enum ClusterMessage {
 
     // -- Forwarding (1) ----------------------------------------------------
     OpForward(OpForwardPayload),
+
+    // -- DAG execution (3) -------------------------------------------------
+    /// Distributed DAG execution plan sent to participating nodes.
+    DagExecute(DagExecutePayload),
+    /// Batch of data items flowing between nodes during DAG execution.
+    DagData(DagDataPayload),
+    /// Signals completion or error of a DAG execution on a node.
+    DagComplete(DagCompletePayload),
 }
 
 // ---------------------------------------------------------------------------
@@ -275,4 +283,48 @@ pub struct OpForwardPayload {
     pub client_id: Option<String>,
     /// MsgPack-serialized client `Message`.
     pub payload: Vec<u8>,
+}
+
+// ---------------------------------------------------------------------------
+// DAG execution payloads
+// ---------------------------------------------------------------------------
+
+/// Distributed DAG execution plan sent to participating nodes.
+///
+/// `plan` is a MsgPack-serialized `ExecutionPlan` (which contains
+/// `DagPlanDescriptor`). Receiving nodes deserialize and reconstruct
+/// a runtime `Dag` via `Dag::from_descriptor()`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DagExecutePayload {
+    pub execution_id: String,
+    /// MsgPack-serialized `ExecutionPlan`.
+    pub plan: Vec<u8>,
+}
+
+/// Batch of data items flowing between nodes during DAG execution.
+///
+/// `items` is a MsgPack-serialized `Vec<rmpv::Value>`, produced by
+/// `rmp_serde::to_vec_named()` in `NetworkSenderProcessor`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DagDataPayload {
+    pub execution_id: String,
+    pub source_vertex: String,
+    pub dest_vertex: String,
+    /// MsgPack-serialized `Vec<rmpv::Value>`.
+    pub items: Vec<u8>,
+}
+
+/// Signals completion or error of a DAG execution on a node.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DagCompletePayload {
+    pub execution_id: String,
+    pub node_id: String,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub results: Option<Vec<u8>>,
 }
