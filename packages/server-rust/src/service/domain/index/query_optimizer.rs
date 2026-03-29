@@ -128,8 +128,14 @@ fn collect_candidates(
             full_scan_keys(all_keys)
         }
 
-        // ---- Neq/Regex/Not: no index acceleration possible ------------------
-        PredicateOp::Neq | PredicateOp::Regex | PredicateOp::Not => full_scan_keys(all_keys),
+        // ---- No index acceleration for these operators: full scan -----------
+        PredicateOp::Neq
+        | PredicateOp::Regex
+        | PredicateOp::Not
+        | PredicateOp::In
+        | PredicateOp::Between
+        | PredicateOp::IsNull
+        | PredicateOp::IsNotNull => full_scan_keys(all_keys),
 
         // ---- And: intersect indexed children; full-scan the rest ------------
         PredicateOp::And => candidates_for_and(registry, predicate, all_keys),
@@ -207,7 +213,15 @@ fn full_scan_keys(all_keys: &[String]) -> HashSet<String> {
 /// or if the node is a compound (And/Or/Not) which is not directly indexable.
 fn is_leaf_without_index(registry: &IndexRegistry, predicate: &PredicateNode) -> bool {
     match predicate.op {
-        PredicateOp::And | PredicateOp::Or | PredicateOp::Not | PredicateOp::Neq | PredicateOp::Regex => true,
+        PredicateOp::And
+        | PredicateOp::Or
+        | PredicateOp::Not
+        | PredicateOp::Neq
+        | PredicateOp::Regex
+        | PredicateOp::In
+        | PredicateOp::Between
+        | PredicateOp::IsNull
+        | PredicateOp::IsNotNull => true,
         _ => registry.get_best_index(predicate).is_none(),
     }
 }

@@ -95,7 +95,15 @@ impl IndexRegistry {
     #[must_use]
     pub fn get_best_index(&self, predicate: &PredicateNode) -> Option<Arc<dyn Index>> {
         let required_type = match predicate.op {
-            PredicateOp::And | PredicateOp::Or | PredicateOp::Not | PredicateOp::Regex => {
+            // Compound and unindexable operators: fall back to full scan
+            PredicateOp::And
+            | PredicateOp::Or
+            | PredicateOp::Not
+            | PredicateOp::Regex
+            | PredicateOp::In
+            | PredicateOp::Between
+            | PredicateOp::IsNull
+            | PredicateOp::IsNotNull => {
                 return None;
             }
             PredicateOp::Eq | PredicateOp::Neq => IndexType::Hash,

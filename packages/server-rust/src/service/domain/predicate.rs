@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 
+use regex::Regex;
 use topgun_core::messages::base::{PredicateNode, PredicateOp, Query, SortDirection};
 use topgun_core::messages::query::QueryResultEntry;
 use topgun_core::types::Value;
@@ -65,9 +66,9 @@ pub fn evaluate_predicate(predicate: &PredicateNode, data: &rmpv::Value) -> bool
                 !evaluate_predicate(&children[0], data)
             }
         }
-        // L3 deferred
-        PredicateOp::Like | PredicateOp::Regex => false,
-        // L1 leaf operators
+        // Null-check operators (don't require a value field)
+        PredicateOp::IsNull | PredicateOp::IsNotNull => evaluate_null_check(predicate, data),
+        // L1 leaf operators (require attribute + value)
         _ => evaluate_leaf(predicate, data),
     }
 }
@@ -158,7 +159,7 @@ pub fn execute_query(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Evaluates a leaf predicate (Eq, Neq, Gt, Gte, Lt, Lte).
+/// Evaluates a leaf predicate (Eq, Neq, Gt, Gte, Lt, Lte, Like, Regex, In, Between).
 fn evaluate_leaf(predicate: &PredicateNode, data: &rmpv::Value) -> bool {
     let Some(map) = data.as_map() else {
         return false;
@@ -189,8 +190,96 @@ fn evaluate_leaf(predicate: &PredicateNode, data: &rmpv::Value) -> bool {
             compare_ordered(actual, expected),
             Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
         ),
+        PredicateOp::Like => evaluate_like(actual, expected),
+        PredicateOp::Regex => evaluate_regex(actual, expected),
+        PredicateOp::In => evaluate_in(actual, expected),
+        PredicateOp::Between => evaluate_between(actual, expected),
         _ => false,
     }
+}
+
+/// Evaluates IsNull / IsNotNull operators (field presence check, no `value` required).
+fn evaluate_null_check(predicate: &PredicateNode, data: &rmpv::Value) -> bool {
+    let Some(map) = data.as_map() else {
+        return false;
+    };
+
+    let Some(attribute) = &predicate.attribute else {
+        return false;
+    };
+
+    let field = find_field_in_map(map, attribute);
+    let is_null = field.is_none() || field.is_some_and(|v| v.is_nil());
+
+    match predicate.op {
+        PredicateOp::IsNull => is_null,
+        PredicateOp::IsNotNull => !is_null,
+        _ => false,
+    }
+}
+
+/// Evaluates LIKE pattern matching (SQL wildcards, case-insensitive).
+///
+/// `%` matches any sequence of characters; `_` matches exactly one character.
+/// Matching is case-insensitive to align with TS client behaviour.
+fn evaluate_like(actual: &rmpv::Value, pattern_val: &rmpv::Value) -> bool {
+    let (Some(text), Some(pattern)) = (actual.as_str(), pattern_val.as_str()) else {
+        return false;
+    };
+
+    // Escape all regex metacharacters in the raw pattern, then convert
+    // SQL wildcards: '%' -> '.*', '_' -> '.'
+    let escaped = regex::escape(pattern);
+    let regex_str = escaped.replace('%', ".*").replace('_', ".");
+    let full_pattern = format!("^(?i){regex_str}$");
+
+    Regex::new(&full_pattern).is_ok_and(|re| re.is_match(text))
+}
+
+/// Evaluates REGEX pattern matching (case-sensitive by default).
+///
+/// Users may embed `(?i)` in the pattern for case-insensitive matching.
+/// Compilation failures return `false` rather than panicking.
+fn evaluate_regex(actual: &rmpv::Value, pattern_val: &rmpv::Value) -> bool {
+    let (Some(text), Some(pattern)) = (actual.as_str(), pattern_val.as_str()) else {
+        return false;
+    };
+
+    Regex::new(pattern).is_ok_and(|re| re.is_match(text))
+}
+
+/// Evaluates IN operator: field value must appear in the provided list.
+fn evaluate_in(actual: &rmpv::Value, allowed_val: &rmpv::Value) -> bool {
+    let rmpv::Value::Array(allowed) = allowed_val else {
+        return false;
+    };
+
+    allowed.iter().any(|item| values_equal(actual, item))
+}
+
+/// Evaluates BETWEEN operator: field value must be within [low, high] inclusive.
+fn evaluate_between(actual: &rmpv::Value, range_val: &rmpv::Value) -> bool {
+    let rmpv::Value::Array(range) = range_val else {
+        return false;
+    };
+
+    if range.len() != 2 {
+        return false;
+    }
+
+    let low = &range[0];
+    let high = &range[1];
+
+    let gte_low = matches!(
+        compare_ordered(actual, low),
+        Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+    );
+    let lte_high = matches!(
+        compare_ordered(actual, high),
+        Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+    );
+
+    gte_low && lte_high
 }
 
 /// Finds a field by name in an `rmpv::Value::Map`.
@@ -579,17 +668,327 @@ mod tests {
         assert!(!evaluate_predicate(&pred, &data));
     }
 
+    // ---- Like tests (AC1) ----
+
     #[test]
-    fn predicate_like_returns_false() {
+    fn predicate_like_percent_at_end() {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
         let pred = leaf(PredicateOp::Like, "name", rmpv::Value::String("Ali%".into()));
+        assert!(evaluate_predicate(&pred, &data));
+
+        let data2 = make_map(vec![("name", rmpv::Value::String("Bob".into()))]);
+        assert!(!evaluate_predicate(&pred, &data2));
+    }
+
+    #[test]
+    fn predicate_like_percent_at_start() {
+        let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
+        let pred = leaf(PredicateOp::Like, "name", rmpv::Value::String("%ice".into()));
+        assert!(evaluate_predicate(&pred, &data));
+
+        let data2 = make_map(vec![("name", rmpv::Value::String("Bob".into()))]);
+        assert!(!evaluate_predicate(&pred, &data2));
+    }
+
+    #[test]
+    fn predicate_like_percent_both_sides() {
+        let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
+        let pred = leaf(PredicateOp::Like, "name", rmpv::Value::String("%li%".into()));
+        assert!(evaluate_predicate(&pred, &data));
+
+        let data2 = make_map(vec![("name", rmpv::Value::String("Bob".into()))]);
+        assert!(!evaluate_predicate(&pred, &data2));
+    }
+
+    #[test]
+    fn predicate_like_underscore_single_char() {
+        let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
+        let pred = leaf(PredicateOp::Like, "name", rmpv::Value::String("A_ice".into()));
+        assert!(evaluate_predicate(&pred, &data));
+
+        let data2 = make_map(vec![("name", rmpv::Value::String("Aice".into()))]);
+        assert!(!evaluate_predicate(&pred, &data2));
+    }
+
+    #[test]
+    fn predicate_like_empty_pattern_matches_empty_string() {
+        let data = make_map(vec![("name", rmpv::Value::String("".into()))]);
+        let pred = leaf(PredicateOp::Like, "name", rmpv::Value::String("".into()));
+        assert!(evaluate_predicate(&pred, &data));
+
+        let data2 = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
+        assert!(!evaluate_predicate(&pred, &data2));
+    }
+
+    #[test]
+    fn predicate_like_case_insensitive() {
+        let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
+        let pred = leaf(PredicateOp::Like, "name", rmpv::Value::String("ali%".into()));
+        assert!(evaluate_predicate(&pred, &data));
+    }
+
+    #[test]
+    fn predicate_like_non_string_field_returns_false() {
+        let data = make_map(vec![("age", rmpv::Value::Integer(42.into()))]);
+        let pred = leaf(PredicateOp::Like, "age", rmpv::Value::String("%".into()));
+        assert!(!evaluate_predicate(&pred, &data));
+    }
+
+    // ---- Regex tests (AC2) ----
+
+    #[test]
+    fn predicate_regex_simple_match() {
+        let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
+        let pred = leaf(PredicateOp::Regex, "name", rmpv::Value::String("^Ali".into()));
+        assert!(evaluate_predicate(&pred, &data));
+
+        let data2 = make_map(vec![("name", rmpv::Value::String("Bob".into()))]);
+        assert!(!evaluate_predicate(&pred, &data2));
+    }
+
+    #[test]
+    fn predicate_regex_invalid_pattern_returns_false() {
+        let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
+        // `[invalid` is an unclosed character class -- invalid regex
+        let pred = leaf(PredicateOp::Regex, "name", rmpv::Value::String("[invalid".into()));
         assert!(!evaluate_predicate(&pred, &data));
     }
 
     #[test]
-    fn predicate_regex_returns_false() {
+    fn predicate_regex_non_string_field_returns_false() {
+        let data = make_map(vec![("age", rmpv::Value::Integer(42.into()))]);
+        let pred = leaf(PredicateOp::Regex, "age", rmpv::Value::String("\\d+".into()));
+        assert!(!evaluate_predicate(&pred, &data));
+    }
+
+    #[test]
+    fn predicate_regex_case_sensitive_by_default() {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
-        let pred = leaf(PredicateOp::Regex, "name", rmpv::Value::String("^Ali".into()));
+        let pred = leaf(PredicateOp::Regex, "name", rmpv::Value::String("^ali".into()));
+        assert!(!evaluate_predicate(&pred, &data));
+    }
+
+    #[test]
+    fn predicate_regex_inline_case_insensitive_flag() {
+        let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
+        let pred = leaf(PredicateOp::Regex, "name", rmpv::Value::String("(?i)^ali".into()));
+        assert!(evaluate_predicate(&pred, &data));
+    }
+
+    // ---- In tests (AC3) ----
+
+    #[test]
+    fn predicate_in_value_present() {
+        let data = make_map(vec![("age", rmpv::Value::Integer(2.into()))]);
+        let pred = leaf(
+            PredicateOp::In,
+            "age",
+            rmpv::Value::Array(vec![
+                rmpv::Value::Integer(1.into()),
+                rmpv::Value::Integer(2.into()),
+                rmpv::Value::Integer(3.into()),
+            ]),
+        );
+        assert!(evaluate_predicate(&pred, &data));
+    }
+
+    #[test]
+    fn predicate_in_value_absent() {
+        let data = make_map(vec![("age", rmpv::Value::Integer(5.into()))]);
+        let pred = leaf(
+            PredicateOp::In,
+            "age",
+            rmpv::Value::Array(vec![
+                rmpv::Value::Integer(1.into()),
+                rmpv::Value::Integer(2.into()),
+                rmpv::Value::Integer(3.into()),
+            ]),
+        );
+        assert!(!evaluate_predicate(&pred, &data));
+    }
+
+    #[test]
+    fn predicate_in_empty_list_returns_false() {
+        let data = make_map(vec![("age", rmpv::Value::Integer(1.into()))]);
+        let pred = leaf(PredicateOp::In, "age", rmpv::Value::Array(vec![]));
+        assert!(!evaluate_predicate(&pred, &data));
+    }
+
+    #[test]
+    fn predicate_in_cross_type_numeric() {
+        // Integer field matched against float in list
+        let data = make_map(vec![("age", rmpv::Value::Integer(2.into()))]);
+        let pred = leaf(
+            PredicateOp::In,
+            "age",
+            rmpv::Value::Array(vec![rmpv::Value::F64(2.0)]),
+        );
+        assert!(evaluate_predicate(&pred, &data));
+    }
+
+    #[test]
+    fn predicate_in_non_array_value_returns_false() {
+        let data = make_map(vec![("age", rmpv::Value::Integer(2.into()))]);
+        let pred = leaf(PredicateOp::In, "age", rmpv::Value::Integer(2.into()));
+        assert!(!evaluate_predicate(&pred, &data));
+    }
+
+    // ---- Between tests (AC4) ----
+
+    #[test]
+    fn predicate_between_value_in_range() {
+        let data = make_map(vec![("age", rmpv::Value::Integer(25.into()))]);
+        let pred = leaf(
+            PredicateOp::Between,
+            "age",
+            rmpv::Value::Array(vec![
+                rmpv::Value::Integer(18.into()),
+                rmpv::Value::Integer(65.into()),
+            ]),
+        );
+        assert!(evaluate_predicate(&pred, &data));
+    }
+
+    #[test]
+    fn predicate_between_value_below_range() {
+        let data = make_map(vec![("age", rmpv::Value::Integer(10.into()))]);
+        let pred = leaf(
+            PredicateOp::Between,
+            "age",
+            rmpv::Value::Array(vec![
+                rmpv::Value::Integer(18.into()),
+                rmpv::Value::Integer(65.into()),
+            ]),
+        );
+        assert!(!evaluate_predicate(&pred, &data));
+    }
+
+    #[test]
+    fn predicate_between_value_above_range() {
+        let data = make_map(vec![("age", rmpv::Value::Integer(70.into()))]);
+        let pred = leaf(
+            PredicateOp::Between,
+            "age",
+            rmpv::Value::Array(vec![
+                rmpv::Value::Integer(18.into()),
+                rmpv::Value::Integer(65.into()),
+            ]),
+        );
+        assert!(!evaluate_predicate(&pred, &data));
+    }
+
+    #[test]
+    fn predicate_between_boundary_inclusive() {
+        let data_low = make_map(vec![("age", rmpv::Value::Integer(18.into()))]);
+        let data_high = make_map(vec![("age", rmpv::Value::Integer(65.into()))]);
+        let range = rmpv::Value::Array(vec![
+            rmpv::Value::Integer(18.into()),
+            rmpv::Value::Integer(65.into()),
+        ]);
+        let pred_low = leaf(PredicateOp::Between, "age", range.clone());
+        let pred_high = leaf(PredicateOp::Between, "age", range);
+        assert!(evaluate_predicate(&pred_low, &data_low));
+        assert!(evaluate_predicate(&pred_high, &data_high));
+    }
+
+    #[test]
+    fn predicate_between_string_range() {
+        let data = make_map(vec![("name", rmpv::Value::String("mango".into()))]);
+        let pred = leaf(
+            PredicateOp::Between,
+            "name",
+            rmpv::Value::Array(vec![
+                rmpv::Value::String("apple".into()),
+                rmpv::Value::String("orange".into()),
+            ]),
+        );
+        assert!(evaluate_predicate(&pred, &data));
+    }
+
+    #[test]
+    fn predicate_between_non_2_element_array_returns_false() {
+        let data = make_map(vec![("age", rmpv::Value::Integer(25.into()))]);
+        let pred = leaf(
+            PredicateOp::Between,
+            "age",
+            rmpv::Value::Array(vec![rmpv::Value::Integer(18.into())]),
+        );
+        assert!(!evaluate_predicate(&pred, &data));
+    }
+
+    // ---- IsNull tests (AC5) ----
+
+    #[test]
+    fn predicate_is_null_nil_field() {
+        let data = make_map(vec![("name", rmpv::Value::Nil)]);
+        let pred = PredicateNode {
+            op: PredicateOp::IsNull,
+            attribute: Some("name".to_string()),
+            value: None,
+            children: None,
+        };
+        assert!(evaluate_predicate(&pred, &data));
+    }
+
+    #[test]
+    fn predicate_is_null_missing_field() {
+        let data = make_map(vec![]);
+        let pred = PredicateNode {
+            op: PredicateOp::IsNull,
+            attribute: Some("name".to_string()),
+            value: None,
+            children: None,
+        };
+        assert!(evaluate_predicate(&pred, &data));
+    }
+
+    #[test]
+    fn predicate_is_null_non_nil_field_returns_false() {
+        let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
+        let pred = PredicateNode {
+            op: PredicateOp::IsNull,
+            attribute: Some("name".to_string()),
+            value: None,
+            children: None,
+        };
+        assert!(!evaluate_predicate(&pred, &data));
+    }
+
+    // ---- IsNotNull tests (AC6) ----
+
+    #[test]
+    fn predicate_is_not_null_non_nil_field() {
+        let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
+        let pred = PredicateNode {
+            op: PredicateOp::IsNotNull,
+            attribute: Some("name".to_string()),
+            value: None,
+            children: None,
+        };
+        assert!(evaluate_predicate(&pred, &data));
+    }
+
+    #[test]
+    fn predicate_is_not_null_nil_field_returns_false() {
+        let data = make_map(vec![("name", rmpv::Value::Nil)]);
+        let pred = PredicateNode {
+            op: PredicateOp::IsNotNull,
+            attribute: Some("name".to_string()),
+            value: None,
+            children: None,
+        };
+        assert!(!evaluate_predicate(&pred, &data));
+    }
+
+    #[test]
+    fn predicate_is_not_null_missing_field_returns_false() {
+        let data = make_map(vec![]);
+        let pred = PredicateNode {
+            op: PredicateOp::IsNotNull,
+            attribute: Some("name".to_string()),
+            value: None,
+            children: None,
+        };
         assert!(!evaluate_predicate(&pred, &data));
     }
 
