@@ -8,15 +8,24 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dashmap::DashMap;
 use parking_lot::Mutex;
+use tokio::sync::{mpsc, oneshot};
 use tower::Service;
 
 use topgun_core::messages::sync::{ClientOpMessage, OpBatchMessage, OpBatchPayload};
 use topgun_core::{ClientOp, HLC, LWWRecord, ORMapRecord, SystemClock, Timestamp};
 
-use crate::cluster::state::ClusterState;
-use crate::cluster::types::ClusterConfig;
+use async_trait::async_trait;
+
+use crate::cluster::dispatch::{run_cluster_dispatch_loop, ClusterDispatchContext};
+use crate::cluster::messages::DagCompletePayload;
+use crate::cluster::state::{ClusterChange, ClusterChannels, ClusterPartitionTable, ClusterState};
+use crate::cluster::traits::ClusterService;
+use crate::cluster::types::{ClusterConfig, ClusterHealth, MembersView};
+use crate::dag::coordinator::ClusterQueryCoordinator;
 use crate::network::connection::ConnectionRegistry;
+use crate::service::registry::{ManagedService, ServiceContext};
 use crate::service::domain::query::QueryRegistry;
 use crate::service::domain::search::SearchRegistry;
 use crate::service::domain::{
@@ -33,6 +42,70 @@ use crate::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
 use crate::storage::record::RecordValue;
 
 use super::network::{SimNetwork, SimTransport};
+
+// ---------------------------------------------------------------------------
+// SimClusterService — thin wrapper around ClusterState for dyn ClusterService
+// ---------------------------------------------------------------------------
+
+/// Minimal `ClusterService` implementation for simulation nodes.
+///
+/// Wraps a shared `ClusterState` so that `ClusterQueryCoordinator` can
+/// query membership and partition tables during distributed GROUP BY execution.
+struct SimClusterService {
+    state: Arc<ClusterState>,
+    node_id: String,
+}
+
+#[async_trait]
+impl ManagedService for SimClusterService {
+    fn name(&self) -> &'static str {
+        "sim-cluster"
+    }
+    async fn init(&self, _ctx: &ServiceContext) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn reset(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn shutdown(&self, _terminate: bool) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ClusterService for SimClusterService {
+    fn node_id(&self) -> &str {
+        &self.node_id
+    }
+    fn is_master(&self) -> bool {
+        self.state.is_master()
+    }
+    fn master_id(&self) -> Option<String> {
+        let view = self.state.current_view();
+        view.members.first().map(|m| m.node_id.clone())
+    }
+    fn members_view(&self) -> Arc<MembersView> {
+        self.state.current_view()
+    }
+    fn partition_table(&self) -> &ClusterPartitionTable {
+        &self.state.partition_table
+    }
+    fn subscribe_changes(&self) -> tokio::sync::mpsc::UnboundedReceiver<ClusterChange> {
+        tokio::sync::mpsc::unbounded_channel().1
+    }
+    fn health(&self) -> ClusterHealth {
+        let view = self.state.current_view();
+        ClusterHealth {
+            node_count: view.members.len(),
+            active_nodes: view.members.len(),
+            suspect_nodes: 0,
+            partition_table_version: 1,
+            active_migrations: 0,
+            is_master: self.state.is_master(),
+            master_node_id: self.master_id(),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // SimNode
@@ -57,6 +130,19 @@ pub struct SimNode {
     pub cluster_state: Arc<ClusterState>,
     /// Shared transport for inter-node message delivery.
     pub transport: SimTransport,
+    /// Connection registry for this node.
+    pub connection_registry: Arc<ConnectionRegistry>,
+    /// Sender half of the inbound cluster message channel. Used by the sim
+    /// transport to inject messages into the dispatch loop via
+    /// `handle_cluster_peer_frame`.
+    pub inbound_tx: mpsc::Sender<crate::cluster::state::InboundClusterMessage>,
+    /// Shared completion registry for `DagComplete` responses. The same `Arc`
+    /// is shared between the dispatch loop and the `ClusterQueryCoordinator`.
+    pub completion_registry: Arc<DashMap<String, oneshot::Sender<DagCompletePayload>>>,
+    /// Coordinator for distributed GROUP BY queries.
+    pub coordinator: Arc<ClusterQueryCoordinator>,
+    /// Handle for the dispatch loop background task. Aborted on `kill()`.
+    dispatch_handle: tokio::task::JoinHandle<()>,
     /// Whether this node is currently alive.
     alive: bool,
 }
@@ -72,6 +158,7 @@ impl SimNode {
     ///
     /// Returns an error if service wiring fails (should not happen with
     /// in-memory storage).
+    #[allow(clippy::too_many_lines)]
     pub fn build(
         node_id: impl Into<String>,
         _seed: u64,
@@ -92,6 +179,12 @@ impl SimNode {
         let (cluster_state, _rx) = ClusterState::new(cluster_config, node_id.clone());
         let cluster_state = Arc::new(cluster_state);
         let connection_registry = Arc::new(ConnectionRegistry::new());
+
+        // Cluster dispatch loop: channels + shared completion registry.
+        let (channels, receivers) = ClusterChannels::new(256);
+        let inbound_tx = channels.inbound_messages;
+        let completion_registry: Arc<DashMap<String, oneshot::Sender<DagCompletePayload>>> =
+            Arc::new(DashMap::new());
 
         // MerkleSyncManager and observer factory for Merkle tree tracking.
         let merkle_manager = Arc::new(MerkleSyncManager::default());
@@ -174,10 +267,35 @@ impl SimNode {
         router.register(
             service_names::PERSISTENCE,
             Arc::new(PersistenceService::new(
-                connection_registry,
+                Arc::clone(&connection_registry),
                 node_id.clone(),
             )),
         );
+
+        // Spawn the cluster dispatch loop in a background task.
+        let dispatch_ctx = ClusterDispatchContext {
+            local_node_id: node_id.clone(),
+            completion_registry: Arc::clone(&completion_registry),
+            record_store_factory: Arc::clone(&record_store_factory),
+            connection_registry: Arc::clone(&connection_registry),
+        };
+        let dispatch_handle =
+            tokio::spawn(run_cluster_dispatch_loop(dispatch_ctx, receivers.inbound_messages));
+
+        // Build the ClusterQueryCoordinator with the shared completion_registry
+        // so the dispatch loop can resolve oneshot receivers created by the coordinator.
+        let sim_cluster_service: Arc<dyn ClusterService> = Arc::new(SimClusterService {
+            state: Arc::clone(&cluster_state),
+            node_id: node_id.clone(),
+        });
+        let coordinator = Arc::new(ClusterQueryCoordinator::new(
+            sim_cluster_service,
+            Arc::clone(&connection_registry),
+            Arc::clone(&record_store_factory),
+            node_id.clone(),
+            crate::dag::types::QueryConfig::default(),
+            Arc::clone(&completion_registry),
+        ));
 
         Ok(SimNode {
             node_id,
@@ -186,6 +304,11 @@ impl SimNode {
             operation_router: router,
             cluster_state,
             transport,
+            connection_registry,
+            inbound_tx,
+            completion_registry,
+            coordinator,
+            dispatch_handle,
             alive: true,
         })
     }
@@ -196,9 +319,10 @@ impl SimNode {
         self.alive
     }
 
-    /// Marks this node as dead (simulates crash).
+    /// Marks this node as dead and aborts the dispatch loop (simulates crash).
     pub fn kill(&mut self) {
         self.alive = false;
+        self.dispatch_handle.abort();
     }
 }
 
