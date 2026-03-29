@@ -129,8 +129,10 @@ pub fn handle_cluster_peer_frame(
     sender_node_id: String,
     tx: &mpsc::Sender<InboundClusterMessage>,
 ) -> Result<(), HandleFrameError> {
-    let message: ClusterMessage =
-        rmp_serde::from_slice(bytes).map_err(HandleFrameError::Deserialize)?;
+    let message: ClusterMessage = rmp_serde::from_slice(bytes).map_err(|e| {
+        tracing::warn!(sender_node_id = %sender_node_id, error = %e, "failed to deserialize cluster peer frame");
+        HandleFrameError::Deserialize(e)
+    })?;
 
     let inbound = InboundClusterMessage {
         sender_node_id,
