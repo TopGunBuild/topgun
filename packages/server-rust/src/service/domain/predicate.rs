@@ -198,7 +198,7 @@ fn evaluate_leaf(predicate: &PredicateNode, data: &rmpv::Value) -> bool {
     }
 }
 
-/// Evaluates IsNull / IsNotNull operators (field presence check, no `value` required).
+/// Evaluates `IsNull` / `IsNotNull` operators (field presence check, no `value` required).
 fn evaluate_null_check(predicate: &PredicateNode, data: &rmpv::Value) -> bool {
     let Some(map) = data.as_map() else {
         return false;
@@ -209,7 +209,7 @@ fn evaluate_null_check(predicate: &PredicateNode, data: &rmpv::Value) -> bool {
     };
 
     let field = find_field_in_map(map, attribute);
-    let is_null = field.is_none() || field.is_some_and(|v| v.is_nil());
+    let is_null = field.is_none() || field.is_some_and(rmpv::Value::is_nil);
 
     match predicate.op {
         PredicateOp::IsNull => is_null,
