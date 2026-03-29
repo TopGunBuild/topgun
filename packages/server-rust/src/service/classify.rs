@@ -1041,4 +1041,68 @@ mod tests {
         assert_eq!(op.ctx().service_name, service_names::QUERY);
         assert!(matches!(op, Operation::QuerySyncInit { .. }));
     }
+
+    #[test]
+    fn classify_query_sub_with_group_by_routes_to_dag_query() {
+        let svc = make_service();
+        let msg = Message::QuerySub(topgun_core::messages::QuerySubMessage {
+            payload: topgun_core::messages::QuerySubPayload {
+                query_id: "dag-q-1".to_string(),
+                map_name: "orders".to_string(),
+                query: topgun_core::messages::base::Query {
+                    group_by: Some(vec!["category".to_string()]),
+                    ..topgun_core::messages::base::Query::default()
+                },
+                fields: None,
+            },
+        });
+        let op = svc.classify(msg, None, CallerOrigin::Client).unwrap();
+        assert_eq!(op.ctx().service_name, service_names::QUERY);
+        assert!(
+            matches!(op, Operation::DagQuery { .. }),
+            "non-empty group_by should route to DagQuery"
+        );
+    }
+
+    #[test]
+    fn classify_query_sub_without_group_by_routes_to_query_subscribe() {
+        let svc = make_service();
+
+        // No group_by field
+        let msg_none = Message::QuerySub(topgun_core::messages::QuerySubMessage {
+            payload: topgun_core::messages::QuerySubPayload {
+                query_id: "q-1".to_string(),
+                map_name: "orders".to_string(),
+                query: topgun_core::messages::base::Query {
+                    group_by: None,
+                    ..topgun_core::messages::base::Query::default()
+                },
+                fields: None,
+            },
+        });
+        let op = svc.classify(msg_none, None, CallerOrigin::Client).unwrap();
+        assert_eq!(op.ctx().service_name, service_names::QUERY);
+        assert!(
+            matches!(op, Operation::QuerySubscribe { .. }),
+            "absent group_by should route to QuerySubscribe"
+        );
+
+        // Empty group_by vec
+        let msg_empty = Message::QuerySub(topgun_core::messages::QuerySubMessage {
+            payload: topgun_core::messages::QuerySubPayload {
+                query_id: "q-2".to_string(),
+                map_name: "orders".to_string(),
+                query: topgun_core::messages::base::Query {
+                    group_by: Some(vec![]),
+                    ..topgun_core::messages::base::Query::default()
+                },
+                fields: None,
+            },
+        });
+        let op = svc.classify(msg_empty, None, CallerOrigin::Client).unwrap();
+        assert!(
+            matches!(op, Operation::QuerySubscribe { .. }),
+            "empty group_by vec should route to QuerySubscribe"
+        );
+    }
 }
