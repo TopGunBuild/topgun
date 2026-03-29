@@ -418,6 +418,7 @@ mod tests {
             sort: None,
             limit: None,
             cursor: None,
+            group_by: None,
         };
 
         let result = backend.execute_query("users", entries, &query).await.unwrap();
