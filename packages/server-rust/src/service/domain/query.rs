@@ -2181,4 +2181,62 @@ mod tests {
             other => panic!("expected OperationError::Internal, got: {:?}", other),
         }
     }
+
+    /// Verifies the `__key` extraction and `group-{i}` fallback logic used by
+    /// `handle_dag_query` when mapping `Vec<rmpv::Value>` to `Vec<QueryResultEntry>`.
+    #[test]
+    fn dag_query_key_synthesis_extracts_key_and_falls_back() {
+        use topgun_core::messages::query::QueryResultEntry;
+
+        // Simulates the mapping logic from handle_dag_query (lines 858-876).
+        let map_results_to_entries = |raw_results: Vec<rmpv::Value>| -> Vec<QueryResultEntry> {
+            raw_results
+                .into_iter()
+                .enumerate()
+                .map(|(i, val)| {
+                    let key = if let rmpv::Value::Map(ref pairs) = val {
+                        pairs.iter().find_map(|(k, v)| {
+                            if k.as_str() == Some("__key") {
+                                v.as_str().map(str::to_string)
+                            } else {
+                                None
+                            }
+                        })
+                    } else {
+                        None
+                    }
+                    .unwrap_or_else(|| format!("group-{i}"));
+                    QueryResultEntry { key, value: val }
+                })
+                .collect()
+        };
+
+        let raw_results = vec![
+            // Result with __key present
+            rmpv::Value::Map(vec![
+                (
+                    rmpv::Value::String("__key".into()),
+                    rmpv::Value::String("active".into()),
+                ),
+                (
+                    rmpv::Value::String("__count".into()),
+                    rmpv::Value::Integer(42.into()),
+                ),
+            ]),
+            // Result with __key absent — should fall back to "group-1"
+            rmpv::Value::Map(vec![(
+                rmpv::Value::String("__count".into()),
+                rmpv::Value::Integer(7.into()),
+            )]),
+            // Non-map value — should fall back to "group-2"
+            rmpv::Value::Integer(99.into()),
+        ];
+
+        let entries = map_results_to_entries(raw_results);
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].key, "active");
+        assert_eq!(entries[1].key, "group-1");
+        assert_eq!(entries[2].key, "group-2");
+    }
 }
