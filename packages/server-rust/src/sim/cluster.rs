@@ -937,3 +937,236 @@ impl SimCluster {
         Ok(first.and_then(|(_, v)| v))
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::sync::{mpsc, oneshot};
+
+    use crate::cluster::dispatch::handle_cluster_peer_frame;
+    use crate::cluster::messages::{ClusterMessage, DagCompletePayload, DagExecutePayload};
+    use crate::cluster::state::InboundClusterMessage;
+    use crate::cluster::types::{MemberInfo, MembersView, NodeState};
+    use crate::dag::types::{
+        DagPlanDescriptor, ExecutionPlan, ProcessorType, QueryConfig, VertexDescriptor,
+    };
+    use crate::network::config::ConnectionConfig;
+    use crate::network::connection::{ConnectionKind, OutboundMessage};
+    use crate::storage::record::RecordValue;
+    use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+
+    use super::*;
+
+    /// Sets up membership on a SimNode's ClusterState so the coordinator sees
+    /// the given node IDs as active members.
+    fn set_membership(node: &SimNode, node_ids: &[&str]) {
+        let members: Vec<MemberInfo> = node_ids
+            .iter()
+            .enumerate()
+            .map(|(i, nid)| MemberInfo {
+                node_id: nid.to_string(),
+                host: "127.0.0.1".to_string(),
+                client_port: 9000 + i as u16,
+                cluster_port: 9100 + i as u16,
+                state: NodeState::Active,
+                join_version: 1,
+            })
+            .collect();
+        node.cluster_state.update_view(MembersView {
+            version: 1,
+            members,
+        });
+    }
+
+    /// Assigns partition ownership on a SimNode's cluster state. The closure
+    /// receives the partition ID and returns the owner node_id.
+    fn assign_partitions(node: &SimNode, owner_fn: &dyn Fn(u32) -> String) {
+        let count = node.cluster_state.partition_table.partition_count();
+        for pid in 0..count {
+            node.cluster_state
+                .partition_table
+                .set_owner(pid, owner_fn(pid), Vec::new());
+        }
+    }
+
+    /// Creates a ClusterPeer connection on `from_node` targeting `to_node_id`
+    /// and spawns a bridge task that forwards outbound binary frames to
+    /// `to_inbound_tx` via `handle_cluster_peer_frame`.
+    ///
+    /// Returns a JoinHandle for the bridge task (should be aborted on cleanup).
+    async fn bridge_peer_connection(
+        from_node: &SimNode,
+        to_node_id: &str,
+        to_inbound_tx: mpsc::Sender<InboundClusterMessage>,
+    ) -> tokio::task::JoinHandle<()> {
+        let config = ConnectionConfig::default();
+        let (handle, mut outbound_rx) =
+            from_node.connection_registry.register(ConnectionKind::ClusterPeer, &config);
+
+        // Set the peer_node_id metadata so send_to_peer can find this connection.
+        {
+            let mut meta = handle.metadata.write().await;
+            meta.peer_node_id = Some(to_node_id.to_string());
+        }
+
+        let from_node_id = from_node.node_id.clone();
+        tokio::spawn(async move {
+            while let Some(msg) = outbound_rx.recv().await {
+                if let OutboundMessage::Binary(bytes) = msg {
+                    // Forward the binary frame to the target node's dispatch loop.
+                    let _ = handle_cluster_peer_frame(
+                        &bytes,
+                        from_node_id.clone(),
+                        &to_inbound_tx,
+                    );
+                }
+            }
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // AC2 + AC3: DagExecute routes to handle_dag_execute on peer, DagComplete
+    // arrives back at coordinator and resolves the completion_registry oneshot.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn dag_execute_roundtrip_resolves_completion() {
+        let mut cluster = SimCluster::new(2, 42);
+        cluster.start().expect("cluster start");
+
+        let node_ids = ["sim-node-0", "sim-node-1"];
+
+        // Set membership so both nodes are visible to the coordinator.
+        for node in &cluster.nodes {
+            set_membership(node, &node_ids);
+        }
+
+        // Assign partitions: even partitions → node-0, odd → node-1.
+        let owner_fn = |pid: u32| -> String {
+            if pid % 2 == 0 {
+                "sim-node-0".to_string()
+            } else {
+                "sim-node-1".to_string()
+            }
+        };
+        for node in &cluster.nodes {
+            assign_partitions(node, &owner_fn);
+        }
+
+        // Bridge connections: node-0 ↔ node-1. Each node can send binary
+        // messages to the other's dispatch loop.
+        let bridge_0_to_1 = bridge_peer_connection(
+            &cluster.nodes[0],
+            "sim-node-1",
+            cluster.nodes[1].inbound_tx.clone(),
+        )
+        .await;
+        let bridge_1_to_0 = bridge_peer_connection(
+            &cluster.nodes[1],
+            "sim-node-0",
+            cluster.nodes[0].inbound_tx.clone(),
+        )
+        .await;
+
+        // Write a record to node-1's storage so DagExecute has data to process.
+        let map_name = "test_map";
+        let key = "user-1";
+        let partition_id = topgun_core::hash_to_partition(key);
+        let store = cluster.nodes[1]
+            .record_store_factory
+            .get_or_create(map_name, partition_id);
+        store
+            .put(
+                key,
+                RecordValue::Lww {
+                    value: topgun_core::Value::Int(42),
+                    timestamp: Timestamp {
+                        millis: 100,
+                        counter: 0,
+                        node_id: "sim-node-1".to_string(),
+                    },
+                },
+                ExpiryPolicy::NONE,
+                CallerProvenance::Client,
+            )
+            .await
+            .expect("put should succeed");
+
+        // Build a minimal execution plan with a scan vertex only.
+        let execution_id = "test-exec-1".to_string();
+        let descriptor = DagPlanDescriptor {
+            vertices: vec![VertexDescriptor {
+                name: "scan".to_string(),
+                local_parallelism: 1,
+                processor_type: ProcessorType::Scan,
+                preferred_partitions: None,
+                config: Some(rmpv::Value::Map(vec![(
+                    rmpv::Value::String("mapName".into()),
+                    rmpv::Value::String(map_name.into()),
+                )])),
+            }],
+            edges: Vec::new(),
+        };
+
+        let mut partition_assignment = std::collections::HashMap::new();
+        partition_assignment.insert("sim-node-1".to_string(), vec![partition_id]);
+
+        let plan = ExecutionPlan {
+            plan: descriptor,
+            partition_assignment,
+            version: 1,
+            config: QueryConfig::default(),
+            created_at: 0,
+        };
+
+        let plan_bytes = rmp_serde::to_vec_named(&plan).expect("serialize plan");
+        let dag_execute = DagExecutePayload {
+            execution_id: execution_id.clone(),
+            plan: plan_bytes,
+        };
+
+        // Register a completion entry on node-0 for the expected response.
+        let (oneshot_tx, oneshot_rx) = oneshot::channel::<DagCompletePayload>();
+        let completion_key = format!("{execution_id}:sim-node-1");
+        cluster.nodes[0]
+            .completion_registry
+            .insert(completion_key.clone(), oneshot_tx);
+
+        // Serialize DagExecute and inject into node-1's dispatch loop.
+        let msg = ClusterMessage::DagExecute(dag_execute);
+        let msg_bytes = rmp_serde::to_vec_named(&msg).expect("serialize msg");
+        handle_cluster_peer_frame(
+            &msg_bytes,
+            "sim-node-0".to_string(),
+            &cluster.nodes[1].inbound_tx,
+        )
+        .expect("frame accepted");
+
+        // The full roundtrip:
+        // 1. node-1 dispatch loop receives DagExecute, spawns handle_dag_execute
+        // 2. handle_dag_execute runs the scan, builds DagComplete
+        // 3. handle_dag_execute sends DagComplete via node-1's ConnectionRegistry
+        // 4. Bridge task forwards the binary to node-0's dispatch loop
+        // 5. node-0 dispatch loop receives DagComplete, calls handle_dag_complete
+        // 6. handle_dag_complete resolves the oneshot in completion_registry
+
+        let result = tokio::time::timeout(Duration::from_secs(5), oneshot_rx)
+            .await
+            .expect("should not timeout")
+            .expect("oneshot should resolve");
+
+        assert_eq!(result.execution_id, execution_id);
+        assert_eq!(result.node_id, "sim-node-1");
+        assert!(result.success, "execution should succeed");
+        assert!(result.results.is_some(), "should have result bytes");
+
+        // Cleanup bridge tasks.
+        bridge_0_to_1.abort();
+        bridge_1_to_0.abort();
+    }
+}
