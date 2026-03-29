@@ -2188,7 +2188,7 @@ mod tests {
     fn dag_query_key_synthesis_extracts_key_and_falls_back() {
         use topgun_core::messages::query::QueryResultEntry;
 
-        // Simulates the mapping logic from handle_dag_query (lines 858-876).
+        // Mirrors the mapping closure in handle_dag_query().
         let map_results_to_entries = |raw_results: Vec<rmpv::Value>| -> Vec<QueryResultEntry> {
             raw_results
                 .into_iter()
