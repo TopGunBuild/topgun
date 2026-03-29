@@ -4,6 +4,7 @@ export type PredicateOp =
   | 'gt' | 'gte'
   | 'lt' | 'lte'
   | 'like' | 'regex'
+  | 'in' | 'between' | 'isNull' | 'isNotNull'
   | 'contains' | 'containsAll' | 'containsAny'
   | 'and' | 'or' | 'not'
   // Full-Text Search predicates
@@ -81,6 +82,28 @@ export class Predicates {
         { op: 'lte', attribute, value: to }
       ]
     };
+  }
+
+  /**
+   * Create an 'in' predicate. Matches when the field value is in the provided list.
+   * Note: method named `isIn` because `in` is a reserved keyword in JavaScript.
+   */
+  static isIn(attribute: string, values: any[]): PredicateNode {
+    return { op: 'in', attribute, value: values };
+  }
+
+  /**
+   * Create an 'isNull' predicate. Matches when the field is null or missing.
+   */
+  static isNull(attribute: string): PredicateNode {
+    return { op: 'isNull', attribute };
+  }
+
+  /**
+   * Create an 'isNotNull' predicate. Matches when the field exists and is not null.
+   */
+  static isNotNull(attribute: string): PredicateNode {
+    return { op: 'isNotNull', attribute };
   }
 
   static and(...predicates: PredicateNode[]): PredicateNode { 
@@ -271,6 +294,14 @@ export function evaluatePredicate(predicate: PredicateNode, data: any): boolean 
     case 'regex':
       if (typeof value !== 'string' || typeof target !== 'string') return false;
       return new RegExp(target).test(value);
+    case 'in':
+      return Array.isArray(target) && target.some(t => t === value);
+    case 'between':
+      return Array.isArray(target) && target.length === 2 && value >= target[0] && value <= target[1];
+    case 'isNull':
+      return value === null || value === undefined;
+    case 'isNotNull':
+      return value !== null && value !== undefined;
     case 'contains':
       if (typeof value !== 'string' || typeof target !== 'string') return false;
       return value.toLowerCase().includes(target.toLowerCase());

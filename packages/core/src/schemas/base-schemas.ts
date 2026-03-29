@@ -49,7 +49,8 @@ export type ChangeEventType = z.infer<typeof ChangeEventTypeSchema>;
 
 // --- Predicate Types ---
 export const PredicateOpSchema = z.enum([
-  'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'like', 'regex', 'and', 'or', 'not'
+  'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'like', 'regex', 'and', 'or', 'not',
+  'in', 'between', 'isNull', 'isNotNull'
 ]);
 // Type export omitted: PredicateOp is already exported from predicate.ts
 
