@@ -80,6 +80,12 @@ pub enum PredicateOp {
     And,
     Or,
     Not,
+    In,
+    Between,
+    #[serde(rename = "isNull")]
+    IsNull,
+    #[serde(rename = "isNotNull")]
+    IsNotNull,
 }
 
 /// Sort direction for query ordering.
@@ -269,6 +275,10 @@ mod tests {
             PredicateOp::And,
             PredicateOp::Or,
             PredicateOp::Not,
+            PredicateOp::In,
+            PredicateOp::Between,
+            PredicateOp::IsNull,
+            PredicateOp::IsNotNull,
         ];
         for v in &variants {
             assert_eq!(&roundtrip_named(v), v);
