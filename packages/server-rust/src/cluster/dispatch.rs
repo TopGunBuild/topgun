@@ -139,3 +139,178 @@ pub fn handle_cluster_peer_frame(
 
     tx.try_send(inbound).map_err(|_| HandleFrameError::ChannelClosed)
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use dashmap::DashMap;
+    use tokio::sync::{mpsc, oneshot};
+
+    use crate::cluster::messages::{
+        ClusterMessage, DagCompletePayload, HeartbeatPayload,
+    };
+    use crate::network::connection::ConnectionRegistry;
+    use crate::storage::datastores::NullDataStore;
+    use crate::storage::factory::RecordStoreFactory;
+    use crate::storage::impls::StorageConfig;
+
+    use super::{
+        handle_cluster_peer_frame, run_cluster_dispatch_loop, ClusterDispatchContext,
+        HandleFrameError,
+    };
+
+    fn make_ctx(
+        completion_registry: Arc<DashMap<String, oneshot::Sender<DagCompletePayload>>>,
+    ) -> ClusterDispatchContext {
+        ClusterDispatchContext {
+            local_node_id: "test-node".to_string(),
+            completion_registry,
+            record_store_factory: Arc::new(RecordStoreFactory::new(
+                StorageConfig::default(),
+                Arc::new(NullDataStore),
+                Vec::new(),
+            )),
+            connection_registry: Arc::new(ConnectionRegistry::new()),
+        }
+    }
+
+    // -- AC1: DagComplete bytes routed through dispatch loop resolve completion_registry --
+
+    #[tokio::test]
+    async fn dag_complete_routed_resolves_completion_registry() {
+        let registry: Arc<DashMap<String, oneshot::Sender<DagCompletePayload>>> =
+            Arc::new(DashMap::new());
+
+        let (tx, rx) = mpsc::channel(16);
+        let ctx = make_ctx(Arc::clone(&registry));
+
+        // Spawn the dispatch loop.
+        let handle = tokio::spawn(run_cluster_dispatch_loop(ctx, rx));
+
+        // Register a completion entry matching the payload we will send.
+        let (oneshot_tx, oneshot_rx) = oneshot::channel();
+        registry.insert("exec-1:peer-node".to_string(), oneshot_tx);
+
+        // Serialize a DagComplete and inject via handle_cluster_peer_frame.
+        let payload = DagCompletePayload {
+            execution_id: "exec-1".to_string(),
+            node_id: "peer-node".to_string(),
+            success: true,
+            error: None,
+            results: Some(vec![1, 2, 3]),
+        };
+        let msg = ClusterMessage::DagComplete(payload.clone());
+        let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
+
+        handle_cluster_peer_frame(&bytes, "peer-node".to_string(), &tx)
+            .expect("frame should be accepted");
+
+        // The oneshot should resolve with the payload.
+        let result = tokio::time::timeout(Duration::from_secs(2), oneshot_rx)
+            .await
+            .expect("should not timeout")
+            .expect("oneshot should resolve");
+
+        assert_eq!(result.execution_id, "exec-1");
+        assert_eq!(result.node_id, "peer-node");
+        assert!(result.success);
+        assert_eq!(result.results, Some(vec![1, 2, 3]));
+
+        // The registry entry should have been removed.
+        assert!(!registry.contains_key("exec-1:peer-node"));
+
+        // Drop sender to close the loop.
+        drop(tx);
+        let _ = handle.await;
+    }
+
+    // -- AC4: Malformed bytes log warning and do not crash the dispatch loop --
+
+    #[test]
+    fn malformed_bytes_return_deserialize_error() {
+        let (tx, _rx) = mpsc::channel(16);
+        let result = handle_cluster_peer_frame(b"garbage", "bad-node".to_string(), &tx);
+
+        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(HandleFrameError::Deserialize(_))),
+            "expected Deserialize error"
+        );
+    }
+
+    // -- AC5: Non-DAG variants pass through without error --
+
+    #[tokio::test]
+    async fn non_dag_variant_does_not_crash_loop() {
+        let registry: Arc<DashMap<String, oneshot::Sender<DagCompletePayload>>> =
+            Arc::new(DashMap::new());
+
+        let (tx, rx) = mpsc::channel(16);
+        let ctx = make_ctx(Arc::clone(&registry));
+
+        let handle = tokio::spawn(run_cluster_dispatch_loop(ctx, rx));
+
+        // Send a Heartbeat (non-DAG variant).
+        let heartbeat = ClusterMessage::Heartbeat(HeartbeatPayload {
+            sender_id: "node-a".to_string(),
+            timestamp_ms: 12345,
+            members_view_version: 1,
+            suspected_nodes: Vec::new(),
+        });
+        let bytes = rmp_serde::to_vec_named(&heartbeat).expect("serialize");
+        handle_cluster_peer_frame(&bytes, "node-a".to_string(), &tx)
+            .expect("heartbeat frame accepted");
+
+        // Now send a DagComplete to verify the loop is still running.
+        let (oneshot_tx, oneshot_rx) = oneshot::channel();
+        registry.insert("exec-probe:prober".to_string(), oneshot_tx);
+
+        let probe_payload = DagCompletePayload {
+            execution_id: "exec-probe".to_string(),
+            node_id: "prober".to_string(),
+            success: true,
+            error: None,
+            results: None,
+        };
+        let probe_msg = ClusterMessage::DagComplete(probe_payload);
+        let probe_bytes = rmp_serde::to_vec_named(&probe_msg).expect("serialize");
+        handle_cluster_peer_frame(&probe_bytes, "prober".to_string(), &tx)
+            .expect("probe frame accepted");
+
+        // The oneshot should resolve, proving the loop survived the non-DAG variant.
+        let result = tokio::time::timeout(Duration::from_secs(2), oneshot_rx)
+            .await
+            .expect("should not timeout")
+            .expect("oneshot should resolve");
+
+        assert_eq!(result.execution_id, "exec-probe");
+
+        drop(tx);
+        let _ = handle.await;
+    }
+
+    // -- Channel closed error --
+
+    #[test]
+    fn channel_closed_returns_error() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx); // Close the receiver so try_send fails.
+
+        let msg = ClusterMessage::Heartbeat(HeartbeatPayload {
+            sender_id: "node-x".to_string(),
+            timestamp_ms: 0,
+            members_view_version: 0,
+            suspected_nodes: Vec::new(),
+        });
+        let bytes = rmp_serde::to_vec_named(&msg).expect("serialize");
+
+        let result = handle_cluster_peer_frame(&bytes, "node-x".to_string(), &tx);
+        assert!(matches!(result, Err(HandleFrameError::ChannelClosed)));
+    }
+}
