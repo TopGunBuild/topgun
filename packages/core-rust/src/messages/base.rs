@@ -111,7 +111,7 @@ pub struct PredicateNode {
     pub children: Option<Vec<PredicateNode>>,
 }
 
-/// Query parameters for filtering, sorting, and pagination.
+/// Query parameters for filtering, sorting, pagination, and grouping.
 ///
 /// Maps to `QuerySchema` in `base-schemas.ts`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -129,6 +129,9 @@ pub struct Query {
     pub limit: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cursor: Option<String>,
+    /// GROUP BY columns for non-SQL query paths. Absent on existing TS clients deserializes to `None`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub group_by: Option<Vec<String>>,
 }
 
 /// A client operation message containing CRDT data.
@@ -358,6 +361,7 @@ mod tests {
             sort: Some(sort),
             limit: Some(50),
             cursor: Some("abc123".to_string()),
+            group_by: None,
         };
         assert_eq!(roundtrip_named(&query), query);
     }
@@ -370,6 +374,7 @@ mod tests {
             sort: None,
             limit: None,
             cursor: None,
+            group_by: None,
         };
         assert_eq!(roundtrip_named(&query), query);
     }
@@ -488,6 +493,7 @@ mod tests {
             sort: None,
             limit: None,
             cursor: None,
+            group_by: None,
         };
         let bytes = rmp_serde::to_vec_named(&query).unwrap();
         let val: rmpv::Value = rmp_serde::from_slice(&bytes).unwrap();
@@ -654,6 +660,7 @@ mod tests {
         assert_eq!(q.sort, None);
         assert_eq!(q.limit, None);
         assert_eq!(q.cursor, None);
+        assert_eq!(q.group_by, None);
     }
 
     #[test]
