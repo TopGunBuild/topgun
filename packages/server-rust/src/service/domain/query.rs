@@ -2131,4 +2131,54 @@ mod tests {
         // Non-existent query returns None
         assert!(registry.get_subscription("nonexistent").is_none());
     }
+
+    /// When `QueryService` has no coordinator attached, a `DagQuery` operation
+    /// must return `OperationError::Internal` rather than routing to the wrong path.
+    #[tokio::test]
+    async fn dag_query_returns_internal_error_when_coordinator_absent() {
+        let registry = Arc::new(QueryRegistry::new());
+        let factory = make_factory();
+        let conn_registry = Arc::new(ConnectionRegistry::new());
+        let config = test_config();
+        let (handle, _rx) = conn_registry.register(ConnectionKind::Client, &config);
+        let conn_id = handle.id;
+
+        // Build a QueryService with no coordinator (coordinator = None).
+        let svc = Arc::new(QueryService::new(
+            registry,
+            factory,
+            conn_registry,
+            Arc::new(PredicateBackend),
+            None,
+            10_000,
+            None,
+            #[cfg(feature = "datafusion")]
+            None,
+        ));
+
+        let ctx = make_ctx(Some(conn_id));
+        let payload = QuerySubMessage {
+            payload: QuerySubPayload {
+                query_id: "dag-q-1".to_string(),
+                map_name: "orders".to_string(),
+                query: Query {
+                    group_by: Some(vec!["category".to_string()]),
+                    ..Query::default()
+                },
+                fields: None,
+            },
+        };
+        let op = Operation::DagQuery { ctx, payload };
+        let result = svc.oneshot(op).await;
+
+        match result {
+            Err(OperationError::Internal(e)) => {
+                assert!(
+                    e.to_string().contains("coordinator"),
+                    "error message should mention coordinator, got: {e}"
+                );
+            }
+            other => panic!("expected OperationError::Internal, got: {:?}", other),
+        }
+    }
 }
