@@ -125,7 +125,7 @@ impl OperationContext {
 /// Grouped by domain:
 /// - **CRDT** (2): `ClientOp`, `OpBatch`
 /// - **Sync** (6): `SyncInit`, `MerkleReqBucket`, `ORMapSyncInit`, `ORMapMerkleReqBucket`, `ORMapDiffRequest`, `ORMapPushDiff`
-/// - **Query** (4): `QuerySubscribe`, `QueryUnsubscribe`, `QuerySyncInit`, `SqlQuery`
+/// - **Query** (5): `QuerySubscribe`, `QueryUnsubscribe`, `QuerySyncInit`, `SqlQuery`, `DagQuery`
 /// - **Messaging** (3): `TopicSubscribe`, `TopicUnsubscribe`, `TopicPublish`
 /// - **Coordination** (4): `LockRequest`, `LockRelease`, `PartitionMapRequest`, `Ping`
 /// - **Search** (3): `Search`, `SearchSubscribe`, `SearchUnsubscribe`
@@ -201,6 +201,11 @@ pub enum Operation {
     SqlQuery {
         ctx: OperationContext,
         payload: messages::query::SqlQueryPayload,
+    },
+    /// Client-initiated DAG query (GROUP BY).
+    DagQuery {
+        ctx: OperationContext,
+        payload: messages::QuerySubMessage,
     },
 
     // --- Messaging domain (service_name = "messaging") ---
@@ -342,6 +347,7 @@ impl Operation {
             | Self::QueryUnsubscribe { ctx, .. }
             | Self::QuerySyncInit { ctx, .. }
             | Self::SqlQuery { ctx, .. }
+            | Self::DagQuery { ctx, .. }
             // Messaging
             | Self::TopicSubscribe { ctx, .. }
             | Self::TopicUnsubscribe { ctx, .. }
@@ -395,6 +401,7 @@ impl Operation {
             | Self::QueryUnsubscribe { ctx, .. }
             | Self::QuerySyncInit { ctx, .. }
             | Self::SqlQuery { ctx, .. }
+            | Self::DagQuery { ctx, .. }
             // Messaging
             | Self::TopicSubscribe { ctx, .. }
             | Self::TopicUnsubscribe { ctx, .. }
@@ -607,6 +614,7 @@ mod tests {
             | Operation::QueryUnsubscribe { .. }
             | Operation::QuerySyncInit { .. }
             | Operation::SqlQuery { .. }
+            | Operation::DagQuery { .. }
             | Operation::TopicSubscribe { .. }
             | Operation::TopicUnsubscribe { .. }
             | Operation::TopicPublish { .. }
