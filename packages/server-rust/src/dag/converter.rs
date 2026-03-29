@@ -21,7 +21,7 @@ use crate::dag::types::{
 // Private helpers
 // ---------------------------------------------------------------------------
 
-/// Converts a `r#where` HashMap (key=field, value=equality target) into a
+/// Converts a `r#where` `HashMap` (key=field, value=equality target) into a
 /// `PredicateNode` compatible with `FilterProcessorSupplier`.
 ///
 /// Each entry becomes an `Eq` leaf. Multiple entries are wrapped in an `And` node.
@@ -96,6 +96,11 @@ impl QueryToDagConverter {
     ///
     /// # Errors
     /// Returns an error if predicate serialization fails.
+    ///
+    /// # Panics
+    /// Does not panic in practice — the internal `expect` is guarded by a prior
+    /// `is_some_and(|v| !v.is_empty())` check on `query.group_by`.
+    #[allow(clippy::too_many_lines)]
     pub fn convert_query(
         query: &Query,
         map_name: &str,
@@ -157,7 +162,8 @@ impl QueryToDagConverter {
         let has_group_by = query.group_by.as_ref().is_some_and(|v| !v.is_empty());
 
         if has_group_by {
-            let group_by_fields = query.group_by.as_ref().unwrap();
+            // SAFETY: has_group_by is true only when group_by is Some(non-empty).
+            let group_by_fields = query.group_by.as_ref().expect("has_group_by guard ensures Some");
             let first_field = group_by_fields
                 .first()
                 .cloned()
