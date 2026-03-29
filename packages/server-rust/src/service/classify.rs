@@ -218,7 +218,18 @@ impl OperationService {
                     caller_origin,
                     None,
                 );
-                Ok(Operation::QuerySubscribe { ctx, payload })
+                // Route GROUP BY queries through DAG path
+                let has_group_by = payload
+                    .payload
+                    .query
+                    .group_by
+                    .as_ref()
+                    .is_some_and(|v| !v.is_empty());
+                if has_group_by {
+                    Ok(Operation::DagQuery { ctx, payload })
+                } else {
+                    Ok(Operation::QuerySubscribe { ctx, payload })
+                }
             }
             Message::QueryUnsub(payload) => {
                 let ctx = self.make_ctx(

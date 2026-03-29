@@ -17,8 +17,10 @@ use tower::Service;
 
 use topgun_core::messages::base::{ChangeEventType, Query};
 use topgun_core::messages::client_events::QueryUpdatePayload;
-use topgun_core::messages::query::{QueryRespMessage, QueryRespPayload};
+use topgun_core::messages::query::{QueryRespMessage, QueryRespPayload, QueryResultEntry};
 use topgun_core::messages::{Message, SyncRespRootMessage, SyncRespRootPayload};
+
+use crate::dag::coordinator::ClusterQueryCoordinator;
 
 use tracing::Instrument;
 
@@ -380,6 +382,9 @@ pub struct QueryService {
     index_observer_factory: Option<Arc<IndexObserverFactory>>,
     #[cfg(feature = "datafusion")]
     sql_query_backend: Option<Arc<dyn crate::service::domain::query_backend::SqlQueryBackend>>,
+    /// Optional DAG coordinator for GROUP BY queries.
+    /// `None` preserves existing behavior for all non-GROUP-BY call sites.
+    coordinator: Option<Arc<ClusterQueryCoordinator>>,
 }
 
 impl QueryService {
@@ -413,7 +418,17 @@ impl QueryService {
             index_observer_factory,
             #[cfg(feature = "datafusion")]
             sql_query_backend,
+            coordinator: None,
         }
+    }
+
+    /// Attaches a `ClusterQueryCoordinator` to enable GROUP BY (DAG) queries.
+    ///
+    /// Uses a builder pattern so existing `new()` call sites require no modification.
+    #[must_use]
+    pub fn with_coordinator(mut self, coordinator: Arc<ClusterQueryCoordinator>) -> Self {
+        self.coordinator = Some(coordinator);
+        self
     }
 
     /// Returns a reference to the underlying `QueryRegistry`.
@@ -487,6 +502,9 @@ impl Service<Operation> for Arc<QueryService> {
                     }
                     Operation::SqlQuery { ctx, payload } => {
                         svc.handle_sql_query(&ctx, &payload).await
+                    }
+                    Operation::DagQuery { ctx, payload } => {
+                        svc.handle_dag_query(&ctx, &payload).await
                     }
                     _ => Err(OperationError::WrongService),
                 }
@@ -803,6 +821,73 @@ impl QueryService {
         Err(OperationError::Internal(anyhow::anyhow!(
             "SQL requires datafusion feature"
         )))
+    }
+
+    /// Handles a `DagQuery` operation (GROUP BY query via DAG execution pipeline).
+    ///
+    /// Delegates to `ClusterQueryCoordinator::execute_distributed()` and maps
+    /// the raw aggregation results into `QueryResultEntry` values using the
+    /// `__key` field convention set by `AggregateProcessor`.
+    async fn handle_dag_query(
+        &self,
+        ctx: &crate::service::operation::OperationContext,
+        payload: &topgun_core::messages::query::QuerySubMessage,
+    ) -> Result<OperationResponse, OperationError> {
+        let _connection_id = ctx.connection_id.ok_or_else(|| {
+            OperationError::Internal(anyhow::anyhow!(
+                "DagQuery requires connection_id in OperationContext"
+            ))
+        })?;
+
+        let map_name = payload.payload.map_name.clone();
+        let query = payload.payload.query.clone();
+        let query_id = payload.payload.query_id.clone();
+
+        let coordinator = self.coordinator.as_ref().ok_or_else(|| {
+            OperationError::Internal(anyhow::anyhow!("DAG coordinator not configured"))
+        })?;
+
+        let raw_results = coordinator
+            .execute_distributed(&query, &map_name)
+            .await
+            .map_err(|e| OperationError::Internal(anyhow::anyhow!("{e}")))?;
+
+        // Map each aggregation result to a QueryResultEntry.
+        // AggregateProcessor sets a `__key` field identifying the GROUP BY bucket;
+        // fall back to index-based key synthesis when `__key` is absent.
+        let results: Vec<QueryResultEntry> = raw_results
+            .into_iter()
+            .enumerate()
+            .map(|(i, val)| {
+                let key = if let rmpv::Value::Map(ref pairs) = val {
+                    pairs.iter().find_map(|(k, v)| {
+                        if k.as_str() == Some("__key") {
+                            v.as_str().map(str::to_string)
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+                .unwrap_or_else(|| format!("group-{i}"));
+                QueryResultEntry { key, value: val }
+            })
+            .collect();
+
+        let resp_payload = QueryRespPayload {
+            query_id,
+            results,
+            has_more: Some(false),
+            merkle_root_hash: None,
+            ..Default::default()
+        };
+
+        Ok(OperationResponse::Message(Box::new(Message::QueryResp(
+            QueryRespMessage {
+                payload: resp_payload,
+            },
+        ))))
     }
 }
 
