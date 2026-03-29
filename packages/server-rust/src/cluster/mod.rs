@@ -5,6 +5,7 @@
 //! inter-node cluster protocol.
 
 pub mod assignment;
+pub mod dispatch;
 pub mod failure_detector;
 pub mod messages;
 pub mod migration;
@@ -54,6 +55,12 @@ pub use assignment::{compute_assignment, order_migrations, plan_rebalance};
 pub use migration::{
     broadcast_partition_map, not_owner_response, MapProvider, MigrationCoordinator,
     RebalanceTrigger,
+};
+
+// dispatch
+pub use dispatch::{
+    run_cluster_dispatch_loop, ClusterDispatchContext, HandleFrameError,
+    handle_cluster_peer_frame,
 };
 
 // resilience
