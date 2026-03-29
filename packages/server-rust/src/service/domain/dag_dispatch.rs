@@ -15,12 +15,6 @@ use crate::dag::types::{Dag, ExecutionPlan};
 use crate::network::connection::{ConnectionKind, ConnectionRegistry, OutboundMessage};
 use crate::storage::RecordStoreFactory;
 
-/// Factory type that builds a `RecordStoreFactory`.
-///
-/// Passed to `handle_dag_execute` so it can create `ExecutorContext`
-/// without knowing the factory construction details.
-pub type RecordStoreFactoryRef = Arc<RecordStoreFactory>;
-
 /// Handles an inbound `DagExecute` cluster message.
 ///
 /// Deserializes the `ExecutionPlan`, builds a `Dag` from the descriptor,
@@ -147,4 +141,60 @@ pub fn handle_dag_complete(
 pub fn handle_dag_data(_payload: DagDataPayload) {
     // TODO: route to NetworkReceiverProcessor inbox when streaming DAG is implemented
     tracing::debug!("DagData received: dropped (streaming DAG not yet implemented)");
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use dashmap::DashMap;
+    use tokio::sync::oneshot;
+
+    use crate::cluster::messages::DagCompletePayload;
+
+    use super::handle_dag_complete;
+
+    fn make_complete_payload(execution_id: &str, node_id: &str) -> DagCompletePayload {
+        DagCompletePayload {
+            execution_id: execution_id.to_string(),
+            node_id: node_id.to_string(),
+            success: true,
+            error: None,
+            results: None,
+        }
+    }
+
+    #[test]
+    fn handle_dag_complete_delivers_payload_to_waiting_receiver() {
+        let registry: DashMap<String, oneshot::Sender<DagCompletePayload>> = DashMap::new();
+        let (tx, mut rx) = oneshot::channel();
+        registry.insert("exec-1:node-1".to_string(), tx);
+
+        let payload = make_complete_payload("exec-1", "node-1");
+        handle_dag_complete(payload, &registry);
+
+        // Receiver should have the delivered payload
+        let received = rx.try_recv().expect("payload should have been delivered");
+        assert_eq!(received.execution_id, "exec-1");
+        assert_eq!(received.node_id, "node-1");
+        assert!(received.success);
+
+        // Registry entry should have been removed after delivery
+        assert!(!registry.contains_key("exec-1:node-1"));
+    }
+
+    #[test]
+    fn handle_dag_complete_late_arrival_does_not_panic() {
+        // When no receiver is registered, the handler should log a warning and
+        // return without panicking (late arrival / coordinator already timed out).
+        let registry: DashMap<String, oneshot::Sender<DagCompletePayload>> = DashMap::new();
+
+        let payload = make_complete_payload("exec-99", "node-1");
+        handle_dag_complete(payload, &registry);
+
+        // Registry remains empty and no panic occurred
+        assert!(registry.is_empty());
+    }
 }
