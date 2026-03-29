@@ -77,13 +77,12 @@ impl NetworkSenderProcessor {
     /// Uses `try_send` because this method is called from synchronous context.
     /// Silently drops the batch if the transport channel is full — the caller
     /// is responsible for not overflowing the channel.
-    fn flush_batch(&self, items: Vec<rmpv::Value>) {
+    fn flush_batch(&self, items: &[rmpv::Value]) {
         if items.is_empty() {
             return;
         }
-        let serialized = match rmp_serde::to_vec_named(&items) {
-            Ok(b) => b,
-            Err(_) => return,
+        let Ok(serialized) = rmp_serde::to_vec_named(items) else {
+            return;
         };
         let msg = ClusterMessage::DagData(DagDataPayload {
             execution_id: self.execution_id.clone(),
@@ -116,7 +115,7 @@ impl Processor for NetworkSenderProcessor {
                     &mut self.buffer,
                     Vec::with_capacity(SENDER_BATCH_SIZE),
                 );
-                self.flush_batch(batch);
+                self.flush_batch(&batch);
             }
         });
         // The sender never self-completes from process(); complete() drives final flush.
@@ -126,7 +125,9 @@ impl Processor for NetworkSenderProcessor {
     fn complete(&mut self, _outbox: &mut dyn Outbox) -> Result<bool> {
         // Flush any remaining buffered items as a final partial batch.
         let remainder = std::mem::take(&mut self.buffer);
-        self.flush_batch(remainder);
+        // Flush any tail items; if the transport channel is full, the final
+        // batch is silently dropped (try_send semantics — no async blocking).
+        self.flush_batch(&remainder);
         Ok(true)
     }
 
@@ -156,6 +157,7 @@ pub struct NetworkSenderProcessorSupplier {
 }
 
 impl NetworkSenderProcessorSupplier {
+    #[must_use]
     pub fn new(
         target_node_id: String,
         execution_id: String,
@@ -284,6 +286,7 @@ pub struct NetworkReceiverProcessorSupplier {
 
 impl NetworkReceiverProcessorSupplier {
     /// Create a new supplier. The internal channel has capacity 1024.
+    #[must_use]
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel(RECEIVER_CHANNEL_CAPACITY);
         Self {
