@@ -340,7 +340,7 @@ impl ClusterQueryCoordinator {
 ///
 /// Maps `ProcessorType` to concrete supplier implementations. Config values are
 /// extracted from `VertexDescriptor::config` where needed.
-fn make_supplier_from_descriptor(
+pub(crate) fn make_supplier_from_descriptor(
     vd: &VertexDescriptor,
     factory: Arc<RecordStoreFactory>,
 ) -> Result<Box<dyn crate::dag::types::ProcessorSupplier>> {
