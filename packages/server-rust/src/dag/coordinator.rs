@@ -52,7 +52,7 @@ pub struct ClusterQueryCoordinator {
     local_node_id: String,
     config: QueryConfig,
     /// Registry of pending completion notifications, keyed by `"{execution_id}:{node_id}"`.
-    /// SPEC-158e wires the cluster message dispatcher to resolve entries on `DagComplete` receipt.
+    /// Entries are resolved by the cluster message dispatcher when a `DagComplete` message arrives from a peer node.
     pub completion_registry: Arc<DashMap<String, oneshot::Sender<DagCompletePayload>>>,
 }
 
@@ -522,7 +522,7 @@ mod tests {
 
     #[async_trait]
     impl ClusterService for MockClusterService {
-        fn node_id(&self) -> &str { "coordinator-test" }
+        fn node_id(&self) -> &'static str { "coordinator-test" }
         fn is_master(&self) -> bool { true }
         fn master_id(&self) -> Option<String> { Some("coordinator-test".to_string()) }
         fn members_view(&self) -> Arc<MembersView> { Arc::clone(&self.view) }
@@ -577,36 +577,49 @@ mod tests {
         let completion_registry = make_completion_registry();
         let registry_ref = Arc::clone(&completion_registry);
 
+        // Use a longer timeout so we can observe intermediate registry state
         let coordinator = ClusterQueryCoordinator::new(
             cluster as Arc<dyn ClusterService>,
             make_connection_registry(),
             make_record_store_factory(),
             "coordinator-test".to_string(),
-            make_test_config(100),
+            make_test_config(2000),
             completion_registry,
         );
 
         let query = Query::default();
-        // execute_distributed will time out (no peers to resolve), but registration
-        // happens before the timeout wait.
-        // We capture the state of the registry BEFORE timeout by intercepting.
-        // Instead, we call the internal registration step by launching the task
-        // and checking registry state before timeout fires.
 
+        // Spawn the distributed execution (will block on timeout awaiting completions)
         let handle = tokio::spawn(async move {
             let _ = coordinator.execute_distributed(&query, "test_map").await;
-            registry_ref
         });
 
-        // Wait for the task to complete (it will time out in 100ms)
-        let registry_after = handle.await.expect("task panicked");
-        // After timeout, entries are cleaned up. We verify 0 entries remain.
-        // The test passes as long as no panic occurs — the registration path was exercised.
+        // Yield briefly to let the coordinator register entries before the timeout wait
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Verify that exactly 3 completion entries were registered (one per node)
         assert_eq!(
-            registry_after.len(),
-            0,
-            "completion registry should be cleaned up after timeout"
+            registry_ref.len(),
+            3,
+            "expected 3 completion entries (one per node), got {}",
+            registry_ref.len()
         );
+
+        // Resolve all entries to let the coordinator finish cleanly
+        let keys: Vec<String> = registry_ref.iter().map(|e| e.key().clone()).collect();
+        for key in keys {
+            if let Some((_, tx)) = registry_ref.remove(&key) {
+                let _ = tx.send(DagCompletePayload {
+                    execution_id: key.split(':').next().unwrap_or("").to_string(),
+                    node_id: key.split(':').nth(1).unwrap_or("").to_string(),
+                    success: true,
+                    error: None,
+                    results: Some(rmp_serde::to_vec_named(&Vec::<rmpv::Value>::new()).unwrap()),
+                });
+            }
+        }
+
+        let _ = handle.await;
     }
 
     // ---------------------------------------------------------------------------
@@ -648,12 +661,26 @@ mod tests {
 
     #[tokio::test]
     async fn group_by_merge_returns_correct_combined_counts() {
+        fn get_count(item: &rmpv::Value) -> u64 {
+            if let rmpv::Value::Map(pairs) = item {
+                for (k, v) in pairs {
+                    if k.as_str() == Some("__count") {
+                        if let rmpv::Value::Integer(i) = v {
+                            return i.as_u64().unwrap_or(0);
+                        }
+                    }
+                }
+            }
+            0
+        }
+
         // Build partial aggregates: 5 categories (A-E) across 3 nodes, total 100 items.
         // Node 1: A=10, B=10, C=10, D=5, E=5 => 40 items
         // Node 2: A=10, B=5,  C=5,  D=10, E=10 => 40 items
         // Node 3: A=0,  B=5,  C=5,  D=5,  E=5  => 20 items (no A)
         // Expected: A=20, B=20, C=20, D=20, E=20 => total 100
 
+        #[allow(clippy::cast_precision_loss)]
         let make_partial = |key: &str, count: u64| -> rmpv::Value {
             rmpv::Value::Map(vec![
                 (
@@ -724,19 +751,6 @@ mod tests {
 
         assert_eq!(merged.len(), 5, "expected 5 distinct groups (A-E)");
 
-        fn get_count(item: &rmpv::Value) -> u64 {
-            if let rmpv::Value::Map(pairs) = item {
-                for (k, v) in pairs {
-                    if k.as_str() == Some("__count") {
-                        if let rmpv::Value::Integer(i) = v {
-                            return i.as_u64().unwrap_or(0);
-                        }
-                    }
-                }
-            }
-            0
-        }
-
         let total_count: u64 = merged.iter().map(get_count).sum();
         assert_eq!(total_count, 100, "total count across all groups should be 100");
 
@@ -788,7 +802,7 @@ mod tests {
         // any peer messages. With an empty RecordStoreFactory, the scan returns 0 items.
         let cluster = Arc::new(MockClusterService::new(&["node-1"]));
         let completion_registry = make_completion_registry();
-        let registry_ref = Arc::clone(&coordinator_registry_ref(&completion_registry));
+        let registry_ref = Arc::clone(&completion_registry);
 
         let coordinator = ClusterQueryCoordinator::new(
             cluster as Arc<dyn ClusterService>,
@@ -803,7 +817,7 @@ mod tests {
         let result = coordinator.execute_distributed(&query, "empty_map").await;
 
         // Local execution should succeed (no records = empty result)
-        assert!(result.is_ok(), "local bypass should succeed: {:?}", result);
+        assert!(result.is_ok(), "local bypass should succeed: {result:?}");
         assert!(result.unwrap().is_empty(), "empty store returns no results");
 
         // No completion registry entries should have been created
@@ -812,10 +826,6 @@ mod tests {
             0,
             "bypass should not register completion entries"
         );
-    }
-
-    fn coordinator_registry_ref(r: &Arc<DashMap<String, oneshot::Sender<DagCompletePayload>>>) -> Arc<DashMap<String, oneshot::Sender<DagCompletePayload>>> {
-        Arc::clone(r)
     }
 
     // ---------------------------------------------------------------------------
