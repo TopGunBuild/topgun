@@ -7,8 +7,10 @@
 pub mod assignment;
 pub mod dispatch;
 pub mod failure_detector;
+pub mod formation;
 pub mod messages;
 pub mod migration;
+pub mod peer_connection;
 pub mod resilience;
 pub mod state;
 pub mod traits;
@@ -56,6 +58,12 @@ pub use migration::{
     broadcast_partition_map, not_owner_response, MapProvider, MigrationCoordinator,
     RebalanceTrigger,
 };
+
+// peer_connection
+pub use peer_connection::{PeerConnection, PeerConnectionMap, PeerSendError};
+
+// formation
+pub use formation::ClusterFormationService;
 
 // dispatch
 pub use dispatch::{

@@ -24,6 +24,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "syn
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors", "timeout", "request-id", "compression-gzip", "fs"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+tokio-util = { version = "0.7", features = ["codec"] }
 dashmap = "6"
 parking_lot = "0.12"
 thiserror = "2"
