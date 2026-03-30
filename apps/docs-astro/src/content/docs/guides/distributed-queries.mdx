@@ -1,0 +1,204 @@
+---
+title: Distributed Queries
+description: How TopGun executes queries across cluster nodes using DAG fan-out, partition-aware scanning, and coordinated aggregation.
+order: 13
+---
+
+import CodeBlock from '../../../components/docs/CodeBlock.astro';
+import { ChevronRight, Network, Cpu, Layers, BarChart2, Zap } from 'lucide-react';
+import { FeatureCard } from '../../../components/docs/FeatureCard';
+
+export const groupByExampleCode = `import { Predicates } from '@topgunbuild/client';
+
+// This GROUP BY query automatically uses the DAG pipeline
+const query = client.query('orders', {
+  predicate: Predicates.greaterThan('total', 0),
+  groupBy: ['status'],
+  aggregate: {
+    order_count: { fn: 'COUNT' },
+    total_revenue: { fn: 'SUM', field: 'total' },
+    avg_order: { fn: 'AVG', field: 'total' },
+  },
+  sort: { total_revenue: 'desc' },
+  limit: 10,
+});
+
+query.subscribe((results) => {
+  // Results are aggregated across ALL cluster nodes
+  console.log('Order summary by status:', results);
+});`;
+
+<div className="flex items-center gap-2 text-sm text-neutral-500 mb-8 overflow-hidden whitespace-nowrap">
+  <span className="text-foreground font-medium">Docs</span>
+  <ChevronRight className="w-4 h-4" />
+  <a href="/docs/guides" className="hover:text-foreground transition-colors">Guides</a>
+  <ChevronRight className="w-4 h-4" />
+  <span className="text-foreground font-medium">Distributed Queries</span>
+</div>
+
+# Distributed Queries
+
+TopGun distributes data across 271 partitions spread over all cluster nodes. Most queries can be answered by a single node, but queries that need data from multiple partitions — particularly aggregations — use a **DAG (directed acyclic graph) execution pipeline** to fan work out across the cluster and merge the results.
+
+<div className="grid md:grid-cols-3 gap-6 mb-16 not-prose">
+  <FeatureCard
+    icon={Network}
+    iconColor="text-brand-subtle"
+    title="Automatic Fan-Out"
+    description="Aggregation queries are automatically dispatched to all nodes that own relevant partitions."
+  />
+  <FeatureCard
+    icon={Cpu}
+    iconColor="text-green-500"
+    title="Parallel Execution"
+    description="Each node runs its portion of the query independently, maximising cluster throughput."
+  />
+  <FeatureCard
+    icon={Layers}
+    iconColor="text-orange-500"
+    title="Coordinator Merge"
+    description="Partial results are combined, sorted, and limited at the coordinator before delivery to the client."
+  />
+</div>
+
+## When Queries Go Distributed
+
+Not every query needs the full DAG pipeline. TopGun automatically chooses the right execution strategy based on the query type:
+
+- **Simple key lookup** — routed directly to the partition that owns the key. Single-node, lowest latency.
+- **Predicate query (no aggregation)** — the coordinator fans out a scan to all nodes, each node filters locally, and the coordinator merges the matching records.
+- **GROUP BY / aggregation** — the coordinator compiles a DAG plan. Each node runs a partial scan + aggregate, and the coordinator combines the partial results into the final output.
+- **SQL query (no aggregation)** — executes locally on the connected node via Apache DataFusion.
+- **SQL query (with aggregation)** — uses the same DAG pipeline as predicate-based GROUP BY queries.
+
+## DAG Architecture
+
+When a query requires distributed aggregation, TopGun compiles it into a DAG plan — a graph of processing steps (vertices) connected by data flow edges.
+
+### Processor Types
+
+| Processor | Role |
+|-----------|------|
+| **Scan** | Read records from a partition's local storage |
+| **Filter** | Apply predicate conditions to discard non-matching records |
+| **Project** | Select specific fields from each record |
+| **GroupBy (partial)** | Run per-partition aggregation (COUNT, SUM, etc.) |
+| **GroupBy (final)** | Combine partial aggregates from all partitions |
+| **Sort** | Order results by the requested columns |
+| **Limit** | Truncate results to the requested count |
+| **Combine** | Merge streams from multiple partitions into one |
+
+### Execution Flow
+
+1. The coordinator compiles the query into a DAG plan describing which processors to run and how data flows between them
+2. The plan is split into per-partition sub-plans — each sub-plan contains Scan, Filter, Project, and partial GroupBy processors
+3. Sub-plans are dispatched to the nodes that own the target partitions
+4. Each node executes its sub-plan locally and streams partial results back to the coordinator
+5. The coordinator runs the final Combine, GroupBy (final), Sort, and Limit processors to produce the result
+
+```
+                         ┌──────────────┐
+                         │    Client    │
+                         └──────┬───────┘
+                                │ query
+                                ▼
+                    ┌───────────────────────┐
+                    │     Coordinator       │
+                    │  compile query → DAG  │
+                    └───┬───────┬───────┬───┘
+                        │       │       │  per-partition sub-plans
+               ┌────────┘       │       └────────┐
+               ▼                ▼                ▼
+        ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
+        │   Node A    │ │   Node B    │ │   Node C    │
+        │ ┌─────────┐ │ │ ┌─────────┐ │ │ ┌─────────┐ │
+        │ │  Scan   │ │ │ │  Scan   │ │ │ │  Scan   │ │
+        │ │ Filter  │ │ │ │ Filter  │ │ │ │ Filter  │ │
+        │ │ Project │ │ │ │ Project │ │ │ │ Project │ │
+        │ │ GroupBy │ │ │ │ GroupBy │ │ │ │ GroupBy │ │
+        │ │(partial)│ │ │ │(partial)│ │ │ │(partial)│ │
+        │ └────┬────┘ │ │ └────┬────┘ │ │ └────┬────┘ │
+        └──────┼──────┘ └──────┼──────┘ └──────┼──────┘
+               │               │               │
+               └───────────────┼───────────────┘
+                               │ partial results
+                               ▼
+                    ┌───────────────────────┐
+                    │     Coordinator       │
+                    │ ┌───────────────────┐ │
+                    │ │     Combine       │ │
+                    │ │ GroupBy (final)   │ │
+                    │ │     Sort          │ │
+                    │ │     Limit         │ │
+                    │ └────────┬──────────┘ │
+                    └──────────┼────────────┘
+                               │ final result
+                               ▼
+                         ┌──────────────┐
+                         │    Client    │
+                         └──────────────┘
+```
+
+## Partition-Aware Execution
+
+TopGun uses consistent hashing to distribute data across 271 partitions. Each partition is owned by a specific cluster node, with backup copies on other nodes for fault tolerance.
+
+When a distributed query executes:
+
+1. **Partition mapping** — the coordinator determines which nodes own which partitions
+2. **Parallel dispatch** — sub-plans are sent to all relevant nodes simultaneously
+3. **Local execution** — each node scans only its own partitions, applying filters and partial aggregation locally
+4. **Result streaming** — partial results flow back to the coordinator as they become available
+5. **Final merge** — the coordinator combines all partial results into the final output
+
+This partition-aware approach means that adding more nodes to the cluster increases query throughput proportionally — each node handles fewer partitions and returns results faster.
+
+## Query Type Comparison
+
+| Query Type | Execution | Latency | Use Case |
+|---|---|---|---|
+| Key lookup | Single partition | Lowest | Get/set by key |
+| Predicate (no agg) | Fan-out scan | Low | Filtered lists, subscriptions |
+| GROUP BY / Aggregation | DAG fan-out | Medium | Analytics, summaries |
+| SQL (no agg) | Local DataFusion | Low-Medium | Ad-hoc exploration |
+| SQL (with agg) | DAG fan-out | Medium | Complex analytics |
+
+## Example
+
+The following GROUP BY query calculates order statistics grouped by status. Because it includes aggregation, TopGun automatically uses the DAG pipeline to execute it across all cluster nodes.
+
+<div className="not-prose">
+  <CodeBlock title="Distributed aggregation query" language="typescript" code={groupByExampleCode} />
+</div>
+
+### Execution Trace
+
+Here is what happens when this query executes on a 3-node cluster:
+
+1. **Compile** — the coordinator parses the query and builds a DAG plan: Scan -> Filter (`total > 0`) -> GroupBy (partial, group by `status`, aggregate COUNT + SUM + AVG) per partition
+2. **Dispatch** — sub-plans are sent to Node A (partitions 0-90), Node B (partitions 91-180), and Node C (partitions 181-270)
+3. **Partial aggregation** — each node scans its local `orders` records, filters by `total > 0`, and computes partial aggregates per `status` group
+4. **Combine** — the coordinator receives three sets of partial results and merges them: COUNTs are summed, SUMs are summed, AVGs are recomputed from the merged SUM/COUNT
+5. **Sort + Limit** — the coordinator sorts by `total_revenue DESC` and takes the top 10 groups
+6. **Deliver** — the final result is sent back to the client
+
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-4 not-prose">
+  <p className="text-sm text-brand">
+    For predicate-based live queries with real-time subscriptions, see <a href="/docs/guides/live-queries" className="underline hover:no-underline">Live Queries</a>. For SQL-based ad-hoc analytics, see <a href="/docs/guides/sql-queries" className="underline hover:no-underline">SQL Queries</a>.
+  </p>
+</div>
+
+<div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
+  <a href="/docs/guides/live-queries" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Previous</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Live Queries
+    </div>
+  </a>
+  <a href="/docs/guides/sql-queries" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+    <span className="text-xs text-neutral-500">Next</span>
+    <div className="flex items-center gap-2 text-foreground font-semibold">
+      SQL Queries <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+    </div>
+  </a>
+</div>
