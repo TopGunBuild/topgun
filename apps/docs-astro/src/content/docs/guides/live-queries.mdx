@@ -122,6 +122,9 @@ For more complex filtering, use the `predicate` field:
 | `like(attr, pattern)` | SQL-like pattern (`%` = any, `_` = single char) | `Predicates.like('name', '%john%')` |
 | `regex(attr, pattern)` | Regular expression | `Predicates.regex('email', '^.*@gmail\\.com$')` |
 | `between(attr, from, to)` | Range (inclusive) | `Predicates.between('price', 10, 100)` |
+| `in(attr, values)` | Match any value in list | `Predicates.in('status', ['active', 'pending'])` |
+| `isNull(attr)` | Field is null or missing | `Predicates.isNull('deletedAt')` |
+| `isNotNull(attr)` | Field exists and is not null | `Predicates.isNotNull('email')` |
 | `and(...predicates)` | Logical AND | `Predicates.and(p1, p2, p3)` |
 | `or(...predicates)` | Logical OR | `Predicates.or(p1, p2)` |
 | `not(predicate)` | Logical NOT | `Predicates.not(p1)` |
@@ -233,6 +236,16 @@ Instead of resending full result sets, nodes send targeted delta updates:
 
 This approach minimizes network traffic and enables efficient UI updates.
 
+### Aggregation Queries
+
+When a live query includes `GROUP BY`, the server automatically switches to a DAG (directed acyclic graph) execution pipeline for distributed aggregation. Instead of merging raw records, each node runs a partial aggregation locally, and the coordinator combines the partial results into the final output.
+
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-4 not-prose">
+  <p className="text-sm text-brand">
+    For a detailed explanation of the DAG execution pipeline, see the <a href="/docs/guides/distributed-queries" className="underline hover:no-underline">Distributed Queries</a> guide. For SQL-based aggregation as an alternative to predicate queries, see <a href="/docs/guides/sql-queries" className="underline hover:no-underline">SQL Queries</a>.
+  </p>
+</div>
+
 ## Field Projection
 
 Use the `fields` option to receive only the fields you need. This reduces network traffic when records contain many fields but your UI only displays a subset.
@@ -297,10 +310,10 @@ This is fully automatic -- no application code is needed. The client stores the 
       <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Security (TLS)
     </div>
   </a>
-  <a href="/docs/guides/sql-queries" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+  <a href="/docs/guides/distributed-queries" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Next</span>
     <div className="flex items-center gap-2 text-foreground font-semibold">
-      SQL Queries <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+      Distributed Queries <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
     </div>
   </a>
 </div>
