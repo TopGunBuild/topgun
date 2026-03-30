@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use topgun_core::messages::base::{PredicateNode, PredicateOp, Query};
+use topgun_core::messages::base::{PredicateNode, PredicateOp, Query, SortDirection};
 
 use crate::dag::types::{
     DagPlanDescriptor, Edge, ProcessorType, RoutingPolicy, VertexDescriptor,
@@ -83,16 +83,13 @@ impl QueryToDagConverter {
     /// Converts a `Query` to a `DagPlanDescriptor` for the given partition assignment.
     ///
     /// Pipeline layout (single-node):
-    ///   scan -> [filter] -> [local-aggregate -> combine-aggregate] -> collector
+    ///   scan -> [filter] -> [local-aggregate -> combine-aggregate] -> [sort] -> [limit] -> collector
     ///
     /// Pipeline layout (multi-node) — `NetworkSender`/`NetworkReceiver` vertices are
     /// inserted at the partition boundary between per-node local processors and the
     /// coordinator-side collector:
     ///   scan -> [filter] -> [local-aggregate] -> network-sender
-    ///   network-receiver -> [combine-aggregate] -> collector
-    ///
-    /// Note: `query.sort` and `query.limit` are not supported in the DAG path for this
-    /// spec and are intentionally ignored. Sort/limit post-processing is deferred.
+    ///   network-receiver -> [combine-aggregate] -> [sort] -> [limit] -> collector
     ///
     /// # Errors
     /// Returns an error if predicate serialization fails.
@@ -307,7 +304,77 @@ impl QueryToDagConverter {
             last_vertex = "network-receiver".to_string();
         }
 
-        // --- Step 4: Collector sink ---
+        // --- Step 4: Sort vertex (optional) ---
+        if let Some(ref sort_map) = query.sort {
+            if !sort_map.is_empty() {
+                // HashMap iteration order is non-deterministic; fields are sorted
+                // alphabetically to ensure deterministic multi-field sort behavior.
+                let mut sort_fields: Vec<(String, SortDirection)> =
+                    sort_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                sort_fields.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+                let sort_config = rmpv::Value::Array(
+                    sort_fields
+                        .iter()
+                        .map(|(field, dir)| {
+                            let dir_str = match dir {
+                                SortDirection::Asc => "asc",
+                                SortDirection::Desc => "desc",
+                            };
+                            rmpv::Value::Array(vec![
+                                rmpv::Value::String(field.clone().into()),
+                                rmpv::Value::String(dir_str.into()),
+                            ])
+                        })
+                        .collect(),
+                );
+
+                vertices.push(VertexDescriptor {
+                    name: "sort".to_string(),
+                    local_parallelism: 1,
+                    processor_type: ProcessorType::Sort,
+                    preferred_partitions: None,
+                    config: Some(sort_config),
+                });
+
+                edges.push(Edge {
+                    source_name: last_vertex.clone(),
+                    source_ordinal: 0,
+                    dest_name: "sort".to_string(),
+                    dest_ordinal: 0,
+                    routing_policy: RoutingPolicy::Isolated,
+                    priority: edge_priority,
+                });
+                edge_priority += 1;
+                last_vertex = "sort".to_string();
+            }
+        }
+
+        // --- Step 5: Limit vertex (optional) ---
+        if let Some(limit) = query.limit {
+            let limit_config = rmpv::Value::Integer(rmpv::Integer::from(u64::from(limit)));
+
+            vertices.push(VertexDescriptor {
+                name: "limit".to_string(),
+                local_parallelism: 1,
+                processor_type: ProcessorType::Limit,
+                preferred_partitions: None,
+                config: Some(limit_config),
+            });
+
+            edges.push(Edge {
+                source_name: last_vertex.clone(),
+                source_ordinal: 0,
+                dest_name: "limit".to_string(),
+                dest_ordinal: 0,
+                routing_policy: RoutingPolicy::Isolated,
+                priority: edge_priority,
+            });
+            edge_priority += 1;
+            last_vertex = "limit".to_string();
+        }
+
+        // --- Step 6: Collector sink ---
         vertices.push(VertexDescriptor {
             name: "collector".to_string(),
             local_parallelism: 1,
@@ -516,5 +583,175 @@ mod tests {
         let children = pred.children.unwrap();
         assert_eq!(children.len(), 2);
         assert!(children.iter().all(|c| c.op == PredicateOp::Eq));
+    }
+
+    // --- Sort vertex insertion ---
+
+    #[test]
+    fn convert_query_with_sort_inserts_sort_vertex() {
+        use topgun_core::messages::base::SortDirection;
+
+        let mut sort_map = HashMap::new();
+        sort_map.insert("age".to_string(), SortDirection::Desc);
+
+        let q = Query {
+            sort: Some(sort_map),
+            ..Default::default()
+        };
+
+        let desc = QueryToDagConverter::convert_query(&q, "users", &single_node_assignment())
+            .expect("convert should succeed");
+
+        assert!(vertex_names(&desc).contains(&"sort"));
+        assert!(vertex_names(&desc).contains(&"collector"));
+
+        // Sort should be between the last processing vertex and collector
+        let sort_idx = desc.vertices.iter().position(|v| v.name == "sort").unwrap();
+        let collector_idx = desc.vertices.iter().position(|v| v.name == "collector").unwrap();
+        assert!(sort_idx < collector_idx, "sort must come before collector");
+
+        // Verify sort config contains the field
+        let sort_vertex = &desc.vertices[sort_idx];
+        let config = sort_vertex.config.as_ref().expect("sort should have config");
+        if let rmpv::Value::Array(arr) = config {
+            assert_eq!(arr.len(), 1, "one sort field");
+            if let rmpv::Value::Array(pair) = &arr[0] {
+                assert_eq!(pair[0].as_str(), Some("age"));
+                assert_eq!(pair[1].as_str(), Some("desc"));
+            } else {
+                panic!("sort config entry should be an array pair");
+            }
+        } else {
+            panic!("sort config should be an array");
+        }
+    }
+
+    // --- Limit vertex insertion ---
+
+    #[test]
+    fn convert_query_with_limit_inserts_limit_vertex() {
+        let q = Query {
+            limit: Some(10),
+            ..Default::default()
+        };
+
+        let desc = QueryToDagConverter::convert_query(&q, "users", &single_node_assignment())
+            .expect("convert should succeed");
+
+        assert!(vertex_names(&desc).contains(&"limit"));
+
+        let limit_idx = desc.vertices.iter().position(|v| v.name == "limit").unwrap();
+        let collector_idx = desc.vertices.iter().position(|v| v.name == "collector").unwrap();
+        assert!(limit_idx < collector_idx, "limit must come before collector");
+
+        // Verify limit config
+        let limit_vertex = &desc.vertices[limit_idx];
+        let config = limit_vertex.config.as_ref().expect("limit should have config");
+        assert_eq!(config.as_u64(), Some(10));
+    }
+
+    // --- Sort + Limit vertex ordering ---
+
+    #[test]
+    fn convert_query_with_sort_and_limit_has_correct_order() {
+        use topgun_core::messages::base::SortDirection;
+
+        let mut sort_map = HashMap::new();
+        sort_map.insert("age".to_string(), SortDirection::Desc);
+
+        let q = Query {
+            sort: Some(sort_map),
+            limit: Some(5),
+            ..Default::default()
+        };
+
+        let desc = QueryToDagConverter::convert_query(&q, "users", &single_node_assignment())
+            .expect("convert should succeed");
+
+        let names = vertex_names(&desc);
+        assert!(names.contains(&"sort"));
+        assert!(names.contains(&"limit"));
+        assert!(names.contains(&"collector"));
+
+        let sort_idx = names.iter().position(|&n| n == "sort").unwrap();
+        let limit_idx = names.iter().position(|&n| n == "limit").unwrap();
+        let collector_idx = names.iter().position(|&n| n == "collector").unwrap();
+
+        assert!(sort_idx < limit_idx, "sort must come before limit");
+        assert!(limit_idx < collector_idx, "limit must come before collector");
+
+        // Verify edge chain: ... -> sort -> limit -> collector
+        let sort_to_limit = desc.edges.iter().find(|e| e.source_name == "sort" && e.dest_name == "limit");
+        assert!(sort_to_limit.is_some(), "edge from sort to limit must exist");
+
+        let limit_to_collector = desc.edges.iter().find(|e| e.source_name == "limit" && e.dest_name == "collector");
+        assert!(limit_to_collector.is_some(), "edge from limit to collector must exist");
+    }
+
+    // --- Sort + Limit after GROUP BY ---
+
+    #[test]
+    fn convert_query_with_group_by_and_sort_limit_inserts_after_combine() {
+        use topgun_core::messages::base::SortDirection;
+
+        let mut sort_map = HashMap::new();
+        sort_map.insert("__count".to_string(), SortDirection::Desc);
+
+        let q = Query {
+            group_by: Some(vec!["category".to_string()]),
+            sort: Some(sort_map),
+            limit: Some(3),
+            ..Default::default()
+        };
+
+        let desc = QueryToDagConverter::convert_query(&q, "orders", &single_node_assignment())
+            .expect("convert should succeed");
+
+        let names = vertex_names(&desc);
+        let combine_idx = names.iter().position(|&n| n == "combine-aggregate").unwrap();
+        let sort_idx = names.iter().position(|&n| n == "sort").unwrap();
+        let limit_idx = names.iter().position(|&n| n == "limit").unwrap();
+        let collector_idx = names.iter().position(|&n| n == "collector").unwrap();
+
+        assert!(combine_idx < sort_idx, "sort must come after combine-aggregate");
+        assert!(sort_idx < limit_idx, "sort must come before limit");
+        assert!(limit_idx < collector_idx, "limit must come before collector");
+    }
+
+    // --- Multi-field sort deterministic ordering ---
+
+    #[test]
+    fn convert_query_multi_field_sort_alphabetical_order() {
+        use topgun_core::messages::base::SortDirection;
+
+        let mut sort_map = HashMap::new();
+        sort_map.insert("z_field".to_string(), SortDirection::Asc);
+        sort_map.insert("a_field".to_string(), SortDirection::Desc);
+
+        let q = Query {
+            sort: Some(sort_map),
+            ..Default::default()
+        };
+
+        let desc = QueryToDagConverter::convert_query(&q, "users", &single_node_assignment())
+            .expect("convert should succeed");
+
+        let sort_vertex = desc.vertices.iter().find(|v| v.name == "sort").unwrap();
+        let config = sort_vertex.config.as_ref().unwrap();
+        if let rmpv::Value::Array(arr) = config {
+            assert_eq!(arr.len(), 2);
+            // First field should be "a_field" (alphabetically first)
+            if let rmpv::Value::Array(pair) = &arr[0] {
+                assert_eq!(pair[0].as_str(), Some("a_field"));
+                assert_eq!(pair[1].as_str(), Some("desc"));
+            }
+            // Second field should be "z_field"
+            if let rmpv::Value::Array(pair) = &arr[1] {
+                assert_eq!(pair[0].as_str(), Some("z_field"));
+                assert_eq!(pair[1].as_str(), Some("asc"));
+            }
+        } else {
+            panic!("sort config should be an array");
+        }
     }
 }
