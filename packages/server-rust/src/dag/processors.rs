@@ -1,11 +1,13 @@
 //! Standard query processors for the DAG execution engine.
 //!
-//! Implements the six standard processors used in query pipelines:
+//! Implements the standard processors used in query pipelines:
 //! - `ScanProcessor`: reads records from `RecordStoreFactory`, emits as `rmpv::Value`
 //! - `FilterProcessor`: evaluates a `PredicateNode` against each item
 //! - `ProjectProcessor`: retains only the specified fields from each item
 //! - `AggregateProcessor`: two-phase GROUP BY aggregation (local pre-aggregate)
 //! - `CombineProcessor`: merges partial aggregates from multiple nodes
+//! - `SortProcessor`: buffers all items, sorts by multi-field sort keys on complete
+//! - `LimitProcessor`: passes through at most N items, then signals completion
 //! - `CollectorProcessor`: sink that accumulates all results
 //!
 //! Each processor has a corresponding supplier (`*ProcessorSupplier`) that
@@ -15,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use topgun_core::messages::base::PredicateNode;
+use topgun_core::messages::base::{PredicateNode, SortDirection};
 
 use crate::dag::types::{Inbox, Outbox, Processor, ProcessorContext, ProcessorSupplier};
 use crate::service::domain::predicate::evaluate_predicate;
@@ -762,6 +764,225 @@ impl ProcessorSupplier for CollectorProcessorSupplier {
 
     fn clone_supplier(&self) -> Box<dyn ProcessorSupplier> {
         Box::new(CollectorProcessorSupplier)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SortProcessor
+// ---------------------------------------------------------------------------
+
+/// Buffers all incoming items and sorts them on `complete()` by the given fields.
+///
+/// Sort comparison is multi-field: for each `(field, direction)` pair in order,
+/// values are compared numerically when possible, falling back to lexicographic
+/// string comparison. Nil/missing field values sort last regardless of direction.
+/// Uses a stable sort to maintain deterministic ordering of equal elements.
+pub struct SortProcessor {
+    sort_fields: Vec<(String, SortDirection)>,
+    buffer: Vec<rmpv::Value>,
+    done: bool,
+}
+
+impl SortProcessor {
+    fn new(sort_fields: Vec<(String, SortDirection)>) -> Self {
+        Self {
+            sort_fields,
+            buffer: Vec::new(),
+            done: false,
+        }
+    }
+}
+
+/// Compare two rmpv values for sorting, with nil/missing sorting last.
+fn compare_sort_values(
+    a: Option<&rmpv::Value>,
+    b: Option<&rmpv::Value>,
+    direction: &SortDirection,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let a_nil = a.is_none() || matches!(a, Some(rmpv::Value::Nil));
+    let b_nil = b.is_none() || matches!(b, Some(rmpv::Value::Nil));
+
+    // Nil/missing values sort last regardless of direction
+    match (a_nil, b_nil) {
+        (true, true) => return Ordering::Equal,
+        (true, false) => return Ordering::Greater,
+        (false, true) => return Ordering::Less,
+        (false, false) => {}
+    }
+
+    let a_val = a.unwrap();
+    let b_val = b.unwrap();
+
+    // Try numeric comparison first
+    let a_num = rmpv_to_f64(a_val);
+    let b_num = rmpv_to_f64(b_val);
+
+    let cmp = match (a_num, b_num) {
+        (Some(af), Some(bf)) => af.partial_cmp(&bf).unwrap_or(Ordering::Equal),
+        (Some(_), None) => {
+            // Numeric values sort before string values in ascending order
+            Ordering::Less
+        }
+        (None, Some(_)) => {
+            Ordering::Greater
+        }
+        (None, None) => {
+            // Fall back to string comparison
+            let a_str = rmpv_to_key_part(a_val);
+            let b_str = rmpv_to_key_part(b_val);
+            a_str.cmp(&b_str)
+        }
+    };
+
+    match direction {
+        SortDirection::Asc => cmp,
+        SortDirection::Desc => cmp.reverse(),
+    }
+}
+
+impl Processor for SortProcessor {
+    fn init(&mut self, _context: &ProcessorContext) -> Result<()> {
+        Ok(())
+    }
+
+    fn process(
+        &mut self,
+        _ordinal: u32,
+        inbox: &mut dyn Inbox,
+        _outbox: &mut dyn Outbox,
+    ) -> Result<bool> {
+        inbox.drain(&mut |item| {
+            self.buffer.push(item);
+        });
+        // Never self-completes; waits for upstream to finish
+        Ok(false)
+    }
+
+    fn complete(&mut self, outbox: &mut dyn Outbox) -> Result<bool> {
+        if self.done {
+            return Ok(true);
+        }
+
+        let sort_fields = &self.sort_fields;
+        self.buffer.sort_by(|a, b| {
+            for (field, direction) in sort_fields {
+                let a_val = get_field(a, field);
+                let b_val = get_field(b, field);
+                let cmp = compare_sort_values(a_val, b_val, direction);
+                if cmp != std::cmp::Ordering::Equal {
+                    return cmp;
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+
+        for item in self.buffer.drain(..) {
+            outbox.offer(0, item);
+        }
+
+        self.done = true;
+        Ok(true)
+    }
+
+    fn is_cooperative(&self) -> bool {
+        true
+    }
+
+    fn close(&mut self) {
+        self.buffer.clear();
+    }
+}
+
+/// Supplier for `SortProcessor`.
+pub struct SortProcessorSupplier {
+    pub sort_fields: Vec<(String, SortDirection)>,
+}
+
+impl ProcessorSupplier for SortProcessorSupplier {
+    fn get(&self, count: u32) -> Vec<Box<dyn Processor>> {
+        (0..count)
+            .map(|_| {
+                Box::new(SortProcessor::new(self.sort_fields.clone())) as Box<dyn Processor>
+            })
+            .collect()
+    }
+
+    fn clone_supplier(&self) -> Box<dyn ProcessorSupplier> {
+        Box::new(SortProcessorSupplier {
+            sort_fields: self.sort_fields.clone(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LimitProcessor
+// ---------------------------------------------------------------------------
+
+/// Passes through at most `limit` items, then signals completion.
+///
+/// Edge case: `limit: 0` immediately returns `true` without polling any items.
+pub struct LimitProcessor {
+    limit: u32,
+    emitted: u32,
+}
+
+impl LimitProcessor {
+    fn new(limit: u32) -> Self {
+        Self { limit, emitted: 0 }
+    }
+}
+
+impl Processor for LimitProcessor {
+    fn init(&mut self, _context: &ProcessorContext) -> Result<()> {
+        Ok(())
+    }
+
+    fn process(
+        &mut self,
+        _ordinal: u32,
+        inbox: &mut dyn Inbox,
+        outbox: &mut dyn Outbox,
+    ) -> Result<bool> {
+        if self.emitted >= self.limit {
+            return Ok(true);
+        }
+
+        while self.emitted < self.limit {
+            let Some(item) = inbox.poll() else { break };
+            outbox.offer(0, item);
+            self.emitted += 1;
+        }
+
+        Ok(self.emitted >= self.limit)
+    }
+
+    fn complete(&mut self, _outbox: &mut dyn Outbox) -> Result<bool> {
+        Ok(true)
+    }
+
+    fn is_cooperative(&self) -> bool {
+        true
+    }
+
+    fn close(&mut self) {}
+}
+
+/// Supplier for `LimitProcessor`.
+pub struct LimitProcessorSupplier {
+    pub limit: u32,
+}
+
+impl ProcessorSupplier for LimitProcessorSupplier {
+    fn get(&self, count: u32) -> Vec<Box<dyn Processor>> {
+        (0..count)
+            .map(|_| Box::new(LimitProcessor::new(self.limit)) as Box<dyn Processor>)
+            .collect()
+    }
+
+    fn clone_supplier(&self) -> Box<dyn ProcessorSupplier> {
+        Box::new(LimitProcessorSupplier { limit: self.limit })
     }
 }
 
