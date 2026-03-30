@@ -1,7 +1,7 @@
 //! Peer connection management for inter-node cluster communication.
 //!
 //! Maintains length-prefixed TCP connections to other cluster nodes,
-//! sends and receives `ClusterMessage` frames serialized with MsgPack.
+//! sends and receives `ClusterMessage` frames serialized with `MsgPack`.
 
 use std::time::SystemTime;
 
@@ -22,7 +22,7 @@ pub enum PeerSendError {
     NotConnected,
     /// The peer's write channel has been closed.
     ChannelClosed,
-    /// MsgPack serialization failed.
+    /// `MsgPack` serialization failed.
     Serialize(rmp_serde::encode::Error),
 }
 
@@ -55,6 +55,12 @@ pub struct PeerConnection {
 /// management and message broadcasting.
 pub struct PeerConnectionMap(DashMap<String, PeerConnection>);
 
+impl Default for PeerConnectionMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PeerConnectionMap {
     /// Creates a new empty peer connection map.
     #[must_use]
@@ -64,6 +70,7 @@ impl PeerConnectionMap {
 
     /// Inserts a peer connection, capturing the current system time as `connected_at_ms`.
     pub fn insert(&self, node_id: String, tx: mpsc::UnboundedSender<Vec<u8>>) {
+        #[allow(clippy::cast_possible_truncation)]
         let connected_at_ms = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
@@ -80,11 +87,18 @@ impl PeerConnectionMap {
     }
 
     /// Removes and returns the peer connection for the given node ID.
+    #[must_use]
     pub fn remove(&self, node_id: &str) -> Option<PeerConnection> {
         self.0.remove(node_id).map(|(_, conn)| conn)
     }
 
     /// Serializes a `ClusterMessage` and sends it to a specific peer.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PeerSendError::NotConnected` if the peer is not in the map,
+    /// `PeerSendError::Serialize` if serialization fails, or
+    /// `PeerSendError::ChannelClosed` if the peer's write channel is closed.
     pub fn send_to(&self, node_id: &str, msg: &ClusterMessage) -> Result<(), PeerSendError> {
         let entry = self.0.get(node_id).ok_or(PeerSendError::NotConnected)?;
         let bytes = rmp_serde::to_vec_named(msg).map_err(PeerSendError::Serialize)?;
@@ -107,7 +121,7 @@ impl PeerConnectionMap {
             }
         };
 
-        for entry in self.0.iter() {
+        for entry in &self.0 {
             if exclude == Some(entry.key().as_str()) {
                 continue;
             }
