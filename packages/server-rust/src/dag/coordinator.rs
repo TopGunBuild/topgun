@@ -340,14 +340,16 @@ impl ClusterQueryCoordinator {
 ///
 /// Maps `ProcessorType` to concrete supplier implementations. Config values are
 /// extracted from `VertexDescriptor::config` where needed.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn make_supplier_from_descriptor(
     vd: &VertexDescriptor,
     factory: Arc<RecordStoreFactory>,
 ) -> Result<Box<dyn crate::dag::types::ProcessorSupplier>> {
     use crate::dag::processors::{
         AggregateProcessorSupplier, CollectorProcessorSupplier, FilterProcessorSupplier,
-        ScanProcessorSupplier,
+        LimitProcessorSupplier, ScanProcessorSupplier, SortProcessorSupplier,
     };
+    use topgun_core::messages::base::SortDirection;
 
     match vd.processor_type {
         ProcessorType::Scan => {
@@ -439,12 +441,45 @@ pub(crate) fn make_supplier_from_descriptor(
                 vd.processor_type
             ))
         }
-        // Sort and Limit suppliers are wired below after processors are implemented.
-        ProcessorType::Sort | ProcessorType::Limit => {
-            Err(anyhow!(
-                "processor type {:?} is not yet wired in make_supplier_from_descriptor",
-                vd.processor_type
-            ))
+        ProcessorType::Sort => {
+            let sort_fields = vd
+                .config
+                .as_ref()
+                .and_then(|c| {
+                    if let rmpv::Value::Array(arr) = c {
+                        let fields: Vec<(String, SortDirection)> = arr
+                            .iter()
+                            .filter_map(|entry| {
+                                if let rmpv::Value::Array(pair) = entry {
+                                    if pair.len() == 2 {
+                                        let field = pair[0].as_str()?.to_string();
+                                        let dir = match pair[1].as_str()? {
+                                            "desc" => SortDirection::Desc,
+                                            _ => SortDirection::Asc,
+                                        };
+                                        return Some((field, dir));
+                                    }
+                                }
+                                None
+                            })
+                            .collect();
+                        Some(fields)
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| anyhow!("sort vertex missing valid sort_fields config"))?;
+            Ok(Box::new(SortProcessorSupplier { sort_fields }))
+        }
+        ProcessorType::Limit => {
+            let limit_u64 = vd
+                .config
+                .as_ref()
+                .and_then(rmpv::Value::as_u64)
+                .ok_or_else(|| anyhow!("limit vertex missing valid limit config"))?;
+            let limit = u32::try_from(limit_u64)
+                .map_err(|_| anyhow!("limit value {limit_u64} exceeds u32::MAX"))?;
+            Ok(Box::new(LimitProcessorSupplier { limit }))
         }
     }
 }
@@ -854,5 +889,78 @@ mod tests {
         assignment.insert("node-2".to_string(), vec![2u32, 3]);
         let q = Query::default();
         assert!(QueryToDagConverter::needs_distribution(&q, &assignment));
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC #10: make_supplier_from_descriptor returns valid Sort/Limit suppliers
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn make_supplier_sort_returns_valid_supplier() {
+        use crate::dag::types::VertexDescriptor;
+        use super::make_supplier_from_descriptor;
+
+        let sort_config = rmpv::Value::Array(vec![
+            rmpv::Value::Array(vec![
+                rmpv::Value::String("age".into()),
+                rmpv::Value::String("desc".into()),
+            ]),
+        ]);
+
+        let vd = VertexDescriptor {
+            name: "sort".to_string(),
+            local_parallelism: 1,
+            processor_type: ProcessorType::Sort,
+            preferred_partitions: None,
+            config: Some(sort_config),
+        };
+
+        let factory = make_record_store_factory();
+        let supplier = make_supplier_from_descriptor(&vd, factory);
+        assert!(supplier.is_ok(), "sort supplier should be created successfully");
+
+        let processors = supplier.unwrap().get(1);
+        assert_eq!(processors.len(), 1);
+    }
+
+    #[test]
+    fn make_supplier_limit_returns_valid_supplier() {
+        use crate::dag::types::VertexDescriptor;
+        use super::make_supplier_from_descriptor;
+
+        let vd = VertexDescriptor {
+            name: "limit".to_string(),
+            local_parallelism: 1,
+            processor_type: ProcessorType::Limit,
+            preferred_partitions: None,
+            config: Some(rmpv::Value::Integer(rmpv::Integer::from(10u64))),
+        };
+
+        let factory = make_record_store_factory();
+        let supplier = make_supplier_from_descriptor(&vd, factory);
+        assert!(supplier.is_ok(), "limit supplier should be created successfully");
+
+        let processors = supplier.unwrap().get(1);
+        assert_eq!(processors.len(), 1);
+    }
+
+    // ---------------------------------------------------------------------------
+    // AC #11: ProcessorType::Sort and ProcessorType::Limit MsgPack roundtrip
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn processor_type_sort_roundtrip() {
+        let pt = ProcessorType::Sort;
+        let bytes = rmp_serde::to_vec_named(&pt).expect("serialize");
+        let decoded: ProcessorType = rmp_serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(decoded, ProcessorType::Sort);
+    }
+
+    #[test]
+    fn processor_type_limit_roundtrip() {
+        let pt = ProcessorType::Limit;
+        let bytes = rmp_serde::to_vec_named(&pt).expect("serialize");
+        let decoded: ProcessorType = rmp_serde::from_slice(&bytes).expect("deserialize");
+        assert_eq!(decoded, ProcessorType::Limit);
     }
 }
