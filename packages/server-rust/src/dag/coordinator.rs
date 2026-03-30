@@ -439,6 +439,13 @@ pub(crate) fn make_supplier_from_descriptor(
                 vd.processor_type
             ))
         }
+        // Sort and Limit suppliers are wired below after processors are implemented.
+        ProcessorType::Sort | ProcessorType::Limit => {
+            Err(anyhow!(
+                "processor type {:?} is not yet wired in make_supplier_from_descriptor",
+                vd.processor_type
+            ))
+        }
     }
 }
 

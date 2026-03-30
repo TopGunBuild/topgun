@@ -38,6 +38,8 @@ pub enum ProcessorType {
     Collector,
     NetworkSender,
     NetworkReceiver,
+    Sort,
+    Limit,
 }
 
 // ---------------------------------------------------------------------------
