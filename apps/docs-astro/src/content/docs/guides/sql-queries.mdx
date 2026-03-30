@@ -1,7 +1,7 @@
 ---
 title: SQL Queries
 description: Query your data with SQL using Apache DataFusion. Supports SELECT, WHERE, GROUP BY, ORDER BY, and aggregate functions on map data.
-order: 13
+order: 14
 ---
 
 import CodeBlock from '../../../components/docs/CodeBlock.astro';
@@ -226,7 +226,7 @@ SQL queries use a simple request/response message pair over the existing WebSock
 
 ## Supported SQL Syntax
 
-DataFusion supports a broad SQL dialect. The subset relevant to TopGun's single-map, single-node usage is listed below. For the full grammar see [datafusion.apache.org](https://datafusion.apache.org/user-guide/sql/index.html).
+DataFusion supports a broad SQL dialect. The subset relevant to TopGun's single-map usage is listed below (aggregation queries automatically execute distributed across the cluster). For the full grammar see [datafusion.apache.org](https://datafusion.apache.org/user-guide/sql/index.html).
 
 ### Clauses
 
@@ -300,15 +300,62 @@ Given a `users` map with fields `country` (string), `age` (number), `plan` (stri
   <CodeBlock title="Combined query" language="sql" code={exampleCombinedCode} />
 </div>
 
+## Distributed Execution
+
+When a SQL query includes `GROUP BY` or aggregate functions (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`), TopGun automatically fans the query out across all cluster nodes using a DAG (directed acyclic graph) execution pipeline. This means aggregation queries see data from the entire cluster, not just the local node.
+
+**How it works:**
+
+1. The coordinator node compiles the SQL into a DAG plan
+2. Partition-specific scan + aggregate tasks are dispatched to the nodes that own the data
+3. Each node runs its partial aggregation locally and streams results back
+4. The coordinator merges partial results, then applies final `ORDER BY` and `LIMIT`
+
+Simple `SELECT`/`WHERE` queries without aggregation still execute locally on the connected node via DataFusion.
+
+```
+                         ┌──────────────┐
+                         │    Client    │
+                         └──────┬───────┘
+                                │ SQL query
+                                ▼
+                         ┌──────────────┐
+                         │ Coordinator  │
+                         │  (compile    │
+                         │   DAG plan)  │
+                         └──┬───┬───┬───┘
+                            │   │   │  dispatch sub-plans
+                   ┌────────┘   │   └────────┐
+                   ▼            ▼            ▼
+            ┌────────────┐┌────────────┐┌────────────┐
+            │  Node A    ││  Node B    ││  Node C    │
+            │ scan + agg ││ scan + agg ││ scan + agg │
+            └─────┬──────┘└─────┬──────┘└─────┬──────┘
+                  │             │             │
+                  └─────────────┼─────────────┘
+                                │ partial results
+                                ▼
+                         ┌──────────────┐
+                         │ Coordinator  │
+                         │  merge +     │
+                         │  sort/limit  │
+                         └──────┬───────┘
+                                │ final result
+                                ▼
+                         ┌──────────────┐
+                         │    Client    │
+                         └──────────────┘
+```
+
+<div className="bg-brand-subtle/10 border-l-4 border-brand-subtle p-4 my-4 not-prose">
+  <p className="text-sm text-brand">
+    For a detailed explanation of the DAG execution pipeline, partition-aware routing, and query type comparison, see the <a href="/docs/guides/distributed-queries" className="underline hover:no-underline">Distributed Queries</a> guide.
+  </p>
+</div>
+
 ## Limitations
 
-<div className="grid md:grid-cols-2 gap-6 mb-8 not-prose">
-  <FeatureCard
-    icon={AlertTriangle}
-    iconColor="text-orange-500"
-    title="Single-Node Only"
-    description="SQL queries execute against the local node's data. Distributed SQL across cluster nodes is not yet supported."
-  />
+<div className="grid md:grid-cols-1 gap-6 mb-8 not-prose">
   <FeatureCard
     icon={AlertTriangle}
     iconColor="text-orange-500"
@@ -319,7 +366,6 @@ Given a `users` map with fields `country` (string), `age` (number), `plan` (stri
 
 The full list of current limitations:
 
-- **Single-node only** — SQL queries execute against the local node's data. Distributed SQL across cluster nodes is not yet supported.
 - **No cross-map JOINs** — each SQL query targets a single map. JOINs between different maps are planned for a future release.
 - **No live SQL subscriptions** — SQL queries are one-shot request/response. For real-time updates, use predicate-based [live queries](/docs/guides/live-queries).
 - **Schema required** — maps without a registered schema cannot be queried via SQL. The server returns `error: "SchemaRequired"` for unregistered maps.
@@ -333,10 +379,10 @@ The full list of current limitations:
 </div>
 
 <div className="flex justify-between pt-10 mt-10 border-t border-card-border not-prose">
-  <a href="/docs/guides/live-queries" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
+  <a href="/docs/guides/distributed-queries" className="group flex flex-col gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
     <span className="text-xs text-neutral-500">Previous</span>
     <div className="flex items-center gap-2 text-foreground font-semibold">
-      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Live Queries
+      <ChevronRight className="w-4 h-4 rotate-180 group-hover:-translate-x-1 transition-transform" /> Distributed Queries
     </div>
   </a>
   <a href="/docs/guides/schema" className="group flex flex-col items-end gap-1 px-6 py-4 rounded-lg border border-card-border hover:border-neutral-400 dark:hover:border-neutral-700 transition-colors">
