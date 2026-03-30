@@ -46,9 +46,10 @@ pub struct ClusterFormationService {
     pub peers: Arc<PeerConnectionMap>,
     pub config: Arc<ClusterConfig>,
     pub local_member: MemberInfo,
-    /// Channel for forwarding unhandled messages to SPEC-165b and existing dispatch.
-    /// Intentionally unbounded to avoid backpressure stalling the per-peer read loop
-    /// -- cluster protocol messages are small and bounded by cluster size.
+    /// Channel for forwarding non-formation messages (heartbeats, DAG ops, etc.)
+    /// to the dispatch layer for handling. Intentionally unbounded to avoid
+    /// backpressure stalling the per-peer read loop -- cluster protocol messages
+    /// are small and bounded by cluster size.
     pub inbound_tx: mpsc::UnboundedSender<InboundClusterMessage>,
     /// Serializes join request processing to prevent stale-view races from concurrent joiners.
     join_mutex: Mutex<()>,
@@ -260,7 +261,16 @@ impl ClusterFormationService {
                 match TcpStream::connect(seed_addr).await {
                     Ok(stream) => {
                         info!(seed = %seed_addr, "Connected to seed node");
-                        if self.send_join_request(stream, seed_addr).await {
+                        if let Some((stream, master_node_id)) =
+                            self.send_join_request(stream, seed_addr).await
+                        {
+                            // Hand off the TCP connection to per-peer handler so both
+                            // sides retain a persistent peer connection
+                            let this = Arc::clone(self);
+                            tokio::spawn(async move {
+                                this.handle_peer_connection(stream, Some(master_node_id))
+                                    .await;
+                            });
                             return; // Successfully joined
                         }
                         // Join request failed (rejected or connection lost), try next seed
@@ -289,10 +299,14 @@ impl ClusterFormationService {
     }
 
     /// Sends a `JoinRequest` to a seed node over a newly established TCP connection.
-    /// Returns `true` if join was successful.
-    async fn send_join_request(&self, stream: TcpStream, seed_addr: &str) -> bool {
-        let framed = Framed::new(stream, LengthDelimitedCodec::new());
-        let (mut sink, mut stream_reader) = framed.split();
+    /// Returns `Some((TcpStream, master_node_id))` on successful join so the caller
+    /// can hand off the stream to `handle_peer_connection` for persistent connectivity.
+    async fn send_join_request(
+        &self,
+        stream: TcpStream,
+        seed_addr: &str,
+    ) -> Option<(TcpStream, String)> {
+        let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
 
         let join_req = ClusterMessage::JoinRequest(JoinRequestPayload {
             node_id: self.local_member.node_id.clone(),
@@ -308,50 +322,70 @@ impl ClusterFormationService {
             Ok(b) => b,
             Err(e) => {
                 warn!("Failed to serialize JoinRequest: {e}");
-                return false;
+                return None;
             }
         };
 
-        if sink.send(bytes.into()).await.is_err() {
+        if framed.send(bytes.into()).await.is_err() {
             warn!(seed = %seed_addr, "Failed to send JoinRequest to seed");
-            return false;
+            return None;
         }
 
         // Wait for JoinResponse
-        match stream_reader.next().await {
+        match framed.next().await {
             Some(Ok(frame)) => {
                 let msg: ClusterMessage = match rmp_serde::from_slice(&frame) {
                     Ok(m) => m,
                     Err(e) => {
                         warn!(seed = %seed_addr, "Failed to deserialize seed response: {e}");
-                        return false;
+                        return None;
                     }
                 };
 
                 if let ClusterMessage::JoinResponse(response) = msg {
                     if response.accepted {
                         info!(seed = %seed_addr, "Join accepted by seed node");
+
+                        // Extract master node_id from the received members view
+                        let master_node_id = response
+                            .members_view
+                            .as_ref()
+                            .and_then(|v| v.master())
+                            .map(|m| m.node_id.clone());
+
                         self.apply_join_response(&response);
-                        return true;
+
+                        if let Some(node_id) = master_node_id {
+                            // Recover the raw TcpStream so the caller can hand it off
+                            // to handle_peer_connection for a persistent read/write loop.
+                            // The codec's internal buffer is empty after reading a complete
+                            // frame, so no data is lost.
+                            let stream = framed.into_inner();
+                            return Some((stream, node_id));
+                        }
+
+                        // Accepted but no master in view (shouldn't happen in practice)
+                        warn!(seed = %seed_addr, "Join accepted but no master in members view");
+                        return None;
                     }
                     warn!(
                         seed = %seed_addr,
                         reason = ?response.reject_reason,
                         "Join rejected by seed node"
                     );
-                    return false;
+                    return None;
                 }
 
                 warn!(seed = %seed_addr, "Unexpected response from seed (expected JoinResponse)");
-                false
+                None
             }
             Some(Err(e)) => {
                 warn!(seed = %seed_addr, "Error reading seed response: {e}");
-                false
+                None
             }
             None => {
                 warn!(seed = %seed_addr, "Seed connection closed before response");
-                false
+                None
             }
         }
     }
