@@ -1216,4 +1216,304 @@ mod tests {
         let second = proc.take_results();
         assert!(second.is_empty(), "take_results should clear the vec");
     }
+
+    // --- SortProcessor ---
+
+    #[test]
+    fn sort_ascending_by_age() {
+        let mut proc = SortProcessor::new(vec![
+            ("age".to_string(), SortDirection::Asc),
+        ]);
+        let ctx = make_context();
+        proc.init(&ctx).unwrap();
+
+        let mut inbox = VecDequeInbox::new(16);
+        inbox.push(make_map_item(&[("age", rmpv::Value::Integer(30.into()))]));
+        inbox.push(make_map_item(&[("age", rmpv::Value::Integer(10.into()))]));
+        inbox.push(make_map_item(&[("age", rmpv::Value::Integer(20.into()))]));
+
+        let mut outbox = VecDequeOutbox::new(1, 16);
+        let done = proc.process(0, &mut inbox, &mut outbox).unwrap();
+        assert!(!done, "sort should not self-complete during process");
+
+        let mut emit_outbox = VecDequeOutbox::new(1, 16);
+        let done = proc.complete(&mut emit_outbox).unwrap();
+        assert!(done);
+
+        let items: Vec<_> = emit_outbox.drain_bucket(0).collect();
+        assert_eq!(items.len(), 3);
+        assert_eq!(get_f64_field(&items[0], "age").unwrap() as i64, 10);
+        assert_eq!(get_f64_field(&items[1], "age").unwrap() as i64, 20);
+        assert_eq!(get_f64_field(&items[2], "age").unwrap() as i64, 30);
+    }
+
+    #[test]
+    fn sort_descending_by_age() {
+        let mut proc = SortProcessor::new(vec![
+            ("age".to_string(), SortDirection::Desc),
+        ]);
+        let ctx = make_context();
+        proc.init(&ctx).unwrap();
+
+        let mut inbox = VecDequeInbox::new(16);
+        inbox.push(make_map_item(&[("age", rmpv::Value::Integer(30.into()))]));
+        inbox.push(make_map_item(&[("age", rmpv::Value::Integer(10.into()))]));
+        inbox.push(make_map_item(&[("age", rmpv::Value::Integer(20.into()))]));
+
+        let mut outbox = VecDequeOutbox::new(1, 16);
+        proc.process(0, &mut inbox, &mut outbox).unwrap();
+
+        let mut emit_outbox = VecDequeOutbox::new(1, 16);
+        proc.complete(&mut emit_outbox).unwrap();
+
+        let items: Vec<_> = emit_outbox.drain_bucket(0).collect();
+        assert_eq!(items.len(), 3);
+        assert_eq!(get_f64_field(&items[0], "age").unwrap() as i64, 30);
+        assert_eq!(get_f64_field(&items[1], "age").unwrap() as i64, 20);
+        assert_eq!(get_f64_field(&items[2], "age").unwrap() as i64, 10);
+    }
+
+    #[test]
+    fn sort_multi_field_status_asc_then_age_desc() {
+        let mut proc = SortProcessor::new(vec![
+            ("status".to_string(), SortDirection::Asc),
+            ("age".to_string(), SortDirection::Desc),
+        ]);
+        let ctx = make_context();
+        proc.init(&ctx).unwrap();
+
+        let mut inbox = VecDequeInbox::new(16);
+        inbox.push(make_map_item(&[
+            ("status", rmpv::Value::String("b".into())),
+            ("age", rmpv::Value::Integer(25.into())),
+        ]));
+        inbox.push(make_map_item(&[
+            ("status", rmpv::Value::String("a".into())),
+            ("age", rmpv::Value::Integer(20.into())),
+        ]));
+        inbox.push(make_map_item(&[
+            ("status", rmpv::Value::String("a".into())),
+            ("age", rmpv::Value::Integer(30.into())),
+        ]));
+        inbox.push(make_map_item(&[
+            ("status", rmpv::Value::String("b".into())),
+            ("age", rmpv::Value::Integer(10.into())),
+        ]));
+
+        let mut outbox = VecDequeOutbox::new(1, 16);
+        proc.process(0, &mut inbox, &mut outbox).unwrap();
+
+        let mut emit_outbox = VecDequeOutbox::new(1, 16);
+        proc.complete(&mut emit_outbox).unwrap();
+
+        let items: Vec<_> = emit_outbox.drain_bucket(0).collect();
+        assert_eq!(items.len(), 4);
+
+        // status="a" first (asc), then within "a" age desc: 30, 20
+        assert_eq!(get_field(&items[0], "status").unwrap().as_str(), Some("a"));
+        assert_eq!(get_f64_field(&items[0], "age").unwrap() as i64, 30);
+        assert_eq!(get_field(&items[1], "status").unwrap().as_str(), Some("a"));
+        assert_eq!(get_f64_field(&items[1], "age").unwrap() as i64, 20);
+
+        // status="b" second, age desc: 25, 10
+        assert_eq!(get_field(&items[2], "status").unwrap().as_str(), Some("b"));
+        assert_eq!(get_f64_field(&items[2], "age").unwrap() as i64, 25);
+        assert_eq!(get_field(&items[3], "status").unwrap().as_str(), Some("b"));
+        assert_eq!(get_f64_field(&items[3], "age").unwrap() as i64, 10);
+    }
+
+    #[test]
+    fn sort_nil_missing_fields_sort_last() {
+        let mut proc = SortProcessor::new(vec![
+            ("score".to_string(), SortDirection::Asc),
+        ]);
+        let ctx = make_context();
+        proc.init(&ctx).unwrap();
+
+        let mut inbox = VecDequeInbox::new(16);
+        inbox.push(make_map_item(&[("score", rmpv::Value::Nil)]));
+        inbox.push(make_map_item(&[("score", rmpv::Value::Integer(5.into()))]));
+        inbox.push(make_map_item(&[("name", rmpv::Value::String("no_score".into()))])); // missing field
+        inbox.push(make_map_item(&[("score", rmpv::Value::Integer(1.into()))]));
+
+        let mut outbox = VecDequeOutbox::new(1, 16);
+        proc.process(0, &mut inbox, &mut outbox).unwrap();
+
+        let mut emit_outbox = VecDequeOutbox::new(1, 16);
+        proc.complete(&mut emit_outbox).unwrap();
+
+        let items: Vec<_> = emit_outbox.drain_bucket(0).collect();
+        assert_eq!(items.len(), 4);
+
+        // Non-nil items first in ascending order
+        assert_eq!(get_f64_field(&items[0], "score").unwrap() as i64, 1);
+        assert_eq!(get_f64_field(&items[1], "score").unwrap() as i64, 5);
+
+        // Nil/missing items last
+        let score_2 = get_field(&items[2], "score");
+        let score_3 = get_field(&items[3], "score");
+        let is_nil_or_missing = |v: Option<&rmpv::Value>| {
+            v.is_none() || matches!(v, Some(rmpv::Value::Nil))
+        };
+        assert!(is_nil_or_missing(score_2), "third item should have nil/missing score");
+        assert!(is_nil_or_missing(score_3), "fourth item should have nil/missing score");
+    }
+
+    #[test]
+    fn sort_nil_fields_sort_last_even_with_desc() {
+        let mut proc = SortProcessor::new(vec![
+            ("score".to_string(), SortDirection::Desc),
+        ]);
+        let ctx = make_context();
+        proc.init(&ctx).unwrap();
+
+        let mut inbox = VecDequeInbox::new(16);
+        inbox.push(make_map_item(&[("score", rmpv::Value::Nil)]));
+        inbox.push(make_map_item(&[("score", rmpv::Value::Integer(5.into()))]));
+        inbox.push(make_map_item(&[("score", rmpv::Value::Integer(1.into()))]));
+
+        let mut outbox = VecDequeOutbox::new(1, 16);
+        proc.process(0, &mut inbox, &mut outbox).unwrap();
+
+        let mut emit_outbox = VecDequeOutbox::new(1, 16);
+        proc.complete(&mut emit_outbox).unwrap();
+
+        let items: Vec<_> = emit_outbox.drain_bucket(0).collect();
+        assert_eq!(items.len(), 3);
+
+        // Desc: 5, 1, then nil last
+        assert_eq!(get_f64_field(&items[0], "score").unwrap() as i64, 5);
+        assert_eq!(get_f64_field(&items[1], "score").unwrap() as i64, 1);
+        assert_eq!(get_field(&items[2], "score"), Some(&rmpv::Value::Nil));
+    }
+
+    // --- LimitProcessor ---
+
+    #[test]
+    fn limit_returns_at_most_n_items() {
+        let mut proc = LimitProcessor::new(3);
+        let ctx = make_context();
+        proc.init(&ctx).unwrap();
+
+        let mut inbox = VecDequeInbox::new(16);
+        for i in 0..10i64 {
+            inbox.push(rmpv::Value::Integer(i.into()));
+        }
+
+        let mut outbox = VecDequeOutbox::new(1, 16);
+        let done = proc.process(0, &mut inbox, &mut outbox).unwrap();
+        assert!(done, "limit should signal completion after emitting limit items");
+
+        let items: Vec<_> = outbox.drain_bucket(0).collect();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0], rmpv::Value::Integer(0.into()));
+        assert_eq!(items[1], rmpv::Value::Integer(1.into()));
+        assert_eq!(items[2], rmpv::Value::Integer(2.into()));
+    }
+
+    #[test]
+    fn limit_zero_returns_no_items() {
+        let mut proc = LimitProcessor::new(0);
+        let ctx = make_context();
+        proc.init(&ctx).unwrap();
+
+        let mut inbox = VecDequeInbox::new(8);
+        inbox.push(rmpv::Value::Integer(1.into()));
+        inbox.push(rmpv::Value::Integer(2.into()));
+
+        let mut outbox = VecDequeOutbox::new(1, 8);
+        let done = proc.process(0, &mut inbox, &mut outbox).unwrap();
+        assert!(done, "limit 0 should immediately signal completion");
+
+        let items: Vec<_> = outbox.drain_bucket(0).collect();
+        assert!(items.is_empty(), "limit 0 should emit no items");
+    }
+
+    #[test]
+    fn limit_with_fewer_items_than_limit() {
+        let mut proc = LimitProcessor::new(10);
+        let ctx = make_context();
+        proc.init(&ctx).unwrap();
+
+        let mut inbox = VecDequeInbox::new(8);
+        inbox.push(rmpv::Value::Integer(1.into()));
+        inbox.push(rmpv::Value::Integer(2.into()));
+
+        let mut outbox = VecDequeOutbox::new(1, 8);
+        let done = proc.process(0, &mut inbox, &mut outbox).unwrap();
+        assert!(!done, "should not complete when fewer items than limit");
+
+        let items: Vec<_> = outbox.drain_bucket(0).collect();
+        assert_eq!(items.len(), 2, "all available items should pass through");
+    }
+
+    // --- Sort + Limit integration ---
+
+    #[test]
+    fn sort_then_limit_returns_top_n() {
+        // Simulate sort -> limit pipeline: sort desc by age, limit 2
+        let mut sort = SortProcessor::new(vec![
+            ("age".to_string(), SortDirection::Desc),
+        ]);
+        let ctx = make_context();
+        sort.init(&ctx).unwrap();
+
+        let mut inbox = VecDequeInbox::new(16);
+        inbox.push(make_map_item(&[("age", rmpv::Value::Integer(10.into()))]));
+        inbox.push(make_map_item(&[("age", rmpv::Value::Integer(30.into()))]));
+        inbox.push(make_map_item(&[("age", rmpv::Value::Integer(20.into()))]));
+        inbox.push(make_map_item(&[("age", rmpv::Value::Integer(40.into()))]));
+        inbox.push(make_map_item(&[("age", rmpv::Value::Integer(50.into()))]));
+
+        let mut sort_outbox = VecDequeOutbox::new(1, 16);
+        sort.process(0, &mut inbox, &mut sort_outbox).unwrap();
+
+        let mut sort_emit_outbox = VecDequeOutbox::new(1, 16);
+        sort.complete(&mut sort_emit_outbox).unwrap();
+
+        // Feed sorted output into LimitProcessor
+        let mut limit = LimitProcessor::new(2);
+        limit.init(&ctx).unwrap();
+
+        let mut limit_inbox = VecDequeInbox::new(16);
+        for item in sort_emit_outbox.drain_bucket(0) {
+            limit_inbox.push(item);
+        }
+
+        let mut limit_outbox = VecDequeOutbox::new(1, 16);
+        limit.process(0, &mut limit_inbox, &mut limit_outbox).unwrap();
+
+        let items: Vec<_> = limit_outbox.drain_bucket(0).collect();
+        assert_eq!(items.len(), 2, "limit 2 should return exactly 2 items");
+        assert_eq!(get_f64_field(&items[0], "age").unwrap() as i64, 50);
+        assert_eq!(get_f64_field(&items[1], "age").unwrap() as i64, 40);
+    }
+
+    // --- SortProcessorSupplier ---
+
+    #[test]
+    fn sort_supplier_creates_correct_count() {
+        let supplier = SortProcessorSupplier {
+            sort_fields: vec![("age".to_string(), SortDirection::Asc)],
+        };
+        let processors = supplier.get(3);
+        assert_eq!(processors.len(), 3);
+
+        let cloned = supplier.clone_supplier();
+        let cloned_procs = cloned.get(1);
+        assert_eq!(cloned_procs.len(), 1);
+    }
+
+    // --- LimitProcessorSupplier ---
+
+    #[test]
+    fn limit_supplier_creates_correct_count() {
+        let supplier = LimitProcessorSupplier { limit: 5 };
+        let processors = supplier.get(2);
+        assert_eq!(processors.len(), 2);
+
+        let cloned = supplier.clone_supplier();
+        let cloned_procs = cloned.get(1);
+        assert_eq!(cloned_procs.len(), 1);
+    }
 }
