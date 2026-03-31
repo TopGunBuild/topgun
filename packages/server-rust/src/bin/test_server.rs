@@ -123,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
     let seed_list: Vec<String> = args
         .seed_nodes
         .split(',')
+        .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
