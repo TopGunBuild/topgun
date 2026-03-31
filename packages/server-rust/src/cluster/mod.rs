@@ -8,6 +8,8 @@ pub mod assignment;
 pub mod dispatch;
 pub mod failure_detector;
 pub mod formation;
+pub mod heartbeat;
+pub mod membership_reactor;
 pub mod messages;
 pub mod migration;
 pub mod peer_connection;
@@ -64,6 +66,12 @@ pub use peer_connection::{PeerConnection, PeerConnectionMap, PeerSendError};
 
 // formation
 pub use formation::ClusterFormationService;
+
+// heartbeat
+pub use heartbeat::HeartbeatService;
+
+// membership_reactor
+pub use membership_reactor::MembershipReactor;
 
 // dispatch
 pub use dispatch::{
