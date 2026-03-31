@@ -32,7 +32,7 @@ export interface RoutingResult {
 export interface PartitionRouterEvents {
   'partitionMap:updated': (version: number, changesCount: number) => void;
   'partitionMap:stale': (currentVersion: number, lastRefresh: number) => void;
-  'routing:miss': (key: string, expectedOwner: string, actualOwner: string) => void;
+  'routing:miss': (partitionId: number, expectedOwner: string, actualOwner: string) => void;
 }
 
 export class PartitionRouter {
@@ -54,12 +54,15 @@ export class PartitionRouter {
       ...config,
     };
 
-    // Listen for partition map updates from any connection
+    // Listen for partition map updates and routing errors from any connection
     this.connectionPool.on('message', (nodeId: string, message: any) => {
       if (message.type === 'PARTITION_MAP') {
         this.handlePartitionMap(message as PartitionMapMessage);
       } else if (message.type === 'PARTITION_MAP_DELTA') {
         this.handlePartitionMapDelta(message as PartitionMapDeltaMessage);
+      } else if (message.error?.code === 'NOT_OWNER') {
+        const { partitionId, currentOwner, mapVersion } = message.error.hint;
+        this.handleNotOwnerError(partitionId, currentOwner, mapVersion);
       }
     });
   }
@@ -363,13 +366,14 @@ export class PartitionRouter {
   }
 
   /**
-   * Handle NOT_OWNER error from server
+   * Handle NOT_OWNER error from server -- triggers partition map refresh when the
+   * server has a newer version, keeping client routing in sync after partition rebalancing.
    */
-  public handleNotOwnerError(key: string, actualOwner: string, newMapVersion: number): void {
-    const routing = this.route(key);
-    const expectedOwner = routing?.nodeId ?? 'unknown';
+  public handleNotOwnerError(partitionId: number, actualOwner: string, newMapVersion: number): void {
+    const partition = this.partitionMap?.partitions.find(p => p.partitionId === partitionId);
+    const expectedOwner = partition?.ownerNodeId ?? 'unknown';
 
-    this.emit('routing:miss', key, expectedOwner, actualOwner);
+    this.emit('routing:miss', partitionId, expectedOwner, actualOwner);
 
     // If server has newer map, request it
     if (newMapVersion > this.getMapVersion()) {
