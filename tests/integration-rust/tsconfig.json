@@ -12,7 +12,8 @@
     "noEmit": true,
     "baseUrl": "../..",
     "paths": {
-      "@topgunbuild/core": ["packages/core/src"]
+      "@topgunbuild/core": ["packages/core/src"],
+      "@topgunbuild/client": ["packages/client/src"]
     }
   },
   "include": ["./**/*.ts"],
