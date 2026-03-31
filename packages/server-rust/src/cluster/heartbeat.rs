@@ -160,7 +160,8 @@ impl HeartbeatService {
     /// Handles an inbound `HeartbeatComplaint` (master only).
     ///
     /// If the failure detector also considers the suspected node not alive,
-    /// the master marks it as `Suspect` via the full view update sequence.
+    /// the master marks it as `Suspect`. Complaints only trigger the initial
+    /// suspicion — Dead promotion is handled by the heartbeat tick loop.
     fn handle_complaint(&self, payload: &HeartbeatComplaintPayload) {
         if !self.cluster_state.is_master() {
             return;
@@ -168,7 +169,17 @@ impl HeartbeatService {
 
         let now_ms = now_ms();
         if !self.failure_detector.is_alive(&payload.suspect_id, now_ms) {
-            self.handle_suspect_or_dead(&payload.suspect_id, now_ms);
+            let already_suspected = self.suspected_at.contains_key(&*payload.suspect_id);
+            if !already_suspected {
+                self.suspected_at
+                    .insert(payload.suspect_id.clone(), now_ms);
+                self.apply_node_state_update(
+                    &payload.suspect_id,
+                    NodeState::Suspect,
+                    true,
+                );
+                debug!(node = %payload.suspect_id, "node marked Suspect via complaint");
+            }
         }
     }
 

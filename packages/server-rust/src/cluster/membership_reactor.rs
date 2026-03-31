@@ -84,8 +84,12 @@ impl MembershipReactor {
     fn handle_membership_change(&self) {
         let view = self.cluster_state.current_view();
 
-        // Collect members as owned values for assignment computation.
-        let active_members = view.members.clone();
+        // Collect active members for assignment computation.
+        let active_members: Vec<_> = view
+            .active_members()
+            .into_iter()
+            .cloned()
+            .collect();
 
         let assignments =
             compute_assignment(&active_members, 271, self.config.backup_count);
