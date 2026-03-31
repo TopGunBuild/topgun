@@ -404,18 +404,6 @@ describe('Integration: 3-node cluster smart routing', () => {
         expect(computedPartitionId).toBe(expectedPartitionId);
       }
 
-      // Track NOT_OWNER errors — server should agree with client routing
-      // The Rust server does not currently emit NOT_OWNER errors (not_owner_response()
-      // exists but is never called), so this assertion trivially passes. It serves
-      // as a forward-compatibility guard for when server-side ownership checks are added.
-      let notOwnerReceived = false;
-      const partitionRouter = (clusterClient as any).partitionRouter;
-      partitionRouter.on('routing:miss', () => {
-        notOwnerReceived = true;
-      });
-
-      clusterClient.resetRoutingMetrics();
-
       // Write the key via the cluster so it routes through the partition owner
       const topgun = new TopGunClient({
         cluster: {
@@ -424,6 +412,18 @@ describe('Integration: 3-node cluster smart routing', () => {
         },
         storage: new MemoryStorageAdapter(),
       });
+
+      // Track NOT_OWNER errors — server should agree with client routing
+      // The Rust server does not currently emit NOT_OWNER errors (not_owner_response()
+      // exists but is never called), so this assertion trivially passes. It serves
+      // as a forward-compatibility guard for when server-side ownership checks are added.
+      let notOwnerReceived = false;
+      const internalCluster = (topgun as any).clusterClient;
+      if (internalCluster) {
+        internalCluster.on('routing:miss', () => {
+          notOwnerReceived = true;
+        });
+      }
 
       try {
         const map = topgun.getMap<string, string>('test-hash-compat');
