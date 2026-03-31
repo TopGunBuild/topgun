@@ -47,6 +47,7 @@ madsim = { workspace = true, optional = true }
 datafusion = { version = "45", optional = true }
 arrow = { version = "54", optional = true }
 tantivy = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
 jsonwebtoken = "9"
 subtle = "2"
 utoipa = { version = "5", features = ["axum_extras"] }
