@@ -7,8 +7,6 @@
  * Timeout: 30 s per test (cluster formation is slow).
  */
 
-import './helpers/setup';
-
 import { TopGunClient, ClusterClient } from '@topgunbuild/client';
 import { PARTITION_COUNT, hashString, LWWRecord, ORMapRecord } from '@topgunbuild/core';
 import type { IStorageAdapter, OpLogEntry } from '@topgunbuild/client';
@@ -152,12 +150,6 @@ describe('Integration: 3-node cluster smart routing', () => {
   // Test 2: Direct routing correctness
   // ----------------------------------------------------------------
   test('routes 100 write operations with directRoutes > 0 and partitionMisses === 0', async () => {
-    const clusterClient = new ClusterClient({
-      enabled: true,
-      seedNodes: cluster.seedAddresses,
-      routingMode: 'direct',
-    });
-
     const topgun = new TopGunClient({
       cluster: {
         seeds: cluster.seedAddresses,
@@ -167,13 +159,15 @@ describe('Integration: 3-node cluster smart routing', () => {
     });
 
     try {
-      await clusterClient.connect();
-      await waitUntil(() => clusterClient.isRoutingActive(), 10_000);
+      // Wait for the TopGunClient's internal ClusterClient to become routing-active
+      await waitUntil(() => topgun.isRoutingActive(), 10_000);
+
+      // Access the internal ClusterClient for metrics
+      const internalCluster = (topgun as any).clusterClient as ClusterClient;
+      internalCluster.resetRoutingMetrics();
 
       // Use the topgun client to write 100 keys
       const map = topgun.getMap<string, string>('test-routing');
-
-      clusterClient.resetRoutingMetrics();
 
       for (let i = 0; i < 100; i++) {
         map.set(`key-${i}`, `value-${i}`);
@@ -184,12 +178,11 @@ describe('Integration: 3-node cluster smart routing', () => {
       // Give the sync engine a moment to flush ops
       await waitMs(500);
 
-      const metrics = clusterClient.getRoutingMetrics();
+      const metrics = internalCluster.getRoutingMetrics();
       expect(metrics.directRoutes).toBeGreaterThan(0);
       expect(metrics.partitionMisses).toBe(0);
     } finally {
       topgun.close();
-      clusterClient.close();
     }
   }, 30_000);
 
@@ -237,20 +230,19 @@ describe('Integration: 3-node cluster smart routing', () => {
   // Test 4: Node failover
   // ----------------------------------------------------------------
   test('write succeeds via fallback routing when owning node is stopped', async () => {
-    const clusterClient = new ClusterClient({
-      enabled: true,
-      seedNodes: cluster.seedAddresses,
-      routingMode: 'direct',
+    // Connect with only nodes 0 and 2 as seeds (node 1 will be stopped)
+    const topgun = new TopGunClient({
+      cluster: {
+        seeds: cluster.seedAddresses.filter((_, i) => i !== 1),
+        smartRouting: true,
+      },
+      storage: new MemoryStorageAdapter(),
     });
 
     try {
-      await clusterClient.connect();
-      await waitUntil(() => clusterClient.isRoutingActive(), 10_000);
+      await waitUntil(() => topgun.isRoutingActive(), 10_000);
 
-      // Pick a key that routes to node-1 (index 1) — we'll stop that node
-      const targetKey = 'failover-test-key';
-
-      clusterClient.resetRoutingMetrics();
+      const internalCluster = (topgun as any).clusterClient as ClusterClient;
 
       // Stop node 1 — the node owning some partitions
       await cluster.stopNode(1);
@@ -258,35 +250,23 @@ describe('Integration: 3-node cluster smart routing', () => {
       // Give the cluster a moment to detect the failure
       await waitMs(2_000);
 
-      // Writes should still succeed via fallback to a healthy node
-      const topgun = new TopGunClient({
-        cluster: {
-          seeds: cluster.seedAddresses.filter((_, i) => i !== 1),
-          smartRouting: true,
-        },
-        storage: new MemoryStorageAdapter(),
-      });
+      internalCluster.resetRoutingMetrics();
 
-      try {
-        const map = topgun.getMap<string, string>('test-failover');
-        map.set(targetKey, 'failover-value');
+      // Write to a key; if it was owned by node-1, routing falls back to a healthy node
+      const map = topgun.getMap<string, string>('test-failover');
+      map.set('failover-test-key', 'failover-value');
 
-        await waitMs(1_000);
+      await waitMs(1_000);
 
-        // The operation should have been routed (direct or fallback)
-        const metrics = clusterClient.getRoutingMetrics();
-        const totalRouted = metrics.directRoutes + metrics.fallbackRoutes;
-        // Write was attempted; not necessarily routed through this clusterClient
-        // but no crash/exception means the write was accepted locally
-        expect(metrics.partitionMisses).toBe(0);
-      } finally {
-        topgun.close();
-      }
+      const metrics = internalCluster.getRoutingMetrics();
+      // The write was routed (direct to live owner or fallback if owner was node-1)
+      const totalRouted = metrics.directRoutes + metrics.fallbackRoutes;
+      expect(totalRouted).toBeGreaterThan(0);
+      expect(metrics.partitionMisses).toBe(0);
     } finally {
-      clusterClient.close();
+      topgun.close();
       // Restart node 1 for subsequent tests
       await cluster.restartNode(1);
-      // Give node 1 time to rejoin
       await waitMs(3_000);
     }
   }, 30_000);
@@ -329,11 +309,29 @@ describe('Integration: 3-node cluster smart routing', () => {
         expect(node1Partitions.length).toBe(0);
       }
 
-      // A write to the same key should now use direct routing (new owner)
+      // A write after rebalance should route to the new owner (direct, no misses)
       clusterClient.resetRoutingMetrics();
-      // Metrics check verifies routing remains healthy after rebalance
-      const metrics = clusterClient.getRoutingMetrics();
-      expect(metrics.partitionMisses).toBe(0);
+
+      const topgun = new TopGunClient({
+        cluster: {
+          seeds: cluster.seedAddresses.filter((_, i) => i !== 1),
+          smartRouting: true,
+        },
+        storage: new MemoryStorageAdapter(),
+      });
+      try {
+        await waitUntil(() => topgun.isRoutingActive(), 10_000);
+        const map = topgun.getMap<string, string>('test-rebalance');
+        map.set('post-rebalance-key', 'rebalanced-value');
+        await waitMs(1_000);
+
+        const internalCluster = (topgun as any).clusterClient as ClusterClient;
+        const metrics = internalCluster.getRoutingMetrics();
+        expect(metrics.directRoutes).toBeGreaterThan(0);
+        expect(metrics.partitionMisses).toBe(0);
+      } finally {
+        topgun.close();
+      }
     } finally {
       clusterClient.close();
       // Restart node 1 for subsequent tests
@@ -411,7 +409,8 @@ describe('Integration: 3-node cluster smart routing', () => {
       // exists but is never called), so this assertion trivially passes. It serves
       // as a forward-compatibility guard for when server-side ownership checks are added.
       let notOwnerReceived = false;
-      clusterClient.on('routing:miss', () => {
+      const partitionRouter = (clusterClient as any).partitionRouter;
+      partitionRouter.on('routing:miss', () => {
         notOwnerReceived = true;
       });
 

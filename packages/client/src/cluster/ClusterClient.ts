@@ -855,6 +855,7 @@ export class ClusterClient implements IConnectionProvider {
 
     this.partitionRouter.on('routing:miss', (partitionId: number, expected: string, actual: string) => {
       logger.debug({ partitionId, expected, actual }, 'Routing miss detected');
+      this.emit('routing:miss', partitionId, expected, actual);
     });
   }
 
