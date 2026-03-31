@@ -5,6 +5,10 @@
 //!
 //! Uses `NullDataStore` (no `PostgreSQL` dependency) and JWT secret `test-e2e-secret`
 //! to match the TS test helpers.
+//!
+//! Optional cluster mode: when `--seed-nodes` is provided, the server participates
+//! in cluster formation, heartbeat-based failure detection, and partition rebalancing.
+//! Running without `--seed-nodes` preserves the original single-node behavior.
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
@@ -12,14 +16,19 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::routing::get;
+use clap::Parser;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use tokio::net::TcpListener;
 use tokio::signal;
+use tokio::sync::{mpsc, watch};
 use topgun_core::{SystemClock, HLC};
 
-use topgun_server::cluster::state::ClusterState;
-use topgun_server::cluster::types::ClusterConfig;
+use topgun_server::cluster::failure_detector::PhiAccrualConfig;
+use topgun_server::cluster::peer_connection::PeerConnectionMap;
+use topgun_server::cluster::state::{ClusterState, InboundClusterMessage, MigrationCommand};
+use topgun_server::cluster::types::{ClusterConfig, MemberInfo, NodeState};
+use topgun_server::cluster::{ClusterFormationService, HeartbeatService, MembershipReactor, PhiAccrualFailureDetector};
 use topgun_server::network::config::NetworkConfig;
 use topgun_server::network::connection::ConnectionRegistry;
 use topgun_server::network::handlers::AppState;
@@ -47,7 +56,48 @@ use topgun_server::storage::impls::StorageConfig;
 use topgun_server::storage::merkle_sync::{MerkleObserverFactory, MerkleSyncManager};
 use topgun_server::storage::mutation_observer::MutationObserver;
 
+// ---------------------------------------------------------------------------
+// CLI argument definition
+// ---------------------------------------------------------------------------
+
+/// Test server for integration tests and multi-node cluster validation.
+///
+/// When `--seed-nodes` is empty, the server runs as a standalone single-node
+/// instance (backward-compatible with existing integration tests). When
+/// `--seed-nodes` lists peer addresses, the server participates in cluster
+/// formation, heartbeat failure detection, and partition rebalancing.
+#[derive(Parser, Debug)]
+#[command(name = "test-server")]
+struct Args {
+    /// Unique identifier for this node in the cluster.
+    #[arg(long, default_value = "test-server-node")]
+    node_id: String,
+
+    /// Host name or IP that peers use to reach this node's cluster port.
+    /// Also used as the `MemberInfo.host` in join handshakes.
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+
+    /// Client WebSocket port. Reads PORT env var if not set; 0 means OS-assigned.
+    #[arg(long, env = "PORT", default_value_t = 0)]
+    port: u16,
+
+    /// Inter-node cluster TCP port. 0 means OS-assigned.
+    #[arg(long, default_value_t = 0)]
+    cluster_port: u16,
+
+    /// Comma-separated list of seed node addresses for cluster formation.
+    /// Example: "127.0.0.1:11001,127.0.0.1:11002". Empty string = single-node mode.
+    #[arg(long, default_value = "")]
+    seed_nodes: String,
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing for debug output
     tracing_subscriber::fmt()
@@ -57,12 +107,156 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let (classify_svc, dispatcher, connection_registry) = build_services();
+    let args = Args::parse();
+    let node_id = args.node_id.clone();
+
+    // Bind the client WebSocket listener first so we know the actual port.
+    // Bind to all interfaces so inter-container traffic (Docker networking) reaches
+    // the server. TOPGUN_BIND_ADDR overrides the default for environments that
+    // require loopback-only binding.
+    let bind_addr = std::env::var("TOPGUN_BIND_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0".to_string());
+    let listener = TcpListener::bind(format!("{bind_addr}:{}", args.port)).await?;
+    let bound_port = listener.local_addr()?.port();
+
+    // Parse seed nodes, filtering empty strings produced by splitting an empty value.
+    let seed_list: Vec<String> = args
+        .seed_nodes
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    let cluster_mode = !seed_list.is_empty();
+
+    // Create a shutdown watch channel used to coordinate graceful termination of
+    // cluster background services (HeartbeatService, etc.).
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    let (cluster_state_for_services, cluster_state_for_app) = if cluster_mode {
+        // --- Cluster mode ---
+
+        // Bind the inter-node TCP listener on the cluster port.
+        let cluster_listener =
+            TcpListener::bind(format!("0.0.0.0:{}", args.cluster_port)).await?;
+        let bound_cluster_port = cluster_listener.local_addr()?.port();
+
+        let cluster_config = Arc::new(ClusterConfig {
+            seed_addresses: seed_list,
+            ..ClusterConfig::default()
+        });
+
+        let (cs, change_rx) =
+            ClusterState::new(Arc::clone(&cluster_config), node_id.clone());
+        let cluster_state = Arc::new(cs);
+
+        let peers = Arc::new(PeerConnectionMap::new());
+
+        // The inbound message channel feeds non-formation frames (heartbeats, DAG ops)
+        // from the per-peer read loops into the routing layer.
+        let (inbound_tx, inbound_rx) = mpsc::unbounded_channel::<InboundClusterMessage>();
+
+        // Heartbeat-specific inbound channel: a routing task selects heartbeat and
+        // complaint frames out of the shared inbound stream and forwards them here.
+        let (heartbeat_tx, heartbeat_rx) = mpsc::unbounded_channel::<topgun_server::cluster::ClusterMessage>();
+
+        // Spawn the routing task that fans out inbound frames to the heartbeat channel.
+        // All other variants are currently discarded; future dispatch integration will
+        // route them to the cluster dispatch loop instead.
+        tokio::spawn(async move {
+            let mut rx = inbound_rx;
+            while let Some(msg) = rx.recv().await {
+                match msg.message {
+                    topgun_server::cluster::ClusterMessage::Heartbeat(_)
+                    | topgun_server::cluster::ClusterMessage::HeartbeatComplaint(_) => {
+                        let _ = heartbeat_tx.send(msg.message);
+                    }
+                    _ => {
+                        // Non-heartbeat frames: no dispatch service wired yet.
+                    }
+                }
+            }
+        });
+
+        // Migration command channel; the receiver is retained until a dedicated
+        // migration service is wired in a follow-up spec.
+        let (migration_tx, _migration_rx) = mpsc::channel::<MigrationCommand>(64);
+
+        // Build the local member descriptor used in the join handshake.
+        let local_member = MemberInfo {
+            node_id: node_id.clone(),
+            host: args.host.clone(),
+            client_port: bound_port,
+            cluster_port: bound_cluster_port,
+            state: NodeState::Joining,
+            join_version: 0,
+        };
+
+        // Wire up the cluster formation service (seed discovery + inbound listener).
+        let formation_svc = ClusterFormationService::new(
+            Arc::clone(&cluster_state),
+            Arc::clone(&peers),
+            Arc::clone(&cluster_config),
+            local_member,
+            inbound_tx,
+        );
+        Arc::new(formation_svc).start(cluster_listener);
+
+        // Wire up the heartbeat service (phi-accrual failure detection).
+        let failure_detector = Arc::new(PhiAccrualFailureDetector::new(PhiAccrualConfig {
+            phi_threshold: cluster_config.phi_threshold,
+            max_sample_size: cluster_config.max_sample_size,
+            min_std_dev_ms: cluster_config.min_std_dev_ms,
+            max_no_heartbeat_ms: cluster_config.max_no_heartbeat_ms,
+            heartbeat_interval_ms: cluster_config.heartbeat_interval_ms,
+        }));
+        let heartbeat_svc = HeartbeatService {
+            cluster_state: Arc::clone(&cluster_state),
+            peers: Arc::clone(&peers),
+            failure_detector,
+            config: Arc::clone(&cluster_config),
+            suspected_at: DashMap::new(),
+        };
+        tokio::spawn(Arc::new(heartbeat_svc).run(heartbeat_rx, shutdown_rx));
+
+        // Build domain services, sharing the cluster_state with CoordinationService.
+        let (classify_svc, dispatcher, connection_registry) =
+            build_services(node_id.clone(), Arc::clone(&cluster_state));
+
+        // Wire up the membership reactor (partition rebalancing on member changes).
+        let reactor = MembershipReactor {
+            cluster_state: Arc::clone(&cluster_state),
+            peers,
+            connection_registry,
+            config: cluster_config,
+            migration_tx,
+        };
+        tokio::spawn(Arc::new(reactor).run(change_rx));
+
+        (
+            (classify_svc, dispatcher),
+            Some(cluster_state),
+        )
+    } else {
+        // --- Single-node mode (backward-compatible) ---
+        let (cs, _rx) = ClusterState::new(
+            Arc::new(ClusterConfig::default()),
+            node_id.clone(),
+        );
+        let cs = Arc::new(cs);
+        let (classify_svc, dispatcher, _connection_registry) =
+            build_services(node_id.clone(), Arc::clone(&cs));
+
+        // Single-node mode: expose no cluster state to AppState (existing behavior).
+        ((classify_svc, dispatcher), None)
+    };
+
+    let (classify_svc, dispatcher) = cluster_state_for_services;
 
     // Build the AppState with all services wired
     let shutdown = Arc::new(ShutdownController::new());
     let state = AppState {
-        registry: connection_registry,
+        registry: Arc::new(ConnectionRegistry::new()),
         shutdown: Arc::clone(&shutdown),
         config: Arc::new(NetworkConfig::default()),
         start_time: Instant::now(),
@@ -70,7 +264,7 @@ async fn main() -> anyhow::Result<()> {
         operation_service: Some(classify_svc),
         dispatcher: Some(Arc::new(dispatcher)),
         jwt_secret: Some("test-e2e-secret".to_string()),
-        cluster_state: None,
+        cluster_state: cluster_state_for_app,
         store_factory: None,
         server_config: None,
     };
@@ -86,32 +280,27 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", health_handler)
         .with_state(state);
 
-    // Use PORT env var if set (for manual testing), otherwise OS-assigned
-    let bind_port: u16 = std::env::var("PORT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    // Bind to all interfaces so inter-container traffic (Docker networking) reaches
-    // the server. TOPGUN_BIND_ADDR overrides the default for environments that
-    // require loopback-only binding.
-    let bind_addr = std::env::var("TOPGUN_BIND_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0".to_string());
-    let listener = TcpListener::bind(format!("{bind_addr}:{bind_port}")).await?;
-    let port = listener.local_addr()?.port();
-
     // Print port to stdout so the TS test harness can read it
-    println!("PORT={port}");
+    println!("PORT={bound_port}");
 
     // Mark the server as ready
     shutdown.set_ready();
 
-    // Serve until SIGTERM or SIGINT
+    // Serve until SIGTERM or SIGINT; signal cluster services to shut down.
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            // Signal cluster services (e.g. HeartbeatService) to exit their loops.
+            let _ = shutdown_tx.send(true);
+        })
         .await?;
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Observer factory
+// ---------------------------------------------------------------------------
 
 /// Observer factory that creates a `SearchMutationObserver` for every map.
 ///
@@ -151,21 +340,31 @@ impl ObserverFactory for SearchObserverFactory {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Service wiring
+// ---------------------------------------------------------------------------
 
 /// Wires all 7 domain services and builds the partition dispatcher.
 ///
-/// Follows the `setup()` pattern from `packages/server-rust/src/lib.rs:63-148`.
+/// Accepts `node_id` and `cluster_state` so callers control node identity and
+/// can share the cluster state across both formation/heartbeat services and the
+/// coordination domain service.
+///
+/// Follows the `setup()` pattern from `packages/server-rust/src/lib.rs`.
 /// Domain services are `Arc`-wrapped and shared across all worker pipelines.
 /// Each worker gets its own `OperationRouter` + `OperationPipeline` via a
 /// factory closure passed to `PartitionDispatcher::new()`.
 #[allow(clippy::too_many_lines)]
-fn build_services() -> (
+fn build_services(
+    node_id: String,
+    cluster_state: Arc<ClusterState>,
+) -> (
     Arc<OperationService>,
     PartitionDispatcher,
     Arc<ConnectionRegistry>,
 ) {
     let config = ServerConfig {
-        node_id: "test-server-node".to_string(),
+        node_id: node_id.clone(),
         default_operation_timeout_ms: 5000,
         max_concurrent_operations: 100,
         gc_interval_ms: 60_000,
@@ -182,10 +381,6 @@ fn build_services() -> (
         Arc::new(config.clone()),
     ));
 
-    let cluster_config = Arc::new(ClusterConfig::default());
-    let (cluster_state, _rx) =
-        ClusterState::new(cluster_config, "test-server-node".to_string());
-    let cluster_state = Arc::new(cluster_state);
     let connection_registry = Arc::new(ConnectionRegistry::new());
 
     // Shared search state: indexes, registry, and needs_population are shared
@@ -300,7 +495,7 @@ fn build_services() -> (
     ));
     let persistence_svc = Arc::new(PersistenceService::new(
         Arc::clone(&connection_registry),
-        config.node_id.clone(),
+        node_id,
     ));
 
     // Factory closure: creates a fresh OperationRouter + pipeline per worker.
@@ -322,6 +517,10 @@ fn build_services() -> (
     let dispatcher = PartitionDispatcher::new(&dispatch_config, pipeline_factory);
     (classify_svc, dispatcher, connection_registry)
 }
+
+// ---------------------------------------------------------------------------
+// Shutdown signal
+// ---------------------------------------------------------------------------
 
 /// Waits for SIGTERM or SIGINT (Ctrl+C) for graceful shutdown.
 async fn shutdown_signal() {
