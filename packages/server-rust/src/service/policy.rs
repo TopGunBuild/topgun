@@ -82,7 +82,7 @@ pub enum PolicyError {
 /// backend to be swapped without touching the evaluator or admin handlers.
 #[async_trait]
 pub trait PolicyStore: Send + Sync {
-    /// Returns all policies whose map_pattern could match the given map_name.
+    /// Returns all policies whose `map_pattern` could match the given `map_name`.
     async fn get_policies(&self, map_name: &str) -> Result<Vec<PermissionPolicy>, PolicyError>;
     /// Returns all policies.
     async fn list_policies(&self) -> Result<Vec<PermissionPolicy>, PolicyError>;
@@ -196,6 +196,15 @@ impl PolicyEvaluator {
         Self { store }
     }
 
+    /// Returns true if the store contains at least one policy.
+    ///
+    /// Used by the authorization middleware to implement a permissive default:
+    /// when no policies are configured, all operations are allowed so existing
+    /// deployments continue to work without any RBAC configuration.
+    pub async fn has_policies(&self) -> bool {
+        !self.store.list_policies().await.unwrap_or_default().is_empty()
+    }
+
     /// Evaluates whether the given principal may perform `action` on `map_name`.
     ///
     /// Constructs an auth context from `principal` so that policy conditions
@@ -216,9 +225,8 @@ impl PolicyEvaluator {
             }
         }
 
-        let policies = match self.store.get_policies(map_name).await {
-            Ok(ps) => ps,
-            Err(_) => return PolicyDecision::Deny,
+        let Ok(policies) = self.store.get_policies(map_name).await else {
+            return PolicyDecision::Deny;
         };
 
         // Filter to policies that apply to this action.
