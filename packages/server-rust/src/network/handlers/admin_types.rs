@@ -163,9 +163,15 @@ pub struct CreatePolicyRequest {
     pub action: PermissionAction,
     pub effect: PolicyEffect,
     /// Optional predicate condition as a JSON object.
+    /// Takes precedence over `condition_expr` when both are provided.
     #[serde(default)]
     #[schema(value_type = Object, nullable = true)]
     pub condition: Option<PredicateNode>,
+    /// CEL-like expression string, parsed to `PredicateNode`.
+    /// Ignored when `condition` is provided (JSON takes precedence).
+    #[serde(default)]
+    #[schema(nullable = true)]
+    pub condition_expr: Option<String>,
 }
 
 /// A single policy as returned by the admin API.

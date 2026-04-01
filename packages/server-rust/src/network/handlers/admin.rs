@@ -28,7 +28,7 @@ use super::admin_types::{
 use super::AppState;
 
 use crate::cluster::types::NodeState;
-use crate::service::policy::PermissionPolicy;
+use crate::service::policy::{expr_parser::parse_permission_expr, PermissionPolicy};
 
 /// JWT claims for token generation (encoding).
 ///
@@ -477,12 +477,30 @@ pub async fn create_policy(
         .id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+    // Resolve condition: JSON `condition` takes precedence over `condition_expr` string.
+    let condition = if req.condition.is_some() {
+        req.condition.clone()
+    } else if let Some(ref expr) = req.condition_expr {
+        let node = parse_permission_expr(expr).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                    field: Some("conditionExpr".to_string()),
+                }),
+            )
+        })?;
+        Some(node)
+    } else {
+        None
+    };
+
     let policy = PermissionPolicy {
         id: id.clone(),
         map_pattern: req.map_pattern.clone(),
         action: req.action,
         effect: req.effect,
-        condition: req.condition.clone(),
+        condition: condition.clone(),
     };
 
     policy_store.upsert_policy(policy).await.map_err(|e| {
@@ -500,7 +518,7 @@ pub async fn create_policy(
         map_pattern: req.map_pattern,
         action: req.action,
         effect: req.effect,
-        condition: req.condition,
+        condition,
     };
 
     Ok((StatusCode::CREATED, Json(response)))
