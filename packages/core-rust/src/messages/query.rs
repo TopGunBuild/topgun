@@ -258,7 +258,7 @@ mod tests {
                         op: PredicateOp::Gt,
                         attribute: Some("age".to_string()),
                         value: Some(rmpv::Value::Integer(18.into())),
-                        children: None,
+                        ..Default::default()
                     }),
                     sort: Some({
                         let mut s = HashMap::new();

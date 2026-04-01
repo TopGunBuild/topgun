@@ -66,9 +66,10 @@ pub enum ChangeEventType {
 ///
 /// Maps to `PredicateOpSchema` in `base-schemas.ts`.
 /// Lowercase variants match the TS enum values exactly.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PredicateOp {
+    #[default]
     Eq,
     Neq,
     Gt,
@@ -105,7 +106,7 @@ pub enum SortDirection {
 /// A recursive predicate node for query filtering.
 ///
 /// Maps to `PredicateNodeSchema` in `base-schemas.ts`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PredicateNode {
     pub op: PredicateOp,
@@ -115,6 +116,13 @@ pub struct PredicateNode {
     pub value: Option<rmpv::Value>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub children: Option<Vec<PredicateNode>>,
+    /// Variable reference for predicate value resolution against an EvalContext.
+    ///
+    /// Holds a dot-path string like `"auth.id"` or `"data.ownerId"`. When both
+    /// `value` and `value_ref` are `Some`, `value_ref` takes precedence.
+    /// Wire-compatible: absent in old clients deserializes as `None`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub value_ref: Option<String>,
 }
 
 /// Query parameters for filtering, sorting, pagination, and grouping.
@@ -323,7 +331,7 @@ mod tests {
             op: PredicateOp::Eq,
             attribute: Some("name".to_string()),
             value: Some(rmpv::Value::String("Alice".into())),
-            children: None,
+            ..Default::default()
         };
         assert_eq!(roundtrip_named(&node), node);
     }
@@ -332,22 +340,21 @@ mod tests {
     fn predicate_node_recursive_roundtrip() {
         let node = PredicateNode {
             op: PredicateOp::And,
-            attribute: None,
-            value: None,
             children: Some(vec![
                 PredicateNode {
                     op: PredicateOp::Gt,
                     attribute: Some("age".to_string()),
                     value: Some(rmpv::Value::Integer(18.into())),
-                    children: None,
+                    ..Default::default()
                 },
                 PredicateNode {
                     op: PredicateOp::Eq,
                     attribute: Some("active".to_string()),
                     value: Some(rmpv::Value::Boolean(true)),
-                    children: None,
+                    ..Default::default()
                 },
             ]),
+            ..Default::default()
         };
         assert_eq!(roundtrip_named(&node), node);
     }
@@ -366,7 +373,7 @@ mod tests {
                 op: PredicateOp::Eq,
                 attribute: Some("type".to_string()),
                 value: Some(rmpv::Value::String("user".into())),
-                children: None,
+                ..Default::default()
             }),
             sort: Some(sort),
             limit: Some(50),

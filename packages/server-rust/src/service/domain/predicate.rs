@@ -38,6 +38,26 @@ pub(crate) fn value_to_rmpv(value: &Value) -> rmpv::Value {
 }
 
 // ---------------------------------------------------------------------------
+// Evaluation context
+// ---------------------------------------------------------------------------
+
+/// Evaluation context for predicate resolution.
+///
+/// Carries the authenticated principal (as `rmpv::Value` for uniform dot-path
+/// access) and the record being evaluated.
+pub struct EvalContext<'a> {
+    pub auth: Option<&'a rmpv::Value>,
+    pub data: &'a rmpv::Value,
+}
+
+impl<'a> EvalContext<'a> {
+    /// Creates a data-only context with no auth. Backward-compatible shorthand.
+    pub fn data_only(data: &'a rmpv::Value) -> Self {
+        EvalContext { auth: None, data }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Predicate evaluation
 // ---------------------------------------------------------------------------
 

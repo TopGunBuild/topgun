@@ -33,7 +33,7 @@ fn where_to_predicate(map: &HashMap<String, rmpv::Value>) -> PredicateNode {
             op: PredicateOp::Eq,
             attribute: Some(k.clone()),
             value: Some(v.clone()),
-            children: None,
+            ..Default::default()
         })
         .collect();
 
@@ -42,9 +42,8 @@ fn where_to_predicate(map: &HashMap<String, rmpv::Value>) -> PredicateNode {
     } else {
         PredicateNode {
             op: PredicateOp::And,
-            attribute: None,
-            value: None,
             children: Some(eq_nodes),
+            ..Default::default()
         }
     }
 }

@@ -479,7 +479,7 @@ mod tests {
                 op: PredicateOp::Eq,
                 attribute: Some("_key".to_string()),
                 value: Some(rmpv::Value::String("hello".into())),
-                children: None,
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -494,22 +494,21 @@ mod tests {
         let query = Query {
             predicate: Some(PredicateNode {
                 op: PredicateOp::Or,
-                attribute: None,
-                value: None,
                 children: Some(vec![
                     PredicateNode {
                         op: PredicateOp::Eq,
                         attribute: Some("_key".to_string()),
                         value: Some(rmpv::Value::String("a".into())),
-                        children: None,
+                        ..Default::default()
                     },
                     PredicateNode {
                         op: PredicateOp::Eq,
                         attribute: Some("_key".to_string()),
                         value: Some(rmpv::Value::String("b".into())),
-                        children: None,
+                        ..Default::default()
                     },
                 ]),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -681,22 +680,21 @@ mod tests {
         let query = Query {
             predicate: Some(PredicateNode {
                 op: PredicateOp::And,
-                attribute: None,
-                value: None,
                 children: Some(vec![
                     PredicateNode {
                         op: PredicateOp::Eq,
                         attribute: Some("_key".to_string()),
                         value: Some(rmpv::Value::String("hello".into())),
-                        children: None,
+                        ..Default::default()
                     },
                     PredicateNode {
                         op: PredicateOp::Gt,
                         attribute: Some("age".to_string()),
                         value: Some(rmpv::Value::Integer(18.into())),
-                        children: None,
+                        ..Default::default()
                     },
                 ]),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -709,14 +707,13 @@ mod tests {
         let query = Query {
             predicate: Some(PredicateNode {
                 op: PredicateOp::Not,
-                attribute: None,
-                value: None,
                 children: Some(vec![PredicateNode {
                     op: PredicateOp::Eq,
                     attribute: Some("_key".to_string()),
                     value: Some(rmpv::Value::String("hello".into())),
-                    children: None,
+                    ..Default::default()
                 }]),
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -730,7 +727,7 @@ mod tests {
                 op: PredicateOp::Eq,
                 attribute: Some("name".to_string()),
                 value: Some(rmpv::Value::String("hello".into())),
-                children: None,
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -750,7 +747,7 @@ mod tests {
                 op: PredicateOp::Eq,
                 attribute: Some("_key".to_string()),
                 value: Some(rmpv::Value::String("key1".into())),
-                children: None,
+                ..Default::default()
             }),
             ..Default::default()
         };

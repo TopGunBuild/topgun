@@ -59,6 +59,7 @@ export const PredicateNodeSchema: z.ZodType<any> = z.lazy(() => z.object({
   attribute: z.string().optional(),
   value: z.any().optional(),
   children: z.array(PredicateNodeSchema).optional(),
+  valueRef: z.string().optional(),
 }));
 // Type export omitted: PredicateNode is already exported from predicate.ts
 
