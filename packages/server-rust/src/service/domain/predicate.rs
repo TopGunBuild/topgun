@@ -61,21 +61,22 @@ impl<'a> EvalContext<'a> {
 // Predicate evaluation
 // ---------------------------------------------------------------------------
 
-/// Evaluates a `PredicateNode` tree against a record's value map.
+/// Evaluates a `PredicateNode` tree against an evaluation context.
 ///
-/// The `data` parameter is the record's value as an `rmpv::Value` (expected
-/// to be a Map for field-level access). Returns `false` if data is not a Map.
+/// The `ctx.data` value is expected to be an `rmpv::Value::Map` for field-level
+/// access. Returns `false` if data is not a Map. `ctx.auth` is used when the
+/// predicate contains a `value_ref` pointing to the `auth` namespace.
 #[must_use]
-pub fn evaluate_predicate(predicate: &PredicateNode, data: &rmpv::Value) -> bool {
+pub fn evaluate_predicate(predicate: &PredicateNode, ctx: &EvalContext) -> bool {
     match predicate.op {
         // L2 combinators
         PredicateOp::And => {
             let children = predicate.children.as_deref().unwrap_or(&[]);
-            children.iter().all(|child| evaluate_predicate(child, data))
+            children.iter().all(|child| evaluate_predicate(child, ctx))
         }
         PredicateOp::Or => {
             let children = predicate.children.as_deref().unwrap_or(&[]);
-            children.iter().any(|child| evaluate_predicate(child, data))
+            children.iter().any(|child| evaluate_predicate(child, ctx))
         }
         PredicateOp::Not => {
             let children = predicate.children.as_deref().unwrap_or(&[]);
@@ -83,13 +84,13 @@ pub fn evaluate_predicate(predicate: &PredicateNode, data: &rmpv::Value) -> bool
                 // Vacuously true if no children
                 true
             } else {
-                !evaluate_predicate(&children[0], data)
+                !evaluate_predicate(&children[0], ctx)
             }
         }
         // Null-check operators (don't require a value field)
-        PredicateOp::IsNull | PredicateOp::IsNotNull => evaluate_null_check(predicate, data),
+        PredicateOp::IsNull | PredicateOp::IsNotNull => evaluate_null_check(predicate, ctx),
         // L1 leaf operators (require attribute + value)
-        _ => evaluate_leaf(predicate, data),
+        _ => evaluate_leaf(predicate, ctx),
     }
 }
 
@@ -134,7 +135,7 @@ pub fn execute_query(
         .into_iter()
         .filter(|(_, data)| {
             if let Some(pred) = &query.predicate {
-                evaluate_predicate(pred, data)
+                evaluate_predicate(pred, &EvalContext::data_only(data))
             } else if let Some(wh) = &query.r#where {
                 evaluate_where(wh, data)
             } else {
@@ -180,8 +181,8 @@ pub fn execute_query(
 // ---------------------------------------------------------------------------
 
 /// Evaluates a leaf predicate (Eq, Neq, Gt, Gte, Lt, Lte, Like, Regex, In, Between).
-fn evaluate_leaf(predicate: &PredicateNode, data: &rmpv::Value) -> bool {
-    let Some(map) = data.as_map() else {
+fn evaluate_leaf(predicate: &PredicateNode, ctx: &EvalContext) -> bool {
+    let Some(map) = ctx.data.as_map() else {
         return false;
     };
 
@@ -219,8 +220,8 @@ fn evaluate_leaf(predicate: &PredicateNode, data: &rmpv::Value) -> bool {
 }
 
 /// Evaluates `IsNull` / `IsNotNull` operators (field presence check, no `value` required).
-fn evaluate_null_check(predicate: &PredicateNode, data: &rmpv::Value) -> bool {
-    let Some(map) = data.as_map() else {
+fn evaluate_null_check(predicate: &PredicateNode, ctx: &EvalContext) -> bool {
+    let Some(map) = ctx.data.as_map() else {
         return false;
     };
 
@@ -421,7 +422,7 @@ mod tests {
             op,
             attribute: Some(attr.to_string()),
             value: Some(value),
-            children: None,
+            ..Default::default()
         }
     }
 
@@ -429,9 +430,8 @@ mod tests {
     fn combinator(op: PredicateOp, children: Vec<PredicateNode>) -> PredicateNode {
         PredicateNode {
             op,
-            attribute: None,
-            value: None,
             children: Some(children),
+            ..Default::default()
         }
     }
 
@@ -507,10 +507,10 @@ mod tests {
     fn predicate_eq_integer() {
         let data = make_map(vec![("age", rmpv::Value::Integer(25.into()))]);
         let pred = leaf(PredicateOp::Eq, "age", rmpv::Value::Integer(25.into()));
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
 
         let pred_ne = leaf(PredicateOp::Eq, "age", rmpv::Value::Integer(30.into()));
-        assert!(!evaluate_predicate(&pred_ne, &data));
+        assert!(!evaluate_predicate(&pred_ne, &EvalContext::data_only(&data)));
     }
 
     #[test]
@@ -521,55 +521,55 @@ mod tests {
             "status",
             rmpv::Value::String("inactive".into()),
         );
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
 
         let pred_eq = leaf(
             PredicateOp::Neq,
             "status",
             rmpv::Value::String("active".into()),
         );
-        assert!(!evaluate_predicate(&pred_eq, &data));
+        assert!(!evaluate_predicate(&pred_eq, &EvalContext::data_only(&data)));
     }
 
     #[test]
     fn predicate_gt_numeric() {
         let data = make_map(vec![("score", rmpv::Value::Integer(85.into()))]);
         let pred = leaf(PredicateOp::Gt, "score", rmpv::Value::Integer(80.into()));
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
 
         let pred_eq = leaf(PredicateOp::Gt, "score", rmpv::Value::Integer(85.into()));
-        assert!(!evaluate_predicate(&pred_eq, &data));
+        assert!(!evaluate_predicate(&pred_eq, &EvalContext::data_only(&data)));
     }
 
     #[test]
     fn predicate_lte_numeric() {
         let data = make_map(vec![("score", rmpv::Value::Integer(80.into()))]);
         let pred = leaf(PredicateOp::Lte, "score", rmpv::Value::Integer(80.into()));
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
 
         let pred_gt = leaf(PredicateOp::Lte, "score", rmpv::Value::Integer(79.into()));
-        assert!(!evaluate_predicate(&pred_gt, &data));
+        assert!(!evaluate_predicate(&pred_gt, &EvalContext::data_only(&data)));
     }
 
     #[test]
     fn predicate_missing_attribute_returns_false() {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
         let pred = leaf(PredicateOp::Eq, "age", rmpv::Value::Integer(25.into()));
-        assert!(!evaluate_predicate(&pred, &data));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
     fn predicate_cross_type_numeric_comparison() {
         let data = make_map(vec![("score", rmpv::Value::Integer(100.into()))]);
         let pred = leaf(PredicateOp::Gte, "score", rmpv::Value::F64(99.5));
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
     fn predicate_non_map_data_returns_false() {
         let data = rmpv::Value::String("not a map".into());
         let pred = leaf(PredicateOp::Eq, "key", rmpv::Value::Integer(1.into()));
-        assert!(!evaluate_predicate(&pred, &data));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
@@ -580,21 +580,21 @@ mod tests {
             "name",
             rmpv::Value::String("apple".into()),
         );
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
 
         let pred_lt = leaf(
             PredicateOp::Lt,
             "name",
             rmpv::Value::String("cherry".into()),
         );
-        assert!(evaluate_predicate(&pred_lt, &data));
+        assert!(evaluate_predicate(&pred_lt, &EvalContext::data_only(&data)));
     }
 
     #[test]
     fn predicate_incompatible_types_return_false() {
         let data = make_map(vec![("field", rmpv::Value::String("text".into()))]);
         let pred = leaf(PredicateOp::Gt, "field", rmpv::Value::Integer(5.into()));
-        assert!(!evaluate_predicate(&pred, &data));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     // ---- evaluate_predicate L2 combinator tests (AC5) ----
@@ -612,7 +612,7 @@ mod tests {
                 leaf(PredicateOp::Eq, "active", rmpv::Value::Boolean(true)),
             ],
         );
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
@@ -628,7 +628,7 @@ mod tests {
                 leaf(PredicateOp::Eq, "active", rmpv::Value::Boolean(true)),
             ],
         );
-        assert!(!evaluate_predicate(&pred, &data));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
@@ -641,7 +641,7 @@ mod tests {
                 leaf(PredicateOp::Eq, "role", rmpv::Value::String("editor".into())),
             ],
         );
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
@@ -654,7 +654,7 @@ mod tests {
                 leaf(PredicateOp::Eq, "role", rmpv::Value::String("editor".into())),
             ],
         );
-        assert!(!evaluate_predicate(&pred, &data));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
@@ -664,28 +664,28 @@ mod tests {
             PredicateOp::Not,
             vec![leaf(PredicateOp::Eq, "banned", rmpv::Value::Boolean(true))],
         );
-        assert!(!evaluate_predicate(&pred, &data));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
     fn predicate_not_vacuously_true_no_children() {
         let data = make_map(vec![]);
         let pred = combinator(PredicateOp::Not, vec![]);
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
     fn predicate_and_empty_children_is_true() {
         let data = make_map(vec![]);
         let pred = combinator(PredicateOp::And, vec![]);
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
     fn predicate_or_empty_children_is_false() {
         let data = make_map(vec![]);
         let pred = combinator(PredicateOp::Or, vec![]);
-        assert!(!evaluate_predicate(&pred, &data));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     // ---- Like tests (AC1) ----
@@ -694,64 +694,64 @@ mod tests {
     fn predicate_like_percent_at_end() {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
         let pred = leaf(PredicateOp::Like, "name", rmpv::Value::String("Ali%".into()));
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
 
         let data2 = make_map(vec![("name", rmpv::Value::String("Bob".into()))]);
-        assert!(!evaluate_predicate(&pred, &data2));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data2)));
     }
 
     #[test]
     fn predicate_like_percent_at_start() {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
         let pred = leaf(PredicateOp::Like, "name", rmpv::Value::String("%ice".into()));
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
 
         let data2 = make_map(vec![("name", rmpv::Value::String("Bob".into()))]);
-        assert!(!evaluate_predicate(&pred, &data2));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data2)));
     }
 
     #[test]
     fn predicate_like_percent_both_sides() {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
         let pred = leaf(PredicateOp::Like, "name", rmpv::Value::String("%li%".into()));
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
 
         let data2 = make_map(vec![("name", rmpv::Value::String("Bob".into()))]);
-        assert!(!evaluate_predicate(&pred, &data2));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data2)));
     }
 
     #[test]
     fn predicate_like_underscore_single_char() {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
         let pred = leaf(PredicateOp::Like, "name", rmpv::Value::String("A_ice".into()));
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
 
         let data2 = make_map(vec![("name", rmpv::Value::String("Aice".into()))]);
-        assert!(!evaluate_predicate(&pred, &data2));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data2)));
     }
 
     #[test]
     fn predicate_like_empty_pattern_matches_empty_string() {
         let data = make_map(vec![("name", rmpv::Value::String("".into()))]);
         let pred = leaf(PredicateOp::Like, "name", rmpv::Value::String("".into()));
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
 
         let data2 = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
-        assert!(!evaluate_predicate(&pred, &data2));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data2)));
     }
 
     #[test]
     fn predicate_like_case_insensitive() {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
         let pred = leaf(PredicateOp::Like, "name", rmpv::Value::String("ali%".into()));
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
     fn predicate_like_non_string_field_returns_false() {
         let data = make_map(vec![("age", rmpv::Value::Integer(42.into()))]);
         let pred = leaf(PredicateOp::Like, "age", rmpv::Value::String("%".into()));
-        assert!(!evaluate_predicate(&pred, &data));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     // ---- Regex tests (AC2) ----
@@ -760,10 +760,10 @@ mod tests {
     fn predicate_regex_simple_match() {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
         let pred = leaf(PredicateOp::Regex, "name", rmpv::Value::String("^Ali".into()));
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
 
         let data2 = make_map(vec![("name", rmpv::Value::String("Bob".into()))]);
-        assert!(!evaluate_predicate(&pred, &data2));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data2)));
     }
 
     #[test]
@@ -771,28 +771,28 @@ mod tests {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
         // `[invalid` is an unclosed character class -- invalid regex
         let pred = leaf(PredicateOp::Regex, "name", rmpv::Value::String("[invalid".into()));
-        assert!(!evaluate_predicate(&pred, &data));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
     fn predicate_regex_non_string_field_returns_false() {
         let data = make_map(vec![("age", rmpv::Value::Integer(42.into()))]);
         let pred = leaf(PredicateOp::Regex, "age", rmpv::Value::String("\\d+".into()));
-        assert!(!evaluate_predicate(&pred, &data));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
     fn predicate_regex_case_sensitive_by_default() {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
         let pred = leaf(PredicateOp::Regex, "name", rmpv::Value::String("^ali".into()));
-        assert!(!evaluate_predicate(&pred, &data));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
     fn predicate_regex_inline_case_insensitive_flag() {
         let data = make_map(vec![("name", rmpv::Value::String("Alice".into()))]);
         let pred = leaf(PredicateOp::Regex, "name", rmpv::Value::String("(?i)^ali".into()));
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     // ---- In tests (AC3) ----
@@ -809,7 +809,7 @@ mod tests {
                 rmpv::Value::Integer(3.into()),
             ]),
         );
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
@@ -824,14 +824,14 @@ mod tests {
                 rmpv::Value::Integer(3.into()),
             ]),
         );
-        assert!(!evaluate_predicate(&pred, &data));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
     fn predicate_in_empty_list_returns_false() {
         let data = make_map(vec![("age", rmpv::Value::Integer(1.into()))]);
         let pred = leaf(PredicateOp::In, "age", rmpv::Value::Array(vec![]));
-        assert!(!evaluate_predicate(&pred, &data));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
@@ -843,14 +843,14 @@ mod tests {
             "age",
             rmpv::Value::Array(vec![rmpv::Value::F64(2.0)]),
         );
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
     fn predicate_in_non_array_value_returns_false() {
         let data = make_map(vec![("age", rmpv::Value::Integer(2.into()))]);
         let pred = leaf(PredicateOp::In, "age", rmpv::Value::Integer(2.into()));
-        assert!(!evaluate_predicate(&pred, &data));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     // ---- Between tests (AC4) ----
@@ -866,7 +866,7 @@ mod tests {
                 rmpv::Value::Integer(65.into()),
             ]),
         );
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
@@ -880,7 +880,7 @@ mod tests {
                 rmpv::Value::Integer(65.into()),
             ]),
         );
-        assert!(!evaluate_predicate(&pred, &data));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
@@ -894,7 +894,7 @@ mod tests {
                 rmpv::Value::Integer(65.into()),
             ]),
         );
-        assert!(!evaluate_predicate(&pred, &data));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
@@ -907,8 +907,8 @@ mod tests {
         ]);
         let pred_low = leaf(PredicateOp::Between, "age", range.clone());
         let pred_high = leaf(PredicateOp::Between, "age", range);
-        assert!(evaluate_predicate(&pred_low, &data_low));
-        assert!(evaluate_predicate(&pred_high, &data_high));
+        assert!(evaluate_predicate(&pred_low, &EvalContext::data_only(&data_low)));
+        assert!(evaluate_predicate(&pred_high, &EvalContext::data_only(&data_high)));
     }
 
     #[test]
@@ -922,7 +922,7 @@ mod tests {
                 rmpv::Value::String("orange".into()),
             ]),
         );
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
@@ -933,7 +933,7 @@ mod tests {
             "age",
             rmpv::Value::Array(vec![rmpv::Value::Integer(18.into())]),
         );
-        assert!(!evaluate_predicate(&pred, &data));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     // ---- IsNull tests (AC5) ----
@@ -944,10 +944,9 @@ mod tests {
         let pred = PredicateNode {
             op: PredicateOp::IsNull,
             attribute: Some("name".to_string()),
-            value: None,
-            children: None,
+            ..Default::default()
         };
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
@@ -956,10 +955,9 @@ mod tests {
         let pred = PredicateNode {
             op: PredicateOp::IsNull,
             attribute: Some("name".to_string()),
-            value: None,
-            children: None,
+            ..Default::default()
         };
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
@@ -968,10 +966,9 @@ mod tests {
         let pred = PredicateNode {
             op: PredicateOp::IsNull,
             attribute: Some("name".to_string()),
-            value: None,
-            children: None,
+            ..Default::default()
         };
-        assert!(!evaluate_predicate(&pred, &data));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     // ---- IsNotNull tests (AC6) ----
@@ -982,10 +979,9 @@ mod tests {
         let pred = PredicateNode {
             op: PredicateOp::IsNotNull,
             attribute: Some("name".to_string()),
-            value: None,
-            children: None,
+            ..Default::default()
         };
-        assert!(evaluate_predicate(&pred, &data));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
@@ -994,10 +990,9 @@ mod tests {
         let pred = PredicateNode {
             op: PredicateOp::IsNotNull,
             attribute: Some("name".to_string()),
-            value: None,
-            children: None,
+            ..Default::default()
         };
-        assert!(!evaluate_predicate(&pred, &data));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     #[test]
@@ -1006,10 +1001,9 @@ mod tests {
         let pred = PredicateNode {
             op: PredicateOp::IsNotNull,
             attribute: Some("name".to_string()),
-            value: None,
-            children: None,
+            ..Default::default()
         };
-        assert!(!evaluate_predicate(&pred, &data));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 
     // ---- evaluate_where tests (AC6) ----
