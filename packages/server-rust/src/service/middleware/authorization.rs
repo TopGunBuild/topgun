@@ -59,7 +59,7 @@ impl<S> Layer<S> for AuthorizationLayer {
 /// Tower `Service` produced by `AuthorizationLayer`.
 ///
 /// Holds references to the `PolicyEvaluator` (shared across all workers via
-/// `Arc`) and the `ConnectionRegistry` (for principal lookup by connection_id).
+/// `Arc`) and the `ConnectionRegistry` (for principal lookup by `connection_id`).
 pub struct AuthorizationService<S> {
     inner: S,
     evaluator: Arc<PolicyEvaluator>,
@@ -86,17 +86,13 @@ where
         // come from peer nodes that have already been authorized at the cluster level.
         let ctx = op.ctx();
         if ctx.caller_origin != CallerOrigin::Client {
-            let fut = self.inner.call(op);
-            return Box::pin(async move { fut.await });
+            return Box::pin(self.inner.call(op));
         }
 
         // Fail-closed: operations from client connections without a connection_id
         // cannot be attributed to a principal and are denied.
-        let connection_id = match ctx.connection_id {
-            Some(id) => id,
-            None => {
-                return Box::pin(async { Err(OperationError::Unauthorized) });
-            }
+        let Some(connection_id) = ctx.connection_id else {
+            return Box::pin(async { Err(OperationError::Unauthorized) });
         };
 
         let evaluator = Arc::clone(&self.evaluator);
@@ -107,8 +103,7 @@ where
 
         // For operations with no policy-relevant action (bypass group), pass through.
         let Some(action) = action else {
-            let fut = self.inner.call(op);
-            return Box::pin(async move { fut.await });
+            return Box::pin(self.inner.call(op));
         };
 
         // Extract data payload for record-level condition evaluation.
@@ -152,7 +147,7 @@ where
 /// Maps an `Operation` variant to a `PermissionAction` and a `map_name`.
 ///
 /// Returns `(None, _)` for operations in the bypass group — these pass through
-/// without any policy evaluation (e.g., Ping, PartitionMapRequest, GarbageCollect).
+/// without any policy evaluation (e.g., Ping, `PartitionMapRequest`, `GarbageCollect`).
 fn classify_operation(op: &Operation) -> (Option<PermissionAction>, String) {
     match op {
         // --- Write actions ---
@@ -188,19 +183,12 @@ fn classify_operation(op: &Operation) -> (Option<PermissionAction>, String) {
         }
 
         // --- Read actions ---
-        Operation::QuerySubscribe { payload, .. } => {
+        Operation::QuerySubscribe { payload, .. } | Operation::DagQuery { payload, .. } => {
             (Some(PermissionAction::Read), payload.payload.map_name.clone())
         }
-        Operation::QuerySyncInit { .. } => {
-            // QuerySyncInit resumes an existing subscription by query_id; no map_name available.
+        // QuerySyncInit resumes by query_id; SqlQuery spans multiple maps — no single map_name.
+        Operation::QuerySyncInit { .. } | Operation::SqlQuery { .. } => {
             (Some(PermissionAction::Read), String::new())
-        }
-        Operation::SqlQuery { .. } => {
-            // SQL queries are not scoped to a single map — use empty string.
-            (Some(PermissionAction::Read), String::new())
-        }
-        Operation::DagQuery { payload, .. } => {
-            (Some(PermissionAction::Read), payload.payload.map_name.clone())
         }
         Operation::Search { payload, .. } => {
             (Some(PermissionAction::Read), payload.map_name.clone())

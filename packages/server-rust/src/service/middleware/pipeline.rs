@@ -38,24 +38,21 @@ pub fn build_operation_pipeline(
     policy_evaluator: Option<Arc<PolicyEvaluator>>,
     connection_registry: Option<Arc<ConnectionRegistry>>,
 ) -> OperationPipeline {
-    match (policy_evaluator, connection_registry) {
-        (Some(evaluator), Some(registry)) => {
-            let svc = ServiceBuilder::new()
-                .layer(LoadShedLayer::new(config.max_concurrent_operations))
-                .layer(TimeoutLayer)
-                .layer(MetricsLayer)
-                .layer(AuthorizationLayer::new(evaluator, registry))
-                .service(router);
-            OperationPipeline::new(svc)
-        }
-        _ => {
-            let svc = ServiceBuilder::new()
-                .layer(LoadShedLayer::new(config.max_concurrent_operations))
-                .layer(TimeoutLayer)
-                .layer(MetricsLayer)
-                .service(router);
-            OperationPipeline::new(svc)
-        }
+    if let (Some(evaluator), Some(registry)) = (policy_evaluator, connection_registry) {
+        let svc = ServiceBuilder::new()
+            .layer(LoadShedLayer::new(config.max_concurrent_operations))
+            .layer(TimeoutLayer)
+            .layer(MetricsLayer)
+            .layer(AuthorizationLayer::new(evaluator, registry))
+            .service(router);
+        OperationPipeline::new(svc)
+    } else {
+        let svc = ServiceBuilder::new()
+            .layer(LoadShedLayer::new(config.max_concurrent_operations))
+            .layer(TimeoutLayer)
+            .layer(MetricsLayer)
+            .service(router);
+        OperationPipeline::new(svc)
     }
 }
 

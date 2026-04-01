@@ -374,7 +374,7 @@ impl ObserverFactory for SearchObserverFactory {
 /// the policy store before reaching domain services.
 ///
 /// The `connection_registry` returned must be shared with `AppState.registry`
-/// so the authorization middleware can look up principals by connection_id.
+/// so the authorization middleware can look up principals by `connection_id`.
 ///
 /// Follows the `setup()` pattern from `packages/server-rust/src/lib.rs`.
 /// Domain services are `Arc`-wrapped and shared across all worker pipelines.
