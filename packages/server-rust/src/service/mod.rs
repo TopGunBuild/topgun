@@ -14,6 +14,7 @@ pub mod dispatch;
 pub mod domain;
 pub mod middleware;
 pub mod operation;
+pub mod policy;
 pub mod registry;
 pub mod router;
 pub mod security;
