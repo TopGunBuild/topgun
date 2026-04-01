@@ -443,4 +443,242 @@ mod tests {
             "missing connection_id should return Unauthorized, got {result:?}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Record-level condition tests (SPEC-170)
+    // -----------------------------------------------------------------------
+
+    use crate::network::connection::ConnectionId;
+    use crate::service::policy::{
+        expr_parser::parse_permission_expr, PermissionPolicy, PolicyEffect,
+    };
+    use topgun_core::{LWWRecord, Principal};
+
+    /// Helper: builds a policy with `auth.id == data.ownerId` condition.
+    fn owner_condition_policy() -> PermissionPolicy {
+        PermissionPolicy {
+            id: "owner-write".to_string(),
+            map_pattern: "*".to_string(),
+            action: PermissionAction::Write,
+            effect: PolicyEffect::Allow,
+            condition: Some(
+                parse_permission_expr("auth.id == data.ownerId")
+                    .expect("owner condition should parse"),
+            ),
+        }
+    }
+
+    /// Helper: registers a connection with the given principal.
+    async fn register_with_principal(
+        registry: &ConnectionRegistry,
+        principal: Principal,
+    ) -> ConnectionId {
+        let config = ConnectionConfig::default();
+        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
+        let conn_id = handle.id;
+        {
+            let mut meta = handle.metadata.write().await;
+            meta.principal = Some(principal);
+        }
+        conn_id
+    }
+
+    /// Helper: builds a ClientOp Operation with a record containing the given ownerId value.
+    fn client_op_with_owner(conn_id: ConnectionId, owner_id: &str) -> Operation {
+        let record = LWWRecord {
+            value: Some(rmpv::Value::Map(vec![(
+                rmpv::Value::String("ownerId".into()),
+                rmpv::Value::String(owner_id.into()),
+            )])),
+            timestamp: make_timestamp(),
+            ttl_ms: None,
+        };
+        let mut ctx =
+            OperationContext::new(10, service_names::CRDT, make_timestamp(), 5000);
+        ctx.caller_origin = CallerOrigin::Client;
+        ctx.connection_id = Some(conn_id);
+        Operation::ClientOp {
+            ctx,
+            payload: topgun_core::messages::sync::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    map_name: "docs".to_string(),
+                    key: "doc1".to_string(),
+                    record: Some(Some(record)),
+                    ..Default::default()
+                },
+            },
+        }
+    }
+
+    /// Helper: builds a ClientOp Operation representing a tombstone (deleted record).
+    fn client_op_tombstone(conn_id: ConnectionId) -> Operation {
+        let record = LWWRecord {
+            value: None,
+            timestamp: make_timestamp(),
+            ttl_ms: None,
+        };
+        let mut ctx =
+            OperationContext::new(11, service_names::CRDT, make_timestamp(), 5000);
+        ctx.caller_origin = CallerOrigin::Client;
+        ctx.connection_id = Some(conn_id);
+        Operation::ClientOp {
+            ctx,
+            payload: topgun_core::messages::sync::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    map_name: "docs".to_string(),
+                    key: "doc1".to_string(),
+                    record: Some(Some(record)),
+                    ..Default::default()
+                },
+            },
+        }
+    }
+
+    /// Helper: builds an OpBatch Operation with the given list of (map_name, owner_id) pairs.
+    fn op_batch_with_owners(conn_id: ConnectionId, ops: &[(&str, &str)]) -> Operation {
+        let client_ops: Vec<topgun_core::messages::base::ClientOp> = ops
+            .iter()
+            .enumerate()
+            .map(|(i, (map_name, owner_id))| {
+                let record = LWWRecord {
+                    value: Some(rmpv::Value::Map(vec![(
+                        rmpv::Value::String("ownerId".into()),
+                        rmpv::Value::String((*owner_id).into()),
+                    )])),
+                    timestamp: make_timestamp(),
+                    ttl_ms: None,
+                };
+                topgun_core::messages::base::ClientOp {
+                    map_name: (*map_name).to_string(),
+                    key: format!("key{i}"),
+                    record: Some(Some(record)),
+                    ..Default::default()
+                }
+            })
+            .collect();
+
+        let mut ctx =
+            OperationContext::new(12, service_names::CRDT, make_timestamp(), 5000);
+        ctx.caller_origin = CallerOrigin::Client;
+        ctx.connection_id = Some(conn_id);
+        Operation::OpBatch {
+            ctx,
+            payload: topgun_core::messages::sync::OpBatchMessage {
+                payload: topgun_core::messages::sync::OpBatchPayload {
+                    ops: client_ops,
+                    ..Default::default()
+                },
+            },
+        }
+    }
+
+    /// Owner condition allows a write when the record's ownerId matches auth.id.
+    #[tokio::test]
+    async fn owner_condition_allows_matching_owner() {
+        let store = Arc::new(InMemoryPolicyStore::new());
+        store.upsert_policy(owner_condition_policy()).await.unwrap();
+
+        let evaluator = Arc::new(PolicyEvaluator::new(store));
+        let registry = Arc::new(ConnectionRegistry::new());
+        let principal = Principal { id: "user1".to_string(), roles: vec!["user".to_string()] };
+        let conn_id = register_with_principal(&registry, principal).await;
+
+        let layer = AuthorizationLayer::new(evaluator, registry);
+        let mut svc = layer.layer(AlwaysOkService);
+
+        // Record ownerId matches the principal's id
+        let op = client_op_with_owner(conn_id, "user1");
+        let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
+        assert!(result.is_ok(), "matching owner should be allowed, got {result:?}");
+    }
+
+    /// Owner condition denies a write when the record's ownerId does NOT match auth.id.
+    #[tokio::test]
+    async fn owner_condition_denies_non_owner() {
+        let store = Arc::new(InMemoryPolicyStore::new());
+        store.upsert_policy(owner_condition_policy()).await.unwrap();
+
+        let evaluator = Arc::new(PolicyEvaluator::new(store));
+        let registry = Arc::new(ConnectionRegistry::new());
+        let principal = Principal { id: "user1".to_string(), roles: vec!["user".to_string()] };
+        let conn_id = register_with_principal(&registry, principal).await;
+
+        let layer = AuthorizationLayer::new(evaluator, registry);
+        let mut svc = layer.layer(AlwaysOkService);
+
+        // Record ownerId does NOT match the principal's id
+        let op = client_op_with_owner(conn_id, "user2");
+        let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
+        assert!(
+            matches!(result, Err(OperationError::Forbidden { .. })),
+            "non-owner should be denied, got {result:?}"
+        );
+    }
+
+    /// OpBatch is denied when any op in the batch fails the owner condition.
+    #[tokio::test]
+    async fn op_batch_denied_when_any_op_fails_condition() {
+        let store = Arc::new(InMemoryPolicyStore::new());
+        store.upsert_policy(owner_condition_policy()).await.unwrap();
+
+        let evaluator = Arc::new(PolicyEvaluator::new(store));
+        let registry = Arc::new(ConnectionRegistry::new());
+        let principal = Principal { id: "user1".to_string(), roles: vec!["user".to_string()] };
+        let conn_id = register_with_principal(&registry, principal).await;
+
+        let layer = AuthorizationLayer::new(evaluator, registry);
+        let mut svc = layer.layer(AlwaysOkService);
+
+        // Batch: first op matches owner, second does not
+        let op = op_batch_with_owners(conn_id, &[("docs", "user1"), ("docs", "other_user")]);
+        let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
+        assert!(
+            matches!(result, Err(OperationError::Forbidden { .. })),
+            "batch with any non-owner op should be denied, got {result:?}"
+        );
+    }
+
+    /// OpBatch is allowed when ALL ops in the batch satisfy the owner condition.
+    #[tokio::test]
+    async fn op_batch_allowed_when_all_ops_pass_condition() {
+        let store = Arc::new(InMemoryPolicyStore::new());
+        store.upsert_policy(owner_condition_policy()).await.unwrap();
+
+        let evaluator = Arc::new(PolicyEvaluator::new(store));
+        let registry = Arc::new(ConnectionRegistry::new());
+        let principal = Principal { id: "user1".to_string(), roles: vec!["user".to_string()] };
+        let conn_id = register_with_principal(&registry, principal).await;
+
+        let layer = AuthorizationLayer::new(evaluator, registry);
+        let mut svc = layer.layer(AlwaysOkService);
+
+        // Batch: both ops match owner
+        let op = op_batch_with_owners(conn_id, &[("docs", "user1"), ("notes", "user1")]);
+        let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
+        assert!(result.is_ok(), "batch where all ops match owner should be allowed, got {result:?}");
+    }
+
+    /// Tombstone writes (record value None) are denied by owner-condition policies
+    /// because there is no data to evaluate the condition against.
+    #[tokio::test]
+    async fn tombstone_write_denied_by_owner_condition() {
+        let store = Arc::new(InMemoryPolicyStore::new());
+        store.upsert_policy(owner_condition_policy()).await.unwrap();
+
+        let evaluator = Arc::new(PolicyEvaluator::new(store));
+        let registry = Arc::new(ConnectionRegistry::new());
+        let principal = Principal { id: "user1".to_string(), roles: vec!["user".to_string()] };
+        let conn_id = register_with_principal(&registry, principal).await;
+
+        let layer = AuthorizationLayer::new(evaluator, registry);
+        let mut svc = layer.layer(AlwaysOkService);
+
+        // Tombstone: record value is None, so data is Nil and condition cannot match
+        let op = client_op_tombstone(conn_id);
+        let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
+        assert!(
+            matches!(result, Err(OperationError::Forbidden { .. })),
+            "tombstone write against owner condition should be denied, got {result:?}"
+        );
+    }
 }
