@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use topgun_core::messages::base::PredicateNode;
 use utoipa::ToSchema;
 
+// rmpv is used for auth context construction in PolicyEvaluator::evaluate.
+
 // ---------------------------------------------------------------------------
 // Permission types
 // ---------------------------------------------------------------------------
@@ -175,12 +177,102 @@ impl PolicyStore for InMemoryPolicyStore {
 }
 
 // ---------------------------------------------------------------------------
-// PolicyEvaluator — placeholder (implementation added in G2b)
+// PolicyEvaluator
 // ---------------------------------------------------------------------------
 
 /// Evaluates permission policies for a given principal, action, and map.
+///
+/// Uses deny-wins semantics: if any matching policy denies, the result is
+/// `Deny` regardless of allow policies. Principals with role "admin" bypass
+/// all policy checks.
 pub struct PolicyEvaluator {
-    pub(crate) store: Arc<dyn PolicyStore>,
+    store: Arc<dyn PolicyStore>,
+}
+
+impl PolicyEvaluator {
+    /// Creates a new evaluator backed by the given policy store.
+    #[must_use]
+    pub fn new(store: Arc<dyn PolicyStore>) -> Self {
+        Self { store }
+    }
+
+    /// Evaluates whether the given principal may perform `action` on `map_name`.
+    ///
+    /// Constructs an auth context from `principal` so that policy conditions
+    /// can reference `$auth.id` and `$auth.roles` via variable references.
+    pub async fn evaluate(
+        &self,
+        principal: Option<&topgun_core::Principal>,
+        action: PermissionAction,
+        map_name: &str,
+        data: &rmpv::Value,
+    ) -> PolicyDecision {
+        use crate::service::domain::predicate::{evaluate_predicate, EvalContext};
+
+        // Admin principals bypass all policy checks.
+        if let Some(p) = principal {
+            if p.roles.iter().any(|r| r == "admin") {
+                return PolicyDecision::Allow;
+            }
+        }
+
+        let policies = match self.store.get_policies(map_name).await {
+            Ok(ps) => ps,
+            Err(_) => return PolicyDecision::Deny,
+        };
+
+        // Filter to policies that apply to this action.
+        let action_matches: Vec<&PermissionPolicy> = policies
+            .iter()
+            .filter(|p| p.action == action || p.action == PermissionAction::All)
+            .collect();
+
+        // Build the auth rmpv::Value once, outside the per-policy loop.
+        let auth_value = principal.map(|p| {
+            rmpv::Value::Map(vec![
+                (
+                    rmpv::Value::String("id".into()),
+                    rmpv::Value::String(p.id.clone().into()),
+                ),
+                (
+                    rmpv::Value::String("roles".into()),
+                    rmpv::Value::Array(
+                        p.roles
+                            .iter()
+                            .map(|r| rmpv::Value::String(r.clone().into()))
+                            .collect(),
+                    ),
+                ),
+            ])
+        });
+
+        // Evaluate conditions and collect policies that pass.
+        let mut effective: Vec<&PermissionPolicy> = Vec::new();
+        for policy in action_matches {
+            if let Some(ref condition) = policy.condition {
+                let ctx = EvalContext {
+                    auth: auth_value.as_ref(),
+                    data,
+                };
+                if !evaluate_predicate(condition, &ctx) {
+                    continue;
+                }
+            }
+            effective.push(policy);
+        }
+
+        // Deny-wins: any deny in effective policies returns Deny.
+        if effective.iter().any(|p| p.effect == PolicyEffect::Deny) {
+            return PolicyDecision::Deny;
+        }
+
+        // Any allow returns Allow; otherwise default-deny.
+        if effective.iter().any(|p| p.effect == PolicyEffect::Allow) {
+            PolicyDecision::Allow
+        } else {
+            PolicyDecision::Deny
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -288,5 +380,157 @@ mod tests {
         let matching = store.get_policies("users.profiles").await.unwrap();
         assert_eq!(matching.len(), 1);
         assert_eq!(matching[0].id, "p1");
+    }
+
+    // -- PolicyEvaluator --
+
+    fn make_store_with(policies: Vec<PermissionPolicy>) -> Arc<InMemoryPolicyStore> {
+        let store = Arc::new(InMemoryPolicyStore::new());
+        let store_clone = store.clone();
+        // Use block_on only in tests; runtime is provided by #[tokio::test].
+        for p in policies {
+            store_clone.policies.insert(p.id.clone(), p);
+        }
+        store
+    }
+
+    fn admin_principal() -> topgun_core::Principal {
+        topgun_core::Principal {
+            id: "admin1".to_string(),
+            roles: vec!["admin".to_string()],
+        }
+    }
+
+    fn user_principal() -> topgun_core::Principal {
+        topgun_core::Principal {
+            id: "user1".to_string(),
+            roles: vec!["user".to_string()],
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_always_allowed() {
+        let store = make_store_with(vec![]);
+        let eval = PolicyEvaluator::new(store);
+        let data = rmpv::Value::Nil;
+        let principal = admin_principal();
+        let decision = eval
+            .evaluate(
+                Some(&principal),
+                PermissionAction::Write,
+                "users.profiles",
+                &data,
+            )
+            .await;
+        assert_eq!(decision, PolicyDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn default_deny_when_no_policies() {
+        let store = make_store_with(vec![]);
+        let eval = PolicyEvaluator::new(store);
+        let data = rmpv::Value::Nil;
+        let principal = user_principal();
+        let decision = eval
+            .evaluate(
+                Some(&principal),
+                PermissionAction::Read,
+                "users.profiles",
+                &data,
+            )
+            .await;
+        assert_eq!(decision, PolicyDecision::Deny);
+    }
+
+    #[tokio::test]
+    async fn allow_when_matching_allow_policy() {
+        let store = make_store_with(vec![PermissionPolicy {
+            id: "p1".to_string(),
+            map_pattern: "users.*".to_string(),
+            action: PermissionAction::Read,
+            effect: PolicyEffect::Allow,
+            condition: None,
+        }]);
+        let eval = PolicyEvaluator::new(store);
+        let data = rmpv::Value::Nil;
+        let principal = user_principal();
+        let decision = eval
+            .evaluate(
+                Some(&principal),
+                PermissionAction::Read,
+                "users.profiles",
+                &data,
+            )
+            .await;
+        assert_eq!(decision, PolicyDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn deny_wins_over_allow() {
+        let store = make_store_with(vec![
+            PermissionPolicy {
+                id: "allow".to_string(),
+                map_pattern: "users.*".to_string(),
+                action: PermissionAction::Read,
+                effect: PolicyEffect::Allow,
+                condition: None,
+            },
+            PermissionPolicy {
+                id: "deny".to_string(),
+                map_pattern: "*".to_string(),
+                action: PermissionAction::All,
+                effect: PolicyEffect::Deny,
+                condition: None,
+            },
+        ]);
+        let eval = PolicyEvaluator::new(store);
+        let data = rmpv::Value::Nil;
+        let principal = user_principal();
+        let decision = eval
+            .evaluate(
+                Some(&principal),
+                PermissionAction::Read,
+                "users.profiles",
+                &data,
+            )
+            .await;
+        assert_eq!(decision, PolicyDecision::Deny);
+    }
+
+    #[tokio::test]
+    async fn condition_false_skips_policy() {
+        use topgun_core::messages::base::{PredicateNode, PredicateOp};
+
+        // Condition that always evaluates to false: attribute "never" == "true",
+        // but data has no "never" field so the predicate fails.
+        let false_condition = PredicateNode {
+            op: PredicateOp::Eq,
+            attribute: Some("never".to_string()),
+            value: Some(rmpv::Value::String("true".into())),
+            value_ref: None,
+            children: None,
+        };
+
+        let store = make_store_with(vec![PermissionPolicy {
+            id: "conditional".to_string(),
+            map_pattern: "*".to_string(),
+            action: PermissionAction::Read,
+            effect: PolicyEffect::Allow,
+            condition: Some(false_condition),
+        }]);
+        let eval = PolicyEvaluator::new(store);
+        // data has no "never" field, so condition evaluates to false — policy is skipped
+        let data = rmpv::Value::Map(vec![]);
+        let principal = user_principal();
+        let decision = eval
+            .evaluate(
+                Some(&principal),
+                PermissionAction::Read,
+                "anything",
+                &data,
+            )
+            .await;
+        // No effective policies -> default deny
+        assert_eq!(decision, PolicyDecision::Deny);
     }
 }
