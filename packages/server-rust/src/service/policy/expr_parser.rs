@@ -108,6 +108,10 @@ pub(crate) enum Token {
 /// Parses a permission expression string into a `PredicateNode` tree.
 ///
 /// Returns `Err(ParseError)` with position information on malformed input.
+///
+/// # Errors
+///
+/// Returns `ParseError` if the input does not conform to the permission expression grammar.
 pub fn parse_permission_expr(input: &str) -> Result<PredicateNode, ParseError> {
     let mut parser = Parser::new(input);
     let node = parser.parse_expr()?;
@@ -158,13 +162,13 @@ impl<'a> Lexer<'a> {
     }
 
     /// Tokenizes the next token from the input.
+    #[allow(clippy::too_many_lines)]
     fn next_token(&mut self) -> Result<(usize, Token), ParseError> {
         self.skip_whitespace();
         let start = self.pos;
 
-        let ch = match self.peek_char() {
-            None => return Ok((self.pos, Token::Eof)),
-            Some(c) => c,
+        let Some(ch) = self.peek_char() else {
+            return Ok((self.pos, Token::Eof));
         };
 
         match ch {
@@ -246,18 +250,18 @@ impl<'a> Lexer<'a> {
             }
             c if c.is_ascii_digit() => {
                 let num_start = self.pos;
-                while self.peek_char().map_or(false, |c| c.is_ascii_digit()) {
+                while self.peek_char().is_some_and(|c| c.is_ascii_digit()) {
                     self.advance();
                 }
                 let has_dot = self.peek_char() == Some('.');
                 // Only treat as float if followed by a digit (not just a lone dot).
                 let is_float = has_dot && {
                     let after_dot = self.input.get(self.pos + 1..).and_then(|s| s.chars().next());
-                    after_dot.map_or(false, |c| c.is_ascii_digit())
+                    after_dot.is_some_and(|c| c.is_ascii_digit())
                 };
                 if is_float {
                     self.advance(); // consume '.'
-                    while self.peek_char().map_or(false, |c| c.is_ascii_digit()) {
+                    while self.peek_char().is_some_and(|c| c.is_ascii_digit()) {
                         self.advance();
                     }
                     let s = &self.input[num_start..self.pos];
@@ -276,7 +280,7 @@ impl<'a> Lexer<'a> {
             c if c.is_ascii_alphabetic() || c == '_' => {
                 // Read the first identifier segment.
                 let seg_start = self.pos;
-                while self.peek_char().map_or(false, |c| c.is_ascii_alphanumeric() || c == '_') {
+                while self.peek_char().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
                     self.advance();
                 }
                 let first = self.input[seg_start..self.pos].to_string();
@@ -292,10 +296,10 @@ impl<'a> Lexer<'a> {
                     while self.peek_char() == Some('.') {
                         self.advance(); // consume '.'
                         let seg_s = self.pos;
-                        if !self.peek_char().map_or(false, |c| c.is_ascii_alphabetic() || c == '_') {
+                        if !self.peek_char().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') {
                             return Err(self.make_error(seg_s, "expected identifier after '.'"));
                         }
-                        while self.peek_char().map_or(false, |c| c.is_ascii_alphanumeric() || c == '_') {
+                        while self.peek_char().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
                             self.advance();
                         }
                         segments.push(self.input[seg_s..self.pos].to_string());
@@ -401,12 +405,12 @@ impl<'a> Parser<'a> {
 
     // ---- Grammar productions ----
 
-    /// expr = or_expr
+    // expr = or_expr
     fn parse_expr(&mut self) -> Result<PredicateNode, ParseError> {
         self.parse_or_expr()
     }
 
-    /// or_expr = and_expr ( "||" and_expr )*
+    // or_expr = and_expr ( "||" and_expr )*
     fn parse_or_expr(&mut self) -> Result<PredicateNode, ParseError> {
         let mut left = self.parse_and_expr()?;
 
@@ -430,7 +434,7 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    /// and_expr = unary_expr ( "&&" unary_expr )*
+    // and_expr = unary_expr ( "&&" unary_expr )*
     fn parse_and_expr(&mut self) -> Result<PredicateNode, ParseError> {
         let mut left = self.parse_unary_expr()?;
 
@@ -454,7 +458,7 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    /// unary_expr = "!" unary_expr | primary
+    // unary_expr = "!" unary_expr | primary
     fn parse_unary_expr(&mut self) -> Result<PredicateNode, ParseError> {
         if self.current_token() == &Token::Not {
             self.advance()?;
@@ -470,7 +474,7 @@ impl<'a> Parser<'a> {
         self.parse_primary()
     }
 
-    /// primary = "(" expr ")" | comparison
+    // primary = "(" expr ")" | comparison
     fn parse_primary(&mut self) -> Result<PredicateNode, ParseError> {
         if self.current_token() == &Token::LParen {
             self.advance()?; // consume '('
@@ -485,7 +489,7 @@ impl<'a> Parser<'a> {
         self.parse_comparison()
     }
 
-    /// comparison = field_ref ( cmp_op value_or_ref | "in" field_ref )
+    // comparison = field_ref ( cmp_op value_or_ref | "in" field_ref )
     fn parse_comparison(&mut self) -> Result<PredicateNode, ParseError> {
         let (lhs_pos, lhs_segments) = self.parse_field_ref_raw()?;
 
@@ -506,7 +510,7 @@ impl<'a> Parser<'a> {
                 let op_pos = self.current_pos();
                 self.advance()?;
                 let rhs = self.parse_value_or_ref(op_pos)?;
-                build_comparison_node(&lhs_segments, op_tok, rhs, lhs_pos, self.input)
+                build_comparison_node(&lhs_segments, &op_tok, rhs, lhs_pos, self.input)
             }
             _ => {
                 let pos = self.current_pos();
@@ -519,7 +523,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parses a field_ref (dotted identifier), returning (position, segments).
+    // Parses a field_ref (dotted identifier), returning (position, segments).
     fn parse_field_ref_raw(&mut self) -> Result<(usize, Vec<String>), ParseError> {
         let pos = self.current_pos();
         match self.current_token().clone() {
@@ -546,7 +550,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// value_or_ref = field_ref | STRING | NUMBER | BOOLEAN
+    // value_or_ref = field_ref | STRING | NUMBER | BOOLEAN
     fn parse_value_or_ref(&mut self, _op_pos: usize) -> Result<RhsValue, ParseError> {
         let pos = self.current_pos();
         match self.current_token().clone() {
@@ -601,13 +605,13 @@ enum RhsValue {
 
 /// Builds a comparison `PredicateNode` from parsed LHS segments, operator token, and RHS value.
 ///
-/// Applies field reference resolution rules:
-/// - LHS `data.X` -> `attribute = "X"`, `value_ref = None` (RHS sets value/value_ref)
-/// - LHS `auth.X` + RHS `data.Y` -> swap: `attribute = "Y"`, `value_ref = "auth.X"`
-/// - LHS `auth.X` without a `data.*` RHS -> `attribute = "auth.X"` (full path)
+/// Applies field reference resolution rules. `data.X op auth.Y` maps to
+/// `attribute = "X"` with `value_ref = "auth.Y"`. When auth is on the left and
+/// data on the right, sides are swapped automatically.
+#[allow(clippy::too_many_lines)]
 fn build_comparison_node(
     lhs: &[String],
-    op_tok: Token,
+    op_tok: &Token,
     rhs: RhsValue,
     _lhs_pos: usize,
     _input: &str,
@@ -623,13 +627,13 @@ fn build_comparison_node(
     };
 
     // Determine if LHS is a data or auth reference.
-    let lhs_is_data = lhs.first().map_or(false, |s| s == "data");
-    let lhs_is_auth = lhs.first().map_or(false, |s| s == "auth");
+    let lhs_is_data = lhs.first().is_some_and(|s| s == "data");
+    let lhs_is_auth = lhs.first().is_some_and(|s| s == "auth");
 
     match rhs {
         RhsValue::FieldRef(rhs_segs) => {
-            let rhs_is_data = rhs_segs.first().map_or(false, |s| s == "data");
-            let rhs_is_auth = rhs_segs.first().map_or(false, |s| s == "auth");
+            let rhs_is_data = rhs_segs.first().is_some_and(|s| s == "data");
+            let rhs_is_auth = rhs_segs.first().is_some_and(|s| s == "auth");
 
             if lhs_is_data && rhs_is_auth {
                 // Normal case: data.X op auth.Y -> attribute=X, value_ref="auth.Y"
@@ -745,8 +749,8 @@ fn build_in_node(
     lhs_pos: usize,
     input: &str,
 ) -> Result<PredicateNode, ParseError> {
-    let lhs_is_data = lhs.first().map_or(false, |s| s == "data");
-    let rhs_is_auth = rhs.first().map_or(false, |s| s == "auth");
+    let lhs_is_data = lhs.first().is_some_and(|s| s == "data");
+    let rhs_is_auth = rhs.first().is_some_and(|s| s == "auth");
 
     if lhs_is_data && rhs_is_auth {
         let attribute = lhs[1..].join(".");
@@ -1084,5 +1088,204 @@ mod tests {
         assert_eq!(node.op, PredicateOp::Eq);
         assert_eq!(node.attribute, Some("age".to_string()));
         assert_eq!(node.value, Some(rmpv::Value::Integer(42.into())));
+    }
+
+    // -----------------------------------------------------------------------
+    // Round-trip tests (G4): parse expression, evaluate with evaluate_predicate
+    // -----------------------------------------------------------------------
+
+    use crate::service::domain::predicate::{evaluate_predicate, EvalContext};
+
+    fn make_data(pairs: &[(&str, rmpv::Value)]) -> rmpv::Value {
+        rmpv::Value::Map(
+            pairs
+                .iter()
+                .map(|(k, v)| (rmpv::Value::String((*k).into()), v.clone()))
+                .collect(),
+        )
+    }
+
+    fn make_auth(id: &str, roles: &[&str]) -> rmpv::Value {
+        rmpv::Value::Map(vec![
+            (
+                rmpv::Value::String("id".into()),
+                rmpv::Value::String(id.into()),
+            ),
+            (
+                rmpv::Value::String("roles".into()),
+                rmpv::Value::Array(
+                    roles
+                        .iter()
+                        .map(|r| rmpv::Value::String((*r).into()))
+                        .collect(),
+                ),
+            ),
+        ])
+    }
+
+    #[test]
+    fn roundtrip_auth_id_eq_owner_id_true() {
+        let node = parsed("auth.id == data.ownerId");
+        let data = make_data(&[("ownerId", rmpv::Value::String("u1".into()))]);
+        let auth = make_auth("u1", &[]);
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
+        assert!(evaluate_predicate(&node, &ctx));
+    }
+
+    #[test]
+    fn roundtrip_auth_id_eq_owner_id_false() {
+        let node = parsed("auth.id == data.ownerId");
+        let data = make_data(&[("ownerId", rmpv::Value::String("u2".into()))]);
+        let auth = make_auth("u1", &[]);
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
+        assert!(!evaluate_predicate(&node, &ctx));
+    }
+
+    #[test]
+    fn roundtrip_and_age_status_true() {
+        let node = parsed("data.age >= 18 && data.status == 'active'");
+        let data = make_data(&[
+            ("age", rmpv::Value::Integer(25.into())),
+            ("status", rmpv::Value::String("active".into())),
+        ]);
+        assert!(evaluate_predicate(&node, &EvalContext::data_only(&data)));
+    }
+
+    #[test]
+    fn roundtrip_and_age_status_false_age() {
+        let node = parsed("data.age >= 18 && data.status == 'active'");
+        let data = make_data(&[
+            ("age", rmpv::Value::Integer(15.into())),
+            ("status", rmpv::Value::String("active".into())),
+        ]);
+        assert!(!evaluate_predicate(&node, &EvalContext::data_only(&data)));
+    }
+
+    #[test]
+    fn roundtrip_in_role_present() {
+        let node = parsed("data.role in auth.roles");
+        let data = make_data(&[("role", rmpv::Value::String("editor".into()))]);
+        let auth = make_auth("u1", &["viewer", "editor"]);
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
+        assert!(evaluate_predicate(&node, &ctx));
+    }
+
+    #[test]
+    fn roundtrip_in_role_absent() {
+        let node = parsed("data.role in auth.roles");
+        let data = make_data(&[("role", rmpv::Value::String("admin".into()))]);
+        let auth = make_auth("u1", &["viewer", "editor"]);
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
+        assert!(!evaluate_predicate(&node, &ctx));
+    }
+
+    #[test]
+    fn roundtrip_or_in_and_bool_true_via_in() {
+        let node = parsed("data.role in auth.roles || data.public == true");
+        let data = make_data(&[
+            ("role", rmpv::Value::String("editor".into())),
+            ("public", rmpv::Value::Boolean(false)),
+        ]);
+        let auth = make_auth("u1", &["editor"]);
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
+        assert!(evaluate_predicate(&node, &ctx));
+    }
+
+    #[test]
+    fn roundtrip_or_in_and_bool_true_via_bool() {
+        let node = parsed("data.role in auth.roles || data.public == true");
+        let data = make_data(&[
+            ("role", rmpv::Value::String("guest".into())),
+            ("public", rmpv::Value::Boolean(true)),
+        ]);
+        let auth = make_auth("u1", &["viewer"]);
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
+        assert!(evaluate_predicate(&node, &ctx));
+    }
+
+    #[test]
+    fn roundtrip_not() {
+        let node = parsed("!(data.age == 18)");
+        let data_18 = make_data(&[("age", rmpv::Value::Integer(18.into()))]);
+        let data_25 = make_data(&[("age", rmpv::Value::Integer(25.into()))]);
+        assert!(!evaluate_predicate(&node, &EvalContext::data_only(&data_18)));
+        assert!(evaluate_predicate(&node, &EvalContext::data_only(&data_25)));
+    }
+
+    #[test]
+    fn roundtrip_nested_parens() {
+        let node = parsed(
+            "data.x == 'hello' && (data.status == 'admin' || data.status == 'editor')",
+        );
+        let data_match = make_data(&[
+            ("x", rmpv::Value::String("hello".into())),
+            ("status", rmpv::Value::String("admin".into())),
+        ]);
+        let data_no_match = make_data(&[
+            ("x", rmpv::Value::String("hello".into())),
+            ("status", rmpv::Value::String("viewer".into())),
+        ]);
+        assert!(evaluate_predicate(&node, &EvalContext::data_only(&data_match)));
+        assert!(!evaluate_predicate(&node, &EvalContext::data_only(&data_no_match)));
+    }
+
+    #[test]
+    fn roundtrip_nested_parens_auth() {
+        let node = parsed(
+            "(auth.id == data.ownerId || data.public == true) && data.active == true",
+        );
+
+        // Owner with inactive record — false because active == false.
+        let data_inactive = make_data(&[
+            ("ownerId", rmpv::Value::String("u1".into())),
+            ("public", rmpv::Value::Boolean(false)),
+            ("active", rmpv::Value::Boolean(false)),
+        ]);
+        let auth = make_auth("u1", &[]);
+        assert!(!evaluate_predicate(
+            &node,
+            &EvalContext { auth: Some(&auth), data: &data_inactive }
+        ));
+
+        // Owner with active record — true.
+        let data_active_owner = make_data(&[
+            ("ownerId", rmpv::Value::String("u1".into())),
+            ("public", rmpv::Value::Boolean(false)),
+            ("active", rmpv::Value::Boolean(true)),
+        ]);
+        assert!(evaluate_predicate(
+            &node,
+            &EvalContext { auth: Some(&auth), data: &data_active_owner }
+        ));
+
+        // Non-owner, public, active — true.
+        let data_public_active = make_data(&[
+            ("ownerId", rmpv::Value::String("u2".into())),
+            ("public", rmpv::Value::Boolean(true)),
+            ("active", rmpv::Value::Boolean(true)),
+        ]);
+        let auth2 = make_auth("u1", &[]);
+        assert!(evaluate_predicate(
+            &node,
+            &EvalContext { auth: Some(&auth2), data: &data_public_active }
+        ));
     }
 }
