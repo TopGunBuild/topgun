@@ -52,6 +52,7 @@ pub struct EvalContext<'a> {
 
 impl<'a> EvalContext<'a> {
     /// Creates a data-only context with no auth. Backward-compatible shorthand.
+    #[must_use]
     pub fn data_only(data: &'a rmpv::Value) -> Self {
         EvalContext { auth: None, data }
     }

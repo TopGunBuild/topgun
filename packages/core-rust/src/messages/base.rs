@@ -116,7 +116,7 @@ pub struct PredicateNode {
     pub value: Option<rmpv::Value>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub children: Option<Vec<PredicateNode>>,
-    /// Variable reference for predicate value resolution against an EvalContext.
+    /// Variable reference for predicate value resolution against an [`EvalContext`].
     ///
     /// Holds a dot-path string like `"auth.id"` or `"data.ownerId"`. When both
     /// `value` and `value_ref` are `Some`, `value_ref` takes precedence.
@@ -334,6 +334,19 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(roundtrip_named(&node), node);
+    }
+
+    #[test]
+    fn predicate_node_value_ref_roundtrip() {
+        let node = PredicateNode {
+            op: PredicateOp::Eq,
+            attribute: Some("ownerId".to_string()),
+            value_ref: Some("auth.id".to_string()),
+            ..Default::default()
+        };
+        let rt = roundtrip_named(&node);
+        assert_eq!(rt, node);
+        assert_eq!(rt.value_ref, Some("auth.id".to_string()));
     }
 
     #[test]
