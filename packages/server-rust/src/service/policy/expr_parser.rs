@@ -777,3 +777,312 @@ fn build_in_node(
         })
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use topgun_core::messages::base::PredicateOp;
+
+    // Helper: assert parse succeeds and matches expected op/attribute/value_ref.
+    fn parsed(input: &str) -> PredicateNode {
+        parse_permission_expr(input).unwrap_or_else(|e| panic!("parse failed for '{input}': {e}"))
+    }
+
+    fn parse_err(input: &str) -> ParseError {
+        parse_permission_expr(input)
+            .err()
+            .unwrap_or_else(|| panic!("expected parse error for '{input}' but parse succeeded"))
+    }
+
+    // --- AC1: auth.id == data.ownerId ---
+
+    #[test]
+    fn ac1_auth_eq_data() {
+        let node = parsed("auth.id == data.ownerId");
+        assert_eq!(node.op, PredicateOp::Eq);
+        assert_eq!(node.attribute, Some("ownerId".to_string()));
+        assert_eq!(node.value_ref, Some("auth.id".to_string()));
+        assert!(node.value.is_none());
+        assert!(node.children.is_none());
+    }
+
+    // --- AC2: data.age >= 18 && data.status == 'active' ---
+
+    #[test]
+    fn ac2_and_with_int_and_string() {
+        let node = parsed("data.age >= 18 && data.status == 'active'");
+        assert_eq!(node.op, PredicateOp::And);
+        let children = node.children.as_ref().unwrap();
+        assert_eq!(children.len(), 2);
+
+        let age_node = &children[0];
+        assert_eq!(age_node.op, PredicateOp::Gte);
+        assert_eq!(age_node.attribute, Some("age".to_string()));
+        assert_eq!(age_node.value, Some(rmpv::Value::Integer(18.into())));
+
+        let status_node = &children[1];
+        assert_eq!(status_node.op, PredicateOp::Eq);
+        assert_eq!(status_node.attribute, Some("status".to_string()));
+        assert_eq!(
+            status_node.value,
+            Some(rmpv::Value::String("active".into()))
+        );
+    }
+
+    // --- AC3: data.role in auth.roles || data.public == true ---
+
+    #[test]
+    fn ac3_in_or_boolean() {
+        let node = parsed("data.role in auth.roles || data.public == true");
+        assert_eq!(node.op, PredicateOp::Or);
+        let children = node.children.as_ref().unwrap();
+        assert_eq!(children.len(), 2);
+
+        let in_node = &children[0];
+        assert_eq!(in_node.op, PredicateOp::In);
+        assert_eq!(in_node.attribute, Some("role".to_string()));
+        assert_eq!(in_node.value_ref, Some("auth.roles".to_string()));
+
+        let public_node = &children[1];
+        assert_eq!(public_node.op, PredicateOp::Eq);
+        assert_eq!(public_node.attribute, Some("public".to_string()));
+        assert_eq!(public_node.value, Some(rmpv::Value::Boolean(true)));
+    }
+
+    // --- AC4: !data.deleted returns error (bare field ref, no comparison) ---
+
+    #[test]
+    fn ac4_not_with_bare_field_ref_is_error() {
+        let err = parse_err("!data.deleted");
+        // The inner unary_expr calls parse_primary -> parse_comparison -> parse_field_ref_raw
+        // which succeeds, then sees Eof instead of a comparison operator.
+        assert!(
+            err.message.contains("expected comparison operator"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // --- AC5: data.x == returns error with position at end ---
+
+    #[test]
+    fn ac5_missing_rhs_gives_error_at_eof() {
+        let err = parse_err("data.x ==");
+        assert!(
+            err.message
+                .contains("expected value or field reference after operator"),
+            "unexpected error: {err}"
+        );
+        // Position should be at or near end of input (length 9).
+        assert!(err.position >= 9, "expected position near end, got {}", err.position);
+    }
+
+    // --- AC6: nested parenthesized Or inside And ---
+
+    #[test]
+    fn ac6_nested_parens() {
+        let node = parsed("data.x == 'hello' && (auth.role == 'admin' || auth.role == 'editor')");
+        assert_eq!(node.op, PredicateOp::And);
+        let children = node.children.as_ref().unwrap();
+        assert_eq!(children.len(), 2);
+
+        // First child: data.x == 'hello'
+        assert_eq!(children[0].op, PredicateOp::Eq);
+        assert_eq!(children[0].attribute, Some("x".to_string()));
+
+        // Second child: Or node
+        let or_node = &children[1];
+        assert_eq!(or_node.op, PredicateOp::Or);
+        let or_children = or_node.children.as_ref().unwrap();
+        assert_eq!(or_children.len(), 2);
+        assert_eq!(or_children[0].op, PredicateOp::Eq);
+        assert_eq!(or_children[1].op, PredicateOp::Eq);
+    }
+
+    // --- All comparison operators ---
+
+    #[test]
+    fn all_cmp_operators() {
+        let cases = [
+            ("data.age == 18", PredicateOp::Eq),
+            ("data.age != 18", PredicateOp::Neq),
+            ("data.age > 18", PredicateOp::Gt),
+            ("data.age >= 18", PredicateOp::Gte),
+            ("data.age < 18", PredicateOp::Lt),
+            ("data.age <= 18", PredicateOp::Lte),
+        ];
+        for (expr, expected_op) in &cases {
+            let node = parsed(expr);
+            assert_eq!(&node.op, expected_op, "failed for: {expr}");
+            assert_eq!(node.attribute, Some("age".to_string()));
+            assert_eq!(node.value, Some(rmpv::Value::Integer(18.into())));
+        }
+    }
+
+    // --- Not combinator ---
+
+    #[test]
+    fn not_combinator() {
+        let node = parsed("!(data.age == 18)");
+        assert_eq!(node.op, PredicateOp::Not);
+        let children = node.children.as_ref().unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].op, PredicateOp::Eq);
+    }
+
+    // --- Float literal ---
+
+    #[test]
+    fn float_literal() {
+        let node = parsed("data.score >= 9.5");
+        assert_eq!(node.op, PredicateOp::Gte);
+        assert_eq!(node.attribute, Some("score".to_string()));
+        assert_eq!(node.value, Some(rmpv::Value::F64(9.5)));
+    }
+
+    // --- Boolean false ---
+
+    #[test]
+    fn boolean_false_literal() {
+        let node = parsed("data.deleted == false");
+        assert_eq!(node.op, PredicateOp::Eq);
+        assert_eq!(node.attribute, Some("deleted".to_string()));
+        assert_eq!(node.value, Some(rmpv::Value::Boolean(false)));
+    }
+
+    // --- data.X == data.Y (data-to-data comparison via value_ref) ---
+
+    #[test]
+    fn data_to_data_comparison() {
+        let node = parsed("data.createdBy == data.ownerId");
+        assert_eq!(node.op, PredicateOp::Eq);
+        assert_eq!(node.attribute, Some("createdBy".to_string()));
+        assert_eq!(node.value_ref, Some("data.ownerId".to_string()));
+    }
+
+    // --- Swap: auth.id == data.ownerId (auth on left) ---
+
+    #[test]
+    fn swap_auth_lhs_data_rhs() {
+        // auth.id == data.ownerId should swap to attribute="ownerId", value_ref="auth.id"
+        let node = parsed("auth.id == data.ownerId");
+        // Same as AC1 but confirm swap logic
+        assert_eq!(node.op, PredicateOp::Eq);
+        assert_eq!(node.attribute, Some("ownerId".to_string()));
+        assert_eq!(node.value_ref, Some("auth.id".to_string()));
+    }
+
+    // --- Multi-segment And (3 terms) ---
+
+    #[test]
+    fn three_term_and() {
+        let node = parsed("data.a == 1 && data.b == 2 && data.c == 3");
+        assert_eq!(node.op, PredicateOp::And);
+        // Flattened: 3 children under single And.
+        let children = node.children.as_ref().unwrap();
+        assert_eq!(children.len(), 3);
+    }
+
+    // --- Multi-segment Or (3 terms) ---
+
+    #[test]
+    fn three_term_or() {
+        let node = parsed("data.x == 1 || data.y == 2 || data.z == 3");
+        assert_eq!(node.op, PredicateOp::Or);
+        let children = node.children.as_ref().unwrap();
+        assert_eq!(children.len(), 3);
+    }
+
+    // --- Error: bogus >>> ---
+
+    #[test]
+    fn error_bogus_characters() {
+        let err = parse_err("bogus >>>");
+        // Should have a position and a snippet.
+        assert!(!err.snippet.is_empty());
+        assert!(err.position < 20);
+    }
+
+    // --- Error: data.x >> (double > not supported as token) ---
+
+    #[test]
+    fn error_data_x_double_gt() {
+        let err = parse_err("data.x >>");
+        assert!(err.position > 0);
+    }
+
+    // --- Error: unclosed paren ---
+
+    #[test]
+    fn error_unclosed_paren() {
+        let err = parse_err("(data.x == 1");
+        assert!(
+            err.message.contains("expected ')'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // --- Error: trailing token ---
+
+    #[test]
+    fn error_trailing_token() {
+        let err = parse_err("data.x == 1 extra");
+        assert!(
+            err.message.contains("unexpected token"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // --- Error: single '=' ---
+
+    #[test]
+    fn error_single_equals() {
+        let err = parse_err("data.x = 1");
+        assert!(err.message.contains("=="), "unexpected error: {err}");
+    }
+
+    // --- Error: empty string ---
+
+    #[test]
+    fn error_empty_input() {
+        let err = parse_err("");
+        assert!(
+            err.message.contains("expected field reference"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // --- ParseError Display format ---
+
+    #[test]
+    fn parse_error_display_includes_position() {
+        let err = parse_err("data.x ==");
+        let display = err.to_string();
+        assert!(display.contains("parse error at position"), "display: {display}");
+        assert!(display.contains('^'), "caret missing in display: {display}");
+    }
+
+    // --- String with spaces ---
+
+    #[test]
+    fn string_with_spaces() {
+        let node = parsed("data.name == 'hello world'");
+        assert_eq!(
+            node.value,
+            Some(rmpv::Value::String("hello world".into()))
+        );
+    }
+
+    // --- Whitespace tolerance ---
+
+    #[test]
+    fn whitespace_tolerance() {
+        let node = parsed("  data.age  ==  42  ");
+        assert_eq!(node.op, PredicateOp::Eq);
+        assert_eq!(node.attribute, Some("age".to_string()));
+        assert_eq!(node.value, Some(rmpv::Value::Integer(42.into())));
+    }
+}
