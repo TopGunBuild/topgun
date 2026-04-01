@@ -285,9 +285,10 @@ mod tests {
     use tower::{Layer, Service, ServiceExt};
 
     use super::*;
-    use crate::network::connection::{ConnectionConfig, ConnectionKind};
+    use crate::network::config::ConnectionConfig;
+    use crate::network::connection::ConnectionKind;
     use crate::service::operation::{service_names, OperationContext};
-    use crate::service::policy::InMemoryPolicyStore;
+    use crate::service::policy::{InMemoryPolicyStore, PolicyStore};
 
     /// Stub inner service that always succeeds.
     struct AlwaysOkService;
