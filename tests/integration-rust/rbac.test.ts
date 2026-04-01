@@ -56,6 +56,27 @@ function makeWriteBatch(mapName: string, key: string): object {
 }
 
 /**
+ * Creates an OP_BATCH payload whose record value contains an ownerId field.
+ * Used for testing record-level write conditions.
+ */
+function makeOwnerWriteBatch(mapName: string, key: string, ownerId: string): object {
+  return {
+    type: 'OP_BATCH',
+    payload: {
+      ops: [
+        {
+          id: `op-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          mapName,
+          opType: 'PUT',
+          key,
+          record: createLWWRecord({ ownerId }),
+        },
+      ],
+    },
+  };
+}
+
+/**
  * Sends an OP_BATCH write and resolves with the first server response
  * (either OP_ACK for success or ERROR for denial).
  */
@@ -98,15 +119,26 @@ async function createPolicy(
     mapPattern: string;
     action: string;
     effect: string;
+    conditionExpr?: string;
   }
 ): Promise<void> {
+  const body: Record<string, string> = {
+    id: policy.id,
+    mapPattern: policy.mapPattern,
+    action: policy.action,
+    effect: policy.effect,
+  };
+  if (policy.conditionExpr) {
+    body.conditionExpr = policy.conditionExpr;
+  }
+
   const resp = await fetch(`http://localhost:${port}/api/admin/policies`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${adminToken}`,
     },
-    body: JSON.stringify(policy),
+    body: JSON.stringify(body),
   });
 
   if (!resp.ok) {
@@ -282,6 +314,132 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
       expect(afterResp.type).toBe('OP_ACK');
     } finally {
       client.close();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 6: Record owner can write own record (record-level condition)
+  // -------------------------------------------------------------------------
+  test('Test 6: record owner can write own record via owner condition', async () => {
+    // Create an owner-only policy for the "owned-docs" map.
+    await createPolicy(server.port, {
+      id: 'p-owned-docs-owner-write',
+      mapPattern: 'owned-docs',
+      action: 'write',
+      effect: 'allow',
+      conditionExpr: 'auth.id == data.ownerId',
+    });
+
+    const client = await createRustTestClient(server.port, {
+      userId: 'owner-user-1',
+      roles: ['user'],
+    });
+
+    try {
+      await client.waitForMessage('AUTH_ACK', 8000);
+
+      // Write with ownerId matching the authenticated user's id.
+      const baseIndex = client.messages.length;
+      client.send(makeOwnerWriteBatch('owned-docs', 'doc-owned', 'owner-user-1'));
+
+      const resp = await new Promise<{ type: string; payload?: any }>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Timeout')), 5000);
+        const check = () => {
+          for (let i = baseIndex; i < client.messages.length; i++) {
+            const msg = client.messages[i];
+            if (msg.type === 'OP_ACK' || msg.type === 'ERROR') {
+              clearTimeout(timeout);
+              resolve(msg);
+              return;
+            }
+          }
+          setTimeout(check, 50);
+        };
+        check();
+      });
+
+      expect(resp.type).toBe('OP_ACK');
+    } finally {
+      client.close();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 7: Non-owner is denied writing another user's record
+  // -------------------------------------------------------------------------
+  test('Test 7: non-owner is denied writing another user\'s record', async () => {
+    // Reuses the "owned-docs" policy from Test 6 (conditionExpr: 'auth.id == data.ownerId').
+    const client = await createRustTestClient(server.port, {
+      userId: 'non-owner-user',
+      roles: ['user'],
+    });
+
+    try {
+      await client.waitForMessage('AUTH_ACK', 8000);
+
+      // Write with ownerId that does NOT match the authenticated user's id.
+      const baseIndex = client.messages.length;
+      client.send(makeOwnerWriteBatch('owned-docs', 'doc-stolen', 'someone-else'));
+
+      const resp = await new Promise<{ type: string; payload?: any }>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Timeout')), 5000);
+        const check = () => {
+          for (let i = baseIndex; i < client.messages.length; i++) {
+            const msg = client.messages[i];
+            if (msg.type === 'OP_ACK' || msg.type === 'ERROR') {
+              clearTimeout(timeout);
+              resolve(msg);
+              return;
+            }
+          }
+          setTimeout(check, 50);
+        };
+        check();
+      });
+
+      expect(resp.type).toBe('ERROR');
+    } finally {
+      client.close();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 8: Admin bypasses record-level conditions
+  // -------------------------------------------------------------------------
+  test('Test 8: admin bypasses record-level conditions', async () => {
+    // Reuses the "owned-docs" policy from Test 6.
+    const adminClient = await createRustTestClient(server.port, {
+      userId: 'admin-owner-test',
+      roles: ['admin'],
+    });
+
+    try {
+      await adminClient.waitForMessage('AUTH_ACK', 8000);
+
+      // Admin writes with an ownerId that does NOT match admin's id.
+      // The admin bypass should allow it regardless of the condition.
+      const baseIndex = adminClient.messages.length;
+      adminClient.send(makeOwnerWriteBatch('owned-docs', 'admin-override', 'any-other-user'));
+
+      const resp = await new Promise<{ type: string; payload?: any }>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Timeout')), 5000);
+        const check = () => {
+          for (let i = baseIndex; i < adminClient.messages.length; i++) {
+            const msg = adminClient.messages[i];
+            if (msg.type === 'OP_ACK' || msg.type === 'ERROR') {
+              clearTimeout(timeout);
+              resolve(msg);
+              return;
+            }
+          }
+          setTimeout(check, 50);
+        };
+        check();
+      });
+
+      expect(resp.type).toBe('OP_ACK');
+    } finally {
+      adminClient.close();
     }
   });
 });
