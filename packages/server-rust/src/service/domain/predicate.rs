@@ -1319,4 +1319,251 @@ mod tests {
         assert!(values_equal(&rmpv::Value::Boolean(true), &rmpv::Value::Boolean(true)));
         assert!(!values_equal(&rmpv::Value::Boolean(true), &rmpv::Value::Boolean(false)));
     }
+
+    // ---- Variable reference tests (AC4, AC5, AC6, AC7, AC8) ----
+
+    /// Build an auth rmpv::Value map for testing.
+    fn make_auth(pairs: Vec<(&str, rmpv::Value)>) -> rmpv::Value {
+        make_map(pairs)
+    }
+
+    /// AC4: auth.id resolves to the id field of ctx.auth when auth is Some.
+    #[test]
+    fn value_ref_auth_id_matches_owner() {
+        let auth = make_auth(vec![("id", rmpv::Value::String("user-42".into()))]);
+        let data = make_map(vec![("ownerId", rmpv::Value::String("user-42".into()))]);
+        let pred = PredicateNode {
+            op: PredicateOp::Eq,
+            attribute: Some("ownerId".to_string()),
+            value_ref: Some("auth.id".to_string()),
+            ..Default::default()
+        };
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
+        assert!(evaluate_predicate(&pred, &ctx));
+    }
+
+    /// AC4: auth.id does NOT match when IDs differ.
+    #[test]
+    fn value_ref_auth_id_no_match_different_values() {
+        let auth = make_auth(vec![("id", rmpv::Value::String("user-99".into()))]);
+        let data = make_map(vec![("ownerId", rmpv::Value::String("user-42".into()))]);
+        let pred = PredicateNode {
+            op: PredicateOp::Eq,
+            attribute: Some("ownerId".to_string()),
+            value_ref: Some("auth.id".to_string()),
+            ..Default::default()
+        };
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
+        assert!(!evaluate_predicate(&pred, &ctx));
+    }
+
+    /// AC5: auth.roles resolves to the roles array of ctx.auth.
+    #[test]
+    fn value_ref_auth_roles_resolves_to_array() {
+        let roles_array = rmpv::Value::Array(vec![
+            rmpv::Value::String("admin".into()),
+            rmpv::Value::String("editor".into()),
+        ]);
+        let auth = make_auth(vec![("roles", roles_array.clone())]);
+        let data = make_map(vec![("assignedRoles", roles_array.clone())]);
+        let pred = PredicateNode {
+            op: PredicateOp::Eq,
+            attribute: Some("assignedRoles".to_string()),
+            value_ref: Some("auth.roles".to_string()),
+            ..Default::default()
+        };
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
+        assert!(evaluate_predicate(&pred, &ctx));
+    }
+
+    /// AC6: data.address.city resolves to a nested field in ctx.data.
+    #[test]
+    fn value_ref_data_nested_field_resolves() {
+        let address = rmpv::Value::Map(vec![(
+            rmpv::Value::String("city".into()),
+            rmpv::Value::String("Berlin".into()),
+        )]);
+        let data = make_map(vec![
+            ("address", address),
+            ("city", rmpv::Value::String("Berlin".into())),
+        ]);
+        let pred = PredicateNode {
+            op: PredicateOp::Eq,
+            attribute: Some("city".to_string()),
+            value_ref: Some("data.address.city".to_string()),
+            ..Default::default()
+        };
+        let ctx = EvalContext { auth: None, data: &data };
+        assert!(evaluate_predicate(&pred, &ctx));
+    }
+
+    /// AC7: unknown namespace (e.g., "env.DEBUG") causes predicate to return false.
+    #[test]
+    fn value_ref_unknown_namespace_returns_false() {
+        let data = make_map(vec![("status", rmpv::Value::String("active".into()))]);
+        let pred = PredicateNode {
+            op: PredicateOp::Eq,
+            attribute: Some("status".to_string()),
+            value_ref: Some("env.DEBUG".to_string()),
+            ..Default::default()
+        };
+        let ctx = EvalContext { auth: None, data: &data };
+        assert!(!evaluate_predicate(&pred, &ctx));
+    }
+
+    /// AC8: auth.id with ctx.auth = None causes predicate to return false.
+    #[test]
+    fn value_ref_auth_with_none_auth_returns_false() {
+        let data = make_map(vec![("ownerId", rmpv::Value::String("user-42".into()))]);
+        let pred = PredicateNode {
+            op: PredicateOp::Eq,
+            attribute: Some("ownerId".to_string()),
+            value_ref: Some("auth.id".to_string()),
+            ..Default::default()
+        };
+        let ctx = EvalContext { auth: None, data: &data };
+        assert!(!evaluate_predicate(&pred, &ctx));
+    }
+
+    // ---- Nested attribute dot-path tests (AC9) ----
+
+    /// AC9: nested attribute "address.city" resolves for leaf comparison.
+    #[test]
+    fn nested_attribute_dot_path_leaf_comparison() {
+        let address = rmpv::Value::Map(vec![(
+            rmpv::Value::String("city".into()),
+            rmpv::Value::String("Berlin".into()),
+        )]);
+        let data = make_map(vec![("address", address)]);
+        let pred = leaf(
+            PredicateOp::Eq,
+            "address.city",
+            rmpv::Value::String("Berlin".into()),
+        );
+        let ctx = EvalContext { auth: None, data: &data };
+        assert!(evaluate_predicate(&pred, &ctx));
+    }
+
+    /// AC9: nested attribute "address.city" does not match for different value.
+    #[test]
+    fn nested_attribute_dot_path_leaf_no_match() {
+        let address = rmpv::Value::Map(vec![(
+            rmpv::Value::String("city".into()),
+            rmpv::Value::String("Paris".into()),
+        )]);
+        let data = make_map(vec![("address", address)]);
+        let pred = leaf(
+            PredicateOp::Eq,
+            "address.city",
+            rmpv::Value::String("Berlin".into()),
+        );
+        let ctx = EvalContext { auth: None, data: &data };
+        assert!(!evaluate_predicate(&pred, &ctx));
+    }
+
+    /// AC9: IsNull with nested attribute "address.city" returns true when field is nil.
+    #[test]
+    fn nested_attribute_is_null_nil_value() {
+        let address = rmpv::Value::Map(vec![(
+            rmpv::Value::String("city".into()),
+            rmpv::Value::Nil,
+        )]);
+        let data = make_map(vec![("address", address)]);
+        let pred = PredicateNode {
+            op: PredicateOp::IsNull,
+            attribute: Some("address.city".to_string()),
+            ..Default::default()
+        };
+        let ctx = EvalContext { auth: None, data: &data };
+        assert!(evaluate_predicate(&pred, &ctx));
+    }
+
+    /// AC9: IsNull with nested attribute "address.city" returns false when field has a value.
+    #[test]
+    fn nested_attribute_is_null_with_value_returns_false() {
+        let address = rmpv::Value::Map(vec![(
+            rmpv::Value::String("city".into()),
+            rmpv::Value::String("Berlin".into()),
+        )]);
+        let data = make_map(vec![("address", address)]);
+        let pred = PredicateNode {
+            op: PredicateOp::IsNull,
+            attribute: Some("address.city".to_string()),
+            ..Default::default()
+        };
+        let ctx = EvalContext { auth: None, data: &data };
+        assert!(!evaluate_predicate(&pred, &ctx));
+    }
+
+    /// AC9: IsNotNull with nested attribute "address.city" returns true when field has a value.
+    #[test]
+    fn nested_attribute_is_not_null_with_value() {
+        let address = rmpv::Value::Map(vec![(
+            rmpv::Value::String("city".into()),
+            rmpv::Value::String("Berlin".into()),
+        )]);
+        let data = make_map(vec![("address", address)]);
+        let pred = PredicateNode {
+            op: PredicateOp::IsNotNull,
+            attribute: Some("address.city".to_string()),
+            ..Default::default()
+        };
+        let ctx = EvalContext { auth: None, data: &data };
+        assert!(evaluate_predicate(&pred, &ctx));
+    }
+
+    /// AC9: IsNull returns true when nested attribute path is absent.
+    #[test]
+    fn nested_attribute_is_null_missing_path_returns_true() {
+        let address = rmpv::Value::Map(vec![(
+            rmpv::Value::String("zip".into()),
+            rmpv::Value::String("10115".into()),
+        )]);
+        let data = make_map(vec![("address", address)]);
+        let pred = PredicateNode {
+            op: PredicateOp::IsNull,
+            attribute: Some("address.city".to_string()),
+            ..Default::default()
+        };
+        let ctx = EvalContext { auth: None, data: &data };
+        assert!(evaluate_predicate(&pred, &ctx));
+    }
+
+    /// value_ref takes precedence over value when both are set.
+    #[test]
+    fn value_ref_takes_precedence_over_value() {
+        let auth = make_auth(vec![("id", rmpv::Value::String("user-42".into()))]);
+        let data = make_map(vec![("ownerId", rmpv::Value::String("user-42".into()))]);
+        // value is wrong, but value_ref is correct — value_ref should win
+        let pred = PredicateNode {
+            op: PredicateOp::Eq,
+            attribute: Some("ownerId".to_string()),
+            value: Some(rmpv::Value::String("wrong-value".into())),
+            value_ref: Some("auth.id".to_string()),
+            ..Default::default()
+        };
+        let ctx = EvalContext {
+            auth: Some(&auth),
+            data: &data,
+        };
+        assert!(evaluate_predicate(&pred, &ctx));
+    }
+
+    /// EvalContext::data_only is backward-compatible (auth = None).
+    #[test]
+    fn eval_context_data_only_is_backward_compatible() {
+        let data = make_map(vec![("score", rmpv::Value::Integer(100.into()))]);
+        let pred = leaf(PredicateOp::Gte, "score", rmpv::Value::Integer(50.into()));
+        // Passing via data_only — same behavior as legacy 2-arg call
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
+    }
 }
