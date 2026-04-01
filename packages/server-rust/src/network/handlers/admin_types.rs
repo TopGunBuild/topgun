@@ -6,6 +6,9 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use crate::service::policy::{PermissionAction, PolicyEffect};
+use topgun_core::messages::base::PredicateNode;
+
 /// Server operational mode.
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -143,4 +146,45 @@ pub struct ErrorResponse {
     pub error: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub field: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Policy admin types
+// ---------------------------------------------------------------------------
+
+/// Request body for creating a new permission policy.
+#[derive(Deserialize, ToSchema, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatePolicyRequest {
+    /// Optional; server generates UUID if omitted.
+    #[serde(default)]
+    pub id: Option<String>,
+    pub map_pattern: String,
+    pub action: PermissionAction,
+    pub effect: PolicyEffect,
+    /// Optional predicate condition as a JSON object.
+    #[serde(default)]
+    #[schema(value_type = Object, nullable = true)]
+    pub condition: Option<PredicateNode>,
+}
+
+/// A single policy as returned by the admin API.
+#[derive(Serialize, ToSchema, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyResponse {
+    pub id: String,
+    pub map_pattern: String,
+    pub action: PermissionAction,
+    pub effect: PolicyEffect,
+    /// Optional predicate condition as a JSON object.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[schema(value_type = Object, nullable = true)]
+    pub condition: Option<PredicateNode>,
+}
+
+/// Response body for the list policies endpoint.
+#[derive(Serialize, ToSchema, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyListResponse {
+    pub policies: Vec<PolicyResponse>,
 }

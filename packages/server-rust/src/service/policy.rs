@@ -10,13 +10,14 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use topgun_core::messages::base::PredicateNode;
+use utoipa::ToSchema;
 
 // ---------------------------------------------------------------------------
 // Permission types
 // ---------------------------------------------------------------------------
 
 /// The specific data operation a policy governs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum PermissionAction {
     Read,
@@ -26,7 +27,7 @@ pub enum PermissionAction {
 }
 
 /// Whether a matching policy grants or denies access.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum PolicyEffect {
     Allow,
