@@ -10,7 +10,7 @@
 
 use std::time::SystemTime;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
@@ -21,13 +21,14 @@ use tracing::info;
 
 use super::admin_auth::AdminClaims;
 use super::admin_types::{
-    self, ClusterStatusResponse, ErrorResponse, LoginRequest, LoginResponse, MapInfo,
-    MapsListResponse, NodeStatus, PartitionInfo, ServerMode, ServerStatusResponse,
-    SettingsResponse, SettingsUpdateRequest,
+    self, ClusterStatusResponse, CreatePolicyRequest, ErrorResponse, LoginRequest, LoginResponse,
+    MapInfo, MapsListResponse, NodeStatus, PartitionInfo, PolicyListResponse, PolicyResponse,
+    ServerMode, ServerStatusResponse, SettingsResponse, SettingsUpdateRequest,
 };
 use super::AppState;
 
 use crate::cluster::types::NodeState;
+use crate::service::policy::PermissionPolicy;
 
 /// JWT claims for token generation (encoding).
 ///
@@ -402,4 +403,140 @@ pub async fn update_settings(
 
     // Return current settings after update.
     get_settings(claims, State(state)).await
+}
+
+// ── Policy admin endpoints ────────────────────────────────────────────
+
+/// Lists all permission policies.
+///
+/// # Errors
+///
+/// Returns 503 if the policy store is not configured.
+pub async fn list_policies(
+    _claims: AdminClaims,
+    State(state): State<AppState>,
+) -> Result<Json<PolicyListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let policy_store = state.policy_store.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "policy store not configured".to_string(),
+                field: None,
+            }),
+        )
+    })?;
+
+    let policies = policy_store
+        .list_policies()
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("failed to list policies: {e}"),
+                    field: None,
+                }),
+            )
+        })?
+        .into_iter()
+        .map(|p| PolicyResponse {
+            id: p.id,
+            map_pattern: p.map_pattern,
+            action: p.action,
+            effect: p.effect,
+            condition: p.condition,
+        })
+        .collect();
+
+    Ok(Json(PolicyListResponse { policies }))
+}
+
+/// Creates a new permission policy.
+///
+/// Generates a UUID for the policy id if not provided in the request.
+///
+/// # Errors
+///
+/// Returns 503 if the policy store is not configured.
+pub async fn create_policy(
+    _claims: AdminClaims,
+    State(state): State<AppState>,
+    Json(req): Json<CreatePolicyRequest>,
+) -> Result<(StatusCode, Json<PolicyResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let policy_store = state.policy_store.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "policy store not configured".to_string(),
+                field: None,
+            }),
+        )
+    })?;
+
+    let id = req
+        .id
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    let policy = PermissionPolicy {
+        id: id.clone(),
+        map_pattern: req.map_pattern.clone(),
+        action: req.action,
+        effect: req.effect,
+        condition: req.condition.clone(),
+    };
+
+    policy_store.upsert_policy(policy).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("failed to create policy: {e}"),
+                field: None,
+            }),
+        )
+    })?;
+
+    let response = PolicyResponse {
+        id,
+        map_pattern: req.map_pattern,
+        action: req.action,
+        effect: req.effect,
+        condition: req.condition,
+    };
+
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+/// Deletes a permission policy by id.
+///
+/// Returns 204 even if the policy did not exist.
+///
+/// # Errors
+///
+/// Returns 503 if the policy store is not configured.
+pub async fn delete_policy(
+    _claims: AdminClaims,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let policy_store = state.policy_store.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "policy store not configured".to_string(),
+                field: None,
+            }),
+        )
+    })?;
+
+    policy_store.delete_policy(&id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("failed to delete policy: {e}"),
+                field: None,
+            }),
+        )
+    })?;
+
+    Ok(StatusCode::NO_CONTENT)
 }

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use tokio::net::TcpListener;
 use tower_http::services::{ServeDir, ServeFile};
@@ -21,7 +21,8 @@ use utoipa::OpenApi;
 use super::config::NetworkConfig;
 use super::connection::{ConnectionRegistry, OutboundMessage};
 use super::handlers::admin::{
-    cluster_status, get_settings, list_maps, login, server_status, update_settings,
+    cluster_status, create_policy, delete_policy, get_settings, list_maps, list_policies, login,
+    server_status, update_settings,
 };
 use super::handlers::{
     health_handler, http_sync_handler, liveness_handler, metrics_handler, readiness_handler,
@@ -33,6 +34,7 @@ use super::shutdown::ShutdownController;
 use crate::cluster::state::ClusterState;
 use crate::service::config::ServerConfig;
 use crate::service::middleware::ObservabilityHandle;
+use crate::service::policy::PolicyStore;
 use crate::storage::factory::RecordStoreFactory;
 
 /// Manages the full HTTP/WebSocket server lifecycle.
@@ -53,6 +55,7 @@ pub struct NetworkModule {
     cluster_state: Option<Arc<ClusterState>>,
     store_factory: Option<Arc<RecordStoreFactory>>,
     server_config: Option<Arc<ArcSwap<ServerConfig>>>,
+    policy_store: Option<Arc<dyn PolicyStore>>,
 }
 
 impl NetworkModule {
@@ -71,6 +74,7 @@ impl NetworkModule {
             cluster_state: None,
             store_factory: None,
             server_config: None,
+            policy_store: None,
         }
     }
 
@@ -96,6 +100,11 @@ impl NetworkModule {
     /// Configures the hot-reloadable server config for admin settings endpoints.
     pub fn set_server_config(&mut self, config: Arc<ArcSwap<ServerConfig>>) {
         self.server_config = Some(config);
+    }
+
+    /// Configures the policy store for permission policy admin endpoints.
+    pub fn set_policy_store(&mut self, store: Arc<dyn PolicyStore>) {
+        self.policy_store = Some(store);
     }
 
     /// Returns a shared reference to the connection registry.
@@ -128,10 +137,13 @@ impl NetworkModule {
             self.config.clone(),
             Arc::clone(&self.registry),
             Arc::clone(&self.shutdown),
-            self.observability.clone(),
-            self.cluster_state.clone(),
-            self.store_factory.clone(),
-            self.server_config.clone(),
+            AppServices {
+                observability: self.observability.clone(),
+                cluster_state: self.cluster_state.clone(),
+                store_factory: self.store_factory.clone(),
+                server_config: self.server_config.clone(),
+                policy_store: self.policy_store.clone(),
+            },
         )
     }
 
@@ -188,18 +200,17 @@ impl NetworkModule {
         let tls = config.tls.take();
         let observability = self.observability.clone();
 
-        let cluster_state = self.cluster_state;
-        let store_factory = self.store_factory;
-        let server_config = self.server_config;
-
         let router = build_app(
             config,
             Arc::clone(&registry),
             Arc::clone(&shutdown_ctrl),
-            observability,
-            cluster_state,
-            store_factory,
-            server_config,
+            AppServices {
+                observability,
+                cluster_state: self.cluster_state,
+                store_factory: self.store_factory,
+                server_config: self.server_config,
+                policy_store: self.policy_store,
+            },
         );
 
         // Transition to Ready so readiness probes pass.
@@ -213,6 +224,18 @@ impl NetworkModule {
     }
 }
 
+/// Bundle of optional services passed to `build_app`.
+///
+/// Grouping optional fields avoids exceeding the clippy 7-argument limit and
+/// makes it clear which parameters are required vs. optional at construction.
+struct AppServices {
+    observability: Option<Arc<ObservabilityHandle>>,
+    cluster_state: Option<Arc<ClusterState>>,
+    store_factory: Option<Arc<RecordStoreFactory>>,
+    server_config: Option<Arc<ArcSwap<ServerConfig>>>,
+    policy_store: Option<Arc<dyn PolicyStore>>,
+}
+
 /// Builds the complete application router with all routes and middleware.
 ///
 /// Takes ownership of `config` to avoid an extra clone: `build_http_layers`
@@ -221,11 +244,15 @@ fn build_app(
     config: NetworkConfig,
     registry: Arc<ConnectionRegistry>,
     shutdown: Arc<ShutdownController>,
-    observability: Option<Arc<ObservabilityHandle>>,
-    cluster_state: Option<Arc<ClusterState>>,
-    store_factory: Option<Arc<RecordStoreFactory>>,
-    server_config: Option<Arc<ArcSwap<ServerConfig>>>,
+    services: AppServices,
 ) -> Router {
+    let AppServices {
+        observability,
+        cluster_state,
+        store_factory,
+        server_config,
+        policy_store,
+    } = services;
     let layers = build_http_layers(&config);
 
     // Load JWT secret from environment so the server can authenticate tokens
@@ -268,6 +295,7 @@ fn build_app(
         cluster_state,
         store_factory,
         server_config,
+        policy_store,
     };
 
     // Swagger UI served at /api/docs
@@ -297,6 +325,12 @@ fn build_app(
         .route("/api/admin/cluster/status", get(cluster_status))
         .route("/api/admin/maps", get(list_maps))
         .route("/api/admin/settings", get(get_settings).put(update_settings))
+        // Policy admin endpoints
+        .route(
+            "/api/admin/policies",
+            get(list_policies).post(create_policy),
+        )
+        .route("/api/admin/policies/{id}", delete(delete_policy))
         // Swagger UI serves both the JSON spec at /api/openapi.json and the UI at /api/docs
         .merge(swagger_ui)
         // Static SPA for admin dashboard

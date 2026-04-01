@@ -268,6 +268,7 @@ async fn main() -> anyhow::Result<()> {
         cluster_state: cluster_state_for_app,
         store_factory: None,
         server_config: None,
+        policy_store: None,
     };
 
     // Build the axum router with state.

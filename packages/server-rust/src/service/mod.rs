@@ -28,6 +28,10 @@ pub use operation::{
     service_names, CallerOrigin, ClassifyError, Operation, OperationContext, OperationError,
     OperationPipeline, OperationResponse,
 };
+pub use policy::{
+    InMemoryPolicyStore, PermissionAction, PermissionPolicy, PolicyDecision, PolicyEffect,
+    PolicyEvaluator, PolicyStore,
+};
 pub use registry::{ManagedService, ServiceContext, ServiceRegistry};
 pub use router::OperationRouter;
 pub use security::{SecurityConfig, WriteValidator};

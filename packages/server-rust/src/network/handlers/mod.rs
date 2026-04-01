@@ -29,6 +29,7 @@ use crate::service::classify::OperationService;
 use crate::service::config::ServerConfig;
 use crate::service::dispatch::PartitionDispatcher;
 use crate::service::middleware::ObservabilityHandle;
+use crate::service::policy::PolicyStore;
 use crate::storage::factory::RecordStoreFactory;
 
 /// Shared application state passed to all axum handlers via `State` extraction.
@@ -78,4 +79,7 @@ pub struct AppState {
     /// continue using their own `Arc<ServerConfig>` references unchanged.
     /// `None` when admin endpoints are not configured.
     pub server_config: Option<Arc<ArcSwap<ServerConfig>>>,
+    /// Policy store for permission policy CRUD and evaluation.
+    /// `None` when policy engine is not configured.
+    pub policy_store: Option<Arc<dyn PolicyStore>>,
 }
