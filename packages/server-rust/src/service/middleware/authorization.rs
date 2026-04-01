@@ -106,9 +106,23 @@ where
             return Box::pin(self.inner.call(op));
         };
 
-        // Extract data payload for record-level condition evaluation.
-        // For write operations, attempt to extract record data from the payload.
-        // For read operations and all others, pass Nil (no record data available).
+        // Extract per-op (map_name, data) pairs for OpBatch before moving `op`.
+        // Each op in the batch needs individual record-level condition evaluation.
+        let batch_ops_data: Option<Vec<(String, rmpv::Value)>> = match &op {
+            Operation::OpBatch { payload, .. } => Some(
+                payload
+                    .payload
+                    .ops
+                    .iter()
+                    .map(|client_op| {
+                        (client_op.map_name.clone(), extract_op_data(client_op))
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        };
+
+        // Extract data payload for record-level condition evaluation (non-batch path).
         let data = extract_data(&op);
 
         let fut = self.inner.call(op);
@@ -127,6 +141,22 @@ where
                 // Connection was removed between dispatch and authorization — fail closed.
                 return Err(OperationError::Unauthorized);
             };
+
+            // For OpBatch, evaluate each op individually. If any op is denied,
+            // reject the entire batch (fail-closed atomicity).
+            if let Some(ops_data) = batch_ops_data {
+                for (op_map_name, op_data) in &ops_data {
+                    let decision = evaluator
+                        .evaluate(principal.as_ref(), action, op_map_name, op_data)
+                        .await;
+                    if decision == PolicyDecision::Deny {
+                        return Err(OperationError::Forbidden {
+                            map_name: op_map_name.clone(),
+                        });
+                    }
+                }
+                return fut.await;
+            }
 
             let decision = evaluator
                 .evaluate(principal.as_ref(), action, &map_name, &data)
@@ -234,26 +264,28 @@ fn classify_operation(op: &Operation) -> (Option<PermissionAction>, String) {
     }
 }
 
+/// Extracts the LWW record value from a single `ClientOp`.
+///
+/// Returns the record's value if present, or `Nil` for tombstones (deleted
+/// records where value is `None`) and operations without record data.
+fn extract_op_data(op: &topgun_core::messages::base::ClientOp) -> rmpv::Value {
+    op.record
+        .as_ref()
+        .and_then(|outer| outer.as_ref())
+        .and_then(|r| r.value.clone())
+        .unwrap_or(rmpv::Value::Nil)
+}
+
 /// Extracts record data from write operations for record-level condition evaluation.
 ///
-/// For `ClientOp` operations the first available record value is returned.
+/// For `ClientOp` operations the record value is extracted via `extract_op_data`.
+/// For `OpBatch`, returns `Nil` — per-op evaluation handles individual ops directly.
 /// For all other operations `rmpv::Value::Nil` is returned because either no
 /// record data is present (reads, meta-ops) or extraction is not meaningful
 /// at the middleware level.
 fn extract_data(op: &Operation) -> rmpv::Value {
     match op {
-        Operation::ClientOp { payload, .. } => {
-            // Extract the LWW record value for record-level condition evaluation.
-            // `record` is `Option<Option<LWWRecord<rmpv::Value>>>` due to serde double-option.
-            // The inner Option<V> on LWWRecord represents tombstones (None = deleted).
-            payload
-                .payload
-                .record
-                .as_ref()
-                .and_then(|outer| outer.as_ref())
-                .and_then(|r| r.value.clone())
-                .unwrap_or(rmpv::Value::Nil)
-        }
+        Operation::ClientOp { payload, .. } => extract_op_data(&payload.payload),
         _ => rmpv::Value::Nil,
     }
 }
