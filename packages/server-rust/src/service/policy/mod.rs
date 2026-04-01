@@ -14,6 +14,8 @@ use utoipa::ToSchema;
 
 // rmpv is used for auth context construction in PolicyEvaluator::evaluate.
 
+pub mod expr_parser;
+
 // ---------------------------------------------------------------------------
 // Permission types
 // ---------------------------------------------------------------------------

@@ -1,0 +1,779 @@
+//! Permission expression string parser.
+//!
+//! Parses CEL-like permission expression strings into `PredicateNode` trees
+//! that can be evaluated by `evaluate_predicate`.
+//!
+//! # Grammar
+//!
+//! ```text
+//! expr        = or_expr
+//! or_expr     = and_expr ( "||" and_expr )*
+//! and_expr    = unary_expr ( "&&" unary_expr )*
+//! unary_expr  = "!" unary_expr | primary
+//! primary     = "(" expr ")" | comparison
+//! comparison  = field_ref ( cmp_op value_or_ref | "in" field_ref )
+//! cmp_op      = "==" | "!=" | ">" | "<" | ">=" | "<="
+//! field_ref   = IDENT ( "." IDENT )*
+//! value_or_ref = field_ref | STRING | NUMBER | BOOLEAN
+//! STRING      = "'" [^']* "'"
+//! NUMBER      = [0-9]+ ("." [0-9]+)?
+//! BOOLEAN     = "true" | "false"
+//! IDENT       = [a-zA-Z_][a-zA-Z0-9_]*
+//! ```
+
+use topgun_core::messages::base::{PredicateNode, PredicateOp};
+
+// ---------------------------------------------------------------------------
+// ParseError
+// ---------------------------------------------------------------------------
+
+/// Error returned when parsing a permission expression fails.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParseError {
+    /// Human-readable description of what went wrong.
+    pub message: String,
+    /// Byte offset in the input where the error was detected.
+    pub position: usize,
+    /// Up to 20 characters around the error position for context.
+    pub snippet: String,
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let caret_offset = self.position.min(self.snippet.len());
+        let caret = " ".repeat(caret_offset) + "^";
+        write!(
+            f,
+            "parse error at position {}: {}\n  {}\n  {}",
+            self.position, self.message, self.snippet, caret
+        )
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+// ---------------------------------------------------------------------------
+// Token types
+// ---------------------------------------------------------------------------
+
+/// Tokens produced by the lexer.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Token {
+    /// An identifier segment or keyword: `auth`, `data`, `true`, `false`, etc.
+    Ident(String),
+    /// A dotted field reference like `data.age` or `auth.id`.
+    FieldRef(Vec<String>),
+    /// A single-quoted string literal (quotes stripped).
+    StringLit(String),
+    /// An integer literal.
+    IntLit(i64),
+    /// A floating-point literal.
+    FloatLit(f64),
+    /// `true`
+    True,
+    /// `false`
+    False,
+    /// `==`
+    Eq,
+    /// `!=`
+    Neq,
+    /// `>`
+    Gt,
+    /// `>=`
+    Gte,
+    /// `<`
+    Lt,
+    /// `<=`
+    Lte,
+    /// `&&`
+    And,
+    /// `||`
+    Or,
+    /// `!`
+    Not,
+    /// `in`
+    In,
+    /// `(`
+    LParen,
+    /// `)`
+    RParen,
+    /// End of input.
+    Eof,
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Parses a permission expression string into a `PredicateNode` tree.
+///
+/// Returns `Err(ParseError)` with position information on malformed input.
+pub fn parse_permission_expr(input: &str) -> Result<PredicateNode, ParseError> {
+    let mut parser = Parser::new(input);
+    let node = parser.parse_expr()?;
+    // Ensure entire input was consumed.
+    if parser.current_token() != &Token::Eof {
+        let pos = parser.current_pos();
+        return Err(parser.error_at(pos, "unexpected token after expression"));
+    }
+    Ok(node)
+}
+
+// ---------------------------------------------------------------------------
+// Lexer
+// ---------------------------------------------------------------------------
+
+struct Lexer<'a> {
+    input: &'a str,
+    pos: usize,
+}
+
+impl<'a> Lexer<'a> {
+    fn new(input: &'a str) -> Self {
+        Lexer { input, pos: 0 }
+    }
+
+    fn remaining(&self) -> &str {
+        &self.input[self.pos..]
+    }
+
+    fn peek_char(&self) -> Option<char> {
+        self.remaining().chars().next()
+    }
+
+    fn advance(&mut self) -> Option<char> {
+        let ch = self.peek_char()?;
+        self.pos += ch.len_utf8();
+        Some(ch)
+    }
+
+    fn skip_whitespace(&mut self) {
+        while let Some(ch) = self.peek_char() {
+            if ch.is_ascii_whitespace() {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Tokenizes the next token from the input.
+    fn next_token(&mut self) -> Result<(usize, Token), ParseError> {
+        self.skip_whitespace();
+        let start = self.pos;
+
+        let ch = match self.peek_char() {
+            None => return Ok((self.pos, Token::Eof)),
+            Some(c) => c,
+        };
+
+        match ch {
+            '(' => {
+                self.advance();
+                Ok((start, Token::LParen))
+            }
+            ')' => {
+                self.advance();
+                Ok((start, Token::RParen))
+            }
+            '!' => {
+                self.advance();
+                if self.peek_char() == Some('=') {
+                    self.advance();
+                    Ok((start, Token::Neq))
+                } else {
+                    Ok((start, Token::Not))
+                }
+            }
+            '=' => {
+                self.advance();
+                if self.peek_char() == Some('=') {
+                    self.advance();
+                    Ok((start, Token::Eq))
+                } else {
+                    Err(self.make_error(start, "expected '==' (single '=' is not valid)"))
+                }
+            }
+            '>' => {
+                self.advance();
+                if self.peek_char() == Some('=') {
+                    self.advance();
+                    Ok((start, Token::Gte))
+                } else {
+                    Ok((start, Token::Gt))
+                }
+            }
+            '<' => {
+                self.advance();
+                if self.peek_char() == Some('=') {
+                    self.advance();
+                    Ok((start, Token::Lte))
+                } else {
+                    Ok((start, Token::Lt))
+                }
+            }
+            '&' => {
+                self.advance();
+                if self.peek_char() == Some('&') {
+                    self.advance();
+                    Ok((start, Token::And))
+                } else {
+                    Err(self.make_error(start, "expected '&&'"))
+                }
+            }
+            '|' => {
+                self.advance();
+                if self.peek_char() == Some('|') {
+                    self.advance();
+                    Ok((start, Token::Or))
+                } else {
+                    Err(self.make_error(start, "expected '||'"))
+                }
+            }
+            '\'' => {
+                self.advance(); // consume opening quote
+                let mut s = String::new();
+                loop {
+                    match self.advance() {
+                        None => {
+                            return Err(self.make_error(start, "unterminated string literal"));
+                        }
+                        Some('\'') => break,
+                        Some(c) => s.push(c),
+                    }
+                }
+                Ok((start, Token::StringLit(s)))
+            }
+            c if c.is_ascii_digit() => {
+                let num_start = self.pos;
+                while self.peek_char().map_or(false, |c| c.is_ascii_digit()) {
+                    self.advance();
+                }
+                let has_dot = self.peek_char() == Some('.');
+                // Only treat as float if followed by a digit (not just a lone dot).
+                let is_float = has_dot && {
+                    let after_dot = self.input.get(self.pos + 1..).and_then(|s| s.chars().next());
+                    after_dot.map_or(false, |c| c.is_ascii_digit())
+                };
+                if is_float {
+                    self.advance(); // consume '.'
+                    while self.peek_char().map_or(false, |c| c.is_ascii_digit()) {
+                        self.advance();
+                    }
+                    let s = &self.input[num_start..self.pos];
+                    let v: f64 = s.parse().map_err(|_| {
+                        self.make_error(num_start, "invalid float literal")
+                    })?;
+                    Ok((start, Token::FloatLit(v)))
+                } else {
+                    let s = &self.input[num_start..self.pos];
+                    let v: i64 = s.parse().map_err(|_| {
+                        self.make_error(num_start, "invalid integer literal")
+                    })?;
+                    Ok((start, Token::IntLit(v)))
+                }
+            }
+            c if c.is_ascii_alphabetic() || c == '_' => {
+                // Read the first identifier segment.
+                let seg_start = self.pos;
+                while self.peek_char().map_or(false, |c| c.is_ascii_alphanumeric() || c == '_') {
+                    self.advance();
+                }
+                let first = self.input[seg_start..self.pos].to_string();
+
+                // Check if this is the keyword `in`.
+                if first == "in" {
+                    return Ok((start, Token::In));
+                }
+
+                // Check if followed by a dot — if so, collect a dotted field_ref.
+                if self.peek_char() == Some('.') {
+                    let mut segments = vec![first];
+                    while self.peek_char() == Some('.') {
+                        self.advance(); // consume '.'
+                        let seg_s = self.pos;
+                        if !self.peek_char().map_or(false, |c| c.is_ascii_alphabetic() || c == '_') {
+                            return Err(self.make_error(seg_s, "expected identifier after '.'"));
+                        }
+                        while self.peek_char().map_or(false, |c| c.is_ascii_alphanumeric() || c == '_') {
+                            self.advance();
+                        }
+                        segments.push(self.input[seg_s..self.pos].to_string());
+                    }
+                    return Ok((start, Token::FieldRef(segments)));
+                }
+
+                // Single identifier — check for booleans.
+                let tok = match first.as_str() {
+                    "true" => Token::True,
+                    "false" => Token::False,
+                    _ => Token::Ident(first),
+                };
+                Ok((start, tok))
+            }
+            other => {
+                self.advance();
+                Err(self.make_error(start, &format!("unexpected character '{other}'")))
+            }
+        }
+    }
+
+    fn make_error(&self, pos: usize, message: &str) -> ParseError {
+        let snippet = make_snippet(self.input, pos);
+        ParseError {
+            message: message.to_string(),
+            position: pos,
+            snippet,
+        }
+    }
+}
+
+/// Extracts up to 20 characters of context around `pos` from `input`.
+fn make_snippet(input: &str, pos: usize) -> String {
+    let start = pos.saturating_sub(5);
+    let end = (pos + 15).min(input.len());
+    input[start..end].to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Parser
+// ---------------------------------------------------------------------------
+
+struct Parser<'a> {
+    input: &'a str,
+    lexer: Lexer<'a>,
+    /// Current token and its position.
+    current: (usize, Token),
+    /// Whether the last lex attempt produced an error (stored for re-reporting).
+    lex_error: Option<ParseError>,
+}
+
+impl<'a> Parser<'a> {
+    fn new(input: &'a str) -> Self {
+        let mut lexer = Lexer::new(input);
+        let (current, lex_error) = match lexer.next_token() {
+            Ok(tok) => (tok, None),
+            Err(e) => {
+                let pos = e.position;
+                ((pos, Token::Eof), Some(e))
+            }
+        };
+        Parser {
+            input,
+            lexer,
+            current,
+            lex_error,
+        }
+    }
+
+    fn current_token(&self) -> &Token {
+        &self.current.1
+    }
+
+    fn current_pos(&self) -> usize {
+        self.current.0
+    }
+
+    /// Advance to the next token, returning the consumed token's position.
+    fn advance(&mut self) -> Result<(usize, Token), ParseError> {
+        if let Some(e) = self.lex_error.take() {
+            return Err(e);
+        }
+        let consumed = std::mem::replace(&mut self.current, (0, Token::Eof));
+        self.current = match self.lexer.next_token() {
+            Ok(tok) => tok,
+            Err(e) => {
+                let pos = e.position;
+                self.lex_error = Some(e);
+                (pos, Token::Eof)
+            }
+        };
+        Ok(consumed)
+    }
+
+    fn error_at(&self, pos: usize, message: &str) -> ParseError {
+        ParseError {
+            message: message.to_string(),
+            position: pos,
+            snippet: make_snippet(self.input, pos),
+        }
+    }
+
+    // ---- Grammar productions ----
+
+    /// expr = or_expr
+    fn parse_expr(&mut self) -> Result<PredicateNode, ParseError> {
+        self.parse_or_expr()
+    }
+
+    /// or_expr = and_expr ( "||" and_expr )*
+    fn parse_or_expr(&mut self) -> Result<PredicateNode, ParseError> {
+        let mut left = self.parse_and_expr()?;
+
+        while self.current_token() == &Token::Or {
+            self.advance()?;
+            let right = self.parse_and_expr()?;
+            // Flatten: if left is already an Or combinator, add right as another child.
+            if left.op == PredicateOp::Or {
+                left.children.as_mut().unwrap().push(right);
+            } else {
+                left = PredicateNode {
+                    op: PredicateOp::Or,
+                    attribute: None,
+                    value: None,
+                    value_ref: None,
+                    children: Some(vec![left, right]),
+                };
+            }
+        }
+
+        Ok(left)
+    }
+
+    /// and_expr = unary_expr ( "&&" unary_expr )*
+    fn parse_and_expr(&mut self) -> Result<PredicateNode, ParseError> {
+        let mut left = self.parse_unary_expr()?;
+
+        while self.current_token() == &Token::And {
+            self.advance()?;
+            let right = self.parse_unary_expr()?;
+            // Flatten: if left is already an And combinator, add right as another child.
+            if left.op == PredicateOp::And {
+                left.children.as_mut().unwrap().push(right);
+            } else {
+                left = PredicateNode {
+                    op: PredicateOp::And,
+                    attribute: None,
+                    value: None,
+                    value_ref: None,
+                    children: Some(vec![left, right]),
+                };
+            }
+        }
+
+        Ok(left)
+    }
+
+    /// unary_expr = "!" unary_expr | primary
+    fn parse_unary_expr(&mut self) -> Result<PredicateNode, ParseError> {
+        if self.current_token() == &Token::Not {
+            self.advance()?;
+            let operand = self.parse_unary_expr()?;
+            return Ok(PredicateNode {
+                op: PredicateOp::Not,
+                attribute: None,
+                value: None,
+                value_ref: None,
+                children: Some(vec![operand]),
+            });
+        }
+        self.parse_primary()
+    }
+
+    /// primary = "(" expr ")" | comparison
+    fn parse_primary(&mut self) -> Result<PredicateNode, ParseError> {
+        if self.current_token() == &Token::LParen {
+            self.advance()?; // consume '('
+            let node = self.parse_expr()?;
+            if self.current_token() != &Token::RParen {
+                let pos = self.current_pos();
+                return Err(self.error_at(pos, "expected ')'"));
+            }
+            self.advance()?; // consume ')'
+            return Ok(node);
+        }
+        self.parse_comparison()
+    }
+
+    /// comparison = field_ref ( cmp_op value_or_ref | "in" field_ref )
+    fn parse_comparison(&mut self) -> Result<PredicateNode, ParseError> {
+        let (lhs_pos, lhs_segments) = self.parse_field_ref_raw()?;
+
+        // Require a comparison operator or "in".
+        match self.current_token().clone() {
+            Token::In => {
+                self.advance()?;
+                let (_rhs_pos, rhs_segments) = self.parse_field_ref_raw()?;
+                build_in_node(&lhs_segments, &rhs_segments, lhs_pos, self.input)
+            }
+            Token::Eq
+            | Token::Neq
+            | Token::Gt
+            | Token::Gte
+            | Token::Lt
+            | Token::Lte => {
+                let op_tok = self.current_token().clone();
+                let op_pos = self.current_pos();
+                self.advance()?;
+                let rhs = self.parse_value_or_ref(op_pos)?;
+                build_comparison_node(&lhs_segments, op_tok, rhs, lhs_pos, self.input)
+            }
+            _ => {
+                let pos = self.current_pos();
+                // A bare field_ref without a comparison operator is a parse error.
+                Err(self.error_at(
+                    pos,
+                    "expected comparison operator (==, !=, >, >=, <, <=) or 'in'",
+                ))
+            }
+        }
+    }
+
+    /// Parses a field_ref (dotted identifier), returning (position, segments).
+    fn parse_field_ref_raw(&mut self) -> Result<(usize, Vec<String>), ParseError> {
+        let pos = self.current_pos();
+        match self.current_token().clone() {
+            Token::FieldRef(segs) => {
+                self.advance()?;
+                Ok((pos, segs))
+            }
+            Token::Ident(name) => {
+                self.advance()?;
+                Ok((pos, vec![name]))
+            }
+            // true/false are valid idents in field position (edge case; treated as bare name)
+            Token::True => {
+                self.advance()?;
+                Ok((pos, vec!["true".to_string()]))
+            }
+            Token::False => {
+                self.advance()?;
+                Ok((pos, vec!["false".to_string()]))
+            }
+            _ => {
+                Err(self.error_at(pos, "expected field reference (e.g. data.age or auth.id)"))
+            }
+        }
+    }
+
+    /// value_or_ref = field_ref | STRING | NUMBER | BOOLEAN
+    fn parse_value_or_ref(&mut self, _op_pos: usize) -> Result<RhsValue, ParseError> {
+        let pos = self.current_pos();
+        match self.current_token().clone() {
+            Token::FieldRef(segs) => {
+                self.advance()?;
+                Ok(RhsValue::FieldRef(segs))
+            }
+            Token::Ident(name) => {
+                self.advance()?;
+                Ok(RhsValue::FieldRef(vec![name]))
+            }
+            Token::StringLit(s) => {
+                self.advance()?;
+                Ok(RhsValue::Str(s))
+            }
+            Token::IntLit(n) => {
+                self.advance()?;
+                Ok(RhsValue::Int(n))
+            }
+            Token::FloatLit(f) => {
+                self.advance()?;
+                Ok(RhsValue::Float(f))
+            }
+            Token::True => {
+                self.advance()?;
+                Ok(RhsValue::Bool(true))
+            }
+            Token::False => {
+                self.advance()?;
+                Ok(RhsValue::Bool(false))
+            }
+            _ => Err(self.error_at(pos, "expected value or field reference after operator")),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RHS value helper
+// ---------------------------------------------------------------------------
+
+enum RhsValue {
+    FieldRef(Vec<String>),
+    Str(String),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+}
+
+// ---------------------------------------------------------------------------
+// Node construction helpers
+// ---------------------------------------------------------------------------
+
+/// Builds a comparison `PredicateNode` from parsed LHS segments, operator token, and RHS value.
+///
+/// Applies field reference resolution rules:
+/// - LHS `data.X` -> `attribute = "X"`, `value_ref = None` (RHS sets value/value_ref)
+/// - LHS `auth.X` + RHS `data.Y` -> swap: `attribute = "Y"`, `value_ref = "auth.X"`
+/// - LHS `auth.X` without a `data.*` RHS -> `attribute = "auth.X"` (full path)
+fn build_comparison_node(
+    lhs: &[String],
+    op_tok: Token,
+    rhs: RhsValue,
+    _lhs_pos: usize,
+    _input: &str,
+) -> Result<PredicateNode, ParseError> {
+    let op = match op_tok {
+        Token::Eq => PredicateOp::Eq,
+        Token::Neq => PredicateOp::Neq,
+        Token::Gt => PredicateOp::Gt,
+        Token::Gte => PredicateOp::Gte,
+        Token::Lt => PredicateOp::Lt,
+        Token::Lte => PredicateOp::Lte,
+        _ => unreachable!("build_comparison_node called with non-cmp token"),
+    };
+
+    // Determine if LHS is a data or auth reference.
+    let lhs_is_data = lhs.first().map_or(false, |s| s == "data");
+    let lhs_is_auth = lhs.first().map_or(false, |s| s == "auth");
+
+    match rhs {
+        RhsValue::FieldRef(rhs_segs) => {
+            let rhs_is_data = rhs_segs.first().map_or(false, |s| s == "data");
+            let rhs_is_auth = rhs_segs.first().map_or(false, |s| s == "auth");
+
+            if lhs_is_data && rhs_is_auth {
+                // Normal case: data.X op auth.Y -> attribute=X, value_ref="auth.Y"
+                let attribute = lhs[1..].join(".");
+                let value_ref = rhs_segs.join(".");
+                Ok(PredicateNode {
+                    op,
+                    attribute: Some(attribute),
+                    value: None,
+                    value_ref: Some(value_ref),
+                    children: None,
+                })
+            } else if lhs_is_auth && rhs_is_data {
+                // Swap: auth.X op data.Y -> attribute=Y, value_ref="auth.X"
+                let attribute = rhs_segs[1..].join(".");
+                let value_ref = lhs.join(".");
+                Ok(PredicateNode {
+                    op,
+                    attribute: Some(attribute),
+                    value: None,
+                    value_ref: Some(value_ref),
+                    children: None,
+                })
+            } else if lhs_is_data {
+                // data.X op other.Y -> attribute=X, value_ref="other.Y"
+                let attribute = lhs[1..].join(".");
+                let value_ref = rhs_segs.join(".");
+                Ok(PredicateNode {
+                    op,
+                    attribute: Some(attribute),
+                    value: None,
+                    value_ref: Some(value_ref),
+                    children: None,
+                })
+            } else {
+                // Fallback: use full paths.
+                let attribute = lhs.join(".");
+                let value_ref = rhs_segs.join(".");
+                Ok(PredicateNode {
+                    op,
+                    attribute: Some(attribute),
+                    value: None,
+                    value_ref: Some(value_ref),
+                    children: None,
+                })
+            }
+        }
+        RhsValue::Str(s) => {
+            let attribute = if lhs_is_data {
+                lhs[1..].join(".")
+            } else {
+                lhs.join(".")
+            };
+            Ok(PredicateNode {
+                op,
+                attribute: Some(attribute),
+                value: Some(rmpv::Value::String(s.into())),
+                value_ref: None,
+                children: None,
+            })
+        }
+        RhsValue::Int(n) => {
+            let attribute = if lhs_is_data {
+                lhs[1..].join(".")
+            } else {
+                lhs.join(".")
+            };
+            Ok(PredicateNode {
+                op,
+                attribute: Some(attribute),
+                value: Some(rmpv::Value::Integer(n.into())),
+                value_ref: None,
+                children: None,
+            })
+        }
+        RhsValue::Float(f) => {
+            let attribute = if lhs_is_data {
+                lhs[1..].join(".")
+            } else {
+                lhs.join(".")
+            };
+            Ok(PredicateNode {
+                op,
+                attribute: Some(attribute),
+                value: Some(rmpv::Value::F64(f)),
+                value_ref: None,
+                children: None,
+            })
+        }
+        RhsValue::Bool(b) => {
+            let attribute = if lhs_is_data {
+                lhs[1..].join(".")
+            } else {
+                lhs.join(".")
+            };
+            Ok(PredicateNode {
+                op,
+                attribute: Some(attribute),
+                value: Some(rmpv::Value::Boolean(b)),
+                value_ref: None,
+                children: None,
+            })
+        }
+        #[allow(unreachable_patterns)]
+        _ => unreachable!(),
+    }
+}
+
+/// Builds an `In` node: `data.role in auth.roles` -> `{ op: In, attribute: "role", value_ref: "auth.roles" }`.
+fn build_in_node(
+    lhs: &[String],
+    rhs: &[String],
+    lhs_pos: usize,
+    input: &str,
+) -> Result<PredicateNode, ParseError> {
+    let lhs_is_data = lhs.first().map_or(false, |s| s == "data");
+    let rhs_is_auth = rhs.first().map_or(false, |s| s == "auth");
+
+    if lhs_is_data && rhs_is_auth {
+        let attribute = lhs[1..].join(".");
+        let value_ref = rhs.join(".");
+        Ok(PredicateNode {
+            op: PredicateOp::In,
+            attribute: Some(attribute),
+            value: None,
+            value_ref: Some(value_ref),
+            children: None,
+        })
+    } else if lhs_is_data {
+        // data.X in some.ref -> attribute=X, value_ref=ref
+        let attribute = lhs[1..].join(".");
+        let value_ref = rhs.join(".");
+        Ok(PredicateNode {
+            op: PredicateOp::In,
+            attribute: Some(attribute),
+            value: None,
+            value_ref: Some(value_ref),
+            children: None,
+        })
+    } else {
+        Err(ParseError {
+            message: "left side of 'in' must be a data.* field reference".to_string(),
+            position: lhs_pos,
+            snippet: make_snippet(input, lhs_pos),
+        })
+    }
+}
