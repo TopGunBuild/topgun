@@ -20,7 +20,7 @@ use anyhow::Result;
 use topgun_core::messages::base::{PredicateNode, SortDirection};
 
 use crate::dag::types::{Inbox, Outbox, Processor, ProcessorContext, ProcessorSupplier};
-use crate::service::domain::predicate::evaluate_predicate;
+use crate::service::domain::predicate::{evaluate_predicate, EvalContext};
 use crate::storage::factory::RecordStoreFactory;
 use crate::storage::record::RecordValue;
 
@@ -279,7 +279,7 @@ impl Processor for FilterProcessor {
         // beyond the batch limit (drain() would remove ALL items permanently).
         for _ in 0..BATCH_SIZE {
             let Some(item) = inbox.poll() else { break };
-            if evaluate_predicate(&self.predicate, &item) {
+            if evaluate_predicate(&self.predicate, &EvalContext::data_only(&item)) {
                 outbox.offer(0, item);
             }
         }
@@ -1032,7 +1032,7 @@ mod tests {
             op: PredicateOp::Eq,
             attribute: Some("status".to_string()),
             value: Some(rmpv::Value::String("active".into())),
-            children: None,
+            ..Default::default()
         };
 
         let mut proc = FilterProcessor::new(predicate);

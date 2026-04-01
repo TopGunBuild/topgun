@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use topgun_core::messages::base::{PredicateNode, PredicateOp};
 
 use super::registry::IndexRegistry;
-use crate::service::domain::predicate::evaluate_predicate;
+use crate::service::domain::predicate::{evaluate_predicate, EvalContext};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -51,7 +51,7 @@ where
         .into_iter()
         .filter(|key| {
             if let Some(data) = records(key) {
-                evaluate_predicate(predicate, &data)
+                evaluate_predicate(predicate, &EvalContext::data_only(&data))
             } else {
                 false
             }
@@ -265,16 +265,15 @@ mod tests {
             op,
             attribute: Some(attr.to_string()),
             value: Some(val),
-            children: None,
+            ..Default::default()
         }
     }
 
     fn combinator(op: PredicateOp, children: Vec<PredicateNode>) -> PredicateNode {
         PredicateNode {
             op,
-            attribute: None,
-            value: None,
             children: Some(children),
+            ..Default::default()
         }
     }
 

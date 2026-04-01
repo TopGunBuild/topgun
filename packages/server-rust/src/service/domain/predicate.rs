@@ -181,56 +181,67 @@ pub fn execute_query(
 // ---------------------------------------------------------------------------
 
 /// Evaluates a leaf predicate (Eq, Neq, Gt, Gte, Lt, Lte, Like, Regex, In, Between).
+///
+/// Attribute lookup uses dot-path traversal to support nested fields (e.g., `"address.city"`).
+/// Comparison value is resolved from `value_ref` (if set) or `value` field. If `value_ref`
+/// cannot be resolved (unknown namespace or missing field), the predicate returns `false`.
 fn evaluate_leaf(predicate: &PredicateNode, ctx: &EvalContext) -> bool {
-    let Some(map) = ctx.data.as_map() else {
-        return false;
-    };
-
     let Some(attribute) = &predicate.attribute else {
         return false;
     };
 
-    let Some(expected) = &predicate.value else {
+    // Resolve attribute via dot-path traversal against ctx.data
+    let segments: Vec<&str> = attribute.split('.').collect();
+    let Some(actual) = resolve_dot_path(ctx.data, &segments) else {
         return false;
     };
 
-    let Some(actual) = find_field_in_map(map, attribute) else {
+    // Resolve comparison value: value_ref takes precedence over value
+    let expected = if let Some(ref_str) = &predicate.value_ref {
+        let Some(resolved) = resolve_value_ref(ref_str, ctx) else {
+            return false;
+        };
+        resolved
+    } else if let Some(val) = &predicate.value {
+        val.clone()
+    } else {
         return false;
     };
 
     match predicate.op {
-        PredicateOp::Eq => values_equal(actual, expected),
-        PredicateOp::Neq => !values_equal(actual, expected),
-        PredicateOp::Gt => compare_ordered(actual, expected) == Some(std::cmp::Ordering::Greater),
+        PredicateOp::Eq => values_equal(&actual, &expected),
+        PredicateOp::Neq => !values_equal(&actual, &expected),
+        PredicateOp::Gt => {
+            compare_ordered(&actual, &expected) == Some(std::cmp::Ordering::Greater)
+        }
         PredicateOp::Gte => matches!(
-            compare_ordered(actual, expected),
+            compare_ordered(&actual, &expected),
             Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
         ),
-        PredicateOp::Lt => compare_ordered(actual, expected) == Some(std::cmp::Ordering::Less),
+        PredicateOp::Lt => compare_ordered(&actual, &expected) == Some(std::cmp::Ordering::Less),
         PredicateOp::Lte => matches!(
-            compare_ordered(actual, expected),
+            compare_ordered(&actual, &expected),
             Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
         ),
-        PredicateOp::Like => evaluate_like(actual, expected),
-        PredicateOp::Regex => evaluate_regex(actual, expected),
-        PredicateOp::In => evaluate_in(actual, expected),
-        PredicateOp::Between => evaluate_between(actual, expected),
+        PredicateOp::Like => evaluate_like(&actual, &expected),
+        PredicateOp::Regex => evaluate_regex(&actual, &expected),
+        PredicateOp::In => evaluate_in(&actual, &expected),
+        PredicateOp::Between => evaluate_between(&actual, &expected),
         _ => false,
     }
 }
 
 /// Evaluates `IsNull` / `IsNotNull` operators (field presence check, no `value` required).
+///
+/// Attribute lookup uses dot-path traversal to support nested fields (e.g., `"address.city"`).
 fn evaluate_null_check(predicate: &PredicateNode, ctx: &EvalContext) -> bool {
-    let Some(map) = ctx.data.as_map() else {
-        return false;
-    };
-
     let Some(attribute) = &predicate.attribute else {
         return false;
     };
 
-    let field = find_field_in_map(map, attribute);
-    let is_null = field.is_none() || field.is_some_and(rmpv::Value::is_nil);
+    let segments: Vec<&str> = attribute.split('.').collect();
+    let field = resolve_dot_path(ctx.data, &segments);
+    let is_null = field.is_none() || field.as_ref().is_some_and(rmpv::Value::is_nil);
 
     match predicate.op {
         PredicateOp::IsNull => is_null,
@@ -301,6 +312,53 @@ fn evaluate_between(actual: &rmpv::Value, range_val: &rmpv::Value) -> bool {
     );
 
     gte_low && lte_high
+}
+
+/// Traverses a nested `rmpv::Value::Map` using dot-path segments.
+///
+/// Iterates over `segments`, descending into Map entries at each step.
+/// Returns `None` if any segment is missing or if an intermediate value is not a Map.
+/// Returns a clone of the final value to avoid lifetime entanglement with the root.
+fn resolve_dot_path(root: &rmpv::Value, segments: &[&str]) -> Option<rmpv::Value> {
+    let mut current = root;
+    for segment in segments {
+        let map = current.as_map()?;
+        current = map
+            .iter()
+            .find(|(k, _)| k.as_str() == Some(segment))
+            .map(|(_, v)| v)?;
+    }
+    Some(current.clone())
+}
+
+/// Resolves a variable reference string against an `EvalContext`.
+///
+/// The `ref_str` format is `"namespace.path"` where:
+/// - `"auth"` namespace maps to `ctx.auth` (returns `None` if auth is `None`)
+/// - `"data"` namespace maps to `ctx.data`
+/// - Any other namespace returns `None` (unknown namespace = safe false)
+///
+/// After the namespace is resolved, the remaining path segments are traversed
+/// via `resolve_dot_path`. An empty path after the namespace returns the root value.
+fn resolve_value_ref(ref_str: &str, ctx: &EvalContext) -> Option<rmpv::Value> {
+    // Split on first '.' to separate namespace from rest
+    let (namespace, rest_path) = match ref_str.find('.') {
+        Some(idx) => (&ref_str[..idx], &ref_str[idx + 1..]),
+        None => (ref_str, ""),
+    };
+
+    let root: &rmpv::Value = match namespace {
+        "auth" => ctx.auth?,
+        "data" => ctx.data,
+        _ => return None,
+    };
+
+    if rest_path.is_empty() {
+        return Some(root.clone());
+    }
+
+    let segments: Vec<&str> = rest_path.split('.').collect();
+    resolve_dot_path(root, &segments)
 }
 
 /// Finds a field by name in an `rmpv::Value::Map`.

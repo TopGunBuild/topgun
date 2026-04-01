@@ -480,7 +480,7 @@ mod tests {
                 op: PredicateOp::Eq,
                 attribute: Some("name".to_string()),
                 value: Some(rmpv::Value::String("Alice".into())),
-                children: None,
+                ..Default::default()
             }),
             ..Default::default()
         };

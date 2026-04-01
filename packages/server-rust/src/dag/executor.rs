@@ -859,7 +859,7 @@ mod tests {
             op: PredicateOp::Eq,
             attribute: Some("status".to_string()),
             value: Some(rmpv::Value::String("active".into())),
-            children: None,
+            ..Default::default()
         };
 
         let mut dag = Dag::new();

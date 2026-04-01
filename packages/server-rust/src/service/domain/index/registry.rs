@@ -164,17 +164,15 @@ mod tests {
         PredicateNode {
             op,
             attribute: Some(attribute.to_string()),
-            value: None,
-            children: None,
+            ..Default::default()
         }
     }
 
     fn make_compound(op: PredicateOp) -> PredicateNode {
         PredicateNode {
             op,
-            attribute: None,
-            value: None,
             children: Some(vec![]),
+            ..Default::default()
         }
     }
 

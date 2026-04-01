@@ -28,7 +28,7 @@ use crate::network::connection::{ConnectionId, ConnectionRegistry, OutboundMessa
 use crate::service::domain::index::query_optimizer::index_aware_evaluate;
 use crate::service::domain::index::IndexObserverFactory;
 use crate::service::domain::predicate::{
-    evaluate_predicate, evaluate_where, value_to_rmpv,
+    evaluate_predicate, evaluate_where, value_to_rmpv, EvalContext,
 };
 use crate::service::domain::query_backend::QueryBackend;
 use crate::service::operation::{
@@ -206,7 +206,7 @@ impl QueryMutationObserver {
     /// Evaluates a single key against a subscription's query predicate.
     fn matches_query(sub: &QuerySubscription, data: &rmpv::Value) -> bool {
         if let Some(pred) = &sub.query.predicate {
-            evaluate_predicate(pred, data)
+            evaluate_predicate(pred, &EvalContext::data_only(data))
         } else if let Some(wh) = &sub.query.r#where {
             evaluate_where(wh, data)
         } else {
@@ -1392,7 +1392,7 @@ mod tests {
                     op: PredicateOp::Gte,
                     attribute: Some("age".to_string()),
                     value: Some(rmpv::Value::Integer(18.into())),
-                    children: None,
+                    ..Default::default()
                 }),
                 ..Query::default()
             },
@@ -1547,7 +1547,7 @@ mod tests {
                     op: PredicateOp::Gte,
                     attribute: Some("age".to_string()),
                     value: Some(rmpv::Value::Integer(18.into())),
-                    children: None,
+                    ..Default::default()
                 }),
                 ..Query::default()
             },
@@ -1722,7 +1722,7 @@ mod tests {
                 op: PredicateOp::Gte,
                 attribute: Some("age".to_string()),
                 value: Some(rmpv::Value::Integer(18.into())),
-                children: None,
+                ..Default::default()
             }),
             ..Query::default()
         };

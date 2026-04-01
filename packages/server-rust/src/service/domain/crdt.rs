@@ -24,7 +24,7 @@ use topgun_core::ORMapRecord;
 use tracing::Instrument;
 
 use crate::network::connection::{ConnectionId, ConnectionMetadata, ConnectionRegistry};
-use crate::service::domain::predicate::{evaluate_predicate, evaluate_where, value_to_rmpv};
+use crate::service::domain::predicate::{evaluate_predicate, evaluate_where, value_to_rmpv, EvalContext};
 use crate::service::domain::query::QueryRegistry;
 use crate::service::operation::{
     service_names, Operation, OperationContext, OperationError, OperationResponse,
@@ -45,7 +45,7 @@ use crate::traits::SchemaProvider;
 /// without depending on `QueryMutationObserver`.
 fn matches_query_predicate(query: &topgun_core::messages::base::Query, data: &rmpv::Value) -> bool {
     if let Some(pred) = &query.predicate {
-        evaluate_predicate(pred, data)
+        evaluate_predicate(pred, &EvalContext::data_only(data))
     } else if let Some(wh) = &query.r#where {
         evaluate_where(wh, data)
     } else {
