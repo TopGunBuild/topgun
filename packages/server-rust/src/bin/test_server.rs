@@ -48,7 +48,7 @@ use topgun_server::service::dispatch::{DispatchConfig, PartitionDispatcher};
 use topgun_server::service::middleware::build_operation_pipeline;
 use topgun_server::service::operation::service_names;
 use topgun_server::service::router::OperationRouter;
-use topgun_server::service::policy::InMemoryPolicyStore;
+use topgun_server::service::policy::{InMemoryPolicyStore, PolicyEvaluator, PolicyStore};
 use topgun_server::service::security::{SecurityConfig, WriteValidator};
 use topgun_server::service::OperationService;
 use topgun_server::storage::datastores::NullDataStore;
@@ -134,6 +134,15 @@ async fn main() -> anyhow::Result<()> {
     // Create a shutdown watch channel used to coordinate graceful termination of
     // cluster background services (HeartbeatService, etc.).
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    // Create the policy store early so it can be shared between the admin HTTP API
+    // (AppState.policy_store) and the authorization middleware (PolicyEvaluator).
+    // Both hold Arc references to the same underlying InMemoryPolicyStore, so
+    // policies created via the admin API are immediately visible to the evaluator.
+    let policy_store = Arc::new(InMemoryPolicyStore::new());
+    let policy_evaluator = Arc::new(PolicyEvaluator::new(
+        policy_store.clone() as Arc<dyn PolicyStore>,
+    ));
 
     let (cluster_state_for_services, cluster_state_for_app) = if cluster_mode {
         // --- Cluster mode ---
@@ -222,21 +231,22 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(Arc::new(heartbeat_svc).run(heartbeat_rx, shutdown_rx));
 
         // Build domain services, sharing the cluster_state with CoordinationService.
+        // Pass the policy evaluator so every client operation is checked against RBAC.
         let (classify_svc, dispatcher, connection_registry) =
-            build_services(node_id.clone(), Arc::clone(&cluster_state));
+            build_services(node_id.clone(), Arc::clone(&cluster_state), Some(Arc::clone(&policy_evaluator)));
 
         // Wire up the membership reactor (partition rebalancing on member changes).
         let reactor = MembershipReactor {
             cluster_state: Arc::clone(&cluster_state),
             peers,
-            connection_registry,
+            connection_registry: Arc::clone(&connection_registry),
             config: cluster_config,
             migration_tx,
         };
         tokio::spawn(Arc::new(reactor).run(change_rx));
 
         (
-            (classify_svc, dispatcher),
+            (classify_svc, dispatcher, connection_registry),
             Some(cluster_state),
         )
     } else {
@@ -246,22 +256,18 @@ async fn main() -> anyhow::Result<()> {
             node_id.clone(),
         );
         let cs = Arc::new(cs);
-        let (classify_svc, dispatcher, _connection_registry) =
-            build_services(node_id.clone(), Arc::clone(&cs));
+        let (classify_svc, dispatcher, connection_registry) =
+            build_services(node_id.clone(), Arc::clone(&cs), Some(Arc::clone(&policy_evaluator)));
 
         // Single-node mode: expose no cluster state to AppState (existing behavior).
-        ((classify_svc, dispatcher), None)
+        ((classify_svc, dispatcher, connection_registry), None)
     };
 
-    let (classify_svc, dispatcher) = cluster_state_for_services;
+    let (classify_svc, dispatcher, connection_registry) = cluster_state_for_services;
 
-    // Build the AppState with all services wired.
-    // A shared InMemoryPolicyStore is created so that the admin policy endpoints
-    // are functional — integration tests use them to configure RBAC policies at runtime.
-    let policy_store = Arc::new(InMemoryPolicyStore::new());
     let shutdown = Arc::new(ShutdownController::new());
     let state = AppState {
-        registry: Arc::new(ConnectionRegistry::new()),
+        registry: connection_registry,
         shutdown: Arc::clone(&shutdown),
         config: Arc::new(NetworkConfig::default()),
         start_time: Instant::now(),
@@ -362,9 +368,13 @@ impl ObserverFactory for SearchObserverFactory {
 
 /// Wires all 7 domain services and builds the partition dispatcher.
 ///
-/// Accepts `node_id` and `cluster_state` so callers control node identity and
-/// can share the cluster state across both formation/heartbeat services and the
-/// coordination domain service.
+/// Accepts `node_id`, `cluster_state`, and an optional `PolicyEvaluator` so
+/// callers can wire RBAC enforcement into the Tower middleware pipeline.
+/// When `policy_evaluator` is `Some`, every client operation is checked against
+/// the policy store before reaching domain services.
+///
+/// The `connection_registry` returned must be shared with `AppState.registry`
+/// so the authorization middleware can look up principals by connection_id.
 ///
 /// Follows the `setup()` pattern from `packages/server-rust/src/lib.rs`.
 /// Domain services are `Arc`-wrapped and shared across all worker pipelines.
@@ -374,6 +384,7 @@ impl ObserverFactory for SearchObserverFactory {
 fn build_services(
     node_id: String,
     cluster_state: Arc<ClusterState>,
+    policy_evaluator: Option<Arc<PolicyEvaluator>>,
 ) -> (
     Arc<OperationService>,
     PartitionDispatcher,
@@ -517,6 +528,10 @@ fn build_services(
     // Factory closure: creates a fresh OperationRouter + pipeline per worker.
     // Domain services are Arc-cloned (cheap reference count bump), while
     // each worker gets its own Tower middleware stack.
+    // When a PolicyEvaluator is provided, it is passed to build_operation_pipeline
+    // so every client operation is checked against the RBAC policy store.
+    let evaluator_for_factory = policy_evaluator;
+    let registry_for_factory = Arc::clone(&connection_registry);
     let pipeline_factory = move || {
         let mut router = OperationRouter::new();
         router.register(service_names::CRDT, Arc::clone(&crdt_svc));
@@ -526,7 +541,12 @@ fn build_services(
         router.register(service_names::COORDINATION, Arc::clone(&coordination_svc));
         router.register(service_names::SEARCH, Arc::clone(&search_svc));
         router.register(service_names::PERSISTENCE, Arc::clone(&persistence_svc));
-        build_operation_pipeline(router, &config, None, None)
+        build_operation_pipeline(
+            router,
+            &config,
+            evaluator_for_factory.clone(),
+            Some(Arc::clone(&registry_for_factory)),
+        )
     };
 
     let dispatch_config = DispatchConfig::default();
