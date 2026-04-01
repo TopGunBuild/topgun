@@ -510,7 +510,7 @@ impl<'a> Parser<'a> {
                 let op_pos = self.current_pos();
                 self.advance()?;
                 let rhs = self.parse_value_or_ref(op_pos)?;
-                build_comparison_node(&lhs_segments, &op_tok, rhs, lhs_pos, self.input)
+                Ok(build_comparison_node(&lhs_segments, &op_tok, rhs))
             }
             _ => {
                 let pos = self.current_pos();
@@ -609,13 +609,7 @@ enum RhsValue {
 /// `attribute = "X"` with `value_ref = "auth.Y"`. When auth is on the left and
 /// data on the right, sides are swapped automatically.
 #[allow(clippy::too_many_lines)]
-fn build_comparison_node(
-    lhs: &[String],
-    op_tok: &Token,
-    rhs: RhsValue,
-    _lhs_pos: usize,
-    _input: &str,
-) -> Result<PredicateNode, ParseError> {
+fn build_comparison_node(lhs: &[String], op_tok: &Token, rhs: RhsValue) -> PredicateNode {
     let op = match op_tok {
         Token::Eq => PredicateOp::Eq,
         Token::Neq => PredicateOp::Neq,
@@ -639,46 +633,46 @@ fn build_comparison_node(
                 // Normal case: data.X op auth.Y -> attribute=X, value_ref="auth.Y"
                 let attribute = lhs[1..].join(".");
                 let value_ref = rhs_segs.join(".");
-                Ok(PredicateNode {
+                PredicateNode {
                     op,
                     attribute: Some(attribute),
                     value: None,
                     value_ref: Some(value_ref),
                     children: None,
-                })
+                }
             } else if lhs_is_auth && rhs_is_data {
                 // Swap: auth.X op data.Y -> attribute=Y, value_ref="auth.X"
                 let attribute = rhs_segs[1..].join(".");
                 let value_ref = lhs.join(".");
-                Ok(PredicateNode {
+                PredicateNode {
                     op,
                     attribute: Some(attribute),
                     value: None,
                     value_ref: Some(value_ref),
                     children: None,
-                })
+                }
             } else if lhs_is_data {
                 // data.X op other.Y -> attribute=X, value_ref="other.Y"
                 let attribute = lhs[1..].join(".");
                 let value_ref = rhs_segs.join(".");
-                Ok(PredicateNode {
+                PredicateNode {
                     op,
                     attribute: Some(attribute),
                     value: None,
                     value_ref: Some(value_ref),
                     children: None,
-                })
+                }
             } else {
                 // Fallback: use full paths.
                 let attribute = lhs.join(".");
                 let value_ref = rhs_segs.join(".");
-                Ok(PredicateNode {
+                PredicateNode {
                     op,
                     attribute: Some(attribute),
                     value: None,
                     value_ref: Some(value_ref),
                     children: None,
-                })
+                }
             }
         }
         RhsValue::Str(s) => {
@@ -687,13 +681,13 @@ fn build_comparison_node(
             } else {
                 lhs.join(".")
             };
-            Ok(PredicateNode {
+            PredicateNode {
                 op,
                 attribute: Some(attribute),
                 value: Some(rmpv::Value::String(s.into())),
                 value_ref: None,
                 children: None,
-            })
+            }
         }
         RhsValue::Int(n) => {
             let attribute = if lhs_is_data {
@@ -701,13 +695,13 @@ fn build_comparison_node(
             } else {
                 lhs.join(".")
             };
-            Ok(PredicateNode {
+            PredicateNode {
                 op,
                 attribute: Some(attribute),
                 value: Some(rmpv::Value::Integer(n.into())),
                 value_ref: None,
                 children: None,
-            })
+            }
         }
         RhsValue::Float(f) => {
             let attribute = if lhs_is_data {
@@ -715,13 +709,13 @@ fn build_comparison_node(
             } else {
                 lhs.join(".")
             };
-            Ok(PredicateNode {
+            PredicateNode {
                 op,
                 attribute: Some(attribute),
                 value: Some(rmpv::Value::F64(f)),
                 value_ref: None,
                 children: None,
-            })
+            }
         }
         RhsValue::Bool(b) => {
             let attribute = if lhs_is_data {
@@ -729,13 +723,13 @@ fn build_comparison_node(
             } else {
                 lhs.join(".")
             };
-            Ok(PredicateNode {
+            PredicateNode {
                 op,
                 attribute: Some(attribute),
                 value: Some(rmpv::Value::Boolean(b)),
                 value_ref: None,
                 children: None,
-            })
+            }
         }
     }
 }
