@@ -1,15 +1,20 @@
 //! Pipeline composition: combines all middleware layers into a single service stack.
 
+use std::sync::Arc;
+
 use tower::ServiceBuilder;
 
+use super::authorization::AuthorizationLayer;
 use super::load_shed::LoadShedLayer;
 use super::metrics::MetricsLayer;
 use super::timeout::TimeoutLayer;
+use crate::network::connection::ConnectionRegistry;
 use crate::service::config::ServerConfig;
 use crate::service::operation::OperationPipeline;
 // Imported for use by the test module (via `super::*`).
 #[cfg(test)]
 use crate::service::operation::{Operation, OperationError, OperationResponse};
+use crate::service::policy::PolicyEvaluator;
 use crate::service::router::OperationRouter;
 
 /// Build the operation pipeline by wrapping the `OperationRouter` with middleware layers.
@@ -17,7 +22,12 @@ use crate::service::router::OperationRouter;
 /// Layer order (outermost to innermost):
 /// 1. `LoadShedLayer` -- reject when overloaded (fail fast before doing any work)
 /// 2. `TimeoutLayer` -- enforce per-operation timeouts
-/// 3. `MetricsLayer` -- record timing and outcome (closest to the actual handler)
+/// 3. `MetricsLayer` -- record timing and outcome (before auth so denied requests are tracked)
+/// 4. `AuthorizationLayer` (optional) -- RBAC policy enforcement; omitted when `None`
+/// 5. `OperationRouter` -- domain service dispatch
+///
+/// When `policy_evaluator` is `None` (RBAC not configured), the authorization layer
+/// is omitted entirely so there is zero overhead for non-RBAC deployments.
 ///
 /// Returns a `BoxService` to erase the unnameable composed type, making the
 /// pipeline storable in `AppState` via `Arc<Mutex<OperationPipeline>>`.
@@ -25,13 +35,28 @@ use crate::service::router::OperationRouter;
 pub fn build_operation_pipeline(
     router: OperationRouter,
     config: &ServerConfig,
+    policy_evaluator: Option<Arc<PolicyEvaluator>>,
+    connection_registry: Option<Arc<ConnectionRegistry>>,
 ) -> OperationPipeline {
-    let svc = ServiceBuilder::new()
-        .layer(LoadShedLayer::new(config.max_concurrent_operations))
-        .layer(TimeoutLayer)
-        .layer(MetricsLayer)
-        .service(router);
-    OperationPipeline::new(svc)
+    match (policy_evaluator, connection_registry) {
+        (Some(evaluator), Some(registry)) => {
+            let svc = ServiceBuilder::new()
+                .layer(LoadShedLayer::new(config.max_concurrent_operations))
+                .layer(TimeoutLayer)
+                .layer(MetricsLayer)
+                .layer(AuthorizationLayer::new(evaluator, registry))
+                .service(router);
+            OperationPipeline::new(svc)
+        }
+        _ => {
+            let svc = ServiceBuilder::new()
+                .layer(LoadShedLayer::new(config.max_concurrent_operations))
+                .layer(TimeoutLayer)
+                .layer(MetricsLayer)
+                .service(router);
+            OperationPipeline::new(svc)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -99,7 +124,7 @@ mod tests {
             ..ServerConfig::default()
         };
 
-        let svc = build_operation_pipeline(router, &config);
+        let svc = build_operation_pipeline(router, &config, None, None);
         let resp = svc.oneshot(make_op()).await.unwrap();
         assert!(matches!(
             resp,

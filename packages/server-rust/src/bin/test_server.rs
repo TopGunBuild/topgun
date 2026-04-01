@@ -15,7 +15,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::routing::get;
+use axum::routing::{delete, get};
 use clap::Parser;
 use dashmap::DashMap;
 use parking_lot::RwLock;
@@ -48,6 +48,7 @@ use topgun_server::service::dispatch::{DispatchConfig, PartitionDispatcher};
 use topgun_server::service::middleware::build_operation_pipeline;
 use topgun_server::service::operation::service_names;
 use topgun_server::service::router::OperationRouter;
+use topgun_server::service::policy::InMemoryPolicyStore;
 use topgun_server::service::security::{SecurityConfig, WriteValidator};
 use topgun_server::service::OperationService;
 use topgun_server::storage::datastores::NullDataStore;
@@ -254,7 +255,10 @@ async fn main() -> anyhow::Result<()> {
 
     let (classify_svc, dispatcher) = cluster_state_for_services;
 
-    // Build the AppState with all services wired
+    // Build the AppState with all services wired.
+    // A shared InMemoryPolicyStore is created so that the admin policy endpoints
+    // are functional — integration tests use them to configure RBAC policies at runtime.
+    let policy_store = Arc::new(InMemoryPolicyStore::new());
     let shutdown = Arc::new(ShutdownController::new());
     let state = AppState {
         registry: Arc::new(ConnectionRegistry::new()),
@@ -268,18 +272,28 @@ async fn main() -> anyhow::Result<()> {
         cluster_state: cluster_state_for_app,
         store_factory: None,
         server_config: None,
-        policy_store: None,
+        policy_store: Some(policy_store),
     };
 
     // Build the axum router with state.
     // Serve WebSocket on both /ws (integration tests) and / (browser clients).
     // Include /health so Docker Compose healthchecks and inter-container probes succeed.
+    // Mount admin policy routes so integration tests can create policies via HTTP.
     let ws_handler = get(topgun_server::network::handlers::ws_upgrade_handler);
     let health_handler = get(topgun_server::network::handlers::health_handler);
     let app = axum::Router::new()
         .route("/ws", ws_handler.clone())
         .route("/", ws_handler)
         .route("/health", health_handler)
+        .route(
+            "/api/admin/policies",
+            get(topgun_server::network::handlers::admin::list_policies)
+                .post(topgun_server::network::handlers::admin::create_policy),
+        )
+        .route(
+            "/api/admin/policies/{id}",
+            delete(topgun_server::network::handlers::admin::delete_policy),
+        )
         .with_state(state);
 
     // Print port to stdout so the TS test harness can read it
@@ -512,7 +526,7 @@ fn build_services(
         router.register(service_names::COORDINATION, Arc::clone(&coordination_svc));
         router.register(service_names::SEARCH, Arc::clone(&search_svc));
         router.register(service_names::PERSISTENCE, Arc::clone(&persistence_svc));
-        build_operation_pipeline(router, &config)
+        build_operation_pipeline(router, &config, None, None)
     };
 
     let dispatch_config = DispatchConfig::default();

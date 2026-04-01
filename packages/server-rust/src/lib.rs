@@ -202,7 +202,7 @@ mod integration_tests {
     #[tokio::test]
     async fn full_pipeline_ping_returns_pong() {
         let (classify_svc, router, config) = setup();
-        let mut pipeline = build_operation_pipeline(router, &config);
+        let mut pipeline = build_operation_pipeline(router, &config, None, None);
 
         // Classify a Ping message.
         let msg = Message::Ping(topgun_core::messages::PingData {
@@ -236,7 +236,7 @@ mod integration_tests {
     #[tokio::test]
     async fn full_pipeline_client_op_to_op_ack() {
         let (classify_svc, router, config) = setup();
-        let mut pipeline = build_operation_pipeline(router, &config);
+        let mut pipeline = build_operation_pipeline(router, &config, None, None);
 
         let msg = Message::ClientOp(topgun_core::messages::sync::ClientOpMessage {
             payload: topgun_core::ClientOp {
@@ -274,7 +274,7 @@ mod integration_tests {
     #[tokio::test]
     async fn full_pipeline_topic_subscribe_returns_empty() {
         let (classify_svc, router, config) = setup();
-        let mut pipeline = build_operation_pipeline(router, &config);
+        let mut pipeline = build_operation_pipeline(router, &config, None, None);
 
         let msg = Message::TopicSub {
             payload: topgun_core::messages::TopicSubPayload {
@@ -317,7 +317,7 @@ mod integration_tests {
     #[tokio::test]
     async fn full_pipeline_sync_init_returns_sync_resp_root() {
         let (classify_svc, router, config) = setup();
-        let mut pipeline = build_operation_pipeline(router, &config);
+        let mut pipeline = build_operation_pipeline(router, &config, None, None);
 
         let msg = Message::SyncInit(topgun_core::messages::SyncInitMessage {
             map_name: "users".to_string(),
