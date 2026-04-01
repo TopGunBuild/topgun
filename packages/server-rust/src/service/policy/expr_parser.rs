@@ -737,8 +737,6 @@ fn build_comparison_node(
                 children: None,
             })
         }
-        #[allow(unreachable_patterns)]
-        _ => unreachable!(),
     }
 }
 
