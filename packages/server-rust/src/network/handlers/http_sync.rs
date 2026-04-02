@@ -118,7 +118,7 @@ pub async fn http_sync_handler(
                     group_ops,
                     partition_id,
                     None,
-                    CallerOrigin::Client,
+                    CallerOrigin::System,
                     None,
                     None,
                 );
