@@ -26,7 +26,7 @@ const MSGPACK_CONTENT_TYPE: &str = "application/msgpack";
 fn wall_clock_timestamp() -> Timestamp {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(0))
         .unwrap_or(0);
     Timestamp {
         millis,
@@ -43,7 +43,7 @@ fn wall_clock_timestamp() -> Timestamp {
 /// any submitted operations.
 ///
 /// Returns HTTP 400 with a JSON error body when the request body is not valid
-/// MsgPack or cannot be decoded as `HttpSyncRequest`.
+/// `MsgPack` or cannot be decoded as `HttpSyncRequest`.
 ///
 /// When `operation_service` or `dispatcher` is absent (test environments without
 /// service wiring), returns a minimal response with only `server_hlc` populated.
@@ -56,8 +56,7 @@ pub async fn http_sync_handler(
     let server_hlc: Timestamp = state
         .operation_service
         .as_ref()
-        .map(|s| s.now())
-        .unwrap_or_else(wall_clock_timestamp);
+        .map_or_else(wall_clock_timestamp, |s| s.now());
 
     // Decode the request body. An empty body is treated as an empty request
     // only when the body length is zero; any non-zero body must be valid MsgPack.
@@ -86,7 +85,7 @@ pub async fn http_sync_handler(
             server_hlc,
             ..Default::default()
         };
-        return msgpack_response(response);
+        return msgpack_response(&response);
     };
 
     let mut http_response = HttpSyncResponse {
@@ -162,12 +161,12 @@ pub async fn http_sync_handler(
         }
     }
 
-    msgpack_response(http_response)
+    msgpack_response(&http_response)
 }
 
-/// Serializes `response` as MsgPack and wraps it in an HTTP 200 response.
-fn msgpack_response(response: HttpSyncResponse) -> axum::response::Response {
-    match rmp_serde::to_vec_named(&response) {
+/// Serializes `response` as `MsgPack` and wraps it in an HTTP 200 response.
+fn msgpack_response(response: &HttpSyncResponse) -> axum::response::Response {
+    match rmp_serde::to_vec_named(response) {
         Ok(bytes) => (
             StatusCode::OK,
             [("content-type", MSGPACK_CONTENT_TYPE)],
