@@ -587,9 +587,11 @@ mod tests {
         let (port, _registry, _shutdown_ctrl, shutdown_tx, _handle) = start_server().await;
 
         let client = reqwest::Client::new();
+        // Empty body is treated as an empty HttpSyncRequest; handler returns 200
+        // with a MsgPack-encoded HttpSyncResponse.
         let resp = client
             .post(format!("http://127.0.0.1:{port}/sync"))
-            .body(vec![0x90_u8]) // empty MsgPack array
+            .body(vec![])
             .send()
             .await
             .expect("POST /sync should succeed");
@@ -605,9 +607,27 @@ mod tests {
         assert_eq!(content_type, "application/msgpack");
 
         let body = resp.bytes().await.expect("body read should succeed");
-        let decoded: Vec<()> =
-            rmp_serde::from_slice(&body).expect("response body should be valid MsgPack");
-        assert!(decoded.is_empty());
+        let decoded: topgun_core::messages::HttpSyncResponse =
+            rmp_serde::from_slice(&body).expect("response body should be valid MsgPack HttpSyncResponse");
+        // server_hlc.millis must be populated with a positive wall-clock value.
+        assert!(decoded.server_hlc.millis > 0);
+
+        drop(shutdown_tx);
+    }
+
+    #[tokio::test]
+    async fn post_sync_malformed_body_returns_400() {
+        let (port, _registry, _shutdown_ctrl, shutdown_tx, _handle) = start_server().await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{port}/sync"))
+            .body(vec![0xFF_u8, 0xFF_u8])
+            .send()
+            .await
+            .expect("POST /sync request should complete");
+
+        assert_eq!(resp.status(), 400);
 
         drop(shutdown_tx);
     }

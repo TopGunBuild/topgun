@@ -15,7 +15,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post};
 use clap::Parser;
 use dashmap::DashMap;
 use parking_lot::RwLock;
@@ -299,6 +299,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/admin/policies/{id}",
             delete(topgun_server::network::handlers::admin::delete_policy),
+        )
+        .route(
+            "/sync",
+            post(topgun_server::network::handlers::http_sync_handler),
         )
         .with_state(state);
 
