@@ -111,6 +111,7 @@ mod tests {
             client_id: None,
             caller_node_id: None,
             connection_id: None,
+            principal: None,
             timestamp: Timestamp {
                 millis: 0,
                 counter: 0,
