@@ -77,21 +77,21 @@ function makeOwnerWriteBatch(mapName: string, key: string, ownerId: string): obj
 }
 
 /**
- * Sends an OP_BATCH write and resolves with the first server response
+ * Sends a pre-built message and resolves with the first server response
  * (either OP_ACK for success or ERROR for denial).
  */
-async function writeAndWaitForResponse(
+async function sendAndWaitForResponse(
   client: TestClient,
-  mapName: string,
-  key = 'k1'
+  message: object,
+  context = 'send'
 ): Promise<{ type: string; payload?: any }> {
   const baseIndex = client.messages.length;
 
-  client.send(makeWriteBatch(mapName, key));
+  client.send(message);
 
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
-      reject(new Error(`Timeout waiting for response on write to map "${mapName}"`));
+      reject(new Error(`Timeout waiting for response on ${context}`));
     }, 5000);
 
     const check = () => {
@@ -107,6 +107,18 @@ async function writeAndWaitForResponse(
     };
     check();
   });
+}
+
+/**
+ * Sends an OP_BATCH write and resolves with the first server response
+ * (either OP_ACK for success or ERROR for denial).
+ */
+async function writeAndWaitForResponse(
+  client: TestClient,
+  mapName: string,
+  key = 'k1'
+): Promise<{ type: string; payload?: any }> {
+  return sendAndWaitForResponse(client, makeWriteBatch(mapName, key), `write to map "${mapName}"`);
 }
 
 /**
@@ -339,24 +351,11 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
       await client.waitForMessage('AUTH_ACK', 8000);
 
       // Write with ownerId matching the authenticated user's id.
-      const baseIndex = client.messages.length;
-      client.send(makeOwnerWriteBatch('owned-docs', 'doc-owned', 'owner-user-1'));
-
-      const resp = await new Promise<{ type: string; payload?: any }>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('Timeout')), 5000);
-        const check = () => {
-          for (let i = baseIndex; i < client.messages.length; i++) {
-            const msg = client.messages[i];
-            if (msg.type === 'OP_ACK' || msg.type === 'ERROR') {
-              clearTimeout(timeout);
-              resolve(msg);
-              return;
-            }
-          }
-          setTimeout(check, 50);
-        };
-        check();
-      });
+      const resp = await sendAndWaitForResponse(
+        client,
+        makeOwnerWriteBatch('owned-docs', 'doc-owned', 'owner-user-1'),
+        'owner write (matching)'
+      );
 
       expect(resp.type).toBe('OP_ACK');
     } finally {
@@ -378,24 +377,11 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
       await client.waitForMessage('AUTH_ACK', 8000);
 
       // Write with ownerId that does NOT match the authenticated user's id.
-      const baseIndex = client.messages.length;
-      client.send(makeOwnerWriteBatch('owned-docs', 'doc-stolen', 'someone-else'));
-
-      const resp = await new Promise<{ type: string; payload?: any }>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('Timeout')), 5000);
-        const check = () => {
-          for (let i = baseIndex; i < client.messages.length; i++) {
-            const msg = client.messages[i];
-            if (msg.type === 'OP_ACK' || msg.type === 'ERROR') {
-              clearTimeout(timeout);
-              resolve(msg);
-              return;
-            }
-          }
-          setTimeout(check, 50);
-        };
-        check();
-      });
+      const resp = await sendAndWaitForResponse(
+        client,
+        makeOwnerWriteBatch('owned-docs', 'doc-stolen', 'someone-else'),
+        'owner write (mismatched)'
+      );
 
       expect(resp.type).toBe('ERROR');
     } finally {
@@ -418,24 +404,11 @@ describe('Integration: RBAC Policy Enforcement (Rust Server)', () => {
 
       // Admin writes with an ownerId that does NOT match admin's id.
       // The admin bypass should allow it regardless of the condition.
-      const baseIndex = adminClient.messages.length;
-      adminClient.send(makeOwnerWriteBatch('owned-docs', 'admin-override', 'any-other-user'));
-
-      const resp = await new Promise<{ type: string; payload?: any }>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error('Timeout')), 5000);
-        const check = () => {
-          for (let i = baseIndex; i < adminClient.messages.length; i++) {
-            const msg = adminClient.messages[i];
-            if (msg.type === 'OP_ACK' || msg.type === 'ERROR') {
-              clearTimeout(timeout);
-              resolve(msg);
-              return;
-            }
-          }
-          setTimeout(check, 50);
-        };
-        check();
-      });
+      const resp = await sendAndWaitForResponse(
+        adminClient,
+        makeOwnerWriteBatch('owned-docs', 'admin-override', 'any-other-user'),
+        'admin write (bypassing condition)'
+      );
 
       expect(resp.type).toBe('OP_ACK');
     } finally {
