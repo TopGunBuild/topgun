@@ -87,12 +87,18 @@ impl WriteValidator {
         map_name: &str,
         value_size: u64,
     ) -> Result<(), OperationError> {
-        // Trusted server-to-server traffic bypasses all checks.
-        if ctx.caller_origin != CallerOrigin::Client {
+        // Trusted server-to-server traffic bypasses all checks. HttpClient
+        // falls through to the same ACL/size checks as Client; its auth
+        // enforcement is handler-level (HTTP 401 before dispatch) rather
+        // than metadata-based.
+        if !matches!(ctx.caller_origin, CallerOrigin::Client | CallerOrigin::HttpClient) {
             return Ok(());
         }
 
-        // Authentication check.
+        // Authentication check via connection metadata. HTTP operations have
+        // no connection_id and therefore no ConnectionMetadata, so this check
+        // is skipped for HttpClient (no metadata is passed through for them
+        // because the CRDT service gates validate_write on connection_id presence).
         if self.config.require_auth && !metadata.authenticated {
             return Err(OperationError::Unauthorized);
         }
