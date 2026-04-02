@@ -42,7 +42,7 @@ impl OperationService {
     }
 
     /// Generate a fresh HLC timestamp.
-    fn now(&self) -> topgun_core::Timestamp {
+    pub fn now(&self) -> topgun_core::Timestamp {
         self.hlc.lock().now()
     }
 
