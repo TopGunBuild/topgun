@@ -281,13 +281,20 @@ fn evaluate_regex(actual: &rmpv::Value, pattern_val: &rmpv::Value) -> bool {
     Regex::new(pattern).is_ok_and(|re| re.is_match(text))
 }
 
-/// Evaluates IN operator: field value must appear in the provided list.
+/// Evaluates IN operator with bidirectional array membership.
+///
+/// - If `allowed_val` is an array: checks whether `actual` appears in `allowed_val` (scalar-in-array).
+/// - If `actual` is an array and `allowed_val` is not: checks whether `allowed_val` appears in `actual` (array-contains-scalar).
+/// - Otherwise: returns `false`.
+///
+/// The second case supports the `contains` parser keyword, which emits a `PredicateOp::In` node
+/// with swapped attribute/value positions so `data.tags contains 'vip'` works without a new op variant.
 fn evaluate_in(actual: &rmpv::Value, allowed_val: &rmpv::Value) -> bool {
-    let rmpv::Value::Array(allowed) = allowed_val else {
-        return false;
-    };
-
-    allowed.iter().any(|item| values_equal(actual, item))
+    match (allowed_val, actual) {
+        (rmpv::Value::Array(arr), _) => arr.iter().any(|item| values_equal(actual, item)),
+        (_, rmpv::Value::Array(arr)) => arr.iter().any(|item| values_equal(item, allowed_val)),
+        _ => false,
+    }
 }
 
 /// Evaluates BETWEEN operator: field value must be within [low, high] inclusive.
@@ -1565,6 +1572,75 @@ mod tests {
         let data = make_map(vec![("score", rmpv::Value::Integer(100.into()))]);
         let pred = leaf(PredicateOp::Gte, "score", rmpv::Value::Integer(50.into()));
         // Passing via data_only — same behavior as legacy 2-arg call
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
+    }
+
+    // ---- contains semantics tests (bidirectional evaluate_in) ----
+
+    #[test]
+    fn contains_array_field_has_matching_string() {
+        // data.tags is ["vip", "premium"]; checking if it contains "vip" -> true
+        let tags = rmpv::Value::Array(vec![
+            rmpv::Value::String("vip".into()),
+            rmpv::Value::String("premium".into()),
+        ]);
+        let data = make_map(vec![("tags", tags)]);
+        // contains uses PredicateOp::In with the scalar as value and the array field as attribute
+        let pred = leaf(PredicateOp::In, "tags", rmpv::Value::String("vip".into()));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
+    }
+
+    #[test]
+    fn contains_array_field_does_not_have_scalar() {
+        // data.tags is ["basic"]; checking if it contains "vip" -> false
+        let tags = rmpv::Value::Array(vec![rmpv::Value::String("basic".into())]);
+        let data = make_map(vec![("tags", tags)]);
+        let pred = leaf(PredicateOp::In, "tags", rmpv::Value::String("vip".into()));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
+    }
+
+    #[test]
+    fn contains_array_field_has_matching_integer() {
+        // data.scores is [1, 2, 3]; checking if it contains 2 -> true
+        let scores = rmpv::Value::Array(vec![
+            rmpv::Value::Integer(1.into()),
+            rmpv::Value::Integer(2.into()),
+            rmpv::Value::Integer(3.into()),
+        ]);
+        let data = make_map(vec![("scores", scores)]);
+        let pred = leaf(PredicateOp::In, "scores", rmpv::Value::Integer(2.into()));
+        assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
+    }
+
+    #[test]
+    fn contains_empty_array_returns_false() {
+        // data.tags is []; any scalar -> false
+        let data = make_map(vec![("tags", rmpv::Value::Array(vec![]))]);
+        let pred = leaf(PredicateOp::In, "tags", rmpv::Value::String("vip".into()));
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
+    }
+
+    #[test]
+    fn contains_non_array_field_with_scalar_returns_false() {
+        // data.role is "admin" (not an array); neither side is array -> false
+        let data = make_map(vec![("role", rmpv::Value::String("admin".into()))]);
+        let pred = leaf(PredicateOp::In, "role", rmpv::Value::String("admin".into()));
+        // Neither actual (String) nor allowed_val (String) is an array, so false
+        assert!(!evaluate_predicate(&pred, &EvalContext::data_only(&data)));
+    }
+
+    #[test]
+    fn in_scalar_checked_against_array_unchanged() {
+        // Existing scalar-in-array semantics still work: data.role in [admin, editor]
+        let data = make_map(vec![("role", rmpv::Value::String("admin".into()))]);
+        let pred = leaf(
+            PredicateOp::In,
+            "role",
+            rmpv::Value::Array(vec![
+                rmpv::Value::String("admin".into()),
+                rmpv::Value::String("editor".into()),
+            ]),
+        );
         assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
     }
 }
