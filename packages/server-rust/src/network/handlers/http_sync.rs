@@ -111,13 +111,10 @@ impl OptionalFromRequestParts<AppState> for ClientClaims {
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok());
 
-        let token_str = match auth_header {
-            Some(v) => v,
-            None => {
-                // No Authorization header at all.
-                parts.extensions.insert(TokenPresence::Absent);
-                return Ok(None);
-            }
+        let Some(token_str) = auth_header else {
+            // No Authorization header at all.
+            parts.extensions.insert(TokenPresence::Absent);
+            return Ok(None);
         };
 
         // Header present — record presence regardless of token validity.
@@ -133,29 +130,25 @@ impl OptionalFromRequestParts<AppState> for ClientClaims {
         }
 
         // JWT secret must be configured. If not configured, treat as no token.
-        let jwt_secret = match state.jwt_secret.as_deref() {
-            Some(s) => s,
-            None => return Ok(None),
+        let Some(jwt_secret) = state.jwt_secret.as_deref() else {
+            return Ok(None);
         };
 
         // Validate JWT — supports both HS256 and RS256 via decode_jwt_key.
-        let (algorithm, key) = match super::auth::decode_jwt_key(jwt_secret) {
-            Ok(v) => v,
-            Err(_) => return Ok(None),
+        let Ok((algorithm, key)) = super::auth::decode_jwt_key(jwt_secret) else {
+            return Ok(None);
         };
         let mut validation = Validation::new(algorithm);
         validation.validate_aud = false;
         validation.leeway = state.config.jwt_clock_skew_secs;
 
-        let token_data = match jsonwebtoken::decode::<JwtClaims>(token, &key, &validation) {
-            Ok(d) => d,
-            Err(_) => return Ok(None),
+        let Ok(token_data) = jsonwebtoken::decode::<JwtClaims>(token, &key, &validation) else {
+            return Ok(None);
         };
 
         // Require sub claim — anonymous identity is not permitted.
-        let user_id = match token_data.claims.sub {
-            Some(s) => s,
-            None => return Ok(None),
+        let Some(user_id) = token_data.claims.sub else {
+            return Ok(None);
         };
 
         let roles = token_data.claims.roles.unwrap_or_default();
@@ -195,6 +188,116 @@ fn wall_clock_timestamp() -> Timestamp {
     }
 }
 
+/// Checks auth requirements and returns an error response if authentication fails.
+/// Returns `None` when the request is authorized to proceed.
+fn enforce_auth(
+    require_auth: bool,
+    token_presence: TokenPresence,
+    claims: Option<&ClientClaims>,
+) -> Option<axum::response::Response> {
+    if !require_auth {
+        return None;
+    }
+    match token_presence {
+        TokenPresence::Absent => {
+            let json = r#"{"code":401,"message":"authentication required"}"#.to_string();
+            Some(
+                (StatusCode::UNAUTHORIZED, [("content-type", "application/json")], json.into_bytes())
+                    .into_response(),
+            )
+        }
+        TokenPresence::Present if claims.is_none() => {
+            let json = r#"{"code":401,"message":"invalid or expired token"}"#.to_string();
+            Some(
+                (StatusCode::UNAUTHORIZED, [("content-type", "application/json")], json.into_bytes())
+                    .into_response(),
+            )
+        }
+        TokenPresence::Present => None,
+    }
+}
+
+/// Dispatches operations through the partition pipeline and populates the response.
+async fn dispatch_operations(
+    ops: Vec<topgun_core::messages::ClientOp>,
+    classify_svc: &crate::service::classify::OperationService,
+    dispatcher: &Arc<PartitionDispatcher>,
+    claims: Option<&ClientClaims>,
+    caller_origin: CallerOrigin,
+    principal: Option<&topgun_core::Principal>,
+    response: &mut HttpSyncResponse,
+) {
+    if ops.is_empty() {
+        return;
+    }
+
+    let last_id = ops
+        .last()
+        .and_then(|op| op.id.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Group ops by partition so each group targets one partition worker.
+    let mut partition_groups: HashMap<u32, Vec<topgun_core::messages::ClientOp>> = HashMap::new();
+    for op in ops {
+        let partition_id = hash_to_partition(&op.key);
+        partition_groups.entry(partition_id).or_default().push(op);
+    }
+
+    // Build sub-batch operations up front, then dispatch concurrently.
+    let mut sub_ops: Vec<crate::service::operation::Operation> =
+        Vec::with_capacity(partition_groups.len());
+    for (partition_id, group_ops) in partition_groups {
+        let mut op = classify_svc.classify_op_batch_for_partition(
+            group_ops,
+            partition_id,
+            claims.map(|c| c.user_id.clone()),
+            caller_origin,
+            None,
+            None,
+        );
+        // Set principal on context for RBAC authorization middleware (HTTP path).
+        if let Some(p) = principal {
+            op.set_principal(p.clone());
+        }
+        sub_ops.push(op);
+    }
+
+    // Dispatch all sub-batches concurrently.
+    let mut join_set = tokio::task::JoinSet::new();
+    for sub_op in sub_ops {
+        let d = Arc::clone(dispatcher);
+        join_set.spawn(async move { d.dispatch(sub_op).await });
+    }
+
+    // Collect results; record any dispatch errors.
+    let mut dispatch_error: Option<String> = None;
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Ok(Ok(_resp)) => {}
+            Ok(Err(e)) => {
+                dispatch_error = Some(format!("{e}"));
+            }
+            Err(join_err) => {
+                dispatch_error = Some(format!("join error: {join_err}"));
+            }
+        }
+    }
+
+    if let Some(msg) = dispatch_error {
+        let errors = response.errors.get_or_insert_with(Vec::new);
+        errors.push(HttpSyncError {
+            code: 500,
+            message: msg,
+            context: None,
+        });
+    } else {
+        response.ack = Some(HttpSyncAck {
+            last_id,
+            results: None,
+        });
+    }
+}
+
 /// Handles POST /sync requests with `MsgPack`-encoded bodies.
 ///
 /// Decodes the request body as `HttpSyncRequest`, dispatches operations through
@@ -216,46 +319,18 @@ pub async fn http_sync_handler(
     axum::Extension(token_presence): axum::Extension<TokenPresence>,
     body: Bytes,
 ) -> impl IntoResponse {
-    // Read require_auth from server_config. Defaults to false when not configured
-    // (test environments and deployments that have not set up admin config).
+    // Read require_auth from server_config. Defaults to false when not configured.
     let require_auth = state
         .server_config
         .as_ref()
-        .map(|sc| sc.load().security.require_auth)
-        .unwrap_or(false);
+        .is_some_and(|sc| sc.load().security.require_auth);
 
     // Authentication enforcement: reject unauthenticated requests when required.
-    if require_auth {
-        match token_presence {
-            TokenPresence::Absent => {
-                let json =
-                    r#"{"code":401,"message":"authentication required"}"#.to_string();
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    [("content-type", "application/json")],
-                    json.into_bytes(),
-                )
-                    .into_response();
-            }
-            TokenPresence::Present => {
-                if claims.is_none() {
-                    // Token was present but invalid.
-                    let json =
-                        r#"{"code":401,"message":"invalid or expired token"}"#.to_string();
-                    return (
-                        StatusCode::UNAUTHORIZED,
-                        [("content-type", "application/json")],
-                        json.into_bytes(),
-                    )
-                        .into_response();
-                }
-            }
-        }
+    if let Some(err_response) = enforce_auth(require_auth, token_presence, claims.as_ref()) {
+        return err_response;
     }
 
     // Determine caller_origin and principal based on claims.
-    // When claims are present, use HttpClient origin and carry the principal.
-    // When absent (require_auth=false and no token), fall back to System (existing behavior).
     let (caller_origin, principal) = if let Some(ref c) = claims {
         (
             CallerOrigin::HttpClient,
@@ -268,15 +343,13 @@ pub async fn http_sync_handler(
         (CallerOrigin::System, None)
     };
 
-    // Obtain the server's current HLC timestamp. Fall back to wall-clock time
-    // if no operation_service is wired (e.g., network-only test environments).
+    // Obtain the server's current HLC timestamp.
     let server_hlc: Timestamp = state
         .operation_service
         .as_ref()
         .map_or_else(wall_clock_timestamp, |s| s.now());
 
-    // Decode the request body. An empty body is treated as an empty request
-    // only when the body length is zero; any non-zero body must be valid MsgPack.
+    // Decode the request body.
     let request: HttpSyncRequest = if body.is_empty() {
         HttpSyncRequest::default()
     } else {
@@ -298,11 +371,7 @@ pub async fn http_sync_handler(
     let (Some(classify_svc), Some(dispatcher)) =
         (state.operation_service.as_ref(), state.dispatcher.as_ref())
     else {
-        let response = HttpSyncResponse {
-            server_hlc,
-            ..Default::default()
-        };
-        return msgpack_response(&response);
+        return msgpack_response(&HttpSyncResponse { server_hlc, ..Default::default() });
     };
 
     let mut http_response = HttpSyncResponse {
@@ -310,76 +379,11 @@ pub async fn http_sync_handler(
         ..Default::default()
     };
 
-    // Dispatch operations if present and non-empty.
     if let Some(ops) = request.operations {
-        if !ops.is_empty() {
-            let last_id = ops
-                .last()
-                .and_then(|op| op.id.clone())
-                .unwrap_or_else(|| "unknown".to_string());
-
-            // Group ops by partition so each group targets one partition worker.
-            let mut partition_groups: HashMap<u32, Vec<topgun_core::messages::ClientOp>> =
-                HashMap::new();
-            for op in ops {
-                let partition_id = hash_to_partition(&op.key);
-                partition_groups.entry(partition_id).or_default().push(op);
-            }
-
-            // Build sub-batch operations up front, then dispatch concurrently.
-            let mut sub_ops: Vec<crate::service::operation::Operation> =
-                Vec::with_capacity(partition_groups.len());
-            for (partition_id, group_ops) in partition_groups {
-                let mut op = classify_svc.classify_op_batch_for_partition(
-                    group_ops,
-                    partition_id,
-                    claims.as_ref().map(|c| c.user_id.clone()),
-                    caller_origin,
-                    None,
-                    None,
-                );
-                // Set principal on context for RBAC authorization middleware (HTTP path).
-                if let Some(ref p) = principal {
-                    op.set_principal(p.clone());
-                }
-                sub_ops.push(op);
-            }
-
-            // Dispatch all sub-batches concurrently.
-            let mut join_set = tokio::task::JoinSet::new();
-            for sub_op in sub_ops {
-                let dispatcher: Arc<PartitionDispatcher> = Arc::clone(dispatcher);
-                join_set.spawn(async move { dispatcher.dispatch(sub_op).await });
-            }
-
-            // Collect results; record any dispatch errors.
-            let mut dispatch_error: Option<String> = None;
-            while let Some(result) = join_set.join_next().await {
-                match result {
-                    Ok(Ok(_resp)) => {}
-                    Ok(Err(e)) => {
-                        dispatch_error = Some(format!("{e}"));
-                    }
-                    Err(join_err) => {
-                        dispatch_error = Some(format!("join error: {join_err}"));
-                    }
-                }
-            }
-
-            if let Some(msg) = dispatch_error {
-                let errors = http_response.errors.get_or_insert_with(Vec::new);
-                errors.push(HttpSyncError {
-                    code: 500,
-                    message: msg,
-                    context: None,
-                });
-            } else {
-                http_response.ack = Some(HttpSyncAck {
-                    last_id,
-                    results: None,
-                });
-            }
-        }
+        dispatch_operations(
+            ops, classify_svc, dispatcher, claims.as_ref(), caller_origin, principal.as_ref(), &mut http_response,
+        )
+        .await;
     }
 
     msgpack_response(&http_response)
