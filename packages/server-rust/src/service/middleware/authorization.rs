@@ -84,19 +84,78 @@ where
     fn call(&mut self, op: Operation) -> Self::Future {
         // Trusted origins bypass policy evaluation entirely. Forwarded operations
         // come from peer nodes that have already been authorized at the cluster level.
+        // HttpClient is NOT trusted: it goes through the same RBAC checks as Client.
         let ctx = op.ctx();
-        if ctx.caller_origin != CallerOrigin::Client {
+        if !matches!(ctx.caller_origin, CallerOrigin::Client | CallerOrigin::HttpClient) {
             return Box::pin(self.inner.call(op));
         }
 
-        // Fail-closed: operations from client connections without a connection_id
-        // cannot be attributed to a principal and are denied.
-        let Some(connection_id) = ctx.connection_id else {
+        // Resolve the principal: WebSocket ops carry a connection_id for registry
+        // lookup; HTTP ops carry ctx.principal set directly by the handler.
+        // Fail-closed when neither is available.
+        let principal_opt: Option<topgun_core::Principal> = if let Some(connection_id) = ctx.connection_id {
+            // WebSocket path: principal resolved lazily from registry inside the async block
+            let evaluator = Arc::clone(&self.evaluator);
+            let registry = Arc::clone(&self.registry);
+            let (action, map_name) = classify_operation(&op);
+            let Some(action) = action else {
+                return Box::pin(self.inner.call(op));
+            };
+            let batch_ops_data: Option<Vec<(String, rmpv::Value)>> = match &op {
+                Operation::OpBatch { payload, .. } => Some(
+                    payload
+                        .payload
+                        .ops
+                        .iter()
+                        .map(|client_op| {
+                            (client_op.map_name.clone(), extract_op_data(client_op))
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            };
+            let data = extract_data(&op);
+            let fut = self.inner.call(op);
+            return Box::pin(async move {
+                if !evaluator.has_policies().await {
+                    return fut.await;
+                }
+                let principal = if let Some(handle) = registry.get(connection_id) {
+                    let metadata = handle.metadata.read().await;
+                    metadata.principal.clone()
+                } else {
+                    return Err(OperationError::Unauthorized);
+                };
+                if let Some(ops_data) = batch_ops_data {
+                    for (op_map_name, op_data) in &ops_data {
+                        let decision = evaluator
+                            .evaluate(principal.as_ref(), action, op_map_name, op_data)
+                            .await;
+                        if decision == PolicyDecision::Deny {
+                            return Err(OperationError::Forbidden {
+                                map_name: op_map_name.clone(),
+                            });
+                        }
+                    }
+                    return fut.await;
+                }
+                let decision = evaluator
+                    .evaluate(principal.as_ref(), action, &map_name, &data)
+                    .await;
+                match decision {
+                    PolicyDecision::Allow => fut.await,
+                    PolicyDecision::Deny => Err(OperationError::Forbidden { map_name }),
+                }
+            });
+        } else if let Some(p) = ctx.principal.clone() {
+            // HTTP path: principal was set directly by the handler after JWT validation.
+            Some(p)
+        } else {
+            // No connection_id and no ctx.principal — fail closed.
             return Box::pin(async { Err(OperationError::Unauthorized) });
         };
 
         let evaluator = Arc::clone(&self.evaluator);
-        let registry = Arc::clone(&self.registry);
 
         // Classify action and extract map_name before moving `op` into the future.
         let (action, map_name) = classify_operation(&op);
@@ -127,20 +186,15 @@ where
 
         let fut = self.inner.call(op);
 
+        // HTTP path: principal already resolved above from ctx.principal.
         Box::pin(async move {
             // When no policies are configured, pass through for backward compatibility.
             if !evaluator.has_policies().await {
                 return fut.await;
             }
 
-            // Look up the principal associated with this connection.
-            let principal = if let Some(handle) = registry.get(connection_id) {
-                let metadata = handle.metadata.read().await;
-                metadata.principal.clone()
-            } else {
-                // Connection was removed between dispatch and authorization — fail closed.
-                return Err(OperationError::Unauthorized);
-            };
+            // Use the principal resolved before entering the async block (HTTP path).
+            let principal = principal_opt;
 
             // For OpBatch, evaluate each op individually. If any op is denied,
             // reject the entire batch (fail-closed atomicity).
