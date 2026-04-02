@@ -445,7 +445,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Record-level condition tests (SPEC-170)
+    // Record-level condition tests (owner restriction, tombstone, batch atomicity)
     // -----------------------------------------------------------------------
 
     use crate::network::connection::ConnectionId;
