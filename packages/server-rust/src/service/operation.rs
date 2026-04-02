@@ -44,6 +44,8 @@ pub mod service_names {
 pub enum CallerOrigin {
     /// Direct client connection.
     Client,
+    /// HTTP client request authenticated via Bearer JWT.
+    HttpClient,
     /// Forwarded from another cluster node.
     Forwarded,
     /// Backup replication from primary node.
@@ -82,6 +84,10 @@ pub struct OperationContext {
     /// Used by services (e.g., `CoordinationService`) to look up the
     /// `ConnectionHandle` for side-effects such as heartbeat updates.
     pub connection_id: Option<ConnectionId>,
+    /// Principal identity for this operation, set directly by HTTP handlers
+    /// that authenticate via JWT. WebSocket handlers set this to `None` and
+    /// rely on `connection_id` + `ConnectionRegistry` for principal lookup.
+    pub principal: Option<topgun_core::Principal>,
     /// HLC timestamp for this operation.
     pub timestamp: Timestamp,
     /// Timeout for this operation in milliseconds.
@@ -106,6 +112,7 @@ impl OperationContext {
             client_id: None,
             caller_node_id: None,
             connection_id: None,
+            principal: None,
             timestamp,
             call_timeout_ms: default_timeout_ms,
         }
@@ -432,6 +439,60 @@ impl Operation {
             }
         }
     }
+
+    /// Sets the `principal` on this operation's `OperationContext`.
+    ///
+    /// Called by HTTP handlers after JWT authentication to carry the caller's
+    /// identity through the pipeline for RBAC authorization checks.
+    /// Mirrors the `set_connection_id` pattern.
+    pub fn set_principal(&mut self, principal: topgun_core::Principal) {
+        match self {
+            // CRDT
+            Self::ClientOp { ctx, .. }
+            | Self::OpBatch { ctx, .. }
+            // Sync
+            | Self::SyncInit { ctx, .. }
+            | Self::MerkleReqBucket { ctx, .. }
+            | Self::ORMapSyncInit { ctx, .. }
+            | Self::ORMapMerkleReqBucket { ctx, .. }
+            | Self::ORMapDiffRequest { ctx, .. }
+            | Self::ORMapPushDiff { ctx, .. }
+            // Query
+            | Self::QuerySubscribe { ctx, .. }
+            | Self::QueryUnsubscribe { ctx, .. }
+            | Self::QuerySyncInit { ctx, .. }
+            | Self::SqlQuery { ctx, .. }
+            | Self::DagQuery { ctx, .. }
+            // Messaging
+            | Self::TopicSubscribe { ctx, .. }
+            | Self::TopicUnsubscribe { ctx, .. }
+            | Self::TopicPublish { ctx, .. }
+            // Coordination
+            | Self::LockRequest { ctx, .. }
+            | Self::LockRelease { ctx, .. }
+            | Self::PartitionMapRequest { ctx, .. }
+            | Self::Ping { ctx, .. }
+            // Search
+            | Self::Search { ctx, .. }
+            | Self::SearchSubscribe { ctx, .. }
+            | Self::SearchUnsubscribe { ctx, .. }
+            // Persistence
+            | Self::CounterRequest { ctx, .. }
+            | Self::CounterSync { ctx, .. }
+            | Self::EntryProcess { ctx, .. }
+            | Self::EntryProcessBatch { ctx, .. }
+            | Self::RegisterResolver { ctx, .. }
+            | Self::UnregisterResolver { ctx, .. }
+            | Self::ListResolvers { ctx, .. }
+            | Self::JournalSubscribe { ctx, .. }
+            | Self::JournalUnsubscribe { ctx, .. }
+            | Self::JournalRead { ctx, .. }
+            // System
+            | Self::GarbageCollect { ctx } => {
+                ctx.principal = Some(principal);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -542,6 +603,8 @@ mod tests {
     fn caller_origin_equality() {
         assert_eq!(CallerOrigin::Client, CallerOrigin::Client);
         assert_ne!(CallerOrigin::Client, CallerOrigin::System);
+        assert_ne!(CallerOrigin::Client, CallerOrigin::HttpClient);
+        assert_ne!(CallerOrigin::HttpClient, CallerOrigin::System);
     }
 
     #[test]
