@@ -93,6 +93,8 @@ pub(crate) enum Token {
     Not,
     /// `in`
     In,
+    /// `contains`
+    Contains,
     /// `(`
     LParen,
     /// `)`
@@ -288,6 +290,11 @@ impl<'a> Lexer<'a> {
                 // Check if this is the keyword `in`.
                 if first == "in" {
                     return Ok((start, Token::In));
+                }
+
+                // Check if this is the keyword `contains`.
+                if first == "contains" {
+                    return Ok((start, Token::Contains));
                 }
 
                 // Check if followed by a dot — if so, collect a dotted field_ref.
@@ -493,12 +500,17 @@ impl<'a> Parser<'a> {
     fn parse_comparison(&mut self) -> Result<PredicateNode, ParseError> {
         let (lhs_pos, lhs_segments) = self.parse_field_ref_raw()?;
 
-        // Require a comparison operator or "in".
+        // Require a comparison operator, "in", or "contains".
         match self.current_token().clone() {
             Token::In => {
                 self.advance()?;
                 let (_rhs_pos, rhs_segments) = self.parse_field_ref_raw()?;
                 build_in_node(&lhs_segments, &rhs_segments, lhs_pos, self.input)
+            }
+            Token::Contains => {
+                self.advance()?;
+                let rhs = self.parse_value_or_ref(lhs_pos)?;
+                build_contains_node(&lhs_segments, rhs, lhs_pos, self.input)
             }
             Token::Eq
             | Token::Neq
@@ -517,7 +529,7 @@ impl<'a> Parser<'a> {
                 // A bare field_ref without a comparison operator is a parse error.
                 Err(self.error_at(
                     pos,
-                    "expected comparison operator (==, !=, >, >=, <, <=) or 'in'",
+                    "expected comparison operator (==, !=, >, >=, <, <=), 'in', or 'contains'",
                 ))
             }
         }
@@ -772,6 +784,73 @@ fn build_in_node(
             snippet: make_snippet(input, lhs_pos),
         })
     }
+}
+
+/// Builds an `In` node for `data.array contains scalar` semantics.
+///
+/// The node uses `PredicateOp::In` with swapped positions so the existing
+/// bidirectional `evaluate_in` can detect the array-contains-scalar case:
+/// - `attribute` is the LHS data field (the array field)
+/// - `value` is the scalar literal RHS, or `value_ref` for a field-reference RHS
+///
+/// The LHS must start with `data.`; non-data references return a `ParseError`.
+fn build_contains_node(
+    lhs: &[String],
+    rhs: RhsValue,
+    lhs_pos: usize,
+    input: &str,
+) -> Result<PredicateNode, ParseError> {
+    let lhs_is_data = lhs.first().is_some_and(|s| s == "data");
+
+    if !lhs_is_data {
+        return Err(ParseError {
+            message: "left side of 'contains' must be a data.* field reference".to_string(),
+            position: lhs_pos,
+            snippet: make_snippet(input, lhs_pos),
+        });
+    }
+
+    let attribute = lhs[1..].join(".");
+
+    let node = match rhs {
+        RhsValue::FieldRef(segs) => PredicateNode {
+            op: PredicateOp::In,
+            attribute: Some(attribute),
+            value: None,
+            value_ref: Some(segs.join(".")),
+            children: None,
+        },
+        RhsValue::Str(s) => PredicateNode {
+            op: PredicateOp::In,
+            attribute: Some(attribute),
+            value: Some(rmpv::Value::String(s.into())),
+            value_ref: None,
+            children: None,
+        },
+        RhsValue::Int(n) => PredicateNode {
+            op: PredicateOp::In,
+            attribute: Some(attribute),
+            value: Some(rmpv::Value::Integer(n.into())),
+            value_ref: None,
+            children: None,
+        },
+        RhsValue::Float(f) => PredicateNode {
+            op: PredicateOp::In,
+            attribute: Some(attribute),
+            value: Some(rmpv::Value::F64(f)),
+            value_ref: None,
+            children: None,
+        },
+        RhsValue::Bool(b) => PredicateNode {
+            op: PredicateOp::In,
+            attribute: Some(attribute),
+            value: Some(rmpv::Value::Boolean(b)),
+            value_ref: None,
+            children: None,
+        },
+    };
+
+    Ok(node)
 }
 
 // ---------------------------------------------------------------------------
@@ -1237,6 +1316,92 @@ mod tests {
         ]);
         assert!(evaluate_predicate(&node, &EvalContext::data_only(&data_match)));
         assert!(!evaluate_predicate(&node, &EvalContext::data_only(&data_no_match)));
+    }
+
+    // --- contains keyword parser tests ---
+
+    #[test]
+    fn contains_string_literal() {
+        // data.tags contains 'vip' -> op: In, attribute: "tags", value: String("vip")
+        let node = parsed("data.tags contains 'vip'");
+        assert_eq!(node.op, PredicateOp::In);
+        assert_eq!(node.attribute, Some("tags".to_string()));
+        assert_eq!(node.value, Some(rmpv::Value::String("vip".into())));
+        assert!(node.value_ref.is_none());
+    }
+
+    #[test]
+    fn contains_integer_literal() {
+        // data.tags contains 42 -> op: In, attribute: "tags", value: Integer(42)
+        let node = parsed("data.tags contains 42");
+        assert_eq!(node.op, PredicateOp::In);
+        assert_eq!(node.attribute, Some("tags".to_string()));
+        assert_eq!(node.value, Some(rmpv::Value::Integer(42.into())));
+        assert!(node.value_ref.is_none());
+    }
+
+    #[test]
+    fn contains_field_reference() {
+        // data.tags contains auth.role -> op: In, attribute: "tags", value_ref: "auth.role"
+        let node = parsed("data.tags contains auth.role");
+        assert_eq!(node.op, PredicateOp::In);
+        assert_eq!(node.attribute, Some("tags".to_string()));
+        assert_eq!(node.value_ref, Some("auth.role".to_string()));
+        assert!(node.value.is_none());
+    }
+
+    #[test]
+    fn contains_in_compound_and_expression() {
+        // data.tags contains 'vip' && data.active == true
+        let node = parsed("data.tags contains 'vip' && data.active == true");
+        assert_eq!(node.op, PredicateOp::And);
+        let children = node.children.as_ref().unwrap();
+        assert_eq!(children.len(), 2);
+
+        let contains_node = &children[0];
+        assert_eq!(contains_node.op, PredicateOp::In);
+        assert_eq!(contains_node.attribute, Some("tags".to_string()));
+        assert_eq!(contains_node.value, Some(rmpv::Value::String("vip".into())));
+
+        let active_node = &children[1];
+        assert_eq!(active_node.op, PredicateOp::Eq);
+        assert_eq!(active_node.attribute, Some("active".to_string()));
+        assert_eq!(active_node.value, Some(rmpv::Value::Boolean(true)));
+    }
+
+    #[test]
+    fn contains_lhs_non_data_is_error() {
+        // auth.roles contains 'x' -> parse error: LHS must be data.*
+        let err = parse_err("auth.roles contains 'x'");
+        assert!(
+            err.message.contains("left side of 'contains' must be a data.*"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // --- contains round-trip tests ---
+
+    #[test]
+    fn roundtrip_contains_true() {
+        let node = parsed("data.tags contains 'vip'");
+        let data = make_data(&[(
+            "tags",
+            rmpv::Value::Array(vec![
+                rmpv::Value::String("vip".into()),
+                rmpv::Value::String("premium".into()),
+            ]),
+        )]);
+        assert!(evaluate_predicate(&node, &EvalContext::data_only(&data)));
+    }
+
+    #[test]
+    fn roundtrip_contains_false() {
+        let node = parsed("data.tags contains 'vip'");
+        let data = make_data(&[(
+            "tags",
+            rmpv::Value::Array(vec![rmpv::Value::String("basic".into())]),
+        )]);
+        assert!(!evaluate_predicate(&node, &EvalContext::data_only(&data)));
     }
 
     #[test]
