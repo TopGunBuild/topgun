@@ -34,6 +34,7 @@ use crate::network::{ConnectionKind, OutboundMessage};
 use crate::service::classify::OperationService;
 use crate::service::dispatch::PartitionDispatcher;
 use crate::service::operation::{CallerOrigin, ClassifyError, OperationError, OperationResponse};
+use topgun_core::Principal;
 
 /// Maximum number of in-flight dispatch tasks per connection.
 ///
@@ -229,6 +230,14 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         }
     }
 
+    // Resolve principal once for this connection so the authorization middleware
+    // can read ctx.principal without performing a registry lookup per operation.
+    // This is done after Phase 1 completes so the metadata is guaranteed to be set.
+    let principal: Option<Principal> = {
+        let meta = handle.metadata.read().await;
+        meta.principal.clone()
+    };
+
     // Phase 2: pipeline mode — each binary frame is dispatched concurrently.
     // The reader continues immediately after spawning, so multiple frames
     // can be in-flight simultaneously up to MAX_IN_FLIGHT.
@@ -255,9 +264,10 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 let tx = handle.tx.clone();
                 let op_service = state.operation_service.clone();
                 let dispatcher = state.dispatcher.clone();
+                let principal_clone = principal.clone();
 
                 tokio::spawn(async move {
-                    dispatch_message(tg_msg, conn_id, op_service, dispatcher, tx).await;
+                    dispatch_message(tg_msg, conn_id, principal_clone, op_service, dispatcher, tx).await;
                     drop(permit); // Release after dispatch completes
                 });
             }
@@ -319,11 +329,12 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 ///
 /// Handles BATCH messages by unpacking and routing each inner message
 /// individually. Non-BATCH messages are classified, have `connection_id`
-/// set, and are routed through the pipeline. Each `OperationResponse`
-/// variant is mapped to the appropriate outbound message(s).
+/// and `principal` set, and are routed through the pipeline. Each
+/// `OperationResponse` variant is mapped to the appropriate outbound message(s).
 async fn dispatch_message(
     tg_msg: TopGunMessage,
     conn_id: ConnectionId,
+    principal: Option<Principal>,
     operation_service: Option<Arc<OperationService>>,
     dispatcher: Option<Arc<PartitionDispatcher>>,
     tx: mpsc::Sender<OutboundMessage>,
@@ -335,7 +346,7 @@ async fn dispatch_message(
 
     // Handle BATCH messages: unpack each inner message and route individually
     if let TopGunMessage::Batch(ref batch_msg) = tg_msg {
-        unpack_and_dispatch_batch(batch_msg, conn_id, &classify_svc, &dispatcher, &tx).await;
+        unpack_and_dispatch_batch(batch_msg, conn_id, principal, &classify_svc, &dispatcher, &tx).await;
         return;
     }
 
@@ -343,15 +354,20 @@ async fn dispatch_message(
     // Split by partition so each sub-batch runs on a dedicated partition worker
     // rather than serializing all ops on the single global worker.
     if let TopGunMessage::OpBatch(ref batch_msg) = tg_msg {
-        dispatch_op_batch(batch_msg, conn_id, &classify_svc, &dispatcher, &tx).await;
+        dispatch_op_batch(batch_msg, conn_id, principal, &classify_svc, &dispatcher, &tx).await;
         return;
     }
 
     // Classify the message into a typed Operation
     match classify_svc.classify(tg_msg, None, CallerOrigin::Client) {
         Ok(mut op) => {
-            // Set connection_id so domain services can look up the connection
+            // Set connection_id for domain services (subscription tracking, heartbeat).
+            // Set principal so the authorization middleware can evaluate RBAC without
+            // a registry lookup.
             op.set_connection_id(conn_id);
+            if let Some(p) = principal.clone() {
+                op.set_principal(p);
+            }
 
             // Route through the partition dispatcher (MPSC channel per worker)
             match dispatcher.dispatch(op).await {
@@ -414,6 +430,7 @@ async fn dispatch_message(
 async fn dispatch_op_batch(
     batch_msg: &topgun_core::messages::OpBatchMessage,
     conn_id: ConnectionId,
+    principal: Option<Principal>,
     classify_svc: &OperationService,
     dispatcher: &Arc<PartitionDispatcher>,
     tx: &mpsc::Sender<OutboundMessage>,
@@ -462,6 +479,9 @@ async fn dispatch_op_batch(
             timeout,
         );
         op.set_connection_id(conn_id);
+        if let Some(p) = principal.clone() {
+            op.set_principal(p);
+        }
         sub_ops.push(op);
     }
 
@@ -533,6 +553,7 @@ async fn dispatch_op_batch(
 async fn unpack_and_dispatch_batch(
     batch_msg: &topgun_core::messages::BatchMessage,
     conn_id: ConnectionId,
+    principal: Option<Principal>,
     classify_svc: &OperationService,
     dispatcher: &Arc<PartitionDispatcher>,
     tx: &mpsc::Sender<OutboundMessage>,
@@ -585,6 +606,9 @@ async fn unpack_and_dispatch_batch(
         match classify_svc.classify(inner_msg, None, CallerOrigin::Client) {
             Ok(mut op) => {
                 op.set_connection_id(conn_id);
+                if let Some(p) = principal.clone() {
+                    op.set_principal(p);
+                }
 
                 match dispatcher.dispatch(op).await {
                     Ok(resp) => {
