@@ -235,11 +235,40 @@ fn evaluate_leaf(predicate: &PredicateNode, ctx: &EvalContext) -> bool {
 /// Evaluates `IsNull` / `IsNotNull` operators (field presence check, no `value` required).
 ///
 /// Attribute lookup uses dot-path traversal to support nested fields (e.g., `"address.city"`).
+/// The `auth` namespace is resolved against `ctx.auth`: bare `"auth"` checks whether auth
+/// context itself is absent; `"auth.X"` checks whether a field in the auth map is absent.
 fn evaluate_null_check(predicate: &PredicateNode, ctx: &EvalContext) -> bool {
     let Some(attribute) = &predicate.attribute else {
         return false;
     };
 
+    if attribute == "auth" {
+        // Bare "auth" — check whether the auth context itself is absent.
+        let is_null = ctx.auth.is_none();
+        return match predicate.op {
+            PredicateOp::IsNull => is_null,
+            PredicateOp::IsNotNull => !is_null,
+            _ => false,
+        };
+    } else if let Some(rest) = attribute.strip_prefix("auth.") {
+        // auth.X — resolve within the auth map.
+        return match ctx.auth {
+            Some(auth_val) => {
+                let segments: Vec<&str> = rest.split('.').collect();
+                let field = resolve_dot_path(auth_val, &segments);
+                let is_null = field.is_none() || field.as_ref().is_some_and(rmpv::Value::is_nil);
+                match predicate.op {
+                    PredicateOp::IsNull => is_null,
+                    PredicateOp::IsNotNull => !is_null,
+                    _ => false,
+                }
+            }
+            // No auth context at all — any auth field is effectively null.
+            None => matches!(predicate.op, PredicateOp::IsNull),
+        };
+    }
+
+    // Data namespace (existing behavior).
     let segments: Vec<&str> = attribute.split('.').collect();
     let field = resolve_dot_path(ctx.data, &segments);
     let is_null = field.is_none() || field.as_ref().is_some_and(rmpv::Value::is_nil);
@@ -1642,5 +1671,106 @@ mod tests {
             ]),
         );
         assert!(evaluate_predicate(&pred, &EvalContext::data_only(&data)));
+    }
+
+    // ---- auth-namespace null check tests (AC11, AC12 from SPEC-174) ----
+
+    fn is_null_pred(attribute: &str) -> PredicateNode {
+        PredicateNode {
+            op: PredicateOp::IsNull,
+            attribute: Some(attribute.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn is_not_null_pred(attribute: &str) -> PredicateNode {
+        PredicateNode {
+            op: PredicateOp::IsNotNull,
+            attribute: Some(attribute.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// AC11: IsNull on bare "auth" returns true when ctx.auth is None.
+    #[test]
+    fn is_null_auth_returns_true_when_auth_none() {
+        let data = make_map(vec![]);
+        let pred = is_null_pred("auth");
+        let ctx = EvalContext { auth: None, data: &data };
+        assert!(evaluate_predicate(&pred, &ctx));
+    }
+
+    /// AC12: IsNull on bare "auth" returns false when ctx.auth is Some.
+    #[test]
+    fn is_null_auth_returns_false_when_auth_some() {
+        let data = make_map(vec![]);
+        let auth = make_auth(vec![("id", rmpv::Value::String("user1".into()))]);
+        let pred = is_null_pred("auth");
+        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        assert!(!evaluate_predicate(&pred, &ctx));
+    }
+
+    /// IsNotNull on bare "auth" returns false when ctx.auth is None.
+    #[test]
+    fn is_not_null_auth_returns_false_when_auth_none() {
+        let data = make_map(vec![]);
+        let pred = is_not_null_pred("auth");
+        let ctx = EvalContext { auth: None, data: &data };
+        assert!(!evaluate_predicate(&pred, &ctx));
+    }
+
+    /// IsNotNull on bare "auth" returns true when ctx.auth is Some.
+    #[test]
+    fn is_not_null_auth_returns_true_when_auth_some() {
+        let data = make_map(vec![]);
+        let auth = make_auth(vec![("id", rmpv::Value::String("user1".into()))]);
+        let pred = is_not_null_pred("auth");
+        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        assert!(evaluate_predicate(&pred, &ctx));
+    }
+
+    /// IsNull on "auth.id" returns false when auth has a non-nil "id" field.
+    #[test]
+    fn is_null_auth_field_returns_false_when_field_present() {
+        let data = make_map(vec![]);
+        let auth = make_auth(vec![("id", rmpv::Value::String("user1".into()))]);
+        let pred = is_null_pred("auth.id");
+        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        assert!(!evaluate_predicate(&pred, &ctx));
+    }
+
+    /// IsNull on "auth.id" returns true when auth is missing the "id" field.
+    #[test]
+    fn is_null_auth_field_returns_true_when_field_absent() {
+        let data = make_map(vec![]);
+        let auth = make_auth(vec![]); // no id field
+        let pred = is_null_pred("auth.id");
+        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        assert!(evaluate_predicate(&pred, &ctx));
+    }
+
+    /// IsNull on "auth.X" returns true when ctx.auth is None (no auth context at all).
+    #[test]
+    fn is_null_auth_field_returns_true_when_auth_none() {
+        let data = make_map(vec![]);
+        let pred = is_null_pred("auth.id");
+        let ctx = EvalContext { auth: None, data: &data };
+        assert!(evaluate_predicate(&pred, &ctx));
+    }
+
+    /// Round-trip: parse "data.public == true && auth == null" and evaluate with no auth.
+    #[test]
+    fn round_trip_public_and_auth_null() {
+        use crate::service::policy::expr_parser::parse_permission_expr;
+        let node = parse_permission_expr("data.public == true && auth == null")
+            .expect("expression should parse");
+        let data = make_map(vec![("public", rmpv::Value::Boolean(true))]);
+        // No auth context — should be true (public == true AND auth == null).
+        let ctx = EvalContext { auth: None, data: &data };
+        assert!(evaluate_predicate(&node, &ctx));
+        // With auth context — should be false (auth is not null).
+        let auth = make_auth(vec![("id", rmpv::Value::String("u1".into()))]);
+        let ctx_with_auth = EvalContext { auth: Some(&auth), data: &data };
+        assert!(!evaluate_predicate(&node, &ctx_with_auth));
     }
 }
