@@ -8,7 +8,6 @@ use super::authorization::AuthorizationLayer;
 use super::load_shed::LoadShedLayer;
 use super::metrics::MetricsLayer;
 use super::timeout::TimeoutLayer;
-use crate::network::connection::ConnectionRegistry;
 use crate::service::config::ServerConfig;
 use crate::service::operation::OperationPipeline;
 // Imported for use by the test module (via `super::*`).
@@ -36,14 +35,13 @@ pub fn build_operation_pipeline(
     router: OperationRouter,
     config: &ServerConfig,
     policy_evaluator: Option<Arc<PolicyEvaluator>>,
-    connection_registry: Option<Arc<ConnectionRegistry>>,
 ) -> OperationPipeline {
-    if let (Some(evaluator), Some(registry)) = (policy_evaluator, connection_registry) {
+    if let Some(evaluator) = policy_evaluator {
         let svc = ServiceBuilder::new()
             .layer(LoadShedLayer::new(config.max_concurrent_operations))
             .layer(TimeoutLayer)
             .layer(MetricsLayer)
-            .layer(AuthorizationLayer::new(evaluator, registry))
+            .layer(AuthorizationLayer::new(evaluator))
             .service(router);
         OperationPipeline::new(svc)
     } else {
@@ -121,7 +119,7 @@ mod tests {
             ..ServerConfig::default()
         };
 
-        let svc = build_operation_pipeline(router, &config, None, None);
+        let svc = build_operation_pipeline(router, &config, None);
         let resp = svc.oneshot(make_op()).await.unwrap();
         assert!(matches!(
             resp,
