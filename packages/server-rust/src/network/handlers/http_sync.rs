@@ -340,7 +340,7 @@ pub async fn http_sync_handler(
             }),
         )
     } else {
-        (CallerOrigin::System, None)
+        (CallerOrigin::Anonymous, None)
     };
 
     // Obtain the server's current HLC timestamp.
