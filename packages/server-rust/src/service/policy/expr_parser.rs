@@ -73,6 +73,8 @@ pub(crate) enum Token {
     True,
     /// `false`
     False,
+    /// `null`
+    Null,
     /// `==`
     Eq,
     /// `!=`
@@ -314,10 +316,11 @@ impl<'a> Lexer<'a> {
                     return Ok((start, Token::FieldRef(segments)));
                 }
 
-                // Single identifier — check for booleans.
+                // Single identifier — check for keywords.
                 let tok = match first.as_str() {
                     "true" => Token::True,
                     "false" => Token::False,
+                    "null" => Token::Null,
                     _ => Token::Ident(first),
                 };
                 Ok((start, tok))
@@ -556,6 +559,10 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 Ok((pos, vec!["false".to_string()]))
             }
+            // null is not a valid left-hand side in a comparison
+            Token::Null => {
+                Err(self.error_at(pos, "null literal is not valid as left-hand side of a comparison"))
+            }
             _ => {
                 Err(self.error_at(pos, "expected field reference (e.g. data.age or auth.id)"))
             }
@@ -594,6 +601,10 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 Ok(RhsValue::Bool(false))
             }
+            Token::Null => {
+                self.advance()?;
+                Ok(RhsValue::Null)
+            }
             _ => Err(self.error_at(pos, "expected value or field reference after operator")),
         }
     }
@@ -609,6 +620,7 @@ enum RhsValue {
     Int(i64),
     Float(f64),
     Bool(bool),
+    Null,
 }
 
 // ---------------------------------------------------------------------------
@@ -743,6 +755,39 @@ fn build_comparison_node(lhs: &[String], op_tok: &Token, rhs: RhsValue) -> Predi
                 children: None,
             }
         }
+        RhsValue::Null => {
+            // For equality/inequality with null, emit IsNull/IsNotNull.
+            // Strip the `data.` prefix but keep the full `auth` or `auth.X` path.
+            let attribute = if lhs_is_data {
+                lhs[1..].join(".")
+            } else {
+                lhs.join(".")
+            };
+            match op_tok {
+                Token::Eq => PredicateNode {
+                    op: PredicateOp::IsNull,
+                    attribute: Some(attribute),
+                    value: None,
+                    value_ref: None,
+                    children: None,
+                },
+                Token::Neq => PredicateNode {
+                    op: PredicateOp::IsNotNull,
+                    attribute: Some(attribute),
+                    value: None,
+                    value_ref: None,
+                    children: None,
+                },
+                // Ordering comparisons against null are meaningless; produce an always-false leaf.
+                _ => PredicateNode {
+                    op: PredicateOp::Eq,
+                    attribute: None,
+                    value: None,
+                    value_ref: None,
+                    children: None,
+                },
+            }
+        }
     }
 }
 
@@ -845,6 +890,14 @@ fn build_contains_node(
             op: PredicateOp::In,
             attribute: Some(attribute),
             value: Some(rmpv::Value::Boolean(b)),
+            value_ref: None,
+            children: None,
+        },
+        // null on the right side of `contains` is not meaningful; produce an always-false leaf.
+        RhsValue::Null => PredicateNode {
+            op: PredicateOp::Eq,
+            attribute: None,
+            value: None,
             value_ref: None,
             children: None,
         },
@@ -1444,5 +1497,65 @@ mod tests {
             &node,
             &EvalContext { auth: Some(&auth2), data: &data_public_active }
         ));
+    }
+
+    // ---- null literal parser tests (AC8, AC9, AC10, AC15) ----
+
+    /// AC8: `auth == null` produces IsNull node with attribute "auth".
+    #[test]
+    fn null_rhs_eq_produces_is_null() {
+        let node = parsed("auth == null");
+        assert_eq!(node.op, PredicateOp::IsNull);
+        assert_eq!(node.attribute.as_deref(), Some("auth"));
+        assert!(node.value.is_none());
+        assert!(node.value_ref.is_none());
+    }
+
+    /// AC9: `auth != null` produces IsNotNull node with attribute "auth".
+    #[test]
+    fn null_rhs_neq_produces_is_not_null() {
+        let node = parsed("auth != null");
+        assert_eq!(node.op, PredicateOp::IsNotNull);
+        assert_eq!(node.attribute.as_deref(), Some("auth"));
+    }
+
+    /// AC10: `data.public == true && auth == null` produces And node with correct children.
+    #[test]
+    fn null_rhs_in_and_expression() {
+        let node = parsed("data.public == true && auth == null");
+        assert_eq!(node.op, PredicateOp::And);
+        let children = node.children.as_ref().expect("And node must have children");
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].op, PredicateOp::Eq);
+        assert_eq!(children[0].attribute.as_deref(), Some("public"));
+        assert_eq!(children[1].op, PredicateOp::IsNull);
+        assert_eq!(children[1].attribute.as_deref(), Some("auth"));
+    }
+
+    /// `auth.id == null` produces IsNull node with attribute "auth.id".
+    #[test]
+    fn null_rhs_dotted_auth_attribute() {
+        let node = parsed("auth.id == null");
+        assert_eq!(node.op, PredicateOp::IsNull);
+        assert_eq!(node.attribute.as_deref(), Some("auth.id"));
+    }
+
+    /// `data.field == null` produces IsNull node with attribute "field" (data. prefix stripped).
+    #[test]
+    fn null_rhs_data_attribute_strips_prefix() {
+        let node = parsed("data.field == null");
+        assert_eq!(node.op, PredicateOp::IsNull);
+        assert_eq!(node.attribute.as_deref(), Some("field"));
+    }
+
+    /// AC15: `null == auth` returns a parse error (null is not valid as LHS).
+    #[test]
+    fn null_lhs_returns_parse_error() {
+        let err = parse_err("null == auth");
+        assert!(
+            err.message.contains("null literal is not valid as left-hand side"),
+            "unexpected error message: {}",
+            err.message
+        );
     }
 }
