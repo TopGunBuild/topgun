@@ -535,7 +535,6 @@ fn build_services(
     // When a PolicyEvaluator is provided, it is passed to build_operation_pipeline
     // so every client operation is checked against the RBAC policy store.
     let evaluator_for_factory = policy_evaluator;
-    let registry_for_factory = Arc::clone(&connection_registry);
     let pipeline_factory = move || {
         let mut router = OperationRouter::new();
         router.register(service_names::CRDT, Arc::clone(&crdt_svc));
@@ -549,7 +548,6 @@ fn build_services(
             router,
             &config,
             evaluator_for_factory.clone(),
-            Some(Arc::clone(&registry_for_factory)),
         )
     };
 

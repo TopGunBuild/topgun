@@ -248,7 +248,7 @@ mod tests {
             max_concurrent_operations: 1000,
             ..ServerConfig::default()
         };
-        build_operation_pipeline(router, &config, None, None)
+        build_operation_pipeline(router, &config, None)
     }
 
     fn make_op_with_partition(call_id: u64, partition_id: Option<u32>) -> Operation {
