@@ -16,13 +16,18 @@ use axum::response::IntoResponse;
 use bytes::Bytes;
 use jsonwebtoken::Validation;
 use topgun_core::hash_to_partition;
-use topgun_core::messages::{HttpSyncAck, HttpSyncError, HttpSyncRequest, HttpSyncResponse};
+use topgun_core::messages::base::Query;
+use topgun_core::messages::{HttpQueryRequest, HttpQueryResult, HttpSyncAck, HttpSyncError, HttpSyncRequest, HttpSyncResponse};
 use topgun_core::Timestamp;
 
 use super::AppState;
 use super::auth::JwtClaims;
 use crate::service::dispatch::PartitionDispatcher;
+use crate::service::domain::predicate::{execute_query, value_to_rmpv};
 use crate::service::operation::CallerOrigin;
+use crate::service::policy::{PermissionAction, PolicyDecision, PolicyEvaluator, PolicyStore};
+use crate::storage::factory::RecordStoreFactory;
+use crate::storage::record::RecordValue;
 
 // ---------------------------------------------------------------------------
 // ClientAuthError
@@ -298,6 +303,121 @@ async fn dispatch_operations(
     }
 }
 
+/// Executes one-shot queries directly from the in-memory record store, bypassing the
+/// partition dispatcher pipeline to avoid unnecessary operation overhead for reads.
+///
+/// This function is `async` solely because the RBAC policy evaluation calls
+/// (`has_policies()` and `evaluate()`) on `PolicyEvaluator` are async. The store
+/// scanning and `execute_query` call are synchronous. The CPU-bound portion is short
+/// enough that `spawn_blocking` is not needed.
+async fn dispatch_queries(
+    queries: Vec<HttpQueryRequest>,
+    store_factory: &RecordStoreFactory,
+    principal: Option<&topgun_core::Principal>,
+    policy_store: Option<&Arc<dyn PolicyStore>>,
+    response: &mut HttpSyncResponse,
+) {
+    for q in queries {
+        let map_name = q.map_name.clone();
+
+        // RBAC map-level read access check. Constructing PolicyEvaluator inline
+        // keeps all changes within this file (no AppState field changes needed).
+        if let Some(store) = policy_store {
+            let evaluator = PolicyEvaluator::new(Arc::clone(store));
+            // Permissive default: if no policies are configured, allow all reads.
+            if evaluator.has_policies().await {
+                let decision = evaluator
+                    .evaluate(principal, PermissionAction::Read, &map_name, &rmpv::Value::Nil)
+                    .await;
+                if decision == PolicyDecision::Deny {
+                    let errors = response.errors.get_or_insert_with(Vec::new);
+                    errors.push(HttpSyncError {
+                        code: 403,
+                        message: "access denied".into(),
+                        context: Some(q.query_id.clone()),
+                    });
+                    // Skip adding any queryResults entry for this denied query.
+                    continue;
+                }
+            }
+        }
+
+        // Collect all entries for the requested map across all partitions.
+        let partition_stores = store_factory.get_all_for_map(&map_name);
+        let mut entries: Vec<(String, rmpv::Value)> = Vec::new();
+        for store in &partition_stores {
+            store.for_each_boxed(
+                &mut |key: &str, record: &crate::storage::record::Record| {
+                    if let RecordValue::Lww { ref value, .. } = record.value {
+                        entries.push((key.to_string(), value_to_rmpv(value)));
+                    }
+                    // Skip OrMap and OrTombstones entries.
+                },
+                false, // is_backup = false
+            );
+        }
+
+        // Build a Query struct from the filter field.
+        // filter is a MsgPack Map -> use it as a where-clause (field equality).
+        // filter is Nil/anything else -> match all (no filter).
+        let where_clause: Option<HashMap<String, rmpv::Value>> =
+            if let rmpv::Value::Map(ref pairs) = q.filter {
+                let map: HashMap<String, rmpv::Value> = pairs
+                    .iter()
+                    .filter_map(|(k, v)| k.as_str().map(|s| (s.to_string(), v.clone())))
+                    .collect();
+                Some(map)
+            } else {
+                None
+            };
+
+        let query = Query {
+            r#where: where_clause,
+            predicate: None,
+            // Do not pass limit/cursor/sort to execute_query; apply pagination manually.
+            limit: None,
+            cursor: None,
+            sort: None,
+            group_by: None,
+        };
+
+        // Execute the query synchronously against the collected entries.
+        let filtered = execute_query(entries, &query);
+        let total_filtered = filtered.len();
+
+        // Apply offset and limit manually after execute_query to avoid the internal
+        // truncation that would occur if we passed limit directly to execute_query.
+        let offset = q.offset.unwrap_or(0) as usize;
+        let page: Vec<rmpv::Value> = if let Some(limit) = q.limit {
+            filtered
+                .into_iter()
+                .skip(offset)
+                .take(limit as usize)
+                .map(|entry| entry.value)
+                .collect()
+        } else {
+            filtered
+                .into_iter()
+                .skip(offset)
+                .map(|entry| entry.value)
+                .collect()
+        };
+
+        // has_more is Some only when a limit was specified; clients use offset for next page.
+        let has_more = q.limit.map(|limit| total_filtered > offset + limit as usize);
+
+        let result = HttpQueryResult {
+            query_id: q.query_id,
+            results: page,
+            has_more,
+            next_cursor: None,
+        };
+
+        let query_results = response.query_results.get_or_insert_with(Vec::new);
+        query_results.push(result);
+    }
+}
+
 /// Handles POST /sync requests with `MsgPack`-encoded bodies.
 ///
 /// Decodes the request body as `HttpSyncRequest`, dispatches operations through
@@ -384,6 +504,19 @@ pub async fn http_sync_handler(
             ops, classify_svc, dispatcher, claims.as_ref(), caller_origin, principal.as_ref(), &mut http_response,
         )
         .await;
+    }
+
+    if let Some(queries) = request.queries {
+        if let Some(store_factory) = state.store_factory.as_ref() {
+            dispatch_queries(
+                queries,
+                store_factory,
+                principal.as_ref(),
+                state.policy_store.as_ref(),
+                &mut http_response,
+            )
+            .await;
+        }
     }
 
     msgpack_response(&http_response)
@@ -699,6 +832,221 @@ mod tests {
             response.status(),
             axum::http::StatusCode::OK,
             "valid token + require_auth=false must return HTTP 200"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // dispatch_queries tests (R4)
+    // -----------------------------------------------------------------------
+
+    use crate::storage::datastores::NullDataStore;
+    use crate::storage::factory::RecordStoreFactory;
+    use crate::storage::impls::StorageConfig;
+    use crate::storage::record::RecordValue as StoreRecordValue;
+    use crate::storage::record_store::{CallerProvenance, ExpiryPolicy};
+    use topgun_core::hlc::Timestamp as HlcTimestamp;
+    use topgun_core::messages::HttpQueryRequest as QueryReq;
+    use topgun_core::types::Value as TgValue;
+
+    /// Helper to build a minimal AppState with a pre-seeded RecordStoreFactory.
+    ///
+    /// Seeds `map_name` with `records` (key -> string value) into partition 0.
+    async fn state_with_map_data(map_name: &str, records: Vec<(&str, &str)>) -> AppState {
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::new(NullDataStore),
+            Vec::new(),
+        ));
+        let store = factory.get_or_create(map_name, 0);
+        for (key, val) in records {
+            store
+                .put(
+                    key,
+                    StoreRecordValue::Lww {
+                        value: TgValue::Map(
+                            [("name".to_string(), TgValue::String(val.to_string()))]
+                                .into_iter()
+                                .collect(),
+                        ),
+                        timestamp: HlcTimestamp {
+                            millis: 1_000_000,
+                            counter: 0,
+                            node_id: "node-1".to_string(),
+                        },
+                    },
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
+                .await
+                .expect("seeding store should not fail");
+        }
+        AppState {
+            registry: Arc::new(crate::network::ConnectionRegistry::new()),
+            shutdown: Arc::new(crate::network::ShutdownController::new()),
+            config: Arc::new(crate::network::NetworkConfig::default()),
+            start_time: Instant::now(),
+            observability: None,
+            operation_service: None,
+            dispatcher: None,
+            jwt_secret: None,
+            cluster_state: None,
+            store_factory: Some(factory),
+            server_config: None,
+            policy_store: None,
+        }
+    }
+
+    /// Executes a dispatch_queries call directly and returns the response.
+    async fn run_dispatch_queries(
+        queries: Vec<QueryReq>,
+        state: &AppState,
+    ) -> HttpSyncResponse {
+        let mut response = HttpSyncResponse::default();
+        if let Some(sf) = state.store_factory.as_ref() {
+            dispatch_queries(queries, sf, None, state.policy_store.as_ref(), &mut response).await;
+        }
+        response
+    }
+
+    /// Query with a matching where-filter returns only the matching records.
+    #[tokio::test]
+    async fn query_returns_matching_results() {
+        let state = state_with_map_data(
+            "users",
+            vec![("alice", "Alice"), ("bob", "Bob"), ("charlie", "Charlie")],
+        )
+        .await;
+
+        // Filter: name == "Alice"
+        let filter = rmpv::Value::Map(vec![(
+            rmpv::Value::String("name".into()),
+            rmpv::Value::String("Alice".into()),
+        )]);
+        let query = QueryReq {
+            query_id: "q1".to_string(),
+            map_name: "users".to_string(),
+            filter,
+            limit: None,
+            offset: None,
+        };
+
+        let response = run_dispatch_queries(vec![query], &state).await;
+        let results = response.query_results.expect("queryResults must be present");
+        assert_eq!(results.len(), 1, "should have one query result entry");
+        assert_eq!(results[0].query_id, "q1");
+        assert_eq!(results[0].results.len(), 1, "filter should return exactly 1 matching record");
+    }
+
+    /// Query against a non-existent map returns empty results, not an error.
+    #[tokio::test]
+    async fn query_empty_map_returns_empty_results() {
+        let state = state_with_map_data("users", vec![]).await;
+
+        let query = QueryReq {
+            query_id: "q-empty".to_string(),
+            map_name: "nonexistent-map".to_string(),
+            filter: rmpv::Value::Nil,
+            limit: None,
+            offset: None,
+        };
+
+        let response = run_dispatch_queries(vec![query], &state).await;
+        // No error entries.
+        assert!(response.errors.is_none(), "missing map must not produce errors");
+        let results = response.query_results.expect("queryResults must be present");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].results.len(), 0, "empty map returns empty results array");
+    }
+
+    /// Query with limit and offset paginates correctly, with hasMore = true.
+    #[tokio::test]
+    async fn query_with_limit_and_offset() {
+        // 5 records: a, b, c, d, e
+        let state = state_with_map_data(
+            "items",
+            vec![("a", "A"), ("b", "B"), ("c", "C"), ("d", "D"), ("e", "E")],
+        )
+        .await;
+
+        // limit=2, offset=1 → skip 1, take 2. With 5 total, has_more should be true (5 > 1+2).
+        let query = QueryReq {
+            query_id: "q-page".to_string(),
+            map_name: "items".to_string(),
+            filter: rmpv::Value::Nil,
+            limit: Some(2),
+            offset: Some(1),
+        };
+
+        let response = run_dispatch_queries(vec![query], &state).await;
+        let results = response.query_results.expect("queryResults must be present");
+        assert_eq!(results.len(), 1);
+        let qr = &results[0];
+        assert_eq!(qr.results.len(), 2, "limit=2 must return exactly 2 records");
+        assert_eq!(
+            qr.has_more,
+            Some(true),
+            "has_more must be true when more records exist beyond the page"
+        );
+    }
+
+    /// Query with Nil filter returns all records in the map.
+    #[tokio::test]
+    async fn query_no_filter_returns_all() {
+        let state = state_with_map_data(
+            "products",
+            vec![("p1", "Widget"), ("p2", "Gadget"), ("p3", "Gizmo")],
+        )
+        .await;
+
+        let query = QueryReq {
+            query_id: "q-all".to_string(),
+            map_name: "products".to_string(),
+            filter: rmpv::Value::Nil,
+            limit: None,
+            offset: None,
+        };
+
+        let response = run_dispatch_queries(vec![query], &state).await;
+        let results = response.query_results.expect("queryResults must be present");
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].results.len(),
+            3,
+            "nil filter should return all 3 records"
+        );
+        assert!(results[0].has_more.is_none(), "has_more must be None when no limit is set");
+    }
+
+    /// When store_factory is None, queries are silently skipped and queryResults is None.
+    #[tokio::test]
+    async fn query_skipped_when_no_store_factory() {
+        let state = test_state(); // store_factory = None
+
+        let req = HttpSyncRequest {
+            client_id: "c1".to_string(),
+            client_hlc: Timestamp { millis: 1000, counter: 0, node_id: "n1".to_string() },
+            queries: Some(vec![QueryReq {
+                query_id: "q-skip".to_string(),
+                map_name: "users".to_string(),
+                filter: rmpv::Value::Nil,
+                limit: None,
+                offset: None,
+            }]),
+            ..Default::default()
+        };
+        let body = Bytes::from(rmp_serde::to_vec_named(&req).unwrap());
+
+        let response =
+            http_sync_handler(State(state), None, axum::Extension(TokenPresence::Absent), body)
+                .await
+                .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        let body_bytes = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+        let decoded: HttpSyncResponse = rmp_serde::from_slice(&body_bytes).unwrap();
+        assert!(
+            decoded.query_results.is_none(),
+            "queryResults must be None when store_factory is not wired"
         );
     }
 }
