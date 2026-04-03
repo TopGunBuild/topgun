@@ -13,7 +13,6 @@ use std::task::{Context, Poll};
 
 use tower::{Layer, Service};
 
-use crate::network::connection::ConnectionRegistry;
 use crate::service::operation::{CallerOrigin, Operation, OperationError, OperationResponse};
 use crate::service::policy::{PermissionAction, PolicyDecision, PolicyEvaluator};
 
@@ -29,14 +28,13 @@ use crate::service::policy::{PermissionAction, PolicyDecision, PolicyEvaluator};
 #[derive(Clone)]
 pub struct AuthorizationLayer {
     evaluator: Arc<PolicyEvaluator>,
-    registry: Arc<ConnectionRegistry>,
 }
 
 impl AuthorizationLayer {
-    /// Creates a new layer with the given evaluator and connection registry.
+    /// Creates a new layer with the given policy evaluator.
     #[must_use]
-    pub fn new(evaluator: Arc<PolicyEvaluator>, registry: Arc<ConnectionRegistry>) -> Self {
-        Self { evaluator, registry }
+    pub fn new(evaluator: Arc<PolicyEvaluator>) -> Self {
+        Self { evaluator }
     }
 }
 
@@ -47,7 +45,6 @@ impl<S> Layer<S> for AuthorizationLayer {
         AuthorizationService {
             inner,
             evaluator: Arc::clone(&self.evaluator),
-            registry: Arc::clone(&self.registry),
         }
     }
 }
@@ -58,12 +55,12 @@ impl<S> Layer<S> for AuthorizationLayer {
 
 /// Tower `Service` produced by `AuthorizationLayer`.
 ///
-/// Holds references to the `PolicyEvaluator` (shared across all workers via
-/// `Arc`) and the `ConnectionRegistry` (for principal lookup by `connection_id`).
+/// Holds a reference to the `PolicyEvaluator` (shared across all workers via
+/// `Arc`). All transport handlers set `ctx.principal` eagerly before pipeline
+/// dispatch, so the middleware reads only `ctx.principal`.
 pub struct AuthorizationService<S> {
     inner: S,
     evaluator: Arc<PolicyEvaluator>,
-    registry: Arc<ConnectionRegistry>,
 }
 
 impl<S> AuthorizationService<S>
@@ -73,37 +70,7 @@ where
         + 'static,
     S::Future: Send + 'static,
 {
-    /// WebSocket path: resolves the principal lazily from the connection registry.
-    fn call_ws_path(
-        &mut self,
-        op: Operation,
-        connection_id: crate::network::connection::ConnectionId,
-    ) -> Pin<Box<dyn Future<Output = Result<OperationResponse, OperationError>> + Send>> {
-        let evaluator = Arc::clone(&self.evaluator);
-        let registry = Arc::clone(&self.registry);
-        let (action, map_name) = classify_operation(&op);
-        let Some(action) = action else {
-            return Box::pin(self.inner.call(op));
-        };
-        let batch_ops_data = extract_batch_ops_data(&op);
-        let data = extract_data(&op);
-        let fut = self.inner.call(op);
-        Box::pin(async move {
-            if !evaluator.has_policies().await {
-                return fut.await;
-            }
-            let principal = if let Some(handle) = registry.get(connection_id) {
-                let metadata = handle.metadata.read().await;
-                metadata.principal.clone()
-            } else {
-                return Err(OperationError::Unauthorized);
-            };
-            evaluate_and_dispatch(evaluator, principal, action, map_name, batch_ops_data, data, fut)
-                .await
-        })
-    }
-
-    /// Evaluates policies with a pre-resolved principal (HTTP path or direct).
+    /// Evaluates policies with a pre-resolved principal.
     fn call_with_principal(
         &mut self,
         op: Operation,
@@ -153,18 +120,13 @@ where
             return Box::pin(self.inner.call(op));
         }
 
-        // WebSocket ops carry a connection_id for registry lookup;
-        // HTTP ops carry ctx.principal set directly by the handler.
-        if let Some(connection_id) = ctx.connection_id {
-            return self.call_ws_path(op, connection_id);
-        }
-
         // Anonymous callers have no principal; pass None through RBAC evaluation.
-        // All other non-WS callers require a principal (set by HTTP handler).
         if caller_origin == CallerOrigin::Anonymous {
             return self.call_with_principal(op, None);
         }
 
+        // All transport handlers (WebSocket, HTTP) set ctx.principal eagerly before
+        // pipeline dispatch, so the middleware reads only ctx.principal.
         let Some(principal) = ctx.principal.clone() else {
             return Box::pin(async { Err(OperationError::Unauthorized) });
         };
@@ -361,8 +323,6 @@ mod tests {
     use tower::{Layer, Service, ServiceExt};
 
     use super::*;
-    use crate::network::config::ConnectionConfig;
-    use crate::network::connection::ConnectionKind;
     use crate::service::operation::{service_names, OperationContext};
     use crate::service::policy::{InMemoryPolicyStore, PolicyStore};
 
@@ -427,9 +387,8 @@ mod tests {
             .unwrap();
 
         let evaluator = Arc::new(PolicyEvaluator::new(store));
-        let registry = Arc::new(ConnectionRegistry::new());
 
-        let layer = AuthorizationLayer::new(evaluator, registry);
+        let layer = AuthorizationLayer::new(evaluator);
         let mut svc = layer.layer(AlwaysOkService);
 
         for origin in [
@@ -453,18 +412,13 @@ mod tests {
         let store = Arc::new(InMemoryPolicyStore::new());
         let evaluator = Arc::new(PolicyEvaluator::new(store));
 
-        let registry = Arc::new(ConnectionRegistry::new());
-        let config = ConnectionConfig::default();
-        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
-        let conn_id = handle.id;
-
-        let layer = AuthorizationLayer::new(evaluator, registry);
+        let layer = AuthorizationLayer::new(evaluator);
         let mut svc = layer.layer(AlwaysOkService);
 
         let mut ctx =
             OperationContext::new(2, service_names::COORDINATION, make_timestamp(), 5000);
         ctx.caller_origin = CallerOrigin::Client;
-        ctx.connection_id = Some(conn_id);
+        ctx.principal = Some(Principal { id: "user1".to_string(), roles: vec![] });
         let op = Operation::Ping {
             ctx,
             payload: topgun_core::messages::PingData { timestamp: 0 },
@@ -474,20 +428,19 @@ mod tests {
         assert!(resp.is_ok(), "empty store should allow all ops, got {resp:?}");
     }
 
-    /// Missing connection_id on a Client-origin operation returns Unauthorized.
+    /// Missing principal on a Client-origin operation returns Unauthorized.
     #[tokio::test]
-    async fn missing_connection_id_returns_unauthorized() {
+    async fn missing_principal_returns_unauthorized() {
         let store = Arc::new(InMemoryPolicyStore::new());
         let evaluator = Arc::new(PolicyEvaluator::new(store));
-        let registry = Arc::new(ConnectionRegistry::new());
 
-        let layer = AuthorizationLayer::new(evaluator, registry);
+        let layer = AuthorizationLayer::new(evaluator);
         let mut svc = layer.layer(AlwaysOkService);
 
         let mut ctx =
             OperationContext::new(3, service_names::COORDINATION, make_timestamp(), 5000);
         ctx.caller_origin = CallerOrigin::Client;
-        // connection_id deliberately left as None
+        // principal deliberately left as None
         let op = Operation::Ping {
             ctx,
             payload: topgun_core::messages::PingData { timestamp: 0 },
@@ -496,7 +449,7 @@ mod tests {
         let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
         assert!(
             matches!(result, Err(OperationError::Unauthorized)),
-            "missing connection_id should return Unauthorized, got {result:?}"
+            "missing principal should return Unauthorized, got {result:?}"
         );
     }
 
@@ -504,7 +457,6 @@ mod tests {
     // Record-level condition tests (owner restriction, tombstone, batch atomicity)
     // -----------------------------------------------------------------------
 
-    use crate::network::connection::ConnectionId;
     use crate::service::policy::{
         expr_parser::parse_permission_expr, PermissionPolicy, PolicyEffect,
     };
@@ -524,23 +476,9 @@ mod tests {
         }
     }
 
-    /// Helper: registers a connection with the given principal.
-    async fn register_with_principal(
-        registry: &ConnectionRegistry,
-        principal: Principal,
-    ) -> ConnectionId {
-        let config = ConnectionConfig::default();
-        let (handle, _rx) = registry.register(ConnectionKind::Client, &config);
-        let conn_id = handle.id;
-        {
-            let mut meta = handle.metadata.write().await;
-            meta.principal = Some(principal);
-        }
-        conn_id
-    }
-
     /// Helper: builds a ClientOp Operation with a record containing the given ownerId value.
-    fn client_op_with_owner(conn_id: ConnectionId, owner_id: &str) -> Operation {
+    /// The principal is set eagerly on ctx so the authorization middleware can read it directly.
+    fn client_op_with_owner(principal: Principal, owner_id: &str) -> Operation {
         let record = LWWRecord {
             value: Some(rmpv::Value::Map(vec![(
                 rmpv::Value::String("ownerId".into()),
@@ -552,7 +490,7 @@ mod tests {
         let mut ctx =
             OperationContext::new(10, service_names::CRDT, make_timestamp(), 5000);
         ctx.caller_origin = CallerOrigin::Client;
-        ctx.connection_id = Some(conn_id);
+        ctx.principal = Some(principal);
         Operation::ClientOp {
             ctx,
             payload: topgun_core::messages::sync::ClientOpMessage {
@@ -567,7 +505,8 @@ mod tests {
     }
 
     /// Helper: builds a ClientOp Operation representing a tombstone (deleted record).
-    fn client_op_tombstone(conn_id: ConnectionId) -> Operation {
+    /// The principal is set eagerly on ctx so the authorization middleware can read it directly.
+    fn client_op_tombstone(principal: Principal) -> Operation {
         let record = LWWRecord {
             value: None,
             timestamp: make_timestamp(),
@@ -576,7 +515,7 @@ mod tests {
         let mut ctx =
             OperationContext::new(11, service_names::CRDT, make_timestamp(), 5000);
         ctx.caller_origin = CallerOrigin::Client;
-        ctx.connection_id = Some(conn_id);
+        ctx.principal = Some(principal);
         Operation::ClientOp {
             ctx,
             payload: topgun_core::messages::sync::ClientOpMessage {
@@ -591,7 +530,8 @@ mod tests {
     }
 
     /// Helper: builds an OpBatch Operation with the given list of (map_name, owner_id) pairs.
-    fn op_batch_with_owners(conn_id: ConnectionId, ops: &[(&str, &str)]) -> Operation {
+    /// The principal is set eagerly on ctx so the authorization middleware can read it directly.
+    fn op_batch_with_owners(principal: Principal, ops: &[(&str, &str)]) -> Operation {
         let client_ops: Vec<topgun_core::messages::base::ClientOp> = ops
             .iter()
             .enumerate()
@@ -616,7 +556,7 @@ mod tests {
         let mut ctx =
             OperationContext::new(12, service_names::CRDT, make_timestamp(), 5000);
         ctx.caller_origin = CallerOrigin::Client;
-        ctx.connection_id = Some(conn_id);
+        ctx.principal = Some(principal);
         Operation::OpBatch {
             ctx,
             payload: topgun_core::messages::sync::OpBatchMessage {
@@ -635,15 +575,13 @@ mod tests {
         store.upsert_policy(owner_condition_policy()).await.unwrap();
 
         let evaluator = Arc::new(PolicyEvaluator::new(store));
-        let registry = Arc::new(ConnectionRegistry::new());
         let principal = Principal { id: "user1".to_string(), roles: vec!["user".to_string()] };
-        let conn_id = register_with_principal(&registry, principal).await;
 
-        let layer = AuthorizationLayer::new(evaluator, registry);
+        let layer = AuthorizationLayer::new(evaluator);
         let mut svc = layer.layer(AlwaysOkService);
 
         // Record ownerId matches the principal's id
-        let op = client_op_with_owner(conn_id, "user1");
+        let op = client_op_with_owner(principal, "user1");
         let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
         assert!(result.is_ok(), "matching owner should be allowed, got {result:?}");
     }
@@ -655,15 +593,13 @@ mod tests {
         store.upsert_policy(owner_condition_policy()).await.unwrap();
 
         let evaluator = Arc::new(PolicyEvaluator::new(store));
-        let registry = Arc::new(ConnectionRegistry::new());
         let principal = Principal { id: "user1".to_string(), roles: vec!["user".to_string()] };
-        let conn_id = register_with_principal(&registry, principal).await;
 
-        let layer = AuthorizationLayer::new(evaluator, registry);
+        let layer = AuthorizationLayer::new(evaluator);
         let mut svc = layer.layer(AlwaysOkService);
 
         // Record ownerId does NOT match the principal's id
-        let op = client_op_with_owner(conn_id, "user2");
+        let op = client_op_with_owner(principal, "user2");
         let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
         assert!(
             matches!(result, Err(OperationError::Forbidden { .. })),
@@ -678,15 +614,13 @@ mod tests {
         store.upsert_policy(owner_condition_policy()).await.unwrap();
 
         let evaluator = Arc::new(PolicyEvaluator::new(store));
-        let registry = Arc::new(ConnectionRegistry::new());
         let principal = Principal { id: "user1".to_string(), roles: vec!["user".to_string()] };
-        let conn_id = register_with_principal(&registry, principal).await;
 
-        let layer = AuthorizationLayer::new(evaluator, registry);
+        let layer = AuthorizationLayer::new(evaluator);
         let mut svc = layer.layer(AlwaysOkService);
 
         // Batch: first op matches owner, second does not
-        let op = op_batch_with_owners(conn_id, &[("docs", "user1"), ("docs", "other_user")]);
+        let op = op_batch_with_owners(principal, &[("docs", "user1"), ("docs", "other_user")]);
         let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
         assert!(
             matches!(result, Err(OperationError::Forbidden { .. })),
@@ -701,15 +635,13 @@ mod tests {
         store.upsert_policy(owner_condition_policy()).await.unwrap();
 
         let evaluator = Arc::new(PolicyEvaluator::new(store));
-        let registry = Arc::new(ConnectionRegistry::new());
         let principal = Principal { id: "user1".to_string(), roles: vec!["user".to_string()] };
-        let conn_id = register_with_principal(&registry, principal).await;
 
-        let layer = AuthorizationLayer::new(evaluator, registry);
+        let layer = AuthorizationLayer::new(evaluator);
         let mut svc = layer.layer(AlwaysOkService);
 
         // Batch: both ops match owner
-        let op = op_batch_with_owners(conn_id, &[("docs", "user1"), ("notes", "user1")]);
+        let op = op_batch_with_owners(principal, &[("docs", "user1"), ("notes", "user1")]);
         let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
         assert!(result.is_ok(), "batch where all ops match owner should be allowed, got {result:?}");
     }
@@ -755,9 +687,8 @@ mod tests {
     async fn anonymous_passes_through_when_no_policies() {
         let store = Arc::new(InMemoryPolicyStore::new());
         let evaluator = Arc::new(PolicyEvaluator::new(store));
-        let registry = Arc::new(ConnectionRegistry::new());
 
-        let layer = AuthorizationLayer::new(evaluator, registry);
+        let layer = AuthorizationLayer::new(evaluator);
         let mut svc = layer.layer(AlwaysOkService);
 
         let op = anon_query_op("public-map");
@@ -781,9 +712,8 @@ mod tests {
             .unwrap();
 
         let evaluator = Arc::new(PolicyEvaluator::new(store));
-        let registry = Arc::new(ConnectionRegistry::new());
 
-        let layer = AuthorizationLayer::new(evaluator, registry);
+        let layer = AuthorizationLayer::new(evaluator);
         let mut svc = layer.layer(AlwaysOkService);
 
         let op = anon_query_op("public-map");
@@ -811,9 +741,8 @@ mod tests {
             .unwrap();
 
         let evaluator = Arc::new(PolicyEvaluator::new(store));
-        let registry = Arc::new(ConnectionRegistry::new());
 
-        let layer = AuthorizationLayer::new(evaluator, registry);
+        let layer = AuthorizationLayer::new(evaluator);
         let mut svc = layer.layer(AlwaysOkService);
 
         let op = anon_write_op("public-map");
@@ -832,15 +761,13 @@ mod tests {
         store.upsert_policy(owner_condition_policy()).await.unwrap();
 
         let evaluator = Arc::new(PolicyEvaluator::new(store));
-        let registry = Arc::new(ConnectionRegistry::new());
         let principal = Principal { id: "user1".to_string(), roles: vec!["user".to_string()] };
-        let conn_id = register_with_principal(&registry, principal).await;
 
-        let layer = AuthorizationLayer::new(evaluator, registry);
+        let layer = AuthorizationLayer::new(evaluator);
         let mut svc = layer.layer(AlwaysOkService);
 
         // Tombstone: record value is None, so data is Nil and condition cannot match
-        let op = client_op_tombstone(conn_id);
+        let op = client_op_tombstone(principal);
         let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
         assert!(
             matches!(result, Err(OperationError::Forbidden { .. })),
