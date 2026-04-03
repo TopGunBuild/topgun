@@ -144,8 +144,12 @@ where
 
     fn call(&mut self, op: Operation) -> Self::Future {
         let ctx = op.ctx();
+        let caller_origin = ctx.caller_origin;
         // Trusted origins bypass policy evaluation entirely.
-        if !matches!(ctx.caller_origin, CallerOrigin::Client | CallerOrigin::HttpClient) {
+        if !matches!(
+            caller_origin,
+            CallerOrigin::Client | CallerOrigin::HttpClient | CallerOrigin::Anonymous
+        ) {
             return Box::pin(self.inner.call(op));
         }
 
@@ -153,6 +157,12 @@ where
         // HTTP ops carry ctx.principal set directly by the handler.
         if let Some(connection_id) = ctx.connection_id {
             return self.call_ws_path(op, connection_id);
+        }
+
+        // Anonymous callers have no principal; pass None through RBAC evaluation.
+        // All other non-WS callers require a principal (set by HTTP handler).
+        if caller_origin == CallerOrigin::Anonymous {
+            return self.call_with_principal(op, None);
         }
 
         let Some(principal) = ctx.principal.clone() else {
@@ -702,6 +712,116 @@ mod tests {
         let op = op_batch_with_owners(conn_id, &[("docs", "user1"), ("notes", "user1")]);
         let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
         assert!(result.is_ok(), "batch where all ops match owner should be allowed, got {result:?}");
+    }
+
+    /// Helper: builds a SyncInit (read) operation with CallerOrigin::Anonymous (no connection_id).
+    fn anon_query_op(map_name: &str) -> Operation {
+        let mut ctx = OperationContext::new(20, service_names::SYNC, make_timestamp(), 5000);
+        ctx.caller_origin = CallerOrigin::Anonymous;
+        // No connection_id — anonymous HTTP callers have none.
+        Operation::SyncInit {
+            ctx,
+            payload: topgun_core::messages::SyncInitMessage {
+                map_name: map_name.to_string(),
+                last_sync_timestamp: None,
+            },
+        }
+    }
+
+    /// Helper: builds a ClientOp write operation with CallerOrigin::Anonymous.
+    fn anon_write_op(map_name: &str) -> Operation {
+        let record = LWWRecord {
+            value: Some(rmpv::Value::Boolean(true)),
+            timestamp: make_timestamp(),
+            ttl_ms: None,
+        };
+        let mut ctx = OperationContext::new(21, service_names::CRDT, make_timestamp(), 5000);
+        ctx.caller_origin = CallerOrigin::Anonymous;
+        Operation::ClientOp {
+            ctx,
+            payload: topgun_core::messages::sync::ClientOpMessage {
+                payload: topgun_core::messages::base::ClientOp {
+                    map_name: map_name.to_string(),
+                    key: "k".to_string(),
+                    record: Some(Some(record)),
+                    ..Default::default()
+                },
+            },
+        }
+    }
+
+    /// Anonymous callers are allowed through when no policies are configured.
+    #[tokio::test]
+    async fn anonymous_passes_through_when_no_policies() {
+        let store = Arc::new(InMemoryPolicyStore::new());
+        let evaluator = Arc::new(PolicyEvaluator::new(store));
+        let registry = Arc::new(ConnectionRegistry::new());
+
+        let layer = AuthorizationLayer::new(evaluator, registry);
+        let mut svc = layer.layer(AlwaysOkService);
+
+        let op = anon_query_op("public-map");
+        let resp = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
+        assert!(resp.is_ok(), "anonymous with no policies should pass through, got {resp:?}");
+    }
+
+    /// Anonymous callers can read when an unconditional Allow-Read policy exists.
+    #[tokio::test]
+    async fn anonymous_read_allowed_by_unconditional_allow_policy() {
+        let store = Arc::new(InMemoryPolicyStore::new());
+        store
+            .upsert_policy(PermissionPolicy {
+                id: "allow-read-all".to_string(),
+                map_pattern: "*".to_string(),
+                action: PermissionAction::Read,
+                effect: PolicyEffect::Allow,
+                condition: None,
+            })
+            .await
+            .unwrap();
+
+        let evaluator = Arc::new(PolicyEvaluator::new(store));
+        let registry = Arc::new(ConnectionRegistry::new());
+
+        let layer = AuthorizationLayer::new(evaluator, registry);
+        let mut svc = layer.layer(AlwaysOkService);
+
+        let op = anon_query_op("public-map");
+        let resp = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
+        assert!(
+            resp.is_ok(),
+            "anonymous read with unconditional allow-read policy should pass, got {resp:?}"
+        );
+    }
+
+    /// Anonymous write operations are denied when policies exist (default-deny with no principal).
+    #[tokio::test]
+    async fn anonymous_write_denied_when_policies_exist() {
+        let store = Arc::new(InMemoryPolicyStore::new());
+        // Only a Read allow policy — write has no Allow, so default-deny applies.
+        store
+            .upsert_policy(PermissionPolicy {
+                id: "allow-read-all".to_string(),
+                map_pattern: "*".to_string(),
+                action: PermissionAction::Read,
+                effect: PolicyEffect::Allow,
+                condition: None,
+            })
+            .await
+            .unwrap();
+
+        let evaluator = Arc::new(PolicyEvaluator::new(store));
+        let registry = Arc::new(ConnectionRegistry::new());
+
+        let layer = AuthorizationLayer::new(evaluator, registry);
+        let mut svc = layer.layer(AlwaysOkService);
+
+        let op = anon_write_op("public-map");
+        let result = ServiceExt::ready(&mut svc).await.unwrap().call(op).await;
+        assert!(
+            matches!(result, Err(OperationError::Forbidden { .. })),
+            "anonymous write should be denied when no Allow-Write policy matches, got {result:?}"
+        );
     }
 
     /// Tombstone writes (record value None) are denied by owner-condition policies
