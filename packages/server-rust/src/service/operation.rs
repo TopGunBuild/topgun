@@ -46,6 +46,8 @@ pub enum CallerOrigin {
     Client,
     /// HTTP client request authenticated via Bearer JWT.
     HttpClient,
+    /// Unauthenticated HTTP request (no Bearer token). Subject to RBAC evaluation.
+    Anonymous,
     /// Forwarded from another cluster node.
     Forwarded,
     /// Backup replication from primary node.
@@ -605,6 +607,9 @@ mod tests {
         assert_ne!(CallerOrigin::Client, CallerOrigin::System);
         assert_ne!(CallerOrigin::Client, CallerOrigin::HttpClient);
         assert_ne!(CallerOrigin::HttpClient, CallerOrigin::System);
+        assert_ne!(CallerOrigin::Anonymous, CallerOrigin::Client);
+        assert_ne!(CallerOrigin::Anonymous, CallerOrigin::HttpClient);
+        assert_ne!(CallerOrigin::Anonymous, CallerOrigin::System);
     }
 
     #[test]
