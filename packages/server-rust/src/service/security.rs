@@ -87,6 +87,15 @@ impl WriteValidator {
         map_name: &str,
         value_size: u64,
     ) -> Result<(), OperationError> {
+        // Anonymous callers are denied writes unconditionally as defense-in-depth.
+        // Even if RBAC allows an anonymous read, writes are never permitted without
+        // an authenticated identity.
+        if matches!(ctx.caller_origin, CallerOrigin::Anonymous) {
+            return Err(OperationError::Forbidden {
+                map_name: map_name.to_string(),
+            });
+        }
+
         // Trusted server-to-server traffic bypasses all checks. HttpClient
         // falls through to the same ACL/size checks as Client; its auth
         // enforcement is handler-level (HTTP 401 before dispatch) rather
@@ -388,6 +397,18 @@ mod tests {
         let metadata = make_metadata(true); // no per-map permissions set
         let result = validator.validate_write(&ctx, &metadata, "any-map", 0);
         assert!(matches!(result, Err(OperationError::Forbidden { .. })));
+    }
+
+    // -- Anonymous origin is always rejected --
+
+    #[test]
+    fn anonymous_origin_is_rejected_with_forbidden() {
+        let validator = make_validator(SecurityConfig::default());
+        let mut ctx = OperationContext::new(1, service_names::CRDT, make_timestamp(), 5000);
+        ctx.caller_origin = CallerOrigin::Anonymous;
+        let metadata = make_metadata(false);
+        let result = validator.validate_write(&ctx, &metadata, "my-map", 0);
+        assert!(matches!(result, Err(OperationError::Forbidden { map_name }) if map_name == "my-map"));
     }
 
     // -- Per-connection map permissions override default --
