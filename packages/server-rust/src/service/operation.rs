@@ -83,12 +83,13 @@ pub struct OperationContext {
     /// Node identifier of the caller, if forwarded from another node.
     pub caller_node_id: Option<String>,
     /// Connection identifier for the caller, set by the WebSocket handler.
-    /// Used by services (e.g., `CoordinationService`) to look up the
-    /// `ConnectionHandle` for side-effects such as heartbeat updates.
+    /// Used by domain services for side-effects (heartbeat updates, subscription
+    /// tracking, message routing). Transport metadata only — not used for
+    /// identity resolution.
     pub connection_id: Option<ConnectionId>,
-    /// Principal identity for this operation, set directly by HTTP handlers
-    /// that authenticate via JWT. WebSocket handlers set this to `None` and
-    /// rely on `connection_id` + `ConnectionRegistry` for principal lookup.
+    /// Principal identity for this operation. Set eagerly by all transport
+    /// handlers (WebSocket, HTTP) before pipeline dispatch. Used by authorization
+    /// middleware for RBAC evaluation.
     pub principal: Option<topgun_core::Principal>,
     /// HLC timestamp for this operation.
     pub timestamp: Timestamp,
