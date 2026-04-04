@@ -10,6 +10,7 @@ use axum::http::{Method, StatusCode};
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
@@ -28,16 +29,19 @@ type HttpLayers = tower::layer::util::Stack<
         tower::layer::util::Stack<
             CorsLayer,
             tower::layer::util::Stack<
-                CompressionLayer,
+                RequestBodyLimitLayer,
                 tower::layer::util::Stack<
-                    TraceLayer<
-                        tower_http::classify::SharedClassifier<
-                            tower_http::classify::ServerErrorsAsFailures,
-                        >,
-                    >,
+                    CompressionLayer,
                     tower::layer::util::Stack<
-                        SetRequestIdLayer<MakeRequestUuid>,
-                        tower::layer::util::Identity,
+                        TraceLayer<
+                            tower_http::classify::SharedClassifier<
+                                tower_http::classify::ServerErrorsAsFailures,
+                            >,
+                        >,
+                        tower::layer::util::Stack<
+                            SetRequestIdLayer<MakeRequestUuid>,
+                            tower::layer::util::Identity,
+                        >,
                     >,
                 >,
             >,
@@ -51,9 +55,10 @@ type HttpLayers = tower::layer::util::Stack<
 /// 1. `SetRequestId` -- assigns a UUID v4 `X-Request-Id` to every incoming request
 /// 2. `Tracing` -- logs request/response with structured trace spans
 /// 3. `Compression` -- gzip response compression for bandwidth savings
-/// 4. `CORS` -- Cross-Origin Resource Sharing based on configured origins
-/// 5. `Timeout` -- enforces a maximum request processing duration
-/// 6. `PropagateRequestId` -- copies `X-Request-Id` from the request to the response
+/// 4. `RequestBodyLimit` -- rejects oversized bodies with HTTP 413 before deserialization
+/// 5. `CORS` -- Cross-Origin Resource Sharing based on configured origins
+/// 6. `Timeout` -- enforces a maximum request processing duration
+/// 7. `PropagateRequestId` -- copies `X-Request-Id` from the request to the response
 ///
 /// This is transport-level middleware only. Operation-level middleware (metrics,
 /// load shedding, auth, partition routing) belongs to a future service layer.
@@ -61,7 +66,7 @@ type HttpLayers = tower::layer::util::Stack<
 pub fn build_http_layers(config: &NetworkConfig) -> HttpLayers {
     let x_request_id = HeaderName::from_static("x-request-id");
 
-    let cors = build_cors_layer(&config.cors_origins);
+    let cors = build_cors_layer(config);
 
     ServiceBuilder::new()
         .layer(SetRequestIdLayer::new(
@@ -70,6 +75,7 @@ pub fn build_http_layers(config: &NetworkConfig) -> HttpLayers {
         ))
         .layer(TraceLayer::new_for_http())
         .layer(CompressionLayer::new())
+        .layer(RequestBodyLimitLayer::new(config.max_body_size))
         .layer(cors)
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
@@ -79,25 +85,47 @@ pub fn build_http_layers(config: &NetworkConfig) -> HttpLayers {
         .into_inner()
 }
 
-/// Builds the CORS layer from the configured list of allowed origins.
+/// Builds the CORS layer from the network configuration.
 ///
 /// A wildcard `"*"` in the origins list allows any origin. Otherwise,
 /// each origin string is parsed and added to an explicit allowlist.
-fn build_cors_layer(origins: &[String]) -> CorsLayer {
-    let allow_origin = if origins.iter().any(|o| o == "*") {
+///
+/// `allow_credentials(true)` is only set when origins are explicit (not
+/// wildcard), because the CORS spec forbids combining credentials with
+/// `Access-Control-Allow-Origin: *`.
+fn build_cors_layer(config: &NetworkConfig) -> CorsLayer {
+    let is_wildcard = config.cors_origins.iter().any(|o| o == "*");
+
+    let allow_origin = if is_wildcard {
         AllowOrigin::any()
     } else {
-        let parsed: Vec<_> = origins
+        let parsed: Vec<_> = config
+            .cors_origins
             .iter()
             .filter_map(|o| o.parse().ok())
             .collect();
         AllowOrigin::list(parsed)
     };
 
-    CorsLayer::new()
+    let mut layer = CorsLayer::new()
         .allow_origin(allow_origin)
-        .allow_methods([Method::GET, Method::POST])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::PATCH,
+            Method::OPTIONS,
+        ])
         .allow_headers(Any)
+        .max_age(config.cors_max_age);
+
+    // CORS spec forbids allow_credentials(true) with wildcard origin.
+    if config.cors_allow_credentials && !is_wildcard {
+        layer = layer.allow_credentials(true);
+    }
+
+    layer
 }
 
 #[cfg(test)]
@@ -113,17 +141,23 @@ mod tests {
 
     #[test]
     fn build_cors_layer_wildcard() {
-        let origins = vec!["*".to_string()];
-        let _cors = build_cors_layer(&origins);
+        let config = NetworkConfig {
+            cors_origins: vec!["*".to_string()],
+            ..NetworkConfig::default()
+        };
+        let _cors = build_cors_layer(&config);
     }
 
     #[test]
     fn build_cors_layer_specific_origins() {
-        let origins = vec![
-            "http://localhost:3000".to_string(),
-            "https://example.com".to_string(),
-        ];
-        let _cors = build_cors_layer(&origins);
+        let config = NetworkConfig {
+            cors_origins: vec![
+                "http://localhost:3000".to_string(),
+                "https://example.com".to_string(),
+            ],
+            ..NetworkConfig::default()
+        };
+        let _cors = build_cors_layer(&config);
     }
 
     #[test]
