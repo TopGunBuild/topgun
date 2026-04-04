@@ -92,6 +92,13 @@ export type { AutoConnectionProviderConfig } from './connection/AutoConnectionPr
 // TopGunClient cluster config types
 export type { TopGunClusterConfig, TopGunClientConfig } from './TopGunClient';
 
+// Auth provider exports
+export { ClerkAuthProvider } from './auth/ClerkAuthProvider';
+export { FirebaseAuthProvider } from './auth/FirebaseAuthProvider';
+export { BetterAuthProvider } from './auth/BetterAuthProvider';
+export { CustomAuthProvider } from './auth/CustomAuthProvider';
+export type { AuthProvider, AuthEvent, AuthEventType, TokenExchangeConfig } from './auth/types';
+
 // Type exports
 export type {
   IStorageAdapter,

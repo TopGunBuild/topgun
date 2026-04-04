@@ -3,6 +3,7 @@ import type { ORMapRecord, LWWRecord, EntryProcessorDef, EntryProcessorResult, S
 import type { IStorageAdapter } from './IStorageAdapter';
 import { SyncEngine } from './SyncEngine';
 import type { BackoffConfig } from './SyncEngine';
+import type { AuthProvider } from './auth/types';
 import { QueryHandle } from './QueryHandle';
 import type { QueryFilter } from './QueryHandle';
 import { DistributedLock } from './DistributedLock';
@@ -85,6 +86,9 @@ export interface TopGunClientConfig {
 
   /** Backpressure configuration */
   backpressure?: Partial<BackpressureConfig>;
+
+  /** Auth provider for automatic token management */
+  auth?: AuthProvider;
 }
 
 export class TopGunClient {
@@ -97,6 +101,7 @@ export class TopGunClient {
   private readonly clusterClient?: ClusterClient;
   private readonly isClusterMode: boolean;
   private readonly clusterConfig?: Required<Omit<TopGunClusterConfig, 'seeds'>> & { seeds: string[] };
+  private readonly authProvider?: AuthProvider;
 
   constructor(config: TopGunClientConfig) {
     // Validate: either serverUrl or cluster, not both
@@ -171,6 +176,13 @@ export class TopGunClient {
       });
 
       logger.info({ serverUrl: config.serverUrl }, 'TopGunClient initialized in single-server mode');
+    }
+
+    // Wire auth provider if supplied
+    if (config.auth) {
+      this.authProvider = config.auth;
+      this.authProvider.initialize?.();
+      this.syncEngine.setTokenProvider(() => config.auth!.getToken());
     }
   }
 
@@ -402,6 +414,7 @@ export class TopGunClient {
    * Closes the client, disconnecting from the server and cleaning up resources.
    */
   public close(): void {
+    this.authProvider?.destroy?.();
     if (this.clusterClient) {
       this.clusterClient.close();
     }
