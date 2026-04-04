@@ -18,6 +18,7 @@ use jsonwebtoken::{EncodingKey, Header};
 use serde::Serialize;
 use subtle::ConstantTimeEq;
 use tracing::info;
+use tracing_subscriber::EnvFilter;
 
 use super::admin_auth::AdminClaims;
 use super::admin_types::{
@@ -353,7 +354,7 @@ pub async fn get_settings(
         port: state.config.port,
         require_auth: config.security.require_auth,
         max_value_bytes: config.security.max_value_bytes,
-        log_level: None, // Runtime log level not yet tracked
+        log_level: state.observability.as_ref().and_then(|o| o.current_log_level()),
     }))
 }
 
@@ -449,10 +450,47 @@ pub async fn update_settings(
     let mut changed = Vec::new();
 
     if let Some(ref log_level) = req.log_level {
-        // Log level update: attempt to reload tracing EnvFilter.
-        // For now, just log the request. Full EnvFilter reload requires
-        // a reload handle which is not yet threaded through AppState.
-        info!(log_level = %log_level, "log level update requested");
+        // Obtain the reload handle from the observability stack.
+        // Returns 503 when observability is not configured (no handle) and 400
+        // when the provided filter directive is invalid.
+        let handle = state
+            .observability
+            .as_ref()
+            .and_then(|o| o.log_level_handle())
+            .ok_or_else(|| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ErrorResponse {
+                        code: 503,
+                        message: "observability not configured".to_string(),
+                        field: None,
+                    }),
+                )
+            })?;
+
+        let new_filter = EnvFilter::try_new(log_level).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    code: 400,
+                    message: format!("invalid log level filter: {e}"),
+                    field: Some("logLevel".to_string()),
+                }),
+            )
+        })?;
+
+        handle.reload(new_filter).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    code: 400,
+                    message: format!("failed to reload log level: {e}"),
+                    field: None,
+                }),
+            )
+        })?;
+
+        info!(log_level = %log_level, "log level reloaded");
         changed.push("logLevel");
     }
 
