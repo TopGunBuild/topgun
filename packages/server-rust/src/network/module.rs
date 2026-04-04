@@ -287,7 +287,8 @@ fn build_app(
         );
     }
 
-    // Extract rate limit burst value before config is moved into Arc<AppState>.
+    // Extract rate limit config before config is moved into Arc<AppState>.
+    let rate_limit_per_ip = config.rate_limit_per_ip;
     let rate_limit_burst = config.rate_limit_burst;
 
     let state = AppState {
@@ -306,14 +307,14 @@ fn build_app(
     };
 
     // Build a per-IP rate limiter for admin and login endpoints.
-    // `per_second(1)` means 1 token is replenished per second; combined with
-    // `burst_size` this allows a burst of N requests before throttling, then
-    // steady-state of 1 request/second (tightened from rate_limit_per_ip which
-    // is applied at the burst level). /ws and /sync are excluded because those
-    // have operation-level load shedding instead of HTTP-layer rate limiting.
+    // Replenishment interval derived from rate_limit_per_ip: for 100 req/s the
+    // governor refills 1 token every 10 ms. burst_size controls the initial
+    // burst window. /ws and /sync are excluded because those have
+    // operation-level load shedding instead of HTTP-layer rate limiting.
+    let replenish_interval_ms = (1000 / u64::from(rate_limit_per_ip).max(1)).max(1);
     let governor_config = GovernorConfigBuilder::default()
         .key_extractor(PeerIpKeyExtractor)
-        .per_second(1)
+        .per_millisecond(replenish_interval_ms)
         .burst_size(rate_limit_burst)
         .finish()
         .expect("GovernorConfig should build with non-zero burst and period");
