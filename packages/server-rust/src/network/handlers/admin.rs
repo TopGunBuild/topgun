@@ -76,7 +76,8 @@ pub async fn login(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: "admin password not configured".to_string(),
+                code: 500,
+                message: "admin password not configured".to_string(),
                 field: None,
             }),
         )
@@ -86,7 +87,8 @@ pub async fn login(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: "authentication not configured".to_string(),
+                code: 500,
+                message: "authentication not configured".to_string(),
                 field: None,
             }),
         )
@@ -102,7 +104,8 @@ pub async fn login(
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(ErrorResponse {
-                error: "invalid credentials".to_string(),
+                code: 401,
+                message: "invalid credentials".to_string(),
                 field: None,
             }),
         ));
@@ -130,7 +133,8 @@ pub async fn login(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("token generation failed: {e}"),
+                code: 500,
+                message: format!("token generation failed: {e}"),
                 field: None,
             }),
         )
@@ -245,7 +249,8 @@ pub async fn list_maps(
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse {
-                error: "storage not configured".to_string(),
+                code: 503,
+                message: "storage not configured".to_string(),
                 field: None,
             }),
         )
@@ -281,7 +286,8 @@ pub async fn get_settings(
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse {
-                error: "server config not available".to_string(),
+                code: 503,
+                message: "server config not available".to_string(),
                 field: None,
             }),
         )
@@ -333,7 +339,8 @@ pub async fn update_settings(
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: format!("invalid JSON: {e}"),
+                code: 400,
+                message: format!("invalid JSON: {e}"),
                 field: None,
             }),
         )
@@ -345,7 +352,8 @@ pub async fn update_settings(
                 return Err((
                     StatusCode::BAD_REQUEST,
                     Json(ErrorResponse {
-                        error: format!("field '{field}' is read-only and cannot be updated"),
+                        code: 400,
+                        message: format!("field '{field}' is read-only and cannot be updated"),
                         field: Some(field.to_string()),
                     }),
                 ));
@@ -358,7 +366,8 @@ pub async fn update_settings(
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
-                error: format!("invalid settings: {e}"),
+                code: 400,
+                message: format!("invalid settings: {e}"),
                 field: None,
             }),
         )
@@ -368,7 +377,8 @@ pub async fn update_settings(
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse {
-                error: "server config not available".to_string(),
+                code: 503,
+                message: "server config not available".to_string(),
                 field: None,
             }),
         )
@@ -420,7 +430,8 @@ pub async fn list_policies(
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse {
-                error: "policy store not configured".to_string(),
+                code: 503,
+                message: "policy store not configured".to_string(),
                 field: None,
             }),
         )
@@ -433,7 +444,8 @@ pub async fn list_policies(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: format!("failed to list policies: {e}"),
+                    code: 500,
+                    message: format!("failed to list policies: {e}"),
                     field: None,
                 }),
             )
@@ -467,7 +479,8 @@ pub async fn create_policy(
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse {
-                error: "policy store not configured".to_string(),
+                code: 503,
+                message: "policy store not configured".to_string(),
                 field: None,
             }),
         )
@@ -485,7 +498,8 @@ pub async fn create_policy(
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
-                    error: e.to_string(),
+                    code: 400,
+                    message: e.to_string(),
                     field: Some("conditionExpr".to_string()),
                 }),
             )
@@ -507,7 +521,8 @@ pub async fn create_policy(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("failed to create policy: {e}"),
+                code: 500,
+                message: format!("failed to create policy: {e}"),
                 field: None,
             }),
         )
@@ -540,7 +555,8 @@ pub async fn delete_policy(
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse {
-                error: "policy store not configured".to_string(),
+                code: 503,
+                message: "policy store not configured".to_string(),
                 field: None,
             }),
         )
@@ -550,7 +566,8 @@ pub async fn delete_policy(
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("failed to delete policy: {e}"),
+                code: 500,
+                message: format!("failed to delete policy: {e}"),
                 field: None,
             }),
         )

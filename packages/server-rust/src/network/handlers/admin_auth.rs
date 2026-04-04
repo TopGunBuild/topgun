@@ -38,7 +38,8 @@ impl IntoResponse for AdminAuthError {
         };
 
         let body = Json(ErrorResponse {
-            error: error_msg.to_string(),
+            code: status.as_u16().into(),
+            message: error_msg.to_string(),
             field: None,
         });
 
