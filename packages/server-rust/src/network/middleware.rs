@@ -5,7 +5,7 @@
 //! layer listed is the outermost (processes the request first on the way
 //! in, and the response last on the way out).
 
-use axum::http::header::HeaderName;
+use axum::http::header::{self, HeaderName};
 use axum::http::{Method, StatusCode};
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
@@ -107,6 +107,8 @@ fn build_cors_layer(config: &NetworkConfig) -> CorsLayer {
         AllowOrigin::list(parsed)
     };
 
+    let use_credentials = config.cors_allow_credentials && !is_wildcard;
+
     let mut layer = CorsLayer::new()
         .allow_origin(allow_origin)
         .allow_methods([
@@ -117,12 +119,20 @@ fn build_cors_layer(config: &NetworkConfig) -> CorsLayer {
             Method::PATCH,
             Method::OPTIONS,
         ])
-        .allow_headers(Any)
         .max_age(config.cors_max_age);
 
-    // CORS spec forbids allow_credentials(true) with wildcard origin.
-    if config.cors_allow_credentials && !is_wildcard {
-        layer = layer.allow_credentials(true);
+    // CORS spec forbids wildcard `Access-Control-Allow-Headers: *` when
+    // credentials are enabled. Use an explicit allowlist instead.
+    if use_credentials {
+        layer = layer
+            .allow_headers([
+                header::AUTHORIZATION,
+                header::CONTENT_TYPE,
+                header::ACCEPT,
+            ])
+            .allow_credentials(true);
+    } else {
+        layer = layer.allow_headers(Any);
     }
 
     layer
