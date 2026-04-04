@@ -16,6 +16,15 @@ pub struct NetworkConfig {
     pub connection: ConnectionConfig,
     /// Allowed CORS origins. An empty list rejects all cross-origin requests.
     pub cors_origins: Vec<String>,
+    /// Maximum age for CORS preflight cache (Access-Control-Max-Age header).
+    pub cors_max_age: Duration,
+    /// Whether to include `Access-Control-Allow-Credentials: true` in CORS
+    /// responses. Must not be combined with wildcard origins (CORS spec
+    /// violation).
+    pub cors_allow_credentials: bool,
+    /// Maximum allowed request body size in bytes. Bodies exceeding this
+    /// limit are rejected with HTTP 413 before deserialization.
+    pub max_body_size: usize,
     /// Maximum time to wait for a request to complete.
     pub request_timeout: Duration,
     /// Clock skew tolerance in seconds for JWT `exp` validation.
@@ -33,6 +42,9 @@ impl Default for NetworkConfig {
             tls: None,
             connection: ConnectionConfig::default(),
             cors_origins: vec![],
+            cors_max_age: Duration::from_secs(86_400),
+            cors_allow_credentials: true,
+            max_body_size: 2 * 1024 * 1024, // 2 MB
             request_timeout: Duration::from_secs(30),
             jwt_clock_skew_secs: 60,
         }
@@ -92,6 +104,9 @@ mod tests {
         // Default CORS allowlist is empty to reject all cross-origin requests
         // by default; operators must explicitly configure allowed origins.
         assert!(config.cors_origins.is_empty());
+        assert_eq!(config.cors_max_age, Duration::from_secs(86_400));
+        assert!(config.cors_allow_credentials);
+        assert_eq!(config.max_body_size, 2 * 1024 * 1024);
         assert_eq!(config.request_timeout, Duration::from_secs(30));
         assert_eq!(config.jwt_clock_skew_secs, 60);
     }

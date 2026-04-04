@@ -143,7 +143,8 @@ pub struct LoginResponse {
 #[derive(Serialize, ToSchema, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ErrorResponse {
-    pub error: String,
+    pub code: u32,
+    pub message: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub field: Option<String>,
 }
