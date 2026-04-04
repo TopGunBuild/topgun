@@ -195,3 +195,46 @@ pub struct PolicyResponse {
 pub struct PolicyListResponse {
     pub policies: Vec<PolicyResponse>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_response_serializes_code_and_message() {
+        let resp = ErrorResponse {
+            code: 400,
+            message: "bad request".to_string(),
+            field: None,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["code"], 400);
+        assert_eq!(json["message"], "bad request");
+        assert!(json.get("field").is_none(), "field should be omitted when None");
+        assert!(json.get("error").is_none(), "old 'error' key must not appear");
+    }
+
+    #[test]
+    fn error_response_includes_field_when_present() {
+        let resp = ErrorResponse {
+            code: 400,
+            message: "invalid value".to_string(),
+            field: Some("nodeId".to_string()),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["code"], 400);
+        assert_eq!(json["message"], "invalid value");
+        assert_eq!(json["field"], "nodeId");
+    }
+
+    #[test]
+    fn error_response_code_is_integer_not_float() {
+        let resp = ErrorResponse {
+            code: 500,
+            message: "internal".to_string(),
+            field: None,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert!(json["code"].is_u64(), "code must serialize as integer");
+    }
+}
