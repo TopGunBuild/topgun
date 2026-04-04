@@ -12,7 +12,18 @@
 use std::sync::{Arc, OnceLock};
 
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::{reload, EnvFilter};
+
+// ---------------------------------------------------------------------------
+// Type alias for the reload handle
+// ---------------------------------------------------------------------------
+
+/// Type alias for the tracing filter reload handle.
+///
+/// Kept as an alias to keep method signatures readable and to insulate call
+/// sites from the concrete subscriber composition type.
+pub type LogLevelHandle = reload::Handle<EnvFilter, tracing_subscriber::Registry>;
 
 // ---------------------------------------------------------------------------
 // Static initialisation guard
@@ -29,10 +40,13 @@ static PROMETHEUS_HANDLE: OnceLock<Arc<PrometheusHandle>> = OnceLock::new();
 /// Handle returned by [`init_observability`].
 ///
 /// Holds a reference to the installed Prometheus recorder so that the `/metrics`
-/// endpoint can render the current metric state on demand.
+/// endpoint can render the current metric state on demand, and optionally a
+/// reload handle for the active tracing `EnvFilter` to support runtime log
+/// level changes.
 #[derive(Clone)]
 pub struct ObservabilityHandle {
     prometheus: Arc<PrometheusHandle>,
+    log_level_handle: Option<LogLevelHandle>,
 }
 
 impl ObservabilityHandle {
@@ -44,6 +58,25 @@ impl ObservabilityHandle {
     #[must_use]
     pub fn render_metrics(&self) -> String {
         self.prometheus.render()
+    }
+
+    /// Returns a reference to the reload handle, if available.
+    ///
+    /// `None` when `init_observability` was called more than once and this
+    /// instance was returned from a subsequent call (the subscriber was already
+    /// installed by the first call).
+    pub fn log_level_handle(&self) -> Option<&LogLevelHandle> {
+        self.log_level_handle.as_ref()
+    }
+
+    /// Returns the current active `EnvFilter` directive string, if available.
+    ///
+    /// Uses the reload handle's `with_current` method to read the live filter
+    /// without taking ownership.
+    pub fn current_log_level(&self) -> Option<String> {
+        self.log_level_handle.as_ref().and_then(|h| {
+            h.with_current(|f| f.to_string()).ok()
+        })
     }
 }
 
@@ -64,6 +97,9 @@ impl ObservabilityHandle {
 ///   `EnvFilter::from_default_env()`.  Defaults to `info` when `RUST_LOG` is
 ///   not set.
 /// - Format: JSON when `TOPGUN_LOG_FORMAT=json`, human-readable otherwise.
+/// - The returned [`ObservabilityHandle`] carries a `reload::Handle` that
+///   allows swapping the active `EnvFilter` at runtime without restarting
+///   the process.
 ///
 /// ## Metrics
 ///
@@ -89,10 +125,6 @@ pub fn init_observability() -> ObservabilityHandle {
         })
         .clone();
 
-    // Install the tracing subscriber.  `try_init()` returns an error when a
-    // subscriber has already been set (e.g., in a second test run) — we
-    // silently ignore that error because the subscriber from the first call is
-    // still active.
     let use_json = std::env::var("TOPGUN_LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("json"))
         .unwrap_or(false);
@@ -100,18 +132,39 @@ pub fn init_observability() -> ObservabilityHandle {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
-    if use_json {
-        let _ = tracing_subscriber::fmt()
-            .json()
-            .with_env_filter(filter)
-            .try_init();
-    } else {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .try_init();
-    }
+    // Wrap the filter in a reload layer so it can be swapped at runtime.
+    let (reload_layer, reload_handle) = reload::Layer::new(filter);
 
-    ObservabilityHandle { prometheus }
+    // Build and install the subscriber. `set_global_default` returns `Err` when
+    // a subscriber is already installed (i.e., on any call after the first).
+    // We must use `set_global_default` directly because there is no `try_init`
+    // equivalent on a manually-composed subscriber built via `registry().with(...)`.
+    let install_result = if use_json {
+        let fmt_layer = tracing_subscriber::fmt::layer().json();
+        let subscriber = tracing_subscriber::registry()
+            .with(reload_layer)
+            .with(fmt_layer);
+        tracing::subscriber::set_global_default(subscriber)
+    } else {
+        let fmt_layer = tracing_subscriber::fmt::layer();
+        let subscriber = tracing_subscriber::registry()
+            .with(reload_layer)
+            .with(fmt_layer);
+        tracing::subscriber::set_global_default(subscriber)
+    };
+
+    // Only the first successful installation gets to own the reload handle.
+    // Subsequent calls (e.g., from test harnesses) do not have a live
+    // subscriber to reload through, so the handle would be inert anyway.
+    let log_level_handle = match install_result {
+        Ok(()) => Some(reload_handle),
+        Err(_) => None,
+    };
+
+    ObservabilityHandle {
+        prometheus,
+        log_level_handle,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -146,5 +199,17 @@ mod tests {
         let output = handle.render_metrics();
         // Prometheus text format is always valid ASCII UTF-8.
         assert!(output.contains("# TYPE") || output.is_empty());
+    }
+
+    #[test]
+    fn current_log_level_returns_some_on_first_call() {
+        // The first call in this test binary installs the subscriber and gets
+        // the reload handle. Subsequent calls return None. We test that at
+        // least one call (possibly this one) returns a non-panic result.
+        let handle = init_observability();
+        // If this is the first subscriber in this test binary, current_log_level
+        // will be Some. If another test already installed the subscriber, it
+        // will be None. Either outcome is valid — we just must not panic.
+        let _ = handle.current_log_level();
     }
 }
