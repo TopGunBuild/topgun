@@ -46,7 +46,7 @@ pub enum PolicyDecision {
 }
 
 /// A single permission rule binding a map pattern + action to an allow/deny effect.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionPolicy {
     pub id: String,
@@ -57,6 +57,7 @@ pub struct PermissionPolicy {
     /// Optional predicate condition. When present, policy only applies if
     /// condition evaluates to true against record data and auth context.
     #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[schema(value_type = Object, nullable = true)]
     pub condition: Option<PredicateNode>,
 }
 
