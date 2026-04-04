@@ -7,6 +7,7 @@
 //! `serve()`.
 
 use std::future::Future;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,9 @@ use arc_swap::ArcSwap;
 use axum::routing::{delete, get, post};
 use axum::Router;
 use tokio::net::TcpListener;
+use tower_governor::governor::GovernorConfigBuilder;
+use tower_governor::key_extractor::PeerIpKeyExtractor;
+use tower_governor::GovernorLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{info, warn};
 use utoipa::OpenApi;
@@ -283,6 +287,9 @@ fn build_app(
         );
     }
 
+    // Extract rate limit burst value before config is moved into Arc<AppState>.
+    let rate_limit_burst = config.rate_limit_burst;
+
     let state = AppState {
         registry,
         shutdown,
@@ -298,6 +305,23 @@ fn build_app(
         policy_store,
     };
 
+    // Build a per-IP rate limiter for admin and login endpoints.
+    // `per_second(1)` means 1 token is replenished per second; combined with
+    // `burst_size` this allows a burst of N requests before throttling, then
+    // steady-state of 1 request/second (tightened from rate_limit_per_ip which
+    // is applied at the burst level). /ws and /sync are excluded because those
+    // have operation-level load shedding instead of HTTP-layer rate limiting.
+    let governor_config = GovernorConfigBuilder::default()
+        .key_extractor(PeerIpKeyExtractor)
+        .per_second(1)
+        .burst_size(rate_limit_burst)
+        .finish()
+        .expect("GovernorConfig should build with non-zero burst and period");
+
+    let governor_layer = GovernorLayer {
+        config: Arc::new(governor_config),
+    };
+
     // Swagger UI served at /api/docs
     let swagger_ui = utoipa_swagger_ui::SwaggerUi::new("/api/docs")
         .url("/api/openapi.json", AdminApiDoc::openapi());
@@ -310,36 +334,47 @@ fn build_app(
         .append_index_html_on_directories(true)
         .fallback(ServeFile::new(index_html));
 
-    Router::new()
-        // Existing routes
-        .route("/health", get(health_handler))
-        .route("/health/live", get(liveness_handler))
-        .route("/health/ready", get(readiness_handler))
-        .route("/ws", get(ws_upgrade_handler))
-        .route("/sync", post(http_sync_handler))
-        .route("/metrics", get(metrics_handler))
-        // Admin API -- public endpoints (no auth)
-        .route("/api/status", get(server_status))
+    // Rate-limited routes: admin API and login are brute-force targets and
+    // get per-IP throttling. All other routes (health, ws, sync, metrics,
+    // docs, status, admin SPA) bypass the governor.
+    let rate_limited_routes = Router::new()
         .route("/api/auth/login", post(login))
-        // Admin API -- protected endpoints (require AdminClaims)
         .route("/api/admin/cluster/status", get(cluster_status))
         .route("/api/admin/maps", get(list_maps))
         .route("/api/admin/settings", get(get_settings).put(update_settings))
-        // Policy admin endpoints
         .route(
             "/api/admin/policies",
             get(list_policies).post(create_policy),
         )
         .route("/api/admin/policies/{id}", delete(delete_policy))
+        .route_layer(governor_layer);
+
+    Router::new()
+        // Health probes -- never rate-limited (Kubernetes liveness/readiness)
+        .route("/health", get(health_handler))
+        .route("/health/live", get(liveness_handler))
+        .route("/health/ready", get(readiness_handler))
+        // Real-time transport -- operation-level load shedding, not HTTP rate limiting
+        .route("/ws", get(ws_upgrade_handler))
+        .route("/sync", post(http_sync_handler))
+        // Metrics and status -- internal observability endpoints
+        .route("/metrics", get(metrics_handler))
+        .route("/api/status", get(server_status))
+        // Rate-limited admin and login routes
+        .merge(rate_limited_routes)
         // Swagger UI serves both the JSON spec at /api/openapi.json and the UI at /api/docs
         .merge(swagger_ui)
-        // Static SPA for admin dashboard
+        // Static SPA for admin dashboard -- served as static files, not rate-limited
         .nest_service("/admin", serve_dir)
         .layer(layers)
         .with_state(state)
 }
 
 /// Serves plain HTTP/WS connections using axum's built-in server.
+///
+/// Uses `into_make_service_with_connect_info` so that the peer `SocketAddr` is
+/// injected into each request's extensions. This is required by
+/// `PeerIpKeyExtractor` to identify which IP to rate-limit.
 async fn serve_plain(
     listener: TcpListener,
     router: Router,
@@ -349,9 +384,12 @@ async fn serve_plain(
 ) -> anyhow::Result<()> {
     info!("Serving plain HTTP/WS connections");
 
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await?;
 
     drain_connections(registry, shutdown_ctrl).await;
     Ok(())
@@ -687,6 +725,106 @@ mod tests {
             36,
             "X-Request-Id should be a UUID (36 chars): {id_str}"
         );
+
+        drop(shutdown_tx);
+    }
+
+    /// Starts a server with a custom `NetworkConfig` and returns the same
+    /// tuple as `start_server`.
+    async fn start_server_with_config(
+        config: NetworkConfig,
+    ) -> (
+        u16,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let mut module = NetworkModule::new(config);
+        let port = module.start().await.expect("start should succeed");
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let serve_handle = tokio::spawn(async move {
+            module
+                .serve(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+                .expect("serve should not fail");
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        (port, shutdown_tx, serve_handle)
+    }
+
+    /// Verifies that sending more requests than `rate_limit_burst` to a
+    /// rate-limited endpoint returns HTTP 429 with a `Retry-After` header.
+    /// Endpoints like /health and /sync must never be affected.
+    #[tokio::test]
+    async fn rate_limit_triggers_429_on_admin_endpoint_after_burst() {
+        let config = NetworkConfig {
+            // A burst of 2 means the 3rd and subsequent requests are throttled.
+            rate_limit_burst: 2,
+            ..NetworkConfig::default()
+        };
+        let (port, shutdown_tx, _handle) = start_server_with_config(config).await;
+
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{port}/api/admin/cluster/status");
+
+        let mut last_status = reqwest::StatusCode::OK;
+        // Send burst+2 requests; at least one must return 429 once the burst is exhausted.
+        for _ in 0..(2 + 2) {
+            let resp = client
+                .get(&url)
+                .send()
+                .await
+                .expect("request should complete");
+            last_status = resp.status();
+            if last_status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                // Confirm Retry-After header is present on 429 responses.
+                assert!(
+                    resp.headers().contains_key("retry-after"),
+                    "429 response must include Retry-After header"
+                );
+                break;
+            }
+        }
+
+        assert_eq!(
+            last_status,
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            "Expected 429 after exhausting burst of 2; last status was {last_status}"
+        );
+
+        drop(shutdown_tx);
+    }
+
+    /// Verifies that /health is never affected by rate limiting even when
+    /// the burst limit is set to a very low value.
+    #[tokio::test]
+    async fn rate_limit_does_not_apply_to_health_endpoint() {
+        let config = NetworkConfig {
+            rate_limit_burst: 1,
+            ..NetworkConfig::default()
+        };
+        let (port, shutdown_tx, _handle) = start_server_with_config(config).await;
+
+        let client = reqwest::Client::new();
+
+        // Send many requests to /health; none should be rate-limited.
+        for _ in 0..5 {
+            let resp = client
+                .get(format!("http://127.0.0.1:{port}/health"))
+                .send()
+                .await
+                .expect("health request should succeed");
+            assert_eq!(
+                resp.status(),
+                200,
+                "/health must never return 429 regardless of rate limit config"
+            );
+        }
 
         drop(shutdown_tx);
     }
