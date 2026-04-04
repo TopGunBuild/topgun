@@ -48,6 +48,14 @@ struct AdminJwtClaims {
 ///
 /// Always returns `mode: Normal` for v1.0 (bootstrap mode deferred to v1.1).
 /// Version is sourced from `CARGO_PKG_VERSION` at compile time.
+#[utoipa::path(
+    get,
+    path = "/api/status",
+    responses(
+        (status = 200, description = "Server status", body = ServerStatusResponse)
+    ),
+    tag = "Server"
+)]
 pub async fn server_status() -> impl IntoResponse {
     Json(ServerStatusResponse {
         configured: true,
@@ -66,6 +74,17 @@ pub async fn server_status() -> impl IntoResponse {
 /// # Errors
 ///
 /// Returns 401 on invalid credentials, 500 if admin password or JWT secret is not configured.
+#[utoipa::path(
+    post,
+    path = "/api/auth/login",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "Login successful", body = LoginResponse),
+        (status = 401, description = "Invalid credentials", body = ErrorResponse),
+        (status = 500, description = "Server error", body = ErrorResponse),
+    ),
+    tag = "Auth"
+)]
 pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
@@ -153,6 +172,15 @@ pub async fn login(
 /// - `Active` / `Joining` / `Leaving` -> `Healthy`
 /// - `Suspect` -> `Suspect`
 /// - `Dead` / `Removed` -> `Dead`
+#[utoipa::path(
+    get,
+    path = "/api/admin/cluster/status",
+    responses(
+        (status = 200, description = "Cluster topology", body = ClusterStatusResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Cluster"
+)]
 #[allow(clippy::cast_possible_truncation)]
 pub async fn cluster_status(
     _claims: AdminClaims,
@@ -241,6 +269,16 @@ pub async fn cluster_status(
 /// # Errors
 ///
 /// Returns 503 if the storage layer is not configured.
+#[utoipa::path(
+    get,
+    path = "/api/admin/maps",
+    responses(
+        (status = 200, description = "List of maps", body = MapsListResponse),
+        (status = 503, description = "Storage not configured", body = ErrorResponse),
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Maps"
+)]
 pub async fn list_maps(
     _claims: AdminClaims,
     State(state): State<AppState>,
@@ -278,6 +316,16 @@ pub async fn list_maps(
 /// # Errors
 ///
 /// Returns 503 if the server config is not available.
+#[utoipa::path(
+    get,
+    path = "/api/admin/settings",
+    responses(
+        (status = 200, description = "Current server settings", body = SettingsResponse),
+        (status = 503, description = "Config not available", body = ErrorResponse),
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Settings"
+)]
 pub async fn get_settings(
     _claims: AdminClaims,
     State(state): State<AppState>,
@@ -329,6 +377,18 @@ const READONLY_FIELDS: &[&str] = &[
 ///
 /// Returns 400 if JSON is invalid, contains read-only fields, or fails
 /// deserialization. Returns 503 if the server config is not available.
+#[utoipa::path(
+    put,
+    path = "/api/admin/settings",
+    request_body = SettingsUpdateRequest,
+    responses(
+        (status = 200, description = "Updated server settings", body = SettingsResponse),
+        (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 503, description = "Config not available", body = ErrorResponse),
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Settings"
+)]
 pub async fn update_settings(
     claims: AdminClaims,
     State(state): State<AppState>,
@@ -422,6 +482,16 @@ pub async fn update_settings(
 /// # Errors
 ///
 /// Returns 503 if the policy store is not configured.
+#[utoipa::path(
+    get,
+    path = "/api/admin/policies",
+    responses(
+        (status = 200, description = "List of policies", body = PolicyListResponse),
+        (status = 503, description = "Policy store not configured", body = ErrorResponse),
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Policies"
+)]
 pub async fn list_policies(
     _claims: AdminClaims,
     State(state): State<AppState>,
@@ -470,6 +540,18 @@ pub async fn list_policies(
 /// # Errors
 ///
 /// Returns 503 if the policy store is not configured.
+#[utoipa::path(
+    post,
+    path = "/api/admin/policies",
+    request_body = CreatePolicyRequest,
+    responses(
+        (status = 201, description = "Policy created", body = PolicyResponse),
+        (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 503, description = "Policy store not configured", body = ErrorResponse),
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Policies"
+)]
 pub async fn create_policy(
     _claims: AdminClaims,
     State(state): State<AppState>,
@@ -546,6 +628,19 @@ pub async fn create_policy(
 /// # Errors
 ///
 /// Returns 503 if the policy store is not configured.
+#[utoipa::path(
+    delete,
+    path = "/api/admin/policies/{id}",
+    params(
+        ("id" = String, Path, description = "Policy ID to delete")
+    ),
+    responses(
+        (status = 204, description = "Policy deleted"),
+        (status = 503, description = "Policy store not configured", body = ErrorResponse),
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Policies"
+)]
 pub async fn delete_policy(
     _claims: AdminClaims,
     State(state): State<AppState>,
