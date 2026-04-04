@@ -599,6 +599,7 @@ mod tests {
             store_factory: None,
             server_config: None,
             policy_store: None,
+            auth_providers: Arc::new(vec![]),
         }
     }
 
@@ -624,6 +625,7 @@ mod tests {
             store_factory: None,
             server_config: Some(Arc::new(ArcSwap::from_pointee(server_cfg))),
             policy_store: None,
+            auth_providers: Arc::new(vec![]),
         }
     }
 
@@ -893,6 +895,7 @@ mod tests {
             store_factory: Some(factory),
             server_config: None,
             policy_store: None,
+            auth_providers: Arc::new(vec![]),
         }
     }
 

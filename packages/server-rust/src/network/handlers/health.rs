@@ -75,6 +75,7 @@ mod tests {
             store_factory: None,
             server_config: None,
             policy_store: None,
+            auth_providers: Arc::new(vec![]),
         }
     }
 

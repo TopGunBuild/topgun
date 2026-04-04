@@ -28,9 +28,10 @@ use super::handlers::admin::{
     cluster_status, create_policy, delete_policy, get_settings, list_maps, list_policies, login,
     server_status, update_settings,
 };
+use super::handlers::auth_provider::{AuthProvider, AuthProviderConfig, HmacProvider, JwksProvider, OidcProvider};
 use super::handlers::{
     health_handler, http_sync_handler, liveness_handler, metrics_handler, readiness_handler,
-    ws_upgrade_handler, AppState,
+    token_exchange_handler, ws_upgrade_handler, AppState,
 };
 use super::middleware::build_http_layers;
 use super::openapi::AdminApiDoc;
@@ -291,6 +292,48 @@ fn build_app(
     let rate_limit_per_ip = config.rate_limit_per_ip;
     let rate_limit_burst = config.rate_limit_burst;
 
+    // Build a single shared HTTP client for all JWKS/OIDC providers so that
+    // connection pooling is shared rather than fragmented across providers.
+    let http_client = reqwest::Client::new();
+
+    // Construct provider instances from config. HmacProvider needs no HTTP
+    // client; JwksProvider and OidcProvider share the client.
+    let auth_providers: Vec<Arc<dyn AuthProvider>> = config
+        .auth_providers
+        .iter()
+        .map(|cfg| -> Arc<dyn AuthProvider> {
+            match cfg {
+                AuthProviderConfig::Jwks { name, jwks_url, issuer, audience, claims } => Arc::new(
+                    JwksProvider::new(
+                        name.clone(),
+                        jwks_url.clone(),
+                        issuer.clone(),
+                        audience.clone(),
+                        claims.clone(),
+                        http_client.clone(),
+                    ),
+                ),
+                AuthProviderConfig::Oidc { name, issuer_url, audience, claims } => Arc::new(
+                    OidcProvider::new(
+                        name.clone(),
+                        issuer_url.clone(),
+                        audience.clone(),
+                        claims.clone(),
+                        http_client.clone(),
+                    ),
+                ),
+                AuthProviderConfig::Hmac { name, secret, issuer, claims } => Arc::new(
+                    HmacProvider::new(
+                        name.clone(),
+                        secret.clone(),
+                        issuer.clone(),
+                        claims.clone(),
+                    ),
+                ),
+            }
+        })
+        .collect();
+
     let state = AppState {
         registry,
         shutdown,
@@ -304,6 +347,7 @@ fn build_app(
         store_factory,
         server_config,
         policy_store,
+        auth_providers: Arc::new(auth_providers),
     };
 
     // Build a per-IP rate limiter for admin and login endpoints.
@@ -340,6 +384,7 @@ fn build_app(
     // docs, status, admin SPA) bypass the governor.
     let rate_limited_routes = Router::new()
         .route("/api/auth/login", post(login))
+        .route("/api/auth/token", post(token_exchange_handler))
         .route("/api/admin/cluster/status", get(cluster_status))
         .route("/api/admin/maps", get(list_maps))
         .route("/api/admin/settings", get(get_settings).put(update_settings))

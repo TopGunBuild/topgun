@@ -54,6 +54,7 @@ utoipa = { version = "5", features = ["axum_extras"] }
 utoipa-axum = "0.2"
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
 tower_governor = "0.6"
+reqwest = { version = "0.12", features = ["json"] }
 
 [[bin]]
 name = "test-server"
@@ -61,7 +62,6 @@ path = "src/bin/test_server.rs"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util", "time"] }
-reqwest = { version = "0.12", features = ["json"] }
 tokio-tungstenite = "0.26"
 hdrhistogram = "7"
 proptest = "1"

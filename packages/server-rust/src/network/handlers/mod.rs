@@ -8,14 +8,17 @@ pub mod admin;
 pub mod admin_auth;
 pub mod admin_types;
 pub mod auth;
+pub mod auth_provider;
 pub mod health;
 pub mod http_sync;
 pub mod metrics_endpoint;
+pub mod token_exchange;
 pub mod websocket;
 
 pub use health::{health_handler, liveness_handler, readiness_handler};
 pub use http_sync::http_sync_handler;
 pub use metrics_endpoint::metrics_handler;
+pub use token_exchange::token_exchange_handler;
 pub use websocket::ws_upgrade_handler;
 
 use std::sync::Arc;
@@ -25,6 +28,7 @@ use arc_swap::ArcSwap;
 
 use super::{ConnectionRegistry, NetworkConfig, ShutdownController};
 use crate::cluster::state::ClusterState;
+use crate::network::handlers::auth_provider::AuthProvider;
 use crate::service::classify::OperationService;
 use crate::service::config::ServerConfig;
 use crate::service::dispatch::PartitionDispatcher;
@@ -82,4 +86,7 @@ pub struct AppState {
     /// Policy store for permission policy CRUD and evaluation.
     /// `None` when policy engine is not configured.
     pub policy_store: Option<Arc<dyn PolicyStore>>,
+    /// External auth providers for token exchange at POST /api/auth/token.
+    /// Empty when token exchange is not configured (endpoint returns 404).
+    pub auth_providers: Arc<Vec<Arc<dyn AuthProvider>>>,
 }

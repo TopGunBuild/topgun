@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::network::handlers::auth_provider::AuthProviderConfig;
+
 /// Top-level network configuration for the server.
 #[derive(Debug, Clone)]
 pub struct NetworkConfig {
@@ -39,6 +41,12 @@ pub struct NetworkConfig {
     /// `rate_limit_burst` requests in a short window before throttling.
     /// Defaults to 50.
     pub rate_limit_burst: u32,
+    /// External auth providers for token exchange at POST /api/auth/token.
+    /// An empty list disables the endpoint (returns 404 on all requests).
+    /// Constructed programmatically from environment variables or config in
+    /// `module.rs`; the Serialize/Deserialize derives on `AuthProviderConfig`
+    /// are included for future config-file support.
+    pub auth_providers: Vec<AuthProviderConfig>,
 }
 
 impl Default for NetworkConfig {
@@ -56,6 +64,7 @@ impl Default for NetworkConfig {
             jwt_clock_skew_secs: 60,
             rate_limit_per_ip: 100,
             rate_limit_burst: 50,
+            auth_providers: vec![],
         }
     }
 }
