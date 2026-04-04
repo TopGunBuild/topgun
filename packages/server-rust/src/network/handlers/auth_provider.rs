@@ -4,6 +4,7 @@
 //! `OidcProvider`, `HmacProvider`) for verifying external tokens and extracting
 //! claims that can be mapped to TopGun's internal subject + roles format.
 
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -192,20 +193,14 @@ impl AuthProvider for HmacProvider {
         let key = DecodingKey::from_secret(self.secret.as_bytes());
         let mut validation = Validation::new(Algorithm::HS256);
 
+        // Skip issuer validation when no issuer is configured; still verify
+        // signature and expiry. `iss` defaults to None in Validation, which
+        // means no issuer check unless explicitly set.
         if let Some(iss) = &self.issuer {
             validation.set_issuer(&[iss.as_str()]);
-        } else {
-            validation.insecure_disable_signature_checking();
-            validation.set_issuer::<String>(&[]);
-            // Re-enable signature checking — only disable issuer validation
-            let key2 = DecodingKey::from_secret(self.secret.as_bytes());
-            let mut v2 = Validation::new(Algorithm::HS256);
-            v2.validate_aud = false;
-            let data = decode::<Value>(token, &key2, &v2)
-                .map_err(|e| format!("HMAC verification failed: {}", e))?;
-            return extract_claims(&data.claims, &self.claims);
         }
 
+        // Audience is not part of the TopGun HMAC token contract for v1.
         validation.validate_aud = false;
 
         let data = decode::<Value>(token, &key, &validation)
@@ -276,19 +271,20 @@ impl JwksProvider {
         }
 
         // Slow path: fetch from network
-        let fetch_result = self
-            .client
-            .get(&self.jwks_url)
-            .send()
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|r| {
-                if r.status().is_success() {
-                    Ok(r)
-                } else {
-                    Err(format!("JWKS fetch returned status {}", r.status()))
-                }
-            });
+        let fetch_result: Result<reqwest::Response, String> = async {
+            let resp = self
+                .client
+                .get(&self.jwks_url)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            if resp.status().is_success() {
+                Ok(resp)
+            } else {
+                Err(format!("JWKS fetch returned status {}", resp.status()))
+            }
+        }
+        .await;
 
         match fetch_result {
             Ok(resp) => {
@@ -349,23 +345,19 @@ impl AuthProvider for JwksProvider {
             }
         };
 
-        let alg = jwk
+        let key_alg = jwk
             .common
-            .algorithm
+            .key_algorithm
             .ok_or("JWK missing 'alg' field")?;
+        let alg = Algorithm::from_str(&key_alg.to_string())
+            .map_err(|e| format!("unsupported JWK algorithm: {}", e))?;
 
         let mut validation = Validation::new(alg);
 
         if let Some(iss) = &self.issuer {
             validation.set_issuer(&[iss.as_str()]);
-        } else {
-            validation.insecure_disable_signature_checking();
-            let mut v2 = Validation::new(alg);
-            v2.validate_aud = false;
-            let data = decode::<Value>(token, &decoding_key, &v2)
-                .map_err(|e| format!("JWKS token verification failed: {}", e))?;
-            return extract_claims(&data.claims, &self.claims);
         }
+        // No issuer configured means no issuer validation (iss defaults to None).
 
         if let Some(aud) = &self.audience {
             validation.set_audience(&[aud.as_str()]);
@@ -470,46 +462,6 @@ impl OidcProvider {
         Ok(jwks_uri)
     }
 
-    /// Get or lazily initialize the inner `JwksProvider` from the discovered JWKS URI.
-    async fn get_jwks_provider(&self) -> Result<Arc<JwksProvider>, String> {
-        {
-            let guard = self.jwks_provider.read().await;
-            if let Some(ref p) = *guard {
-                // Check if discovery cache is still valid; if so reuse existing provider
-                let dc = self.discovery_cache.read().await;
-                if let Some(cached) = dc.as_ref() {
-                    if cached.fetched_at.elapsed() < OIDC_DISCOVERY_CACHE_TTL {
-                        // We can't return a reference out of the guard, so we'll
-                        // reconstruct with the cached URI below.
-                        let _ = p;
-                    }
-                }
-            }
-        }
-
-        // Always re-check URI (handles re-discovery after cache expiry)
-        let jwks_uri = self.get_jwks_uri().await?;
-
-        let mut guard = self.jwks_provider.write().await;
-        // Rebuild only if URI changed or not yet initialized
-        let needs_rebuild = guard
-            .as_ref()
-            .map(|p| p.jwks_url != jwks_uri)
-            .unwrap_or(true);
-
-        if needs_rebuild {
-            *guard = Some(JwksProvider::new(
-                self.provider_name.clone(),
-                jwks_uri,
-                Some(self.issuer_url.clone()),
-                self.audience.clone(),
-                self.claims.clone(),
-                self.client.clone(),
-            ));
-        }
-
-        Ok(Arc::new(guard.take().expect("just set")))
-    }
 }
 
 #[async_trait]
@@ -681,7 +633,8 @@ mod tests {
 
     #[tokio::test]
     async fn hmac_provider_expired_token_fails() {
-        let exp = jsonwebtoken::get_current_timestamp() - 10; // already expired
+        // Expire far enough in the past to exceed the default 60-second leeway.
+        let exp = jsonwebtoken::get_current_timestamp() - 120;
         let token = make_hmac_token("secret", json!({ "sub": "u", "exp": exp }), Algorithm::HS256);
 
         let provider = HmacProvider::new(
