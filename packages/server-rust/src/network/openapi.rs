@@ -10,13 +10,34 @@
 
 use axum::response::IntoResponse;
 use axum::Json;
-use utoipa::OpenApi;
+use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+use utoipa::{Modify, OpenApi};
 
+use super::handlers::admin;
 use super::handlers::admin_types::{
-    ClusterStatusResponse, ErrorResponse, LoginRequest, LoginResponse, MapInfo, MapsListResponse,
-    NodeInfo, NodeStatus, PartitionInfo, ServerMode, ServerStatusResponse, SettingsResponse,
-    SettingsUpdateRequest,
+    ClusterStatusResponse, CreatePolicyRequest, ErrorResponse, LoginRequest, LoginResponse, MapInfo,
+    MapsListResponse, NodeInfo, NodeStatus, PartitionInfo, PolicyListResponse, PolicyResponse,
+    ServerMode, ServerStatusResponse, SettingsResponse, SettingsUpdateRequest,
 };
+use crate::service::policy::{PermissionAction, PermissionPolicy, PolicyEffect};
+
+/// Adds the `bearer_auth` HTTP security scheme to the OpenAPI spec.
+struct BearerAuthAddon;
+
+impl Modify for BearerAuthAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme(
+            "bearer_auth",
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .bearer_format("JWT")
+                    .build(),
+            ),
+        );
+    }
+}
 
 /// Aggregated `OpenAPI` spec for all admin endpoints.
 #[derive(OpenApi)]
@@ -28,6 +49,15 @@ use super::handlers::admin_types::{
     ),
     paths(
         openapi_json,
+        admin::server_status,
+        admin::login,
+        admin::cluster_status,
+        admin::list_maps,
+        admin::get_settings,
+        admin::update_settings,
+        admin::list_policies,
+        admin::create_policy,
+        admin::delete_policy,
     ),
     components(schemas(
         ServerStatusResponse,
@@ -43,7 +73,14 @@ use super::handlers::admin_types::{
         LoginRequest,
         LoginResponse,
         ErrorResponse,
-    ))
+        PermissionAction,
+        PolicyEffect,
+        PermissionPolicy,
+        CreatePolicyRequest,
+        PolicyListResponse,
+        PolicyResponse,
+    )),
+    modifiers(&BearerAuthAddon)
 )]
 pub struct AdminApiDoc;
 
