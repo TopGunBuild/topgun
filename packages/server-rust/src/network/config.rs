@@ -32,6 +32,13 @@ pub struct NetworkConfig {
     /// Tokens expired within this window are still accepted to handle clock
     /// drift between clients and the server. Defaults to 60 seconds.
     pub jwt_clock_skew_secs: u64,
+    /// Maximum sustained requests per second per IP address for rate-limited
+    /// endpoints (admin API and login). Defaults to 100.
+    pub rate_limit_per_ip: u32,
+    /// Burst allowance above the sustained rate. The governor allows up to
+    /// `rate_limit_burst` requests in a short window before throttling.
+    /// Defaults to 50.
+    pub rate_limit_burst: u32,
 }
 
 impl Default for NetworkConfig {
@@ -47,6 +54,8 @@ impl Default for NetworkConfig {
             max_body_size: 2 * 1024 * 1024, // 2 MB
             request_timeout: Duration::from_secs(30),
             jwt_clock_skew_secs: 60,
+            rate_limit_per_ip: 100,
+            rate_limit_burst: 50,
         }
     }
 }
@@ -109,6 +118,8 @@ mod tests {
         assert_eq!(config.max_body_size, 2 * 1024 * 1024);
         assert_eq!(config.request_timeout, Duration::from_secs(30));
         assert_eq!(config.jwt_clock_skew_secs, 60);
+        assert_eq!(config.rate_limit_per_ip, 100);
+        assert_eq!(config.rate_limit_burst, 50);
     }
 
     #[test]
