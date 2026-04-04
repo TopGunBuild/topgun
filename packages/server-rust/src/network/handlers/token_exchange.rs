@@ -1,7 +1,7 @@
 //! Token exchange handler for POST /api/auth/token.
 //!
 //! Accepts an external provider's JWT, verifies it via the configured
-//! `AuthProvider` implementations, and returns a signed TopGun JWT.
+//! [`AuthProvider`] implementations, and returns a signed `TopGun` JWT.
 //! This eliminates the need for a custom bridge server when integrating
 //! external auth providers (Clerk, Auth0, Firebase, etc.).
 
@@ -34,7 +34,7 @@ pub struct TokenExchangeRequest {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenExchangeResponse {
-    /// The issued TopGun JWT.
+    /// The issued `TopGun` JWT.
     pub token: String,
     /// Token expiry as seconds since Unix epoch.
     pub expires_at: u64,
@@ -44,7 +44,7 @@ pub struct TokenExchangeResponse {
 
 /// JWT claims for token exchange signing.
 ///
-/// Mirrors AdminJwtClaims but includes `iat` and is local to this handler.
+/// Mirrors `AdminJwtClaims` but includes `iat` and is local to this handler.
 #[derive(Serialize)]
 struct ExchangeJwtClaims {
     sub: String,
@@ -55,11 +55,20 @@ struct ExchangeJwtClaims {
 
 // ── Handler ───────────────────────────────────────────────────────────────────
 
-/// Exchange an external provider token for a TopGun JWT.
+/// Exchange an external provider token for a `TopGun` JWT.
 ///
 /// If `provider` is specified, only that provider is tried. If omitted, every
 /// configured provider is tried in order and the first successful verification
 /// wins. Returns 404 when no providers are configured.
+///
+/// # Errors
+///
+/// Returns an error tuple of `(StatusCode, Json<ErrorResponse>)` when:
+/// - No auth providers are configured (404)
+/// - JWT secret is missing (500)
+/// - Named provider not found (400)
+/// - All providers fail verification (401)
+/// - Token signing fails (500)
 pub async fn token_exchange_handler(
     State(state): State<AppState>,
     Json(req): Json<TokenExchangeRequest>,
@@ -101,7 +110,7 @@ pub async fn token_exchange_handler(
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
                     code: 400,
-                    message: format!("unknown provider '{}'", name),
+                    message: format!("unknown provider '{name}'"),
                     field: Some("provider".to_string()),
                 }),
             ));
@@ -140,7 +149,7 @@ pub async fn token_exchange_handler(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(ErrorResponse {
                             code: 500,
-                            message: format!("token signing failed: {}", e),
+                            message: format!("token signing failed: {e}"),
                             field: None,
                         }),
                     )
@@ -162,7 +171,7 @@ pub async fn token_exchange_handler(
         StatusCode::UNAUTHORIZED,
         Json(ErrorResponse {
             code: 401,
-            message: format!("token verification failed: {}", last_error),
+            message: format!("token verification failed: {last_error}"),
             field: None,
         }),
     ))

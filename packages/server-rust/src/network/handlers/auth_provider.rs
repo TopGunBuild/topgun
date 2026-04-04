@@ -2,7 +2,7 @@
 //!
 //! Defines the `AuthProvider` trait and its implementations (`JwksProvider`,
 //! `OidcProvider`, `HmacProvider`) for verifying external tokens and extracting
-//! claims that can be mapped to TopGun's internal subject + roles format.
+//! claims that can be mapped to `TopGun`'s internal subject + roles format.
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -26,16 +26,16 @@ const OIDC_DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(86400);
 
 // ── Claim mapping ─────────────────────────────────────────────────────────────
 
-/// Which external claims map to TopGun's `sub` and `roles`.
+/// Which external claims map to `TopGun`'s `sub` and `roles`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaimMapping {
-    /// JSON key to read the subject claim from (e.g., "sub", "email", "user_id").
+    /// JSON key to read the subject claim from (e.g., "sub", "email", "`user_id`").
     /// Falls back to "sub" when empty.
     #[serde(default)]
     pub sub_claim: String,
     /// JSON key to read the roles claim from.
-    /// If absent, the issued TopGun JWT has empty roles.
+    /// If absent, the issued `TopGun` JWT has empty roles.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub roles_claim: Option<String>,
 }
@@ -75,7 +75,7 @@ pub enum AuthProviderConfig {
     Oidc {
         /// Human-readable name for error messages.
         name: String,
-        /// Base URL of the OIDC provider (e.g., "https://accounts.google.com").
+        /// Base URL of the OIDC provider (e.g., `https://accounts.google.com`).
         /// The server appends `/.well-known/openid-configuration` to this URL.
         issuer_url: String,
         /// Expected audience (`aud` claim). Tokens without this audience are rejected.
@@ -113,7 +113,7 @@ pub struct ExternalClaims {
 
 // ── AuthProvider trait ────────────────────────────────────────────────────────
 
-/// Verifies an external token and extracts claims for TopGun JWT issuance.
+/// Verifies an external token and extracts claims for `TopGun` JWT issuance.
 #[async_trait]
 pub trait AuthProvider: Send + Sync {
     /// Provider name used in error messages and logging.
@@ -142,16 +142,15 @@ pub(crate) fn extract_claims(payload: &Value, mapping: &ClaimMapping) -> Result<
     let sub = payload
         .get(sub_key)
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| format!("claim '{}' not found or not a string", sub_key))?;
+        .map(ToString::to_string)
+        .ok_or_else(|| format!("claim '{sub_key}' not found or not a string"))?;
 
     let roles = match &mapping.roles_claim {
         None => vec![],
         Some(roles_key) => match payload.get(roles_key.as_str()) {
-            None => vec![],
             Some(Value::Array(arr)) => arr
                 .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .filter_map(|v| v.as_str().map(ToString::to_string))
                 .collect(),
             Some(Value::String(s)) => vec![s.clone()],
             _ => vec![],
@@ -173,6 +172,7 @@ pub struct HmacProvider {
 
 impl HmacProvider {
     /// Construct a new `HmacProvider` from its config.
+    #[must_use]
     pub fn new(name: String, secret: String, issuer: Option<String>, claims: ClaimMapping) -> Self {
         Self {
             provider_name: name,
@@ -204,7 +204,7 @@ impl AuthProvider for HmacProvider {
         validation.validate_aud = false;
 
         let data = decode::<Value>(token, &key, &validation)
-            .map_err(|e| format!("HMAC verification failed: {}", e))?;
+            .map_err(|e| format!("HMAC verification failed: {e}"))?;
 
         extract_claims(&data.claims, &self.claims)
     }
@@ -236,6 +236,7 @@ pub struct JwksProvider {
 
 impl JwksProvider {
     /// Construct a new `JwksProvider` with a shared HTTP client.
+    #[must_use]
     pub fn new(
         name: String,
         jwks_url: String,
@@ -291,7 +292,7 @@ impl JwksProvider {
                 let jwk_set: JwkSet = resp
                     .json()
                     .await
-                    .map_err(|e| format!("JWKS parse error: {}", e))?;
+                    .map_err(|e| format!("JWKS parse error: {e}"))?;
                 let mut guard = self.cache.write().await;
                 *guard = Some(CachedJwks {
                     jwk_set: jwk_set.clone(),
@@ -310,7 +311,7 @@ impl JwksProvider {
                     );
                     Ok(cached.jwk_set.clone())
                 } else {
-                    Err(format!("JWKS fetch failed and no cache available: {}", e))
+                    Err(format!("JWKS fetch failed and no cache available: {e}"))
                 }
             }
         }
@@ -324,21 +325,21 @@ impl AuthProvider for JwksProvider {
     }
 
     async fn verify(&self, token: &str) -> Result<ExternalClaims, String> {
-        let header = decode_header(token).map_err(|e| format!("invalid token header: {}", e))?;
+        let header = decode_header(token).map_err(|e| format!("invalid token header: {e}"))?;
         let kid = header.kid.ok_or("token header missing 'kid'")?;
 
         let jwk_set = self.get_jwks().await?;
 
         let jwk = jwk_set
             .find(&kid)
-            .ok_or_else(|| format!("no JWK found for kid '{}'", kid))?;
+            .ok_or_else(|| format!("no JWK found for kid '{kid}'"))?;
 
         let decoding_key = match &jwk.algorithm {
             AlgorithmParameters::RSA(rsa) => DecodingKey::from_rsa_components(&rsa.n, &rsa.e)
-                .map_err(|e| format!("invalid RSA key: {}", e))?,
+                .map_err(|e| format!("invalid RSA key: {e}"))?,
             AlgorithmParameters::EllipticCurve(ec) => {
                 DecodingKey::from_ec_components(&ec.x, &ec.y)
-                    .map_err(|e| format!("invalid EC key: {}", e))?
+                    .map_err(|e| format!("invalid EC key: {e}"))?
             }
             AlgorithmParameters::OctetKeyPair(_) | AlgorithmParameters::OctetKey(_) => {
                 return Err("unsupported JWK algorithm type".to_string());
@@ -350,7 +351,7 @@ impl AuthProvider for JwksProvider {
             .key_algorithm
             .ok_or("JWK missing 'alg' field")?;
         let alg = Algorithm::from_str(&key_alg.to_string())
-            .map_err(|e| format!("unsupported JWK algorithm: {}", e))?;
+            .map_err(|e| format!("unsupported JWK algorithm: {e}"))?;
 
         let mut validation = Validation::new(alg);
 
@@ -366,7 +367,7 @@ impl AuthProvider for JwksProvider {
         }
 
         let data = decode::<Value>(token, &decoding_key, &validation)
-            .map_err(|e| format!("JWKS token verification failed: {}", e))?;
+            .map_err(|e| format!("JWKS token verification failed: {e}"))?;
 
         extract_claims(&data.claims, &self.claims)
     }
@@ -399,12 +400,14 @@ pub struct OidcProvider {
     claims: ClaimMapping,
     client: Client,
     discovery_cache: Arc<RwLock<Option<CachedDiscovery>>>,
-    // Lazily initialized after discovery
-    jwks_provider: Arc<RwLock<Option<JwksProvider>>>,
+    // Lazily initialized after discovery; wrapped in Arc so concurrent
+    // callers can clone a handle without moving the provider out of the lock.
+    jwks_provider: Arc<RwLock<Option<Arc<JwksProvider>>>>,
 }
 
 impl OidcProvider {
     /// Construct a new `OidcProvider` with a shared HTTP client.
+    #[must_use]
     pub fn new(
         name: String,
         issuer_url: String,
@@ -446,10 +449,10 @@ impl OidcProvider {
             .get(&discovery_url)
             .send()
             .await
-            .map_err(|e| format!("OIDC discovery fetch failed: {}", e))?
+            .map_err(|e| format!("OIDC discovery fetch failed: {e}"))?
             .json()
             .await
-            .map_err(|e| format!("OIDC discovery parse error: {}", e))?;
+            .map_err(|e| format!("OIDC discovery parse error: {e}"))?;
 
         let jwks_uri = discovery.jwks_uri.clone();
 
@@ -461,7 +464,6 @@ impl OidcProvider {
 
         Ok(jwks_uri)
     }
-
 }
 
 #[async_trait]
@@ -473,40 +475,37 @@ impl AuthProvider for OidcProvider {
     async fn verify(&self, token: &str) -> Result<ExternalClaims, String> {
         let jwks_uri = self.get_jwks_uri().await?;
 
-        // Use cached JwksProvider or rebuild if JWKS URI changed
+        // Clone the Arc handle so we can release the lock before calling verify.
+        // This allows concurrent callers to proceed without seeing None.
         let provider = {
-            let mut guard = self.jwks_provider.write().await;
-            let needs_rebuild = guard
-                .as_ref()
-                .map(|p| p.jwks_url != jwks_uri)
-                .unwrap_or(true);
+            let needs_rebuild = {
+                let guard = self.jwks_provider.read().await;
+                guard.as_ref().is_none_or(|p| p.jwks_url != jwks_uri)
+            };
 
             if needs_rebuild {
-                *guard = Some(JwksProvider::new(
-                    self.provider_name.clone(),
-                    jwks_uri,
-                    Some(self.issuer_url.clone()),
-                    self.audience.clone(),
-                    self.claims.clone(),
-                    self.client.clone(),
-                ));
+                let mut guard = self.jwks_provider.write().await;
+                // Double-check after acquiring write lock
+                if guard.as_ref().is_none_or(|p| p.jwks_url != jwks_uri) {
+                    *guard = Some(Arc::new(JwksProvider::new(
+                        self.provider_name.clone(),
+                        jwks_uri,
+                        Some(self.issuer_url.clone()),
+                        self.audience.clone(),
+                        self.claims.clone(),
+                        self.client.clone(),
+                    )));
+                }
+                guard.clone()
+            } else {
+                self.jwks_provider.read().await.clone()
             }
-
-            // We need to verify using the JwksProvider, but we can't return a ref
-            // from behind the lock — extract what we need instead
-            guard.take()
         };
 
-        let result = if let Some(p) = provider {
-            let r = p.verify(token).await;
-            // Put the provider back
-            *self.jwks_provider.write().await = Some(p);
-            r
-        } else {
-            Err("failed to initialize JWKS provider".to_string())
-        };
-
-        result
+        match provider {
+            Some(p) => p.verify(token).await,
+            None => Err("failed to initialize JWKS provider".to_string()),
+        }
     }
 }
 

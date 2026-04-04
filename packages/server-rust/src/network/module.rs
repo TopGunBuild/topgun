@@ -245,6 +245,7 @@ struct AppServices {
 ///
 /// Takes ownership of `config` to avoid an extra clone: `build_http_layers`
 /// borrows it first, then it is moved into `Arc` for the `AppState`.
+#[allow(clippy::too_many_lines)]
 fn build_app(
     config: NetworkConfig,
     registry: Arc<ConnectionRegistry>,
