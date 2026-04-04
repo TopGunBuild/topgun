@@ -53,6 +53,7 @@ subtle = "2"
 utoipa = { version = "5", features = ["axum_extras"] }
 utoipa-axum = "0.2"
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
+tower_governor = "0.6"
 
 [[bin]]
 name = "test-server"
