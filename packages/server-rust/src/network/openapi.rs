@@ -21,7 +21,7 @@ use super::handlers::admin_types::{
 };
 use crate::service::policy::{PermissionAction, PermissionPolicy, PolicyEffect};
 
-/// Adds the `bearer_auth` HTTP security scheme to the OpenAPI spec.
+/// Adds the `bearer_auth` HTTP security scheme to the `OpenAPI` spec.
 struct BearerAuthAddon;
 
 impl Modify for BearerAuthAddon {
