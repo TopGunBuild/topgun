@@ -65,6 +65,7 @@ impl ObservabilityHandle {
     /// `None` when `init_observability` was called more than once and this
     /// instance was returned from a subsequent call (the subscriber was already
     /// installed by the first call).
+    #[must_use]
     pub fn log_level_handle(&self) -> Option<&LogLevelHandle> {
         self.log_level_handle.as_ref()
     }
@@ -73,10 +74,11 @@ impl ObservabilityHandle {
     ///
     /// Uses the reload handle's `with_current` method to read the live filter
     /// without taking ownership.
+    #[must_use]
     pub fn current_log_level(&self) -> Option<String> {
-        self.log_level_handle.as_ref().and_then(|h| {
-            h.with_current(|f| f.to_string()).ok()
-        })
+        self.log_level_handle
+            .as_ref()
+            .and_then(|h| h.with_current(ToString::to_string).ok())
     }
 }
 
