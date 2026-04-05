@@ -135,7 +135,11 @@ fn collect_candidates(
         | PredicateOp::In
         | PredicateOp::Between
         | PredicateOp::IsNull
-        | PredicateOp::IsNotNull => full_scan_keys(all_keys),
+        | PredicateOp::IsNotNull
+        | PredicateOp::ContainsAll
+        | PredicateOp::ContainsAny
+        | PredicateOp::StartsWith
+        | PredicateOp::EndsWith => full_scan_keys(all_keys),
 
         // ---- And: intersect indexed children; full-scan the rest ------------
         PredicateOp::And => candidates_for_and(registry, predicate, all_keys),

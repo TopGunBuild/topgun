@@ -11,7 +11,9 @@
 //! and_expr    = unary_expr ( "&&" unary_expr )*
 //! unary_expr  = "!" unary_expr | primary
 //! primary     = "(" expr ")" | comparison
-//! comparison  = field_ref ( cmp_op value_or_ref | "in" field_ref )
+//! comparison  = field_ref ( cmp_op value_or_ref | "in" field_ref | "contains" value_or_ref
+//!             | "containsAll" value_or_ref | "containsAny" value_or_ref
+//!             | "startsWith" value_or_ref | "endsWith" value_or_ref )
 //! cmp_op      = "==" | "!=" | ">" | "<" | ">=" | "<="
 //! field_ref   = IDENT ( "." IDENT )*
 //! value_or_ref = field_ref | STRING | NUMBER | BOOLEAN
@@ -97,6 +99,14 @@ pub(crate) enum Token {
     In,
     /// `contains`
     Contains,
+    /// `containsAll`
+    ContainsAll,
+    /// `containsAny`
+    ContainsAny,
+    /// `startsWith`
+    StartsWith,
+    /// `endsWith`
+    EndsWith,
     /// `(`
     LParen,
     /// `)`
@@ -289,14 +299,17 @@ impl<'a> Lexer<'a> {
                 }
                 let first = self.input[seg_start..self.pos].to_string();
 
-                // Check if this is the keyword `in`.
-                if first == "in" {
-                    return Ok((start, Token::In));
-                }
-
-                // Check if this is the keyword `contains`.
-                if first == "contains" {
-                    return Ok((start, Token::Contains));
+                // Check for operator keywords before dot-path collection.
+                // The full identifier word is read before matching, so longer keywords
+                // like "containsAll" cannot be confused with "contains".
+                match first.as_str() {
+                    "in" => return Ok((start, Token::In)),
+                    "containsAll" => return Ok((start, Token::ContainsAll)),
+                    "containsAny" => return Ok((start, Token::ContainsAny)),
+                    "contains" => return Ok((start, Token::Contains)),
+                    "startsWith" => return Ok((start, Token::StartsWith)),
+                    "endsWith" => return Ok((start, Token::EndsWith)),
+                    _ => {}
                 }
 
                 // Check if followed by a dot — if so, collect a dotted field_ref.
@@ -515,6 +528,26 @@ impl<'a> Parser<'a> {
                 let rhs = self.parse_value_or_ref(lhs_pos)?;
                 build_contains_node(&lhs_segments, rhs, lhs_pos, self.input)
             }
+            Token::ContainsAll => {
+                self.advance()?;
+                let rhs = self.parse_value_or_ref(lhs_pos)?;
+                build_data_lhs_node(PredicateOp::ContainsAll, &lhs_segments, rhs, lhs_pos, self.input)
+            }
+            Token::ContainsAny => {
+                self.advance()?;
+                let rhs = self.parse_value_or_ref(lhs_pos)?;
+                build_data_lhs_node(PredicateOp::ContainsAny, &lhs_segments, rhs, lhs_pos, self.input)
+            }
+            Token::StartsWith => {
+                self.advance()?;
+                let rhs = self.parse_value_or_ref(lhs_pos)?;
+                build_data_lhs_node(PredicateOp::StartsWith, &lhs_segments, rhs, lhs_pos, self.input)
+            }
+            Token::EndsWith => {
+                self.advance()?;
+                let rhs = self.parse_value_or_ref(lhs_pos)?;
+                build_data_lhs_node(PredicateOp::EndsWith, &lhs_segments, rhs, lhs_pos, self.input)
+            }
             Token::Eq
             | Token::Neq
             | Token::Gt
@@ -532,7 +565,7 @@ impl<'a> Parser<'a> {
                 // A bare field_ref without a comparison operator is a parse error.
                 Err(self.error_at(
                     pos,
-                    "expected comparison operator (==, !=, >, >=, <, <=), 'in', or 'contains'",
+                    "expected comparison operator (==, !=, >, >=, <, <=), 'in', 'contains', 'containsAll', 'containsAny', 'startsWith', or 'endsWith'",
                 ))
             }
         }
@@ -894,6 +927,88 @@ fn build_contains_node(
             children: None,
         },
         // null on the right side of `contains` is not meaningful; produce an always-false leaf.
+        RhsValue::Null => PredicateNode {
+            op: PredicateOp::Eq,
+            attribute: None,
+            value: None,
+            value_ref: None,
+            children: None,
+        },
+    };
+
+    Ok(node)
+}
+
+/// Builds a `PredicateNode` for operators that require `data.*` on the left-hand side.
+///
+/// Used by `containsAll`, `containsAny`, `startsWith`, and `endsWith`. Validates that
+/// the LHS is a `data.*` field reference and strips the `data.` prefix from `attribute`.
+/// Returns a `ParseError` if the LHS does not start with `data.`.
+fn build_data_lhs_node(
+    op: PredicateOp,
+    lhs: &[String],
+    rhs: RhsValue,
+    lhs_pos: usize,
+    input: &str,
+) -> Result<PredicateNode, ParseError> {
+    let lhs_is_data = lhs.first().is_some_and(|s| s == "data");
+
+    if !lhs_is_data {
+        return Err(ParseError {
+            message: format!(
+                "left side of '{}' must be a data.* field reference",
+                match op {
+                    PredicateOp::ContainsAll => "containsAll",
+                    PredicateOp::ContainsAny => "containsAny",
+                    PredicateOp::StartsWith => "startsWith",
+                    PredicateOp::EndsWith => "endsWith",
+                    _ => "operator",
+                }
+            ),
+            position: lhs_pos,
+            snippet: make_snippet(input, lhs_pos),
+        });
+    }
+
+    let attribute = lhs[1..].join(".");
+
+    let node = match rhs {
+        RhsValue::FieldRef(segs) => PredicateNode {
+            op,
+            attribute: Some(attribute),
+            value: None,
+            value_ref: Some(segs.join(".")),
+            children: None,
+        },
+        RhsValue::Str(s) => PredicateNode {
+            op,
+            attribute: Some(attribute),
+            value: Some(rmpv::Value::String(s.into())),
+            value_ref: None,
+            children: None,
+        },
+        RhsValue::Int(n) => PredicateNode {
+            op,
+            attribute: Some(attribute),
+            value: Some(rmpv::Value::Integer(n.into())),
+            value_ref: None,
+            children: None,
+        },
+        RhsValue::Float(f) => PredicateNode {
+            op,
+            attribute: Some(attribute),
+            value: Some(rmpv::Value::F64(f)),
+            value_ref: None,
+            children: None,
+        },
+        RhsValue::Bool(b) => PredicateNode {
+            op,
+            attribute: Some(attribute),
+            value: Some(rmpv::Value::Boolean(b)),
+            value_ref: None,
+            children: None,
+        },
+        // null on the right side is not meaningful; produce an always-false leaf.
         RhsValue::Null => PredicateNode {
             op: PredicateOp::Eq,
             attribute: None,
@@ -1557,5 +1672,158 @@ mod tests {
             "unexpected error message: {}",
             err.message
         );
+    }
+
+    // ---- containsAll parser tests ----
+
+    #[test]
+    fn contains_all_field_ref_rhs() {
+        // AC1: data.tags containsAll auth.requiredTags
+        let node = parsed("data.tags containsAll auth.requiredTags");
+        assert_eq!(node.op, PredicateOp::ContainsAll);
+        assert_eq!(node.attribute, Some("tags".to_string()));
+        assert_eq!(node.value_ref, Some("auth.requiredTags".to_string()));
+        assert!(node.value.is_none());
+        assert!(node.children.is_none());
+    }
+
+    #[test]
+    fn contains_all_string_literal_rhs() {
+        // data.tags containsAll 'admin' -> scalar literal RHS
+        let node = parsed("data.tags containsAll 'admin'");
+        assert_eq!(node.op, PredicateOp::ContainsAll);
+        assert_eq!(node.attribute, Some("tags".to_string()));
+        assert_eq!(node.value, Some(rmpv::Value::String("admin".into())));
+        assert!(node.value_ref.is_none());
+    }
+
+    #[test]
+    fn contains_all_non_data_lhs_is_error() {
+        // AC12: auth.roles containsAll auth.x -> parse error
+        let err = parse_err("auth.roles containsAll auth.x");
+        assert!(
+            err.message.contains("left side of 'containsAll' must be a data.*"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // ---- containsAny parser tests ----
+
+    #[test]
+    fn contains_any_field_ref_rhs() {
+        // AC2: data.roles containsAny auth.allowedRoles
+        let node = parsed("data.roles containsAny auth.allowedRoles");
+        assert_eq!(node.op, PredicateOp::ContainsAny);
+        assert_eq!(node.attribute, Some("roles".to_string()));
+        assert_eq!(node.value_ref, Some("auth.allowedRoles".to_string()));
+        assert!(node.value.is_none());
+    }
+
+    #[test]
+    fn contains_any_non_data_lhs_is_error() {
+        let err = parse_err("auth.roles containsAny auth.x");
+        assert!(
+            err.message.contains("left side of 'containsAny' must be a data.*"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // ---- startsWith parser tests ----
+
+    #[test]
+    fn starts_with_string_literal() {
+        // AC3: data.path startsWith '/public'
+        let node = parsed("data.path startsWith '/public'");
+        assert_eq!(node.op, PredicateOp::StartsWith);
+        assert_eq!(node.attribute, Some("path".to_string()));
+        assert_eq!(node.value, Some(rmpv::Value::String("/public".into())));
+        assert!(node.value_ref.is_none());
+    }
+
+    #[test]
+    fn starts_with_field_ref_rhs() {
+        // data.path startsWith auth.pathPrefix -> value_ref
+        let node = parsed("data.path startsWith auth.pathPrefix");
+        assert_eq!(node.op, PredicateOp::StartsWith);
+        assert_eq!(node.attribute, Some("path".to_string()));
+        assert_eq!(node.value_ref, Some("auth.pathPrefix".to_string()));
+        assert!(node.value.is_none());
+    }
+
+    #[test]
+    fn starts_with_non_data_lhs_is_error() {
+        let err = parse_err("auth.path startsWith '/public'");
+        assert!(
+            err.message.contains("left side of 'startsWith' must be a data.*"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // ---- endsWith parser tests ----
+
+    #[test]
+    fn ends_with_string_literal() {
+        // AC4: data.email endsWith '@company.com'
+        let node = parsed("data.email endsWith '@company.com'");
+        assert_eq!(node.op, PredicateOp::EndsWith);
+        assert_eq!(node.attribute, Some("email".to_string()));
+        assert_eq!(node.value, Some(rmpv::Value::String("@company.com".into())));
+        assert!(node.value_ref.is_none());
+    }
+
+    #[test]
+    fn ends_with_non_data_lhs_is_error() {
+        let err = parse_err("auth.email endsWith '@company.com'");
+        assert!(
+            err.message.contains("left side of 'endsWith' must be a data.*"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // ---- keyword disambiguation: "contains" vs "containsAll"/"containsAny" ----
+
+    #[test]
+    fn contains_keyword_unchanged_after_new_keywords() {
+        // Existing "contains" keyword must still work correctly (AC13)
+        let node = parsed("data.tags contains 'vip'");
+        assert_eq!(node.op, PredicateOp::In);
+        assert_eq!(node.attribute, Some("tags".to_string()));
+        assert_eq!(node.value, Some(rmpv::Value::String("vip".into())));
+    }
+
+    // ---- updated catch-all error message ----
+
+    #[test]
+    fn catch_all_error_includes_new_keywords() {
+        let err = parse_err("data.x");
+        assert!(
+            err.message.contains("containsAll"),
+            "error message should mention 'containsAll': {err}"
+        );
+        assert!(
+            err.message.contains("startsWith"),
+            "error message should mention 'startsWith': {err}"
+        );
+    }
+
+    // ---- new operators in compound expressions ----
+
+    #[test]
+    fn contains_all_and_starts_with_compound() {
+        // AC11 parser side: data.tags containsAll auth.required && data.path startsWith '/api'
+        let node = parsed("data.tags containsAll auth.required && data.path startsWith '/api'");
+        assert_eq!(node.op, PredicateOp::And);
+        let children = node.children.as_ref().unwrap();
+        assert_eq!(children.len(), 2);
+
+        let ca_node = &children[0];
+        assert_eq!(ca_node.op, PredicateOp::ContainsAll);
+        assert_eq!(ca_node.attribute, Some("tags".to_string()));
+        assert_eq!(ca_node.value_ref, Some("auth.required".to_string()));
+
+        let sw_node = &children[1];
+        assert_eq!(sw_node.op, PredicateOp::StartsWith);
+        assert_eq!(sw_node.attribute, Some("path".to_string()));
+        assert_eq!(sw_node.value, Some(rmpv::Value::String("/api".into())));
     }
 }

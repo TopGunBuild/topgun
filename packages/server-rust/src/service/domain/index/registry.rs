@@ -103,7 +103,11 @@ impl IndexRegistry {
             | PredicateOp::In
             | PredicateOp::Between
             | PredicateOp::IsNull
-            | PredicateOp::IsNotNull => {
+            | PredicateOp::IsNotNull
+            | PredicateOp::ContainsAll
+            | PredicateOp::ContainsAny
+            | PredicateOp::StartsWith
+            | PredicateOp::EndsWith => {
                 return None;
             }
             PredicateOp::Eq | PredicateOp::Neq => IndexType::Hash,
