@@ -450,6 +450,33 @@ fn json_type_tag(v: &serde_json::Value) -> &'static str {
     }
 }
 
+/// Converts an `rmpv::Value` to a `serde_json::Value` for cursor serialization.
+///
+/// Only primitive types (nil, bool, integer, float, string) are converted; complex
+/// types (map, array, binary, ext) return None as they are not sortable.
+fn rmpv_to_json_value(v: &rmpv::Value) -> Option<serde_json::Value> {
+    match v {
+        rmpv::Value::Nil => Some(serde_json::Value::Null),
+        rmpv::Value::Boolean(b) => Some(serde_json::Value::Bool(*b)),
+        rmpv::Value::Integer(i) => {
+            if let Some(n) = i.as_i64() {
+                Some(serde_json::Value::Number(serde_json::Number::from(n)))
+            } else if let Some(n) = i.as_u64() {
+                Some(serde_json::Value::Number(serde_json::Number::from(n)))
+            } else {
+                None
+            }
+        }
+        rmpv::Value::F32(f) => serde_json::Number::from_f64(*f as f64)
+            .map(serde_json::Value::Number),
+        rmpv::Value::F64(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number),
+        rmpv::Value::String(s) => s.as_str()
+            .map(|s| serde_json::Value::String(s.to_owned())),
+        _ => None,
+    }
+}
+
 /// Extension trait for converting `std::cmp::Ordering` to an i32 sign value.
 trait OrderingExt {
     fn into_i32_sign(self) -> i32;
@@ -545,34 +572,136 @@ async fn dispatch_queries(
 
         // Execute the query synchronously against the collected entries.
         let filtered = execute_query(entries, &query);
-        let total_filtered = filtered.len();
 
-        // Apply offset and limit manually after execute_query to avoid the internal
-        // truncation that would occur if we passed limit directly to execute_query.
-        let offset = q.offset.unwrap_or(0) as usize;
-        let page: Vec<rmpv::Value> = if let Some(limit) = q.limit {
-            filtered
+        // Current timestamp for cursor generation and expiry validation.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+
+        // Determine pagination strategy: cursor takes precedence over offset.
+        let (page_entries, has_more, next_cursor) = if let Some(ref cursor_str) = q.cursor {
+            // --- Cursor-based pagination ---
+            let cursor_data = match decode_http_cursor(cursor_str) {
+                Some(c) => c,
+                None => {
+                    // Malformed cursor: return a 400 error and skip this query.
+                    let errors = response.errors.get_or_insert_with(Vec::new);
+                    errors.push(HttpSyncError {
+                        code: 400,
+                        message: "invalid or expired cursor".into(),
+                        context: Some(q.query_id.clone()),
+                    });
+                    continue;
+                }
+            };
+
+            // Validate cursor expiry: cursors older than 10 minutes are rejected.
+            if now_ms - cursor_data.timestamp > 10 * 60 * 1000 {
+                let errors = response.errors.get_or_insert_with(Vec::new);
+                errors.push(HttpSyncError {
+                    code: 400,
+                    message: "invalid or expired cursor".into(),
+                    context: Some(q.query_id.clone()),
+                });
+                continue;
+            }
+
+            // Filter to only entries strictly after the cursor position.
+            let after_cursor: Vec<_> = filtered
                 .into_iter()
-                .skip(offset)
-                .take(limit as usize)
-                .map(|entry| entry.value)
-                .collect()
+                .filter(|entry| is_after_cursor(&entry.key, &entry.value, &cursor_data))
+                .collect();
+
+            let total_after = after_cursor.len();
+
+            if let Some(limit) = q.limit {
+                let lim = limit as usize;
+                let truncated = total_after > lim;
+                let page_entries: Vec<_> = after_cursor.into_iter().take(lim).collect();
+
+                let nc = if truncated {
+                    page_entries.last().map(|last| {
+                        // Extract the sort field value from the last entry in the page.
+                        let last_sort_value = cursor_data.sort_field.as_deref().and_then(|field| {
+                            if let rmpv::Value::Map(ref pairs) = last.value {
+                                pairs.iter()
+                                    .find(|(k, _)| k.as_str() == Some(field))
+                                    .and_then(|(_, v)| rmpv_to_json_value(v))
+                            } else {
+                                None
+                            }
+                        }).unwrap_or(serde_json::Value::Null);
+
+                        let next = HttpCursorData {
+                            last_sort_value,
+                            last_key: last.key.clone(),
+                            sort_field: cursor_data.sort_field.clone(),
+                            sort_direction: cursor_data.sort_direction.clone(),
+                            predicate_hash: cursor_data.predicate_hash,
+                            sort_hash: cursor_data.sort_hash,
+                            timestamp: now_ms,
+                        };
+                        encode_http_cursor(&next)
+                    })
+                } else {
+                    None
+                };
+
+                let values: Vec<rmpv::Value> = page_entries.into_iter().map(|e| e.value).collect();
+                (values, Some(truncated), nc)
+            } else {
+                // No limit: return all results after cursor, no next_cursor needed.
+                let values: Vec<rmpv::Value> = after_cursor.into_iter().map(|e| e.value).collect();
+                (values, None, None)
+            }
         } else {
-            filtered
-                .into_iter()
-                .skip(offset)
-                .map(|entry| entry.value)
-                .collect()
-        };
+            // --- Offset-based pagination (backward compatible) ---
+            let total_filtered = filtered.len();
+            let offset = q.offset.unwrap_or(0) as usize;
 
-        // has_more is Some only when a limit was specified; clients use offset for next page.
-        let has_more = q.limit.map(|limit| total_filtered > offset + limit as usize);
+            if let Some(limit) = q.limit {
+                let lim = limit as usize;
+                // Keep entries as QueryResultEntry to access keys for cursor generation.
+                let page_entries: Vec<_> = filtered.into_iter().skip(offset).take(lim).collect();
+                let truncated = total_filtered > offset + lim;
+
+                // Generate next_cursor from the last entry when more results exist.
+                let nc = if truncated {
+                    page_entries.last().map(|last| {
+                        let last_sort_value = serde_json::Value::Null; // key-based ordering
+                        let next = HttpCursorData {
+                            last_sort_value,
+                            last_key: last.key.clone(),
+                            sort_field: None,
+                            sort_direction: topgun_core::messages::base::SortDirection::Asc,
+                            predicate_hash: 0,
+                            sort_hash: 0,
+                            timestamp: now_ms,
+                        };
+                        encode_http_cursor(&next)
+                    })
+                } else {
+                    None
+                };
+
+                let values: Vec<rmpv::Value> = page_entries.into_iter().map(|e| e.value).collect();
+                (values, Some(truncated), nc)
+            } else {
+                let values: Vec<rmpv::Value> = filtered
+                    .into_iter()
+                    .skip(offset)
+                    .map(|entry| entry.value)
+                    .collect();
+                (values, None, None)
+            }
+        };
 
         let result = HttpQueryResult {
             query_id: q.query_id,
-            results: page,
+            results: page_entries,
             has_more,
-            next_cursor: None,
+            next_cursor,
         };
 
         let query_results = response.query_results.get_or_insert_with(Vec::new);
