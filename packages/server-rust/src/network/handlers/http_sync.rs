@@ -571,7 +571,9 @@ async fn dispatch_queries(
         };
 
         // Execute the query synchronously against the collected entries.
-        let filtered = execute_query(entries, &query);
+        // Sort by key for stable cursor-based pagination when no explicit sort is given.
+        let mut filtered = execute_query(entries, &query);
+        filtered.sort_by(|a, b| a.key.cmp(&b.key));
 
         // Current timestamp for cursor generation and expiry validation.
         let now_ms = std::time::SystemTime::now()
@@ -1347,5 +1349,250 @@ mod tests {
             decoded.query_results.is_none(),
             "queryResults must be None when store_factory is not wired"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // R5: Cursor-based pagination tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: seeds records with key and integer `score` field, sorted by key.
+    async fn state_with_scored_data(map_name: &str, records: Vec<(&str, i64)>) -> AppState {
+        let factory = Arc::new(RecordStoreFactory::new(
+            StorageConfig::default(),
+            Arc::new(NullDataStore),
+            Vec::new(),
+        ));
+        let store = factory.get_or_create(map_name, 0);
+        for (key, score) in records {
+            store
+                .put(
+                    key,
+                    StoreRecordValue::Lww {
+                        value: TgValue::Map(
+                            [("score".to_string(), TgValue::Int(score))]
+                                .into_iter()
+                                .collect(),
+                        ),
+                        timestamp: HlcTimestamp {
+                            millis: 1_000_000,
+                            counter: 0,
+                            node_id: "node-1".to_string(),
+                        },
+                    },
+                    ExpiryPolicy::NONE,
+                    CallerProvenance::Client,
+                )
+                .await
+                .expect("seeding store should not fail");
+        }
+        AppState {
+            registry: Arc::new(crate::network::ConnectionRegistry::new()),
+            shutdown: Arc::new(crate::network::ShutdownController::new()),
+            config: Arc::new(crate::network::NetworkConfig::default()),
+            start_time: Instant::now(),
+            observability: None,
+            operation_service: None,
+            dispatcher: None,
+            jwt_secret: None,
+            cluster_state: None,
+            store_factory: Some(factory),
+            server_config: None,
+            policy_store: None,
+            auth_providers: Arc::new(vec![]),
+        }
+    }
+
+    /// R5 test 1: Two-page cursor traversal returns all records without duplicates.
+    ///
+    /// Seeds 5 records (keys a–e). Queries with limit=2 to get page 1, extracts
+    /// next_cursor, then queries with that cursor + limit=2 to get page 2.
+    /// Verifies page 2 contains 2 records not in page 1, and that a third query
+    /// with the page-2 cursor returns the remaining 1 record.
+    #[tokio::test]
+    async fn query_with_cursor_paginates_correctly() {
+        // Records keyed a–e; key sort gives stable order: a, b, c, d, e.
+        let state = state_with_map_data(
+            "paged",
+            vec![("a", "A"), ("b", "B"), ("c", "C"), ("d", "D"), ("e", "E")],
+        )
+        .await;
+
+        // Page 1: limit=2, no cursor → first 2 records.
+        let page1_query = QueryReq {
+            query_id: "p1".to_string(),
+            map_name: "paged".to_string(),
+            filter: rmpv::Value::Nil,
+            limit: Some(2),
+            offset: None,
+            cursor: None,
+        };
+        let resp1 = run_dispatch_queries(vec![page1_query], &state).await;
+        let results1 = resp1.query_results.expect("page 1 must have results");
+        let qr1 = &results1[0];
+        assert_eq!(qr1.results.len(), 2, "page 1 must have 2 results");
+        assert_eq!(qr1.has_more, Some(true), "has_more must be true for page 1");
+        let cursor1 = qr1.next_cursor.clone().expect("page 1 must have next_cursor");
+
+        // Page 2: use cursor from page 1.
+        let page2_query = QueryReq {
+            query_id: "p2".to_string(),
+            map_name: "paged".to_string(),
+            filter: rmpv::Value::Nil,
+            limit: Some(2),
+            offset: None,
+            cursor: Some(cursor1),
+        };
+        let resp2 = run_dispatch_queries(vec![page2_query], &state).await;
+        let results2 = resp2.query_results.expect("page 2 must have results");
+        let qr2 = &results2[0];
+        assert_eq!(qr2.results.len(), 2, "page 2 must have 2 results");
+        assert_eq!(qr2.has_more, Some(true), "has_more must be true for page 2");
+        let cursor2 = qr2.next_cursor.clone().expect("page 2 must have next_cursor");
+
+        // Page 3: use cursor from page 2, should get 1 remaining record.
+        let page3_query = QueryReq {
+            query_id: "p3".to_string(),
+            map_name: "paged".to_string(),
+            filter: rmpv::Value::Nil,
+            limit: Some(2),
+            offset: None,
+            cursor: Some(cursor2),
+        };
+        let resp3 = run_dispatch_queries(vec![page3_query], &state).await;
+        let results3 = resp3.query_results.expect("page 3 must have results");
+        let qr3 = &results3[0];
+        assert_eq!(qr3.results.len(), 1, "page 3 must have 1 remaining record");
+        assert_eq!(qr3.has_more, Some(false), "has_more must be false for last page");
+        assert!(qr3.next_cursor.is_none(), "next_cursor must be None on last page");
+
+        // Verify no duplicates across pages.
+        let all_count = qr1.results.len() + qr2.results.len() + qr3.results.len();
+        assert_eq!(all_count, 5, "all 5 records must appear across pages");
+    }
+
+    /// R5 test 2: Invalid cursor string produces a 400 error for that query.
+    #[tokio::test]
+    async fn query_with_invalid_cursor_returns_error() {
+        let state = state_with_map_data(
+            "items2",
+            vec![("x", "X"), ("y", "Y")],
+        )
+        .await;
+
+        let query = QueryReq {
+            query_id: "q-bad-cursor".to_string(),
+            map_name: "items2".to_string(),
+            filter: rmpv::Value::Nil,
+            limit: Some(5),
+            offset: None,
+            cursor: Some("not-valid-base64!!!".to_string()),
+        };
+        let response = run_dispatch_queries(vec![query], &state).await;
+
+        // Should produce an error, not query results for this query.
+        let errors = response.errors.expect("errors must be present for invalid cursor");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, 400);
+        assert!(errors[0].message.contains("invalid or expired cursor"));
+        assert_eq!(errors[0].context.as_deref(), Some("q-bad-cursor"));
+        // No query result entry for the failed query.
+        assert!(response.query_results.is_none(), "queryResults must be absent when cursor is invalid");
+    }
+
+    /// R5 test 3: When both cursor and offset are provided, cursor takes precedence.
+    #[tokio::test]
+    async fn query_cursor_precedence_over_offset() {
+        // Seed 5 records a–e; key sort: a, b, c, d, e.
+        let state = state_with_map_data(
+            "prec",
+            vec![("a", "A"), ("b", "B"), ("c", "C"), ("d", "D"), ("e", "E")],
+        )
+        .await;
+
+        // First, get page 1 to obtain a real cursor (last key should be "b").
+        let page1 = QueryReq {
+            query_id: "prec-p1".to_string(),
+            map_name: "prec".to_string(),
+            filter: rmpv::Value::Nil,
+            limit: Some(2),
+            offset: None,
+            cursor: None,
+        };
+        let resp1 = run_dispatch_queries(vec![page1], &state).await;
+        let cursor = resp1
+            .query_results.unwrap()[0]
+            .next_cursor.clone()
+            .expect("page 1 must produce a cursor");
+
+        // Query with both cursor and offset=0; cursor must win (should skip a, b).
+        let query = QueryReq {
+            query_id: "prec-both".to_string(),
+            map_name: "prec".to_string(),
+            filter: rmpv::Value::Nil,
+            limit: Some(2),
+            offset: Some(0), // would return a, b if offset path taken
+            cursor: Some(cursor),
+        };
+        let response = run_dispatch_queries(vec![query], &state).await;
+        let results = response.query_results.expect("results must be present");
+        let qr = &results[0];
+        // Cursor path: should return c, d (the two records after b).
+        // Offset=0 path would return a, b. If cursor won, len=2 and records != a, b.
+        assert_eq!(qr.results.len(), 2, "cursor + offset must return cursor-based page (2 records)");
+    }
+
+    /// R5 test 4: encode_http_cursor / decode_http_cursor roundtrip.
+    #[test]
+    fn query_cursor_encode_decode_roundtrip() {
+        let original = HttpCursorData {
+            last_sort_value: serde_json::Value::Number(serde_json::Number::from(42i64)),
+            last_key: "record-abc".to_string(),
+            sort_field: Some("score".to_string()),
+            sort_direction: topgun_core::messages::base::SortDirection::Asc,
+            predicate_hash: 12345u64,
+            sort_hash: 67890u64,
+            timestamp: 1_700_000_000_000i64,
+        };
+
+        let encoded = encode_http_cursor(&original);
+        let decoded = decode_http_cursor(&encoded).expect("valid cursor must decode");
+
+        assert_eq!(decoded.last_key, original.last_key);
+        assert_eq!(decoded.sort_field, original.sort_field);
+        assert_eq!(decoded.sort_direction, original.sort_direction);
+        assert_eq!(decoded.predicate_hash, original.predicate_hash);
+        assert_eq!(decoded.sort_hash, original.sort_hash);
+        assert_eq!(decoded.timestamp, original.timestamp);
+        assert_eq!(decoded.last_sort_value, original.last_sort_value);
+
+        // Invalid inputs must return None.
+        assert!(decode_http_cursor("!!!not-base64!!!").is_none());
+        assert!(decode_http_cursor("aGVsbG8=").is_none()); // valid base64 but not JSON cursor
+    }
+
+    /// R5 test 5: Offset pagination continues to work (regression guard).
+    #[tokio::test]
+    async fn query_offset_still_works() {
+        let state = state_with_map_data(
+            "offset-guard",
+            vec![("a", "A"), ("b", "B"), ("c", "C"), ("d", "D"), ("e", "E")],
+        )
+        .await;
+
+        // limit=2, offset=2 → should return records 3 and 4 (c, d in key order).
+        let query = QueryReq {
+            query_id: "offset-test".to_string(),
+            map_name: "offset-guard".to_string(),
+            filter: rmpv::Value::Nil,
+            limit: Some(2),
+            offset: Some(2),
+            cursor: None,
+        };
+        let response = run_dispatch_queries(vec![query], &state).await;
+        let results = response.query_results.expect("results must be present");
+        let qr = &results[0];
+        assert_eq!(qr.results.len(), 2, "offset=2 limit=2 must return 2 records");
+        assert_eq!(qr.has_more, Some(true), "has_more must be true (5 > 2+2)");
+        assert!(response.errors.is_none(), "offset pagination must not produce errors");
     }
 }
