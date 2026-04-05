@@ -1826,4 +1826,279 @@ mod tests {
         assert_eq!(sw_node.attribute, Some("path".to_string()));
         assert_eq!(sw_node.value, Some(rmpv::Value::String("/api".into())));
     }
+
+    // ---- Round-trip integration tests (G4): parse + evaluate ----
+
+    fn make_array_data(key: &str, values: &[&str]) -> rmpv::Value {
+        make_data(&[(
+            key,
+            rmpv::Value::Array(
+                values
+                    .iter()
+                    .map(|s| rmpv::Value::String((*s).into()))
+                    .collect(),
+            ),
+        )])
+    }
+
+    // ---- containsAll round-trip ----
+
+    #[test]
+    fn roundtrip_contains_all_field_ref_true() {
+        // AC1 + AC5: data.tags containsAll auth.requiredTags -> true when all present
+        let node = parsed("data.tags containsAll auth.requiredTags");
+        let data = make_array_data("tags", &["a", "b", "c"]);
+        let auth = make_data(&[(
+            "requiredTags",
+            rmpv::Value::Array(vec![
+                rmpv::Value::String("a".into()),
+                rmpv::Value::String("c".into()),
+            ]),
+        )]);
+        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        assert!(evaluate_predicate(&node, &ctx));
+    }
+
+    #[test]
+    fn roundtrip_contains_all_field_ref_false() {
+        // AC5: false when expected has an element not in actual
+        let node = parsed("data.tags containsAll auth.requiredTags");
+        let data = make_array_data("tags", &["a", "b", "c"]);
+        let auth = make_data(&[(
+            "requiredTags",
+            rmpv::Value::Array(vec![
+                rmpv::Value::String("a".into()),
+                rmpv::Value::String("d".into()),
+            ]),
+        )]);
+        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        assert!(!evaluate_predicate(&node, &ctx));
+    }
+
+    #[test]
+    fn roundtrip_contains_all_scalar_literal_rhs() {
+        // AC14: data.tags containsAll 'admin' — scalar literal treated as single-element array
+        let node = parsed("data.tags containsAll 'admin'");
+        let data_yes = make_array_data("tags", &["admin", "editor"]);
+        let data_no = make_array_data("tags", &["editor", "viewer"]);
+        assert!(evaluate_predicate(&node, &EvalContext::data_only(&data_yes)));
+        assert!(!evaluate_predicate(&node, &EvalContext::data_only(&data_no)));
+    }
+
+    #[test]
+    fn roundtrip_contains_all_non_array_actual_false() {
+        // AC9: non-array actual -> false (safe deny)
+        let node = parsed("data.tags containsAll 'admin'");
+        let data = make_data(&[("tags", rmpv::Value::String("admin".into()))]);
+        assert!(!evaluate_predicate(&node, &EvalContext::data_only(&data)));
+    }
+
+    // ---- containsAny round-trip ----
+
+    #[test]
+    fn roundtrip_contains_any_field_ref_true() {
+        // AC2 + AC6: data.roles containsAny auth.allowedRoles -> true when overlap exists
+        let node = parsed("data.roles containsAny auth.allowedRoles");
+        let data = make_array_data("roles", &["a", "b"]);
+        let auth = make_data(&[(
+            "allowedRoles",
+            rmpv::Value::Array(vec![
+                rmpv::Value::String("b".into()),
+                rmpv::Value::String("x".into()),
+            ]),
+        )]);
+        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        assert!(evaluate_predicate(&node, &ctx));
+    }
+
+    #[test]
+    fn roundtrip_contains_any_field_ref_false() {
+        // AC6: false when no overlap
+        let node = parsed("data.roles containsAny auth.allowedRoles");
+        let data = make_array_data("roles", &["a", "b"]);
+        let auth = make_data(&[(
+            "allowedRoles",
+            rmpv::Value::Array(vec![
+                rmpv::Value::String("x".into()),
+                rmpv::Value::String("y".into()),
+            ]),
+        )]);
+        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        assert!(!evaluate_predicate(&node, &ctx));
+    }
+
+    // ---- startsWith round-trip ----
+
+    #[test]
+    fn roundtrip_starts_with_true() {
+        // AC3 + AC7: data.path startsWith '/public' -> true
+        let node = parsed("data.path startsWith '/public'");
+        let data = make_data(&[("path", rmpv::Value::String("/public/docs".into()))]);
+        assert!(evaluate_predicate(&node, &EvalContext::data_only(&data)));
+    }
+
+    #[test]
+    fn roundtrip_starts_with_false() {
+        // AC7: false for non-matching prefix
+        let node = parsed("data.path startsWith '/public'");
+        let data = make_data(&[("path", rmpv::Value::String("/private/docs".into()))]);
+        assert!(!evaluate_predicate(&node, &EvalContext::data_only(&data)));
+    }
+
+    #[test]
+    fn roundtrip_starts_with_field_ref() {
+        // data.path startsWith auth.pathPrefix
+        let node = parsed("data.path startsWith auth.pathPrefix");
+        let data = make_data(&[("path", rmpv::Value::String("/api/v2/users".into()))]);
+        let auth = make_data(&[("pathPrefix", rmpv::Value::String("/api/v2".into()))]);
+        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        assert!(evaluate_predicate(&node, &ctx));
+    }
+
+    // ---- endsWith round-trip ----
+
+    #[test]
+    fn roundtrip_ends_with_true() {
+        // AC4 + AC8: data.email endsWith '@company.com' -> true
+        let node = parsed("data.email endsWith '@company.com'");
+        let data = make_data(&[("email", rmpv::Value::String("user@company.com".into()))]);
+        assert!(evaluate_predicate(&node, &EvalContext::data_only(&data)));
+    }
+
+    #[test]
+    fn roundtrip_ends_with_false() {
+        // AC8: false for non-matching suffix
+        let node = parsed("data.email endsWith '@company.com'");
+        let data = make_data(&[("email", rmpv::Value::String("user@other.com".into()))]);
+        assert!(!evaluate_predicate(&node, &EvalContext::data_only(&data)));
+    }
+
+    // ---- compound expression round-trip (AC11) ----
+
+    #[test]
+    fn roundtrip_contains_all_and_starts_with_compound_true() {
+        // AC11: data.tags containsAll auth.required && data.path startsWith '/api'
+        let node = parsed(
+            "data.tags containsAll auth.required && data.path startsWith '/api'",
+        );
+        let data = make_data(&[
+            (
+                "tags",
+                rmpv::Value::Array(vec![
+                    rmpv::Value::String("x".into()),
+                    rmpv::Value::String("y".into()),
+                ]),
+            ),
+            ("path", rmpv::Value::String("/api/users".into())),
+        ]);
+        let auth = make_data(&[(
+            "required",
+            rmpv::Value::Array(vec![rmpv::Value::String("x".into())]),
+        )]);
+        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        assert!(evaluate_predicate(&node, &ctx));
+    }
+
+    #[test]
+    fn roundtrip_contains_all_and_starts_with_compound_false_path() {
+        // AC11: false when path condition fails
+        let node = parsed(
+            "data.tags containsAll auth.required && data.path startsWith '/api'",
+        );
+        let data = make_data(&[
+            (
+                "tags",
+                rmpv::Value::Array(vec![rmpv::Value::String("x".into())]),
+            ),
+            ("path", rmpv::Value::String("/public/docs".into())),
+        ]);
+        let auth = make_data(&[(
+            "required",
+            rmpv::Value::Array(vec![rmpv::Value::String("x".into())]),
+        )]);
+        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        assert!(!evaluate_predicate(&node, &ctx));
+    }
+
+    #[test]
+    fn roundtrip_three_operator_compound() {
+        // Validation Checklist item 4: 3-child And node with containsAll, startsWith, ==
+        let node = parsed(
+            "data.tags containsAll auth.required && data.path startsWith '/api' && data.status == 'active'",
+        );
+        assert_eq!(node.op, PredicateOp::And);
+        let children = node.children.as_ref().unwrap();
+        assert_eq!(children.len(), 3, "expected 3 children in flattened And node");
+
+        // Evaluate: all conditions true
+        let data = make_data(&[
+            (
+                "tags",
+                rmpv::Value::Array(vec![rmpv::Value::String("req".into())]),
+            ),
+            ("path", rmpv::Value::String("/api/v1".into())),
+            ("status", rmpv::Value::String("active".into())),
+        ]);
+        let auth = make_data(&[(
+            "required",
+            rmpv::Value::Array(vec![rmpv::Value::String("req".into())]),
+        )]);
+        let ctx = EvalContext { auth: Some(&auth), data: &data };
+        assert!(evaluate_predicate(&node, &ctx));
+
+        // Evaluate: status wrong -> false
+        let data_bad = make_data(&[
+            (
+                "tags",
+                rmpv::Value::Array(vec![rmpv::Value::String("req".into())]),
+            ),
+            ("path", rmpv::Value::String("/api/v1".into())),
+            ("status", rmpv::Value::String("inactive".into())),
+        ]);
+        assert!(!evaluate_predicate(&node, &EvalContext { auth: Some(&auth), data: &data_bad }));
+    }
+
+    #[test]
+    fn roundtrip_contains_any_or_ends_with() {
+        // data.roles containsAny auth.allowed || data.email endsWith '@admin.com'
+        let node = parsed(
+            "data.roles containsAny auth.allowed || data.email endsWith '@admin.com'",
+        );
+        // True via containsAny
+        let data_via_roles = make_data(&[
+            (
+                "roles",
+                rmpv::Value::Array(vec![rmpv::Value::String("mod".into())]),
+            ),
+            ("email", rmpv::Value::String("user@company.com".into())),
+        ]);
+        let auth = make_data(&[(
+            "allowed",
+            rmpv::Value::Array(vec![rmpv::Value::String("mod".into())]),
+        )]);
+        let ctx = EvalContext { auth: Some(&auth), data: &data_via_roles };
+        assert!(evaluate_predicate(&node, &ctx));
+
+        // True via endsWith
+        let data_via_email = make_data(&[
+            (
+                "roles",
+                rmpv::Value::Array(vec![rmpv::Value::String("guest".into())]),
+            ),
+            ("email", rmpv::Value::String("super@admin.com".into())),
+        ]);
+        let ctx2 = EvalContext { auth: Some(&auth), data: &data_via_email };
+        assert!(evaluate_predicate(&node, &ctx2));
+
+        // False on both
+        let data_neither = make_data(&[
+            (
+                "roles",
+                rmpv::Value::Array(vec![rmpv::Value::String("guest".into())]),
+            ),
+            ("email", rmpv::Value::String("user@company.com".into())),
+        ]);
+        let ctx3 = EvalContext { auth: Some(&auth), data: &data_neither };
+        assert!(!evaluate_predicate(&node, &ctx3));
+    }
 }
