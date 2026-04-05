@@ -303,6 +303,168 @@ async fn dispatch_operations(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cursor helpers
+// ---------------------------------------------------------------------------
+
+/// Internal cursor payload for HTTP one-shot query pagination.
+///
+/// Encodes the position after the last returned result so the next request
+/// can resume from exactly that point. HTTP queries run on a single server
+/// scanning all partitions locally, so per-node tracking (used in WebSocket
+/// cursors) adds no value. The cursor is JSON-serialized and base64url-encoded.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HttpCursorData {
+    /// Sort value of the last result in the page (accommodates any sortable type).
+    pub last_sort_value: serde_json::Value,
+    /// Key of the last result in the page, used as tiebreaker for equal sort values.
+    pub last_key: String,
+    /// Sort field name, or None when defaulting to key-based ordering.
+    pub sort_field: Option<String>,
+    /// Sort direction used for this query.
+    pub sort_direction: topgun_core::messages::base::SortDirection,
+    /// Hash of the predicate applied in this query (0 if no predicate).
+    pub predicate_hash: u64,
+    /// Hash of the sort specification (0 if no sort).
+    pub sort_hash: u64,
+    /// Unix timestamp (ms) when this cursor was created; used for expiry checks.
+    pub timestamp: i64,
+}
+
+/// Encodes cursor data as base64url JSON for use in HTTP responses.
+fn encode_http_cursor(data: &HttpCursorData) -> String {
+    let json = serde_json::to_vec(data).expect("HttpCursorData serialization is infallible");
+    base64::engine::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &json)
+}
+
+/// Decodes and validates a cursor string from an HTTP request.
+///
+/// Returns None when the cursor is malformed, not valid base64url, or fails JSON
+/// deserialization. Callers must additionally validate the timestamp for expiry.
+fn decode_http_cursor(cursor: &str) -> Option<HttpCursorData> {
+    let bytes = base64::engine::Engine::decode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        cursor,
+    )
+    .ok()?;
+    serde_json::from_slice::<HttpCursorData>(&bytes).ok()
+}
+
+/// Returns true when the given `(key, value)` entry comes strictly after the cursor position.
+///
+/// For ASC sort: include if sort value > cursor value, or equal value with key > cursor key.
+/// For DESC sort: include if sort value < cursor value, or equal value with key > cursor key.
+///
+/// The `value` parameter is an `rmpv::Value` (from the store), while `cursor.last_sort_value`
+/// is a `serde_json::Value` (from JSON round-tripping). Comparison converts both to f64 for
+/// numbers or compares string representations to avoid needing rmpv<->serde_json conversion.
+fn is_after_cursor(key: &str, value: &rmpv::Value, cursor: &HttpCursorData) -> bool {
+    // Extract the sort field value from the rmpv record if a sort field is specified.
+    let sort_val: &rmpv::Value = match &cursor.sort_field {
+        Some(field) => match value {
+            rmpv::Value::Map(pairs) => pairs
+                .iter()
+                .find(|(k, _)| k.as_str() == Some(field.as_str()))
+                .map(|(_, v)| v)
+                .unwrap_or(&rmpv::Value::Nil),
+            _ => &rmpv::Value::Nil,
+        },
+        // No sort field: ordering is by key only; use Nil as sort value.
+        None => &rmpv::Value::Nil,
+    };
+
+    let cmp = compare_rmpv_to_json(sort_val, &cursor.last_sort_value);
+
+    use topgun_core::messages::base::SortDirection;
+    match cursor.sort_direction {
+        SortDirection::Asc => {
+            // After cursor: sort_val > last_sort_value, or equal with key > last_key
+            cmp > 0 || (cmp == 0 && key > cursor.last_key.as_str())
+        }
+        SortDirection::Desc => {
+            // After cursor (descending): sort_val < last_sort_value, or equal with key > last_key
+            cmp < 0 || (cmp == 0 && key > cursor.last_key.as_str())
+        }
+    }
+}
+
+/// Compares an `rmpv::Value` (from store) to a `serde_json::Value` (from cursor JSON).
+///
+/// Returns negative/zero/positive like a standard comparison. Nil/null sorts last.
+/// Strings are compared lexicographically. Numbers are compared as f64.
+/// Mixed types (string vs number) compare by type name for stability.
+fn compare_rmpv_to_json(rmpv_val: &rmpv::Value, json_val: &serde_json::Value) -> i32 {
+    match (rmpv_val, json_val) {
+        (rmpv::Value::Nil, serde_json::Value::Null) => 0,
+        (rmpv::Value::Nil, _) => 1,  // nil sorts after any non-null value
+        (_, serde_json::Value::Null) => -1, // any non-nil sorts before null
+
+        (rmpv::Value::String(s), serde_json::Value::String(js)) => {
+            s.as_str().unwrap_or("").cmp(js.as_str()).into_i32_sign()
+        }
+        (rmpv::Value::Integer(i), serde_json::Value::Number(n)) => {
+            let a = i.as_f64().unwrap_or(f64::NAN);
+            let b = n.as_f64().unwrap_or(f64::NAN);
+            a.partial_cmp(&b).map(|o| o.into_i32_sign()).unwrap_or(0)
+        }
+        (rmpv::Value::F32(a), serde_json::Value::Number(n)) => {
+            let b = n.as_f64().unwrap_or(f64::NAN);
+            (*a as f64).partial_cmp(&b).map(|o| o.into_i32_sign()).unwrap_or(0)
+        }
+        (rmpv::Value::F64(a), serde_json::Value::Number(n)) => {
+            let b = n.as_f64().unwrap_or(f64::NAN);
+            a.partial_cmp(&b).map(|o| o.into_i32_sign()).unwrap_or(0)
+        }
+        // Type mismatch: compare by type tag string for stable ordering
+        _ => {
+            let a_tag = rmpv_type_tag(rmpv_val);
+            let b_tag = json_type_tag(json_val);
+            a_tag.cmp(b_tag).into_i32_sign()
+        }
+    }
+}
+
+fn rmpv_type_tag(v: &rmpv::Value) -> &'static str {
+    match v {
+        rmpv::Value::Nil => "nil",
+        rmpv::Value::Boolean(_) => "bool",
+        rmpv::Value::Integer(_) => "number",
+        rmpv::Value::F32(_) | rmpv::Value::F64(_) => "number",
+        rmpv::Value::String(_) => "string",
+        rmpv::Value::Binary(_) => "binary",
+        rmpv::Value::Array(_) => "array",
+        rmpv::Value::Map(_) => "map",
+        rmpv::Value::Ext(_, _) => "ext",
+    }
+}
+
+fn json_type_tag(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "nil",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "map",
+    }
+}
+
+/// Extension trait for converting `std::cmp::Ordering` to an i32 sign value.
+trait OrderingExt {
+    fn into_i32_sign(self) -> i32;
+}
+
+impl OrderingExt for std::cmp::Ordering {
+    fn into_i32_sign(self) -> i32 {
+        match self {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        }
+    }
+}
+
 /// Executes one-shot queries directly from the in-memory record store, bypassing the
 /// partition dispatcher pipeline to avoid unnecessary operation overhead for reads.
 ///
@@ -931,6 +1093,7 @@ mod tests {
             filter,
             limit: None,
             offset: None,
+            cursor: None,
         };
 
         let response = run_dispatch_queries(vec![query], &state).await;
@@ -951,6 +1114,7 @@ mod tests {
             filter: rmpv::Value::Nil,
             limit: None,
             offset: None,
+            cursor: None,
         };
 
         let response = run_dispatch_queries(vec![query], &state).await;
@@ -978,6 +1142,7 @@ mod tests {
             filter: rmpv::Value::Nil,
             limit: Some(2),
             offset: Some(1),
+            cursor: None,
         };
 
         let response = run_dispatch_queries(vec![query], &state).await;
@@ -1007,6 +1172,7 @@ mod tests {
             filter: rmpv::Value::Nil,
             limit: None,
             offset: None,
+            cursor: None,
         };
 
         let response = run_dispatch_queries(vec![query], &state).await;
@@ -1034,6 +1200,7 @@ mod tests {
                 filter: rmpv::Value::Nil,
                 limit: None,
                 offset: None,
+                cursor: None,
             }]),
             ..Default::default()
         };
