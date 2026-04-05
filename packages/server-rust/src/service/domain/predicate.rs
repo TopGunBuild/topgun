@@ -228,6 +228,10 @@ fn evaluate_leaf(predicate: &PredicateNode, ctx: &EvalContext) -> bool {
         PredicateOp::Regex => evaluate_regex(&actual, &expected),
         PredicateOp::In => evaluate_in(&actual, &expected),
         PredicateOp::Between => evaluate_between(&actual, &expected),
+        PredicateOp::ContainsAll => evaluate_contains_all(&actual, &expected),
+        PredicateOp::ContainsAny => evaluate_contains_any(&actual, &expected),
+        PredicateOp::StartsWith => evaluate_starts_with(&actual, &expected),
+        PredicateOp::EndsWith => evaluate_ends_with(&actual, &expected),
         _ => false,
     }
 }
@@ -349,6 +353,65 @@ fn evaluate_between(actual: &rmpv::Value, range_val: &rmpv::Value) -> bool {
     );
 
     gte_low && lte_high
+}
+
+/// Evaluates `containsAll`: checks that `actual` array contains every element of `expected`.
+///
+/// `actual` must be an array; returns `false` if not. `expected` may be an array or scalar;
+/// a scalar is treated as a single-element array (vacuous truth: empty expected returns `true`).
+fn evaluate_contains_all(actual: &rmpv::Value, expected: &rmpv::Value) -> bool {
+    let rmpv::Value::Array(actual_arr) = actual else {
+        return false;
+    };
+
+    let expected_items: Vec<&rmpv::Value> = match expected {
+        rmpv::Value::Array(arr) => arr.iter().collect(),
+        scalar => vec![scalar],
+    };
+
+    // Vacuous truth: every element of an empty set is trivially contained.
+    expected_items
+        .iter()
+        .all(|item| actual_arr.iter().any(|a| values_equal(a, item)))
+}
+
+/// Evaluates `containsAny`: checks that `actual` array contains at least one element of `expected`.
+///
+/// `actual` must be an array; returns `false` if not. `expected` may be an array or scalar;
+/// a scalar is treated as a single-element array (empty expected returns `false`).
+fn evaluate_contains_any(actual: &rmpv::Value, expected: &rmpv::Value) -> bool {
+    let rmpv::Value::Array(actual_arr) = actual else {
+        return false;
+    };
+
+    let expected_items: Vec<&rmpv::Value> = match expected {
+        rmpv::Value::Array(arr) => arr.iter().collect(),
+        scalar => vec![scalar],
+    };
+
+    expected_items
+        .iter()
+        .any(|item| actual_arr.iter().any(|a| values_equal(a, item)))
+}
+
+/// Evaluates `startsWith`: checks that `actual` string starts with `prefix` string.
+///
+/// Both arguments must be strings; returns `false` if either is not. Case-sensitive.
+fn evaluate_starts_with(actual: &rmpv::Value, prefix: &rmpv::Value) -> bool {
+    let (Some(actual_str), Some(prefix_str)) = (actual.as_str(), prefix.as_str()) else {
+        return false;
+    };
+    actual_str.starts_with(prefix_str)
+}
+
+/// Evaluates `endsWith`: checks that `actual` string ends with `suffix` string.
+///
+/// Both arguments must be strings; returns `false` if either is not. Case-sensitive.
+fn evaluate_ends_with(actual: &rmpv::Value, suffix: &rmpv::Value) -> bool {
+    let (Some(actual_str), Some(suffix_str)) = (actual.as_str(), suffix.as_str()) else {
+        return false;
+    };
+    actual_str.ends_with(suffix_str)
 }
 
 /// Traverses a nested `rmpv::Value::Map` using dot-path segments.
@@ -1772,5 +1835,178 @@ mod tests {
         let auth = make_auth(vec![("id", rmpv::Value::String("u1".into()))]);
         let ctx_with_auth = EvalContext { auth: Some(&auth), data: &data };
         assert!(!evaluate_predicate(&node, &ctx_with_auth));
+    }
+
+    // ---- evaluate_contains_all tests ----
+
+    fn arr(items: &[&str]) -> rmpv::Value {
+        rmpv::Value::Array(
+            items
+                .iter()
+                .map(|s| rmpv::Value::String((*s).into()))
+                .collect(),
+        )
+    }
+
+    /// AC5: containsAll true when data array has all expected elements.
+    #[test]
+    fn contains_all_true_subset() {
+        let actual = arr(&["a", "b", "c"]);
+        let expected = arr(&["a", "c"]);
+        assert!(evaluate_contains_all(&actual, &expected));
+    }
+
+    /// AC5: containsAll false when expected has a missing element.
+    #[test]
+    fn contains_all_false_missing_element() {
+        let actual = arr(&["a", "b", "c"]);
+        let expected = arr(&["a", "d"]);
+        assert!(!evaluate_contains_all(&actual, &expected));
+    }
+
+    /// Empty expected array returns true (vacuous truth).
+    #[test]
+    fn contains_all_empty_expected_returns_true() {
+        let actual = arr(&["a", "b"]);
+        let expected = rmpv::Value::Array(vec![]);
+        assert!(evaluate_contains_all(&actual, &expected));
+    }
+
+    /// Non-array actual returns false (safe deny).
+    #[test]
+    fn contains_all_non_array_actual_returns_false() {
+        let actual = rmpv::Value::String("not-an-array".into());
+        let expected = arr(&["a"]);
+        // AC9
+        assert!(!evaluate_contains_all(&actual, &expected));
+    }
+
+    /// AC14: scalar RHS is treated as single-element array.
+    #[test]
+    fn contains_all_scalar_rhs_treated_as_array() {
+        let actual = arr(&["admin", "editor"]);
+        let expected = rmpv::Value::String("admin".into());
+        assert!(evaluate_contains_all(&actual, &expected));
+
+        let expected_miss = rmpv::Value::String("superuser".into());
+        assert!(!evaluate_contains_all(&actual, &expected_miss));
+    }
+
+    // ---- evaluate_contains_any tests ----
+
+    /// AC6: containsAny true when at least one element overlaps.
+    #[test]
+    fn contains_any_true_overlap() {
+        let actual = arr(&["a", "b"]);
+        let expected = arr(&["b", "x"]);
+        assert!(evaluate_contains_any(&actual, &expected));
+    }
+
+    /// AC6: containsAny false when no overlap.
+    #[test]
+    fn contains_any_false_no_overlap() {
+        let actual = arr(&["a", "b"]);
+        let expected = arr(&["x", "y"]);
+        assert!(!evaluate_contains_any(&actual, &expected));
+    }
+
+    /// Empty expected array returns false (no overlap possible).
+    #[test]
+    fn contains_any_empty_expected_returns_false() {
+        let actual = arr(&["a", "b"]);
+        let expected = rmpv::Value::Array(vec![]);
+        assert!(!evaluate_contains_any(&actual, &expected));
+    }
+
+    /// Non-array actual returns false (safe deny).
+    #[test]
+    fn contains_any_non_array_actual_returns_false() {
+        let actual = rmpv::Value::Integer(42.into());
+        let expected = arr(&["a"]);
+        assert!(!evaluate_contains_any(&actual, &expected));
+    }
+
+    /// Scalar RHS treated as single-element array.
+    #[test]
+    fn contains_any_scalar_rhs() {
+        let actual = arr(&["editor", "viewer"]);
+        let expected = rmpv::Value::String("editor".into());
+        assert!(evaluate_contains_any(&actual, &expected));
+    }
+
+    // ---- evaluate_starts_with tests ----
+
+    /// AC7: startsWith true for matching prefix.
+    #[test]
+    fn starts_with_true() {
+        let actual = rmpv::Value::String("/public/docs".into());
+        let prefix = rmpv::Value::String("/public".into());
+        assert!(evaluate_starts_with(&actual, &prefix));
+    }
+
+    /// AC7: startsWith false for non-matching prefix.
+    #[test]
+    fn starts_with_false() {
+        let actual = rmpv::Value::String("/private/docs".into());
+        let prefix = rmpv::Value::String("/public".into());
+        assert!(!evaluate_starts_with(&actual, &prefix));
+    }
+
+    /// AC10: non-string actual returns false (safe deny).
+    #[test]
+    fn starts_with_non_string_actual_returns_false() {
+        let actual = rmpv::Value::Integer(42.into());
+        let prefix = rmpv::Value::String("/public".into());
+        assert!(!evaluate_starts_with(&actual, &prefix));
+    }
+
+    /// AC10: non-string prefix returns false (safe deny).
+    #[test]
+    fn starts_with_non_string_prefix_returns_false() {
+        let actual = rmpv::Value::String("/public/docs".into());
+        let prefix = rmpv::Value::Integer(42.into());
+        assert!(!evaluate_starts_with(&actual, &prefix));
+    }
+
+    /// Case-sensitive: uppercase prefix does not match lowercase actual.
+    #[test]
+    fn starts_with_case_sensitive() {
+        let actual = rmpv::Value::String("/public".into());
+        let prefix = rmpv::Value::String("/PUBLIC".into());
+        assert!(!evaluate_starts_with(&actual, &prefix));
+    }
+
+    // ---- evaluate_ends_with tests ----
+
+    /// AC8: endsWith true for matching suffix.
+    #[test]
+    fn ends_with_true() {
+        let actual = rmpv::Value::String("user@company.com".into());
+        let suffix = rmpv::Value::String("@company.com".into());
+        assert!(evaluate_ends_with(&actual, &suffix));
+    }
+
+    /// AC8: endsWith false for non-matching suffix.
+    #[test]
+    fn ends_with_false() {
+        let actual = rmpv::Value::String("user@other.com".into());
+        let suffix = rmpv::Value::String("@company.com".into());
+        assert!(!evaluate_ends_with(&actual, &suffix));
+    }
+
+    /// AC10: non-string actual returns false (safe deny).
+    #[test]
+    fn ends_with_non_string_actual_returns_false() {
+        let actual = rmpv::Value::Boolean(true);
+        let suffix = rmpv::Value::String("@company.com".into());
+        assert!(!evaluate_ends_with(&actual, &suffix));
+    }
+
+    /// Case-sensitive: uppercase suffix does not match lowercase actual.
+    #[test]
+    fn ends_with_case_sensitive() {
+        let actual = rmpv::Value::String("user@company.com".into());
+        let suffix = rmpv::Value::String("@COMPANY.COM".into());
+        assert!(!evaluate_ends_with(&actual, &suffix));
     }
 }
