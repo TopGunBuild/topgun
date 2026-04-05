@@ -3,7 +3,6 @@ import type { BetterAuthOptions } from 'better-auth';
 import type {
   DBAdapter,
   Where,
-  DBAdapterInstance
 } from 'better-auth/adapters';
 import type { PredicateNode } from '@topgunbuild/core';
 
@@ -43,8 +42,34 @@ export interface TopGunAdapterOptions {
   foreignKeyMap?: Record<string, string>;
 }
 
-export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterInstance => {
-  return (options: BetterAuthOptions): DBAdapter => {
+/**
+ * Options for cursor-based pagination via findManyWithCursor.
+ * Cursor pagination always uses sort by id asc for stable page results.
+ */
+export interface TopGunAdapterCursorOptions {
+  /** ID of the last record from the previous page. Results will start after this record. */
+  afterCursor?: string;
+}
+
+/**
+ * Extended adapter type that includes the TopGun-specific findManyWithCursor method.
+ * This type exposes the cursor-based pagination extension without modifying BetterAuth's
+ * DBAdapter interface contract.
+ *
+ * The sortBy parameter is intentionally absent from findManyWithCursor — cursor pagination
+ * always enforces sort by id asc to guarantee stable pages with string IDs.
+ */
+export type TopGunDBAdapter = DBAdapter & {
+  findManyWithCursor(params: {
+    model: string;
+    where?: Where[];
+    limit?: number;
+    cursor?: TopGunAdapterCursorOptions['afterCursor'];
+  }): Promise<{ data: Record<string, unknown>[]; nextCursor: string | null }>;
+};
+
+export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): ((options: BetterAuthOptions) => TopGunDBAdapter) => {
+  return (options: BetterAuthOptions): TopGunDBAdapter => {
     const { client, modelMap = {} } = adapterOptions;
 
     const getMapName = (model: string) => {
@@ -106,12 +131,41 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
     /**
      * Run a query against TopGun.
      *
-     * Note: BetterAuth uses offset-based pagination, but TopGun uses cursor-based pagination.
-     * For BetterAuth compatibility, we fetch limit+offset results and slice client-side.
-     * This is acceptable for auth queries which typically have small result sets.
+     * When cursor is provided, cursor-based pagination is used:
+     * - Sort is forced to { id: 'asc' } for stable page results
+     * - A greaterThan('id', cursor) predicate is added
+     * - limit is used directly without over-fetching
+     *
+     * Without cursor (default path): BetterAuth offset-based pagination is emulated
+     * by fetching limit+offset records and slicing client-side. Acceptable for auth
+     * queries which typically have small result sets.
      */
-    const runQuery = async <T extends AuthRecord>(model: string, where?: Where[], sort?: SortSpec, limit?: number, offset?: number): Promise<T[]> => {
+    const runQuery = async <T extends AuthRecord>(model: string, where?: Where[], sort?: SortSpec, limit?: number, offset?: number, cursor?: string): Promise<T[]> => {
       const mapName = getMapName(model);
+
+      if (cursor !== undefined) {
+        // Cursor-based pagination: enforce id asc sort, add id > cursor predicate
+        const cursorPredicate = Predicates.greaterThan('id', cursor);
+        const wherePredicate = where ? whereToPredicate(where) : undefined;
+        const predicate = wherePredicate
+          ? Predicates.and(wherePredicate, cursorPredicate)
+          : cursorPredicate;
+
+        const filter = {
+          predicate,
+          sort: { id: 'asc' } as SortSpec,
+          limit,
+        };
+
+        return new Promise((resolve) => {
+          const handle = client.query<T>(mapName, filter);
+          const unsubscribe = handle.subscribe((results: T[]) => {
+            unsubscribe();
+            resolve(results);
+          });
+        });
+      }
+
       const predicate = where ? whereToPredicate(where) : undefined;
 
       // For BetterAuth offset compatibility, we request more results and slice
@@ -338,7 +392,31 @@ export const topGunAdapter = (adapterOptions: TopGunAdapterOptions): DBAdapterIn
        */
       async transaction(callback) {
          return callback(this as Omit<DBAdapter, 'transaction'>);
-      }
-    } as DBAdapter;
+      },
+
+      /**
+       * Cursor-based pagination for TopGun callers who need efficient large-result iteration.
+       *
+       * Sort order is always id asc — this is not configurable. Cursor pagination requires
+       * a stable, deterministic sort to guarantee non-overlapping pages. String IDs sorted
+       * lexicographically with greaterThan(id, cursor) provide this guarantee.
+       *
+       * Callers who need a different sort order should use the standard findMany with offset.
+       *
+       * This method is NOT part of BetterAuth's DBAdapter interface. It is a TopGun extension
+       * accessible to callers who use topGunAdapter directly and type the result as TopGunDBAdapter.
+       */
+      async findManyWithCursor({ model, where, limit, cursor }) {
+        await ensureReady();
+        const results = await runQuery<AuthRecord>(model, where, undefined, limit, undefined, cursor);
+        const data = results as unknown as Record<string, unknown>[];
+        const nextCursor = limit !== undefined && results.length < limit
+          ? null
+          : results.length > 0
+            ? String(results[results.length - 1].id)
+            : null;
+        return { data, nextCursor };
+      },
+    } as TopGunDBAdapter;
   };
 };
